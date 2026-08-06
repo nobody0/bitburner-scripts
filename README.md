@@ -9,8 +9,10 @@ small architecture.
 
 - Game source: `/Users/bob/git/bitburner-src`, pinned to the release documented
   in [GAME_SOURCE.md](GAME_SOURCE.md).
-- Legacy scripts: `/Users/bob/git/bitburner-legacy`, cloned from
-  [`nobody0/bitburner`](https://github.com/nobody0/bitburner).
+- Legacy scripts: `/Users/bob/git/bitburner-legacy`, tracking the repository's
+  newest branch, `patch-1`, at commit `29d8bd2`; cloned from
+  [`nobody0/bitburner`](https://github.com/nobody0/bitburner). That branch is one
+  test-cleanup commit ahead of `main` and contains no additional feature work.
 
 Both checkouts are reference material. New scripts and history belong only in
 this repository.
