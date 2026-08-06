@@ -1,0 +1,13 @@
+{
+  "host": "127.0.0.1",
+  "port": 12525,
+  "server": "home",
+  "buildDir": "build",
+  "entries": [
+    {
+      "source": "src/main.ts",
+      "target": "main.js"
+    }
+  ]
+}
+

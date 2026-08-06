@@ -1,0 +1,22 @@
+{
+  "name": "bitburner-scripts",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun run tools/build.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "dev": "bun run tools/rfa-server.ts --watch",
+    "sync": "bun run tools/rfa-server.ts --once",
+    "types": "bun run tools/rfa-server.ts --types-only"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "latest",
+    "@types/ws": "latest",
+    "esbuild": "latest",
+    "typescript": "latest",
+    "ws": "latest"
+  }
+}
