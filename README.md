@@ -5,6 +5,16 @@ A clean-sheet Bitburner automation codebase. The old
 inspiration only; this repository starts with new history and a deliberately
 small architecture.
 
+## Local references
+
+- Game source: `/Users/bob/git/bitburner-src`, pinned to the release documented
+  in [GAME_SOURCE.md](GAME_SOURCE.md).
+- Legacy scripts: `/Users/bob/git/bitburner-legacy`, cloned from
+  [`nobody0/bitburner`](https://github.com/nobody0/bitburner).
+
+Both checkouts are reference material. New scripts and history belong only in
+this repository.
+
 ## Development loop
 
 1. Install dependencies with `bun install`.
@@ -68,4 +78,3 @@ most behavior can be tested without a running game.
 
 See [GAME_SOURCE.md](GAME_SOURCE.md) for the matching upstream source checkout
 and [docs/architecture.md](docs/architecture.md) for the pipeline design.
-
