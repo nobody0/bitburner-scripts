@@ -2,6 +2,7 @@ import type { NS, Player, Server } from "@ns";
 import type { FeatureId } from "../../../shared/features/ids.ts";
 import type { Capabilities } from "../../../shared/features/unlock.ts";
 import type { StateKey, StateMap } from "../../../shared/telemetry/state-map.ts";
+import type { Topics } from "../state.ts";
 
 /** Feature probes: the read half of the feature axis. One probe collects the
  * state for one feature and returns typed topic emissions; the runner
@@ -51,6 +52,11 @@ interface ProbeBase {
   /** Skipped unless capabilities report this feature as "yes". Omit for
    *  probes that are themselves the source of capability information. */
   requires?: FeatureId;
+  /** Extra gate for conditions the feature axis cannot express: a source-file
+   *  requirement, or a one-shot latch on something already in the store.
+   *  Returning false is "not applicable", NOT "unaffordable" — such a probe is
+   *  never reported as skipped, because there is no price that would help. */
+  when?(caps: Capabilities, topics: Topics): boolean;
   /** Shallow-merge this emission over the last one for the same key instead
    *  of replacing it. Several probes contribute to one topic at different
    *  cost tiers (the free `factions.joined` and the SF4-gated `standings`,

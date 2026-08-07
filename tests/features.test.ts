@@ -4,7 +4,8 @@ import { resolve } from "node:path";
 import { changedMultipliers, BITNODES, DEFAULT_BITNODE_MULTIPLIERS } from "../shared/features/bitnode.ts";
 import { FEATURE_IDS, type FeatureId } from "../shared/features/ids.ts";
 import { FEATURES, featureById, featureForBitNode } from "../shared/features/registry.ts";
-import { deriveCapabilities, sfLevel, unknownCapabilities } from "../shared/features/unlock.ts";
+import { capsDelta, deriveCapabilities, sfLevel, unknownCapabilities } from "../shared/features/unlock.ts";
+import { FEATURE_DRIVERS, selectDue } from "../game/lib/features/index.ts";
 import { DODGED_PROBES, LOCAL_PROBES, GATE_PROBE } from "../game/lib/probes/index.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 
@@ -269,12 +270,103 @@ describe("probe table", () => {
       .map(([field, ids]) => `${field} written by ${[...ids].join(" and ")}`);
     expect(contested).toEqual([]);
   });
+});
 
-  test("cadences are plain literals so --perf can tree-shake the table", () => {
-    // Guards the esbuild purity trap: `2 * MINUTE` in an initializer pins the
-    // whole probe object into performance bundles.
-    const source = readFileSync(resolve(root, "game/lib/probes/dodged.ts"), "utf8");
-    expect(source).not.toMatch(/everyMs:\s*\d+\s*\*/);
+describe("feature drivers", () => {
+  test("every feature has exactly one driver", () => {
+    expect(FEATURE_DRIVERS.map((d) => d.id).sort()).toEqual([...FEATURE_IDS].sort());
+  });
+
+  test("driver gates name real features and cadences are positive", () => {
+    for (const driver of FEATURE_DRIVERS) {
+      if (driver.requires) expect(FEATURE_IDS).toContain(driver.requires);
+      expect(driver.everyMs, `${driver.id} has a non-positive cadence`).toBeGreaterThan(0);
+    }
+  });
+
+  test("a driver for a gated feature requires that feature", () => {
+    // A driver that acts on a locked feature spends a stub launch discovering
+    // an API that throws. "Always playable" is not restated here: with nothing
+    // probed, unknownCapabilities() reports exactly those as "yes", so this
+    // tracks shared/features/unlock.ts instead of drifting from it.
+    const unprobed = unknownCapabilities();
+    for (const driver of FEATURE_DRIVERS) {
+      if (unprobed.unlocked[driver.id] === "yes") continue;
+      expect(driver.requires, `${driver.id} runs without a capability gate`).toBe(driver.id);
+    }
+  });
+
+  test("hacking runs at the HWGW spacer; nothing else is that hot", () => {
+    // Batch ops land on 200ms slots, so a slower cadence would miss them.
+    // Everything else is slower by orders of magnitude — which is the whole
+    // reason the frame schedules by cadence instead of running everything.
+    const hacking = FEATURE_DRIVERS.find((d) => d.id === "hacking")!;
+    expect(hacking.everyMs).toBe(200);
+    for (const driver of FEATURE_DRIVERS) {
+      if (driver.id !== "hacking") expect(driver.everyMs).toBeGreaterThanOrEqual(5_000);
+    }
+  });
+});
+
+describe("driver scheduling", () => {
+  const caps = deriveCapabilities({ bitNode: 1, sourceFiles: {}, inGang: false, goPlayable: true });
+  const drivers = [
+    { id: "hacking" as FeatureId, everyMs: 200, tick() {} },
+    { id: "gang" as FeatureId, everyMs: 1_000, requires: "gang" as FeatureId, tick() {} },
+    { id: "go" as FeatureId, everyMs: 1_000, requires: "go" as FeatureId, tick() {} },
+  ];
+
+  test("a locked feature never ticks", () => {
+    // caps has gang "no" and go "yes" on a fresh BN1.
+    const due = selectDue(drivers, {}, caps, 10_000).map((d) => d.id);
+    expect(due).toContain("hacking");
+    expect(due).toContain("go");
+    expect(due).not.toContain("gang");
+  });
+
+  test("an unknown feature never ticks either", () => {
+    // "we have not looked" is not "you may play it": acting on an unprobed
+    // feature spends a stub launch on an API that may throw.
+    const due = selectDue(drivers, {}, unknownCapabilities(), 10_000).map((d) => d.id);
+    expect(due).toEqual(["hacking"]);
+  });
+
+  test("cadence is respected, and a never-run driver is always due", () => {
+    // hacking ran 50ms ago against a 200ms cadence: not yet.
+    expect(selectDue(drivers, { hacking: 9_950 }, caps, 10_000).map((d) => d.id)).toEqual(["go"]);
+    expect(selectDue(drivers, { hacking: 9_800 }, caps, 10_000).map((d) => d.id)).toContain("hacking");
+    // Clearing an entry — what an unlock does — makes the driver due at once,
+    // instead of waiting out a cadence it was never eligible for.
+    expect(selectDue(drivers, { go: 9_999 }, caps, 10_000).map((d) => d.id)).toEqual(["hacking"]);
+    expect(selectDue(drivers, {}, caps, 10_000).map((d) => d.id)).toEqual(["hacking", "go"]);
+  });
+});
+
+describe("capability deltas", () => {
+  const fresh = deriveCapabilities({ bitNode: 1, sourceFiles: {}, inGang: false });
+
+  test("only no|unknown -> yes counts as an unlock", () => {
+    const withGang = deriveCapabilities({ bitNode: 1, sourceFiles: { "2": 1 }, inGang: true });
+    expect(capsDelta(fresh, withGang).unlocked).toContain("gang");
+    // The gate finally reporting is information, not a change in what we can
+    // play — otherwise every cold boot would look like a wave of unlocks.
+    expect(capsDelta(unknownCapabilities(), fresh).unlocked).toEqual([]);
+  });
+
+  test("losing a feature is reported separately", () => {
+    const withGang = deriveCapabilities({ bitNode: 1, sourceFiles: { "2": 1 }, inGang: true });
+    const delta = capsDelta(withGang, fresh);
+    expect(delta.locked).toContain("gang");
+    expect(delta.unlocked).toEqual([]);
+  });
+
+  test("bitNodeChanged needs both readings known", () => {
+    // undefined -> 1 is the first successful gate batch, NOT a node reset.
+    // Treating it as one would wipe the fleet on every cold boot.
+    expect(capsDelta(unknownCapabilities(), fresh).bitNodeChanged).toBe(false);
+    expect(capsDelta(fresh, unknownCapabilities()).bitNodeChanged).toBe(false);
+    expect(capsDelta(fresh, deriveCapabilities({ bitNode: 4 })).bitNodeChanged).toBe(true);
+    expect(capsDelta(fresh, deriveCapabilities({ bitNode: 1 })).bitNodeChanged).toBe(false);
   });
 });
 

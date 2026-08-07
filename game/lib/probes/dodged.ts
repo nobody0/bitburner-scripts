@@ -1,4 +1,5 @@
 import type { NS } from "@ns";
+import { sfLevel } from "../../../shared/features/unlock.ts";
 import { emit, emitPartial, type DodgedProbe, type Emission, type ProbeContext } from "./index.ts";
 import { fleetFrom } from "./local.ts";
 
@@ -53,25 +54,42 @@ const hackingCloud: DodgedProbe = {
 
 // --- progression -----------------------------------------------------------
 
-const progressionDetail: DodgedProbe = {
-  id: "progression.detail",
+const progressionMoney: DodgedProbe = {
+  id: "progression.money",
   kind: "dodged",
   feature: "progression",
   everyMs: MIN_2,
   merge: true,
-  methods: ["getMoneySources", "getBitNodeMultipliers"],
+  methods: ["getMoneySources"],
   run(stubNs: NS) {
-    const out: Partial<Record<string, unknown>> = {
-      moneySources: stubNs["getMoneySources"](),
-    };
-    // Throws without SF5/BN5 — the multiplier table stays absent, which the
-    // BitNode tab renders as "requires SF5" rather than as all-default.
-    try {
-      out.multipliers = { ...stubNs["getBitNodeMultipliers"]() } as unknown as Record<string, number>;
-    } catch {
-      /* no SF5 */
-    }
-    return [emit("progression", out as never)];
+    return [emitPartial("progression", { moneySources: stubNs["getMoneySources"]() })];
+  },
+};
+
+/** Split out from the money probe and latched, because it is expensive and
+ * constant. ns.getBitNodeMultipliers costs 4 GB — more than the whole dodge
+ * budget on a fresh 8 GB home (~2.3 GB) — so pricing it together with the free
+ * getMoneySources would have made BOTH unaffordable for the entire early game.
+ *
+ * The multipliers only change when the BitNode does, so `when` reads them once
+ * and never again: the controller clears the cached value on a node reset,
+ * which re-arms this probe. Without SF5/BN5 the call throws, so `when` also
+ * refuses to spend a stub launch discovering that. */
+const progressionMults: DodgedProbe = {
+  id: "progression.mults",
+  kind: "dodged",
+  feature: "progression",
+  everyMs: MIN_10,
+  merge: true,
+  methods: ["getBitNodeMultipliers"],
+  when: (caps, topics) =>
+    (caps.bitNode === 5 || sfLevel(caps.sourceFiles, 5) > 0) && topics.progression?.multipliers === undefined,
+  run(stubNs: NS) {
+    return [
+      emitPartial("progression", {
+        multipliers: { ...stubNs["getBitNodeMultipliers"]() } as unknown as Record<string, number>,
+      }),
+    ];
   },
 };
 
@@ -1000,7 +1018,8 @@ const sideInfiltration: DodgedProbe = {
 
 export const DODGED_PROBES: readonly DodgedProbe[] = [
   hackingCloud,
-  progressionDetail,
+  progressionMoney,
+  progressionMults,
   factionStandings,
   factionAugs,
   careerWork,

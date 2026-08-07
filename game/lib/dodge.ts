@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { stateKey } from "../../shared/telemetry/schema.ts";
 import type { DodgeGlobalThis } from "./dodge-shared.ts";
-import type { Telemetry } from "./telemetry.ts";
+import { setMirror, type GameState } from "./state.ts";
 
 /** RAM dodger — TypeScript port of the legacy stubCall design
  * (bitburner-legacy/lib/stubcall.js). A temporary stub script buys a dynamic
@@ -60,7 +60,7 @@ type NsMethods = { [K in keyof NS]: NS[K] extends (...args: never[]) => unknown 
 
 export interface Dodger {
   /** Typed dodged call: runs ns[method](...args) inside the stub. The result
-   * is mirrored to telemetry under `method:args`, exactly like a watched get. */
+   * is mirrored into the game-state store under `method:args`. */
   call<K extends NsMethods>(
     method: K,
     ...args: Parameters<NS[K]>
@@ -69,15 +69,19 @@ export interface Dodger {
   batch<T>(func: (stubNs: NS) => T | Promise<T>, budgetGb?: number): Promise<T>;
 }
 
-export function makeDodger(ns: NS, tel?: Telemetry): Dodger {
+/** `state` is the game-state store, not a telemetry sink: a dodged get is a
+ * read of the world like any other, so it lands in the store unconditionally
+ * and reaches the wire only if a sink is flushing. */
+export function makeDodger(ns: NS, state?: GameState): Dodger {
   return {
     call: async (method, ...args) => {
       const value = await dodge(ns, (stubNs) => {
         const fn = stubNs[method] as (...a: unknown[]) => unknown;
         return fn.apply(stubNs, args);
       });
-      TELEMETRY: if (__TELEMETRY__) {
-        tel?.mirror(stateKey(method, ...(args.filter((a) => typeof a !== "object") as (string | number | boolean)[])), value);
+      if (state) {
+        const key = stateKey(method, ...(args.filter((a) => typeof a !== "object") as (string | number | boolean)[]));
+        setMirror(state, key, value);
       }
       return value as never;
     },

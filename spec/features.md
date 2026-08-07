@@ -11,8 +11,9 @@ feature, multiplies it, and asks you to win the game with it. That makes the
 node roster the game's own statement of where the separable problems are.
 
 One feature = one entry in `shared/features/registry.ts` + at least one topic
-in `shared/telemetry/topics/` + one probe in `game/lib/probes/` + one tab in
-`ui/app/tabs/`. `tests/features.test.ts` enforces that the four stay in sync.
+in `shared/telemetry/topics/` + one probe in `game/lib/probes/` + one driver in
+`game/lib/features/` + one tab in `ui/app/tabs/`. `tests/features.test.ts`
+enforces that the five stay in sync.
 
 ## The roster
 
@@ -41,9 +42,11 @@ Notes on the boundaries, since several are judgement calls:
 - **Karma** lives inside `career` because it is a *precondition* other
   features wait on — BN2's gang needs -54,000 of it.
 - **Coding contracts and infiltration** share `side`: universal income with no
-  BitNode of their own. The casino belongs here conceptually but exposes no
-  ns API (it is DOM-driven), so `Feature.api` records that and the panel says
-  so rather than waiting forever.
+  BitNode of their own. The casino belongs here conceptually but exposes no ns
+  API (it is DOM-driven); `side` is still `api: true` because its other two
+  halves are automatable. `Feature.api` exists for a feature with *no* ns
+  surface at all, so the tab can say so rather than waiting forever — nothing
+  in the roster is that yet.
 - **BN1** is themed by `hacking` — it unlocks nothing else. **BN12** is themed
   by `progression`, being the node about the reset loop itself.
 
@@ -69,9 +72,11 @@ the dispatcher everything above `HOME_RESERVE_GB`:
    (`ns.getPlayer`, the servers map). No ns call, no dodge, always runs. Karma,
    skills, joined factions and fleet totals live here, so those panels are
    never empty regardless of budget.
-2. **Gates** (`probes/gates.ts`) — one dodge, ~1.1 GB, every sweep. Every
-   unlock test the game offers is free or nearly so, and `ns.getResetInfo` at
-   1 GB fills the whole BitNode tab. Cheapest high-value probe we have.
+2. **Gates** (`probes/gates.ts`) — one dodge, budgeted at `GATE_COST_GB`
+   (1.5 GB), every sweep. Every unlock test the game offers is free or nearly
+   so, and `ns.getResetInfo` at 1 GB fills the whole BitNode tab. Cheapest
+   high-value probe we have — and the only one the *controller* cannot run
+   without, since `Capabilities` is what gates the feature drivers.
 3. **Dodged** (`probes/dodged.ts`) — everything else, split into `core` and
    detail tiers per feature. The runner prices each with
    `ns.getFunctionRamCost` (0 GB, and it already folds in the singularity
@@ -88,12 +93,76 @@ Rules for probe bodies:
   rather than returning empty when unavailable. The runner isolates each probe
   from its batch-mates; a probe must isolate any sub-API gated differently
   from its own `requires`.
-- **Cadences must be plain literals.** `everyMs: 2 * MINUTE` defeats esbuild's
-  purity analysis and pins the whole probe object into `--perf` bundles.
-  `tests/features.test.ts` greps for this.
+- **Cadences are plain literals.** This was once load-bearing: `everyMs:
+  2 * MINUTE` defeats esbuild's purity analysis, which used to pin the whole
+  probe object into `--perf` bundles. Probes are now compiled into every build
+  by design, so nothing tree-shakes and the rule guards nothing — it survives
+  as house style only. Do not reintroduce a test for it.
 - **`methods` must name real ns functions.** A typo makes
   `getFunctionRamCost` throw, the runner guess a price, and the probe quietly
   never run. The test checks every name against the type definitions.
+
+## Driving
+
+The write side is `game/lib/features/`, scheduled by `game/lib/controller.ts`.
+A probe reads one feature's state; a **driver** acts on it.
+
+```ts
+interface FeatureDriver {
+  id: FeatureId;
+  everyMs: number;          // plain literal, like a probe cadence
+  requires?: FeatureId;     // ticks only while caps.unlocked[requires] === "yes"
+  tick(ctx: DriverContext): void | Promise<void>;
+}
+```
+
+`selectDue(drivers, lastRun, caps, now)` is pure and unit-tested: it is the
+whole scheduling rule, and it is where the capability gate is enforced. Two
+properties matter.
+
+- **`unknown` never ticks.** "We have not looked" is not "you may play it".
+  Acting on an unprobed feature spends a stub launch discovering an API that
+  throws.
+- **An unlock is not a wait.** When the gate batch reports a feature moving to
+  `yes`, the controller deletes its `featureLastRun` entry so it ticks on the
+  next pass instead of serving out a cadence it was never eligible for.
+
+`hacking` is the only driver at 200 ms — batch ops land on HWGW spacer slots,
+so a slower cadence would miss them. Everything else is slower by orders of
+magnitude, which is the reason the frame schedules by cadence at all rather
+than running every driver every pass. Twelve of the fourteen are registered
+inert (`tick() {}`) with the registry's `problem` string as their TODO: a
+declared no-op makes the gating visible, gives the scheduler its real shape,
+and keeps `tests/features.test.ts` able to enforce a driver per feature.
+
+The network sweep — scan, reclaim, root, deploy, reap, heap resync — stays in
+the controller rather than becoming a `hacking` concern, because a rooted
+fleet is what every feature spends. Hacking is only its first customer.
+
+### BitNode resets
+
+`capsDelta` (`shared/features/unlock.ts`) reports `bitNodeChanged` only when
+*both* readings are known: `undefined -> 1` is the first successful gate
+batch, not a node reset, and treating it as one would wipe the fleet on every
+cold boot.
+
+On a real change everything derived from the world we left is dropped — the
+server snapshot, the farm and fleet rollups, the multiplier cache, the
+dispatcher ledger and heap, and the realm worker registry — and the controller
+rescans and reclaims immediately rather than waiting for the next sweep.
+
+Two rules that are easy to get backwards:
+
+- **The server snapshot goes too.** The sweep scans *before* the gate batch
+  reports the new node, so whether that scan saw the old world or the new one
+  depends on when the reset landed. A snapshot that is only probably fresh is
+  the same class of bug as a heap describing a dead fleet. Rescan; do not keep
+  it to save latency.
+- **The realm worker registry is cleared here and nowhere else.** Across a
+  build handoff it must survive — the incoming controller has a fresh ledger
+  while the old workers keep running, and the registry is the only proof they
+  are alive. A node reset is the opposite: every script was killed, so every
+  op id in it is unreportable.
 
 ## The simulator
 

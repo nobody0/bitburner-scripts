@@ -13,16 +13,17 @@ Defined in `shared/telemetry/schema.ts`. Three kinds, all carrying
 
 - **state** — two families, both last-write-wins per key:
   - *Getter mirrors* (`Telemetry.mirror`), keyed `<getter>` or
-    `<getter>:<argKey>` (e.g. `getServer:home`). Reading state IS logging
-    state: `game/lib/watched-ns.ts` wraps ns getters so every call passes
-    through and mirrors its result; dodged getters (`makeDodger(...).call`)
-    mirror the same way.
+    `<getter>:<argKey>` (e.g. `getServer:home`). Fed by dodged getters
+    (`makeDodger(...).call`), which write into the store's mirror space; the
+    sink republishes `player` under the `getPlayer` mirror key as well, so
+    `shared/goals/evaluate.ts` and the UI money chart keep working off one
+    acquisition.
   - *Typed topics* (`Telemetry.state`), keyed by
     `shared/telemetry/state-map.ts` (`player`, `servers`, …). The payload
     type is checked against StateMap at compile time, and the same StateMap
-    types the `gameGlobal` cache (`game/lib/globals.ts`) — so a dodge batch
-    like `collectServers` feeds the log, the UI, and `gameGlobal.servers`
-    from one inferred type. New app-level state = one new StateMap entry.
+    types the game-state store (`game/lib/state.ts`) — so a dodge batch like
+    `collectServers` feeds the store, the UI and the log from one inferred
+    type. New app-level state = one new StateMap entry.
 
     Beyond the core three there is one topic per feature, declared in
     `shared/telemetry/topics/` (see `spec/features.md`). Two rules hold for
@@ -70,21 +71,47 @@ oldest debug first, reports `telemetry.dropped`), reconnect with 1s→30s
 backoff (same run id, seq continues — gaps are visible), final flush in
 `ns.atExit`.
 
+## Acquisition is not telemetry
+
+The script reads the game and stores the result in its own game-state copy
+(`game/lib/state.ts`), keyed by StateMap. That happens in every build. The
+controller decides from that store — the capability gates it reads are what
+gate the feature drivers — and telemetry is the optional extra step that also
+sends the store over the wire.
+
+The store is the single write target for every acquisition path: the sweep
+scan, `ns.getPlayer`, the gate batch, all local and dodged probes, the
+dispatcher rollup. `set` / `merge` mark keys dirty; `game/lib/telemetry-sink.ts`
+publishes the dirty set once per tick and is the only module that touches
+`Telemetry` at all. Probe failures and skips are recorded as store fields, not
+emitted as events at the call site; the sink diffs them so an unaffordable
+probe reports once per *price* and a failing one once per *message*.
+
 ## Compile-time elimination
 
 `tools/build.ts` defines `__TELEMETRY__` per build (`true` default, `false`
 with `--perf`) and drops `TELEMETRY`-labelled statements in performance
-builds. The hard rule, enforced by convention plus
-`tests/build-perf.test.ts` (greps the perf bundle for `WebSocket`/`telemetry`):
+builds. The hard rule, enforced by `tests/build-perf.test.ts`:
 
-> Every reference to `tel`, `initTelemetry`, or `watchNs` in calling `game/`
-> code sits inside `TELEMETRY: if (__TELEMETRY__)`.
+> Telemetry may only **send** state the script already holds. Every getter,
+> dodge and probe runs unconditionally and writes to the game-state store;
+> `TELEMETRY: if (__TELEMETRY__)` wraps the send and nothing else. A `--perf`
+> build must be behaviourally identical to a telemetry build — only quieter.
 
 esbuild drops the labelled branch — including payload construction — then
-tree-shakes the unreferenced telemetry modules out of the bundle. This avoids
+tree-shakes the sink and the telemetry client out of the bundle. This avoids
 syntax minification, which would rewrite the dodger's bracket-notation ns calls
 and change RAM accounting. `shared/` code never references `__TELEMETRY__`;
 the flag only exists in esbuild-processed game bundles.
+
+Compiling acquisition into perf builds is free because Bitburner charges for
+*dotted* ns references, not bundle size: every probe body calls through
+bracket notation on its own stub ns, so the whole probe table costs 0 GB.
+`tests/build-perf.test.ts` asserts both bundles contain the same set of
+`stubNs[...]` call sites — the mechanical statement of "same behaviour" — and
+`tests/ram-budget.test.ts` asserts they cost the same static RAM. So `--perf`
+buys no socket, no serialization, no ring buffer and a smaller bundle, and
+changes nothing about what the script does.
 
 ## Hub
 

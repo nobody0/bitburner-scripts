@@ -22,7 +22,11 @@ treat its architecture as authoritative.
 - Strategy belongs in `shared/strategy/` as pure functions; `game/` drivers
   only move data (build a WorldView, execute Actions). Anything decided in the
   game must be A/B-testable in the simulator.
-- Telemetry rule: every calling-code reference to `tel`, `initTelemetry`, or
-  `watchNs` in `game/` must sit behind
-  `TELEMETRY: if (__TELEMETRY__)` so `--perf` builds eliminate all telemetry
-  code and payload construction without rewriting dodge calls.
+- Telemetry rule: telemetry may only **send** state the script already holds.
+  Every getter, dodge and probe runs unconditionally and writes to the
+  game-state store (`game/lib/state.ts`); `TELEMETRY: if (__TELEMETRY__)` wraps
+  the send and nothing else. A `--perf` build must be behaviourally identical
+  to a telemetry build — only quieter. Concretely: every reference to `tel`,
+  `initTelemetry` or the sink sits inside the label, and nothing the controller
+  *decides on* (capabilities, BitNode, progression, any probe result) may.
+  `tests/build-perf.test.ts` pins both halves.

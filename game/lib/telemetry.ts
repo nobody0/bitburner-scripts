@@ -8,8 +8,11 @@ import {
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
 
 /** In-game telemetry client. Streams LogRecords to the ui/ process over a bare
- * `new WebSocket()` (browser global — 0 GB ns RAM). Every reference to this
- * module in calling game code must sit behind
+ * `new WebSocket()` (browser global — 0 GB ns RAM).
+ *
+ * Its only caller is ./telemetry-sink.ts, which publishes the game-state
+ * store. Nothing else in game/ may reference it: acquisition runs in every
+ * build, and every reference to this module sits behind
  * `TELEMETRY: if (__TELEMETRY__)` so --perf builds eliminate it entirely
  * (see game/flags.d.ts). */
 
@@ -23,8 +26,8 @@ export interface Telemetry {
   /** Typed app-state topic (shared/telemetry/state-map.ts): the payload type
    * is checked against StateMap[key] at compile time. */
   state<K extends StateKey>(key: K, data: StateMap[K]): void;
-  /** Untyped getter auto-mirror (`getServer:home`, ...) — used by watchNs and
-   * the dodger, where the key is derived from the ns call itself. */
+  /** Untyped getter auto-mirror (`getServer:home`, ...), where the key is
+   * derived from the ns call itself rather than from StateMap. */
   mirror(key: string, data: unknown): void;
   event(name: string, data?: unknown): void;
   debug(msg: string, data?: unknown): void;

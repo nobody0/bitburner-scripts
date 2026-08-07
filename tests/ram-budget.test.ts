@@ -77,6 +77,19 @@ describe("in-game static RAM budget", () => {
     expect(members).not.toContain("ns.scan");
   });
 
+  test("the --perf build costs exactly the same static RAM", async () => {
+    // Compiling acquisition into perf builds is only affordable because
+    // Bitburner charges for DOTTED ns references, not bundle size: every probe
+    // body calls through bracket notation on its own stub ns, so the whole
+    // probe table is free here. If a probe ever reaches for `ns.foo` directly,
+    // this is where the fresh-game story breaks — not in-game at 3 a.m.
+    const [telemetryBuild] = await buildScripts(config, { telemetry: true });
+    const [perfBuild] = await buildScripts(config, { telemetry: false });
+    const perf = staticRam(perfBuild!.content);
+    expect(perf.total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
+    expect(perf.members).toEqual(staticRam(telemetryBuild!.content).members);
+  });
+
   test("the puppet worker references only the three ops it performs", async () => {
     const artifacts = await buildScripts(config, { telemetry: true });
     const worker = artifacts.find((a) => a.filename === "worker/worker.js")!;

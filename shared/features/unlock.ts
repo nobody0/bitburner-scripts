@@ -98,3 +98,35 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
 export function unknownCapabilities(): Capabilities {
   return deriveCapabilities({});
 }
+
+export interface CapsDelta {
+  /** Features that became playable. */
+  unlocked: FeatureId[];
+  /** Features that stopped being playable (a reset dropped a gang, say). */
+  locked: FeatureId[];
+  /** The active BitNode changed under a live realm — everything the controller
+   *  cached about the world is now about a game that no longer exists. */
+  bitNodeChanged: boolean;
+}
+
+/** What changed between two capability readings. Pure, so the controller and
+ * the simulator agree on what counts as an unlock.
+ *
+ * Only `no | unknown -> yes` is an unlock: `unknown -> no` is the gate finally
+ * reporting, not a feature being taken away. `bitNodeChanged` needs BOTH
+ * readings known — `undefined -> 1` is the first successful gate batch, not a
+ * node reset, and treating it as one would wipe the fleet on every cold boot. */
+export function capsDelta(before: Capabilities, after: Capabilities): CapsDelta {
+  const unlocked: FeatureId[] = [];
+  const locked: FeatureId[] = [];
+  for (const id of FEATURE_IDS) {
+    const was = before.unlocked[id];
+    const now = after.unlocked[id];
+    if (was === now) continue;
+    if (now === "yes") unlocked.push(id);
+    else if (was === "yes") locked.push(id);
+  }
+  const bitNodeChanged =
+    before.bitNode !== undefined && after.bitNode !== undefined && before.bitNode !== after.bitNode;
+  return { unlocked, locked, bitNodeChanged };
+}

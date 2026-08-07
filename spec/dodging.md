@@ -27,14 +27,21 @@ caller pays only `ns.exec` (1.3 GB).
 
 ## Dodged gets are state sync
 
-`makeDodger(ns, tel).call("getServer", host)` is the typed form: result typed
-as `ReturnType<NS["getServer"]>`, mirrored to telemetry under `getServer:home`
-exactly like a watched getter. Two getter paths, one state stream:
+`makeDodger(ns, state).call("getServer", host)` is the typed form: result
+typed as `ReturnType<NS["getServer"]>`, mirrored into the game-state store
+(`game/lib/state.ts`) under `getServer:home`. It mirrors into the *store*, not
+into telemetry — reading state is storing state, and sending it is a separate,
+optional step (`spec/telemetry.md`). Two getter paths, one store:
 
 | path       | RAM                     | when                              |
 |------------|-------------------------|-----------------------------------|
-| `watchNs`  | static cost per getter  | hot-loop reads you always need    |
+| direct     | static cost per getter  | hot-loop reads you always need    |
 | `dodger`   | 1.3 GB exec, per call   | occasional/expensive reads        |
+
+The controller takes the direct path for exactly three reads — `ns.getPlayer`
+every 2 s, and `getServerMoneyAvailable` / `getServerSecurityLevel` on the hot
+targets in `buildView` — because the dispatcher's 200 ms pass cannot afford a
+stub launch. Everything else dodges.
 
 `Dodger.batch(fn)` is the escape hatch: many calls in one stub launch (the
 legacy stocker pattern), mirroring left to the caller.

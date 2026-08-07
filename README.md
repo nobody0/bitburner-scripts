@@ -7,9 +7,10 @@ small architecture.
 
 Four parts (see [spec/repo-layout.md](spec/repo-layout.md)):
 
-- **game/** — the only code synced into the game: `start.js` (controller —
-  scan, root, dispatch), the telemetry logger, the RAM-dodge stub, and the
-  puppet worker the HWGW dispatcher drives. 3.6 GB static, budget-tested.
+- **game/** — the only code synced into the game: `start.js` (startup script,
+  the core loop, the game-state store, feature probes and drivers), the
+  telemetry logger, the RAM-dodge stub, and the puppet worker the HWGW
+  dispatcher drives. 3.6 GB static, budget-tested.
 - **shared/** — the pure engine: HWGW targeting/dispatch
   ([spec/targeting.md](spec/targeting.md)), the RAM heap, goals, telemetry
   schema, and the feature registry
@@ -83,6 +84,14 @@ pipeline is intentionally one-way and never calls the Remote File API's
 Telemetry is compiled **in** by default and compiled **out** entirely by
 `--perf` builds (esbuild `define` + dead-code elimination; verified by
 `tests/build-perf.test.ts`).
+
+`--perf` changes what the script *reports*, never what it *does*. The script
+reads the game into its own state store in every build — that store is what
+the controller decides from — and telemetry is the optional step that also
+sends it over the wire. So `--perf` buys no WebSocket, no serialization, no
+ring buffer and a smaller bundle, at identical game behaviour and identical
+static RAM. The tests pin this: both bundles must contain the same set of
+dodged ns call sites and cost the same 3.6 GB.
 
 ## Simulation / A-B testing
 
