@@ -5,14 +5,29 @@ A clean-sheet Bitburner automation codebase. The old
 inspiration only; this repository starts with new history and a deliberately
 small architecture.
 
+Four parts (see [spec/repo-layout.md](spec/repo-layout.md)):
+
+- **game/** — the only code synced into the game. Kept minimal by design:
+  `start.js` (scan, root, spread, report), the telemetry logger, the RAM-dodge
+  stub, and the placeholder starter worker.
+- **shared/** — pure cross-cutting code: telemetry schema, the world/planner
+  seam, goal definitions and the stream reducer.
+- **sim/** — the simulator: vendored game formulas + virtual clock; measures
+  "time to goal" so strategy changes can be A/B compared before touching the
+  game. See [spec/simulator.md](spec/simulator.md), [spec/goals.md](spec/goals.md).
+- **ui/** — the external UI process (never in-game): telemetry hub + browser
+  viewer for live play and sim replays. See [spec/telemetry.md](spec/telemetry.md).
+
 ## Local references
 
 - Game source: `/Users/bob/git/bitburner-src`, pinned to the release documented
-  in [GAME_SOURCE.md](GAME_SOURCE.md).
+  in [spec/game-source.md](spec/game-source.md).
 - Legacy scripts: `/Users/bob/git/bitburner-legacy`, tracking the repository's
   newest branch, `patch-1`, at commit `29d8bd2`; cloned from
   [`nobody0/bitburner`](https://github.com/nobody0/bitburner). That branch is one
   test-cleanup commit ahead of `main` and contains no additional feature work.
+  Its RAM dodger design is ported (with credit) into `game/lib/dodge.ts` — see
+  [spec/dodging.md](spec/dodging.md).
 
 Both checkouts are reference material. New scripts and history belong only in
 this repository.
@@ -20,39 +35,65 @@ this repository.
 ## Development loop
 
 1. Install dependencies with `bun install`.
-2. Run `bun run dev` and leave it running.
-3. In Bitburner, open **Options → Remote API** and configure the game to connect
-   to `127.0.0.1:12525` without TLS.
-4. Edit TypeScript under `src/`. Successful builds are pushed to `home` whenever
-   the game is connected.
+2. Run `bun run dev` and leave it running (add `--perf` to strip telemetry).
+3. Run `bun run ui` and open <http://127.0.0.1:12526> for the live dashboard.
+4. In Bitburner, open **Options → Remote API** and configure the game to connect
+   to `127.0.0.1:12525` — hostname `localhost`, port `12525`, **Use wss OFF**,
+   reconnection delay `5`.
+5. In **Options → System**, set the autoexec script to `start.js main` so it
+   starts whenever the game loads (cold boot: scan, root, redeploy).
+6. Edit TypeScript under `game/` (and `shared/`). Successful builds are pushed
+   to `home` whenever the game is connected, and the running `start.js`
+   detects the new build stamp (`build-id.txt`) and hands off to a fresh
+   instance of itself — no manual restarts. Game reload and code change share
+   the same entry point; a controller-epoch guard keeps exactly one instance
+   in charge.
 
-Bitburner is the WebSocket client. This repository runs the WebSocket server and
-sends JSON-RPC requests such as `pushFile` over the connection initiated by the
-game.
+Bitburner is the WebSocket client for file sync (port 12525, this repo is the
+server); the in-game telemetry logger is a WebSocket client of the UI hub
+(port 12526). Neither costs ns RAM.
 
 ## What reaches the game
 
 `bitburner.config.json` is the deployment allowlist. Each entry maps one
-TypeScript entrypoint to one in-game JavaScript filename:
+TypeScript entrypoint under `game/` (enforced) to one in-game JavaScript
+filename:
 
 ```json
 {
-  "source": "src/main.ts",
-  "target": "main.js"
+  "source": "game/start.ts",
+  "target": "start.js"
 }
 ```
 
 esbuild bundles the entrypoint and its imports into that single `.js` file.
-Files that are not listed as entries are never pushed independently. The first
-version of the pipeline is intentionally one-way and never calls the Remote File
-API's `deleteFile` method, so it cannot remove unrelated in-game scripts.
+Files that are not listed as entries are never pushed independently. The
+pipeline is intentionally one-way and never calls the Remote File API's
+`deleteFile` method, so it cannot remove unrelated in-game scripts.
+
+Telemetry is compiled **in** by default and compiled **out** entirely by
+`--perf` builds (esbuild `define` + dead-code elimination; verified by
+`tests/build-perf.test.ts`).
+
+## Simulation / A-B testing
+
+```
+bun run sim -- --goal earn:1e6 --goal only:hack,grow,weaken,nuke --seeds 1..10 --horizon 12h
+bun run sim:compare runs/<baseline>.jsonl runs/<candidate>.jsonl
+```
+
+The sim and live game emit the same telemetry schema and core state keys, so
+the UI can replay either source. Source-specific detail differs deliberately:
+the sim currently records `hack.done`, while live farming will expose aggregate
+totals through the future one-per-second `farm` rollup.
 
 ## Type safety
 
 Run `bun run types` while Bitburner is connected. The pipeline requests the
 game's own `NetscriptDefinitions.d.ts` through `getDefinitionFile` and writes it
 to `types/NetscriptDefinitions.d.ts`. Commit changes to that file alongside an
-intentional game-version update.
+intentional game-version update. (The committed copy matches the pinned v3.0.1
+source checkout.)
 
 Use the definitions through type-only imports:
 
@@ -60,23 +101,14 @@ Use the definitions through type-only imports:
 import type { NS } from "@ns";
 ```
 
-`bun run typecheck` performs strict TypeScript checking without emitting files.
-`bun run build` is the only production compiler.
-
-## Tests
-
-`bun test` runs fast unit tests with Bun's built-in test framework. Keep strategy
-and scheduling logic pure where possible; wrap Netscript calls at the edges so
-most behavior can be tested without a running game.
-
 ## Commands
 
-- `bun run build` — compile the configured subset to `build/`.
-- `bun run typecheck` — strict type checking against the game definitions.
-- `bun test` — run unit tests.
-- `bun run dev` — listen for Bitburner, then build and push on changes.
-- `bun run sync` — wait for one connection, build and push once, then exit.
-- `bun run types` — refresh only the exact type definitions from the game.
-
-See [GAME_SOURCE.md](GAME_SOURCE.md) for the matching upstream source checkout
-and [docs/architecture.md](docs/architecture.md) for the pipeline design.
+- `bun run dev` / `dev:perf` — listen for Bitburner, build and push on changes.
+- `bun run sync` — one-shot build and push, then exit.
+- `bun run build` / `build:perf` — compile the allowlist to `build/`.
+- `bun run ui` — telemetry hub + viewer on port 12526.
+- `bun run sim -- --goal …` — run the simulator; JSONL lands in `runs/`.
+- `bun run sim:compare a.jsonl b.jsonl` — A/B time-to-goal.
+- `bun run vendor` — re-extract the game formula core from the pinned tag.
+- `bun run typecheck` / `typecheck:vendor` / `bun test` — checks; run before commit.
+- `bun run types` — refresh type definitions from the running game.

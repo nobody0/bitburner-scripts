@@ -6,7 +6,8 @@ const valid = {
   port: 12525,
   server: "home",
   buildDir: "build",
-  entries: [{ source: "src/main.ts", target: "main.js" }],
+  watchDirs: ["game", "shared", "types"],
+  entries: [{ source: "game/start.ts", target: "start.js" }],
 };
 
 describe("validateConfig", () => {
@@ -14,8 +15,25 @@ describe("validateConfig", () => {
     expect(validateConfig(valid)).toEqual(valid);
   });
 
+  test("defaults watchDirs when omitted", () => {
+    const { watchDirs: _watchDirs, ...withoutWatchDirs } = valid;
+    expect(validateConfig(withoutWatchDirs).watchDirs).toEqual(["game", "shared"]);
+  });
+
+  test("rejects watch dirs outside the repository", () => {
+    expect(() => validateConfig({ ...valid, watchDirs: ["../elsewhere"] })).toThrow(
+      "must stay inside the repository",
+    );
+  });
+
+  test("rejects entry sources outside game/", () => {
+    expect(() => validateConfig({ ...valid, entries: [{ source: "sim/run.ts", target: "run.js" }] })).toThrow(
+      "must live under game/",
+    );
+  });
+
   test("rejects targets outside the repository", () => {
-    expect(() => validateConfig({ ...valid, entries: [{ source: "src/main.ts", target: "../main.js" }] })).toThrow(
+    expect(() => validateConfig({ ...valid, entries: [{ source: "game/start.ts", target: "../start.js" }] })).toThrow(
       "must stay inside the repository",
     );
   });
@@ -25,11 +43,10 @@ describe("validateConfig", () => {
       validateConfig({
         ...valid,
         entries: [
-          { source: "src/main.ts", target: "main.js" },
-          { source: "src/other.ts", target: "main.js" },
+          { source: "game/start.ts", target: "start.js" },
+          { source: "game/other.ts", target: "start.js" },
         ],
       }),
     ).toThrow("duplicate target");
   });
 });
-

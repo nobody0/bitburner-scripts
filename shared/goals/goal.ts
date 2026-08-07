@@ -1,0 +1,106 @@
+import type { Action } from "../world.ts";
+
+/** Goals are predicates over the recorded state stream (spec/goals.md): the
+ * same GoalContext is reduced from LogRecords whether they came from the live
+ * game or the simulator, so "did we reach the goal, and when" has exactly one
+ * implementation. */
+
+export interface GoalPlayer {
+  money: number;
+  hackingSkill: number;
+  hackingExp: number;
+}
+
+export interface GoalServer {
+  hostname: string;
+  hasAdminRights: boolean;
+  purchasedByPlayer: boolean;
+  moneyAvailable: number;
+  moneyMax: number;
+  hackDifficulty: number;
+  maxRam: number;
+}
+
+export interface GoalContext {
+  time: number;
+  player: GoalPlayer;
+  servers: Map<string, GoalServer>;
+  totals: { moneyEarned: number; hacks: number };
+}
+
+/** Sim-only initial conditions a goal may demand. */
+export interface GoalSetup {
+  homeRam?: number;
+  startingMoney?: number;
+}
+
+export interface Goal {
+  id: string;
+  describe(): string;
+  setup?: GoalSetup;
+  /** Strategy-space restriction ("do ONLY hacking"). The driver filters
+   * planner output through this and emits action.blocked for the rest. */
+  allows?(action: Action): boolean;
+  done(ctx: GoalContext): boolean;
+}
+
+export interface Cmp {
+  gte?: number;
+  lte?: number;
+}
+
+function matches(value: number, cmp: Cmp): boolean {
+  if (cmp.gte !== undefined && !(value >= cmp.gte)) return false;
+  if (cmp.lte !== undefined && !(value <= cmp.lte)) return false;
+  return true;
+}
+
+/** Declarative minimum-state form, compiled into a predicate. */
+export interface StateConstraints {
+  player?: Partial<Record<keyof GoalPlayer, Cmp>>;
+  servers?: Record<string, Partial<Record<"moneyAvailable" | "moneyMax" | "maxRam" | "hackDifficulty", Cmp>> & { hasAdminRights?: boolean }>;
+  totals?: Partial<Record<"moneyEarned" | "hacks", Cmp>>;
+}
+
+export function goalFrom(id: string, constraints: StateConstraints, setup?: GoalSetup): Goal {
+  return {
+    id,
+    setup,
+    describe: () => `${id}: ${JSON.stringify(constraints)}`,
+    done(ctx) {
+      for (const [field, cmp] of Object.entries(constraints.player ?? {})) {
+        if (!matches(ctx.player[field as keyof GoalPlayer], cmp)) return false;
+      }
+      for (const [field, cmp] of Object.entries(constraints.totals ?? {})) {
+        if (!matches(ctx.totals[field as "moneyEarned" | "hacks"], cmp)) return false;
+      }
+      for (const [hostname, wants] of Object.entries(constraints.servers ?? {})) {
+        const server = ctx.servers.get(hostname);
+        if (!server) return false;
+        for (const [field, want] of Object.entries(wants)) {
+          if (field === "hasAdminRights") {
+            if (server.hasAdminRights !== want) return false;
+          } else if (!matches(server[field as "moneyAvailable" | "moneyMax" | "maxRam" | "hackDifficulty"], want as Cmp)) {
+            return false;
+          }
+        }
+      }
+      return true;
+    },
+  };
+}
+
+/** Compose sub-goals: done = all done; allows = intersection; setup = merged. */
+export function allOf(...goals: Goal[]): Goal {
+  const restricting = goals.filter((g) => g.allows);
+  return {
+    id: goals.map((g) => g.id).join("+"),
+    describe: () => goals.map((g) => g.describe()).join(" AND "),
+    setup: goals.reduce<GoalSetup | undefined>(
+      (acc, g) => (g.setup ? { ...acc, ...g.setup } : acc),
+      undefined,
+    ),
+    allows: restricting.length > 0 ? (a) => restricting.every((g) => g.allows!(a)) : undefined,
+    done: (ctx) => goals.every((g) => g.done(ctx)),
+  };
+}

@@ -5,18 +5,25 @@
   "type": "module",
   "scripts": {
     "build": "bun run tools/build.ts",
+    "build:perf": "bun run tools/build.ts --perf",
     "typecheck": "tsc --noEmit",
+    "typecheck:vendor": "tsc -p tsconfig.vendor.json --noEmit",
     "test": "bun test",
     "dev": "bun run tools/rfa-server.ts --watch",
+    "dev:perf": "bun run tools/rfa-server.ts --watch --perf",
     "sync": "bun run tools/rfa-server.ts --once",
-    "types": "bun run tools/rfa-server.ts --types-only"
+    "types": "bun run tools/rfa-server.ts --types-only",
+    "vendor": "bun run tools/vendor.ts",
+    "sim": "bun run sim/run.ts",
+    "sim:compare": "bun run sim/compare.ts",
+    "ui": "bun run ui/server.ts"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "@types/node": "latest",
-    "@types/ws": "latest",
-    "esbuild": "latest",
-    "typescript": "latest",
-    "ws": "latest"
+    "@types/bun": "^1.3.14",
+    "@types/node": "^26.1.2",
+    "@types/ws": "^8.18.1",
+    "esbuild": "^0.28.1",
+    "typescript": "^7.0.2",
+    "ws": "^8.21.2"
   }
 }

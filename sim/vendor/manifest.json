@@ -1,0 +1,73 @@
+{
+  "tag": "v3.0.1",
+  "files": [
+    {
+      "path": "src/Hacking.ts",
+      "sha256": "519b5ba8f70c6cf7fad6cb48360f149998ba74560ed016bc571f2a7d1098be8d"
+    },
+    {
+      "path": "src/Server/formulas/grow.ts",
+      "sha256": "104acf9ed837d6efddb5d3ca3673dc31862572018bc389b7d8c87f4b41f2d3e6"
+    },
+    {
+      "path": "src/PersonObjects/formulas/skill.ts",
+      "sha256": "3eed73f832daacf7a20108c64f95cb8894a171e2bb9160484bd97c3fe35fd97f"
+    },
+    {
+      "path": "src/PersonObjects/formulas/intelligence.ts",
+      "sha256": "2d04d2b7982c42b562961df0a3d5c914539966f9ef2c8eed8858d66f942095e4"
+    },
+    {
+      "path": "src/PersonObjects/Multipliers.ts",
+      "sha256": "07271244b0b2c720df3724878ef81d480156d793909952efa8ac16a3847af1f0"
+    },
+    {
+      "path": "src/Hacknet/formulas/HacknetNodes.ts",
+      "sha256": "f1cad082d19a0a70ca728d50c5ef1524ed99b762e88b02dcc135aa401c62e277"
+    },
+    {
+      "path": "src/Hacknet/formulas/HacknetServers.ts",
+      "sha256": "2eef2a2194a2501b809e3316e416aac3275479853458c458cbe332404c7c1b46"
+    },
+    {
+      "path": "src/BitNode/BitNodeMultipliers.ts",
+      "sha256": "b3e59e7380e27d2f82c7330adbe8254604438f681d96e58bb8a228b9f47a4b6a"
+    },
+    {
+      "path": "src/Constants.ts",
+      "sha256": "ed879c506d86a75ecdaf929e6c557f9d13c5b88a4c75290d28826e08904e2723"
+    },
+    {
+      "path": "src/Server/data/Constants.ts",
+      "sha256": "291453af3aa10bd71aaebfea7e35545921f7550422e254c90f0d83c834f5a459"
+    },
+    {
+      "path": "src/Hacknet/data/Constants.ts",
+      "sha256": "7aa1c4ae7e9524319cb24444c65745b3912a50a9a28f206b158e2cc9fd08eeb9"
+    },
+    {
+      "path": "src/Types/Record.ts",
+      "sha256": "6d9737795a71b75881516c6d307e2df40c1089179b39404cc5bf2085b737d145"
+    },
+    {
+      "path": "src/utils/helpers/clampNumber.ts",
+      "sha256": "98f17cb7dee4961a5254fd0d629587d04a295c8c4185d4b78089187785148eb6"
+    },
+    {
+      "path": "src/utils/helpers/isValidNumber.ts",
+      "sha256": "faf20a0c13535c86ee6f7d5c444f779332173052cd83f02b593109a7d13968ca"
+    },
+    {
+      "path": "src/utils/helpers/isPowerOfTwo.ts",
+      "sha256": "51ff920d19c204ad6d60913929a9ed7f3e1f2b796161e639bada186b54536971"
+    },
+    {
+      "path": "src/BitNode/BitNode.tsx#getBitNodeMultipliers",
+      "sha256": "1c549710ac88f9414fef7db6b74d8f0b0cfe8709c0bc61167c34e33b850975ce"
+    },
+    {
+      "path": "src/Server/ServerHelpers.ts#numCycleForGrowthCorrected",
+      "sha256": "68d195bc09b25f8d4070c1759048cca6a55b61d5eabda3c0c7ec1e1777a7d927"
+    }
+  ]
+}

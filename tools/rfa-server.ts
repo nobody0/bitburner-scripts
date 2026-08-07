@@ -9,6 +9,7 @@ const args = new Set(process.argv.slice(2));
 const watchMode = args.has("--watch");
 const onceMode = args.has("--once");
 const typesOnly = args.has("--types-only");
+const telemetry = !args.has("--perf");
 if ([watchMode, onceMode, typesOnly].filter(Boolean).length !== 1) {
   throw new Error("choose exactly one of --watch, --once, or --types-only");
 }
@@ -29,7 +30,7 @@ async function refreshTypes(session: RfaSession): Promise<void> {
 }
 
 async function buildAndPush(session: RfaSession): Promise<void> {
-  const artifacts = await buildScripts(config);
+  const artifacts = await buildScripts(config, { telemetry });
   for (const artifact of artifacts) {
     await session.pushFile(config.server, artifact.filename, artifact.content);
     console.log(`pushed ${config.server}:${artifact.filename}`);
@@ -65,13 +66,15 @@ server.on("connection", async (socket: WebSocket) => {
 });
 
 if (watchMode) {
-  const watcher = watch("src", { recursive: true });
-  void (async () => {
-    for await (const _event of watcher) {
-      if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(queueSync, 100);
-    }
-  })();
+  for (const dir of config.watchDirs) {
+    const watcher = watch(dir, { recursive: true });
+    void (async () => {
+      for await (const _event of watcher) {
+        if (debounce) clearTimeout(debounce);
+        debounce = setTimeout(queueSync, 100);
+      }
+    })();
+  }
 }
 
 console.log(`waiting for Bitburner at ws://${config.host}:${config.port}`);

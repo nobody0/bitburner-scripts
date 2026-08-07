@@ -1,0 +1,188 @@
+import { readdirSync, statSync, unlinkSync } from "node:fs";
+import path from "node:path";
+import { TELEMETRY_PORT, type WireMessage } from "../shared/telemetry/schema.ts";
+import { RunStore } from "./store.ts";
+
+/** Telemetry hub: one Bun.serve hosting
+ *  - ws /ingest — game scripts and sim runs push WireMessages in
+ *  - ws /live   — browser viewers get a snapshot, then live fan-out
+ *  - HTTP /     — the viewer app; /runs, /runs/:file — stored JSONL replays
+ *  - POST /sim  — launch a simulation (bun sim/run.ts) from the dashboard */
+
+const RUNS_DIR = new URL("../runs", import.meta.url).pathname;
+const PUBLIC_DIR = new URL("./public", import.meta.url).pathname;
+const REPO_ROOT = new URL("..", import.meta.url).pathname;
+const RETENTION_MS = 24 * 3_600_000;
+const SWEEP_EVERY_MS = 3_600_000;
+
+type SocketData = { role: "ingest"; store?: RunStore } | { role: "live" };
+
+/** Keyed by run id. Closed runs stay here (live=false) until the sweep, so a
+ * reconnecting client reattaches to its store instead of truncating the file. */
+const runs = new Map<string, RunStore>();
+const viewers = new Set<Bun.ServerWebSocket<SocketData>>();
+let simBusy = false;
+
+function listRunFiles(): { file: string; size: number }[] {
+  let names: string[] = [];
+  try {
+    names = readdirSync(RUNS_DIR).filter((n) => n.endsWith(".jsonl"));
+  } catch {
+    return [];
+  }
+  return names
+    .sort()
+    .reverse()
+    .map((name) => ({ file: name, size: Bun.file(path.join(RUNS_DIR, name)).size }));
+}
+
+/** Delete run files older than the retention window and prune dead stores. */
+function sweep(): void {
+  const cutoff = Date.now() - RETENTION_MS;
+  for (const { file } of listRunFiles()) {
+    const full = path.join(RUNS_DIR, file);
+    try {
+      if (statSync(full).mtimeMs < cutoff) {
+        unlinkSync(full);
+        console.log(`swept ${file}`);
+      }
+    } catch {
+      /* raced with a writer; next sweep gets it */
+    }
+  }
+  for (const [id, store] of runs) {
+    if (!store.live && (store.closedAt ?? 0) < cutoff) runs.delete(id);
+  }
+}
+
+function broadcast(payload: unknown): void {
+  const text = JSON.stringify(payload);
+  for (const viewer of viewers) viewer.send(text);
+}
+
+function liveRunList(): RunStore[] {
+  return [...runs.values()].filter((r) => r.live);
+}
+
+function snapshotFor(): unknown {
+  return {
+    type: "snapshot",
+    runs: liveRunList().map((r) => ({
+      ...r.summary(),
+      state: [...r.state.values()],
+      tail: r.ring.slice(-1_000),
+    })),
+    stored: listRunFiles(),
+    simBusy,
+  };
+}
+
+const SIM_ARG = /^[\w.,:+~-]+$/;
+
+async function launchSim(body: { goal?: string; goals?: string[]; seeds?: string; horizon?: string; label?: string }): Promise<Response> {
+  if (simBusy) return Response.json({ error: "a simulation is already running" }, { status: 409 });
+  const goals = body.goals ?? (body.goal ? [body.goal] : []);
+  const args: string[] = [];
+  for (const goal of goals) args.push("--goal", goal);
+  if (body.seeds) args.push(/\.\.|,/.test(body.seeds) ? "--seeds" : "--seed", body.seeds);
+  if (body.horizon) args.push("--horizon", body.horizon);
+  if (body.label) args.push("--label", body.label);
+  if (goals.length === 0) return Response.json({ error: "goal is required" }, { status: 400 });
+  if (!args.every((a) => a.startsWith("--") || SIM_ARG.test(a))) {
+    return Response.json({ error: "invalid characters in arguments" }, { status: 400 });
+  }
+
+  simBusy = true;
+  broadcast({ type: "sim-status", busy: true });
+  const proc = Bun.spawn(["bun", "run", "sim/run.ts", ...args], {
+    cwd: REPO_ROOT,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  void (async () => {
+    const [out, err, code] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ]);
+    simBusy = false;
+    console.log(`sim finished (exit ${code})\n${out}${err}`);
+    broadcast({ type: "sim-finished", code, output: (out + err).slice(-4_000), stored: listRunFiles() });
+  })();
+  return Response.json({ started: true, args });
+}
+
+const server = Bun.serve<SocketData, never>({
+  port: TELEMETRY_PORT,
+  fetch(req, srv) {
+    const url = new URL(req.url);
+    if (url.pathname === "/ingest" && srv.upgrade(req, { data: { role: "ingest" } as SocketData })) return;
+    if (url.pathname === "/live" && srv.upgrade(req, { data: { role: "live" } as SocketData })) return;
+
+    if (url.pathname === "/sim" && req.method === "POST") {
+      return req.json().then(launchSim).catch(() => Response.json({ error: "bad JSON" }, { status: 400 }));
+    }
+    if (url.pathname === "/runs") return Response.json(listRunFiles());
+    if (url.pathname.startsWith("/runs/")) {
+      const name = path.basename(url.pathname);
+      const file = Bun.file(path.join(RUNS_DIR, name));
+      return file.size > 0 ? new Response(file) : new Response("not found", { status: 404 });
+    }
+
+    const asset = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
+    const file = Bun.file(path.join(PUBLIC_DIR, path.normalize(asset)));
+    return file.size > 0 ? new Response(file) : new Response("not found", { status: 404 });
+  },
+  websocket: {
+    open(ws) {
+      if (ws.data.role === "live") {
+        viewers.add(ws);
+        ws.send(JSON.stringify(snapshotFor()));
+      }
+    },
+    message(ws, raw) {
+      if (ws.data.role !== "ingest") return;
+      let message: WireMessage;
+      try {
+        message = JSON.parse(String(raw)) as WireMessage;
+      } catch {
+        return;
+      }
+      if ("hello" in message) {
+        const existing = runs.get(message.hello.run);
+        if (existing) {
+          existing.reattach();
+          ws.data.store = existing;
+          console.log(`run reattached: ${existing.id}`);
+        } else {
+          ws.data.store = new RunStore(RUNS_DIR, message.hello);
+          runs.set(message.hello.run, ws.data.store);
+          console.log(`run started: ${message.hello.src}/${message.hello.script} (${message.hello.run})`);
+        }
+        broadcast({ type: "run-started", run: ws.data.store.summary() });
+        return;
+      }
+      const store = ws.data.store ?? (message.records[0] && runs.get(message.records[0].run));
+      if (!store) return;
+      store.append(message.records);
+      broadcast({ type: "records", run: store.id, records: message.records });
+    },
+    close(ws) {
+      if (ws.data.role === "live") {
+        viewers.delete(ws);
+        return;
+      }
+      const store = ws.data.store;
+      if (store) {
+        store.close();
+        console.log(`run ended: ${store.id} (${store.recordCount} records -> ${store.file})`);
+        broadcast({ type: "run-ended", run: store.summary(), stored: listRunFiles() });
+      }
+    },
+  },
+});
+
+sweep();
+setInterval(sweep, SWEEP_EVERY_MS);
+
+console.log(`telemetry hub on http://127.0.0.1:${server.port} (ws /ingest, /live; POST /sim; retention ${RETENTION_MS / 3_600_000}h)`);

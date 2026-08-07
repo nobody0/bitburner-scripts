@@ -10,8 +10,18 @@
     "skipLibCheck": true,
     "types": ["bun", "node"],
     "paths": {
-      "@ns": ["./types/NetscriptDefinitions.d.ts"]
+      "@ns": ["./types/NetscriptDefinitions.d.ts"],
+      "@nsdefs": ["./types/NetscriptDefinitions.d.ts"]
     }
   },
-  "include": ["src/**/*.ts", "tools/**/*.ts", "tests/**/*.ts", "types/**/*.d.ts"]
+  "include": [
+    "game/**/*.ts",
+    "shared/**/*.ts",
+    "sim/**/*.ts",
+    "ui/**/*.ts",
+    "tools/**/*.ts",
+    "tests/**/*.ts",
+    "types/**/*.d.ts"
+  ],
+  "exclude": ["sim/vendor"]
 }

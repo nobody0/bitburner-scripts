@@ -19,14 +19,14 @@ class FakeSocket implements JsonSocket {
 test("pushFile sends the Bitburner JSON-RPC shape", async () => {
   const socket = new FakeSocket();
   const session = new RfaSession(socket);
-  await session.pushFile("home", "main.js", "export async function main() {}\n");
+  await session.pushFile("home", "start.js", "export async function main() {}\n");
 
   expect(socket.sent).toEqual([
     {
       jsonrpc: "2.0",
       id: 1,
       method: "pushFile",
-      params: { server: "home", filename: "main.js", content: "export async function main() {}\n" },
+      params: { server: "home", filename: "start.js", content: "export async function main() {}\n" },
     },
   ]);
 });

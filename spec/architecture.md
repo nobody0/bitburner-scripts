@@ -4,7 +4,10 @@
 
 The repository has three deliberately separate layers:
 
-1. `src/` contains authored TypeScript and no generated JavaScript.
+1. `game/` contains authored TypeScript and no generated JavaScript. It is the
+   only directory whose contents ever reach the game (enforced by config
+   validation); `shared/` code enters bundles only by being imported from
+   `game/` entrypoints.
 2. `tools/build.ts` reads the explicit entrypoint allowlist and bundles each
    entry to `build/` with esbuild.
 3. `tools/rfa-server.ts` pushes only those built artifacts to the configured

@@ -3,11 +3,19 @@
   "port": 12525,
   "server": "home",
   "buildDir": "build",
+  "watchDirs": ["game", "shared", "types"],
   "entries": [
     {
-      "source": "src/main.ts",
-      "target": "main.js"
+      "source": "game/start.ts",
+      "target": "start.js"
+    },
+    {
+      "source": "game/lib/dodge-stub.ts",
+      "target": "lib/dodge-stub.js"
+    },
+    {
+      "source": "game/worker/starter.ts",
+      "target": "worker/starter.js"
     }
   ]
 }
-
