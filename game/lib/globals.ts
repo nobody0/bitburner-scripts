@@ -8,8 +8,9 @@ export interface GameGlobals {
   player?: StateMap["player"];
   /** Newest start.js instance bumps this; older loops see it and exit. */
   controllerEpoch?: number;
-  /** Desired target retained across handoffs for transition telemetry only. */
-  starterTarget?: string;
+  /** Active farm target, retained across handoffs so a build push does not
+   * look like a target switch. */
+  farmTarget?: string;
 }
 
 export const gameGlobal = globalThis as typeof globalThis & GameGlobals;

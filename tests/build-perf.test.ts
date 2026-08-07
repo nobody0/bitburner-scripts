@@ -39,12 +39,13 @@ describe("compile-time telemetry elimination", () => {
       "start.respawn",
       "start.respawn_failed",
       "net.rooted",
-      "net.deployed",
+      "farm.targetSwitch",
+      "dispatch.slow",
     ]) {
       expect(main!.content).not.toContain(payloadMarker);
     }
     // Dead-code elimination must not use syntax minification: bracket access
     // is what keeps dodged ns calls out of the controller's static RAM bill.
-    expect(main!.content).toContain('stubNs["ps"]');
+    expect(main!.content).toContain('stubNs["scp"]');
   });
 });

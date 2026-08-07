@@ -1,7 +1,7 @@
 import type { Person } from "@ns";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
 import { stateKey } from "../shared/telemetry/schema.ts";
-import type { Action, PlayerView, ServerView, WorldView } from "../shared/world.ts";
+import type { Action, CompletionEvent, HgwAction, PlayerView, ServerView, WorldView } from "../shared/world.ts";
 import { WORKER_RAM } from "../shared/world.ts";
 import { Clock } from "./clock.ts";
 import {
@@ -18,7 +18,7 @@ import {
 import { mockPerson, mockServer } from "./core/mocks.ts";
 import { mulberry32 } from "./core/rng.ts";
 import { getBitNodeMultipliers } from "./vendor/bitburner/src/BitNode/BitNodeMults.ts";
-import { replaceCurrentNodeMults } from "./vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
+import { currentNodeMults, replaceCurrentNodeMults } from "./vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import {
   calculateGrowTime,
   calculateHackingTime,
@@ -31,11 +31,16 @@ export interface SimOptions {
   bitnode?: number;
   sourceFileLevel?: number;
   homeRam?: number;
+  homeCores?: number;
   startingMoney?: number;
   network?: ServerSpec[];
   runId?: string;
   /** Installed before construction emits the initial world snapshot. */
   onRecord?: (record: LogRecord) => void;
+  /** Emit per-op events + per-completion mirrors (debugging). Default off:
+   * completions mark servers dirty and a 1Hz virtual rollup flushes dirty
+   * mirrors + the cumulative "farm" state topic — keeps JSONLs sane. */
+  verbose?: boolean;
 }
 
 /** The simulated world. Durations come from the vendored game formulas at
@@ -52,14 +57,18 @@ export class SimWorld {
   money: number;
   moneyEarned = 0;
   hacks = 0;
+  readonly landed = { hack: 0, grow: 0, weaken: 0 };
   readonly records: LogRecord[] = [];
   onRecord?: (record: LogRecord) => void;
   /** Fires after any scheduled action completes — the driver replans on it. */
-  onSettled?: () => void;
+  onSettled?: (event: CompletionEvent) => void;
   #rng: () => number;
   #seq = 0;
   #run: string;
   #inFlight = 0;
+  #verbose: boolean;
+  #dirty = new Set<SimServer>();
+  #lastRollup = -1;
 
   constructor(opts: SimOptions) {
     replaceCurrentNodeMults(getBitNodeMultipliers(opts.bitnode ?? 1, (opts.sourceFileLevel ?? 0) + 1));
@@ -68,12 +77,13 @@ export class SimWorld {
     this.onRecord = opts.onRecord;
     this.money = opts.startingMoney ?? 1_000;
     this.person = mockPerson();
+    this.#verbose = opts.verbose ?? false;
 
     const home = mockServer({
       hostname: "home",
       hasAdminRights: true,
       purchasedByPlayer: true,
-      cpuCores: 1,
+      cpuCores: opts.homeCores ?? 1,
       maxRam: opts.homeRam ?? 8,
     }) as SimServer;
     this.servers.set("home", home);
@@ -85,6 +95,7 @@ export class SimWorld {
     this.emit({ kind: "event", name: "sim.started", data: { seed: opts.seed, bitnode: opts.bitnode ?? 1 } });
     this.mirrorPlayer();
     for (const server of this.servers.values()) this.mirrorServer(server);
+    this.#rollup();
   }
 
   emit(partial: { kind: "state"; key: string; data: unknown } | { kind: "event"; name: string; data?: unknown } | { kind: "debug"; msg: string; data?: unknown }): void {
@@ -122,6 +133,7 @@ export class SimWorld {
       money: this.money,
       hackingSkill: this.person.skills.hacking,
       hackingExp: this.person.exp.hacking,
+      intelligence: this.person.skills.intelligence,
       mults: {
         hacking: this.person.mults.hacking,
         hacking_exp: this.person.mults.hacking_exp,
@@ -161,6 +173,13 @@ export class SimWorld {
         cloudServer: { 64: getCloudServerCost(64), 256: getCloudServerCost(256), 1024: getCloudServerCost(1024) },
         cloudServerLimit: getCloudServerLimit(),
       },
+      nodeMults: {
+        HackingSpeedMultiplier: currentNodeMults.HackingSpeedMultiplier,
+        HackExpGain: currentNodeMults.HackExpGain,
+        ScriptHackMoney: currentNodeMults.ScriptHackMoney,
+        ServerGrowthRate: currentNodeMults.ServerGrowthRate,
+        ServerWeakenRate: currentNodeMults.ServerWeakenRate,
+      },
     };
   }
 
@@ -174,7 +193,7 @@ export class SimWorld {
       case "hack":
       case "grow":
       case "weaken":
-        return this.#executeHgw(action.type, action.target, action.source, action.threads);
+        return this.#executeHgw(action);
       case "nuke": {
         const target = this.servers.get(action.target);
         if (!target || target.hasAdminRights) return this.#fail(action, "missing or already rooted");
@@ -220,7 +239,7 @@ export class SimWorld {
         this.#inFlight++;
         this.clock.in(action.ms, () => {
           this.#inFlight--;
-          this.onSettled?.();
+          this.onSettled?.({ kind: "sleep" });
         });
         return true;
       }
@@ -232,8 +251,8 @@ export class SimWorld {
     return false;
   }
 
-  #executeHgw(type: "hack" | "grow" | "weaken", targetName: string, sourceName: string, threads: number): boolean {
-    const action = { type, target: targetName, source: sourceName, threads };
+  #executeHgw(action: HgwAction): boolean {
+    const { type, target: targetName, source: sourceName, threads } = action;
     const target = this.servers.get(targetName);
     const source = this.servers.get(sourceName);
     if (!target || !source) return this.#fail(action, "unknown server");
@@ -247,38 +266,72 @@ export class SimWorld {
 
     // Duration computed at action start with CURRENT state (game: NetscriptFunctions
     // hack/grow/weaken compute *Time before netscriptDelay); seconds -> ms.
+    // additionalMsec extends the landing exactly like the game's HGWOptions.
     const seconds =
       type === "hack"
         ? calculateHackingTime(target, this.person)
         : type === "grow"
           ? calculateGrowTime(target, this.person)
           : calculateWeakenTime(target, this.person);
+    const durationMs = seconds * 1000 + (action.additionalMsec ?? 0);
 
     source.ramUsed += ram;
     this.#inFlight++;
-    this.emit({ kind: "event", name: `${type}.start`, data: { ...action, durationMs: seconds * 1000 } });
+    if (this.#verbose) this.emit({ kind: "event", name: `${type}.start`, data: { ...action, durationMs } });
 
-    this.clock.in(seconds * 1000, () => {
+    this.clock.in(durationMs, () => {
       source.ramUsed -= ram;
       this.#inFlight--;
       const cores = source.cpuCores;
+      const event: CompletionEvent = { kind: type, opId: action.opId, target: targetName, threads };
       if (type === "hack") {
         const outcome = applyHack(target, this.person, threads, this.#rng());
         this.money += outcome.moneyGained;
         this.moneyEarned += outcome.moneyGained;
-        this.hacks++;
-        this.emit({ kind: "event", name: "hack.done", data: { ...action, ...outcome } });
+        if (outcome.success) this.hacks++;
+        this.landed.hack++;
+        event.result = outcome;
+        if (this.#verbose) this.emit({ kind: "event", name: "hack.done", data: { ...action, ...outcome } });
       } else if (type === "grow") {
         const outcome = applyGrow(target, this.person, threads, cores);
-        this.emit({ kind: "event", name: "grow.done", data: { ...action, growth: outcome.growth } });
+        this.landed.grow++;
+        event.result = { growth: outcome.growth, expGained: outcome.expGained };
+        if (this.#verbose) this.emit({ kind: "event", name: "grow.done", data: { ...action, growth: outcome.growth } });
       } else {
         const outcome = applyWeaken(target, this.person, threads, cores);
-        this.emit({ kind: "event", name: "weaken.done", data: { ...action, ...outcome } });
+        this.landed.weaken++;
+        event.result = outcome;
+        if (this.#verbose) this.emit({ kind: "event", name: "weaken.done", data: { ...action, ...outcome } });
       }
-      this.mirrorServer(target);
-      this.mirrorPlayer();
-      this.onSettled?.();
+      if (this.#verbose) {
+        this.mirrorServer(target);
+        this.mirrorPlayer();
+      } else {
+        this.#dirty.add(target);
+        this.#maybeRollup();
+      }
+      this.onSettled?.(event);
     });
     return true;
+  }
+
+  #maybeRollup(): void {
+    if (this.clock.now() - this.#lastRollup < 1_000) return;
+    this.#rollup();
+  }
+
+  #rollup(): void {
+    this.#lastRollup = this.clock.now();
+    for (const server of this.#dirty) this.mirrorServer(server);
+    this.#dirty.clear();
+    this.mirrorPlayer();
+    this.emit({
+      kind: "state",
+      key: "farm",
+      data: {
+        landed: { ...this.landed },
+        totals: { moneyEarned: this.moneyEarned, hacks: this.hacks },
+      },
+    });
   }
 }

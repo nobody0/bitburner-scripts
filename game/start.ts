@@ -3,12 +3,18 @@ import { dodge } from "./lib/dodge.ts";
 import { gameGlobal } from "./lib/globals.ts";
 import {
   canRoot,
-  collectProcesses,
-  deployStarters,
+  deployWorker,
   listPortOpeners,
-  planDeploy,
   rootServers,
 } from "./lib/net.ts";
+import {
+  buildView,
+  drainCompletions,
+  initDriver,
+  pump,
+  resyncHeap,
+  WORKER_SCRIPT,
+} from "./lib/dispatch-driver.ts";
 import { collectServers } from "./lib/scan.ts";
 import { initTelemetry, type Telemetry } from "./lib/telemetry.ts";
 import { watchNs, type WatchedNS } from "./lib/watched-ns.ts";
@@ -27,8 +33,11 @@ import { watchNs, type WatchedNS } from "./lib/watched-ns.ts";
  * dodge stub <= 4.1 GB = 7.5 GB peak; handoff overlap 2 x 3.4 = 6.8 GB. Fits.
  */
 
-const TICK_MS = 2_000;
-const SWEEP_EVERY_TICKS = 15;
+/** Dispatcher pass cadence: one HWGW spacer. Ticks use absolute deadlines
+ * with a catch-up clamp so a game stall cannot produce a burst of passes. */
+const TICK_MS = 200;
+const PLAYER_EVERY_TICKS = 10; // 2s
+const SWEEP_EVERY_TICKS = 150; // 30s
 
 export async function main(ns: NS): Promise<void> {
   const mode = ns.args[0] === "handoff" ? "handoff" : "cold";
@@ -75,8 +84,16 @@ async function runController(
   // Sentinel opener count (legacy watchHuman trick): guarantees the first
   // sweep always roots + deploys, which covers the cold-boot dead fleet.
   let openerCount = -1;
-  let currentTarget = mode === "handoff" ? (gameGlobal.starterTarget ?? "") : "";
+  let currentTarget = mode === "handoff" ? (gameGlobal.farmTarget ?? "") : "";
   let reportedRespawnFailure: string | undefined;
+
+  // HWGW engine (shared/strategy) plus its thin game-side driver.
+  const driver = initDriver();
+  let servers: Record<string, Server> = gameGlobal.servers ?? {};
+  let player = g.getPlayer();
+  let nextTick = Date.now();
+  let lastRollup = 0;
+  let pumpMaxMs = 0;
 
   for (let tick = 0; ; tick++) {
     // Yield to a newer controller (manual restart, double autoexec, handoff).
@@ -112,18 +129,18 @@ async function runController(
     }
     reportedRespawnFailure = undefined;
 
-    const player = g.getPlayer();
-    gameGlobal.player = player;
+    if (tick % PLAYER_EVERY_TICKS === 0) {
+      player = g.getPlayer();
+      gameGlobal.player = player;
+    }
 
     if (tick % SWEEP_EVERY_TICKS === 0) {
       // 1) Scan the whole network (typed snapshot -> globals + UI).
-      const servers = await dodge(ns, collectServers);
+      servers = await dodge(ns, collectServers);
       gameGlobal.servers = servers;
       TELEMETRY: if (__TELEMETRY__) tel!.state("servers", servers);
 
-      // 2) Root anything newly rootable. Openers change rarely (the player
-      //    buys/creates an .exe), so the sentinel + count comparison keeps
-      //    this sweep cheap.
+      // 2) Root anything newly rootable.
       const openers = await dodge(ns, listPortOpeners, 0.5);
       const rootable = Object.values(servers).filter((s) => !s.hasAdminRights && canRoot(s, openers));
       if (openers.length !== openerCount || rootable.length > 0) {
@@ -136,30 +153,61 @@ async function runController(
         }
       }
 
-      // 3) Spread the starter worker onto every useful rooted server. The
-      //    target choice is a placeholder heuristic — the real targeting
-      //    engine is the next phase (spec/targeting.md).
-      const target = pickStarterTarget(servers, player.skills.hacking);
-      const retarget = target !== currentTarget && currentTarget !== "";
-      const processes = await dodge(ns, (stubNs) => collectProcesses(stubNs, Object.keys(servers)), 0.5);
-      const plans = planDeploy(servers, processes, target);
-      const deployed = await dodge(ns, (stubNs) => deployStarters(stubNs, plans, target), 2.5);
-      if (deployed.started.length > 0 || deployed.failed.length > 0 || retarget) {
-        TELEMETRY: if (__TELEMETRY__) {
-          tel!.event("net.deployed", {
-            target,
-            retarget,
-            started: deployed.started,
-            failed: deployed.failed,
-            hosts: plans.length,
-          });
-        }
-      }
-      currentTarget = target;
-      gameGlobal.starterTarget = target;
+      // 3) Deploy the puppet worker (dodged: scp stays out of our RAM bill)
+      //    and reconcile the heap with the game's real usage.
+      const deployed = await dodge(ns, (stubNs) => deployWorker(stubNs, WORKER_SCRIPT, servers), 1);
+      for (const host of deployed) driver.deployed.add(host);
+      const drifted = resyncHeap(driver, servers);
+      TELEMETRY: if (__TELEMETRY__ && drifted.length > 0) tel!.event("heap.resync", { hosts: drifted });
     }
 
-    await ns.sleep(TICK_MS);
+    // Dispatcher pass: absorb worker completions, plan, launch.
+    if (Object.keys(servers).length > 0) {
+      // Only the farm and prep targets get live reads; everything else comes
+      // from the sweep snapshot.
+      const active = driver.memory.dispatch.evaluator.directive;
+      const hot = [active.farm?.host, active.prep?.host].filter((h): h is string => Boolean(h));
+      const view = buildView(ns, driver, servers, player, hot);
+      const completions = drainCompletions(driver);
+      const started = Date.now();
+      const result = pump(ns, driver, view, completions);
+      const elapsed = Date.now() - started;
+      if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
+
+      const target = result.directive.farm?.host ?? "";
+      if (target !== currentTarget) {
+        TELEMETRY: if (__TELEMETRY__) tel!.event("farm.targetSwitch", { from: currentTarget, to: target });
+        currentTarget = target;
+        gameGlobal.farmTarget = target;
+      }
+      TELEMETRY: if (__TELEMETRY__ && elapsed > 5) tel!.event("dispatch.slow", { ms: elapsed, launched: result.launched });
+
+      // 1 Hz rollup — never per-op events (they would be ~3 per 16ms).
+      TELEMETRY: if (__TELEMETRY__ && Date.now() - lastRollup >= 1_000) {
+        lastRollup = Date.now();
+        const stats = driver.memory.dispatch.stats;
+        tel!.state("farm", {
+          target,
+          prepTarget: result.directive.prep?.host,
+          segOrder: result.directive.segments.map((segment) => segment.kind),
+          inFlight: { ...driver.memory.dispatch.inFlight },
+          launched: { ...stats.launched },
+          landed: { ...stats.landed },
+          allocFails: stats.allocFails,
+          execFails: driver.execFails,
+          batchesSkipped: stats.batchesSkipped,
+          pumpMaxMs,
+          totals: { moneyEarned: stats.moneyEarned, hacks: stats.hacks },
+        });
+        pumpMaxMs = 0;
+      }
+    }
+
+    // Absolute deadline with catch-up clamp (legacy accumulated drift).
+    nextTick += TICK_MS;
+    const now = Date.now();
+    if (nextTick < now - TICK_MS) nextTick = now;
+    await ns.sleep(Math.max(0, nextTick - now));
   }
 }
 
@@ -174,19 +222,4 @@ function errorDetails(error: unknown): { name: string; message: string; stack?: 
     message: error.message,
     ...(error.stack ? { stack: error.stack } : {}),
   };
-}
-
-/** Placeholder until the targeting phase: richest x fastest-growing server we
- * can already hack (same shape as the sim planner's pickTarget). */
-function pickStarterTarget(servers: Record<string, Server>, skill: number): string {
-  const candidates = Object.values(servers).filter(
-    (s) =>
-      s.hasAdminRights &&
-      !s.purchasedByPlayer &&
-      s.hostname !== "home" &&
-      (s.moneyMax ?? 0) > 0 &&
-      (s.requiredHackingSkill ?? 1) <= skill,
-  );
-  candidates.sort((a, b) => (b.moneyMax ?? 0) * (b.serverGrowth ?? 0) - (a.moneyMax ?? 0) * (a.serverGrowth ?? 0));
-  return candidates[0]?.hostname ?? "n00dles";
 }

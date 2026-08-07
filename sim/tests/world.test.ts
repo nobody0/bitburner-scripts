@@ -3,7 +3,7 @@ import { DEFAULT_NETWORK } from "../network.ts";
 import { SimWorld } from "../world.ts";
 
 function makeWorld(seed = 1): SimWorld {
-  return new SimWorld({ seed, network: DEFAULT_NETWORK, homeRam: 8, startingMoney: 1_000 });
+  return new SimWorld({ seed, network: DEFAULT_NETWORK, homeRam: 8, startingMoney: 1_000, verbose: true });
 }
 
 describe("SimWorld", () => {
@@ -59,5 +59,33 @@ describe("SimWorld", () => {
     const world = makeWorld();
     world.execute({ type: "nuke", target: "joesguns" }); // requires skill 10, player has 1
     expect(world.execute({ type: "hack", target: "joesguns", source: "home", threads: 1 })).toBe(false);
+  });
+});
+
+describe("HWGW seam support", () => {
+  test("additionalMsec delays landing; completions carry opId + result", () => {
+    const world = new SimWorld({ seed: 3, network: DEFAULT_NETWORK, homeRam: 32 });
+    world.execute({ type: "nuke", target: "n00dles" });
+    const events: { kind: string; opId?: number; t: number }[] = [];
+    world.onSettled = (e) => events.push({ kind: e.kind, opId: e.opId, t: world.clock.now() });
+
+    const okPlain = world.execute({ type: "weaken", target: "n00dles", source: "home", threads: 1, opId: 1 });
+    const okPadded = world.execute({ type: "weaken", target: "n00dles", source: "home", threads: 1, opId: 2, additionalMsec: 5_000 });
+    expect(okPlain).toBe(true);
+    expect(okPadded).toBe(true);
+    world.clock.run();
+
+    expect(events.map((e) => e.opId)).toEqual([1, 2]);
+    expect(events[1]!.t - events[0]!.t).toBe(5_000);
+  });
+
+  test("non-verbose runs emit farm rollups instead of per-op events", () => {
+    const world = new SimWorld({ seed: 4, network: DEFAULT_NETWORK, homeRam: 32 });
+    world.execute({ type: "nuke", target: "n00dles" });
+    world.execute({ type: "hack", target: "n00dles", source: "home", threads: 4, opId: 7 });
+    world.clock.run();
+    expect(world.records.some((r) => r.kind === "event" && r.name === "hack.done")).toBe(false);
+    const farm = world.records.filter((r) => r.kind === "state" && r.key === "farm");
+    expect(farm.length).toBeGreaterThanOrEqual(2); // initial + post-completion
   });
 });

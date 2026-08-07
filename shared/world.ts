@@ -1,3 +1,5 @@
+import type { HackNodeMults } from "./formulas.ts";
+
 /** The game/sim seam. The simulator implements it today; a future live-game
  * adapter will produce the same WorldView snapshots and execute Actions. The
  * planner remains pure so that adapter can run it unchanged. */
@@ -32,6 +34,7 @@ export interface PlayerView {
   money: number;
   hackingSkill: number;
   hackingExp: number;
+  intelligence: number;
   mults: PlayerMults;
 }
 
@@ -50,14 +53,44 @@ export interface WorldView {
   player: PlayerView;
   servers: ServerView[];
   prices: Prices;
+  /** BitNode multiplier subset for makeHackContext. Sim supplies real values;
+   * the game driver supplies {} (BN1 defaults) until SF5 detection exists. */
+  nodeMults?: HackNodeMults;
+}
+
+export interface HgwAction {
+  type: "hack" | "grow" | "weaken";
+  target: string;
+  source: string;
+  threads: number;
+  /** Dispatcher-assigned id, echoed back in the CompletionEvent. */
+  opId?: number;
+  /** Extra landing delay for HWGW alignment: the op completes at
+   * launch + duration + additionalMsec (both worlds honor it identically). */
+  additionalMsec?: number;
 }
 
 export type Action =
-  | { type: "hack" | "grow" | "weaken"; target: string; source: string; threads: number }
+  | HgwAction
   | { type: "nuke"; target: string }
   | { type: "buyServer"; ram: number; name: string }
   | { type: "upgradeHomeRam" }
   | { type: "sleep"; ms: number };
+
+/** Delivered to the driver when a scheduled op settles. */
+export interface CompletionEvent {
+  kind: "hack" | "grow" | "weaken" | "sleep";
+  opId?: number;
+  target?: string;
+  threads?: number;
+  result?: {
+    success?: boolean;
+    moneyGained?: number;
+    expGained?: number;
+    growth?: number;
+    securityReduced?: number;
+  };
+}
 
 export interface PlanResult<M> {
   actions: Action[];

@@ -1,106 +1,138 @@
-# Targeting & dispatch (next phase — PLAN, not yet built)
+# Targeting & dispatch (as built)
 
-Replaces the placeholder starter worker with a real farming engine. The hard
-constraint shaping everything: **steady-state decisions must run in well under
-10 ms** (first decision may take ~200 ms). The design splits work by cadence
-so the hot path never evaluates a formula.
+Picks the best hack target, farms it with HWGW batches, preps the next target
+in the background, and switches when it pays. The pure engine
+(`shared/strategy/*`, `shared/ram/heap.ts`) runs identically in the simulator
+(virtual clock — the A/B oracle) and in the game (thin driver), so a policy
+measured in sim transfers directly.
 
-## Three loops, three budgets
+## Cadences and budgets
 
-| Loop | Trigger | Budget | Work |
+| Loop | Trigger | Budget | Measured |
 |---|---|---|---|
-| **Dispatch** | every op completion | < 1 ms | pop next batch from the current plan, allocate RAM from the heap, exec puppet workers. Table lookups only. |
-| **Plan refresh** | ~1 s, or skill/fleet delta | < 10 ms | recompute thread ratios + timings for current & prepped targets from formulas (~20 numbers per server; the vendored formulas cost microseconds). |
-| **Strategy review** | ~30 s, or new root / prep done / big money event | < 200 ms | full target ranking, switch decision, prep scheduling. |
+| Dispatcher pass | every 200 ms tick (one spacer) | ≤10 ms | 0.01–0.03 ms |
+| Evaluator slice | ≥2 s, `clamp(ceil(N/10),1,8)` targets | ≤2 ms | 0.03 ms / 8 targets |
+| Decision gate | ≥5 s, or invalidation | ≤200 ms | ~0.6 ms / 100 targets |
+| Sweep | 30 s, dodged | — | scan + root + deploy + heap resync |
 
-## 4.1 Farming the current target
+Enforced by `tests/heap.test.ts`, `sim/tests/targeting.test.ts` (bench),
+`sim/tests/dispatch.test.ts` (bench), and `dispatch.slow` telemetry at runtime.
 
-Steady-state proportional model first (HWGW batch alignment is a later
-optimization): hold security at min and money at max by keeping thread ratios
-weaken : grow : hack derived from the formulas at (minDifficulty, moneyMax) —
-hack steals fraction `h` per cycle, grow must restore it, weaken must offset
-both fortify amounts. Ratios are recomputed at plan refresh (they move with
-skill), cached in planner memory, and consumed by dispatch as constants.
+## Per-target solve (`shared/strategy/targeting.ts`)
 
-### 4.1.1 RAM segmentation
+At the prepped state (minSec, moneyMax M), for steal fraction s:
+`H = round(s/hackPercent)`, `G = growThreads(k, M, M(1−s), M)`,
+`W1 = ceil(0.002·H/weakenEffect)`, `W2 = ceil(0.004·G/weakenEffect)`.
+Income `E = c·s·M`; RAM-seconds `R = t_h·(1.7H + 1.75·3.2·G + 1.75·4·W)`.
+**Score = E/R in $/GB/sec** — the RAM-bound unit (legacy analyze-profit's
+insight, with exact Newton grow threads instead of its log approximation).
 
-Port the legacy design (`lib/heap.js` + `worker/worker.js`):
+Search: 16-point grid uniform in −log(1−s) → 8 golden-section refines →
+integer snap. **Feasibility is part of the search**: `RamCaps.batchGb` bounds
+the batch, `hackBlockGb` bounds the hack op alone (hack must land as ONE call
+— splitting compounds the steal and desyncs the grow sizing). If no grid point
+fits, a bisection finds the largest feasible batch. Without this the solver
+happily returns a 240 GB batch for an 84 GB fleet and nothing ever launches.
 
-- **Puppet worker**: one ~0-cost worker script, exec'd with
-  `{ ramOverride: opCost, temporary: true }`; it reads its op from
-  `global.workerInfo` and reports completion via `ns.atExit` → the dispatcher
-  knows RAM is free at the exact moment it frees. The sim already accounts RAM
-  this way (`WORKER_RAM`), so fidelity is 1:1.
-- **Heap allocator** over the fleet: slabs bucketed by free RAM; hack wants a
-  single block, weaken spreads anywhere, grow prefers high-core hosts (home).
-  Free-RAM tracking is incremental (adjust on start/finish) — never rescan.
-- **Segments** (the RAM budget pie): `reserve(home)` for start.js + dodge,
-  `farm` for the current target, `prep` for the next target, `share`
-  (optional). Segment sizes are strategy-review decisions.
+`solvePrep` returns W1→G→W2 from the *current* state plus a latency floor:
+`prepTime = max(weakenTime, ramSec / prepGb)`.
 
-## 4.2 Target selection & switching
+## Evaluator (`shared/strategy/evaluator.ts`)
 
-Score each candidate at current skill: effective **$/sec/GB** at steady state
-= chance × %-per-thread × moneyMax / cycleTime, amortized over the full
-h+g+w thread cost of one sustainable cycle. Income is RAM-bound, so
-fleet income = score × farm-segment GB.
+Steady-state scores depend only on static fields + HackContext, so the
+round-robin works off the 30 s snapshot; dynamic security/money feed only prep
+plans of the hot set. A context **generation** guards every cached solution —
+a >2 % skill change, a fleet-RAM change >10 %, or a new root bumps it and
+forces a re-score, so an argmax never mixes generations.
 
-Switch policy over a horizon `T` (from the active goal):
+## Switching (in the gate)
 
-```
-stay    = rate_current × T
-switch  = rate_next × (T − prepTime_next)     // prep runs on spare RAM, so
-                                              // little income is lost during prep
-switch if: next is PREPPED and rate_next > rate_current × (1 + hysteresis 10%)
-```
+`rate = score × fleetGb`; horizon `T = clamp(goalRemaining/rate, 60 s, 30 min)`.
+Prep pick maximizes `rate·(T − prepTime)` and must beat the farm target by 5 %.
+A farm switch requires **all** of: candidate prepped (sec ≤ min+1, money ≥ 90 %
+max), +10 % hysteresis on same-generation scores, 60 s dwell.
+**Segment order** is `[farm, prep, share]`, flipping to `[prep, farm, share]`
+when the candidate beats the current target by ≥25 % — spend now to switch
+sooner.
 
-### 4.2.1 Background prep
+## HWGW dispatcher (`shared/strategy/dispatch.ts`)
 
-The strategy review picks the best not-current candidate whose score beats
-the current target's and assigns the `prep` segment (idle/spare RAM first) to
-weaken+grow it. When prep completes, the switch is nearly free — retarget the
-farm segment. Hysteresis + the prepped-precondition prevent flapping while
-skill rises quickly.
+Four ops land H → W1 → G → W2, `SPACER = 200 ms` apart; each batch is anchored
+at least `4·SPACER` after the previous one (collision guard, pure bookkeeping —
+no ns reads). `additionalMsec = landing − now − duration`.
 
-## 4.3 Real-time budget & the simulator
+**Durations are computed at launch from live state**, never from the cached
+solution: security drift or a level-up between solve and launch would otherwise
+land ops off their slots. Our formulas are bit-identical to the game's
+(`sim/tests/formulas-parity.test.ts`), so the recomputed duration matches the
+engine exactly — verified by asserting observed landing times in
+`sim/tests/dispatch.test.ts`.
 
-- The planner stays pure and allocation-light; per-event dispatch touches only
-  cached tables. Instrument with `performance.now()` and emit a
-  `plan.slow` event when any refresh exceeds 5 ms — perf regressions become
-  visible in the dashboard.
-- The sim runs the same planner on the virtual clock, so switching policies
-  are A/B-tested with `bun run sim -- --goal earn:1e9 --seeds 1..10` before
-  touching the game. This is where "which policy wins over 12h" gets computed
-  — never at runtime.
-- **Formula access**: the planner needs hack chance/percent/time formulas.
-  In-game `ns.formulas` requires Formulas.exe (not fresh-game). Decision:
-  re-export the needed vendored pure functions through `shared/formulas.ts`
-  (they are dependency-free math; ~10 KB bundle weight, zero ns RAM) so the
-  identical code runs in game and sim. This carves a deliberate, narrow
-  exception into the "game never imports sim/vendor" rule — only via
-  `shared/formulas.ts`, never directly.
+Prep fires in **non-overlapping waves per host** (a new wave only when the host
+has nothing in flight), so plans can never overshoot. Prep work always spreads;
+only hack demands contiguity.
 
-## 4.3.1 Telemetry volume
+## RAM engine (`shared/ram/heap.ts`)
 
-Per-op events would be ~3 events / 16 ms at scale — never emit them.
+Legacy design — 21 clz32 slabs, home pinned last, three policies (contiguous
+best-fit for hack, home-first for grow's core bonus, ascending-slab spread for
+weaken/prep so fragments get eaten first), two-phase-commit spread, O(1)
+rebucket through one `#update` choke point — with its defects fixed:
 
-- **Rollup topic**: dispatcher accumulates counters (ops by kind, money, exp,
-  in-flight, per-op rates) and flushes ONE `StateMap["farm"]` record per
-  second. The UI charts rates, not events.
-- **Transition events only**: target switch, prep start/done, allocation
-  failure, plan.slow. These are rare and meaningful.
-- **Sampled traces** as `debug` records (1-in-N batches) for debugging — the
-  client ring drops debug first under pressure, so they can never crowd out
-  state.
-- Sim runs write full detail only under a future `--verbose`; default sim
-  output uses the same rollup, keeping JSONL sizes sane (the ram:home:64 run
-  was 83 MB — rollups fix that too).
+- reservations release per block and are **idempotent**; ops the driver could
+  not start are rolled back via `reportFailed` (legacy leaked them);
+- allocation failure is a typed value `{wanted, grantable, freeTotal}`, counted
+  in telemetry — never silent ratio starvation;
+- **one** home-reserve constant (`HOME_RESERVE_GB`, imported by `net.ts`);
+- batch-atomic `allocateAll`: all four ops or none.
 
-## Build order
+Double-entry: the sim tracks per-source RAM independently, and
+`sim/tests/dispatch.test.ts` asserts the two ledgers agree — a disagreement is
+a test failure, not a silent overcommit. In game, `resyncHeap` reconciles
+against real `ramUsed` on each sweep and emits `heap.resync`.
 
-1. Puppet worker + heap allocator + farm rollup telemetry (replaces starter).
-2. `shared/strategy/targeting.ts`: score, ratios, switch policy (pure).
-3. Wire into start.js dispatch; sim drives the identical planner.
-4. Sim A/B: switching policy vs fixed-target baseline; tune hysteresis/prep
-   segment size by measured time-to-goal.
-5. UI farm panel (rates, current/next target, prep progress).
+## Worker protocol (`game/worker/worker.ts`)
+
+One puppet script for all three ops, launched
+`{ threads, temporary: true, ramOverride: WORKER_RAM[kind] }` with an integer
+opId. It reads its descriptor from `worker_info` on globalThis (written
+*before* exec, so the race to `undefined` cannot happen) and registers
+`ns.atExit` *before* awaiting the op — every exit path pushes to the
+`dispatch_done` mailbox and pokes `dispatch_wake`, so RAM frees on kills and
+reloads too. A fresh realm (game reload) has no descriptor: the worker exits
+silently and the controller rebuilds its ledger from the next sweep.
+
+## Telemetry
+
+One 1 Hz `farm` rollup (`shared/telemetry/state-map.ts`): target, prep target,
+segment order, in-flight and landed counts, alloc/exec failures, pump time,
+cumulative totals. Transition events only: `farm.targetSwitch`,
+`dispatch.slow` (>5 ms), `heap.resync`. **Per-op events are never emitted** —
+at scale that would be ~3 events per 16 ms.
+
+## Static RAM (`tests/ram-budget.test.ts`)
+
+`start.js` = 3.60 GB: base 1.6 + `getPlayer` 0.5 + `exec` 1.3 +
+`getServerSecurityLevel` 0.1 + `getServerMoneyAvailable` 0.1. The last two are
+the hot-target live reads — **the hot path never dodges**. Everything else
+(scan, scp, ls, nuke) lives inside dodge closures with bracket notation; the
+test fails if any of them leaks into the controller's bill. Peak on a fresh
+8 GB home: 3.6 + 4.1 (transient dodge stub) = 7.7 GB.
+
+## Sim A/B results (baseline = the old naive planner)
+
+| Goal | Fleet | Baseline | HWGW | Speedup |
+|---|---|---|---|---|
+| earn:1e6 | 8 GB home + early net | 2.17 h | 18.2 m | 7.1× |
+| earn:1e9 | 8 GB home + early net | 13.1 h | 6.13 h | 2.1× |
+| earn:1e9 | 1 TB home | — | 23.1 m | — |
+
+10/10 seeds reached, zero `action.failed` (no RAM overcommit), security and
+money bands held during farming.
+
+## Known gaps
+
+- Share/exp segment is declared but not yet dispatched (leftover RAM idles).
+- Port openers are still start.js's job; the sim network is 0-port only.
+- The game driver quotes purchases as unavailable (start.js owns them); the
+  sim dispatcher buys servers and upgrades home so the A/B includes economy.

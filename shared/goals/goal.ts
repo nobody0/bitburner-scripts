@@ -41,6 +41,9 @@ export interface Goal {
   /** Strategy-space restriction ("do ONLY hacking"). The driver filters
    * planner output through this and emits action.blocked for the rest. */
   allows?(action: Action): boolean;
+  /** Money still needed, when the goal is money-shaped. Sets the switching
+   * horizon: prep time is amortized against how long the goal will last. */
+  remainingMoney?(ctx: GoalContext): number;
   done(ctx: GoalContext): boolean;
 }
 
@@ -63,10 +66,19 @@ export interface StateConstraints {
 }
 
 export function goalFrom(id: string, constraints: StateConstraints, setup?: GoalSetup): Goal {
+  // Money-shaped goals expose their remaining distance so the switching
+  // horizon can amortize prep time against how long the goal will last.
+  const earnedTarget = constraints.totals?.moneyEarned?.gte;
+  const moneyTarget = earnedTarget ?? constraints.player?.money?.gte;
+  const progress =
+    earnedTarget !== undefined
+      ? (ctx: GoalContext) => ctx.totals.moneyEarned
+      : (ctx: GoalContext) => ctx.player.money;
   return {
     id,
     setup,
     describe: () => `${id}: ${JSON.stringify(constraints)}`,
+    remainingMoney: moneyTarget !== undefined ? (ctx) => Math.max(0, moneyTarget - progress(ctx)) : undefined,
     done(ctx) {
       for (const [field, cmp] of Object.entries(constraints.player ?? {})) {
         if (!matches(ctx.player[field as keyof GoalPlayer], cmp)) return false;

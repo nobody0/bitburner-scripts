@@ -1,4 +1,5 @@
-import type { NS, ProcessInfo, Server } from "@ns";
+import type { NS, Server } from "@ns";
+import { HOME_RESERVE_GB } from "../../shared/ram/heap.ts";
 
 /** Network bootstrap closures — every function here runs INSIDE a dodge stub
  * (bracket-notation ns calls, so importing bundles pay nothing). Budgets are
@@ -13,10 +14,7 @@ const CRACKERS = [
   { file: "SQLInject.exe", portFlag: "sqlPortOpen" },
 ] as const;
 
-export const STARTER_SCRIPT = "worker/starter.js";
-export const STARTER_RAM = 2.4;
-/** Keep home free for start.js + a dodge stub + handoff headroom. */
-export const HOME_RESERVE_GB = 8;
+export { HOME_RESERVE_GB } from "../../shared/ram/heap.ts";
 
 /** Budget: ls 0.2. Returns the cracker files present on home, in game order. */
 export function listPortOpeners(stubNs: NS): string[] {
@@ -61,75 +59,14 @@ export function isUseful(server: Server): boolean {
   return server.hasAdminRights && server.maxRam >= 2 && !server.hostname.startsWith("hacknet-");
 }
 
-export interface DeployPlan {
-  hostname: string;
-  threads: number;
-  /** Replace starter processes whose arguments do not match the desired target. */
-  replace: boolean;
-}
-
-export type ProcessSnapshot = Record<string, ProcessInfo[]>;
-
-/** Budget: ps 0.2. Snapshot processes so deployment planning can distinguish
- * RAM owned by our starter from RAM owned by unrelated scripts. */
-export function collectProcesses(stubNs: NS, hosts: string[]): ProcessSnapshot {
-  const processes: ProcessSnapshot = {};
-  for (const host of hosts) processes[host] = stubNs["ps"](host);
-  return processes;
-}
-
-/** Pure: size starter threads per host from the latest server + process
- * snapshots. A correctly targeted starter is left alone. An old starter's RAM
- * is reclaimable during retargeting; unrelated script RAM remains reserved. */
-export function planDeploy(
-  servers: Record<string, Server>,
-  processes: ProcessSnapshot,
-  target: string,
-): DeployPlan[] {
-  const plans: DeployPlan[] = [];
+/** Budget: scp 0.6. Copies the dispatcher's puppet worker to every useful
+ * rooted host. Runs on the dodged sweep so the controller never pays for scp.
+ * Returns the hosts that now hold the worker. */
+export function deployWorker(stubNs: NS, script: string, servers: Record<string, Server>): string[] {
+  const deployed: string[] = ["home"];
   for (const server of Object.values(servers)) {
-    if (!isUseful(server) && server.hostname !== "home") continue;
-
-    const starters = (processes[server.hostname] ?? []).filter((process) => process.filename === STARTER_SCRIPT);
-    if (starters.length === 1 && String(starters[0]!.args[0] ?? "") === target) continue;
-
-    const reserve = server.hostname === "home" ? HOME_RESERVE_GB : 0;
-    const reclaimableRam = starters.reduce((ram, process) => ram + process.threads * STARTER_RAM, 0);
-    const threads = Math.floor((server.maxRam - server.ramUsed - reserve + reclaimableRam) / STARTER_RAM);
-    // If an old starter cannot be replaced with at least one thread, preserve
-    // it. The next sweep inventories the host again and retries.
-    if (threads >= 1) plans.push({ hostname: server.hostname, threads, replace: starters.length > 0 });
+    if (server.hostname === "home" || !isUseful(server)) continue;
+    if (stubNs["scp"](script, server.hostname, "home")) deployed.push(server.hostname);
   }
-  return plans;
-}
-
-/** Budget: scriptKill 0.5 + scp 0.6 + exec 1.3 = 2.4. Copies the starter and
- * (re)starts it. Replacement plans kill existing starters only after a remote
- * copy succeeds. Failed hosts are reported and retried from a fresh inventory
- * on the next sweep.
- * Deliberately never killall: a live save may run scripts we don't own. */
-export interface DeployResult {
-  started: string[];
-  failed: string[];
-}
-
-export async function deployStarters(stubNs: NS, plans: DeployPlan[], target: string): Promise<DeployResult> {
-  const result: DeployResult = { started: [], failed: [] };
-  for (const plan of plans) {
-    try {
-      if (plan.hostname !== "home") {
-        const copied = await stubNs["scp"](STARTER_SCRIPT, plan.hostname, "home");
-        if (!copied) {
-          result.failed.push(plan.hostname);
-          continue;
-        }
-      }
-      if (plan.replace) stubNs["scriptKill"](STARTER_SCRIPT, plan.hostname);
-      const pid = stubNs["exec"](STARTER_SCRIPT, plan.hostname, plan.threads, target);
-      (pid === 0 ? result.failed : result.started).push(plan.hostname);
-    } catch {
-      result.failed.push(plan.hostname);
-    }
-  }
-  return result;
+  return deployed;
 }

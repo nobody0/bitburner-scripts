@@ -4,8 +4,9 @@ import path from "node:path";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import type { Goal } from "../shared/goals/goal.ts";
 import { parseGoals } from "../shared/goals/presets.ts";
+import { initFarm, planFarm, reportFailed } from "../shared/strategy/farm-planner.ts";
 import { defaultPlanner } from "../shared/strategy/planner.ts";
-import type { Planner } from "../shared/world.ts";
+import type { CompletionEvent, Planner } from "../shared/world.ts";
 import { DEFAULT_NETWORK } from "./network.ts";
 import { SimWorld, type SimOptions } from "./world.ts";
 
@@ -14,6 +15,8 @@ export interface RunOptions {
   seed: number;
   horizonMs: number;
   planner?: Planner<unknown>;
+  /** Use the HWGW farm engine (evaluator + dispatcher) instead of `planner`. */
+  farm?: boolean;
   world?: Partial<SimOptions>;
   label?: string;
   onRecord?: (line: string) => void;
@@ -64,24 +67,58 @@ export function runSim(options: RunOptions): RunResult {
     return result;
   }
 
-  let memory = planner.init(world.view());
   let done = false;
-  const replan = (): void => {
-    if (done) return;
-    const result = planner.plan(world.view(), memory);
-    memory = result.memory;
-    let executed = 0;
-    for (const action of result.actions) {
-      if (goal.allows && !goal.allows(action)) {
-        world.emit({ kind: "event", name: "action.blocked", data: { action } });
-        continue;
+  let replan: (event?: CompletionEvent) => void;
+
+  if (options.farm) {
+    // HWGW engine: completions are coalesced into the next pass, and the
+    // dispatcher is told about actions the world refused so reservations
+    // never leak (the legacy dispatcher's bug).
+    let farmMemory = initFarm();
+    let pending: CompletionEvent[] = [];
+    replan = (event?: CompletionEvent): void => {
+      if (done) return;
+      if (event) pending.push(event);
+      const completions = pending;
+      pending = [];
+      const result = planFarm(world.view(), farmMemory, completions, {
+        goalRemaining: goal.remainingMoney?.(ctx) ?? Infinity,
+      });
+      farmMemory = result.memory;
+      const failed: number[] = [];
+      let executed = 0;
+      for (const action of result.actions) {
+        if (goal.allows && !goal.allows(action)) {
+          world.emit({ kind: "event", name: "action.blocked", data: { action } });
+          if ("opId" in action && action.opId !== undefined) failed.push(action.opId);
+          continue;
+        }
+        if (world.execute(action)) executed++;
+        else if ("opId" in action && action.opId !== undefined) failed.push(action.opId);
       }
-      if (world.execute(action)) executed++;
-    }
-    // Idle guard: nothing running means nothing will ever settle — nap and
-    // replan (longer when the whole plan failed, e.g. waiting for money).
-    if (world.inFlight() === 0) world.execute({ type: "sleep", ms: executed > 0 ? 1_000 : 10_000 });
-  };
+      if (failed.length > 0) reportFailed(farmMemory, failed);
+      if (world.inFlight() === 0) world.execute({ type: "sleep", ms: executed > 0 ? 200 : 2_000 });
+    };
+  } else {
+    let memory = planner.init(world.view());
+    replan = (): void => {
+      if (done) return;
+      const result = planner.plan(world.view(), memory);
+      memory = result.memory;
+      let executed = 0;
+      for (const action of result.actions) {
+        if (goal.allows && !goal.allows(action)) {
+          world.emit({ kind: "event", name: "action.blocked", data: { action } });
+          continue;
+        }
+        if (world.execute(action)) executed++;
+      }
+      // Idle guard: nothing running means nothing will ever settle — nap and
+      // replan (longer when the whole plan failed, e.g. waiting for money).
+      if (world.inFlight() === 0) world.execute({ type: "sleep", ms: executed > 0 ? 1_000 : 10_000 });
+    };
+  }
+
   world.onSettled = replan;
   replan();
 
@@ -140,6 +177,8 @@ if (import.meta.main) {
   let bitnode = 1;
   let homeRam: number | undefined;
   let startingMoney: number | undefined;
+  let verbose = false;
+  let farm = true;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -153,6 +192,9 @@ if (import.meta.main) {
     else if (arg === "--bitnode") bitnode = Number(next());
     else if (arg === "--homeRam") homeRam = Number(next());
     else if (arg === "--money") startingMoney = Number(next());
+    else if (arg === "--verbose") verbose = true;
+    else if (arg === "--farm") farm = true;
+    else if (arg === "--baseline") farm = false;
     else throw new Error(`unknown argument: ${arg}`);
   }
 
@@ -178,7 +220,8 @@ if (import.meta.main) {
       seed,
       horizonMs,
       label: label ?? gitRev,
-      world: { bitnode, homeRam, startingMoney },
+      farm,
+      world: { bitnode, homeRam, startingMoney, verbose },
       onRecord: (line) => void sink.write(line + "\n"),
     });
     void sink.end();

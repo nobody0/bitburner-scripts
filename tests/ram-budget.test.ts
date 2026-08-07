@@ -1,0 +1,90 @@
+import { afterAll, describe, expect, test } from "bun:test";
+import { rm } from "node:fs/promises";
+import { buildScripts } from "../tools/build.ts";
+import type { BitburnerConfig } from "../tools/config.ts";
+
+/** Static RAM is the fresh-game constraint: start.js plus a transient dodge
+ * stub must fit an 8 GB home. Bitburner charges a script for every ns member
+ * its source references with dot notation, so this test pins that surface —
+ * an accidental `ns.foo` in the controller shows up here, not in-game. */
+
+const RAM_COSTS: Record<string, number> = {
+  // Only the members the controller is allowed to touch directly.
+  "ns.getPlayer": 0.5,
+  "ns.exec": 1.3,
+  "ns.getServerSecurityLevel": 0.1,
+  "ns.getServerMoneyAvailable": 0.1,
+  "ns.scp": 0.6,
+  "ns.scan": 0.2,
+  "ns.getServer": 2.0,
+  "ns.ps": 0.2,
+  "ns.ls": 0.2,
+  "ns.nuke": 0.05,
+  "ns.brutessh": 0.05,
+  "ns.scriptKill": 0.5,
+  "ns.kill": 0.5,
+  "ns.killall": 0.5,
+  "ns.getServerMaxRam": 0.05,
+  "ns.getServerUsedRam": 0.05,
+  "ns.hack": 0.1,
+  "ns.grow": 0.15,
+  "ns.weaken": 0.15,
+};
+const BASE_GB = 1.6;
+/** start.js + dodge stub (1.6 + 2.5) must stay under an 8 GB home. */
+const START_BUDGET_GB = 3.6;
+
+const config: BitburnerConfig = {
+  host: "127.0.0.1",
+  port: 12525,
+  server: "home",
+  buildDir: "build-test-ram",
+  watchDirs: ["game", "shared"],
+  entries: [
+    { source: "game/start.ts", target: "start.js" },
+    { source: "game/worker/worker.ts", target: "worker/worker.js" },
+  ],
+};
+
+afterAll(async () => {
+  await rm(config.buildDir, { recursive: true, force: true });
+});
+
+/** Approximate Bitburner's static parser: dotted ns member references. */
+function staticRam(source: string): { total: number; members: string[] } {
+  const members = new Set<string>();
+  for (const [member] of Object.entries(RAM_COSTS)) {
+    const name = member.slice(3);
+    if (new RegExp(`\\bns\\d*\\.${name}\\b`).test(source)) members.add(member);
+  }
+  let total = BASE_GB;
+  for (const member of members) total += RAM_COSTS[member]!;
+  return { total, members: [...members].sort() };
+}
+
+describe("in-game static RAM budget", () => {
+  test("start.js stays within its fresh-game budget", async () => {
+    const [start] = await buildScripts(config, { telemetry: true });
+    const { total, members } = staticRam(start!.content);
+    console.log(`start.js static RAM ~${total.toFixed(2)}GB via ${members.join(", ")}`);
+    expect(total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
+    // The hot path must never dodge, so these two live reads are expected...
+    expect(members).toContain("ns.getServerSecurityLevel");
+    expect(members).toContain("ns.getServerMoneyAvailable");
+    // ...and these must stay inside dodge closures (bracket notation).
+    expect(members).not.toContain("ns.scp");
+    expect(members).not.toContain("ns.getServer");
+    expect(members).not.toContain("ns.scan");
+  });
+
+  test("the puppet worker references only the three ops it performs", async () => {
+    const artifacts = await buildScripts(config, { telemetry: true });
+    const worker = artifacts.find((a) => a.filename === "worker/worker.js")!;
+    // The worker is billed per launch via ramOverride (1.7 / 1.75), not by its
+    // own static cost — but only because it references nothing beyond the
+    // three ops. Anything else here would exceed the declared override at
+    // runtime and the game would kill the worker mid-batch.
+    const { members } = staticRam(worker.content);
+    expect(members).toEqual(["ns.grow", "ns.hack", "ns.weaken"]);
+  });
+});

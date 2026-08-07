@@ -1,0 +1,277 @@
+/** Fleet RAM allocator — the legacy heap design (bitburner-legacy/lib/heap.js)
+ * with its known defects fixed. Pure data structure: the sim and the game
+ * driver each own an instance; all mutation flows through #update (O(1)
+ * rebucket, single choke point).
+ *
+ * Legacy keepers: 21 power-of-two slabs bucketed by clz32 (no Math.log),
+ * home pinned last as a fallback, three policies (contiguous best-fit for
+ * hack, home-first for grow's core bonus, ascending-slab spread for weaken /
+ * prep so fragments get eaten first), two-phase-commit spread.
+ *
+ * Legacy fixes: allocations return Reservation handles with idempotent
+ * release() (rollback on exec failure — their leak); failures are typed
+ * values, never silent; the home reserve lives HERE, once, as explicit
+ * reserved GB (not fake ramUsed); batch-atomic multi-request allocation
+ * (all ops of an HWGW batch or none). */
+
+/** The single home-reserve constant (legacy hardcoded it in three places).
+ * Covers the transient dodge stub plus handoff overlap; the controller's own
+ * RAM is already counted in the observed usedRam. Sim passes 0 — nothing
+ * else runs on its home. */
+export const HOME_RESERVE_GB = 4.5;
+
+export interface HeapHost {
+  hostname: string;
+  maxRam: number;
+  used: number;
+  /** Kept free on this host (home: controller + dodge stub headroom). */
+  reserved: number;
+  cores: number;
+  slab: number;
+}
+
+export interface Block {
+  hostname: string;
+  threads: number;
+  cores: number;
+}
+
+export interface Reservation {
+  blocks: Block[];
+  gb: number;
+  release(): void;
+}
+
+export interface AllocFailure {
+  ok: false;
+  wanted: number;
+  /** Largest single contiguous grant currently possible for this block size. */
+  grantable: number;
+  freeTotal: number;
+}
+
+export type AllocResult = { ok: true; reservation: Reservation } | AllocFailure;
+
+export interface AllocRequest {
+  /** GB per thread (WORKER_RAM[kind]). */
+  blockSize: number;
+  threads: number;
+  policy: "contiguous" | "homeFirst" | "spread";
+}
+
+const SLABS = 21;
+
+function slabIndex(free: number): number {
+  return free <= 1 ? 0 : 31 - Math.clz32(Math.ceil(free));
+}
+
+export class Heap {
+  #hosts = new Map<string, HeapHost>();
+  /** slabs[i] holds hosts with free RAM in (2^i - 1, 2^(i+1) - 1]; home is
+   * kept out of slabs and scanned last. */
+  #slabs: HeapHost[][] = Array.from({ length: SLABS }, () => []);
+  #home: HeapHost | undefined;
+  maxRam = 0;
+  usedTotal = 0;
+  reservedTotal = 0;
+
+  /** Add or refresh a host. Home is identified by hostname. */
+  upsert(hostname: string, maxRam: number, used: number, cores = 1, reserved = 0): void {
+    const existing = this.#hosts.get(hostname);
+    if (existing) {
+      this.maxRam += maxRam - existing.maxRam;
+      this.reservedTotal += reserved - existing.reserved;
+      existing.maxRam = maxRam;
+      existing.reserved = reserved;
+      existing.cores = cores;
+      this.#update(existing, used);
+      return;
+    }
+    const host: HeapHost = { hostname, maxRam, used, reserved, cores, slab: -1 };
+    this.#hosts.set(hostname, host);
+    this.maxRam += maxRam;
+    this.usedTotal += used;
+    this.reservedTotal += reserved;
+    if (hostname === "home") {
+      this.#home = host;
+    } else {
+      host.slab = slabIndex(this.#free(host));
+      this.#slabs[host.slab]!.push(host);
+    }
+  }
+
+  host(hostname: string): HeapHost | undefined {
+    return this.#hosts.get(hostname);
+  }
+
+  hosts(): IterableIterator<HeapHost> {
+    return this.#hosts.values();
+  }
+
+  freeTotal(): number {
+    let free = 0;
+    for (const host of this.#hosts.values()) free += this.#free(host);
+    return free;
+  }
+
+  /** Threads of `blockSize` that a spread allocation could place right now.
+   * Callers size divisible work (weaken, prep grow) against this instead of
+   * failing and retrying. */
+  capacity(blockSize: number): number {
+    let threads = 0;
+    for (const host of this.#hosts.values()) threads += Math.floor(this.#free(host) / blockSize);
+    return threads;
+  }
+
+  /** Release part of a reservation. Ops of one allocation can complete
+   * independently (a spread weaken lands per host), so the dispatcher frees
+   * per block rather than per reservation. */
+  free(hostname: string, gb: number): void {
+    const host = this.#hosts.get(hostname);
+    if (host) this.#update(host, host.used - gb);
+  }
+
+  /** Reconcile a host against externally observed usage (game sweep).
+   * Returns the drift in GB (0 = in sync). */
+  resync(hostname: string, observedUsed: number): number {
+    const host = this.#hosts.get(hostname);
+    if (!host) return 0;
+    const drift = observedUsed - host.used;
+    if (drift !== 0) this.#update(host, observedUsed);
+    return drift;
+  }
+
+  /** Allocate one request. Never partially succeeds. */
+  allocate(request: AllocRequest): AllocResult {
+    const blocks = this.#place(request);
+    if (!blocks) return this.#failure(request);
+    return { ok: true, reservation: this.#commit(blocks, request.blockSize) };
+  }
+
+  /** Batch-atomic: place every request (against tentative state), then commit
+   * all — an HWGW batch gets all four ops or none. */
+  allocateAll(requests: AllocRequest[]): { ok: true; reservations: Reservation[] } | (AllocFailure & { index: number }) {
+    const placed: { blocks: Block[]; blockSize: number }[] = [];
+    const tentative = new Map<string, number>();
+    for (let i = 0; i < requests.length; i++) {
+      const request = requests[i]!;
+      const blocks = this.#place(request, tentative);
+      if (!blocks) {
+        return { ...this.#failure(request, tentative), index: i };
+      }
+      placed.push({ blocks, blockSize: request.blockSize });
+      for (const block of blocks) {
+        tentative.set(block.hostname, (tentative.get(block.hostname) ?? 0) + block.threads * request.blockSize);
+      }
+    }
+    return { ok: true, reservations: placed.map((p) => this.#commit(p.blocks, p.blockSize)) };
+  }
+
+  #free(host: HeapHost, tentative?: Map<string, number>): number {
+    return host.maxRam - host.used - host.reserved - (tentative?.get(host.hostname) ?? 0);
+  }
+
+  /** Find blocks for a request without mutating state. */
+  #place(request: AllocRequest, tentative?: Map<string, number>): Block[] | undefined {
+    const { blockSize, threads, policy } = request;
+    const wanted = blockSize * threads;
+
+    if (policy === "homeFirst" && this.#home && this.#free(this.#home, tentative) >= wanted) {
+      return [{ hostname: this.#home.hostname, threads, cores: this.#home.cores }];
+    }
+
+    // grow (homeFirst) is divisible, so when home is full it spreads rather
+    // than demanding one contiguous block; only hack must stay contiguous.
+    if (policy === "spread" || policy === "homeFirst") {
+      const blocks: Block[] = [];
+      let remaining = threads;
+      // Ascending slabs: consume the most fragmented hosts first, preserving
+      // large contiguous blocks for hack/grow. Two-phase: commit only if full.
+      for (let slab = 0; slab < SLABS && remaining > 0; slab++) {
+        if (2 ** (slab + 1) - 1 < blockSize) continue;
+        for (const host of this.#slabs[slab]!) {
+          if (remaining <= 0) break;
+          const fit = Math.floor(this.#free(host, tentative) / blockSize);
+          if (fit < 1) continue;
+          const take = Math.min(fit, remaining);
+          blocks.push({ hostname: host.hostname, threads: take, cores: host.cores });
+          remaining -= take;
+        }
+      }
+      if (remaining > 0 && this.#home) {
+        const fit = Math.floor(this.#free(this.#home, tentative) / blockSize);
+        if (fit >= 1) {
+          const take = Math.min(fit, remaining);
+          blocks.push({ hostname: this.#home.hostname, threads: take, cores: this.#home.cores });
+          remaining -= take;
+        }
+      }
+      return remaining <= 0 ? blocks : undefined;
+    }
+
+    // contiguous (and homeFirst fallback): best fit within the smallest slab
+    // that yields any fit; home scanned last.
+    let best: HeapHost | undefined;
+    let bestFree = Infinity;
+    const startSlab = Math.max(0, slabIndex(Math.max(1, wanted)) - 0);
+    for (let slab = startSlab; slab < SLABS; slab++) {
+      for (const host of this.#slabs[slab]!) {
+        const free = this.#free(host, tentative);
+        if (free >= wanted && free < bestFree) {
+          best = host;
+          bestFree = free;
+        }
+      }
+      if (best) break;
+    }
+    if (!best && this.#home && this.#free(this.#home, tentative) >= wanted) best = this.#home;
+    if (!best) return undefined;
+    return [{ hostname: best.hostname, threads, cores: best.cores }];
+  }
+
+  #commit(blocks: Block[], blockSize: number): Reservation {
+    let gb = 0;
+    for (const block of blocks) {
+      const host = this.#hosts.get(block.hostname)!;
+      const amount = block.threads * blockSize;
+      gb += amount;
+      this.#update(host, host.used + amount);
+    }
+    let released = false;
+    const release = (): void => {
+      if (released) return;
+      released = true;
+      for (const block of blocks) {
+        const host = this.#hosts.get(block.hostname);
+        if (host) this.#update(host, host.used - block.threads * blockSize);
+      }
+    };
+    return { blocks, gb, release };
+  }
+
+  #failure(request: AllocRequest, tentative?: Map<string, number>): AllocFailure {
+    let grantable = 0;
+    let freeTotal = 0;
+    for (const host of this.#hosts.values()) {
+      const free = this.#free(host, tentative);
+      freeTotal += Math.max(0, free);
+      const fit = Math.floor(free / request.blockSize);
+      if (fit > grantable) grantable = fit;
+    }
+    return { ok: false, wanted: request.threads, grantable, freeTotal };
+  }
+
+  /** Single mutation choke point: O(1) rebucket only when the slab changes. */
+  #update(host: HeapHost, newUsed: number): void {
+    this.usedTotal += newUsed - host.used;
+    host.used = newUsed;
+    if (host === this.#home) return;
+    const newSlab = Math.min(SLABS - 1, Math.max(0, slabIndex(Math.max(0, this.#free(host)))));
+    if (newSlab === host.slab) return;
+    const oldList = this.#slabs[host.slab]!;
+    const index = oldList.indexOf(host);
+    if (index >= 0) oldList.splice(index, 1);
+    host.slab = newSlab;
+    this.#slabs[newSlab]!.push(host);
+  }
+}

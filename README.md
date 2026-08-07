@@ -7,11 +7,12 @@ small architecture.
 
 Four parts (see [spec/repo-layout.md](spec/repo-layout.md)):
 
-- **game/** — the only code synced into the game. Kept minimal by design:
-  `start.js` (scan, root, spread, report), the telemetry logger, the RAM-dodge
-  stub, and the placeholder starter worker.
-- **shared/** — pure cross-cutting code: telemetry schema, the world/planner
-  seam, goal definitions and the stream reducer.
+- **game/** — the only code synced into the game: `start.js` (controller —
+  scan, root, dispatch), the telemetry logger, the RAM-dodge stub, and the
+  puppet worker the HWGW dispatcher drives. 3.6 GB static, budget-tested.
+- **shared/** — the pure engine: HWGW targeting/dispatch
+  ([spec/targeting.md](spec/targeting.md)), the RAM heap, goals, telemetry
+  schema. Runs unchanged in the sim and the game.
 - **sim/** — the simulator: vendored game formulas + virtual clock; measures
   "time to goal" so strategy changes can be A/B compared before touching the
   game. See [spec/simulator.md](spec/simulator.md), [spec/goals.md](spec/goals.md).
@@ -78,14 +79,15 @@ Telemetry is compiled **in** by default and compiled **out** entirely by
 ## Simulation / A-B testing
 
 ```
-bun run sim -- --goal earn:1e6 --goal only:hack,grow,weaken,nuke --seeds 1..10 --horizon 12h
+bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h            # HWGW engine (default)
+bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h --baseline # naive planner
 bun run sim:compare runs/<baseline>.jsonl runs/<candidate>.jsonl
 ```
 
-The sim and live game emit the same telemetry schema and core state keys, so
-the UI can replay either source. Source-specific detail differs deliberately:
-the sim currently records `hack.done`, while live farming will expose aggregate
-totals through the future one-per-second `farm` rollup.
+The sim and live game emit the same telemetry schema and state keys, so the UI
+replays either source and goals evaluate identically. Both default to the 1 Hz
+`farm` rollup; `--verbose` adds per-op events for debugging (and much larger
+run files).
 
 ## Type safety
 

@@ -19,6 +19,9 @@ treat its architecture as authoritative.
 - Run `bun run typecheck` and `bun test` before committing.
 - Use the pinned upstream checkout documented in `spec/game-source.md` when game
   behavior or API details are unclear.
+- Strategy belongs in `shared/strategy/` as pure functions; `game/` drivers
+  only move data (build a WorldView, execute Actions). Anything decided in the
+  game must be A/B-testable in the simulator.
 - Telemetry rule: every calling-code reference to `tel`, `initTelemetry`, or
   `watchNs` in `game/` must sit behind
   `TELEMETRY: if (__TELEMETRY__)` so `--perf` builds eliminate all telemetry

@@ -49,6 +49,12 @@ export function reduceRecord(ctx: GoalContext, record: LogRecord): GoalContext {
       for (const [hostname, data] of Object.entries(record.data as Record<string, ServerData>)) {
         applyServer(ctx, data, hostname);
       }
+    } else if (record.key === "farm") {
+      // Dispatcher rollup: cumulative totals are authoritative (they replace
+      // per-op hack.done accumulation, which only exists in verbose runs).
+      const data = record.data as { totals?: { moneyEarned?: number; hacks?: number } };
+      if (typeof data.totals?.moneyEarned === "number") ctx.totals.moneyEarned = data.totals.moneyEarned;
+      if (typeof data.totals?.hacks === "number") ctx.totals.hacks = data.totals.hacks;
     }
     return ctx;
   }
