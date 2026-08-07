@@ -70,3 +70,71 @@ export function deployWorker(stubNs: NS, script: string, servers: Record<string,
   }
   return deployed;
 }
+
+/** Budget: ps 0.2 + kill 0.5 + killall 0.5 = 1.2.
+ *
+ * Cold-boot fleet reclaim. Our controller owns the fleet, so anything still
+ * running when a fresh realm starts is an orphan: workers from a previous
+ * session can never report completion (their descriptor map died with the old
+ * realm), so their RAM would be held forever and the dispatcher would starve.
+ *
+ * Home is handled per-process so we never kill ourselves or the dodge stub we
+ * are currently running inside; other rooted hosts are cleared wholesale.
+ * Returns the hosts that had something to reclaim. */
+export function reclaimFleet(stubNs: NS, servers: Record<string, Server>, controllerPid: number): string[] {
+  const reclaimed: string[] = [];
+  for (const server of Object.values(servers)) {
+    if (!server.hasAdminRights) continue;
+    if (server.hostname === "home") {
+      const survivors = new Set([controllerPid, stubNs["pid"]]);
+      let killed = 0;
+      for (const process of stubNs["ps"]("home")) {
+        if (survivors.has(process.pid)) continue;
+        if (stubNs["kill"](process.pid)) killed++;
+      }
+      if (killed > 0) reclaimed.push("home");
+      continue;
+    }
+    if (server.ramUsed > 0) {
+      stubNs["killall"](server.hostname);
+      reclaimed.push(server.hostname);
+    }
+  }
+  return reclaimed;
+}
+
+/** Scripts from earlier versions of this project. They are killed wherever
+ * they turn up, so a build push is enough to retire an architecture — no game
+ * reload required. */
+export const RETIRED_SCRIPTS = ["worker/starter.js", "main.js"];
+
+/** Budget: ps 0.2 + kill 0.5 = 0.7. Continuous safety net run every sweep:
+ * kills retired scripts, plus workers whose op is no longer registered.
+ *
+ * Liveness is tested against the realm-level worker registry, NOT the
+ * dispatcher's own ledger: a build handoff gives the new controller a fresh
+ * ledger while its workers keep running, so using the ledger here would kill
+ * the whole in-flight fleet on every push. The registry dies only with the
+ * realm, which is exactly when those workers really are unreachable. */
+export function reapStrayScripts(
+  stubNs: NS,
+  hosts: string[],
+  workerScript: string,
+  registeredOpIds: Set<number>,
+): { workers: number; retired: number } {
+  const retiredNames = new Set(RETIRED_SCRIPTS);
+  let workers = 0;
+  let retired = 0;
+  for (const host of hosts) {
+    for (const process of stubNs["ps"](host)) {
+      if (retiredNames.has(process.filename)) {
+        if (stubNs["kill"](process.pid)) retired++;
+        continue;
+      }
+      if (process.filename !== workerScript) continue;
+      if (registeredOpIds.has(Number(process.args[0]))) continue;
+      if (stubNs["kill"](process.pid)) workers++;
+    }
+  }
+  return { workers, retired };
+}

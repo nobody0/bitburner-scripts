@@ -5,6 +5,8 @@ import {
   canRoot,
   deployWorker,
   listPortOpeners,
+  reapStrayScripts,
+  reclaimFleet,
   rootServers,
 } from "./lib/net.ts";
 import {
@@ -77,10 +79,6 @@ async function runController(
   TELEMETRY: if (__TELEMETRY__) tel!.event("start.boot", { mode, build: __BUILD_ID__, epoch });
   ns.tprint(`start.js online (${mode}, build ${__BUILD_ID__})`);
 
-  // Migration: retire the pre-startup-phase main.js if it is still running
-  // (it would respawn-loop on the next build push). Harmless no-op otherwise.
-  await dodge(ns, (stubNs) => stubNs["scriptKill"]("main.js", "home"), 1);
-
   // Sentinel opener count (legacy watchHuman trick): guarantees the first
   // sweep always roots + deploys, which covers the cold-boot dead fleet.
   let openerCount = -1;
@@ -140,6 +138,20 @@ async function runController(
       gameGlobal.servers = servers;
       TELEMETRY: if (__TELEMETRY__) tel!.state("servers", servers);
 
+      // 1a) Cold boot: this realm is fresh, so every script still running is
+      //     an orphan whose RAM we can never account for. Reclaim the fleet
+      //     once, before the dispatcher tries to allocate anything.
+      if (tick === 0 && mode === "cold") {
+        const self = ns.pid;
+        const reclaimed = await dodge(ns, (stubNs) => reclaimFleet(stubNs, servers, self), 1.5);
+        if (reclaimed.length > 0) {
+          ns.tprint(`reclaimed ${reclaimed.length} host(s) from orphaned scripts`);
+          TELEMETRY: if (__TELEMETRY__) tel!.event("fleet.reclaimed", { hosts: reclaimed });
+        }
+        servers = await dodge(ns, collectServers);
+        gameGlobal.servers = servers;
+      }
+
       // 2) Root anything newly rootable.
       const openers = await dodge(ns, listPortOpeners, 0.5);
       const rootable = Object.values(servers).filter((s) => !s.hasAdminRights && canRoot(s, openers));
@@ -157,6 +169,20 @@ async function runController(
       //    and reconcile the heap with the game's real usage.
       const deployed = await dodge(ns, (stubNs) => deployWorker(stubNs, WORKER_SCRIPT, servers), 1);
       for (const host of deployed) driver.deployed.add(host);
+
+      // 3a) Safety net: retire old architectures and kill unreachable
+      //     workers. Liveness comes from the realm registry (survives build
+      //     handoffs), never from this instance's ledger.
+      const registered = new Set(driver.globals.worker_info?.keys() ?? []);
+      const reaped = await dodge(
+        ns,
+        (stubNs) => reapStrayScripts(stubNs, deployed, WORKER_SCRIPT, registered),
+        1,
+      );
+      if (reaped.workers > 0 || reaped.retired > 0) {
+        TELEMETRY: if (__TELEMETRY__) tel!.event("fleet.reaped", reaped);
+      }
+
       const drifted = resyncHeap(driver, servers);
       TELEMETRY: if (__TELEMETRY__ && drifted.length > 0) tel!.event("heap.resync", { hosts: drifted });
     }
