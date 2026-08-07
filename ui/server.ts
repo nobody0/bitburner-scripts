@@ -1,4 +1,4 @@
-import { readdirSync, statSync, unlinkSync } from "node:fs";
+import { mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import { TELEMETRY_PORT, type WireMessage } from "../shared/telemetry/schema.ts";
 import { RunStore } from "./store.ts";
@@ -11,6 +11,10 @@ import { RunStore } from "./store.ts";
  *  - POST /sim  — launch a simulation (bun sim/run.ts) from the dashboard */
 
 const RUNS_DIR = new URL("../runs", import.meta.url).pathname;
+/** Pinned runs live here and are never swept. Without somewhere to put them,
+ * every A/B comparison evaporates after the retention window — which is the
+ * one thing a simulation run exists to survive. */
+const PINNED_DIR = path.join(RUNS_DIR, "pinned");
 const PUBLIC_DIR = new URL("./public", import.meta.url).pathname;
 const APP_DIR = new URL("./app", import.meta.url).pathname;
 const APP_ENTRY = path.join(APP_DIR, "main.ts");
@@ -26,23 +30,38 @@ const runs = new Map<string, RunStore>();
 const viewers = new Set<Bun.ServerWebSocket<SocketData>>();
 let simBusy = false;
 
-function listRunFiles(): { file: string; size: number }[] {
+function listIn(dir: string, prefix: string): { file: string; size: number; pinned: boolean }[] {
   let names: string[] = [];
   try {
-    names = readdirSync(RUNS_DIR).filter((n) => n.endsWith(".jsonl"));
+    names = readdirSync(dir).filter((n) => n.endsWith(".jsonl"));
   } catch {
     return [];
   }
-  return names
-    .sort()
-    .reverse()
-    .map((name) => ({ file: name, size: Bun.file(path.join(RUNS_DIR, name)).size }));
+  return names.map((name) => ({
+    file: prefix + name,
+    size: Bun.file(path.join(dir, name)).size,
+    pinned: prefix !== "",
+  }));
+}
+
+function listRunFiles(): { file: string; size: number; pinned: boolean }[] {
+  return [...listIn(PINNED_DIR, "pinned/"), ...listIn(RUNS_DIR, "")].sort((a, b) =>
+    path.basename(b.file).localeCompare(path.basename(a.file)),
+  );
+}
+
+/** Resolve a client-supplied run name to a path inside runs/, pinned or not.
+ * basename() on the last segment keeps ".." out of it. */
+function runPath(name: string): string {
+  const pinned = name.startsWith("pinned/");
+  return path.join(pinned ? PINNED_DIR : RUNS_DIR, path.basename(name));
 }
 
 /** Delete run files older than the retention window and prune dead stores. */
 function sweep(): void {
   const cutoff = Date.now() - RETENTION_MS;
-  for (const { file } of listRunFiles()) {
+  for (const { file, pinned } of listRunFiles()) {
+    if (pinned) continue;
     const full = path.join(RUNS_DIR, file);
     try {
       if (statSync(full).mtimeMs < cutoff) {
@@ -123,15 +142,45 @@ function snapshotFor(): unknown {
 
 const SIM_ARG = /^[\w.,:+~-]+$/;
 
-async function launchSim(body: { goal?: string; goals?: string[]; seeds?: string; horizon?: string; label?: string }): Promise<Response> {
+/** Move a stored run out of the retention sweep's reach. */
+function pinRun(name: string): Response {
+  if (!name || name.startsWith("pinned/")) {
+    return Response.json({ error: "nothing to pin" }, { status: 400 });
+  }
+  const from = path.join(RUNS_DIR, path.basename(name));
+  if (Bun.file(from).size === 0) return Response.json({ error: "no such run" }, { status: 404 });
+  mkdirSync(PINNED_DIR, { recursive: true });
+  renameSync(from, path.join(PINNED_DIR, path.basename(name)));
+  broadcast({ type: "runs-changed", stored: listRunFiles() });
+  return Response.json({ pinned: `pinned/${path.basename(name)}` });
+}
+
+interface SimRequest {
+  goal?: string;
+  goals?: string[];
+  seeds?: string;
+  horizon?: string;
+  label?: string;
+  profile?: string;
+  save?: string;
+  driver?: string;
+}
+
+async function launchSim(body: SimRequest): Promise<Response> {
   if (simBusy) return Response.json({ error: "a simulation is already running" }, { status: 409 });
   const goals = body.goals ?? (body.goal ? [body.goal] : []);
   const args: string[] = [];
+  if (body.profile) args.push("--profile", body.profile);
+  if (body.save) args.push("--save", body.save);
+  if (body.driver) args.push("--driver", body.driver);
   for (const goal of goals) args.push("--goal", goal);
   if (body.seeds) args.push(/\.\.|,/.test(body.seeds) ? "--seeds" : "--seed", body.seeds);
   if (body.horizon) args.push("--horizon", body.horizon);
   if (body.label) args.push("--label", body.label);
-  if (goals.length === 0) return Response.json({ error: "goal is required" }, { status: 400 });
+  // A profile carries its own goals, so either is a complete request.
+  if (goals.length === 0 && !body.profile) {
+    return Response.json({ error: "a goal or a profile is required" }, { status: 400 });
+  }
   if (!args.every((a) => a.startsWith("--") || SIM_ARG.test(a))) {
     return Response.json({ error: "invalid characters in arguments" }, { status: 400 });
   }
@@ -156,8 +205,12 @@ async function launchSim(body: { goal?: string; goals?: string[]; seeds?: string
   return Response.json({ started: true, args });
 }
 
+/** The game and the sim both dial TELEMETRY_PORT, so this is only for running
+ * a second hub alongside a live one (a scratch instance, or a test). */
+const PORT = Number(process.env["UI_PORT"] ?? TELEMETRY_PORT);
+
 const server = Bun.serve<SocketData, never>({
-  port: TELEMETRY_PORT,
+  port: PORT,
   fetch(req, srv) {
     const url = new URL(req.url);
     if (url.pathname === "/ingest" && srv.upgrade(req, { data: { role: "ingest" } as SocketData })) return;
@@ -168,9 +221,25 @@ const server = Bun.serve<SocketData, never>({
     }
     if (url.pathname === "/app.js") return appBundle();
     if (url.pathname === "/runs") return Response.json(listRunFiles());
+    if (url.pathname === "/profiles") {
+      return import("../sim/profiles.ts").then((mod) =>
+        Response.json(mod.PROFILES.map((p) => ({ id: p.id, description: p.description }))),
+      );
+    }
+    if (url.pathname === "/saves") {
+      return import("../tools/save-io.ts")
+        .then((mod) => Response.json(mod.readIndex().saves))
+        .catch(() => Response.json([]));
+    }
+    if (url.pathname === "/pin" && req.method === "POST") {
+      return req
+        .json()
+        .then((body: { file?: string }) => pinRun(body.file ?? ""))
+        .catch(() => Response.json({ error: "bad JSON" }, { status: 400 }));
+    }
     if (url.pathname.startsWith("/runs/")) {
-      const name = path.basename(url.pathname);
-      const file = Bun.file(path.join(RUNS_DIR, name));
+      const name = decodeURIComponent(url.pathname.slice("/runs/".length));
+      const file = Bun.file(runPath(name));
       return file.size > 0 ? new Response(file) : new Response("not found", { status: 404 });
     }
 

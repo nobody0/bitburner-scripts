@@ -167,11 +167,21 @@ export function formatDuration(ms: number): string {
   return `${(s / 3600).toFixed(2)}h`;
 }
 
+/** CLI.
+ *
+ * Two drivers. `--driver game` (the default) runs the REAL game/ controller
+ * against the synthetic world; `--driver planner` runs shared/strategy's
+ * planner directly, which is the older, narrower A/B loop and stays because it
+ * isolates planner changes from driver changes.
+ *
+ * The game driver is one run per process — the vendored core's currentNodeMults
+ * and game/'s globalThis rendezvous slots are both module state — so a
+ * multi-seed sweep re-invokes this file once per seed. */
 if (import.meta.main) {
   const args = process.argv.slice(2);
   const goalSpecs: string[] = [];
-  let seeds = [1];
-  let horizonMs = parseDuration("24h");
+  let seeds: number[] | undefined;
+  let horizonMs: number | undefined;
   let label: string | undefined;
   let outDir = "runs";
   let bitnode = 1;
@@ -179,6 +189,10 @@ if (import.meta.main) {
   let startingMoney: number | undefined;
   let verbose = false;
   let farm = true;
+  let driver: "game" | "planner" = "game";
+  let profileId: string | undefined;
+  let saveId: string | undefined;
+  let child = false;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -195,10 +209,28 @@ if (import.meta.main) {
     else if (arg === "--verbose") verbose = true;
     else if (arg === "--farm") farm = true;
     else if (arg === "--baseline") farm = false;
-    else throw new Error(`unknown argument: ${arg}`);
+    else if (arg === "--profile") profileId = next();
+    else if (arg === "--save") saveId = next();
+    else if (arg === "--driver") {
+      const value = next();
+      if (value !== "game" && value !== "planner") throw new Error(`--driver wants game|planner, got ${value}`);
+      driver = value;
+    } else if (arg === "--child") child = true;
+    else if (arg === "--list") {
+      const { PROFILES } = await import("./profiles.ts");
+      for (const entry of PROFILES) console.log(`${entry.id.padEnd(16)} ${entry.description}`);
+      process.exit(0);
+    } else throw new Error(`unknown argument: ${arg}`);
   }
 
-  const goal = parseGoals(goalSpecs);
+  const profile = profileId ? (await import("./profiles.ts")).findProfile(profileId) : undefined;
+  const specs = goalSpecs.length > 0 ? goalSpecs : [...(profile?.goals ?? [])];
+  const goal = parseGoals(specs);
+  const runSeeds = seeds ?? profile?.seeds ?? [1];
+  const horizon = horizonMs ?? (profile ? parseDuration(profile.horizon) : parseDuration("24h"));
+  const save = saveId ?? profile?.save;
+  const runLabel = label ?? profile?.id;
+
   let gitRev = "unknown";
   try {
     gitRev = execSync("git rev-parse --short HEAD", { encoding: "utf8" }).trim();
@@ -208,22 +240,79 @@ if (import.meta.main) {
   mkdirSync(outDir, { recursive: true });
 
   console.log(`goal: ${goal.describe()}`);
-  console.log(`rev: ${gitRev}${label ? `  label: ${label}` : ""}  horizon: ${formatDuration(horizonMs)}`);
+  console.log(
+    `driver: ${driver}  rev: ${gitRev}${runLabel ? `  profile: ${runLabel}` : ""}` +
+      `${save ? `  save: ${save}` : ""}  horizon: ${formatDuration(horizon)}`,
+  );
+
+  // A multi-seed game run fans out to one child process per seed, because the
+  // game driver cannot be run twice in one process.
+  if (driver === "game" && runSeeds.length > 1 && !child) {
+    const base = args.filter((a, i) => a !== "--seeds" && args[i - 1] !== "--seeds");
+    let reached = 0;
+    for (const seed of runSeeds) {
+      const proc = Bun.spawn(["bun", "run", "sim/run.ts", ...base, "--child", "--seed", String(seed)], {
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      if ((await proc.exited) === 0) reached++;
+    }
+    console.log(`\n${reached}/${runSeeds.length} seed processes completed`);
+    process.exit(0);
+  }
 
   const times: number[] = [];
-  for (const seed of seeds) {
+  for (const seed of runSeeds) {
     const stamp = Date.now();
-    const file = path.join(outDir, `${stamp}-sim-${label ?? goal.id.replaceAll(/[^\w.-]/g, "_")}-seed${seed}.jsonl`);
+    const name = [stamp, "sim", runLabel ?? goal.id.replaceAll(/[^\w.-]/g, "_"), save, `seed${seed}`]
+      .filter(Boolean)
+      .join("-");
+    const file = path.join(outDir, `${name}.jsonl`);
     const sink = Bun.file(file).writer();
-    const result = runSim({
-      goal,
-      seed,
-      horizonMs,
-      label: label ?? gitRev,
-      farm,
-      world: { bitnode, homeRam, startingMoney, verbose },
-      onRecord: (line) => void sink.write(line + "\n"),
-    });
+
+    let result: { reached: boolean; timeToGoalMs: number; records: number; stoppedBecause: string };
+    if (driver === "planner") {
+      result = runSim({
+        goal,
+        seed,
+        horizonMs: horizon,
+        label: runLabel ?? gitRev,
+        farm,
+        world: { bitnode, homeRam, startingMoney, verbose },
+        onRecord: (line) => void sink.write(line + "\n"),
+      });
+    } else {
+      const { runGame } = await import("./game-run.ts");
+      let seedData;
+      if (save) {
+        const { findSave, readSnapshot } = await import("../tools/save-io.ts");
+        const { saveToSeed } = await import("../shared/save/to-sim.ts");
+        seedData = saveToSeed(readSnapshot(findSave(save).file));
+      }
+      const outcome = await runGame({
+        goal,
+        seed,
+        horizonMs: horizon,
+        label: runLabel ?? gitRev,
+        verbose,
+        ...(profileId !== undefined ? { profile: profileId } : {}),
+        ...(save !== undefined ? { saveId: save } : {}),
+        ...(seedData ? { save: seedData } : { bitnode }),
+        ...(profile?.features ? { features: profile.features } : {}),
+        ...(homeRam !== undefined ? { homeRam } : profile?.homeRam !== undefined ? { homeRam: profile.homeRam } : {}),
+        ...(startingMoney !== undefined ? { startingMoney } : {}),
+        onRecord: (line) => void sink.write(line + "\n"),
+      });
+      result = outcome;
+      const gaps = Object.entries(outcome.unmodeled);
+      if (gaps.length > 0) {
+        console.log(`  not modelled: ${gaps.map(([name, count]) => `${name} x${count}`).join(", ")}`);
+      }
+      for (const crash of outcome.crashes.slice(0, 3)) {
+        console.log(`  CRASH ${crash.filename}: ${crash.error}`);
+      }
+    }
+
     void sink.end();
     times.push(result.timeToGoalMs);
     console.log(
@@ -232,10 +321,10 @@ if (import.meta.main) {
     );
   }
 
-  if (seeds.length > 1) {
+  if (runSeeds.length > 1) {
     const reached = times.filter(Number.isFinite).sort((a, b) => a - b);
     console.log(
-      `\nreached ${reached.length}/${seeds.length}` +
+      `\nreached ${reached.length}/${runSeeds.length}` +
         (reached.length > 0
           ? `  median=${formatDuration(quantile(reached, 0.5))}  p10=${formatDuration(quantile(reached, 0.1))}  p90=${formatDuration(quantile(reached, 0.9))}`
           : ""),

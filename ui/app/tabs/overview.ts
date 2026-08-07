@@ -42,6 +42,29 @@ function statusChips(state: ProjectedState): string {
   );
 }
 
+/** What this run asked the simulator for and did not get.
+ *
+ * The gap list is the roadmap: a simulated run that reads "reached the goal"
+ * means much less if half the feature surface threw on contact, so the count
+ * of each unmodelled call sits next to the result rather than in a log
+ * nobody reads. Empty for a live game run, which models everything by
+ * definition. */
+function fidelityRows(state: ProjectedState): string[][] {
+  const counts = new Map<string, { kind: string; name: string; count: number; detail?: string }>();
+  for (const event of state.events) {
+    if (event.kind !== "event" || event.name !== "sim.unmodeled") continue;
+    const data = event.data as { kind?: string; name?: string; detail?: string } | undefined;
+    if (!data?.name) continue;
+    const key = `${data.kind ?? "ns"} ${data.name}`;
+    const existing = counts.get(key);
+    if (existing) existing.count++;
+    else counts.set(key, { kind: data.kind ?? "ns", name: data.name, count: 1, ...(data.detail ? { detail: data.detail } : {}) });
+  }
+  return [...counts.values()]
+    .sort((a, b) => b.count - a.count)
+    .map((gap) => [esc(gap.kind), esc(gap.name), String(gap.count), esc(gap.detail ?? "")]);
+}
+
 export const overviewTab: Tab = {
   id: "overview",
   render(state) {
@@ -65,6 +88,7 @@ export const overviewTab: Tab = {
     const chart = `<div id="chartwrap"><canvas id="chart"></canvas><div id="tooltip"></div></div>`;
 
     const income = incomeRows(state);
+    const gaps = fidelityRows(state);
     const feed = state.events.slice(-200).reverse();
     const events = feed.length
       ? `<ul id="events">${feed
@@ -91,6 +115,14 @@ export const overviewTab: Tab = {
       card("Features", statusChips(state)) +
       `</div>` +
       `<div class="col">` +
+      (state.src === "sim"
+        ? card(
+            "Not modelled",
+            gaps.length
+              ? table(["kind", "what was asked for", "times", "note"], gaps)
+              : note("this run stayed inside what the simulator models"),
+          )
+        : "") +
       card("Events", events) +
       `</div>`
     );

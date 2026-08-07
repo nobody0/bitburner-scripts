@@ -92,6 +92,13 @@ export function selectDue(
   now: number,
 ): FeatureDriver[] {
   return drivers.filter((driver) => {
+    // A driver never runs while its OWN feature reads "no". `requires` is
+    // about a dependency; this is about the feature itself, and it is what
+    // lets an isolation profile switch off the five always-playable drivers —
+    // they declare no `requires`, so nothing else would ever stop them.
+    // In the real game this is a no-op: deriveCapabilities reports those five
+    // as "yes" unconditionally, and gated features are handled below.
+    if (caps.unlocked[driver.id] === "no") return false;
     if (driver.requires && caps.unlocked[driver.requires] !== "yes") return false;
     return now - (lastRun[driver.id] ?? 0) >= driver.everyMs;
   });

@@ -1,4 +1,4 @@
-import type { Person } from "@ns";
+import type { Person, Player } from "@ns";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
 import { stateKey } from "../shared/telemetry/schema.ts";
 import type { Action, CompletionEvent, HgwAction, PlayerView, ServerView, WorldView } from "../shared/world.ts";
@@ -41,6 +41,27 @@ export interface SimOptions {
    * completions mark servers dirty and a 1Hz virtual rollup flushes dirty
    * mirrors + the cumulative "farm" state topic — keeps JSONLs sane. */
   verbose?: boolean;
+  /** What the capability gate batch will see. Everything defaults to locked,
+   * which is a fresh BN1 save. */
+  gates?: Partial<GateFlags>;
+  /** Fully-specified servers, injected as-is instead of being derived from
+   * base metadata through serverFromSpec. This is the path a real save takes:
+   * its servers carry live money, security and RAM, and re-deriving them from
+   * metadata would rewind the save to a fresh game. Overrides `network`. */
+  liveServers?: Partial<SimServer>[];
+  /** Skills, exp and multipliers from a save. Merged over mockPerson(). */
+  person?: { skills?: Record<string, number>; exp?: Record<string, number>; mults?: Record<string, number> };
+}
+
+/** The unlock readings ns exposes for free — what game/lib/probes/gates.ts
+ * reads to decide which feature drivers may tick. */
+export interface GateFlags {
+  inGang: boolean;
+  inBladeburner: boolean;
+  hasCorporation: boolean;
+  hasWseAccount: boolean;
+  hasTixApiAccess: boolean;
+  goPlayable: boolean;
 }
 
 /** The simulated world. Durations come from the vendored game formulas at
@@ -59,6 +80,7 @@ export class SimWorld {
   hacks = 0;
   readonly landed = { hack: 0, grow: 0, weaken: 0 };
   readonly records: LogRecord[] = [];
+  readonly gates: GateFlags;
   onRecord?: (record: LogRecord) => void;
   /** Fires after any scheduled action completes — the driver replans on it. */
   onSettled?: (event: CompletionEvent) => void;
@@ -77,7 +99,23 @@ export class SimWorld {
     this.onRecord = opts.onRecord;
     this.money = opts.startingMoney ?? 1_000;
     this.person = mockPerson();
+    if (opts.person) {
+      // Merged, not replaced: a save stores a sparse mults bag, and the
+      // missing entries must stay at their 1.0 defaults rather than vanish.
+      if (opts.person.skills) Object.assign(this.person.skills, opts.person.skills);
+      if (opts.person.exp) Object.assign(this.person.exp, opts.person.exp);
+      if (opts.person.mults) Object.assign(this.person.mults, opts.person.mults);
+    }
     this.#verbose = opts.verbose ?? false;
+    this.gates = {
+      inGang: false,
+      inBladeburner: false,
+      hasCorporation: false,
+      hasWseAccount: false,
+      hasTixApiAccess: false,
+      goPlayable: false,
+      ...opts.gates,
+    };
 
     const home = mockServer({
       hostname: "home",
@@ -87,9 +125,17 @@ export class SimWorld {
       maxRam: opts.homeRam ?? 8,
     }) as SimServer;
     this.servers.set("home", home);
-    for (const spec of opts.network ?? []) {
-      const server = serverFromSpec(spec, mockServer() as SimServer);
-      this.servers.set(server.hostname, server);
+    if (opts.liveServers && opts.liveServers.length > 0) {
+      // A save's servers replace the derived set outright, home included.
+      for (const live of opts.liveServers) {
+        const server = { ...mockServer(), ...live } as SimServer;
+        this.servers.set(server.hostname, server);
+      }
+    } else {
+      for (const spec of opts.network ?? []) {
+        const server = serverFromSpec(spec, mockServer() as SimServer);
+        this.servers.set(server.hostname, server);
+      }
     }
 
     this.emit({ kind: "event", name: "sim.started", data: { seed: opts.seed, bitnode: opts.bitnode ?? 1 } });
@@ -143,6 +189,82 @@ export class SimWorld {
         hacking_chance: this.person.mults.hacking_chance,
       },
     };
+  }
+
+  /** What ns.getPlayer() reports. */
+  playerRecord(): Player {
+    return {
+      ...this.person,
+      money: this.money,
+      numPeopleKilled: 0,
+      entropy: 0,
+      jobs: {},
+      factions: [],
+      karma: 0,
+      totalPlaytime: this.clock.now(),
+      location: "Sector-12" as Player["location"],
+    } as unknown as Player;
+  }
+
+  /** Duration of one op, in ms, from the state as it is RIGHT NOW. The game
+   * snapshots this before the delay starts, so a weaken landing mid-flight
+   * never speeds up an op already in the air. */
+  hgwDurationMs(kind: HgwAction["type"], server: SimServer): number {
+    const seconds =
+      kind === "hack"
+        ? calculateHackingTime(server, this.person)
+        : kind === "grow"
+          ? calculateGrowTime(server, this.person)
+          : calculateWeakenTime(server, this.person);
+    return seconds * 1000;
+  }
+
+  /** Apply one completed op. Shared by both drivers: the planner path calls it
+   * from its clock callback, the synthetic ns calls it from the `.then` on
+   * netscriptDelay. Returns the value the ns function resolves to, alongside
+   * the planner's CompletionEvent payload. */
+  land(
+    kind: HgwAction["type"],
+    targetName: string,
+    threads: number,
+    cores = 1,
+  ): { nsValue: number; result: CompletionEvent["result"] } {
+    const target = this.servers.get(targetName);
+    if (!target) throw new Error(`land: unknown server ${targetName}`);
+
+    let nsValue = 0;
+    let result: CompletionEvent["result"];
+    if (kind === "hack") {
+      const outcome = applyHack(target, this.person, threads, this.#rng());
+      this.money += outcome.moneyGained;
+      this.moneyEarned += outcome.moneyGained;
+      if (outcome.success) this.hacks++;
+      this.landed.hack++;
+      result = outcome;
+      nsValue = outcome.moneyGained;
+      if (this.#verbose) this.emit({ kind: "event", name: "hack.done", data: { target: targetName, threads, ...outcome } });
+    } else if (kind === "grow") {
+      const outcome = applyGrow(target, this.person, threads, cores);
+      this.landed.grow++;
+      result = { growth: outcome.growth, expGained: outcome.expGained };
+      nsValue = target.moneyMax === 0 ? 0 : outcome.growth;
+      if (this.#verbose) this.emit({ kind: "event", name: "grow.done", data: { target: targetName, threads, growth: outcome.growth } });
+    } else {
+      const outcome = applyWeaken(target, this.person, threads, cores);
+      this.landed.weaken++;
+      result = outcome;
+      nsValue = outcome.securityReduced;
+      if (this.#verbose) this.emit({ kind: "event", name: "weaken.done", data: { target: targetName, threads, ...outcome } });
+    }
+
+    if (this.#verbose) {
+      this.mirrorServer(target);
+      this.mirrorPlayer();
+    } else {
+      this.#dirty.add(target);
+      this.#maybeRollup();
+    }
+    return { nsValue, result };
   }
 
   view(): WorldView {
@@ -267,13 +389,7 @@ export class SimWorld {
     // Duration computed at action start with CURRENT state (game: NetscriptFunctions
     // hack/grow/weaken compute *Time before netscriptDelay); seconds -> ms.
     // additionalMsec extends the landing exactly like the game's HGWOptions.
-    const seconds =
-      type === "hack"
-        ? calculateHackingTime(target, this.person)
-        : type === "grow"
-          ? calculateGrowTime(target, this.person)
-          : calculateWeakenTime(target, this.person);
-    const durationMs = seconds * 1000 + (action.additionalMsec ?? 0);
+    const durationMs = this.hgwDurationMs(type, target) + (action.additionalMsec ?? 0);
 
     source.ramUsed += ram;
     this.#inFlight++;
@@ -282,35 +398,8 @@ export class SimWorld {
     this.clock.in(durationMs, () => {
       source.ramUsed -= ram;
       this.#inFlight--;
-      const cores = source.cpuCores;
-      const event: CompletionEvent = { kind: type, opId: action.opId, target: targetName, threads };
-      if (type === "hack") {
-        const outcome = applyHack(target, this.person, threads, this.#rng());
-        this.money += outcome.moneyGained;
-        this.moneyEarned += outcome.moneyGained;
-        if (outcome.success) this.hacks++;
-        this.landed.hack++;
-        event.result = outcome;
-        if (this.#verbose) this.emit({ kind: "event", name: "hack.done", data: { ...action, ...outcome } });
-      } else if (type === "grow") {
-        const outcome = applyGrow(target, this.person, threads, cores);
-        this.landed.grow++;
-        event.result = { growth: outcome.growth, expGained: outcome.expGained };
-        if (this.#verbose) this.emit({ kind: "event", name: "grow.done", data: { ...action, growth: outcome.growth } });
-      } else {
-        const outcome = applyWeaken(target, this.person, threads, cores);
-        this.landed.weaken++;
-        event.result = outcome;
-        if (this.#verbose) this.emit({ kind: "event", name: "weaken.done", data: { ...action, ...outcome } });
-      }
-      if (this.#verbose) {
-        this.mirrorServer(target);
-        this.mirrorPlayer();
-      } else {
-        this.#dirty.add(target);
-        this.#maybeRollup();
-      }
-      this.onSettled?.(event);
+      const { result } = this.land(type, targetName, threads, source.cpuCores);
+      this.onSettled?.({ kind: type, opId: action.opId, target: targetName, threads, result });
     });
     return true;
   }

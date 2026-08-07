@@ -16,6 +16,9 @@
     "vendor": "bun run tools/vendor.ts",
     "sim": "bun run sim/run.ts",
     "sim:compare": "bun run sim/compare.ts",
+    "saves": "bun run tools/save-io.ts list",
+    "save:add": "bun run tools/save-io.ts add",
+    "save:restore": "bun run tools/save-restore.ts",
     "ui": "bun run ui/server.ts"
   },
   "devDependencies": {

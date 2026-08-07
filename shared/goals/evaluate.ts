@@ -1,5 +1,5 @@
 import type { LogRecord } from "../telemetry/schema.ts";
-import type { GoalContext, GoalServer } from "./goal.ts";
+import type { GoalContext, GoalFaction, GoalServer } from "./goal.ts";
 
 /** The single goal stream→state reducer. Consumes compatible LogRecords (live
  * game, live sim, or a replayed JSONL) and maintains the GoalContext goals
@@ -13,7 +13,30 @@ export function initialContext(): GoalContext {
     player: { money: 0, hackingSkill: 1, hackingExp: 0 },
     servers: new Map(),
     totals: { moneyEarned: 0, hacks: 0 },
+    factions: new Map(),
   };
+}
+
+interface FactionsData {
+  joined?: string[];
+  standings?: { name?: string; rep?: number; favor?: number }[];
+}
+
+function applyFactions(ctx: GoalContext, data: FactionsData): void {
+  const upsert = (name: string): GoalFaction => {
+    const existing = ctx.factions.get(name);
+    if (existing) return existing;
+    const fresh: GoalFaction = { name, joined: false, rep: 0, favor: 0 };
+    ctx.factions.set(name, fresh);
+    return fresh;
+  };
+  for (const name of data.joined ?? []) upsert(name).joined = true;
+  for (const standing of data.standings ?? []) {
+    if (typeof standing.name !== "string") continue;
+    const faction = upsert(standing.name);
+    if (typeof standing.rep === "number") faction.rep = standing.rep;
+    if (typeof standing.favor === "number") faction.favor = standing.favor;
+  }
 }
 
 interface PlayerData {
@@ -49,6 +72,8 @@ export function reduceRecord(ctx: GoalContext, record: LogRecord): GoalContext {
       for (const [hostname, data] of Object.entries(record.data as Record<string, ServerData>)) {
         applyServer(ctx, data, hostname);
       }
+    } else if (record.key === "factions") {
+      applyFactions(ctx, record.data as FactionsData);
     } else if (record.key === "farm") {
       // Dispatcher rollup: cumulative totals are authoritative (they replace
       // per-op hack.done accumulation, which only exists in verbose runs).

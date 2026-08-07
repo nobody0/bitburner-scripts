@@ -128,6 +128,12 @@ export async function runProbes(ns: NS, runner: ProbeRunner, state: GameState): 
 
   const ctx: ProbeContext = { player, servers, caps: caps(state) };
   const applicable = (probe: DodgedProbe | (typeof LOCAL_PROBES)[number]): boolean => {
+    // A probe never runs while its OWN feature reads "no". Mirrors the same
+    // rule in selectDue: `requires` is a dependency, this is the feature
+    // itself, and without it an isolation profile would still spend its dodge
+    // budget probing features it switched off. No-op in the real game, where
+    // the always-playable features read "yes" unconditionally.
+    if (ctx.caps.unlocked[probe.feature] === "no") return false;
     if (probe.requires && ctx.caps.unlocked[probe.requires] !== "yes") return false;
     return probe.when ? probe.when(ctx.caps, state.topics) : true;
   };

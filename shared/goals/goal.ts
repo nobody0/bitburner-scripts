@@ -21,11 +21,22 @@ export interface GoalServer {
   maxRam: number;
 }
 
+export interface GoalFaction {
+  name: string;
+  joined: boolean;
+  rep: number;
+  favor: number;
+}
+
 export interface GoalContext {
   time: number;
   player: GoalPlayer;
   servers: Map<string, GoalServer>;
   totals: { moneyEarned: number; hacks: number };
+  /** Faction membership and standing, for feature-isolation goals. Membership
+   *  is free (Player.factions); rep needs the singularity API, so it stays 0
+   *  without BN4/SF4 and a rep goal is simply unreachable there. */
+  factions: Map<string, GoalFaction>;
 }
 
 /** Sim-only initial conditions a goal may demand. */

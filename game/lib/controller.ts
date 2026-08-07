@@ -1,4 +1,5 @@
 import type { NS, Server } from "@ns";
+import type { FeatureOverrides } from "../../shared/features/profile.ts";
 import { capsDelta } from "../../shared/features/unlock.ts";
 import { resyncHeap, WORKER_SCRIPT } from "./dispatch-driver.ts";
 import { dodge } from "./dodge.ts";
@@ -41,11 +42,15 @@ export async function runController(
   sink: TelemetrySink | undefined,
   mode: "cold" | "handoff",
   epoch: number,
+  /** Injected feature switches. Absent in the game; a simulation supplies them
+   *  to isolate one feature. A decision, so deliberately not behind TELEMETRY. */
+  featureOverrides?: FeatureOverrides,
 ): Promise<void> {
   TELEMETRY: if (__TELEMETRY__) tel!.event("start.boot", { mode, build: __BUILD_ID__, epoch });
   ns.tprint(`start.js online (${mode}, build ${__BUILD_ID__})`);
 
   const state = initState();
+  if (featureOverrides) state.featureOverrides = featureOverrides;
   const probes = initProbeRunner();
 
   // Sentinel opener count (legacy watchHuman trick): guarantees the first

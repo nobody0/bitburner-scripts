@@ -43,6 +43,7 @@ const config: BitburnerConfig = {
   entries: [
     { source: "game/start.ts", target: "start.js" },
     { source: "game/worker/worker.ts", target: "worker/worker.js" },
+    { source: "game/restore.ts", target: "restore.js" },
   ],
 };
 
@@ -88,6 +89,29 @@ describe("in-game static RAM budget", () => {
     const perf = staticRam(perfBuild!.content);
     expect(perf.total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
     expect(perf.members).toEqual(staticRam(telemetryBuild!.content).members);
+  });
+
+  test("the controller can never reach the save", async () => {
+    // restore.js overwrites the real save. It is a separate entrypoint so that
+    // no code path the controller runs can reach IndexedDB or a page reload —
+    // an accidental import here is the difference between a bug and lost
+    // progress.
+    const [start] = await buildScripts(config, { telemetry: true });
+    expect(start!.content).not.toContain("indexedDB");
+    expect(start!.content).not.toContain("location.reload");
+    expect(start!.content).not.toContain("restore-payload");
+  });
+
+  test("restore.js stays cheap and read-only against the game", async () => {
+    const artifacts = await buildScripts(config, { telemetry: true });
+    const restore = artifacts.find((a) => a.filename === "restore.js")!;
+    const { total, members } = staticRam(restore.content);
+    // It only inspects the live game to describe what it is about to
+    // overwrite; everything destructive goes through browser globals, which
+    // cost no ns RAM.
+    expect(members).toEqual([]);
+    expect(total).toBe(BASE_GB);
+    expect(restore.content).toContain("indexedDB");
   });
 
   test("the puppet worker references only the three ops it performs", async () => {

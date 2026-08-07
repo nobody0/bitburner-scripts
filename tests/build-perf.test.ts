@@ -89,6 +89,17 @@ describe("compile-time telemetry elimination", () => {
     expect(main!.content).toContain('stubNs["corporation"]["getCorporation"]');
   });
 
+  test("--perf build keeps the feature-override seam", async () => {
+    // Injected feature switches are a DECISION, applied inside caps(). If they
+    // were ever stripped from a perf build, the two builds would gate their
+    // feature drivers differently — i.e. play different games — and every
+    // --perf measurement would stop describing the real one.
+    for (const telemetry of [true, false]) {
+      const [main] = await buildScripts(config, { telemetry });
+      expect(main!.content).toContain("applyOverrides");
+    }
+  });
+
   test("both builds call the game in exactly the same places", async () => {
     // The mechanical statement of "behaviour is identical": same dodged ns
     // surface, so the two bundles play the same game at the same cost. If this

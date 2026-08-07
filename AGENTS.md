@@ -6,8 +6,8 @@ treat its architecture as authoritative.
 
 - Author game scripts in `game/` as TypeScript; only `game/` is ever synced to
   the game. Cross-cutting pure code (log schema, planner, goals) lives in
-  `shared/`; the simulator in `sim/`; the external UI process in `ui/`; design
-  docs in `spec/`.
+  `shared/`; the simulator in `sim/`; the external UI process in `ui/`; save
+  snapshots in `saves/`; design docs in `spec/`.
 - Add deployable entrypoints explicitly to `bitburner.config.json` (sources must
   live under `game/`).
 - `bun run build` emits only those entrypoints as bundled JavaScript under
@@ -30,3 +30,14 @@ treat its architecture as authoritative.
   `initTelemetry` or the sink sits inside the label, and nothing the controller
   *decides on* (capabilities, BitNode, progression, any probe result) may.
   `tests/build-perf.test.ts` pins both halves.
+- The simulator runs the real `game/` controller, so `sim/` may import `game/`
+  but never the reverse, and `game/` must stay unaware it is being simulated —
+  no clock injection, no sim-only branches. Virtual time is installed under it
+  (`sim/realm/timers.ts`); see `spec/simulator.md`.
+- Never let the simulator fabricate a value it does not model. An unimplemented
+  ns path or subsystem calls `unmodeled()`, which reports and throws. A run that
+  blends measured and invented behaviour is worse than one that fails loudly.
+- `saves/` holds real exported saves and is destructive to restore. Only
+  `game/restore.ts` may touch the game's IndexedDB, and it stays a separate
+  entrypoint so the controller can never reach it — `tests/ram-budget.test.ts`
+  pins that.

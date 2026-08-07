@@ -24,7 +24,7 @@ interface RunSummaryLike {
 const run = { id: null as string | null, src: null as "game" | "sim" | null, live: false, records: [] as LogRecord[], t0: null as number | null };
 let cutoff = Infinity;
 let liveRuns: RunSummaryLike[] = [];
-let storedRuns: { file: string; size: number }[] = [];
+let storedRuns: { file: string; size: number; pinned?: boolean }[] = [];
 let active: TabId = "overview";
 let state: ProjectedState = emptyState();
 
@@ -119,9 +119,15 @@ function refreshPicker(): void {
     ...liveRuns.map(
       (r) => `<option value="live:${esc(r.id)}">● live — ${esc(r.hello?.src)}/${esc(r.hello?.script)} (${esc(r.id)})</option>`,
     ),
-    ...storedRuns.map((f) => `<option value="file:${esc(f.file)}">${esc(f.file)}</option>`),
+    ...storedRuns.map(
+      (f) => `<option value="file:${esc(f.file)}">${f.pinned ? "📌 " : ""}${esc(f.file)}</option>`,
+    ),
   ].join("");
   if ([...pick.options].some((o) => o.value === current)) pick.value = current;
+  // Only an unpinned stored run can be pinned.
+  const selected = pick.value;
+  const pin = $<HTMLButtonElement>("simpin");
+  pin.disabled = !selected.startsWith("file:") || selected.startsWith("file:pinned/");
 }
 
 async function loadStored(file: string): Promise<void> {
@@ -184,7 +190,7 @@ $("scrub").addEventListener("input", () => {
 interface HubMessage {
   type: string;
   runs?: RunSummaryLike[];
-  stored?: { file: string; size: number }[];
+  stored?: { file: string; size: number; pinned?: boolean }[];
   run?: RunSummaryLike & { id: string };
   records?: LogRecord[];
   busy?: boolean;
@@ -230,6 +236,11 @@ function connect(): void {
         $("status").textContent = "run ended";
       }
       refreshPicker();
+    } else if (msg.type === "runs-changed") {
+      // A run was pinned: its name gained a "pinned/" prefix, so the picker
+      // has to be rebuilt or the selection would point at a moved file.
+      if (msg.stored) storedRuns = msg.stored;
+      refreshPicker();
     } else if (msg.type === "sim-status") {
       $<HTMLButtonElement>("simrun").disabled = Boolean(msg.busy);
     } else if (msg.type === "sim-finished") {
@@ -247,16 +258,40 @@ function connect(): void {
   };
 }
 
+/** Populate the profile and save pickers from the hub. Both are optional: an
+ * empty profile means "use the goal box", an empty save means a fresh BN1. */
+async function refreshLaunchers(): Promise<void> {
+  const [profiles, saves] = await Promise.all([
+    fetch("/profiles").then((r) => r.json() as Promise<{ id: string; description: string }[]>),
+    fetch("/saves").then((r) => r.json() as Promise<{ id: string; bitNode: number; label: string }[]>),
+  ]).catch(() => [[], []] as [{ id: string; description: string }[], { id: string; bitNode: number; label: string }[]]);
+
+  $<HTMLSelectElement>("simprofile").innerHTML = [
+    `<option value="">— goal below —</option>`,
+    ...profiles.map((p) => `<option value="${esc(p.id)}" title="${esc(p.description)}">${esc(p.id)}</option>`),
+  ].join("");
+  $<HTMLSelectElement>("simsave").innerHTML = [
+    `<option value="">fresh BN1</option>`,
+    ...saves.map((s) => `<option value="${esc(s.id)}">${esc(s.id)} (BN${s.bitNode})</option>`),
+  ].join("");
+}
+void refreshLaunchers();
+
 $("simrun").addEventListener("click", async () => {
   $<HTMLButtonElement>("simrun").disabled = true;
+  const profile = $<HTMLSelectElement>("simprofile").value;
+  const save = $<HTMLSelectElement>("simsave").value;
   const res = await fetch("/sim", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      goals: $<HTMLInputElement>("simgoal").value.trim().split(/\s+/).filter(Boolean),
+      // A profile brings its own goals, seeds and horizon; the boxes only
+      // override what the operator actually typed over.
+      ...(profile ? { profile } : { goals: $<HTMLInputElement>("simgoal").value.trim().split(/\s+/).filter(Boolean) }),
+      ...(save ? { save } : {}),
       seeds: $<HTMLInputElement>("simseeds").value.trim(),
       horizon: $<HTMLInputElement>("simhorizon").value.trim(),
-      label: "dashboard",
+      ...(profile ? {} : { label: "dashboard" }),
     }),
   });
   const body = (await res.json()) as { error?: string };
@@ -266,6 +301,19 @@ $("simrun").addEventListener("click", async () => {
   } else {
     $("status").textContent = "sim running…";
   }
+});
+
+$("simpin").addEventListener("click", async () => {
+  const value = $<HTMLSelectElement>("runpick").value;
+  if (!value.startsWith("file:")) return;
+  const file = value.slice("file:".length);
+  const res = await fetch("/pin", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ file }),
+  });
+  const body = (await res.json()) as { error?: string; pinned?: string };
+  $("status").textContent = res.ok ? `pinned ${body.pinned} — it will survive the sweep` : `pin failed: ${body.error}`;
 });
 
 active = readHash();

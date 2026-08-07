@@ -1,0 +1,198 @@
+import { describe, expect, test } from "bun:test";
+import { parseGoals } from "../../shared/goals/presets.ts";
+import { runGame } from "../game-run.ts";
+import { getRamCost } from "../ns/ram-costs.ts";
+
+/** The synthetic ns exists to run game/ for real. These pin the mechanics that
+ * make that possible, and the end-to-end proof that it does. */
+
+describe("ram costs", () => {
+  test("prices the gate batch as the game does", () => {
+    // game/lib/probes/gates.ts budgets 1.5 GB and documents ~1.1 GB actual.
+    const methods = [
+      "getResetInfo",
+      "gang.inGang",
+      "bladeburner.inBladeburner",
+      "corporation.hasCorporation",
+      "stock.hasWseAccount",
+      "stock.hasTixApiAccess",
+      "go.getGameState",
+    ];
+    const total = methods.reduce((sum, m) => sum + getRamCost(m), 0);
+    expect(total).toBeCloseTo(1.1, 10);
+  });
+
+  test("matches the costs tests/ram-budget.test.ts pins", () => {
+    expect(getRamCost("getPlayer")).toBe(0.5);
+    expect(getRamCost("exec")).toBe(1.3);
+    expect(getRamCost("getServer")).toBe(2);
+    expect(getRamCost("getServerMoneyAvailable")).toBe(0.1);
+    expect(getRamCost("getServerSecurityLevel")).toBe(0.1);
+    expect(getRamCost("scp")).toBe(0.6);
+    expect(getRamCost("scan")).toBe(0.2);
+    expect(getRamCost("ls")).toBe(0.2);
+    expect(getRamCost("ps")).toBe(0.2);
+    expect(getRamCost("kill")).toBe(0.5);
+    expect(getRamCost("hack")).toBe(0.1);
+    expect(getRamCost("grow")).toBe(0.15);
+    expect(getRamCost("weaken")).toBe(0.15);
+    expect(getRamCost("nuke")).toBe(0.05);
+  });
+
+  test("applies the SF4 multiplier to singularity costs", () => {
+    // SF4Cost: 16x with no SF4, 4x at level 2, 1x at 3+ or inside BN4.
+    expect(getRamCost("singularity.getFactionRep", {})).toBe(16);
+    expect(getRamCost("singularity.getFactionRep", { sf4Level: 2 })).toBe(4);
+    expect(getRamCost("singularity.getFactionRep", { sf4Level: 3 })).toBe(1);
+    expect(getRamCost("singularity.getFactionRep", { bitNode: 4 })).toBe(1);
+  });
+
+  test("an unknown name costs 0, exactly as getRamCost reports it", () => {
+    // probe-runner relies on this: 0 means free, not missing.
+    expect(getRamCost("noSuchFunction")).toBe(0);
+    expect(getRamCost("gang.noSuchFunction")).toBe(0);
+    expect(getRamCost("sleep")).toBe(0);
+    expect(getRamCost("atExit")).toBe(0);
+    expect(getRamCost("getFunctionRamCost")).toBe(0);
+  });
+});
+
+describe("running game/ in the synthetic world", () => {
+  test("the real controller reaches a money goal", async () => {
+    const result = await runGame({
+      goal: parseGoals(["earn:1e6"]),
+      seed: 1,
+      horizonMs: 60 * 60_000,
+      homeRam: 16,
+      label: "test",
+    });
+
+    expect(result.reached).toBe(true);
+    expect(result.stoppedBecause).toBe("goal");
+    // No script may die of anything but a deliberate kill.
+    expect(result.crashes).toEqual([]);
+    // The controller announces itself, which proves start.js's main ran.
+    expect(result.output[0]).toContain("start.js online");
+    expect(result.records).toBeGreaterThan(100);
+  });
+
+  test("the run is deterministic for a fixed seed", async () => {
+    const run = () =>
+      runGame({ goal: parseGoals(["earn:1e6"]), seed: 7, horizonMs: 60 * 60_000, homeRam: 16, label: "det" });
+    const [a, b] = [await run(), await run()];
+    expect(a.timeToGoalMs).toBe(b.timeToGoalMs);
+    expect(a.records).toBe(b.records);
+  });
+
+  test("the sweep roots and deploys, and the dispatcher lands real ops", async () => {
+    let farm: { landed?: Record<string, number>; totals?: Record<string, number> } | undefined;
+    const events = new Set<string>();
+    await runGame({
+      goal: parseGoals(["earn:1e6"]),
+      seed: 1,
+      horizonMs: 60 * 60_000,
+      homeRam: 16,
+      onRecord: (line) => {
+        const record = JSON.parse(line) as { kind: string; key?: string; name?: string; data?: unknown };
+        if (record.kind === "state" && record.key === "farm") farm = record.data as typeof farm;
+        if (record.kind === "event" && record.name) events.add(record.name);
+      },
+    });
+
+    // Rooting happened through the real net.ts closures inside a real dodge stub.
+    expect(events.has("net.rooted")).toBe(true);
+    // And all three op kinds actually completed against the vendored formulas.
+    expect(farm?.landed?.["hack"]).toBeGreaterThan(0);
+    expect(farm?.landed?.["grow"]).toBeGreaterThan(0);
+    expect(farm?.landed?.["weaken"]).toBeGreaterThan(0);
+    expect(farm?.totals?.["moneyEarned"]).toBeGreaterThan(1e6);
+  });
+
+  test("the capability gate detects the BitNode and derives unlocks", async () => {
+    let caps: { bitNode?: number; unlocked?: Record<string, string> } | undefined;
+    await runGame({
+      goal: parseGoals(["earn:1e6"]),
+      seed: 1,
+      horizonMs: 60 * 60_000,
+      homeRam: 16,
+      onRecord: (line) => {
+        const record = JSON.parse(line) as { kind: string; key?: string; data?: unknown };
+        if (record.kind === "state" && record.key === "capabilities") caps = record.data as typeof caps;
+      },
+    });
+
+    expect(caps?.bitNode).toBe(1);
+    // Always-playable five.
+    expect(caps?.unlocked?.["hacking"]).toBe("yes");
+    expect(caps?.unlocked?.["progression"]).toBe("yes");
+    // A fresh BN1 save holds no source files, so the node-gated features lock.
+    expect(caps?.unlocked?.["factions"]).toBe("no");
+    expect(caps?.unlocked?.["gang"]).toBe("no");
+    expect(caps?.unlocked?.["corp"]).toBe("no");
+  });
+
+  test("gates can be opened, and unlocking is observable", async () => {
+    let caps: { unlocked?: Record<string, string> } | undefined;
+    await runGame({
+      goal: parseGoals(["earn:1e6"]),
+      seed: 1,
+      horizonMs: 60 * 60_000,
+      homeRam: 16,
+      gates: { inGang: true, hasWseAccount: true },
+      onRecord: (line) => {
+        const record = JSON.parse(line) as { kind: string; key?: string; data?: unknown };
+        if (record.kind === "state" && record.key === "capabilities") caps = record.data as typeof caps;
+      },
+    });
+
+    expect(caps?.unlocked?.["gang"]).toBe("yes");
+    expect(caps?.unlocked?.["stock"]).toBe("yes");
+  });
+
+  test("unmodelled surface is reported by name and never crashes a run", async () => {
+    const result = await runGame({
+      goal: parseGoals(["earn:1e6"]),
+      seed: 1,
+      horizonMs: 60 * 60_000,
+      homeRam: 16,
+      label: "gaps",
+    });
+
+    // Probes for features we do not simulate hit the wall and say so...
+    const gaps = Object.keys(result.unmodeled);
+    expect(gaps.length).toBeGreaterThan(0);
+    expect(gaps).toContain("ns hacknet.numNodes");
+    // ...with no leading-dot mangling of the root namespace...
+    expect(gaps.every((gap) => !gap.includes(" ."))).toBe(true);
+    // ...and the run still completes, because probe-runner isolates each probe.
+    expect(result.reached).toBe(true);
+    expect(result.crashes).toEqual([]);
+  });
+
+  test("a fresh 8GB home cannot afford ANY probe, so nothing ever unlocks", async () => {
+    // Regression pin for a real game/ finding, not a simulator gap: the sweep
+    // snapshots the network from INSIDE a 4.1 GB dodge stub, so home.ramUsed
+    // carries the stub's own footprint. dodgeBudget() then reads
+    // 8 - 3.6 (controller) - 4.1 (stub) - 1.6 - 0.5 < 0, and the capability
+    // gate batch is skipped on every sweep forever. The farm still runs, so
+    // this is invisible from the outside — which is the point of pinning it.
+    let caps: unknown;
+    let skipped = 0;
+    const result = await runGame({
+      goal: parseGoals(["earn:1e6"]),
+      seed: 1,
+      horizonMs: 60 * 60_000,
+      homeRam: 8,
+      onRecord: (line) => {
+        const record = JSON.parse(line) as { kind: string; key?: string; name?: string };
+        if (record.kind === "state" && record.key === "capabilities") caps = record;
+        if (record.kind === "event" && record.name === "probe.skipped") skipped++;
+      },
+    });
+
+    expect(caps).toBeUndefined();
+    expect(skipped).toBeGreaterThan(0);
+    // The farm is unaffected, which is exactly why this hides so well.
+    expect(result.reached).toBe(true);
+  });
+});
