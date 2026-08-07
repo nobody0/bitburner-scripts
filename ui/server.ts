@@ -6,11 +6,14 @@ import { RunStore } from "./store.ts";
 /** Telemetry hub: one Bun.serve hosting
  *  - ws /ingest — game scripts and sim runs push WireMessages in
  *  - ws /live   — browser viewers get a snapshot, then live fan-out
- *  - HTTP /     — the viewer app; /runs, /runs/:file — stored JSONL replays
+ *  - HTTP /     — the viewer app; /app.js — its bundle; /runs, /runs/:file —
+ *                 stored JSONL replays
  *  - POST /sim  — launch a simulation (bun sim/run.ts) from the dashboard */
 
 const RUNS_DIR = new URL("../runs", import.meta.url).pathname;
 const PUBLIC_DIR = new URL("./public", import.meta.url).pathname;
+const APP_DIR = new URL("./app", import.meta.url).pathname;
+const APP_ENTRY = path.join(APP_DIR, "main.ts");
 const REPO_ROOT = new URL("..", import.meta.url).pathname;
 const RETENTION_MS = 24 * 3_600_000;
 const SWEEP_EVERY_MS = 3_600_000;
@@ -53,6 +56,47 @@ function sweep(): void {
   for (const [id, store] of runs) {
     if (!store.live && (store.closedAt ?? 0) < cutoff) runs.delete(id);
   }
+}
+
+/** Viewer bundle. `ui/app/` is TypeScript so the tab renderers typecheck
+ * against StateMap, but the viewer keeps its no-build-step feel: Bun's own
+ * bundler runs in this process and rebuilds whenever a source file changes.
+ * A browser refresh is the whole dev loop, exactly as before. */
+let appCache: { mtime: number; body: string } | undefined;
+
+function appSourceMtime(dir: string): number {
+  let newest = 0;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    const mtime = entry.isDirectory() ? appSourceMtime(full) : statSync(full).mtimeMs;
+    if (mtime > newest) newest = mtime;
+  }
+  return newest;
+}
+
+async function appBundle(): Promise<Response> {
+  // shared/ is in the graph too, so its mtime matters for the cache key.
+  const mtime = Math.max(appSourceMtime(APP_DIR), appSourceMtime(path.join(REPO_ROOT, "shared")));
+  if (!appCache || appCache.mtime !== mtime) {
+    const result = await Bun.build({
+      entrypoints: [APP_ENTRY],
+      target: "browser",
+      format: "esm",
+      sourcemap: "inline",
+    });
+    if (!result.success) {
+      const message = result.logs.map((log) => String(log)).join("\n");
+      console.error(`app bundle failed:\n${message}`);
+      // Surface the failure in the page instead of serving a stale bundle.
+      return new Response(`document.body.textContent = ${JSON.stringify(`app build failed:\n${message}`)};`, {
+        headers: { "content-type": "text/javascript" },
+      });
+    }
+    appCache = { mtime, body: await result.outputs[0]!.text() };
+  }
+  return new Response(appCache.body, {
+    headers: { "content-type": "text/javascript", "cache-control": "no-store" },
+  });
 }
 
 function broadcast(payload: unknown): void {
@@ -122,6 +166,7 @@ const server = Bun.serve<SocketData, never>({
     if (url.pathname === "/sim" && req.method === "POST") {
       return req.json().then(launchSim).catch(() => Response.json({ error: "bad JSON" }, { status: 400 }));
     }
+    if (url.pathname === "/app.js") return appBundle();
     if (url.pathname === "/runs") return Response.json(listRunFiles());
     if (url.pathname.startsWith("/runs/")) {
       const name = path.basename(url.pathname);

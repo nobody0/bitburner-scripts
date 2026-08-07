@@ -41,7 +41,9 @@ export const FEATURES: readonly Feature[] = [
   {
     id: "progression",
     label: "BitNode",
-    bitnodes: [1, 12],
+    // BN12 (The Recursion) is the node *about* the reset loop itself. BN1 is
+    // the unmodified baseline and belongs to hacking, which is all it has.
+    bitnodes: [12],
     topics: ["progression", "capabilities"],
     problem:
       "Choose the BitNode destroy order and the augmentation/reset cadence that minimises total wall-clock to a target source-file set.",
@@ -51,6 +53,8 @@ export const FEATURES: readonly Feature[] = [
   {
     id: "hacking",
     label: "Hacking",
+    // BN1 is pure hacking with no other system unlocked; BN5's intelligence
+    // feeds the hack formulas directly through intBonus.
     bitnodes: [1, 5],
     topics: ["servers", "farm", "fleet"],
     problem:

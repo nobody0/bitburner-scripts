@@ -34,8 +34,11 @@ export interface BladeburnerState {
   city: string;
   current?: { type: string; name: string; elapsedMs: number };
   nextBlackOp?: { name: string; rank: number };
-  skills: Record<string, { level: number; upgradeCost: number }>;
-  actions: BladeActionDigest[];
-  cities: BladeCityDigest[];
+  /** Owned by the `bladeburner.actions` / `.cities` probes, never by `.core`.
+   *  Core runs four times as often; because topic merges are shallow, an
+   *  empty placeholder from core would wipe these between detail sweeps. */
+  skills?: Record<string, { level: number; upgradeCost: number }>;
+  actions?: BladeActionDigest[];
+  cities?: BladeCityDigest[];
   bonusTime?: number;
 }

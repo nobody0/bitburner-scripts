@@ -53,7 +53,11 @@ export interface CorpState {
   dividendRate: number;
   dividendEarnings: number;
   state: string;
-  divisions: CorpDivisionDigest[];
+  /** Owned solely by the `corp.divisions` probe. `corp.core` runs twice as
+   *  often and cannot afford getDivision, so it must not write this field —
+   *  topic merges are shallow, and a placeholder here would blank the table
+   *  every other sweep. */
+  divisions?: CorpDivisionDigest[];
   investmentOffer?: { round: number; funds: number; shares: number };
   bonusTime?: number;
 }

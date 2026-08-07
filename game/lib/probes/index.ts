@@ -34,6 +34,14 @@ export function emit<K extends StateKey>(key: K, data: StateMap[K]): Emission {
   return { key, data } as Emission;
 }
 
+/** Emission from a probe declaring `merge: true`, which contributes only part
+ * of a topic. Completeness is relaxed; field names and types are still checked
+ * against the topic, so a renamed or misspelled field is a compile error
+ * rather than a field the UI silently never finds. */
+export function emitPartial<K extends StateKey>(key: K, data: Partial<StateMap[K]>): Emission {
+  return { key, data } as Emission;
+}
+
 interface ProbeBase {
   /** Stable id, used for scheduling and in probe.* telemetry. */
   id: string;
@@ -43,6 +51,14 @@ interface ProbeBase {
   /** Skipped unless capabilities report this feature as "yes". Omit for
    *  probes that are themselves the source of capability information. */
   requires?: FeatureId;
+  /** Shallow-merge this emission over the last one for the same key instead
+   *  of replacing it. Several probes contribute to one topic at different
+   *  cost tiers (the free `factions.joined` and the SF4-gated `standings`,
+   *  say); without this the cheap one would clobber the expensive one every
+   *  sweep. Merged fields are additive digests, so a stale field simply
+   *  persists until its probe runs again — acceptable, and the alternative
+   *  (a topic per tier) would fragment the UI's state. */
+  merge?: boolean;
 }
 
 export interface LocalProbe extends ProbeBase {

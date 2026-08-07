@@ -12,12 +12,20 @@ Four parts (see [spec/repo-layout.md](spec/repo-layout.md)):
   puppet worker the HWGW dispatcher drives. 3.6 GB static, budget-tested.
 - **shared/** — the pure engine: HWGW targeting/dispatch
   ([spec/targeting.md](spec/targeting.md)), the RAM heap, goals, telemetry
-  schema. Runs unchanged in the sim and the game.
+  schema, and the feature registry
+  ([spec/features.md](spec/features.md)). Runs unchanged in the sim and the game.
 - **sim/** — the simulator: vendored game formulas + virtual clock; measures
   "time to goal" so strategy changes can be A/B compared before touching the
   game. See [spec/simulator.md](spec/simulator.md), [spec/goals.md](spec/goals.md).
 - **ui/** — the external UI process (never in-game): telemetry hub + browser
-  viewer for live play and sim replays. See [spec/telemetry.md](spec/telemetry.md).
+  viewer for live play and sim replays, one tab per feature. See
+  [spec/telemetry.md](spec/telemetry.md).
+
+The game is split into **features** — separable optimization problems, one per
+BitNode theme (hacking, factions, stocks, gang, corp, bladeburner, sleeves,
+Go, Stanek, darknet, …). Each owns a telemetry topic, a probe, and a UI tab,
+and will eventually own a simulator model; the composed "beat this BitNode"
+problem is what they add up to. See [spec/features.md](spec/features.md).
 
 ## Local references
 

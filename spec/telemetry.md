@@ -23,6 +23,19 @@ Defined in `shared/telemetry/schema.ts`. Three kinds, all carrying
     types the `gameGlobal` cache (`game/lib/globals.ts`) — so a dodge batch
     like `collectServers` feeds the log, the UI, and `gameGlobal.servers`
     from one inferred type. New app-level state = one new StateMap entry.
+
+    Beyond the core three there is one topic per feature, declared in
+    `shared/telemetry/topics/` (see `spec/features.md`). Two rules hold for
+    all of them:
+    - **Digests, not dumps.** Records are last-write-wins and rare, but a raw
+      `getDivision()` or bladeburner action table would still dominate the
+      JSONL. Emit what the panel shows, and cap list lengths with the true
+      count alongside.
+    - **No `Map` in a payload.** The wire is JSON and
+      `JSON.stringify(new Map())` is `{}`. `ResetInfo.ownedSF`, `ownedAugs`
+      and `bitNodeOptions.sourceFileOverrides` are all Maps upstream; probes
+      flatten them with `Object.fromEntries`. This one silently ships empty
+      panels, so `tests/features.test.ts` pins it.
 - **event** — discrete happenings (`start.boot`, `action.blocked`,
   `telemetry.dropped`).
 - **debug** — free-form diagnostics; first to be dropped under buffer pressure.
@@ -33,9 +46,16 @@ a structured error before being rethrown; Bitburner's normal `ScriptDeath`
 cancellation marker is deliberately excluded.
 
 `shared/goals/evaluate.ts` reduces compatible records into goal state. The
-browser has a separate UI projection because it retains raw server fields and
-the event feed. Until the `farm` rollup lands, live earned/hack totals are shown
-as unavailable rather than incorrectly inferred as zero.
+browser has a separate UI projection (`ui/app/project.ts`) because it retains
+raw server fields, the event feed and every feature topic. Earned/hack totals
+come from the `farm` rollup when present, fall back to `hack.done` events, and
+are shown as unavailable when neither exists — the test for "do we have
+totals" is the presence of a source, never the `src` of the run.
+
+Feature probes add two events: `probe.skipped {id, cost, budget}` when a probe
+cannot afford its dodge budget (reported once per price, not per sweep) and
+`probe.failed {id, error}` when a body throws. Silence would read as "this
+feature has no data".
 
 ## Wire
 
@@ -69,6 +89,7 @@ the flag only exists in esbuild-processed game bundles.
 ## Hub
 
 `ui/server.ts` (Bun.serve, port 12526): ws `/ingest` for emitters, ws `/live`
-for browser viewers (snapshot then fan-out), HTTP `/` viewer app, `/runs` +
+for browser viewers (snapshot then fan-out), HTTP `/` viewer shell, `/app.js`
+(the viewer bundle, built on demand from `ui/app/`), `/runs` +
 `/runs/:file` for stored JSONL replays. `ui/store.ts` handles persistence,
 tail ring, and state reduction per run.

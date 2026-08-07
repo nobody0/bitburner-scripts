@@ -5,7 +5,6 @@
 
 export interface StockPosition {
   sym: string;
-  organization?: string;
   price: number;
   ask: number;
   bid: number;
@@ -15,20 +14,32 @@ export interface StockPosition {
   avgPx: number;
   sharesShort: number;
   avgPxShort: number;
-  /** 4S-only; undefined without market data access. */
-  forecast?: number;
-  volatility?: number;
   /** Mark-to-market value of the held position at bid/ask. */
   value: number;
   costBasis: number;
 }
 
+/** 4S market data, keyed by symbol. Deliberately a SEPARATE field rather than
+ * fields on StockPosition: the 4S probe runs half as often as the price probe
+ * and cannot afford the position getters, so writing into `positions` would
+ * replace real prices with signal-only stubs on every merge. */
+export interface StockSignal {
+  organization?: string;
+  forecast?: number;
+  volatility?: number;
+}
+
 export interface StockState {
   hasWseAccount: boolean;
   hasTixApiAccess: boolean;
-  has4SData: boolean;
-  has4SDataApi: boolean;
+  /** Owned by the `stock.forecast` probe — it is the only one that can tell
+   *  whether 4S data answers. `stock.core` runs twice as often and must not
+   *  write these, or the flags would flip on every merge. */
+  has4SData?: boolean;
+  has4SDataApi?: boolean;
   positions: StockPosition[];
+  /** Symbol -> 4S signal. Owned solely by the `stock.forecast` probe. */
+  signals?: Record<string, StockSignal>;
   portfolioValue: number;
   portfolioCost: number;
   /** Open limit/stop orders — 4S/BN8 only. */

@@ -8,6 +8,7 @@
   :root {
     color-scheme: light;
     --surface-1: #fcfcfb;
+    --surface-2: #f2f2ef;
     --page: #f9f9f7;
     --text-primary: #0b0b0b;
     --text-secondary: #52514e;
@@ -16,6 +17,10 @@
     --baseline: #c3c2b7;
     --border: rgba(11, 11, 11, 0.1);
     --series-1: #2a78d6;
+    --series-2: #7a5bd0;
+    --series-3: #1f9e8f;
+    --series-4: #c3c2b7;
+    --series-5: #d08a3b;
     --good: #0ca30c;
     --critical: #d03b3b;
   }
@@ -23,6 +28,7 @@
     :root {
       color-scheme: dark;
       --surface-1: #1a1a19;
+      --surface-2: #232322;
       --page: #0d0d0d;
       --text-primary: #ffffff;
       --text-secondary: #c3c2b7;
@@ -31,6 +37,10 @@
       --baseline: #383835;
       --border: rgba(255, 255, 255, 0.1);
       --series-1: #3987e5;
+      --series-2: #9277e0;
+      --series-3: #35b5a4;
+      --series-4: #45443f;
+      --series-5: #e0a154;
     }
   }
   * { box-sizing: border-box; }
@@ -49,7 +59,6 @@
     flex-wrap: wrap;
   }
   header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
-  select, input[type="range"] { font: inherit; }
   select, input, button {
     background: var(--surface-1);
     color: var(--text-primary);
@@ -63,28 +72,66 @@
   button:disabled { opacity: 0.5; cursor: default; }
   #status { color: var(--text-secondary); }
   #status .live { color: var(--good); font-weight: 600; }
-  main {
+
+  /* --- tab bar: generated from shared/features/registry.ts --- */
+  nav#tabs {
+    display: flex;
+    gap: 2px;
+    padding: 0 16px;
+    border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+    background: var(--surface-2);
+  }
+  .tab {
+    padding: 7px 12px;
+    font-size: 13px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    border-bottom: 2px solid transparent;
+    white-space: nowrap;
+  }
+  .tab:hover { color: var(--text-primary); }
+  .tab.on { color: var(--text-primary); font-weight: 600; border-bottom-color: var(--series-1); }
+  .tab.locked { opacity: 0.42; }
+  .tab.unknown { opacity: 0.66; font-style: italic; }
+
+  #scrubrow {
+    display: none;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 16px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  #scrub { flex: 1; }
+
+  main#view {
     display: grid;
     grid-template-columns: minmax(420px, 3fr) minmax(300px, 2fr);
     gap: 14px;
     padding: 14px 16px;
     align-items: start;
   }
+  .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
   section.card {
     background: var(--surface-1);
     border: 1px solid var(--border);
     border-radius: 10px;
     padding: 12px 14px;
+    min-width: 0;
+    overflow-x: auto;
   }
-  section.card h2 {
-    margin: 0 0 8px;
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text-secondary);
-  }
+  section.card h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+  .locked-card p { margin: 4px 0; }
+  .muted { color: var(--muted); }
+  .good { color: var(--good); }
+  .bad, .fail { color: var(--critical); }
+
   .tiles { display: flex; gap: 22px; margin-bottom: 8px; flex-wrap: wrap; }
-  .tile .v { font-size: 22px; font-weight: 600; }
+  .tile .v { font-size: 20px; font-weight: 600; }
   .tile .l { color: var(--muted); font-size: 12px; }
+
   #chartwrap { position: relative; }
   canvas { width: 100%; height: 240px; display: block; }
   #tooltip {
@@ -99,26 +146,63 @@
     white-space: nowrap;
     box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
   }
-  #scrubrow { display: none; align-items: center; gap: 10px; margin-top: 6px; color: var(--text-secondary); font-size: 12px; }
-  #scrub { flex: 1; }
+
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-  th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--grid); }
+  th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
   th:first-child, td:first-child { text-align: left; }
-  td.root { color: var(--good); }
-  td.noroot { color: var(--muted); }
-  #events {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    font-size: 12px;
-    max-height: 320px;
-    overflow-y: auto;
-  }
+
+  dl.defs { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0; }
+  dl.defs dt { color: var(--muted); font-size: 12px; }
+  dl.defs dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+  #events { list-style: none; margin: 0; padding: 0; font-size: 12px; max-height: 420px; overflow-y: auto; }
   #events li { padding: 2px 0; border-bottom: 1px solid var(--grid); display: flex; gap: 8px; }
   #events .t { color: var(--muted); flex: none; width: 9ch; }
-  #events .fail { color: var(--critical); }
   #events .data { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* --- feature status chips (Overview) --- */
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { font-size: 12px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); }
+  .chip.on { background: var(--good); color: #fff; border-color: transparent; }
+  .chip.idle { color: var(--text-secondary); }
+  .chip.off { color: var(--muted); opacity: 0.55; }
+  .chip.unknown { color: var(--muted); font-style: italic; }
+
+  /* --- proportional bar --- */
+  .bar { display: flex; height: 14px; border-radius: 4px; overflow: hidden; background: var(--grid); }
+  .barkey { display: flex; gap: 12px; align-items: center; font-size: 12px; color: var(--muted); margin-top: 4px; flex-wrap: wrap; }
+  .barkey .seg { width: 10px; height: 10px; border-radius: 2px; display: inline-block; margin-right: 4px; }
+  .seg { display: block; height: 100%; }
+  .seg.s1 { background: var(--series-1); }
+  .seg.s2 { background: var(--series-2); }
+  .seg.s3 { background: var(--series-3); }
+  .seg.s4 { background: var(--series-4); }
+  .seg.s5 { background: var(--series-5); }
+
+  /* --- BitNode grid --- */
+  .nodegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 10px; }
+  .node { border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--surface-2); }
+  .node .n { font-weight: 600; font-size: 13px; display: flex; justify-content: space-between; }
+  .node .lvl { background: var(--good); color: #fff; border-radius: 999px; padding: 0 6px; font-size: 11px; }
+  .node .nm { font-size: 12px; color: var(--text-secondary); }
+  .node .ft { font-size: 11px; color: var(--muted); }
+  .node.current { border-color: var(--series-1); box-shadow: inset 0 0 0 1px var(--series-1); }
+  .node.todo { opacity: 0.5; }
+
+  /* --- Go board and Stanek grid --- */
+  .goboard, .gift { display: grid; gap: 2px; margin: 10px 0; max-width: 420px; }
+  .goboard .cell, .gift .cell { aspect-ratio: 1; border-radius: 2px; background: var(--grid); }
+  .goboard .cell.black { background: #16161a; }
+  .goboard .cell.white { background: #f2f2ef; box-shadow: inset 0 0 0 1px var(--baseline); }
+  .goboard .cell.dead { background: transparent; }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; }
+  .f0, .gift .cell.f0 { background: var(--series-1); }
+  .f1, .gift .cell.f1 { background: var(--series-2); }
+  .f2, .gift .cell.f2 { background: var(--series-3); }
+  .f3, .gift .cell.f3 { background: var(--series-5); }
+  .f4, .gift .cell.f4 { background: var(--good); }
+  .f5, .gift .cell.f5 { background: var(--critical); }
 </style>
 </head>
 <body>
@@ -132,343 +216,13 @@
   <input id="simhorizon" placeholder="horizon" value="12h" size="6" />
   <button id="simrun">run sim</button>
 </header>
-<main>
-  <div style="display:flex;flex-direction:column;gap:14px;">
-    <section class="card">
-      <h2>Money</h2>
-      <div class="tiles">
-        <div class="tile"><div class="v" id="money">–</div><div class="l">on hand</div></div>
-        <div class="tile"><div class="v" id="earned">–</div><div class="l" id="earned-label">earned by hacking</div></div>
-        <div class="tile"><div class="v" id="hacks">–</div><div class="l" id="hacks-label">successful hacks</div></div>
-        <div class="tile"><div class="v" id="skill">–</div><div class="l">hacking skill</div></div>
-      </div>
-      <div id="chartwrap">
-        <canvas id="chart"></canvas>
-        <div id="tooltip"></div>
-      </div>
-      <div id="scrubrow">
-        <span>replay</span>
-        <input type="range" id="scrub" min="0" max="1000" value="1000" />
-        <span id="scrubt"></span>
-      </div>
-    </section>
-    <section class="card">
-      <h2>Servers</h2>
-      <table>
-        <thead><tr><th>host</th><th>root</th><th>money</th><th>max</th><th>sec</th><th>ram</th></tr></thead>
-        <tbody id="servers"></tbody>
-      </table>
-    </section>
-  </div>
-  <section class="card">
-    <h2>Events</h2>
-    <ul id="events"></ul>
-  </section>
-</main>
-<script>
-"use strict";
-const $ = (id) => document.getElementById(id);
-const fmtMoney = (n) => {
-  if (n === undefined || n === null || Number.isNaN(n)) return "–";
-  const units = [["t", 1e12], ["b", 1e9], ["m", 1e6], ["k", 1e3]];
-  for (const [suffix, size] of units) if (Math.abs(n) >= size) return "$" + (n / size).toFixed(2) + suffix;
-  return "$" + n.toFixed(0);
-};
-const fmtTime = (ms) => {
-  const s = ms / 1000;
-  if (s < 90) return s.toFixed(0) + "s";
-  if (s < 5400) return (s / 60).toFixed(1) + "m";
-  return (s / 3600).toFixed(2) + "h";
-};
-
-// --- state -----------------------------------------------------------------
-// One loaded run at a time. records: full ordered list; cutoff for replay.
-const run = { id: null, src: null, live: false, records: [], t0: null };
-let cutoff = Infinity;
-let liveRuns = [];
-let storedRuns = [];
-
-function derive() {
-  const state = { player: null, servers: new Map(), earned: 0, hacks: 0, events: [], lastT: 0 };
-  for (const r of run.records) {
-    if (r.t > cutoff) break;
-    state.lastT = r.t;
-    if (r.kind === "state") {
-      if (r.key === "getPlayer" || r.key === "player") state.player = r.data;
-      else if (r.key.startsWith("getServer:")) state.servers.set(r.key.slice(10), r.data);
-      else if (r.key === "servers" && r.data) for (const [h, s] of Object.entries(r.data)) state.servers.set(h, s);
-    } else if (r.kind === "event") {
-      if (r.name === "hack.done" && r.data && r.data.success) { state.earned += r.data.moneyGained || 0; state.hacks++; }
-      state.events.push(r);
-    } else {
-      state.events.push(r);
-    }
-  }
-  return state;
-}
-
-function moneySeries() {
-  const pts = [];
-  for (const r of run.records) {
-    if (r.t > cutoff) break;
-    if (r.kind === "state" && r.key === "getPlayer" && r.data && typeof r.data.money === "number") {
-      pts.push([r.t, r.data.money]);
-    }
-  }
-  return pts;
-}
-
-// --- render ----------------------------------------------------------------
-function render() {
-  const state = derive();
-  const player = state.player || {};
-  $("money").textContent = fmtMoney(player.money);
-  if (run.src === "game") {
-    // Live workers deliberately do not emit per-operation events. The future
-    // one-per-second farm rollup will make these totals available cheaply.
-    $("earned").textContent = "N/A";
-    $("hacks").textContent = "N/A";
-    $("earned-label").textContent = "requires farm rollup";
-    $("hacks-label").textContent = "requires farm rollup";
-  } else {
-    $("earned").textContent = fmtMoney(state.earned);
-    $("hacks").textContent = state.hacks || "0";
-    $("earned-label").textContent = "earned by hacking";
-    $("hacks-label").textContent = "successful hacks";
-  }
-  $("skill").textContent = (player.skills && player.skills.hacking) || "–";
-
-  const rows = [...state.servers.values()].sort((a, b) => (a.hostname > b.hostname ? 1 : -1));
-  $("servers").innerHTML = rows.map((s) =>
-    `<tr><td>${s.hostname}</td>` +
-    `<td class="${s.hasAdminRights ? "root" : "noroot"}">${s.hasAdminRights ? "yes" : "no"}</td>` +
-    `<td>${fmtMoney(s.moneyAvailable)}</td><td>${fmtMoney(s.moneyMax)}</td>` +
-    `<td>${s.hackDifficulty !== undefined ? s.hackDifficulty.toFixed(1) : "–"}</td>` +
-    `<td>${s.ramUsed !== undefined ? s.ramUsed.toFixed(1) : "0"}/${s.maxRam || 0}</td></tr>`,
-  ).join("");
-
-  const feed = state.events.slice(-200).reverse();
-  $("events").innerHTML = feed.map((e) => {
-    const name = e.kind === "debug" ? "debug: " + e.msg : e.name;
-    const cls = name === "action.failed" || name === "action.blocked" ? "fail" : "";
-    const data = e.data ? JSON.stringify(e.data) : "";
-    return `<li><span class="t">${fmtTime(e.t - (run.t0 ?? e.t))}</span><span class="${cls}">${name}</span><span class="data">${data.slice(0, 120)}</span></li>`;
-  }).join("");
-
-  drawChart(moneySeries());
-}
-
-// --- chart (single series: no legend, title names it) -----------------------
-const canvas = $("chart");
-const ctx = canvas.getContext("2d");
-let chartGeom = null;
-
-function drawChart(pts) {
-  const css = getComputedStyle(document.documentElement);
-  const color = (name) => css.getPropertyValue(name).trim();
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  canvas.width = w * dpr; canvas.height = h * dpr;
-  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  ctx.clearRect(0, 0, w, h);
-  if (pts.length < 2) { chartGeom = null; return; }
-
-  const pad = { l: 56, r: 10, t: 8, b: 22 };
-  const t0 = run.t0 ?? pts[0][0];
-  const x0 = pts[0][0], x1 = pts[pts.length - 1][0];
-  let y1 = 0;
-  for (const p of pts) if (p[1] > y1) y1 = p[1];
-  y1 = y1 || 1;
-  const sx = (t) => pad.l + ((t - x0) / Math.max(1, x1 - x0)) * (w - pad.l - pad.r);
-  const sy = (v) => h - pad.b - (v / y1) * (h - pad.t - pad.b);
-  chartGeom = { pts, sx, sy, t0, pad, w, h };
-
-  ctx.font = "11px system-ui, sans-serif";
-  // recessive grid: 4 horizontal hairlines + labels in muted ink
-  for (let i = 0; i <= 4; i++) {
-    const v = (y1 / 4) * i, y = sy(v);
-    ctx.strokeStyle = i === 0 ? color("--baseline") : color("--grid");
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(w - pad.r, y); ctx.stroke();
-    ctx.fillStyle = color("--muted");
-    ctx.textAlign = "right"; ctx.textBaseline = "middle";
-    ctx.fillText(fmtMoney(v), pad.l - 6, y);
-  }
-  // x labels: start / mid / end elapsed
-  ctx.textBaseline = "top"; ctx.textAlign = "center";
-  for (const f of [0, 0.5, 1]) {
-    const t = x0 + (x1 - x0) * f;
-    ctx.fillText(fmtTime(t - t0), sx(t), h - pad.b + 4);
-  }
-  // the line: 2px, series-1
-  ctx.strokeStyle = color("--series-1");
-  ctx.lineWidth = 2;
-  ctx.lineJoin = "round";
-  ctx.beginPath();
-  pts.forEach((p, i) => (i === 0 ? ctx.moveTo(sx(p[0]), sy(p[1])) : ctx.lineTo(sx(p[0]), sy(p[1]))));
-  ctx.stroke();
-}
-
-// crosshair + tooltip
-canvas.addEventListener("mousemove", (ev) => {
-  if (!chartGeom) return;
-  const rect = canvas.getBoundingClientRect();
-  const mx = ev.clientX - rect.left;
-  let best = null, bestD = Infinity;
-  for (const p of chartGeom.pts) {
-    const d = Math.abs(chartGeom.sx(p[0]) - mx);
-    if (d < bestD) { bestD = d; best = p; }
-  }
-  if (!best) return;
-  drawChart(chartGeom.pts);
-  const css = getComputedStyle(document.documentElement);
-  ctx.strokeStyle = css.getPropertyValue("--baseline").trim();
-  ctx.setLineDash([3, 3]);
-  ctx.beginPath();
-  ctx.moveTo(chartGeom.sx(best[0]), chartGeom.pad.t);
-  ctx.lineTo(chartGeom.sx(best[0]), chartGeom.h - chartGeom.pad.b);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = css.getPropertyValue("--series-1").trim();
-  ctx.beginPath();
-  ctx.arc(chartGeom.sx(best[0]), chartGeom.sy(best[1]), 4, 0, Math.PI * 2);
-  ctx.fill();
-  const tip = $("tooltip");
-  tip.style.display = "block";
-  tip.textContent = `${fmtTime(best[0] - chartGeom.t0)} — ${fmtMoney(best[1])}`;
-  tip.style.left = Math.min(chartGeom.w - 140, chartGeom.sx(best[0]) + 10) + "px";
-  tip.style.top = Math.max(0, chartGeom.sy(best[1]) - 30) + "px";
-});
-canvas.addEventListener("mouseleave", () => {
-  $("tooltip").style.display = "none";
-  if (chartGeom) drawChart(chartGeom.pts);
-});
-
-// --- run selection & replay --------------------------------------------------
-function refreshPicker() {
-  const pick = $("runpick");
-  const options = [
-    ...liveRuns.map((r) => `<option value="live:${r.id}">● live — ${r.hello.src}/${r.hello.script} (${r.id})</option>`),
-    ...storedRuns.map((f) => `<option value="file:${f.file}">${f.file}</option>`),
-  ];
-  const current = pick.value;
-  pick.innerHTML = options.join("");
-  if ([...pick.options].some((o) => o.value === current)) pick.value = current;
-}
-
-async function loadStored(file) {
-  const res = await fetch("/runs/" + encodeURIComponent(file));
-  const text = await res.text();
-  run.records = text.split("\n").filter(Boolean).map((l) => JSON.parse(l));
-  run.id = file;
-  run.src = run.records[0] ? run.records[0].src : null;
-  run.live = false;
-  run.t0 = run.records.length ? run.records[0].t : null;
-  const maxT = run.records.length ? run.records[run.records.length - 1].t : 0;
-  const scrub = $("scrub");
-  $("scrubrow").style.display = "flex";
-  scrub.max = String(maxT);
-  scrub.value = scrub.max;
-  cutoff = Infinity;
-  $("status").textContent = `replay — ${run.records.length} records`;
-  render();
-}
-
-function attachLive(summary) {
-  run.id = summary.id;
-  run.src = summary.hello ? summary.hello.src : null;
-  run.live = true;
-  run.records = [...(summary.state || []), ...(summary.tail || [])].sort((a, b) => a.seq - b.seq);
-  // dedupe by seq (state snapshot overlaps tail)
-  const seen = new Set();
-  run.records = run.records.filter((r) => (seen.has(r.seq) ? false : (seen.add(r.seq), true)));
-  run.t0 = run.records.length ? run.records[0].t : null;
-  cutoff = Infinity;
-  $("scrubrow").style.display = "none";
-  render();
-}
-
-$("runpick").addEventListener("change", () => {
-  const [kind, ...idParts] = $("runpick").value.split(":");
-  const id = idParts.join(":");
-  if (kind === "live") {
-    const summary = liveRuns.find((r) => r.id === id);
-    if (summary) attachLive(summary);
-  } else {
-    loadStored(id);
-  }
-});
-
-$("scrub").addEventListener("input", () => {
-  cutoff = Number($("scrub").value);
-  $("scrubt").textContent = fmtTime(cutoff - (run.t0 ?? 0));
-  render();
-});
-
-// --- live socket -------------------------------------------------------------
-let renderQueued = false;
-function queueRender() {
-  if (renderQueued) return;
-  renderQueued = true;
-  requestAnimationFrame(() => { renderQueued = false; render(); });
-}
-
-function connect() {
-  const ws = new WebSocket(`ws://${location.host}/live`);
-  ws.onopen = () => { $("status").innerHTML = '<span class="live">connected</span>'; };
-  ws.onclose = () => {
-    $("status").textContent = "disconnected — retrying…";
-    setTimeout(connect, 2000);
-  };
-  ws.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data);
-    if (msg.type === "snapshot") {
-      liveRuns = msg.runs || [];
-      storedRuns = msg.stored || [];
-      refreshPicker();
-      if (liveRuns.length > 0) { $("runpick").value = "live:" + liveRuns[0].id; attachLive(liveRuns[0]); }
-      else if (storedRuns.length > 0) { $("runpick").value = "file:" + storedRuns[0].file; loadStored(storedRuns[0].file); }
-    } else if (msg.type === "run-started") {
-      liveRuns.push({ ...msg.run, state: [], tail: [] });
-      refreshPicker();
-      if (liveRuns.length === 1) { $("runpick").value = "live:" + msg.run.id; attachLive(liveRuns[0]); }
-    } else if (msg.type === "run-ended") {
-      liveRuns = liveRuns.filter((r) => r.id !== msg.run.id);
-      if (msg.stored) storedRuns = msg.stored;
-      if (run.id === msg.run.id) { run.live = false; $("status").textContent = "run ended"; }
-      refreshPicker();
-    } else if (msg.type === "sim-status") {
-      $("simrun").disabled = msg.busy;
-    } else if (msg.type === "sim-finished") {
-      $("simrun").disabled = false;
-      if (msg.stored) { storedRuns = msg.stored; refreshPicker(); }
-      $("status").textContent = "sim finished (exit " + msg.code + ")";
-    } else if (msg.type === "records" && run.live && msg.run === run.id) {
-      run.records.push(...msg.records);
-      if (run.t0 === null && msg.records.length) run.t0 = msg.records[0].t;
-      queueRender();
-    }
-  };
-}
-$("simrun").addEventListener("click", async () => {
-  $("simrun").disabled = true;
-  const res = await fetch("/sim", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      goals: $("simgoal").value.trim().split(/\s+/).filter(Boolean),
-      seeds: $("simseeds").value.trim(),
-      horizon: $("simhorizon").value.trim(),
-      label: "dashboard",
-    }),
-  });
-  const body = await res.json();
-  if (!res.ok) { $("simrun").disabled = false; $("status").textContent = "sim error: " + body.error; }
-  else $("status").textContent = "sim running…";
-});
-
-connect();
-window.addEventListener("resize", queueRender);
-</script>
+<nav id="tabs"></nav>
+<div id="scrubrow">
+  <span>replay</span>
+  <input type="range" id="scrub" min="0" max="1000" value="1000" />
+  <span id="scrubt"></span>
+</div>
+<main id="view"></main>
+<script type="module" src="/app.js"></script>
 </body>
 </html>

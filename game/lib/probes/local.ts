@@ -1,3 +1,5 @@
+import type { Server } from "@ns";
+import type { FleetRollup } from "../../../shared/telemetry/topics/hacking.ts";
 import { emit, type LocalProbe, type ProbeContext } from "./index.ts";
 
 /** Zero-cost probes: everything derivable from the sweep snapshot
@@ -9,11 +11,44 @@ import { emit, type LocalProbe, type ProbeContext } from "./index.ts";
  * Anything that can be computed from state we already paid for should be, and
  * the Career / Fleet / joined-factions panels are never empty as a result. */
 
+/** Fleet aggregates from the sweep snapshot. Exported so the dodged
+ * `hacking.cloud` probe can republish a complete FleetRollup rather than a
+ * fragment. */
+export function fleetFrom(servers: Record<string, Server>): FleetRollup {
+  let rootedHosts = 0;
+  let totalHosts = 0;
+  let maxRam = 0;
+  let usedRam = 0;
+  let purchasedCount = 0;
+  let purchasedRam = 0;
+  for (const server of Object.values(servers)) {
+    totalHosts++;
+    if (!server.hasAdminRights) continue;
+    rootedHosts++;
+    maxRam += server.maxRam;
+    usedRam += server.ramUsed;
+    if (server.purchasedByPlayer && server.hostname !== "home") {
+      purchasedCount++;
+      purchasedRam += server.maxRam;
+    }
+  }
+  const home = servers["home"];
+  return {
+    rootedHosts,
+    totalHosts,
+    maxRam,
+    usedRam,
+    purchased: { count: purchasedCount, totalRam: purchasedRam },
+    home: { maxRam: home?.maxRam ?? 0, usedRam: home?.ramUsed ?? 0, cores: home?.cpuCores ?? 1 },
+  };
+}
+
 const careerProbe: LocalProbe = {
   id: "career.local",
   kind: "local",
   feature: "career",
   everyMs: 5_000,
+  merge: true,
   run({ player }: ProbeContext) {
     return [
       emit("career", {
@@ -36,6 +71,7 @@ const factionsProbe: LocalProbe = {
   kind: "local",
   feature: "factions",
   everyMs: 5_000,
+  merge: true,
   run({ player }: ProbeContext) {
     // Player.factions is free and needs no singularity access, so the tab has
     // something real even without SF4.
@@ -48,39 +84,9 @@ const fleetProbe: LocalProbe = {
   kind: "local",
   feature: "hacking",
   everyMs: 5_000,
+  merge: true,
   run({ servers }: ProbeContext) {
-    let rootedHosts = 0;
-    let totalHosts = 0;
-    let maxRam = 0;
-    let usedRam = 0;
-    let purchasedCount = 0;
-    let purchasedRam = 0;
-    for (const server of Object.values(servers)) {
-      totalHosts++;
-      if (!server.hasAdminRights) continue;
-      rootedHosts++;
-      maxRam += server.maxRam;
-      usedRam += server.ramUsed;
-      if (server.purchasedByPlayer && server.hostname !== "home") {
-        purchasedCount++;
-        purchasedRam += server.maxRam;
-      }
-    }
-    const home = servers["home"];
-    return [
-      emit("fleet", {
-        rootedHosts,
-        totalHosts,
-        maxRam,
-        usedRam,
-        purchased: { count: purchasedCount, totalRam: purchasedRam },
-        home: {
-          maxRam: home?.maxRam ?? 0,
-          usedRam: home?.ramUsed ?? 0,
-          cores: home?.cpuCores ?? 1,
-        },
-      }),
-    ];
+    return [emit("fleet", fleetFrom(servers))];
   },
 };
 

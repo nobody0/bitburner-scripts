@@ -17,6 +17,7 @@ import {
   resyncHeap,
   WORKER_SCRIPT,
 } from "./lib/dispatch-driver.ts";
+import { initProbeRunner, runProbes, type ProbeRunner } from "./lib/probe-runner.ts";
 import { collectServers } from "./lib/scan.ts";
 import { initTelemetry, type Telemetry } from "./lib/telemetry.ts";
 import { watchNs, type WatchedNS } from "./lib/watched-ns.ts";
@@ -92,6 +93,12 @@ async function runController(
   let nextTick = Date.now();
   let lastRollup = 0;
   let pumpMaxMs = 0;
+
+  // Feature probes are telemetry-only: perf builds drop the assignment, and
+  // every use below sits in a TELEMETRY branch, so the whole probe table
+  // tree-shakes out of the bundle.
+  let probes: ProbeRunner | undefined;
+  TELEMETRY: if (__TELEMETRY__) probes = initProbeRunner();
 
   for (let tick = 0; ; tick++) {
     // Yield to a newer controller (manual restart, double autoexec, handoff).
@@ -185,6 +192,13 @@ async function runController(
 
       const drifted = resyncHeap(driver, servers);
       TELEMETRY: if (__TELEMETRY__ && drifted.length > 0) tel!.event("heap.resync", { hosts: drifted });
+
+      // 4) Feature probes, last in the sweep: they are pure observation, so
+      //    they yield to rooting and deployment for the dodge mutex. The
+      //    runner prices itself against whatever home RAM the heap left free.
+      TELEMETRY: if (__TELEMETRY__) {
+        await runProbes(ns, probes!, tel!, { player, servers });
+      }
     }
 
     // Dispatcher pass: absorb worker completions, plan, launch.
