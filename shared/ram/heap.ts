@@ -1,23 +1,32 @@
-/** Fleet RAM allocator — the legacy heap design (bitburner-legacy/lib/heap.js)
- * with its known defects fixed. Pure data structure: the sim and the game
- * driver each own an instance; all mutation flows through #update (O(1)
- * rebucket, single choke point).
+/** Fleet RAM allocator — the slab-heap design from an earlier rewrite
+ * (`nobody0/bitburner`, no longer checked out; see README's citation note) with
+ * its known defects fixed. The predecessor scripts now on disk
+ * (nobody01/bitburnerscript@2023) have no heap at all: their `cluster.ts`
+ * re-reads ns.getServerUsedRam every pass and reconciles by killing non-HGW
+ * workers, which is why this file cites the rewrite rather than them.
  *
- * Legacy keepers: 21 power-of-two slabs bucketed by clz32 (no Math.log),
+ * Pure data structure: the sim and the game driver each own an instance; all
+ * mutation flows through #update (O(1) rebucket, single choke point).
+ *
+ * Inherited keepers: 21 power-of-two slabs bucketed by clz32 (no Math.log),
  * home pinned last as a fallback, three policies (contiguous best-fit for
  * hack, home-first for grow's core bonus, ascending-slab spread for weaken /
  * prep so fragments get eaten first), two-phase-commit spread.
  *
- * Legacy fixes: allocations return Reservation handles with idempotent
- * release() (rollback on exec failure — their leak); failures are typed
- * values, never silent; the home reserve lives HERE, once, as explicit
+ * Fixes over the rewrite: allocations return Reservation handles with
+ * idempotent release() (rollback on exec failure — its leak); failures are
+ * typed values, never silent; the home reserve lives HERE, once, as explicit
  * reserved GB (not fake ramUsed); batch-atomic multi-request allocation
  * (all ops of an HWGW batch or none). */
 
-/** The single home-reserve constant (legacy hardcoded it in three places).
- * Covers the transient dodge stub plus handoff overlap; the controller's own
- * RAM is already counted in the observed usedRam. Sim passes 0 — nothing
- * else runs on its home. */
+/** The single home-reserve BASE constant (the rewrite hardcoded its equivalent
+ * in three places). Covers the transient dodge stub plus handoff overlap; the
+ * controller's own RAM is already counted in the observed usedRam. Sim passes
+ * 0 — nothing else runs on its home.
+ *
+ * This is a floor, not the whole reserve: shared/ram/reserve.ts raises it by
+ * the largest dodge step the enabled features declare, so a feature whose probe
+ * needs 8 GB is not permanently starved by the dispatcher. */
 export const HOME_RESERVE_GB = 4.5;
 
 export interface HeapHost {
@@ -114,6 +123,20 @@ export class Heap {
     return free;
   }
 
+  /** Free RAM on one host, from the live ledger rather than a stale scan.
+   *
+   * `includeReserved` counts the host's reserve as available. That is not a
+   * loophole: home's reserve exists precisely so a dodge stub can launch, so
+   * the dodge placement asks with it included while the dispatcher — which
+   * must never touch it — asks without. Returns 0 for an unknown host, which
+   * reads as "cannot place here" at every call site. */
+  freeOn(hostname: string, includeReserved = false): number {
+    const host = this.#hosts.get(hostname);
+    if (!host) return 0;
+    const free = host.maxRam - host.used - (includeReserved ? 0 : host.reserved);
+    return Math.max(0, free);
+  }
+
   /** Threads of `blockSize` that a spread allocation could place right now.
    * Callers size divisible work (weaken, prep grow) against this instead of
    * failing and retrying. */
@@ -139,6 +162,29 @@ export class Heap {
     const drift = observedUsed - host.used;
     if (drift !== 0) this.#update(host, observedUsed);
     return drift;
+  }
+
+  /** Reserve a block on a NAMED host, for a consumer that has already chosen
+   * where it is going — currently only dodge placement
+   * (shared/ram/placement.ts picks the host by policy, then this makes the
+   * choice visible to the dispatcher).
+   *
+   * Without this a dodge stub would occupy RAM the heap still believed was
+   * free, and the dispatcher would keep allocating it and keep getting pid 0
+   * back from `ns.exec` — the two allocators silently fighting over the same
+   * gigabytes. Taking the lease here means an HWGW batch simply plans around
+   * the stub, which is the whole reason the heap exists.
+   *
+   * `includeReserved` lets a caller draw on the host's reserve. Home's reserve
+   * exists precisely so a stub can launch, so the dodge is entitled to it —
+   * and once the stub is running, that RAM genuinely IS used, which is what
+   * the next `resync` will independently observe. */
+  reserveOn(hostname: string, gb: number, includeReserved = false): Reservation | undefined {
+    const host = this.#hosts.get(hostname);
+    if (!host) return undefined;
+    const free = host.maxRam - host.used - (includeReserved ? 0 : host.reserved);
+    if (free < gb) return undefined;
+    return this.#commit([{ hostname, threads: 1, cores: host.cores }], gb);
   }
 
   /** Allocate one request. Never partially succeeds. */

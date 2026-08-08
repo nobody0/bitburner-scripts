@@ -24,4 +24,18 @@ export interface SleevesState {
   sleeves: SleeveDigest[];
   /** Cost of the next sleeve from The Covenant, if offered. */
   nextSleeveCost?: number;
+  /** Task menu, priced per sleeve by the probe. */
+  taskOptions?: {
+    type: "recovery" | "synchro" | "crime" | "class" | "gym" | "faction" | "company" | "bladeburner";
+    detail?: string;
+    rates: Record<string, number>;
+    moneyPerSec: number;
+  }[];
+  plan?: SleevesPlan;
+}
+
+export interface SleevesPlan {
+  assignments: { index: number; task: string; why: string }[];
+  why: string;
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

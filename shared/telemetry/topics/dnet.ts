@@ -19,4 +19,14 @@ export interface DarknetState {
   stasisLinked: string[];
   instability: { authenticationDurationMultiplier: number; authenticationTimeoutChance: number };
   servers: DarknetServerDigest[];
+  plan?: DarknetPlan;
+}
+
+export interface DarknetPlan {
+  action: { type: string; why: string; hostname?: string };
+  ranked: { hostname: string; depth: number; unlocks: number; why: string }[];
+  why: string;
+  /** Charisma the traversal is blocked on, posted to the needs board. */
+  charismaNeeded?: number;
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

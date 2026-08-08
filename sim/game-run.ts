@@ -8,7 +8,12 @@ import type { StateKey, StateMap } from "../shared/telemetry/state-map.ts";
 import { Clock } from "./clock.ts";
 import type { ServerSpec } from "./core/effects.ts";
 import { Engine } from "./engine.ts";
+import { CrimeSystem } from "./features/crime.ts";
+import { FactionSystem } from "./features/factions.ts";
+import { HacknetSystem } from "./features/hacknet.ts";
+import { satisfiesAll, type SatisfyContext } from "./features/requirements.ts";
 import { DEFAULT_NETWORK } from "./network.ts";
+import { makeSingularity } from "./ns/singularity.ts";
 import { launch, makeSimNs, type ScriptMain, type SimNsHost } from "./ns/api.ts";
 import { ProcessTable } from "./ns/process.ts";
 import { installVirtualTime } from "./realm/timers.ts";
@@ -132,11 +137,6 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
 
   const clock = new Clock();
   const virtualTime = installVirtualTime(clock);
-  // The game's second timebase. No subsystem is wired yet (only `hacking`
-  // exists), but the cycle machinery runs so that anything measured in game
-  // cycles is already on the right clock when it lands.
-  const engine = new Engine(clock);
-  engine.start();
 
   const ctx = initialContext();
   let recordCount = 0;
@@ -149,7 +149,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     homeCores: options.homeCores ?? save?.homeCores ?? 1,
     startingMoney: goal.setup?.startingMoney ?? options.startingMoney ?? save?.startingMoney ?? 1_000,
     network: options.network ?? DEFAULT_NETWORK,
-    ...(save ? { liveServers: save.servers, person: save.person } : {}),
+    ...(save ? { liveServers: save.servers, person: save.person, playerState: save.playerState } : {}),
     runId: options.runId ?? `${options.label ?? "game"}-seed${seed}`,
     verbose: options.verbose ?? false,
     ...(save || options.gates ? { gates: { ...save?.gates, ...options.gates } } : {}),
@@ -161,6 +161,62 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   });
 
   setUnmodeledReporter((report) => world.emit({ kind: "event", name: "sim.unmodeled", data: report }));
+
+  // The game's SECOND timebase, constructed AFTER the world so each feature
+  // slice can hand it a subsystem that closes over real state. Order matters:
+  // a subsystem cannot be wired to a world that does not exist yet, and
+  // retrofitting a second timebase under models written against the first
+  // would mean redoing all of them.
+  const factions = new FactionSystem(world, world.player, save?.factions);
+  const terminal = { host: "home" };
+  const hasTor = { value: false };
+  // Netburners' requirements are hacknet totals, so they have to be real
+  // rather than the zeros a stub would report.
+  const hacknetTotals = (): { ram: number; cores: number; levels: number } =>
+    hacknet.nodes.reduce(
+      (sum, node) => ({ ram: sum.ram + node.ram, cores: sum.cores + node.cores, levels: sum.levels + node.level }),
+      { ram: 0, cores: 0, levels: 0 },
+    );
+
+  const satisfyContext = (): SatisfyContext => ({
+    player: world.player,
+    person: world.person,
+    servers: world.servers,
+    factionRep: (name) => factions.get(name)?.rep ?? 0,
+    companyRep: () => 0,
+    bitNode: bitnode,
+    // Not modelled yet; these feed requirements only, and reporting 0 is the
+    // truth for a run with no hacknet rather than a fabricated value.
+    hacknet: {
+      ram: hacknetTotals().ram,
+      cores: hacknetTotals().cores,
+      levels: hacknetTotals().levels,
+    },
+    bladeburnerRank: 0,
+    numInfiltrations: 0,
+    files: new Set<string>(),
+  });
+
+  const crimes = new CrimeSystem(world, world.player, world.crimeRng);
+  const hacknet = new HacknetSystem(world, world.player);
+
+  const engine: Engine = new Engine(clock, {
+    // One work slot, so exactly one of these can be active — each returns
+    // immediately unless it owns `currentWork`.
+    processWork: (cycles) => {
+      factions.processWork(cycles);
+      crimes.processWork(cycles);
+    },
+    checkFactionInvitations: () => factions.checkInvitations((reqs) => satisfiesAll(reqs, satisfyContext())),
+    // The one counter that compensates for a fat catch-up tick, and the one
+    // that SKIPS the faction currently being worked.
+    processPassiveFactionRepGain: (cycles) =>
+      factions.passiveGain(cycles, world.player.currentWork?.kind === "faction" ? world.player.currentWork.subject : undefined),
+    // LINEAR in cycles, with no bonus-time cap — the one subsystem that needs
+    // no CycleBuffer.
+    processHacknetEarnings: (cycles) => hacknet.processEarnings(cycles),
+  });
+  engine.start();
 
   // A save carries its own topology. Otherwise: a star, which is what the six
   // servers in DEFAULT_NETWORK really are — all one hop from home.
@@ -187,6 +243,28 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     reset: buildResetInfo(bitnode, sourceFileLevel),
     output: [],
     crashes: [],
+    engine,
+    hacknet,
+    singularity: makeSingularity({
+      world,
+      player: world.player,
+      factions,
+      clock,
+      bitNode: bitnode,
+      terminal,
+      crimes,
+      satisfyContext,
+      // The real call resets the counter to force an immediate re-check
+      // rather than waiting out the 2 s cycle.
+      pokeInvitationCounter: () => void (engine.counters["checkFactionInvitations"] = 0),
+      homeFiles: () => host.files.get("home")!,
+      hasTor: () => hasTor.value,
+      setTor: (value) => void (hasTor.value = value),
+    }),
+    // An augmentation install kills every process, so game/'s module-level
+    // dispatcher ledger and the realm rendezvous slots describe a world that
+    // no longer exists. game/ stays unaware it is simulated, so the cleanup
+    // lives here. Wired below, once the modules are imported.
   };
 
   // Imported AFTER the flags are on globalThis, and dynamically so module
@@ -205,6 +283,16 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // the first one's heap and dispatcher stats. Clearing it here is what makes
   // this call equivalent to a fresh realm.
   resetHackingState();
+
+  // A prestige is the same problem as a second run in one process: module
+  // state outlives the world it describes. The realm slots go too — every
+  // worker was killed, so every op id in the registry is unreportable.
+  host.onPrestige = (): void => {
+    resetHackingState();
+    for (const slot of REALM_SLOTS) {
+      if (slot !== "controllerEpoch") delete (globalThis as Record<string, unknown>)[slot];
+    }
+  };
 
   // The sink is the real one; only the Telemetry underneath it is swapped for
   // the world's record stream instead of a WebSocket.

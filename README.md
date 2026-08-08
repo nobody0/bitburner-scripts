@@ -1,9 +1,9 @@
 # bitburner-scripts
 
-A clean-sheet Bitburner automation codebase. The old
-[`nobody0/bitburner`](https://github.com/nobody0/bitburner) repository is
-inspiration only; this repository starts with new history and a deliberately
-small architecture.
+A clean-sheet Bitburner automation codebase. The predecessor scripts
+([`nobody01/bitburnerscript`](https://gitlab.com/nobody01/bitburnerscript),
+branch `2023`) are inspiration only; this repository starts with new history and
+a deliberately small architecture.
 
 Four parts (see [spec/repo-layout.md](spec/repo-layout.md)):
 
@@ -32,15 +32,31 @@ problem is what they add up to. See [spec/features.md](spec/features.md).
 
 - Game source: `/Users/bob/git/bitburner-src`, pinned to the release documented
   in [spec/game-source.md](spec/game-source.md).
-- Legacy scripts: `/Users/bob/git/bitburner-legacy`, tracking the repository's
-  newest branch, `patch-1`, at commit `29d8bd2`; cloned from
-  [`nobody0/bitburner`](https://github.com/nobody0/bitburner). That branch is one
-  test-cleanup commit ahead of `main` and contains no additional feature work.
-  Its RAM dodger design is ported (with credit) into `game/lib/dodge.ts` — see
-  [spec/dodging.md](spec/dodging.md).
+- Predecessor scripts: `/Users/bob/git/bitburner-legacy`, tracking
+  [`nobody01/bitburnerscript`](https://gitlab.com/nobody01/bitburnerscript)
+  branch `2023` at commit `43e8585` (54 commits). This is the real predecessor:
+  it has the faction/augmentation planner (`src/_lib/factions.ts`,
+  `augmentations.ts`), four batchers, a batch optimizer, a predictive target
+  simulation, and the full reset/BitNode loop. Its `stubCall` RAM-dodger design
+  (`src/_lib/stub-call.ts`) is ported with credit into `game/lib/dodge.ts` —
+  see [spec/dodging.md](spec/dodging.md).
 
 Both checkouts are reference material. New scripts and history belong only in
 this repository.
+
+### A note on citations
+
+Comments across this repository credit two different predecessors, and the
+distinction matters because only one is still on disk:
+
+- **the reference scripts** — `nobody01/bitburnerscript@2023`, the checkout
+  above. Cited by file (`src/_lib/optimizer.ts`), and verifiable.
+- **an earlier rewrite** — `nobody0/bitburner`, which this project briefly
+  treated as the predecessor and which is **no longer checked out**. It was an
+  abandoned rewrite carrying none of the faction, augmentation or progression
+  logic. Several designs here (the RAM heap's slab allocator, the `$/GB/sec`
+  target score, the single-binary worker) came from it, and are attributed to
+  it by name rather than repointed at a file that does not contain them.
 
 ## Development loop
 

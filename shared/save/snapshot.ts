@@ -48,6 +48,12 @@ export interface SavePlayer {
   augmentations: { name: string; level: number }[];
   queuedAugmentations: { name: string; level: number }[];
   factions: string[];
+  /** Pending invitations. Distinct from `factions` and NOT derivable from it:
+   *  an invitation is revoked by joining an enemy, so a planner that treated
+   *  "not joined" as "invitable" would commit to a faction set the save can no
+   *  longer reach. */
+  factionInvitations: string[];
+  numPeopleKilled: number;
   jobs: Record<string, string>;
   hasWseAccount: boolean;
   hasTixApiAccess: boolean;

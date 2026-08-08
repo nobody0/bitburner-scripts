@@ -71,20 +71,55 @@ function lockedPanel(id: TabId): string | null {
   );
 }
 
+/** The tab the DOM currently holds, so scroll is only restored across a
+ * re-render of the SAME tab. Switching tabs should start at the top. */
+let renderedTab: string | undefined;
+
+/** Re-render the active tab, preserving scroll position.
+ *
+ * Panels are fully re-rendered from an HTML string on every frame, which is
+ * what keeps each tab readable as a description of its layout — but replacing
+ * `innerHTML` destroys every scroll offset in the subtree. On a live run that
+ * fires every flush, so the page yanks back to the top while you are reading
+ * it, and any horizontally-scrolled card snaps back to the left.
+ *
+ * Capturing and restoring is enough because the DOM shape is stable between
+ * frames: the same tab renders the same cards in the same order. */
 function renderView(): void {
   const el = $("view");
   const tab = TABS[active];
   if (!run.id) {
     el.innerHTML = `<section class="card">${note("no run selected")}</section>`;
+    renderedTab = undefined;
     return;
   }
   const locked = lockedPanel(active);
   if (locked) {
     el.innerHTML = locked;
+    renderedTab = undefined;
     return;
   }
+
+  const sameTab = renderedTab === active;
+  const pageScroll = window.scrollY;
+  const cardScroll = sameTab
+    ? [...el.querySelectorAll<HTMLElement>("section.card")].map((card) => [card.scrollLeft, card.scrollTop] as const)
+    : [];
+
   el.innerHTML = tab.render(state);
   tab.mount?.(state, el);
+  renderedTab = active;
+
+  if (!sameTab) return;
+  const cards = el.querySelectorAll<HTMLElement>("section.card");
+  cardScroll.forEach(([left, top], index) => {
+    const card = cards[index];
+    if (!card) return;
+    card.scrollLeft = left;
+    card.scrollTop = top;
+  });
+  // Restored synchronously, before paint, so there is no visible jump.
+  window.scrollTo(window.scrollX, pageScroll);
 }
 
 function render(): void {

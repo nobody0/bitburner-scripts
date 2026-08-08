@@ -1,6 +1,8 @@
 import { execSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { FEATURE_IDS, type FeatureId } from "../shared/features/ids.ts";
+import { only, type FeatureOverrides } from "../shared/features/profile.ts";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import type { Goal } from "../shared/goals/goal.ts";
 import { parseGoals } from "../shared/goals/presets.ts";
@@ -33,6 +35,42 @@ export interface RunResult {
 /** Drive one simulated run: planner replans whenever an action settles; the
  * goal is evaluated by the shared goal reducer, while the UI independently
  * projects the same records for display. Virtual time to goal is the metric. */
+/** Parse `a,b,c` into feature ids, rejecting unknown names rather than
+ * silently ignoring them — a typo'd `--only hackign` that quietly ran every
+ * feature would invalidate the measurement without saying so. */
+function parseFeatureList(value: string): FeatureId[] {
+  const names = value
+    .split(",")
+    .map((name) => name.trim())
+    .filter((name) => name.length > 0);
+  const unknown = names.filter((name) => !FEATURE_IDS.includes(name as FeatureId));
+  if (unknown.length > 0) {
+    throw new Error(`unknown feature(s): ${unknown.join(", ")} (have: ${FEATURE_IDS.join(", ")})`);
+  }
+  return names as FeatureId[];
+}
+
+/** Combine a profile's isolation with the command line. */
+function resolveFeatures(
+  fromProfile: FeatureOverrides | undefined,
+  onlyList: FeatureId[] | undefined,
+  addList: FeatureId[] | undefined,
+): FeatureOverrides | undefined {
+  if (onlyList) {
+    // Replaces outright, profile included.
+    const base = only(...onlyList);
+    for (const id of addList ?? []) delete base[id];
+    return base;
+  }
+  if (!addList) return fromProfile;
+  // Widen: clear the "off" the profile set for each named feature. Not forced
+  // "on" — a feature the save cannot really play must stay locked rather than
+  // being pretended into existence.
+  const merged: FeatureOverrides = { ...(fromProfile ?? {}) };
+  for (const id of addList) delete merged[id];
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 export function runSim(options: RunOptions): RunResult {
   const { goal, seed, horizonMs } = options;
   const planner = (options.planner ?? defaultPlanner) as Planner<unknown>;
@@ -73,7 +111,7 @@ export function runSim(options: RunOptions): RunResult {
   if (options.farm) {
     // HWGW engine: completions are coalesced into the next pass, and the
     // dispatcher is told about actions the world refused so reservations
-    // never leak (the legacy dispatcher's bug).
+    // never leak (the earlier rewrite's dispatcher bug; see README).
     let farmMemory = initFarm();
     let pending: CompletionEvent[] = [];
     replan = (event?: CompletionEvent): void => {
@@ -184,7 +222,10 @@ if (import.meta.main) {
   let horizonMs: number | undefined;
   let label: string | undefined;
   let outDir = "runs";
-  let bitnode = 1;
+  // `undefined`, not 1: the profile's `bitnode` has to be able to win, and a
+  // default of 1 makes `bitnode ?? profile?.bitnode` silently always 1 — which
+  // gates every faction feature off while the run looks healthy.
+  let bitnode: number | undefined;
   let homeRam: number | undefined;
   let startingMoney: number | undefined;
   let verbose = false;
@@ -193,6 +234,8 @@ if (import.meta.main) {
   let profileId: string | undefined;
   let saveId: string | undefined;
   let child = false;
+  let featureOnly: FeatureId[] | undefined;
+  let featureAdd: FeatureId[] | undefined;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;
@@ -210,6 +253,11 @@ if (import.meta.main) {
     else if (arg === "--farm") farm = true;
     else if (arg === "--baseline") farm = false;
     else if (arg === "--profile") profileId = next();
+    // Feature switches on the command line, so a profile's isolation can be
+    // narrowed or widened without editing sim/profiles.ts. `--only` replaces
+    // the set outright; `--features` adds to whatever the profile enabled.
+    else if (arg === "--only") featureOnly = parseFeatureList(next());
+    else if (arg === "--features") featureAdd = parseFeatureList(next());
     else if (arg === "--save") saveId = next();
     else if (arg === "--driver") {
       const value = next();
@@ -230,6 +278,11 @@ if (import.meta.main) {
   const horizon = horizonMs ?? (profile ? parseDuration(profile.horizon) : parseDuration("24h"));
   const save = saveId ?? profile?.save;
   const runLabel = label ?? profile?.id;
+  // `--only` replaces the profile's isolation; `--features` widens it by
+  // clearing the "off" for the named features.
+  const features = resolveFeatures(profile?.features, featureOnly, featureAdd);
+  const runBitnode = bitnode ?? profile?.bitnode ?? 1;
+  const runMoney = startingMoney ?? profile?.startingMoney;
 
   let gitRev = "unknown";
   try {
@@ -297,10 +350,10 @@ if (import.meta.main) {
         verbose,
         ...(profileId !== undefined ? { profile: profileId } : {}),
         ...(save !== undefined ? { saveId: save } : {}),
-        ...(seedData ? { save: seedData } : { bitnode }),
-        ...(profile?.features ? { features: profile.features } : {}),
+        ...(seedData ? { save: seedData } : { bitnode: runBitnode }),
+        ...(features ? { features } : {}),
         ...(homeRam !== undefined ? { homeRam } : profile?.homeRam !== undefined ? { homeRam: profile.homeRam } : {}),
-        ...(startingMoney !== undefined ? { startingMoney } : {}),
+        ...(runMoney !== undefined ? { startingMoney: runMoney } : {}),
         onRecord: (line) => void sink.write(line + "\n"),
       });
       result = outcome;

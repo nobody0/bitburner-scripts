@@ -11,8 +11,8 @@ measured in sim transfers directly.
 | Loop | Trigger | Budget | Measured |
 |---|---|---|---|
 | Dispatcher pass | every 200 ms tick (one spacer) | ≤10 ms | 0.01–0.03 ms |
-| Evaluator slice | ≥2 s, `clamp(ceil(N/10),1,8)` targets | ≤2 ms | 0.03 ms / 8 targets |
-| Decision gate | ≥5 s, or invalidation | ≤200 ms | ~0.6 ms / 100 targets |
+| Evaluator slice | ≥2 s, `clamp(ceil(N/10),1,8)` targets | ≤2 ms | 0.1–0.9 ms / 8 targets |
+| Decision gate | ≥5 s, or invalidation | ≤200 ms | 3–21 ms / 100 targets |
 | Sweep | 30 s, dodged | — | scan + root + deploy + heap resync |
 
 Enforced by `tests/heap.test.ts`, `sim/tests/targeting.test.ts` (bench),
@@ -24,11 +24,22 @@ At the prepped state (minSec, moneyMax M), for steal fraction s:
 `H = round(s/hackPercent)`, `G = growThreads(k, M, M(1−s), M)`,
 `W1 = ceil(0.002·H/weakenEffect)`, `W2 = ceil(0.004·G/weakenEffect)`.
 Income `E = c·s·M`; RAM-seconds `R = t_h·(1.7H + 1.75·3.2·G + 1.75·4·W)`.
-**Score = E/R in $/GB/sec** — the RAM-bound unit (legacy analyze-profit's
-insight, with exact Newton grow threads instead of its log approximation).
+**Score = E/R in $/GB/sec** — the RAM-bound unit. The insight came from an
+earlier rewrite's `analyze-profit.js` (`nobody0/bitburner`, no longer checked
+out; see README's citation note), with exact Newton grow threads here instead
+of its log approximation. The predecessor scripts on disk score by
+duration-weighted money per thread instead (`src/_lib/optimizer.ts:123`). The
+Q2 audit proved the two are not constant-factor conversions (hack is 1.70 GB,
+grow/weaken 1.75 GB), but they are monotonic in the same duration-weighted
+non-hack/hack ratio and therefore induce the same ordering.
 
-Search: 16-point grid uniform in −log(1−s) → 8 golden-section refines →
-integer snap. **Feasibility is part of the search**: `RamCaps.batchGb` bounds
+Search first derives a finite hack-thread ceiling from the 95% steal cap, the
+contiguous hack-block cap, and total batch RAM. Domains of at most **1,024**
+threads evaluate every integer candidate and return `exact: true`. Larger
+domains use a 16-point grid uniform in −log(1−s), 8 golden-section refines, and
+bounded integer neighborhoods around every promising point; those results are
+explicitly labelled `exact: false`. **Feasibility is part of the search**:
+`RamCaps.batchGb` bounds
 the batch, `hackBlockGb` bounds the hack op alone (hack must land as ONE call
 — splitting compounds the steal and desyncs the grow sizing). If no grid point
 fits, a bisection finds the largest feasible batch. Without this the solver
@@ -74,13 +85,15 @@ only hack demands contiguity.
 
 ## RAM engine (`shared/ram/heap.ts`)
 
-Legacy design — 21 clz32 slabs, home pinned last, three policies (contiguous
-best-fit for hack, home-first for grow's core bonus, ascending-slab spread for
-weaken/prep so fragments get eaten first), two-phase-commit spread, O(1)
-rebucket through one `#update` choke point — with its defects fixed:
+Inherited from an earlier rewrite (`nobody0/bitburner`, no longer checked out;
+the predecessor scripts on disk have no heap at all) — 21 clz32 slabs, home
+pinned last, three policies (contiguous best-fit for hack, home-first for
+grow's core bonus, ascending-slab spread for weaken/prep so fragments get eaten
+first), two-phase-commit spread, O(1) rebucket through one `#update` choke
+point — with its defects fixed:
 
 - reservations release per block and are **idempotent**; ops the driver could
-  not start are rolled back via `reportFailed` (legacy leaked them);
+  not start are rolled back via `reportFailed` (the rewrite leaked them);
 - allocation failure is a typed value `{wanted, grantable, freeTotal}`, counted
   in telemetry — never silent ratio starvation;
 - **one** home-reserve constant (`HOME_RESERVE_GB`, imported by `net.ts`);
@@ -133,6 +146,7 @@ money bands held during farming.
 ## Known gaps
 
 - Share/exp segment is declared but not yet dispatched (leftover RAM idles).
-- Port openers are still start.js's job; the sim network is 0-port only.
+- Port openers are acquired on demand for posted backdoor needs; general
+  infrastructure purchasing remains outside the target solver.
 - The game driver quotes purchases as unavailable (start.js owns them); the
   sim dispatcher buys servers and upgrades home so the A/B includes economy.

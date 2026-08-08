@@ -1,0 +1,154 @@
+import { describe, expect, test } from "bun:test";
+import { PRIORITY, type Claim } from "../shared/strategy/arbiter.ts";
+import { coordinate, emptyDigest, postNeeds } from "../shared/strategy/coordination.ts";
+import type { Need } from "../shared/strategy/needs.ts";
+
+const karmaNeed: Need = {
+  by: "factions",
+  kind: "karma",
+  target: -45,
+  have: 0,
+  weight: 12,
+  urgency: "blocking",
+  why: "Slum Snakes requires karma <= -9 and Tetrads -18",
+};
+
+const workClaim: Claim = {
+  by: "factions",
+  id: "work:CyberSec",
+  resource: "time",
+  amount: 1,
+  priority: PRIORITY["factions:work"],
+  mode: "spend",
+  why: "hacking contracts for CyberSec",
+};
+
+const crimeClaim: Claim = {
+  by: "career",
+  id: "crime:Mug",
+  resource: "time",
+  amount: 1,
+  priority: PRIORITY["career:blocking-need"],
+  mode: "spend",
+  why: "clearing a blocking karma need",
+};
+
+describe("the coordination pass", () => {
+  test("stays completely silent when nothing is posted", () => {
+    // The Phase-0 neutrality property: a hacking-only run must not gain a
+    // single telemetry record from this machinery existing.
+    const result = coordinate({ now: 0, money: 1e6, ramGb: 8, board: postNeeds([]), claims: [] });
+    expect(result.digest).toBeUndefined();
+    expect(result.arbitration.grants).toEqual([]);
+  });
+
+  test("a need alone is enough to report, even with no claims", () => {
+    const result = coordinate({ now: 0, money: 0, ramGb: 0, board: postNeeds([karmaNeed]), claims: [] });
+    expect(result.digest!.needs).toHaveLength(1);
+    expect(result.digest!.needs[0]).toMatchObject({
+      by: "factions",
+      kind: "karma",
+      target: -45,
+      progress: 0,
+      satisfied: false,
+      why: karmaNeed.why,
+    });
+  });
+
+  test("a blocking need lets career outbid factions for the single work slot", () => {
+    // The end-to-end point of the whole mechanism: factions asks for karma
+    // rather than for a crime, and career — which knows HOW — wins the slot.
+    const board = postNeeds([karmaNeed]);
+    const result = coordinate({ now: 1_000, money: 0, ramGb: 0, board, claims: [workClaim, crimeClaim] });
+    expect(result.arbitration.slot).toMatchObject({ by: "career", claimId: "crime:Mug" });
+    expect(result.digest!.arbitration.denied).toEqual([
+      expect.objectContaining({ by: "factions", id: "work:CyberSec", reason: "slot-held" }),
+    ]);
+  });
+
+  test("once the karma need is satisfied, factions takes the slot back", () => {
+    // career's claim is only high-priority WHILE something is blocked on it;
+    // with the need met it would bid `career:income` instead.
+    const satisfied = postNeeds([{ ...karmaNeed, have: -50 }]);
+    expect(satisfied.open).toEqual([]);
+    const idleCrime: Claim = { ...crimeClaim, priority: PRIORITY["career:income"] };
+    const result = coordinate({ now: 1_000, money: 0, ramGb: 0, board: satisfied, claims: [workClaim, idleCrime] });
+    expect(result.arbitration.slot).toMatchObject({ by: "factions" });
+  });
+
+  test("the digest reports slot hold time relative to `now`", () => {
+    const board = postNeeds([]);
+    const result = coordinate({
+      now: 5_000,
+      money: 0,
+      ramGb: 0,
+      board,
+      claims: [workClaim],
+      slot: { claimId: "work:CyberSec", by: "factions", priority: PRIORITY["factions:work"], since: 1_500 },
+    });
+    expect(result.digest!.arbitration.slot).toEqual({
+      by: "factions",
+      id: "work:CyberSec",
+      priority: PRIORITY["factions:work"],
+      heldMs: 3_500,
+    });
+  });
+
+  test("pre-emption is reported so a cancelled activity is never silent", () => {
+    const result = coordinate({
+      now: 5_000,
+      money: 0,
+      ramGb: 0,
+      board: postNeeds([karmaNeed]),
+      claims: [workClaim, crimeClaim],
+      slot: { claimId: "work:CyberSec", by: "factions", priority: PRIORITY["factions:work"], since: 1_000 },
+    });
+    // workForFaction silently cancels whatever was running, so losing the slot
+    // is a real loss of progress and has to be visible.
+    expect(result.digest!.arbitration.preempted).toEqual({ by: "factions", id: "work:CyberSec", heldMs: 4_000 });
+  });
+
+  test("money and the work slot are allocated in the same pass", () => {
+    const fund: Claim = {
+      by: "factions",
+      id: "aug-fund",
+      resource: "money",
+      amount: 5e6,
+      priority: PRIORITY["factions:aug-fund"],
+      mode: "reserve",
+      why: "Cranial Signal Processors G1",
+    };
+    const upgrade: Claim = {
+      by: "hacknet",
+      id: "level",
+      resource: "money",
+      amount: 4e6,
+      priority: PRIORITY["hacknet:upgrade"],
+      mode: "spend",
+      why: "node 0 level 40->50",
+    };
+    const result = coordinate({
+      now: 0,
+      money: 6e6,
+      ramGb: 0,
+      board: postNeeds([]),
+      claims: [fund, upgrade, workClaim],
+    });
+    expect(result.digest!.arbitration.grants).toEqual([
+      { by: "factions", id: "aug-fund", resource: "money", amount: 5e6, mode: "reserve", partial: false },
+      { by: "factions", id: "work:CyberSec", resource: "time", amount: 1, mode: "spend", partial: false },
+    ]);
+    expect(result.digest!.arbitration.remaining.money).toBe(1e6);
+  });
+
+  test("the empty digest clears rather than leaving a stale board behind", () => {
+    // merge() drops undefined fields, so `arbitration: undefined` would leave
+    // the last arbitration on screen forever — reading as "still blocked" when
+    // the truth is "nobody asked".
+    const empty = emptyDigest();
+    expect(empty.needs).toEqual([]);
+    expect(empty.arbitration.grants).toEqual([]);
+    expect(empty.arbitration.denied).toEqual([]);
+    expect(empty.arbitration.slot).toBeUndefined();
+  });
+});

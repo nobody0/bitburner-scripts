@@ -1,31 +1,102 @@
 import type { NS } from "@ns";
 import { FEATURE_IDS, type FeatureId } from "../../../shared/features/ids.ts";
 import type { Capabilities } from "../../../shared/features/unlock.ts";
+import type { ArbiterResult, Claim } from "../../../shared/strategy/arbiter.ts";
+import { emptyArbitration, grantedAmount, holdsSlot } from "../../../shared/strategy/arbiter.ts";
+import type { HostRam } from "../../../shared/ram/placement.ts";
+import type { Need, NeedBoard } from "../../../shared/strategy/needs.ts";
+import { emptyBoard } from "../../../shared/strategy/needs.ts";
 import type { GameState } from "../state.ts";
-import { hacking } from "./hacking.ts";
+import type { DodgeLease } from "../ram.ts";
+import { careerModule } from "./career.ts";
+import { factionsModule } from "./factions.ts";
+import { hacknetModule } from "./hacknet.ts";
+import {
+  bladeburnerModule,
+  corpModule,
+  dnetModule,
+  gangModule,
+  goModule,
+  progressionModule,
+  sideModule,
+  sleevesModule,
+  stanekModule,
+} from "./remaining.ts";
+import { stockModule } from "./stock.ts";
+import { hackingModule } from "./hacking.ts";
 
-/** Feature drivers: the write half of the feature axis.
+/** Feature modules: the write half of the feature axis.
  *
- * A probe reads one feature's state; a driver acts on it. One driver per entry
- * in shared/features/registry.ts, gated on the capabilities the gate batch
- * produces — which is why acquisition can never sit behind the telemetry flag.
- * A --perf build must make the same decisions as a telemetry build, and those
- * decisions start here.
+ * A probe reads one feature's state; a MODULE owns everything the controller
+ * needs to know about acting on it — the driver, what it wants from other
+ * features, what contended resources it is bidding for, and how to throw away
+ * everything it derived from a world that no longer exists.
  *
- * Twelve of the fourteen are declared but inert. That is deliberate: a
- * registered no-op makes the gating visible, gives the scheduler its real
- * shape, and lets tests/features.test.ts enforce a driver per feature exactly
- * as it enforces a probe, a topic and a tab. Filling one in is a local change
- * to one file, not a change to the loop. */
+ * The point of bundling the four is that the controller never names a feature.
+ * Before this existed, `onBitNodeReset` called `resetHackingState()` directly,
+ * so every new feature meant editing the loop; now the loop walks the registry.
+ * Filling in a feature is a local change to one file.
+ *
+ * All fourteen are implemented. `tests/features.test.ts` enforces a module per
+ * feature exactly as it enforces a probe, a topic and a tab, so a new feature
+ * cannot be half-registered. */
 
 export interface DriverContext {
   ns: NS;
   state: GameState;
   caps: Capabilities;
-  /** RAM a dodge closure can use right now, if this driver needs to dodge. */
+  /** Largest dodge budget any host could serve right now. This is the
+   *  whole-fleet figure; what this feature may actually spend is
+   *  `grants.ram`, which the arbiter has already cut down. */
   budgetGb: number;
+  /** Where a dodge may be placed, with each host's free RAM. Feature actions
+   * use featureDodge(), which validates their claim and leases this heap. */
+  dodgeHosts: readonly HostRam[];
+  /** Home RAM the dispatcher must leave free this pass, already accounting for
+   *  every unlocked feature's declared dodge step (shared/ram/reserve.ts). */
+  homeReserveGb: number;
   /** Controller tick counter, for drivers that want a phase offset. */
   tick: number;
+  /** What everyone wants, this tick. A driver satisfying another feature's
+   *  need reads it here (see shared/strategy/needs.ts). */
+  board: NeedBoard;
+  /** What this feature was actually granted. */
+  grants: FeatureGrants;
+  /** Atomically choose a host and reserve its RAM in the dispatcher's heap. */
+  acquireDodge(budgetGb: number): DodgeLease | undefined;
+}
+
+/** The arbiter's answer, pre-narrowed to one feature so a driver cannot
+ * accidentally read another's grant. */
+export interface FeatureGrants {
+  money: number;
+  ram: number;
+  /** True when this feature holds Player.currentWork this tick. A driver that
+   *  does not hold it must not start player work — the game would silently
+   *  cancel whatever is running. */
+  slot: boolean;
+  /** The full result, for a driver that needs to know WHY it was denied. */
+  result: ArbiterResult;
+}
+
+/** Context for the pure pre-tick passes. Deliberately narrower than
+ * DriverContext: neither pass may call ns, because both run for every due
+ * module before any of them acts. */
+export interface NeedContext {
+  state: GameState;
+  caps: Capabilities;
+  now: number;
+}
+
+export interface ClaimContext extends NeedContext {
+  budgetGb: number;
+  /** Runtime dynamic-RAM price supplied by the controller. The claim remains
+   * decision-only: it receives the priced observation, never an ns handle. */
+  ramPrice(methods: readonly string[]): number;
+  /** The board is complete before any claim is collected, so a feature can bid
+   *  harder BECAUSE something else is blocked on it — that is how `career`
+   *  outbids `factions` for the work slot when a karma need is blocking. */
+  board: NeedBoard;
 }
 
 export interface FeatureDriver {
@@ -39,45 +110,79 @@ export interface FeatureDriver {
   tick(ctx: DriverContext): void | Promise<void>;
 }
 
-/** Declared, not yet implemented. `problem` is the one-line contract from the
- * registry — the question this driver has to answer once it grows a body. */
-function inert(id: FeatureId, everyMs: number, requires?: FeatureId): FeatureDriver {
-  return { id, everyMs, ...(requires ? { requires } : {}), tick() {} };
+export interface FeatureModule {
+  driver: FeatureDriver;
+  /** Drop everything derived from a world that no longer exists. Called on a
+   *  BitNode reset for EVERY module, so a feature's cross-run state cannot be
+   *  forgotten by the controller failing to name it. */
+  reset?(): void;
+  /** PURE. Called for every due module BEFORE any tick(). */
+  claims?(ctx: ClaimContext): Claim[];
+  /** PURE. Outcomes this feature wants from others, this tick. */
+  needs?(ctx: NeedContext): Need[];
+  /** Largest single dodge step this feature needs to function, in GB. Declared
+   *  next to the driver so it cannot drift from the probe, and folded into the
+   *  home reserve by shared/ram/reserve.ts. */
+  peakStepGb?: number;
 }
 
-export const FEATURE_DRIVERS: readonly FeatureDriver[] = [
-  // TODO(progression): choose the BitNode destroy order and the
-  // augmentation/reset cadence that minimises wall-clock to a source-file set.
-  inert("progression", 60_000),
-  hacking,
-  // TODO(factions): reach a target augmentation set in the least wall-clock,
-  // trading faction work against donations against grafting.
-  inert("factions", 30_000, "factions"),
-  // TODO(career): reach the stat, karma and company-rep thresholds other
-  // features depend on, using crime as early income.
-  inert("career", 10_000),
-  // TODO(hacknet): schedule purchases and upgrades so cumulative production
-  // minus spend is maximised over the run horizon.
-  inert("hacknet", 10_000),
-  // TODO(stock): allocate capital across symbols from forecast and volatility.
-  inert("stock", 5_000, "stock"),
-  // TODO(gang): assign tasks, schedule ascensions and equipment.
-  inert("gang", 10_000, "gang"),
-  // TODO(corp): sequence divisions, offices, research and investment rounds.
-  inert("corp", 30_000, "corp"),
-  // TODO(bladeburner): pick the action sequence that climbs rank fastest.
-  inert("bladeburner", 5_000, "bladeburner"),
-  // TODO(sleeves): assign N sleeves across crime, work, training and sync.
-  inert("sleeves", 30_000, "sleeves"),
-  // TODO(go): maximise territory captured per game against each opponent.
-  inert("go", 10_000, "go"),
-  // TODO(stanek): pack fragments into the gift grid, then schedule charging.
-  inert("stanek", 30_000, "stanek"),
-  // TODO(dnet): traverse the darknet graph, spending stasis links.
-  inert("dnet", 30_000, "dnet"),
-  // TODO(side): solve contracts before they expire; rank infiltration targets.
-  inert("side", 60_000),
-];
+export const FEATURE_MODULES: Readonly<Record<FeatureId, FeatureModule>> = {
+  progression: progressionModule,
+  hacking: hackingModule,
+  factions: factionsModule,
+  career: careerModule,
+  hacknet: hacknetModule,
+  stock: stockModule,
+  gang: gangModule,
+  corp: corpModule,
+  bladeburner: bladeburnerModule,
+  sleeves: sleevesModule,
+  go: goModule,
+  stanek: stanekModule,
+  dnet: dnetModule,
+  side: sideModule,
+};
+
+/** Registry order is FEATURE_IDS order, so the tab bar, the scheduler and the
+ * telemetry all agree without a second list to keep in sync. */
+export const FEATURE_DRIVERS: readonly FeatureDriver[] = FEATURE_IDS.map((id) => FEATURE_MODULES[id].driver);
+
+export function featureModule(id: FeatureId): FeatureModule {
+  return FEATURE_MODULES[id];
+}
+
+/** Every module's reset hook, in registry order. The controller calls this on
+ * a BitNode reset instead of naming features one by one. */
+export function resetAllFeatures(): void {
+  for (const id of FEATURE_IDS) FEATURE_MODULES[id].reset?.();
+}
+
+/** Peak dodge step per enabled feature, for shared/ram/reserve.ts. */
+export function featureRamDemand(): Partial<Record<FeatureId, number>> {
+  const demand: Partial<Record<FeatureId, number>> = {};
+  for (const id of FEATURE_IDS) {
+    const peak = FEATURE_MODULES[id].peakStepGb;
+    if (peak !== undefined) demand[id] = peak;
+  }
+  return demand;
+}
+
+/** Narrow a whole arbitration to one feature's share. */
+export function grantsFor(result: ArbiterResult, id: FeatureId): FeatureGrants {
+  return {
+    money: grantedAmount(result, id, "money"),
+    ram: grantedAmount(result, id, "ram"),
+    slot: holdsSlot(result, id),
+    result,
+  };
+}
+
+/** The grants a driver sees before any claim has been resolved. */
+export function noGrants(): FeatureGrants {
+  return { money: 0, ram: 0, slot: false, result: emptyArbitration() };
+}
+
+export { emptyBoard };
 
 /** Which drivers should run now. Pure, so the scheduling rule is unit-tested
  * rather than inferred from live behaviour.
@@ -98,10 +203,26 @@ export function selectDue(
     // they declare no `requires`, so nothing else would ever stop them.
     // In the real game this is a no-op: deriveCapabilities reports those five
     // as "yes" unconditionally, and gated features are handled below.
-    if (caps.unlocked[driver.id] === "no") return false;
-    if (driver.requires && caps.unlocked[driver.requires] !== "yes") return false;
+    if (!driverEnabled(driver, caps)) return false;
     return now - (lastRun[driver.id] ?? 0) >= driver.everyMs;
   });
+}
+
+/** Capability half of scheduling, shared with contribution-cache pruning. */
+export function driverEnabled(driver: FeatureDriver, caps: Capabilities): boolean {
+  if (caps.unlocked[driver.id] !== "yes") return false;
+  return driver.requires === undefined || caps.unlocked[driver.requires] === "yes";
+}
+
+/** The modules whose drivers are due — the set the needs and claims passes run
+ * over. Same rule as selectDue, so a feature can never post a claim on a tick
+ * its driver would not run and then fail to spend the grant. */
+export function selectDueModules(
+  lastRun: Record<string, number>,
+  caps: Capabilities,
+  now: number,
+): FeatureModule[] {
+  return selectDue(FEATURE_DRIVERS, lastRun, caps, now).map((driver) => FEATURE_MODULES[driver.id]);
 }
 
 export { FEATURE_IDS };

@@ -31,4 +31,22 @@ export interface HacknetState {
   /** Hash economy — hacknet servers only. */
   hashes?: { current: number; capacity: number };
   hashUpgrades?: { name: string; level: number; cost: number }[];
+  /** The decision digest: what to buy, why, and what was passed over. */
+  plan?: HacknetPlan;
+}
+
+export interface HacknetPlan {
+  buy?: { kind: string; node?: number; cost: number };
+  why: string;
+  /** Set when nothing is worth buying, with the reason — an upgrade that
+   *  cannot repay itself before the horizon ends is a decision, not a stall. */
+  hold?: string;
+  ranked: {
+    label: string;
+    cost: number;
+    deltaProduction: number;
+    paybackSec: number;
+    netOverHorizon: number;
+  }[];
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

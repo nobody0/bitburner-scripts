@@ -149,6 +149,10 @@
 
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
   th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  /* Opt-in wrapping for prose columns (requirement trees, rationales). Without
+     it a long string forces the whole card into horizontal scroll, which is
+     both ugly and makes the rest of the panel unreadable. */
+  th.wrap, td.wrap { white-space: normal; overflow-wrap: anywhere; text-align: left; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
   th:first-child, td:first-child { text-align: left; }
 

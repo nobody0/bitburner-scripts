@@ -1,0 +1,22 @@
+// Vendored from bitburner-src v3.0.1:src/Server/data/SpecialServers.ts by tools/vendor.ts — DO NOT EDIT
+/* Holds IP of Special Servers */
+export const SpecialServers = {
+  Home: "home",
+  FulcrumSecretTechnologies: "fulcrumassets",
+  CyberSecServer: "CSEC",
+  NiteSecServer: "avmnite-02h",
+  TheBlackHandServer: "I.I.I.I",
+  BitRunnersServer: "run4theh111z",
+  TheDarkArmyServer: ".",
+  DaedalusServer: "The-Cave",
+  WorldDaemon: "w0r1d_d43m0n",
+  DarkWeb: "darkweb",
+  NormalLab: "th3_l4byr1nth",
+  CruelLab: "cru3l_l4byr1nth",
+  MercilessLab: "m3rc1l3ss_l4byr1nth",
+  UberLab: "ub3r_l4byr1nth",
+  EternalLab: "et3rn4l_l4byr1nth",
+  EndlessLab: "end13ss_l4byr1nth",
+  FinalLab: "f1n4l_l4byr1nth",
+  BonusLab: "b0nus_l4byr1nth",
+} as const;

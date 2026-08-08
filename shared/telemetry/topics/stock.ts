@@ -44,4 +44,17 @@ export interface StockState {
   portfolioCost: number;
   /** Open limit/stop orders — 4S/BN8 only. */
   orders?: Record<string, { type: string; position: string; shares: number; price: number }[]>;
+  /** The decision digest. */
+  plan?: StockPlan;
+}
+
+/** The decision digest: what was traded, what was ranked, and — when nothing
+ * happened — why not. A stock feature that holds because no edge clears the
+ * commission is WORKING, and the panel has to be able to say so. */
+export interface StockPlan {
+  actions: { type: string; why: string }[];
+  ranked: { sym: string; edge: number; expectedGain: number; why: string }[];
+  why: string;
+  hold?: string;
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

@@ -49,6 +49,46 @@ export function parseGoal(spec: string): Goal {
         done: (ctx) => ctx.factions.get(name)?.joined === true,
       };
     }
+    case "karma": {
+      // Karma is an UPPER bound on a negative number: `karma:-9` is reached by
+      // going BELOW -9. Parsing it as a `gte` would make it instantly true.
+      const target = Number(rest.join(":"));
+      if (!Number.isFinite(target)) throw new Error(`bad karma in goal spec: ${spec}`);
+      return {
+        id: spec,
+        describe: () => `karma <= ${target}`,
+        done: (ctx) => ctx.player.karma <= target,
+      };
+    }
+    case "augs": {
+      const count = parseAmount(rest[0], spec);
+      return {
+        id: spec,
+        describe: () => `${count} augmentations owned (installed or queued)`,
+        done: (ctx) => ctx.augmentations.size >= count,
+      };
+    }
+    case "aug": {
+      const name = rest.join(":");
+      if (name === "") throw new Error(`bad augmentation in goal spec: ${spec}`);
+      return {
+        id: spec,
+        describe: () => `owns ${name}`,
+        done: (ctx) => ctx.augmentations.has(name),
+      };
+    }
+    case "favor": {
+      const amount = parseAmount(rest[rest.length - 1], spec);
+      const name = rest.slice(0, -1).join(":");
+      if (name === "") throw new Error(`bad faction in goal spec: ${spec}`);
+      return {
+        id: spec,
+        describe: () => `${name} favor >= ${amount}`,
+        // Favor is banked ONLY at install, so this goal is unreachable without
+        // one — which is exactly what makes it the install-cadence test.
+        done: (ctx) => (ctx.factions.get(name)?.favor ?? 0) >= amount,
+      };
+    }
     case "rep": {
       const amount = parseAmount(rest[rest.length - 1], spec);
       const name = rest.slice(0, -1).join(":");
@@ -60,7 +100,9 @@ export function parseGoal(spec: string): Goal {
       };
     }
     default:
-      throw new Error(`unknown goal spec: ${spec} (want earn:|money:|skill:|ram:|only:|faction:|rep:)`);
+      throw new Error(
+        `unknown goal spec: ${spec} (want earn:|money:|skill:|ram:|only:|faction:|rep:|karma:|augs:|aug:|favor:)`,
+      );
   }
 }
 

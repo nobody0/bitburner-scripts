@@ -45,6 +45,27 @@ export interface SaveSeed {
   /** hostname -> neighbours, from the save's own topology. */
   topology: Record<string, string[]>;
   person: { skills: Record<string, number>; exp: Record<string, number>; mults: Record<string, number> };
+  /** The non-Person half: karma, kills, joined factions, augmentations, jobs.
+   *  Without this a save-seeded run starts at karma 0 with no factions, which
+   *  silently makes every criminal faction unreachable and every karma need
+   *  look freshly blocking. */
+  playerState: {
+    money: number;
+    karma: number;
+    numPeopleKilled: number;
+    city: string;
+    location: string;
+    jobs: Record<string, string>;
+    factions: string[];
+    factionInvitations: string[];
+    augmentations: { name: string; level: number }[];
+    queuedAugmentations: { name: string; level: number }[];
+    sourceFiles: Record<string, number>;
+  };
+  /** Faction name -> reputation and favor. Favor is the one thing that CANNOT
+   *  be earned within a run — it is banked only at install — so a save is the
+   *  only way to study donation-gated strategy at all. */
+  factions: Record<string, { rep: number; favor: number }>;
   gates: {
     inGang: boolean;
     inBladeburner: boolean;
@@ -125,6 +146,25 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
       exp: snapshot.player.exp,
       mults: snapshot.player.mults,
     },
+    playerState: {
+      money: snapshot.player.money,
+      karma: snapshot.player.karma,
+      numPeopleKilled: snapshot.player.numPeopleKilled,
+      city: snapshot.player.city,
+      location: snapshot.player.location,
+      jobs: snapshot.player.jobs,
+      factions: snapshot.player.factions,
+      factionInvitations: snapshot.player.factionInvitations,
+      augmentations: snapshot.player.augmentations,
+      queuedAugmentations: snapshot.player.queuedAugmentations,
+      sourceFiles: { ...snapshot.activeSourceFiles },
+    },
+    factions: Object.fromEntries(
+      Object.entries(snapshot.factions).map(([name, standing]) => [
+        name,
+        { rep: standing.playerReputation ?? 0, favor: standing.favor ?? 0 },
+      ]),
+    ),
     gates: {
       inGang: snapshot.player.hasGang,
       inBladeburner: snapshot.player.hasBladeburner,

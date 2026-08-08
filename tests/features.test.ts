@@ -5,8 +5,22 @@ import { changedMultipliers, BITNODES, DEFAULT_BITNODE_MULTIPLIERS } from "../sh
 import { FEATURE_IDS, type FeatureId } from "../shared/features/ids.ts";
 import { FEATURES, featureById, featureForBitNode } from "../shared/features/registry.ts";
 import { capsDelta, deriveCapabilities, sfLevel, unknownCapabilities } from "../shared/features/unlock.ts";
-import { FEATURE_DRIVERS, selectDue } from "../game/lib/features/index.ts";
-import { DODGED_PROBES, LOCAL_PROBES, GATE_PROBE } from "../game/lib/probes/index.ts";
+import {
+  FEATURE_DRIVERS,
+  FEATURE_MODULES,
+  featureModule,
+  featureRamDemand,
+  resetAllFeatures,
+  selectDue,
+} from "../game/lib/features/index.ts";
+import {
+  DODGED_PROBES,
+  GATE_PROBE,
+  isStepped,
+  LOCAL_PROBES,
+  probeMethods,
+  type ProbeAcc,
+} from "../game/lib/probes/index.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 
 const root = resolve(import.meta.dir, "..");
@@ -186,7 +200,19 @@ async function runAllProbes(): Promise<{
   const threw: string[] = [];
   for (const probe of [...LOCAL_PROBES, ...DODGED_PROBES]) {
     try {
-      const emitted = probe.kind === "local" ? probe.run(probeContext) : await probe.run(universal(), probeContext);
+      let emitted: { key: string; data: unknown }[];
+      if (probe.kind === "local") {
+        emitted = probe.run(probeContext);
+      } else if (isStepped(probe)) {
+        // A stepped probe is exercised the way the runner drives it: every
+        // step against the shared accumulator, then finish(). That also
+        // covers the rule that finish() must tolerate whatever the steps left.
+        const acc: ProbeAcc = {};
+        for (const step of probe.steps) await step.run(universal(), probeContext, acc);
+        emitted = probe.finish(acc);
+      } else {
+        emitted = await probe.run(universal(), probeContext);
+      }
       emissions.set(probe.id, emitted);
     } catch (error) {
       threw.push(`${probe.id}: ${String(error).slice(0, 120)}`);
@@ -211,7 +237,7 @@ describe("probe table", () => {
     // falls back to a guessed price, and the probe may never run. Both halves
     // of a dotted name are checked — the namespace must be a real property of
     // the NS interface, and the leaf must be a declared method somewhere.
-    const names = [...DODGED_PROBES.flatMap((p) => p.methods), ...GATE_PROBE.methods];
+    const names = [...DODGED_PROBES.flatMap(probeMethods), ...GATE_PROBE.methods];
     const missing: string[] = [];
     for (const name of names) {
       const segments = name.split(".");
@@ -269,6 +295,73 @@ describe("probe table", () => {
       .filter(([, ids]) => ids.size > 1)
       .map(([field, ids]) => `${field} written by ${[...ids].join(" and ")}`);
     expect(contested).toEqual([]);
+  });
+});
+
+describe("feature modules", () => {
+  test("every feature id has exactly one module, keyed by its own id", () => {
+    expect(Object.keys(FEATURE_MODULES).sort()).toEqual([...FEATURE_IDS].sort());
+    for (const id of FEATURE_IDS) {
+      expect(FEATURE_MODULES[id].driver.id, `module ${id} holds a driver for another feature`).toBe(id);
+    }
+  });
+
+  test("drivers are derived from the module registry, in registry order", () => {
+    // One list, not two. A second hand-maintained array is exactly how the
+    // tab bar, the scheduler and the telemetry drift apart.
+    expect(FEATURE_DRIVERS.map((d) => d.id)).toEqual([...FEATURE_IDS]);
+    for (const id of FEATURE_IDS) expect(featureModule(id).driver).toBe(FEATURE_MODULES[id].driver);
+  });
+
+  test("reset hooks are registered, not hardcoded in the controller", () => {
+    // The property that matters: resetAllFeatures() reaches every module that
+    // declares a reset, so adding a feature with cross-run state cannot
+    // silently leak it across a BitNode reset because nobody edited the loop.
+    const declared = FEATURE_IDS.filter((id) => FEATURE_MODULES[id].reset !== undefined);
+    expect(declared, "no module declares a reset — the walk would be vacuous").not.toEqual([]);
+
+    const called: FeatureId[] = [];
+    const originals = new Map<FeatureId, (() => void) | undefined>();
+    for (const id of declared) {
+      originals.set(id, FEATURE_MODULES[id].reset);
+      (FEATURE_MODULES[id] as { reset?: () => void }).reset = () => called.push(id);
+    }
+    try {
+      resetAllFeatures();
+    } finally {
+      for (const id of declared) (FEATURE_MODULES[id] as { reset?: () => void }).reset = originals.get(id);
+    }
+    expect(called.sort()).toEqual([...declared].sort());
+  });
+
+  test("the controller resets features by registry walk, not by name", () => {
+    // The whole point of the registry. Before it existed the loop called
+    // resetHackingState() directly, so every new feature meant editing the
+    // core loop — and forgetting to meant leaking state across a node reset.
+    const controller = readFileSync(resolve(root, "game/lib/controller.ts"), "utf8");
+    expect(controller).toContain("resetAllFeatures()");
+    expect(controller).not.toContain("resetHackingState");
+  });
+
+  test("the controller mentions only the two features it is allowed to", () => {
+    // A drift detector, not a purity claim. Two mentions are legitimate and
+    // documented; a third means feature logic has leaked back into the loop.
+    //   - `progression` is a TELEMETRY TOPIC here (the coordination digest
+    //     hangs off it), never a driver decision.
+    //   - `hacking` is the network sweep's heap owner. The sweep is
+    //     controller-level on purpose: a rooted fleet is what every feature
+    //     spends, and hacking is only its first customer.
+    const allowed = new Set<FeatureId>(["progression", "hacking"]);
+    const controller = readFileSync(resolve(root, "game/lib/controller.ts"), "utf8");
+    const named = FEATURE_IDS.filter((id) => new RegExp(`\\b${id}\\b`).test(controller));
+    expect(named.filter((id) => !allowed.has(id))).toEqual([]);
+  });
+
+  test("declared RAM demand is positive and belongs to a real feature", () => {
+    for (const [id, gb] of Object.entries(featureRamDemand())) {
+      expect(FEATURE_IDS).toContain(id as FeatureId);
+      expect(gb, `${id} declares a non-positive peak step`).toBeGreaterThan(0);
+    }
   });
 });
 
@@ -385,5 +478,45 @@ describe("telemetry payloads survive JSON", () => {
     expect(back.sourceFiles).toEqual({ "4": 3 });
     expect(back.unlocked.factions).toBe("yes");
     expect(back.unlocked.gang).toBe("no");
+  });
+});
+
+describe("feature dodges are centralised and priced", () => {
+  test("no feature driver calls dodge directly", () => {
+    // A REAL BUG this pins, found by running in the actual game: a hardcoded
+    // 2.5 GB budget for `singularity.joinFaction` produced a 4.10 GB
+    // allocation against 4.60 GB of dynamic usage, and the game killed the
+    // stub with "RAM USAGE ERROR ... Dynamic RAM usage calculated to be
+    // greater than RAM allocation".
+    //
+    // `joinFaction` is SingularityFn2 = 3.0 GB, so the guessed 2.5 was short
+    // even at SF4 level 3 where the multiplier is 1x — wrong at EVERY level,
+    // not just the expensive ones. `priceCalls` asks `ns.getFunctionRamCost`,
+    // which is free and already folds the multiplier in.
+    //
+    // The simulator cannot catch this class of bug: it does not enforce
+    // dynamic RAM, so an under-allocated stub runs there quite happily. Only
+    // the real game rejects it.
+    const files = [
+      "game/lib/features/factions.ts",
+      "game/lib/features/career.ts",
+      "game/lib/features/hacknet.ts",
+      "game/lib/features/stock.ts",
+      "game/lib/features/hacking.ts",
+      "game/lib/features/remaining.ts",
+    ];
+    for (const file of files) {
+      const source = readFileSync(resolve(root, file), "utf8");
+      expect(source, `${file} bypasses featureDodge`).not.toMatch(/\bdodge\s*\(/);
+      expect(source, `${file} bypasses the heap lease`).not.toMatch(/\bdodgeHost\s*\(/);
+    }
+  });
+
+  test("the one feature dodge helper prices calls and requires a matching grant and lease", () => {
+    const source = readFileSync(resolve(root, "game/lib/features/dodge.ts"), "utf8");
+    expect(source).toContain("priceCalls(ctx.ns, methods)");
+    expect(source).toContain("grantFor(ctx.grants.result, by, claimId)");
+    expect(source).toContain("ctx.acquireDodge(budgetGb)");
+    expect(source).toContain("lease.release()");
   });
 });

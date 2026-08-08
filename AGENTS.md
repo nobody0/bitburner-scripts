@@ -1,8 +1,13 @@
 # Working in bitburner-scripts
 
-This is a clean-sheet Bitburner automation project. The legacy
-`nobody0/bitburner` repository is inspiration only: do not copy its history or
-treat its architecture as authoritative.
+This is a clean-sheet Bitburner automation project. The predecessor scripts
+(`nobody01/bitburnerscript@2023`, checked out at `/Users/bob/git/bitburner-legacy`)
+are inspiration only: do not copy their history, and explicitly do not copy
+their architecture — a 1621-line `main()` coordinating every subsystem through a
+mutable `globalThis.globalState` is the shape this repository exists to replace.
+Designs credited to "an earlier rewrite" (`nobody0/bitburner`) refer to a
+different, abandoned repository that is no longer checked out; see the citation
+note in `README.md`.
 
 - Author game scripts in `game/` as TypeScript; only `game/` is ever synced to
   the game. Cross-cutting pure code (log schema, planner, goals) lives in

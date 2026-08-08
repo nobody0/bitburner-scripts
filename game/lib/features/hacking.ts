@@ -1,8 +1,11 @@
+import type { NS } from "@ns";
 import { gameGlobal } from "../globals.ts";
 import { buildView, drainCompletions, initDriver, pump, type DriverState } from "../dispatch-driver.ts";
 import { set, type GameState } from "../state.ts";
 import { workerGlobals } from "../worker-shared.ts";
-import type { DriverContext, FeatureDriver } from "./index.ts";
+import { isScriptDeath } from "../errors.ts";
+import { actionRamClaim, featureDodge } from "./dodge.ts";
+import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
 
 /** The hacking driver: one HWGW dispatcher pass per tick.
  *
@@ -22,8 +25,12 @@ export function hackingState(): DriverState {
   return (state ??= initDriver());
 }
 
-/** Drop the ledger, the heap and the realm rendezvous. Called on a BitNode
- * reset, where the entire fleet the heap describes has ceased to exist.
+/** Drop the ledger, the heap and the realm rendezvous. Registered as this
+ * module's `reset` hook and called on a BitNode reset, where the entire fleet
+ * the heap describes has ceased to exist. Still exported by name because the
+ * simulator calls it directly: Bun caches modules for the life of a process,
+ * so a second run in the same process would otherwise inherit the first one's
+ * heap and dispatcher stats.
  *
  * The realm registry is cleared here and NOWHERE else. Across a build handoff
  * it must survive — the incoming controller has a fresh ledger while the old
@@ -40,6 +47,9 @@ export function resetHackingState(): void {
   pumpMaxMs = 0;
   lastRollup = 0;
   switched = undefined;
+  backdoorAttempted.clear();
+  backdoorInFlight = false;
+  lastBackdoorAt = 0;
 }
 
 /** Peak pump duration since the last rollup, reported so a dispatcher pass
@@ -66,8 +76,10 @@ export function takeTargetSwitch(): { from: string; to: string } | undefined {
 
 function rollup(game: GameState, driver: DriverState, target: string, prepTarget?: string, segOrder?: string[]): void {
   const stats = driver.memory.dispatch.stats;
+  const targetSolveExact = driver.memory.dispatch.evaluator.directive.farm?.solution.exact;
   set(game, "farm", {
     target,
+    ...(targetSolveExact !== undefined ? { targetSolveExact } : {}),
     ...(prepTarget !== undefined ? { prepTarget } : {}),
     ...(segOrder !== undefined ? { segOrder } : {}),
     inFlight: { ...driver.memory.dispatch.inFlight },
@@ -81,10 +93,132 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   });
 }
 
+/** Hosts we have already backdoored (or tried and failed), so a need that
+ * cannot be satisfied does not relaunch a stub every pass. Cleared on reset. */
+const backdoorAttempted = new Set<string>();
+/** ns functions each dodged closure calls. PRICED at runtime rather than
+ * guessed: a constant budget has to be at least the sum of the call costs, and
+ * getting that wrong kills the stub outright (see dodge.ts#priceCalls). */
+const BACKDOOR_CALLS = ["singularity.connect", "singularity.installBackdoor"] as const;
+const PORT_OPENER_CALLS = ["ls", "singularity.purchaseTor", "singularity.purchaseProgram"] as const;
+let backdoorInFlight = false;
+let lastBackdoorAt = 0;
+
+/** Satisfy `backdoor` needs from the board.
+ *
+ * This is the needs board doing its job end to end: `factions` posts
+ * `{kind:"backdoor", subject:"CSEC"}` because CyberSec requires it, without
+ * knowing or caring how a backdoor is installed; `hacking` owns servers, so it
+ * delivers. Neither feature references the other.
+ *
+ * Deliberately conservative — one attempt per host, throttled, and skipped
+ * entirely while a batch-critical pass is running: a backdoor takes
+ * hackingTime/4 and would otherwise be launched on every 200 ms tick. */
+async function serveBackdoorNeeds(ctx: DriverContext): Promise<void> {
+  if (backdoorInFlight) return;
+  const now = Date.now();
+  if (now - lastBackdoorAt < 10_000) return;
+
+  const pending = nextBackdoorAction(ctx);
+  if (!pending) return;
+  const { host, server, action } = pending;
+
+  // Not rooted yet: the blocker is usually a missing port opener, and
+  // nothing else in the loop will ever buy one. Rooting servers is
+  // hacking's job, so acquiring the means to root them is too. This is
+  // load-bearing rather than incidental — CSEC needs one open port, so
+  // without a cracker the entire faction ladder is unreachable.
+  if (action === "port-opener") {
+    if (await buyPortOpener(ctx, server.numOpenPortsRequired ?? 0)) lastBackdoorAt = now;
+    return;
+  }
+
+  backdoorInFlight = true;
+  lastBackdoorAt = now;
+  try {
+    const outcome = await featureDodge(ctx, "hacking", "action:backdoor", BACKDOOR_CALLS, async (stubNs: NS) => {
+      stubNs["singularity"]["connect"](host as never);
+      await stubNs["singularity"]["installBackdoor"]();
+    });
+    if (outcome.ok) {
+      backdoorAttempted.add(host);
+      server.backdoorInstalled = true;
+    }
+  } catch (error) {
+    if (isScriptDeath(error)) throw error;
+    backdoorAttempted.add(host);
+    // No singularity access, or the connection failed. Recorded by the
+    // attempt set so we do not retry forever.
+  } finally {
+    backdoorInFlight = false;
+  }
+}
+
+type BackdoorAction = {
+  action: "backdoor" | "port-opener";
+  host: string;
+  server: NonNullable<GameState["topics"]["servers"]>[string];
+};
+
+/** Select the exact board action both claim collection and execution use. */
+function nextBackdoorAction(ctx: Pick<ClaimContext, "board" | "state">): BackdoorAction | undefined {
+  const servers = ctx.state.topics.servers ?? {};
+  const player = ctx.state.topics.player;
+  if (!player) return undefined;
+  for (const need of ctx.board.byKind.backdoor) {
+    if (need.have >= need.target) continue;
+    const host = need.subject;
+    if (!host || backdoorAttempted.has(host)) continue;
+    const server = servers[host];
+    if (!server || server.backdoorInstalled) continue;
+    if (player.skills.hacking < (server.requiredHackingSkill ?? Infinity)) continue;
+    if (!server.hasAdminRights) {
+      if ((server.numOpenPortsRequired ?? 0) === 0) continue;
+      return { action: "port-opener", host, server };
+    }
+    return { action: "backdoor", host, server };
+  }
+  return undefined;
+}
+
+/** Darkweb port openers, cheapest first — the order the game unlocks ports in. */
+const PORT_OPENERS = ["BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe", "SQLInject.exe"] as const;
+
+/** Buy the next port opener we lack, if a needed server requires more ports
+ * than we can currently open. Returns true if anything was bought.
+ *
+ * Deliberately narrow: this runs ONLY to unblock a posted backdoor need, so
+ * the fleet does not spend money on crackers nothing has asked for. */
+async function buyPortOpener(ctx: DriverContext, portsRequired: number): Promise<boolean> {
+  if (portsRequired === 0) return false;
+  try {
+    const outcome = await featureDodge(
+      ctx,
+      "hacking",
+      "action:port-opener",
+      PORT_OPENER_CALLS,
+      (stubNs: NS) => {
+        const owned = new Set(stubNs["ls"]("home", ".exe"));
+        const missing = PORT_OPENERS.filter((program) => !owned.has(program));
+        if (owned.size >= portsRequired || missing.length === 0) return false;
+        // TOR first; it is a precondition and idempotent.
+        if (!stubNs["singularity"]["purchaseTor"]()) return false;
+        return stubNs["singularity"]["purchaseProgram"](missing[0] as never);
+      },
+    );
+    return outcome.ok && outcome.value;
+  } catch (error) {
+    if (isScriptDeath(error)) throw error;
+    // No singularity access — the crackers must come from elsewhere.
+    return false;
+  }
+}
+
 export const hacking: FeatureDriver = {
   id: "hacking",
   everyMs: 200,
-  tick({ ns, state: game }: DriverContext) {
+  tick(ctx: DriverContext) {
+    const { ns, state: game, homeReserveGb } = ctx;
     const servers = game.topics.servers;
     const player = game.topics.player;
     if (!servers || !player || Object.keys(servers).length === 0) return;
@@ -99,7 +233,11 @@ export const hacking: FeatureDriver = {
     const completions = drainCompletions(driver);
 
     const started = Date.now();
-    const result = pump(ns, driver, view, completions);
+    // The reserve is computed per pass, not constant: it grows to cover the
+    // largest dodge step any unlocked feature declares, so an expensive
+    // singularity probe stays affordable instead of being crowded out by the
+    // dispatcher taking every free gigabyte.
+    const result = pump(ns, driver, view, completions, Infinity, homeReserveGb);
     const elapsed = Date.now() - started;
     if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
 
@@ -122,5 +260,25 @@ export const hacking: FeatureDriver = {
         result.directive.segments.map((segment) => segment.kind),
       );
     }
+
+    // Serve the board LAST, so a backdoor's dodge can never delay a
+    // dispatcher pass. Fire-and-forget: the dispatcher must not await a
+    // multi-second backdoor on its 200 ms cadence.
+    if (ctx.board.byKind.backdoor.length > 0) void serveBackdoorNeeds(ctx);
+  },
+};
+
+export const hackingModule: FeatureModule = {
+  driver: hacking,
+  reset: resetHackingState,
+  claims: (ctx) => {
+    const action = nextBackdoorAction(ctx)?.action;
+    if (action === "backdoor") {
+      return [actionRamClaim(ctx, "hacking", "action:backdoor", BACKDOOR_CALLS, "install requested backdoor")];
+    }
+    if (action === "port-opener") {
+      return [actionRamClaim(ctx, "hacking", "action:port-opener", PORT_OPENER_CALLS, "acquire required port opener")];
+    }
+    return [];
   },
 };

@@ -60,4 +60,14 @@ export interface CorpState {
   divisions?: CorpDivisionDigest[];
   investmentOffer?: { round: number; funds: number; shares: number };
   bonusTime?: number;
+  plan?: CorpPlan;
+}
+
+export interface CorpPlan {
+  action: { type: string; why: string };
+  /** Which stage produced the action, so a stall is attributable. */
+  stage: string;
+  completed: string[];
+  why: string;
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

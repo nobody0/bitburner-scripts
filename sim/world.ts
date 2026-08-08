@@ -16,6 +16,7 @@ import {
   type SimServer,
 } from "./core/effects.ts";
 import { mockPerson, mockServer } from "./core/mocks.ts";
+import { playerRecord, SimPlayer, type SimPlayerOptions } from "./core/player.ts";
 import { mulberry32 } from "./core/rng.ts";
 import { getBitNodeMultipliers } from "./vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { currentNodeMults, replaceCurrentNodeMults } from "./vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
@@ -24,6 +25,7 @@ import {
   calculateHackingTime,
   calculateWeakenTime,
 } from "./vendor/bitburner/src/Hacking.ts";
+import { calculateSkill } from "./vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { ServerConstants } from "./vendor/bitburner/src/Server/data/Constants.ts";
 
 export interface SimOptions {
@@ -51,6 +53,9 @@ export interface SimOptions {
   liveServers?: Partial<SimServer>[];
   /** Skills, exp and multipliers from a save. Merged over mockPerson(). */
   person?: { skills?: Record<string, number>; exp?: Record<string, number>; mults?: Record<string, number> };
+  /** Karma, kills, joined factions, owned augmentations, jobs — the non-Person
+   *  half, from a save or a profile. */
+  playerState?: SimPlayerOptions;
 }
 
 /** The unlock readings ns exposes for free — what game/lib/probes/gates.ts
@@ -74,9 +79,22 @@ export interface GateFlags {
 export class SimWorld {
   readonly clock = new Clock();
   readonly person: Person;
+  /** The non-Person half: karma, kills, factions, augmentations, the work
+   *  slot. Kept separate so the vendored formulas keep taking exactly an
+   *  `IPerson` — a sleeve is a Person too. */
+  readonly player: SimPlayer;
   readonly servers = new Map<string, SimServer>();
-  money: number;
+  readonly bitnode: number;
   moneyEarned = 0;
+
+  /** Single source of truth, delegated so the many `this.money += x` sites
+   *  keep working while the value itself lives on the player. */
+  get money(): number {
+    return this.player.money;
+  }
+  set money(value: number) {
+    this.player.money = value;
+  }
   hacks = 0;
   readonly landed = { hack: 0, grow: 0, weaken: 0 };
   readonly records: LogRecord[] = [];
@@ -95,10 +113,16 @@ export class SimWorld {
   constructor(opts: SimOptions) {
     replaceCurrentNodeMults(getBitNodeMultipliers(opts.bitnode ?? 1, (opts.sourceFileLevel ?? 0) + 1));
     this.#rng = mulberry32(opts.seed);
+    // Offset so the two streams never coincide.
+    this.crimeRng = mulberry32(opts.seed + 0x9e3779b9);
     this.#run = opts.runId ?? `seed${opts.seed}`;
     this.onRecord = opts.onRecord;
-    this.money = opts.startingMoney ?? 1_000;
+    this.bitnode = opts.bitnode ?? 1;
     this.person = mockPerson();
+    this.player = new SimPlayer({
+      money: opts.startingMoney ?? 1_000,
+      ...(opts.playerState ?? {}),
+    });
     if (opts.person) {
       // Merged, not replaced: a save stores a sparse mults bag, and the
       // missing entries must stay at their 1.0 defaults rather than vanish.
@@ -170,6 +194,10 @@ export class SimWorld {
         skills: { ...this.person.skills },
         exp: { ...this.person.exp },
         mults: this.person.mults,
+        // Karma and kills ride the player mirror because goals are evaluated
+        // from the record stream, and a `karma:` goal has no other source.
+        karma: this.player.karma,
+        numPeopleKilled: this.player.numPeopleKilled,
       },
     });
   }
@@ -191,19 +219,41 @@ export class SimWorld {
     };
   }
 
-  /** What ns.getPlayer() reports. */
+  /** `Person.updateSkillLevels` @ v3.0.1, transcribed.
+   *
+   * Every skill from its experience, floored and clamped to at least 1, each
+   * with its own BitNode multiplier — and the HP recalculation, which is not
+   * cosmetic: max HP is derived from defense, and the ratio is preserved so
+   * training defense does not silently heal the player. */
+  /** A SEPARATE seeded stream for subsystems that roll independently of the
+   * HGW path. Sharing `#rng` would make a crime outcome shift every subsequent
+   * hack roll, so two runs differing only in career activity would diverge in
+   * their farm results and the comparison would be meaningless. */
+  readonly crimeRng: () => number;
+
+  recalculateSkills(): void {
+    const person = this.person;
+    for (const [skill, bnMult] of [
+      ["hacking", "HackingLevelMultiplier"],
+      ["strength", "StrengthLevelMultiplier"],
+      ["defense", "DefenseLevelMultiplier"],
+      ["dexterity", "DexterityLevelMultiplier"],
+      ["agility", "AgilityLevelMultiplier"],
+      ["charisma", "CharismaLevelMultiplier"],
+    ] as const) {
+      person.skills[skill] = Math.max(
+        1,
+        Math.floor(calculateSkill(person.exp[skill], person.mults[skill] * currentNodeMults[bnMult])),
+      );
+    }
+    const ratio = Math.min(person.hp.current / person.hp.max, 1);
+    person.hp.max = Math.floor(10 + person.skills.defense / 10);
+    person.hp.current = Math.round(person.hp.max * ratio);
+  }
+
+  /** What ns.getPlayer() reports. Deep-copied — see sim/core/player.ts. */
   playerRecord(): Player {
-    return {
-      ...this.person,
-      money: this.money,
-      numPeopleKilled: 0,
-      entropy: 0,
-      jobs: {},
-      factions: [],
-      karma: 0,
-      totalPlaytime: this.clock.now(),
-      location: "Sector-12" as Player["location"],
-    } as unknown as Player;
+    return playerRecord(this.person, this.player, this.clock.now());
   }
 
   /** Duration of one op, in ms, from the state as it is RIGHT NOW. The game

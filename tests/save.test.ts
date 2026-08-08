@@ -44,8 +44,9 @@ function buildSaveJson(options: FixtureOptions = {}): string {
       { name: "Bionic Arms", level: 1 },
       { name: "NeuroFlux Governor", level: 12 },
     ],
-    queuedAugmentations: [],
-    factions: ["CyberSec", "NiteSec"],
+    queuedAugmentations: [{ name: "PCMatrix", level: 1 }],
+    factions: ["CyberSec", "NiteSec", "Sector-12"],
+    factionInvitations: ["Tetrads", "Chongqing"],
     jobs: { "Noodle Bar": "Employee" },
     hasWseAccount: true,
     hasTixApiAccess: true,
@@ -168,7 +169,7 @@ describe("decoding a save", () => {
     expect(snapshot.player.money).toBe(1_234_567);
     expect(snapshot.player.skills["hacking"]).toBe(812);
     expect(snapshot.player.augmentations).toHaveLength(2);
-    expect(snapshot.player.factions).toEqual(["CyberSec", "NiteSec"]);
+    expect(snapshot.player.factions).toEqual(["CyberSec", "NiteSec", "Sector-12"]);
   });
 
   test("keeps a __proto__ hostname as an ordinary server", () => {
@@ -309,5 +310,13 @@ describe("seeding a simulation from a save", () => {
   test("carries the player's real skills and multipliers", () => {
     expect(seed.person.skills["hacking"]).toBe(812);
     expect(seed.person.mults["hacking"]).toBe(1.5);
+  });
+
+  test("carries every non-Person field needed by faction requirements", () => {
+    expect(seed.playerState.factionInvitations).toEqual(["Tetrads", "Chongqing"]);
+    expect(seed.playerState.augmentations).toHaveLength(2);
+    expect(seed.playerState.queuedAugmentations).toEqual([{ name: "PCMatrix", level: 1 }]);
+    expect(seed.playerState.sourceFiles).toEqual({ "1": 3 });
+    expect(seed.factions["CyberSec"]).toEqual({ rep: 1_000_000, favor: 20 });
   });
 });

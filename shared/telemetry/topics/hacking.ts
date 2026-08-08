@@ -7,6 +7,8 @@
  * their own rare events). Optional fields fill in as the dispatcher lands. */
 export interface FarmRollup {
   target?: string;
+  /** Whether the target's integer batch solve exhausted its whole domain. */
+  targetSolveExact?: boolean;
   prepTarget?: string;
   segOrder?: string[];
   inFlight?: { hack: number; grow: number; weaken: number };

@@ -1,12 +1,18 @@
 import type { NS, Server } from "@ns";
+import { dodgeCapacityGb, STUB_BASE_GB, type HostRam } from "../../shared/ram/placement.ts";
 import { dodge } from "./dodge.ts";
+import type { DodgeLease } from "./ram.ts";
 import {
   DODGED_PROBES,
   GATE_PROBE,
+  isStepped,
   LOCAL_PROBES,
   type DodgedProbe,
   type Emission,
+  type ProbeAcc,
   type ProbeContext,
+  type SingleStepProbe,
+  type SteppedProbe,
 } from "./probes/index.ts";
 import {
   caps,
@@ -43,7 +49,6 @@ import {
 
 /** Left free on top of the stub so ns.exec of the stub itself never fails. */
 export const SAFETY_GB = 0.5;
-const STUB_BASE_GB = 1.6;
 /** Fallback when getFunctionRamCost cannot price a name (renamed API, typo). */
 const UNKNOWN_METHOD_GB = 4;
 
@@ -68,21 +73,45 @@ function methodCost(ns: NS, method: string): number {
   }
 }
 
-/** Sum of the distinct method costs. Bitburner charges a script for each ns
- * function it references once, however many times it calls it, so a probe
- * that reads 12 gang members still pays getMemberInformation a single time. */
-function priceProbe(ns: NS, runner: ProbeRunner, probe: DodgedProbe): number {
-  const cached = runner.costs.get(probe.id);
-  if (cached !== undefined) return cached;
+/** Sum of the distinct method costs in one closure. Bitburner charges a script
+ * for each ns function it references once, however many times it calls it, so a
+ * probe that reads 12 gang members still pays getMemberInformation a single
+ * time. */
+function priceMethods(ns: NS, methods: readonly string[]): number {
   let total = 0;
-  for (const method of new Set(probe.methods)) total += methodCost(ns, method);
-  runner.costs.set(probe.id, total);
+  for (const method of new Set(methods)) total += methodCost(ns, method);
   return total;
 }
 
-/** Dynamic RAM a dodge closure can use right now. Uses the sweep's own fresh
- * scan, so it costs nothing. */
-export function dodgeBudget(servers: Record<string, Server>): number {
+/** What a probe costs to LAUNCH.
+ *
+ * For a stepped probe this is the largest single step, not the sum — that is
+ * the entire point of splitting one. Each step is its own stub, so the peak
+ * RAM the game ever has to find at once is one step's worth. */
+function priceProbe(ns: NS, runner: ProbeRunner, probe: DodgedProbe): number {
+  const cached = runner.costs.get(probe.id);
+  if (cached !== undefined) return cached;
+  const price = isStepped(probe)
+    ? probe.steps.reduce((peak, step) => Math.max(peak, priceMethods(ns, step.methods)), 0)
+    : priceMethods(ns, probe.methods);
+  runner.costs.set(probe.id, price);
+  return price;
+}
+
+/** Dynamic RAM a dodge closure can use right now.
+ *
+ * Fleet-wide: with placement in the picture (shared/ram/placement.ts) the
+ * question is what the whole realm can serve, not what is left on home. A
+ * rooted 64 GB client dwarfs anything home will have for hours, and a probe
+ * priced against home alone would report itself unaffordable while 200 GB sat
+ * idle two hops away. */
+export function dodgeBudget(hosts: readonly HostRam[]): number {
+  return Math.max(0, dodgeCapacityGb(hosts) - SAFETY_GB);
+}
+
+/** Home-only budget, kept for the cold-boot path: before the first sweep has
+ * scp'd anything, home is the only host that holds the stub. */
+export function homeDodgeBudget(servers: Record<string, Server>): number {
   const home = servers["home"];
   if (!home) return 0;
   return Math.max(0, home.maxRam - home.ramUsed - STUB_BASE_GB - SAFETY_GB);
@@ -97,13 +126,19 @@ function publish(state: GameState, emissions: Emission[], mergeTopic: boolean): 
 
 /** The capability gate batch: cheap, and everything downstream depends on it —
  * probe gating AND feature-driver gating — so it runs first and every sweep. */
-async function runGateBatch(ns: NS, state: GameState, budget: number): Promise<void> {
-  if (budget < GATE_PROBE.cost) {
+async function runGateBatch(
+  ns: NS,
+  state: GameState,
+  budget: number,
+  acquire: (budgetGb: number) => DodgeLease | undefined,
+): Promise<void> {
+  const lease = budget >= GATE_PROBE.cost ? acquire(GATE_PROBE.cost) : undefined;
+  if (!lease) {
     recordProbeSkip(state, GATE_PROBE.id, GATE_PROBE.cost, budget);
     return;
   }
   try {
-    const gates = await dodge(ns, GATE_PROBE.run, GATE_PROBE.cost);
+    const gates = await dodge(ns, GATE_PROBE.run, GATE_PROBE.cost, { host: lease.host });
     set(state, "capabilities", gates.caps);
     if (gates.progression) merge(state, "progression", gates.progression);
     if (gates.failures.length > 0) recordProbeFailure(state, GATE_PROBE.id, gates.failures.join(", "));
@@ -111,20 +146,35 @@ async function runGateBatch(ns: NS, state: GameState, budget: number): Promise<v
     delete state.probeSkips[GATE_PROBE.id];
   } catch (error) {
     recordProbeFailure(state, GATE_PROBE.id, error);
+  } finally {
+    lease.release();
   }
 }
 
 /** One sweep's worth of acquisition. Requires `player` and `servers` to be in
- * the store already — the controller writes both before calling. */
-export async function runProbes(ns: NS, runner: ProbeRunner, state: GameState): Promise<void> {
+ * the store already — the controller writes both before calling.
+ *
+ * `hosts` describes where a stub may run and how much room each has; the
+ * controller builds it from the scan plus the dispatcher's heap
+ * (game/lib/ram.ts). Placement is per dodge, so a 40 GB augmentation step can
+ * land on a big client while a 1.5 GB gate batch stays on home. */
+export async function runProbes(
+  ns: NS,
+  runner: ProbeRunner,
+  state: GameState,
+  hosts: readonly HostRam[],
+  /** Reserves the chosen host's RAM for the life of the stub, so the
+   *  dispatcher plans around it instead of racing it. */
+  acquire: (budgetGb: number) => DodgeLease | undefined,
+): Promise<void> {
   const servers = state.topics.servers;
   const player = state.topics.player;
   if (!servers || !player) return;
 
   const now = Date.now();
-  const budget = dodgeBudget(servers);
+  const budget = dodgeBudget(hosts);
 
-  await runGateBatch(ns, state, budget);
+  await runGateBatch(ns, state, budget, acquire);
 
   const ctx: ProbeContext = { player, servers, caps: caps(state) };
   const applicable = (probe: DodgedProbe | (typeof LOCAL_PROBES)[number]): boolean => {
@@ -150,16 +200,27 @@ export async function runProbes(ns: NS, runner: ProbeRunner, state: GameState): 
     }
   }
 
-  // One packed dodged batch. Earliest-deadline-first so a cheap 30 s probe
-  // cannot starve behind an expensive 10 min one.
+  // Earliest-deadline-first so a cheap 30 s probe cannot starve behind an
+  // expensive 10 min one.
   const dueProbes = DODGED_PROBES.filter((probe) => due(runner, probe.id, probe.everyMs, now) && applicable(probe)).sort(
     (a, b) => lastRun(runner, a.id) + a.everyMs - (lastRun(runner, b.id) + b.everyMs),
   );
 
-  const batch: DodgedProbe[] = [];
+  // Stepped probes run on their own, one dodge per step: their whole reason
+  // for existing is that their methods must NOT share a stub, so they cannot
+  // join the packed batch. They go first — a probe that was split is one that
+  // could not be afforded otherwise, and it should not lose its slot to
+  // cheaper company.
+  for (const probe of dueProbes) {
+    if (isStepped(probe)) await runSteppedProbe(ns, runner, state, probe, ctx, budget, acquire, now);
+  }
+
+  // One packed batch for everything else.
+  const batch: SingleStepProbe[] = [];
   const methods = new Set<string>();
   let cost = 0;
   for (const probe of dueProbes) {
+    if (isStepped(probe)) continue;
     // Shared methods are charged once for the whole stub, so the marginal cost
     // of adding a probe is only its methods we are not already paying for.
     let marginal = 0;
@@ -183,6 +244,17 @@ export async function runProbes(ns: NS, runner: ProbeRunner, state: GameState): 
   for (const probe of batch) runner.lastRunAt.set(probe.id, now);
   state.probeBatch = { ids: batch.map((p) => p.id), cost, budget };
 
+  const lease = acquire(cost);
+  if (!lease) {
+    // Placement moved under us between pricing and launching. Report it as a
+    // skip against every member rather than a failure — nothing went wrong,
+    // the RAM simply went elsewhere first. Each probe is reported at ITS OWN
+    // price, not the batch's: telling the panel that `hacknet.core` costs the
+    // whole batch's 13.2 GB would be a plain lie about that probe.
+    for (const probe of batch) recordProbeSkip(state, probe.id, priceProbe(ns, runner, probe), budget);
+    return;
+  }
+
   let results: { id: string; emissions?: Emission[]; error?: string }[];
   try {
     results = await dodge(
@@ -201,11 +273,14 @@ export async function runProbes(ns: NS, runner: ProbeRunner, state: GameState): 
         return out;
       },
       cost,
+      { host: lease.host },
     );
   } catch (error) {
     // The stub itself failed to launch or timed out — the whole batch is lost.
     for (const probe of batch) recordProbeFailure(state, probe.id, error);
     return;
+  } finally {
+    lease.release();
   }
 
   for (const result of results) {
@@ -217,6 +292,64 @@ export async function runProbes(ns: NS, runner: ProbeRunner, state: GameState): 
     publish(state, result.emissions ?? [], probe.merge ?? false);
     clearProbeFailure(state, result.id);
   }
+}
+
+/** Run one stepped probe: a dodge per step, sequentially, accumulating into a
+ * shared bag.
+ *
+ * Partial results are kept on purpose. A five-step probe whose last step is
+ * unaffordable still learned four steps' worth, and emitting that beats
+ * discarding it — the topics these write are `merge: true` digests, so a
+ * missing field simply keeps its previous value. What must not happen is
+ * silence: the step that did not fit is recorded with ITS price, so the panel
+ * can say which half of the probe is blocked rather than reporting the whole
+ * probe as unaffordable at a price no single stub was ever asked to pay. */
+async function runSteppedProbe(
+  ns: NS,
+  runner: ProbeRunner,
+  state: GameState,
+  probe: SteppedProbe,
+  ctx: ProbeContext,
+  budget: number,
+  acquire: (budgetGb: number) => DodgeLease | undefined,
+  now: number,
+): Promise<void> {
+  runner.lastRunAt.set(probe.id, now);
+  const acc: ProbeAcc = {};
+  let ran = 0;
+  let skipped: { id: string; cost: number } | undefined;
+
+  for (const step of probe.steps) {
+    const cost = priceMethods(ns, step.methods);
+    const lease = acquire(cost);
+    if (!lease) {
+      skipped = { id: step.id, cost };
+      break;
+    }
+    try {
+      await dodge(ns, async (stubNs) => await step.run(stubNs, ctx, acc), cost, { host: lease.host });
+      ran++;
+    } catch (error) {
+      // One step failing is not the probe failing: report it and keep what the
+      // earlier steps learned.
+      recordProbeFailure(state, `${probe.id}:${step.id}`, error);
+      break;
+    } finally {
+      lease.release();
+    }
+  }
+
+  if (ran > 0) {
+    try {
+      publish(state, probe.finish(acc), probe.merge ?? false);
+      clearProbeFailure(state, probe.id);
+    } catch (error) {
+      recordProbeFailure(state, probe.id, error);
+    }
+  }
+
+  if (skipped) recordProbeSkip(state, `${probe.id}:${skipped.id}`, skipped.cost, budget);
+  else delete state.probeSkips[probe.id];
 }
 
 function lastRun(runner: ProbeRunner, id: string): number {

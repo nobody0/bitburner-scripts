@@ -44,7 +44,13 @@ describe("isUseful", () => {
 
 /** Minimal ns double for the dodged closures: they only use bracket-notation
  * calls, so a plain object with the right methods is enough. */
-function stubNs(processes: Record<string, { pid: number; filename: string; args: (string | number)[] }[]>, pid = 1) {
+function stubNs(
+  processes: Record<string, { pid: number; filename: string; args: (string | number)[] }[]>,
+  pid = 1,
+  /** Where this stub is running. Since dodges can be placed on the fleet, the
+   *  reclaim may itself be executing on a client rather than on home. */
+  stubHost = "home",
+) {
   const killed: number[] = [];
   const cleared: string[] = [];
   return {
@@ -52,6 +58,7 @@ function stubNs(processes: Record<string, { pid: number; filename: string; args:
     cleared,
     ns: {
       pid,
+      getHostname: () => stubHost,
       ps: (host: string) => processes[host] ?? [],
       kill: (target: number) => {
         killed.push(target);
@@ -98,6 +105,32 @@ describe("reclaimFleet", () => {
     const servers = { locked: { hostname: "locked", hasAdminRights: false, ramUsed: 32, maxRam: 64 } as Server };
     expect(reclaimFleet(stub.ns, servers, 1)).toEqual([]);
     expect(stub.cleared).toEqual([]);
+  });
+
+  test("never killalls the host the stub is running on", () => {
+    // Since dodges can be placed on the fleet, this reclaim may be executing
+    // on a client. A blanket killall there would kill the very stub doing the
+    // killing, and the dodge would hang until its 10s watchdog fired — every
+    // cold boot, non-deterministically, depending only on where placement
+    // happened to put it.
+    const stub = stubNs(
+      {
+        home: [{ pid: 1, filename: "start.js", args: [] }],
+        "pserv-0": [
+          { pid: 7, filename: "lib/dodge-stub.js", args: [] }, // us
+          { pid: 8, filename: "worker/worker.js", args: [42] }, // a real orphan
+        ],
+      },
+      7,
+      "pserv-0",
+    );
+    const servers = { home: rooted("home", 4), "pserv-0": rooted("pserv-0", 40), other: rooted("other", 12) };
+    const reclaimed = reclaimFleet(stub.ns, servers, 1);
+
+    // pserv-0 is cleared per-process, sparing the stub; only `other` is nuked.
+    expect(stub.cleared).toEqual(["other"]);
+    expect(stub.killed).toEqual([8]);
+    expect(reclaimed.sort()).toEqual(["other", "pserv-0"]);
   });
 });
 

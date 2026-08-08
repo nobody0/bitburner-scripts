@@ -1,6 +1,8 @@
 import type { NS, Player, ResetInfo, Server } from "@ns";
 import type { Clock } from "../clock.ts";
 import type { SimServer } from "../core/effects.ts";
+import type { Engine } from "../engine.ts";
+import type { HacknetSystem } from "../features/hacknet.ts";
 import { unmodeled } from "../realm/unmodeled.ts";
 import type { SimWorld } from "../world.ts";
 import { getRamCost, SCRIPT_BASE_RAM_GB, type RamCostContext } from "./ram-costs.ts";
@@ -46,6 +48,28 @@ export interface SimNsHost {
   output: string[];
   /** Unhandled script errors, for the run summary. */
   crashes: { pid: number; filename: string; error: string }[];
+  /** The game's SECOND timebase (sim/engine.ts).
+   *
+   *  Present so an ns call can poke a counter the way the game does —
+   *  `Singularity.checkFactionInvitations` resets `checkFactionInvitations` to
+   *  force an immediate re-check rather than waiting out the 2 s cycle. Absent
+   *  in harnesses that drive ns without an engine. */
+  engine?: Engine;
+  /** The singularity namespace plus its two loose members, when a run wires a
+   *  faction system. Built by sim/ns/singularity.ts. */
+  singularity?: {
+    singularity: Record<string, unknown>;
+    getFavorToDonate: () => number;
+    enums: Record<string, unknown>;
+  };
+  hacknet?: HacknetSystem;
+  /** Called when an augmentation install prestiges the run.
+   *
+   *  Lives here rather than in `game/` on purpose: a prestige kills every
+   *  process, so `game/`'s module-level dispatcher ledger and the realm
+   *  rendezvous slots describe a world that no longer exists. `game/` must stay
+   *  unaware it is being simulated, so the simulator owns the cleanup. */
+  onPrestige?: () => void;
 }
 
 /** Static RAM for a script launched WITHOUT a ramOverride. Every exec site in
@@ -305,6 +329,52 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     },
     "go",
   );
+
+  if (host.hacknet) {
+    const hacknet = host.hacknet;
+    impl["hacknet"] = namespace(
+      {
+        numNodes: () => hacknet.nodes.length,
+        // Hacknet NODES are uncapped upstream; only hacknet SERVERS cap at 20.
+        maxNumNodes: () => Infinity,
+        purchaseNode: () => hacknet.purchaseNode(),
+        getPurchaseNodeCost: () => hacknet.nodeCost(),
+        getNodeStats: (index: number) => {
+          const node = hacknet.nodes[index];
+          if (!node) throw new Error(`hacknet.getNodeStats: no node ${index}`);
+          return {
+            name: `hacknet-node-${index}`,
+            level: node.level,
+            ram: node.ram,
+            cores: node.cores,
+            production: hacknet.production(node),
+            totalProduction: node.totalProduction,
+            timeOnline: node.onlineTimeSeconds,
+            // NOT reported: `hashCapacity` is what distinguishes a hacknet
+            // SERVER from a node, and its absence is how the strategy detects
+            // it is in the money economy rather than the hash one.
+          };
+        },
+        upgradeLevel: (index: number, n = 1) => hacknet.upgradeLevel(index, n),
+        upgradeRam: (index: number, n = 1) => hacknet.upgradeRam(index, n),
+        upgradeCore: (index: number, n = 1) => hacknet.upgradeCore(index, n),
+        getLevelUpgradeCost: (index: number) => hacknet.levelCost(index),
+        getRamUpgradeCost: (index: number) => hacknet.ramCost(index),
+        getCoreUpgradeCost: (index: number) => hacknet.coreCost(index),
+      },
+      "hacknet",
+    );
+  }
+
+  // Singularity, when the host wired a faction system. Absent in harnesses
+  // that drive ns without one, where every member reports itself as usual.
+  if (host.singularity) {
+    impl["singularity"] = namespace(host.singularity.singularity as Record<string, unknown>, "singularity");
+    impl["getFavorToDonate"] = host.singularity.getFavorToDonate;
+    // `ns.enums` is a PROPERTY, not a function — a 0 GB read, and the
+    // planner's only way to enumerate factions it has not been invited to.
+    impl["enums"] = host.singularity.enums;
+  }
 
   return namespace(impl, "") as NS;
 }

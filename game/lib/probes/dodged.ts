@@ -95,6 +95,12 @@ const progressionMults: DodgedProbe = {
 
 // --- factions (singularity) ------------------------------------------------
 
+/** Standing at every joined faction, plus pending invitations and enemies.
+ *
+ * Stepped, because the singularity getters cost 5 GB EACH once SF4's 16/4/1
+ * multiplier is applied: five of them in one closure is ~25 GB, against a
+ * dodge budget that is a fraction of that on any early home. One method per
+ * step makes the PEAK price 5 GB instead of the sum. */
 const factionStandings: DodgedProbe = {
   id: "factions.standings",
   kind: "dodged",
@@ -102,32 +108,154 @@ const factionStandings: DodgedProbe = {
   requires: "factions",
   everyMs: MIN_1,
   merge: true,
-  methods: [
-    "singularity.getFactionRep",
-    "singularity.getFactionFavor",
-    "singularity.checkFactionInvitations",
-    "singularity.getFactionInviteRequirements",
-    "getFavorToDonate",
+  steps: [
+    {
+      id: "rep",
+      methods: ["singularity.getFactionRep"],
+      run(stubNs: NS, { player }: ProbeContext, acc) {
+        const rep: Record<string, number> = {};
+        for (const faction of player.factions) rep[String(faction)] = stubNs["singularity"]["getFactionRep"](faction);
+        acc["rep"] = rep;
+      },
+    },
+    {
+      id: "favor",
+      methods: ["singularity.getFactionFavor", "getFavorToDonate"],
+      run(stubNs: NS, { player }: ProbeContext, acc) {
+        const favor: Record<string, number> = {};
+        for (const faction of player.factions) {
+          favor[String(faction)] = stubNs["singularity"]["getFactionFavor"](faction);
+        }
+        acc["favor"] = favor;
+        acc["favorToDonate"] = stubNs["getFavorToDonate"]();
+      },
+    },
+    {
+      id: "invites",
+      methods: ["singularity.checkFactionInvitations"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        acc["invites"] = stubNs["singularity"]["checkFactionInvitations"]().map(String);
+      },
+    },
+    {
+      id: "workTypes",
+      methods: ["singularity.getFactionWorkTypes"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        // Which work types each faction actually offers. NOT optional: without
+        // it the planner has to guess, and guessing "all three" makes it issue
+        // `workForFaction(Tetrads, "hacking")` — which Tetrads does not offer,
+        // so the call fails every tick and reputation never accrues.
+        //
+        // EVERY faction, not just the joined ones. The planner estimates how
+        // long a faction would take to earn reputation at BEFORE deciding to
+        // join it, so restricting this to current members leaves every
+        // candidate looking unworkable and empties the objective.
+        const workTypes: Record<string, string[]> = {};
+        for (const faction of Object.values(stubNs["enums"]["FactionName"]) as string[]) {
+          try {
+            workTypes[faction] = stubNs["singularity"]["getFactionWorkTypes"](faction as never).map(String);
+          } catch {
+            /* a faction this node does not define */
+          }
+        }
+        acc["workTypes"] = workTypes;
+      },
+    },
+    {
+      id: "enemies",
+      methods: ["singularity.getFactionEnemies"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        // A join permanently BANS these, so the panel must be able to show
+        // what a join gives up before it happens.
+        const enemies: Record<string, string[]> = {};
+        for (const faction of Object.values(stubNs["enums"]["FactionName"]) as string[]) {
+          try {
+            enemies[faction] = stubNs["singularity"]["getFactionEnemies"](faction as never).map(String);
+          } catch {
+            /* a faction this node does not define */
+          }
+        }
+        acc["enemies"] = enemies;
+      },
+    },
   ],
-  run(stubNs: NS, { player }: ProbeContext) {
-    const favorToDonate = stubNs["getFavorToDonate"]();
-    const standings = player.factions.map((faction) => ({
-      name: String(faction),
-      rep: stubNs["singularity"]["getFactionRep"](faction),
-      favor: stubNs["singularity"]["getFactionFavor"](faction),
-      favorToDonate,
+  finish(acc) {
+    // Tolerates a partial accumulator: a later step being unaffordable does
+    // not invalidate what the earlier ones learned.
+    const rep = (acc["rep"] as Record<string, number>) ?? {};
+    const favor = (acc["favor"] as Record<string, number>) ?? {};
+    const enemies = (acc["enemies"] as Record<string, string[]>) ?? {};
+    const workTypes = (acc["workTypes"] as Record<string, string[]>) ?? {};
+    const favorToDonate = acc["favorToDonate"] as number | undefined;
+    const standings = Object.keys({ ...rep, ...favor }).map((name) => ({
+      name,
+      rep: rep[name] ?? 0,
+      favor: favor[name] ?? 0,
     }));
-    const invites = stubNs["singularity"]["checkFactionInvitations"]().map(String);
-    const inviteRequirements: Record<string, string[]> = {};
-    for (const invite of invites) {
-      inviteRequirements[invite] = stubNs["singularity"]["getFactionInviteRequirements"](
-        invite as never,
-      ).map((requirement) => JSON.stringify(requirement));
-    }
-    return [emit("factions", { joined: player.factions.map(String), standings, invites, inviteRequirements })];
+    return [
+      emitPartial("factions", {
+        standings,
+        ...(acc["invites"] !== undefined ? { invites: acc["invites"] as string[] } : {}),
+        ...(favorToDonate !== undefined ? { favorToDonate } : {}),
+        ...(acc["workTypes"] !== undefined ? { workTypes } : {}),
+        ...(acc["enemies"] !== undefined ? { enemies } : {}),
+      }),
+    ];
   },
 };
 
+/** STRUCTURED invite requirements for every faction the game knows about.
+ *
+ * Three things make this its own probe. `ns.enums.FactionName` is a 0 GB
+ * property, so enumerating ALL factions costs nothing beyond the getter —
+ * which matters because the planner must reason about factions it has not been
+ * invited to yet. The tree only changes when the BitNode does, so `when`
+ * latches it. And the requirements must be the STRUCTURED tree: the strategy
+ * has to tell an OR branch from an AND, which a display string cannot express. */
+const factionRequirements: DodgedProbe = {
+  id: "factions.requirements",
+  kind: "dodged",
+  feature: "factions",
+  requires: "factions",
+  everyMs: MIN_10,
+  merge: true,
+  when: (_caps, topics) => topics.factions?.requirements === undefined,
+  steps: [
+    {
+      id: "all",
+      methods: ["singularity.getFactionInviteRequirements"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const requirements: Record<string, unknown[]> = {};
+        const names = Object.values(stubNs["enums"]["FactionName"]) as string[];
+        for (const name of names) {
+          try {
+            requirements[name] = stubNs["singularity"]["getFactionInviteRequirements"](name as never);
+          } catch {
+            /* a faction this node does not define */
+          }
+        }
+        acc["requirements"] = requirements;
+      },
+    },
+  ],
+  finish(acc) {
+    return [
+      emitPartial("factions", {
+        requirements: (acc["requirements"] ?? {}) as never,
+      }),
+    ];
+  },
+};
+
+/** The augmentation catalogue.
+ *
+ * This is the probe that motivated stepped dodging. Nine singularity methods
+ * in one closure sum to ~33.5 GB even inside BN4, against a dodge budget that
+ * used to be pinned near 2.4 GB — so it could never run. One or two methods
+ * per step brings the PEAK to ~5-10 GB, which the fleet can serve.
+ *
+ * Every step tolerates the previous ones having been skipped, and `finish`
+ * emits whatever was learned. */
 const factionAugs: DodgedProbe = {
   id: "factions.augs",
   kind: "dodged",
@@ -135,59 +263,180 @@ const factionAugs: DodgedProbe = {
   requires: "factions",
   everyMs: MIN_5,
   merge: true,
-  methods: [
-    "singularity.getOwnedAugmentations",
-    "singularity.getAugmentationsFromFaction",
-    "singularity.getAugmentationPrice",
-    "singularity.getAugmentationRepReq",
-    "singularity.getAugmentationPrereq",
-    "singularity.getFactionRep",
-    "grafting.getGraftableAugmentations",
-    "grafting.getAugmentationGraftPrice",
-    "grafting.getAugmentationGraftTime",
+  steps: [
+    {
+      id: "owned",
+      methods: ["singularity.getOwnedAugmentations"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        acc["owned"] = stubNs["singularity"]["getOwnedAugmentations"](true).map(String);
+      },
+    },
+    {
+      id: "catalog",
+      methods: ["singularity.getAugmentationsFromFaction"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        // EVERY faction, not just the joined ones. This getter does not
+        // require membership, and restricting it to joined factions would
+        // leave the planner unable to value a faction it has not joined —
+        // which is precisely the decision it needs to make.
+        const owned = new Set((acc["owned"] as string[]) ?? []);
+        const byFaction: Record<string, string[]> = {};
+        let total = 0;
+        for (const faction of Object.values(stubNs["enums"]["FactionName"]) as string[]) {
+          try {
+            const names = stubNs["singularity"]["getAugmentationsFromFaction"](faction as never)
+              .map(String)
+              .filter((name) => !owned.has(name));
+            if (names.length === 0) continue;
+            byFaction[faction] = names;
+            total += names.length;
+          } catch {
+            /* a faction this node does not define */
+          }
+        }
+        acc["byFaction"] = byFaction;
+        acc["augTotal"] = total;
+      },
+    },
+    {
+      id: "price",
+      methods: ["singularity.getAugmentationPrice"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const prices: Record<string, number> = {};
+        for (const name of listedAugs(acc)) prices[name] = stubNs["singularity"]["getAugmentationPrice"](name as never);
+        acc["prices"] = prices;
+      },
+    },
+    {
+      id: "rep",
+      methods: ["singularity.getAugmentationRepReq", "singularity.getFactionRep"],
+      run(stubNs: NS, { player }: ProbeContext, acc) {
+        const repReq: Record<string, number> = {};
+        for (const name of listedAugs(acc)) repReq[name] = stubNs["singularity"]["getAugmentationRepReq"](name as never);
+        acc["repReq"] = repReq;
+        const rep: Record<string, number> = {};
+        for (const faction of player.factions) rep[String(faction)] = stubNs["singularity"]["getFactionRep"](faction);
+        acc["factionRep"] = rep;
+      },
+    },
+    {
+      id: "prereqs",
+      methods: ["singularity.getAugmentationPrereq", "singularity.getAugmentationStats"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const prereqs: Record<string, string[]> = {};
+        const mults: Record<string, Record<string, number>> = {};
+        for (const name of listedAugs(acc)) {
+          prereqs[name] = stubNs["singularity"]["getAugmentationPrereq"](name as never).map(String);
+          // The multipliers are what the objective SCORES; without them the
+          // planner can only rank by price, which is not the objective at all.
+          //
+          // Per-augmentation isolation: Unstable Circadian Modulator has no
+          // stable stats (upstream randomises them at load), so the simulator
+          // refuses rather than inventing a value. One refusal must not cost
+          // the other ~200 augmentations their multipliers.
+          try {
+            mults[name] = { ...stubNs["singularity"]["getAugmentationStats"](name as never) } as Record<string, number>;
+          } catch {
+            /* no stable multipliers for this augmentation */
+          }
+        }
+        acc["prereqs"] = prereqs;
+        acc["mults"] = mults;
+      },
+    },
+    {
+      id: "graft",
+      // Grafting is gated by BN10/SF10, NOT the SF4 that gates the rest of
+      // this probe, and it THROWS rather than returning empty. Its own step,
+      // so a save with Singularity but no Grafting still gets everything else.
+      methods: [
+        "grafting.getGraftableAugmentations",
+        "grafting.getAugmentationGraftPrice",
+        "grafting.getAugmentationGraftTime",
+      ],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const graftable: { name: string; price: number; timeMs: number }[] = [];
+        try {
+          for (const name of stubNs["grafting"]["getGraftableAugmentations"]().slice(0, LIST_LIMIT)) {
+            graftable.push({
+              name: String(name),
+              price: stubNs["grafting"]["getAugmentationGraftPrice"](name),
+              timeMs: stubNs["grafting"]["getAugmentationGraftTime"](name),
+            });
+          }
+        } catch {
+          /* no Grafting API in this BitNode */
+        }
+        acc["graftable"] = graftable;
+      },
+    },
   ],
-  run(stubNs: NS, { player }: ProbeContext) {
-    const owned = new Set(stubNs["singularity"]["getOwnedAugmentations"](true).map(String));
+  finish(acc) {
+    const byFaction = (acc["byFaction"] as Record<string, string[]>) ?? {};
+    const prices = (acc["prices"] as Record<string, number>) ?? {};
+    const repReq = (acc["repReq"] as Record<string, number>) ?? {};
+    const factionRep = (acc["factionRep"] as Record<string, number>) ?? {};
+    const prereqs = (acc["prereqs"] as Record<string, string[]>) ?? {};
+    const mults = (acc["mults"] as Record<string, Record<string, number>>) ?? {};
+
     const offers = [];
-    let augTotal = 0;
-    for (const faction of player.factions) {
-      const rep = stubNs["singularity"]["getFactionRep"](faction);
-      for (const name of stubNs["singularity"]["getAugmentationsFromFaction"](faction)) {
-        if (owned.has(String(name))) continue;
-        augTotal++;
-        if (offers.length >= LIST_LIMIT) continue;
-        const repReq = stubNs["singularity"]["getAugmentationRepReq"](name);
+    for (const [faction, names] of Object.entries(byFaction)) {
+      for (const name of names) {
+        if (offers.length >= FACTION_AUG_LIMIT) break;
+        const required = repReq[name] ?? 0;
+        const have = factionRep[faction] ?? 0;
         offers.push({
-          name: String(name),
-          faction: String(faction),
-          price: stubNs["singularity"]["getAugmentationPrice"](name),
-          repReq,
-          affordableRep: rep >= repReq,
+          name,
+          faction,
+          price: prices[name] ?? 0,
+          repReq: required,
+          affordableRep: have >= required,
+          repGap: Math.max(0, required - have),
           owned: false,
-          prereqs: stubNs["singularity"]["getAugmentationPrereq"](name).map(String),
+          prereqs: prereqs[name] ?? [],
+          ...(mults[name] ? { mults: mults[name] } : {}),
         });
       }
     }
     offers.sort((a, b) => a.price - b.price);
 
-    // Grafting is gated by BN10/SF10, NOT by the SF4 that gates the rest of
-    // this probe, and it throws rather than returning empty. Isolated so a
-    // save with Singularity but no Grafting still gets its augmentation list.
-    const graftable = [];
-    try {
-      for (const name of stubNs["grafting"]["getGraftableAugmentations"]().slice(0, LIST_LIMIT)) {
-        graftable.push({
-          name: String(name),
-          price: stubNs["grafting"]["getAugmentationGraftPrice"](name),
-          timeMs: stubNs["grafting"]["getAugmentationGraftTime"](name),
-        });
-      }
-    } catch {
-      /* no Grafting API in this BitNode */
-    }
-    return [emit("factions", { joined: player.factions.map(String), ownedAugs: [...owned], offers, augTotal, graftable })];
+    return [
+      emitPartial("factions", {
+        ...(acc["owned"] !== undefined ? { ownedAugs: acc["owned"] as string[] } : {}),
+        offers,
+        ...(acc["augTotal"] !== undefined ? { augTotal: acc["augTotal"] as number } : {}),
+        ...(acc["graftable"] !== undefined
+          ? { graftable: acc["graftable"] as { name: string; price: number; timeMs: number }[] }
+          : {}),
+      }),
+    ];
   },
 };
+
+/** The augmentation list is capped far higher than the display lists, because
+ * the PLANNER reads it, not just the panel.
+ *
+ * It has to cover every (faction, augmentation) pair: there are ~137
+ * augmentations across 34 factions, so ~400 pairs. A tighter cap truncates in
+ * `FactionName` enum order — under which CyberSec is 31st — so the early-game
+ * factions the planner most needs would score ZERO and never be chosen, while
+ * the endgame ones at the top of the enum looked like the only options. That
+ * is a silent wrong answer, not a missing panel row. */
+const FACTION_AUG_LIMIT = 500;
+
+/** Distinct augmentation names the catalog step found, capped so one step's
+ * loop cannot become unbounded on a late-game save. */
+function listedAugs(acc: Record<string, unknown>): string[] {
+  const byFaction = (acc["byFaction"] as Record<string, string[]>) ?? {};
+  const seen = new Set<string>();
+  for (const names of Object.values(byFaction)) {
+    for (const name of names) {
+      if (seen.size >= FACTION_AUG_LIMIT) return [...seen];
+      seen.add(name);
+    }
+  }
+  return [...seen];
+}
 
 // --- career (singularity) --------------------------------------------------
 
@@ -215,6 +464,11 @@ const careerWork: DodgedProbe = {
               type: work.type,
               detail: String(work.factionName ?? work.companyName ?? work.crimeType ?? work.classType ?? ""),
               focused: stubNs["singularity"]["isFocused"](),
+              // How far in the activity already is. Load-bearing for the work
+              // slot: without it a driver can only say "a crime is running",
+              // not "it has 90 seconds left", and the arbiter cannot tell a
+              // nearly-finished activity from one just started.
+              cyclesWorked: typeof work.cyclesWorked === "number" ? work.cyclesWorked : 0,
             }
           : undefined,
         companies,
@@ -245,6 +499,19 @@ const careerCrimes: DodgedProbe = {
         money: stats.money,
         timeMs: stats.time,
         karma: stats.karma,
+        kills: stats.kills,
+        // The planner scores actions by how fast they move POSTED NEEDS, and
+        // several of those are stat thresholds — so the experience table is a
+        // decision input, not decoration.
+        exp: {
+          hacking: stats.hacking_exp,
+          strength: stats.strength_exp,
+          defense: stats.defense_exp,
+          dexterity: stats.dexterity_exp,
+          agility: stats.agility_exp,
+          charisma: stats.charisma_exp,
+          intelligence: stats.intelligence_exp,
+        },
         moneyPerSec: stats.time > 0 ? (stats.money * chance) / (stats.time / 1000) : 0,
       };
     });
@@ -1021,6 +1288,7 @@ export const DODGED_PROBES: readonly DodgedProbe[] = [
   progressionMoney,
   progressionMults,
   factionStandings,
+  factionRequirements,
   factionAugs,
   careerWork,
   careerCrimes,

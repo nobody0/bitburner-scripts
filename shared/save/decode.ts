@@ -185,6 +185,10 @@ function decodeBitNodeOptions(raw: unknown): SaveBitNodeOptions {
   };
 }
 
+function strList(raw: unknown): string[] {
+  return Array.isArray(raw) ? (raw as unknown[]).filter((v): v is string => typeof v === "string") : [];
+}
+
 function decodePlayer(raw: unknown): SavePlayer {
   const bag = asBag(raw);
   const hp = asBag(bag["hp"]);
@@ -204,9 +208,9 @@ function decodePlayer(raw: unknown): SavePlayer {
     hp: { current: num(hp["current"], 10), max: num(hp["max"], 10) },
     augmentations: ownedAugList(bag["augmentations"]),
     queuedAugmentations: ownedAugList(bag["queuedAugmentations"]),
-    factions: Array.isArray(bag["factions"])
-      ? (bag["factions"] as unknown[]).filter((f): f is string => typeof f === "string")
-      : [],
+    factions: strList(bag["factions"]),
+    factionInvitations: strList(bag["factionInvitations"]),
+    numPeopleKilled: num(bag["numPeopleKilled"], 0),
     jobs: Object.fromEntries(
       Object.entries(asBag(bag["jobs"])).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
     ),

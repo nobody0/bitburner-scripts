@@ -84,6 +84,21 @@ the dispatcher everything above `HOME_RESERVE_GB`:
    emits `probe.skipped {id, cost, budget}` for the rest. A panel that stays
    empty says why.
 
+A dodged probe comes in two shapes. A **single-step** probe reads everything in
+one stub. A **stepped** probe (`SteppedProbe`) runs one dodge per step, so its
+launch price is the largest *step* rather than the sum of its methods — the
+difference between a 33.5 GB augmentation sweep and five ~5 GB ones. Steps
+accumulate into a shared bag and `finish(acc)` turns it into emissions;
+`finish` **must** tolerate a partial accumulator, because a later step being
+unaffordable does not invalidate what the earlier ones learned.
+
+Home RAM is no longer the ceiling it was. Dodges are placed across the whole
+rooted fleet (`spec/dodging.md`), and the home reserve grows to cover the
+largest step any unlocked feature declares (`FeatureModule.peakStepGb` →
+`shared/ram/reserve.ts`). What that cannot fix is one *indivisible* expensive
+call: a single `SingularityFn3` at SF4 level 1 costs 80 GB, and no splitting
+helps, so the feature reports an explicit blocker instead of spinning.
+
 Rules for probe bodies:
 
 - **Bracket notation on the stub's own ns** (`stubNs["gang"]["inGang"]()`), or
@@ -105,9 +120,18 @@ Rules for probe bodies:
 ## Driving
 
 The write side is `game/lib/features/`, scheduled by `game/lib/controller.ts`.
-A probe reads one feature's state; a **driver** acts on it.
+A probe reads one feature's state; a **module** owns everything needed to act
+on it.
 
 ```ts
+interface FeatureModule {
+  driver: FeatureDriver;
+  reset?(): void;                    // drop state derived from a dead world
+  claims?(ctx: ClaimContext): Claim[];  // PURE — bids for contended resources
+  needs?(ctx: NeedContext): Need[];     // PURE — outcomes wanted from others
+  peakStepGb?: number;               // largest dodge step, feeds the reserve
+}
+
 interface FeatureDriver {
   id: FeatureId;
   everyMs: number;          // plain literal, like a probe cadence
@@ -115,6 +139,46 @@ interface FeatureDriver {
   tick(ctx: DriverContext): void | Promise<void>;
 }
 ```
+
+Bundling the four is what lets the controller name no feature. `FEATURE_DRIVERS`
+is *derived* from `FEATURE_MODULES` rather than being a second hand-maintained
+list, and `onBitNodeReset` walks the registry calling every `reset?.()` instead
+of calling `resetHackingState()` directly — so a new feature that caches
+anything across a node reset cannot leak it because someone forgot to edit the
+loop. `tests/features.test.ts` pins all of this.
+
+### The feature pass
+
+Four phases, and the ordering is load-bearing:
+
+```
+collect needs (pure)  →  collect claims against the completed board (pure)
+   →  one arbitration  →  tick each due driver with its own grants
+```
+
+Needs come first so a feature can bid harder *because* another is blocked on
+it. Claims are collected only from modules whose driver is due, so a feature
+can never win a grant on a tick it would not run to spend it.
+
+### Cross-feature coordination
+
+Two mechanisms, deliberately distinct, both pure and both rendered:
+
+- **The needs board** (`shared/strategy/needs.ts`) broadcasts a desired
+  *outcome and its worth* — never a method. `factions` posts
+  `{kind:"karma", target:-45}`; `career` folds the board into objective weights
+  and decides for itself whether that is Mugs or Homicides. `gang` later posts
+  `{kind:"karma", target:-54000}` the same way, and the two weights *add*,
+  because delivering the outcome once unblocks both.
+- **The arbiter** (`shared/strategy/arbiter.ts`) allocates the three genuinely
+  contended resources: money, the single `Player.currentWork` slot, and dodge
+  RAM. The work slot needs pre-emption rules rather than fairness ones because
+  `ns.singularity.workForFaction` silently *cancels* whatever is running — the
+  loser is not delayed, its progress is destroyed.
+
+Both hang off the `progression` telemetry topic. That is not a feature id, and
+deliberately so: they describe the relationships *between* features, so giving
+them one would be a category error.
 
 `selectDue(drivers, lastRun, caps, now)` is pure and unit-tested: it is the
 whole scheduling rule, and it is where the capability gate is enforced. Two
@@ -130,10 +194,14 @@ properties matter.
 `hacking` is the only driver at 200 ms — batch ops land on HWGW spacer slots,
 so a slower cadence would miss them. Everything else is slower by orders of
 magnitude, which is the reason the frame schedules by cadence at all rather
-than running every driver every pass. Twelve of the fourteen are registered
-inert (`tick() {}`) with the registry's `problem` string as their TODO: a
-declared no-op makes the gating visible, gives the scheduler its real shape,
-and keeps `tests/features.test.ts` able to enforce a driver per feature.
+than running every driver every pass.
+
+All fourteen are implemented; there is no `inert()` helper any more. Four have
+their own file (`factions`, `career`, `hacknet`, `stock`) because they needed
+more than the common shape; the rest share `features/remaining.ts`, which is a
+statement about their SHAPE — build a view, call one pure `step*`, execute at
+most one action per tick in one dodge — not about their size. Any of them moves
+to its own file the moment it needs more.
 
 The network sweep — scan, reclaim, root, deploy, reap, heap resync — stays in
 the controller rather than becoming a `hacking` concern, because a rooted
@@ -166,7 +234,12 @@ Two rules that are easy to get backwards:
 
 ## The simulator
 
-Nothing in `sim/` models a non-hacking feature yet. `Feature.problem` is the
-placeholder contract: it states, in one line, the question a future
-`sim/features/<id>.ts` has to answer. The composed BitNode-level simulation is
-the point of splitting them this way.
+`sim/features/` models `factions`, `crime` (career's engine) and `hacknet`,
+each wired to the real `EngineSubsystems` hook and each driving a deterministic
+isolation profile that runs the **real** controller to a goal. The remaining
+features have pure strategy, a driver and unit tests, but no simulator model —
+so they are unit-proven, not simulator-proven, and their ns calls report
+`unmodeled()` rather than fabricating a value. `spec/progress.md` tracks which
+is which.
+
+The composed BitNode-level simulation is the point of splitting them this way.

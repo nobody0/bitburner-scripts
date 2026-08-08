@@ -10,12 +10,19 @@ import {
 import { WORKER_RAM } from "../world.ts";
 
 /** Per-target strategy solve — the inner half of "find the optimal target".
- * Pure math on shared/formulas.ts; ~27 evaluations per target (16-pt grid in
- * -log(1-s) + golden-section refine + integer snap), budget ~50µs.
+ * Pure math on shared/formulas.ts. Small domains are exhaustively searched;
+ * large ones use a bounded grid/refinement search. Both stay inside the
+ * refresh budgets pinned by sim/tests/targeting.test.ts.
  *
  * Scores are $/GB/sec at the PREPPED steady state (minSec, moneyMax): the
- * right unit for a RAM-bound dispatcher (legacy analyze-profit's insight),
- * computed with exact thread counts instead of its log-approximation.
+ * right unit for a RAM-bound dispatcher. The insight came from an earlier
+ * rewrite's `analyze-profit.js` (`nobody0/bitburner`, no longer checked out —
+ * see README's citation note); we compute it with exact thread counts instead
+ * of its log-approximation. The predecessor scripts on disk score differently
+ * and arguably better — `src/_lib/optimizer.ts:123` weights money per thread by
+ * op duration, `(moneyHack + moneyStocks)·hackChance / (1 + growPerHack·3.2 +
+ * weakPerHack·4) / hackTime`, which prices grow and weaken holding RAM longer.
+ * spec/progress.md tracks that as an open audit question.
  *
  * RAM-seconds are UNWEIGHTED by hack chance: our HWGW batches always launch
  * all four ops (the RAM is spent whether the hack lands or not); only income
@@ -31,6 +38,8 @@ export interface TargetStatics {
 }
 
 export interface CycleSolution {
+  /** True when every feasible integer hack-thread count was evaluated. */
+  exact: boolean;
   /** Effective steal fraction per successful hack (H * percent, capped). */
   stealFraction: number;
   hackThreads: number;
@@ -84,6 +93,8 @@ interface CycleEval {
 
 const GOLDEN = (Math.sqrt(5) - 1) / 2;
 const MAX_STEAL = 0.95;
+/** Exhaustive integer search is cheap enough below this inclusive boundary. */
+export const EXACT_THREAD_LIMIT = 1_024;
 
 /** RAM feasibility caps. A batch that cannot be placed is worthless however
  * well it scores, so the search only considers placeable thread counts:
@@ -112,6 +123,16 @@ export function solveCycle(
   if (k === -Infinity) return undefined;
   const hackTimeS = hackTimeSeconds(ctx, minDifficulty, requiredHackingSkill);
   const weakenPerThread = weakenEffect(ctx, 1, cores);
+
+  const stealBound = Math.max(1, Math.floor(MAX_STEAL / percent));
+  const hackBlockBound = Number.isFinite(caps.hackBlockGb)
+    ? Math.floor(caps.hackBlockGb / WORKER_RAM.hack)
+    : Infinity;
+  // The other three operations consume additional RAM, so this is a finite
+  // upper bound, not a claim that every count below it is feasible.
+  const batchBound = Number.isFinite(caps.batchGb) ? Math.floor(caps.batchGb / WORKER_RAM.hack) : Infinity;
+  const maxThreads = Math.min(stealBound, hackBlockBound, batchBound);
+  if (maxThreads < 1) return undefined;
 
   const evalThreads = (hackThreads: number): CycleEval | undefined => {
     if (hackThreads < 1) return undefined;
@@ -145,7 +166,38 @@ export function solveCycle(
     };
   };
 
-  const threadsFor = (s: number): number => Math.max(1, Math.round(s / percent));
+  const better = (candidate: CycleEval | undefined, incumbent: CycleEval | undefined): candidate is CycleEval =>
+    candidate !== undefined &&
+    (incumbent === undefined ||
+      candidate.score > incumbent.score ||
+      (candidate.score === incumbent.score && candidate.hackThreads < incumbent.hackThreads));
+
+  const finish = (best: CycleEval, exact: boolean): CycleSolution => ({
+    exact,
+    stealFraction: best.steal,
+    hackThreads: best.hackThreads,
+    weaken1Threads: best.weaken1,
+    growThreads: best.growThreadCount,
+    weaken2Threads: best.weaken2,
+    hackTimeS,
+    growTimeS: 3.2 * hackTimeS,
+    weakenTimeS: 4 * hackTimeS,
+    chance,
+    score: best.score,
+    ramPerBatch: best.ram,
+    incomePerBatch: best.income,
+  });
+
+  if (maxThreads <= EXACT_THREAD_LIMIT) {
+    let exactBest: CycleEval | undefined;
+    for (let threads = 1; threads <= maxThreads; threads++) {
+      const candidate = evalThreads(threads);
+      if (better(candidate, exactBest)) exactBest = candidate;
+    }
+    return exactBest ? finish(exactBest, true) : undefined;
+  }
+
+  const threadsFor = (s: number): number => Math.min(maxThreads, Math.max(1, Math.round(s / percent)));
   const evalSteal = (s: number): CycleEval | undefined => evalThreads(threadsFor(s));
 
   // 16-point grid, uniform in u = -log(1-s) over [one thread, MAX_STEAL].
@@ -156,10 +208,12 @@ export function solveCycle(
   const uHigh = -Math.log1p(-MAX_STEAL);
   let best: CycleEval | undefined;
   let bestU = uLow;
+  const promising = new Set<number>();
   for (let i = 0; i < 16; i++) {
     const u = uLow + ((uHigh - uLow) * i) / 15;
     const candidate = evalSteal(1 - Math.exp(-u));
-    if (candidate && (!best || candidate.score > best.score)) {
+    if (candidate) promising.add(candidate.hackThreads);
+    if (better(candidate, best)) {
       best = candidate;
       bestU = u;
     }
@@ -170,7 +224,7 @@ export function solveCycle(
     // optimum, so the largest feasible batch is the best one — bisect for it.
     if (!evalThreads(1)) return undefined;
     let lo = 1;
-    let hi = threadsFor(MAX_STEAL);
+    let hi = maxThreads;
     while (lo < hi) {
       const mid = Math.ceil((lo + hi) / 2);
       if (evalThreads(mid)) lo = mid;
@@ -190,32 +244,26 @@ export function solveCycle(
     const mid2 = lo + GOLDEN * (hi - lo);
     const eval1 = evalSteal(1 - Math.exp(-mid1));
     const eval2 = evalSteal(1 - Math.exp(-mid2));
+    if (eval1) promising.add(eval1.hackThreads);
+    if (eval2) promising.add(eval2.hackThreads);
     if ((eval1?.score ?? -1) >= (eval2?.score ?? -1)) hi = mid2;
     else lo = mid1;
     const mid = evalSteal(1 - Math.exp(-(lo + hi) / 2));
-    if (mid && mid.score > best.score) best = mid;
+    if (mid) promising.add(mid.hackThreads);
+    if (better(mid, best)) best = mid;
   }
 
-  // Integer snap: the solution space is integer hack threads.
-  for (const candidateThreads of [best.hackThreads - 1, best.hackThreads + 1]) {
-    const candidate = evalThreads(candidateThreads);
-    if (candidate && candidate.score > best.score) best = candidate;
+  // The large domain remains heuristic, but every promising continuous/grid
+  // point gets a bounded integer neighborhood rather than a one-step snap.
+  promising.add(best.hackThreads);
+  for (const center of promising) {
+    for (let candidateThreads = Math.max(1, center - 8); candidateThreads <= Math.min(maxThreads, center + 8); candidateThreads++) {
+      const candidate = evalThreads(candidateThreads);
+      if (better(candidate, best)) best = candidate;
+    }
   }
 
-  return {
-    stealFraction: best.steal,
-    hackThreads: best.hackThreads,
-    weaken1Threads: best.weaken1,
-    growThreads: best.growThreadCount,
-    weaken2Threads: best.weaken2,
-    hackTimeS,
-    growTimeS: 3.2 * hackTimeS,
-    weakenTimeS: 4 * hackTimeS,
-    chance,
-    score: best.score,
-    ramPerBatch: best.ram,
-    incomePerBatch: best.income,
-  };
+  return finish(best, false);
 }
 
 export const PREPPED_SEC_TOLERANCE = 1;

@@ -72,7 +72,8 @@ export interface LocalProbe extends ProbeBase {
   run(ctx: ProbeContext): Emission[];
 }
 
-export interface DodgedProbe extends ProbeBase {
+/** A dodged probe that reads everything in one stub launch. */
+export interface SingleStepProbe extends ProbeBase {
   kind: "dodged";
   /** Fully-qualified ns methods called by `run`, exactly as
    *  ns.getFunctionRamCost expects them ("gang.getMemberInformation").
@@ -81,6 +82,55 @@ export interface DodgedProbe extends ProbeBase {
    *  tests/features.test.ts checks every name against the type definitions. */
   methods: string[];
   run(stubNs: NS, ctx: ProbeContext): Emission[] | Promise<Emission[]>;
+}
+
+/** Whatever a stepped probe carries between its steps. Deliberately untyped at
+ * this layer — each probe owns its own shape and casts once, because typing it
+ * generically would force the probe TABLE to become generic and every consumer
+ * with it. */
+export type ProbeAcc = Record<string, unknown>;
+
+export interface DodgeStep {
+  /** Reported when this step is the one that did not fit, so the UI can say
+   *  WHICH half of a probe is unaffordable rather than just "the probe". */
+  id: string;
+  methods: string[];
+  run(stubNs: NS, ctx: ProbeContext, acc: ProbeAcc): void | Promise<void>;
+}
+
+/** A dodged probe split across several stub launches.
+ *
+ * The reason this shape exists: a stub's RAM bill is the sum of every distinct
+ * ns function it references, so nine singularity methods in one closure cost
+ * ~33.5 GB even in BN4 — against a dodge budget pinned near 2.4 GB by the home
+ * reserve. Split into one method per step, the PEAK cost becomes the largest
+ * single step (~5 GB) instead of the sum, and the probe becomes affordable on
+ * hardware where it never could have run.
+ *
+ * Steps run sequentially, each in its own dodge, accumulating into a shared
+ * bag. What it cannot fix is one indivisible expensive call — a single
+ * `SingularityFn3` at SF4 level 1 is 80 GB and no amount of splitting helps.
+ * That is reported as an explicit blocker instead. */
+export interface SteppedProbe extends ProbeBase {
+  kind: "dodged";
+  steps: DodgeStep[];
+  /** Turn the accumulator into emissions.
+   *
+   *  MUST tolerate a PARTIAL accumulator: when a later step cannot be afforded
+   *  the earlier ones have already run, and emitting what we learned beats
+   *  discarding it. The skipped step is reported separately. */
+  finish(acc: ProbeAcc): Emission[];
+}
+
+export type DodgedProbe = SingleStepProbe | SteppedProbe;
+
+export function isStepped(probe: DodgedProbe): probe is SteppedProbe {
+  return "steps" in probe;
+}
+
+/** Every ns method a probe can reach, whichever shape it has. */
+export function probeMethods(probe: DodgedProbe): string[] {
+  return isStepped(probe) ? probe.steps.flatMap((step) => step.methods) : probe.methods;
 }
 
 export type Probe = LocalProbe | DodgedProbe;

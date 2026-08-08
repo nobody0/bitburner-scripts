@@ -15,6 +15,7 @@ export const hackingTab: Tab = {
     const farmTiles = farm
       ? tiles([
           { label: "farm target", value: farm.target || "–" },
+          { label: "target solve", value: farm.targetSolveExact === undefined ? "–" : farm.targetSolveExact ? "exact" : "heuristic" },
           { label: "prepping", value: farm.prepTarget || "–" },
           { label: "$/sec", value: farm.moneyRate !== undefined ? `${fmtMoney(farm.moneyRate)}/s` : "–" },
           { label: "exp/sec", value: farm.expRate !== undefined ? fmtNum(farm.expRate, 1) : "–" },

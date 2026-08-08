@@ -3,6 +3,7 @@ import { goalFrom } from "../../shared/goals/goal.ts";
 import { parseGoal } from "../../shared/goals/presets.ts";
 import type { LogRecord } from "../../shared/telemetry/schema.ts";
 import type { Planner } from "../../shared/world.ts";
+import { DEFAULT_NETWORK } from "../network.ts";
 import { runSim } from "../run.ts";
 
 describe("runSim initialization", () => {
@@ -58,7 +59,10 @@ describe("runSim initialization", () => {
     const initialServers = records.filter(
       (record) => record.kind === "state" && record.key.startsWith("getServer:"),
     );
-    expect(initialServers.length).toBe(7);
+    // Derived, not hardcoded: home plus the network. A literal here goes stale
+    // every time a server is added and says nothing about the property under
+    // test, which is that EVERY server is snapshotted before the run starts.
+    expect(initialServers.length).toBe(DEFAULT_NETWORK.length + 1);
     expect(initialServers.some((record) => record.kind === "state" && record.key === "getServer:home")).toBe(true);
     expect(records.some((record) => record.kind === "event" && record.name === "sim.meta")).toBe(true);
     expect(records.at(-1)).toMatchObject({ kind: "event", name: "sim.result" });

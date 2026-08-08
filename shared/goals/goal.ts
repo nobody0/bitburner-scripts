@@ -9,6 +9,9 @@ export interface GoalPlayer {
   money: number;
   hackingSkill: number;
   hackingExp: number;
+  /** Negative and decreasing; a karma goal is an UPPER bound. */
+  karma: number;
+  numPeopleKilled: number;
 }
 
 export interface GoalServer {
@@ -37,6 +40,13 @@ export interface GoalContext {
    *  is free (Player.factions); rep needs the singularity API, so it stays 0
    *  without BN4/SF4 and a rep goal is simply unreachable there. */
   factions: Map<string, GoalFaction>;
+  /** Augmentations OWNED — installed or queued, matching what
+   *  `ns.singularity.getOwnedAugmentations(true)` reports and what every
+   *  `numAugmentations` faction requirement counts. A goal like `augs:5` is
+   *  about acquisition, not installation: reputation converts to augmentations
+   *  at purchase time, and whether they have been installed yet is the
+   *  `progression` feature's separate decision. */
+  augmentations: Set<string>;
 }
 
 /** Sim-only initial conditions a goal may demand. */

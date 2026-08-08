@@ -59,6 +59,22 @@ const MANIFEST: VendorFile[] = [
   },
   { path: "src/Constants.ts" },
   { path: "src/Server/data/Constants.ts" },
+  // Enums and data constants: import-free upstream, so they vendor verbatim.
+  // These are also the SCOPE for extractDataTable below — the faction table is
+  // keyed by FactionName and references the others, so having one source of
+  // truth for them is what keeps the extracted table honest.
+  { path: "src/Faction/Enums.ts" },
+  { path: "src/Company/Enums.ts" },
+  { path: "src/Locations/Enums.ts" },
+  { path: "src/Work/Enums.ts" },
+  { path: "src/Literature/Enums.ts" },
+  { path: "src/Message/Enums.ts" },
+  { path: "src/Augmentation/Enums.ts" },
+  { path: "src/Programs/Enums.ts" },
+  { path: "src/Crime/Enums.ts" },
+  { path: "src/Server/data/SpecialServers.ts" },
+  { path: "src/Bladeburner/data/Constants.ts" },
+  { path: "src/Faction/formulas/favor.ts" },
   { path: "src/Hacknet/data/Constants.ts" },
   { path: "src/Types/Record.ts" },
   { path: "src/utils/helpers/clampNumber.ts" },
@@ -103,32 +119,73 @@ for (const file of MANIFEST) {
   console.log(`vendored ${file.path}`);
 }
 
-/** Slice a single `export function name(...)` out of a source file whose other
- * contents are not portable (react/@player imports). Ends at the first
- * column-zero `}`. */
-function extractFunction(sourcePath: string, name: string, prologue: string[], outRelPath: string, patches: Patch[] = []): void {
-  const lines = gitShow(sourcePath).split("\n");
-  const start = lines.findIndex((l) => l.startsWith(`export function ${name}`));
-  if (start === -1) throw new Error(`${sourcePath}: ${name} not found (source drifted?)`);
-  const end = lines.findIndex((l, i) => i > start && l === "}");
-  let fn = lines.slice(start, end + 1).join("\n");
-  for (const patch of patches) {
-    if (!fn.includes(patch.find)) throw new Error(`${sourcePath}#${name}: patch target not found:\n${patch.find}`);
-    fn = fn.replace(patch.find, patch.replace);
+/** Is this line a complete declaration on its own? A one-line
+ * `export const MaxFavor = 35331;` has no column-zero closer to look for. */
+function selfContained(line: string): boolean {
+  let depth = 0;
+  for (const char of line) {
+    if (char === "{" || char === "[" || char === "(") depth++;
+    else if (char === "}" || char === "]" || char === ")") depth--;
   }
+  return depth === 0 && /[;}]\s*$/.test(line);
+}
+
+/** Slice one top-level declaration out of a source file whose other contents
+ * are not portable (react/@player imports).
+ *
+ * Terminates at the first COLUMN-ZERO `}`, `};` or `} as const;` — column zero
+ * being the whole trick, since any nested closer is indented. A declaration
+ * that fits on one line is taken as-is. */
+function sliceSymbol(lines: string[], name: string, sourcePath: string): string {
+  const declaration = new RegExp(`^(export )?(async )?(function|const|class|interface|type) ${name}\\b`);
+  const start = lines.findIndex((line) => declaration.test(line));
+  if (start === -1) throw new Error(`${sourcePath}: ${name} not found (source drifted?)`);
+  if (selfContained(lines[start]!)) return lines[start]!;
+  for (let i = start + 1; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (line === "}" || line === "};" || line === "} as const;") return lines.slice(start, i + 1).join("\n");
+  }
+  throw new Error(`${sourcePath}: ${name} has no column-zero terminator (source drifted?)`);
+}
+
+/** Slice one or more named declarations out of a file. */
+function extractSymbols(
+  sourcePath: string,
+  names: string[],
+  prologue: string[],
+  outRelPath: string,
+  patches: Patch[] = [],
+): void {
+  const lines = gitShow(sourcePath).split("\n");
+  let body = names.map((name) => sliceSymbol(lines, name, sourcePath)).join("\n\n");
+  for (const patch of patches) {
+    if (!body.includes(patch.find)) {
+      throw new Error(`${sourcePath}#${names.join(",")}: patch target not found:\n${patch.find}`);
+    }
+    body = body.replace(patch.find, patch.replace);
+  }
+  const label = names.length === 1 ? `${names[0]} only` : `${names.length} symbols`;
   const synthesized = [
-    `// Vendored from bitburner-src ${TAG}:${sourcePath} (${name} only, extracted by`,
+    `// Vendored from bitburner-src ${TAG}:${sourcePath} (${label}, extracted by`,
     `// tools/vendor.ts — the rest of that file is not portable) — DO NOT EDIT`,
     ...prologue,
     ``,
-    fn,
+    body,
     ``,
   ].join("\n");
   const outPath = path.join(OUT_DIR, outRelPath);
   mkdirSync(path.dirname(outPath), { recursive: true });
   writeFileSync(outPath, synthesized, "utf8");
-  written.push({ path: `${sourcePath}#${name}`, sha256: createHash("sha256").update(synthesized).digest("hex") });
-  console.log(`vendored ${sourcePath}#${name} -> ${outRelPath}`);
+  written.push({
+    path: `${sourcePath}#${names.join(",")}`,
+    sha256: createHash("sha256").update(synthesized).digest("hex"),
+  });
+  console.log(`vendored ${sourcePath}#${names.join(",")} -> ${outRelPath}`);
+}
+
+/** Back-compat wrapper for the two original single-name call sites. */
+function extractFunction(sourcePath: string, name: string, prologue: string[], outRelPath: string, patches: Patch[] = []): void {
+  extractSymbols(sourcePath, [name], prologue, outRelPath, patches);
 }
 
 // Pure BitNodeMultipliers literals; the rest of BitNode.tsx imports react/@player.
@@ -156,6 +213,593 @@ extractFunction(
   "src/Server/GrowthCycles.ts",
   [{ find: `person: IPerson = Player,`, replace: `person: IPerson,` }],
 );
+
+/** One slice of source feeding a data table. */
+interface TableSource {
+  path: string;
+  /** Exact first line of the slice. Missing => throw (the drift detector). */
+  from: string;
+  /** Exact last line of the slice. */
+  to: string;
+  patches?: Patch[];
+}
+
+interface DataTableSpec {
+  sources: TableSource[];
+  /** Free identifiers the sliced code may use. ANY identifier not in here is a
+   *  ReferenceError at evaluation time — which is exactly the drift detector
+   *  for a new upstream dependency. */
+  scope: Record<string, unknown>;
+  /** Expression returning the plain-JSON table, evaluated after the sources. */
+  shape: string;
+  /** Sanity-check the extracted table. Throwing here fails the vendor run. */
+  verify(table: unknown): void;
+  outRelPath: string;
+  /** Lines emitted above the data (imports, the exported type). */
+  prologue: string[];
+  /** `export const <name>: <type> = <json>;` */
+  exportName: string;
+  exportType: string;
+}
+
+/** Extract a data table buried in an unportable file by TRANSPILING AND
+ * EVALUATING it, rather than parsing it.
+ *
+ * Parsing is not an option here and it is worth being explicit about why: the
+ * faction table is JSX prose full of apostrophes, quotes and typographic
+ * characters, so any regex that tried to find the end of an entry would be
+ * wrong on the first faction whose blurb contains a brace. Evaluating the real
+ * code is the only way to get the real values — including the structured
+ * condition tree, where upstream's own `everyCondition` iterator flattens
+ * nested ANDs but not ANDs nested inside an OR.
+ *
+ * JSX is mapped to inert stubs: we want the data, not the prose. */
+async function extractDataTable(spec: DataTableSpec): Promise<void> {
+  const chunks: string[] = [];
+  for (const source of spec.sources) {
+    const text = gitShow(source.path);
+    const lines = text.split("\n");
+    const start = lines.indexOf(source.from);
+    if (start === -1) throw new Error(`${source.path}: anchor not found (source drifted?):\n${source.from}`);
+    // LAST occurrence: a closing anchor is usually a bare `}`, and the first
+    // one after the opening anchor would end the slice at the first nested
+    // block instead of the intended one.
+    const end = lines.lastIndexOf(source.to);
+    if (end <= start) throw new Error(`${source.path}: end anchor not found after start (source drifted?):\n${source.to}`);
+    let slice = lines.slice(start, end + 1).join("\n");
+    for (const patch of source.patches ?? []) {
+      if (!slice.includes(patch.find)) {
+        throw new Error(`${source.path}: patch target not found (source drifted?):\n${patch.find}`);
+      }
+      slice = slice.replaceAll(patch.find, patch.replace);
+    }
+    chunks.push(slice);
+  }
+
+  // `import`/`export` cannot appear inside a Function body; the scope supplies
+  // what the imports would have.
+  const stripped = stripImports(chunks.join("\n\n"));
+  const transpiler = new Bun.Transpiler({
+    loader: "tsx",
+    tsconfig: JSON.stringify({
+      compilerOptions: { jsx: "react", jsxFactory: "__jsx", jsxFragmentFactory: "__jsxFrag" },
+    }),
+  });
+  const js = transpiler.transformSync(stripped.replace(/^export /gm, ""));
+
+  const scope: Record<string, unknown> = {
+    // JSX is prose; we want the data. Inert stubs keep the elements evaluable.
+    __jsx: () => null,
+    __jsxFrag: () => null,
+    ...spec.scope,
+  };
+  const evaluate = new Function(...Object.keys(scope), `${js}\nreturn (${spec.shape});`);
+  const table: unknown = evaluate(...Object.values(scope));
+  spec.verify(table);
+
+  const synthesized = [
+    `// Vendored from bitburner-src ${TAG} by tools/vendor.ts (extractDataTable:`,
+    `// ${spec.sources.map((s) => s.path).join(", ")}) — DO NOT EDIT`,
+    ...spec.prologue,
+    ``,
+    `export const ${spec.exportName}: ${spec.exportType} = ${serialize(table)};`,
+    ``,
+  ].join("\n");
+  const outPath = path.join(OUT_DIR, spec.outRelPath);
+  mkdirSync(path.dirname(outPath), { recursive: true });
+  writeFileSync(outPath, synthesized, "utf8");
+  written.push({
+    path: `${spec.sources.map((s) => s.path).join("+")}#${spec.exportName}`,
+    sha256: createHash("sha256").update(synthesized).digest("hex"),
+  });
+  console.log(`vendored data table ${spec.exportName} -> ${spec.outRelPath}`);
+}
+
+/** Serialize a table as a TypeScript literal, preserving non-finite numbers.
+ *
+ * `JSON.stringify(Infinity)` is `null`, and the game genuinely uses Infinity —
+ * an unpurchasable special augmentation costs `Infinity`, which is meaningfully
+ * different from `null` (a missing price) and from `0` (free). Emitting a
+ * source file rather than JSON means we can just write `Infinity`. */
+function serialize(value: unknown): string {
+  const MARKER = "@@nonfinite@@";
+  const json = JSON.stringify(
+    value,
+    (_key, v: unknown) => (typeof v === "number" && !Number.isFinite(v) ? `${MARKER}${String(v)}` : v),
+    2,
+  );
+  const out = json.replaceAll(new RegExp(`"${MARKER}(-?Infinity|NaN)"`, "g"), "$1");
+  if (out.includes(MARKER)) throw new Error("non-finite marker survived serialization");
+  return out;
+}
+
+/** Drop `import ...` statements (single- and multi-line). The scope replaces
+ * them, so a missing entry surfaces as a ReferenceError naming the symbol. */
+function stripImports(source: string): string {
+  const lines = source.split("\n");
+  const out: string[] = [];
+  let inImport = false;
+  for (const line of lines) {
+    if (inImport) {
+      if (/^\s*}\s*from\s+".*";?\s*$/.test(line) || /;\s*$/.test(line)) inImport = false;
+      continue;
+    }
+    if (/^import\s/.test(line)) {
+      // Single-line import ends on the same line.
+      if (!/;\s*$/.test(line)) inImport = true;
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+// Donation math only. The mutating `donate` and the `canDonate` guard both
+// reach for the live @player singleton; the sim owns that side itself.
+extractSymbols(
+  "src/Faction/formulas/donation.ts",
+  ["repFromDonation", "donationForRep", "favorNeededToDonate"],
+  [
+    `import type { Person as IPerson } from "@nsdefs";`,
+    `import { CONSTANTS } from "../../Constants";`,
+    `import { currentNodeMults } from "../../BitNode/BitNodeMultipliers";`,
+  ],
+  "src/Faction/formulas/Donation.ts",
+);
+
+// Reputation rates per work type. Two upstream dependencies reach for live
+// singletons and are turned into explicit injections rather than stubbed out:
+// the share bonus (NetworkShare) and SF15 level (@player), both of which
+// genuinely change the rate and would be silently wrong at 1x / 0.
+extractSymbols(
+  "src/PersonObjects/formulas/reputation.ts",
+  ["mult", "getHackingWorkRepGain", "getFactionSecurityWorkRepGain", "getFactionFieldWorkRepGain", "getDarknetCharismaBonus"],
+  [
+    `import type { Person as IPerson } from "@nsdefs";`,
+    `import { CONSTANTS } from "../../Constants";`,
+    `import { currentNodeMults } from "../../BitNode/BitNodeMultipliers";`,
+    `import { calculateIntelligenceBonus } from "./intelligence";`,
+    ``,
+    `/** Injected: upstream reads these from live singletons (NetworkShare and`,
+    ` *  @player). They are real inputs to the rate, so they are parameters here`,
+    ` *  rather than constants — a hardcoded 1x share bonus would quietly`,
+    ` *  understate every rep rate on a sharing fleet. */`,
+    `let shareBonus = 1;`,
+    `let sf15Level = 0;`,
+    `export function setReputationContext(ctx: { shareBonus?: number; sf15Level?: number }): void {`,
+    `  if (ctx.shareBonus !== undefined) shareBonus = ctx.shareBonus;`,
+    `  if (ctx.sf15Level !== undefined) sf15Level = ctx.sf15Level;`,
+    `}`,
+    `const calculateCurrentShareBonus = (): number => shareBonus;`,
+  ],
+  "src/PersonObjects/formulas/Reputation.ts",
+  [{ find: `Player.activeSourceFileLvl(15)`, replace: `sf15Level` }],
+);
+
+// --- data tables ------------------------------------------------------------
+//
+// The 33 factions, with BOTH the flattened toJSON() requirement arrays the ns
+// API returns AND the structured condition tree. Both are needed and they are
+// not the same thing: upstream's `everyCondition` iterator flattens nested
+// ANDs but NOT ANDs nested inside an OR, so a strategy that only ever saw the
+// flattened form could not tell "A and (B or (C and D))" from something it can
+// actually satisfy. Regenerating from the real code is the only way to get it
+// right.
+
+const enums = await import(`../${OUT_DIR}/src/Faction/Enums.ts`);
+const companyEnums = await import(`../${OUT_DIR}/src/Company/Enums.ts`);
+const locationEnums = await import(`../${OUT_DIR}/src/Locations/Enums.ts`);
+const workEnums = await import(`../${OUT_DIR}/src/Work/Enums.ts`);
+const literatureEnums = await import(`../${OUT_DIR}/src/Literature/Enums.ts`);
+const messageEnums = await import(`../${OUT_DIR}/src/Message/Enums.ts`);
+const augEnums = await import(`../${OUT_DIR}/src/Augmentation/Enums.ts`);
+const specialServers = await import(`../${OUT_DIR}/src/Server/data/SpecialServers.ts`);
+const bladeburnerConstants = await import(`../${OUT_DIR}/src/Bladeburner/data/Constants.ts`);
+const gameConstants = await import(`../${OUT_DIR}/src/Constants.ts`);
+const bitNodeMults = await import(`../${OUT_DIR}/src/BitNode/BitNodeMultipliers.ts`);
+
+await extractDataTable({
+  sources: [
+    {
+      path: "src/Faction/FactionJoinCondition.ts",
+      from: "export interface PlayerCondition {",
+      to: "}",
+    },
+    {
+      path: "src/Faction/FactionInfo.tsx",
+      from: "export class FactionInfo {",
+      to: "}",
+    },
+  ],
+  scope: {
+    FactionName: enums.FactionName,
+    CompanyName: companyEnums.CompanyName,
+    CityName: locationEnums.CityName,
+    LocationName: locationEnums.LocationName,
+    JobName: workEnums.JobName,
+    LiteratureName: literatureEnums.LiteratureName,
+    MessageFilename: messageEnums.MessageFilename,
+    AugmentationName: augEnums.AugmentationName,
+    SpecialServers: specialServers.SpecialServers,
+    BladeburnerConstants: bladeburnerConstants.BladeburnerConstants,
+    CONSTANTS: gameConstants.CONSTANTS,
+    currentNodeMults: bitNodeMults.currentNodeMults,
+    // The gang factions are patched onto the table by a trailing loop.
+    GangConstants: { Names: gangFactionNames() },
+    // toJSON() on a company-reputation condition multiplies by a backdoor
+    // discount that depends on LIVE game state. The vendored table is the
+    // BASE requirement; the sim applies the discount itself when a company
+    // server is backdoored. Returning `reputation` unchanged is therefore the
+    // correct base value, not a simplification.
+    calculateEffectiveRequiredReputation: (_company: unknown, reputation: number) => reputation,
+  },
+  // Booleans are coerced rather than passed through: an upstream field left
+  // undefined would be DROPPED by JSON.stringify, and the emitted file
+  // declares them non-optional. A missing `keepOnInstall` reading as
+  // `undefined` at runtime is exactly the kind of quiet falsiness that works
+  // until someone writes `if (f.keepOnInstall === false)`.
+  shape: `Object.fromEntries(
+    Object.entries(FactionInfos).map(([name, info]) => [name, {
+      enemies: [...(info.enemies ?? [])],
+      offerHackingWork: !!info.offerHackingWork,
+      offerFieldWork: !!info.offerFieldWork,
+      offerSecurityWork: !!info.offerSecurityWork,
+      special: !!info.special,
+      // NOTE the field rename: the constructor param is \`keepOnInstall\` but it
+      // is stored as \`keep\`. Reading the param name here yields undefined for
+      // every faction, which \`!!\` then turns into a plausible-looking \`false\`
+      // across the board. The verify() below pins the real count.
+      keepOnInstall: !!info.keep,
+      inviteReqs: [...info.inviteReqs].map((c) => c.toJSON()),
+      rumorReqs: [...info.rumorReqs].map((c) => c.toJSON()),
+    }])
+  )`,
+  verify(table) {
+    const factions = table as Record<
+      string,
+      { inviteReqs: unknown[]; enemies: string[]; keepOnInstall: boolean; special: boolean; offerHackingWork: boolean }
+    >;
+    const names = Object.keys(factions);
+    // 34, counted from the pinned source — both `FactionName` and the table
+    // itself. (Commonly miscited as 33; ShadowsOfAnarchy is easy to miss
+    // because it is special-cased everywhere.)
+    if (names.length !== 34) throw new Error(`expected 34 factions, extracted ${names.length}`);
+    // Spot-checks against facts an incorrect extraction would get wrong.
+    if (!names.includes("CyberSec")) throw new Error("CyberSec missing");
+    const daedalus = factions["Daedalus"];
+    if (!daedalus || daedalus.inviteReqs.length === 0) throw new Error("Daedalus has no invite requirements");
+    // Bans reference real factions; the ban graph depends on it.
+    for (const [name, info] of Object.entries(factions)) {
+      for (const enemy of info.enemies ?? []) {
+        if (!factions[enemy]) throw new Error(`${name} names unknown enemy ${enemy}`);
+      }
+    }
+    // Guard against reading a field the class renamed: a wrong field name
+    // yields undefined for EVERY faction, which coerces to a uniform false
+    // that looks entirely plausible.
+    const counts = {
+      keepOnInstall: Object.values(factions).filter((f) => f.keepOnInstall).length,
+      special: Object.values(factions).filter((f) => f.special).length,
+      offerHackingWork: Object.values(factions).filter((f) => f.offerHackingWork).length,
+    };
+    for (const [field, count] of Object.entries(counts)) {
+      if (count === 0) throw new Error(`no faction has ${field} — is the field named differently upstream?`);
+      if (count === names.length) throw new Error(`every faction has ${field} — suspicious`);
+    }
+    // Sector-12 bans the four cities it is at war with; a ban graph that lost
+    // its edges would silently let the planner join mutually exclusive
+    // factions and then fail every join.
+    if ((factions["Sector-12"]?.enemies ?? []).length !== 4) {
+      throw new Error("Sector-12 should ban exactly 4 factions");
+    }
+  },
+  outRelPath: "src/Faction/FactionTable.ts",
+  prologue: [
+    `import type { PlayerRequirement } from "@nsdefs";`,
+    ``,
+    `export interface VendoredFaction {`,
+    `  enemies: string[];`,
+    `  offerHackingWork: boolean;`,
+    `  offerFieldWork: boolean;`,
+    `  offerSecurityWork: boolean;`,
+    `  special: boolean;`,
+    `  keepOnInstall: boolean;`,
+    `  /** Flattened exactly as ns.singularity.getFactionInviteRequirements returns. */`,
+    `  inviteReqs: PlayerRequirement[];`,
+    `  rumorReqs: PlayerRequirement[];`,
+    `}`,
+  ],
+  exportName: "FACTION_TABLE",
+  exportType: "Record<string, VendoredFaction>",
+});
+
+const programEnums = await import(`../${OUT_DIR}/src/Programs/Enums.ts`);
+
+// Every augmentation's price, reputation requirement, prerequisites, offering
+// factions and multipliers.
+//
+// The `Augmentation` CLASS is deliberately not evaluated — it drags in the
+// live player and the UI formatters. One exact patch replaces the constructing
+// return with the raw metadata the constructor would have consumed, which is
+// the same data without the dependencies.
+await extractDataTable({
+  sources: [
+    {
+      path: "src/Augmentation/Augmentations.ts",
+      from: "export const Augmentations: Record<AugmentationName, Augmentation> = (() => {",
+      to: "})();",
+      patches: [
+        {
+          find: `  return createEnumKeyedRecord(AugmentationName, (name) => {
+    const params = metadata[name] as AugmentationCtorParams;
+    params.name = name;
+    return new Augmentation(params);
+  });`,
+          replace: `  return metadata;`,
+        },
+      ],
+    },
+  ],
+  scope: {
+    AugmentationName: augEnums.AugmentationName,
+    CompletedProgramName: programEnums.CompletedProgramName,
+    FactionName: enums.FactionName,
+    CONSTANTS: gameConstants.CONSTANTS,
+    // UnstableCircadianModulator picks its multipliers from a random set at
+    // load time (src/Augmentation/CircadianModulator.ts, seeded by WHRNG), so
+    // there is no single correct answer to vendor. Its price, reputation cost
+    // and offering faction ARE fixed, so those are kept and the multipliers
+    // are marked unknown — rather than freezing one arbitrary roll into the
+    // table, which would be a fabricated value the planner would then score.
+    getUnstableCircadianModulatorParams: () => ({
+      moneyCost: 5e9,
+      repCost: 3.625e5,
+      info: "",
+      factions: [enums.FactionName.SpeakersForTheDead],
+      multsUnknown: true,
+    }),
+  },
+  shape: `Object.fromEntries(
+    Object.entries(Augmentations).map(([name, m]) => {
+      // Everything destructured out here is METADATA, not a multiplier.
+      // \`startingMoney\` and \`programs\` are real one-off grants (CashRoot
+      // Starter Kit, BitRunners' BigD's Big Brain) and are carried as their
+      // own fields — folding either into \`mults\` would add a $1,000,000
+      // "multiplier" to the log-sum scoring and dominate every real bonus.
+      const {
+        info, stats, factions, prereqs, repCost, moneyCost, isSpecial, multsUnknown,
+        startingMoney, programs, name: _n, ...mults
+      } = m;
+      return [name, {
+        name,
+        baseRepRequirement: repCost ?? 0,
+        baseCost: moneyCost ?? 0,
+        factions: [...(factions ?? [])],
+        prereqs: [...(prereqs ?? [])],
+        isSpecial: !!isSpecial,
+        ...(startingMoney ? { startingMoney } : {}),
+        ...(programs ? { programs: [...programs] } : {}),
+        ...(multsUnknown ? { multsUnknown: true } : {}),
+        mults,
+      }];
+    })
+  )`,
+  verify(table) {
+    const augs = table as Record<
+      string,
+      { baseCost: number; baseRepRequirement: number; factions: string[]; prereqs: string[]; mults: Record<string, number> }
+    >;
+    const names = Object.keys(augs);
+    if (names.length < 100) throw new Error(`only ${names.length} augmentations extracted`);
+    if (!augs["NeuroFlux Governor"]) throw new Error("NeuroFlux Governor missing");
+    // Costs may be Infinity (an unpurchasable special) but never NaN or null:
+    // Infinity means "cannot be bought", which the planner must distinguish
+    // from free.
+    for (const [name, aug] of Object.entries(augs)) {
+      for (const field of ["baseCost", "baseRepRequirement"] as const) {
+        const value = aug[field];
+        if (typeof value !== "number" || Number.isNaN(value)) {
+          throw new Error(`${name}.${field} is not a number (${JSON.stringify(value)})`);
+        }
+      }
+    }
+    // Every leftover field must be a numeric multiplier. Anything else means
+    // upstream grew a metadata field this shape is silently folding into
+    // `mults`, where it would corrupt the scoring sum.
+    for (const [name, aug] of Object.entries(augs)) {
+      for (const [field, value] of Object.entries(aug.mults)) {
+        if (typeof value !== "number" || !Number.isFinite(value)) {
+          throw new Error(`${name}.${field} is not a numeric multiplier (${JSON.stringify(value)})`);
+        }
+      }
+    }
+    // Prereqs must resolve, or the closure the planner computes is broken.
+    for (const [name, aug] of Object.entries(augs)) {
+      for (const prereq of aug.prereqs) {
+        if (!augs[prereq]) throw new Error(`${name} requires unknown augmentation ${prereq}`);
+      }
+    }
+    // A known anchor: The Red Pill is free and offered only by Daedalus.
+    const redPill = augs["The Red Pill"];
+    if (!redPill || redPill.baseCost !== 0) throw new Error("The Red Pill should cost 0");
+    // Exactly one augmentation has unknowable multipliers. More than one means
+    // a stub leaked; none means the marker stopped being emitted and the
+    // planner would score a randomised augmentation as if it had no effect.
+    const unknown = Object.entries(augs).filter(([, a]) => (a as { multsUnknown?: boolean }).multsUnknown);
+    if (unknown.length !== 1 || unknown[0]![0] !== "Unstable Circadian Modulator") {
+      throw new Error(`expected exactly UnstableCircadianModulator to have unknown mults, got ${unknown.map((u) => u[0]).join(", ")}`);
+    }
+  },
+  outRelPath: "src/Augmentation/AugmentationTable.ts",
+  prologue: [
+    `export interface VendoredAugmentation {`,
+    `  name: string;`,
+    `  /** Base money price, before the 1.9^queued escalation. */`,
+    `  baseCost: number;`,
+    `  /** Reputation requirement. Does NOT scale with the purchase queue. */`,
+    `  baseRepRequirement: number;`,
+    `  factions: string[];`,
+    `  prereqs: string[];`,
+    `  isSpecial: boolean;`,
+    `  /** Multiplier fields only — every value is a finite number. */`,
+    `  mults: Record<string, number>;`,
+    `  /** One-off cash grant on install (CashRoot Starter Kit). NOT a multiplier. */`,
+    `  startingMoney?: number;`,
+    `  /** Programs granted on install (BigD's Big Brain). NOT multipliers. */`,
+    `  programs?: string[];`,
+    `  /** Set when upstream randomises this augmentation's multipliers at load`,
+    `   *  time, so \`mults\` is NOT the truth and must not be scored. Exactly one`,
+    `   *  augmentation is like this (Unstable Circadian Modulator). */`,
+    `  multsUnknown?: boolean;`,
+    `}`,
+  ],
+  exportName: "AUGMENTATION_TABLE",
+  exportType: "Record<string, VendoredAugmentation>",
+});
+
+const crimeEnums = await import(`../${OUT_DIR}/src/Crime/Enums.ts`);
+
+// The twelve crimes: time, money, difficulty, karma, kills, the six
+// success-weight fields and the seven experience fields.
+//
+// `Crimes.ts` builds `new Crime(...)` from positional arguments, so the CLASS
+// is what knows which argument is which. Rather than re-derive that mapping by
+// hand — where an off-by-one in the argument list would silently swap
+// `difficulty` and `karma` and look entirely plausible — the class is
+// evaluated too, with its unportable `commit` removed.
+await extractDataTable({
+  sources: [
+    {
+      path: "src/Crime/Crime.ts",
+      from: "export class Crime {",
+      to: "}",
+      patches: [
+        // `commit` reaches for the live Player and the work system; the table
+        // only needs the constructor's field assignments.
+        {
+          find: `  commit(div = 1, workerScript: WorkerScript | null = null): number {`,
+          replace: `  commitRemoved(): number {\n    return this.time;\n  }\n  private unusedCommit(div = 1, workerScript: unknown = null): number {`,
+        },
+      ],
+    },
+    { path: "src/Crime/Crimes.ts", from: "export const Crimes: Record<CrimeType, Crime> = {", to: "};" },
+  ],
+  scope: {
+    CrimeType: crimeEnums.CrimeType,
+    CONSTANTS: gameConstants.CONSTANTS,
+    currentNodeMults: bitNodeMults.currentNodeMults,
+    Player: {},
+    calculateIntelligenceBonus: () => 1,
+    WorkerScript: class {},
+    CrimeWork: class {},
+  },
+  shape: `Object.fromEntries(
+    Object.entries(Crimes).map(([type, c]) => [type, {
+      type,
+      timeMs: c.time,
+      money: c.money,
+      difficulty: c.difficulty,
+      karma: c.karma,
+      kills: c.kills,
+      weights: {
+        hacking: c.hacking_success_weight,
+        strength: c.strength_success_weight,
+        defense: c.defense_success_weight,
+        dexterity: c.dexterity_success_weight,
+        agility: c.agility_success_weight,
+        charisma: c.charisma_success_weight,
+      },
+      exp: {
+        hacking: c.hacking_exp,
+        strength: c.strength_exp,
+        defense: c.defense_exp,
+        dexterity: c.dexterity_exp,
+        agility: c.agility_exp,
+        charisma: c.charisma_exp,
+        intelligence: c.intelligence_exp,
+      },
+    }])
+  )`,
+  verify(table) {
+    const crimes = table as Record<
+      string,
+      { timeMs: number; money: number; difficulty: number; karma: number; kills: number; weights: Record<string, number> }
+    >;
+    const names = Object.keys(crimes);
+    if (names.length !== 12) throw new Error(`expected 12 crimes, extracted ${names.length}`);
+    // Anchors an argument-order mistake would break: shoplift is the cheapest
+    // and easiest, homicide is the karma/kills workhorse the gang path needs.
+    // Keyed by the enum VALUE ("Shoplift"), which is also what
+    // ns.singularity.commitCrime takes.
+    const shoplift = crimes["Shoplift"];
+    if (!shoplift || shoplift.timeMs !== 2e3 || shoplift.money !== 15e3) {
+      throw new Error("Shoplift should be 2s for $15k — are the constructor arguments in the expected order?");
+    }
+    const homicide = crimes["Homicide"];
+    if (!homicide || homicide.kills !== 1) throw new Error("Homicide should kill exactly 1");
+    for (const [name, crime] of Object.entries(crimes)) {
+      if (!(crime.timeMs > 0)) throw new Error(`${name} has no duration`);
+      if (!(crime.difficulty > 0)) throw new Error(`${name} has no difficulty`);
+      // Karma is stored POSITIVE here and SUBTRACTED by the game.
+      if (!(crime.karma > 0)) throw new Error(`${name} grants no karma`);
+      if (Object.values(crime.weights).every((weight) => weight === 0)) {
+        throw new Error(`${name} has no success weights — the chance would be 0 forever`);
+      }
+    }
+  },
+  outRelPath: "src/Crime/CrimeTable.ts",
+  prologue: [
+    `export interface VendoredCrime {`,
+    `  type: string;`,
+    `  timeMs: number;`,
+    `  money: number;`,
+    `  difficulty: number;`,
+    `  /** POSITIVE here; the game SUBTRACTS it, so karma goes down. */`,
+    `  karma: number;`,
+    `  kills: number;`,
+    `  /** Success-chance weights, per skill. */`,
+    `  weights: Record<string, number>;`,
+    `  /** Experience granted on success, per skill. */`,
+    `  exp: Record<string, number>;`,
+    `}`,
+  ],
+  exportName: "CRIME_TABLE",
+  exportType: "Record<string, VendoredCrime>",
+});
+
+/** The six gang factions, read from the pinned source rather than retyped. */
+function gangFactionNames(): string[] {
+  const source = gitShow("src/Gang/data/Constants.ts");
+  const match = source.match(/Names:\s*\[([^\]]*)\]/);
+  if (!match) throw new Error("src/Gang/data/Constants.ts: gang faction Names not found (source drifted?)");
+  const names = [...match[1]!.matchAll(/FactionName\.(\w+)/g)].map((m) => m[1]!);
+  if (names.length === 0) throw new Error("src/Gang/data/Constants.ts: no gang faction names parsed");
+  return names.map((key) => {
+    const value = (enums.FactionName as Record<string, string>)[key];
+    if (!value) throw new Error(`unknown FactionName.${key}`);
+    return value;
+  });
+}
 
 writeFileSync(
   path.join("sim/vendor", "manifest.json"),

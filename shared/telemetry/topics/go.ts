@@ -29,4 +29,14 @@ export interface GoState {
   /** Controlled empty territory per colour, from ns.go.analysis. */
   territory?: { black: number; white: number };
   stats: GoOpponentStats[];
+  plan?: GoPlan;
+}
+
+export interface GoPlan {
+  action: { type: string; why: string; x?: number; y?: number };
+  ranked: { x: number; y: number; score: number; why: string }[];
+  why: string;
+  /** Opponent worth playing next, by bonus value. */
+  preferredOpponent: string;
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

@@ -125,7 +125,8 @@ function release(memory: DispatchMemory, opId: number): void {
 
 /** Roll back ops the driver could not actually start (sim rejection, ns.exec
  * returning pid 0). Without this the reservation would never be freed — the
- * exact leak the legacy dispatcher had. */
+ * exact leak the earlier rewrite's dispatcher had (`nobody0/bitburner`; see
+ * README's citation note). */
 export function releaseFailed(memory: DispatchMemory, opIds: Iterable<number>): void {
   for (const opId of opIds) {
     const tracked = memory.tracked.get(opId);
@@ -351,7 +352,7 @@ function launchPrepWave(
   let ops = 0;
   for (const block of allocation.reservation.blocks) {
     if (ops >= MAX_PREP_OPS_PER_PASS) {
-      // Never launched -> never completes -> free it now (legacy's leak).
+      // Never launched -> never completes -> free it now (the rewrite's leak).
       memory.heap.free(block.hostname, block.threads * WORKER_RAM[kind]);
       continue;
     }

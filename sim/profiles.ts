@@ -24,6 +24,14 @@ export interface SimProfile {
   /** Registered save id (saves/index.json). Absent = fresh BN1 fixture. */
   save?: string;
   homeRam?: number;
+  /** BitNode to run in.
+   *
+   *  Load-bearing for the gated features: `deriveCapabilities` reports
+   *  `factions: "no"` in BN1, so every faction probe and driver is switched
+   *  off and a faction goal is unreachable no matter how long the run lasts.
+   *  A faction isolation profile has to declare `bitnode: 4`. */
+  bitnode?: number;
+  startingMoney?: number;
 }
 
 export const PROFILES: readonly SimProfile[] = [
@@ -51,12 +59,33 @@ export const PROFILES: readonly SimProfile[] = [
     seeds: [1, 2, 3, 4, 5],
   },
   {
-    id: "factions",
+    id: "factions-join",
     description:
-      "Faction progress with hacking as the only income and skill source. Needs a save with BN4/SF4 for reputation to be observable at all.",
+      "Faction progress in BN4, with hacking as the only income and skill source. Joining CyberSec needs a backdoor on CSEC.",
+    // BN4 is load-bearing, not a detail. In BN1 deriveCapabilities reports
+    // `factions: "no"`, so every faction probe AND the driver are gated off
+    // and the goal is unreachable however long the run lasts — which is what
+    // the previous version of this profile silently did.
+    bitnode: 4,
     features: only("hacking", "factions", "career", "progression"),
     goals: ["faction:CyberSec"],
+    // Enough for TOR ($200k) plus BruteSSH ($500k), which CSEC's single
+    // required port makes a hard precondition. A fresh BN4 start earns only
+    // ~$240k in two hours, so without this the profile measures the money
+    // grind rather than the faction logic — and an isolation profile exists
+    // precisely to isolate the feature under test from that.
+    startingMoney: 1_000_000,
     horizon: "2h",
+    seeds: [1, 2, 3],
+  },
+  {
+    id: "career-karma",
+    description:
+      "Career serving a posted karma need in isolation: how fast does crime reach the Slum Snakes threshold?",
+    bitnode: 4,
+    features: only("career", "factions", "progression"),
+    goals: ["karma:-9"],
+    horizon: "1h",
     seeds: [1, 2, 3],
   },
 ] as const;

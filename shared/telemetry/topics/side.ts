@@ -32,4 +32,17 @@ export interface SideState {
    * the full sweep is rare and partial results are normal). */
   infiltration?: InfiltrationDigest[];
   infiltrationTotal?: number;
+  plan?: SidePlan;
+}
+
+export interface SidePlan {
+  solvable: { host: string; file: string; type: string }[];
+  /** Contract types with no solver. Named explicitly: an unsolved contract
+   *  EXPIRES, so a gap in the registry is a countdown, not a curiosity. */
+  unsolvable: { host: string; file: string; type: string }[];
+  infiltration: { location: string; city: string; valuePerMinute: number }[];
+  /** Permanent blocker, reported rather than omitted. */
+  casino: string;
+  why: string;
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

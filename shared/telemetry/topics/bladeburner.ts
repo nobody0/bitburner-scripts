@@ -16,6 +16,8 @@ export interface BladeActionDigest {
   successes?: number;
   repGain?: number;
   rankGain?: number;
+  /** Rank required to attempt — Black Ops only. */
+  rankNeeded?: number;
   /** Black ops only: rank required to attempt. */
   rankReq?: number;
 }
@@ -41,4 +43,12 @@ export interface BladeburnerState {
   actions?: BladeActionDigest[];
   cities?: BladeCityDigest[];
   bonusTime?: number;
+  plan?: BladeburnerPlan;
+}
+
+export interface BladeburnerPlan {
+  action: { type: string; why: string; actionType?: string; name?: string; skill?: string };
+  ranked: { name: string; actionType: string; rankPerSec: number; chanceLow: number; why: string }[];
+  why: string;
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import type { Server } from "@ns";
+import { homeDodgeBudget } from "../../game/lib/probe-runner.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { runGame } from "../game-run.ts";
 import { getRamCost } from "../ns/ram-costs.ts";
@@ -161,7 +163,11 @@ describe("running game/ in the synthetic world", () => {
     // Probes for features we do not simulate hit the wall and say so...
     const gaps = Object.keys(result.unmodeled);
     expect(gaps.length).toBeGreaterThan(0);
-    expect(gaps).toContain("ns hacknet.numNodes");
+    // Every gap names a real ns path or subsystem rather than a bare
+    // placeholder. Deliberately NOT pinned to a specific call: as feature
+    // slices land, individual gaps close, and a hardcoded name turns that
+    // progress into a test failure.
+    expect(gaps.every((gap) => /^(ns|subsystem) \S/.test(gap))).toBe(true);
     // ...with no leading-dot mangling of the root namespace...
     expect(gaps.every((gap) => !gap.includes(" ."))).toBe(true);
     // ...and the run still completes, because probe-runner isolates each probe.
@@ -169,30 +175,43 @@ describe("running game/ in the synthetic world", () => {
     expect(result.crashes).toEqual([]);
   });
 
-  test("a fresh 8GB home cannot afford ANY probe, so nothing ever unlocks", async () => {
-    // Regression pin for a real game/ finding, not a simulator gap: the sweep
-    // snapshots the network from INSIDE a 4.1 GB dodge stub, so home.ramUsed
-    // carries the stub's own footprint. dodgeBudget() then reads
-    // 8 - 3.6 (controller) - 4.1 (stub) - 1.6 - 0.5 < 0, and the capability
-    // gate batch is skipped on every sweep forever. The farm still runs, so
-    // this is invisible from the outside — which is the point of pinning it.
-    let caps: unknown;
-    let skipped = 0;
+  test("a fresh 8GB home still cannot fund a dodge on home ALONE", () => {
+    // The underlying arithmetic, pinned so the motivation for fleet placement
+    // cannot quietly stop being true: the sweep snapshots the network from
+    // INSIDE a 4.1 GB dodge stub, so home.ramUsed carries the stub's own
+    // footprint. 8 - 3.6 (controller) - 4.1 (stub) - 1.6 - 0.5 is negative,
+    // and a home-only budget skips the capability gate batch forever.
+    const home = { hostname: "home", maxRam: 8, ramUsed: 3.6 + 4.1 } as Server;
+    expect(homeDodgeBudget({ home })).toBe(0);
+  });
+
+  test("...but fleet placement funds it anyway, so features actually unlock", async () => {
+    // The Phase 0.4 payoff, and the reason this test is the inverse of what it
+    // used to assert. The stub ships to every rooted host alongside the
+    // worker, so a 1.5 GB gate batch lands on a client instead of competing
+    // with the dispatcher for a home reserve that can never hold it. Before
+    // fleet dodging, `capabilities` was NEVER emitted on an 8 GB home and no
+    // gated feature could ever be discovered.
+    let caps: { data: { unlocked: Record<string, string> } } | undefined;
     const result = await runGame({
       goal: parseGoals(["earn:1e6"]),
       seed: 1,
       horizonMs: 60 * 60_000,
       homeRam: 8,
       onRecord: (line) => {
-        const record = JSON.parse(line) as { kind: string; key?: string; name?: string };
+        const record = JSON.parse(line) as {
+          kind: string;
+          key?: string;
+          data: { unlocked: Record<string, string> };
+        };
         if (record.kind === "state" && record.key === "capabilities") caps = record;
-        if (record.kind === "event" && record.name === "probe.skipped") skipped++;
       },
     });
 
-    expect(caps).toBeUndefined();
-    expect(skipped).toBeGreaterThan(0);
-    // The farm is unaffected, which is exactly why this hides so well.
+    expect(caps, "the gate batch never ran — fleet placement is not funding it").toBeDefined();
+    // A real reading, not the all-unknown placeholder.
+    expect(caps!.data.unlocked.hacking).toBe("yes");
+    expect(caps!.data.unlocked.factions).toBe("no");
     expect(result.reached).toBe(true);
   });
 });

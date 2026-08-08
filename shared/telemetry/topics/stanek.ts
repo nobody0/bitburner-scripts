@@ -26,4 +26,17 @@ export interface StanekState {
   fragments: StanekFragment[];
   /** Fragment ids that exist but are not placed. */
   availableTypes?: { id: number; type: string; power: number; limit: number }[];
+  plan?: StanekPlan;
+}
+
+export interface StanekPlan {
+  placements: { id: number; x: number; y: number; rotation: number }[];
+  value: number;
+  /** True when the exhaustive search was capped — the packing may not be
+   *  optimal, and saying so matters because optimality is this feature's
+   *  entire evidence claim. */
+  approximated: boolean;
+  chargeOrder: number[];
+  why: string;
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

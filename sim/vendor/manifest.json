@@ -42,6 +42,54 @@
       "sha256": "291453af3aa10bd71aaebfea7e35545921f7550422e254c90f0d83c834f5a459"
     },
     {
+      "path": "src/Faction/Enums.ts",
+      "sha256": "0a851f9600405eec92d2a41ab28facf9293c43334c21ad8cd4738d63593e7f1b"
+    },
+    {
+      "path": "src/Company/Enums.ts",
+      "sha256": "1972ec0a9737d1222884c9cceed9156c5e1bc215a0405ca71d58b404e5aee9c3"
+    },
+    {
+      "path": "src/Locations/Enums.ts",
+      "sha256": "dd77a47c5f2899d3085cebf0adfc626ad83d798291ab58da28c1430fb1d21b56"
+    },
+    {
+      "path": "src/Work/Enums.ts",
+      "sha256": "c44c19c3cf10a4a214c846833ee09f39119781af4631d01819ef489b7f2755fe"
+    },
+    {
+      "path": "src/Literature/Enums.ts",
+      "sha256": "5807fe0c91fede9d3285f8b4d052a245df5015a7363426e677026447adff2236"
+    },
+    {
+      "path": "src/Message/Enums.ts",
+      "sha256": "0dccad3e97087693c92cc107ed043456bab95eed905e7efb9e3526f1a77874ae"
+    },
+    {
+      "path": "src/Augmentation/Enums.ts",
+      "sha256": "4ffc0ee2b2e948c10af23c52b1783e3657e78c5f51135fc63feb201fcc76f7bd"
+    },
+    {
+      "path": "src/Programs/Enums.ts",
+      "sha256": "ec86fd00a157b34e0747972e93f98435fe09c9d521387b127c7baa60414410ab"
+    },
+    {
+      "path": "src/Crime/Enums.ts",
+      "sha256": "fb243b3d2c67dc21a839bc7ceba9fb87f1ea621506e8a99a6429cdb357959c58"
+    },
+    {
+      "path": "src/Server/data/SpecialServers.ts",
+      "sha256": "44830d112202142772db23e782f342c11f7c3a2c0cf4cd2ee0cb3d89e17834cf"
+    },
+    {
+      "path": "src/Bladeburner/data/Constants.ts",
+      "sha256": "bc267dcd7147594bba249254ae2d1fbdc1c9e21aabfb006e0fa125c3fb024db9"
+    },
+    {
+      "path": "src/Faction/formulas/favor.ts",
+      "sha256": "2ba43608a2ec0b87f7824b905f9f231c580423b23107696a5a4e564437a6682a"
+    },
+    {
       "path": "src/Hacknet/data/Constants.ts",
       "sha256": "7aa1c4ae7e9524319cb24444c65745b3912a50a9a28f206b158e2cc9fd08eeb9"
     },
@@ -68,6 +116,26 @@
     {
       "path": "src/Server/ServerHelpers.ts#numCycleForGrowthCorrected",
       "sha256": "68d195bc09b25f8d4070c1759048cca6a55b61d5eabda3c0c7ec1e1777a7d927"
+    },
+    {
+      "path": "src/Faction/formulas/donation.ts#repFromDonation,donationForRep,favorNeededToDonate",
+      "sha256": "2ac47e9447f80eccc1bb8d3d0102a0b29ebcb4f03b6b2be528e26b69b6c94514"
+    },
+    {
+      "path": "src/PersonObjects/formulas/reputation.ts#mult,getHackingWorkRepGain,getFactionSecurityWorkRepGain,getFactionFieldWorkRepGain,getDarknetCharismaBonus",
+      "sha256": "b170947088ffff6f37e15022392fc6e352674e195ec0e21363ddb9213ab7d77e"
+    },
+    {
+      "path": "src/Faction/FactionJoinCondition.ts+src/Faction/FactionInfo.tsx#FACTION_TABLE",
+      "sha256": "4e70c86f6c6453e585b8703e6341061736012cb4412bdebf64054768c074f1b4"
+    },
+    {
+      "path": "src/Augmentation/Augmentations.ts#AUGMENTATION_TABLE",
+      "sha256": "1d2953e248fe6b9291cf54171b631ac4d85d1644c5fef572df7c2113112efa64"
+    },
+    {
+      "path": "src/Crime/Crime.ts+src/Crime/Crimes.ts#CRIME_TABLE",
+      "sha256": "2a964460699658c6c813f6850e9e8681adcec3afd5a944c63a15560cfc3b22ff"
     }
   ]
 }

@@ -38,4 +38,18 @@ export interface GangState {
   /** Win chance against each rival gang. */
   clashChances?: Record<string, number>;
   bonusTime?: number;
+  /** Per-member task rates, as the game reports them. The strategy scores
+   *  against these; without them it would be inventing numbers. */
+  taskRates?: Record<string, { name: string; respect: number; money: number; wanted: number }[]>;
+  /** Member name -> ascension multiplier gain, for the crossover. */
+  ascensionGain?: Record<string, number>;
+  plan?: GangPlan;
+}
+
+export interface GangPlan {
+  actions: { type: string; why: string }[];
+  why: string;
+  /** Set when the wanted penalty is eating most of the gang's output. */
+  warning?: string;
+  lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

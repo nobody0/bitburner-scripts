@@ -10,16 +10,18 @@ import type { GoalContext, GoalFaction, GoalServer } from "./goal.ts";
 export function initialContext(): GoalContext {
   return {
     time: 0,
-    player: { money: 0, hackingSkill: 1, hackingExp: 0 },
+    player: { money: 0, hackingSkill: 1, hackingExp: 0, karma: 0, numPeopleKilled: 0 },
     servers: new Map(),
     totals: { moneyEarned: 0, hacks: 0 },
     factions: new Map(),
+    augmentations: new Set(),
   };
 }
 
 interface FactionsData {
   joined?: string[];
   standings?: { name?: string; rep?: number; favor?: number }[];
+  ownedAugs?: string[];
 }
 
 function applyFactions(ctx: GoalContext, data: FactionsData): void {
@@ -31,6 +33,10 @@ function applyFactions(ctx: GoalContext, data: FactionsData): void {
     return fresh;
   };
   for (const name of data.joined ?? []) upsert(name).joined = true;
+  // Accumulated, never replaced: the probe caps its list, and an augmentation
+  // already seen does not stop being owned because a later digest was
+  // truncated.
+  for (const aug of data.ownedAugs ?? []) ctx.augmentations.add(aug);
   for (const standing of data.standings ?? []) {
     if (typeof standing.name !== "string") continue;
     const faction = upsert(standing.name);
@@ -43,6 +49,8 @@ interface PlayerData {
   money?: number;
   skills?: { hacking?: number };
   exp?: { hacking?: number };
+  karma?: number;
+  numPeopleKilled?: number;
 }
 
 interface ServerData {
@@ -65,6 +73,8 @@ export function reduceRecord(ctx: GoalContext, record: LogRecord): GoalContext {
       if (typeof data.money === "number") ctx.player.money = data.money;
       if (typeof data.skills?.hacking === "number") ctx.player.hackingSkill = data.skills.hacking;
       if (typeof data.exp?.hacking === "number") ctx.player.hackingExp = data.exp.hacking;
+      if (typeof data.karma === "number") ctx.player.karma = data.karma;
+      if (typeof data.numPeopleKilled === "number") ctx.player.numPeopleKilled = data.numPeopleKilled;
     } else if (record.key.startsWith("getServer:")) {
       applyServer(ctx, record.data as ServerData, record.key.slice("getServer:".length));
     } else if (record.key === "servers") {

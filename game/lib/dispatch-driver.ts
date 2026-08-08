@@ -106,9 +106,13 @@ export function pump(
   view: WorldView,
   completions: CompletionEvent[],
   goalRemaining = Infinity,
+  /** Computed per pass by the controller: the base reserve plus the largest
+   *  dodge step any unlocked feature declares (shared/ram/reserve.ts). The
+   *  constant is only the fallback for callers with no feature context. */
+  homeReserveGb = HOME_RESERVE_GB,
 ): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"] } {
   const result = planFarm(view, state.memory, completions, {
-    homeReserveGb: HOME_RESERVE_GB,
+    homeReserveGb,
     goalRemaining,
   });
   state.memory = result.memory;
@@ -143,7 +147,11 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
     WORKER_SCRIPT,
     host,
     // ramOverride is per thread: the generic worker is billed exactly as the
-    // op it performs (legacy's single-binary trick).
+    // op it performs. One binary, deliberately — note that the predecessor
+    // scripts moved the OTHER way, to a script per batch role
+    // (src/workers/{hs,w1s,gs,w2s}.ts), to fix their shotgun batcher
+    // ("fixed shotgun by separating different workers", 8a8fb9c). Understand
+    // why that was needed before collapsing or splitting this.
     { threads: action.threads, temporary: true, ramOverride: WORKER_RAM[action.type] },
     opId,
   );

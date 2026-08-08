@@ -89,3 +89,85 @@ describe("HWGW seam support", () => {
     expect(farm.length).toBeGreaterThanOrEqual(2); // initial + post-completion
   });
 });
+
+describe("playerRecord", () => {
+  test("is a SNAPSHOT — nested objects are copied, never aliased", () => {
+    // The controller stores this in its game-state store and DECIDES from it.
+    // The previous implementation spread `this.person`, so `skills`, `exp` and
+    // `mults` all aliased the live objects: a "snapshot" taken ten minutes ago
+    // would silently report the current skill vector, and any test comparing
+    // the two would pass for entirely the wrong reason.
+    const world = makeWorld();
+    const before = world.playerRecord();
+    const skillsBefore = before.skills.hacking;
+
+    world.person.skills.hacking = 500;
+    world.person.exp.hacking = 12_345;
+    world.person.mults.hacking = 2;
+
+    expect(before.skills.hacking, "skills aliased the live person").toBe(skillsBefore);
+    expect(before.exp.hacking).toBe(0);
+    expect(before.mults.hacking).toBe(1);
+    // ...and a record taken AFTER the change does see it.
+    expect(world.playerRecord().skills.hacking).toBe(500);
+  });
+
+  test("mutating a record cannot corrupt the world", () => {
+    const world = makeWorld();
+    const record = world.playerRecord();
+    (record.factions as string[]).push("CyberSec");
+    (record.jobs as Record<string, string>)["ECorp"] = "Software";
+    record.skills.hacking = 9999;
+
+    expect(world.player.factions).toEqual([]);
+    expect(world.player.jobs).toEqual({});
+    expect(world.person.skills.hacking).toBe(1);
+  });
+
+  test("carries the player-only fields the faction requirements are written against", () => {
+    const world = new SimWorld({
+      seed: 1,
+      network: DEFAULT_NETWORK,
+      bitnode: 4,
+      playerState: { karma: -54_000, numPeopleKilled: 30, factions: ["Slum Snakes"], jobs: { ECorp: "Software" } },
+    });
+    const record = world.playerRecord();
+    expect(record.karma).toBe(-54_000);
+    expect(record.numPeopleKilled).toBe(30);
+    expect(record.factions).toEqual(["Slum Snakes"]);
+    expect(record.jobs as Record<string, string>).toEqual({ ECorp: "Software" });
+    // Deliberately NOT asserted here: Player carries no BitNode field. The
+    // active node comes from ns.getResetInfo().currentNode.
+    expect("bitNodeN" in record).toBe(false);
+  });
+
+  test("money has exactly one home", () => {
+    const world = makeWorld();
+    world.money += 500;
+    expect(world.player.money).toBe(1_500);
+    expect(world.playerRecord().money).toBe(1_500);
+  });
+});
+
+describe("SimPlayer augmentation accounting", () => {
+  test("owned counts QUEUED augmentations, as the game's requirements do", () => {
+    // ns.singularity.getOwnedAugmentations(true) includes queued, and every
+    // `numAugmentations` faction requirement counts them. Getting this wrong
+    // makes Daedalus unreachable on exactly the run that qualifies for it.
+    const world = makeWorld();
+    world.player.augmentations.set("Cranial Signal Processors - Gen I", 1);
+    world.player.queuedAugmentations.set("NeuroFlux Governor", 3);
+
+    expect(world.player.augmentationCount(true)).toBe(2);
+    expect(world.player.augmentationCount(false)).toBe(1);
+    expect(world.player.hasAugmentation("NeuroFlux Governor", true)).toBe(true);
+    expect(world.player.hasAugmentation("NeuroFlux Governor", false)).toBe(false);
+  });
+
+  test("an augmentation both installed and queued is counted once", () => {
+    const world = makeWorld();
+    world.player.augmentations.set("NeuroFlux Governor", 2);
+    world.player.queuedAugmentations.set("NeuroFlux Governor", 3);
+    expect(world.player.ownedAugmentations(true)).toEqual(["NeuroFlux Governor"]);
+  });
+});

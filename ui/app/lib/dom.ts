@@ -28,13 +28,29 @@ export function card(title: string, body: string): string {
   return `<section class="card"><h2>${esc(title)}</h2>${body}</section>`;
 }
 
+export interface TableOptions {
+  empty?: string;
+  /** Column indices that carry prose and must WRAP rather than force the card
+   *  into horizontal scroll. Cells are `nowrap` by default because most
+   *  columns are numeric and should stay aligned; a requirement tree or a
+   *  rationale is the exception, not the rule. */
+  wrap?: number[];
+}
+
 /** A table. Cells are pre-escaped HTML fragments so a column can carry a
  * class; use esc() when building them. */
-export function table(headers: string[], rows: string[][], empty = "no data"): string {
-  if (rows.length === 0) return `<p class="muted">${esc(empty)}</p>`;
+export function table(
+  headers: string[],
+  rows: string[][],
+  emptyOrOptions: string | TableOptions = "no data",
+): string {
+  const options: TableOptions = typeof emptyOrOptions === "string" ? { empty: emptyOrOptions } : emptyOrOptions;
+  if (rows.length === 0) return `<p class="muted">${esc(options.empty ?? "no data")}</p>`;
+  const wrap = new Set(options.wrap ?? []);
+  const cls = (index: number): string => (wrap.has(index) ? ' class="wrap"' : "");
   return (
-    `<table><thead><tr>${headers.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>` +
-    rows.map((cells) => `<tr>${cells.map((c) => `<td>${c}</td>`).join("")}</tr>`).join("") +
+    `<table><thead><tr>${headers.map((h, i) => `<th${cls(i)}>${esc(h)}</th>`).join("")}</tr></thead><tbody>` +
+    rows.map((cells) => `<tr>${cells.map((c, i) => `<td${cls(i)}>${c}</td>`).join("")}</tr>`).join("") +
     `</tbody></table>`
   );
 }
