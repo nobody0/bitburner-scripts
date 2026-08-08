@@ -6,6 +6,7 @@ import { emptyArbitration, grantedAmount, holdsSlot } from "../../../shared/stra
 import type { HostRam } from "../../../shared/ram/placement.ts";
 import type { Need, NeedBoard } from "../../../shared/strategy/needs.ts";
 import { emptyBoard } from "../../../shared/strategy/needs.ts";
+import type { RouteId } from "../../../shared/strategy/progression/endgame.ts";
 import type { GameState } from "../state.ts";
 import type { DodgeLease } from "../ram.ts";
 import { careerModule } from "./career.ts";
@@ -62,6 +63,17 @@ export interface DriverContext {
   board: NeedBoard;
   /** What this feature was actually granted. */
   grants: FeatureGrants;
+  /** Expected remaining run time in seconds, derived from the published
+   *  endgame route decision (shared/strategy/progression/eta.ts). This is THE
+   *  horizon every investment decision amortizes against: an upgrade that
+   *  cannot repay itself before the run ends is not worth buying, and a
+   *  hacking target that only pays off after it is not worth prepping. Falls
+   *  back to DEFAULT_HORIZON_SEC until a decision exists. */
+  horizonSec: number;
+  /** The chosen way to finish this BitNode, when decided. A driver may use it
+   *  to bias priorities (bladeburner when it IS the route, combat stats for
+   *  the Daedalus combat branch) — never to gate its whole tick. */
+  route?: RouteId;
   /** Atomically choose a host and reserve its RAM in the dispatcher's heap. */
   acquireDodge(budgetGb: number): DodgeLease | undefined;
 }
@@ -120,6 +132,17 @@ export interface FeatureModule {
    *  BitNode reset for EVERY module, so a feature's cross-run state cannot be
    *  forgotten by the controller failing to name it. */
   reset?(): void;
+  /** The refresh half of the refresh/act split. Called for every due module
+   *  BEFORE needs, claims or any tick() — evaluation only, writing its
+   *  conclusions (digests, ETA contributions) to the store for everyone else
+   *  to read this same pass. No ns access: anything that touches the game
+   *  belongs in tick(), the act half.
+   *
+   *  This is what resolves the ordering problem between the endgame decision
+   *  and the features: every due feature's published state is refreshed, THEN
+   *  progression's refresh picks the route from it, THEN drivers act with the
+   *  route and horizon in their context. */
+  refresh?(ctx: NeedContext): void;
   /** PURE. Called for every due module BEFORE any tick(). */
   claims?(ctx: ClaimContext): Claim[];
   /** PURE. Outcomes this feature wants from others, this tick. */

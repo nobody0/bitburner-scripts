@@ -7,6 +7,15 @@ import { stepGang } from "../../../shared/strategy/gang/decide.ts";
 import { bestOpponent, stepGo } from "../../../shared/strategy/go/decide.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
 import { stepProgression } from "../../../shared/strategy/progression/decide.ts";
+import { RED_PILL, stepEndgame, type EndgameView, type RouteId } from "../../../shared/strategy/progression/endgame.ts";
+import {
+  chooseRoute,
+  noRates,
+  routeEtas,
+  type RouteChoice,
+  type RouteRates,
+} from "../../../shared/strategy/progression/eta.ts";
+import type { RouteEtaDigest } from "../../../shared/telemetry/topics/progression.ts";
 import { canSolve, rankInfiltrations, solve } from "../../../shared/strategy/side/contracts.ts";
 import { chargeOrder, packFragments } from "../../../shared/strategy/stanek/pack.ts";
 import { stepSleeves } from "../../../shared/strategy/sleeves/decide.ts";
@@ -570,44 +579,257 @@ const side: FeatureDriver = {
 
 // --- progression ------------------------------------------------------------
 
+/** Observed rate over a sliding window of samples. The window (30 min, 30 s
+ * granularity) is long enough to smooth probe cadence and short enough that a
+ * mid-run regime change (new augs, new fleet) shows up within the dwell the
+ * route choice already applies. A NEGATIVE delta means the series was reset
+ * under us (an install dropped money to zero, a node reset dropped a skill) —
+ * the window restarts rather than reporting a nonsense negative rate. */
+class RateTracker {
+  private samples: { t: number; v: number }[] = [];
+
+  sample(t: number, v: number): void {
+    const last = this.samples[this.samples.length - 1];
+    if (last && t - last.t < 30_000) return;
+    if (last && v < last.v) this.samples.length = 0;
+    this.samples.push({ t, v });
+    while (this.samples.length > 0 && t - this.samples[0]!.t > 1_800_000) this.samples.shift();
+  }
+
+  /** Per-second rate, or 0 while there is no signal (selects the fallback). */
+  perSec(): number {
+    const first = this.samples[0];
+    const last = this.samples[this.samples.length - 1];
+    if (!first || !last || last.t <= first.t) return 0;
+    return ((last.v - first.v) / (last.t - first.t)) * 1000;
+  }
+
+  clear(): void {
+    this.samples.length = 0;
+  }
+}
+
+interface ProgressionMemory {
+  trackers: {
+    moneyEarned: RateTracker;
+    hacking: RateTracker;
+    combat: RateTracker;
+    augs: RateTracker;
+    daedalusRep: RateTracker;
+    blackOps: RateTracker;
+    rank: RateTracker;
+  };
+  choice?: RouteChoice;
+}
+
+function freshProgressionMemory(): ProgressionMemory {
+  return {
+    trackers: {
+      moneyEarned: new RateTracker(),
+      hacking: new RateTracker(),
+      combat: new RateTracker(),
+      augs: new RateTracker(),
+      daedalusRep: new RateTracker(),
+      blackOps: new RateTracker(),
+      rank: new RateTracker(),
+    },
+  };
+}
+
+let progressionMemory = freshProgressionMemory();
+
+/** Route change since the controller last asked, for the `endgame.route`
+ * telemetry event — the takeTargetSwitch pattern: recorded here, emitted by
+ * the controller, which is the only module that touches Telemetry. */
+let routeChange:
+  | { from?: RouteId; to: RouteId; etaSec: number; expectedEndAt: number; why: string; routes: RouteEtaDigest[] }
+  | undefined;
+
+export function takeRouteChange(): typeof routeChange {
+  const value = routeChange;
+  routeChange = undefined;
+  return value;
+}
+
+/** Assemble the endgame view from the store. Every field is already acquired
+ * by an existing probe; this composes, it never calls ns.
+ *
+ * Two aug sets with different meanings: `factions.ownedAugs` is owned
+ * INCLUDING queued (getOwnedAugmentations(true)); `progression.ownedAugs` is
+ * installed only (ResetInfo). Owning the pill and having installed it are
+ * exactly that distinction, and Daedalus's aug count checks installed. */
+function endgameView(ctx: NeedContext): EndgameView | undefined {
+  const player = ctx.state.topics.player;
+  if (!player) return undefined;
+  const prog = ctx.state.topics.progression;
+  const factions = ctx.state.topics.factions;
+  const blade = ctx.state.topics.bladeburner;
+
+  const installed = prog?.ownedAugs ?? {};
+  const ownedAll = factions?.ownedAugs ?? Object.keys(installed);
+  const blackOps = (blade?.actions ?? []).filter((action) => action.type === "blackop");
+  const skills = player.skills;
+
+  return {
+    bitNode: ctx.caps.bitNode,
+    sourceFiles: ctx.caps.sourceFiles ?? {},
+    augCount: prog?.augCount ?? Object.keys(installed).length,
+    ownsRedPill: ownedAll.includes(RED_PILL),
+    redPillInstalled: RED_PILL in installed,
+    money: player.money,
+    hackingSkill: skills.hacking,
+    lowestCombatSkill: Math.min(skills.strength, skills.defense, skills.dexterity, skills.agility),
+    daedalusRep: factions?.standings?.find((standing) => standing.name === "Daedalus")?.rep ?? 0,
+    inBladeburner: ctx.caps.unlocked.bladeburner === "yes",
+    blackOpsComplete: blackOps.filter((action) => (action.countRemaining ?? 1) <= 0).length,
+    ...(blade?.rank !== undefined ? { bladeburnerRank: blade.rank } : {}),
+  };
+}
+
+function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
+  const t = ctx.now;
+  const trackers = progressionMemory.trackers;
+  const earned = ctx.state.topics.progression?.moneySources?.sinceInstall?.total;
+  if (earned !== undefined) trackers.moneyEarned.sample(t, earned);
+  trackers.hacking.sample(t, view.hackingSkill);
+  trackers.combat.sample(t, view.lowestCombatSkill);
+  trackers.augs.sample(t, view.augCount);
+  trackers.daedalusRep.sample(t, view.daedalusRep);
+  trackers.blackOps.sample(t, view.blackOpsComplete);
+  if (view.bladeburnerRank !== undefined) trackers.rank.sample(t, view.bladeburnerRank);
+  return {
+    ...noRates(),
+    moneyPerSec: trackers.moneyEarned.perSec(),
+    hackingSkillPerSec: trackers.hacking.perSec(),
+    combatSkillPerSec: trackers.combat.perSec(),
+    augsPerSec: trackers.augs.perSec(),
+    daedalusRepPerSec: trackers.daedalusRep.perSec(),
+    blackOpsPerSec: trackers.blackOps.perSec(),
+    bladeburnerRankPerSec: trackers.rank.perSec(),
+  };
+}
+
+/** Value product of the augmentations affordable right now: the product over
+ * each one's multiplier product. Multipliers MULTIPLY, which is why this is a
+ * product of products rather than any sum. An offer with no reported mults
+ * (NeuroFlux, the odd unstable aug) counts a token 1.01 — present, near-
+ * worthless, never zeroing the whole product. */
+function affordableValueProduct(ctx: NeedContext): number {
+  const offers = ctx.state.topics.factions?.offers ?? [];
+  const money = ctx.state.topics.player?.money ?? 0;
+  let product = 1;
+  for (const offer of offers) {
+    if (offer.owned || !offer.affordableRep || offer.price > money) continue;
+    const mults = Object.values(offer.mults ?? {});
+    product *= mults.length > 0 ? mults.reduce((a, b) => a * b, 1) : 1.01;
+  }
+  return product;
+}
+
+/** The previous route decision, surviving a build handoff: module state dies
+ * with the old bundle, but the published plan lives in the realm store. */
+function previousChoice(ctx: NeedContext): RouteChoice | undefined {
+  if (progressionMemory.choice) return progressionMemory.choice;
+  const plan = ctx.state.topics.progression?.plan;
+  if (!plan?.route || plan.decidedAt === undefined) return undefined;
+  return {
+    route: plan.route,
+    etaSec: plan.expectedEndAt !== undefined ? Math.max(0, (plan.expectedEndAt - ctx.now) / 1000) : 0,
+    decidedAt: plan.decidedAt,
+    why: plan.routeWhy ?? "",
+  };
+}
+
+/** The refresh half: decide how this BitNode ends and when, from the enriched
+ * store, and publish it for every feature to read this same pass. Runs before
+ * any needs/claims/tick — see FeatureModule.refresh. */
+function progressionRefresh(ctx: NeedContext): void {
+  const player = ctx.state.topics.player;
+  if (!player) return;
+  const factions = ctx.state.topics.factions;
+  const prog = ctx.state.topics.progression;
+
+  // --- route: how does the run END, and how long is each way expected to take
+  const view = endgameView(ctx)!;
+  const endgame = stepEndgame(view);
+  const rates = sampledRates(ctx, view);
+  const etas = routeEtas(view, endgame, rates);
+  const previous = previousChoice(ctx);
+  const { choice, switched } = chooseRoute(previous, etas, ctx.now);
+  progressionMemory.choice = choice;
+
+  const blockerOf = new Map(endgame.routes.map((route) => [route.id, route.blocker]));
+  const routesDigest: RouteEtaDigest[] = etas.map((eta) => ({
+    id: eta.id,
+    available: eta.available,
+    complete: eta.complete,
+    blocker: blockerOf.get(eta.id) ?? "",
+    etaSec: Math.round(eta.etaSec),
+    parts: eta.parts.map((entry) => ({ what: entry.what, sec: Math.round(entry.sec), measured: entry.measured })),
+  }));
+
+  const expectedEndAt = choice ? ctx.now + choice.etaSec * 1000 : undefined;
+  if (switched && choice) {
+    routeChange = {
+      ...(previous ? { from: previous.route } : {}),
+      to: choice.route,
+      etaSec: Math.round(choice.etaSec),
+      expectedEndAt: expectedEndAt!,
+      why: choice.why,
+      routes: routesDigest,
+    };
+  }
+
+  // --- install cadence, on real inputs rather than the stubbed constants the
+  // first cut shipped with (affordableValueProduct 1, runSec 0).
+  const installed = prog?.ownedAugs ?? {};
+  const pending = (factions?.ownedAugs ?? []).filter((name) => !(name in installed));
+  const standings = Object.fromEntries(
+    (factions?.standings ?? []).map((standing) => [standing.name, { rep: standing.rep, favor: standing.favor }]),
+  );
+  const decision = stepProgression({
+    queued: pending,
+    affordableValueProduct: affordableValueProduct(ctx),
+    factionWorkInProgress: ctx.state.topics.career?.currentWork?.type === "FACTION",
+    money: player.money,
+    earnedThisRun: prog?.moneySources?.sinceInstall?.total ?? ctx.state.topics.farm?.totals?.moneyEarned ?? 0,
+    factions: standings,
+    favorToDonate: factions?.favorToDonate ?? 150,
+    homeRam: ctx.state.topics.servers?.["home"]?.maxRam ?? 8,
+    // No probe prices the home upgrade yet; Infinity keeps the budget advisory.
+    homeRamUpgradeCost: Infinity,
+    runSec: prog?.lastAugReset ? Math.max(0, (ctx.now - prog.lastAugReset) / 1000) : 0,
+  });
+
+  merge(ctx.state, "progression", {
+    plan: {
+      phase: decision.phase,
+      install: decision.install,
+      homeRamBudgetFraction: decision.homeRamBudgetFraction,
+      favorCrossings: decision.favorCrossings,
+      why: decision.why,
+      ...(choice
+        ? {
+            route: choice.route,
+            expectedEndAt: expectedEndAt!,
+            decidedAt: choice.decidedAt,
+            routeWhy: choice.why,
+          }
+        : {}),
+      routes: routesDigest,
+    },
+  });
+}
+
 const progression: FeatureDriver = {
   id: "progression",
   everyMs: 60_000,
-  tick(ctx: DriverContext) {
-    const factions = ctx.state.topics.factions;
-    const player = ctx.state.topics.player;
-    if (!player) return;
-
-    const standings = Object.fromEntries(
-      (factions?.standings ?? []).map((standing) => [standing.name, { rep: standing.rep, favor: standing.favor }]),
-    );
-    const decision = stepProgression({
-      queued: factions?.ownedAugs ?? [],
-      // Reported by the factions plan; without it the phase machine stays in
-      // `start`, which is the safe default.
-      affordableValueProduct: 1,
-      factionWorkInProgress: ctx.state.topics.career?.currentWork?.type === "FACTION",
-      money: player.money,
-      earnedThisRun: ctx.state.topics.farm?.totals?.moneyEarned ?? 0,
-      factions: standings,
-      favorToDonate: factions?.favorToDonate ?? 150,
-      homeRam: ctx.state.topics.servers?.["home"]?.maxRam ?? 8,
-      homeRamUpgradeCost: Infinity,
-      runSec: 0,
-    });
-
-    merge(ctx.state, "progression", {
-      plan: {
-        phase: decision.phase,
-        install: decision.install,
-        homeRamBudgetFraction: decision.homeRamBudgetFraction,
-        favorCrossings: decision.favorCrossings,
-        why: decision.why,
-      },
-    });
-    // Installing is NOT executed here. It ends the run, kills every process
-    // and is irreversible; wiring it needs the prestige path proven end to end
-    // first. The recommendation is published and acted on by nothing yet.
+  tick(_ctx: DriverContext) {
+    // The act half is deliberately empty for now. The decisions this feature
+    // owns — install the queued augmentations, destroy the world daemon — end
+    // the run, kill every process and are irreversible; wiring them needs the
+    // prestige path proven end to end first. The refresh half publishes the
+    // recommendation; nothing acts on it yet.
   },
 };
 
@@ -771,6 +993,13 @@ function dnetMethods(action: string | undefined): readonly string[] {
 
 export const progressionModule: FeatureModule = {
   driver: progression,
-  reset,
+  reset: () => {
+    reset();
+    // Rates and the route choice describe the node that just ended; the next
+    // one re-measures and re-decides from scratch.
+    progressionMemory = freshProgressionMemory();
+    routeChange = undefined;
+  },
+  refresh: progressionRefresh,
   peakStepGb: STEP_GB.progression,
 };

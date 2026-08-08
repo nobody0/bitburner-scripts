@@ -106,4 +106,30 @@ export interface ProgressionPlan {
    *  strongest single argument for resetting now. */
   favorCrossings: { faction: string; favorNow: number; favorAfter: number }[];
   why: string;
+  /** The chosen way to finish this BitNode, with the estimate it was chosen
+   *  on. Everything below is the decision record the calibration loop reads
+   *  back out of runs/*.jsonl: which route, guessed for how long, decided
+   *  when — matched at the node reset against what actually happened. */
+  route?: "daedalus" | "labyrinth" | "bladeburner";
+  /** Wall-clock timestamp the run is expected to end at, from the chosen
+   *  route's estimate. Features derive their planning horizon from it. */
+  expectedEndAt?: number;
+  /** When the current route was chosen (survives refreshes that keep it). */
+  decidedAt?: number;
+  routeWhy?: string;
+  /** Every route's estimate with its per-part breakdown, so a wrong total can
+   *  be attributed to the specific sub-heuristic that produced it. */
+  routes?: RouteEtaDigest[];
+}
+
+export interface RouteEtaDigest {
+  id: "daedalus" | "labyrinth" | "bladeburner";
+  available: boolean;
+  complete: boolean;
+  /** The single next thing this route is waiting on (from stepEndgame). */
+  blocker: string;
+  etaSec: number;
+  /** `measured: false` marks a fallback constant rather than an observed
+   *  rate — the calibration loop treats the two kinds of error differently. */
+  parts: { what: string; sec: number; measured: boolean }[];
 }

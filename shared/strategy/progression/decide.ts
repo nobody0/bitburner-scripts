@@ -120,7 +120,9 @@ export interface BitNodeEntry {
   node: number;
   /** Target source-file level. */
   level: number;
-  /** Measured hours to complete, once known. */
+  /** HEURISTIC hours to complete — an estimate from ./eta.ts and the recorded
+   *  runs, never a known constant. We optimise to reduce it; the telemetry log
+   *  (estimate at decision time, actual at reset) is what tunes it. */
   hours?: number;
   /** Source files that make this node materially easier. */
   wants: number[];

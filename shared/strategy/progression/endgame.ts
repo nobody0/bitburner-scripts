@@ -56,6 +56,10 @@ export interface EndgameView {
   daedalusRep: number;
   inBladeburner: boolean;
   blackOpsComplete: number;
+  /** Current Bladeburner rank, when known — ./eta.ts prices the rank climb to
+   *  the final black op from it. Optional because the detail probe may not
+   *  have reported yet; absent reads as rank 0. */
+  bladeburnerRank?: number;
 }
 
 export interface RouteStatus {

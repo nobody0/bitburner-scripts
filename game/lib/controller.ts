@@ -5,6 +5,7 @@ import type { HostRam } from "../../shared/ram/placement.ts";
 import type { Claim, SlotState } from "../../shared/strategy/arbiter.ts";
 import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../shared/strategy/coordination.ts";
 import type { Need } from "../../shared/strategy/needs.ts";
+import { DEFAULT_HORIZON_SEC } from "../../shared/strategy/progression/eta.ts";
 import { FEATURE_IDS, type FeatureId } from "../../shared/features/ids.ts";
 import { homeReserveGb } from "../../shared/ram/reserve.ts";
 import { resyncHeap, WORKER_BASE_SCRIPT, workerScript } from "./dispatch-driver.ts";
@@ -249,6 +250,7 @@ export async function runController(
           tick,
           board,
           grants: grantsFor(coordination.arbitration, driver.id),
+          horizonSec: DEFAULT_HORIZON_SEC,
           acquireDodge: (gb) => acquireDodge(hosts, hackingState().memory.dispatch.heap, gb),
         });
       } catch (error) {
