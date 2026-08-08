@@ -19,9 +19,8 @@ NetscriptDefinitions), `runs/` (gitignored JSONL telemetry, one file per run;
 ## Daily commands
 
 ```
-bun run dev          # sync-on-save to the game (telemetry ON)
-bun run dev:perf     # same, telemetry compiled out
-bun run ui           # telemetry hub + viewer at http://127.0.0.1:12526
+bun run ui           # telemetry hub + viewer, with a manual sync button
+bun run sync         # one-shot build + push without the UI
 bun run sim -- --list                       # named profiles
 bun run sim -- --profile hacking-only --seeds 1..3
 bun run sim -- --goal earn:1e6 --seed 1     # simulate; JSONL lands in runs/

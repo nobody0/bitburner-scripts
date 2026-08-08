@@ -230,6 +230,8 @@ interface HubMessage {
   records?: LogRecord[];
   busy?: boolean;
   code?: number;
+  output?: string;
+  syncBusy?: boolean;
 }
 
 function connect(): void {
@@ -246,6 +248,7 @@ function connect(): void {
     if (msg.type === "snapshot") {
       liveRuns = msg.runs ?? [];
       storedRuns = msg.stored ?? [];
+      $<HTMLButtonElement>("sync").disabled = Boolean(msg.syncBusy);
       refreshPicker();
       if (liveRuns.length > 0) {
         $<HTMLSelectElement>("runpick").value = `live:${liveRuns[0]!.id}`;
@@ -285,6 +288,14 @@ function connect(): void {
         refreshPicker();
       }
       $("status").textContent = `sim finished (exit ${msg.code})`;
+    } else if (msg.type === "sync-status") {
+      $<HTMLButtonElement>("sync").disabled = Boolean(msg.busy);
+      if (msg.busy) $("status").textContent = "sync waiting for Bitburner…";
+    } else if (msg.type === "sync-finished") {
+      $<HTMLButtonElement>("sync").disabled = false;
+      const status = $("status");
+      status.textContent = msg.code === 0 ? "sync complete" : `sync failed (exit ${msg.code})`;
+      status.title = msg.output?.trim() ?? "";
     } else if (msg.type === "records" && run.live && (msg as { run?: string }).run === run.id) {
       run.records.push(...(msg.records ?? []));
       if (run.t0 === null && msg.records?.length) run.t0 = msg.records[0]!.t;
@@ -311,6 +322,24 @@ async function refreshLaunchers(): Promise<void> {
   ].join("");
 }
 void refreshLaunchers();
+
+$("sync").addEventListener("click", async () => {
+  const button = $<HTMLButtonElement>("sync");
+  button.disabled = true;
+  try {
+    const res = await fetch("/sync", { method: "POST" });
+    const body = (await res.json()) as { error?: string };
+    if (!res.ok) {
+      button.disabled = false;
+      $("status").textContent = `sync failed: ${body.error ?? res.statusText}`;
+    } else {
+      $("status").textContent = "sync waiting for Bitburner…";
+    }
+  } catch (error) {
+    button.disabled = false;
+    $("status").textContent = `sync failed: ${String(error)}`;
+  }
+});
 
 $("simrun").addEventListener("click", async () => {
   $<HTMLButtonElement>("simrun").disabled = true;

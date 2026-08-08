@@ -9,8 +9,6 @@
     "typecheck": "tsc --noEmit",
     "typecheck:vendor": "tsc -p tsconfig.vendor.json --noEmit",
     "test": "bun test",
-    "dev": "bun run tools/rfa-server.ts --watch",
-    "dev:perf": "bun run tools/rfa-server.ts --watch --perf",
     "sync": "bun run tools/rfa-server.ts --once",
     "types": "bun run tools/rfa-server.ts --types-only",
     "vendor": "bun run tools/vendor.ts",

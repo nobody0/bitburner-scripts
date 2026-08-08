@@ -47,17 +47,17 @@ async function main(): Promise<void> {
   }
 
   // The repository is the Remote File API server and Bitburner is the client,
-  // so this waits for the game to connect. Port 12525 holds only one listener:
-  // stop `bun run dev` first.
+  // so this waits for the game to connect. Port 12525 holds only one listener,
+  // so an in-progress sync must finish first.
   let server: WebSocketServer;
   try {
     server = new WebSocketServer({ host: config.host, port: config.port });
   } catch {
-    console.error(`could not listen on ${config.host}:${config.port} — stop "bun run dev" and retry`);
+    console.error(`could not listen on ${config.host}:${config.port} — wait for the active sync and retry`);
     process.exit(1);
   }
   server.on("error", (error) => {
-    console.error(`${String(error)}\n(if this is EADDRINUSE, stop "bun run dev" and retry)`);
+    console.error(`${String(error)}\n(if this is EADDRINUSE, wait for the active sync and retry)`);
     process.exit(1);
   });
 

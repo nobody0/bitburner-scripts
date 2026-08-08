@@ -61,19 +61,17 @@ distinction matters because only one is still on disk:
 ## Development loop
 
 1. Install dependencies with `bun install`.
-2. Run `bun run dev` and leave it running (add `--perf` to strip telemetry).
-3. Run `bun run ui` and open <http://127.0.0.1:12526> for the live dashboard.
-4. In Bitburner, open **Options → Remote API** and configure the game to connect
+2. Run `bun run ui` and open <http://127.0.0.1:12526> for the live dashboard.
+3. In Bitburner, open **Options → Remote API** and configure the game to connect
    to `127.0.0.1:12525` — hostname `localhost`, port `12525`, **Use wss OFF**,
    reconnection delay `5`.
-5. In **Options → System**, set the autoexec script to `start.js main` so it
+4. In **Options → System**, set the autoexec script to `start.js main` so it
    starts whenever the game loads (cold boot: scan, root, redeploy).
-6. Edit TypeScript under `game/` (and `shared/`). Successful builds are pushed
-   to `home` whenever the game is connected, and the running `start.js`
-   detects the new build stamp (`build-id.txt`) and hands off to a fresh
-   instance of itself — no manual restarts. Game reload and code change share
-   the same entry point; a controller-epoch guard keeps exactly one instance
-   in charge.
+5. Edit TypeScript under `game/` (and `shared/`), then click **sync to game** in
+   the dashboard. You can instead run `bun run sync` from a terminal.
+   There is deliberately no file watcher: only an explicit action can push a
+   build. The running `start.js` detects the new build stamp (`build-id.txt`)
+   and hands off to a fresh instance of itself — no manual restart required.
 
 Bitburner is the WebSocket client for file sync (port 12525, this repo is the
 server); the in-game telemetry logger is a WebSocket client of the UI hub
@@ -138,10 +136,9 @@ import type { NS } from "@ns";
 
 ## Commands
 
-- `bun run dev` / `dev:perf` — listen for Bitburner, build and push on changes.
 - `bun run sync` — one-shot build and push, then exit.
 - `bun run build` / `build:perf` — compile the allowlist to `build/`.
-- `bun run ui` — telemetry hub + viewer on port 12526.
+- `bun run ui` — telemetry hub + viewer on port 12526, including manual sync.
 - `bun run sim -- --goal …` — run the simulator; JSONL lands in `runs/`.
 - `bun run sim:compare a.jsonl b.jsonl` — A/B time-to-goal.
 - `bun run vendor` — re-extract the game formula core from the pinned tag.

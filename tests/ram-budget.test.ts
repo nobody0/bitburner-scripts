@@ -39,7 +39,6 @@ const config: BitburnerConfig = {
   port: 12525,
   server: "home",
   buildDir: "build-test-ram",
-  watchDirs: ["game", "shared"],
   entries: [
     { source: "game/start.ts", target: "start.js" },
     { source: "game/worker/worker.ts", target: "worker/worker.js" },

@@ -8,7 +8,8 @@ import { RunStore } from "./store.ts";
  *  - ws /live   — browser viewers get a snapshot, then live fan-out
  *  - HTTP /     — the viewer app; /app.js — its bundle; /runs, /runs/:file —
  *                 stored JSONL replays
- *  - POST /sim  — launch a simulation (bun sim/run.ts) from the dashboard */
+ *  - POST /sim  — launch a simulation (bun sim/run.ts) from the dashboard
+ *  - POST /sync — deliberately build and push the game scripts */
 
 const RUNS_DIR = new URL("../runs", import.meta.url).pathname;
 /** Pinned runs live here and are never swept. Without somewhere to put them,
@@ -29,6 +30,7 @@ type SocketData = { role: "ingest"; store?: RunStore } | { role: "live" };
 const runs = new Map<string, RunStore>();
 const viewers = new Set<Bun.ServerWebSocket<SocketData>>();
 let simBusy = false;
+let syncBusy = false;
 
 function listIn(dir: string, prefix: string): { file: string; size: number; pinned: boolean }[] {
   let names: string[] = [];
@@ -137,6 +139,7 @@ function snapshotFor(): unknown {
     })),
     stored: listRunFiles(),
     simBusy,
+    syncBusy,
   };
 }
 
@@ -205,6 +208,47 @@ async function launchSim(body: SimRequest): Promise<Response> {
   return Response.json({ started: true, args });
 }
 
+/** Run the exact same one-shot command exposed as `bun run sync`. Keeping it
+ * in a child process means the UI never owns the Remote File API port while
+ * idle: clicking the button opens it only long enough for Bitburner to connect,
+ * receive a complete build, and disconnect. */
+function launchSync(): Response {
+  if (syncBusy) return Response.json({ error: "a sync is already running" }, { status: 409 });
+
+  syncBusy = true;
+  broadcast({ type: "sync-status", busy: true });
+  try {
+    const proc = Bun.spawn(["bun", "run", "sync"], {
+      cwd: process.cwd(),
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    void (async () => {
+      let code = 1;
+      let output = "";
+      try {
+        const [out, err, exitCode] = await Promise.all([
+          new Response(proc.stdout).text(),
+          new Response(proc.stderr).text(),
+          proc.exited,
+        ]);
+        code = exitCode;
+        output = (out + err).slice(-4_000);
+      } catch (error) {
+        output = String(error);
+      }
+      syncBusy = false;
+      console.log(`sync finished (exit ${code})\n${output}`);
+      broadcast({ type: "sync-finished", code, output });
+    })();
+  } catch (error) {
+    syncBusy = false;
+    broadcast({ type: "sync-finished", code: 1, output: String(error) });
+    return Response.json({ error: String(error) }, { status: 500 });
+  }
+  return Response.json({ started: true });
+}
+
 /** The game and the sim both dial TELEMETRY_PORT, so this is only for running
  * a second hub alongside a live one (a scratch instance, or a test). */
 const PORT = Number(process.env["UI_PORT"] ?? TELEMETRY_PORT);
@@ -219,6 +263,7 @@ const server = Bun.serve<SocketData, never>({
     if (url.pathname === "/sim" && req.method === "POST") {
       return req.json().then(launchSim).catch(() => Response.json({ error: "bad JSON" }, { status: 400 }));
     }
+    if (url.pathname === "/sync" && req.method === "POST") return launchSync();
     if (url.pathname === "/app.js") return appBundle();
     if (url.pathname === "/runs") return Response.json(listRunFiles());
     if (url.pathname === "/profiles") {

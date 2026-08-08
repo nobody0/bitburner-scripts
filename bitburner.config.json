@@ -3,11 +3,6 @@
   "port": 12525,
   "server": "home",
   "buildDir": "build",
-  "watchDirs": [
-    "game",
-    "shared",
-    "types"
-  ],
   "entries": [
     {
       "source": "game/start.ts",

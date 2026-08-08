@@ -6,24 +6,12 @@ const valid = {
   port: 12525,
   server: "home",
   buildDir: "build",
-  watchDirs: ["game", "shared", "types"],
   entries: [{ source: "game/start.ts", target: "start.js" }],
 };
 
 describe("validateConfig", () => {
   test("accepts a minimal allowlist", () => {
     expect(validateConfig(valid)).toEqual(valid);
-  });
-
-  test("defaults watchDirs when omitted", () => {
-    const { watchDirs: _watchDirs, ...withoutWatchDirs } = valid;
-    expect(validateConfig(withoutWatchDirs).watchDirs).toEqual(["game", "shared"]);
-  });
-
-  test("rejects watch dirs outside the repository", () => {
-    expect(() => validateConfig({ ...valid, watchDirs: ["../elsewhere"] })).toThrow(
-      "must stay inside the repository",
-    );
   });
 
   test("rejects entry sources outside game/", () => {

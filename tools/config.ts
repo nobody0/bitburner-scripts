@@ -11,7 +11,6 @@ export interface BitburnerConfig {
   port: number;
   server: string;
   buildDir: string;
-  watchDirs: string[];
   entries: BuildEntry[];
 }
 
@@ -41,14 +40,6 @@ export function validateConfig(raw: unknown): BitburnerConfig {
   if (buildDir === ".") throw new Error("buildDir cannot be the repository root");
   if (!Array.isArray(value.entries) || value.entries.length === 0) throw new Error("entries must not be empty");
 
-  const rawWatchDirs = value.watchDirs ?? ["game", "shared"];
-  if (!Array.isArray(rawWatchDirs) || rawWatchDirs.length === 0) throw new Error("watchDirs must not be empty");
-  const watchDirs = rawWatchDirs.map((dir, index) => {
-    const normalized = relativePath(dir, `watchDirs[${index}]`);
-    if (normalized === ".") throw new Error(`watchDirs[${index}] cannot be the repository root`);
-    return normalized;
-  });
-
   const targets = new Set<string>();
   const entries = value.entries.map((entry, index) => {
     if (entry === null || typeof entry !== "object") throw new Error(`entries[${index}] must be an object`);
@@ -63,7 +54,7 @@ export function validateConfig(raw: unknown): BitburnerConfig {
     return { source, target };
   });
 
-  return { host: value.host, port: value.port as number, server: value.server, buildDir, watchDirs, entries };
+  return { host: value.host, port: value.port as number, server: value.server, buildDir, entries };
 }
 
 export async function loadConfig(filename = "bitburner.config.json"): Promise<BitburnerConfig> {
