@@ -64,6 +64,18 @@ export function runGates(stubNs: NS): GateResult {
     const ownedAugs = fromMap(reset.ownedAugs);
     readings.bitNode = reset.currentNode;
     readings.sourceFiles = sourceFiles;
+    // The same options the telemetry topic carries, but ALSO fed to the
+    // capability derivation: a run can hold SF2 and still forbid gangs, so
+    // deriving unlocks from source files alone reports features we cannot play.
+    readings.bitNodeOptions = {
+      disableGang: reset.bitNodeOptions?.disableGang,
+      disableCorporation: reset.bitNodeOptions?.disableCorporation,
+      disableBladeburner: reset.bitNodeOptions?.disableBladeburner,
+      disable4SData: reset.bitNodeOptions?.disable4SData,
+      disableHacknetServer: reset.bitNodeOptions?.disableHacknetServer,
+      disableSleeveExpAndAugmentation: reset.bitNodeOptions?.disableSleeveExpAndAugmentation,
+      restrictHomePCUpgrade: reset.bitNodeOptions?.restrictHomePCUpgrade,
+    };
     progression = {
       bitNode: reset.currentNode,
       sourceFiles,

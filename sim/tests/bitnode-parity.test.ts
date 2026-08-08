@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { BITNODES, DEFAULT_BITNODE_MULTIPLIERS } from "../../shared/features/bitnode.ts";
+import {
+  BITNODES,
+  DEFAULT_BITNODE_MULTIPLIERS,
+  bitNodeMultipliers,
+  worldDaemonSkill,
+} from "../../shared/features/bitnode.ts";
 import { getBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { BitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 
@@ -55,5 +60,51 @@ describe("BitNode reference data parity", () => {
       }
     }
     expect([...unknown]).toEqual([]);
+  });
+
+  // The transcribed per-node table is what lets the controller know its own
+  // multipliers without SF5 and without the 4 GB getter. It is also the single
+  // most tedious thing in `shared/` to keep correct by hand, so it is pinned
+  // field-by-field rather than spot-checked.
+  test("every node's transcribed multipliers match the vendored getter exactly", () => {
+    for (const node of BITNODES) {
+      // lvl only affects BN12; pass 0 so the non-BN12 comparison is unambiguous.
+      const vendoredMults = { ...getBitNodeMultipliers(node.n, 0) } as Record<string, number>;
+      const ours = bitNodeMultipliers(node.n, 0);
+      expect(ours, `BN${node.n} is missing from the transcription`).toBeDefined();
+      for (const [field, value] of Object.entries(vendoredMults)) {
+        expect(ours![field], `BN${node.n}.${field}`).toBe(value);
+      }
+      // And nothing invented: same field set, so a stray key cannot hide.
+      expect(Object.keys(ours!).sort()).toEqual(Object.keys(vendoredMults).sort());
+    }
+  });
+
+  test("BN12 tracks the vendored source-file-level formula", () => {
+    // BN12 is a formula, not a table, and it is the one node whose multipliers
+    // change between visits — so it is swept rather than sampled once.
+    for (const lvl of [0, 1, 2, 3, 5, 10, 25, 50, 100]) {
+      const vendoredMults = { ...getBitNodeMultipliers(12, lvl) } as Record<string, number>;
+      const ours = bitNodeMultipliers(12, lvl)!;
+      for (const [field, value] of Object.entries(vendoredMults)) {
+        expect(ours[field], `BN12.${field} at SF12 level ${lvl}`).toBe(value);
+      }
+    }
+  });
+
+  test("an unknown BitNode yields undefined rather than BN1's defaults", () => {
+    // "We do not know what node this is" and "this is BN1" must not collapse
+    // into the same value: BN1 is the all-ones baseline, so a wrong guess of
+    // BN1 is silently the most dangerous default possible.
+    expect(bitNodeMultipliers(undefined)).toBeUndefined();
+    expect(bitNodeMultipliers(BITNODES.length + 1)).toBeUndefined();
+  });
+
+  test("worldDaemonSkill matches the server's scaled requirement", () => {
+    // ServerHelpers multiplies the 3000 base by WorldDaemonDifficulty.
+    for (const node of BITNODES) {
+      const expected = 3000 * getBitNodeMultipliers(node.n, 0).WorldDaemonDifficulty;
+      expect(worldDaemonSkill(node.n, 0), `BN${node.n} w0r1d_d43m0n skill`).toBe(expected);
+    }
   });
 });

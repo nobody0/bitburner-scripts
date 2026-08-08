@@ -11,12 +11,31 @@ import { FEATURE_IDS, type FeatureId } from "./ids.ts";
 
 export type UnlockState = "yes" | "no" | "unknown";
 
+/** The subset of ResetInfo.bitNodeOptions that changes what we may play.
+ *
+ * These are per-run toggles chosen when entering the node, so holding a source
+ * file is NO LONGER sufficient for "this feature is available" — a run can
+ * carry SF2 and still forbid gangs. Undefined means the option was not read. */
+export interface BitNodeDisables {
+  disableGang?: boolean;
+  disableCorporation?: boolean;
+  disableBladeburner?: boolean;
+  disable4SData?: boolean;
+  disableHacknetServer?: boolean;
+  disableSleeveExpAndAugmentation?: boolean;
+  restrictHomePCUpgrade?: boolean;
+}
+
 /** Everything the 0 GB-ish gate batch can see. All optional: a gate that was
  * skipped or threw leaves its field undefined and yields "unknown". */
 export interface GateReadings {
   bitNode?: number;
-  /** ResetInfo.ownedSF flattened (Map does not survive JSON). SF n -> level. */
+  /** ResetInfo.ownedSF flattened (Map does not survive JSON). SF n -> level.
+   *  Already ACTIVE levels — the game folds `sourceFileOverrides` in before
+   *  handing this over, so callers must not apply the overrides again. */
   sourceFiles?: Record<string, number>;
+  /** ResetInfo.bitNodeOptions, the per-run feature switches. */
+  bitNodeOptions?: BitNodeDisables;
   inGang?: boolean;
   inBladeburner?: boolean;
   hasCorporation?: boolean;
@@ -32,6 +51,10 @@ export interface Capabilities {
   unlocked: Record<FeatureId, UnlockState>;
   /** Why a feature is not "yes". Present for every non-"yes" entry. */
   reason: Partial<Record<FeatureId, string>>;
+  /** Options that degrade a feature we can still play, so a driver can lower
+   *  its ambition instead of discovering the restriction by failing. Distinct
+   *  from `unlocked`, which is about whether we may play it at all. */
+  restrictions: BitNodeDisables;
 }
 
 /** Source file level for SF n, or 0. */
@@ -72,13 +95,31 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
   set("factions", hasNode(r, 4), "requires BN4 or SF4 (Singularity) for the faction/augmentation API");
 
   set("stock", fromFlag(r.hasWseAccount), "requires a WSE account (and TIX API access for positions)");
-  set("gang", fromFlag(r.inGang), "requires a gang — BN2, or SF2 plus enough negative karma");
+  set("gang", fromFlag(r.inGang), "requires a gang — BN2, or SF2 plus karma <= -54,000");
   set("corp", fromFlag(r.hasCorporation), "requires a corporation — BN3, or SF3 plus the seed money");
-  set("bladeburner", fromFlag(r.inBladeburner), "requires the Bladeburner division — BN6/BN7, or SF6");
+  // Both the division and its ns API are gated on BN6/SF6 OR BN7/SF7
+  // (NetscriptFunctions/Bladeburner.ts). SF7 adds multipliers, not access.
+  set("bladeburner", fromFlag(r.inBladeburner), "requires the Bladeburner division — BN6/BN7, or SF6/SF7");
   set("sleeves", hasNode(r, 10), "requires BN10 or SF10 (Digital Carbon)");
   set("go", fromFlag(r.goPlayable), "IPvGO is unreachable");
   set("stanek", hasNode(r, 13), "requires BN13 or SF13 (Stanek's Gift)");
   set("dnet", hasNode(r, 15), "requires BN15 or SF15 (the Dark Net)");
+
+  // BitNode options veto LAST, and only where the option removes the feature
+  // outright. A run may hold SF2 and still forbid gangs, so a source file is
+  // not sufficient evidence any more.
+  //
+  // The other four options degrade rather than remove — hacknet is still
+  // playable without hacknet servers, stock without 4S, sleeves without exp
+  // and augmentations — so they travel in `restrictions` for the drivers to
+  // read, and are deliberately NOT allowed to flip a feature to "no".
+  const options = r.bitNodeOptions ?? {};
+  const veto = (id: FeatureId, disabled: boolean | undefined, why: string) => {
+    if (disabled === true) set(id, "no", why);
+  };
+  veto("gang", options.disableGang, "gangs are disabled by this BitNode's options");
+  veto("corp", options.disableCorporation, "corporations are disabled by this BitNode's options");
+  veto("bladeburner", options.disableBladeburner, "Bladeburner is disabled by this BitNode's options");
 
   // Anything the table above forgot stays explicitly unknown rather than
   // silently absent — Record<FeatureId, ...> must be total for the UI.
@@ -91,6 +132,7 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
     sourceFiles: r.sourceFiles ?? {},
     unlocked,
     reason,
+    restrictions: { ...options },
   };
 }
 

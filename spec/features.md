@@ -10,6 +10,10 @@ The list is derived from the BitNodes for a reason: each node picks one
 feature, multiplies it, and asks you to win the game with it. That makes the
 node roster the game's own statement of where the separable problems are.
 
+This document describes the feature **machinery**. What the features are
+actually *for* — per-BitNode rules, what each feature needs and yields, and how
+they depend on each other — lives in [spec/strategy/](strategy/README.md).
+
 One feature = one entry in `shared/features/registry.ts` + at least one topic
 in `shared/telemetry/topics/` + one probe in `game/lib/probes/` + one driver in
 `game/lib/features/` + one tab in `ui/app/tabs/`. `tests/features.test.ts`

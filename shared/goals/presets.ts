@@ -1,5 +1,11 @@
 import type { Action } from "../world.ts";
+import { bitNodeMultipliers, worldDaemonSkill } from "../features/bitnode.ts";
 import { allOf, goalFrom, type Goal } from "./goal.ts";
+
+/** The augmentation that makes w0r1d_d43m0n reachable. Not a free-text name:
+ * it is load-bearing in `bn:` and a typo would make the goal unreachable
+ * rather than failing loudly. */
+const RED_PILL = "The Red Pill";
 
 /** String forms for the CLI (bun run sim -- --goal ...):
  *   earn:1e9            money earned from hacking >= 1e9
@@ -9,6 +15,10 @@ import { allOf, goalFrom, type Goal } from "./goal.ts";
  *   only:hack,grow,weaken  restrict allowed action types (sleep always allowed)
  *   faction:CyberSec    joined that faction
  *   rep:CyberSec:1e5    reputation with that faction >= 1e5
+ *   daedalus / daedalus:6   Daedalus's invite gate for that BitNode
+ *   redpill             owns The Red Pill
+ *   wd / wd:14          hacking >= that node's w0r1d_d43m0n requirement
+ *   bn / bn:6           the whole node: daedalus, then redpill, then wd
  * Repeat --goal to combine; they compose with allOf.
  *
  * The two faction forms are what a feature-isolation run asks for: "unlock
@@ -99,9 +109,59 @@ export function parseGoal(spec: string): Goal {
         done: (ctx) => (ctx.factions.get(name)?.rep ?? 0) >= amount,
       };
     }
+    // --- BitNode milestones -------------------------------------------------
+    // The composed "beat this node" goal, which is what makes time-to-BitNode
+    // measurable at all. Node-parameterised rather than BN1-only, because the
+    // two numbers that move (`DaedalusAugsRequirement` and the w0r1d_d43m0n
+    // skill) are exactly what `shared/features/bitnode.ts` now knows for free.
+    case "daedalus": {
+      // BN12's requirement also depends on the SF12 level, which a goal spec
+      // has no way to carry; level 0 is assumed, and the difference is one
+      // augmentation until SF12 is very deep (31 at level 0, 32 by level 50).
+      const node = rest.length > 0 ? parseAmount(rest[0], spec) : 1;
+      const mults = bitNodeMultipliers(node);
+      if (!mults) throw new Error(`unknown BitNode in goal spec: ${spec}`);
+      const augs = mults.DaedalusAugsRequirement!;
+      return {
+        id: spec,
+        describe: () => `Daedalus invite in BN${node}: ${augs} augs, $100b, hacking 2500`,
+        // Daedalus accepts hacking 2500 OR all four combat at 1500. Only the
+        // hacking branch is expressible here — GoalContext carries no combat
+        // skills — so this is the hacking route's milestone specifically, and
+        // a combat-route run would satisfy Daedalus without satisfying this.
+        done: (ctx) =>
+          ctx.augmentations.size >= augs && ctx.player.money >= 100e9 && ctx.player.hackingSkill >= 2500,
+      };
+    }
+    case "redpill":
+      return {
+        id: spec,
+        describe: () => `owns ${RED_PILL}`,
+        done: (ctx) => ctx.augmentations.has(RED_PILL),
+      };
+    case "wd": {
+      const node = rest.length > 0 ? parseAmount(rest[0], spec) : 1;
+      const skill = worldDaemonSkill(node);
+      if (skill === undefined) throw new Error(`unknown BitNode in goal spec: ${spec}`);
+      return {
+        id: spec,
+        describe: () => `hacking ${skill} — w0r1d_d43m0n in BN${node}`,
+        done: (ctx) => ctx.player.hackingSkill >= skill,
+      };
+    }
+    case "bn": {
+      // The whole node, in the order the constraints bind. The skill goal is
+      // deliberately LAST and separate from `daedalus`: owning The Red Pill
+      // requires an install, which resets hacking to 1, so "reach 2500" and
+      // "reach the w0r1d_d43m0n level" are two different climbs with a reset
+      // between them. Collapsing them would hide a whole regrow phase.
+      const node = rest.length > 0 ? parseAmount(rest[0], spec) : 1;
+      return allOf(parseGoal(`daedalus:${node}`), parseGoal("redpill"), parseGoal(`wd:${node}`));
+    }
     default:
       throw new Error(
-        `unknown goal spec: ${spec} (want earn:|money:|skill:|ram:|only:|faction:|rep:|karma:|augs:|aug:|favor:)`,
+        `unknown goal spec: ${spec} ` +
+          `(want earn:|money:|skill:|ram:|only:|faction:|rep:|karma:|augs:|aug:|favor:|daedalus:|redpill|wd:|bn:)`,
       );
   }
 }
