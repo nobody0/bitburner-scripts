@@ -15,6 +15,11 @@ export interface FactionStanding {
   favorToDonate?: number;
 }
 
+/** One (faction, augmentation) pair. Deliberately carries only what varies
+ * BETWEEN pairs — an augmentation offered by four factions produces four of
+ * these, and duplicating its multiplier table four times is what made this
+ * topic 198 KB per record. The per-augmentation facts live once, in
+ * `FactionsState.augMeta`. */
 export interface AugmentationOffer {
   name: string;
   faction: string;
@@ -29,15 +34,20 @@ export interface AugmentationOffer {
   /** Reputation still needed at the cheapest offering faction. */
   repGap?: number;
   owned: boolean;
-  prereqs?: string[];
-  /** Multiplier fields, for the value column. */
-  mults?: Record<string, number>;
   /** Score under the run's objective weights. */
   score?: number;
   /** Shadows-of-Anarchy pricing (7^owned), which is not the normal curve. */
   soa?: boolean;
   /** NeuroFlux pricing (1.14^level on BOTH rep and money). */
   neuroflux?: boolean;
+}
+
+/** Facts that belong to an augmentation rather than to an offer of it. Keyed
+ * by augmentation name, so N offering factions cost one copy, not N. */
+export interface AugmentationMeta {
+  prereqs?: string[];
+  /** Multiplier fields, for the value column. */
+  mults?: Record<string, number>;
 }
 
 export interface GraftOffer {
@@ -60,6 +70,29 @@ export interface PlanBlocker {
   reachable: boolean;
   negated?: boolean;
   why: string;
+}
+
+/** One unmet invite requirement, without the faction name — the gate it
+ * belongs to is the key. */
+export type GateBlocker = Omit<PlanBlocker, "faction">;
+
+/** How close we are to an invitation from ONE faction, and what is in the way.
+ *
+ * Emitted for EVERY faction the game knows, not only the ones the current
+ * objective is chasing. Deciding whether an objective is worth switching to
+ * needs the whole board, and so does the operator reading the panel. */
+export interface FactionGate {
+  joined: boolean;
+  invited: boolean;
+  /** The BOTTLENECK requirement's progress, in [0, 1] — a faction is only as
+   *  close as its furthest-away condition, and averaging would report
+   *  "80% there" for one that is missing a BitNode. 1 when nothing is
+   *  missing. */
+  progress: number;
+  /** False when nothing in this run can satisfy it (wrong BitNode, a negated
+   *  karma requirement, a special faction joined by its own mechanic). */
+  reachable: boolean;
+  missing: GateBlocker[];
 }
 
 /** The decision digest: what we are doing, why, and what would change it. */
@@ -105,11 +138,18 @@ export interface FactionsState {
    *  string. The strategy must INTERPRET these (an OR branch is not an AND),
    *  so a stringified form would be useless to it. */
   requirements?: Record<string, PlayerRequirement[]>;
+  /** Evaluated invite requirements, per faction. The strategy's own reading of
+   *  `requirements` against the current player — reported rather than
+   *  re-derived in the viewer, so there is one interpretation of an OR branch
+   *  in the repository, not two. */
+  gates?: Record<string, FactionGate>;
   ownedAugs?: string[];
   /** Not-yet-owned augmentations offered by joined factions. Capped by the
    * probe (see FACTION_AUG_LIMIT) so a late-game save cannot balloon the
    * record; `augTotal` reports the true count. */
   offers?: AugmentationOffer[];
+  /** Per-augmentation facts for everything named in `offers`, deduped by name. */
+  augMeta?: Record<string, AugmentationMeta>;
   augTotal?: number;
   graftable?: GraftOffer[];
   /** The decision digest. */

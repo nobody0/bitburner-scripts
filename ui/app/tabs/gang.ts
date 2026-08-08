@@ -1,4 +1,4 @@
-import { bar, card, note, table, tiles } from "../lib/dom.ts";
+import { bar, card, meter, note, table, tiles } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -40,7 +40,7 @@ export const gangTab: Tab = {
         String(m.skills.cha),
         String(m.augmentations),
       ]),
-      "no members recruited",
+      { empty: "no members recruited", left: [0, 1] },
     );
 
     const clash = g.clashChances
@@ -50,8 +50,9 @@ export const gangTab: Tab = {
             .sort((a, b) => b[1] - a[1])
             .map(([name, chance]) => [
               esc(name),
-              `<span class="${chance > 0.5 ? "good" : "bad"}">${fmtPct(chance)}</span>`,
+              meter(chance, fmtPct(chance), chance > 0.5),
             ]),
+          { left: [0] },
         )
       : note("clash odds need the detail probe");
 

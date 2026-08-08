@@ -52,13 +52,17 @@
   }
   header {
     display: flex;
-    gap: 12px;
+    gap: 10px 12px;
     align-items: center;
-    padding: 10px 16px;
+    padding: 8px 16px;
     border-bottom: 1px solid var(--border);
     flex-wrap: wrap;
   }
-  header h1 { font-size: 15px; margin: 0 8px 0 0; font-weight: 600; }
+  header h1 { font-size: 15px; margin: 0 4px 0 0; font-weight: 600; flex: none; }
+  /* The launcher is one unit: it wraps as a block instead of scattering six
+     controls across the header and pushing the last one off-screen. */
+  .group { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .group.launch { margin-left: auto; }
   select, input, button {
     background: var(--surface-1);
     color: var(--text-primary);
@@ -70,7 +74,7 @@
   select { max-width: 46ch; }
   button { cursor: pointer; }
   button:disabled { opacity: 0.5; cursor: default; }
-  #status { color: var(--text-secondary); }
+  #status { color: var(--text-secondary); min-width: 12ch; }
   #status .live { color: var(--good); font-weight: 600; }
 
   /* --- tab bar: generated from shared/features/registry.ts --- */
@@ -109,27 +113,44 @@
   main#view {
     display: grid;
     grid-template-columns: minmax(420px, 3fr) minmax(300px, 2fr);
-    gap: 14px;
-    padding: 14px 16px;
+    gap: 12px;
+    padding: 12px 16px;
     align-items: start;
   }
-  .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+  .col { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+  /* A column of dense tables needs the room; the sidebar keeps its ratio.
+     Previously `wide` was written on nine panels and defined nowhere. */
+  .col.wide { grid-column: 1; }
+  @media (max-width: 1100px) {
+    main#view { grid-template-columns: minmax(0, 1fr); }
+  }
   section.card {
     background: var(--surface-1);
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 12px 14px;
+    padding: 10px 12px;
     min-width: 0;
     overflow-x: auto;
   }
-  section.card h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; color: var(--text-secondary); }
+  section.card h2 {
+    margin: 0 0 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  section.card h2 .acts { margin-left: auto; display: flex; gap: 6px; align-items: center; font-weight: 400; }
   .locked-card p { margin: 4px 0; }
   .muted { color: var(--muted); }
   .good { color: var(--good); }
   .bad, .fail { color: var(--critical); }
+  .warn { color: var(--series-5); }
 
-  .tiles { display: flex; gap: 22px; margin-bottom: 8px; flex-wrap: wrap; }
-  .tile .v { font-size: 20px; font-weight: 600; }
+  .tiles { display: flex; gap: 18px; margin-bottom: 6px; flex-wrap: wrap; }
+  .tile .v { font-size: 19px; font-weight: 600; }
   .tile .l { color: var(--muted); font-size: 12px; }
 
   #chartwrap { position: relative; }
@@ -148,13 +169,77 @@
   }
 
   table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
-  th, td { text-align: right; padding: 3px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+  th, td { text-align: right; padding: 2px 8px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
   /* Opt-in wrapping for prose columns (requirement trees, rationales). Without
      it a long string forces the whole card into horizontal scroll, which is
      both ugly and makes the rest of the panel unreadable. */
   th.wrap, td.wrap { white-space: normal; overflow-wrap: anywhere; text-align: left; }
+  th.l, td.l { text-align: left; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
   th:first-child, td:first-child { text-align: left; }
+  tbody tr:hover td { background: var(--surface-2); }
+
+  /* Sortable headers. A button, not a click handler on the th, so keyboard
+     users get the same control. */
+  th .sortby {
+    background: none;
+    border: 0;
+    padding: 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  th .sortby:hover { color: var(--text-primary); }
+  th .sortby.sel { color: var(--text-primary); font-weight: 600; }
+
+  /* --- status dot: one vocabulary across every panel --- */
+  .dot { font-size: 10px; line-height: 1; margin-right: 5px; }
+  .dot.good { color: var(--good); }
+  .dot.ready { color: var(--series-1); }
+  .dot.wait { color: var(--series-5); }
+  .dot.bad { color: var(--critical); }
+  .dot.off { color: var(--baseline); }
+
+  /* --- in-cell meter: a bar behind its own label --- */
+  .meter {
+    position: relative;
+    display: inline-block;
+    min-width: 13ch;
+    padding: 0 5px;
+    border-radius: 3px;
+    background: var(--grid);
+    overflow: hidden;
+    text-align: right;
+  }
+  .meter .fill { position: absolute; inset: 0 auto 0 0; background: var(--series-1); opacity: 0.35; }
+  .meter.done .fill { background: var(--good); opacity: 0.4; }
+  .meter .lab { position: relative; }
+
+  /* --- clickable filter chips and search --- */
+  .chips.filters { gap: 4px; }
+  .chip.pick { cursor: pointer; background: none; color: var(--text-secondary); font: inherit; font-size: 12px; }
+  .chip.pick:hover { color: var(--text-primary); }
+  .chip.pick.sel { background: var(--series-1); color: #fff; border-color: transparent; }
+  .chip .badge { margin-left: 5px; opacity: 0.7; font-variant-numeric: tabular-nums; }
+  input.search { padding: 2px 8px; font-size: 12px; min-width: 18ch; }
+
+  /* --- a missing requirement, with the feature that owes it --- */
+  .need {
+    display: inline-block;
+    font-size: 11px;
+    padding: 0 4px;
+    margin: 1px 2px 1px 0;
+    border-radius: 3px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .need.bad { border-color: var(--critical); }
+  .need .owner { color: var(--muted); margin-left: 5px; }
+
+  details { margin: 2px 0; }
+  details > summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
+  details > summary:hover { color: var(--text-primary); }
 
   dl.defs { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0; }
   dl.defs dt { color: var(--muted); font-size: 12px; }
@@ -184,6 +269,30 @@
   .seg.s4 { background: var(--series-4); }
   .seg.s5 { background: var(--series-5); }
 
+  /* --- BitNode multipliers: a dense grid, grouped by subsystem --- */
+  .multgroup { margin-top: 8px; }
+  .multgroup h3 {
+    margin: 0 0 3px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .mults { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 0 16px; }
+  .mult {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 12px;
+    padding: 1px 0;
+    border-bottom: 1px solid var(--grid);
+    font-variant-numeric: tabular-nums;
+  }
+  .mult .nm { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mult .vl { margin-left: auto; }
+  .mult .dl { width: 5ch; text-align: right; }
+
   /* --- BitNode grid --- */
   .nodegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 8px; margin-top: 10px; }
   .node { border: 1px solid var(--border); border-radius: 8px; padding: 8px; background: var(--surface-2); }
@@ -212,17 +321,20 @@
 <body>
 <header>
   <h1>bitburner telemetry</h1>
-  <select id="runpick"></select>
-  <span id="status">connecting…</span>
-  <span style="flex:1"></span>
-  <button id="sync" title="Build all configured game entrypoints and push the complete build through the Remote File API">sync to game</button>
-  <button id="simpin" title="Move this stored run into runs/pinned/, where the retention sweep cannot delete it">📌 pin</button>
-  <select id="simprofile" title="A named profile carries its own features, goals, seeds and horizon"></select>
-  <select id="simsave" title="Start the run from a registered save snapshot"></select>
-  <input id="simgoal" placeholder="earn:1e6" value="earn:1e6" size="18" />
-  <input id="simseeds" placeholder="seeds (1 or 1..5)" value="1" size="12" />
-  <input id="simhorizon" placeholder="horizon" value="12h" size="6" />
-  <button id="simrun">run sim</button>
+  <div class="group">
+    <select id="runpick"></select>
+    <span id="status">connecting…</span>
+    <button id="simpin" title="Move this stored run into runs/pinned/, where the retention sweep cannot delete it">📌 pin</button>
+  </div>
+  <div class="group launch">
+    <button id="sync" title="Build all configured game entrypoints and push the complete build through the Remote File API">sync to game</button>
+    <select id="simprofile" title="A named profile carries its own features, goals, seeds and horizon"></select>
+    <select id="simsave" title="Start the run from a registered save snapshot"></select>
+    <input id="simgoal" placeholder="earn:1e6" value="earn:1e6" size="14" title="Goal expression, when no profile is selected" />
+    <input id="simseeds" placeholder="seeds" value="1" size="8" title="One seed, or a range like 1..5" />
+    <input id="simhorizon" placeholder="horizon" value="12h" size="5" title="Simulated time to run for" />
+    <button id="simrun">run sim</button>
+  </div>
 </header>
 <nav id="tabs"></nav>
 <div id="scrubrow">

@@ -114,7 +114,13 @@ function factionValue(faction: string, view: FactionsView): { value: number; aug
   return { value, augs };
 }
 
-function blockersFor(standing: FactionStanding, view: FactionsView): Blocker[] {
+/** Invite blockers for one faction.
+ *
+ * Exported so the driver can report the gate for EVERY faction rather than
+ * only the objective's: "what is still missing, for each of the 34" is the
+ * question the factions panel exists to answer, and re-deriving it in the
+ * viewer would put a second, drifting copy of this interpretation there. */
+export function blockersFor(standing: FactionStanding, view: FactionsView): Blocker[] {
   if (standing.joined) return [];
   if (standing.invited) return [];
   // A special faction is joined through its own mechanic (Bladeburner's

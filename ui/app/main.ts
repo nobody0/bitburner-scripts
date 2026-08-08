@@ -2,7 +2,8 @@ import { FEATURES } from "../../shared/features/registry.ts";
 import type { LogRecord } from "../../shared/telemetry/schema.ts";
 import { esc, fmtTime } from "./lib/format.ts";
 import { note } from "./lib/dom.ts";
-import { emptyState, project, type ProjectedState } from "./project.ts";
+import { NO_SORT, setView, toggleSort } from "./lib/viewstate.ts";
+import { appendRecords, emptyState, project, type ProjectedState } from "./project.ts";
 import { TABS, type TabId } from "./tabs/index.ts";
 
 /** Viewer shell: one live socket, one loaded run, one active tab.
@@ -21,10 +22,23 @@ interface RunSummaryLike {
   tail?: LogRecord[];
 }
 
-const run = { id: null as string | null, src: null as "game" | "sim" | null, live: false, records: [] as LogRecord[], t0: null as number | null };
+/** The loaded run.
+ *
+ * `records` is retained ONLY for a run that can be scrubbed — a stored file
+ * small enough to hold. A live run folds incrementally into `state` and keeps
+ * no history at all: it has no scrubber, and holding every record of a
+ * multi-hour run was both the memory and the per-frame cost. */
+const run = {
+  id: null as string | null,
+  src: null as "game" | "sim" | null,
+  live: false,
+  records: null as LogRecord[] | null,
+  t0: null as number | null,
+};
 let cutoff = Infinity;
 let liveRuns: RunSummaryLike[] = [];
 let storedRuns: { file: string; size: number; pinned?: boolean }[] = [];
+let compactOverBytes = 8_000_000;
 let active: TabId = "overview";
 let state: ProjectedState = emptyState();
 
@@ -105,6 +119,12 @@ function renderView(): void {
   const cardScroll = sameTab
     ? [...el.querySelectorAll<HTMLElement>("section.card")].map((card) => [card.scrollLeft, card.scrollTop] as const)
     : [];
+  // Scroll is not the only thing worth carrying across the rebuild: a search
+  // box is a focused element inside the subtree we are about to destroy, and
+  // losing the caret mid-word makes it unusable on a live run.
+  const focused = document.activeElement as HTMLInputElement | null;
+  const focusId = sameTab && focused && el.contains(focused) ? focused.id : "";
+  const selection = focusId ? [focused!.selectionStart, focused!.selectionEnd] : null;
 
   el.innerHTML = tab.render(state);
   tab.mount?.(state, el);
@@ -118,25 +138,60 @@ function renderView(): void {
     card.scrollLeft = left;
     card.scrollTop = top;
   });
+  if (focusId) {
+    const restored = el.querySelector<HTMLInputElement>(`#${CSS.escape(focusId)}`);
+    if (restored) {
+      restored.focus();
+      if (selection) restored.setSelectionRange(selection[0] ?? null, selection[1] ?? null);
+    }
+  }
   // Restored synchronously, before paint, so there is no visible jump.
   window.scrollTo(window.scrollX, pageScroll);
 }
 
+/** Rebuild `state` from the retained records. Only a scrubbable run has any,
+ * so a live run just re-renders whatever the incremental fold has produced. */
+function reproject(): void {
+  if (!run.records) return;
+  const compacted = state.compacted;
+  state = project(run.records, cutoff, {
+    id: run.id,
+    src: run.src,
+    live: run.live,
+    t0: run.t0,
+    compacted,
+  });
+}
+
 function render(): void {
-  state = project(run.records, cutoff, { id: run.id, src: run.src, live: run.live, t0: run.t0 });
+  reproject();
   renderTabs();
   renderView();
   $("scrubt").textContent = cutoff === Infinity ? "" : fmtTime(cutoff - (run.t0 ?? 0));
 }
 
+/** Minimum wall-clock between live re-renders.
+ *
+ * The dispatcher publishes a rollup every second and the game flushes on its
+ * own cadence, so an unthrottled rAF render repaints the whole panel several
+ * times per second for data that changed in the third decimal place. Half a
+ * second still reads as live and leaves the main thread free enough to
+ * scroll. */
+const MIN_RENDER_MS = 500;
 let queued = false;
+let lastRenderAt = 0;
+
 function queueRender(): void {
   if (queued) return;
   queued = true;
-  requestAnimationFrame(() => {
-    queued = false;
-    render();
-  });
+  const wait = Math.max(0, MIN_RENDER_MS - (Date.now() - lastRenderAt));
+  setTimeout(() => {
+    requestAnimationFrame(() => {
+      queued = false;
+      lastRenderAt = Date.now();
+      render();
+    });
+  }, wait);
 }
 
 window.addEventListener("hashchange", () => {
@@ -144,6 +199,39 @@ window.addEventListener("hashchange", () => {
   render();
 });
 window.addEventListener("resize", queueRender);
+
+// --- panel interaction -----------------------------------------------------
+
+/** Filters, sorting and search are DELEGATED from the container rather than
+ * bound to the controls themselves. The panel is replaced wholesale on every
+ * frame, so a listener attached to a chip would be discarded within the
+ * second; `#view` is the only node that survives. Handlers write to viewstate
+ * and re-render, which is what makes a choice outlive the frame that made it. */
+$("view").addEventListener("click", (ev) => {
+  const target = (ev.target as HTMLElement | null)?.closest<HTMLElement>("[data-view-key],[data-sort-key]");
+  if (!target) return;
+  const sortKey = target.dataset["sortKey"];
+  if (sortKey) {
+    toggleSort(target.dataset["sortTable"] ?? "", sortKey, NO_SORT);
+    render();
+    return;
+  }
+  const key = target.dataset["viewKey"];
+  if (key !== undefined && target.dataset["viewValue"] !== undefined) {
+    setView(key, target.dataset["viewValue"]);
+    render();
+  }
+});
+
+$("view").addEventListener("input", (ev) => {
+  const target = ev.target as HTMLInputElement | null;
+  const key = target?.dataset["viewKey"];
+  if (!target || key === undefined || target.dataset["viewValue"] !== undefined) return;
+  setView(key, target.value);
+  // Typing must not wait on the live-render throttle, or the box lags a
+  // keystroke behind what it filters.
+  render();
+});
 
 // --- run selection & replay ------------------------------------------------
 
@@ -165,41 +253,97 @@ function refreshPicker(): void {
   pin.disabled = !selected.startsWith("file:") || selected.startsWith("file:pinned/");
 }
 
+/** Load a stored run.
+ *
+ * Large runs are fetched COMPACTED — one record per state key plus a bounded
+ * event tail, folded server-side by streaming the file. A 126 MB JSONL parsed
+ * whole in the browser is minutes of blocked main thread for a panel that only
+ * ever shows the last write of each topic, and the scrubber is the only thing
+ * that genuinely needs the history. So the trade is made explicit: a compacted
+ * run loads instantly and says its timeline is gone. */
 async function loadStored(file: string): Promise<void> {
-  const res = await fetch(`/runs/${encodeURIComponent(file)}`);
-  const text = await res.text();
-  run.records = text
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line) as LogRecord);
+  const size = storedRuns.find((r) => r.file === file)?.size ?? 0;
+  const compact = size > compactOverBytes;
+  $("status").textContent = `loading ${file}…`;
+
+  let records: LogRecord[];
+  let total: number;
+  if (compact) {
+    const body = (await fetch(`/runs/${encodeURIComponent(file)}?compact=1`).then((r) => r.json())) as {
+      entries: LogRecord[];
+      records: number;
+      t0: number | null;
+    };
+    records = body.entries;
+    total = body.records;
+    run.t0 = body.t0;
+  } else {
+    const text = await fetch(`/runs/${encodeURIComponent(file)}`).then((r) => r.text());
+    records = text
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line) as LogRecord];
+        } catch {
+          return []; // a live run's last line can be a partial write
+        }
+      });
+    total = records.length;
+    run.t0 = records[0]?.t ?? null;
+  }
+
+  run.records = records;
   run.id = file;
-  run.src = run.records[0]?.src ?? null;
+  run.src = records[0]?.src ?? null;
   run.live = false;
-  run.t0 = run.records[0]?.t ?? null;
+  cutoff = Infinity;
+
   // The slider spans the run's own timeline. `min` must be t0, not 0: game
   // records carry Date.now() timestamps, so a 0-based range puts the entire
   // run inside its last pixel and any drag lands decades before the start.
+  // A compacted run has no timeline left to span, so it gets no slider.
   const scrub = $<HTMLInputElement>("scrub");
-  $("scrubrow").style.display = "flex";
+  $("scrubrow").style.display = compact ? "none" : "flex";
   scrub.min = String(run.t0 ?? 0);
-  scrub.max = String(run.records[run.records.length - 1]?.t ?? run.t0 ?? 0);
+  scrub.max = String(records[records.length - 1]?.t ?? run.t0 ?? 0);
   scrub.value = scrub.max;
-  cutoff = Infinity;
-  $("status").textContent = `replay — ${run.records.length} records`;
+
+  state = emptyState();
+  state.compacted = compact;
+  $("status").textContent = compact
+    ? `compacted — ${total} records folded, ${records.length} kept (${fmtBytes(size)}; too large to scrub)`
+    : `replay — ${total} records`;
   render();
+}
+
+function fmtBytes(bytes: number): string {
+  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)}GB`;
+  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(1)}MB`;
+  return `${(bytes / 1e3).toFixed(0)}kB`;
 }
 
 function attachLive(summary: RunSummaryLike): void {
   run.id = summary.id;
   run.src = summary.hello?.src ?? null;
   run.live = true;
+  // A live run keeps no history: the snapshot is folded once, and every later
+  // batch is folded as it arrives.
+  run.records = null;
   const seen = new Set<number>();
-  run.records = [...(summary.state ?? []), ...(summary.tail ?? [])]
+  const initial = [...(summary.state ?? []), ...(summary.tail ?? [])]
     .sort((a, b) => a.seq - b.seq)
     .filter((r) => (seen.has(r.seq) ? false : (seen.add(r.seq), true)));
-  run.t0 = run.records[0]?.t ?? null;
+  run.t0 = initial[0]?.t ?? null;
   cutoff = Infinity;
   $("scrubrow").style.display = "none";
+
+  state = emptyState();
+  state.runId = run.id;
+  state.src = run.src;
+  state.live = true;
+  state.t0 = run.t0;
+  appendRecords(state, initial);
   render();
 }
 
@@ -232,6 +376,7 @@ interface HubMessage {
   code?: number;
   output?: string;
   syncBusy?: boolean;
+  compactOverBytes?: number;
 }
 
 function connect(): void {
@@ -248,6 +393,7 @@ function connect(): void {
     if (msg.type === "snapshot") {
       liveRuns = msg.runs ?? [];
       storedRuns = msg.stored ?? [];
+      if (msg.compactOverBytes !== undefined) compactOverBytes = msg.compactOverBytes;
       $<HTMLButtonElement>("sync").disabled = Boolean(msg.syncBusy);
       refreshPicker();
       if (liveRuns.length > 0) {
@@ -297,8 +443,11 @@ function connect(): void {
       status.textContent = msg.code === 0 ? "sync complete" : `sync failed (exit ${msg.code})`;
       status.title = msg.output?.trim() ?? "";
     } else if (msg.type === "records" && run.live && (msg as { run?: string }).run === run.id) {
-      run.records.push(...(msg.records ?? []));
-      if (run.t0 === null && msg.records?.length) run.t0 = msg.records[0]!.t;
+      if (run.t0 === null && msg.records?.length) {
+        run.t0 = msg.records[0]!.t;
+        state.t0 = run.t0;
+      }
+      appendRecords(state, msg.records ?? []);
       queueRender();
     }
   };

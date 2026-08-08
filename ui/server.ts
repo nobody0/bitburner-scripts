@@ -81,6 +81,78 @@ function sweep(): void {
   }
 }
 
+/** Above this, a stored run is served compacted rather than whole.
+ *
+ * The viewer used to fetch the entire JSONL, split it and JSON.parse every
+ * line. Real runs reach 126 MB, which is minutes of blocked main thread for a
+ * panel that only ever shows the last-write-wins state plus a short event
+ * feed. Small runs still load whole, because only they can be scrubbed. */
+const COMPACT_OVER_BYTES = 8_000_000;
+/** Discrete records kept by a compaction, newest-first-wins. */
+const COMPACT_TAIL = 2_000;
+
+/** Fold a stored run down to what a panel needs: one record per state key
+ * (last write wins) plus a bounded tail of discrete records.
+ *
+ * Streamed line by line — the whole point is never to hold the file in memory,
+ * so this must not grow with run length. */
+async function compactRun(file: string): Promise<Response> {
+  const state = new Map<string, LogRecordish>();
+  const tail: LogRecordish[] = [];
+  let records = 0;
+  let t0: number | null = null;
+  let lastT = 0;
+  let pending = "";
+
+  const decoder = new TextDecoder();
+  const consume = (line: string): void => {
+    if (!line) return;
+    let record: LogRecordish;
+    try {
+      record = JSON.parse(line) as LogRecordish;
+    } catch {
+      return; // a live run's last line can be a partial write
+    }
+    records++;
+    if (t0 === null) t0 = record.t;
+    lastT = record.t;
+    if (record.kind === "state" && typeof record.key === "string") {
+      state.set(record.key, record);
+      return;
+    }
+    tail.push(record);
+    if (tail.length > COMPACT_TAIL) tail.splice(0, tail.length - COMPACT_TAIL);
+  };
+
+  for await (const chunk of Bun.file(file).stream()) {
+    pending += decoder.decode(chunk as Uint8Array, { stream: true });
+    // Split once per chunk and keep the trailing fragment. Repeatedly slicing
+    // the head off `pending` instead would be quadratic in lines-per-chunk —
+    // invisible on a run whose records are megabytes each, and pathological on
+    // a sim run with a million small ones.
+    const lines = pending.split("\n");
+    pending = lines.pop() ?? "";
+    for (const line of lines) consume(line);
+  }
+  consume(pending);
+
+  return Response.json({
+    compacted: true,
+    records,
+    t0,
+    lastT,
+    // Ordered by seq so the viewer folds them exactly as it folds a live run.
+    entries: [...state.values(), ...tail].sort((a, b) => a.seq - b.seq),
+  });
+}
+
+interface LogRecordish {
+  seq: number;
+  t: number;
+  kind: string;
+  key?: string;
+}
+
 /** Viewer bundle. `ui/app/` is TypeScript so the tab renderers typecheck
  * against StateMap, but the viewer keeps its no-build-step feel: Bun's own
  * bundler runs in this process and rebuilds whenever a source file changes.
@@ -137,9 +209,12 @@ function snapshotFor(): unknown {
     runs: liveRunList().map((r) => ({
       ...r.summary(),
       state: [...r.state.values()],
-      tail: r.ring.slice(-1_000),
+      tail: r.tail(),
     })),
     stored: listRunFiles(),
+    // Advertised rather than duplicated in the client: the viewer decides
+    // whole-vs-compacted from the file size it already has in `stored`.
+    compactOverBytes: COMPACT_OVER_BYTES,
     simBusy,
     syncBusy,
   };
@@ -286,8 +361,13 @@ const server = Bun.serve<SocketData, never>({
     }
     if (url.pathname.startsWith("/runs/")) {
       const name = decodeURIComponent(url.pathname.slice("/runs/".length));
-      const file = Bun.file(runPath(name));
-      return file.size > 0 ? new Response(file) : new Response("not found", { status: 404 });
+      const full = runPath(name);
+      const file = Bun.file(full);
+      if (file.size === 0) return new Response("not found", { status: 404 });
+      // The viewer asks for whichever form it can use: whole when the run is
+      // small enough to scrub, compacted when it is not.
+      if (url.searchParams.get("compact") === "1") return compactRun(full);
+      return new Response(file);
     }
 
     const asset = url.pathname === "/" ? "index.html" : url.pathname.slice(1);

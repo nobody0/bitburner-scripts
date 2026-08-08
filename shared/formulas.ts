@@ -184,3 +184,59 @@ export function growThreads(k: number, targetMoney: number, startMoney: number, 
   }
   return ccycle + 1;
 }
+
+// --- skill levels -----------------------------------------------------------
+
+/** The skill curve, transcribed from `src/PersonObjects/formulas/skill.ts`.
+ *
+ * Needed outside the simulator so the career panel can say how far a stat is
+ * through its current level. A raw experience total cannot answer that: 855
+ * defense at 1.2m exp is nearly a level away or nearly there, and the number
+ * alone does not say which. Pinned against the vendored original by
+ * `sim/tests/formulas-parity.test.ts`. */
+export function skillFromExp(exp: number, mult = 1): number {
+  // Mult can be 0 in BN12 at a high SF12 level, where the stat never moves.
+  if (mult === 0) return 1;
+  const value = Math.floor(mult * (32 * Math.log(exp + 534.6) - 200));
+  // The upper clamp is the game's, via clampNumber: infinite experience yields
+  // Number.MAX_VALUE, not Infinity. Unreachable in play, but the parity
+  // contract is bit-for-bit and an exception here would be a real divergence.
+  return Math.max(Math.min(value, Number.MAX_VALUE), 1);
+}
+
+/** Experience needed to reach a skill level — the inverse of skillFromExp. */
+export function expForSkill(skill: number, mult = 1): number {
+  if (mult === 0) return 0;
+  return Math.max(Math.min(Math.exp((skill / mult + 200) / 32) - 534.6, Number.MAX_VALUE), 0);
+}
+
+export interface SkillProgress {
+  level: number;
+  /** Experience earned since this level began. */
+  into: number;
+  /** Experience this level spans. */
+  span: number;
+  /** Fraction of the way to the next level, in [0, 1]. */
+  fraction: number;
+  remaining: number;
+}
+
+/** How far through the current level a stat is.
+ *
+ * Deliberately a fraction rather than the game's 0-100: every other progress
+ * value in this repository is [0, 1], and mixing the two scales is how a bar
+ * ends up 100x too long. */
+export function skillProgress(exp: number, mult = 1): SkillProgress {
+  const level = skillFromExp(exp, mult);
+  const base = expForSkill(level, mult);
+  const next = expForSkill(level + 1, mult);
+  const span = next - base;
+  const into = Math.max(0, exp - base);
+  return {
+    level,
+    into,
+    span,
+    fraction: span > 0 ? Math.max(0, Math.min(1, into / span)) : 1,
+    remaining: Math.max(0, next - exp),
+  };
+}

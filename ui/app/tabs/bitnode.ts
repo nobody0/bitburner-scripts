@@ -1,13 +1,88 @@
-import { BITNODES, changedMultipliers } from "../../../shared/features/bitnode.ts";
+import {
+  BITNODES,
+  MULTIPLIER_GROUPS,
+  changedMultipliers,
+  type ChangedMultiplier,
+  type MultiplierGroup,
+} from "../../../shared/features/bitnode.ts";
 import { featureForBitNode } from "../../../shared/features/registry.ts";
-import { card, definitions, note, table, tiles } from "../lib/dom.ts";
+import { card, definitions, filters, note, table, tiles } from "../lib/dom.ts";
 import { esc, fmtNum, fmtTime } from "../lib/format.ts";
+import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
 /** BitNode tab: where we are, what we have finished, and exactly what this
  * node changes. Source-file level doubles as the completion count — SF n at
  * level 3 means BitNode n was destroyed three times. */
+
+const GROUP_LABELS: Record<MultiplierGroup, string> = {
+  hacking: "Hacking",
+  infra: "Infrastructure",
+  skills: "Skills",
+  career: "Career",
+  factions: "Factions",
+  side: "Side income",
+  hacknet: "Hacknet",
+  stock: "Stocks",
+  gang: "Gang",
+  corp: "Corporation",
+  bladeburner: "Bladeburner",
+  stanek: "Stanek",
+  go: "Go",
+  darknet: "Darknet",
+  endgame: "Endgame",
+};
+
+/** Strip the noise words every field name repeats. `HackingLevelMultiplier`
+ * inside a card titled "BitNode multipliers" spends 10 of its 23 characters
+ * saying nothing. */
+function shortField(field: string): string {
+  return field.replace(/Multiplier$/, "").replace(/([a-z])([A-Z])/g, "$1 $2");
+}
+
+/** One multiplier as `name  value  ±%`.
+ *
+ * The BN1 default is not a column: it is 1.0 for every field but two, so a
+ * whole column of "1.000" was a third of the table's width. The percentage
+ * carries the same information and reads as a magnitude — 0.700 is "70% of
+ * BN1", 1.428 is "143%" — while the colour says whether that helps. */
+function multiplierEntry(entry: ChangedMultiplier): string {
+  const cls = entry.harder ? "bad" : "good";
+  // StaneksGiftExtraSize is the one field with a base of 0, where a ratio is
+  // undefined; it is a count of grid squares, so it is shown as a delta.
+  const delta =
+    entry.base === 0
+      ? `${entry.value > 0 ? "+" : ""}${fmtNum(entry.value, 0)}`
+      : `${((entry.value / entry.base) * 100).toFixed(0)}%`;
+  return (
+    `<div class="mult" title="${esc(`${entry.field}: ${entry.value} (BN1 default ${entry.base})`)}">` +
+    `<span class="nm">${esc(shortField(entry.field))}</span>` +
+    `<span class="vl">${fmtNum(entry.value, entry.value < 10 ? 2 : 0)}</span>` +
+    `<span class="dl ${cls}">${esc(delta)}</span>` +
+    `</div>`
+  );
+}
+
+function multiplierGrid(changed: ChangedMultiplier[]): string {
+  const mode = view("bitnode.mults", "all");
+  const shown = mode === "harder" ? changed.filter((c) => c.harder) : mode === "easier" ? changed.filter((c) => !c.harder) : changed;
+  if (shown.length === 0) return note("nothing in this view");
+
+  const byGroup = new Map<MultiplierGroup, ChangedMultiplier[]>();
+  for (const entry of shown) {
+    const list = byGroup.get(entry.group);
+    if (list) list.push(entry);
+    else byGroup.set(entry.group, [entry]);
+  }
+  return MULTIPLIER_GROUPS.filter((group) => byGroup.has(group))
+    .map(
+      (group) =>
+        `<div class="multgroup"><h3>${esc(GROUP_LABELS[group])}</h3>` +
+        `<div class="mults">${byGroup.get(group)!.map(multiplierEntry).join("")}</div></div>`,
+    )
+    .join("");
+}
 
 export const bitnodeTab: Tab = {
   id: "progression",
@@ -43,14 +118,24 @@ export const bitnodeTab: Tab = {
     ]);
 
     const changed = changedMultipliers(p.multipliers);
+    const harder = changed.filter((m) => m.harder).length;
     const multipliers = p.multipliers
       ? changed.length > 0
-        ? table(
-            ["multiplier", "value", "BN1 default"],
-            changed.map((m) => [esc(m.field), fmtNum(m.value, 3), fmtNum(m.base, 3)]),
-          )
+        ? multiplierGrid(changed)
         : note("this BitNode uses every default multiplier")
       : note("requires SF5 or BN5 — ns.getBitNodeMultipliers is unavailable otherwise");
+    const multiplierFilters =
+      p.multipliers && changed.length > 0
+        ? filters(
+            "bitnode.mults",
+            [
+              { value: "all", label: "all", badge: String(changed.length) },
+              { value: "harder", label: "harder", badge: String(harder) },
+              { value: "easier", label: "easier", badge: String(changed.length - harder) },
+            ],
+            "all",
+          )
+        : "";
 
     const options = p.bitNodeOptions;
     const flags = options
@@ -88,7 +173,7 @@ export const bitnodeTab: Tab = {
     return (
       `<div class="col wide">` +
       card("Progression", summary + grid) +
-      card("BitNode multipliers", multipliers) +
+      card("BitNode multipliers", multipliers, multiplierFilters) +
       `</div>` +
       `<div class="col">` +
       card(

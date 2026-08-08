@@ -10,6 +10,8 @@ import {
   weakenTimeSeconds,
   makeHackContext,
   weakenEffect,
+  skillFromExp,
+  skillProgress,
   type HackContext,
 } from "../../shared/formulas.ts";
 import { mockPerson, mockServer } from "../core/mocks.ts";
@@ -27,6 +29,7 @@ import {
 import { numCycleForGrowthCorrected } from "../vendor/bitburner/src/Server/GrowthCycles.ts";
 import { calculateServerGrowthLog } from "../vendor/bitburner/src/Server/formulas/grow.ts";
 import { getWeakenEffect } from "../core/effects.ts";
+import { calculateSkill } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 
 /** THE CONTRACT (spec/targeting.md, Formula access): shared/formulas.ts must produce
  * bit-for-bit identical results to the vendored game formulas. Exact `toBe`,
@@ -159,5 +162,39 @@ describe("hand-crafted formulas are bit-identical to vendored game formulas", ()
       {},
     );
     assertParity(fresh);
+  });
+});
+
+describe("the skill curve is bit-identical to the vendored one", () => {
+  test("levels match across the whole experience range and every multiplier", () => {
+    const rng = mulberry32(1337);
+    for (let i = 0; i < 4_000; i++) {
+      // Log-uniform: the curve is logarithmic, so a linear sweep would spend
+      // every sample in the top two levels and test nothing.
+      const exp = Math.exp(rng() * 30) - 1;
+      const mult = [0, 0.5, 1, 1.2, 2.75][Math.floor(rng() * 5)]!;
+      expect(skillFromExp(exp, mult), `exp=${exp} mult=${mult}`).toBe(calculateSkill(exp, mult));
+    }
+  });
+
+  test("the boundary cases the game guards", () => {
+    // BN12 at a high SF12 level drives the multiplier to 0; the stat is pinned.
+    expect(skillFromExp(1e12, 0)).toBe(calculateSkill(1e12, 0));
+    // Below the first level's threshold the game clamps to 1, not to 0.
+    expect(skillFromExp(0)).toBe(calculateSkill(0));
+    expect(skillFromExp(0)).toBe(1);
+    expect(skillFromExp(Infinity)).toBe(calculateSkill(Infinity));
+  });
+
+  test("progress within a level is consistent with the curve", () => {
+    for (const exp of [0, 1_000, 1e6, 1.2e6, 1e9]) {
+      const progress = skillProgress(exp);
+      expect(progress.level).toBe(calculateSkill(exp));
+      // The fraction is [0, 1] here where the game reports 0-100.
+      expect(progress.fraction).toBeGreaterThanOrEqual(0);
+      expect(progress.fraction).toBeLessThanOrEqual(1);
+      // Spending exactly `remaining` more experience buys exactly one level.
+      expect(calculateSkill(exp + progress.remaining)).toBe(progress.level + 1);
+    }
   });
 });

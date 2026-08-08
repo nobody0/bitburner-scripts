@@ -680,6 +680,88 @@ await extractDataTable({
   exportType: "Record<string, VendoredAugmentation>",
 });
 
+// The generated network's base ranges.
+//
+// Upstream rolls each `{min, max}` field once at world generation
+// (`ServerHelpers.toNumber` -> `getRandomIntInclusive`), so two saves of the
+// same BitNode do NOT have the same megacorp. Without the ranges there is no
+// way to tell a lucky roll from an unlucky one, or to explain why a server the
+// wiki calls "$40b" is showing $720b — that number is `25 * roll *
+// ServerMaxMoney`, and all three factors have to be known to invert it.
+//
+// The whole file is import-heavy prose-free data, but its hostnames come from
+// two enums, so it is evaluated rather than parsed like everything else here.
+await extractDataTable({
+  sources: [
+    {
+      path: "src/Server/data/servers.ts",
+      from: "export const serverMetadata: IServerMetadata[] = [",
+      to: "];",
+    },
+  ],
+  scope: {
+    LocationName: locationEnums.LocationName,
+    SpecialServers: specialServers.SpecialServers,
+    FactionName: enums.FactionName,
+    LiteratureName: literatureEnums.LiteratureName,
+  },
+  // Only the fields that are ROLLED, normalised to [min, max] pairs so a
+  // consumer never has to care which form upstream happened to use. A fixed
+  // number is a degenerate range, which is exactly how it behaves.
+  shape: `(() => {
+    const range = (v) => v === undefined ? undefined : (typeof v === "number" ? [v, v] : [v.min, v.max]);
+    return Object.fromEntries(serverMetadata.map((s) => [s.hostname, {
+      host: s.hostname,
+      money: range(s.moneyAvailable),
+      skill: range(s.requiredHackingSkill),
+      sec: range(s.hackDifficulty),
+      growth: range(s.serverGrowth),
+      ramExp: range(s.maxRamExponent),
+      ports: s.numOpenPortsRequired,
+    }]));
+  })()`,
+  verify(table) {
+    const servers = table as Record<
+      string,
+      { money?: [number, number]; skill?: [number, number]; ports: number }
+    >;
+    const names = Object.keys(servers);
+    if (names.length !== 70) throw new Error(`expected 70 servers, extracted ${names.length}`);
+    // Hostnames that come from an enum rather than a literal — a missing scope
+    // entry would yield "undefined" as a hostname and still look like a table.
+    for (const host of ["ecorp", "megacorp", "nwo", "fulcrumassets", "CSEC", "w0r1d_d43m0n"]) {
+      if (!servers[host]) throw new Error(`${host} missing — hostname enum not resolved?`);
+    }
+    if (servers["n00dles"]?.money?.[0] !== 70_000) throw new Error("n00dles base money drifted");
+    // The point of the table: some fields are genuinely ranges. If NONE are,
+    // the range() helper collapsed everything and the roll column is a lie.
+    const ranged = Object.values(servers).filter((s) => s.money && s.money[0] !== s.money[1]).length;
+    if (ranged < 20) throw new Error(`only ${ranged} servers have a money range — extraction collapsed it?`);
+    if (!Object.values(servers).some((s) => s.ports > 0)) throw new Error("no server needs an open port");
+  },
+  outRelPath: "src/Server/data/ServerMetadata.ts",
+  prologue: [
+    `/** A field upstream rolls at world generation, as [min, max]. A fixed`,
+    ` *  value is emitted as a degenerate range. */`,
+    `export type Range = [number, number];`,
+    ``,
+    `export interface VendoredServer {`,
+    `  host: string;`,
+    `  /** BASE money. The live \`moneyMax\` is \`25 * roll * ServerMaxMoney\`. */`,
+    `  money?: Range;`,
+    `  skill?: Range;`,
+    `  /** Base security. \`minDifficulty\` is \`round(roll / 3)\`, both after`,
+    `   *  ServerStartingSecurity. */`,
+    `  sec?: Range;`,
+    `  growth?: Range;`,
+    `  ramExp?: Range;`,
+    `  ports: number;`,
+    `}`,
+  ],
+  exportName: "SERVER_METADATA",
+  exportType: "Record<string, VendoredServer>",
+});
+
 const crimeEnums = await import(`../${OUT_DIR}/src/Crime/Enums.ts`);
 
 // The twelve crimes: time, money, difficulty, karma, kills, the six

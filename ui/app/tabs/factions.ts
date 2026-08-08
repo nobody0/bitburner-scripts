@@ -1,17 +1,46 @@
-import type { PlayerRequirement } from "@ns";
-import { card, note, table, tiles } from "../lib/dom.ts";
+import { AUGMENTATIONS, describeMults, offeredBy } from "../../../shared/features/augmentations.ts";
+import type {
+  AugmentationOffer,
+  FactionGate,
+  FactionStanding,
+  GateBlocker,
+} from "../../../shared/telemetry/topics/factions.ts";
+import {
+  card,
+  collapsible,
+  dataTable,
+  dot,
+  filters,
+  meter,
+  note,
+  search,
+  table,
+  tiles,
+  type Column,
+  type Status,
+} from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtTime } from "../lib/format.ts";
+import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
-/** Factions tab: the plan, reputation standing, pending invites, and the
- * augmentation shopping list (grafting included — it is another way to buy the
- * same augs).
+/** Factions tab: three questions, three cards.
  *
- * The Plan card is the point of this panel. A faction run spends most of its
- * time doing ONE long thing, so "what is it doing and why" matters far more
- * than a live number, and a blocked feature must name the feature it is
- * waiting on rather than silently sitting there. */
+ *  1. **Plan** — what the driver is doing and why. A faction run spends most
+ *     of its time doing ONE long thing, so "what and why" beats a live number,
+ *     and a blocked feature must name the feature it is waiting on.
+ *  2. **Factions** — every faction the game has, whether we are in, how close
+ *     an invitation is, and exactly what is still missing. This replaces what
+ *     used to be three separate cards (standings, invitations, blockers) that
+ *     each showed a different subset of the same 34 rows.
+ *  3. **Augmentations** — the whole catalogue, what each one gives and who
+ *     sells it. Not just the ones our current factions offer: which faction to
+ *     join is the decision this panel exists to support, and it cannot be made
+ *     from a list that only contains factions already joined. Static facts come
+ *     from the bundled transcription; live price, rep gap and ownership are
+ *     overlaid from telemetry. */
+
+// --- plan ------------------------------------------------------------------
 
 const ACTION_LABELS: Record<string, string> = {
   idle: "idle",
@@ -25,13 +54,6 @@ const ACTION_LABELS: Record<string, string> = {
   installAugmentations: "install",
 };
 
-function actionLine(action: FactionPlanAction): string {
-  const label = ACTION_LABELS[action.type] ?? action.type;
-  const subject = action.faction ?? action.augmentation ?? action.city ?? "";
-  const work = action.workType ? ` (${action.workType})` : "";
-  return `${esc(label)}${subject ? ` <strong>${esc(subject)}</strong>` : ""}${esc(work)}`;
-}
-
 interface FactionPlanAction {
   type: string;
   why: string;
@@ -41,67 +63,11 @@ interface FactionPlanAction {
   workType?: string;
 }
 
-/** Render a requirement tree as something a human can act on.
- *
- * The bare `type` field is useless in a panel: four skill requirements render
- * as "skills, skills, skills, skills", which tells the reader neither which
- * skills nor how much. The values are already in the structured tree, so this
- * just shows them. */
-function describeRequirement(requirement: PlayerRequirement): string {
-  switch (requirement.type) {
-    case "money":
-      return `$${fmtMoney(requirement.money)}`;
-    case "skills":
-      return Object.entries(requirement.skills)
-        .map(([skill, level]) => `${skill} ${level}`)
-        .join(" + ");
-    // Karma is an UPPER bound on a negative number — showing "karma 9" would
-    // read as a target to climb toward rather than fall below.
-    case "karma":
-      return `karma ≤ ${requirement.karma}`;
-    case "numPeopleKilled":
-      return `${requirement.numPeopleKilled} kills`;
-    case "numAugmentations":
-      return `${requirement.numAugmentations} augs`;
-    case "employedBy":
-      return `job at ${requirement.company}`;
-    case "companyReputation":
-      return `${fmtNum(requirement.reputation, 0)} rep at ${requirement.company}`;
-    case "jobTitle":
-      return `title: ${requirement.jobTitle}`;
-    case "city":
-      return `in ${requirement.city}`;
-    case "location":
-      return `at ${requirement.location}`;
-    case "backdoorInstalled":
-      return `backdoor ${requirement.server}`;
-    case "file":
-      return `file ${requirement.file}`;
-    case "hacknetRAM":
-      return `${requirement.hacknetRAM}GB hacknet RAM`;
-    case "hacknetCores":
-      return `${requirement.hacknetCores} hacknet cores`;
-    case "hacknetLevels":
-      return `${requirement.hacknetLevels} hacknet levels`;
-    case "bladeburnerRank":
-      return `Bladeburner rank ${requirement.bladeburnerRank}`;
-    case "numInfiltrations":
-      return `${requirement.numInfiltrations} infiltrations`;
-    case "bitNodeN":
-      return `BN${requirement.bitNodeN}`;
-    case "sourceFile":
-      return `SF${requirement.sourceFile}`;
-    case "not":
-      return `NOT (${describeRequirement(requirement.condition)})`;
-    case "someCondition":
-      return `(${requirement.conditions.map(describeRequirement).join(" OR ")})`;
-    case "everyCondition":
-      return requirement.conditions.map(describeRequirement).join(" + ");
-  }
-}
-
-function describeRequirements(requirements: readonly PlayerRequirement[]): string {
-  return requirements.map(describeRequirement).join(" + ");
+function actionLine(action: FactionPlanAction): string {
+  const label = ACTION_LABELS[action.type] ?? action.type;
+  const subject = action.faction ?? action.augmentation ?? action.city ?? "";
+  const work = action.workType ? ` (${action.workType})` : "";
+  return `${esc(label)}${subject ? ` <strong>${esc(subject)}</strong>` : ""}${esc(work)}`;
 }
 
 function planCard(state: ProjectedState): string {
@@ -143,8 +109,14 @@ function planCard(state: ProjectedState): string {
 
   if (plan.objective) {
     const objective = plan.objective;
+    // Chips, not a comma-separated paragraph: twenty faction names wrapped
+    // across three lines of prose is unreadable and unscannable.
     parts.push(
-      `<div class="row"><span class="muted">objective</span> ${esc(objective.factions.join(", ") || "none")}</div>` +
+      `<div class="row"><span class="muted">objective</span></div>` +
+        `<div class="chips">${
+          objective.factions.map((name) => `<span class="chip idle">${esc(name)}</span>`).join("") ||
+          `<span class="muted">none</span>`
+        }</div>` +
         `<div class="muted">${esc(objective.why)}</div>`,
     );
     if (objective.foreclosed.length > 0) {
@@ -157,9 +129,21 @@ function planCard(state: ProjectedState): string {
     }
     if (objective.augmentations.length > 0) {
       parts.push(
-        table(
-          ["#", "augmentation"],
-          objective.augmentations.slice(0, 20).map((name, i) => [String(i + 1), esc(name)]),
+        collapsible(
+          `shopping list — ${objective.augmentations.length} augmentation(s)`,
+          table(
+            ["#", "augmentation", "gives"],
+            objective.augmentations.slice(0, 30).map((name, i) => [
+              String(i + 1),
+              esc(name),
+              `<span class="muted">${esc(
+                describeMults(AUGMENTATIONS[name]?.mults, 2)
+                  .map((m) => m.text)
+                  .join(", ") || "—",
+              )}</span>`,
+            ]),
+            { left: [1, 2] },
+          ),
         ),
       );
     }
@@ -172,43 +156,303 @@ function planCard(state: ProjectedState): string {
     );
   }
 
-  const alternatives =
-    plan.alternatives.length > 0
-      ? table(
-          ["alternative", "value", "why"],
-          plan.alternatives
-            .slice()
-            .sort((a, b) => b.value - a.value)
-            .slice(0, 6)
-            .map((entry) => [esc(entry.label), fmtNum(entry.value, 3), esc(entry.why)]),
-          { wrap: [2] },
-        )
-      : note("no scored alternatives");
-
-  const blockers =
-    plan.blockers.length > 0
-      ? table(
-          ["faction", "needs", "progress", "owner"],
-          plan.blockers
-            .slice()
-            .sort((a, b) => b.progress - a.progress)
-            .slice(0, 20)
-            .map((blocker) => [
-              esc(blocker.faction),
-              `${esc(blocker.why)}${blocker.reachable ? "" : ' <span class="bad">(unreachable)</span>'}`,
-              `${fmtNum(blocker.progress * 100, 0)}%`,
-              // The cross-feature contract, rendered: a stalled faction names
-              // the feature it is waiting on.
-              `<span class="muted">${esc(blocker.owner)}</span>`,
-            ]),
-          { wrap: [1] },
-        )
-      : note("nothing blocking");
-
-  return (
-    card("Plan", parts.join("")) + card("Alternatives considered", alternatives) + card("Blockers", blockers)
-  );
+  return card("Plan", parts.join(""));
 }
+
+// --- factions --------------------------------------------------------------
+
+interface FactionRow {
+  name: string;
+  joined: boolean;
+  invited: boolean;
+  reachable: boolean;
+  /** [0, 1] toward an invitation; 1 once joined or invited. */
+  progress: number;
+  rep: number;
+  favor: number;
+  /** Fraction of the donation favor gate. */
+  favorFrac: number;
+  canDonate: boolean;
+  missing: GateBlocker[];
+  workTypes: string[];
+  enemies: string[];
+  /** Augmentations this faction sells that we do not own. */
+  augsLeft: number;
+  inObjective: boolean;
+}
+
+function describeBlocker(blocker: GateBlocker): string {
+  const subject = blocker.subject ? ` ${blocker.subject}` : "";
+  const amounts =
+    blocker.target > 0 && blocker.have >= 0 && blocker.kind !== "bitNode" && blocker.kind !== "sourceFile"
+      ? ` ${fmtNum(blocker.have)}/${fmtNum(blocker.target)}`
+      : "";
+  return `${blocker.negated ? "not " : ""}${blocker.kind}${subject}${amounts}`;
+}
+
+function factionRows(state: ProjectedState): FactionRow[] {
+  const f = state.topics.factions;
+  if (!f) return [];
+  const gates = f.gates ?? {};
+  const standings = new Map<string, FactionStanding>((f.standings ?? []).map((s) => [s.name, s]));
+  const joined = new Set(f.joined);
+  const invited = new Set(f.invites ?? []);
+  const owned = new Set(f.ownedAugs ?? []);
+  const objective = new Set(f.plan?.objective?.factions ?? []);
+  const gate = f.favorToDonate;
+
+  // Every faction we know of from any source: the gate map is complete once
+  // the driver has run, but before that the joined list is all we have.
+  const names = new Set<string>([
+    ...Object.keys(gates),
+    ...Object.keys(f.requirements ?? {}),
+    ...joined,
+    ...invited,
+  ]);
+
+  return [...names].map((name) => {
+    const g: FactionGate | undefined = gates[name];
+    const standing = standings.get(name);
+    const favor = standing?.favor ?? 0;
+    const augsLeft = Object.entries(AUGMENTATIONS).filter(
+      ([aug, info]) => info.factions.includes(name) && !owned.has(aug),
+    ).length;
+    return {
+      name,
+      joined: joined.has(name),
+      invited: invited.has(name),
+      reachable: g?.reachable ?? true,
+      progress: joined.has(name) || invited.has(name) ? 1 : (g?.progress ?? 0),
+      rep: standing?.rep ?? 0,
+      favor,
+      favorFrac: gate ? Math.min(1, favor / gate) : 0,
+      canDonate: gate !== undefined && favor >= gate,
+      missing: g?.missing ?? [],
+      workTypes: f.workTypes?.[name] ?? [],
+      enemies: f.enemies?.[name] ?? [],
+      augsLeft,
+      inObjective: objective.has(name),
+    };
+  });
+}
+
+function factionStatus(row: FactionRow): { status: Status; why: string } {
+  if (row.joined) return { status: "good", why: "joined" };
+  if (row.invited) return { status: "ready", why: "invitation pending — join it" };
+  if (!row.reachable) return { status: "bad", why: "not reachable in this run" };
+  return { status: "wait", why: `${row.missing.length} requirement(s) still missing` };
+}
+
+const FACTION_COLUMNS: Column<FactionRow>[] = [
+  {
+    id: "name",
+    label: "faction",
+    left: true,
+    sort: (r) => r.name,
+    cell: (r) => {
+      const { status, why } = factionStatus(r);
+      const star = r.inObjective ? ` <span class="warn" title="in the current objective">★</span>` : "";
+      return `${dot(status, why)}${esc(r.name)}${star}`;
+    },
+  },
+  {
+    id: "progress",
+    label: "invite",
+    sort: (r) => r.progress,
+    cell: (r) => {
+      if (r.joined) return `<span class="good">joined</span>`;
+      if (r.invited) return `<span class="good">invited</span>`;
+      if (!r.reachable) return `<span class="bad">unreachable</span>`;
+      return meter(r.progress, `${(r.progress * 100).toFixed(0)}%`, false, "progress on the bottleneck requirement");
+    },
+  },
+  {
+    id: "missing",
+    label: "still needs",
+    wrap: true,
+    sort: (r) => r.missing.length,
+    cell: (r) => {
+      if (r.missing.length === 0) return `<span class="muted">—</span>`;
+      return r.missing
+        .slice(0, 4)
+        .map(
+          (blocker) =>
+            `<span class="need ${blocker.reachable ? "" : "bad"}" title="${esc(blocker.why)}">` +
+            `${esc(describeBlocker(blocker))}` +
+            `<span class="owner">${esc(blocker.owner)}</span></span>`,
+        )
+        .join(" ")
+        .concat(r.missing.length > 4 ? ` <span class="muted">+${r.missing.length - 4}</span>` : "");
+    },
+  },
+  { id: "rep", label: "rep", sort: (r) => r.rep, cell: (r) => (r.joined ? fmtNum(r.rep, 0) : `<span class="muted">–</span>`) },
+  {
+    id: "favor",
+    label: "favor",
+    sort: (r) => r.favor,
+    cell: (r) => {
+      if (!r.joined) return `<span class="muted">–</span>`;
+      // Favor only matters as a donation gate, so it is shown as progress
+      // toward that gate rather than as a bare number.
+      return meter(r.favorFrac, fmtNum(r.favor, 1), r.canDonate, r.canDonate ? "donations unlocked" : "favor needed to donate");
+    },
+  },
+  {
+    id: "augs",
+    label: "augs left",
+    sort: (r) => r.augsLeft,
+    cell: (r) => (r.augsLeft > 0 ? String(r.augsLeft) : `<span class="muted">—</span>`),
+  },
+  {
+    id: "work",
+    label: "work",
+    left: true,
+    sort: (r) => r.workTypes.join(","),
+    cell: (r) => (r.workTypes.length ? `<span class="muted">${esc(r.workTypes.join(", "))}</span>` : `<span class="muted">–</span>`),
+  },
+];
+
+// --- augmentations ---------------------------------------------------------
+
+interface AugRow {
+  name: string;
+  owned: boolean;
+  /** Live offer from a joined faction, when there is one. */
+  offer?: AugmentationOffer;
+  cost: number;
+  rep: number;
+  factions: readonly string[];
+  /** Factions we are in that sell it. */
+  fromJoined: string[];
+  gives: string;
+  multsUnknown: boolean;
+  prereqs: readonly string[];
+  inPlan: boolean;
+}
+
+function augRows(state: ProjectedState): AugRow[] {
+  const f = state.topics.factions;
+  const owned = new Set(f?.ownedAugs ?? []);
+  const joined = new Set(f?.joined ?? []);
+  const planned = new Set(f?.plan?.objective?.augmentations ?? []);
+  // Cheapest live offer per augmentation: the same aug from four factions is
+  // one decision, not four rows.
+  const bestOffer = new Map<string, AugmentationOffer>();
+  for (const offer of f?.offers ?? []) {
+    const existing = bestOffer.get(offer.name);
+    if (!existing || offer.price < existing.price) bestOffer.set(offer.name, offer);
+  }
+  const meta = f?.augMeta ?? {};
+
+  return Object.entries(AUGMENTATIONS).map(([name, info]) => {
+    const offer = bestOffer.get(name);
+    // The live probe wins on multipliers where it has them: one augmentation
+    // has its multipliers randomised per save, so the static table is wrong
+    // for it by design.
+    const mults = info.multsUnknown ? meta[name]?.mults : (info.mults ?? meta[name]?.mults);
+    return {
+      name,
+      owned: owned.has(name),
+      ...(offer ? { offer } : {}),
+      cost: offer?.price ?? info.cost,
+      rep: offer?.repReq ?? info.rep,
+      factions: info.factions,
+      fromJoined: info.factions.filter((faction) => joined.has(faction)),
+      gives:
+        describeMults(mults, 3)
+          .map((m) => m.text)
+          .join(", ") ||
+        (info.startingMoney ? `${fmtMoney(info.startingMoney)} on install` : "") ||
+        (info.programs?.length ? `${info.programs.length} program(s)` : "") ||
+        "—",
+      multsUnknown: info.multsUnknown === true && meta[name]?.mults === undefined,
+      prereqs: info.prereqs ?? [],
+      inPlan: planned.has(name),
+    };
+  });
+}
+
+const AUG_COLUMNS: Column<AugRow>[] = [
+  {
+    id: "name",
+    label: "augmentation",
+    left: true,
+    sort: (r) => r.name,
+    cell: (r) => {
+      const status: Status = r.owned ? "good" : r.offer?.affordableRep ? "ready" : r.fromJoined.length ? "wait" : "off";
+      const why = r.owned
+        ? "owned"
+        : r.offer?.affordableRep
+          ? "reputation met — purchasable"
+          : r.fromJoined.length
+            ? "offered by a faction we are in, reputation short"
+            : "no faction we are in offers this";
+      const plan = r.inPlan ? ` <span class="warn" title="in the current shopping list">★</span>` : "";
+      const pre = r.prereqs.length
+        ? ` <span class="muted" title="${esc(`needs ${r.prereqs.join(", ")}`)}">(needs ${r.prereqs.length})</span>`
+        : "";
+      return `${dot(status, why)}${esc(r.name)}${plan}${pre}`;
+    },
+  },
+  {
+    id: "gives",
+    label: "gives",
+    left: true,
+    wrap: true,
+    sort: (r) => r.gives,
+    cell: (r) =>
+      r.multsUnknown
+        ? `<span class="muted" title="upstream randomises this augmentation's multipliers per save">randomised</span>`
+        : `<span class="muted">${esc(r.gives)}</span>`,
+  },
+  {
+    id: "from",
+    label: "from",
+    left: true,
+    wrap: true,
+    sort: (r) => r.factions.length,
+    cell: (r) => {
+      if (r.factions.length === 0) return `<span class="muted">not sold</span>`;
+      // Factions we are already in first, and marked: that is the difference
+      // between "buy it" and "join something first".
+      const inside = r.fromJoined.map((name) => `<span class="good">${esc(name)}</span>`);
+      const outside = r.factions
+        .filter((name) => !r.fromJoined.includes(name))
+        .map((name) => `<span class="muted">${esc(name)}</span>`);
+      return [...inside, ...outside].join(", ");
+    },
+  },
+  {
+    id: "cost",
+    label: "price",
+    sort: (r) => r.cost,
+    cell: (r) => {
+      if (!Number.isFinite(r.cost)) return `<span class="muted">unbuyable</span>`;
+      const base = r.offer?.basePrice;
+      // Both prices when they differ: the 1.9^queued escalation should be
+      // visible as an escalation, not look like a price change.
+      return base !== undefined && base !== r.cost
+        ? `${fmtMoney(r.cost)} <span class="muted">(base ${fmtMoney(base)})</span>`
+        : fmtMoney(r.cost);
+    },
+  },
+  {
+    id: "rep",
+    label: "rep",
+    sort: (r) => r.rep,
+    cell: (r) => {
+      if (!Number.isFinite(r.rep)) return `<span class="muted">–</span>`;
+      if (r.owned) return `<span class="muted">owned</span>`;
+      if (r.offer?.affordableRep) return `<span class="good">met</span>`;
+      const gap = r.offer?.repGap;
+      return gap !== undefined
+        ? `<span class="muted" title="reputation still needed at the cheapest offering faction">${fmtNum(gap, 0)} short</span>`
+        : fmtNum(r.rep, 0);
+    },
+  },
+];
+
+// --- tab -------------------------------------------------------------------
 
 export const factionsTab: Tab = {
   id: "factions",
@@ -216,103 +460,123 @@ export const factionsTab: Tab = {
     const f = state.topics.factions;
     if (!f) return note("waiting for the factions probe");
 
+    const rows = factionRows(state);
+    // One predicate per filter, used for BOTH the badge and the filtering. A
+    // badge computed separately drifts from the rows it promises: "reachable"
+    // counted only un-invited factions while the filter included invited ones,
+    // so every pending invitation made the badge undercount its own view.
+    const FACTION_VIEWS: { value: string; label: string; match(row: (typeof rows)[number]): boolean }[] = [
+      { value: "all", label: "all", match: () => true },
+      { value: "joined", label: "joined", match: (r) => r.joined },
+      { value: "open", label: "reachable", match: (r) => !r.joined && r.reachable },
+      { value: "objective", label: "objective", match: (r) => r.inObjective },
+      { value: "unreachable", label: "unreachable", match: (r) => !r.reachable },
+    ];
+    const counts = {
+      joined: rows.filter((r) => r.joined).length,
+      invited: rows.filter((r) => r.invited).length,
+    };
+    const factionMode = view("factions.mode", "all");
+    const active = FACTION_VIEWS.find((v) => v.value === factionMode) ?? FACTION_VIEWS[0]!;
+    const shown = rows.filter((r) => active.match(r));
+
+    const factionControls = filters(
+      "factions.mode",
+      FACTION_VIEWS.map((v) => ({
+        value: v.value,
+        label: v.label,
+        badge: String(rows.filter((r) => v.match(r)).length),
+      })),
+      "all",
+    );
+
+    const factionTable = f.gates
+      ? dataTable("factions.list", shown, FACTION_COLUMNS, {
+          defaultSort: { key: "progress", dir: -1 },
+          empty: "no factions match this filter",
+        })
+      : dataTable("factions.list", shown, FACTION_COLUMNS, {
+          defaultSort: { key: "name", dir: 1 },
+          empty: "no factions known yet",
+        }) + note("requirement evaluation needs the factions driver — joined/rep only until it runs");
+
+    // --- augmentations ---
+    const augs = augRows(state);
+    const augMode = view("augs.mode", "available");
+    const needle = view("augs.search").trim().toLowerCase();
+    const augCounts = {
+      owned: augs.filter((a) => a.owned).length,
+      available: augs.filter((a) => !a.owned && a.fromJoined.length > 0).length,
+      planned: augs.filter((a) => a.inPlan).length,
+    };
+    const shownAugs = augs.filter((a) => {
+      if (needle && !a.name.toLowerCase().includes(needle) && !a.gives.toLowerCase().includes(needle)) return false;
+      if (augMode === "owned") return a.owned;
+      if (augMode === "available") return !a.owned && a.fromJoined.length > 0;
+      if (augMode === "planned") return a.inPlan;
+      if (augMode === "locked") return !a.owned && a.fromJoined.length === 0;
+      return true;
+    });
+
+    const augControls =
+      filters(
+        "augs.mode",
+        [
+          { value: "available", label: "buyable", badge: String(augCounts.available) },
+          { value: "planned", label: "planned", badge: String(augCounts.planned) },
+          { value: "owned", label: "owned", badge: String(augCounts.owned) },
+          { value: "locked", label: "locked" },
+          { value: "all", label: "all", badge: String(augs.length) },
+        ],
+        "available",
+      ) + search("augs.search", "name or effect…");
+
     const summary = tiles([
-      { label: "joined", value: String(f.joined.length) },
-      { label: "invites", value: f.invites ? String(f.invites.length) : "–" },
-      { label: "augs owned", value: f.ownedAugs ? String(f.ownedAugs.length) : "–" },
-      { label: "augs available", value: f.augTotal !== undefined ? String(f.augTotal) : "–" },
+      { label: "joined", value: String(counts.joined), sub: `${rows.length} exist` },
+      { label: "invites", value: String(counts.invited) },
+      { label: "augs owned", value: String(augCounts.owned), sub: `${augs.length} exist` },
+      { label: "buyable now", value: String(augCounts.available) },
     ]);
-
-    const standings = f.standings
-      ? table(
-          ["faction", "rep", "favor", "donate at", "work", "bans"],
-          f.standings
-            .slice()
-            .sort((a, b) => b.rep - a.rep)
-            .map((s) => {
-              const gate = f.favorToDonate;
-              const unlocked = gate !== undefined && s.favor >= gate;
-              const progress = gate ? Math.min(100, (s.favor / gate) * 100) : 0;
-              return [
-                esc(s.name),
-                fmtNum(s.rep, 0),
-                `<span class="${unlocked ? "good" : ""}">${fmtNum(s.favor, 1)}</span>`,
-                gate !== undefined
-                  ? `${fmtNum(gate, 0)} <span class="muted">(${fmtNum(progress, 0)}%)</span>`
-                  : "–",
-                f.workTypes?.[s.name]?.length
-                  ? `<span class="muted">${esc(f.workTypes[s.name]!.join(", "))}</span>`
-                  : "–",
-                f.enemies?.[s.name]?.length
-                  ? `<span class="muted">${esc(f.enemies[s.name]!.join(", ").slice(0, 60))}</span>`
-                  : "–",
-              ];
-            }),
-          { wrap: [4, 5] },
-        )
-      : table(
-          ["faction"],
-          f.joined.map((name) => [esc(name)]),
-          "no factions joined",
-        ) + note("rep and favor need BN4 or SF4 (Singularity)");
-
-    const invites =
-      f.invites && f.invites.length > 0
-        ? table(
-            ["faction", "requirements"],
-            f.invites.map((name) => [
-              esc(name),
-              esc(describeRequirements(f.requirements?.[name] ?? []) || "satisfied"),
-            ]),
-            // A requirement tree is prose and can be long; without wrapping it
-            // pushes the card into horizontal scroll and hides everything else.
-            { wrap: [1] },
-          )
-        : note("no pending invitations");
-
-    const offers = f.offers
-      ? table(
-          ["augmentation", "faction", "price", "rep req", "rep gap"],
-          f.offers
-            .slice(0, 60)
-            .map((a) => [
-              esc(a.name),
-              esc(a.faction),
-              // Both prices when they differ: the 1.9^queued escalation should
-              // be visible as an escalation, not look like a price change.
-              a.basePrice !== undefined && a.basePrice !== a.price
-                ? `${fmtMoney(a.price)} <span class="muted">(base ${fmtMoney(a.basePrice)})</span>`
-                : fmtMoney(a.price),
-              fmtNum(a.repReq, 0),
-              a.affordableRep
-                ? `<span class="good">met</span>`
-                : `<span class="muted">${fmtNum(a.repGap ?? a.repReq, 0)}</span>`,
-            ]),
-          "nothing purchasable",
-        ) +
-        (f.augTotal !== undefined && f.augTotal > (f.offers?.length ?? 0)
-          ? note(`showing ${f.offers.length} of ${f.augTotal} — the probe caps its list`)
-          : "")
-      : note("augmentation list needs BN4 or SF4");
 
     const graft =
       f.graftable && f.graftable.length > 0
         ? table(
             ["augmentation", "price", "time"],
             f.graftable.slice(0, 40).map((g) => [esc(g.name), fmtMoney(g.price), fmtTime(g.timeMs)]),
+            { left: [0] },
           )
         : note("nothing graftable (needs New Tokyo's VitaLife clinic)");
+
+    const alternatives =
+      f.plan && f.plan.alternatives.length > 0
+        ? table(
+            ["alternative", "value", "why"],
+            f.plan.alternatives
+              .slice()
+              .sort((a, b) => b.value - a.value)
+              .slice(0, 6)
+              .map((entry) => [esc(entry.label), fmtNum(entry.value, 3), esc(entry.why)]),
+            { wrap: [2], left: [0] },
+          )
+        : note("no scored alternatives");
 
     return (
       `<div class="col wide">` +
       planCard(state) +
-      card("Standing", summary + standings) +
-      card("Augmentations", offers) +
+      card("Factions", summary + factionTable, factionControls) +
+      card("Augmentations", dataTable("augs.list", shownAugs, AUG_COLUMNS, {
+        defaultSort: { key: "cost", dir: 1 },
+        empty: "nothing matches this filter",
+        limit: 200,
+      }), augControls) +
       `</div>` +
       `<div class="col">` +
-      card("Invitations", invites) +
+      card("Alternatives considered", alternatives) +
       card("Grafting", graft) +
       `</div>`
     );
   },
 };
+
+/** Re-exported for the tests, which assert the catalogue joins correctly. */
+export { augRows, factionRows, offeredBy };

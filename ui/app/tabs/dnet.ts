@@ -30,7 +30,7 @@ export const dnetTab: Tab = {
           `<span class="${s.isOnline ? "good" : "muted"}">${s.isOnline ? "yes" : "no"}</span>`,
           s.stasisLinked ? `<span class="good">linked</span>` : "–",
         ]),
-      "nothing probed",
+      { empty: "nothing probed", left: [0] },
     );
 
     return (

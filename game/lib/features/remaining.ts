@@ -533,16 +533,27 @@ const side: FeatureDriver = {
     const topic = ctx.state.topics.side;
     if (!topic) return;
 
+    // The probe has already partitioned the network: `contracts` is a capped,
+    // most-at-risk-first window onto the SOLVABLE ones, and the rest arrive
+    // pre-counted per type. Re-filtering with canSolve is defensive — a legacy
+    // record predating the split carries both kinds in one list.
     const solvable = (topic.contracts ?? []).filter((contract) => canSolve(contract.type));
-    const unknown = (topic.contracts ?? []).filter((contract) => !canSolve(contract.type));
+    const unsolvable = Object.entries(topic.unsolvableByType ?? {})
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
+    const solvableTotal = topic.solvableTotal ?? solvable.length;
+    const unsolvableTotal = topic.unsolvableTotal ?? 0;
     const infiltration = rankInfiltrations(topic.infiltration ?? []);
 
     merge(ctx.state, "side", {
       plan: {
         solvable: solvable.map((contract) => ({ host: contract.host, file: contract.file, type: contract.type })),
+        solvableTotal,
         // Named explicitly: an unsolved contract expires, and a type we cannot
-        // solve is a gap in the registry, not a mystery.
-        unsolvable: unknown.map((contract) => ({ host: contract.host, file: contract.file, type: contract.type })),
+        // solve is a gap in the registry, not a mystery. One row per TYPE —
+        // the fix is a solver, and listing every file that needs it is noise.
+        unsolvable,
+        unsolvableTotal,
         infiltration: infiltration.slice(0, 8).map((target) => ({
           location: target.location,
           city: target.city,
@@ -552,7 +563,7 @@ const side: FeatureDriver = {
         // with no ns API at all, so it is reported as a permanent blocker
         // rather than silently omitted.
         casino: "no ns API — the casino is DOM-driven and cannot be automated",
-        why: `${solvable.length} solvable, ${unknown.length} unknown, ${infiltration.length} infiltration targets`,
+        why: `${solvableTotal} solvable, ${unsolvableTotal} without a solver (${unsolvable.length} types), ${infiltration.length} infiltration targets`,
         ...(results["side"] ? { lastResult: results["side"] } : {}),
       },
     });
@@ -715,12 +726,17 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
  * (NeuroFlux, the odd unstable aug) counts a token 1.01 — present, near-
  * worthless, never zeroing the whole product. */
 function affordableValueProduct(ctx: NeedContext): number {
-  const offers = ctx.state.topics.factions?.offers ?? [];
+  const topic = ctx.state.topics.factions;
+  const offers = topic?.offers ?? [];
   const money = ctx.state.topics.player?.money ?? 0;
+  // Multipliers live once per AUGMENTATION, not once per (faction,
+  // augmentation) offer — carrying them on every pair duplicated each table up
+  // to four times and dominated this topic's wire size.
+  const meta = topic?.augMeta ?? {};
   let product = 1;
   for (const offer of offers) {
     if (offer.owned || !offer.affordableRep || offer.price > money) continue;
-    const mults = Object.values(offer.mults ?? {});
+    const mults = Object.values(meta[offer.name]?.mults ?? {});
     product *= mults.length > 0 ? mults.reduce((a, b) => a * b, 1) : 1.01;
   }
   return product;

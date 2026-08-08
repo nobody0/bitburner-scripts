@@ -1,7 +1,8 @@
 import { FEATURES } from "../../../shared/features/registry.ts";
 import { attachChartHover, drawChart } from "../lib/chart.ts";
-import { card, note, table, tiles } from "../lib/dom.ts";
+import { card, filters, meter, note, search, table, tiles } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtTime } from "../lib/format.ts";
+import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
@@ -22,10 +23,13 @@ function incomeRows(state: ProjectedState): string[][] {
   }
   rows.sort((a, b) => Math.abs(b.value) - Math.abs(a.value));
   const grand = sources.total || rows.reduce((sum, r) => sum + r.value, 0);
+  const largest = Math.max(...rows.map((r) => Math.abs(r.value)), 1);
   return rows.map((r) => [
     esc(r.label),
-    fmtMoney(r.value),
-    grand !== 0 ? `${((r.value / grand) * 100).toFixed(1)}%` : "–",
+    // The share is the point of this table — which feature to work on next —
+    // so it is a bar, not a fourth right-aligned number to compare by eye.
+    meter(Math.abs(r.value) / largest, fmtMoney(r.value), false, `${fmtMoney(r.value)} since install`),
+    grand !== 0 ? `<span class="${r.value < 0 ? "bad" : ""}">${((r.value / grand) * 100).toFixed(1)}%</span>` : "–",
   ]);
 }
 
@@ -89,19 +93,60 @@ export const overviewTab: Tab = {
 
     const income = incomeRows(state);
     const gaps = fidelityRows(state);
-    const feed = state.events.slice(-200).reverse();
+
+    // The feed is mostly `probe.batch` debug in steady state, which buries the
+    // handful of records that mean something went wrong. Filtering is the
+    // difference between a log and a signal.
+    const mode = view("overview.events", "all");
+    const needle = view("overview.search").trim().toLowerCase();
+    const named = state.events.map((e) => ({
+      record: e,
+      name: e.kind === "debug" ? `debug: ${e.msg}` : e.name,
+    }));
+    const isFailure = (name: string): boolean =>
+      name === "action.failed" || name === "action.blocked" || name.startsWith("probe.");
+    const feed = named
+      .filter(({ record, name }) => {
+        if (mode === "events" && record.kind !== "event") return false;
+        if (mode === "failures" && !isFailure(name)) return false;
+        if (needle) {
+          const data = record.data ? JSON.stringify(record.data).toLowerCase() : "";
+          if (!name.toLowerCase().includes(needle) && !data.includes(needle)) return false;
+        }
+        return true;
+      })
+      .slice(-200)
+      .reverse();
+
+    const eventControls =
+      filters(
+        "overview.events",
+        [
+          { value: "all", label: "all" },
+          { value: "events", label: "events" },
+          { value: "failures", label: "problems", badge: String(named.filter((e) => isFailure(e.name)).length) },
+        ],
+        "all",
+      ) + search("overview.search", "filter…");
+
     const events = feed.length
       ? `<ul id="events">${feed
-          .map((e) => {
-            const name = e.kind === "debug" ? `debug: ${e.msg}` : e.name;
-            const bad = name === "action.failed" || name === "action.blocked" || name.startsWith("probe.");
-            const data = e.data ? JSON.stringify(e.data) : "";
-            return `<li><span class="t">${esc(fmtTime(e.t - (state.t0 ?? e.t)))}</span><span class="${
-              bad ? "fail" : ""
-            }">${esc(name)}</span><span class="data">${esc(data.slice(0, 160))}</span></li>`;
+          .map(({ record, name }) => {
+            const data = record.data ? JSON.stringify(record.data) : "";
+            return `<li><span class="t">${esc(fmtTime(record.t - (state.t0 ?? record.t)))}</span><span class="${
+              isFailure(name) ? "fail" : ""
+            }">${esc(name)}</span><span class="data" title="${esc(data.slice(0, 600))}">${esc(
+              data.slice(0, 160),
+            )}</span></li>`;
           })
           .join("")}</ul>`
-      : note("no events yet");
+      : note(named.length ? "nothing matches this filter" : "no events yet");
+
+    // A compacted run kept only the tail; saying so beats letting the feed
+    // look like the run started three minutes before it ended.
+    const compactNote = state.compacted
+      ? note("this run was too large to load whole — topics are the last write of each, and the feed is the tail")
+      : "";
 
     return (
       `<div class="col">` +
@@ -109,7 +154,7 @@ export const overviewTab: Tab = {
       card(
         "Income by feature",
         income.length
-          ? table(["feature", "since install", "share"], income)
+          ? table(["feature", "since install", "share"], income, { left: [0] })
           : note("waiting for ns.getMoneySources() — probed every 2 minutes"),
       ) +
       card("Features", statusChips(state)) +
@@ -119,11 +164,11 @@ export const overviewTab: Tab = {
         ? card(
             "Not modelled",
             gaps.length
-              ? table(["kind", "what was asked for", "times", "note"], gaps)
+              ? table(["kind", "what was asked for", "times", "note"], gaps, { left: [0, 1, 3] })
               : note("this run stayed inside what the simulator models"),
           )
         : "") +
-      card("Events", events) +
+      card("Events", compactNote + events, eventControls) +
       `</div>`
     );
   },

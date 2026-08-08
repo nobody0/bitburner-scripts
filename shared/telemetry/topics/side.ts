@@ -27,7 +27,21 @@ export interface InfiltrationDigest {
 }
 
 export interface SideState {
+  /** Contracts we hold a solver for, most-at-risk first, capped by the probe
+   *  (see CONTRACT_LIMIT in game/lib/probes/dodged.ts, which carries the full
+   *  reasoning). NEVER the whole network: a long-lived save reached 8,557
+   *  contracts, and dumping them made this one record 1.66 MB. */
   contracts: ContractDigest[];
+  /** Every .cct on the network, solvable or not. */
+  contractTotal?: number;
+  /** How many of `contractTotal` we can solve. `contracts.length` is the
+   *  capped window onto these, not the count. */
+  solvableTotal?: number;
+  /** Contracts with no registered solver, counted PER TYPE. One row per type
+   *  is the actionable shape: a gap in the registry is a missing solver, and
+   *  an unsolved contract expires, so this is a countdown, not a curiosity. */
+  unsolvableByType?: Record<string, number>;
+  unsolvableTotal?: number;
   /** Ranked; the probe caps the list (getInfiltration is 15 GB per call, so
    * the full sweep is rare and partial results are normal). */
   infiltration?: InfiltrationDigest[];
@@ -36,10 +50,12 @@ export interface SideState {
 }
 
 export interface SidePlan {
+  /** The attempt queue, capped exactly as `SideState.contracts` is. */
   solvable: { host: string; file: string; type: string }[];
-  /** Contract types with no solver. Named explicitly: an unsolved contract
-   *  EXPIRES, so a gap in the registry is a countdown, not a curiosity. */
-  unsolvable: { host: string; file: string; type: string }[];
+  solvableTotal: number;
+  /** Missing solvers, one row per type rather than one per file. */
+  unsolvable: { type: string; count: number }[];
+  unsolvableTotal: number;
   infiltration: { location: string; city: string; valuePerMinute: number }[];
   /** Permanent blocker, reported rather than omitted. */
   casino: string;

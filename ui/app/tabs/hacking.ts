@@ -1,10 +1,180 @@
-import { bar, card, note, table, tiles } from "../lib/dom.ts";
+import type { Server } from "@ns";
+import {
+  rollPercentile,
+  rolledMoney,
+  rolledSecurity,
+  rootState,
+  serverRanges,
+  type RootState,
+} from "../../../shared/features/servers.ts";
+import { bar, card, dataTable, dot, filters, meter, note, search, table, tiles, type Column } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtRam } from "../lib/format.ts";
+import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
 /** Hacking tab: the farm. Dispatcher rollup on top (rates, target, RAM pie),
- * fleet capacity next, per-server detail below. */
+ * fleet capacity next, per-server detail below.
+ *
+ * The server table is the panel people actually read, so it answers the three
+ * questions a target list is for, in one row each:
+ *  - can we take it? — the dot, and the skill it needs, together
+ *  - is it prepped? — money against its max, security against its min, both
+ *    as meters that turn green at the target rather than as four raw numbers
+ *  - is it worth it? — where this save's roll landed in the range the game
+ *    generated it from, which is otherwise invisible
+ */
+
+interface Row {
+  server: Server;
+  root: RootState;
+  /** Fraction of max money currently on the host. */
+  moneyFrac: number;
+  atMaxMoney: boolean;
+  /** 0 when at minimum security, 1 at the 100 cap. */
+  secFrac: number;
+  atMinSec: boolean;
+  /** Where the world generator's roll landed, when the field is a range. */
+  moneyRoll?: number;
+  skillRoll?: number;
+  secRoll?: number;
+}
+
+const ROOT_DOT: Record<RootState, { status: "good" | "ready" | "bad"; why: string }> = {
+  rooted: { status: "good", why: "rooted" },
+  ready: { status: "ready", why: "can be rooted now" },
+  blocked: { status: "bad", why: "not enough skill or port openers yet" },
+};
+
+function buildRows(state: ProjectedState): Row[] {
+  const skill = state.player?.skills?.hacking ?? 0;
+  const openers = state.topics.fleet?.portOpeners ?? 0;
+  const mults = state.topics.progression?.multipliers;
+  const maxMoneyMult = mults?.["ServerMaxMoney"] ?? 1;
+  const startSecMult = mults?.["ServerStartingSecurity"] ?? 1;
+
+  return [...state.servers.values()].map((server) => {
+    const ranges = serverRanges(server.hostname);
+    const max = server.moneyMax ?? 0;
+    const money = server.moneyAvailable ?? 0;
+    const min = server.minDifficulty ?? 1;
+    const current = server.hackDifficulty ?? min;
+
+    const rolled = rolledMoney(server.moneyMax, maxMoneyMult);
+    const rolledSec = rolledSecurity(server.baseDifficulty, startSecMult);
+
+    return {
+      server,
+      root: rootState(server, skill, openers),
+      moneyFrac: max > 0 ? money / max : 0,
+      atMaxMoney: max > 0 && money >= max * 0.999,
+      // 100 is the game's hard cap, so the bar spans min..100 and empty means
+      // "as weak as this host can be".
+      secFrac: Math.max(0, Math.min(1, (current - min) / Math.max(1, 100 - min))),
+      atMinSec: current <= min + 0.01,
+      ...(rolled !== undefined ? { moneyRoll: rollPercentile(rolled, ranges?.money) } : {}),
+      ...(server.requiredHackingSkill !== undefined
+        ? { skillRoll: rollPercentile(server.requiredHackingSkill, ranges?.skill) }
+        : {}),
+      ...(rolledSec !== undefined ? { secRoll: rollPercentile(rolledSec, ranges?.sec) } : {}),
+    };
+  });
+}
+
+/** A percentile as a short, sortable label. Deliberately terse: it is a
+ * curiosity column, not a decision column, and it must not push the meters
+ * off the right edge. */
+function rollCell(row: Row): string {
+  const p = row.moneyRoll;
+  const ranges = serverRanges(row.server.hostname);
+  if (p === undefined || !ranges?.money) return `<span class="muted">fixed</span>`;
+  const [min, max] = ranges.money;
+  const cls = p >= 0.66 ? "good" : p <= 0.33 ? "bad" : "";
+  return (
+    `<span class="${cls}" title="${esc(
+      `this save rolled ${fmtMoney(min + p * (max - min))} of the ${fmtMoney(min)}–${fmtMoney(max)} the generator allows` +
+        `\nmoneyMax = 25 x roll x ServerMaxMoney`,
+    )}">p${(p * 100).toFixed(0)}</span>`
+  );
+}
+
+const COLUMNS: Column<Row>[] = [
+  {
+    id: "host",
+    label: "host",
+    left: true,
+    sort: (r) => r.server.hostname,
+    cell: (r) => {
+      const { status, why } = ROOT_DOT[r.root];
+      return `${dot(status, why)}${esc(r.server.hostname)}`;
+    },
+  },
+  {
+    id: "skill",
+    label: "skill",
+    sort: (r) => r.server.requiredHackingSkill ?? 0,
+    cell: (r) => {
+      const need = r.server.requiredHackingSkill;
+      if (need === undefined) return `<span class="muted">–</span>`;
+      // Colour matches the dot's reasoning: the number is the reason we cannot
+      // take the host, so it should read as the blocker.
+      const cls = r.root === "rooted" ? "muted" : r.root === "ready" ? "" : "bad";
+      const roll =
+        r.skillRoll !== undefined ? ` <span class="muted">p${(r.skillRoll * 100).toFixed(0)}</span>` : "";
+      return `<span class="${cls}">${fmtNum(need)}</span>${roll}`;
+    },
+  },
+  {
+    id: "money",
+    label: "money",
+    sort: (r) => r.server.moneyMax ?? 0,
+    cell: (r) => {
+      const max = r.server.moneyMax ?? 0;
+      if (max <= 0) return `<span class="muted">none</span>`;
+      return meter(
+        r.moneyFrac,
+        `${fmtMoney(r.server.moneyAvailable)} / ${fmtMoney(max)}`,
+        r.atMaxMoney,
+        `${fmtPct(r.moneyFrac)} of maximum`,
+      );
+    },
+  },
+  {
+    id: "sec",
+    label: "security",
+    sort: (r) => r.server.hackDifficulty ?? 0,
+    cell: (r) => {
+      const min = r.server.minDifficulty;
+      const current = r.server.hackDifficulty;
+      if (min === undefined || current === undefined) return `<span class="muted">–</span>`;
+      // The bar EMPTIES as security falls, so "prepped" reads as an empty bar
+      // that has gone green — the same visual as a full money bar.
+      const roll =
+        r.secRoll !== undefined ? `\nbase security rolled at p${(r.secRoll * 100).toFixed(0)} of its range` : "";
+      return meter(
+        1 - r.secFrac,
+        `${current.toFixed(1)} / ${min.toFixed(1)}`,
+        r.atMinSec,
+        `current ${current.toFixed(2)}, minimum ${min.toFixed(2)}, cap 100${roll}`,
+      );
+    },
+  },
+  {
+    id: "roll",
+    label: "roll",
+    sort: (r) => r.moneyRoll ?? -1,
+    cell: rollCell,
+  },
+  {
+    id: "ram",
+    label: "ram",
+    sort: (r) => r.server.maxRam ?? 0,
+    cell: (r) =>
+      (r.server.maxRam ?? 0) > 0
+        ? `${fmtNum(r.server.ramUsed ?? 0)}/${fmtNum(r.server.maxRam)}`
+        : `<span class="muted">–</span>`,
+  },
+];
 
 export const hackingTab: Tab = {
   id: "hacking",
@@ -23,17 +193,6 @@ export const hackingTab: Tab = {
           { label: "hacks", value: String(farm.totals?.hacks ?? 0) },
         ])
       : "";
-
-    const targetState =
-      farm && (farm.money !== undefined || farm.security !== undefined)
-        ? table(
-            ["", "current", "target"],
-            [
-              ["money", fmtMoney(farm.money), fmtMoney(farm.moneyMax)],
-              ["security", fmtNum(farm.security, 2), fmtNum(farm.minSecurity, 2)],
-            ],
-          )
-        : "";
 
     const inFlight = farm?.inFlight;
     const landed = farm?.landed;
@@ -92,27 +251,61 @@ export const hackingTab: Tab = {
         ])
       : note("waiting for the fleet probe");
 
-    const rows = [...state.servers.values()]
-      .sort((a, b) => (b.moneyMax ?? 0) - (a.moneyMax ?? 0))
-      .map((s) => [
-        esc(s.hostname),
-        `<span class="${s.hasAdminRights ? "good" : "muted"}">${s.hasAdminRights ? "yes" : "no"}</span>`,
-        fmtMoney(s.moneyAvailable),
-        fmtMoney(s.moneyMax),
-        s.hackDifficulty !== undefined ? s.hackDifficulty.toFixed(1) : "–",
-        s.minDifficulty !== undefined ? s.minDifficulty.toFixed(1) : "–",
-        String(s.requiredHackingSkill ?? "–"),
-        `${(s.ramUsed ?? 0).toFixed(0)}/${s.maxRam || 0}`,
-      ]);
+    // --- servers ---
+    const all = buildRows(state);
+    const counts = {
+      rooted: all.filter((r) => r.root === "rooted").length,
+      ready: all.filter((r) => r.root === "ready").length,
+      blocked: all.filter((r) => r.root === "blocked").length,
+      prepped: all.filter((r) => r.atMaxMoney && r.atMinSec).length,
+    };
+    const mode = view("hacking.servers", "money");
+    const needle = view("hacking.search").trim().toLowerCase();
+    const rows = all
+      .filter((r) => {
+        if (needle && !r.server.hostname.toLowerCase().includes(needle)) return false;
+        if (mode === "money") return (r.server.moneyMax ?? 0) > 0;
+        if (mode === "rooted") return r.root === "rooted";
+        if (mode === "ready") return r.root === "ready";
+        if (mode === "blocked") return r.root === "blocked";
+        if (mode === "prepped") return r.atMaxMoney && r.atMinSec;
+        return true;
+      });
+
+    const serverControls =
+      filters(
+        "hacking.servers",
+        [
+          { value: "money", label: "worth hacking" },
+          { value: "rooted", label: "rooted", badge: String(counts.rooted) },
+          { value: "ready", label: "rootable", badge: String(counts.ready) },
+          { value: "blocked", label: "blocked", badge: String(counts.blocked) },
+          { value: "prepped", label: "prepped", badge: String(counts.prepped) },
+          { value: "all", label: "all", badge: String(all.length) },
+        ],
+        "money",
+      ) + search("hacking.search", "host…");
+
+    const servers =
+      dataTable("hacking.servers", rows, COLUMNS, {
+        defaultSort: { key: "money", dir: -1 },
+        empty: "no servers match this filter",
+        limit: 120,
+      }) +
+      note(
+        "● rooted · ● rootable now · ● needs more skill or port openers. " +
+          "roll is where this save landed in the range the generator rolls each server from — " +
+          "money, security and required skill are all randomised per save, so two BN12s do not share a network.",
+      );
 
     return (
       `<div class="col wide">` +
-      card("Farm", farm ? farmTiles + targetState + ops : note("no farm rollup — the dispatcher publishes one per second")) +
-      (pie ? card("RAM segments", pie) : "") +
-      card("Servers", table(["host", "root", "money", "max", "sec", "min", "skill", "ram"], rows, "no servers scanned yet")) +
+      card("Farm", farm ? farmTiles + ops : note("no farm rollup — the dispatcher publishes one per second")) +
+      card("Servers", servers, serverControls) +
       `</div>` +
       `<div class="col">` +
       card("Fleet", fleetTiles) +
+      (pie ? card("RAM segments", pie) : "") +
       (health ? card("Dispatcher health", health) : "") +
       `</div>`
     );

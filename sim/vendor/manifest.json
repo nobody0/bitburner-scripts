@@ -134,6 +134,10 @@
       "sha256": "1d2953e248fe6b9291cf54171b631ac4d85d1644c5fef572df7c2113112efa64"
     },
     {
+      "path": "src/Server/data/servers.ts#SERVER_METADATA",
+      "sha256": "c2501abf79022da6136411b4611ab542833168b10f8a0f288d27e5736fb11f07"
+    },
+    {
       "path": "src/Crime/Crime.ts+src/Crime/Crimes.ts#CRIME_TABLE",
       "sha256": "2a964460699658c6c813f6850e9e8681adcec3afd5a944c63a15560cfc3b22ff"
     }

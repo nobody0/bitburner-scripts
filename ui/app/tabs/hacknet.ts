@@ -42,13 +42,14 @@ export const hacknetTab: Tab = {
               fmtTime(n.timeOnline * 1000),
             ],
       ),
-      "no nodes purchased",
+      { empty: "no nodes purchased", left: [0] },
     );
 
     const upgrades = h.nextUpgrades?.length
       ? table(
           ["upgrade", "cheapest node", "cost"],
           h.nextUpgrades.map((u) => [esc(u.kind), `#${u.node}`, fmtMoney(u.cost)]),
+          { left: [0] },
         )
       : note("no upgrade costs yet");
 
@@ -56,6 +57,7 @@ export const hacknetTab: Tab = {
       ? table(
           ["hash upgrade", "level", "cost"],
           h.hashUpgrades.map((u) => [esc(u.name), String(u.level), fmtNum(u.cost, 0)]),
+          { left: [0] },
         )
       : "";
 

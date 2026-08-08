@@ -2,12 +2,12 @@ import type { NS, PlayerRequirement } from "@ns";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { augCost, defaultWeights, type AugInfo, type PriceContext } from "../../../shared/strategy/factions/augs.ts";
-import { stepFactions } from "../../../shared/strategy/factions/decide.ts";
+import { blockersFor, stepFactions } from "../../../shared/strategy/factions/decide.ts";
 import { initFactionMemory, type FactionAction, type FactionDecision, type FactionMemory } from "../../../shared/strategy/factions/plan.ts";
 import type { FactionStanding, FactionsView } from "../../../shared/strategy/factions/state.ts";
-import type { RequirementView } from "../../../shared/strategy/factions/requirements.ts";
+import { isReachable, type RequirementView } from "../../../shared/strategy/factions/requirements.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
-import type { FactionPlan } from "../../../shared/telemetry/topics/factions.ts";
+import type { FactionGate, FactionPlan } from "../../../shared/telemetry/topics/factions.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge, type GameState } from "../state.ts";
 import { armWorkCompletion, disarmWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
@@ -109,6 +109,9 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
 
   const owned = new Set(topic.ownedAugs ?? []);
   const catalog = new Map<string, AugInfo>();
+  // Offers are (faction, augmentation) pairs; the per-augmentation facts live
+  // once in `augMeta` and are joined back on by name here.
+  const meta = topic.augMeta ?? {};
   for (const offer of topic.offers ?? []) {
     const existing = catalog.get(offer.name);
     if (existing) {
@@ -121,8 +124,8 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
       baseCost: offer.basePrice ?? offer.price,
       baseRepRequirement: offer.repReq,
       factions: [offer.faction],
-      prereqs: offer.prereqs ?? [],
-      mults: offer.mults ?? {},
+      prereqs: meta[offer.name]?.prereqs ?? [],
+      mults: meta[offer.name]?.mults ?? {},
     });
   }
 
@@ -372,6 +375,39 @@ function annotateOffers(state: GameState, view: FactionsView): void {
   merge(state, "factions", { offers });
 }
 
+/** The invitation gate for every faction, not just the objective's.
+ *
+ * `plan.blockers` is deliberately narrow — it is what the CURRENT objective is
+ * waiting on, and it feeds the needs board. This is the whole board: what each
+ * of the 34 factions still wants, so the panel can show which ones are one
+ * backdoor away and which need a different BitNode. */
+function gatesFrom(view: FactionsView): Record<string, FactionGate> {
+  const gates: Record<string, FactionGate> = {};
+  for (const standing of view.factions) {
+    const missing = blockersFor(standing, view);
+    gates[standing.name] = {
+      joined: standing.joined,
+      invited: standing.invited,
+      // The bottleneck, not the average: a faction missing a BitNode is 0%
+      // there however close its other requirements are.
+      progress: missing.length === 0 ? 1 : Math.min(...missing.map((blocker) => blocker.progress)),
+      reachable: standing.joined || standing.invited || isReachable(missing),
+      missing: missing.map((blocker) => ({
+        kind: blocker.kind,
+        ...(blocker.subject !== undefined ? { subject: blocker.subject } : {}),
+        target: blocker.target,
+        have: blocker.have,
+        progress: blocker.progress,
+        owner: blocker.owner,
+        reachable: blocker.reachable,
+        ...(blocker.negated ? { negated: true } : {}),
+        why: blocker.why,
+      })),
+    };
+  }
+  return gates;
+}
+
 // --- module -----------------------------------------------------------------
 
 const driver: FeatureDriver = {
@@ -387,7 +423,7 @@ const driver: FeatureDriver = {
     memory = next;
 
     annotateOffers(ctx.state, view);
-    merge(ctx.state, "factions", { plan: planDigest(decision) });
+    merge(ctx.state, "factions", { plan: planDigest(decision), gates: gatesFrom(view) });
 
     try {
       await execute(ctx.ns, ctx, decision.action);

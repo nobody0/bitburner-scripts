@@ -41,6 +41,10 @@ export interface FleetRollup {
   /** Purchased ("cloud") servers. count/totalRam come from the sweep snapshot;
    *  limit and maxRamPerServer need ns.cloud and fill in when it is probed. */
   purchased: { count: number; totalRam: number; limit?: number; maxRamPerServer?: number };
+  /** Port-opener programs owned, inferred from the highest `openPortCount`
+   *  seen on the network — a lower bound until the first rooting sweep, exact
+   *  after it. Free, unlike asking the game for home's file list. */
+  portOpeners?: number;
   home: { maxRam: number; usedRam: number; cores: number };
   /** ns.getTotalScriptIncome() -> [$/sec since aug install, $/sec since start]. */
   scriptIncome?: [number, number];

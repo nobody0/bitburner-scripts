@@ -360,15 +360,163 @@ export function worldDaemonSkill(n: number | undefined, sf12Level = 0): number |
   return WORLD_DAEMON_BASE_SKILL * (mults.WorldDaemonDifficulty ?? 1);
 }
 
+/** What a multiplier belongs to, and which direction hurts.
+ *
+ * `harderWhen` is the load-bearing half. A BitNode panel that colours by sign
+ * is actively misleading: `CrimeMoney 0.70` and `AugmentationMoneyCost 1.43`
+ * are both bad news, and half the fields in this table are costs where "up" is
+ * the punishment. Classification is editorial — it is not transcribed from the
+ * game — but `tests/bitnode-facets.test.ts` pins that every known field has
+ * one, so a vendor bump that adds a multiplier cannot silently land as an
+ * uncategorised, uncoloured row. */
+export type MultiplierGroup =
+  | "hacking"
+  | "skills"
+  | "career"
+  | "factions"
+  | "infra"
+  | "side"
+  | "hacknet"
+  | "stock"
+  | "gang"
+  | "corp"
+  | "bladeburner"
+  | "stanek"
+  | "go"
+  | "darknet"
+  | "endgame";
+
+export interface MultiplierFacet {
+  group: MultiplierGroup;
+  harderWhen: "higher" | "lower";
+}
+
+/** Display order for the groups — roughly the order a run engages with them. */
+export const MULTIPLIER_GROUPS: readonly MultiplierGroup[] = [
+  "hacking",
+  "infra",
+  "skills",
+  "career",
+  "factions",
+  "side",
+  "hacknet",
+  "stock",
+  "gang",
+  "corp",
+  "bladeburner",
+  "stanek",
+  "go",
+  "darknet",
+  "endgame",
+];
+
+const HIGHER: "higher" = "higher";
+const LOWER: "lower" = "lower";
+
+export const MULTIPLIER_FACETS: Readonly<Record<string, MultiplierFacet>> = {
+  HackingLevelMultiplier: { group: "hacking", harderWhen: LOWER },
+  HackingSpeedMultiplier: { group: "hacking", harderWhen: LOWER },
+  HackExpGain: { group: "hacking", harderWhen: LOWER },
+  ManualHackMoney: { group: "hacking", harderWhen: LOWER },
+  ScriptHackMoney: { group: "hacking", harderWhen: LOWER },
+  ScriptHackMoneyGain: { group: "hacking", harderWhen: LOWER },
+  ServerGrowthRate: { group: "hacking", harderWhen: LOWER },
+  ServerMaxMoney: { group: "hacking", harderWhen: LOWER },
+  ServerStartingMoney: { group: "hacking", harderWhen: LOWER },
+  ServerWeakenRate: { group: "hacking", harderWhen: LOWER },
+  // More starting security is more weakening before the first batch lands.
+  ServerStartingSecurity: { group: "hacking", harderWhen: HIGHER },
+
+  HomeComputerRamCost: { group: "infra", harderWhen: HIGHER },
+  CloudServerCost: { group: "infra", harderWhen: HIGHER },
+  CloudServerSoftcap: { group: "infra", harderWhen: HIGHER },
+  CloudServerLimit: { group: "infra", harderWhen: LOWER },
+  CloudServerMaxRam: { group: "infra", harderWhen: LOWER },
+
+  AgilityLevelMultiplier: { group: "skills", harderWhen: LOWER },
+  CharismaLevelMultiplier: { group: "skills", harderWhen: LOWER },
+  DefenseLevelMultiplier: { group: "skills", harderWhen: LOWER },
+  DexterityLevelMultiplier: { group: "skills", harderWhen: LOWER },
+  StrengthLevelMultiplier: { group: "skills", harderWhen: LOWER },
+  ClassGymExpGain: { group: "skills", harderWhen: LOWER },
+
+  CompanyWorkExpGain: { group: "career", harderWhen: LOWER },
+  CompanyWorkMoney: { group: "career", harderWhen: LOWER },
+  CompanyWorkRepGain: { group: "career", harderWhen: LOWER },
+  CrimeExpGain: { group: "career", harderWhen: LOWER },
+  CrimeMoney: { group: "career", harderWhen: LOWER },
+  CrimeSuccessRate: { group: "career", harderWhen: LOWER },
+
+  AugmentationMoneyCost: { group: "factions", harderWhen: HIGHER },
+  AugmentationRepCost: { group: "factions", harderWhen: HIGHER },
+  DaedalusAugsRequirement: { group: "factions", harderWhen: HIGHER },
+  FavorToDonateToFaction: { group: "factions", harderWhen: HIGHER },
+  FactionPassiveRepGain: { group: "factions", harderWhen: LOWER },
+  FactionWorkExpGain: { group: "factions", harderWhen: LOWER },
+  FactionWorkRepGain: { group: "factions", harderWhen: LOWER },
+
+  CodingContractMoney: { group: "side", harderWhen: LOWER },
+  InfiltrationMoney: { group: "side", harderWhen: LOWER },
+  InfiltrationRep: { group: "side", harderWhen: LOWER },
+
+  HacknetNodeMoney: { group: "hacknet", harderWhen: LOWER },
+
+  FourSigmaMarketDataApiCost: { group: "stock", harderWhen: HIGHER },
+  FourSigmaMarketDataCost: { group: "stock", harderWhen: HIGHER },
+
+  GangSoftcap: { group: "gang", harderWhen: LOWER },
+  GangUniqueAugs: { group: "gang", harderWhen: LOWER },
+
+  CorporationDivisions: { group: "corp", harderWhen: LOWER },
+  CorporationSoftcap: { group: "corp", harderWhen: LOWER },
+  CorporationValuation: { group: "corp", harderWhen: LOWER },
+
+  BladeburnerRank: { group: "bladeburner", harderWhen: LOWER },
+  BladeburnerSkillCost: { group: "bladeburner", harderWhen: HIGHER },
+
+  StaneksGiftPowerMultiplier: { group: "stanek", harderWhen: LOWER },
+  StaneksGiftExtraSize: { group: "stanek", harderWhen: LOWER },
+
+  GoPower: { group: "go", harderWhen: LOWER },
+
+  DarknetMoneyMultiplier: { group: "darknet", harderWhen: LOWER },
+  DarknetLabyrinthRewardsTheRedPill: { group: "darknet", harderWhen: LOWER },
+
+  WorldDaemonDifficulty: { group: "endgame", harderWhen: HIGHER },
+};
+
+/** Facet for a field, with a safe fallback for one the table has not met. */
+export function multiplierFacet(field: string): MultiplierFacet {
+  return MULTIPLIER_FACETS[field] ?? { group: "endgame", harderWhen: LOWER };
+}
+
+export interface ChangedMultiplier {
+  field: string;
+  value: number;
+  base: number;
+  group: MultiplierGroup;
+  harderWhen: "higher" | "lower";
+  /** True when this node's value is worse for the run than BN1's. */
+  harder: boolean;
+}
+
 /** Fields whose active value differs from the BN1 default. */
-export function changedMultipliers(
-  active: Readonly<Record<string, number>> | undefined,
-): { field: string; value: number; base: number }[] {
+export function changedMultipliers(active: Readonly<Record<string, number>> | undefined): ChangedMultiplier[] {
   if (!active) return [];
-  const changed: { field: string; value: number; base: number }[] = [];
+  const changed: ChangedMultiplier[] = [];
   for (const [field, value] of Object.entries(active)) {
     const base = DEFAULT_BITNODE_MULTIPLIERS[field];
-    if (base === undefined || value !== base) changed.push({ field, value, base: base ?? 1 });
+    if (base !== undefined && value === base) continue;
+    const facet = multiplierFacet(field);
+    const resolved = base ?? 1;
+    changed.push({
+      field,
+      value,
+      base: resolved,
+      group: facet.group,
+      harderWhen: facet.harderWhen,
+      harder: facet.harderWhen === HIGHER ? value > resolved : value < resolved,
+    });
   }
   return changed.sort((a, b) => (a.field < b.field ? -1 : 1));
 }

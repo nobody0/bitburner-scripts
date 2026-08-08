@@ -42,7 +42,7 @@ export const bladeburnerTab: Tab = {
           a.countRemaining >= 1e9 ? "∞" : fmtNum(a.countRemaining, 0),
           a.maxLevel ? `${a.level ?? 0}/${a.maxLevel}` : "–",
         ]),
-      "waiting for the bladeburner.actions probe",
+      { empty: "waiting for the bladeburner.actions probe", left: [0, 1] },
     );
 
     const skills = Object.keys(b.skills ?? {}).length
@@ -55,6 +55,7 @@ export const bladeburnerTab: Tab = {
               String(s.level),
               `<span class="${s.upgradeCost <= b.skillPoints ? "good" : "muted"}">${fmtNum(s.upgradeCost, 0)}</span>`,
             ]),
+          { left: [0] },
         )
       : note("skill list needs the actions probe");
 
@@ -67,6 +68,7 @@ export const bladeburnerTab: Tab = {
             String(c.communities),
             `<span class="${c.chaos > 50 ? "bad" : ""}">${fmtNum(c.chaos, 1)}</span>`,
           ]),
+          { left: [0] },
         )
       : note("city intel needs the cities probe");
 

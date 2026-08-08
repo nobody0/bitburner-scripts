@@ -1,6 +1,9 @@
 import type { NS } from "@ns";
 import { armWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
+import { canSolve } from "../../../shared/strategy/side/contracts.ts";
+import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
+import type { ContractDigest } from "../../../shared/telemetry/topics/side.ts";
 import { emit, emitPartial, type DodgedProbe, type Emission, type ProbeContext } from "./index.ts";
 import { fleetFrom } from "./local.ts";
 
@@ -381,6 +384,10 @@ const factionAugs: DodgedProbe = {
     const mults = (acc["mults"] as Record<string, Record<string, number>>) ?? {};
 
     const offers = [];
+    // Per-augmentation facts go here ONCE. Carrying prereqs and the multiplier
+    // table on every (faction, augmentation) pair duplicated them up to four
+    // times each and was most of this topic's 198 KB per record.
+    const augMeta: Record<string, AugmentationMeta> = {};
     for (const [faction, names] of Object.entries(byFaction)) {
       for (const name of names) {
         if (offers.length >= FACTION_AUG_LIMIT) break;
@@ -394,9 +401,14 @@ const factionAugs: DodgedProbe = {
           affordableRep: have >= required,
           repGap: Math.max(0, required - have),
           owned: false,
-          prereqs: prereqs[name] ?? [],
-          ...(mults[name] ? { mults: mults[name] } : {}),
         });
+        if (augMeta[name] === undefined) {
+          const requires = prereqs[name] ?? [];
+          augMeta[name] = {
+            ...(requires.length > 0 ? { prereqs: requires } : {}),
+            ...(mults[name] ? { mults: mults[name] } : {}),
+          };
+        }
       }
     }
     offers.sort((a, b) => a.price - b.price);
@@ -405,6 +417,7 @@ const factionAugs: DodgedProbe = {
       emitPartial("factions", {
         ...(acc["owned"] !== undefined ? { ownedAugs: acc["owned"] as string[] } : {}),
         offers,
+        augMeta,
         ...(acc["augTotal"] !== undefined ? { augTotal: acc["augTotal"] as number } : {}),
         ...(acc["graftable"] !== undefined
           ? { graftable: acc["graftable"] as { name: string; price: number; timeMs: number }[] }
@@ -1235,6 +1248,24 @@ const dnetCore: DodgedProbe = {
 
 // --- side ------------------------------------------------------------------
 
+/** Cap on the contract rows that reach the store and the wire.
+ *
+ * A long-lived save accumulates .cct files faster than one-per-minute solving
+ * retires them, and every type without a solver stays forever: a real BN12
+ * save reached 8,557 contracts, of which 3,730 were unsolvable. Dumping that
+ * list made a single `side` state record 1.66 MB — 88 MB across one run, and
+ * the viewer's snapshot alone was then large enough to stall the browser
+ * before first paint.
+ *
+ * The driver only ever attempts the HEAD of this list, once a minute, so a
+ * hundred is already a queue nothing can drain. Unsolvable contracts are not
+ * rows at all: they collapse to a count per type, which is the actionable
+ * form, since the fix is a solver rather than a file listing.
+ *
+ * Lives here rather than beside the topic because a `--perf` build must not
+ * link anything under shared/telemetry (tests/build-perf.test.ts). */
+const CONTRACT_LIMIT = 100;
+
 const sideContracts: DodgedProbe = {
   id: "side.contracts",
   kind: "dodged",
@@ -1243,18 +1274,49 @@ const sideContracts: DodgedProbe = {
   merge: true,
   methods: ["ls", "codingcontract.getContractType", "codingcontract.getNumTriesRemaining"],
   run(stubNs: NS, { servers }: ProbeContext) {
-    const contracts = [];
+    // PARTITION, DO NOT DUMP. The network can hold thousands of .cct files and
+    // every type without a solver stays there forever (see CONTRACT_LIMIT).
+    // Solvable ones are carried as rows because the driver attempts the head
+    // of that list; the rest collapse to a count per type, which is the only
+    // actionable form — the fix is a solver, not a file listing.
+    const solvable: ContractDigest[] = [];
+    const unsolvableByType: Record<string, number> = {};
+    let contractTotal = 0;
+    let unsolvableTotal = 0;
     for (const host of Object.keys(servers)) {
       for (const file of stubNs["ls"](host, ".cct")) {
-        contracts.push({
+        contractTotal++;
+        const type = stubNs["codingcontract"]["getContractType"](file, host);
+        if (!canSolve(type)) {
+          unsolvableTotal++;
+          unsolvableByType[type] = (unsolvableByType[type] ?? 0) + 1;
+          continue;
+        }
+        solvable.push({
           host,
           file,
-          type: stubNs["codingcontract"]["getContractType"](file, host),
+          type,
           triesRemaining: stubNs["codingcontract"]["getNumTriesRemaining"](file, host),
         });
       }
     }
-    return [emit("side", { contracts })];
+    // Most-at-risk first, so the capped window is the one worth working on;
+    // host/file breaks ties so the window is stable between sweeps.
+    solvable.sort(
+      (a, b) =>
+        a.triesRemaining - b.triesRemaining ||
+        a.host.localeCompare(b.host) ||
+        a.file.localeCompare(b.file),
+    );
+    return [
+      emit("side", {
+        contracts: solvable.slice(0, CONTRACT_LIMIT),
+        contractTotal,
+        solvableTotal: solvable.length,
+        unsolvableByType,
+        unsolvableTotal,
+      }),
+    ];
   },
 };
 

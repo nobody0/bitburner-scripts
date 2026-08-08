@@ -81,7 +81,11 @@ describe("bitnode reference data", () => {
   test("changedMultipliers reports only true deviations", () => {
     expect(changedMultipliers(undefined)).toEqual([]);
     const active = { ...DEFAULT_BITNODE_MULTIPLIERS, ScriptHackMoney: 0.2 };
-    expect(changedMultipliers(active)).toEqual([{ field: "ScriptHackMoney", value: 0.2, base: 1 }]);
+    expect(changedMultipliers(active)).toEqual([
+      // Each deviation carries its facet, so a panel can group and colour it
+      // without a second lookup table.
+      { field: "ScriptHackMoney", value: 0.2, base: 1, group: "hacking", harderWhen: "lower", harder: true },
+    ]);
     // A BitNode that leaves DaedalusAugsRequirement at 30 has not changed it.
     expect(changedMultipliers({ ...DEFAULT_BITNODE_MULTIPLIERS })).toEqual([]);
   });

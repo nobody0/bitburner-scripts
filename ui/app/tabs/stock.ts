@@ -1,4 +1,4 @@
-import { card, note, table, tiles } from "../lib/dom.ts";
+import { card, dataTable, meter, note, table, tiles } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -32,31 +32,49 @@ export const stockTab: Tab = {
           `<span class="${gain >= 0 ? "good" : "bad"}">${fmtMoney(gain)}</span>`,
         ];
       }),
-      "no open positions",
+      { empty: "no open positions", left: [0] },
     );
 
     // Prices come from stock.core, 4S signal from stock.forecast — two probes
     // at different cadences, joined here by symbol.
     const signal = (sym: string) => s.signals?.[sym];
-    const market = table(
-      ["sym", "org", "price", "forecast", "volatility", "max shares"],
-      s.positions
-        .slice()
-        .sort((a, b) => (signal(b.sym)?.forecast ?? 0) - (signal(a.sym)?.forecast ?? 0))
-        .map((p) => {
-          const sig = signal(p.sym);
-          return [
-            esc(p.sym),
-            esc(sig?.organization ?? "—"),
-            fmtMoney(p.price),
-            sig?.forecast !== undefined
-              ? `<span class="${sig.forecast > 0.5 ? "good" : "bad"}">${fmtPct(sig.forecast)}</span>`
-              : "–",
-            sig?.volatility !== undefined ? fmtPct(sig.volatility, 2) : "–",
-            fmtNum(p.maxShares, 0),
-          ];
-        }),
-      "no symbols",
+    const market = dataTable(
+      "stock.market",
+      s.positions,
+      [
+        { id: "sym", label: "sym", left: true, sort: (p) => p.sym, cell: (p) => esc(p.sym) },
+        {
+          id: "org",
+          label: "org",
+          left: true,
+          sort: (p) => signal(p.sym)?.organization ?? "",
+          cell: (p) => esc(signal(p.sym)?.organization ?? "—"),
+        },
+        { id: "price", label: "price", sort: (p) => p.price, cell: (p) => fmtMoney(p.price) },
+        {
+          id: "forecast",
+          label: "forecast",
+          sort: (p) => signal(p.sym)?.forecast ?? 0,
+          cell: (p) => {
+            const forecast = signal(p.sym)?.forecast;
+            if (forecast === undefined) return `<span class="muted">–</span>`;
+            // A forecast is a probability centred on 0.5, so the meter shows
+            // distance from the coin flip rather than the raw value.
+            return meter(forecast, fmtPct(forecast), forecast > 0.5);
+          },
+        },
+        {
+          id: "vol",
+          label: "volatility",
+          sort: (p) => signal(p.sym)?.volatility ?? 0,
+          cell: (p) => {
+            const vol = signal(p.sym)?.volatility;
+            return vol !== undefined ? fmtPct(vol, 2) : `<span class="muted">–</span>`;
+          },
+        },
+        { id: "max", label: "max shares", sort: (p) => p.maxShares, cell: (p) => fmtNum(p.maxShares, 0) },
+      ],
+      { defaultSort: { key: "forecast", dir: -1 }, empty: "no symbols" },
     );
 
     return (

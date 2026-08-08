@@ -34,7 +34,7 @@ export const sleevesTab: Tab = {
         String(x.skills.agility),
         String(x.skills.charisma),
       ]),
-      "no sleeves",
+      { empty: "no sleeves", left: [1, 4] },
     );
 
     const augs = s.sleeves
@@ -45,6 +45,7 @@ export const sleevesTab: Tab = {
           table(
             ["augmentation", "price"],
             (x.purchasableAugs ?? []).slice(0, 20).map((a) => [esc(a.name), fmtMoney(a.price)]),
+            { left: [0] },
           ),
         ),
       )

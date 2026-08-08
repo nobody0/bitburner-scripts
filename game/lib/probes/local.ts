@@ -21,8 +21,15 @@ export function fleetFrom(servers: Record<string, Server>): FleetRollup {
   let usedRam = 0;
   let purchasedCount = 0;
   let purchasedRam = 0;
+  // How many port openers we own, inferred from the network rather than from
+  // an ns call. `rootServers` runs EVERY cracker it holds against every host
+  // it touches, so the most ports opened anywhere is the size of our toolkit.
+  // A lower bound before the first rooting attempt, exact after — and free,
+  // where `ns.ls("home", ".exe")` would cost dodge budget every sweep.
+  let portOpeners = 0;
   for (const server of Object.values(servers)) {
     totalHosts++;
+    if ((server.openPortCount ?? 0) > portOpeners) portOpeners = server.openPortCount ?? 0;
     if (!server.hasAdminRights) continue;
     rootedHosts++;
     maxRam += server.maxRam;
@@ -38,6 +45,7 @@ export function fleetFrom(servers: Record<string, Server>): FleetRollup {
     totalHosts,
     maxRam,
     usedRam,
+    portOpeners,
     purchased: { count: purchasedCount, totalRam: purchasedRam },
     home: { maxRam: home?.maxRam ?? 0, usedRam: home?.ramUsed ?? 0, cores: home?.cpuCores ?? 1 },
   };
