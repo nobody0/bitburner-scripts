@@ -141,6 +141,14 @@ export const PRIORITY = {
    *  incumbent to give up on its own. Clearing something another feature is
    *  blocked on genuinely outranks ordinary reputation grinding. */
   "career:blocking-need": 75,
+  /** Career's request queue. Blocking work may interrupt ordinary faction
+   * reputation; wanted/nice work may not. The gaps exceed PREEMPT_MARGIN so a
+   * priority change has the same result regardless of which side is incumbent. */
+  "career:wanted-request": 45,
+  "career:nice-request": 35,
+  /** Temporary ownership while a completable task has unbanked progress. This
+   * is a lock, not an assertion that its objective is more valuable. */
+  "career:progress-lock": 100,
   /** Career earning money with no need outstanding. */
   "career:income": 30,
   /** Corp seed money — huge, rare, and gates the whole feature. */

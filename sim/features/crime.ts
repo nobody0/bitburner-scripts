@@ -63,13 +63,13 @@ export class CrimeSystem {
     const crime = CRIME_TABLE[type];
     if (!crime) return 0;
     // Silently CANCELS whatever was running, like every other work start.
-    this.#player.currentWork = {
+    this.#player.startWork({
       kind: "crime",
       subject: type,
       startedAt: this.#world.clock.now(),
       cyclesWorked: 0,
       focused: focus,
-    };
+    });
     this.#player.focus = focus;
     return crime.timeMs;
   }
@@ -119,5 +119,6 @@ export class CrimeSystem {
       this.#world.emit({ kind: "event", name: "crime.done", data: { crime: crime.type, success: false } });
     }
     this.#world.recalculateSkills();
+    this.#player.completeWorkUnit();
   }
 }

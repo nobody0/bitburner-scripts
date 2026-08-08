@@ -148,14 +148,14 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       if (!offers[key as keyof typeof offers]) return false;
       // Silently CANCELS whatever was running — the single most important
       // behaviour for the strategy's continuation guard to be tested against.
-      player.currentWork = {
+      player.startWork({
         kind: "faction",
         subject: name,
         workType: key,
         startedAt: clock.now(),
         cyclesWorked: 0,
         focused: focus,
-      };
+      });
       player.focus = focus;
       world.emit({ kind: "event", name: "faction.work", data: { faction: name, type: key, focus } });
       return true;
@@ -203,9 +203,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
     },
 
     stopAction: (): boolean => {
-      if (!player.currentWork) return false;
-      player.currentWork = undefined;
-      return true;
+      return player.stopWork();
     },
 
     getCurrentWork: (): unknown => {
@@ -217,6 +215,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
         crimeType: work.kind === "crime" ? work.subject : undefined,
         factionWorkType: work.workType,
         cyclesWorked: work.cyclesWorked,
+        nextCompletion: work.nextCompletion,
       };
     },
 
@@ -285,7 +284,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
         player.augmentations.set(name, (player.augmentations.get(name) ?? 0) + level);
       }
       player.queuedAugmentations.clear();
-      player.currentWork = undefined;
+      player.stopWork();
       world.emit({ kind: "event", name: "aug.installed", data: { count: player.augmentations.size } });
       deps.onPrestige?.();
       return true;

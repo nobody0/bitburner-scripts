@@ -10,6 +10,7 @@ import type { Need } from "../../../shared/strategy/needs.ts";
 import type { FactionPlan } from "../../../shared/telemetry/topics/factions.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge, type GameState } from "../state.ts";
+import { armWorkCompletion, disarmWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
@@ -292,11 +293,26 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction): Prom
     }
 
     case "graft": {
-      const ok = await run(["grafting.graftAugmentation"], (stubNs) =>
-        stubNs["grafting"]["graftAugmentation"](action.augmentation as never, false),
-      );
-      if (ok === refused) return;
-      record(Boolean(ok), ok ? `grafting ${action.augmentation}` : "grafting refused");
+      const result = await run(["grafting.graftAugmentation", "singularity.getCurrentWork"], (stubNs) => {
+        disarmWorkCompletion();
+        const ok = stubNs["grafting"]["graftAugmentation"](action.augmentation as never, false);
+        const task = stubNs["singularity"]["getCurrentWork"]() as (Record<string, unknown> & WorkTaskLike) | null;
+        if (task) armWorkCompletion(task);
+        return {
+          ok,
+          currentWork: task
+            ? {
+                type: String(task.type),
+                detail: workDetail(task) ?? "",
+                cyclesWorked: typeof task.cyclesWorked === "number" ? task.cyclesWorked : 0,
+                observedAt: Date.now(),
+              }
+            : null,
+        };
+      });
+      if (result === refused) return;
+      merge(ctx.state, "career", { currentWork: result.currentWork });
+      record(Boolean(result.ok), result.ok ? `grafting ${action.augmentation}` : "grafting refused");
       return;
     }
 
@@ -528,7 +544,7 @@ function factionMethods(type: string): readonly string[] {
     case "travelTo": return ["singularity.travelToCity"];
     case "donate": return ["singularity.donateToFaction"];
     case "purchaseAugmentation": return ["singularity.purchaseAugmentation"];
-    case "graft": return ["grafting.graftAugmentation"];
+    case "graft": return ["grafting.graftAugmentation", "singularity.getCurrentWork"];
     default: return [];
   }
 }

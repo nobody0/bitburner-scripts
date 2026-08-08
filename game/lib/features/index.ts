@@ -104,6 +104,10 @@ export interface FeatureDriver {
   /** Minimum interval between ticks. A plain literal, matching the probe
    *  table's convention. */
   everyMs: number;
+  /** Event-driven early wake. Used when the game exposes an authoritative
+   * completion signal and waiting for the ordinary cadence would waste work
+   * ticks. It must be observation-only. */
+  wake?(): boolean;
   /** Ticks only while capabilities report this feature as "yes". Omit for
    *  features that are always playable. */
   requires?: FeatureId;
@@ -204,7 +208,7 @@ export function selectDue(
     // In the real game this is a no-op: deriveCapabilities reports those five
     // as "yes" unconditionally, and gated features are handled below.
     if (!driverEnabled(driver, caps)) return false;
-    return now - (lastRun[driver.id] ?? 0) >= driver.everyMs;
+    return driver.wake?.() === true || now - (lastRun[driver.id] ?? 0) >= driver.everyMs;
   });
 }
 

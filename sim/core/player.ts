@@ -33,6 +33,9 @@ export interface SimWork {
   cyclesWorked: number;
   /** Unfocused work is ×0.8 unless NeuroreceptorManager is owned. */
   focused: boolean;
+  /** Modeled Task.nextCompletion. Kept live across the NS API copy. */
+  nextCompletion: Promise<void>;
+  resolveNextCompletion: () => void;
 }
 
 export interface SimPlayerOptions {
@@ -91,6 +94,31 @@ export class SimPlayer {
     this.sourceFiles = { ...(options.sourceFiles ?? {}) };
     this.augmentations = new Map((options.augmentations ?? []).map((a) => [a.name, a.level]));
     this.queuedAugmentations = new Map((options.queuedAugmentations ?? []).map((a) => [a.name, a.level]));
+  }
+
+  startWork(work: Omit<SimWork, "nextCompletion" | "resolveNextCompletion">): void {
+    this.stopWork();
+    let resolveNextCompletion!: () => void;
+    const nextCompletion = new Promise<void>((resolve) => { resolveNextCompletion = resolve; });
+    this.currentWork = { ...work, nextCompletion, resolveNextCompletion };
+  }
+
+  /** Resolve one repeatable unit and immediately arm the following one. */
+  completeWorkUnit(): void {
+    const work = this.currentWork;
+    if (!work) return;
+    work.resolveNextCompletion();
+    let resolveNextCompletion!: () => void;
+    work.nextCompletion = new Promise<void>((resolve) => { resolveNextCompletion = resolve; });
+    work.resolveNextCompletion = resolveNextCompletion;
+  }
+
+  stopWork(): boolean {
+    const work = this.currentWork;
+    if (!work) return false;
+    this.currentWork = undefined;
+    work.resolveNextCompletion();
+    return true;
   }
 
   /** Owned means INSTALLED OR QUEUED, which is what

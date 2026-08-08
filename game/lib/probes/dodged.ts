@@ -1,4 +1,5 @@
 import type { NS } from "@ns";
+import { armWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { emit, emitPartial, type DodgedProbe, type Emission, type ProbeContext } from "./index.ts";
 import { fleetFrom } from "./local.ts";
@@ -449,7 +450,8 @@ const careerWork: DodgedProbe = {
   merge: true,
   methods: ["singularity.getCurrentWork", "singularity.isFocused", "singularity.getCompanyRep", "singularity.getCompanyFavor"],
   run(stubNs: NS, { player }: ProbeContext) {
-    const work = stubNs["singularity"]["getCurrentWork"]() as ({ type: string } & Record<string, unknown>) | null;
+    const work = stubNs["singularity"]["getCurrentWork"]() as (({ type: string } & Record<string, unknown>) & WorkTaskLike) | null;
+    if (work) armWorkCompletion(work);
     const companies: Record<string, { rep: number; favor: number }> = {};
     for (const company of Object.keys(player.jobs)) {
       companies[company] = {
@@ -462,15 +464,16 @@ const careerWork: DodgedProbe = {
         currentWork: work
           ? {
               type: work.type,
-              detail: String(work.factionName ?? work.companyName ?? work.crimeType ?? work.classType ?? ""),
+              detail: workDetail(work) ?? "",
               focused: stubNs["singularity"]["isFocused"](),
               // How far in the activity already is. Load-bearing for the work
               // slot: without it a driver can only say "a crime is running",
               // not "it has 90 seconds left", and the arbiter cannot tell a
               // nearly-finished activity from one just started.
               cyclesWorked: typeof work.cyclesWorked === "number" ? work.cyclesWorked : 0,
+              observedAt: Date.now(),
             }
-          : undefined,
+          : null,
         companies,
       }),
     ];

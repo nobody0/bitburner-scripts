@@ -30,8 +30,51 @@ export const careerTab: Tab = {
           ["type", esc(c.currentWork.type)],
           ["detail", esc(c.currentWork.detail ?? "—")],
           ["focused", c.currentWork.focused ? "yes" : "no"],
+          ["cycles", fmtNum(c.currentWork.cyclesWorked ?? 0, 0)],
         ])
       : note("idle, or singularity access (BN4/SF4) is unavailable");
+
+    const decision = c.plan
+      ? definitions([
+          ["selected", esc(`${c.plan.action.type}${c.plan.action.subject ? `: ${c.plan.action.subject}` : ""}`)],
+          ["priority", c.plan.priority ? `${esc(c.plan.priority.band)} (${c.plan.priority.value})` : "--"],
+          ["decision", esc(c.plan.why)],
+          ["action", esc(c.plan.action.why)],
+          ["review", c.plan.schedule ? `${esc(c.plan.schedule.reason)} / ${esc(c.plan.schedule.mode)}` : "--"],
+          ["last completion", c.plan.schedule?.lastCompletion
+            ? `${esc(c.plan.schedule.lastCompletion.type)}: ${esc(c.plan.schedule.lastCompletion.detail ?? "")} (${fmtTime(Date.now() - c.plan.schedule.lastCompletion.at)} ago)`
+            : "--"],
+        ])
+      : note("waiting for the first career decision");
+
+    const requests = c.plan?.serving.length
+      ? table(
+          ["priority", "requester", "outcome", "have to target", "weight", "progress", "why"],
+          c.plan.serving.map((request) => [
+            esc(request.urgency ?? "--"),
+            esc(request.by ?? "--"),
+            esc(`${request.kind}${request.subject ? `: ${request.subject}` : ""}`),
+            request.have !== undefined && request.target !== undefined ? `${fmtNum(request.have, 1)} to ${fmtNum(request.target, 1)}` : "--",
+            fmtNum(request.weight, 2),
+            fmtPct(request.progress),
+            esc(request.why ?? ""),
+          ]),
+        )
+      : note("no open career requests; income fallback is active");
+
+    const options = c.plan?.ranked.length
+      ? table(
+          ["option", "priority", "score", "$/sec", "contributes", "why"],
+          c.plan.ranked.map((option) => [
+            esc(option.label),
+            esc(option.priority ?? "income"),
+            fmtNum(option.score, 4),
+            fmtMoney(option.moneyPerSec),
+            esc((option.contributions ?? []).map((part) => `${part.kind}${part.subject ? `:${part.subject}` : ""} ${fmtNum(part.score, 3)}`).join(", ") || "income"),
+            esc(option.why),
+          ]),
+        )
+      : note("no viable career options");
 
     const jobs = Object.keys(c.jobs).length
       ? table(
@@ -64,6 +107,9 @@ export const careerTab: Tab = {
     return (
       `<div class="col wide">` +
       card("Career", summary) +
+      card("Decision", decision) +
+      card("Request queue", requests) +
+      card("Ranked options", options) +
       card("Crime ranking", crimes) +
       `</div>` +
       `<div class="col">` +

@@ -246,6 +246,14 @@ describe("arbiter shape", () => {
     expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(PRIORITY["factions:work"] + PREEMPT_MARGIN);
     // ...while ordinary career income must NOT be able to.
     expect(PRIORITY["career:income"]).toBeLessThan(PRIORITY["factions:work"]);
+    // Wanted/nice requests stay queued behind faction reputation. The margin
+    // is large enough that faction work can also take the slot back when one
+    // of those requests was the incumbent.
+    expect(PRIORITY["factions:work"]).toBeGreaterThan(PRIORITY["career:wanted-request"] + PREEMPT_MARGIN);
+    expect(PRIORITY["career:wanted-request"]).toBeGreaterThan(PRIORITY["career:nice-request"]);
+    // Progress protection is a transaction lock, independent of objective
+    // value, and must beat every ordinary time bid until completion fires.
+    expect(PRIORITY["career:progress-lock"]).toBeGreaterThan(PRIORITY["career:blocking-need"]);
   });
 
   test("the empty arbitration is inert", () => {
