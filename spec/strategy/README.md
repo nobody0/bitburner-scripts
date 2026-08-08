@@ -7,6 +7,7 @@ folder describes what those features are for.
 | Document | Answers |
 |---|---|
 | [`bitnodes/bn01.md` … `bn15.md`](bitnodes/) | "What are the rules in this node, and what does that do to our plan?" |
+| [`endgame.md`](endgame.md) | "Which way do we finish this node, how long will that take, and how does the guess steer the features?" |
 | [`feature-catalog.md`](feature-catalog.md) | "When does this feature unlock, what does it need, what does it give back?" |
 | [`graph.md`](graph.md) | "What depends on what, and which resources are contended?" |
 

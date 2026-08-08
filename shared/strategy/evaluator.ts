@@ -121,6 +121,11 @@ export function stepEvaluator(
   memory: EvaluatorMemory,
   capacity: FleetCapacity,
   goalRemaining: number,
+  /** Expected remaining RUN time in ms (the endgame route's estimate). Caps
+   *  the amortization horizon: a target whose prep only pays off after the
+   *  run is expected to end is not worth switching to, however good its
+   *  steady-state rate. Infinity preserves the goal-only behaviour. */
+  horizonCapMs = Infinity,
 ): { memory: EvaluatorMemory; directive: TargetDirective; switched?: { from?: string; to: string } } {
   const now = view.time;
 
@@ -216,11 +221,11 @@ export function stepEvaluator(
   };
 
   // Horizon bounds how far prep time is amortized (and caps skill staleness).
+  // Two ceilings apply: how long the GOAL still needs at the current rate,
+  // and how long the RUN is expected to last at all — whichever ends first.
   const currentRate = currentScore * fleetGb;
-  const horizonMs =
-    currentRate > 0
-      ? Math.min(HORIZON_MAX_MS, Math.max(HORIZON_MIN_MS, (goalRemaining / currentRate) * 1000))
-      : HORIZON_MAX_MS;
+  const goalHorizonMs = currentRate > 0 ? (goalRemaining / currentRate) * 1000 : HORIZON_MAX_MS;
+  const horizonMs = Math.min(HORIZON_MAX_MS, Math.max(HORIZON_MIN_MS, Math.min(goalHorizonMs, horizonCapMs)));
 
   // Farm pick: best PREPPED candidate, with hysteresis + dwell against the
   // incumbent. An unprepped better candidate becomes the prep target instead.

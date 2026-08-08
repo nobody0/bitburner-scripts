@@ -57,11 +57,6 @@ export interface FactionsView {
   /** Measured income per second, for the donate-vs-work crossover. */
   incomePerSec: number;
 
-  /** Blockers this feature cannot act on itself are posted as needs; this is
-   *  what the board currently reports as satisfied, so a need that has been
-   *  delivered stops being re-posted. */
-  horizonSec: number;
-
   /** SF4 level and BitNode, for the 80 GB single-call blocker. */
   sf4Level: number;
   bitNode: number;

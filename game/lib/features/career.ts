@@ -479,7 +479,11 @@ export function careerDecision(): CareerDecision | undefined {
 
 export const careerModule: FeatureModule = {
   driver,
-  reset: resetCareerState,
+  reset: (state) => {
+    resetCareerState();
+    // Jobs, work state and crime stats from the ended node.
+    delete state.topics.career;
+  },
   claims,
   peakStepGb: PEAK_STEP_GB,
 };

@@ -50,7 +50,9 @@ function buildView(ctx: DriverContext): StockView | undefined {
     hasTixApi: topic.hasTixApiAccess ?? false,
     moneyGranted: ctx.grants.money,
     totalMoney: ctx.state.topics.player?.money ?? 0,
-    horizonSec: 3_600,
+    // Expected remaining run time from the endgame route decision — 4S data
+    // and any position must pay for themselves before the run ends.
+    horizonSec: ctx.horizonSec,
     incomePerSec: 0,
   };
 }
@@ -177,7 +179,11 @@ function stockMethods(actions: readonly StockAction[]): readonly string[] {
 
 export const stockModule: FeatureModule = {
   driver,
-  reset: resetStockState,
+  reset: (state) => {
+    resetStockState();
+    // Positions, prices and account flags from the ended node.
+    delete state.topics.stock;
+  },
   claims,
   peakStepGb: PEAK_STEP_GB,
 };

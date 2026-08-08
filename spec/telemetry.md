@@ -58,6 +58,14 @@ cannot afford its dodge budget (reported once per price, not per sweep) and
 `probe.failed {id, error}` when a body throws. Silence would read as "this
 feature has no data".
 
+Two records carry the endgame decision loop (`spec/strategy/endgame.md`).
+`endgame.route` fires only when the chosen route CHANGES — decisions, not
+heartbeats — with `{from?, to, etaSec, expectedEndAt, why, routes[]}`, where
+`routes[]` is every route's per-part estimate breakdown at decision time.
+`bitnode.reset` carries the outcome half: `{to, from?, elapsedMs?, route?,
+guessedEndAt?, decidedAt?}` — the actual elapsed time next to the last guess,
+which is what makes the ETA heuristic tunable from these files at all.
+
 ## Wire
 
 WebSocket to the ui/ hub at `ws://127.0.0.1:12526/ingest`; the in-game side is

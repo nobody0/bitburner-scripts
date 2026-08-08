@@ -5,26 +5,9 @@ import {
   daedalusAugsRequired,
   labyrinthOffersRedPill,
   stepEndgame,
-  type EndgameView,
 } from "../shared/strategy/progression/endgame.ts";
 import { parseGoal } from "../shared/goals/presets.ts";
-
-function view(over: Partial<EndgameView> = {}): EndgameView {
-  return {
-    bitNode: 1,
-    sourceFiles: {},
-    augCount: 0,
-    ownsRedPill: false,
-    redPillInstalled: false,
-    money: 0,
-    hackingSkill: 1,
-    lowestCombatSkill: 1,
-    daedalusRep: 0,
-    inBladeburner: false,
-    blackOpsComplete: 0,
-    ...over,
-  };
-}
+import { freshEndgameView as view } from "./fixtures/endgame-view.ts";
 
 describe("per-node multipliers without the 4 GB getter", () => {
   test("BN14's hacking speed penalty is visible, not defaulted to 1", () => {

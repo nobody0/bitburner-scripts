@@ -128,10 +128,15 @@ export interface FeatureDriver {
 
 export interface FeatureModule {
   driver: FeatureDriver;
-  /** Drop everything derived from a world that no longer exists. Called on a
-   *  BitNode reset for EVERY module, so a feature's cross-run state cannot be
-   *  forgotten by the controller failing to name it. */
-  reset?(): void;
+  /** Drop everything derived from a world that no longer exists — module
+   *  state AND the feature's published topics. Called on a BitNode reset for
+   *  EVERY module, so a feature's cross-run state cannot be forgotten by the
+   *  controller failing to name it. The state is passed precisely so each
+   *  module can clear its own topics: a per-field delete blacklist in the
+   *  controller is the coupling this registry exists to remove, and a stale
+   *  topic surviving a reset is live data from a dead node (the first route
+   *  decision of a new node once read the old node's Red Pill out of it). */
+  reset?(state: GameState): void;
   /** The refresh half of the refresh/act split. Called for every due module
    *  BEFORE needs, claims or any tick() — evaluation only, writing its
    *  conclusions (digests, ETA contributions) to the store for everyone else
@@ -180,8 +185,8 @@ export function featureModule(id: FeatureId): FeatureModule {
 
 /** Every module's reset hook, in registry order. The controller calls this on
  * a BitNode reset instead of naming features one by one. */
-export function resetAllFeatures(): void {
-  for (const id of FEATURE_IDS) FEATURE_MODULES[id].reset?.();
+export function resetAllFeatures(state: GameState): void {
+  for (const id of FEATURE_IDS) FEATURE_MODULES[id].reset?.(state);
 }
 
 /** Peak dodge step per enabled feature, for shared/ram/reserve.ts. */

@@ -116,6 +116,9 @@ export interface ProgressionPlan {
   expectedEndAt?: number;
   /** When the current route was chosen (survives refreshes that keep it). */
   decidedAt?: number;
+  /** When the plan was last recomputed. The horizon's staleness guard reads
+   *  this: a plan whose publisher has gone quiet must stop steering. */
+  refreshedAt?: number;
   routeWhy?: string;
   /** Every route's estimate with its per-part breakdown, so a wrong total can
    *  be attributed to the specific sub-heuristic that produced it. */

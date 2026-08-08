@@ -130,7 +130,8 @@ on it.
 ```ts
 interface FeatureModule {
   driver: FeatureDriver;
-  reset?(): void;                    // drop state derived from a dead world
+  reset?(state: GameState): void;    // drop module state AND published topics
+  refresh?(ctx: NeedContext): void;  // evaluate store → store, before any act
   claims?(ctx: ClaimContext): Claim[];  // PURE — bids for contended resources
   needs?(ctx: NeedContext): Need[];     // PURE — outcomes wanted from others
   peakStepGb?: number;               // largest dodge step, feeds the reserve
@@ -151,18 +152,31 @@ of calling `resetHackingState()` directly — so a new feature that caches
 anything across a node reset cannot leak it because someone forgot to edit the
 loop. `tests/features.test.ts` pins all of this.
 
-### The feature pass
+### The feature pass — refresh, then act
 
-Four phases, and the ordering is load-bearing:
+Five phases, and the ordering is load-bearing:
 
 ```
-collect needs (pure)  →  collect claims against the completed board (pure)
-   →  one arbitration  →  tick each due driver with its own grants
+refresh each due module (evaluate → store; progression LAST)
+   →  collect needs (pure)  →  collect claims against the completed board (pure)
+   →  one arbitration  →  tick each due driver with its own grants + horizon
 ```
 
 Needs come first so a feature can bid harder *because* another is blocked on
 it. Claims are collected only from modules whose driver is due, so a feature
 can never win a grant on a tick it would not run to spend it.
+
+**Refresh** is the evaluation half of a feature: read the store, re-derive the
+published digest (including any ETA contributions), write it back — no ns
+access. **Tick** is the act half. Splitting them resolves the ordering problem
+the endgame decision poses: the route choice needs every feature's enriched
+state, and every feature's actions need the chosen route. So each pass
+refreshes the due modules first — with `progression`, the meta module,
+deliberately ordered last so its route decision reads *this* pass's state —
+and then hands every driver `{route, horizonSec}` in its context
+(see `spec/strategy/endgame.md`). Only `progression` implements `refresh`
+today; a feature adopts it the moment its evaluation needs to be visible to
+others before anyone acts.
 
 ### Cross-feature coordination
 
@@ -207,9 +221,12 @@ statement about their SHAPE — build a view, call one pure `step*`, execute at
 most one action per tick in one dodge — not about their size. Any of them moves
 to its own file the moment it needs more.
 
-The network sweep — scan, reclaim, root, deploy, reap, heap resync — stays in
-the controller rather than becoming a `hacking` concern, because a rooted
-fleet is what every feature spends. Hacking is only its first customer.
+The network sweep — scan, reclaim, root, deploy, reap, heap resync — lives in
+`game/lib/fleet.ts` as an infrastructure module: the shape of a feature
+refresh (read the game, write the store), but deliberately not a registry
+feature, because a rooted fleet is what every feature spends. Hacking is only
+its first customer, so the sweep belongs to none of them, takes no part in
+needs/claims arbitration, and the controller runs it first.
 
 ### BitNode resets
 
@@ -219,9 +236,16 @@ batch, not a node reset, and treating it as one would wipe the fleet on every
 cold boot.
 
 On a real change everything derived from the world we left is dropped — the
-server snapshot, the farm and fleet rollups, the multiplier cache, the
+server snapshot, every feature's published topics, the multiplier cache, the
 dispatcher ledger and heap, and the realm worker registry — and the controller
 rescans and reclaims immediately rather than waiting for the next sweep.
+`reset(state)` takes the store precisely so each module clears its OWN
+topics: a per-field delete blacklist in the controller cannot keep up with
+what features publish, and a topic that survives the reset is live data from
+a dead node (a stale aug list once handed the new node's first endgame route
+decision the old run's Red Pill). Progression clears field-level rather than
+its whole topic — the gate batch that *detected* the reset has already
+written the new node's identity into it.
 
 Two rules that are easy to get backwards:
 

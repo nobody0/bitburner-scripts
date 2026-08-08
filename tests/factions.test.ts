@@ -609,7 +609,6 @@ function factionsView(over: Partial<FactionsView> = {}): FactionsView {
     moneyGranted: 0,
     holdsWorkSlot: true,
     incomePerSec: 1000,
-    horizonSec: 3600,
     sf4Level: 3,
     bitNode: 4,
     ...over,

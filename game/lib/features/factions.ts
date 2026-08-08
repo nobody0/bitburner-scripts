@@ -207,7 +207,6 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     // first element is the rate this run, which is the one the donate-vs-work
     // crossover is about.
     incomePerSec: incomeRate(state.topics.fleet?.scriptIncome),
-    horizonSec: 3600,
     sf4Level: sfLevel(caps.sourceFiles, 4),
     bitNode: caps.bitNode ?? 1,
   };
@@ -587,7 +586,14 @@ function factionMethods(type: string): readonly string[] {
 
 export const factionsModule: FeatureModule = {
   driver,
-  reset: resetFactionsState,
+  reset: (state) => {
+    resetFactionsState();
+    // The published topic is live data from a dead node. Left in place, the
+    // new node's FIRST route decision reads the old run's Red Pill out of
+    // ownedAugs — and the singularity probe that would correct it can be
+    // unaffordable for a long time on a fresh home.
+    delete state.topics.factions;
+  },
   claims,
   needs,
   peakStepGb: PEAK_STEP_GB,

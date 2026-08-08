@@ -68,6 +68,9 @@ export interface DispatchOptions {
   homeReserveGb?: number;
   /** Money still needed for the active goal — sets the switch horizon. */
   goalRemaining?: number;
+  /** Expected remaining run time in ms (the endgame route's estimate). Caps
+   *  the evaluator's amortization horizon alongside the goal. */
+  horizonMs?: number;
 }
 
 export function initDispatch(): DispatchMemory {
@@ -168,7 +171,13 @@ export function dispatch(
   }
 
   const capacity = syncTopology(memory, view, homeReserveGb);
-  const stepped = stepEvaluator(view, memory.evaluator, capacity, options.goalRemaining ?? Infinity);
+  const stepped = stepEvaluator(
+    view,
+    memory.evaluator,
+    capacity,
+    options.goalRemaining ?? Infinity,
+    options.horizonMs ?? Infinity,
+  );
   memory.evaluator = stepped.memory;
   const directive = stepped.directive;
 

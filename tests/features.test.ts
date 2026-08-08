@@ -22,9 +22,23 @@ import {
   type ProbeAcc,
 } from "../game/lib/probes/index.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
+import type { GameState } from "../game/lib/state.ts";
 
 const root = resolve(import.meta.dir, "..");
 const nsDefs = readFileSync(resolve(root, "types/NetscriptDefinitions.d.ts"), "utf8");
+
+/** A minimal real store for the reset-walk tests. */
+function freshState(): GameState {
+  return {
+    topics: {},
+    dirty: new Set(),
+    mirrors: {},
+    mirrorDirty: new Set(),
+    probeFailures: {},
+    probeSkips: {},
+    featureLastRun: {},
+  };
+}
 
 describe("feature registry", () => {
   test("every feature id has exactly one registry entry", () => {
@@ -324,18 +338,53 @@ describe("feature modules", () => {
     const declared = FEATURE_IDS.filter((id) => FEATURE_MODULES[id].reset !== undefined);
     expect(declared, "no module declares a reset — the walk would be vacuous").not.toEqual([]);
 
+    type ResetHook = ((state: GameState) => void) | undefined;
     const called: FeatureId[] = [];
-    const originals = new Map<FeatureId, (() => void) | undefined>();
+    const originals = new Map<FeatureId, ResetHook>();
     for (const id of declared) {
       originals.set(id, FEATURE_MODULES[id].reset);
-      (FEATURE_MODULES[id] as { reset?: () => void }).reset = () => called.push(id);
+      (FEATURE_MODULES[id] as { reset?: ResetHook }).reset = () => called.push(id);
     }
     try {
-      resetAllFeatures();
+      resetAllFeatures(freshState());
     } finally {
-      for (const id of declared) (FEATURE_MODULES[id] as { reset?: () => void }).reset = originals.get(id);
+      for (const id of declared) (FEATURE_MODULES[id] as { reset?: ResetHook }).reset = originals.get(id);
     }
     expect(called.sort()).toEqual([...declared].sort());
+  });
+
+  test("a node reset clears every feature-published topic, not just module state", () => {
+    // THE BUG THIS PINS: the controller used to keep a per-field delete
+    // blacklist, and the factions topic survived a node reset — so the new
+    // node's first endgame route decision read the old run's Red Pill out of
+    // stale ownedAugs and priced the route ~80x too short. Each module now
+    // clears its own published topics via reset(state).
+    const state = freshState();
+    state.topics.factions = { joined: ["Daedalus"], ownedAugs: ["The Red Pill"] };
+    state.topics.gang = { faction: "x" } as never;
+    state.topics.farm = { target: "n00dles" } as never;
+    state.topics.fleet = { sharePower: 1 } as never;
+    state.topics.progression = {
+      bitNode: 2,
+      sourceFiles: { "1": 3 },
+      ownedAugs: {},
+      augCount: 0,
+      lastAugReset: 0,
+      lastNodeReset: 0,
+      multipliers: { ScriptHackMoney: 0.2 },
+      plan: { phase: "start", install: false, homeRamBudgetFraction: 0.1, favorCrossings: [], why: "stale" },
+    };
+    resetAllFeatures(state);
+    expect(state.topics.factions).toBeUndefined();
+    expect(state.topics.gang).toBeUndefined();
+    expect(state.topics.farm).toBeUndefined();
+    expect(state.topics.fleet).toBeUndefined();
+    // Field-level for progression: the plan and the multiplier latch are the
+    // feature's own; bitNode/sourceFiles were just written by the gate batch
+    // that DETECTED the reset and must survive.
+    expect(state.topics.progression?.plan).toBeUndefined();
+    expect(state.topics.progression?.multipliers).toBeUndefined();
+    expect(state.topics.progression?.bitNode).toBe(2);
   });
 
   test("the controller resets features by registry walk, not by name", () => {
@@ -343,22 +392,33 @@ describe("feature modules", () => {
     // resetHackingState() directly, so every new feature meant editing the
     // core loop — and forgetting to meant leaking state across a node reset.
     const controller = readFileSync(resolve(root, "game/lib/controller.ts"), "utf8");
-    expect(controller).toContain("resetAllFeatures()");
+    expect(controller).toContain("resetAllFeatures(state)");
     expect(controller).not.toContain("resetHackingState");
   });
 
-  test("the controller mentions only the two features it is allowed to", () => {
-    // A drift detector, not a purity claim. Two mentions are legitimate and
-    // documented; a third means feature logic has leaked back into the loop.
-    //   - `progression` is a TELEMETRY TOPIC here (the coordination digest
-    //     hangs off it), never a driver decision.
-    //   - `hacking` is the network sweep's heap owner. The sweep is
-    //     controller-level on purpose: a rooted fleet is what every feature
-    //     spends, and hacking is only its first customer.
-    const allowed = new Set<FeatureId>(["progression", "hacking"]);
-    const controller = readFileSync(resolve(root, "game/lib/controller.ts"), "utf8");
-    const named = FEATURE_IDS.filter((id) => new RegExp(`\\b${id}\\b`).test(controller));
-    expect(named.filter((id) => !allowed.has(id))).toEqual([]);
+  test("the loop's infrastructure files mention only the features they are allowed to", () => {
+    // A drift detector, not a purity claim. The allowed mentions are
+    // legitimate and documented; anything else means feature logic has
+    // leaked back into always-on infrastructure.
+    //   - controller: `progression` is the meta layer (the coordination
+    //     digest hangs off its topic, its refresh is deliberately ordered
+    //     last, and the route + horizon handed to every driver are read back
+    //     off its published plan — the DECISION still lives in the feature
+    //     module); `hacking` owns the dispatcher heap that dodge placement
+    //     leases.
+    //   - fleet: the sweep leases the same heap, and hacking is the fleet's
+    //     first customer. It runs unconditionally every sweep, which is
+    //     exactly the kind of place feature logic accretes — hence its own
+    //     scan rather than an exemption.
+    const scans: [string, Set<FeatureId>][] = [
+      ["game/lib/controller.ts", new Set<FeatureId>(["progression", "hacking"])],
+      ["game/lib/fleet.ts", new Set<FeatureId>(["hacking"])],
+    ];
+    for (const [file, allowed] of scans) {
+      const source = readFileSync(resolve(root, file), "utf8");
+      const named = FEATURE_IDS.filter((id) => new RegExp(`\\b${id}\\b`).test(source));
+      expect(named.filter((id) => !allowed.has(id)), file).toEqual([]);
+    }
   });
 
   test("declared RAM demand is positive and belongs to a real feature", () => {

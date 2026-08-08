@@ -57,7 +57,10 @@ function buildView(ctx: DriverContext): HacknetView | undefined {
     newNodeProduction: nodes.length > 0 ? Math.min(...nodes.map((node) => node.production)) : (topic.productionPerSec ?? 0),
     upgrades,
     moneyGranted: ctx.grants.money,
-    horizonSec: 3_600,
+    // Expected remaining run time from the endgame route decision. This is
+    // the number that makes "worth buying?" a real question: an upgrade that
+    // cannot repay itself before the run ends is a loss, not an investment.
+    horizonSec: ctx.horizonSec,
     hashMode: topic.servers === true,
   };
 }
@@ -191,7 +194,11 @@ export function hacknetDecision(): HacknetDecision | undefined {
 
 export const hacknetModule: FeatureModule = {
   driver,
-  reset: resetHacknetState,
+  reset: (state) => {
+    resetHacknetState();
+    // Nodes and upgrade prices from the ended node.
+    delete state.topics.hacknet;
+  },
   claims,
   peakStepGb: PEAK_STEP_GB,
 };

@@ -110,15 +110,21 @@ export function pump(
   state: DriverState,
   view: WorldView,
   completions: CompletionEvent[],
-  goalRemaining = Infinity,
-  /** Computed per pass by the controller: the base reserve plus the largest
-   *  dodge step any unlocked feature declares (shared/ram/reserve.ts). The
-   *  constant is only the fallback for callers with no feature context. */
-  homeReserveGb = HOME_RESERVE_GB,
+  /** Planning options, passed straight through to planFarm.
+   *  - homeReserveGb: computed per pass by the controller — base reserve plus
+   *    the largest dodge step any unlocked feature declares
+   *    (shared/ram/reserve.ts); the constant is only the no-context fallback.
+   *  - horizonMs: expected remaining run time (endgame route decision).
+   *  `goalRemaining` is deliberately NOT named here: the game has no money
+   *  goal — that is the sim's device, and the sim sets it on planFarm
+   *  directly. Named options rather than a positional number tail, because
+   *  three adjacent defaulted numbers in three different units transpose
+   *  silently. */
+  options: { homeReserveGb?: number; horizonMs?: number } = {},
 ): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"] } {
   const result = planFarm(view, state.memory, completions, {
-    homeReserveGb,
-    goalRemaining,
+    homeReserveGb: options.homeReserveGb ?? HOME_RESERVE_GB,
+    ...(options.horizonMs !== undefined ? { horizonMs: options.horizonMs } : {}),
   });
   state.memory = result.memory;
 

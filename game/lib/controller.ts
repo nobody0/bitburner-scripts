@@ -1,32 +1,24 @@
-import type { NS, Server } from "@ns";
+import type { NS } from "@ns";
 import type { FeatureOverrides } from "../../shared/features/profile.ts";
 import { capsDelta, type Capabilities } from "../../shared/features/unlock.ts";
 import type { HostRam } from "../../shared/ram/placement.ts";
 import type { Claim, SlotState } from "../../shared/strategy/arbiter.ts";
 import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../shared/strategy/coordination.ts";
 import type { Need } from "../../shared/strategy/needs.ts";
-import { DEFAULT_HORIZON_SEC } from "../../shared/strategy/progression/eta.ts";
+import { planningHorizonSec } from "../../shared/strategy/progression/eta.ts";
 import { FEATURE_IDS, type FeatureId } from "../../shared/features/ids.ts";
 import { homeReserveGb } from "../../shared/ram/reserve.ts";
-import { resyncHeap, WORKER_BASE_SCRIPT, workerScript } from "./dispatch-driver.ts";
-import { dodge, dodgeStubScript, priceCalls } from "./dodge.ts";
+import { priceCalls } from "./dodge.ts";
 import { isScriptDeath } from "./errors.ts";
 import { ContributionCache } from "./features/contributions.ts";
 import { hackingState, takeTargetSwitch } from "./features/hacking.ts";
+import { takeRouteChange } from "./features/remaining.ts";
 import { driverEnabled, featureModule, featureRamDemand, grantsFor, resetAllFeatures, selectDueModules } from "./features/index.ts";
 import type { ClaimContext, NeedContext } from "./features/index.ts";
+import { sweepFleet } from "./fleet.ts";
 import { gameGlobal } from "./globals.ts";
-import {
-  canRoot,
-  deployFleet,
-  listPortOpeners,
-  reapStrayScripts,
-  reclaimFleet,
-  rootServers,
-} from "./net.ts";
 import { dodgeBudget, homeDodgeBudget, initProbeRunner, runProbes } from "./probe-runner.ts";
 import { acquireDodge, dodgeHosts } from "./ram.ts";
-import { collectServers } from "./scan.ts";
 import { caps, initState, merge, set, type GameState } from "./state.ts";
 import { republish, type TelemetrySink } from "./telemetry-sink.ts";
 import type { Telemetry } from "./telemetry.ts";
@@ -63,9 +55,6 @@ export async function runController(
   if (featureOverrides) state.featureOverrides = featureOverrides;
   const probes = initProbeRunner();
 
-  // Sentinel opener count: guarantees the first sweep always roots + deploys,
-  // which covers the cold-boot dead fleet.
-  let openerCount = -1;
   let reportedRespawnFailure: string | undefined;
   let nextTick = Date.now();
   // A BitNode reset makes the next sweep behave like a cold boot: the fleet
@@ -118,7 +107,7 @@ export async function runController(
     if (tick % PLAYER_EVERY_TICKS === 0) set(state, "player", ns.getPlayer());
 
     if (tick % SWEEP_EVERY_TICKS === 0) {
-      openerCount = await sweep(ns, state, tel, coldSweep, openerCount);
+      await sweepFleet(ns, state, tel, coldSweep);
       coldSweep = false;
 
       // Acquisition, last in the sweep: pure observation, so it yields to
@@ -126,6 +115,12 @@ export async function runController(
       // against the whole realm's spare RAM, not just home's — a probe that
       // cannot fit a 4.5 GB home reserve may fit a rooted 64 GB client
       // comfortably (shared/ram/placement.ts).
+      //
+      // Captured BEFORE the probes: the gate batch overwrites lastNodeReset
+      // with the NEW node's start the moment a reset is observed, so the old
+      // node's start — the thing its elapsed time is measured from — is only
+      // readable before runProbes lands.
+      const nodeStartedAt = state.topics.progression?.lastNodeReset;
       const before = caps(state);
       const probeHosts = placement(state);
       await runProbes(ns, probes, state, probeHosts, (gb) =>
@@ -134,6 +129,26 @@ export async function runController(
       const delta = capsDelta(before, caps(state));
 
       if (delta.bitNodeChanged) {
+        // Emitted FIRST — before the reset walk deletes the plan and before
+        // the awaited rescan below gets a chance to throw. This is the one
+        // record that closes the guess-vs-actual calibration loop for the
+        // whole node (elapsed actual next to the last guess, matched offline
+        // against the endgame.route decisions in the same run log); a failed
+        // post-reset sweep must not be able to lose it. `capabilities`
+        // already reports the new node — the gate batch is what detected the
+        // change — and the plan still describes the node that just ended,
+        // because the gate batch merges only gate fields.
+        TELEMETRY: if (__TELEMETRY__) {
+          const endedPlan = state.topics.progression?.plan;
+          tel!.event("bitnode.reset", {
+            to: caps(state).bitNode,
+            ...(before.bitNode !== undefined ? { from: before.bitNode } : {}),
+            ...(nodeStartedAt !== undefined ? { elapsedMs: Date.now() - nodeStartedAt } : {}),
+            ...(endedPlan?.route !== undefined ? { route: endedPlan.route } : {}),
+            ...(endedPlan?.expectedEndAt !== undefined ? { guessedEndAt: endedPlan.expectedEndAt } : {}),
+            ...(endedPlan?.decidedAt !== undefined ? { decidedAt: endedPlan.decidedAt } : {}),
+          });
+        }
         onBitNodeReset(state);
         merge(state, "progression", emptyDigest());
         workSlot = undefined;
@@ -141,14 +156,9 @@ export async function runController(
         contributions.clear();
         // Rescan and reclaim NOW, not on the next sweep. Waiting would leave
         // the dispatcher with no world to farm for 30 s, and would leave the
-        // new node's orphans holding RAM for just as long. The sentinel
-        // opener count forces the root pass to run: a fresh node owns no
-        // crackers and has nothing rooted.
-        openerCount = await sweep(ns, state, tel, true, -1);
-        TELEMETRY: if (__TELEMETRY__) {
-          republish(state);
-          tel!.event("bitnode.reset", { to: caps(state).bitNode });
-        }
+        // new node's orphans holding RAM for just as long.
+        await sweepFleet(ns, state, tel, true);
+        TELEMETRY: if (__TELEMETRY__) republish(state);
       }
       for (const id of delta.unlocked) {
         // Tick the newly-playable feature on the next pass rather than making
@@ -161,10 +171,11 @@ export async function runController(
       }
     }
 
-    // Feature pass, in three phases: collect (pure) -> arbitrate (pure) ->
-    // tick. Splitting it this way is what lets features coordinate at all —
-    // every due feature's wants are known before any of them acts, so the
-    // single Player.currentWork slot and the money pool are allocated once
+    // Feature pass, refresh/act: refresh (evaluate -> store) -> collect
+    // (pure) -> arbitrate (pure) -> tick (act). Splitting it this way is what
+    // lets features coordinate at all — every due feature's published state
+    // and wants are known before any of them acts, so the endgame route, the
+    // single Player.currentWork slot and the money pool are each decided once
     // rather than claimed by whoever the loop happened to reach first.
     const now = Date.now();
     const active = caps(state);
@@ -180,6 +191,38 @@ export async function runController(
       contributions.remove(id);
     }
 
+    // 0) Refresh: evaluation only, before any need, claim or tick. Each due
+    //    module re-derives its published digest from the store. The meta
+    //    module (progression) refreshes LAST so its endgame route decision
+    //    reads every other feature's state as refreshed by THIS pass, not the
+    //    previous one — the resolution of the "endgame needs the enriched
+    //    state, features need the chosen route" ordering. The sort is stable,
+    //    so everyone else keeps registry order.
+    const needContext: NeedContext = { state, caps: active, now };
+    const refreshOrder = [...dueModules].sort(
+      (a, b) => Number(a.driver.id === "progression") - Number(b.driver.id === "progression"),
+    );
+    for (const module of refreshOrder) {
+      if (!module.refresh) continue;
+      try {
+        module.refresh(needContext);
+      } catch (error) {
+        if (isScriptDeath(error)) throw error;
+        TELEMETRY: if (__TELEMETRY__) {
+          tel!.event("feature.failed", { feature: module.driver.id, phase: "refresh", error: String(error) });
+        }
+      }
+    }
+
+    // The route decision just published (or the standing one from an earlier
+    // pass) is what every driver plans against below: the horizon bounds
+    // every investment's payoff window, the route biases priorities. The
+    // planning horizon is run-remaining CAPPED BY THE INSTALL CADENCE — an
+    // install destroys what the consumers buy — and guarded for staleness,
+    // so a publisher gone quiet stops steering (see eta.ts).
+    const plan = state.topics.progression?.plan;
+    const horizonSec = planningHorizonSec(plan?.expectedEndAt, now, plan?.refreshedAt);
+
     // 1) Needs first: a feature may bid harder BECAUSE another is blocked on
     //    it, so the board must be complete before any claim is collected.
     //
@@ -188,7 +231,6 @@ export async function runController(
     //    the ticks when its poster's driver is not due. Collecting only from
     //    due modules would show a 200 ms consumer an empty board on 149 of
     //    every 150 ticks, and it would never act on anything.
-    const needContext: NeedContext = { state, caps: active, now };
     for (const module of dueModules) {
       if (!module.needs) continue;
       try {
@@ -250,7 +292,8 @@ export async function runController(
           tick,
           board,
           grants: grantsFor(coordination.arbitration, driver.id),
-          horizonSec: DEFAULT_HORIZON_SEC,
+          horizonSec,
+          ...(plan?.route !== undefined ? { route: plan.route } : {}),
           acquireDodge: (gb) => acquireDodge(hosts, hackingState().memory.dispatch.heap, gb),
         });
       } catch (error) {
@@ -268,6 +311,12 @@ export async function runController(
 
     const switched = takeTargetSwitch();
     TELEMETRY: if (__TELEMETRY__ && switched) tel!.event("farm.targetSwitch", switched);
+
+    // The decision record for the calibration loop: the chosen route with its
+    // per-part estimate breakdown, emitted only when the route CHANGES so the
+    // log carries decisions, not heartbeats.
+    const routeSwitch = takeRouteChange();
+    TELEMETRY: if (__TELEMETRY__ && routeSwitch) tel!.event("endgame.route", routeSwitch);
 
     TELEMETRY: if (__TELEMETRY__) sink!.flush(state);
 
@@ -350,73 +399,6 @@ function publishCoordination(
   return encoded;
 }
 
-/** Network sweep: scan, reclaim, root, deploy, reap, reconcile. Returns the
- * opener count to carry into the next sweep.
- *
- * Controller-level rather than a feature driver, because a rooted fleet is
- * what every feature spends — hacking is only its first customer. Every step
- * is dodged, so none of it is charged to the controller's static RAM. */
-async function sweep(
-  ns: NS,
-  state: GameState,
-  tel: Telemetry | undefined,
-  cold: boolean,
-  openerCount: number,
-): Promise<number> {
-  // 1) Scan the whole network (typed snapshot -> store + UI).
-  set(state, "servers", await dodge(ns, collectServers));
-
-  // 1a) Cold boot: this realm is fresh, so every script still running is an
-  //     orphan whose RAM we can never account for. Reclaim the fleet once,
-  //     before the dispatcher tries to allocate anything.
-  if (cold) {
-    const self = ns.pid;
-    const snapshot = state.topics.servers!;
-    const reclaimed = await dodge(ns, (stubNs) => reclaimFleet(stubNs, snapshot, self), 1.5);
-    if (reclaimed.length > 0) {
-      ns.tprint(`reclaimed ${reclaimed.length} host(s) from orphaned scripts`);
-      TELEMETRY: if (__TELEMETRY__) tel!.event("fleet.reclaimed", { hosts: reclaimed });
-    }
-    set(state, "servers", await dodge(ns, collectServers));
-  }
-
-  const servers = state.topics.servers!;
-  const driver = hackingState();
-
-  // 2) Root anything newly rootable.
-  const openers = await dodge(ns, listPortOpeners, 0.5);
-  const rootable = Object.values(servers).filter((s: Server) => !s.hasAdminRights && canRoot(s, openers));
-  if (openers.length !== openerCount || rootable.length > 0) {
-    openerCount = openers.length;
-    if (rootable.length > 0) {
-      const hosts = rootable.map((s: Server) => s.hostname);
-      const rooted = await dodge(ns, (stubNs) => rootServers(stubNs, hosts, openers), 1);
-      for (const host of rooted) servers[host]!.hasAdminRights = true;
-      TELEMETRY: if (__TELEMETRY__) tel!.event("net.rooted", { hosts: rooted, openers });
-    }
-  }
-
-  // 3) Deploy the fleet payload — puppet worker AND dodge stub — so any rooted
-  //    host can serve a dodge (dodged: scp stays out of our RAM bill).
-  const deployed = await dodge(ns, (stubNs) => deployFleet(stubNs, [workerScript(), dodgeStubScript()], servers), 1);
-  for (const host of deployed) driver.deployed.add(host);
-
-  // 3a) Safety net: retire old architectures and kill unreachable workers.
-  //     Liveness comes from the realm registry (survives build handoffs),
-  //     never from this instance's ledger.
-  const registered = new Set(driver.globals.worker_info?.keys() ?? []);
-  const reaped = await dodge(ns, (stubNs) => reapStrayScripts(stubNs, deployed, WORKER_BASE_SCRIPT, registered), 1);
-  TELEMETRY: if (__TELEMETRY__ && (reaped.workers > 0 || reaped.retired > 0)) {
-    tel!.event("fleet.reaped", reaped);
-  }
-
-  // 4) Reconcile the heap with the game's real usage.
-  const drifted = resyncHeap(driver, servers);
-  TELEMETRY: if (__TELEMETRY__ && drifted.length > 0) tel!.event("heap.resync", { hosts: drifted });
-
-  return openerCount;
-}
-
 /** A node reset under a live realm: everything derived from the world we left
  * describes a game that no longer exists. Drop all of it and re-arm the
  * multiplier latch.
@@ -427,18 +409,16 @@ async function sweep(
  * probably fresh is the same class of bug as the heap describing a dead fleet.
  * The caller rescans immediately rather than keeping it. */
 function onBitNodeReset(state: GameState): void {
-  // Every module's own reset, by registry walk rather than by name. Naming
-  // features here is exactly the coupling the module registry removes: a new
-  // feature that caches anything across a node reset would otherwise leak
-  // silently until someone remembered to edit this function.
-  resetAllFeatures();
+  // Every module's own reset, by registry walk rather than by name — module
+  // state AND each feature's published topics, which is why the walk takes
+  // the state. Naming features (or their topic fields) here is exactly the
+  // coupling the registry removes: the per-field delete blacklist this used
+  // to carry left one feature's topic alive across a reset, and the new
+  // node's first route decision read the old run's Red Pill out of it.
+  resetAllFeatures(state);
   state.featureLastRun = {};
   gameGlobal.farmTarget = undefined;
+  // The server snapshot is the fleet substrate's, owned by no feature; the
+  // caller rescans immediately rather than keeping it.
   delete state.topics.servers;
-  // Cumulative totals live in the dispatcher stats the reset walk above just
-  // cleared; dropping the last rollups stops the UI showing the old node's
-  // earnings until the next one lands.
-  delete state.topics.farm;
-  delete state.topics.fleet;
-  if (state.topics.progression) delete state.topics.progression.multipliers;
 }

@@ -36,6 +36,12 @@ export interface BladeburnerState {
   city: string;
   current?: { type: string; name: string; elapsedMs: number };
   nextBlackOp?: { name: string; rank: number };
+  /** Completed black operations, derived on the CORE probe from the next
+   *  uncompleted op's position in getBlackOpNames (0 GB). The endgame route
+   *  estimate reads this rather than counting the detail probe's action
+   *  table, which lands minutes later and costs ~28 GB — a fabricated 0 in
+   *  that window mispriced the whole bladeburner route. */
+  blackOpsComplete?: number;
   /** Owned by the `bladeburner.actions` / `.cities` probes, never by `.core`.
    *  Core runs four times as often; because topic merges are shallow, an
    *  empty placeholder from core would wipe these between detail sweeps. */

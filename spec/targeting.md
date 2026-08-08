@@ -58,8 +58,13 @@ forces a re-score, so an argmax never mixes generations.
 
 ## Switching (in the gate)
 
-`rate = score × fleetGb`; horizon `T = clamp(goalRemaining/rate, 60 s, 30 min)`.
-Prep pick maximizes `rate·(T − prepTime)` and must beat the farm target by 5 %.
+`rate = score × fleetGb`; horizon
+`T = clamp(min(goalRemaining/rate, runRemaining), 60 s, 30 min)`, where
+`runRemaining` is the endgame route's expected remaining run time
+(`spec/strategy/endgame.md`) — in the game the goal term is ∞, so the run
+horizon is the only finite bound, and it binds once the expected end is
+nearer than 30 min. Prep pick maximizes `rate·(T − prepTime)` and must beat
+the farm target by 5 %.
 A farm switch requires **all** of: candidate prepped (sec ≤ min+1, money ≥ 90 %
 max), +10 % hysteresis on same-generation scores, 60 s dwell.
 **Segment order** is `[farm, prep, share]`, flipping to `[prep, farm, share]`

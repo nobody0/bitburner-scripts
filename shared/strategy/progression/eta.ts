@@ -164,7 +164,7 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
       } else {
         // Black ops earn rank as they complete, so the rank climb and the op
         // sequence overlap: the estimate is the slower of the two.
-        const remainingOps = Math.max(0, BLACK_OP_COUNT - view.blackOpsComplete);
+        const remainingOps = Math.max(0, BLACK_OP_COUNT - (view.blackOpsComplete ?? 0));
         const ops = part("black operations", remainingOps, rates.blackOpsPerSec, 1 / FALLBACK_SEC_PER_BLACK_OP);
         const rank = part(
           "bladeburner rank",
@@ -317,6 +317,18 @@ export function chooseRoute(
 export const DEFAULT_HORIZON_SEC = 3_600;
 export const HORIZON_FLOOR_SEC = 60;
 export const HORIZON_CEIL_SEC = 86_400;
+/** Assumed augmentation-install cadence, until installs are modelled. An
+ * install destroys exactly what the horizon consumers buy — hacknet nodes,
+ * stock access, skills — so their payoff window is bounded by the NEXT
+ * install, not by the node's end: the node ETA spans many installs. Equal to
+ * DEFAULT_HORIZON_SEC on purpose, so "no decision yet" and "long run ahead"
+ * price investments identically. Heuristic v1, tuned from runs/*.jsonl. */
+export const INSTALL_CADENCE_SEC = 3_600;
+/** A plan whose refresh has gone quiet for this long is treated as absent.
+ * Progression refreshes every 60 s; five missed cadences means the publisher
+ * is dead (locked, or throwing every pass), and trusting its aging
+ * expectedEndAt would decay every feature's horizon to the floor. */
+export const PLAN_STALE_MS = 300_000;
 
 /** Seconds the run is expected to keep going, derived from the published
  * decision. Clamped: a sub-minute horizon degenerates every investment
@@ -324,4 +336,41 @@ export const HORIZON_CEIL_SEC = 86_400;
 export function horizonSecFrom(expectedEndAt: number | undefined, now: number): number {
   if (expectedEndAt === undefined) return DEFAULT_HORIZON_SEC;
   return Math.min(HORIZON_CEIL_SEC, Math.max(HORIZON_FLOOR_SEC, (expectedEndAt - now) / 1000));
+}
+
+/** The horizon the controller hands every driver: run-remaining, guarded for
+ * staleness, capped by the install cadence.
+ *
+ * The cap is what keeps a fallback-guessed multi-day node ETA from loosening
+ * every investment test ~24x at the cash-scarce start of a run: a short
+ * expected end still passes through (the "run ends in ten minutes, stop
+ * prepping" signal survives), only the long tail is bounded. */
+export function planningHorizonSec(
+  expectedEndAt: number | undefined,
+  now: number,
+  /** When the plan was last recomputed — NOT decidedAt, which deliberately
+   *  survives refreshes that keep the same route. */
+  refreshedAt?: number,
+): number {
+  const stale = refreshedAt !== undefined && now - refreshedAt > PLAN_STALE_MS;
+  const end = stale ? undefined : expectedEndAt;
+  return Math.min(INSTALL_CADENCE_SEC, horizonSecFrom(end, now));
+}
+
+/** The expectedEndAt to publish for a choice, or undefined when there is
+ * nothing to plan against.
+ *
+ * A COMPLETE route estimates zero — "the node can be ended now" — but the act
+ * half that would end it is deliberately unwired, so publishing now-as-the-end
+ * would floor every feature's horizon at 60 s indefinitely, freezing all
+ * investment exactly while the run waits for the manual finish. Absent reads
+ * as DEFAULT_HORIZON_SEC, the pre-decision behaviour. */
+export function expectedEndFrom(
+  choice: RouteChoice | undefined,
+  etas: readonly RouteEta[],
+  now: number,
+): number | undefined {
+  if (!choice) return undefined;
+  if (etas.find((eta) => eta.id === choice.route)?.complete) return undefined;
+  return now + choice.etaSec * 1000;
 }

@@ -10,6 +10,7 @@ import { stepProgression } from "../../../shared/strategy/progression/decide.ts"
 import { RED_PILL, stepEndgame, type EndgameView, type RouteId } from "../../../shared/strategy/progression/endgame.ts";
 import {
   chooseRoute,
+  expectedEndFrom,
   noRates,
   routeEtas,
   type RouteChoice,
@@ -20,7 +21,7 @@ import { canSolve, rankInfiltrations, solve } from "../../../shared/strategy/sid
 import { chargeOrder, packFragments } from "../../../shared/strategy/stanek/pack.ts";
 import { stepSleeves } from "../../../shared/strategy/sleeves/decide.ts";
 import { isScriptDeath } from "../errors.ts";
-import { merge } from "../state.ts";
+import { merge, type GameState } from "../state.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
@@ -678,8 +679,17 @@ function endgameView(ctx: NeedContext): EndgameView | undefined {
 
   const installed = prog?.ownedAugs ?? {};
   const ownedAll = factions?.ownedAugs ?? Object.keys(installed);
-  const blackOps = (blade?.actions ?? []).filter((action) => action.type === "blackop");
   const skills = player.skills;
+
+  // Preferred source: the core probe's derived count (30 s cadence, 0 GB
+  // extra). Fallback: count the detail probe's action table once it lands.
+  // Neither present -> undefined; "unknown" must stay expressible, or a
+  // fabricated 0 re-prices completed ops into the route estimate and feeds a
+  // phantom 0->N jump into the rate tracker.
+  const blackOpsFromActions = blade?.actions
+    ? blade.actions.filter((action) => action.type === "blackop" && (action.countRemaining ?? 1) <= 0).length
+    : undefined;
+  const blackOpsComplete = blade?.blackOpsComplete ?? blackOpsFromActions;
 
   return {
     bitNode: ctx.caps.bitNode,
@@ -692,7 +702,7 @@ function endgameView(ctx: NeedContext): EndgameView | undefined {
     lowestCombatSkill: Math.min(skills.strength, skills.defense, skills.dexterity, skills.agility),
     daedalusRep: factions?.standings?.find((standing) => standing.name === "Daedalus")?.rep ?? 0,
     inBladeburner: ctx.caps.unlocked.bladeburner === "yes",
-    blackOpsComplete: blackOps.filter((action) => (action.countRemaining ?? 1) <= 0).length,
+    ...(blackOpsComplete !== undefined ? { blackOpsComplete } : {}),
     ...(blade?.rank !== undefined ? { bladeburnerRank: blade.rank } : {}),
   };
 }
@@ -704,9 +714,16 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
   if (earned !== undefined) trackers.moneyEarned.sample(t, earned);
   trackers.hacking.sample(t, view.hackingSkill);
   trackers.combat.sample(t, view.lowestCombatSkill);
-  trackers.augs.sample(t, view.augCount);
-  trackers.daedalusRep.sample(t, view.daedalusRep);
-  trackers.blackOps.sample(t, view.blackOpsComplete);
+  // Series whose zero can be FABRICATED (the backing probe has not landed
+  // yet) are sampled only when the reading is real: a phantom (t0, 0) sample
+  // would sit in the 30-minute window and inflate the rate ~24x when the
+  // true value arrives — the increase-jump passes the decrease-only reset
+  // guard by design.
+  const augsKnown =
+    ctx.state.topics.progression?.augCount !== undefined || ctx.state.topics.factions?.ownedAugs !== undefined;
+  if (augsKnown) trackers.augs.sample(t, view.augCount);
+  if (ctx.state.topics.factions?.standings !== undefined) trackers.daedalusRep.sample(t, view.daedalusRep);
+  if (view.blackOpsComplete !== undefined) trackers.blackOps.sample(t, view.blackOpsComplete);
   if (view.bladeburnerRank !== undefined) trackers.rank.sample(t, view.bladeburnerRank);
   return {
     ...noRates(),
@@ -784,13 +801,16 @@ function progressionRefresh(ctx: NeedContext): void {
     parts: eta.parts.map((entry) => ({ what: entry.what, sec: Math.round(entry.sec), measured: entry.measured })),
   }));
 
-  const expectedEndAt = choice ? ctx.now + choice.etaSec * 1000 : undefined;
+  // A complete route publishes NO expected end: it "ends now", but nothing
+  // can act on that yet, and expectedEndAt = now would floor every feature's
+  // horizon at 60 s for the rest of the (manually-ended) run.
+  const expectedEndAt = expectedEndFrom(choice, etas, ctx.now);
   if (switched && choice) {
     routeChange = {
       ...(previous ? { from: previous.route } : {}),
       to: choice.route,
       etaSec: Math.round(choice.etaSec),
-      expectedEndAt: expectedEndAt!,
+      expectedEndAt: expectedEndAt ?? ctx.now,
       why: choice.why,
       routes: routesDigest,
     };
@@ -827,11 +847,14 @@ function progressionRefresh(ctx: NeedContext): void {
       ...(choice
         ? {
             route: choice.route,
-            expectedEndAt: expectedEndAt!,
+            ...(expectedEndAt !== undefined ? { expectedEndAt } : {}),
             decidedAt: choice.decidedAt,
             routeWhy: choice.why,
           }
         : {}),
+      // Freshness marker for the horizon's staleness guard — decidedAt cannot
+      // serve: it deliberately survives refreshes that keep the same route.
+      refreshedAt: ctx.now,
       routes: routesDigest,
     },
   });
@@ -855,9 +878,20 @@ const reset = (): void => {
   for (const key of Object.keys(results)) delete results[key];
 };
 
+/** Shared reset shape: drop the recorded outcomes AND this feature's
+ * published topic — the digest describes a node that no longer exists, and
+ * each module clears its own rather than the controller keeping a per-field
+ * blacklist of what everyone publishes. */
+const resetWithTopic =
+  (topic: keyof GameState["topics"]) =>
+  (state: GameState): void => {
+    reset();
+    delete state.topics[topic];
+  };
+
 export const gangModule: FeatureModule = {
   driver: gang,
-  reset,
+  reset: resetWithTopic("gang"),
   claims: (ctx) => {
     const action = ctx.state.topics.gang?.plan?.actions.find((entry) => entry.type !== "idle")?.type;
     return maybeActionClaim("gang", ctx, action, gangMethods(action));
@@ -867,7 +901,7 @@ export const gangModule: FeatureModule = {
 
 export const corpModule: FeatureModule = {
   driver: corp,
-  reset,
+  reset: resetWithTopic("corp"),
   claims: (_ctx) => [
     // The single largest money claim in the roster: $150b in BN3.
     {
@@ -885,7 +919,7 @@ export const corpModule: FeatureModule = {
 
 export const bladeburnerModule: FeatureModule = {
   driver: bladeburner,
-  reset,
+  reset: resetWithTopic("bladeburner"),
   claims: (ctx) => {
     const action = ctx.state.topics.bladeburner?.plan?.action.type;
     return maybeActionClaim("bladeburner", ctx, action, bladeMethods(action));
@@ -914,7 +948,7 @@ export const bladeburnerModule: FeatureModule = {
 
 export const sleevesModule: FeatureModule = {
   driver: sleeves,
-  reset,
+  reset: resetWithTopic("sleeves"),
   claims: (ctx) => {
     const action = ctx.state.topics.sleeves?.plan?.assignments[0]?.task.split(":", 1)[0];
     return maybeActionClaim("sleeves", ctx, action, sleeveMethods(action));
@@ -924,7 +958,7 @@ export const sleevesModule: FeatureModule = {
 
 export const goModule: FeatureModule = {
   driver: go,
-  reset,
+  reset: resetWithTopic("go"),
   claims: (ctx) => {
     const action = ctx.state.topics.go?.plan?.action.type;
     return maybeActionClaim("go", ctx, action, goMethods(action));
@@ -934,7 +968,7 @@ export const goModule: FeatureModule = {
 
 export const stanekModule: FeatureModule = {
   driver: stanek,
-  reset,
+  reset: resetWithTopic("stanek"),
   claims: (ctx) => maybeActionClaim(
     "stanek",
     ctx,
@@ -946,7 +980,7 @@ export const stanekModule: FeatureModule = {
 
 export const dnetModule: FeatureModule = {
   driver: dnet,
-  reset,
+  reset: resetWithTopic("dnet"),
   claims: (ctx) => {
     const action = ctx.state.topics.dnet?.plan?.action.type;
     return maybeActionClaim("dnet", ctx, action === "idle" ? undefined : action, dnetMethods(action));
@@ -957,7 +991,7 @@ export const dnetModule: FeatureModule = {
 
 export const sideModule: FeatureModule = {
   driver: side,
-  reset,
+  reset: resetWithTopic("side"),
   claims: (ctx) => maybeActionClaim(
     "side",
     ctx,
@@ -1009,12 +1043,21 @@ function dnetMethods(action: string | undefined): readonly string[] {
 
 export const progressionModule: FeatureModule = {
   driver: progression,
-  reset: () => {
+  reset: (state: GameState) => {
     reset();
     // Rates and the route choice describe the node that just ended; the next
     // one re-measures and re-decides from scratch.
     progressionMemory = freshProgressionMemory();
     routeChange = undefined;
+    // Field-level, not the whole topic: the gate batch has ALREADY written
+    // the new node's bitNode/sourceFiles/ownedAugs into it by the time the
+    // reset walk runs. The plan (route, ETA, phase) and the multiplier latch
+    // are ours and describe the dead node — dropping the latch also re-arms
+    // the progression.mults probe.
+    if (state.topics.progression) {
+      delete state.topics.progression.plan;
+      delete state.topics.progression.multipliers;
+    }
   },
   refresh: progressionRefresh,
   peakStepGb: STEP_GB.progression,

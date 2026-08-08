@@ -55,7 +55,13 @@ export interface EndgameView {
   lowestCombatSkill: number;
   daedalusRep: number;
   inBladeburner: boolean;
-  blackOpsComplete: number;
+  /** Completed black operations, when known. Optional because the reading may
+   *  not have landed yet — and "unknown" must stay expressible: a fabricated 0
+   *  here would re-price already-completed ops into the route estimate and
+   *  feed a phantom 0->N jump into the rate tracker. Absent reads as 0 for
+   *  the completeness check (never complete on no data) and is skipped by the
+   *  rate sampler. */
+  blackOpsComplete?: number;
   /** Current Bladeburner rank, when known — ./eta.ts prices the rank climb to
    *  the final black op from it. Optional because the detail probe may not
    *  have reported yet; absent reads as rank 0. */
@@ -175,7 +181,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
     // No Red Pill and no hacking requirement: all black ops is sufficient on
     // its own, which is why this route is checked independently rather than
     // as a variation of the others.
-    const complete = view.inBladeburner && view.blackOpsComplete >= BLACK_OP_COUNT;
+    const complete = view.inBladeburner && (view.blackOpsComplete ?? 0) >= BLACK_OP_COUNT;
     routes.push({
       id: "bladeburner",
       available: view.inBladeburner,
@@ -184,7 +190,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
         ? "not in the Bladeburner division"
         : complete
           ? ""
-          : `${view.blackOpsComplete} of ${BLACK_OP_COUNT} black operations`,
+          : `${view.blackOpsComplete ?? "?"} of ${BLACK_OP_COUNT} black operations`,
     });
   }
 

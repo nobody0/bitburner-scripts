@@ -237,7 +237,14 @@ export const hacking: FeatureDriver = {
     // largest dodge step any unlocked feature declares, so an expensive
     // singularity probe stays affordable instead of being crowded out by the
     // dispatcher taking every free gigabyte.
-    const result = pump(ns, driver, view, completions, Infinity, homeReserveGb);
+    //
+    // The horizon is the endgame route's expected remaining run time: a
+    // target that would only pay off after the run is expected to end is not
+    // worth prepping, however good its steady-state rate. The game has no
+    // money GOAL (that is the sim's device), so the run horizon is the only
+    // finite bound the evaluator gets here. Converted to ms at this boundary:
+    // everything below planFarm is ms-native.
+    const result = pump(ns, driver, view, completions, { homeReserveGb, horizonMs: ctx.horizonSec * 1000 });
     const elapsed = Date.now() - started;
     if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
 
@@ -270,7 +277,16 @@ export const hacking: FeatureDriver = {
 
 export const hackingModule: FeatureModule = {
   driver: hacking,
-  reset: resetHackingState,
+  reset: (state) => {
+    resetHackingState();
+    // The rollups this feature publishes. Cumulative totals live in the
+    // dispatcher stats resetHackingState just cleared; dropping the last
+    // rollups stops the UI showing the old node's earnings until the next
+    // one lands. (The server snapshot is the fleet substrate's, not ours —
+    // the controller rescans it.)
+    delete state.topics.farm;
+    delete state.topics.fleet;
+  },
   claims: (ctx) => {
     const action = nextBackdoorAction(ctx)?.action;
     if (action === "backdoor") {

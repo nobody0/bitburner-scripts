@@ -38,7 +38,8 @@ The acceptance bar for a feature is the full vertical slice:
 | 10 | stanek | **done** |
 | 11 | dnet | **done** |
 | 12 | side | **done** |
-| 13 | progression | **done** |
+| 13 | progression | **done*** — decision layer live (endgame route + horizon); the act half (install / destroy) is deliberately unwired |
+| 14 | endgame route + refresh/act split | **done** — see below |
 
 ## Completed work
 
@@ -79,7 +80,9 @@ differing byte in the entire record stream was the `--label` passed on the CLI.
 Phase 0.1 is provably behaviour-neutral. `tests/features.test.ts` pins that
 every id has exactly one module, that reset hooks are reached by registry walk,
 and that the controller mentions only the two features it is allowed to
-(`progression` as a topic name, `hacking` as the sweep's heap owner).
+(`progression` as the meta layer it schedules last and reads the route from,
+`hacking` as the heap owner for dodge placement; the network sweep itself has
+since moved to `game/lib/fleet.ts`).
 
 **0.2/0.3 Needs board and arbiter.** Both pure and deterministic.
 `shared/strategy/needs.ts` broadcasts desired *outcomes* (`{kind:"karma",
@@ -408,6 +411,114 @@ penalised heavily (`UNWORKABLE_REP_SEC`) rather than annihilated.
   for numeric columns and wrong for a requirement tree. `table()` gained an
   opt-in `wrap` column list; the factions tab marks its prose columns.
 
+### Phase 14 — the endgame route decision, and the refresh/act split
+
+The gap this closed: `stepEndgame` modelled the three ways a node ends but was
+called only by tests; no route was ever chosen; nothing estimated how long any
+path would take; the decision existed in no telemetry record; and every
+feature that was BUILT to take an "expected remaining run time" was fed a
+hard-coded `horizonSec: 3_600` (hacknet, stock, factions) or `Infinity`
+(hacking's `goalRemaining`). Full write-up: `spec/strategy/endgame.md`.
+
+What landed, in dependency order:
+
+- **`shared/strategy/progression/eta.ts`** — per-route time HEURISTICS (gap ÷
+  observed rate, finite pessimistic fallbacks, parallel tracks priced as the
+  slowest not the sum, the shared Red Pill install+regrow tail) and
+  `chooseRoute` with a 25 % switch margin and 10-minute dwell. Every part is
+  `{what, sec, measured}` so a wrong total is attributable to the specific
+  sub-heuristic. `BitNodeEntry.hours` re-documented as a heuristic — it was
+  framed as "measured hours, once known", which is the wrong model: the
+  estimate must be computable NOW, always, and tuned from the log later.
+- **The refresh/act split** (`FeatureModule.refresh`) — evaluation runs for
+  every due module before any needs/claims/tick, with `progression` ordered
+  LAST so its route decision reads the pass's refreshed state; drivers then
+  act with `{route, horizonSec}` in their context. This resolves the ordering
+  circularity ("endgame needs enriched state; features need the route") the
+  same way the needs→claims phases already resolved theirs.
+- **The progression driver is no longer decorative** — its refresh builds the
+  `EndgameView` entirely from store topics (every input was already probed),
+  chooses the route, and publishes `{route, expectedEndAt, decidedAt,
+  routeWhy, routes[]}` on `progression.plan`. Its previously stubbed
+  `stepProgression` inputs are real now: `affordableValueProduct` from the
+  offer catalog's multipliers, `earnedThisRun` from `getMoneySources` (all
+  sources, not just hacking — in a non-hacking node the old farm-only figure
+  kept the phase machine in `start` forever), `runSec` from `lastAugReset`,
+  and `queued` is pending-not-installed rather than all owned.
+- **Horizon threading** — the `horizonSec` literals replaced with the derived
+  horizon; `stepEvaluator` gained a `horizonCapMs` that bounds the prep/switch
+  amortization window (binding only when the expected end is nearer than the
+  existing 30-minute ceiling — that parity claim is evaluator-only; the
+  hacknet/stock windows DID change, see the review round below).
+- **The sweep moved to `game/lib/fleet.ts`** — infrastructure with the shape
+  of a feature refresh, owned by no feature; the controller keeps gating,
+  phase ordering and the decide step.
+- **Telemetry closes both loops** — `endgame.route` on change (with the full
+  per-route breakdown) and `bitnode.reset` enriched with `{from, elapsedMs,
+  route, guessedEndAt, decidedAt}`. The old node's start time is captured
+  BEFORE the probe pass, because the gate batch overwrites `lastNodeReset`
+  with the new node's the moment a reset is observed.
+
+*Evidence:* 19 new tests (`tests/endgame-eta.test.ts`) pin finiteness (no
+route annihilated by Infinity — the unworkable-faction lesson, relearned
+deliberately this time), measured-vs-fallback marking, the shared-tail
+collapse once the pill is owned, parallel-track pricing, switch
+margin/dwell/incumbent-loss behaviour, and the horizon clamps. Full suite 534
+pass. Typecheck clean.
+
+### Phase 14 review round — 11 verified findings, all fixed
+
+An 8-angle review with adversarial verification (13 candidates, 3 refuted)
+ran over the slice before it merged. Every confirmed finding was fixed:
+
+- **The horizon was the wrong quantity for hacknet/stock** — the node-end ETA
+  spans augmentation installs, and installs destroy exactly what those
+  features buy; a fallback-guessed multi-day ETA also pinned it at the 24 h
+  ceiling from the first refresh (~24x looser than the replaced 3600 s
+  literals). `planningHorizonSec` now caps at `INSTALL_CADENCE_SEC` (3600, a
+  named heuristic until installs are modelled) and short expected ends still
+  pass through.
+- **Stale topics survived a node reset** — `reset()` became `reset(state)`;
+  every module clears its own published topics (progression field-level: the
+  gate batch already wrote the new node's identity). Pinned by a new
+  registry-walk test. The concrete bug: the new node's first route decision
+  read the old run's Red Pill out of stale `factions.ownedAugs`.
+- **A complete route froze investment** — etaSec 0 published
+  `expectedEndAt = now`, flooring every horizon at 60 s indefinitely while
+  the unwired act half waits for a manual finish. A complete route now
+  publishes no expected end (`expectedEndFrom`), reading as the default.
+- **A quiet publisher decayed the horizon** — `refreshedAt` on the plan plus
+  a `PLAN_STALE_MS` guard: a plan whose refresh has died stops steering.
+- **`blackOpsComplete` fabricated 0 pre-probe** — now optional ("unknown"
+  expressible), derived on the cheap core probe from `getBlackOpNames`
+  (0 GB) + `nextBlackOp`, and rate sampling skips unknown series (also
+  Daedalus rep and aug count) so a phantom 0→N jump cannot contaminate the
+  30-minute rate window.
+- **`FactionsView.horizonSec` was dead** — declared, populated, read by
+  nothing, and the spec claimed a consumer; removed (the donate-vs-work
+  crossover is rate-based).
+- **`bitnode.reset` could be lost** — emitted after the awaited post-reset
+  sweep, so a sweep failure dropped the node's one calibration record; now
+  emitted first in the branch, which also deleted the snapshot local.
+- **`openerCount` was functionally dead** — the review proved its gate
+  reduced to `rootable.length > 0`; the parameter, return value and both -1
+  sentinels are deleted (pre-existing, faithfully moved code).
+- **`pump` had grown a swappable positional number tail** — collapsed to an
+  options object; `goalRemaining` dropped from the game path entirely (the
+  sim's device, set on `planFarm` directly).
+- **The drift detector did not follow the sweep** — it now scans
+  `game/lib/fleet.ts` with its own allowlist.
+- **The EndgameView test fixture was duplicated byte-for-byte** — shared via
+  `tests/fixtures/endgame-view.ts`.
+
+Refuted by verification, recorded so they are not re-raised: the evaluator's
+tighter horizon band is deliberate layering, not clamp duplication; the sim's
+default `game` driver exercises the horizon end-to-end (only the opt-in
+planner A/B loop omits it, by design); the refresh-order sort survived on no
+angle once sized.
+
+Suite after fixes: 539 pass, typecheck clean.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
@@ -425,7 +536,16 @@ the *strategy* level without full end-to-end execution:
   simulator-proven. Their ns calls report `unmodeled()` rather than
   fabricating.
 - **UI tabs beyond `factions` do not yet render their `plan` digest.** The
-  digests are published; the panels show the underlying state.
+  digests are published; the panels show the underlying state. That now
+  includes the endgame route decision on `progression.plan`.
+- **`ctx.route` has no consumer yet.** The chosen route reaches every driver's
+  context, but no feature biases its priorities by it so far (bladeburner
+  when it IS the route, combat stats for the Daedalus combat branch). The
+  horizon half is consumed; the route half is plumbing awaiting its first
+  customer.
+- **The labyrinth walk is a pure guess** (`LABYRINTH_WALK_SEC`): the darknet
+  labyrinth mechanic is unmodelled, so the route's estimate carries an
+  explicit unmeasured constant until a walk is implemented and measured.
 
 ## Deferred, tracked, not hidden
 

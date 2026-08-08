@@ -944,10 +944,17 @@ const bladeCore: DodgedProbe = {
     "bladeburner.getCurrentAction",
     "bladeburner.getActionCurrentTime",
     "bladeburner.getNextBlackOp",
+    "bladeburner.getBlackOpNames",
   ],
   run(stubNs: NS) {
     const action = stubNs["bladeburner"]["getCurrentAction"]();
     const next = stubNs["bladeburner"]["getNextBlackOp"]();
+    // Black ops complete in a fixed order, so the next uncompleted op's index
+    // IS the completed count (null next = all done). getBlackOpNames is 0 GB,
+    // which keeps this on the cheap 30 s core tier instead of the ~28 GB
+    // detail probe the endgame estimate would otherwise wait minutes for.
+    const blackOpNames = stubNs["bladeburner"]["getBlackOpNames"]().map(String);
+    const nextIndex = next ? blackOpNames.indexOf(String(next.name)) : blackOpNames.length;
     return [
       emit("bladeburner", {
         rank: stubNs["bladeburner"]["getRank"](),
@@ -958,6 +965,7 @@ const bladeCore: DodgedProbe = {
           ? { type: String(action.type), name: String(action.name), elapsedMs: stubNs["bladeburner"]["getActionCurrentTime"]() }
           : undefined,
         nextBlackOp: next ? { name: String(next.name), rank: next.rank } : undefined,
+        blackOpsComplete: nextIndex >= 0 ? nextIndex : undefined,
         // skills/actions/cities belong to the detail probes — see
         // BladeburnerState; emitting placeholders here would blank them.
       }),
