@@ -219,7 +219,7 @@ function launchSync(): Response {
   broadcast({ type: "sync-status", busy: true });
   try {
     const proc = Bun.spawn(["bun", "run", "sync"], {
-      cwd: process.cwd(),
+      cwd: REPO_ROOT,
       stdout: "pipe",
       stderr: "pipe",
     });

@@ -10,15 +10,17 @@
     },
     {
       "source": "game/lib/dodge-stub.ts",
-      "target": "lib/dodge-stub.js"
+      "target": "lib/dodge-stub.js",
+      "versioned": true
     },
     {
       "source": "game/worker/worker.ts",
-      "target": "worker/worker.js"
-    },
-    {
-      "source": "game/restore.ts",
-      "target": "restore.js"
+      "target": "worker/worker.js",
+      "versioned": true
     }
-  ]
+  ],
+  "restoreEntry": {
+    "source": "game/restore.ts",
+    "target": "restore.js"
+  }
 }

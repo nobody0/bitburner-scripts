@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
-import { buildScripts } from "../tools/build.ts";
+import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 
 /** Static RAM is the fresh-game constraint: start.js plus a transient dodge
@@ -42,8 +42,8 @@ const config: BitburnerConfig = {
   entries: [
     { source: "game/start.ts", target: "start.js" },
     { source: "game/worker/worker.ts", target: "worker/worker.js" },
-    { source: "game/restore.ts", target: "restore.js" },
   ],
+  restoreEntry: { source: "game/restore.ts", target: "restore.js" },
 };
 
 afterAll(async () => {
@@ -102,8 +102,7 @@ describe("in-game static RAM budget", () => {
   });
 
   test("restore.js stays cheap and read-only against the game", async () => {
-    const artifacts = await buildScripts(config, { telemetry: true });
-    const restore = artifacts.find((a) => a.filename === "restore.js")!;
+    const restore = await buildScript(config, config.restoreEntry!, { telemetry: true });
     const { total, members } = staticRam(restore.content);
     // It only inspects the live game to describe what it is about to
     // overwrite; everything destructive goes through browser globals, which

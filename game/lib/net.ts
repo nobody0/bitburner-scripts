@@ -1,4 +1,5 @@
 import type { NS, Server } from "@ns";
+import { isScriptVersion } from "../../shared/deployment.ts";
 import { HOME_RESERVE_GB } from "../../shared/ram/heap.ts";
 
 /** Network bootstrap closures — every function here runs INSIDE a dodge stub
@@ -133,7 +134,7 @@ export const RETIRED_SCRIPTS = ["worker/starter.js", "main.js"];
 export function reapStrayScripts(
   stubNs: NS,
   hosts: string[],
-  workerScript: string,
+  workerBaseScript: string,
   registeredOpIds: Set<number>,
 ): { workers: number; retired: number } {
   const retiredNames = new Set(RETIRED_SCRIPTS);
@@ -145,7 +146,7 @@ export function reapStrayScripts(
         if (stubNs["kill"](process.pid)) retired++;
         continue;
       }
-      if (process.filename !== workerScript) continue;
+      if (!isScriptVersion(process.filename, workerBaseScript)) continue;
       if (registeredOpIds.has(Number(process.args[0]))) continue;
       if (stubNs["kill"](process.pid)) workers++;
     }

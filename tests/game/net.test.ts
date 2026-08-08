@@ -162,4 +162,16 @@ describe("reapStrayScripts", () => {
     expect(reaped).toEqual({ workers: 0, retired: 0 });
     expect(stub.killed).toEqual([]);
   });
+
+  test("reaps unregistered workers from older versioned builds", () => {
+    const stub = stubNs({
+      "pserv-0": [
+        { pid: 30, filename: "worker/worker.old-build.js", args: [1] },
+        { pid: 31, filename: "worker/worker.new-build.js", args: [2] },
+      ],
+    });
+    const reaped = reapStrayScripts(stub.ns, ["pserv-0"], "worker/worker.js", new Set([2]));
+    expect(reaped).toEqual({ workers: 1, retired: 0 });
+    expect(stub.killed).toEqual([30]);
+  });
 });

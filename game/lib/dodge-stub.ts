@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import type { DodgeGlobalThis } from "./dodge-shared.ts";
 
-/** Dodge stub worker. Synced as lib/dodge-stub.js; launched by dodge() via
+/** Dodge stub worker. Synced as lib/dodge-stub.<build-id>.js; launched by dodge() via
  * ns.exec with a ramOverride sized per call — the RAM budget is declared at
  * launch, not bought by referencing an expensive ns member in source. Keep
  * this file free of value imports and ns references so the base stays 1.6GB. */

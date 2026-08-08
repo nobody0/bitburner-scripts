@@ -70,7 +70,9 @@ distinction matters because only one is still on disk:
 5. Edit TypeScript under `game/` (and `shared/`), then click **sync to game** in
    the dashboard. You can instead run `bun run sync` from a terminal.
    There is deliberately no file watcher: only an explicit action can push a
-   build. The running `start.js` detects the new build stamp (`build-id.txt`)
+   build. A disconnected game makes the attempt fail after 30 seconds instead
+   of leaving a stale listener. The running `start.js` detects the new build
+   stamp (`build-id.txt`)
    and hands off to a fresh instance of itself — no manual restart required.
 
 Bitburner is the WebSocket client for file sync (port 12525, this repo is the
@@ -94,6 +96,16 @@ esbuild bundles the entrypoint and its imports into that single `.js` file.
 Files that are not listed as entries are never pushed independently. The
 pipeline is intentionally one-way and never calls the Remote File API's
 `deleteFile` method, so it cannot remove unrelated in-game scripts.
+
+The worker and RAM-dodge helper are immutable per build: their filenames carry
+the same build id baked into `start.js`. Helpers are pushed first, then the
+stable controller, with `build-id.txt` last as the commit point. The ids use a
+timestamp plus a random suffix rather than a mutable counter, so concurrent
+builds and branches cannot claim the same version. Old helper files remain in
+the game under the no-delete policy.
+
+`game/restore.ts` is a maintenance entrypoint, not part of that normal allowlist.
+Only `bun run save:restore` builds and pushes `restore.js`.
 
 Telemetry is compiled **in** by default and compiled **out** entirely by
 `--perf` builds (esbuild `define` + dead-code elimination; verified by
@@ -126,7 +138,7 @@ Run `bun run types` while Bitburner is connected. The pipeline requests the
 game's own `NetscriptDefinitions.d.ts` through `getDefinitionFile` and writes it
 to `types/NetscriptDefinitions.d.ts`. Commit changes to that file alongside an
 intentional game-version update. (The committed copy matches the pinned v3.0.1
-source checkout.)
+source checkout.) Ordinary `sync` never reads or rewrites the definitions.
 
 Use the definitions through type-only imports:
 

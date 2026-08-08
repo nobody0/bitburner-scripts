@@ -1,8 +1,10 @@
 import type { NS, Player, Server } from "@ns";
+import { versionedScript } from "../../shared/deployment.ts";
 import { HOME_RESERVE_GB } from "../../shared/ram/heap.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
 import type { CompletionEvent, HgwAction, ServerView, WorldView } from "../../shared/world.ts";
 import { WORKER_RAM } from "../../shared/world.ts";
+import { gameBuildId } from "./build-id.ts";
 import { workerGlobals, type WorkerGlobalThis } from "./worker-shared.ts";
 
 /** Game-side driver for the pure HWGW engine. It only moves data: builds a
@@ -10,7 +12,10 @@ import { workerGlobals, type WorkerGlobalThis } from "./worker-shared.ts";
  * completions to the planner, and turns returned Actions into ns.exec calls.
  * All decisions live in shared/strategy. */
 
-export const WORKER_SCRIPT = "worker/worker.js";
+export const WORKER_BASE_SCRIPT = "worker/worker.js";
+export function workerScript(): string {
+  return versionedScript(WORKER_BASE_SCRIPT, gameBuildId());
+}
 
 export interface DriverState {
   memory: FarmMemory;
@@ -144,7 +149,7 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
   });
 
   const pid = ns.exec(
-    WORKER_SCRIPT,
+    workerScript(),
     host,
     // ramOverride is per thread: the generic worker is billed exactly as the
     // op it performs. One binary, deliberately — note that the predecessor

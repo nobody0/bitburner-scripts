@@ -1,6 +1,8 @@
 import type { NS } from "@ns";
+import { versionedScript } from "../../shared/deployment.ts";
 import { STUB_BASE_GB } from "../../shared/ram/placement.ts";
 import { stateKey } from "../../shared/telemetry/schema.ts";
+import { gameBuildId } from "./build-id.ts";
 import type { DodgeGlobalThis } from "./dodge-shared.ts";
 import { setMirror, type GameState } from "./state.ts";
 
@@ -17,7 +19,9 @@ import { setMirror, type GameState } from "./state.ts";
 
 const g = globalThis as DodgeGlobalThis;
 
-export const DODGE_STUB = "lib/dodge-stub.js";
+export function dodgeStubScript(): string {
+  return versionedScript("lib/dodge-stub.js", gameBuildId());
+}
 const DODGE_TIMEOUT_MS = 10_000;
 /** How many times to retry `ns.exec` of the stub before giving up.
  *
@@ -124,15 +128,16 @@ export async function dodge<T>(
   const watchdog = setTimeout(() => fail(new Error("dodge timed out")), DODGE_TIMEOUT_MS);
 
   try {
+    const stubScript = dodgeStubScript();
     let pid = 0;
     for (let attempt = 0; attempt < EXEC_RETRIES && pid === 0; attempt++) {
-      pid = ns.exec(DODGE_STUB, host, { ramOverride: STUB_BASE_GB + budgetGb });
+      pid = ns.exec(stubScript, host, { ramOverride: STUB_BASE_GB + budgetGb });
       // Yield to the game's scheduler so a pending reap can free the RAM.
       if (pid === 0) await ns.sleep(0);
     }
     if (pid === 0) {
       const error = new Error(
-        `failed to exec ${DODGE_STUB} on ${host} after ${EXEC_RETRIES} attempts ` +
+        `failed to exec ${stubScript} on ${host} after ${EXEC_RETRIES} attempts ` +
           `— is it synced there, and is ${STUB_BASE_GB + budgetGb}GB free?`,
       );
       fail(error);

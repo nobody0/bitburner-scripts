@@ -1,9 +1,8 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { WebSocketServer, type WebSocket } from "ws";
-import { buildScripts } from "./build.ts";
+import { buildScript } from "./build.ts";
 import { loadConfig } from "./config.ts";
-import { RfaSession } from "./rfa-session.ts";
+import { waitForRfaConnection } from "./rfa-connect.ts";
 import { findSave, readSnapshot, SAVES_DIR } from "./save-io.ts";
 
 /** Push a registered save into the game, ready for restore.js to apply.
@@ -39,47 +38,23 @@ async function main(): Promise<void> {
   const payload = `${header}\n${bytes.toString("base64")}`;
 
   const config = await loadConfig();
-  const artifacts = await buildScripts(config, { telemetry: true });
-  const restore = artifacts.find((artifact) => artifact.filename === "restore.js");
-  if (!restore) {
-    console.error("restore.js is not an entrypoint — add game/restore.ts to bitburner.config.json");
+  if (!config.restoreEntry) {
+    console.error("restoreEntry is missing from bitburner.config.json");
     process.exit(1);
   }
+  const restore = await buildScript(config, config.restoreEntry, { telemetry: true });
 
   // The repository is the Remote File API server and Bitburner is the client,
   // so this waits for the game to connect. Port 12525 holds only one listener,
   // so an in-progress sync must finish first.
-  let server: WebSocketServer;
-  try {
-    server = new WebSocketServer({ host: config.host, port: config.port });
-  } catch {
-    console.error(`could not listen on ${config.host}:${config.port} — wait for the active sync and retry`);
-    process.exit(1);
-  }
-  server.on("error", (error) => {
-    console.error(`${String(error)}\n(if this is EADDRINUSE, wait for the active sync and retry)`);
-    process.exit(1);
-  });
-
   console.log(`waiting for Bitburner at ws://${config.host}:${config.port} ...`);
-  await new Promise<void>((resolve, reject) => {
-    server.on("connection", (socket: WebSocket) => {
-      const session = new RfaSession(socket);
-      void (async () => {
-        try {
-          await session.pushFile(config.server, "restore-payload.txt", payload);
-          await session.pushFile(config.server, "restore.js", restore.content);
-          resolve();
-        } catch (error) {
-          reject(error instanceof Error ? error : new Error(String(error)));
-        } finally {
-          session.dispose();
-          socket.close();
-          server.close();
-        }
-      })();
-    });
-  });
+  const connection = await waitForRfaConnection(config);
+  try {
+    await connection.session.pushFile(config.server, "restore-payload.txt", payload);
+    await connection.session.pushFile(config.server, "restore.js", restore.content);
+  } finally {
+    connection.close();
+  }
 
   console.log(`pushed "${entry.id}" (BN${snapshot.bitNode}, ${(snapshot.player.playtimeSinceLastBitnode / 3_600_000).toFixed(1)}h into the node)`);
   console.log("");

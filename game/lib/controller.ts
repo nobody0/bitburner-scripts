@@ -7,8 +7,8 @@ import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../sha
 import type { Need } from "../../shared/strategy/needs.ts";
 import { FEATURE_IDS, type FeatureId } from "../../shared/features/ids.ts";
 import { homeReserveGb } from "../../shared/ram/reserve.ts";
-import { resyncHeap, WORKER_SCRIPT } from "./dispatch-driver.ts";
-import { DODGE_STUB, dodge, priceCalls } from "./dodge.ts";
+import { resyncHeap, WORKER_BASE_SCRIPT, workerScript } from "./dispatch-driver.ts";
+import { dodge, dodgeStubScript, priceCalls } from "./dodge.ts";
 import { isScriptDeath } from "./errors.ts";
 import { ContributionCache } from "./features/contributions.ts";
 import { hackingState, takeTargetSwitch } from "./features/hacking.ts";
@@ -396,14 +396,14 @@ async function sweep(
 
   // 3) Deploy the fleet payload — puppet worker AND dodge stub — so any rooted
   //    host can serve a dodge (dodged: scp stays out of our RAM bill).
-  const deployed = await dodge(ns, (stubNs) => deployFleet(stubNs, [WORKER_SCRIPT, DODGE_STUB], servers), 1);
+  const deployed = await dodge(ns, (stubNs) => deployFleet(stubNs, [workerScript(), dodgeStubScript()], servers), 1);
   for (const host of deployed) driver.deployed.add(host);
 
   // 3a) Safety net: retire old architectures and kill unreachable workers.
   //     Liveness comes from the realm registry (survives build handoffs),
   //     never from this instance's ledger.
   const registered = new Set(driver.globals.worker_info?.keys() ?? []);
-  const reaped = await dodge(ns, (stubNs) => reapStrayScripts(stubNs, deployed, WORKER_SCRIPT, registered), 1);
+  const reaped = await dodge(ns, (stubNs) => reapStrayScripts(stubNs, deployed, WORKER_BASE_SCRIPT, registered), 1);
   TELEMETRY: if (__TELEMETRY__ && (reaped.workers > 0 || reaped.retired > 0)) {
     tel!.event("fleet.reaped", reaped);
   }

@@ -1,4 +1,5 @@
 import type { NS, ResetInfo } from "@ns";
+import { versionedScript } from "../shared/deployment.ts";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import type { Goal } from "../shared/goals/goal.ts";
 import { describeOverrides, type FeatureOverrides } from "../shared/features/profile.ts";
@@ -32,8 +33,8 @@ import { SimWorld, type GateFlags } from "./world.ts";
  * uses for its dodge and worker rendezvous — so multi-seed fan-out is
  * process-level (sim/run.ts). */
 
-const WORKER_SCRIPT = "worker/worker.js";
-const DODGE_STUB = "lib/dodge-stub.js";
+const WORKER_SCRIPT = versionedScript("worker/worker.js", "sim");
+const DODGE_STUB = versionedScript("lib/dodge-stub.js", "sim");
 const START_SCRIPT = "start.js";
 
 export interface GameRunOptions {

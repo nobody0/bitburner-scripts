@@ -14,6 +14,19 @@ describe("validateConfig", () => {
     expect(validateConfig(valid)).toEqual(valid);
   });
 
+  test("accepts versioned runtime entries and a separate restore entry", () => {
+    const configured = {
+      ...valid,
+      entries: [{ source: "game/worker/worker.ts", target: "worker/worker.js", versioned: true }],
+      restoreEntry: { source: "game/restore.ts", target: "restore.js" },
+    };
+    expect(validateConfig(configured)).toEqual(configured);
+  });
+
+  test("rejects a build directory that could contain source", () => {
+    expect(() => validateConfig({ ...valid, buildDir: "game" })).toThrow("buildDir must be build/");
+  });
+
   test("rejects entry sources outside game/", () => {
     expect(() => validateConfig({ ...valid, entries: [{ source: "sim/run.ts", target: "run.js" }] })).toThrow(
       "must live under game/",
@@ -35,6 +48,12 @@ describe("validateConfig", () => {
           { source: "game/other.ts", target: "start.js" },
         ],
       }),
+    ).toThrow("duplicate target");
+  });
+
+  test("rejects a restore target that overlaps the normal deployment", () => {
+    expect(() =>
+      validateConfig({ ...valid, restoreEntry: { source: "game/restore.ts", target: "start.js" } }),
     ).toThrow("duplicate target");
   });
 });

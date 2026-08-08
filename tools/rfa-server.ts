@@ -1,20 +1,19 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { WebSocketServer, type WebSocket } from "ws";
 import { buildScripts } from "./build.ts";
 import { loadConfig } from "./config.ts";
-import { RfaSession } from "./rfa-session.ts";
+import { waitForRfaConnection, type RfaConnection } from "./rfa-connect.ts";
+import type { RfaSession } from "./rfa-session.ts";
 
 const args = new Set(process.argv.slice(2));
-const onceMode = args.has("--once");
+const syncMode = args.has("--sync");
 const typesOnly = args.has("--types-only");
 const telemetry = !args.has("--perf");
-if ([onceMode, typesOnly].filter(Boolean).length !== 1) {
-  throw new Error("choose exactly one of --once or --types-only");
+if ([syncMode, typesOnly].filter(Boolean).length !== 1) {
+  throw new Error("choose exactly one of --sync or --types-only");
 }
 
 const config = await loadConfig();
-const server = new WebSocketServer({ host: config.host, port: config.port });
 
 async function refreshTypes(session: RfaSession): Promise<void> {
   const definitions = await session.request("getDefinitionFile", { server: config.server });
@@ -33,23 +32,16 @@ async function buildAndPush(session: RfaSession): Promise<void> {
   }
 }
 
-server.on("connection", async (socket: WebSocket) => {
-  // One connection is the whole lifetime of this one-shot server. Stop
-  // accepting replacements while the complete build is in flight.
-  server.close();
-  const session = new RfaSession(socket);
-  console.log("Bitburner connected");
-
-  try {
-    await refreshTypes(session);
-    if (!typesOnly) await buildAndPush(session);
-  } catch (error) {
-    console.error(error);
-    process.exitCode = 1;
-  } finally {
-    socket.close();
-  }
-});
-
 console.log(`waiting for Bitburner at ws://${config.host}:${config.port}`);
-
+let connection: RfaConnection | undefined;
+try {
+  connection = await waitForRfaConnection(config);
+  console.log("Bitburner connected");
+  if (typesOnly) await refreshTypes(connection.session);
+  else await buildAndPush(connection.session);
+} catch (error) {
+  console.error(error);
+  process.exitCode = 1;
+} finally {
+  connection?.close();
+}

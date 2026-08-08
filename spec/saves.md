@@ -69,7 +69,8 @@ metadata and would rewind the save to a fresh game.
 `tools/save-restore.ts` only **delivers**: it pushes a base64 payload and
 `restore.js` over the existing Remote File API. It never writes to the save, so
 a mistyped id here costs an unused file on `home` and nothing else. (It needs
-port 12525, so wait for any in-progress sync to finish first.)
+port 12525, so wait for any in-progress sync to finish first.) Normal builds and
+syncs do not build or push `restore.js` at all.
 
 `game/restore.ts` does the destructive half. The save lives in IndexedDB under
 database `bitburnerSave` v2, store `savestring`, key `save`, holding exactly the

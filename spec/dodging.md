@@ -14,7 +14,7 @@ caller pays only `ns.exec` (1.3 GB).
 - All scripts share one JS realm; the rendezvous is four slots on
   `globalThis` (`dodge_func/cb/reject/running`) — live references, no
   serialization, class instances survive.
-- The stub (`lib/dodge-stub.js`, a synced entry) references no ns members;
+- The stub (`lib/dodge-stub.<build-id>.js`, a versioned synced entry) references no ns members;
   its RAM budget is declared at launch via `ns.exec(..., { ramOverride })` —
   `dodge(ns, fn, budgetGb)` sizes each call (default 2.5 GB dynamic; pass more
   for e.g. contract batches). One stub file serves every budget. The reference
