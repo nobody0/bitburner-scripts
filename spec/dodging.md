@@ -1,8 +1,9 @@
 # RAM dodging
 
 Port of the proven `stubCall` design from the predecessor scripts
-(`/Users/bob/git/bitburner-legacy/src/_lib/stub-call.ts`,
-`nobody01/bitburnerscript@2023`; itself credited there to a Discord thread).
+([`src/_lib/stub-call.ts`](https://gitlab.com/nobody01/bitburnerscript/-/blob/43e8585/src/_lib/stub-call.ts),
+`nobody01/bitburnerscript@2023`, commit `43e8585`; itself credited there to a
+Discord thread).
 Bitburner charges a
 script's RAM by the ns functions its source visibly references. A *dodge*
 spawns a temporary stub script that has bought a dynamic RAM budget, runs one

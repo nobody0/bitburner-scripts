@@ -1,7 +1,7 @@
 # Working in bitburner-scripts
 
 This is a clean-sheet Bitburner automation project. The predecessor scripts
-(`nobody01/bitburnerscript@2023`, checked out at `/Users/bob/git/bitburner-legacy`)
+(`nobody01/bitburnerscript@2023`, commit `43e8585`)
 are inspiration only: do not copy their history, and explicitly do not copy
 their architecture — a 1621-line `main()` coordinating every subsystem through a
 mutable `globalThis.globalState` is the shape this repository exists to replace.

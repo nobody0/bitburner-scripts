@@ -3,7 +3,8 @@
 The canonical upstream is
 [`bitburner-official/bitburner-src`](https://github.com/bitburner-official/bitburner-src).
 
-- Local checkout: `/Users/bob/git/bitburner-src`
+- Local checkout: `BITBURNER_SRC` when set, otherwise the sibling directory
+  `../bitburner-src`
 - Steam app ID: `1812820`
 - Steam target build ID observed during installation: `23272653`
 - Installed game version: `3.0.1` (Steam build `23272653`)

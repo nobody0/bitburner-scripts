@@ -44,8 +44,8 @@ The acceptance bar for a feature is the full vertical slice:
 
 ### Provenance corrections
 
-The predecessor was misidentified. The checkout at `/Users/bob/git/bitburner-legacy`
-is now **`gitlab.com/nobody01/bitburnerscript` branch `2023`** (HEAD `43e8585`),
+The predecessor was misidentified. The reference is now
+**`gitlab.com/nobody01/bitburnerscript` branch `2023`** (commit `43e8585`),
 which has the faction/augmentation planner, four batchers, an optimizer, a
 predictive target simulation and the full reset/BitNode loop. The previous
 checkout (`nobody0/bitburner`) was an abandoned rewrite with none of that.

@@ -1,4 +1,5 @@
 import { mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { TELEMETRY_PORT, type WireMessage } from "../shared/telemetry/schema.ts";
 import { RunStore } from "./store.ts";
@@ -11,15 +12,16 @@ import { RunStore } from "./store.ts";
  *  - POST /sim  — launch a simulation (bun sim/run.ts) from the dashboard
  *  - POST /sync — deliberately build and push the game scripts */
 
-const RUNS_DIR = new URL("../runs", import.meta.url).pathname;
+const modulePath = (relativePath: string): string => fileURLToPath(new URL(relativePath, import.meta.url));
+const RUNS_DIR = modulePath("../runs");
 /** Pinned runs live here and are never swept. Without somewhere to put them,
  * every A/B comparison evaporates after the retention window — which is the
  * one thing a simulation run exists to survive. */
 const PINNED_DIR = path.join(RUNS_DIR, "pinned");
-const PUBLIC_DIR = new URL("./public", import.meta.url).pathname;
-const APP_DIR = new URL("./app", import.meta.url).pathname;
+const PUBLIC_DIR = modulePath("./public");
+const APP_DIR = modulePath("./app");
 const APP_ENTRY = path.join(APP_DIR, "main.ts");
-const REPO_ROOT = new URL("..", import.meta.url).pathname;
+const REPO_ROOT = modulePath("..");
 const RETENTION_MS = 24 * 3_600_000;
 const SWEEP_EVERY_MS = 3_600_000;
 

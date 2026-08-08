@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { decodeSaveJson } from "../shared/save/decode.ts";
 import type { SaveSnapshot } from "../shared/save/snapshot.ts";
 
@@ -14,7 +15,7 @@ import type { SaveSnapshot } from "../shared/save/snapshot.ts";
  *   - plain base64 of the JSON, when the browser lacks CompressionStream
  *   - base64 of the gzip bytes, the Steam Cloud format */
 
-export const SAVES_DIR = new URL("../saves", import.meta.url).pathname;
+export const SAVES_DIR = fileURLToPath(new URL("../saves", import.meta.url));
 export const INDEX_FILE = path.join(SAVES_DIR, "index.json");
 
 export interface SaveEntry {

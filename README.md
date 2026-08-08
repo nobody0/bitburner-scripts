@@ -26,20 +26,26 @@ The game is split into **features** — separable optimization problems, one per
 BitNode theme (hacking, factions, stocks, gang, corp, bladeburner, sleeves,
 Go, Stanek, darknet, …). Each owns a telemetry topic, a probe, and a UI tab,
 and will eventually own a simulator model; the composed "beat this BitNode"
-problem is what they add up to. See [spec/features.md](spec/features.md).
+problem is what they add up to. See [spec/features.md](spec/features.md) for
+the machinery and [spec/strategy/](spec/strategy/README.md) for the play: a
+note per BitNode, a feature catalog (unlock / needs / yields), and the
+dependency graph of shared resources.
 
-## Local references
+## Reference repositories
 
-- Game source: `/Users/bob/git/bitburner-src`, pinned to the release documented
-  in [spec/game-source.md](spec/game-source.md).
-- Predecessor scripts: `/Users/bob/git/bitburner-legacy`, tracking
-  [`nobody01/bitburnerscript`](https://gitlab.com/nobody01/bitburnerscript)
+- Game source: [`bitburner-official/bitburner-src`](https://github.com/bitburner-official/bitburner-src),
+  pinned to the release documented in [spec/game-source.md](spec/game-source.md).
+  `bun run vendor` uses `BITBURNER_SRC` when set and otherwise looks for a
+  sibling checkout at `../bitburner-src`, which is portable across machines.
+- Predecessor scripts:
+  [`nobody01/bitburnerscript`](https://gitlab.com/nobody01/bitburnerscript),
   branch `2023` at commit `43e8585` (54 commits). This is the real predecessor:
   it has the faction/augmentation planner (`src/_lib/factions.ts`,
   `augmentations.ts`), four batchers, a batch optimizer, a predictive target
   simulation, and the full reset/BitNode loop. Its `stubCall` RAM-dodger design
   (`src/_lib/stub-call.ts`) is ported with credit into `game/lib/dodge.ts` —
-  see [spec/dodging.md](spec/dodging.md).
+  see [spec/dodging.md](spec/dodging.md). Its local checkout name is deliberately
+  not part of this repository's configuration.
 
 Both checkouts are reference material. New scripts and history belong only in
 this repository.

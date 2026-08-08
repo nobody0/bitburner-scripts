@@ -9,7 +9,10 @@ import path from "node:path";
  * string is absent — that is the drift detector when bumping TAG. */
 
 const TAG = "v3.0.1";
-const SRC_REPO = process.env.BITBURNER_SRC ?? "/Users/bob/git/bitburner-src";
+// Keep machine-specific checkout locations out of the repository. A sibling
+// checkout is the zero-config convention on every OS; BITBURNER_SRC remains
+// available for layouts that do not follow it.
+const SRC_REPO = path.resolve(process.env.BITBURNER_SRC ?? path.join(import.meta.dir, "..", "..", "bitburner-src"));
 const OUT_DIR = "sim/vendor/bitburner";
 
 interface Patch {
