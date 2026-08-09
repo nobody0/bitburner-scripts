@@ -136,6 +136,16 @@ export interface FactionMemory {
   lastAction?: FactionAction;
   /** Invalidation keys as of the last decision. */
   lastInvalidation: InvalidationKey[];
+  /** Which intent the stall tracker is watching, the best rep seen for it,
+   * and when that rep last MOVED. The committed-objective latch exists so
+   * near-equal packages do not thrash — but a latch with no progress escape
+   * held an unservable objective for a full two-hour run (Blade Industries,
+   * whose employment blocker nothing could deliver) while a one-step faction
+   * sat ignored. No progress for INTENT_STALL_MS + a frontier that prefers a
+   * different package = drop the latch. */
+  intentKey?: string;
+  intentRepSeen?: number;
+  intentProgressAt?: number;
   /** Cash on hand when the final-sweep drain began. The drain spends DOWN from
    * this frozen snapshot: income earned while draining never funds further
    * NeuroFlux escalation, because a fast farm otherwise turns the drain into a
@@ -164,6 +174,9 @@ export function initFactionMemory(): FactionMemory {
  * oscillate between two near-equal options and complete neither. */
 export const FOCUS_DWELL_MS = 60_000;
 export const WORK_SWITCH_MARGIN = 1.05;
+/** How long a latched objective may make ZERO reputation progress before the
+ * frontier is allowed to replace it with a different package. */
+export const INTENT_STALL_MS = 600_000;
 
 /** EWMA weight for the measured rep rate. */
 export const RATE_SMOOTHING = 0.3;

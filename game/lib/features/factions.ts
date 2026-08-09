@@ -731,6 +731,34 @@ function needs(ctx: NeedContext): Need[] {
       why: `${blocker.faction} ${blocker.why}`,
     });
   }
+  // Near-complete NON-OBJECTIVE gates: a faction sitting ONE reachable,
+  // other-owned blocker away from an invite is worth asking for even when it
+  // is not the objective. The measured failure: CyberSec was one cheap CSEC
+  // backdoor from an invite for an entire two-hour run while the objective
+  // was deadlocked on an unservable employment requirement — and the board
+  // never heard about the backdoor because only objective blockers post.
+  // Urgency "wanted", never "blocking": these must not preempt real work.
+  const gates = ctx.state.topics.factions?.gates ?? {};
+  const posted = new Set(plan.blockers.map((blocker) => `${blocker.kind}\0${blocker.subject ?? ""}`));
+  for (const [faction, gate] of Object.entries(gates)) {
+    if (gate.joined || gate.invited || gate.missing.length !== 1) continue;
+    const blocker = gate.missing[0]!;
+    if (!blocker.reachable || blocker.owner === "factions") continue;
+    if (blocker.kind === "bitNode" || blocker.kind === "sourceFile" || blocker.kind === "location") continue;
+    const key = `${blocker.kind}\0${blocker.subject ?? ""}`;
+    if (posted.has(key)) continue;
+    posted.add(key);
+    out.push({
+      by: "factions",
+      kind: blocker.kind as Need["kind"],
+      ...(blocker.subject !== undefined ? { subject: blocker.subject } : {}),
+      target: blocker.target,
+      have: blocker.have,
+      weight: 1 + blocker.progress * 2,
+      urgency: "wanted",
+      why: `${faction} ${blocker.why} — one step from an invite`,
+    });
+  }
   if (plan.until?.kind === "rep" && plan.until.faction && plan.until.have < plan.until.target) {
     out.push({
       by: "factions",

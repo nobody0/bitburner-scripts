@@ -12,6 +12,7 @@ import {
 } from "./augs.ts";
 import {
   FOCUS_DWELL_MS,
+  INTENT_STALL_MS,
   RATE_SMOOTHING,
   WORK_SWITCH_MARGIN,
   type FactionAction,
@@ -292,8 +293,35 @@ function decideFactions(
           (view.factions.find((standing) => standing.name === previousRunner.faction)?.enemies.includes(member.name) ?? false)),
     ),
   );
-  const keepPrevious = Boolean(previousIntent && previousStanding && (!previousComplete || runnerBlockedThisCycle));
+  let keepPrevious = Boolean(previousIntent && previousStanding && (!previousComplete || runnerBlockedThisCycle));
+  // Stall escape for the latch: zero reputation progress for INTENT_STALL_MS
+  // while the frontier prefers a DIFFERENT package means the latched intent
+  // is not merely slow, it is unservable — measured: an employment-gated
+  // package latched at t=0 held the whole feature idle for two hours while a
+  // one-blocker faction sat ignored. Re-selecting the same package resets
+  // nothing, so a legitimately slow grind is never dropped.
+  let intentKey = memory.intentKey;
+  let intentRepSeen = memory.intentRepSeen;
+  let intentProgressAt = memory.intentProgressAt;
+  if (keepPrevious && previousIntent && previousStanding) {
+    if (intentKey !== previousIntent.faction || intentRepSeen === undefined || previousStanding.rep > intentRepSeen) {
+      intentKey = previousIntent.faction;
+      intentRepSeen = previousStanding.rep;
+      intentProgressAt = view.time;
+    } else if (
+      view.time - (intentProgressAt ?? view.time) >= INTENT_STALL_MS &&
+      fresh.intent !== undefined &&
+      fresh.intent.faction !== previousIntent.faction
+    ) {
+      keepPrevious = false;
+    }
+  }
   const objective = keepPrevious ? previous! : fresh;
+  if (!keepPrevious) {
+    intentKey = objective.intent?.faction;
+    intentRepSeen = undefined;
+    intentProgressAt = view.time;
+  }
   if (objective.runnerUp) {
     alternatives.push({
       label: `${objective.runnerUp.faction} to ${Math.round(objective.runnerUp.repTarget).toLocaleString()} rep`,
@@ -311,8 +339,15 @@ function decideFactions(
   // The drain ceiling survives ONLY through consecutive recommending-drain
   // decisions (set again below); any other decision clears it, so an aborted
   // drain can never leak a stale, lower snapshot into the next one.
-  const { drainCeiling: _staleCeiling, ...carried } = memory;
-  const next = { ...carried, objective, lastInvalidation: invalidation };
+  const { drainCeiling: _staleCeiling, intentKey: _ik, intentRepSeen: _irs, intentProgressAt: _ipa, ...carried } = memory;
+  const next = {
+    ...carried,
+    objective,
+    lastInvalidation: invalidation,
+    ...(intentKey !== undefined ? { intentKey } : {}),
+    ...(intentRepSeen !== undefined ? { intentRepSeen } : {}),
+    ...(intentProgressAt !== undefined ? { intentProgressAt } : {}),
+  };
 
   if (view.currentWork?.kind === "grafting") {
     const action: FactionAction = {
@@ -369,6 +404,33 @@ function decideFactions(
         lost.length > 0
           ? `joining ${invitation.name} forecloses ${lost.map((e) => e.name).join(", ")} until the next install`
           : `${invitation.name} is in the objective and has invited us`,
+    };
+    return {
+      memory: { ...next, lastAction: action },
+      decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
+    };
+  }
+
+  // --- 2b) free joins -------------------------------------------------------
+  // An invitation that forecloses NOTHING is pure upside regardless of the
+  // objective: it costs one call, unlocks the faction's augmentations and
+  // reputation forever, and cannot ban anything (no enemies in either
+  // direction). Measured failure without this: CyberSec's invite arrived with
+  // half an hour left in the run and sat unaccepted because the objective had
+  // moved on — the entire backdoor chain completed for nothing. Enemy-bearing
+  // invitations still wait for the objective to want them.
+  const freeInvite = view.factions.find(
+    (standing) =>
+      standing.invited &&
+      !standing.joined &&
+      standing.enemies.length === 0 &&
+      !view.factions.some((member) => member.joined && member.enemies.includes(standing.name)),
+  );
+  if (freeInvite) {
+    const action: FactionAction = {
+      type: "joinFaction",
+      faction: freeInvite.name,
+      why: `${freeInvite.name} invited us and forecloses nothing`,
     };
     return {
       memory: { ...next, lastAction: action },

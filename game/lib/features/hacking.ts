@@ -405,11 +405,17 @@ function nextBackdoorAction(ctx: Pick<ClaimContext, "board" | "state">): Backdoo
     if (!host || backdoorAttempted.has(host)) continue;
     const server = servers[host];
     if (!server || server.backdoorInstalled) continue;
-    if (player.skills.hacking < (server.requiredHackingSkill ?? Infinity)) continue;
+    // Port openers are MONEY, not skill: buy them the moment the need exists
+    // so the root is ready when the skill arrives. Gating the purchase behind
+    // the skill check closed the buying window on factions-join — by the time
+    // hacking crossed CSEC's requirement, the bankroll had been spent on
+    // fleet and BruteSSH stayed unaffordable for the rest of the run.
     if (!server.hasAdminRights) {
       if ((server.numOpenPortsRequired ?? 0) === 0) continue;
       return { action: "port-opener", host, server };
     }
+    // The backdoor itself DOES need the skill (and the connect chain).
+    if (player.skills.hacking < (server.requiredHackingSkill ?? Infinity)) continue;
     return { action: "backdoor", host, server };
   }
   return undefined;
