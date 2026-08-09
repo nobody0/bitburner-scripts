@@ -244,7 +244,13 @@ function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): 
       incomePerSec: homeCoreIncomeDelta(ctx),
     });
   }
+  // The probe quotes a ladder of new-server sizes; only sizes the CURRENT
+  // bankroll covers may compete. The winner executes in this same pass, so an
+  // aspirational quote would not merely lose — it would win the ranking and
+  // then block the whole infrastructure lane until the money materialized.
+  const money = ctx.state.topics.player?.money ?? 0;
   for (const quote of fleet.infrastructureOptions ?? []) {
+    if (quote.kind === "buyServer" && quote.cost > money) continue;
     options.push({ ...quote, incomePerSec: quote.addedRam * perGb, horizonSec: installHorizonSec });
   }
   return stepInfrastructure(options, nodeHorizonSec);

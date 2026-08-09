@@ -357,8 +357,24 @@ export function dispatch(
       actions.push({ type: "upgradeHomeRam" });
     }
   }
+  // Idle-segment spillover: RAM reserved for a segment with NOTHING TO DO
+  // farms instead of idling. The 25% prep share on a 92 GB fleet is ~23 GB —
+  // a whole extra batch — and it sat free whenever no target was worth
+  // prepping (measured on hacking-early: ramPie {farm 61.65, prep 0, free
+  // 26.15} for the entire run). The spill is recomputed per pass, so the
+  // moment the evaluator names a prep target the farm stops drawing on it;
+  // in-flight farm ops beyond the nominal share drain within one weakenTime.
+  const prepServer = directive.prep ? byHost.get(directive.prep.host) : undefined;
+  const prepActive = prepServer !== undefined && !isPrepped(prepServer);
+  let spillGb = 0;
   for (const segment of directive.segments) {
-    const budget = segment.gb - memory.segmentGb[segment.kind];
+    if (segment.kind === "share") spillGb += Math.max(0, segment.gb - memory.segmentGb.share);
+    if (segment.kind === "prep" && !prepActive) spillGb += Math.max(0, segment.gb - memory.segmentGb.prep);
+  }
+
+  for (const segment of directive.segments) {
+    const segmentCap = segment.kind === "farm" ? segment.gb + spillGb : segment.gb;
+    const budget = segmentCap - memory.segmentGb[segment.kind];
     if (budget <= 0) continue;
 
     if (segment.kind === "farm" && directive.farm) {
@@ -404,7 +420,7 @@ export function dispatch(
         const interval = solution.kind === "hgw" ? 3 * SPACER_MS : INTERVAL_MS;
         const depth = Math.max(
           1,
-          Math.min(Math.floor(weakenMs / interval), Math.floor(segment.gb / solution.ramPerBatch)),
+          Math.min(Math.floor(weakenMs / interval), Math.floor(segmentCap / solution.ramPerBatch)),
         );
         // Shotgun uses ONE-SHOT workers only: thousands of distinct same-tick
         // ops make pooling pointless (nothing repeats within a worker's idle

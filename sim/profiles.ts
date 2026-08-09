@@ -92,7 +92,13 @@ export const PROFILES: readonly SimProfile[] = [
     id: "hacking-only",
     description: "Hacking in isolation: money earned per unit time, nothing else contributing.",
     features: only("hacking", "progression"),
-    goals: ["earn:1e9"],
+    // Calibrated to the default fixture's physics, not aspiration: its eight
+    // servers top out around $12k/sec under a PERFECT joesguns farm, so the
+    // old earn:1e9 was two orders of magnitude out of reach and the profile
+    // produced no A/B gradient (every run: NOT reached). $5m is earned around
+    // minute 40 by the current strategy — reliably reached, with most of the
+    // hour left as headroom for targeting/prep improvements to show up in.
+    goals: ["earn:5e6"],
     horizon: "1h",
     seeds: [1, 2, 3],
   },

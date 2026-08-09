@@ -65,9 +65,18 @@ const hackingCloud: DodgedProbe = {
       server.purchasedByPlayer && server.hostname !== "home" && !server.hostname.startsWith("hacknet-server-"),
     );
     if (cloudServers.length < fleet.purchased.limit) {
-      const targetRam = Math.min(8, fleet.purchased.maxRamPerServer);
-      const cost = stubNs["cloud"]["getServerCost"](targetRam);
-      if (targetRam >= 2 && Number.isFinite(cost)) options.push({ kind: "buyServer", cost, addedRam: targetRam, targetRam });
+      // Quote a LADDER of sizes, not just the 8 GB starter. Cloud cost is
+      // linear in RAM, so return-per-dollar ties across sizes and the ranking
+      // then prefers the largest income — which is exactly the compounding a
+      // growing bankroll wants. The driver filters the ladder to what the
+      // current bankroll can actually pay (a quote that cannot execute this
+      // pass would freeze the whole infrastructure lane behind it). Measured
+      // before this: an hour-long run bought fifteen 8 GB servers while the
+      // bank could long since have carried 512 GB ones.
+      for (let targetRam = 8; targetRam <= fleet.purchased.maxRamPerServer; targetRam *= 4) {
+        const cost = stubNs["cloud"]["getServerCost"](targetRam);
+        if (targetRam >= 2 && Number.isFinite(cost)) options.push({ kind: "buyServer", cost, addedRam: targetRam, targetRam });
+      }
     }
     for (const server of cloudServers) {
       const targetRam = Math.min(fleet.purchased.maxRamPerServer, server.maxRam * 2);
