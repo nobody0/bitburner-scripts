@@ -810,6 +810,24 @@ deploy in the first minutes and entries never revisit the ranking head, so
 (preference 0.25 → 0.6, and a farm-target preference). The next lever is the
 entry/rotation mechanic itself, not the ranking.
 
+## Profile ledger, third pass (`4864d7f` → `e1c3a14`, 2026-08-09)
+
+The BN-time pass. The objective function is BitNode completion time —
+augmentations die with the node, so every install/drain decision is priced by
+its acceleration of the REMAINDER. Runs under `runs/final4/`.
+
+| profile | before | after | note |
+|---|---|---|---|
+| bn1-speedrun | 2.69–2.75h | **2.43/2.45/2.46h** | best of any generation. The regression decomposed: zero installs in this profile (the NFG drain was innocent); MAX_PREP_OPS_PER_PASS=6 left the now-always-active prep segment idle while blocking spillover (utilization 90%→72%). Raised to 24. Riding along: RAM priced at MARGINAL income vs the published depth cap (a $450m 16 TB server had been bought half-idle), and the spilled fleet reserve best-fits the smallest host so the largest contiguous hack block survives. |
+| factions-join | goal NEVER reached | **88m/93m/88m** | four chain fixes: near-complete non-objective gates post needs; a stalled objective latch (10 min, zero rep progress) yields to the frontier; port openers buy on money not skill (BruteSSH at t=0, CSEC rooted at 0.5m); invitations that foreclose nothing are accepted regardless of objective. |
+| stock-manipulation | NOT/NOT/5.26h | NOT/NOT/5.25h, **stockOps 0 → 342** | the speculative intent closes the loop: one intent for the farm-pushable symbol BEFORE any position, the farm's flagged ops push the forecast, the estimator measures it, entries buy the manufactured edge. Farm graduates to joesguns at 19.5m (was 46.7m). Distributions tie stock-only; per-seed spread is shared-RNG divergence. The push physics cap at this fleet scale (~1 flagged grow/min ⇒ ~0.007 forecast/run) — the mechanism pays at bigger fleets. |
+| factions-install / donation / hacking-early / hacking-only / career-karma | — | 46.8s / 2.0m / 16.1m / 44.0m / ~8.9m | all unchanged |
+
+New policy, encoded: **the NeuroFlux drain is gated by the remaining node
+horizon** (`NFG_MIN_PAYBACK_SEC`) — a +1% level repays ~1% of the remainder,
+so a minutes-long remainder drains nothing. Unknown horizons keep the full
+drain.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
