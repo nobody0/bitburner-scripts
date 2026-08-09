@@ -725,7 +725,38 @@ function nextWorkFaction(state: GameState): string | undefined {
     if (gap <= 0) continue;
     if (!best || gap < best.gap) best = { name: standing.name, gap };
   }
-  return best?.name;
+  if (best) return best.name;
+
+  // THE BREAKPOINT HAND-OFF, and it is worth a paragraph because losing it cost
+  // ~86% of this feature's work time.
+  //
+  // Reaching the breakpoint closes the gap above, so every objective faction is
+  // skipped and this returned `undefined` — no claim. But dropping the claim is how
+  // an incumbent RELEASES the slot (arbiter rule 3), and the planner only chooses
+  // its next breakpoint on its own 30 s cadence. So at every breakpoint the slot
+  // came free for one pass, `career` filled it with a 10-minute Heist, and faction
+  // work waited out the lock: measured on a live BN12 run, 91 s of reputation per
+  // 650 s cycle, which turns a 14 h Daedalus grind into ~100 h.
+  //
+  // Reputation is not finished here — only this breakpoint is. So hold the slot for
+  // the hand-off when the node still has reputation worth earning anywhere we have
+  // joined. Deliberately the weak question the doc above describes, and it is safe
+  // to ask HERE because it cannot undo the breakpoint decision: it selects no
+  // target and changes no plan, it only keeps the reservation warm for the one pass
+  // until the planner names the next one. Re-issuing the SAME id is what preserves
+  // incumbency, so the intent's faction is preferred.
+  //
+  // When nothing is left to work toward at all, this still returns `undefined` and
+  // the slot is genuinely released — otherwise factions would sit on it doing
+  // nothing and `career` could never earn again.
+  const stillWanted = (topic.offers ?? []).some((offer) => {
+    if (offer.owned) return false;
+    if (!joined.has(offer.faction)) return false;
+    const standing = topic.standings?.find((entry) => entry.name === offer.faction);
+    return standing !== undefined && offer.repReq > standing.rep;
+  });
+  if (!stillWanted) return undefined;
+  return intent?.faction !== undefined && joined.has(intent.faction) ? intent.faction : undefined;
 }
 
 /** What this feature is bidding for. */
