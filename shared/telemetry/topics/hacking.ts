@@ -33,6 +33,10 @@ export interface FarmRollup {
   /** Ops launched with a `{stock:true}` influence flag — the observable link
    * between manipulation intent and nudges actually rolled. */
   stockOps?: number;
+  /** The current farm target's pipeline demand ceiling in GB (one batch per
+   * interval for one weakenTime). Infrastructure valuation reads it so RAM
+   * beyond saturation prices at its true ~0 marginal income. */
+  depthCapGb?: number;
   execFails?: number;
   batchesSkipped?: number;
   pumpMaxMs?: number;

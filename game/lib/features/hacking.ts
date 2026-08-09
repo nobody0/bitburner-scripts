@@ -9,6 +9,7 @@ import {
   type InfrastructureOption,
   type ScoredInfrastructure,
 } from "../../../shared/strategy/infrastructure.ts";
+import { FARM_SHARE } from "../../../shared/strategy/evaluator.ts";
 import { solveCycle } from "../../../shared/strategy/targeting.ts";
 import { PORT_OPENER_PROGRAMS, preferProgramCreation, type ProgramOption } from "../../../shared/strategy/career/programs.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
@@ -163,6 +164,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     allocFails: stats.allocFails,
     execs: stats.execs,
     ...(stats.stockOps > 0 ? { stockOps: stats.stockOps } : {}),
+    ...(driver.memory.dispatch.depthCapGb !== undefined ? { depthCapGb: driver.memory.dispatch.depthCapGb } : {}),
     execFails: driver.execFails,
     batchesSkipped: stats.batchesSkipped,
     pumpMaxMs: takePumpMaxMs(),
@@ -227,13 +229,23 @@ function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): 
   const fleet = ctx.state.topics.fleet;
   if (!fleet) return stepInfrastructure([], nodeHorizonSec);
   const perGb = Math.max(0, ctx.state.topics.farm?.moneyPerSecPerGb ?? 0);
+  // MARGINAL income, not linear: the farm's demand saturates at the current
+  // target's pipeline depth cap (grossed up by the farm segment share), and
+  // RAM beyond it earns nothing until the target changes. Pricing every GB at
+  // the average rate bought a $450m 16 TB server the farm could only half
+  // fill (measured on bn1-speedrun: fleet utilization 90% -> 72%).
+  const depthCap = ctx.state.topics.farm?.depthCapGb;
+  const fleetGb = fleet.maxRam ?? 0;
+  const demandCeiling = depthCap !== undefined ? depthCap / FARM_SHARE : Infinity;
+  const marginalIncome = (addedRam: number): number =>
+    perGb * Math.max(0, Math.min(fleetGb + addedRam, demandCeiling) - Math.min(fleetGb, demandCeiling));
   const options: InfrastructureOption[] = [];
   if (fleet.homeRamUpgradeCost !== undefined) {
     options.push({
       kind: "homeRam",
       cost: fleet.homeRamUpgradeCost,
       addedRam: fleet.home.maxRam,
-      incomePerSec: fleet.home.maxRam * perGb,
+      incomePerSec: marginalIncome(fleet.home.maxRam),
       targetRam: fleet.home.maxRam * 2,
     });
   }
@@ -252,7 +264,7 @@ function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): 
   const money = ctx.state.topics.player?.money ?? 0;
   for (const quote of fleet.infrastructureOptions ?? []) {
     if (quote.kind === "buyServer" && quote.cost > money) continue;
-    options.push({ ...quote, incomePerSec: quote.addedRam * perGb, horizonSec: installHorizonSec });
+    options.push({ ...quote, incomePerSec: marginalIncome(quote.addedRam), horizonSec: installHorizonSec });
   }
   return stepInfrastructure(options, nodeHorizonSec);
 }

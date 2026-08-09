@@ -54,7 +54,12 @@ export const MAX_BATCHES_PER_PASS = 8;
 /** Shotgun emits a whole wave per pass — every batch lands the same engine
  * tick, so there is no interleave to protect, only the pump budget. */
 export const SHOTGUN_BATCHES_PER_PASS = 256;
-export const MAX_PREP_OPS_PER_PASS = 6;
+/** Raised from 6: with long-horizon prep the segment is ACTIVE for hours, and
+ * a 6-op wave left most of its 25% reservation idle while also blocking the
+ * idle-segment spillover — measured as the bn1-speedrun utilization drop
+ * (90% → ~75%). The budget still bounds each wave; this only stops the op
+ * count from being the binding constraint. */
+export const MAX_PREP_OPS_PER_PASS = 24;
 /** Pooled workers idle out after this long (worker.ts IDLE_MS — keep the two
  * in agreement): pooling is only worth it when the batch launch period fits
  * inside it, so a worker's next job arrives before its process exits. */
@@ -133,6 +138,13 @@ export interface DispatchMemory {
   hgw?: { host: string; generation: number; solution?: CycleSolution };
   /** Pooled serve workers (shared/strategy/worker-pool.ts). */
   pool: WorkerPoolMemory;
+  /** The current farm target's pipeline demand ceiling in GB — one batch per
+   * interval for one weakenTime (shared/strategy/economics.ts depthCapGb).
+   * RAM beyond it earns nothing on THIS target; infrastructure valuation
+   * reads it so a purchase past saturation prices at its true marginal
+   * income (~0) instead of the linear per-GB rate (measured: a $450m 16 TB
+   * server bought half-idle on bn1-speedrun). */
+  depthCapGb?: number;
   stats: DispatchStats;
 }
 
@@ -214,23 +226,40 @@ function syncTopology(
     ours.set(tracked.hostname, (ours.get(tracked.hostname) ?? 0) + tracked.gb);
   }
   // A home too small to hold the full feature-step reserve (the 40% cap in
-  // shared/ram/reserve.ts) spills the SHORTFALL onto the largest fleet host,
-  // so the biggest declared probe step stays affordable somewhere. Without
-  // this the farm packs every fleet block and the probe that is a feature's
-  // only signal source starves — measured: stock-manipulation observed
-  // 906/3600 market ticks because the 10 GB sampler lost every sweep.
+  // shared/ram/reserve.ts) spills the SHORTFALL onto a fleet host, so the
+  // biggest declared probe step stays affordable somewhere. Without this the
+  // farm packs every fleet block and the probe that is a feature's only
+  // signal source starves — measured: stock-manipulation observed 906/3600
+  // market ticks because the 10 GB sampler lost every sweep.
+  //
+  // SMALLEST host that fits, not the largest: the hack block must land as ONE
+  // contiguous call, so carving the reserve out of the biggest host shrinks
+  // `largestBlockGb` for every solve (measured on bn1-speedrun: fleet
+  // utilization fell ~90% → ~72% with the reserve parked on the top host).
+  // Same best-fit policy as dodgeHost. Largest only as the fallback when
+  // nothing else fits.
   let reserveHost: string | undefined;
   if (fleetReserveGb > 0) {
+    const fitsGb = fleetReserveGb + 4; // stub base + a couple of threads of churn
+    let largest: string | undefined;
+    let largestRam = 0;
+    let smallestFit: string | undefined;
+    let smallestFitRam = Infinity;
     for (const server of view.servers) {
       if (!server.hasAdminRights || server.hostname === "home" || server.maxRam < 2) continue;
-      if (reserveHost === undefined) reserveHost = server.hostname;
-      else {
-        const best = view.servers.find((s) => s.hostname === reserveHost)!;
-        if (server.maxRam > best.maxRam || (server.maxRam === best.maxRam && server.hostname < best.hostname)) {
-          reserveHost = server.hostname;
-        }
+      if (server.maxRam > largestRam || (server.maxRam === largestRam && server.hostname < (largest ?? "￿"))) {
+        largest = server.hostname;
+        largestRam = server.maxRam;
+      }
+      if (
+        server.maxRam >= fitsGb &&
+        (server.maxRam < smallestFitRam || (server.maxRam === smallestFitRam && server.hostname < (smallestFit ?? "￿")))
+      ) {
+        smallestFit = server.hostname;
+        smallestFitRam = server.maxRam;
       }
     }
+    reserveHost = smallestFit ?? largest;
   }
   let fleetGb = 0;
   let largestBlockGb = 0;
@@ -453,6 +482,7 @@ export function dispatch(
         // out before reuse, degenerating to spawn-per-op plus an idle timeout
         // of stranded RAM (measured: +11 % time-to-goal on a 16 GB start).
         const interval = solution.kind === "hgw" ? 3 * SPACER_MS : INTERVAL_MS;
+        memory.depthCapGb = Math.max(1, Math.floor(weakenMs / interval)) * solution.ramPerBatch;
         const depth = Math.max(
           1,
           Math.min(Math.floor(weakenMs / interval), Math.floor(segmentCap / solution.ramPerBatch)),
