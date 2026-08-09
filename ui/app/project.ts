@@ -2,6 +2,7 @@ import type { Player, Server } from "@ns";
 import { unknownCapabilities, type Capabilities } from "../../shared/features/unlock.ts";
 import type { DebugRecord, EventRecord, LogRecord } from "../../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
+import type { ContractFailure } from "../../shared/telemetry/topics/side.ts";
 
 /** The viewer's projection of a record stream.
  *
@@ -42,6 +43,9 @@ export interface ProjectedState {
   /** State records are folded into `topics`; only the discrete records reach
    *  the feed, so this is never a StateRecord. */
   events: (EventRecord | DebugRecord)[];
+  /** Latest full contract replay. Held separately from the bounded event feed
+   * so ordinary debug traffic cannot evict the actionable failure details. */
+  contractReplay: ContractFailure | null;
   /** Money earned by hacking and successful hack count. */
   earned: number;
   hacks: number;
@@ -71,6 +75,7 @@ export function emptyState(): ProjectedState {
     topics: {},
     caps: unknownCapabilities(),
     events: [],
+    contractReplay: null,
     earned: 0,
     hacks: 0,
     hasTotals: false,
@@ -143,6 +148,9 @@ function foldOne(state: ProjectedState, record: LogRecord, cutoff: number): bool
       state.hackDoneEarned += data.moneyGained ?? 0;
       state.hackDoneCount++;
     }
+  }
+  if (record.kind === "event" && record.name === "contract.quarantined") {
+    state.contractReplay = record.data as ContractFailure;
   }
   state.events.push(record);
   if (state.events.length > EVENT_RING) state.events.splice(0, state.events.length - EVENT_RING);

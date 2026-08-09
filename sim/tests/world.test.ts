@@ -28,14 +28,19 @@ describe("SimWorld", () => {
     expect(failures.length).toBe(2);
   });
 
-  test("buyServer and upgradeHomeRam move money and mirror state", () => {
+  test("infrastructure purchases move money and mirror state", () => {
     const world = makeWorld();
-    world.money = 1e9;
+    world.money = 1e12;
     expect(world.execute({ type: "buyServer", ram: 64, name: "pserv-0" })).toBe(true);
     expect(world.servers.get("pserv-0")!.maxRam).toBe(64);
+    expect(world.execute({ type: "upgradeServer", host: "pserv-0", ram: 128 })).toBe(true);
+    expect(world.servers.get("pserv-0")!.maxRam).toBe(128);
     const homeBefore = world.servers.get("home")!.maxRam;
     expect(world.execute({ type: "upgradeHomeRam" })).toBe(true);
     expect(world.servers.get("home")!.maxRam).toBe(homeBefore * 2);
+    const coresBefore = world.servers.get("home")!.cpuCores;
+    expect(world.execute({ type: "upgradeHomeCore" })).toBe(true);
+    expect(world.servers.get("home")!.cpuCores).toBe(coresBefore + 1);
   });
 
   test("same seed produces identical record streams", () => {
@@ -150,24 +155,26 @@ describe("playerRecord", () => {
 });
 
 describe("SimPlayer augmentation accounting", () => {
-  test("owned counts QUEUED augmentations, as the game's requirements do", () => {
-    // ns.singularity.getOwnedAugmentations(true) includes queued, and every
-    // `numAugmentations` faction requirement counts them. Getting this wrong
-    // makes Daedalus unreachable on exactly the run that qualifies for it.
+  test("owned reports every queued level while installed count stays separate", () => {
     const world = makeWorld();
     world.player.augmentations.set("Cranial Signal Processors - Gen I", 1);
     world.player.queuedAugmentations.set("NeuroFlux Governor", 3);
 
-    expect(world.player.augmentationCount(true)).toBe(2);
+    expect(world.player.augmentationCount(true)).toBe(4);
     expect(world.player.augmentationCount(false)).toBe(1);
     expect(world.player.hasAugmentation("NeuroFlux Governor", true)).toBe(true);
     expect(world.player.hasAugmentation("NeuroFlux Governor", false)).toBe(false);
   });
 
-  test("an augmentation both installed and queued is counted once", () => {
+  test("an augmentation both installed and queued remains duplicated in the API", () => {
     const world = makeWorld();
     world.player.augmentations.set("NeuroFlux Governor", 2);
     world.player.queuedAugmentations.set("NeuroFlux Governor", 3);
-    expect(world.player.ownedAugmentations(true)).toEqual(["NeuroFlux Governor"]);
+    expect(world.player.ownedAugmentations(true)).toEqual([
+      "NeuroFlux Governor",
+      "NeuroFlux Governor",
+      "NeuroFlux Governor",
+      "NeuroFlux Governor",
+    ]);
   });
 });

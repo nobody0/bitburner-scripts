@@ -2,6 +2,7 @@ import { AUGMENTATIONS, describeMults, offeredBy } from "../../../shared/feature
 import type {
   AugmentationOffer,
   FactionGate,
+  FactionPlan,
   FactionStanding,
   GateBlocker,
 } from "../../../shared/telemetry/topics/factions.ts";
@@ -61,13 +62,24 @@ interface FactionPlanAction {
   augmentation?: string;
   city?: string;
   workType?: string;
+  amount?: number;
+  purchaseCost?: number;
 }
 
 function actionLine(action: FactionPlanAction): string {
   const label = ACTION_LABELS[action.type] ?? action.type;
-  const subject = action.faction ?? action.augmentation ?? action.city ?? "";
+  const subject = action.type === "donate" && action.amount !== undefined
+    ? `${fmtMoney(action.amount)}${action.faction ? ` to ${action.faction}` : ""}`
+    : action.augmentation
+      ? `${action.augmentation}${action.faction ? ` from ${action.faction}` : ""}`
+      : (action.faction ?? action.city ?? "");
   const work = action.workType ? ` (${action.workType})` : "";
   return `${esc(label)}${subject ? ` <strong>${esc(subject)}</strong>` : ""}${esc(work)}`;
+}
+
+function fmtRate(value: number | undefined): string {
+  if (value === undefined || Number.isNaN(value)) return "–";
+  return Math.abs(value) >= 0.001 ? fmtNum(value, 3) : value.toExponential(2);
 }
 
 function planCard(state: ProjectedState): string {
@@ -87,6 +99,28 @@ function planCard(state: ProjectedState): string {
     `<div class="row"><span class="muted">next</span> ${actionLine(plan.action as FactionPlanAction)}</div>` +
       `<div class="muted">${esc(plan.action.why)}</div>`,
   );
+
+  {
+    const context = plan.context;
+    const augGoal = context.targetAugCount === undefined
+      ? `${context.ownedAugCount} owned`
+      : `${context.ownedAugCount} / ${context.targetAugCount}`;
+    parts.push(tiles([
+      { label: "planning window", value: fmtTime(context.horizonSec * 1000), sub: context.route ?? "no end route" },
+      { label: "income", value: `${fmtMoney(context.incomePerSec)}/s` },
+      { label: "cash", value: fmtMoney(context.moneyAvailable), sub: `${fmtMoney(context.moneyGranted)} granted` },
+      { label: "augmentation goal", value: augGoal, sub: `${context.queuedAugCount} queued (included)` },
+    ]));
+    const inputRows = [
+      ["work slot", context.holdsWorkSlot ? "granted" : "held elsewhere"],
+      ["donation favor", fmtNum(context.favorToDonate, 0)],
+      ["normal queue", String(context.priceQueue.nonSoA)],
+      ["SoA owned", String(context.priceQueue.ownedSoA)],
+      ["NeuroFlux level", String(context.priceQueue.neurofluxLevel)],
+      ...(plan.invalidation ?? []).map((entry) => [`replan: ${entry.label}`, esc(entry.value)]),
+    ];
+    parts.push(collapsible("decision inputs", table(["input", "value"], inputRows, { left: [0, 1] })));
+  }
 
   if (plan.until) {
     const eta = Number.isFinite(plan.until.etaSec) ? fmtTime(plan.until.etaSec * 1000) : "never at this rate";
@@ -119,10 +153,52 @@ function planCard(state: ProjectedState): string {
         }</div>` +
         `<div class="muted">${esc(objective.why)}</div>`,
     );
-    if (objective.foreclosed.length > 0) {
-      // A ban is permanent, so what the objective gives up is part of the plan.
+    if (objective.intent) {
+      const intent = objective.intent;
       parts.push(
-        `<div class="muted">forecloses ${objective.foreclosed
+        `<div class="row"><span class="muted">breakpoint</span> ` +
+          `<strong>${esc(intent.faction)}</strong> to ${fmtNum(intent.repTarget, 0)} rep ` +
+          `(${intent.augmentations.length} aug, ${esc(fmtTime(intent.etaSec * 1000))})</div>` +
+          `<div class="muted">favor after install ${fmtNum(intent.favorAfterInstall, 1)}; ${esc(intent.why)}</div>` +
+          table(
+            ["package", "value", "avg/sec", "marginal/sec", "ETA", "cash"],
+            [
+              [
+                "chosen",
+                fmtNum(intent.value, 3),
+                fmtRate(intent.rate),
+                fmtRate(intent.marginalRate),
+                esc(fmtTime(intent.etaSec * 1000)),
+                fmtMoney(intent.totalCost),
+              ],
+              ...(objective.runnerUp
+                ? [[
+                    `${esc(objective.runnerUp.faction)} @ ${fmtNum(objective.runnerUp.repTarget, 0)} rep`,
+                    fmtNum(objective.runnerUp.value, 3),
+                    fmtRate(objective.runnerUp.rate),
+                    fmtRate(objective.runnerUp.marginalRate),
+                    esc(fmtTime(objective.runnerUp.etaSec * 1000)),
+                    fmtMoney(objective.runnerUp.totalCost),
+                  ]]
+                : []),
+            ],
+            { left: [0] },
+          ) +
+          `<div class="muted">ETA: unlock ${esc(fmtTime(intent.unlockSec * 1000))}, rep ${esc(fmtTime(intent.repSec * 1000))}, ` +
+          `money ${esc(fmtTime(intent.moneySec * 1000))}; cash: ${fmtMoney(intent.purchaseCost)} purchase` +
+          `${intent.donationCost > 0 ? ` + ${fmtMoney(intent.donationCost)} donation` : ""}</div>`,
+      );
+    }
+    if (objective.runnerUp) {
+      const runner = objective.runnerUp;
+      parts.push(
+        `<div class="muted">runner-up rationale: ${esc(runner.why)}</div>`,
+      );
+    }
+    if (objective.foreclosed.length > 0) {
+      // Enemy exclusions last for this install cycle, so show the trade-off.
+      parts.push(
+        `<div class="muted">forecloses this install cycle: ${objective.foreclosed
           .map((entry) => `${esc(entry.name)} (via ${esc(entry.bannedBy)})`)
           .join(", ")}</div>`,
       );
@@ -149,6 +225,13 @@ function planCard(state: ProjectedState): string {
     }
   }
 
+  if (plan.nextBuy) {
+    parts.push(
+      `<div><strong>next purchase:</strong> ${esc(plan.nextBuy.name)} at ${fmtMoney(plan.nextBuy.price)}</div>` +
+        note("priced at its slot in the purchase order, dearest first — this is what the money claim reserves"),
+    );
+  }
+
   if (plan.recommendInstall) {
     parts.push(
       `<div class="good"><strong>recommends install:</strong> ${esc(plan.recommendInstall.why)}</div>` +
@@ -157,6 +240,31 @@ function planCard(state: ProjectedState): string {
   }
 
   return card("Plan", parts.join(""));
+}
+
+function decisionHistory(state: ProjectedState): string {
+  const decisions = state.events
+    .filter((record) => record.kind === "event" && record.name === "faction.decision")
+    .slice(-8)
+    .reverse()
+    .map((record) => {
+      const data = record.data as { plan?: FactionPlan } | undefined;
+      const plan = data?.plan;
+      if (!plan) return undefined;
+      const ageMs = Math.max(0, state.lastT - record.t);
+      const when = ageMs < 1_000 ? "now" : `${fmtTime(ageMs)} ago`;
+      const target = plan.objective?.intent;
+      return [
+        esc(when),
+        actionLine(plan.action),
+        target ? `${esc(target.faction)} @ ${fmtNum(target.repTarget, 0)} rep` : `<span class="muted">none</span>`,
+        esc(plan.action.why),
+      ];
+    })
+    .filter((row): row is string[] => row !== undefined);
+  return decisions.length > 0
+    ? table(["when", "decision", "target", "why"], decisions, { left: [0, 1, 2], wrap: [3] })
+    : note("decision transitions will appear here as the plan changes");
 }
 
 // --- factions --------------------------------------------------------------
@@ -571,6 +679,7 @@ export const factionsTab: Tab = {
       }), augControls) +
       `</div>` +
       `<div class="col">` +
+      card("Decision history", decisionHistory(state)) +
       card("Alternatives considered", alternatives) +
       card("Grafting", graft) +
       `</div>`

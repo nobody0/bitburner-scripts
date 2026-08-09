@@ -1,15 +1,27 @@
-/** Coding-contract solvers and infiltration ranking.
+/** Coding-contract solvers.
  *
  * The strongest evidence in the whole roster, and the reason is structural:
  * every contract type has a KNOWN CORRECT ANSWER, so solver correctness is
- * PROVEN over generated instances rather than measured against a baseline.
+ * checked against the game's validators over generated instances rather than
+ * measured against a baseline.
  * Nothing else in the project gets to say that.
  *
  * The registry is keyed by the contract type string the game reports. An
  * unknown type returns `undefined` — never a guess — because a wrong answer
- * costs a try, and three wrong answers destroy the contract. */
+ * costs a try, and some contracts allow only one. */
 
 export type ContractSolver = (data: unknown) => unknown;
+
+/** Bump after changing answer behavior so a hot handoff releases contracts
+ * quarantined by an older solver build. */
+export const CONTRACT_SOLVER_VERSION = 1;
+
+/** Local work stays broad enough to drain efficiently; telemetry carries only
+ * the front batch plus totals. Keep these limits shared so probe and driver
+ * cannot silently disagree. */
+export const CONTRACT_BATCH_SIZE = 20;
+export const CONTRACT_QUEUE_LIMIT = 100;
+export const CONTRACT_TELEMETRY_LIMIT = CONTRACT_BATCH_SIZE;
 
 /** Largest sum of any contiguous subarray. */
 function maxSubarraySum(data: unknown): number {
@@ -37,19 +49,19 @@ function arrayJumpingGame(data: unknown): number {
 /** Minimum jumps to reach the end, or 0 when unreachable. */
 function arrayJumpingGameII(data: unknown): number {
   const values = data as number[];
-  const n = values.length;
-  if (n <= 1) return 0;
-  const best = new Array<number>(n).fill(Infinity);
-  best[0] = 0;
-  for (let i = 0; i < n; i++) {
-    if (!Number.isFinite(best[i]!)) continue;
-    for (let step = 1; step <= values[i]!; step++) {
-      const j = i + step;
-      if (j >= n) break;
-      best[j] = Math.min(best[j]!, best[i]! + 1);
-    }
+  if (values.length <= 1) return 0;
+  let jumps = 0;
+  let edge = 0;
+  let reach = 0;
+  for (let i = 0; i < values.length - 1; i++) {
+    if (i > reach) return 0;
+    reach = Math.max(reach, i + values[i]!);
+    if (i !== edge) continue;
+    jumps++;
+    edge = reach;
+    if (edge >= values.length - 1) return jumps;
   }
-  return Number.isFinite(best[n - 1]!) ? best[n - 1]! : 0;
+  return 0;
 }
 
 /** Merge overlapping intervals, sorted ascending. */
@@ -77,17 +89,16 @@ function uniquePathsI(data: unknown): number {
 /** Unique paths with obstacles (1 = blocked). */
 function uniquePathsII(data: unknown): number {
   const grid = data as number[][];
-  const rows = grid.length;
   const cols = grid[0]?.length ?? 0;
-  const ways = Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
-  for (let r = 0; r < rows; r++) {
+  const ways = new Array<number>(cols).fill(0);
+  ways[0] = 1;
+  for (let r = 0; r < grid.length; r++) {
     for (let c = 0; c < cols; c++) {
-      if (grid[r]![c] === 1) continue;
-      if (r === 0 && c === 0) ways[r]![c] = 1;
-      else ways[r]![c] = (r > 0 ? ways[r - 1]![c]! : 0) + (c > 0 ? ways[r]![c - 1]! : 0);
+      if (grid[r]![c] === 1) ways[c] = 0;
+      else if (c > 0) ways[c] = ways[c]! + ways[c - 1]!;
     }
   }
-  return ways[rows - 1]?.[cols - 1] ?? 0;
+  return ways[cols - 1] ?? 0;
 }
 
 /** Total ways to sum to n using smaller positive integers. */
@@ -176,24 +187,329 @@ function largestPrimeFactor(data: unknown): number {
   return n > 1 ? n : largest;
 }
 
-/** Number of distinct 2-colourings... actually: spiralize a matrix. */
+/** Matrix entries in clockwise spiral order. */
 function spiralizeMatrix(data: unknown): number[] {
-  const matrix = (data as number[][]).map((row) => [...row]);
+  const matrix = data as number[][];
   const out: number[] = [];
-  while (matrix.length > 0) {
-    out.push(...(matrix.shift() ?? []));
-    for (const row of matrix) {
-      const value = row.pop();
-      if (value !== undefined) out.push(value);
+  let top = 0;
+  let bottom = matrix.length - 1;
+  let left = 0;
+  let right = (matrix[0]?.length ?? 0) - 1;
+  while (top <= bottom && left <= right) {
+    for (let c = left; c <= right; c++) out.push(matrix[top]![c]!);
+    top++;
+    for (let r = top; r <= bottom; r++) out.push(matrix[r]![right]!);
+    right--;
+    if (top <= bottom) {
+      for (let c = right; c >= left; c--) out.push(matrix[bottom]![c]!);
+      bottom--;
     }
-    const last = matrix.pop();
-    if (last) out.push(...last.reverse());
-    for (let i = matrix.length - 1; i >= 0; i--) {
-      const value = matrix[i]!.shift();
-      if (value !== undefined) out.push(value);
+    if (left <= right) {
+      for (let r = bottom; r >= top; r--) out.push(matrix[r]![left]!);
+      left++;
     }
   }
   return out;
+}
+
+/** All valid four-octet renderings of a digit string. */
+function generateIPAddresses(data: unknown): string[] {
+  const digits = data as string;
+  const out: string[] = [];
+  const valid = (part: string): boolean => part.length === 1 || (part[0] !== "0" && Number(part) <= 255);
+  for (let a = 1; a <= 3; a++) {
+    for (let b = 1; b <= 3; b++) {
+      for (let c = 1; c <= 3; c++) {
+        const d = digits.length - a - b - c;
+        if (d < 1 || d > 3) continue;
+        const parts = [digits.slice(0, a), digits.slice(a, a + b), digits.slice(a + b, a + b + c), digits.slice(-d)];
+        if (parts.every(valid)) out.push(parts.join("."));
+      }
+    }
+  }
+  return out;
+}
+
+/** One shortest UDLR path through a zero-cell grid. */
+function shortestPathInGrid(data: unknown): string {
+  const grid = data as number[][];
+  const rows = grid.length;
+  const cols = grid[0]?.length ?? 0;
+  if (rows === 0 || cols === 0) return "";
+  const end = rows * cols - 1;
+  const parent = new Int32Array(rows * cols).fill(-1);
+  const move = new Array<string>(rows * cols);
+  const queue = new Int32Array(rows * cols);
+  const directions: readonly [number, number, string][] = [[-1, 0, "U"], [1, 0, "D"], [0, -1, "L"], [0, 1, "R"]];
+  let head = 0;
+  let tail = 1;
+  queue[0] = 0;
+  parent[0] = 0;
+  while (head < tail && parent[end] === -1) {
+    const at = queue[head++]!;
+    const r = Math.floor(at / cols);
+    const c = at % cols;
+    for (const [dr, dc, letter] of directions) {
+      const nr = r + dr;
+      const nc = c + dc;
+      const next = nr * cols + nc;
+      if (nr < 0 || nr >= rows || nc < 0 || nc >= cols || grid[nr]![nc] !== 0 || parent[next] !== -1) continue;
+      parent[next] = at;
+      move[next] = letter;
+      queue[tail++] = next;
+    }
+  }
+  if (parent[end] === -1) return "";
+  const path: string[] = [];
+  for (let at = end; at !== 0; at = parent[at]!) path.push(move[at]!);
+  return path.reverse().join("");
+}
+
+/** Every minimally edited valid-parenthesis expression. */
+function sanitizeParentheses(data: unknown): string[] {
+  const text = data as string;
+  let removeLeft = 0;
+  let removeRight = 0;
+  for (const char of text) {
+    if (char === "(") removeLeft++;
+    else if (char === ")" && removeLeft > 0) removeLeft--;
+    else if (char === ")") removeRight++;
+  }
+  const out = new Set<string>();
+  const visit = (index: number, balance: number, left: number, right: number, built: string): void => {
+    if (text.length - index < left + right) return;
+    if (index === text.length) {
+      if (balance === 0 && left === 0 && right === 0) out.add(built);
+      return;
+    }
+    const char = text[index]!;
+    if (char === "(") {
+      if (left > 0) visit(index + 1, balance, left - 1, right, built);
+      visit(index + 1, balance + 1, left, right, built + char);
+    } else if (char === ")") {
+      if (right > 0) visit(index + 1, balance, left, right - 1, built);
+      if (balance > 0) visit(index + 1, balance - 1, left, right, built + char);
+    } else visit(index + 1, balance, left, right, built + char);
+  };
+  visit(0, 0, removeLeft, removeRight, "");
+  return [...out];
+}
+
+/** Insert +, -, and * between digits to hit a target. */
+function validMathExpressions(data: unknown): string[] {
+  const [digits, target] = data as [string, number];
+  const out: string[] = [];
+  const visit = (index: number, expression: string, total: number, term: number): void => {
+    if (index === digits.length) {
+      if (total === target) out.push(expression);
+      return;
+    }
+    for (let end = index; end < digits.length && (end === index || digits[index] !== "0"); end++) {
+      const token = digits.slice(index, end + 1);
+      const value = Number(token);
+      if (index === 0) visit(end + 1, token, value, value);
+      else {
+        visit(end + 1, `${expression}+${token}`, total + value, value);
+        visit(end + 1, `${expression}-${token}`, total - value, -value);
+        visit(end + 1, `${expression}*${token}`, total - term + term * value, term * value);
+      }
+    }
+  };
+  visit(0, "", 0, 0);
+  return out;
+}
+
+function isPowerOfTwo(value: number): boolean {
+  return value > 0 && (value & (value - 1)) === 0;
+}
+
+/** The game's extended Hamming layout, including its historical bit order. */
+function hammingEncode(data: unknown): string {
+  const source = (data as number).toString(2);
+  const bits: number[] = [0];
+  let read = 0;
+  for (let position = 1; read < source.length; position++) {
+    if (isPowerOfTwo(position)) bits[position] = 0;
+    else bits[position] = Number(source[read++]!);
+  }
+  let syndrome = 0;
+  for (let i = 1; i < bits.length; i++) if (bits[i]) syndrome ^= i;
+  for (let parity = 1; parity < bits.length; parity *= 2) bits[parity] = syndrome & parity ? 1 : 0;
+  bits[0] = bits.reduce((ones, bit) => ones + bit, 0) % 2;
+  return bits.join("");
+}
+
+function hammingDecode(data: unknown): number {
+  const bits = [...(data as string)].map(Number);
+  let syndrome = 0;
+  for (let i = 1; i < bits.length; i++) if (bits[i]) syndrome ^= i;
+  if (syndrome > 0 && syndrome < bits.length) bits[syndrome] = bits[syndrome] ? 0 : 1;
+  let binary = "";
+  for (let i = 1; i < bits.length; i++) if (!isPowerOfTwo(i)) binary += bits[i];
+  return Number.parseInt(binary, 2);
+}
+
+/** A coloring for every component, or [] when the graph is not bipartite. */
+function properTwoColoring(data: unknown): number[] {
+  const [count, edges] = data as [number, [number, number][]];
+  const adjacent = Array.from({ length: count }, () => [] as number[]);
+  for (const [a, b] of edges) {
+    adjacent[a]!.push(b);
+    adjacent[b]!.push(a);
+  }
+  const colors = new Array<number>(count).fill(-1);
+  const queue = new Int32Array(count);
+  for (let root = 0; root < count; root++) {
+    if (colors[root] !== -1) continue;
+    let head = 0;
+    let tail = 1;
+    queue[0] = root;
+    colors[root] = 0;
+    while (head < tail) {
+      const vertex = queue[head++]!;
+      for (const neighbor of adjacent[vertex]!) {
+        if (colors[neighbor] === -1) {
+          colors[neighbor] = 1 - colors[vertex]!;
+          queue[tail++] = neighbor;
+        } else if (colors[neighbor] === colors[vertex]) return [];
+      }
+    }
+  }
+  return colors;
+}
+
+function rleCompress(data: unknown): string {
+  const plain = data as string;
+  let out = "";
+  for (let start = 0; start < plain.length;) {
+    let end = start + 1;
+    while (end < plain.length && end - start < 9 && plain[end] === plain[start]) end++;
+    out += `${end - start}${plain[start]}`;
+    start = end;
+  }
+  return out;
+}
+
+function lzDecompress(data: unknown): string {
+  const encoded = data as string;
+  let plain = "";
+  for (let i = 0; i < encoded.length;) {
+    const literal = Number(encoded[i++]);
+    plain += encoded.slice(i, i + literal);
+    i += literal;
+    if (i >= encoded.length) break;
+    const length = Number(encoded[i++]);
+    if (length === 0) continue;
+    const offset = Number(encoded[i++]);
+    for (let j = 0; j < length; j++) plain += plain[plain.length - offset];
+  }
+  return plain;
+}
+
+/** Shortest valid encoding via a four-state suffix dynamic program. */
+function lzCompress(data: unknown): string {
+  const plain = data as string;
+  const memo = new Map<string, string | null>();
+  const better = (best: string | undefined, candidate: string): string =>
+    best === undefined || candidate.length < best.length || (candidate.length === best.length && candidate < best)
+      ? candidate
+      : best;
+  const encode = (at: number, literal: boolean, maySkip: boolean): string | undefined => {
+    if (at === plain.length) return "";
+    const key = `${at}:${literal ? 1 : 0}:${maySkip ? 1 : 0}`;
+    const cached = memo.get(key);
+    if (cached !== undefined) return cached ?? undefined;
+    let best: string | undefined;
+    if (maySkip) {
+      const suffix = encode(at, !literal, false);
+      if (suffix !== undefined) best = `0${suffix}`;
+    }
+    if (literal) {
+      for (let length = 1; length <= 9 && at + length <= plain.length; length++) {
+        const suffix = encode(at + length, false, true);
+        if (suffix !== undefined) best = better(best, `${length}${plain.slice(at, at + length)}${suffix}`);
+      }
+    } else {
+      for (let offset = 1; offset <= 9 && offset <= at; offset++) {
+        for (let length = 1; length <= 9 && at + length <= plain.length; length++) {
+          let valid = true;
+          for (let j = 0; j < length; j++) {
+            if (plain[at + j] !== plain[at + j - offset]) { valid = false; break; }
+          }
+          if (!valid) break;
+          const suffix = encode(at + length, true, true);
+          if (suffix !== undefined) best = better(best, `${length}${offset}${suffix}`);
+        }
+      }
+    }
+    memo.set(key, best ?? null);
+    return best;
+  };
+  return encode(0, true, true) ?? "";
+}
+
+function nearestSquareRoot(data: unknown): bigint {
+  const value = data as bigint;
+  if (value < 2n) return value;
+  let root = 1n << BigInt(Math.ceil(value.toString(2).length / 2));
+  for (;;) {
+    const next = (root + value / root) >> 1n;
+    if (next >= root) break;
+    root = next;
+  }
+  const upper = root + 1n;
+  return value - root * root < upper * upper - value ? root : upper;
+}
+
+/** Segmented sieve over the game's at-most-one-million-wide interval. */
+function totalPrimes(data: unknown): number {
+  let [low, high] = data as [number, number];
+  low = Math.max(low, 2);
+  if (low > high) return 0;
+  const limit = Math.floor(Math.sqrt(high));
+  const composite = new Uint8Array(limit + 1);
+  const primes: number[] = [];
+  for (let n = 2; n <= limit; n++) {
+    if (composite[n]) continue;
+    primes.push(n);
+    if (n * n <= limit) for (let multiple = n * n; multiple <= limit; multiple += n) composite[multiple] = 1;
+  }
+  const range = new Uint8Array(high - low + 1);
+  for (const prime of primes) {
+    for (let multiple = Math.max(prime * prime, Math.ceil(low / prime) * prime); multiple <= high; multiple += prime) {
+      range[multiple - low] = 1;
+    }
+  }
+  let count = 0;
+  for (const marked of range) if (!marked) count++;
+  return count;
+}
+
+/** Largest all-zero rectangle via one monotonic-stack pass per row. */
+function largestRectangle(data: unknown): number[][] {
+  const grid = data as number[][];
+  const cols = grid[0]?.length ?? 0;
+  const heights = new Array<number>(cols).fill(0);
+  let bestArea = 0;
+  let answer = [[0, 0], [0, 0]];
+  for (let row = 0; row < grid.length; row++) {
+    for (let col = 0; col < cols; col++) heights[col] = grid[row]![col] === 0 ? heights[col]! + 1 : 0;
+    const stack: number[] = [];
+    for (let col = 0; col <= cols; col++) {
+      const height = col === cols ? 0 : heights[col]!;
+      while (stack.length > 0 && heights[stack[stack.length - 1]!]! > height) {
+        const index = stack.pop()!;
+        const left = (stack[stack.length - 1] ?? -1) + 1;
+        const area = heights[index]! * (col - left);
+        if (area > bestArea) {
+          bestArea = area;
+          answer = [[row - heights[index]! + 1, left], [row, col - 1]];
+        }
+      }
+      stack.push(col);
+    }
+  }
+  return answer;
 }
 
 /** Caesar cipher: shift each letter LEFT by n. */
@@ -223,17 +539,21 @@ function vigenereCipher(data: unknown): string {
 }
 
 /** Every solver, keyed by the game's contract type string. */
-export const SOLVERS: Record<string, ContractSolver> = {
+export const SOLVERS: Readonly<Record<string, ContractSolver>> = {
   "Subarray with Maximum Sum": maxSubarraySum,
   "Array Jumping Game": arrayJumpingGame,
   "Array Jumping Game II": arrayJumpingGameII,
   "Merge Overlapping Intervals": mergeOverlappingIntervals,
+  "Generate IP Addresses": generateIPAddresses,
   "Unique Paths in a Grid I": uniquePathsI,
   "Unique Paths in a Grid II": uniquePathsII,
+  "Shortest Path in a Grid": shortestPathInGrid,
+  "Sanitize Parentheses in Expression": sanitizeParentheses,
+  "Find All Valid Math Expressions": validMathExpressions,
   "Total Ways to Sum": totalWaysToSum,
   "Total Ways to Sum II": totalWaysToSumII,
-  "Algorithmic Stock Trader I": (data) => stockTraderI(data),
-  "Algorithmic Stock Trader II": (data) => stockTraderII(data),
+  "Algorithmic Stock Trader I": stockTraderI,
+  "Algorithmic Stock Trader II": stockTraderII,
   "Algorithmic Stock Trader III": (data) => stockTraderK(data as number[], 2),
   "Algorithmic Stock Trader IV": (data) => {
     const [k, prices] = data as [number, number[]];
@@ -242,20 +562,29 @@ export const SOLVERS: Record<string, ContractSolver> = {
   "Minimum Path Sum in a Triangle": minimumPathSumTriangle,
   "Find Largest Prime Factor": largestPrimeFactor,
   "Spiralize Matrix": spiralizeMatrix,
+  "HammingCodes: Integer to Encoded Binary": hammingEncode,
+  "HammingCodes: Encoded Binary to Integer": hammingDecode,
+  "Proper 2-Coloring of a Graph": properTwoColoring,
+  "Compression I: RLE Compression": rleCompress,
+  "Compression II: LZ Decompression": lzDecompress,
+  "Compression III: LZ Compression": lzCompress,
   "Encryption I: Caesar Cipher": caesarCipher,
   "Encryption II: Vigenère Cipher": vigenereCipher,
+  "Square Root": nearestSquareRoot,
+  "Total Number of Primes": totalPrimes,
+  "Largest Rectangle in a Matrix": largestRectangle,
 };
 
 /** Solve one contract, or `undefined` when the type is unknown.
  *
  * `undefined` rather than a guess is the whole contract: a wrong answer burns
- * one of three tries and the third destroys the contract, so not attempting is
- * strictly better than attempting badly. */
+ * a try and some types self-destruct after the first miss, so not attempting
+ * is strictly better than attempting badly. */
 export function solve(type: string, data: unknown): unknown {
+  if (!Object.hasOwn(SOLVERS, type)) return undefined;
   const solver = SOLVERS[type];
-  if (!solver) return undefined;
   try {
-    return solver(data);
+    return solver!(data);
   } catch {
     // A solver that throws on malformed data must not take the driver down,
     // and must not submit a partial answer either.
@@ -264,36 +593,5 @@ export function solve(type: string, data: unknown): unknown {
 }
 
 export function canSolve(type: string): boolean {
-  return type in SOLVERS;
-}
-
-// --- infiltration -----------------------------------------------------------
-
-export interface InfiltrationTarget {
-  location: string;
-  city: string;
-  difficulty: number;
-  maxClearanceLevel: number;
-  repReward: number;
-  moneyReward: number;
-}
-
-/** Rank infiltration targets by reward per REAL-TIME MINUTE.
- *
- * Difficulty and clearance level both drive how long a run takes and how
- * likely it is to fail, so raw reward is the wrong ranking — a lucrative
- * target that cannot be cleared is worth nothing. */
-export function rankInfiltrations(
-  targets: readonly InfiltrationTarget[],
-  /** How much the run values reputation against money. */
-  repWeight = 1,
-): (InfiltrationTarget & { valuePerMinute: number })[] {
-  return targets
-    .map((target) => {
-      // Each clearance level is one minigame; difficulty scales failure odds.
-      const minutes = Math.max(0.5, (target.maxClearanceLevel * (1 + target.difficulty)) / 6);
-      const value = target.moneyReward + target.repReward * repWeight;
-      return { ...target, valuePerMinute: value / minutes };
-    })
-    .sort((a, b) => b.valuePerMinute - a.valuePerMinute || (a.location < b.location ? -1 : 1));
+  return Object.hasOwn(SOLVERS, type);
 }

@@ -3,6 +3,7 @@ import {
   SKILL_NAMES,
   type SaveBitNodeOptions,
   type SaveFactionStanding,
+  type SaveHacknetNode,
   type SavePlayer,
   type SaveServer,
   type SaveSnapshot,
@@ -166,6 +167,12 @@ function decodeServer(hostname: string, raw: unknown): SaveServer {
     ? (bag["serversOnNetwork"] as unknown[]).filter((h): h is string => typeof h === "string")
     : [];
   server.ramUsed = ramUsedFrom(bag["runningScripts"]);
+  if (server.kind === "HacknetServer") {
+    server.hacknetLevel = num(bag["level"], 1);
+    server.hacknetCache = num(bag["cache"], 1);
+    server.hacknetTotalProduction = num(bag["totalHashesGenerated"], 0);
+    server.hacknetOnlineTimeSeconds = num(bag["onlineTimeSeconds"], 0);
+  }
   return server;
 }
 
@@ -193,6 +200,21 @@ function decodePlayer(raw: unknown): SavePlayer {
   const bag = asBag(raw);
   const hp = asBag(bag["hp"]);
   const sleeves = bag["sleeves"];
+  const hashManager = asBag(bag["hashManager"]);
+  const hacknetNodes = Array.isArray(bag["hacknetNodes"])
+    ? (bag["hacknetNodes"] as unknown[]).flatMap((rawNode): (string | SaveHacknetNode)[] => {
+        if (typeof rawNode === "string") return [rawNode];
+        const node = asBag(rawNode);
+        if (Object.keys(node).length === 0) return [];
+        return [{
+          level: num(node["level"], 1),
+          ram: num(node["ram"], 1),
+          cores: num(node["cores"], 1),
+          totalProduction: num(node["totalMoneyGenerated"], 0),
+          onlineTimeSeconds: num(node["onlineTimeSeconds"], 0),
+        }];
+      })
+    : [];
   return {
     // loadPlayer parses money through parseFloat, so a string is legal here.
     money: typeof bag["money"] === "string" ? Number.parseFloat(bag["money"]) : num(bag["money"], 0),
@@ -225,6 +247,9 @@ function decodePlayer(raw: unknown): SavePlayer {
     sleeveCount: Array.isArray(sleeves) ? sleeves.length : 0,
     playtimeSinceLastBitnode: num(bag["playtimeSinceLastBitnode"], 0),
     totalPlaytime: num(bag["totalPlaytime"], 0),
+    hacknetNodes,
+    hashes: num(hashManager["hashes"], 0),
+    hashUpgrades: numberMap(hashManager["upgrades"], true),
   };
 }
 

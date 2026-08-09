@@ -104,11 +104,16 @@ export const overviewTab: Tab = {
       name: e.kind === "debug" ? `debug: ${e.msg}` : e.name,
     }));
     const isFailure = (name: string): boolean =>
-      name === "action.failed" || name === "action.blocked" || name.startsWith("probe.");
+      name === "action.failed"
+      || name === "action.blocked"
+      || name.startsWith("probe.")
+      || name.startsWith("contract.");
+    const isDecision = (name: string): boolean => name.endsWith(".decision") || name.endsWith(".result");
     const feed = named
       .filter(({ record, name }) => {
         if (mode === "events" && record.kind !== "event") return false;
         if (mode === "failures" && !isFailure(name)) return false;
+        if (mode === "decisions" && !isDecision(name)) return false;
         if (needle) {
           const data = record.data ? JSON.stringify(record.data).toLowerCase() : "";
           if (!name.toLowerCase().includes(needle) && !data.includes(needle)) return false;
@@ -124,6 +129,7 @@ export const overviewTab: Tab = {
         [
           { value: "all", label: "all" },
           { value: "events", label: "events" },
+          { value: "decisions", label: "decisions", badge: String(named.filter((e) => isDecision(e.name)).length) },
           { value: "failures", label: "problems", badge: String(named.filter((e) => isFailure(e.name)).length) },
         ],
         "all",

@@ -15,6 +15,7 @@ export function initialContext(): GoalContext {
     totals: { moneyEarned: 0, hacks: 0 },
     factions: new Map(),
     augmentations: new Set(),
+    installs: 0,
   };
 }
 
@@ -32,6 +33,11 @@ function applyFactions(ctx: GoalContext, data: FactionsData): void {
     ctx.factions.set(name, fresh);
     return fresh;
   };
+  // Membership lasts only until the next augmentation install. A factions
+  // topic is an authoritative snapshot, so clear the previous cycle before
+  // applying the currently joined set. Reputation/favor remain useful history
+  // for factions that are not joined in this cycle.
+  for (const faction of ctx.factions.values()) faction.joined = false;
   for (const name of data.joined ?? []) upsert(name).joined = true;
   // Accumulated, never replaced: the probe caps its list, and an augmentation
   // already seen does not stop being owned because a later digest was
@@ -97,6 +103,7 @@ export function reduceRecord(ctx: GoalContext, record: LogRecord): GoalContext {
   if (record.kind === "event" && record.name === "hack.done") {
     return reduceHackDone(ctx, record);
   }
+  if (record.kind === "event" && record.name === "aug.installed") ctx.installs++;
   return ctx;
 }
 

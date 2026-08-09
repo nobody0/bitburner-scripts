@@ -1,15 +1,35 @@
-import { card, note, table, tiles } from "../lib/dom.ts";
-import { esc, fmtMoney, fmtNum } from "../lib/format.ts";
+import type { ContractFailure } from "../../../shared/telemetry/topics/side.ts";
+import { card, collapsible, definitions, note, table, tiles } from "../lib/dom.ts";
+import { esc, fmtNum, fmtTime } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
-/** Side income: coding contracts and infiltration. The casino belongs to this
- * feature conceptually but exposes no ns API, so it can only be noted.
- *
- * Contracts arrive pre-partitioned (see CONTRACT_LIMIT): a window onto the
- * ones we can solve, and a per-TYPE count of the ones we cannot. That second
- * table is the actionable one — every row is a solver worth writing, and the
- * count is how many contracts are quietly expiring without it. */
+/** Coding-contract telemetry is a digest: totals and the front work batch are
+ * state, while a full rejected input/answer is logged once as
+ * `contract.quarantined`. */
+
+function latestReplay(state: ProjectedState): ContractFailure | undefined {
+  if (state.contractReplay) return state.contractReplay;
+  for (let index = state.events.length - 1; index >= 0; index--) {
+    const record = state.events[index]!;
+    if (record.kind !== "event" || record.name !== "contract.quarantined") continue;
+    const value = record.data as Partial<ContractFailure> | undefined;
+    if (
+      typeof value?.host === "string"
+      && typeof value.file === "string"
+      && typeof value.type === "string"
+      && typeof value.data === "string"
+      && typeof value.answer === "string"
+      && typeof value.reason === "string"
+      && typeof value.at === "number"
+    ) return value as ContractFailure;
+  }
+  return undefined;
+}
+
+function age(reference: number, at: number): string {
+  return `${fmtTime(Math.max(0, reference - at))} ago`;
+}
 
 export const sideTab: Tab = {
   id: "side",
@@ -17,74 +37,112 @@ export const sideTab: Tab = {
     const s = state.topics.side;
     if (!s) return note("waiting for the side probe");
 
-    const solvableTotal = s.solvableTotal ?? s.contracts.length;
-    const unsolvableTotal = s.unsolvableTotal ?? 0;
+    const candidates = s.solvableTotal ?? s.contracts.length;
+    const quarantined = s.quarantinedTotal ?? s.failures?.length ?? 0;
+    const typeTotal = s.contractTypeTotal;
+    const supportedTypes = s.supportedTypeTotal;
+    const coverage = typeTotal !== undefined && supportedTypes !== undefined
+      ? `${supportedTypes}/${typeTotal}`
+      : s.registryComplete ? "complete" : "–";
     const summary = tiles([
-      { label: "contracts on the network", value: fmtNum(s.contractTotal ?? s.contracts.length) },
-      { label: "we can solve", value: fmtNum(solvableTotal) },
+      { label: "contracts on network", value: fmtNum(s.contractTotal ?? s.contracts.length) },
       {
-        label: "no solver",
-        value: fmtNum(unsolvableTotal),
-        sub: `${Object.keys(s.unsolvableByType ?? {}).length} type(s)`,
+        label: "candidate queue",
+        value: fmtNum(candidates),
+        sub: `${s.contracts.length} visible in telemetry`,
       },
       {
-        label: "infiltration targets",
-        value: s.infiltrationTotal !== undefined ? String(s.infiltrationTotal) : "–",
+        label: "quarantined",
+        value: fmtNum(quarantined),
+        sub: quarantined ? "automatic retry disabled" : "no solver failures",
+      },
+      {
+        label: "solver coverage",
+        value: coverage,
+        sub: s.registryComplete === false ? "registry has gaps" : "v3 registry complete",
       },
     ]);
 
     const queue =
       table(
-        ["host", "file", "type", "tries left"],
-        s.contracts.map((c) => [
-          esc(c.host),
-          esc(c.file),
-          esc(c.type),
-          `<span class="${c.triesRemaining <= 2 ? "bad" : ""}">${c.triesRemaining}</span>`,
-        ]),
-        "no solvable contracts on the network",
-      ) +
-      (solvableTotal > s.contracts.length
-        ? note(`showing the ${s.contracts.length} most at risk of ${solvableTotal} — one is attempted per minute`)
-        : "");
+        ["host", "file"],
+        s.contracts.map((contract) => [esc(contract.host), esc(contract.file)]),
+        { empty: "no contract candidates waiting", left: [1] },
+      )
+      + (candidates > s.contracts.length
+        ? note(`showing the front ${s.contracts.length} of ${fmtNum(candidates)} candidates; one 20-contract batch is published`)
+        : note("the visible batch is the complete candidate queue"));
 
-    const missing = Object.entries(s.unsolvableByType ?? {}).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
+    const last = s.lastResult;
+    const automation = last
+      ? definitions([
+          ["status", `<span class="${last.ok ? "good" : "bad"}">${last.ok ? "completed" : "blocked"}</span>`],
+          ["last batch", esc(last.detail)],
+          ["when", esc(age(state.lastT || last.at, last.at))],
+          ["last network scan", s.contractScannedAt === undefined ? "–" : esc(age(state.lastT || s.contractScannedAt, s.contractScannedAt))],
+        ])
+      : definitions([
+          ["status", `<span class="muted">waiting for the first contract batch</span>`],
+          ["last network scan", s.contractScannedAt === undefined ? "–" : esc(age(state.lastT || s.contractScannedAt, s.contractScannedAt))],
+        ]);
+
+    const missing = Object.entries(s.unsolvableByType ?? {})
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
     const gaps = missing.length
       ? table(
-          ["contract type", "waiting", "share"],
-          missing.map(([type, count]) => [
-            esc(type),
-            String(count),
-            unsolvableTotal ? `${((count / unsolvableTotal) * 100).toFixed(0)}%` : "–",
-          ]),
-        ) + note("each row is one missing solver in shared/strategy/side/contracts.ts")
-      : note("every contract type on the network has a solver");
+          ["unsupported contract type", "observed files"],
+          missing.map(([type, count]) => [esc(type), String(count)]),
+          { wrap: [0] },
+        ) + note("zero means the game exposes the type but no matching file has reached inspection")
+      : note("every contract type reported by the running game has a solver");
 
-    const infiltration = s.infiltration?.length
+    const failures = s.failures?.length
       ? table(
-          ["location", "city", "difficulty", "levels", "cash", "rep", "$/difficulty"],
-          s.infiltration.map((i) => [
-            esc(i.location),
-            esc(i.city),
-            fmtNum(i.difficulty, 3),
-            String(i.maxClearanceLevel),
-            fmtMoney(i.moneyReward),
-            fmtNum(i.repReward, 0),
-            fmtMoney(i.moneyPerDifficulty),
+          ["host", "file", "type", "reason", "tries"],
+          s.failures.map((failure) => [
+            esc(failure.host),
+            esc(failure.file),
+            esc(failure.type),
+            esc(failure.reason),
+            failure.triesBefore === undefined ? "–" : String(failure.triesBefore),
           ]),
+          { wrap: [2, 3], left: [1, 2, 3] },
+        ) + note(`showing ${s.failures.length} of ${quarantined}; quarantined files are never retried automatically`)
+      : note("no contract has been quarantined");
+
+    const replay = latestReplay(state);
+    const replayCard = replay
+      ? definitions([
+          ["contract", `${esc(replay.host)} / ${esc(replay.file)}`],
+          ["type", esc(replay.type)],
+          ["reason", `<span class="bad">${esc(replay.reason)}</span>`],
+          ["tries before", replay.triesBefore === undefined ? "–" : String(replay.triesBefore)],
+          ["when", esc(age(state.lastT || replay.at, replay.at))],
+        ])
+        + collapsible(
+          `input · ${replay.data.length} chars`,
+          `<div class="replay-value">${esc(replay.data)}</div>`,
+          true,
         )
-      : note("infiltration ranking needs 15 GB of dodge budget — it is probed every 10 minutes when affordable");
+        + collapsible(
+          `submitted answer · ${replay.answer.length} chars`,
+          `<div class="replay-value">${esc(replay.answer)}</div>`,
+        )
+      : note(s.failures?.length
+          ? "failure replay is outside the retained event tail; the compact summary remains above"
+          : "a rejected answer will log its input and submitted answer here once");
 
     return (
-      `<div class="col wide">` +
-      card("Side income", summary) +
-      card("Attempt queue", queue) +
-      card("Infiltration", infiltration) +
-      `</div>` +
-      `<div class="col">` +
-      card("Missing solvers", gaps) +
-      card("Casino", note("no ns API exists for the casino — it is DOM-driven only, so nothing can be reported here")) +
-      `</div>`
+      `<div class="col wide">`
+      + card("Coding contracts", summary)
+      + card("Contract candidates", queue)
+      + `</div>`
+      + `<div class="col">`
+      + card("Automation", automation)
+      + card("Solver gaps", gaps)
+      + card("Quarantine", failures)
+      + card("Latest failure replay", replayCard)
+      + `</div>`
     );
   },
 };

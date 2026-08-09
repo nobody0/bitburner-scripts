@@ -25,6 +25,33 @@ interface VendorFile {
   patches?: Patch[];
 }
 
+const CONTRACT_IMPLEMENTATIONS = [
+  "AlgorithmicStockTrader",
+  "ArrayJumpingGame",
+  "Compression",
+  "Encryption",
+  "FindAllValidMathExpressions",
+  "FindLargestPrimeFactor",
+  "GenerateIPAddresses",
+  "HammingCode",
+  "LargestRectangle",
+  "MergeOverlappingIntervals",
+  "MinimumPathSumInATriangle",
+  "Proper2ColoringOfAGraph",
+  "SanitizeParenthesesInExpression",
+  "ShortestPathInAGrid",
+  "SpiralizeMatrix",
+  "SquareRoot",
+  "SubarrayWithMaximumSum",
+  "TotalPrimesInRange",
+  "TotalWaysToSum",
+  "UniquePathsInAGrid",
+] as const;
+
+const CONTRACTS_WITH_ENUM_ALIAS: ReadonlySet<string> = new Set(
+  CONTRACT_IMPLEMENTATIONS.filter((name) => name !== "Encryption" && name !== "SubarrayWithMaximumSum"),
+);
+
 const MANIFEST: VendorFile[] = [
   {
     path: "src/Hacking.ts",
@@ -61,7 +88,155 @@ const MANIFEST: VendorFile[] = [
     ],
   },
   { path: "src/Constants.ts" },
+  { path: "src/Casino/RNG.ts" },
+  { path: "src/Go/Enums.ts" },
+  {
+    path: "src/Go/Types.ts",
+    patches: [{ find: `from "@enums";`, replace: `from "./Enums";` }],
+  },
+  {
+    path: "src/Go/Constants.ts",
+    patches: [{ find: `from "@enums";`, replace: `from "./Enums";` }],
+  },
+  {
+    path: "src/Go/boardAnalysis/boardAnalysis.ts",
+    patches: [
+      { find: `from "@enums";`, replace: `from "../Enums";` },
+      { find: `from "../Go";`, replace: `from "../OracleStubs";` },
+      {
+        find: `board.highlightedPoints = getEmptyHighlightedPoints(Go.currentGame.board.length);`,
+        replace: `board.highlightedPoints = getEmptyHighlightedPoints(board.board.length);`,
+      },
+    ],
+  },
+  {
+    path: "src/Go/boardState/boardState.ts",
+    patches: [
+      {
+        find: `import { Board, BoardState, Move, Neighbor, PointState, SimpleBoard } from "../Types";`,
+        replace: `import type { Board, BoardState, Move, Neighbor, PointState, SimpleBoard } from "../Types";`,
+      },
+      { find: `from "@enums";`, replace: `from "../Enums";` },
+      { find: `from "../boardAnalysis/scoring";`, replace: `from "../OracleStubs";` },
+    ],
+  },
+  {
+    path: "src/Go/boardState/offlineNodes.ts",
+    patches: [
+      { find: `import { Player } from "@player";`, replace: `import { Player } from "../OracleStubs";` },
+      { find: `from "@enums";`, replace: `from "../Enums";` },
+    ],
+  },
+  {
+    path: "src/Go/boardAnalysis/controlledTerritory.ts",
+    patches: [{ find: `from "@enums";`, replace: `from "../Enums";` }],
+  },
+  {
+    path: "src/Go/boardAnalysis/patternMatching.ts",
+    patches: [
+      { find: `from "@enums";`, replace: `from "../Enums";` },
+      { find: `from "../../utils/Utility";`, replace: `from "../OracleStubs";` },
+    ],
+  },
+  {
+    path: "src/Go/boardAnalysis/goAI.ts",
+    patches: [
+      { find: `import { Player } from "@player";`, replace: `import { Player } from "../OracleStubs";` },
+      {
+        find: `import { AugmentationName, GoColor, GoOpponent, GoPlayType } from "@enums";`,
+        replace: `import { GoColor, GoOpponent, GoPlayType } from "../Enums";\nimport { AugmentationName } from "../OracleStubs";`,
+      },
+      { find: `from "../Go";`, replace: `from "../OracleStubs";` },
+      { find: `from "../../utils/helpers/exceptionAlert";`, replace: `from "../OracleStubs";` },
+      { find: `from "../../utils/Utility";`, replace: `from "../OracleStubs";` },
+    ],
+  },
   { path: "src/Server/data/Constants.ts" },
+  // --- the stock market ------------------------------------------------------
+  //
+  // The market is the one subsystem whose MECHANICS (not just its formulas) we
+  // need verbatim: the second-order forecast is what hack/grow manipulate, and
+  // a transcription of `cycleForecast` that got the direction of
+  // `getForecastIncreaseChance` backwards would make the whole strategy look
+  // profitable in the sim and lose money in the game. So the Stock class, the
+  // per-symbol metadata and the transaction helpers all vendor, and only the
+  // three things that reach for live singletons are injected (see MarketAdapter).
+  {
+    path: "src/StockMarket/Enums.ts",
+    patches: [{ find: `from "@enums";`, replace: `from "../Locations/Enums";` }],
+  },
+  { path: "src/StockMarket/data/Constants.ts" },
+  {
+    path: "src/StockMarket/Stock.ts",
+    patches: [
+      // ../types is 200 lines of unrelated numeric brands for one interface.
+      {
+        find: `import { IMinMaxRange } from "../types";`,
+        replace: [
+          `export interface IMinMaxRange {`,
+          `  /** Value by which the bounds are to be divided for the final range */`,
+          `  divisor?: number;`,
+          `  /** The maximum bound of the range. */`,
+          `  max: number;`,
+          `  /** The minimum bound of the range. */`,
+          `  min: number;`,
+          `}`,
+        ].join("\n"),
+      },
+      // Save serialization only; the simulator never round-trips a Stock.
+      {
+        find: `import { Generic_fromJSON, Generic_toJSON, IReviverValue, constructorsForReviver } from "../utils/JSONReviver";\n`,
+        replace: "",
+      },
+      {
+        find: [
+          `  /** Serialize the Stock to a JSON save state. */`,
+          `  toJSON(): IReviverValue {`,
+          `    return Generic_toJSON("Stock", this);`,
+          `  }`,
+          ``,
+          `  /** Initializes a Stock from a JSON save state */`,
+          `  static fromJSON(value: IReviverValue): Stock {`,
+          `    return Generic_fromJSON(Stock, value.data);`,
+          `  }`,
+          `}`,
+          ``,
+          `constructorsForReviver.Stock = Stock;`,
+        ].join("\n"),
+        replace: `}`,
+      },
+      // Seeded randomness: a market that rolls the global Math.random cannot be
+      // A/B tested, which is the entire point of running it in the simulator.
+      {
+        find: `import { getRandomIntInclusive } from "../utils/helpers/getRandomIntInclusive";`,
+        replace: `import { getRandomIntInclusive, stockRandom } from "./MarketAdapter";`,
+      },
+      { find: `    if (Math.random() < increaseChance) {`, replace: `    if (stockRandom() < increaseChance) {` },
+      { find: `    if (Math.random() < 0.5) {`, replace: `    if (stockRandom() < 0.5) {` },
+    ],
+  },
+  {
+    path: "src/StockMarket/StockMarketHelpers.ts",
+    patches: [{ find: `import { PositionType } from "@enums";`, replace: `import { PositionType } from "./Enums";` }],
+  },
+  // The BitNode-multiplied unlock prices. Import-free apart from the vendored
+  // multipliers, and the reason `shared/strategy/stock/market.ts#unlockCosts`
+  // has a parity test: BN9 charges 5x for the data and 4x for the API, which is
+  // the difference between "buy the forecast" and "never afford it".
+  { path: "src/StockMarket/StockMarketCosts.ts" },
+  {
+    path: "src/StockMarket/data/InitStockMetadata.ts",
+    patches: [
+      {
+        find: `import { LocationName, StockSymbol } from "@enums";`,
+        replace: [
+          `import { LocationName } from "../../Locations/Enums";`,
+          `import { StockSymbol } from "../Enums";`,
+        ].join("\n"),
+      },
+      { find: `import { IConstructorParams } from "../Stock";`, replace: `import type { IConstructorParams } from "../Stock";` },
+    ],
+  },
   // Enums and data constants: import-free upstream, so they vendor verbatim.
   // These are also the SCOPE for extractDataTable below — the faction table is
   // keyed by FactionName and references the others, so having one source of
@@ -83,6 +258,19 @@ const MANIFEST: VendorFile[] = [
   { path: "src/utils/helpers/clampNumber.ts" },
   { path: "src/utils/helpers/isValidNumber.ts" },
   { path: "src/utils/helpers/isPowerOfTwo.ts" },
+  { path: "src/utils/helpers/getRandomIntInclusive.ts" },
+  { path: "src/utils/helpers/randomBigIntExclusive.ts" },
+  { path: "src/CodingContract/Enums.ts" },
+  {
+    path: "src/CodingContract/ContractTypes.ts",
+    patches: [{ find: `from "@enums";`, replace: `from "./Enums";` }],
+  },
+  ...CONTRACT_IMPLEMENTATIONS.map((name): VendorFile => ({
+    path: `src/CodingContract/contracts/${name}.ts`,
+    ...(CONTRACTS_WITH_ENUM_ALIAS.has(name)
+      ? { patches: [{ find: `from "@enums";`, replace: `from "../Enums";` }] }
+      : {}),
+  })),
 ];
 
 function gitShow(objectPath: string): string {
@@ -113,6 +301,14 @@ for (const file of MANIFEST) {
   // @nsdefs exports only types; make that explicit so the import erases at
   // runtime (Bun would otherwise try to load the .d.ts as a module).
   content = content.replace(/^import \{([^}]*)\} from "@nsdefs";$/gm, `import type {$1} from "@nsdefs";`);
+  if (file.path.startsWith("src/CodingContract/contracts/")) {
+    // Upstream's compiler permits value-style imports for this type. Our
+    // verbatimModuleSyntax build deliberately does not.
+    content = content.replace(
+      /^import \{([^}]*)\} from "\.\.\/ContractTypes";$/gm,
+      (line, members: string) => line.replace(members, members.replace(/(?<!type )\bCodingContractTypes\b/, "type CodingContractTypes")),
+    );
+  }
 
   const outPath = path.join(OUT_DIR, file.path);
   mkdirSync(path.dirname(outPath), { recursive: true });
@@ -121,6 +317,146 @@ for (const file of MANIFEST) {
   written.push({ path: file.path, sha256: createHash("sha256").update(header + content).digest("hex") });
   console.log(`vendored ${file.path}`);
 }
+
+// Minimal adapters for branches outside the board-rules oracle. They keep the
+// source importable in tests without dragging Player, React, AI timing, or the
+// live singleton into the simulator. Parity tests never call these branches.
+const goOracleStubs = `// Test-only portability adapters generated by tools/vendor.ts — DO NOT EDIT
+import type { Board, BoardState, Move, PointState } from "./Types";
+
+export const Go = { currentGame: undefined as unknown as BoardState, storedCycles: 0 };
+export const GoEvents = { emit(): void {} };
+export const Player = {
+  totalPlaytime: 1,
+  hasAugmentation: (_name: unknown, _includeQueued?: boolean): boolean => false,
+  activeSourceFileLvl: (_node: number): number => 0,
+};
+export const AugmentationName = { TheRedPill: "The Red Pill" } as const;
+export const sleepLog: number[] = [];
+export const sleep = async (milliseconds: number): Promise<void> => { sleepLog.push(milliseconds); };
+export function exceptionAlert(error: unknown, _caught?: boolean): never { throw error; }
+export const getEmptyHighlightedPoints = (size = 7): null[][] =>
+  Array.from({ length: size }, () => Array.from({ length: size }, () => null));
+export const getExpansionMoveArray = (_board: Board, _spaces: PointState[]): Move[] => [];
+export function endGoGame(state: BoardState): void { state.previousPlayer = null; }
+export function addObstacles(_state: BoardState): void {}
+export function resetCoordinates(board: Board): Board { return board; }
+export function rotate90Degrees(board: Board): Board { return board; }
+`;
+const goOracleStubPath = "src/Go/OracleStubs.ts";
+const goOracleStubOut = path.join(OUT_DIR, goOracleStubPath);
+mkdirSync(path.dirname(goOracleStubOut), { recursive: true });
+writeFileSync(goOracleStubOut, goOracleStubs, "utf8");
+written.push({ path: goOracleStubPath, sha256: createHash("sha256").update(goOracleStubs).digest("hex") });
+
+// Contract validators call this only for impossible internal states. Keep
+// those failures loud without pulling React, Player, or the live UI into sim.
+const contractExceptionStub = `// Test-only portability adapter generated by tools/vendor.ts — DO NOT EDIT
+export function exceptionAlert(error: unknown): never {
+  throw error instanceof Error ? error : new Error(String(error));
+}
+`;
+const contractExceptionPath = "src/utils/helpers/exceptionAlert.ts";
+const contractExceptionOut = path.join(OUT_DIR, contractExceptionPath);
+mkdirSync(path.dirname(contractExceptionOut), { recursive: true });
+writeFileSync(contractExceptionOut, contractExceptionStub, "utf8");
+written.push({
+  path: contractExceptionPath,
+  sha256: createHash("sha256").update(contractExceptionStub).digest("hex"),
+});
+
+/** The market's three live-singleton dependencies, made explicit.
+ *
+ * Upstream `StockMarket.ts` owns a module-level singleton, reads the wall
+ * clock, and rolls the global Math.random. All three are hostile to a
+ * simulator: one market per process, no virtual time, no reproducible seeds.
+ * They are the ONLY substitutions — every price, forecast and cost still comes
+ * from the vendored source.
+ *
+ * `getRandomIntInclusive` is re-implemented over the injected stream on purpose:
+ * upstream's version calls Math.random, and it is what rolls a Stock's price
+ * cap, spread and volatility in the constructor. Left global, two runs with the
+ * same seed would face different markets. */
+const marketAdapter = `// Portability adapters generated by tools/vendor.ts — DO NOT EDIT
+import type { Stock } from "./Stock";
+
+export interface IOrderBook {
+  [key: string]: unknown[];
+}
+
+export type IStockMarket = Record<string, Stock> & {
+  lastUpdate: number;
+  Orders: IOrderBook;
+  storedCycles: number;
+  ticksUntilCycle: number;
+};
+
+/** Upstream: \`export let StockMarket\` in StockMarket.ts. Mutated in place by
+ *  initStockMarket, never reassigned by anything we vendor. */
+export const StockMarket: IStockMarket = {
+  lastUpdate: 0,
+  Orders: {},
+  storedCycles: 0,
+  ticksUntilCycle: 0,
+} as IStockMarket;
+
+export const SymbolToStockMap: Record<string, Stock> = {};
+
+export const StockMarketPromise: { promise: Promise<number> | null; resolve: ((value: number) => void) | null } = {
+  promise: null,
+  resolve: null,
+};
+
+/** Limit/stop orders (BN8.3) are not modelled: nothing in shared/strategy
+ *  places one, so a no-op is the truth rather than an approximation. Wire this
+ *  to a real order book the day the solver learns to place orders. */
+export function processOrders(
+  _stock: Stock,
+  _orderType: unknown,
+  _posType: unknown,
+  _refs: { stockMarket: IStockMarket; symbolToStockMap: Record<string, Stock> },
+): void {}
+
+let random: () => number = Math.random;
+let now: () => number = () => Date.now();
+
+export function setMarketContext(ctx: { random?: () => number; now?: () => number }): void {
+  if (ctx.random) random = ctx.random;
+  if (ctx.now) now = ctx.now;
+}
+
+export function stockRandom(): number {
+  return random();
+}
+
+export function stockNow(): number {
+  return now();
+}
+
+/** Upstream src/utils/helpers/getRandomIntInclusive.ts, over the seeded stream. */
+export function getRandomIntInclusive(min: number, max: number): number {
+  if (!Number.isInteger(min)) throw new Error(\`Min is not an integer. Min: \${min}.\`);
+  if (!Number.isInteger(max)) throw new Error(\`Max is not an integer. Max: \${max}.\`);
+  if (min > max) throw new Error(\`Min is greater than max. Min: \${min}. Max: \${max}.\`);
+  return Math.floor(random() * (max - min + 1) + min);
+}
+
+/** BN15's darknet can raise a symbol's volatility (src/DarkNet/effects/effects.ts),
+ *  decaying by 0.4x at every market cycle. \`dnet\` has no simulation model, so the
+ *  neutral 1x is the truth for every run we can currently produce — NOT an
+ *  approximation of a modelled effect. Wire these to the darknet system the day
+ *  it lands, and the price engine picks it up with no further change. */
+export function getDarknetVolatilityMult(_symbol: string): number {
+  return 1;
+}
+
+export function scaleDarknetVolatilityIncreases(_scalar: number): void {}
+`;
+const marketAdapterPath = "src/StockMarket/MarketAdapter.ts";
+const marketAdapterOut = path.join(OUT_DIR, marketAdapterPath);
+mkdirSync(path.dirname(marketAdapterOut), { recursive: true });
+writeFileSync(marketAdapterOut, marketAdapter, "utf8");
+written.push({ path: marketAdapterPath, sha256: createHash("sha256").update(marketAdapter).digest("hex") });
 
 /** Is this line a complete declaration on its own? A one-line
  * `export const MaxFavor = 35331;` has no column-zero closer to look for. */
@@ -215,6 +551,46 @@ extractFunction(
   ],
   "src/Server/GrowthCycles.ts",
   [{ find: `person: IPerson = Player,`, replace: `person: IPerson,` }],
+);
+
+extractFunction(
+  "src/Go/boardAnalysis/goAI.ts",
+  "getKomi",
+  [
+    `import type { BoardState } from "../Types";`,
+    `import { opponentDetails } from "../Constants";`,
+  ],
+  "src/Go/boardAnalysis/KomiOracle.ts",
+);
+
+// Exact score/territory oracle. Runtime strategy does not import this: tests
+// compare the handcrafted engine with these verbatim functions from the pin.
+extractSymbols(
+  "src/Go/boardAnalysis/scoring.ts",
+  ["getScore", "getColoredPieceCount", "getTerritoryScores", "checkTerritoryOwnership"],
+  [
+    `import type { Board, BoardState, PointState } from "../Types";`,
+    `import { GoColor } from "../Enums";`,
+    `import { getKomi } from "./KomiOracle";`,
+    `import { getAllChains, getPlayerNeighbors } from "./boardAnalysis";`,
+    `import { isNotNullish } from "../boardState/boardState";`,
+  ],
+  "src/Go/boardAnalysis/ScoringOracle.ts",
+);
+
+// Exact reward curve and streak/difficulty rules. Production keeps a
+// handcrafted parameterized version; tests compare it with this v3.0.1 slice.
+extractSymbols(
+  "src/Go/effects/effect.ts",
+  ["CalculateEffect", "getMaxRep", "getWinstreakMultiplier", "getDifficultyMultiplier", "getEffectPowerForFaction"],
+  [
+    `import { GoOpponent } from "../Enums";`,
+    `import { opponentDetails } from "../Constants";`,
+    `export const EffectOracleState = { sourceFile14Level: 0, goPower: 1 };`,
+    `const Player = { activeSourceFileLvl: (node: number): number => node === 14 ? EffectOracleState.sourceFile14Level : 0 };`,
+    `const currentNodeMults = { get GoPower(): number { return EffectOracleState.goPower; } };`,
+  ],
+  "src/Go/effects/EffectOracle.ts",
 );
 
 /** One slice of source feeding a data table. */
@@ -399,6 +775,72 @@ extractSymbols(
   [{ find: `Player.activeSourceFileLvl(15)`, replace: `sf15Level` }],
 );
 
+// The market's tick loop. StockMarket.ts as a whole imports the netscript
+// helpers and the React dialog box, but these five declarations are the entire
+// price/forecast engine: the 6 s tick, the shared volatility roll `v`, the
+// 75-tick cycle that flips 45% of symbols, and the world generator that rolls
+// each symbol's cap, spread and volatility.
+extractSymbols(
+  "src/StockMarket/StockMarket.ts",
+  ["initStockMarket", "initSymbolToStockMap", "stockMarketCycle", "cyclesPerStockUpdate", "processStockPrices"],
+  [
+    `import { CONSTANTS } from "../Constants";`,
+    `import { StockMarketConstants } from "./data/Constants";`,
+    `import { InitStockMetadata } from "./data/InitStockMetadata";`,
+    `import { OrderType, PositionType, StockSymbol } from "./Enums";`,
+    `import { Stock } from "./Stock";`,
+    `import {`,
+    `  getDarknetVolatilityMult,`,
+    `  getRandomIntInclusive,`,
+    `  processOrders,`,
+    `  scaleDarknetVolatilityIncreases,`,
+    `  StockMarket,`,
+    `  StockMarketPromise,`,
+    `  stockNow,`,
+    `  stockRandom,`,
+    `  SymbolToStockMap,`,
+    `  type IOrderBook,`,
+    `} from "./MarketAdapter";`,
+  ],
+  "src/StockMarket/StockPrices.ts",
+  [
+    // The injected reads. Each `find` carries enough context to be unique.
+    { find: `    const roll = Math.random();`, replace: `    const roll = stockRandom();` },
+    { find: `  const timeNow = new Date().getTime();`, replace: `  const timeNow = stockNow();` },
+    { find: `  StockMarket.lastUpdate = Date.now();`, replace: `  StockMarket.lastUpdate = stockNow();` },
+    { find: `  const v = Math.random();`, replace: `  const v = stockRandom();` },
+    { find: `    const c = Math.random();`, replace: `    const c = stockRandom();` },
+  ],
+);
+
+// Hack/grow price manipulation — four lines that decide whether BN8 is
+// playable, and the reason `hacking` needs a stock-aware target score. Upstream
+// takes a full Server; only two fields are read.
+extractSymbols(
+  "src/StockMarket/PlayerInfluencing.ts",
+  [
+    "forecastForecastChangeFromHack",
+    "forecastForecastChangeFromCompanyWork",
+    "influenceStockThroughServerHack",
+    "influenceStockThroughServerGrow",
+  ],
+  [
+    `import { Stock } from "./Stock";`,
+    `import { StockMarket, stockRandom } from "./MarketAdapter";`,
+    ``,
+    `/** The two fields upstream's \`Server\` argument is actually read for. */`,
+    `interface Server {`,
+    `  organizationName: string;`,
+    `  moneyMax: number;`,
+    `}`,
+  ],
+  "src/StockMarket/PlayerInfluence.ts",
+  [
+    { find: `  if (Math.random() < percTotalMoneyHacked) {`, replace: `  if (stockRandom() < percTotalMoneyHacked) {` },
+    { find: `  if (Math.random() < percTotalMoneyGrown) {`, replace: `  if (stockRandom() < percTotalMoneyGrown) {` },
+  ],
+);
+
 // --- data tables ------------------------------------------------------------
 //
 // The 33 factions, with BOTH the flattened toJSON() requirement arrays the ns
@@ -537,6 +979,73 @@ await extractDataTable({
 });
 
 const programEnums = await import(`../${OUT_DIR}/src/Programs/Enums.ts`);
+
+// Program creation requirements/times and darkweb prices come from two
+// upstream tables. The shared/game strategy stays handwritten; this extracted
+// copy is an independent simulator oracle that catches drift in either table.
+await extractDataTable({
+  sources: [
+    {
+      path: "src/Programs/Programs.ts",
+      from: "export const Programs: Record<CompletedProgramName, Program> = {",
+      to: "};",
+    },
+    {
+      path: "src/DarkWeb/DarkWebItems.ts",
+      from: "export const DarkWebItems = {",
+      to: "};",
+    },
+  ],
+  scope: {
+    CompletedProgramName: programEnums.CompletedProgramName,
+    CONSTANTS: gameConstants.CONSTANTS,
+    DarknetConstants: { DarkscapeNavigatorPrice: 0 },
+    Program: class { constructor(params: Record<string, unknown>) { Object.assign(this, params); } },
+    DarkWebItem: class {
+      program: string;
+      price: number;
+      description: string;
+      constructor(program: string, price: number, description: string) {
+        this.program = program;
+        this.price = price;
+        this.description = description;
+      }
+    },
+    requireHackingLevel: () => () => true,
+    bitFlumeRequirements: () => () => true,
+  },
+  shape: `Object.fromEntries(
+    ["BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe", "SQLInject.exe"].map((name) => {
+      const program = Programs[name];
+      const item = Object.values(DarkWebItems).find((entry) => entry.program === name);
+      return [name, {
+        name,
+        level: program.create.level,
+        baseTimeMs: program.create.time,
+        purchaseCost: item.price,
+      }];
+    })
+  )`,
+  verify(table) {
+    const programs = table as Record<string, { level: number; baseTimeMs: number; purchaseCost: number }>;
+    if (Object.keys(programs).length !== 5) throw new Error("expected five port-opening programs");
+    if (programs["BruteSSH.exe"]?.level !== 50 || programs["BruteSSH.exe"]?.baseTimeMs !== 600_000) {
+      throw new Error("BruteSSH.exe creation metadata drifted");
+    }
+    if (programs["SQLInject.exe"]?.purchaseCost !== 250_000_000) throw new Error("SQLInject.exe price drifted");
+  },
+  outRelPath: "src/Programs/ProgramTable.ts",
+  prologue: [
+    `export interface VendoredProgram {`,
+    `  name: string;`,
+    `  level: number;`,
+    `  baseTimeMs: number;`,
+    `  purchaseCost: number;`,
+    `}`,
+  ],
+  exportName: "PROGRAM_TABLE",
+  exportType: "Record<string, VendoredProgram>",
+});
 
 // Every augmentation's price, reputation requirement, prerequisites, offering
 // factions and multipliers.
@@ -712,6 +1221,7 @@ await extractDataTable({
     const range = (v) => v === undefined ? undefined : (typeof v === "number" ? [v, v] : [v.min, v.max]);
     return Object.fromEntries(serverMetadata.map((s) => [s.hostname, {
       host: s.hostname,
+      org: s.organizationName,
       money: range(s.moneyAvailable),
       skill: range(s.requiredHackingSkill),
       sec: range(s.hackDifficulty),
@@ -747,6 +1257,11 @@ await extractDataTable({
     ``,
     `export interface VendoredServer {`,
     `  host: string;`,
+    `  /** The company this server belongs to. Load-bearing, not decorative: it`,
+    `   *  is the key hack/grow stock influence looks the symbol up by`,
+    `   *  (StockMarket/PlayerInfluencing.ts), so it is what maps a farm target`,
+    `   *  onto a tradeable stock. */`,
+    `  org: string;`,
     `  /** BASE money. The live \`moneyMax\` is \`25 * roll * ServerMaxMoney\`. */`,
     `  money?: Range;`,
     `  skill?: Range;`,

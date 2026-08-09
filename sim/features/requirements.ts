@@ -50,9 +50,19 @@ export function satisfies(requirement: PlayerRequirement, ctx: SatisfyContext): 
     case "file":
       return ctx.files.has(requirement.file);
 
-    // Counts INSTALLED AND QUEUED, matching getOwnedAugmentations(true).
-    case "numAugmentations":
-      return player.augmentationCount(true) >= requirement.numAugmentations;
+    // Positive gates (including Daedalus) count INSTALLED augmentations only.
+    // The zero gate is the upstream exception: queued non-NeuroFlux augs also
+    // prevent joining the Church of the Machine God.
+    case "numAugmentations": {
+      if (requirement.numAugmentations > 0) {
+        return player.augmentationCount(false) >= requirement.numAugmentations;
+      }
+      const installed = [...player.augmentations.keys()].filter((name) => name !== "NeuroFlux Governor").length;
+      const queued = [...player.queuedAugmentations]
+        .filter(([name]) => name !== "NeuroFlux Governor")
+        .reduce((sum, [, levels]) => sum + levels, 0);
+      return installed + queued === 0;
+    }
 
     case "employedBy":
       return Object.hasOwn(player.jobs, requirement.company);

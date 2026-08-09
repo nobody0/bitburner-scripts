@@ -30,6 +30,45 @@ allowed to read both sides:
 |---|---|---|
 | `shared/formulas.ts` | ships inside the game bundle | `sim/tests/formulas-parity.test.ts` |
 | `shared/features/bitnode.ts` | pure shared data read by `ui/` | `sim/tests/bitnode-parity.test.ts` |
+| `shared/features/stocks.ts` | pure shared data read by `ui/` | `sim/tests/stock-parity.test.ts` |
+| `shared/strategy/stock/market.ts` | ships inside the game bundle | `sim/tests/stock-parity.test.ts` |
+| `shared/strategy/side/contracts.ts` | handcrafted solvers ship inside the game bundle | `sim/tests/contracts-parity.test.ts` |
+
+The stock pair is worth a note, because three of its constants are inline
+literals upstream rather than named exports — the 0.45 cycle-flip chance, the
++10 share-transaction recovery, and the ±45 second-order gap clamp. The parity
+suite pins those by matching the vendored SOURCE TEXT. That is uglier than
+importing a constant and it is the only way to notice upstream changing 0.45 to
+0.4, which would silently halve the value of every regime-aware decision.
+
+## The market, and the three things it cannot bring with it
+
+`sim/vendor/bitburner/src/StockMarket/` is the one subsystem vendored for its
+MECHANICS rather than just its formulas: the `Stock` class (forecast dynamics),
+the price tick, the per-symbol metadata, the transaction helpers, the
+BitNode-multiplied unlock prices and the hack/grow influence are all real
+v3.0.1 code. A simulator built from the same transcription as the strategy would
+only ever confirm the transcription.
+
+Three dependencies are replaced, all in the generated
+`StockMarket/MarketAdapter.ts`, and each is forced by a simulator requirement
+rather than by convenience:
+
+| Upstream | Replaced by | Because |
+|---|---|---|
+| the module-level `StockMarket` singleton | an adapter-owned object | one market per process otherwise |
+| `Math.random` | an injected seeded stream | reproducible A/B runs |
+| `new Date().getTime()` | the virtual clock | virtual time |
+
+`getRandomIntInclusive` is re-implemented over the injected stream for the same
+reason: upstream's version calls `Math.random`, and it is what rolls each
+symbol's price cap, spread and volatility in the constructor. Left global, two
+runs with the same seed would face different markets.
+
+Genuinely NOT modelled, and reported rather than approximated: limit/stop orders
+(`processOrders` is a no-op and `ns.stock.placeOrder` calls `unmodeled()`), and
+BN15's darknet volatility boost (a neutral 1x, because `dnet` has no model to
+drive it).
 
 After a vendor bump, a failing parity suite is the expected signal, not a
 regression: update the transcription to match the new game data. Without them a

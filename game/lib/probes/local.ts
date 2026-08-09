@@ -34,7 +34,7 @@ export function fleetFrom(servers: Record<string, Server>): FleetRollup {
     rootedHosts++;
     maxRam += server.maxRam;
     usedRam += server.ramUsed;
-    if (server.purchasedByPlayer && server.hostname !== "home") {
+    if (server.purchasedByPlayer && server.hostname !== "home" && !server.hostname.startsWith("hacknet-server-")) {
       purchasedCount++;
       purchasedRam += server.maxRam;
     }

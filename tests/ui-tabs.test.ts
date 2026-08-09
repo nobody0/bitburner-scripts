@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { FEATURES } from "../shared/features/registry.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
@@ -20,6 +20,24 @@ import { TABS, type TabId } from "../ui/app/tabs/index.ts";
 const root = resolve(import.meta.dir, "..");
 const runsDir = resolve(root, "runs");
 const ALL_TABS = Object.keys(TABS) as TabId[];
+const RUN_SAMPLE_BYTES = 2_000_000;
+
+/** Read a bounded tail without first allocating the whole historical JSONL.
+ * A pre-digest Side run can be tens of megabytes with individual huge lines. */
+function runSample(path: string): string[] {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size;
+    const start = Math.max(0, size - RUN_SAMPLE_BYTES);
+    const buffer = Buffer.alloc(size - start);
+    readSync(fd, buffer, 0, buffer.length, start);
+    const lines = buffer.toString("utf8").split("\n");
+    if (start > 0) lines.shift(); // partial first line
+    return lines.slice(-20_000);
+  } finally {
+    closeSync(fd);
+  }
+}
 
 function renderAll(state: ProjectedState): void {
   for (const id of ALL_TABS) {
@@ -39,9 +57,7 @@ describe("tab rendering", () => {
     if (files.length === 0) return; // runs/ is gitignored; skip on a clean checkout
     // Newest file, capped: some runs are tens of megabytes.
     const newest = files.sort().at(-1)!;
-    const records: LogRecord[] = readFileSync(resolve(runsDir, newest), "utf8")
-      .split("\n")
-      .slice(0, 20_000)
+    const records: LogRecord[] = runSample(resolve(runsDir, newest))
       .filter(Boolean)
       .flatMap((line) => {
         try {
@@ -67,18 +83,105 @@ describe("tab rendering", () => {
       farm: { target: "n00dles", totals: { moneyEarned: 1e6, hacks: 12 }, inFlight: { hack: 1, grow: 2, weaken: 3 }, ramPie: { farm: 10, prep: 5, share: 0, free: 2, reserve: 4 } },
       fleet: { rootedHosts: 3, totalHosts: 9, maxRam: 64, usedRam: 32, purchased: { count: 1, totalRam: 8, limit: 25 }, home: { maxRam: 32, usedRam: 8, cores: 2 }, portOpeners: 2 },
       progression: { bitNode: 12, sourceFiles: { "4": 3 }, ownedAugs: { NeuroFlux: 5 }, augCount: 1, lastAugReset: 1, lastNodeReset: 1, multipliers: { ScriptHackMoney: 0.2 } },
-      factions: { joined: ["CyberSec"], standings: [{ name: "CyberSec", rep: 100, favor: 1, favorToDonate: 150 }], invites: ["NiteSec"], favorToDonate: 150, workTypes: { CyberSec: ["hacking"] }, enemies: { CyberSec: [] }, requirements: { NiteSec: [{ type: "skills", skills: { hacking: 200 } }] }, gates: { CyberSec: { joined: true, invited: false, progress: 1, reachable: true, missing: [] }, NiteSec: { joined: false, invited: true, progress: 1, reachable: true, missing: [] }, "The Covenant": { joined: false, invited: false, progress: 0.4, reachable: true, missing: [{ kind: "skill", subject: "agility", target: 850, have: 340, progress: 0.4, owner: "career", reachable: true, why: "needs agility 850" }] }, Illuminati: { joined: false, invited: false, progress: 0, reachable: false, missing: [{ kind: "bitNode", target: 0, have: 0, progress: 0, owner: "progression", reachable: false, why: "wrong BitNode" }] } }, augMeta: { Rootkit: { prereqs: [], mults: { hacking: 1.1 } } }, ownedAugs: ["BitWire"], offers: [{ name: "Rootkit", faction: "CyberSec", price: 1.9e6, basePrice: 1e6, repReq: 100, affordableRep: true, repGap: 0, owned: false }], augTotal: 1, graftable: [{ name: "Rootkit", price: 1e6, timeMs: 6e4 }], plan: { objective: { factions: ["CyberSec"], augmentations: ["Rootkit"], value: 1.5, foreclosed: [{ name: "Volhaven", bannedBy: "Sector-12" }], why: "exact MWIS" }, action: { type: "workForFaction", faction: "CyberSec", workType: "hacking", why: "0.5 rep/sec toward 100" }, alternatives: [{ label: "work NiteSec", value: 0.2, why: "lower rate" }], blockers: [{ faction: "NiteSec", kind: "skill", subject: "hacking", target: 200, have: 50, progress: 0.25, owner: "hacking", reachable: true, why: "needs hacking 200" }], until: { kind: "rep", faction: "CyberSec", target: 100, have: 40, etaSec: 120 }, lastResult: { action: "workForFaction", ok: true, detail: "started", at: 1 }, recommendInstall: { why: "objective owned", augmentations: ["Rootkit"] } } },
+      factions: { joined: ["CyberSec"], standings: [{ name: "CyberSec", rep: 100, favor: 1 }], invites: ["NiteSec"], favorToDonate: 150, workTypes: { CyberSec: ["hacking"] }, enemies: { CyberSec: [] }, requirements: { NiteSec: [{ type: "skills", skills: { hacking: 200 } }] }, gates: { CyberSec: { joined: true, invited: false, progress: 1, reachable: true, missing: [] }, NiteSec: { joined: false, invited: true, progress: 1, reachable: true, missing: [] }, "The Covenant": { joined: false, invited: false, progress: 0.4, reachable: true, missing: [{ kind: "skill", subject: "agility", target: 850, have: 340, progress: 0.4, owner: "career", reachable: true, why: "needs agility 850" }] }, Illuminati: { joined: false, invited: false, progress: 0, reachable: false, missing: [{ kind: "bitNode", target: 0, have: 0, progress: 0, owner: "progression", reachable: false, why: "wrong BitNode" }] } }, augMeta: { Rootkit: { prereqs: [], mults: { hacking: 1.1 } } }, ownedAugs: ["BitWire"], offers: [{ name: "Rootkit", faction: "CyberSec", price: 1.9e6, basePrice: 1e6, repReq: 100, affordableRep: true, repGap: 0, owned: false }], augTotal: 1, graftable: [{ name: "Rootkit", price: 1e6, timeMs: 6e4 }], plan: { context: { evaluatedAt: 0, horizonSec: 3600, ownedAugCount: 1, queuedAugCount: 0, incomePerSec: 1000, moneyAvailable: 1e6, moneyGranted: 1e6, holdsWorkSlot: true, favorToDonate: 150, priceQueue: { nonSoA: 0, ownedSoA: 0, neurofluxLevel: 0 } }, objective: { factions: ["CyberSec"], augmentations: ["Rootkit"], value: 1.5, foreclosed: [{ name: "Volhaven", bannedBy: "Sector-12" }], why: "exact MWIS" }, action: { type: "workForFaction", faction: "CyberSec", workType: "hacking", why: "0.5 rep/sec toward 100" }, alternatives: [{ label: "work NiteSec", value: 0.2, why: "lower rate" }], blockers: [{ faction: "NiteSec", kind: "skill", subject: "hacking", target: 200, have: 50, progress: 0.25, owner: "hacking", reachable: true, why: "needs hacking 200" }], until: { kind: "rep", faction: "CyberSec", target: 100, have: 40, etaSec: 120 }, lastResult: { action: "workForFaction", ok: true, detail: "started", at: 1 }, recommendInstall: { why: "objective owned", augmentations: ["Rootkit"] } } },
       career: { karma: -100, numPeopleKilled: 0, skills: { hacking: 10, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1, intelligence: 0 }, exp: { hacking: 10, strength: 0, defense: 0, dexterity: 0, agility: 0, charisma: 0, intelligence: 0 }, city: "Sector-12", location: "home", entropy: 0, totalPlaytime: 1e6, jobs: { ECorp: "Software" }, companies: { ECorp: { rep: 10, favor: 1 } }, currentWork: { type: "CRIME", detail: "Mug" }, crimes: [{ name: "Mug", chance: 0.5, money: 1000, timeMs: 4000, karma: -0.25, moneyPerSec: 125 }] },
       hacknet: { servers: false, numNodes: 2, maxNumNodes: 30, purchaseNodeCost: 1e5, totalProduction: 500, productionPerSec: 1.5, nodes: [{ name: "hacknet-node-0", level: 10, ram: 2, cores: 1, production: 1.5, totalProduction: 500, timeOnline: 3600 }], nextUpgrades: [{ kind: "level", node: 0, cost: 1000 }] },
-      stock: { hasWseAccount: true, hasTixApiAccess: true, has4SData: true, has4SDataApi: true, positions: [{ sym: "ECP", price: 100, ask: 100, bid: 100, maxShares: 1e6, shares: 100, avgPx: 90, sharesShort: 0, avgPxShort: 0, value: 10000, costBasis: 9000 }], signals: { ECP: { organization: "ECorp", forecast: 0.6, volatility: 0.01 } }, portfolioValue: 10000, portfolioCost: 9000 },
+      stock: { hasWseAccount: true, hasTixApiAccess: true, has4SData: false, has4SDataApi: true, positions: [{ sym: "ECP", price: 100, ask: 100.2, bid: 99.8, maxShares: 1e6, shares: 100, avgPx: 90, sharesShort: 0, avgPxShort: 0, value: 9980, costBasis: 9000 }], signals: { ECP: { forecast: 0.6, volatility: 0.0045 } }, portfolioValue: 9980, portfolioCost: 9000, market: { tick: 120, ticksUntilCycle: 43, cyclesSeen: 1, lastFlipCount: 0, lastV: 0.42 }, manipulation: { ecorp: { sym: "ECP", side: "long", valuePerOp: 12000, notional: 9980, why: "grow ecorp to push ECP up" } }, plan: { actions: [{ type: "buy", why: "long ECP" }], ranked: [{ sym: "ECP", side: "long", forecast: 0.6, volatility: 0.0045, exact: true, breakEvenTicks: 4.2, expectedProfit: 5e5, why: "4S forecast 0.600" }], entry: { sym: "ECP", side: "long", shares: 1000, cost: 1e5, expectedProfit: 5e5, holdTicks: 43, breakEvenTicks: 4.2 }, unlock: { type: "buy4SApi", cost: 25e9, gainPerSec: 1e6, paybackSec: 25000, netOverHorizon: 1e9, why: "exact forecasts" }, flat: false, why: "1 action(s)", lastResult: { action: "buy", ok: true, detail: "bought 1000 ECP", at: 1 } } },
       gang: { faction: "Slum Snakes", isHacking: false, respect: 100, respectGainRate: 1, wantedLevel: 2, wantedLevelGainRate: 0.1, wantedPenalty: 0.9, moneyGainRate: 500, power: 10, territory: 0.2, territoryClashChance: 0.1, territoryWarfareEngaged: false, respectForNextRecruit: 200, recruitsAvailable: 1, canRecruit: true, members: [{ name: "a", task: "Mug People", earnedRespect: 10, respectGain: 0.5, wantedLevelGain: 0.01, moneyGain: 100, skills: { hack: 1, str: 10, def: 10, dex: 10, agi: 10, cha: 1 }, ascMults: { hack: 1, str: 1, def: 1, dex: 1, agi: 1, cha: 1 }, upgrades: 2, augmentations: 1 }], clashChances: { Tetrads: 0.4 } },
       corp: { name: "Acme", funds: 1e9, revenue: 1e6, expenses: 5e5, public: false, valuation: 1e10, sharePrice: 10, totalShares: 1e9, numShares: 9e8, issuedShares: 0, dividendRate: 0, dividendEarnings: 0, state: "START", divisions: [{ name: "Ag", industry: "Agriculture", awareness: 1, popularity: 1, productionMult: 2, researchPoints: 100, lastCycleRevenue: 1e6, lastCycleExpenses: 5e5, numAdVerts: 1, cities: ["Sector-12"], products: [], maxProducts: 0, offices: [{ city: "Sector-12", size: 9, numEmployees: 9, avgEnergy: 99, avgMorale: 99, jobs: { Operations: 3 } }], warehouses: [{ city: "Sector-12", level: 1, size: 100, sizeUsed: 50, smartSupplyEnabled: true }] }], investmentOffer: { round: 1, funds: 1e9, shares: 1e8 } },
       bladeburner: { rank: 100, skillPoints: 5, stamina: [50, 100], city: "Sector-12", current: { type: "Contract", name: "Tracking", elapsedMs: 1000 }, nextBlackOp: { name: "Operation Typhoon", rank: 2500 }, skills: { "Blade's Intuition": { level: 1, upgradeCost: 3 } }, actions: [{ type: "contract", name: "Tracking", chance: [0.5, 0.7], timeMs: 30000, countRemaining: 100, level: 1, maxLevel: 5 }], cities: [{ name: "Sector-12", population: 1e6, communities: 5, chaos: 10 }] },
       sleeves: { count: 1, sleeves: [{ index: 0, shock: 10, sync: 90, memory: 1, storedCycles: 0, city: "Sector-12", hp: { current: 10, max: 10 }, skills: { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 }, task: { type: "CRIME", detail: "Mug" }, purchasableAugs: [{ name: "BitWire", price: 1e6 }] }] },
-      go: { status: "inProgress", currentPlayer: "Black", opponent: "Netburners", boardSize: 5, board: ["XO...", ".X...", "..O..", ".....", "....."], whiteScore: 5.5, blackScore: 3, moveCount: 4, territory: { black: 2, white: 1 }, stats: [{ opponent: "Netburners", wins: 3, losses: 1, winStreak: 2, highestWinStreak: 2, rep: 100, bonusPercent: 5, bonusDescription: "hacking speed" }] },
+      go: {
+        status: "inProgress",
+        currentPlayer: "Black",
+        opponent: "Netburners",
+        boardSize: 5,
+        board: ["XO...", ".X...", "..O..", ".....", "....."],
+        previousBoards: [["X....", ".....", ".....", ".....", "....."]],
+        whiteScore: 5.5,
+        blackScore: 3,
+        komi: 1.5,
+        bonusCycles: 12,
+        moveCount: 4,
+        territory: { black: 2, white: 1 },
+        stats: [{ opponent: "Netburners", wins: 3, losses: 1, winStreak: 2, highestWinStreak: 2, rep: 100, bonusPercent: 5, bonusDescription: "hacking speed" }],
+        plan: {
+          action: { type: "move", x: 1, y: 1, why: "best blended line" },
+          ranked: [{
+            x: 1, y: 1, score: 4.2, tacticalScore: 3.5, forecastScore: 5.5, captures: 1,
+            predictedReplies: [{ x: 2, y: 2, count: 5 }, { x: null, y: null, count: 1 }],
+            why: "fixed-budget tactical shortlist; forecast 2,2 in 5/6 seeds",
+          }],
+          why: "fixed-budget tactical shortlist of 4 moves",
+          input: {
+            at: 1_000, board: ["X....", ".....", ".....", ".....", "....."], previousBoards: [],
+            status: "inProgress", currentPlayer: "Black", opponent: "Netburners", blackScore: 1, whiteScore: 1.5, komi: 1.5,
+          },
+          planning: { finalistCount: 4, positionValue: 0.25 },
+          prediction: {
+            model: "clean-room-v3.0.1",
+            sampledTotalPlaytime: 100_000,
+            sampledAt: 900,
+            decisionAt: 1_000,
+            preparationMs: 1.2,
+            finalizationMs: 0.8,
+            totalPlanningMs: 2,
+            engineCycleMs: 200,
+            aiWaitMs: 200,
+            seedCandidates: [100_200],
+            dispatchPlaytime: 100_000,
+            boundaryRetries: 0,
+          },
+          selection: {
+          preferred: {
+            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, winProbability: 0.8,
+            expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
+            currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
+            multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
+            favorEventProbability: 0, favorBefore: 0, favorAfter: 0, favorRemainingWorkSec: 0,
+            expectedFavorGain: 0, favorSecSaved: 0, totalSecSaved: 20, utilityPerSec: 20 / 70,
+            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0, why: "hacking throughput",
+          },
+          candidates: [{
+            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, winProbability: 0.8,
+            expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
+            currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
+            multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
+            favorEventProbability: 0, favorBefore: 0, favorAfter: 0, favorRemainingWorkSec: 0,
+            expectedFavorGain: 0, favorSecSaved: 0, totalSecSaved: 20, utilityPerSec: 20 / 70,
+            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0, why: "hacking throughput",
+          }],
+          context: {
+            goPower: 1, hasSourceFile14: false, favorRepCap: 100_000, installRemainingSec: 3_600,
+            joinedFactions: [], demands: {}, factionFavor: {},
+          },
+        },
+        },
+        lastTurn: {
+          at: 1_100,
+          durationMs: 205,
+          action: { type: "move", x: 1, y: 1, why: "best blended line" },
+          opponentResponse: { type: "move", x: 2, y: 2 },
+          predictionSupport: { matching: 5, total: 6 },
+          ok: true,
+          detail: "move; opponent move",
+        },
+      },
       stanek: { width: 3, height: 3, occupied: { "0,0": 1, "1,0": 1 }, fragments: [{ id: 1, type: "Hacking", x: 0, y: 0, rotation: 0, power: 1.5, limit: 1, effect: "+x% hacking", numCharge: 10, highestCharge: 10, chargedEffect: 1.2 }], availableTypes: [{ id: 1, type: "Hacking", power: 1.5, limit: 1 }] },
       dnet: { reachable: 4, maxDepth: 2, stasisLinkLimit: 2, stasisLinked: ["dn-1"], instability: { authenticationDurationMultiplier: 1.2, authenticationTimeoutChance: 0.05 }, servers: [{ hostname: "dn-1", depth: 1, blockedRam: 16, isOnline: true, requiredCharisma: 50, stasisLinked: true }] },
-      side: { contracts: [{ host: "home", file: "c.cct", type: "Array Jumping Game", triesRemaining: 3 }], contractTotal: 900, solvableTotal: 400, unsolvableByType: { "Proper 2-Coloring of a Graph": 500 }, unsolvableTotal: 500, infiltration: [{ location: "ECorp", city: "Aevum", difficulty: 1.5, maxClearanceLevel: 37, startingSecurityLevel: 8, repReward: 100, moneyReward: 1e6, moneyPerDifficulty: 666666 }], infiltrationTotal: 1, plan: { solvable: [{ host: "home", file: "c.cct", type: "Array Jumping Game" }], solvableTotal: 400, unsolvable: [{ type: "Proper 2-Coloring of a Graph", count: 500 }], unsolvableTotal: 500, infiltration: [{ location: "ECorp", city: "Aevum", valuePerMinute: 1e5 }], casino: "no ns API", why: "test" } },
+      side: {
+        contracts: [{ host: "home", file: "c.cct" }],
+        contractTotal: 900,
+        solvableTotal: 400,
+        unsolvableByType: { "Proper 2-Coloring of a Graph": 500 },
+        unsolvableTotal: 500,
+        registryComplete: false,
+        contractTypeTotal: 30,
+        supportedTypeTotal: 29,
+        failures: [{ host: "n00dles", file: "bad.cct", type: "Array Jumping Game", reason: "answer rejected", triesBefore: 1, at: 1 }],
+        quarantinedTotal: 1,
+        lastResult: { action: "contract", ok: true, detail: "20 solved", at: 1 },
+      },
     };
 
     const state = emptyState();
@@ -96,6 +199,137 @@ describe("tab rendering", () => {
     });
     renderAll(state);
   });
+
+  test("Go shows reproducible decision inputs, forecast support, and the observed reply", () => {
+    const state = emptyState();
+    state.topics.go = {
+      status: "inProgress",
+      currentPlayer: "Black",
+      opponent: "Netburners",
+      boardSize: 5,
+      board: ["X....", ".X...", "..O..", ".....", "....."],
+      previousBoards: [],
+      stats: [],
+      plan: {
+        action: { type: "move", x: 1, y: 1, why: "best line" },
+        ranked: [{
+          x: 1, y: 1, score: 4.2, tacticalScore: 3.5, forecastScore: 5.5, captures: 1,
+          predictedReplies: [{ x: 2, y: 2, count: 5 }, { x: null, y: null, count: 1 }],
+          why: "fixed-budget tactical shortlist",
+        }],
+        why: "ranked 20 legal moves",
+        input: { at: 1_000, board: [".....", ".....", ".....", ".....", "....."], previousBoards: [], status: "inProgress", currentPlayer: "Black", opponent: "Netburners" },
+        planning: { finalistCount: 4, positionValue: 0.25 },
+        prediction: {
+          model: "clean-room-v3.0.1",
+          sampledTotalPlaytime: 100_000,
+          sampledAt: 900,
+          decisionAt: 1_000,
+          preparationMs: 1.2,
+          finalizationMs: 0.8,
+          totalPlanningMs: 2,
+          engineCycleMs: 200,
+          aiWaitMs: 200,
+          seedCandidates: [100_200],
+          dispatchPlaytime: 100_000,
+          boundaryRetries: 0,
+        },
+        selection: {
+          preferred: {
+            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, winProbability: 0.8,
+            expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
+            currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
+            multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
+            favorEventProbability: 0, favorBefore: 0, favorAfter: 0, favorRemainingWorkSec: 0,
+            expectedFavorGain: 0, favorSecSaved: 0, totalSecSaved: 20, utilityPerSec: 20 / 70,
+            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0, why: "hacking throughput",
+          },
+          candidates: [{
+            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, winProbability: 0.8,
+            expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
+            currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
+            multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
+            favorEventProbability: 0, favorBefore: 0, favorAfter: 0, favorRemainingWorkSec: 0,
+            expectedFavorGain: 0, favorSecSaved: 0, totalSecSaved: 20, utilityPerSec: 20 / 70,
+            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0, why: "hacking throughput",
+          }],
+          context: {
+            goPower: 1, hasSourceFile14: false, favorRepCap: 100_000, installRemainingSec: 3_600,
+            joinedFactions: [], demands: {}, factionFavor: {},
+          },
+        },
+      },
+      lastTurn: {
+        at: 1_100,
+        durationMs: 205,
+        action: { type: "move", x: 1, y: 1, why: "best line" },
+        opponentResponse: { type: "move", x: 2, y: 2 },
+        predictionSupport: { matching: 5, total: 6 },
+        ok: true,
+        detail: "move; opponent move",
+      },
+    };
+    const html = TABS.go.render(state);
+    expect(html).toContain("Candidate analysis");
+    expect(html).toContain("5.00/6 expected seed support");
+    expect(html).toContain("clean-room-v3.0.1");
+    expect(html).toContain("exact seed");
+    expect(html).toContain("200 ms cycles");
+    expect(html).toContain("same-slot dispatch");
+    expect(html).toContain("AI cycle 200 ms");
+    expect(html).toContain("class=\"cell black chosen\"");
+    expect(html).toContain("class=\"cell white reply\"");
+    expect(html).toContain("Opponent reward choice");
+    expect(html).toContain("GoPower");
+    expect(html).toContain("install runway");
+    expect(html).toContain("favor event");
+  });
+
+  test("Side shows compact status plus the latest report-once replay", () => {
+    const state = emptyState();
+    state.lastT = 2_000;
+    state.topics.side = {
+      contracts: [{ host: "n00dles", file: "next.cct" }],
+      contractTotal: 2,
+      solvableTotal: 1,
+      registryComplete: true,
+      contractTypeTotal: 30,
+      supportedTypeTotal: 30,
+      failures: [{
+        host: "n00dles", file: "bad.cct", type: "Array Jumping Game", reason: "answer rejected", triesBefore: 1, at: 1_000,
+      }],
+      quarantinedTotal: 1,
+    };
+    state.events.push({
+      seq: 1,
+      t: 1_000,
+      run: "r",
+      src: "game",
+      kind: "event",
+      name: "contract.quarantined",
+      data: {
+        host: "n00dles",
+        file: "bad.cct",
+        type: "Array Jumping Game",
+        data: "[2,<script>]",
+        answer: "1",
+        triesBefore: 1,
+        reason: "answer rejected",
+        at: 1_000,
+      },
+    });
+    state.contractReplay = state.events[0]!.data as NonNullable<typeof state.contractReplay>;
+
+    const html = TABS.side.render(state);
+    expect(html).toContain("30/30");
+    expect(html).toContain("input · 12 chars");
+    expect(html).toContain("[2,&lt;script&gt;]");
+    expect(html).not.toContain("[2,<script>]");
+    expect(html).toContain("submitted answer · 1 chars");
+    expect(html).not.toContain("Infiltration value");
+    expect(html).not.toContain("Casino");
+  });
+
 });
 
 describe("stream projection", () => {
@@ -201,6 +435,26 @@ describe("stream projection", () => {
     expect(state.events.length).toBe(1);
     expect(state.events[0]!.kind).toBe("event");
   });
+
+  test("a contract replay survives eviction from the bounded event feed", () => {
+    const replay = {
+      host: "n00dles", file: "bad.cct", type: "Array Jumping Game", data: "[0]", answer: "1",
+      reason: "answer rejected", at: 0,
+    };
+    const records: LogRecord[] = [
+      { ...base, kind: "event", name: "contract.quarantined", data: replay },
+      ...Array.from({ length: EVENT_RING + 1 }, (_, index) => ({
+        ...base,
+        seq: index + 1,
+        t: index + 1,
+        kind: "debug" as const,
+        msg: "noise",
+      })),
+    ];
+    const state = project(records, Infinity, { id: "r", src: "game", live: false, t0: 0 });
+    expect(state.events.some((record) => record.kind === "event" && record.name === "contract.quarantined")).toBe(false);
+    expect(state.contractReplay).toEqual(replay);
+  });
 });
 
 describe("incremental projection", () => {
@@ -257,6 +511,54 @@ describe("incremental projection", () => {
 });
 
 describe("panel view state", () => {
+  test("progression shows separate install/node countdowns and their critical-path evidence", () => {
+    const state = emptyState();
+    const now = Date.now();
+    state.topics.progression = {
+      bitNode: 14,
+      sourceFiles: {},
+      ownedAugs: {},
+      augCount: 0,
+      lastAugReset: now - 60_000,
+      lastNodeReset: now - 120_000,
+      plan: {
+        phase: "finishUp",
+        installWanted: true,
+        installBlockers: [{ kind: "factions", why: "finish package" }],
+        installReady: false,
+        queuedAugmentations: ["BitWire"],
+        install: false,
+        homeRamBudgetFraction: 0.1,
+        favorCrossings: [],
+        why: "finish the committed package",
+        forecasts: {
+          install: {
+            state: "estimated", estimatedAt: now, nextRecalibrationAt: now + 600_000,
+            expectedAt: now + 660_000, remainingSec: 660, confidence: "mixed", basis: "package",
+            components: [
+              { what: "faction unlock and reputation", sec: 600, measured: true, mode: "parallel", critical: true },
+              { what: "package money", sec: 300, measured: true, mode: "parallel", critical: false },
+              { what: "final purchase and donation sweep", sec: 60, measured: false, mode: "sequential", critical: true },
+            ],
+          },
+          node: {
+            state: "estimated", estimatedAt: now, nextRecalibrationAt: now + 600_000,
+            expectedAt: now + 172_800_000, remainingSec: 172_800, confidence: "measured", basis: "route",
+            components: [{ what: "hacking level", sec: 172_800, measured: true, mode: "sequential", critical: true }],
+          },
+        },
+      },
+    };
+
+    const html = TABS["progression"].render(state);
+    expect(html).toContain("Expected next installation");
+    expect(html).toContain("Expected BitNode completion");
+    expect(html).toContain("faction unlock and reputation");
+    expect(html).toContain("final purchase and donation sweep");
+    expect(html).toContain("model/fallback");
+    expect(html).toContain("2.0d");
+  });
+
   test("a filter chip changes what the panel renders", () => {
     const state = emptyState();
     state.runId = "r";
@@ -453,6 +755,76 @@ describe("skill progress uses the multiplier the game applies", () => {
     expect(html).toContain("9999");
     expect(html).toContain("exp");
     expect(html).not.toContain("to 10000");
+  });
+});
+
+describe("faction decision review", () => {
+  test("shows decision inputs, package economics, cycle exclusions, and transition history", () => {
+    const state = emptyState();
+    state.lastT = 10_000;
+    const intent = {
+      faction: "CyberSec",
+      repTarget: 2_000,
+      augmentations: ["Synaptic Enhancement Implant"],
+      value: 1.03,
+      etaSec: 120,
+      rate: 0.0086,
+      marginalRate: 0.007,
+      unlockSec: 0,
+      repSec: 90,
+      moneySec: 120,
+      favorAfterInstall: 151,
+      totalCost: 2_674_166_667,
+      purchaseCost: 7_500_000,
+      donationCost: 2_666_666_667,
+      purpose: "augmentations" as const,
+      why: "best finite-horizon package",
+    };
+    const plan = {
+      context: {
+        evaluatedAt: 9_000,
+        horizonSec: 3_600,
+        route: "daedalus" as const,
+        targetAugCount: 30,
+        ownedAugCount: 12,
+        queuedAugCount: 2,
+        incomePerSec: 5_000_000,
+        moneyAvailable: 1_500_000_000,
+        moneyGranted: 2_674_166_667,
+        holdsWorkSlot: true,
+        favorToDonate: 150,
+        priceQueue: { nonSoA: 2, ownedSoA: 0, neurofluxLevel: 0 },
+      },
+      objective: {
+        factions: ["CyberSec"],
+        augmentations: intent.augmentations,
+        value: intent.value,
+        foreclosed: [{ name: "NiteSec", bannedBy: "CyberSec" }],
+        why: "finite-horizon package frontier",
+        intent,
+      },
+      action: { type: "donate", faction: "CyberSec", amount: 2_666_666_667, why: "income beats work" },
+      alternatives: [],
+      blockers: [],
+      invalidation: [{ label: "owned", value: 12 }],
+    };
+    state.topics.factions = { joined: ["CyberSec"], plan };
+    state.events.push({
+      kind: "event",
+      name: "faction.decision",
+      data: { plan },
+      seq: 1,
+      t: 9_000,
+      run: "test",
+      src: "game",
+    });
+
+    const html = TABS["factions"].render(state);
+    expect(html).toContain("planning window");
+    expect(html).toContain("marginal/sec");
+    expect(html).toContain("forecloses this install cycle");
+    expect(html).toContain("Decision history");
+    expect(html).toContain("income beats work");
   });
 });
 

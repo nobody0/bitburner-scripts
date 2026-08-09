@@ -2,6 +2,7 @@ import type { MoneySource } from "@ns";
 import type { FeatureId } from "../../features/ids.ts";
 import type { DenyReason, ResourceId } from "../../strategy/arbiter.ts";
 import type { NeedKind, NeedUrgency } from "../../strategy/needs.ts";
+import type { PlanningHorizons } from "../../strategy/progression/forecast.ts";
 
 /** Progression feature — the meta layer. Problem: pick the destroy order and
  * the augmentation/reset cadence that minimises total wall-clock to a target
@@ -77,6 +78,12 @@ export interface GrantDigest {
   amount: number;
   mode: "spend" | "reserve";
   partial: boolean;
+  /** Original bid evidence. Optional for backwards-compatible replays. */
+  wanted?: number;
+  priority?: number;
+  ratePerSec?: number;
+  returnPerDollarSec?: number;
+  why?: string;
 }
 
 export interface DenialDigest {
@@ -87,6 +94,9 @@ export interface DenialDigest {
   available: number;
   reason: DenyReason;
   why: string;
+  priority?: number;
+  ratePerSec?: number;
+  returnPerDollarSec?: number;
 }
 
 export interface ArbitrationDigest {
@@ -100,6 +110,16 @@ export interface ArbitrationDigest {
 
 export interface ProgressionPlan {
   phase: "start" | "finishUp" | "ending";
+  /** Economic reset decision before safety barriers. */
+  installWanted: boolean;
+  /** Why the reset cannot execute yet. */
+  installBlockers: { kind: "factions" | "stock" | "graft" | "augmentations"; why: string }[];
+  /** Every reset-sensitive subsystem has acknowledged readiness. */
+  installReady: boolean;
+  /** First safe pass has been published; execution occurs on the next pass. */
+  installArmedAt?: number;
+  /** Exact queue the armed transaction revalidates before executing. */
+  queuedAugmentations: string[];
   install: boolean;
   homeRamBudgetFraction: number;
   /** Factions that would cross the donation threshold on install — the
@@ -111,18 +131,15 @@ export interface ProgressionPlan {
    *  back out of runs/*.jsonl: which route, guessed for how long, decided
    *  when — matched at the node reset against what actually happened. */
   route?: "daedalus" | "labyrinth" | "bladeburner";
-  /** Wall-clock timestamp the run is expected to end at, from the chosen
-   *  route's estimate. Features derive their planning horizon from it. */
-  expectedEndAt?: number;
   /** When the current route was chosen (survives refreshes that keep it). */
   decidedAt?: number;
-  /** When the plan was last recomputed. The horizon's staleness guard reads
-   *  this: a plan whose publisher has gone quiet must stop steering. */
-  refreshedAt?: number;
   routeWhy?: string;
   /** Every route's estimate with its per-part breakdown, so a wrong total can
    *  be attributed to the specific sub-heuristic that produced it. */
   routes?: RouteEtaDigest[];
+  /** Independently anchored forecasts for the next destructive install and
+   * the end of the BitNode. Neither is capped or silently defaulted. */
+  forecasts: PlanningHorizons;
 }
 
 export interface RouteEtaDigest {

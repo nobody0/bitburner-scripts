@@ -30,6 +30,17 @@ export interface SaveSeedServer {
   smtpPortOpen: boolean;
   httpPortOpen: boolean;
   sqlPortOpen: boolean;
+  isHacknetServer?: boolean;
+}
+
+export interface SaveSeedHacknetNode {
+  hostname?: string;
+  level: number;
+  ram: number;
+  cores: number;
+  totalProduction: number;
+  onlineTimeSeconds: number;
+  cache?: number;
 }
 
 export interface SaveSeed {
@@ -38,6 +49,7 @@ export interface SaveSeed {
    *  the capability gates key off. */
   sourceFileLevel: number;
   sourceFiles: Record<string, number>;
+  bitNodeOptions: SaveSnapshot["bitNodeOptions"];
   homeRam: number;
   homeCores: number;
   startingMoney: number;
@@ -66,21 +78,27 @@ export interface SaveSeed {
    *  be earned within a run — it is banked only at install — so a save is the
    *  only way to study donation-gated strategy at all. */
   factions: Record<string, { rep: number; favor: number }>;
+  hacknet: { nodes: SaveSeedHacknetNode[]; hashes: number; hashLevels: Record<string, number> };
   gates: {
     inGang: boolean;
     inBladeburner: boolean;
     hasCorporation: boolean;
     hasWseAccount: boolean;
     hasTixApiAccess: boolean;
+    /** The $1b ticker data and the $25b script API, which are bought
+     *  independently — only the second one `getForecast` can read. Both survive
+     *  an augmentation install and are cleared only by a BitNode reset, so a
+     *  save is the only way to study a run that already owns them. */
+    has4SData: boolean;
+    has4SDataTixApi: boolean;
     goPlayable: boolean;
   };
 }
 
-/** Hacknet and darknet servers are not part of the hacking fleet: the game
- * excludes hacknet servers from `isUseful` and darknet ones are a separate
- * mechanic entirely. */
+/** Ordinary and Hacknet servers participate in the network/fleet. Darknet
+ * servers are a separate mechanic. */
 function isFleetServer(server: SaveServer): boolean {
-  return server.kind === "Server";
+  return server.kind === "Server" || server.kind === "HacknetServer";
 }
 
 function portFlags(server: SaveServer): Pick<
@@ -128,6 +146,7 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
       numOpenPortsRequired: server.numOpenPortsRequired,
       openPortCount: server.openPortCount,
       ...portFlags(server),
+      ...(server.kind === "HacknetServer" ? { isHacknetServer: true } : {}),
     });
   }
 
@@ -136,6 +155,7 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
     bitnode: snapshot.bitNode,
     sourceFileLevel: sfLevel(snapshot.activeSourceFiles, snapshot.bitNode),
     sourceFiles: snapshot.activeSourceFiles,
+    bitNodeOptions: snapshot.bitNodeOptions,
     homeRam: home?.maxRam ?? 8,
     homeCores: home?.cpuCores ?? 1,
     startingMoney: snapshot.player.money,
@@ -165,12 +185,32 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
         { rep: standing.playerReputation ?? 0, favor: standing.favor ?? 0 },
       ]),
     ),
+    hacknet: {
+      nodes: snapshot.player.hacknetNodes.flatMap((node): SaveSeedHacknetNode[] => {
+        if (typeof node !== "string") return [node];
+        const server = snapshot.servers.get(node);
+        if (!server || server.kind !== "HacknetServer") return [];
+        return [{
+          hostname: server.hostname,
+          level: server.hacknetLevel ?? 1,
+          ram: server.maxRam,
+          cores: server.cpuCores,
+          totalProduction: server.hacknetTotalProduction ?? 0,
+          onlineTimeSeconds: server.hacknetOnlineTimeSeconds ?? 0,
+          cache: server.hacknetCache ?? 1,
+        }];
+      }),
+      hashes: snapshot.player.hashes,
+      hashLevels: { ...snapshot.player.hashUpgrades },
+    },
     gates: {
       inGang: snapshot.player.hasGang,
       inBladeburner: snapshot.player.hasBladeburner,
       hasCorporation: snapshot.player.hasCorporation,
       hasWseAccount: snapshot.player.hasWseAccount,
       hasTixApiAccess: snapshot.player.hasTixApiAccess,
+      has4SData: snapshot.player.has4SData,
+      has4SDataTixApi: snapshot.player.has4SDataTixApi,
       // IPvGO is always reachable; the simulator has no model for it, so the
       // ns call still reports itself as unmodelled when a probe asks.
       goPlayable: true,

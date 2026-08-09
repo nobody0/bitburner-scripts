@@ -7,23 +7,26 @@ import {
   type EndgameView,
 } from "../shared/strategy/progression/endgame.ts";
 import {
-  DEFAULT_HORIZON_SEC,
   FALLBACK_SEC_PER_BLACK_OP,
-  HORIZON_CEIL_SEC,
-  HORIZON_FLOOR_SEC,
-  INSTALL_CADENCE_SEC,
   LABYRINTH_WALK_SEC,
-  PLAN_STALE_MS,
   ROUTE_DWELL_MS,
   chooseRoute,
-  expectedEndFrom,
-  horizonSecFrom,
   noRates,
-  planningHorizonSec,
   routeEtas,
   type RouteChoice,
   type RouteRates,
 } from "../shared/strategy/progression/eta.ts";
+import {
+  FORECAST_RECALIBRATION_MS,
+  FORECAST_STALE_MS,
+  estimatedForecast,
+  forecastAt,
+  installForecast,
+  nodeForecast,
+  shouldReforecast,
+  unknownForecast,
+  usableForecastSec,
+} from "../shared/strategy/progression/forecast.ts";
 import { freshEndgameView as view } from "./fixtures/endgame-view.ts";
 
 function etasFor(v: EndgameView, rates: RouteRates = noRates()) {
@@ -163,60 +166,70 @@ describe("route choice", () => {
   });
 });
 
-describe("horizon", () => {
-  test("no decision falls back to the pre-existing constant", () => {
-    expect(horizonSecFrom(undefined, 1_000)).toBe(DEFAULT_HORIZON_SEC);
+describe("anchored uncapped forecasts", () => {
+  test("a multi-day estimate stays uncapped and counts down", () => {
+    const week = estimatedForecast(1_000, "week", [
+      { what: "long route", sec: 7 * 86_400, measured: true, mode: "sequential" },
+    ]);
+    expect(week.remainingSec).toBe(7 * 86_400);
+    expect(forecastAt(week, 3_601_000)).toMatchObject({ state: "stale", remainingSec: 7 * 86_400 - 3_600 });
   });
 
-  test("derives remaining seconds from the expected end, clamped both ways", () => {
-    expect(horizonSecFrom(601_000, 1_000)).toBe(600);
-    // A run past its expected end still plans a floor, never zero or negative.
-    expect(horizonSecFrom(0, 1_000)).toBe(HORIZON_FLOOR_SEC);
-    // A week-long guess adds nothing over a day.
-    expect(horizonSecFrom(7 * 86_400_000, 0)).toBe(HORIZON_CEIL_SEC);
+  test("re-estimates every ten minutes or when the structural basis changes", () => {
+    const forecast = estimatedForecast(1_000, "same", [
+      { what: "work", sec: 100, measured: true, mode: "sequential" },
+    ]);
+    expect(shouldReforecast(forecast, 1_000 + FORECAST_RECALIBRATION_MS - 1, "same")).toBe(false);
+    expect(shouldReforecast(forecast, 1_000 + FORECAST_RECALIBRATION_MS, "same")).toBe(true);
+    expect(shouldReforecast(forecast, 2_000, "changed")).toBe(true);
+    const unknown = unknownForecast(1_000, "same", "waiting for a package");
+    expect(shouldReforecast(unknown, 1_000 + FORECAST_RECALIBRATION_MS - 1, "same")).toBe(false);
+    expect(shouldReforecast(unknown, 2_000, "changed")).toBe(true);
   });
 
-  test("the planning horizon is capped by the install cadence", () => {
-    // THE 24x BUG THIS PINS: a fallback-guessed multi-day node ETA must not
-    // widen hacknet/stock payback windows to the 24h ceiling — an install
-    // destroys what those features buy, and installs come much sooner than
-    // the node's end. Short expected ends still pass through un-capped.
-    expect(planningHorizonSec(7 * 86_400_000, 0)).toBe(INSTALL_CADENCE_SEC);
-    expect(planningHorizonSec(601_000, 1_000)).toBe(600);
-    expect(planningHorizonSec(undefined, 1_000)).toBe(Math.min(DEFAULT_HORIZON_SEC, INSTALL_CADENCE_SEC));
+  test("a complete route publishes NO node forecast", () => {
+    // The act that ends the node is deliberately unwired (a human clicks), so
+    // "done" can persist indefinitely. Publishing a 0-second estimate for it
+    // would freeze every horizon-gated purchase in the meantime.
+    const done = nodeForecast(0, { id: "daedalus", available: true, complete: true, etaSec: 0, parts: [] }, "basis");
+    expect(done.state).toBe("unknown");
+    expect(usableForecastSec(done)).toBeUndefined();
   });
 
-  test("a stale plan stops steering: quiet publisher falls back to the default", () => {
-    const now = 10_000_000;
-    // Fresh enough: the expected end is honoured.
-    expect(planningHorizonSec(now + 600_000, now, now - 60_000)).toBe(600);
-    // Refresh went quiet: the aging expectedEndAt would otherwise decay the
-    // horizon to the floor over hours; treat the plan as absent instead.
-    expect(planningHorizonSec(now + 600_000, now, now - PLAN_STALE_MS - 1)).toBe(DEFAULT_HORIZON_SEC);
-    // No freshness marker at all (old records) behaves as fresh.
-    expect(planningHorizonSec(now + 600_000, now)).toBe(600);
-  });
-});
-
-describe("expected end publication", () => {
-  const etaOf = (complete: boolean) => [
-    { id: "daedalus" as const, available: true, complete, etaSec: 0, parts: [] },
-  ];
-
-  test("a complete route publishes NO expected end", () => {
-    // THE STALL THIS PINS: etaSec 0 -> expectedEndAt = now would floor every
-    // feature's horizon at 60s for the rest of the run — and the act half
-    // that would actually end the node is deliberately unwired, so that
-    // state persists until a human clicks. Absent reads as the default.
-    const choice: RouteChoice = { route: "daedalus", etaSec: 0, decidedAt: 0, why: "" };
-    expect(expectedEndFrom(choice, etaOf(true), 5_000)).toBeUndefined();
-    expect(planningHorizonSec(expectedEndFrom(choice, etaOf(true), 5_000), 5_000)).toBe(DEFAULT_HORIZON_SEC);
+  test("unknown and stale stay explicit", () => {
+    expect(usableForecastSec(unknownForecast(0, "route", "no route"))).toBeUndefined();
+    const forecast = estimatedForecast(0, "route", [
+      { what: "work", sec: 100, measured: true, mode: "sequential" },
+    ]);
+    const stale = forecastAt(forecast, FORECAST_STALE_MS + 1);
+    expect(stale.state).toBe("stale");
+    expect(usableForecastSec(stale)).toBeUndefined();
   });
 
-  test("an incomplete route publishes decision time plus the estimate", () => {
-    const choice: RouteChoice = { route: "daedalus", etaSec: 120, decidedAt: 0, why: "" };
-    expect(expectedEndFrom(choice, etaOf(false), 5_000)).toBe(125_000);
-    expect(expectedEndFrom(undefined, etaOf(false), 5_000)).toBeUndefined();
+  test("install ETA is the critical parallel path plus final sweep", () => {
+    const forecast = installForecast(0, {
+      installNow: false,
+      queuedCount: 1,
+      phase: "finishUp",
+      workMeasured: true,
+      moneyMeasured: true,
+      finalSweepReady: false,
+      intent: {
+        faction: "Daedalus", repTarget: 1_000, augmentations: ["a"], value: 1, etaSec: 700, rate: 1,
+        marginalRate: 1, unlockSec: 100, repSec: 500, moneySec: 300, favorAfterInstall: 0,
+        totalCost: 1, purchaseCost: 1, donationCost: 0, purpose: "augmentations", why: "test",
+      },
+    }, "package");
+    expect(forecast).toMatchObject({
+      state: "estimated",
+      remainingSec: 660,
+      confidence: "mixed",
+      components: [
+        { critical: true, measured: true },
+        { critical: false, measured: true },
+        { critical: true, measured: false },
+      ],
+    });
   });
 });
 

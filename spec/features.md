@@ -28,7 +28,7 @@ enforces that the five stay in sync.
 | `factions` | Factions | BN4 The Singularity | BN4 or SF4 |
 | `career` | Career | BN11 The Big Crash | always |
 | `hacknet` | Hacknet | BN9 Hacktocracy | always |
-| `stock` | Stocks | BN8 Ghost of Wall Street | `stock.hasWseAccount()` — 0.05 GB |
+| `stock` | Stocks | BN8 Ghost of Wall Street | always |
 | `gang` | Gang | BN2 Rise of the Underworld | `gang.inGang()` — **0 GB** |
 | `corp` | Corp | BN3 Corporatocracy | `corporation.hasCorporation()` — **0 GB** |
 | `bladeburner` | Bladeburner | BN6, BN7 Bladeburners | `bladeburner.inBladeburner()` — **0 GB** |
@@ -45,14 +45,21 @@ Notes on the boundaries, since several are judgement calls:
   than SF4, so its probe section carries its own try/catch.
 - **Karma** lives inside `career` because it is a *precondition* other
   features wait on — BN2's gang needs -54,000 of it.
-- **Coding contracts and infiltration** share `side`: universal income with no
-  BitNode of their own. The casino belongs here conceptually but exposes no ns
-  API (it is DOM-driven); `side` is still `api: true` because its other two
-  halves are automatable. `Feature.api` exists for a feature with *no* ns
-  surface at all, so the tab can say so rather than waiting forever — nothing
-  in the roster is that yet.
+- **Coding contracts** live in `side`: universal income with no BitNode of its
+  own. Infiltration and the casino are intentionally outside the automation
+  roster because their gameplay is DOM-driven and has no action API.
 - **BN1** is themed by `hacking` — it unlocks nothing else. **BN12** is themed
   by `progression`, being the node about the reset loop itself.
+- **`stock` is always playable**, and that is a correction rather than a
+  convenience. The market is MONEY-gated: a WSE account costs $200m and the TIX
+  API $5b, with no source file and no BitNode requirement — the same shape as
+  buying a hacknet node. Gating the feature on `hasWseAccount()` made the
+  purchase unreachable, because a driver never runs while its own feature reads
+  "no", so nothing could ever buy the thing that would unlock it. The account
+  flags now travel as ordinary state on the topic and the driver climbs the
+  ladder itself; `restrictions.disable4SData` still tells it when the forecast
+  cannot be bought at all. Its probes carry `when` guards so a locked market
+  costs one 0.2 GB flag read per minute and nothing else.
 
 ## Capabilities
 
@@ -159,7 +166,7 @@ Five phases, and the ordering is load-bearing:
 ```
 refresh each due module (evaluate → store; progression LAST)
    →  collect needs (pure)  →  collect claims against the completed board (pure)
-   →  one arbitration  →  tick each due driver with its own grants + horizon
+   →  one arbitration  →  tick each due driver with its own grants + forecasts
 ```
 
 Needs come first so a feature can bid harder *because* another is blocked on
@@ -173,7 +180,7 @@ the endgame decision poses: the route choice needs every feature's enriched
 state, and every feature's actions need the chosen route. So each pass
 refreshes the due modules first — with `progression`, the meta module,
 deliberately ordered last so its route decision reads *this* pass's state —
-and then hands every driver `{route, horizonSec}` in its context
+and then hands every driver `{route, horizons: {install, node}}` in its context
 (see `spec/strategy/endgame.md`). Only `progression` implements `refresh`
 today; a feature adopts it the moment its evaluation needs to be visible to
 others before anyone acts.

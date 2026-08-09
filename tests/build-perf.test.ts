@@ -68,6 +68,7 @@ describe("compile-time telemetry elimination", () => {
       "probe.skipped",
       "probe.failed",
       "probe.batch",
+      "contract.quarantined",
     ]) {
       expect(main!.content, `perf bundle still carries ${payloadMarker}`).not.toContain(`"${payloadMarker}"`);
     }

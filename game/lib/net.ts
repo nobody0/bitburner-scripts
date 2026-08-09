@@ -54,9 +54,11 @@ export function rootServers(stubNs: NS, hosts: string[], openers: string[]): str
   return rooted;
 }
 
-/** Usable as a worker host: rooted, has RAM, not a hacknet server. */
+/** Usable as a worker host: rooted and has RAM. Hacknet Servers are genuine
+ * player-owned servers; using their RAM reduces hash production, and that
+ * opportunity cost is accounted for by the Hacknet investment model. */
 export function isUseful(server: Server): boolean {
-  return server.hasAdminRights && server.maxRam >= 2 && !server.hostname.startsWith("hacknet-");
+  return server.hasAdminRights && server.maxRam >= 2;
 }
 
 /** Budget: scp 0.6. Copies the fleet payload — the dispatcher's puppet worker

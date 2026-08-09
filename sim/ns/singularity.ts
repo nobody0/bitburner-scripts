@@ -3,6 +3,7 @@ import type { Clock } from "../clock.ts";
 import type { SimPlayer } from "../core/player.ts";
 import type { CrimeSystem } from "../features/crime.ts";
 import type { FactionSystem } from "../features/factions.ts";
+import type { GraftingSystem } from "../features/grafting.ts";
 import { satisfiesAll, type SatisfyContext } from "../features/requirements.ts";
 import { unmodeled } from "../realm/unmodeled.ts";
 import type { SimWorld } from "../world.ts";
@@ -15,6 +16,7 @@ import { CompanyName } from "../vendor/bitburner/src/Company/Enums.ts";
 import { JobName } from "../vendor/bitburner/src/Work/Enums.ts";
 import { AugmentationName } from "../vendor/bitburner/src/Augmentation/Enums.ts";
 import { calculateHackingTime } from "../vendor/bitburner/src/Hacking.ts";
+import { getUpgradeHomeRamCost } from "../core/effects.ts";
 
 /** The `ns.singularity` namespace, plus `ns.getFavorToDonate` and `ns.enums`.
  *
@@ -37,6 +39,7 @@ export interface SingularityDeps {
   /** Current hostname of the terminal's connection, for backdoors. */
   terminal: { host: string };
   crimes: CrimeSystem;
+  grafting?: GraftingSystem;
   satisfyContext(): SatisfyContext;
   /** Poke the engine's invitation counter, as the real call does. */
   pokeInvitationCounter(): void;
@@ -44,7 +47,8 @@ export interface SingularityDeps {
   homeFiles(): Set<string>;
   hasTor(): boolean;
   setTor(value: boolean): void;
-  onPrestige?: () => void;
+  assertPrestigeSupported?(): void;
+  onPrestige?: (cbScript: string | undefined, newlyInstalled: ReadonlyMap<string, number>) => void;
 }
 
 /** Darkweb prices @ v3.0.1 (src/DarkWeb/DarkWebItems.ts). Port openers only —
@@ -72,12 +76,19 @@ const SOA_SET = new Set([
 
 export interface SingularityNamespace {
   singularity: Record<string, unknown>;
+  grafting: Record<string, unknown>;
   getFavorToDonate: () => number;
   enums: Record<string, unknown>;
 }
 
 export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
   const { world, player, factions, clock } = deps;
+  const requireGraftingAccess = (): void => {
+    if (deps.bitNode === 10 || (player.sourceFiles["10"] ?? 0) > 0) return;
+    throw new Error(
+      "You do not currently have access to the Grafting API. This is either because you are not in BitNode 10 or because you do not have Source-File 10",
+    );
+  };
 
   const queuedNonSoA = (): number =>
     [...player.queuedAugmentations.keys()].filter((name) => !SOA_SET.has(name)).length;
@@ -210,7 +221,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       const work = player.currentWork;
       if (!work) return null;
       return {
-        type: work.kind === "faction" ? "FACTION" : work.kind.toUpperCase(),
+        type: work.kind === "faction" ? "FACTION" : work.kind === "graft" ? "GRAFTING" : work.kind.toUpperCase(),
         factionName: work.subject,
         crimeType: work.kind === "crime" ? work.subject : undefined,
         factionWorkType: work.workType,
@@ -228,6 +239,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       if (player.money < cost) return false;
       if (!Object.values(CityName).includes(city as never)) return false;
       player.money -= cost;
+      world.recordMoney("other", -cost);
       player.city = city;
       world.emit({ kind: "event", name: "travel", data: { city } });
       return true;
@@ -270,23 +282,26 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       if (faction.rep < repCost) return false;
       if (player.money < moneyCost) return false;
       player.money -= moneyCost;
+      world.recordMoney("augmentations", -moneyCost);
       player.queuedAugmentations.set(augName, (player.queuedAugmentations.get(augName) ?? 0) + 1);
       world.emit({ kind: "event", name: "aug.purchased", data: { faction: factionName, augmentation: augName, cost: moneyCost } });
       return true;
     },
 
-    installAugmentations: (_cbScript?: string): boolean => {
+    installAugmentations: (cbScript?: string): boolean => {
       if (player.queuedAugmentations.size === 0) return false;
+      deps.assertPrestigeSupported?.();
+      const newlyInstalled = new Map(player.queuedAugmentations);
       // Reputation banks into favor HERE and nowhere else — the reason a
       // donation-gated faction is a reset decision rather than a wait.
-      factions.bankFavor();
+      factions.prestigeAugmentation();
       for (const [name, level] of player.queuedAugmentations) {
         player.augmentations.set(name, (player.augmentations.get(name) ?? 0) + level);
       }
       player.queuedAugmentations.clear();
       player.stopWork();
       world.emit({ kind: "event", name: "aug.installed", data: { count: player.augmentations.size } });
-      deps.onPrestige?.();
+      deps.onPrestige?.(cbScript, newlyInstalled);
       return true;
     },
 
@@ -300,6 +315,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       if (deps.hasTor()) return true;
       if (player.money < 200_000) return false;
       player.money -= 200_000;
+      world.recordMoney("other", -200_000);
       deps.setTor(true);
       return true;
     },
@@ -311,6 +327,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       if (deps.homeFiles().has(name)) return true;
       if (player.money < cost) return false;
       player.money -= cost;
+      world.recordMoney("other", -cost);
       deps.homeFiles().add(name);
       world.emit({ kind: "event", name: "program.bought", data: { program: name, cost } });
       return true;
@@ -318,6 +335,21 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
 
     getDarkwebProgramCost: (name: string): number => DARKWEB_PRICES[name] ?? -1,
     getDarkwebPrograms: (): string[] => Object.keys(DARKWEB_PRICES),
+
+    // --- home infrastructure -----------------------------------------
+    getUpgradeHomeRamCost: (): number => {
+      const home = world.servers.get("home");
+      return home ? getUpgradeHomeRamCost(home.maxRam) : Infinity;
+    },
+
+    upgradeHomeRam: (): boolean => world.execute({ type: "upgradeHomeRam" }),
+
+    getUpgradeHomeCoresCost: (): number => {
+      const home = world.servers.get("home");
+      return home ? 1e9 * Math.pow(7.5, home.cpuCores) : Infinity;
+    },
+
+    upgradeHomeCores: (): boolean => world.execute({ type: "upgradeHomeCore" }),
 
     // --- terminal / backdoors -----------------------------------------
     getCurrentServer: (): string => deps.terminal.host,
@@ -346,9 +378,6 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       world.emit({ kind: "event", name: "backdoor", data: { host: server.hostname } });
     },
 
-    // Deferred with a reason, never faked.
-    graftAugmentation: (): never =>
-      unmodeled("ns", "grafting.graftAugmentation", "needs a second work type with entropy on completion"),
     b1tflum3: (): never => unmodeled("ns", "singularity.b1tflum3", "one BitNode per process (see spec/simulator.md)"),
     destroyW0r1dD43m0n: (): never =>
       unmodeled("ns", "singularity.destroyW0r1dD43m0n", "one BitNode per process (see spec/simulator.md)"),
@@ -356,6 +385,35 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
 
   return {
     singularity,
+    grafting: {
+      getGraftableAugmentations: () => {
+        requireGraftingAccess();
+        return deps.grafting?.available()
+          ?? unmodeled("subsystem", "grafting", "the harness did not install GraftingSystem");
+      },
+      getAugmentationGraftPrice: (name: string) => {
+        requireGraftingAccess();
+        return deps.grafting?.price(name)
+          ?? unmodeled("subsystem", "grafting", "the harness did not install GraftingSystem");
+      },
+      getAugmentationGraftTime: (name: string) => {
+        requireGraftingAccess();
+        return deps.grafting?.timeMs(name)
+          ?? unmodeled("subsystem", "grafting", "the harness did not install GraftingSystem");
+      },
+      graftAugmentation: (name: string, focus = true) => {
+        requireGraftingAccess();
+        return deps.grafting?.start(name, focus)
+          ?? unmodeled("subsystem", "grafting", "the harness did not install GraftingSystem");
+      },
+      waitForOngoingGrafting: (): Promise<void> => {
+        requireGraftingAccess();
+        const work = player.currentWork;
+        if (!work) return Promise.resolve();
+        if (work.kind !== "graft") return Promise.reject(`The current work is not a grafting work. Type: ${work.kind}`);
+        return work.nextCompletion;
+      },
+    },
     getFavorToDonate: favorToDonate,
     enums: makeEnums(),
   };

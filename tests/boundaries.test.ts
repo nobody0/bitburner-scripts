@@ -29,7 +29,11 @@ describe("sub-project boundaries", () => {
   test("game does not import simulator, UI, or host runtime APIs", () => {
     const violations = sourceFiles("game").flatMap((path) =>
       importedModules(path)
-        .filter((module) => /(?:^|\/)\.{0,2}\/?(?:sim|ui)(?:\/|$)/.test(module) || /^(?:bun|node:)/.test(module))
+        .filter((module) =>
+          /(?:^|\/)\.{0,2}\/?(?:sim|ui)(?:\/|$)/.test(module)
+          || module.includes("bitburner-src")
+          || /^(?:bun|node:)/.test(module),
+        )
         .map((module) => `${display(path)} -> ${module}`),
     );
     expect(violations).toEqual([]);

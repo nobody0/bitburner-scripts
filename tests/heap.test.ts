@@ -94,6 +94,36 @@ describe("Heap", () => {
     expect(heap.usedTotal).toBeCloseTo(13.8, 6);
   });
 
+  test("core-aware grow/weaken reserves fewer real threads on stronger hosts", () => {
+    const heap = new Heap();
+    heap.upsert("quad", 64, 0, 4, 0);
+    heap.upsert("one-core", 64, 0, 1, 0);
+    // 17 effect threads at coreEffect(4) = 1.1875 -> 15 real threads.
+    const result = heap.allocate({ blockSize: 1.75, threads: 17, policy: "spread", coreAware: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.reservation.blocks).toEqual([{ hostname: "quad", threads: 15, cores: 4 }]);
+    expect(result.reservation.gb).toBe(26.25);
+  });
+
+  test("core-aware spread still leaves home as the last resort", () => {
+    const heap = new Heap();
+    heap.upsert("home", 64, 0, 8, 0);
+    heap.upsert("one-core", 64, 0, 1, 0);
+    // one-core fits the whole request, so home — despite having the most
+    // cores — must not be touched: grow's homeFirst and hack's contiguous
+    // fallback depend on home staying free.
+    const result = heap.allocate({ blockSize: 1.75, threads: 17, policy: "spread", coreAware: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.reservation.blocks).toEqual([{ hostname: "one-core", threads: 17, cores: 1 }]);
+    // Only when the rest of the fleet cannot finish the job does home chip in.
+    const spill = heap.allocate({ blockSize: 1.75, threads: 40, policy: "spread", coreAware: true });
+    expect(spill.ok).toBe(true);
+    if (!spill.ok) throw new Error("unreachable");
+    expect(spill.reservation.blocks.map((block) => block.hostname)).toEqual(["one-core", "home"]);
+  });
+
   test("resync reports and repairs drift", () => {
     const heap = makeFleet();
     heap.allocate({ blockSize: 1.7, threads: 2, policy: "contiguous" });

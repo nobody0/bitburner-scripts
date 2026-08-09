@@ -1,27 +1,59 @@
 import type { NS } from "@ns";
+import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
+import { nextPurchasableAugmentation } from "../../../shared/strategy/factions/augs.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
 import { stepGang } from "../../../shared/strategy/gang/decide.ts";
-import { bestOpponent, stepGo } from "../../../shared/strategy/go/decide.ts";
+import {
+  GO_OPPONENTS,
+  evaluate,
+  isGoRewardOpponent,
+  playMove,
+  prepareGoDecision,
+  finalizeGoDecision,
+  scoreBoard,
+  territory as goTerritory,
+  type GoAction,
+  type GoDecision,
+  type GoObservedBoardSize,
+  type GoFactionOpponent,
+  type GoRewardOpponent,
+  type GoView,
+} from "../../../shared/strategy/go/decide.ts";
+import { goFavorRepCap, rankGoGames, type GoEtaDemand } from "../../../shared/strategy/go/rewards.ts";
+import { sfLevel } from "../../../shared/features/unlock.ts";
+import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
+import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
 import { stepProgression } from "../../../shared/strategy/progression/decide.ts";
 import { RED_PILL, stepEndgame, type EndgameView, type RouteId } from "../../../shared/strategy/progression/endgame.ts";
 import {
   chooseRoute,
-  expectedEndFrom,
   noRates,
   routeEtas,
   type RouteChoice,
   type RouteRates,
 } from "../../../shared/strategy/progression/eta.ts";
-import type { RouteEtaDigest } from "../../../shared/telemetry/topics/progression.ts";
-import { canSolve, rankInfiltrations, solve } from "../../../shared/strategy/side/contracts.ts";
+import {
+  forecastAt,
+  installForecast,
+  nodeForecast,
+  shouldReforecast,
+  type PlanningHorizons,
+  usableForecastSec,
+} from "../../../shared/strategy/progression/forecast.ts";
+import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/topics/progression.ts";
+import type { GoPlan, GoResponse, GoTurnResult } from "../../../shared/telemetry/topics/go.ts";
 import { chargeOrder, packFragments } from "../../../shared/strategy/stanek/pack.ts";
-import { stepSleeves } from "../../../shared/strategy/sleeves/decide.ts";
+import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
+import { workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
+import { stepSleeves, type SleevesView, type SleeveTask } from "../../../shared/strategy/sleeves/decide.ts";
 import { isScriptDeath } from "../errors.ts";
-import { merge, type GameState } from "../state.ts";
+import { merge, set, type GameState } from "../state.ts";
+import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions, resetSleeveCompletions } from "../sleeve-completion.ts";
+import type { WorkTaskLike } from "../work-completion.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
@@ -36,13 +68,19 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
 
 /** Every driver here reports its own peak dodge step so the home reserve can
  * cover it (shared/ram/reserve.ts). */
-const STEP_GB = { gang: 6, corp: 24, bladeburner: 10, sleeves: 12, go: 4, stanek: 6, dnet: 8, side: 16, progression: 8 };
+const STEP_GB = { gang: 6, corp: 24, bladeburner: 10, sleeves: 12, go: 4, stanek: 6, dnet: 8, progression: 8 };
 
 type Result = { action: string; ok: boolean; detail: string; at: number } | undefined;
 const results: Record<string, Result> = {};
 
 function record(id: string, action: string, ok: boolean, detail: string): void {
   results[id] = { action, ok, detail, at: Date.now() };
+}
+
+function requireResult(id: string): NonNullable<Result> {
+  const result = results[id];
+  if (!result) throw new Error(`missing ${id} action result`);
+  return result;
 }
 
 /** One dodged call, placed on the fleet, with its outcome recorded. A `false`
@@ -57,7 +95,7 @@ async function act<T>(
   methods: readonly string[],
   body: (stubNs: NS) => T | Promise<T>,
   describe: (value: T) => { ok: boolean; detail: string },
-): Promise<void> {
+): Promise<T | undefined> {
   try {
     const outcome = await featureDodge(ctx, id as Claim["by"], actionClaimId(action), methods, body);
     if (!outcome.ok) {
@@ -67,6 +105,7 @@ async function act<T>(
     const value = outcome.value;
     const { ok, detail } = describe(value);
     record(id, action, ok, detail);
+    return value;
   } catch (error) {
     if (isScriptDeath(error)) throw error;
     record(id, action, false, String(error));
@@ -275,35 +314,155 @@ const bladeburner: FeatureDriver = {
 
 // --- sleeves ----------------------------------------------------------------
 
+function sleeveView(state: GameState): SleevesView | undefined {
+  const topic = state.topics.sleeves;
+  if (!topic) return undefined;
+  const completed = pendingSleeveCompletions();
+  const sleeves = (topic.sleeves ?? []).map((sleeve) => ({
+    index: sleeve.index,
+    shock: sleeve.shock,
+    sync: sleeve.sync,
+    city: sleeve.city,
+    skills: sleeve.skills as unknown as Record<string, number>,
+    ...(sleeve.task
+      ? {
+          task: {
+            type: sleeve.task.type,
+            detail: sleeve.task.detail,
+            ...(sleeve.task.workType !== undefined ? { workType: sleeve.task.workType } : {}),
+          },
+        }
+      : {}),
+    ...(completed.has(sleeve.index) ? { allowCrimeSwitch: true } : {}),
+  }));
+  const progression = state.topics.progression;
+  const node = effectiveBitNodeMultipliers(
+    progression?.bitNode,
+    sfLevel(progression?.sourceFiles, 12),
+    progression?.multipliers,
+  ) ?? {};
+  const crimes = state.topics.career?.crimes ?? [];
+  const tasks: SleeveTask[] = [
+    { type: "recovery", outcomes: [{ rates: {}, moneyPerSec: 0 }] },
+    { type: "synchro", outcomes: [{ rates: {}, moneyPerSec: 0 }] },
+  ];
+  for (const crime of crimes) {
+    const outcomes = (topic.sleeves ?? []).map((sleeve) => {
+      const mults = sleeve.mults ?? {};
+      const stats: CrimeStats = {
+        type: crime.name,
+        timeMs: crime.timeMs,
+        money: crime.money,
+        difficulty: crime.difficulty ?? 1,
+        karma: Math.abs(crime.karma),
+        kills: crime.kills ?? 0,
+        weights: crime.weights ?? {},
+        exp: crime.exp ?? {},
+      };
+      const chance = successChance(
+        stats,
+        { skills: sleeve.skills as unknown as Record<string, number>, mults: { crime_success: mults["crime_success"] ?? 1, crime_money: mults["crime_money"] ?? 1 } },
+        { crimeSuccessRate: node["CrimeSuccessRate"] ?? 1, crimeMoney: node["CrimeMoney"] ?? 1 },
+      );
+      const seconds = crime.timeMs / 1_000;
+      const sync = sleeve.sync / 100;
+      const expectedExp = 0.25 + 0.75 * chance;
+      const exp = crime.exp ?? {};
+      const expRate = (skill: string): number =>
+        expectedExp * sync * (exp[skill] ?? 0) * (mults[`${skill}_exp`] ?? 1) * (node["CrimeExpGain"] ?? 1) / seconds;
+      const rates = {
+        combatSkills: Math.min(expRate("strength"), expRate("defense"), expRate("dexterity"), expRate("agility")),
+        charisma: expRate("charisma"),
+      };
+      const contributions = Object.keys(exp)
+        .map((skill) => ({ kind: "skill" as const, subject: skill, perSec: expRate(skill) }))
+        .filter((entry) => entry.perSec > 0);
+      // SleeveCrimeWork changes karma/kills directly. Unlike WorkStats gains,
+      // these two outcomes are not multiplied by sleeve shock.
+      const shockExemptRates = {
+        karma: chance * Math.abs(crime.karma) * sync / seconds,
+        kills: chance * (crime.kills ?? 0) / seconds,
+      };
+      const moneyPerSec = chance * crime.money * (mults["crime_money"] ?? 1) * (node["CrimeMoney"] ?? 1) / seconds;
+      return { sleeve: sleeve.index, rates, contributions, shockExemptRates, moneyPerSec };
+    });
+    tasks.push({
+      type: "crime",
+      detail: crime.name,
+      outcomes,
+    });
+  }
+
+  // The current faction reputation breakpoint is an outcome sleeves can
+  // advance in parallel with Player.currentWork. Each faction is capacity-one
+  // in the game, while crime remains freely repeatable across sleeves.
+  const factionTopic = state.topics.factions;
+  const repTarget = factionTopic?.plan?.until;
+  if (repTarget?.kind === "rep" && repTarget.faction && factionTopic?.joined.includes(repTarget.faction)) {
+    const standing = factionTopic.standings?.find((entry) => entry.name === repTarget.faction);
+    const offered = factionTopic.workTypes?.[repTarget.faction] ?? [];
+    const sourceFiles = state.topics.progression?.sourceFiles ?? {};
+    for (const workType of ["hacking", "field", "security"] as const) {
+      if (!offered.includes(workType)) continue;
+      const outcomes = (topic.sleeves ?? []).map((sleeve) => {
+        const mults = sleeve.mults ?? {};
+        const contributions = [{
+          kind: "factionRep" as const,
+          subject: repTarget.faction,
+          perSec: workRepPerSec(
+            workType as WorkType,
+            {
+              skills: {
+                hacking: sleeve.skills.hacking,
+                strength: sleeve.skills.strength,
+                defense: sleeve.skills.defense,
+                dexterity: sleeve.skills.dexterity,
+                agility: sleeve.skills.agility,
+                charisma: sleeve.skills.charisma,
+                intelligence: sleeve.skills.intelligence ?? 0,
+              },
+              mults: { faction_rep: mults["faction_rep"] ?? 1 },
+            },
+            standing?.favor ?? 0,
+            {
+              factionWorkRepGain: node["FactionWorkRepGain"] ?? 1,
+              shareBonus: state.topics.fleet?.sharePower ?? 1,
+              sf15Level: sfLevel(sourceFiles, 15),
+              hasFocusAug: true,
+            },
+            true,
+          ),
+        }];
+        return { sleeve: sleeve.index, rates: {}, contributions, moneyPerSec: 0 };
+      });
+      tasks.push({
+        type: "faction",
+        detail: repTarget.faction,
+        workType,
+        exclusiveKey: `faction:${repTarget.faction}`,
+        outcomes,
+      });
+    }
+  }
+  return { sleeves, tasks, shockCeiling: 50, syncFloor: 50 };
+}
+
 const sleeves: FeatureDriver = {
   id: "sleeves",
   everyMs: 30_000,
+  wake: () => pendingSleeveCompletions().size > 0,
   requires: "sleeves",
   async tick(ctx: DriverContext) {
     const topic = ctx.state.topics.sleeves;
-    if (!topic) return;
-    const decision = stepSleeves(
-      {
-        sleeves: (topic.sleeves ?? []).map((sleeve) => ({
-          index: sleeve.index,
-          shock: sleeve.shock,
-          sync: sleeve.sync,
-          city: sleeve.city,
-          skills: sleeve.skills as unknown as Record<string, number>,
-          ...(sleeve.task ? { task: { type: sleeve.task.type, detail: sleeve.task.detail } } : {}),
-        })),
-        tasks: topic.taskOptions ?? [],
-        shockCeiling: 50,
-        syncFloor: 50,
-      },
-      ctx.board,
-    );
+    const view = sleeveView(ctx.state);
+    if (!topic || !view) return;
+    const decision = stepSleeves(view, ctx.board);
 
     merge(ctx.state, "sleeves", {
       plan: {
         assignments: decision.assignments.map((entry) => ({
           index: entry.index,
-          task: `${entry.task.type}${entry.task.detail ? `:${entry.task.detail}` : ""}`,
+          task: `${entry.task.type}${entry.task.detail ? `:${entry.task.detail}` : ""}${entry.task.workType ? `:${entry.task.workType}` : ""}`,
           why: entry.why,
         })),
         why: decision.why,
@@ -311,75 +470,584 @@ const sleeves: FeatureDriver = {
       },
     });
 
-    const next = decision.assignments[0];
-    if (!next) return;
-    await act(
+    const completed = [...pendingSleeveCompletions()];
+    if (decision.assignments.length === 0 && completed.length === 0) return;
+    const outcome = await featureDodge(
       ctx,
       "sleeves",
-      next.task.type,
-      sleeveMethods(next.task.type),
+      "action:batch",
+      sleeveBatchMethods(decision.assignments.map((entry) => entry.task.type)),
       (stubNs: NS) => {
-        switch (next.task.type) {
-          case "recovery":
-            return stubNs["sleeve"]["setToShockRecovery"](next.index);
-          case "synchro":
-            return stubNs["sleeve"]["setToSynchronize"](next.index);
-          case "crime":
-            return stubNs["sleeve"]["setToCommitCrime"](next.index, next.task.detail as never);
-          case "gym":
-            return stubNs["sleeve"]["setToGymWorkout"](next.index, "Powerhouse Gym" as never, next.task.detail as never);
-          case "class":
-            return stubNs["sleeve"]["setToUniversityCourse"](next.index, "Rothman University" as never, next.task.detail as never);
-          case "faction":
-            return stubNs["sleeve"]["setToFactionWork"](next.index, next.task.detail as never, "hacking" as never);
-          default:
-            return false;
+        const changed: number[] = [];
+        for (const next of decision.assignments) {
+          let ok = false;
+          if (next.task.type === "recovery") ok = stubNs["sleeve"]["setToShockRecovery"](next.index);
+          else if (next.task.type === "synchro") ok = stubNs["sleeve"]["setToSynchronize"](next.index);
+          else if (next.task.type === "crime") ok = stubNs["sleeve"]["setToCommitCrime"](next.index, next.task.detail as never);
+          else if (next.task.type === "gym") ok = stubNs["sleeve"]["setToGymWorkout"](next.index, "Powerhouse Gym" as never, next.task.detail as never);
+          else if (next.task.type === "class") ok = stubNs["sleeve"]["setToUniversityCourse"](next.index, "Rothman University" as never, next.task.detail as never);
+          else if (next.task.type === "faction") {
+            ok = Boolean(stubNs["sleeve"]["setToFactionWork"](next.index, next.task.detail as never, next.task.workType as never));
+          }
+          if (ok) changed.push(next.index);
         }
+        const observed: { index: number; task?: { type: string; detail?: string; workType?: string } }[] = [];
+        for (const sleeve of topic.sleeves ?? []) {
+          const task = stubNs["sleeve"]["getTask"](sleeve.index) as (WorkTaskLike & Record<string, unknown>) | null;
+          armSleeveCompletion(sleeve.index, task);
+          if (!task) observed.push({ index: sleeve.index });
+          else {
+            const detail = task.factionName ?? task.companyName ?? task.crimeType ?? task.classType;
+            observed.push({
+              index: sleeve.index,
+              task: {
+                type: String(task.type),
+                ...(detail !== undefined ? { detail: String(detail) } : {}),
+                ...(task.factionWorkType !== undefined ? { workType: String(task.factionWorkType) } : {}),
+              },
+            });
+          }
+        }
+        return { changed, observed };
       },
-      (value) => ({ ok: Boolean(value), detail: Boolean(value) ? `sleeve ${next.index} -> ${next.task.type}` : "refused" }),
     );
+    if (outcome.ok) {
+      for (const index of completed) consumeSleeveCompletion(index);
+      const observed = new Map(outcome.value.observed.map((entry) => [entry.index, entry.task]));
+      merge(ctx.state, "sleeves", {
+        sleeves: (topic.sleeves ?? []).map((sleeve) => {
+          const task = observed.get(sleeve.index);
+          return task === undefined ? { ...sleeve, task: undefined } : { ...sleeve, task };
+        }),
+      });
+      results["sleeves"] = { action: "batch", ok: true, detail: `updated ${outcome.value.changed.length} sleeves`, at: Date.now() };
+    }
   },
 };
 
 // --- go ---------------------------------------------------------------------
 
+function addGoDemand(
+  demands: Partial<Record<ReturnType<typeof goRewardOpponent>, GoEtaDemand>>,
+  opponent: ReturnType<typeof goRewardOpponent>,
+  seconds: number,
+  share: number,
+  why: string,
+): void {
+  if (!(seconds > 0) || !(share > 0)) return;
+  const previous = demands[opponent];
+  const effective = seconds * Math.min(1, share) + (previous?.seconds ?? 0) * (previous?.share ?? 0);
+  demands[opponent] = {
+    seconds: effective,
+    share: 1,
+    why: previous ? `${previous.why}; ${why}` : why,
+  };
+}
+
+function goRewardOpponent(value: "hacknet" | "crime" | "money" | "combat" | "reputation" | "speed" | "level") {
+  return ({
+    hacknet: "Netburners",
+    crime: "Slum Snakes",
+    money: "The Black Hand",
+    combat: "Tetrads",
+    reputation: "Daedalus",
+    speed: "Illuminati",
+    level: "????????????",
+  } as const)[value];
+}
+
+/** Convert the same ETA decomposition shown in the UI into seconds that each
+ * Go multiplier can remove. No generic feature weights are involved. */
+function goDemands(ctx: DriverContext): Partial<Record<ReturnType<typeof goRewardOpponent>, GoEtaDemand>> {
+  const demands: Partial<Record<ReturnType<typeof goRewardOpponent>, GoEtaDemand>> = {};
+  const installSec = usableForecastSec(ctx.horizons.install);
+  const nodeSec = usableForecastSec(ctx.horizons.node);
+  const runway = installSec ?? nodeSec ?? 0;
+  const sources = ctx.state.topics.progression?.moneySources?.sinceInstall;
+  const positiveTotal = sources ? Math.max(0, sources.total) : 0;
+  const hackingShare = positiveTotal > 0 ? Math.max(0, sources!.hacking) / positiveTotal : 0.5;
+  const hacknetShare = positiveTotal > 0 ? Math.max(0, sources!.hacknet) / positiveTotal : 0;
+
+  // Hacking is the background engine for both money and experience. Its value
+  // compounds across the remaining install runway, which makes it naturally
+  // strongest early and naturally fade as the install approaches.
+  addGoDemand(demands, goRewardOpponent("speed"), runway, 0.5 + hackingShare * 0.5, "hacking throughput over the install runway");
+  addGoDemand(demands, goRewardOpponent("money"), runway, hackingShare, "measured hacking share of install income");
+  addGoDemand(demands, goRewardOpponent("hacknet"), runway, hacknetShare, "measured Hacknet share of install income");
+
+  if (ctx.horizons.install.state === "estimated") {
+    for (const part of ctx.horizons.install.components) {
+      if (part.what.includes("reputation") || part.what.includes("faction unlock")) {
+        addGoDemand(demands, goRewardOpponent("reputation"), part.sec, 1, `install component: ${part.what}`);
+      }
+      if (part.what.includes("money")) {
+        addGoDemand(demands, goRewardOpponent("money"), part.sec, hackingShare, `install component: ${part.what}`);
+        addGoDemand(demands, goRewardOpponent("hacknet"), part.sec, hacknetShare, `install component: ${part.what}`);
+      }
+    }
+  }
+  if (ctx.horizons.node.state === "estimated") {
+    for (const part of ctx.horizons.node.components) {
+      if (part.what.includes("hacking") || part.what.includes("regrow")) {
+        addGoDemand(demands, goRewardOpponent("speed"), part.sec, 1, `node route component: ${part.what}`);
+        addGoDemand(demands, goRewardOpponent("level"), part.sec, 1, `node route component: ${part.what}`);
+      } else if (part.what.includes("reputation")) {
+        addGoDemand(demands, goRewardOpponent("reputation"), part.sec, 1, `node route component: ${part.what}`);
+      } else if (part.what.includes("combat") || part.what.includes("black operations") || part.what.includes("rank")) {
+        addGoDemand(demands, goRewardOpponent("combat"), part.sec, 1, `node route component: ${part.what}`);
+      }
+    }
+  }
+  for (const need of ctx.board.open) {
+    const seconds = runway * Math.min(1, Math.max(0.1, need.weight / 10));
+    if (need.kind === "karma" || need.kind === "kills") addGoDemand(demands, goRewardOpponent("crime"), seconds, 1, need.why);
+    else if (need.kind === "combatSkills" || need.kind === "bladeburnerRank") addGoDemand(demands, goRewardOpponent("combat"), seconds, 1, need.why);
+    else if (need.kind === "companyRep") addGoDemand(demands, goRewardOpponent("reputation"), seconds, 1, need.why);
+    else if (need.kind === "hacknetRam" || need.kind === "hacknetCores" || need.kind === "hacknetLevels") {
+      addGoDemand(demands, goRewardOpponent("hacknet"), seconds, 1, need.why);
+    } else if (need.kind === "backdoor" || need.kind === "skill" && need.subject === "hacking") {
+      addGoDemand(demands, goRewardOpponent("speed"), seconds, 1, need.why);
+      addGoDemand(demands, goRewardOpponent("level"), seconds, 1, need.why);
+    }
+  }
+  return demands;
+}
+
+function goFactionFavor(ctx: DriverContext): Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>> {
+  const result: Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>> = {};
+  const joined = new Set(ctx.state.topics.factions?.joined ?? []);
+  const intent = ctx.state.topics.factions?.plan?.objective?.intent;
+  const standings = new Map((ctx.state.topics.factions?.standings ?? []).map((standing) => [standing.name, standing]));
+  for (const opponent of GO_OPPONENTS) {
+    if (!joined.has(opponent)) continue;
+    const standing = standings.get(opponent);
+    if (!standing) continue;
+    result[opponent] = {
+      favor: standing.favor,
+      remainingWorkSec: intent?.faction === opponent ? Math.max(0, intent.repSec) : 0,
+    };
+  }
+  return result;
+}
+
+function observedGoBoardSize(board: readonly string[]): GoObservedBoardSize {
+  const size = board.length;
+  if ((size !== 5 && size !== 7 && size !== 9 && size !== 13 && size !== 19)
+    || board.some((column) => column.length !== size)) {
+    throw new Error(`unexpected Go reset board dimensions ${size}x${board[0]?.length ?? 0}`);
+  }
+  return size;
+}
+
+type RawGoResponse = Awaited<ReturnType<NS["go"]["makeMove"]>>;
+type GoActionOutcome = {
+  response?: RawGoResponse;
+  alignment: "none" | "same-slot" | "boundary-replan";
+  dispatchPlaytime?: number;
+  player?: ReturnType<NS["getPlayer"]>;
+  action?: Extract<GoAction, { type: "move" | "pass" }>;
+  decision?: GoDecision;
+  prediction?: NonNullable<GoPlan["prediction"]>;
+};
+
+function normalizeGoResponse(response: RawGoResponse): GoResponse {
+  if (response.type === "move") {
+    if (response.x === null || response.y === null) throw new Error("Go move response omitted its coordinates");
+    return { type: "move", x: response.x, y: response.y };
+  }
+  if (response.x !== null || response.y !== null) throw new Error(`Go ${response.type} response carried coordinates`);
+  return { type: response.type, x: null, y: null };
+}
+
+/** `makeMove`, `passTurn`, and `opponentNextTurn` all resolve only when the
+ * opponent has finished. Once one does, wake Go on the next controller pass
+ * rather than imposing the ordinary five-second review cadence. */
+let goContinuationReady = false;
+
+function sameGoPosition(plan: GoPlan | undefined, topic: NonNullable<GameState["topics"]["go"]>): boolean {
+  if (!plan || plan.input.status !== topic.status || plan.input.currentPlayer !== topic.currentPlayer) return false;
+  return plan.input.board.length === topic.board?.length
+    && plan.input.board.every((column, index) => column === topic.board?.[index]);
+}
+
+/** Claims are collected before tick() computes the next plan. Derive lifecycle
+ * transitions from the current public board so a freshly completed promise can
+ * act immediately even though the stored plan describes the preceding turn. */
+function goClaimAction(state: GameState): GoAction["type"] | undefined {
+  const topic = state.topics.go;
+  if (!topic?.board || !topic.status || !topic.currentPlayer) return undefined;
+  if (topic.status === "gameOver" || topic.currentPlayer === "None") return "newGame";
+  if (topic.currentPlayer !== "Black") return "resume";
+  if (sameGoPosition(topic.plan, topic)) {
+    const planned = topic.plan!.action.type;
+    if (planned === "move" || planned === "pass") return planned;
+  }
+  return topic.board.some((column) => column.includes(".")) ? "move" : "pass";
+}
+
 const go: FeatureDriver = {
   id: "go",
-  everyMs: 10_000,
+  everyMs: 5_000,
+  wake: () => goContinuationReady,
   requires: "go",
   async tick(ctx: DriverContext) {
+    // Consume the edge. A successful action below raises it again when the
+    // authoritative game promise resolves. Failure falls back to the normal
+    // cadence, except for a one-pass stale-claim transition corrected below.
+    goContinuationReady = false;
     const topic = ctx.state.topics.go;
-    if (!topic?.board) return;
-    const view = {
-      board: { rows: topic.board, size: topic.boardSize ?? topic.board.length },
-      currentPlayer: topic.currentPlayer ?? "Black",
-      opponent: topic.opponent ?? "Netburners",
-      opponentValue: Object.fromEntries((topic.stats ?? []).map((entry) => [entry.opponent, entry.bonusPercent])),
-      maxDepth: 3,
-    };
-    const decision = stepGo(view);
-
-    merge(ctx.state, "go", {
-      plan: {
-        action: decision.action,
-        ranked: decision.ranked,
-        why: decision.why,
-        preferredOpponent: bestOpponent(view),
-        ...(results["go"] ? { lastResult: results["go"] } : {}),
+    if (
+      !topic?.board || !topic.boardSize || !topic.previousBoards || !topic.status || !topic.currentPlayer ||
+      !topic.opponent || !topic.stats || !isGoRewardOpponent(topic.opponent)
+    ) return;
+    const claimedAction = goClaimAction(ctx.state);
+    const joined = new Set(ctx.state.topics.factions?.joined ?? []);
+    const stats = topic.stats;
+    const allowWorldDaemon = Boolean(ctx.state.topics.progression?.ownedAugs?.["The Red Pill"]);
+    const nodeMults = effectiveBitNodeMultipliers(
+      ctx.caps.bitNode,
+      sfLevel(ctx.caps.sourceFiles, 12),
+      ctx.state.topics.progression?.multipliers,
+    );
+    const installRemainingSec = usableForecastSec(ctx.horizons.install);
+    const rewardOpponents: readonly GoRewardOpponent[] = allowWorldDaemon
+      ? ["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati", "????????????"]
+      : ["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati"];
+    const rewardView = {
+      opponents: rewardOpponents,
+      stats,
+      joinedFactions: joined,
+      factionFavor: goFactionFavor(ctx),
+      demands: goDemands(ctx),
+      goPower: nodeMults?.GoPower ?? 1,
+      hasSourceFile14: sfLevel(ctx.caps.sourceFiles, 14) > 0,
+      favorRepCap: goFavorRepCap(sfLevel(ctx.caps.sourceFiles, 14)),
+      ...(installRemainingSec !== undefined
+        ? { installRemainingSec }
+        : {}),
+    } as const;
+    const candidates = rankGoGames(rewardView);
+    const preferred = candidates[0];
+    if (!preferred) return;
+    const view: GoView = {
+      board: { rows: topic.board, size: topic.boardSize },
+      currentPlayer: topic.currentPlayer,
+      opponent: topic.opponent,
+      status: topic.status,
+      previousBoards: topic.previousBoards,
+      ...(topic.komi !== undefined ? { komi: topic.komi } : {}),
+      ...(topic.bonusCycles !== undefined ? { bonusCycles: topic.bonusCycles } : {}),
+      currentWinStreak: stats.find((entry) => entry.opponent === topic.opponent)?.winStreak ?? 0,
+      nextGame: {
+        opponent: preferred.opponent,
+        boardSize: preferred.boardSize,
+        why: `${preferred.totalSecSaved.toFixed(1)}s immediate and ${(preferred.horizonTransientSecSaved + preferred.horizonFavorSecSaved).toFixed(1)}s over ${preferred.planningGames} games`,
       },
-    });
+    };
+    let decision: GoDecision;
+    // Board analysis is seed-independent. The exact seed-dependent half runs
+    // inside the dodge immediately before the Go call, so planning never
+    // reserves a future tick or sleeps merely to make a seed reachable.
+    const planStartedAt = Date.now();
+    const exactForecast = view.board.size === 5;
+    const prepared = prepareGoDecision(view, exactForecast);
+    const preparationMs = Date.now() - planStartedAt;
+    decision = prepared.immediate ?? finalizeGoDecision(prepared);
+    const decisionAt = Date.now();
+    const plan: GoPlan = {
+      action: decision.action,
+      ranked: decision.ranked,
+      why: decision.why,
+      input: {
+        at: decisionAt,
+        board: [...view.board.rows],
+        previousBoards: view.previousBoards.map((position) => [...position]),
+        status: view.status,
+        currentPlayer: view.currentPlayer,
+        opponent: view.opponent,
+        ...(topic.blackScore !== undefined ? { blackScore: topic.blackScore } : {}),
+        ...(topic.whiteScore !== undefined ? { whiteScore: topic.whiteScore } : {}),
+        ...(topic.komi !== undefined ? { komi: topic.komi } : {}),
+        ...(topic.bonusCycles !== undefined ? { bonusCycles: topic.bonusCycles } : {}),
+      },
+      planning: { finalistCount: decision.finalists, positionValue: decision.positionValue },
+      selection: {
+        preferred,
+        candidates,
+        context: {
+          goPower: rewardView.goPower,
+          hasSourceFile14: rewardView.hasSourceFile14,
+          favorRepCap: rewardView.favorRepCap,
+          ...(installRemainingSec !== undefined ? { installRemainingSec } : {}),
+          joinedFactions: [...joined].sort(),
+          demands: rewardView.demands,
+          factionFavor: rewardView.factionFavor,
+        },
+      },
+    };
 
-    await act(
+    merge(ctx.state, "go", { plan });
+
+    let action = decision.action;
+    if (action.type === "newGame") {
+      const newGameAction = action;
+      const actionStartedAt = Date.now();
+      const reset = await act(
+        ctx,
+        "go",
+        action.type,
+        goMethods(action.type),
+        (stubNs: NS) => stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize),
+        (value) => ({
+          ok: value !== undefined,
+          detail: value
+            ? `new ${value.length}x${value.length} game against ${newGameAction.opponent}`
+            : `could not start a game against ${newGameAction.opponent}`,
+        }),
+      );
+      const result = requireResult("go");
+      const lastTurn: GoTurnResult = {
+        at: result.at,
+        durationMs: Date.now() - actionStartedAt,
+        action,
+        ok: result.ok,
+        detail: result.detail,
+      };
+      if (reset) {
+        // A new opponent has a different komi. Clear every board-derived value
+        // until the core probe supplies that public metadata; retaining the
+        // completed game's score would make the first new-game record lie.
+        const fresh: NonNullable<typeof topic> = {
+          ...topic,
+          board: reset,
+          boardSize: observedGoBoardSize(reset),
+          previousBoards: [],
+          moveCount: 0,
+          currentPlayer: "Black",
+          status: "inProgress",
+          opponent: action.opponent,
+          territory: { black: 0, white: 0 },
+          plan,
+          lastTurn,
+        };
+        delete fresh.blackScore;
+        delete fresh.whiteScore;
+        delete fresh.komi;
+        set(ctx.state, "go", fresh);
+        goContinuationReady = true;
+      } else {
+        merge(ctx.state, "go", { plan, lastTurn });
+        // The board can transition between action kinds while the prior plan
+        // is still stored. Retry that bookkeeping mismatch next pass; do not
+        // hot-loop genuine RAM denial or an unavailable host.
+        if (claimedAction !== action.type) goContinuationReady = true;
+      }
+      return;
+    }
+
+    const actionStartedAt = Date.now();
+    const rawOutcome = await act(
       ctx,
       "go",
-      decision.action.type,
-      goMethods(decision.action.type),
-      async (stubNs: NS) =>
-        decision.action.type === "move"
-          ? await stubNs["go"]["makeMove"](decision.action.x, decision.action.y)
-          : await stubNs["go"]["passTurn"](),
-      (value) => ({ ok: Boolean(value), detail: decision.action.type }),
+      action.type,
+      goMethods(action.type),
+      async (stubNs: NS): Promise<GoActionOutcome> => {
+        let dispatchPlayer: ReturnType<NS["getPlayer"]> | undefined;
+        let dispatchedAction = action.type === "move" || action.type === "pass" ? action : undefined;
+        let dispatchedDecision: GoDecision | undefined;
+        let dispatchPrediction: NonNullable<GoPlan["prediction"]> | undefined;
+        let boundaryRetries = 0;
+        if (dispatchedAction && exactForecast && !prepared.immediate) {
+          const preparedAction = dispatchedAction;
+          const finalizeForSlot = (player: ReturnType<NS["getPlayer"]>) => {
+            const sampledAt = Date.now();
+            const seeds = (topic.bonusCycles ?? 0) > 0
+              ? [player.totalPlaytime, player.totalPlaytime + GO_ENGINE_CYCLE_MS]
+              : [alignedAiSeed(player.totalPlaytime, topic.bonusCycles)];
+            const finalizationStartedAt = Date.now();
+            let exactDecision = finalizeGoDecision({
+              ...prepared,
+              view: { ...view, alignedDispatchPlaytime: player.totalPlaytime },
+            }, seeds);
+            const decisionAt = Date.now();
+            const exactAction = exactDecision.action;
+            const chosenAction = exactAction.type === preparedAction.type
+              && (exactAction.type === "move" || exactAction.type === "pass")
+              ? exactAction
+              : preparedAction;
+            if (chosenAction === preparedAction && exactAction !== preparedAction) {
+              exactDecision = {
+                ...exactDecision,
+                action: preparedAction,
+                why: `${exactDecision.why}; keep the prepared action type for immediate dispatch`,
+              };
+            }
+            return {
+              action: chosenAction,
+              decision: exactDecision,
+              prediction: {
+                model: GO_OPPONENT_MODEL,
+                sampledTotalPlaytime: player.totalPlaytime,
+                sampledAt,
+                decisionAt,
+                preparationMs,
+                finalizationMs: decisionAt - finalizationStartedAt,
+                totalPlanningMs: decisionAt - planStartedAt,
+                engineCycleMs: GO_ENGINE_CYCLE_MS,
+                aiWaitMs: goAiWaitMs(topic.bonusCycles),
+                seedCandidates: seeds,
+                dispatchPlaytime: player.totalPlaytime,
+                boundaryRetries,
+              } satisfies NonNullable<GoPlan["prediction"]>,
+            };
+          };
+          // Finalize against the tick we can dispatch in now. A second public
+          // read proves that the sub-millisecond exact step stayed in that
+          // slot. Only an observed rollover pays a short retry; there is no
+          // fixed 200/600 ms seed reservation.
+          for (let attempt = 0; attempt < 3; attempt++) {
+            dispatchPlayer = stubNs["getPlayer"]();
+            const finalized = finalizeForSlot(dispatchPlayer);
+            const verified = stubNs["getPlayer"]();
+            if (verified.totalPlaytime === dispatchPlayer.totalPlaytime) {
+              dispatchedAction = finalized.action;
+              dispatchedDecision = finalized.decision;
+              dispatchPrediction = finalized.prediction;
+              break;
+            }
+            boundaryRetries++;
+            await stubNs["sleep"](10);
+          }
+          // Three consecutive rollovers require a heavily throttled browser.
+          // Throughput still wins: dispatch immediately from one fresh read
+          // instead of waiting for a distant guaranteed tick.
+          if (!dispatchPrediction) {
+            dispatchPlayer = stubNs["getPlayer"]();
+            const finalized = finalizeForSlot(dispatchPlayer);
+            dispatchedAction = finalized.action;
+            dispatchedDecision = finalized.decision;
+            dispatchPrediction = finalized.prediction;
+          }
+        }
+        let response: RawGoResponse;
+        if (dispatchedAction?.type === "move") {
+          response = await stubNs["go"]["makeMove"](dispatchedAction.x, dispatchedAction.y);
+        } else if (action.type === "resume") {
+          // makeMove/passTurn already await this same promise. This branch only
+          // reattaches after a restart interrupted an in-flight white turn.
+          response = await stubNs["go"]["opponentNextTurn"](false, false);
+        } else if (dispatchedAction?.type === "pass") {
+          response = await stubNs["go"]["passTurn"]();
+        } else {
+          throw new Error(`invalid Go turn action ${action.type}`);
+        }
+        return {
+          response,
+          alignment: dispatchPlayer ? boundaryRetries ? "boundary-replan" : "same-slot" : "none",
+          ...(dispatchPlayer ? { dispatchPlaytime: dispatchPlayer.totalPlaytime, player: dispatchPlayer } : {}),
+          ...(dispatchedAction ? { action: dispatchedAction } : {}),
+          ...(dispatchedDecision ? { decision: dispatchedDecision } : {}),
+          ...(dispatchPrediction ? { prediction: dispatchPrediction } : {}),
+        } satisfies GoActionOutcome;
+      },
+      (value) => ({
+        ok: value.response !== undefined,
+        detail: `${value.action?.type ?? action.type}; opponent ${value.response?.type}`,
+      }),
     );
+    const result = requireResult("go");
+    if (rawOutcome?.action && rawOutcome.decision) {
+      action = rawOutcome.action;
+      decision = rawOutcome.decision;
+      plan.action = decision.action;
+      plan.ranked = decision.ranked;
+      plan.why = decision.why;
+      plan.planning = { finalistCount: decision.finalists, positionValue: decision.positionValue };
+      if (rawOutcome.prediction) plan.prediction = rawOutcome.prediction;
+    }
+    if (rawOutcome?.player) {
+      set(ctx.state, "player", rawOutcome.player);
+      ctx.state.playerObservedAt = Date.now();
+    }
+    if (!rawOutcome?.response) {
+      merge(ctx.state, "go", {
+        plan,
+        lastTurn: {
+          at: result.at,
+          durationMs: Date.now() - actionStartedAt,
+          action,
+          timing: {
+            alignment: rawOutcome?.alignment ?? "none",
+            ...(rawOutcome?.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
+            ...(plan.prediction ? { seed: plan.prediction.seedCandidates[0] } : {}),
+          },
+          ok: result.ok,
+          detail: result.detail,
+        },
+      });
+      if (claimedAction !== action.type) goContinuationReady = true;
+      return;
+    }
+    const response = normalizeGoResponse(rawOutcome.response);
+
+    // makeMove/passTurn returns the AI's actual public response. Advance the
+    // held board immediately so the driver never replays a stale move while
+    // waiting for the next 30 s probe sweep. No hidden AI state is inferred.
+    let board = view.board;
+    const previousBoards = [...view.previousBoards];
+    if (action.type === "move") {
+      const ours = playMove(board, action.x, action.y, "X", new Set(previousBoards.map((prior) => prior.join(""))));
+      if (!ours) throw new Error(`Go rules drift: accepted move ${action.x},${action.y} was locally illegal`);
+      previousBoards.unshift(board.rows);
+      board = ours.board;
+    }
+    if (response.type === "move") {
+      const theirs = playMove(board, response.x, response.y, "O", new Set(previousBoards.map((prior) => prior.join(""))));
+      if (!theirs) throw new Error(`Go rules drift: accepted AI move ${response.x},${response.y} was locally illegal`);
+      previousBoards.unshift(board.rows);
+      board = theirs.board;
+    }
+    const responsePlayer = ctx.ns.getPlayer();
+    set(ctx.state, "player", responsePlayer);
+    ctx.state.playerObservedAt = Date.now();
+    const selected = action.type === "move"
+      ? decision.ranked.find((candidate) => candidate.x === action.x && candidate.y === action.y)
+      : undefined;
+    const predicted = selected?.predictedReplies ?? [];
+    const predictionTotal = predicted.reduce((sum, candidate) => sum + candidate.count, 0);
+    const matching = predicted.reduce((sum, candidate) => {
+      const matches = response.type === "move"
+        ? candidate.x === response.x && candidate.y === response.y
+        : candidate.x === null && candidate.y === null;
+      return sum + (matches ? candidate.count : 0);
+    }, 0);
+    const controlled = goTerritory(board);
+    const score = topic.komi === undefined ? undefined : scoreBoard(board, topic.komi);
+    merge(ctx.state, "go", {
+      board: board.rows,
+      previousBoards,
+      moveCount: previousBoards.length,
+      territory: { black: controlled.X, white: controlled.O },
+      ...(score ? { blackScore: score.X, whiteScore: score.O } : {}),
+      currentPlayer: response.type === "gameOver" ? "None" : "Black",
+      status: response.type === "gameOver" ? "gameOver" : "inProgress",
+      plan,
+      lastTurn: {
+        at: result.at,
+        durationMs: Date.now() - actionStartedAt,
+        action,
+        opponentResponse: response,
+        timing: {
+          alignment: rawOutcome.alignment,
+          ...(rawOutcome.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
+          ...(plan.prediction ? { seed: plan.prediction.seedCandidates[0] } : {}),
+        },
+        ...(predictionTotal > 0 ? { predictionSupport: { matching, total: predictionTotal } } : {}),
+        ok: result.ok,
+        detail: result.detail,
+      },
+    });
+    goContinuationReady = true;
   },
 };
 
@@ -525,70 +1193,6 @@ function dnetNeeds(ctx: NeedContext): Need[] {
   ];
 }
 
-// --- side -------------------------------------------------------------------
-
-const side: FeatureDriver = {
-  id: "side",
-  everyMs: 60_000,
-  async tick(ctx: DriverContext) {
-    const topic = ctx.state.topics.side;
-    if (!topic) return;
-
-    // The probe has already partitioned the network: `contracts` is a capped,
-    // most-at-risk-first window onto the SOLVABLE ones, and the rest arrive
-    // pre-counted per type. Re-filtering with canSolve is defensive — a legacy
-    // record predating the split carries both kinds in one list.
-    const solvable = (topic.contracts ?? []).filter((contract) => canSolve(contract.type));
-    const unsolvable = Object.entries(topic.unsolvableByType ?? {})
-      .map(([type, count]) => ({ type, count }))
-      .sort((a, b) => b.count - a.count || a.type.localeCompare(b.type));
-    const solvableTotal = topic.solvableTotal ?? solvable.length;
-    const unsolvableTotal = topic.unsolvableTotal ?? 0;
-    const infiltration = rankInfiltrations(topic.infiltration ?? []);
-
-    merge(ctx.state, "side", {
-      plan: {
-        solvable: solvable.map((contract) => ({ host: contract.host, file: contract.file, type: contract.type })),
-        solvableTotal,
-        // Named explicitly: an unsolved contract expires, and a type we cannot
-        // solve is a gap in the registry, not a mystery. One row per TYPE —
-        // the fix is a solver, and listing every file that needs it is noise.
-        unsolvable,
-        unsolvableTotal,
-        infiltration: infiltration.slice(0, 8).map((target) => ({
-          location: target.location,
-          city: target.city,
-          valuePerMinute: target.valuePerMinute,
-        })),
-        // The casino belongs to this feature conceptually but is DOM-driven
-        // with no ns API at all, so it is reported as a permanent blocker
-        // rather than silently omitted.
-        casino: "no ns API — the casino is DOM-driven and cannot be automated",
-        why: `${solvableTotal} solvable, ${unsolvableTotal} without a solver (${unsolvable.length} types), ${infiltration.length} infiltration targets`,
-        ...(results["side"] ? { lastResult: results["side"] } : {}),
-      },
-    });
-
-    const next = solvable[0];
-    if (!next) return;
-    await act(
-      ctx,
-      "side",
-      "contract",
-      ["codingcontract.getData", "codingcontract.attempt"],
-      (stubNs: NS) => {
-        const data = stubNs["codingcontract"]["getData"](next.file, next.host);
-        const answer = solve(next.type, data);
-        // Never submit a guess: a wrong answer burns one of three tries and
-        // the third destroys the contract.
-        if (answer === undefined) return "no solver";
-        return stubNs["codingcontract"]["attempt"](answer as never, next.file, next.host);
-      },
-      (value) => ({ ok: typeof value === "string" && value !== "no solver" && value !== "", detail: String(value) }),
-    );
-  },
-};
-
 // --- progression ------------------------------------------------------------
 
 /** Observed rate over a sliding window of samples. The window (30 min, 30 s
@@ -632,6 +1236,8 @@ interface ProgressionMemory {
     rank: RateTracker;
   };
   choice?: RouteChoice;
+  installArmedAt?: number;
+  installQueueKey?: string;
 }
 
 function freshProgressionMemory(): ProgressionMemory {
@@ -759,15 +1365,41 @@ function affordableValueProduct(ctx: NeedContext): number {
   return product;
 }
 
+/** The published plan, but only if THIS bundle can read it.
+ *
+ * The plan outlives the code that wrote it: module state dies with the old bundle
+ * while the topic lives in the realm store, which is the whole point of
+ * `previousChoice` below. The corollary is that a plan written before a field
+ * existed will be missing it, and the type — which describes what we write, not
+ * what we may find — says nothing about that.
+ *
+ * THE BUG this exists to prevent: `plan.forecasts.node` was read unguarded, so
+ * after a rebuild that added `forecasts` the refresh threw
+ * `Cannot read properties of undefined (reading 'node')` on every pass. It threw
+ * BEFORE publishing, so it could never replace the plan that was breaking it —
+ * permanently wedged, reporting "waiting for the progression planner" while every
+ * other feature ran normally. A stale plan has to be discarded, not trusted.
+ *
+ * Checked by the fields later code dereferences rather than by a version number:
+ * there is no schema version to bump, and this cannot drift out of date silently
+ * the way a hand-maintained one would. */
+function readablePlan(state: GameState): ProgressionPlan | undefined {
+  const plan = state.topics.progression?.plan;
+  if (!plan?.forecasts?.node || !plan.forecasts.install) return undefined;
+  if (!plan.queuedAugmentations || !plan.installBlockers) return undefined;
+  return plan;
+}
+
 /** The previous route decision, surviving a build handoff: module state dies
  * with the old bundle, but the published plan lives in the realm store. */
 function previousChoice(ctx: NeedContext): RouteChoice | undefined {
   if (progressionMemory.choice) return progressionMemory.choice;
-  const plan = ctx.state.topics.progression?.plan;
+  const plan = readablePlan(ctx.state);
   if (!plan?.route || plan.decidedAt === undefined) return undefined;
+  const node = plan.forecasts.node;
   return {
     route: plan.route,
-    etaSec: plan.expectedEndAt !== undefined ? Math.max(0, (plan.expectedEndAt - ctx.now) / 1000) : 0,
+    etaSec: node.state === "unknown" ? 0 : Math.max(0, (node.expectedAt - ctx.now) / 1_000),
     decidedAt: plan.decidedAt,
     why: plan.routeWhy ?? "",
   };
@@ -776,6 +1408,30 @@ function previousChoice(ctx: NeedContext): RouteChoice | undefined {
 /** The refresh half: decide how this BitNode ends and when, from the enriched
  * store, and publish it for every feature to read this same pass. Runs before
  * any needs/claims/tick — see FeatureModule.refresh. */
+/** An augmentation that could still be PURCHASED right now, if there is one.
+ *
+ * The half of the install barrier that is not about stocks. Cash does not survive
+ * an install, so resetting while something is still affordable destroys money
+ * that could have become a permanent multiplier — the reset should always lose
+ * that race. Returned as a name so the blocker can say which one is holding it.
+ *
+ * The test is {@link nextPurchasableAugmentation}. It is deliberately NOT the same
+ * code path factions buys through — see there for why the two converge instead of
+ * matching, and why NeuroFlux holds this barrier without wedging it. */
+export function purchasableAugmentation(ctx: NeedContext): string | undefined {
+  const factions = ctx.state.topics.factions;
+  const money = ctx.state.topics.player?.money ?? 0;
+  if (!factions?.offers) return undefined;
+  const owned = new Set(factions.ownedAugs ?? []);
+  return nextPurchasableAugmentation({
+    offers: factions.offers,
+    joined: new Set(factions.joined ?? []),
+    owned,
+    prereqs: (name) => factions.augMeta?.[name]?.prereqs ?? [],
+    money,
+  })?.name;
+}
+
 function progressionRefresh(ctx: NeedContext): void {
   const player = ctx.state.topics.player;
   if (!player) return;
@@ -800,17 +1456,23 @@ function progressionRefresh(ctx: NeedContext): void {
     etaSec: Math.round(eta.etaSec),
     parts: eta.parts.map((entry) => ({ what: entry.what, sec: Math.round(entry.sec), measured: entry.measured })),
   }));
-
-  // A complete route publishes NO expected end: it "ends now", but nothing
-  // can act on that yet, and expectedEndAt = now would floor every feature's
-  // horizon at 60 s for the rest of the (manually-ended) run.
-  const expectedEndAt = expectedEndFrom(choice, etas, ctx.now);
-  if (switched && choice) {
+  const selectedEta = choice ? etas.find((eta) => eta.id === choice.route) : undefined;
+  const nodeBasis = JSON.stringify({
+    route: choice?.route,
+    complete: selectedEta?.complete,
+    blocker: endgame.routes.find((route) => route.id === choice?.route)?.blocker,
+    parts: selectedEta?.parts.map((part) => [part.what, part.measured]),
+  });
+  const previousNodeForecast = readablePlan(ctx.state)?.forecasts.node;
+  const nextNodeForecast = shouldReforecast(previousNodeForecast, ctx.now, nodeBasis)
+    ? nodeForecast(ctx.now, selectedEta, nodeBasis)
+    : forecastAt(previousNodeForecast!, ctx.now);
+  if (switched && choice && nextNodeForecast.state !== "unknown") {
     routeChange = {
       ...(previous ? { from: previous.route } : {}),
       to: choice.route,
       etaSec: Math.round(choice.etaSec),
-      expectedEndAt: expectedEndAt ?? ctx.now,
+      expectedEndAt: nextNodeForecast.expectedAt,
       why: choice.why,
       routes: routesDigest,
     };
@@ -819,14 +1481,40 @@ function progressionRefresh(ctx: NeedContext): void {
   // --- install cadence, on real inputs rather than the stubbed constants the
   // first cut shipped with (affordableValueProduct 1, runSec 0).
   const installed = prog?.ownedAugs ?? {};
-  const pending = (factions?.ownedAugs ?? []).filter((name) => !(name in installed));
+  const occurrences = new Map<string, number>();
+  for (const name of factions?.ownedAugs ?? []) occurrences.set(name, (occurrences.get(name) ?? 0) + 1);
+  const pending: string[] = [];
+  for (const [name, count] of occurrences) {
+    // Installed augmentations appear once in getOwnedAugmentations(true), even
+    // when NeuroFlux's installed level is greater than one. Every additional
+    // occurrence is queued and must survive into the reset record.
+    const installedOccurrence = (installed[name] ?? 0) > 0 ? 1 : 0;
+    for (let i = installedOccurrence; i < count; i++) pending.push(name);
+  }
+  pending.sort();
   const standings = Object.fromEntries(
     (factions?.standings ?? []).map((standing) => [standing.name, { rep: standing.rep, favor: standing.favor }]),
   );
+  const purchasable = purchasableAugmentation(ctx);
   const decision = stepProgression({
     queued: pending,
     affordableValueProduct: affordableValueProduct(ctx),
     factionWorkInProgress: ctx.state.topics.career?.currentWork?.type === "FACTION",
+    // Once factions has published any plan it owns the pre-install handshake:
+    // progression may reset only after the last-chance drain reports ready.
+    factionsReadyToInstall:
+      ctx.caps.unlocked.factions === "no" || Boolean(factions?.plan?.recommendInstall),
+    // The market's OWN answer, not a scan of its positions: `flat` accounts for
+    // an exit decided but not yet executed and for an entry wanted on the next
+    // pass, neither of which a position snapshot can show. A market that has
+    // never published a plan is not evidence of flatness, so it blocks — except
+    // where there is no market to be flat at all, which the two guards cover.
+    stockReadyToInstall:
+      ctx.caps.unlocked.stock === "no"
+      || ctx.state.topics.stock?.hasTixApiAccess !== true
+      || ctx.state.topics.stock.plan?.flat === true,
+    ...(purchasable !== undefined ? { purchasableAugmentation: purchasable } : {}),
+    graftInProgress: ctx.state.topics.career?.currentWork?.type === "GRAFTING",
     money: player.money,
     earnedThisRun: prog?.moneySources?.sinceInstall?.total ?? ctx.state.topics.farm?.totals?.moneyEarned ?? 0,
     factions: standings,
@@ -837,25 +1525,72 @@ function progressionRefresh(ctx: NeedContext): void {
     runSec: prog?.lastAugReset ? Math.max(0, (ctx.now - prog.lastAugReset) / 1000) : 0,
   });
 
+  const queueKey = pending.join("\0");
+  const persistedArm = prog?.plan?.installReady && prog.plan.installArmedAt !== undefined
+    ? prog.plan.installArmedAt
+    : undefined;
+  if (progressionMemory.installArmedAt === undefined && persistedArm !== undefined) {
+    progressionMemory.installArmedAt = persistedArm;
+    progressionMemory.installQueueKey = prog?.plan?.queuedAugmentations.join("\0") ?? queueKey;
+  }
+  if (
+    !decision.installReady
+    || (progressionMemory.installQueueKey !== undefined && progressionMemory.installQueueKey !== queueKey)
+  ) {
+    progressionMemory.installArmedAt = undefined;
+    progressionMemory.installQueueKey = undefined;
+  }
+  const armedAt = progressionMemory.installArmedAt;
+
+  const installBasis = JSON.stringify({
+    phase: decision.phase,
+    wanted: decision.installWanted,
+    ready: decision.installReady,
+    blockers: decision.installBlockers.map((blocker) => blocker.kind),
+    queue: pending,
+    intent: factions?.plan?.objective?.intent
+      ? {
+          faction: factions.plan.objective.intent.faction,
+          repTarget: factions.plan.objective.intent.repTarget,
+          augmentations: factions.plan.objective.intent.augmentations,
+          purpose: factions.plan.objective.intent.purpose,
+        }
+      : undefined,
+  });
+  const previousInstallForecast = readablePlan(ctx.state)?.forecasts.install;
+  const nextInstallForecast = shouldReforecast(previousInstallForecast, ctx.now, installBasis)
+    ? installForecast(ctx.now, {
+        installNow: decision.installReady && armedAt !== undefined,
+        queuedCount: pending.length,
+        phase: decision.phase,
+        ...(factions?.plan?.objective?.intent ? { intent: factions.plan.objective.intent } : {}),
+        workMeasured: factions?.plan?.until?.kind === "rep",
+        moneyMeasured: (factions?.plan?.context?.incomePerSec ?? 0) > 0,
+        finalSweepReady: decision.installReady,
+      }, installBasis)
+    : forecastAt(previousInstallForecast!, ctx.now);
+  const forecasts: PlanningHorizons = { node: nextNodeForecast, install: nextInstallForecast };
   merge(ctx.state, "progression", {
     plan: {
       phase: decision.phase,
-      install: decision.install,
+      installWanted: decision.installWanted,
+      installBlockers: decision.installBlockers,
+      installReady: decision.installReady,
+      ...(armedAt !== undefined ? { installArmedAt: armedAt } : {}),
+      queuedAugmentations: pending,
+      install: decision.installReady && armedAt !== undefined,
       homeRamBudgetFraction: decision.homeRamBudgetFraction,
       favorCrossings: decision.favorCrossings,
       why: decision.why,
       ...(choice
         ? {
             route: choice.route,
-            ...(expectedEndAt !== undefined ? { expectedEndAt } : {}),
             decidedAt: choice.decidedAt,
             routeWhy: choice.why,
           }
         : {}),
-      // Freshness marker for the horizon's staleness guard — decidedAt cannot
-      // serve: it deliberately survives refreshes that keep the same route.
-      refreshedAt: ctx.now,
       routes: routesDigest,
+      forecasts,
     },
   });
 }
@@ -863,12 +1598,46 @@ function progressionRefresh(ctx: NeedContext): void {
 const progression: FeatureDriver = {
   id: "progression",
   everyMs: 60_000,
-  tick(_ctx: DriverContext) {
-    // The act half is deliberately empty for now. The decisions this feature
-    // owns — install the queued augmentations, destroy the world daemon — end
-    // the run, kill every process and are irreversible; wiring them needs the
-    // prestige path proven end to end first. The refresh half publishes the
-    // recommendation; nothing acts on it yet.
+  wake: () => progressionMemory.installArmedAt !== undefined,
+  async tick(ctx: DriverContext) {
+    const plan = readablePlan(ctx.state);
+    if (!plan?.installReady) {
+      progressionMemory.installArmedAt = undefined;
+      progressionMemory.installQueueKey = undefined;
+      return;
+    }
+    const queueKey = plan.queuedAugmentations.join("\0");
+    if (progressionMemory.installArmedAt === undefined) {
+      progressionMemory.installArmedAt = Date.now();
+      progressionMemory.installQueueKey = queueKey;
+      merge(ctx.state, "progression", {
+        plan: { ...plan, install: false, installArmedAt: progressionMemory.installArmedAt },
+      });
+      return;
+    }
+    if (!plan.install || progressionMemory.installQueueKey !== queueKey) return;
+
+    // The rooted callback is deliberate: relative "start.js" would resolve
+    // beside the versioned dodge stub as lib/start.js.
+    const outcome = await featureDodge(
+      ctx,
+      "progression",
+      "action:install",
+      ["singularity.installAugmentations"],
+      (stubNs) => {
+        stubNs["singularity"]["installAugmentations"]("/start.js");
+        return true;
+      },
+    );
+    if (!outcome.ok) {
+      progressionMemory.installArmedAt = undefined;
+      progressionMemory.installQueueKey = undefined;
+      const { installArmedAt: _armed, ...disarmed } = plan;
+      merge(ctx.state, "progression", {
+        plan: { ...disarmed, install: false, why: outcome.reason },
+      });
+    }
+    return;
   },
 };
 
@@ -948,19 +1717,29 @@ export const bladeburnerModule: FeatureModule = {
 
 export const sleevesModule: FeatureModule = {
   driver: sleeves,
-  reset: resetWithTopic("sleeves"),
+  reset: (state) => {
+    resetSleeveCompletions();
+    delete state.topics.sleeves;
+  },
   claims: (ctx) => {
-    const action = ctx.state.topics.sleeves?.plan?.assignments[0]?.task.split(":", 1)[0];
-    return maybeActionClaim("sleeves", ctx, action, sleeveMethods(action));
+    const view = sleeveView(ctx.state);
+    if (!view) return [];
+    const decision = stepSleeves(view, ctx.board);
+    const methods = sleeveBatchMethods(decision.assignments.map((entry) => entry.task.type));
+    if (methods.length === 0 && pendingSleeveCompletions().size === 0) return [];
+    return [actionRamClaim(ctx, "sleeves", "action:batch", methods.length > 0 ? methods : ["sleeve.getTask"], "update and arm sleeve work")];
   },
   peakStepGb: STEP_GB.sleeves,
 };
 
 export const goModule: FeatureModule = {
   driver: go,
-  reset: resetWithTopic("go"),
+  reset: (state) => {
+    goContinuationReady = false;
+    delete state.topics.go;
+  },
   claims: (ctx) => {
-    const action = ctx.state.topics.go?.plan?.action.type;
+    const action = goClaimAction(ctx.state);
     return maybeActionClaim("go", ctx, action, goMethods(action));
   },
   peakStepGb: STEP_GB.go,
@@ -987,18 +1766,6 @@ export const dnetModule: FeatureModule = {
   },
   needs: dnetNeeds,
   peakStepGb: STEP_GB.dnet,
-};
-
-export const sideModule: FeatureModule = {
-  driver: side,
-  reset: resetWithTopic("side"),
-  claims: (ctx) => maybeActionClaim(
-    "side",
-    ctx,
-    ctx.state.topics.side?.plan?.solvable?.length ? "contract" : undefined,
-    ["codingcontract.getData", "codingcontract.attempt"],
-  ),
-  peakStepGb: STEP_GB.side,
 };
 
 function gangMethods(action: string | undefined): readonly string[] {
@@ -1030,9 +1797,17 @@ function sleeveMethods(action: string | undefined): readonly string[] {
 }
 
 function goMethods(action: string | undefined): readonly string[] {
-  if (action === "move") return ["go.makeMove"];
-  if (action === "pass") return ["go.passTurn"];
+  if (action === "move") return ["getPlayer", "sleep", "go.makeMove"];
+  if (action === "pass") return ["getPlayer", "sleep", "go.passTurn"];
+  if (action === "resume") return ["go.opponentNextTurn"];
+  if (action === "newGame") return ["go.resetBoardState"];
   return [];
+}
+
+function sleeveBatchMethods(actions: readonly string[]): readonly string[] {
+  const methods = new Set<string>(["sleeve.getTask"]);
+  for (const action of actions) for (const method of sleeveMethods(action)) methods.add(method);
+  return [...methods];
 }
 
 function dnetMethods(action: string | undefined): readonly string[] {
@@ -1060,5 +1835,29 @@ export const progressionModule: FeatureModule = {
     }
   },
   refresh: progressionRefresh,
+  claims: (ctx) => {
+    const plan = readablePlan(ctx.state);
+    if (!plan?.installReady) return [];
+    const claims: Claim[] = [{
+      by: "progression",
+      id: "install-freeze",
+      resource: "money",
+      amount: ctx.state.topics.player?.money ?? 0,
+      priority: PRIORITY["progression:install-freeze"],
+      mode: "reserve",
+      divisible: true,
+      why: "freeze cash after the final augmentation sweep until the armed install executes",
+    }];
+    if (plan.install) {
+      claims.push(actionRamClaim(
+        ctx,
+        "progression",
+        "action:install",
+        ["singularity.installAugmentations"],
+        "install queued augmentations and restart /start.js",
+      ));
+    }
+    return claims;
+  },
   peakStepGb: STEP_GB.progression,
 };

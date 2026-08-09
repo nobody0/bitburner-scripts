@@ -11,6 +11,73 @@
 
 export const CONTINUOUS_REVIEW_MS = 5_000;
 
+/** One engine cycle. `cyclesWorked` counts these, so it is the unit that turns
+ *  observed progress into elapsed milliseconds. */
+export const ENGINE_CYCLE_MS = 200;
+
+/** When the progress task in flight will BANK, from the game's own numbers.
+ *
+ * This is the boundary the slot lock exists to protect, and it is the boundary at
+ * which the job should be re-chosen. `undefined` means we cannot tell — see
+ * `progressLockUntil` for why that must NOT be treated as "hold for ever".
+ *
+ * Not a guess: `totalMs` is the duration the game reports for this exact activity
+ * and `cyclesWorked` is how much of it the game says is already spent, so the
+ * remainder is arithmetic on observed values. */
+export function progressBanksAt(input: {
+  mode: CareerWorkMode;
+  /** Duration of the activity in flight, from the crime or graft table. */
+  totalMs: number | undefined;
+  cyclesWorked: number | undefined;
+  /** When `getCurrentWork` produced the observation the cycles came from. */
+  observedAt: number | undefined;
+}): number | undefined {
+  if (input.mode !== "progress") return undefined;
+  if (input.totalMs === undefined || input.observedAt === undefined) return undefined;
+  const spentMs = Math.max(0, input.cyclesWorked ?? 0) * ENGINE_CYCLE_MS;
+  return input.observedAt + Math.max(0, input.totalMs - spentMs);
+}
+
+/** Whether the slot lock still applies, and until when.
+ *
+ * THE BUG this replaces: the lock was posted at `career:progress-lock` (100) with
+ * `holdUntil: Number.MAX_SAFE_INTEGER`, released only by the completion event. The
+ * arbiter refuses pre-emption until `holdUntil` passes, so a completion event that
+ * never arrived — the watcher failing to arm is enough — locked `Player.currentWork`
+ * to career permanently. On a live BN12 run `factions work:Tetrads` was denied
+ * `slot-held` on every pass, so "factions has not finished its final purchase and
+ * donation sweep" could never clear and the run could not end. Career meanwhile
+ * re-committed the longest crime available ($/sec ranking, 10-minute Heist) the
+ * moment each one finished, so even a working event only opened a window career
+ * immediately took back.
+ *
+ * The lock is now bounded by the moment the progress actually banks. Before it, the
+ * lock is real and absolute — cancelling a crime at 99% throws the whole thing away.
+ * After it, career competes for the slot at its ordinary band, so the end of a crime
+ * is a fair re-evaluation rather than an automatic renewal.
+ *
+ * An unknown boundary yields NO lock, which is the deliberate direction. A lock we
+ * cannot bound is a lock we cannot guarantee to release, and the failure it caused
+ * is the whole run stalling; losing one partial crime is recoverable. In practice
+ * `undefined` only happens before the crime table has been probed, which is brief.
+ *
+ * Continuous work is never locked: it banks every engine cycle, so it can be
+ * replaced at any moment and there is nothing to protect. */
+export function progressLockUntil(input: {
+  mode: CareerWorkMode;
+  totalMs: number | undefined;
+  cyclesWorked: number | undefined;
+  observedAt: number | undefined;
+  /** A banked-progress notice already in hand ends the lock immediately. */
+  completionPending: boolean;
+  now: number;
+}): number | undefined {
+  if (input.completionPending) return undefined;
+  const banksAt = progressBanksAt(input);
+  if (banksAt === undefined) return undefined;
+  return input.now < banksAt ? banksAt : undefined;
+}
+
 export type CareerWorkMode = "idle" | "continuous" | "progress";
 export type CareerReviewReason = "idle" | "completion" | "continuous-interval" | "initial";
 
@@ -19,7 +86,6 @@ export function careerWorkMode(type: string | undefined): CareerWorkMode {
     case undefined:
       return "idle";
     case "CRIME":
-    case "CREATE_PROGRAM":
     case "GRAFTING":
       return "progress";
     default:

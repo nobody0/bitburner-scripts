@@ -27,6 +27,22 @@ export interface SaveServer {
   serversOnNetwork: string[];
   /** "Server" | "HacknetServer" | "DarknetServer" */
   kind: string;
+  /** HacknetServer-only state. */
+  hacknetLevel?: number;
+  hacknetCache?: number;
+  hacknetTotalProduction?: number;
+  hacknetOnlineTimeSeconds?: number;
+}
+
+export interface SaveHacknetNode {
+  /** Present for Hacknet Servers; absent for ordinary Hacknet Nodes. */
+  hostname?: string;
+  level: number;
+  ram: number;
+  cores: number;
+  totalProduction: number;
+  onlineTimeSeconds: number;
+  cache?: number;
 }
 
 export interface SaveFactionStanding {
@@ -65,6 +81,9 @@ export interface SavePlayer {
   sleeveCount: number;
   playtimeSinceLastBitnode: number;
   totalPlaytime: number;
+  hacknetNodes: (string | SaveHacknetNode)[];
+  hashes: number;
+  hashUpgrades: Record<string, number>;
 }
 
 export interface SaveBitNodeOptions {

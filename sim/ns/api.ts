@@ -3,8 +3,11 @@ import type { Clock } from "../clock.ts";
 import type { SimServer } from "../core/effects.ts";
 import type { Engine } from "../engine.ts";
 import type { HacknetSystem } from "../features/hacknet.ts";
+import type { StockMarketSystem } from "../features/stock.ts";
+import { StockMarketConstants as STOCK_CONSTANTS } from "../vendor/bitburner/src/StockMarket/data/Constants.ts";
 import { unmodeled } from "../realm/unmodeled.ts";
 import type { SimWorld } from "../world.ts";
+import { getCloudServerCost, getCloudServerLimit, getCloudServerMaxRam, getCloudServerUpgradeCost } from "../core/effects.ts";
 import { getRamCost, SCRIPT_BASE_RAM_GB, type RamCostContext } from "./ram-costs.ts";
 import { ProcessTable, ScriptDeath, type SimProcess } from "./process.ts";
 
@@ -59,17 +62,22 @@ export interface SimNsHost {
    *  faction system. Built by sim/ns/singularity.ts. */
   singularity?: {
     singularity: Record<string, unknown>;
+    grafting: Record<string, unknown>;
     getFavorToDonate: () => number;
     enums: Record<string, unknown>;
   };
   hacknet?: HacknetSystem;
+  /** The World Stock Exchange, when a run wires one. Absent means the whole
+   *  namespace degrades to the gate flags, which is what a run with no market
+   *  model should see. */
+  stock?: StockMarketSystem;
   /** Called when an augmentation install prestiges the run.
    *
    *  Lives here rather than in `game/` on purpose: a prestige kills every
    *  process, so `game/`'s module-level dispatcher ledger and the realm
    *  rendezvous slots describe a world that no longer exists. `game/` must stay
    *  unaware it is being simulated, so the simulator owns the cleanup. */
-  onPrestige?: () => void;
+  onPrestige?: (cbScript: string | undefined, newlyInstalled: ReadonlyMap<string, number>) => void;
 }
 
 /** Static RAM for a script launched WITHOUT a ramOverride. Every exec site in
@@ -175,7 +183,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   const world = host.world;
 
   function hgw(kind: "hack" | "grow" | "weaken") {
-    return (target: string, opts?: { additionalMsec?: number; threads?: number }): Promise<number> => {
+    return (target: string, opts?: { additionalMsec?: number; threads?: number; stock?: boolean }): Promise<number> => {
       const server = requireServer(host, target);
       const threads = opts?.threads ?? process.threads;
       // Duration from CALL-time state, additionalMsec folded in before the
@@ -188,7 +196,13 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         }
       }
       const cores = requireServer(host, process.host).cpuCores;
-      return netscriptDelay(host, process, durationMs).then(() => world.land(kind, target, threads, cores).nsValue);
+      // `stock: true` is honoured at COMPLETION, not at call time: the influence
+      // roll is against the money actually moved, which is not known until the
+      // op lands (NetscriptHelpers.tsx:614, NetscriptFunctions.ts:305).
+      const stock = opts?.stock === true;
+      return netscriptDelay(host, process, durationMs).then(
+        () => world.land(kind, target, threads, cores, stock).nsValue,
+      );
     };
   }
 
@@ -269,11 +283,36 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     // --- world reads ----------------------------------------------------
     getPlayer: (): Player => world.playerRecord(),
     getResetInfo: (): ResetInfo => host.reset,
+    getMoneySources: () => structuredClone(world.moneySources),
+    getTotalScriptIncome: (): [number, number] => {
+      const sinceInstallSec = Math.max(0, host.clock.now() - host.reset.lastAugReset) / 1_000;
+      const sinceStartSec = host.clock.now() / 1_000;
+      const sinceInstall = sinceInstallSec > 0 ? world.moneySources.sinceInstall.hacking / sinceInstallSec : 0;
+      const sinceStart = sinceStartSec > 0 ? world.moneySources.sinceStart.hacking / sinceStartSec : 0;
+      return [sinceInstall, sinceStart];
+    },
+    getTotalScriptExpGain: (): number => {
+      const elapsedSec = host.clock.now() / 1_000;
+      return elapsedSec > 0 ? world.scriptExpEarned / elapsedSec : 0;
+    },
+    // Share is not an executable action in this simulator yet, so the exact
+    // power is its game default rather than an invented bonus.
+    getSharePower: (): number => 1,
     getHostname: (): string => process.host,
     // A copy, like the game: the controller mutates its snapshot (setting
     // hasAdminRights after a root pass) and must not reach into the world.
     getServer: (hostname = process.host): Server => ({ ...requireServer(host, hostname) }),
-    scan: (hostname = process.host): string[] => [...(host.network.get(hostname) ?? [])],
+    scan: (hostname = process.host): string[] => {
+      const known = new Set(host.network.get(hostname) ?? []);
+      if (hostname === "home") {
+        for (const server of world.servers.values()) {
+          if (server.hostname !== "home" && server.purchasedByPlayer) known.add(server.hostname);
+        }
+      } else if (world.servers.get(hostname)?.purchasedByPlayer) {
+        known.add("home");
+      }
+      return [...known];
+    },
     hasRootAccess: (hostname: string): boolean => requireServer(host, hostname).hasAdminRights,
     getServerMoneyAvailable: (hostname: string): number => requireServer(host, hostname).moneyAvailable ?? 0,
     getServerSecurityLevel: (hostname: string): number => requireServer(host, hostname).hackDifficulty ?? 0,
@@ -313,13 +352,132 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   impl["gang"] = namespace({ inGang: () => world.gates.inGang }, "gang");
   impl["bladeburner"] = namespace({ inBladeburner: () => world.gates.inBladeburner }, "bladeburner");
   impl["corporation"] = namespace({ hasCorporation: () => world.gates.hasCorporation }, "corporation");
-  impl["stock"] = namespace(
-    {
-      hasWseAccount: () => world.gates.hasWseAccount,
-      hasTixApiAccess: () => world.gates.hasTixApiAccess,
+  // The market, when a run wires one. Every getter reads the vendored `Stock`
+  // objects directly, so a price, a spread or a forecast the strategy sees is
+  // the same value the vendored price engine just wrote.
+  //
+  // The gate checks match upstream exactly, because the strategy is built to
+  // climb the unlock ladder and a stub that answered anyway would let it skip
+  // rungs: `getSymbols` and everything below it need the TIX API, and
+  // `getForecast`/`getVolatility` need has4SDataTixApi — NOT has4SData, which is
+  // the $1b ticker data a script can never read.
+  if (host.stock) {
+    const stock = host.stock;
+    const requireTix = (fn: string): void => {
+      if (!stock.hasWseAccount) throw new Error(`${fn}: no WSE account`);
+      if (!stock.hasTixApiAccess) throw new Error(`${fn}: no TIX API access`);
+    };
+    const requireForecast = (fn: string): void => {
+      if (!stock.has4SDataTixApi) throw new Error(`${fn}: no 4S Market Data TIX API access`);
+    };
+    const require4SPosition = (fn: string, symbol: string) => {
+      requireTix(fn);
+      const found = stock.stock(symbol);
+      if (!found) throw new Error(`${fn}: invalid stock symbol ${symbol}`);
+      return found;
+    };
+    const requireShorts = (fn: string): void => {
+      if (host.ramCtx.bitNode !== 8 && (host.reset.ownedSF.get(8) ?? 0) <= 1) {
+        throw new Error(`${fn}: shorts need BN8 or SF8 level 2`);
+      }
+    };
+    impl["stock"] = namespace(
+      {
+        hasWseAccount: () => stock.hasWseAccount,
+        hasTixApiAccess: () => stock.hasTixApiAccess,
+        has4SData: () => stock.has4SData,
+        has4SDataTixApi: () => stock.has4SDataTixApi,
+        getConstants: () => structuredClone(STOCK_CONSTANTS),
+        getSymbols: () => {
+          requireTix("getSymbols");
+          return stock.symbols();
+        },
+        getPrice: (symbol: string) => require4SPosition("getPrice", symbol).price,
+        getAskPrice: (symbol: string) => require4SPosition("getAskPrice", symbol).getAskPrice(),
+        getBidPrice: (symbol: string) => require4SPosition("getBidPrice", symbol).getBidPrice(),
+        getOrganization: (symbol: string) => require4SPosition("getOrganization", symbol).name,
+        getMaxShares: (symbol: string) => require4SPosition("getMaxShares", symbol).maxShares,
+        getPosition: (symbol: string) => {
+          const found = require4SPosition("getPosition", symbol);
+          return [found.playerShares, found.playerAvgPx, found.playerShortShares, found.playerAvgShortPx];
+        },
+        getForecast: (symbol: string) => {
+          requireForecast("getForecast");
+          const found = require4SPosition("getForecast", symbol);
+          return found.getAbsoluteForecast() / 100;
+        },
+        getVolatility: (symbol: string) => {
+          requireForecast("getVolatility");
+          return require4SPosition("getVolatility", symbol).mv / 100;
+        },
+        buyStock: (symbol: string, shares: number) => {
+          requireTix("buyStock");
+          return stock.buyStock(symbol, shares);
+        },
+        sellStock: (symbol: string, shares: number) => {
+          requireTix("sellStock");
+          return stock.sellStock(symbol, shares);
+        },
+        buyShort: (symbol: string, shares: number) => {
+          requireTix("buyShort");
+          requireShorts("buyShort");
+          return stock.buyShort(symbol, shares);
+        },
+        sellShort: (symbol: string, shares: number) => {
+          requireTix("sellShort");
+          requireShorts("sellShort");
+          return stock.sellShort(symbol, shares);
+        },
+        purchaseWseAccount: () => stock.purchaseWseAccount(),
+        purchaseTixApi: () => stock.purchaseTixApi(),
+        purchase4SMarketData: () => stock.purchase4SMarketData(),
+        purchase4SMarketDataTixApi: () => stock.purchase4SMarketDataTixApi(),
+        // Not modelled: `processOrders` in the vendored price engine is a no-op,
+        // so an order book would silently never fill. Reporting it is the honest
+        // answer, and nothing in shared/strategy places one.
+        getOrders: () => unmodeled("ns", "stock.getOrders", "limit/stop orders have no simulation model"),
+        placeOrder: () => unmodeled("ns", "stock.placeOrder", "limit/stop orders have no simulation model"),
+        cancelOrder: () => unmodeled("ns", "stock.cancelOrder", "limit/stop orders have no simulation model"),
+      },
+      "stock",
+    );
+  } else {
+    impl["stock"] = namespace(
+      {
+        hasWseAccount: () => world.gates.hasWseAccount,
+        hasTixApiAccess: () => world.gates.hasTixApiAccess,
+        has4SData: () => world.gates.has4SData,
+        has4SDataTixApi: () => world.gates.has4SDataTixApi,
+      },
+      "stock",
+    );
+  }
+  impl["cloud"] = namespace({
+    getServerLimit: () => getCloudServerLimit(),
+    getRamLimit: () => getCloudServerMaxRam(),
+    getServerCost: (ram: number) => getCloudServerCost(ram),
+    getServerUpgradeCost: (hostname: string, ram: number) => {
+      const server = world.servers.get(hostname);
+      if (!server || !server.purchasedByPlayer || hostname === "home" || hostname.startsWith("hacknet-server-")) return -1;
+      return getCloudServerUpgradeCost(server.maxRam, ram);
     },
-    "stock",
-  );
+    getServerNames: () => [...world.servers.values()]
+      .filter((server) => server.purchasedByPlayer && server.hostname !== "home" && !server.hostname.startsWith("hacknet-server-"))
+      .map((server) => server.hostname),
+    purchaseServer: (requested: string, ram: number) => {
+      let name = String(requested).replaceAll(" ", "");
+      if (!name) return "";
+      const base = name;
+      let suffix = 0;
+      while (world.servers.has(name)) name = `${base}-${suffix++}`;
+      if (!world.execute({ type: "buyServer", name, ram })) return "";
+      host.network.set(name, ["home"]);
+      const homeLinks = host.network.get("home") ?? [];
+      if (!homeLinks.includes(name)) host.network.set("home", [...homeLinks, name]);
+      return name;
+    },
+    upgradeServer: (hostname: string, ram: number) => world.execute({ type: "upgradeServer", host: hostname, ram }),
+  }, "cloud");
   impl["go"] = namespace(
     {
       getGameState: () => {
@@ -335,32 +493,44 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     impl["hacknet"] = namespace(
       {
         numNodes: () => hacknet.nodes.length,
-        // Hacknet NODES are uncapped upstream; only hacknet SERVERS cap at 20.
-        maxNumNodes: () => Infinity,
+        maxNumNodes: () => hacknet.maxNodes,
         purchaseNode: () => hacknet.purchaseNode(),
         getPurchaseNodeCost: () => hacknet.nodeCost(),
         getNodeStats: (index: number) => {
           const node = hacknet.nodes[index];
           if (!node) throw new Error(`hacknet.getNodeStats: no node ${index}`);
+          const server = node.hostname ? world.servers.get(node.hostname) : undefined;
           return {
-            name: `hacknet-node-${index}`,
+            name: node.hostname ?? `hacknet-node-${index}`,
             level: node.level,
-            ram: node.ram,
+            ram: server?.maxRam ?? node.ram,
             cores: node.cores,
             production: hacknet.production(node),
             totalProduction: node.totalProduction,
             timeOnline: node.onlineTimeSeconds,
-            // NOT reported: `hashCapacity` is what distinguishes a hacknet
-            // SERVER from a node, and its absence is how the strategy detects
-            // it is in the money economy rather than the hash one.
+            ...(hacknet.hashMode
+              ? {
+                  cache: node.cache ?? 1,
+                  hashCapacity: 32 * Math.pow(2, node.cache ?? 1),
+                  ramUsed: server?.ramUsed ?? node.ramUsed ?? 0,
+                }
+              : {}),
           };
         },
         upgradeLevel: (index: number, n = 1) => hacknet.upgradeLevel(index, n),
         upgradeRam: (index: number, n = 1) => hacknet.upgradeRam(index, n),
         upgradeCore: (index: number, n = 1) => hacknet.upgradeCore(index, n),
+        upgradeCache: (index: number, n = 1) => hacknet.upgradeCache(index, n),
         getLevelUpgradeCost: (index: number) => hacknet.levelCost(index),
         getRamUpgradeCost: (index: number) => hacknet.ramCost(index),
         getCoreUpgradeCost: (index: number) => hacknet.coreCost(index),
+        getCacheUpgradeCost: (index: number) => hacknet.cacheCost(index),
+        numHashes: () => hacknet.hashes,
+        hashCapacity: () => hacknet.hashCapacity(),
+        hashCost: (name: string, count = 1) => hacknet.hashCost(name, count),
+        spendHashes: (name: string, target = "", count = 1) => hacknet.spendHashes(name, target, count),
+        getHashUpgrades: () => hacknet.hashUpgrades(),
+        getHashUpgradeLevel: (name: string) => hacknet.hashLevels[name] ?? 0,
       },
       "hacknet",
     );
@@ -370,6 +540,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   // that drive ns without one, where every member reports itself as usual.
   if (host.singularity) {
     impl["singularity"] = namespace(host.singularity.singularity as Record<string, unknown>, "singularity");
+    impl["grafting"] = namespace(host.singularity.grafting, "grafting");
     impl["getFavorToDonate"] = host.singularity.getFavorToDonate;
     // `ns.enums` is a PROPERTY, not a function — a 0 GB read, and the
     // planner's only way to enumerate factions it has not been invited to.

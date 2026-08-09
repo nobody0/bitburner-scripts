@@ -52,10 +52,10 @@ describe("the horizon is a decision input, not a tuning constant", () => {
   const slow = upgrade({ kind: "core", cost: 100_000, deltaProduction: 50 }); // 2000s payback
   const fast = upgrade({ kind: "level", cost: 1_000, deltaProduction: 1 }); // 1000s payback
 
-  test("with a long horizon the big upgrade wins", () => {
-    // 8 hours: slow nets 50*28800-100000 = 1.34m; fast nets 27800.
+  test("with a long horizon the fastest ROI wins", () => {
+    // Both repay in time; level pays back in 1000s versus core's 2000s.
     const decision = stepHacknet(view({ upgrades: [slow, fast], horizonSec: 28_800 }));
-    expect(decision.buy?.kind).toBe("core");
+    expect(decision.buy?.kind).toBe("level");
   });
 
   test("with a short horizon the SAME upgrade is refused", () => {
@@ -137,7 +137,7 @@ describe("dynamic-programming oracle", () => {
     return best[cap]!;
   }
 
-  test("the greedy first pick is the highest-value item the optimum would also take", () => {
+  test("the first pick is the viable item with the fastest payback", () => {
     const options: UpgradeOption[] = [
       upgrade({ kind: "level", node: 0, cost: 1_000, deltaProduction: 1 }),
       upgrade({ kind: "ram", node: 0, cost: 30_000, deltaProduction: 20 }),
@@ -147,13 +147,11 @@ describe("dynamic-programming oracle", () => {
     const horizonSec = 28_800;
     const decision = stepHacknet(view({ upgrades: options, horizonSec, moneyGranted: 1e9 }));
 
-    // With an unbounded budget the optimum takes every positive-value item, so
-    // the greedy's first pick must be the single highest-value one.
-    const byValue = [...options].sort(
-      (a, b) => netOverHorizon(b, horizonSec) - netOverHorizon(a, horizonSec),
-    );
-    expect(decision.buy!.kind).toBe(byValue[0]!.kind);
-    expect(decision.buy!.node).toBe(byValue[0]!.node!);
+    const byPayback = [...options]
+      .filter((option) => netOverHorizon(option, horizonSec) > 0)
+      .sort((a, b) => paybackSec(a) - paybackSec(b));
+    expect(decision.buy!.kind).toBe(byPayback[0]!.kind);
+    expect(decision.buy!.node).toBe(byPayback[0]!.node!);
   });
 
   test("greedy reaches the DP optimum when purchases are made one per tick", () => {
@@ -178,14 +176,49 @@ describe("dynamic-programming oracle", () => {
     expect(greedyValue).toBeCloseTo(optimal(options, budget, horizonSec), 4);
   });
 
-  test("beats the common 'level to 80 then RAM' heuristic when RAM is better value", () => {
-    // The baseline from the plan. A RAM upgrade that adds 20/s for $30k
-    // dominates a level upgrade adding 1/s for $1k on any long horizon, and a
-    // fixed level-first script would take 80 levels before touching it.
+  test("chooses RAM as soon as RAM has the faster ROI", () => {
     const level = upgrade({ kind: "level", node: 0, cost: 1_000, deltaProduction: 1 });
-    const ram = upgrade({ kind: "ram", node: 0, cost: 30_000, deltaProduction: 20 });
+    const ram = upgrade({ kind: "ram", node: 0, cost: 30_000, deltaProduction: 40 });
     const decision = stepHacknet(view({ upgrades: [level, ram], horizonSec: 28_800 }));
     expect(decision.buy?.kind).toBe("ram");
-    expect(netOverHorizon(ram, 28_800)).toBeGreaterThan(netOverHorizon(level, 28_800));
+    expect(paybackSec(ram)).toBeLessThan(paybackSec(level));
+  });
+
+  test("a blocking faction milestone can justify a non-economic upgrade", () => {
+    const decision = stepHacknet(view({
+      upgrades: [upgrade({ kind: "core", cost: 5_000, deltaProduction: 0, progress: { hacknetCores: 1 } })],
+      milestones: [{ kind: "hacknetCores", target: 4, have: 3, priority: 75, why: "Netburners needs four cores" }],
+      horizonSec: 1,
+    }));
+    expect(decision.buy?.kind).toBe("core");
+    expect(decision.buy?.milestone?.kind).toBe("hacknetCores");
+    expect(decision.why).toContain("Netburners");
+  });
+
+  test("cache is bought only when it advances a selected capacity milestone", () => {
+    const cache = upgrade({ kind: "cache", cost: 1_000, deltaProduction: 0, progress: { hashCapacity: 64 } });
+    expect(stepHacknet(view({ upgrades: [cache], hashMode: true })).buy).toBeUndefined();
+    const wanted = stepHacknet(view({
+      upgrades: [cache],
+      hashMode: true,
+      milestones: [{ kind: "hashCapacity", target: 100, have: 64, priority: 45, why: "save for Bladeburner rank" }],
+    }));
+    expect(wanted.buy?.kind).toBe("cache");
+  });
+
+  test("the first server can establish capacity for a hash goal", () => {
+    const decision = stepHacknet(view({
+      nodes: [],
+      upgrades: [],
+      nodeCost: 1_000_000,
+      maxNodes: 20,
+      newNodeProduction: 0,
+      newNodeHashCapacity: 64,
+      horizonSec: 1,
+      hashMode: true,
+      milestones: [{ kind: "hashCapacity", target: 50, have: 0, priority: 45, why: "bank the selected hash action" }],
+    }));
+    expect(decision.buy?.kind).toBe("node");
+    expect(decision.buy?.milestone?.kind).toBe("hashCapacity");
   });
 });

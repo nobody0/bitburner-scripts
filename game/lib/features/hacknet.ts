@@ -1,6 +1,31 @@
 import type { NS } from "@ns";
+import { bitNodeMultipliers, effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
+import { makeHackContext } from "../../../shared/formulas.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
-import { stepHacknet, type HacknetDecision, type HacknetView, type UpgradeOption } from "../../../shared/strategy/hacknet/decide.ts";
+import { DEFAULT_PLANNING_HORIZON_SEC, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
+import {
+  stepHacknet,
+  type HacknetDecision,
+  type HacknetMilestone,
+  type HacknetView,
+  type UpgradeOption,
+} from "../../../shared/strategy/hacknet/decide.ts";
+import {
+  HASH_UPGRADE,
+  hashNeedPriority,
+  stepHashes,
+  targetHashValues,
+  type HashDecision,
+  type HashGoalCandidate,
+} from "../../../shared/strategy/hacknet/hashes.ts";
+import {
+  freshProduction,
+  HASH_SALE_DOLLARS,
+  productionDelta,
+  productionDeltaWithAddedRamOccupied,
+} from "../../../shared/strategy/hacknet/formulas.ts";
+import { scoreInvestment } from "../../../shared/strategy/investment.ts";
+import type { NeedUrgency } from "../../../shared/strategy/needs.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge } from "../state.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
@@ -11,7 +36,7 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * Cheap in every sense: `ns.hacknet.*` costs 0.05-4 GB, so unlike the
  * singularity features this one never fights for RAM. Its real constraint is
  * MONEY, and it competes for that with the augmentation fund — which is why
- * `hacknet:upgrade` (25) sits deliberately below `factions:aug-fund` (90).
+ * income investments (25) sit deliberately below `factions:aug-fund` (90).
  * Without that ordering hacknet would win every time simply by being cheaper
  * and always ready. */
 
@@ -19,68 +44,227 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
 const PEAK_STEP_GB = 5;
 
 let lastDecision: HacknetDecision | undefined;
+let lastHashDecision: HashDecision | undefined;
 let lastResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
+let lastHashResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
 
 export function resetHacknetState(): void {
   lastDecision = undefined;
+  lastHashDecision = undefined;
   lastResult = undefined;
+  lastHashResult = undefined;
 }
 
-function buildView(ctx: DriverContext): HacknetView | undefined {
+type HacknetViewContext = Pick<ClaimContext, "state" | "caps" | "horizons" | "board">;
+
+function milestonePriority(urgency: NeedUrgency): number {
+  if (urgency === "blocking") return PRIORITY["hacknet:blocking-need"];
+  if (urgency === "wanted") return PRIORITY["hacknet:wanted-need"];
+  return PRIORITY["hacknet:nice-need"];
+}
+
+function factionMilestones(ctx: HacknetViewContext, topic: NonNullable<HacknetViewContext["state"]["topics"]["hacknet"]>): HacknetMilestone[] {
+  const totals = {
+    hacknetRam: topic.nodes.reduce((sum, node) => sum + node.ram, 0),
+    hacknetCores: topic.nodes.reduce((sum, node) => sum + node.cores, 0),
+    hacknetLevels: topic.nodes.reduce((sum, node) => sum + node.level, 0),
+  };
+  return ctx.board.open
+    .filter((need) => need.kind === "hacknetRam" || need.kind === "hacknetCores" || need.kind === "hacknetLevels")
+    .map((need) => ({
+      kind: need.kind as "hacknetRam" | "hacknetCores" | "hacknetLevels",
+      target: need.target,
+      have: totals[need.kind as keyof typeof totals],
+      priority: milestonePriority(need.urgency),
+      why: need.why,
+    }));
+}
+
+function hashGoals(ctx: HacknetViewContext): HashGoalCandidate[] {
+  const state = ctx.state.topics;
+  const topic = state.hacknet;
+  if (!topic?.servers || !topic.hashes) return [];
+  const goals: HashGoalCandidate[] = [];
+
+  // Target mutations are economic investments: compare their exact target
+  // solve over the remaining horizon against selling the same hashes.
+  const targetName = state.farm?.target;
+  const target = targetName ? state.servers?.[targetName] : undefined;
+  const player = state.player;
+  if (target && player && (state.farm?.moneyPerSecPerGb ?? 0) > 0) {
+    const mults = player.mults;
+    const hackCtx = makeHackContext({
+      skill: player.skills.hacking,
+      intelligence: player.skills.intelligence,
+      mults: {
+        hacking_exp: mults.hacking_exp,
+        hacking_money: mults.hacking_money,
+        hacking_grow: mults.hacking_grow,
+        hacking_speed: mults.hacking_speed,
+        hacking_chance: mults.hacking_chance,
+      },
+    }, effectiveBitNodeMultipliers(
+      ctx.caps.bitNode,
+      ctx.caps.sourceFiles["12"] ?? 0,
+      state.progression?.multipliers,
+    ) ?? {});
+    const fleetGb = Math.max(0, state.fleet?.maxRam ?? 0);
+    const largest = Math.max(0, ...Object.values(state.servers ?? {}).map((server) => server.hasAdminRights ? server.maxRam : 0));
+    const values = targetHashValues(hackCtx, {
+      hostname: target.hostname,
+      minDifficulty: target.minDifficulty ?? 1,
+      moneyMax: target.moneyMax ?? 0,
+      requiredHackingSkill: target.requiredHackingSkill ?? Infinity,
+      serverGrowth: target.serverGrowth ?? 0,
+      baseDifficulty: target.baseDifficulty ?? 1,
+    }, { batchGb: fleetGb, hackBlockGb: largest }, fleetGb, usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC);
+    goals.push(
+      { name: HASH_UPGRADE.maxMoney, target: targetName, priority: 30, valueDollars: values.maxMoney, why: `increase ${targetName}'s farm value over the remaining horizon` },
+      { name: HASH_UPGRADE.minSecurity, target: targetName, priority: 30, valueDollars: values.minSecurity, why: `reduce ${targetName}'s minimum security over the remaining horizon` },
+    );
+  }
+
+  for (const need of ctx.board.open) {
+    if (need.kind === "bladeburnerRank" && state.bladeburner) {
+      goals.push({ name: HASH_UPGRADE.bladeRank, priority: hashNeedPriority(need), urgency: need.urgency, why: need.why });
+    } else if (need.kind === "companyRep" && need.subject) {
+      goals.push({ name: HASH_UPGRADE.companyFavor, target: need.subject, priority: hashNeedPriority(need), urgency: need.urgency, why: `company favor accelerates ${need.why}` });
+    } else if ((need.kind === "combatSkills" || need.kind === "skill") && state.career?.currentWork?.type === "CLASS") {
+      const combat = need.kind === "combatSkills" || ["strength", "defense", "dexterity", "agility"].includes(need.subject ?? "");
+      goals.push({ name: combat ? HASH_UPGRADE.gym : HASH_UPGRADE.study, priority: hashNeedPriority(need), urgency: need.urgency, why: need.why });
+    }
+  }
+
+  const route = state.progression?.plan?.route;
+  if (route === "bladeburner" && state.bladeburner) {
+    if (state.bladeburner.nextBlackOp && state.bladeburner.rank < state.bladeburner.nextBlackOp.rank) {
+      goals.push({
+        name: HASH_UPGRADE.bladeRank,
+        priority: 58,
+        why: `${state.bladeburner.nextBlackOp.name} still needs ${Math.ceil(state.bladeburner.nextBlackOp.rank - state.bladeburner.rank)} rank`,
+      });
+    }
+    if (state.bladeburner.plan?.action.type === "upgradeSkill") {
+      goals.push({ name: HASH_UPGRADE.bladeSp, priority: 60, why: "the Bladeburner route is waiting on a skill upgrade" });
+    }
+  }
+  if (state.corp?.plan && state.corp.plan.action.type !== "idle") {
+    goals.push({ name: HASH_UPGRADE.corpFunds, priority: 55, why: `corporation stage ${state.corp.plan.stage} is active` });
+  }
+  if (state.corp?.plan?.stage.toLowerCase().includes("research")) {
+    goals.push({ name: HASH_UPGRADE.corpResearch, priority: 55, why: `corporation stage ${state.corp.plan.stage} needs research` });
+  }
+  return goals;
+}
+
+function decideHashes(ctx: HacknetViewContext): HashDecision | undefined {
+  const topic = ctx.state.topics.hacknet;
+  if (!topic?.servers || !topic.hashes) return undefined;
+  return stepHashes({
+    current: topic.hashes.current,
+    capacity: topic.hashes.capacity,
+    productionPerSec: topic.productionPerSec,
+    upgrades: topic.hashUpgrades ?? [],
+    goals: hashGoals(ctx),
+  });
+}
+
+function buildView(ctx: HacknetViewContext, moneyGranted: number): HacknetView | undefined {
   const topic = ctx.state.topics.hacknet;
   if (!topic) return undefined;
+
+  const hashMode =
+    ctx.caps.restrictions.disableHacknetServer !== true &&
+    (ctx.caps.bitNode === 9 || (ctx.caps.sourceFiles["9"] ?? 0) > 0);
+  const hashDollarValue = hashMode && topic.hashes && topic.hashes.sellForMoneyCost > 0
+    ? HASH_SALE_DOLLARS / topic.hashes.sellForMoneyCost
+    : hashMode ? 0 : 1;
 
   const nodes = (topic.nodes ?? []).map((node, index) => ({
     index,
     level: node.level,
     ram: node.ram,
     cores: node.cores,
-    production: node.production,
+    production: node.production * hashDollarValue,
+    ramUsed: node.ramUsed,
   }));
 
+  const fleet = ctx.state.topics.fleet;
+  const fleetUtilization = fleet && fleet.maxRam > 0 ? fleet.usedRam / fleet.maxRam : 0;
+  const fleetDemanded = (ctx.state.topics.farm?.moneyPerSecPerGb ?? 0) > 0 && fleetUtilization >= 0.8;
   const upgrades: UpgradeOption[] = (topic.nextUpgrades ?? []).map((upgrade) => ({
     kind: upgrade.kind as UpgradeOption["kind"],
     node: upgrade.node,
     cost: upgrade.cost,
-    // The probe reports the cost; the production delta is derived from the
-    // node's current production and the known shape of each upgrade.
-    deltaProduction: deltaFor(upgrade.kind, nodes[upgrade.node ?? 0]),
+    deltaProduction: (() => {
+      const raw = topic.nodes[upgrade.node]?.production ?? 0;
+      const node = topic.nodes[upgrade.node];
+      if (!node) return 0;
+      if (upgrade.kind === "cache") return 0;
+      const nativeDelta = productionDelta(
+        { level: node.level, ram: node.ram, cores: node.cores, production: raw, ramUsed: node.ramUsed },
+        upgrade.kind as "level" | "ram" | "core",
+        hashMode,
+      );
+      // Hacknet-server RAM is simultaneously hash capacity and fleet RAM.
+      const fleetDelta = hashMode && upgrade.kind === "ram" && fleetDemanded
+        ? node.ram * (ctx.state.topics.farm?.moneyPerSecPerGb ?? 0)
+        : 0;
+      const hashDelta = hashMode && upgrade.kind === "ram" && fleetDemanded
+        ? productionDeltaWithAddedRamOccupied({ level: node.level, ram: node.ram, cores: node.cores, production: raw, ramUsed: node.ramUsed })
+        : nativeDelta;
+      return hashDelta * hashDollarValue + fleetDelta;
+    })(),
+    progress: (() => {
+      const node = topic.nodes[upgrade.node];
+      if (!node) return {};
+      if (upgrade.kind === "ram") return { hacknetRam: node.ram };
+      if (upgrade.kind === "core") return { hacknetCores: 1 };
+      if (upgrade.kind === "level") return { hacknetLevels: 1 };
+      if (upgrade.kind === "cache") return { hashCapacity: node.hashCapacity ?? 0 };
+      return {};
+    })(),
   }));
+
+  const sf12 = ctx.caps.sourceFiles["12"] ?? 0;
+  const nodeMult = bitNodeMultipliers(ctx.caps.bitNode, sf12)?.HacknetNodeMoney ?? 0;
+  const playerMult = ctx.state.topics.player?.mults.hacknet_node_money ?? 1;
+  const freshNative = freshProduction(hashMode, playerMult, nodeMult);
+  const hashes = decideHashes(ctx);
+  const milestones = factionMilestones(ctx, topic);
+  if (hashes?.capacityTarget !== undefined) {
+    const selectedHashGoal = hashes.ranked[0];
+    milestones.push({
+      kind: "hashCapacity",
+      target: hashes.capacityTarget,
+      have: topic.hashes?.capacity ?? 0,
+      // Hash ranking priorities are internal utility scores, not arbiter
+      // priorities. Map explicit faction urgency onto the shared money bands;
+      // route/economic goals use the ordinary wanted band.
+      priority: selectedHashGoal?.urgency
+        ? milestonePriority(selectedHashGoal.urgency)
+        : PRIORITY["hacknet:wanted-need"],
+      why: hashes.why,
+    });
+  }
 
   return {
     nodes,
     nodeCost: topic.purchaseNodeCost ?? Infinity,
-    maxNodes: topic.maxNumNodes ?? 0,
-    // A fresh node is level 1 / 1 GB / 1 core. Rather than re-derive its
-    // production from the formulas, use the weakest existing node as the
-    // estimate, falling back to the observed per-node average.
-    newNodeProduction: nodes.length > 0 ? Math.min(...nodes.map((node) => node.production)) : (topic.productionPerSec ?? 0),
+    maxNodes: topic.maxNumNodes ?? Infinity,
+    // A fresh Hacknet Server has 1 GB and cannot fit our 1.7 GB worker. It is
+    // hash production first; its later RAM upgrades enter the fleet valuation.
+    newNodeProduction: freshNative * hashDollarValue,
+    ...(hashMode ? { newNodeHashCapacity: 64 } : {}),
     upgrades,
-    moneyGranted: ctx.grants.money,
+    moneyGranted,
     // Expected remaining run time from the endgame route decision. This is
     // the number that makes "worth buying?" a real question: an upgrade that
     // cannot repay itself before the run ends is a loss, not an investment.
-    horizonSec: ctx.horizonSec,
-    hashMode: topic.servers === true,
+    horizonSec: usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC,
+    hashMode,
+    milestones,
   };
-}
-
-/** Production delta for one upgrade step, from the game's own shape:
- * `level x 1.5/level`, `ram x 1.035^(ram-1)`, `cores x (cores+5)/6`. Derived
- * from the node's CURRENT production so the player's multipliers and the
- * BitNode's HacknetNodeMoney are already folded in. */
-function deltaFor(kind: string, node: { level: number; ram: number; cores: number; production: number } | undefined): number {
-  if (!node || node.production <= 0) return 0;
-  switch (kind) {
-    case "level":
-      return node.production * ((node.level + 1) / node.level - 1);
-    case "ram":
-      return node.production * (Math.pow(1.035, node.ram * 2 - 1) / Math.pow(1.035, node.ram - 1) - 1);
-    case "core":
-      return node.production * ((node.cores + 6) / (node.cores + 5) - 1);
-    default:
-      return 0;
-  }
 }
 
 async function execute(_ns: NS, ctx: DriverContext, buy: UpgradeOption): Promise<void> {
@@ -101,6 +285,8 @@ async function execute(_ns: NS, ctx: DriverContext, buy: UpgradeOption): Promise
           return stubNs["hacknet"]["upgradeRam"](buy.node!, 1);
         case "core":
           return stubNs["hacknet"]["upgradeCore"](buy.node!, 1);
+        case "cache":
+          return stubNs["hacknet"]["upgradeCache"](buy.node!, 1);
       }
     },
   );
@@ -115,64 +301,197 @@ async function execute(_ns: NS, ctx: DriverContext, buy: UpgradeOption): Promise
     detail: ok ? `bought ${buy.kind} for $${Math.round(buy.cost).toLocaleString()}` : "purchase refused",
     at,
   };
+  const publishedPlan = ctx.state.topics.hacknet?.plan;
+  if (publishedPlan) merge(ctx.state, "hacknet", { plan: { ...publishedPlan, lastResult } });
+  if (ok) {
+    // Every price/production delta was quoted for the pre-purchase state.
+    // Invalidate the menu so a later tick cannot spend against that stale
+    // grant; the unconditional probes repopulate it with authoritative data.
+    merge(ctx.state, "hacknet", { nextUpgrades: [], purchaseNodeCost: Infinity });
+  }
+}
+
+const HASH_SPEND_METHODS = ["hacknet.spendHashes"] as const;
+
+async function spendHashes(ctx: DriverContext, decision: HashDecision): Promise<void> {
+  const hashes = ctx.state.topics.hacknet?.hashes;
+  const spend = decision.spend;
+  if (!hashes || !spend) return;
+  const at = Date.now();
+  const outcome = await featureDodge(ctx, "hacknet", "action:spend-hashes", HASH_SPEND_METHODS, (stubNs: NS) =>
+    stubNs["hacknet"]["spendHashes"](spend.name as never, spend.target ?? "", spend.count),
+  );
+  const ok = outcome.ok && Boolean(outcome.value);
+  lastHashResult = {
+    action: spend.name,
+    ok,
+    detail: ok
+      ? `spent ${Math.round(spend.cost).toLocaleString()} hashes on ${spend.name}${spend.target ? ` for ${spend.target}` : ""}`
+      : outcome.ok ? "hash spend refused" : outcome.reason,
+    at,
+  };
+  if (outcome.ok && outcome.value) {
+    // Both the balance and every escalating quote are stale after a spend.
+    merge(ctx.state, "hacknet", {
+      hashes: { ...hashes, current: Math.max(0, hashes.current - spend.cost) },
+      hashUpgrades: [],
+    });
+  }
+  const publishedPlan = ctx.state.topics.hacknet?.plan;
+  if (publishedPlan?.hashes) {
+    merge(ctx.state, "hacknet", {
+      plan: { ...publishedPlan, hashes: { ...publishedPlan.hashes, lastResult: lastHashResult } },
+    });
+  }
 }
 
 const driver: FeatureDriver = {
   id: "hacknet",
   everyMs: 10_000,
   async tick(ctx: DriverContext) {
-    const view = buildView(ctx);
+    const view = buildView(ctx, ctx.grants.money);
     if (!view) return;
     const decision = stepHacknet(view);
+    const hashDecision = decideHashes(ctx);
     lastDecision = decision;
+    lastHashDecision = hashDecision;
+
+    const topic = ctx.state.topics.hacknet!;
+    const hashDollarValue = view.hashMode && topic.hashes && topic.hashes.sellForMoneyCost > 0
+      ? HASH_SALE_DOLLARS / topic.hashes.sellForMoneyCost
+      : view.hashMode ? 0 : 1;
+    const fleet = ctx.state.topics.fleet;
+    const fleetUtilization = fleet && fleet.maxRam > 0 ? fleet.usedRam / fleet.maxRam : 0;
+    const fleetDemanded = (ctx.state.topics.farm?.moneyPerSecPerGb ?? 0) > 0 && fleetUtilization >= 0.8;
+    const candidate = decision.ranked[0];
+    const evaluatedAt = Date.now();
 
     merge(ctx.state, "hacknet", {
       plan: {
+        evaluatedAt,
+        horizonSec: usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC,
+        moneyAvailable: ctx.state.topics.player?.money ?? 0,
+        moneyGranted: ctx.grants.money,
+        hashDollarValue,
+        fleetUtilization,
+        fleetDemanded,
+        ...(candidate ? { candidate: { kind: candidate.kind, node: candidate.node, cost: candidate.cost } } : {}),
         ...(decision.buy ? { buy: { kind: decision.buy.kind, node: decision.buy.node, cost: decision.buy.cost } } : {}),
         why: decision.why,
         ...(decision.hold ? { hold: decision.hold } : {}),
-        ranked: decision.ranked.slice(0, 6).map((entry) => ({
+        rankedTotal: decision.ranked.length,
+        ranked: decision.ranked.slice(0, 6).map((entry, index) => ({
+          kind: entry.kind,
+          ...(entry.node !== undefined ? { node: entry.node } : {}),
           label: `${entry.kind}${entry.node !== undefined ? ` #${entry.node}` : ""}`,
           cost: entry.cost,
           deltaProduction: entry.deltaProduction,
+          returnPerDollarSec: entry.cost > 0 ? entry.deltaProduction / entry.cost : 0,
           paybackSec: entry.paybackSec,
           netOverHorizon: entry.netOverHorizon,
+          worthBuying: Boolean(entry.milestone) || entry.netOverHorizon > 0,
+          selected: index === 0,
+          ...(entry.milestone ? { milestone: {
+            kind: entry.milestone.kind,
+            target: entry.milestone.target,
+            have: entry.milestone.have,
+            delta: entry.milestone.delta,
+            priority: entry.milestone.priority,
+            why: entry.milestone.why,
+          } } : {}),
+          why: entry.milestone?.why ?? (entry.netOverHorizon > 0
+            ? `repays within the ${Math.round(usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC)}s horizon`
+            : `does not repay within the ${Math.round(usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC)}s horizon`),
         })),
         ...(lastResult ? { lastResult } : {}),
+        ...(hashDecision ? { hashes: {
+          current: topic.hashes?.current ?? 0,
+          capacity: topic.hashes?.capacity ?? 0,
+          productionPerSec: topic.productionPerSec,
+          sellForMoneyCost: topic.hashes?.sellForMoneyCost ?? 0,
+          ...(hashDecision.spend ? { spend: {
+            name: hashDecision.spend.name,
+            ...(hashDecision.spend.target ? { target: hashDecision.spend.target } : {}),
+            count: hashDecision.spend.count,
+            cost: hashDecision.spend.cost,
+          } } : {}),
+          ...(hashDecision.reserve ? { reserve: {
+            name: hashDecision.reserve.name,
+            ...(hashDecision.reserve.target ? { target: hashDecision.reserve.target } : {}),
+            cost: hashDecision.reserve.cost,
+            missing: hashDecision.reserve.missing,
+          } } : {}),
+          ...(hashDecision.capacityTarget !== undefined ? { capacityTarget: hashDecision.capacityTarget } : {}),
+          why: hashDecision.why,
+          rankedTotal: hashDecision.ranked.length,
+          ranked: hashDecision.ranked.slice(0, 8).map((entry) => ({
+            name: entry.name,
+            ...(entry.target ? { target: entry.target } : {}),
+            cost: entry.cost,
+            priority: entry.priority,
+            affordable: entry.affordable,
+            fitsCapacity: entry.fitsCapacity,
+            ...(entry.valueDollars !== undefined ? { valueDollars: entry.valueDollars } : {}),
+            saleValueDollars: entry.saleValueDollars,
+            ...(entry.netDollars !== undefined ? { netDollars: entry.netDollars } : {}),
+            eligible: entry.eligible,
+            selected: entry.eligible && (
+              (hashDecision.spend?.name === entry.name && hashDecision.spend.target === entry.target) ||
+              (hashDecision.reserve?.name === entry.name && hashDecision.reserve.target === entry.target)
+            ),
+            why: entry.why,
+          })),
+          ...(lastHashResult ? { lastResult: lastHashResult } : {}),
+        } } : {}),
       },
     });
 
-    if (!decision.buy) return;
     try {
-      await execute(ctx.ns, ctx, decision.buy);
+      if (decision.buy) await execute(ctx.ns, ctx, decision.buy);
+      if (hashDecision) await spendHashes(ctx, hashDecision);
     } catch (error) {
       if (isScriptDeath(error)) throw error;
-      lastResult = { action: decision.buy.kind, ok: false, detail: String(error), at: Date.now() };
+      if (decision.buy) {
+        lastResult = { action: decision.buy.kind, ok: false, detail: String(error), at: Date.now() };
+      } else {
+        lastHashResult = { action: hashDecision?.spend?.name ?? "hashes", ok: false, detail: String(error), at: Date.now() };
+      }
     }
   },
 };
 
 function claims(ctx: ClaimContext): Claim[] {
-  const plan = ctx.state.topics.hacknet?.plan;
+  const view = buildView(ctx, Infinity);
+  const decision = view ? stepHacknet(view) : undefined;
+  const best = decision?.buy;
   const out: Claim[] = [];
-  if (plan?.buy) {
-    out.push(actionRamClaim(ctx, "hacknet", hacknetClaimId(plan.buy.kind), hacknetMethods(plan.buy.kind), `hacknet ${plan.buy.kind}`));
+  if (best) {
+    out.push(actionRamClaim(ctx, "hacknet", hacknetClaimId(best.kind), hacknetMethods(best.kind), `hacknet ${best.kind}`));
   }
-  const best = plan?.ranked?.[0];
-  if (best && best.netOverHorizon > 0) {
+  if (best) {
+    const scored = scoreInvestment(
+      { cost: best.cost, incomePerSec: best.deltaProduction },
+      usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC,
+    );
+    const priority = best.milestone?.priority ?? PRIORITY["income:investment"];
     out.push({
       by: "hacknet",
       id: "upgrade",
       resource: "money",
       amount: best.cost,
-      priority: PRIORITY["hacknet:upgrade"],
+      priority,
       mode: "spend",
-      // Divisible: buying a cheaper upgrade than the best one is still
-      // progress, unlike an augmentation.
+      // One upgrade is atomic. If it is unaffordable the arbiter leaves the
+      // cash available to another positive-return investment.
       divisible: false,
       ratePerSec: best.deltaProduction,
-      why: `${best.label} pays back in ${Math.round(best.paybackSec)}s`,
+      returnPerDollarSec: scored.returnPerDollarSec,
+      why: best.milestone?.why ?? `${best.kind}${best.node !== undefined ? ` #${best.node}` : ""} pays back in ${Math.round(scored.paybackSec)}s`,
     });
+  }
+  const hashes = decideHashes(ctx);
+  if (hashes?.spend) {
+    out.push(actionRamClaim(ctx, "hacknet", "action:spend-hashes", HASH_SPEND_METHODS, hashes.spend.why));
   }
   return out;
 }
@@ -184,12 +503,17 @@ function hacknetMethods(kind: string): readonly string[] {
     case "level": return ["hacknet.upgradeLevel"];
     case "ram": return ["hacknet.upgradeRam"];
     case "core": return ["hacknet.upgradeCore"];
+    case "cache": return ["hacknet.upgradeCache"];
     default: return [];
   }
 }
 
 export function hacknetDecision(): HacknetDecision | undefined {
   return lastDecision;
+}
+
+export function hacknetHashDecision(): HashDecision | undefined {
+  return lastHashDecision;
 }
 
 export const hacknetModule: FeatureModule = {

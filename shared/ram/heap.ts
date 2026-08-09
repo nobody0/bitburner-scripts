@@ -66,6 +66,9 @@ export interface AllocRequest {
   blockSize: number;
   threads: number;
   policy: "contiguous" | "homeFirst" | "spread";
+  /** Grow/weaken requests express `threads` in one-core effect units. When
+   * true, fewer real threads are reserved on multi-core hosts. */
+  coreAware?: boolean;
 }
 
 const SLABS = 21;
@@ -219,16 +222,43 @@ export class Heap {
 
   /** Find blocks for a request without mutating state. */
   #place(request: AllocRequest, tentative?: Map<string, number>): Block[] | undefined {
-    const { blockSize, threads, policy } = request;
+    const { blockSize, threads, policy, coreAware = false } = request;
     const wanted = blockSize * threads;
 
-    if (policy === "homeFirst" && this.#home && this.#free(this.#home, tentative) >= wanted) {
-      return [{ hostname: this.#home.hostname, threads, cores: this.#home.cores }];
+    if (policy === "homeFirst" && this.#home) {
+      const actualThreads = coreAware ? Math.ceil(threads / coreEffect(this.#home.cores) - 1e-12) : threads;
+      if (this.#free(this.#home, tentative) >= actualThreads * blockSize) {
+        return [{ hostname: this.#home.hostname, threads: actualThreads, cores: this.#home.cores }];
+      }
     }
 
     // grow (homeFirst) is divisible, so when home is full it spreads rather
     // than demanding one contiguous block; only hack must stay contiguous.
     if (policy === "spread" || policy === "homeFirst") {
+      if (coreAware) {
+        const blocks: Block[] = [];
+        let remainingEffect = threads;
+        // Highest cores first is the minimum-RAM allocation for a fixed grow
+        // or weaken effect — but the heap's other two invariants still hold:
+        // home stays the LAST resort (grow's homeFirst and hack's contiguous
+        // fallback depend on it), and equal-core hosts keep the ascending-slab
+        // order so fragments are eaten before large contiguous blocks. Stable
+        // hostname tie-break keeps replay exact.
+        const hosts = [...this.#hosts.values()]
+          .filter((host) => host !== this.#home)
+          .sort((a, b) => b.cores - a.cores || a.slab - b.slab || a.hostname.localeCompare(b.hostname));
+        if (this.#home) hosts.push(this.#home);
+        for (const host of hosts) {
+          if (remainingEffect <= 1e-9) break;
+          const fit = Math.floor(this.#free(host, tentative) / blockSize);
+          if (fit < 1) continue;
+          const bonus = coreEffect(host.cores);
+          const take = Math.min(fit, Math.ceil(remainingEffect / bonus - 1e-12));
+          blocks.push({ hostname: host.hostname, threads: take, cores: host.cores });
+          remainingEffect -= take * bonus;
+        }
+        return remainingEffect <= 1e-9 ? blocks : undefined;
+      }
       const blocks: Block[] = [];
       let remaining = threads;
       // Ascending slabs: consume the most fragmented hosts first, preserving
@@ -301,7 +331,7 @@ export class Heap {
     for (const host of this.#hosts.values()) {
       const free = this.#free(host, tentative);
       freeTotal += Math.max(0, free);
-      const fit = Math.floor(free / request.blockSize);
+      const fit = Math.floor(free / request.blockSize) * (request.coreAware ? coreEffect(host.cores) : 1);
       if (fit > grantable) grantable = fit;
     }
     return { ok: false, wanted: request.threads, grantable, freeTotal };
@@ -320,4 +350,8 @@ export class Heap {
     host.slab = newSlab;
     this.#slabs[newSlab]!.push(host);
   }
+}
+
+function coreEffect(cores: number): number {
+  return 1 + (Math.max(1, cores) - 1) / 16;
 }

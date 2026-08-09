@@ -1,4 +1,4 @@
-import type { Person, Player } from "@ns";
+import type { MoneySource, Person, Player } from "@ns";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
 import { stateKey } from "../shared/telemetry/schema.ts";
 import type { Action, CompletionEvent, HgwAction, PlayerView, ServerView, WorldView } from "../shared/world.ts";
@@ -10,6 +10,8 @@ import {
   applyWeaken,
   getCloudServerCost,
   getCloudServerLimit,
+  getCloudServerUpgradeCost,
+  getUpgradeHomeCoresCost,
   getUpgradeHomeRamCost,
   serverFromSpec,
   type ServerSpec,
@@ -18,6 +20,8 @@ import {
 import { mockPerson, mockServer } from "./core/mocks.ts";
 import { playerRecord, SimPlayer, type SimPlayerOptions } from "./core/player.ts";
 import { mulberry32 } from "./core/rng.ts";
+import { unmodeled } from "./realm/unmodeled.ts";
+import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 import { getBitNodeMultipliers } from "./vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { currentNodeMults, replaceCurrentNodeMults } from "./vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import {
@@ -28,8 +32,22 @@ import {
 import { calculateSkill } from "./vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { ServerConstants } from "./vendor/bitburner/src/Server/data/Constants.ts";
 
+type MoneySourceKey = Exclude<keyof MoneySource, "total">;
+
+function emptyMoneySource(): MoneySource {
+  return {
+    bladeburner: 0, casino: 0, class: 0, codingcontract: 0,
+    corporation: 0, crime: 0, gang: 0, gang_expenses: 0,
+    hacking: 0, hacknet: 0, hacknet_expenses: 0, hospitalization: 0,
+    infiltration: 0, sleeves: 0, stock: 0, total: 0, work: 0,
+    servers: 0, other: 0, augmentations: 0,
+  };
+}
+
 export interface SimOptions {
   seed: number;
+  /** Shared with the virtual realm when running the real game controller. */
+  clock?: Clock;
   bitnode?: number;
   sourceFileLevel?: number;
   homeRam?: number;
@@ -66,6 +84,10 @@ export interface GateFlags {
   hasCorporation: boolean;
   hasWseAccount: boolean;
   hasTixApiAccess: boolean;
+  /** The $1b ticker data. Deliberately separate from the API flag below: the
+   *  two are bought independently and only the API is readable from a script. */
+  has4SData: boolean;
+  has4SDataTixApi: boolean;
   goPlayable: boolean;
 }
 
@@ -77,7 +99,7 @@ export interface GateFlags {
  * currentNodeMults is module-level state in the vendored core: one BitNode
  * config per process. */
 export class SimWorld {
-  readonly clock = new Clock();
+  readonly clock: Clock;
   readonly person: Person;
   /** The non-Person half: karma, kills, factions, augmentations, the work
    *  slot. Kept separate so the vendored formulas keep taking exactly an
@@ -86,6 +108,8 @@ export class SimWorld {
   readonly servers = new Map<string, SimServer>();
   readonly bitnode: number;
   moneyEarned = 0;
+  scriptExpEarned = 0;
+  readonly moneySources = { sinceInstall: emptyMoneySource(), sinceStart: emptyMoneySource() };
 
   /** Single source of truth, delegated so the many `this.money += x` sites
    *  keep working while the value itself lives on the player. */
@@ -102,6 +126,15 @@ export class SimWorld {
   onRecord?: (record: LogRecord) => void;
   /** Fires after any scheduled action completes — the driver replans on it. */
   onSettled?: (event: CompletionEvent) => void;
+  /** The market, when a run wires one. Assigned AFTER construction because the
+   *  system needs the world (and its clock) to exist first, exactly like
+   *  `onPrestige` in sim/ns/api.ts. Absent in harnesses with no market, where a
+   *  `{stock: true}` op is simply an ordinary op — which is also true in the game
+   *  before a WSE account is bought. */
+  stockSystem?: {
+    influenceHack(server: { organizationName: string; moneyMax: number }, moneyDrained: number): void;
+    influenceGrow(server: { organizationName: string; moneyMax: number }, moneyGrown: number): void;
+  };
   #rng: () => number;
   #seq = 0;
   #run: string;
@@ -109,8 +142,11 @@ export class SimWorld {
   #verbose: boolean;
   #dirty = new Set<SimServer>();
   #lastRollup = -1;
+  #prestigeServers = new Map<string, SimServer>();
+  #prestigeSupported: boolean;
 
   constructor(opts: SimOptions) {
+    this.clock = opts.clock ?? new Clock();
     replaceCurrentNodeMults(getBitNodeMultipliers(opts.bitnode ?? 1, (opts.sourceFileLevel ?? 0) + 1));
     this.#rng = mulberry32(opts.seed);
     // Offset so the two streams never coincide.
@@ -118,6 +154,7 @@ export class SimWorld {
     this.#run = opts.runId ?? `seed${opts.seed}`;
     this.onRecord = opts.onRecord;
     this.bitnode = opts.bitnode ?? 1;
+    this.#prestigeSupported = !opts.liveServers || opts.liveServers.length === 0;
     this.person = mockPerson();
     this.player = new SimPlayer({
       money: opts.startingMoney ?? 1_000,
@@ -137,6 +174,8 @@ export class SimWorld {
       hasCorporation: false,
       hasWseAccount: false,
       hasTixApiAccess: false,
+      has4SData: false,
+      has4SDataTixApi: false,
       goPlayable: false,
       ...opts.gates,
     };
@@ -161,11 +200,101 @@ export class SimWorld {
         this.servers.set(server.hostname, server);
       }
     }
+    for (const [hostname, server] of this.servers) {
+      if (!server.purchasedByPlayer || hostname === "home") {
+        this.#prestigeServers.set(hostname, structuredClone(server));
+      }
+    }
 
     this.emit({ kind: "event", name: "sim.started", data: { seed: opts.seed, bitnode: opts.bitnode ?? 1 } });
     this.mirrorPlayer();
     for (const server of this.servers.values()) this.mirrorServer(server);
     this.#rollup();
+  }
+
+  /** A save snapshot contains live rolled servers, not their generation rolls.
+   * Reusing those values after an install would fabricate a reset world. */
+  assertPrestigeSupported(): void {
+    if (!this.#prestigeSupported) {
+      unmodeled("subsystem", "augmentation prestige", "live-save server regeneration is not modelled");
+    }
+  }
+
+  /** Mirror Player.gainMoney/loseMoney attribution. Callers still own the
+   * actual balance mutation; this records the same signed delta exactly once. */
+  recordMoney(source: MoneySourceKey, amount: number): void {
+    if (!Number.isFinite(amount) || amount === 0) return;
+    for (const ledger of [this.moneySources.sinceInstall, this.moneySources.sinceStart]) {
+      ledger[source] += amount;
+      ledger.total += amount;
+    }
+  }
+
+  resetInstallMoneySources(): void {
+    Object.assign(this.moneySources.sinceInstall, emptyMoneySource());
+  }
+
+  /** Player/server half of prestigeAugmentation. Factions, stock, Hacknet and
+   * process lifecycle are owned by their systems and the host orchestrator. */
+  prestigeAugmentation(newlyInstalled: ReadonlyMap<string, number>): void {
+    this.assertPrestigeSupported();
+    this.resetInstallMoneySources();
+
+    const mults = this.person.mults as unknown as Record<string, number>;
+    for (const [name, levels] of newlyInstalled) {
+      const aug = AUGMENTATION_TABLE[name];
+      if (!aug) unmodeled("subsystem", "augmentation prestige", `unknown augmentation ${name}`);
+      if (aug!.multsUnknown) {
+        unmodeled("subsystem", "augmentation prestige", `${name} has randomized multipliers`);
+      }
+      for (let level = 0; level < levels; level++) {
+        for (const [field, value] of Object.entries(aug!.mults)) {
+          mults[field] = (mults[field] ?? 1) * value;
+        }
+      }
+    }
+
+    const intelligenceUnlocked = this.bitnode === 5 || (this.player.sourceFiles["5"] ?? 0) > 0;
+    for (const skill of ["hacking", "strength", "defense", "dexterity", "agility", "charisma"] as const) {
+      this.person.exp[skill] = 0;
+      this.person.skills[skill] = 1;
+    }
+    if (!intelligenceUnlocked) {
+      this.person.exp.intelligence = 0;
+      this.person.skills.intelligence = 0;
+    }
+    this.person.hp.current = this.person.hp.max;
+
+    this.player.numPeopleKilled = 0;
+    this.player.city = "Sector-12";
+    this.player.location = "Travel Agency";
+    this.player.jobs = {};
+    this.player.factionRumors = [];
+    this.player.focus = true;
+
+    let startingMoney = 1_000;
+    for (const name of this.player.augmentations.keys()) startingMoney += AUGMENTATION_TABLE[name]?.startingMoney ?? 0;
+    this.player.money = this.bitnode === 8 ? 250e6 : startingMoney;
+
+    const currentHome = this.servers.get("home");
+    const homeRam = currentHome?.maxRam ?? this.#prestigeServers.get("home")?.maxRam ?? 8;
+    const homeCores = currentHome?.cpuCores ?? this.#prestigeServers.get("home")?.cpuCores ?? 1;
+    this.servers.clear();
+    for (const [hostname, baseline] of this.#prestigeServers) {
+      const server = structuredClone(baseline);
+      server.ramUsed = 0;
+      if (hostname === "home") {
+        server.maxRam = homeRam;
+        server.cpuCores = homeCores;
+      }
+      this.servers.set(hostname, server);
+      this.mirrorServer(server);
+    }
+    this.#dirty.clear();
+    this.recalculateSkills();
+    this.person.hp.current = this.person.hp.max;
+    this.emit({ kind: "event", name: "sim.prestige", data: { newlyInstalled: [...newlyInstalled] } });
+    this.mirrorPlayer();
   }
 
   emit(partial: { kind: "state"; key: string; data: unknown } | { kind: "event"; name: string; data?: unknown } | { kind: "debug"; msg: string; data?: unknown }): void {
@@ -278,6 +407,11 @@ export class SimWorld {
     targetName: string,
     threads: number,
     cores = 1,
+    /** `{stock: true}` was passed: this op also moves the target
+     *  organization's share price. Hack pushes the second-order forecast DOWN,
+     *  grow pushes it UP, and weaken does nothing at all — the game has no
+     *  weaken-side influence, so there is deliberately no branch for it. */
+    stock = false,
   ): { nsValue: number; result: CompletionEvent["result"] } {
     const target = this.servers.get(targetName);
     if (!target) throw new Error(`land: unknown server ${targetName}`);
@@ -288,19 +422,25 @@ export class SimWorld {
       const outcome = applyHack(target, this.person, threads, this.#rng());
       this.money += outcome.moneyGained;
       this.moneyEarned += outcome.moneyGained;
+      this.recordMoney("hacking", outcome.moneyGained);
+      this.scriptExpEarned += outcome.expGained;
       if (outcome.success) this.hacks++;
       this.landed.hack++;
       result = outcome;
       nsValue = outcome.moneyGained;
+      if (stock) this.stockSystem?.influenceHack(target, outcome.moneyDrained);
       if (this.#verbose) this.emit({ kind: "event", name: "hack.done", data: { target: targetName, threads, ...outcome } });
     } else if (kind === "grow") {
       const outcome = applyGrow(target, this.person, threads, cores);
+      this.scriptExpEarned += outcome.expGained;
       this.landed.grow++;
       result = { growth: outcome.growth, expGained: outcome.expGained };
       nsValue = target.moneyMax === 0 ? 0 : outcome.growth;
+      if (stock) this.stockSystem?.influenceGrow(target, outcome.moneyGrown);
       if (this.#verbose) this.emit({ kind: "event", name: "grow.done", data: { target: targetName, threads, growth: outcome.growth } });
     } else {
       const outcome = applyWeaken(target, this.person, threads, cores);
+      this.scriptExpEarned += outcome.expGained;
       this.landed.weaken++;
       result = outcome;
       nsValue = outcome.securityReduced;
@@ -349,6 +489,12 @@ export class SimWorld {
         HackingSpeedMultiplier: currentNodeMults.HackingSpeedMultiplier,
         HackExpGain: currentNodeMults.HackExpGain,
         ScriptHackMoney: currentNodeMults.ScriptHackMoney,
+        // The player's CUT of what was drained, distinct from the drain rate
+        // above and applied at a different point. BN8 sets it to 0: the farm
+        // still empties servers, still gains experience and still moves share
+        // prices, and earns nothing. Omitting it made every BN8 target score as
+        // though hacking paid full price.
+        ScriptHackMoneyGain: currentNodeMults.ScriptHackMoneyGain,
         ServerGrowthRate: currentNodeMults.ServerGrowthRate,
         ServerWeakenRate: currentNodeMults.ServerWeakenRate,
       },
@@ -377,11 +523,14 @@ export class SimWorld {
       }
       case "buyServer": {
         const cost = getCloudServerCost(action.ram);
-        const owned = [...this.servers.values()].filter((s) => s.purchasedByPlayer && s.hostname !== "home").length;
+        const owned = [...this.servers.values()].filter((s) =>
+          s.purchasedByPlayer && s.hostname !== "home" && !s.hostname.startsWith("hacknet-server-"),
+        ).length;
         if (owned >= getCloudServerLimit()) return this.#fail(action, "server limit reached");
         if (this.servers.has(action.name)) return this.#fail(action, "name taken");
         if (this.money < cost) return this.#fail(action, "insufficient money");
         this.money -= cost;
+        this.recordMoney("servers", -cost);
         const server = mockServer({
           hostname: action.name,
           hasAdminRights: true,
@@ -395,14 +544,44 @@ export class SimWorld {
         this.mirrorPlayer();
         return true;
       }
+      case "upgradeServer": {
+        const server = this.servers.get(action.host);
+        if (!server || !server.purchasedByPlayer || server.hostname.startsWith("hacknet-server-")) {
+          return this.#fail(action, "not a cloud server");
+        }
+        const cost = getCloudServerUpgradeCost(server.maxRam, action.ram);
+        if (cost < 0) return this.#fail(action, "invalid target RAM");
+        if (this.money < cost) return this.#fail(action, "insufficient money");
+        this.money -= cost;
+        this.recordMoney("servers", -cost);
+        server.maxRam = action.ram;
+        this.emit({ kind: "event", name: "upgradeServer", data: { host: action.host, ram: action.ram, cost } });
+        this.mirrorServer(server);
+        this.mirrorPlayer();
+        return true;
+      }
       case "upgradeHomeRam": {
         const home = this.servers.get("home")!;
         const cost = getUpgradeHomeRamCost(home.maxRam);
         if (home.maxRam >= ServerConstants.HomeComputerMaxRam) return this.#fail(action, "home RAM maxed");
         if (this.money < cost) return this.#fail(action, "insufficient money");
         this.money -= cost;
+        this.recordMoney("servers", -cost);
         home.maxRam *= 2;
         this.emit({ kind: "event", name: "upgradeHomeRam", data: { maxRam: home.maxRam, cost } });
+        this.mirrorServer(home);
+        this.mirrorPlayer();
+        return true;
+      }
+      case "upgradeHomeCore": {
+        const home = this.servers.get("home")!;
+        if (home.cpuCores >= 8) return this.#fail(action, "home cores maxed");
+        const cost = getUpgradeHomeCoresCost(home.cpuCores);
+        if (this.money < cost) return this.#fail(action, "insufficient money");
+        this.money -= cost;
+        this.recordMoney("servers", -cost);
+        home.cpuCores += 1;
+        this.emit({ kind: "event", name: "upgradeHomeCore", data: { cores: home.cpuCores, cost } });
         this.mirrorServer(home);
         this.mirrorPlayer();
         return true;
@@ -448,10 +627,22 @@ export class SimWorld {
     this.clock.in(durationMs, () => {
       source.ramUsed -= ram;
       this.#inFlight--;
-      const { result } = this.land(type, targetName, threads, source.cpuCores);
+      const { result } = this.land(type, targetName, threads, source.cpuCores, action.stock === true);
       this.onSettled?.({ kind: type, opId: action.opId, target: targetName, threads, result });
     });
     return true;
+  }
+
+  /** Advance the 1 Hz rollup from a timebase OTHER than an HGW landing.
+   *
+   * `land()` is the only other caller, which used to be the only one — and that
+   * silently made the earnings ledger invisible to any run without a farm. A
+   * hacknet-only or market-only run credited `moneyEarned` correctly and never
+   * published it, so an `earn:` goal could not be reached however much the run
+   * made. The engine calls this so every subsystem on the 200 ms timebase is
+   * covered, not just the ones that happen to land ops. */
+  pulse(): void {
+    this.#maybeRollup();
   }
 
   #maybeRollup(): void {

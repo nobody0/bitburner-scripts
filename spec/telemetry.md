@@ -58,6 +58,14 @@ cannot afford its dodge budget (reported once per price, not per sweep) and
 `probe.failed {id, error}` when a body throws. Silence would read as "this
 feature has no data".
 
+Coding contracts split repeated state from forensic detail. The `side` topic
+carries totals, solver coverage, the front 20 rows of a private 100-contract
+work queue, compact quarantine summaries, scan freshness and the last batch
+outcome. A full rejected input/answer is emitted once as
+`contract.quarantined`; the UI retains the latest replay outside its bounded
+event feed. This keeps a failure actionable without copying up to eight large
+replays into every 30-second state record.
+
 Two records carry the endgame decision loop (`spec/strategy/endgame.md`).
 `endgame.route` fires only when the chosen route CHANGES — decisions, not
 heartbeats — with `{from?, to, etaSec, expectedEndAt, why, routes[]}`, where
@@ -65,6 +73,52 @@ heartbeats — with `{from?, to, etaSec, expectedEndAt, why, routes[]}`, where
 `bitnode.reset` carries the outcome half: `{to, from?, elapsedMs?, route?,
 guessedEndAt?, decidedAt?}` — the actual elapsed time next to the last guess,
 which is what makes the ETA heuristic tunable from these files at all.
+
+`progression.plan.forecasts` carries the live planning half as two typed,
+independently anchored forecasts: `install` and `node`. Estimated records retain
+`estimatedAt`, `expectedAt`, the ten-minute recalibration deadline, confidence,
+and every parallel/sequential component with critical-path and measured flags.
+Unknown and stale are explicit states, so replay never mistakes absence for a
+one-hour guess. The progression tab renders the same fields.
+
+Go decisions retain the exact public board/history input, bounded search
+ranking, sampled playtime and WHRNG seed window, observed-response support, and
+the full opponent/board reward comparison. Each candidate records simulator-
+fitted win/score priors, heuristic duration, exact expected node power and
+multiplier change, transient install-ETA savings, expected nonlinear faction-
+favor gain, persistent faction-work savings and saved-seconds-per-game-second. This is enough to
+recompute why an opponent was chosen and to detect live-prior drift without
+shipping or importing the game implementation.
+
+Investment decisions use the same snapshot-plus-transition pattern. The
+`fleet.infrastructurePlan` and `hacknet.plan` topics capture the horizon,
+available and granted cash, valuation inputs, the selected candidate, the top
+ranked alternatives, the uncapped candidate count and rejection evidence. The
+full observed quote menus remain in the surrounding topic for offline
+recomputation. Hash rankings additionally
+carry capacity/affordability, the forgone cash-sale value and estimated net
+value. `investment.decision`, `hash.decision`, `investment.result` and
+`hash.result` form a compact index over those snapshots: they fire when the
+winner, hold/funding state, or outcome changes, not once per sample. The raw
+topic stream remains the authoritative high-frequency history; the events make
+transitions easy to find in replay and fit in the UI's bounded event ring.
+
+Faction planning follows that pattern too. `factions.plan.context` records the
+planning horizon and route, augmentation-count goal, income, available/granted
+cash, work-slot grant, donation threshold, and augmentation price-queue state.
+The objective records both the chosen and runner-up reputation breakpoints with
+value rates, unlock/rep/money ETA components, favor after install, and purchase
+versus donation cost. Standings, invitations, gates, offers, and ownership stay
+in the surrounding faction topic. `faction.decision` indexes changes to the
+chosen package or action, while `faction.result` preserves each executed
+outcome without repeating unchanged plans every sample.
+
+The progression topic's arbitration digest carries both winners and losers.
+Grant rows retain the original amount, priority, reason and comparable
+return-per-dollar bid; denial rows retain the same scoring evidence plus the
+denial reason and available pool. That is the cross-feature join needed to
+explain why Hacknet, home RAM, a purchased server, or a progression reserve won
+the shared dollar at a particular pass.
 
 ## Wire
 

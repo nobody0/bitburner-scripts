@@ -1,8 +1,10 @@
+import { scoreInvestment } from "../investment.ts";
+
 /** Hacknet purchase scheduling.
  *
- * Objective: maximise cumulative production minus spend over the REMAINING
- * HORIZON. The horizon is what makes this a real decision rather than a
- * ranking — an upgrade that pays for itself in four hours is excellent with
+ * Objective: reject anything that cannot repay over the REMAINING HORIZON,
+ * then buy the surviving option with the fastest ROI. The horizon is what
+ * makes it a real decision: an upgrade that pays for itself in four hours is excellent with
  * eight hours left and worthless with one, and a planner without a horizon
  * buys the same thing in both cases.
  *
@@ -11,10 +13,8 @@
  * the same reason as everywhere else: the BitNode multipliers and the player's
  * hacknet cost multipliers are already folded into what the game reports.
  *
- * Hacknet SERVERS (BN9/SF9) change the objective from money to hashes. The
- * detection is `hashCapacity` being present on a node's stats — reported by
- * the probe — and the strategy reports the difference rather than silently
- * pricing hashes as dollars. */
+ * Hacknet Servers are converted to dollars/sec through the observed
+ * "Sell for Money" hash price before they reach this pure decision. */
 
 export interface HacknetNodeState {
   index: number;
@@ -25,7 +25,17 @@ export interface HacknetNodeState {
   production: number;
 }
 
-export type UpgradeKind = "level" | "ram" | "core" | "node";
+export type UpgradeKind = "level" | "ram" | "core" | "cache" | "node";
+
+export type HacknetMilestoneKind = "hacknetRam" | "hacknetCores" | "hacknetLevels" | "hashCapacity";
+
+export interface HacknetMilestone {
+  kind: HacknetMilestoneKind;
+  target: number;
+  have: number;
+  priority: number;
+  why: string;
+}
 
 export interface UpgradeOption {
   kind: UpgradeKind;
@@ -34,6 +44,9 @@ export interface UpgradeOption {
   cost: number;
   /** Extra money per second this upgrade would produce. */
   deltaProduction: number;
+  /** Progress toward a non-income milestone, filled by the driver from the
+   * observed node state. Cache upgrades use hash-capacity units. */
+  progress?: Partial<Record<HacknetMilestoneKind, number>>;
 }
 
 export interface HacknetView {
@@ -44,6 +57,8 @@ export interface HacknetView {
   /** Production of a freshly-purchased node, so a new node can be ranked
    *  against upgrading an existing one. */
   newNodeProduction: number;
+  /** Initial capacity of a fresh Hacknet Server; zero for ordinary nodes. */
+  newNodeHashCapacity?: number;
   /** Candidate upgrades, priced by the game. */
   upgrades: UpgradeOption[];
   /** Money the arbiter granted this feature. */
@@ -52,13 +67,20 @@ export interface HacknetView {
   horizonSec: number;
   /** True in BN9/SF9, where production is hashes rather than money. */
   hashMode: boolean;
+  milestones?: HacknetMilestone[];
+}
+
+export interface RankedUpgrade extends UpgradeOption {
+  paybackSec: number;
+  netOverHorizon: number;
+  milestone?: HacknetMilestone & { delta: number; completion: number };
 }
 
 export interface HacknetDecision {
   /** The purchase to make, or undefined to hold. */
-  buy?: UpgradeOption;
+  buy?: RankedUpgrade;
   /** Everything considered, best payback first. */
-  ranked: (UpgradeOption & { paybackSec: number; netOverHorizon: number })[];
+  ranked: RankedUpgrade[];
   why: string;
   /** Set when nothing is worth buying and why that is. */
   hold?: string;
@@ -67,7 +89,7 @@ export interface HacknetDecision {
 /** Seconds for an upgrade to repay its own cost. `Infinity` when it produces
  * nothing, which is a real answer and must not be treated as "cheap". */
 export function paybackSec(option: UpgradeOption): number {
-  return option.deltaProduction > 0 ? option.cost / option.deltaProduction : Infinity;
+  return scoreInvestment({ cost: option.cost, incomePerSec: option.deltaProduction }, Infinity).paybackSec;
 }
 
 /** Net money over the remaining horizon: what it earns in the time left, minus
@@ -76,7 +98,7 @@ export function paybackSec(option: UpgradeOption): number {
  * This is the whole objective, and it is why the horizon is a first-class
  * input rather than a tuning constant. */
 export function netOverHorizon(option: UpgradeOption, horizonSec: number): number {
-  return option.deltaProduction * horizonSec - option.cost;
+  return scoreInvestment({ cost: option.cost, incomePerSec: option.deltaProduction }, horizonSec).netOverHorizon;
 }
 
 export function stepHacknet(view: HacknetView): HacknetDecision {
@@ -84,22 +106,57 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
 
   // A new node competes with upgrading an existing one, on the same terms.
   if (view.nodes.length < view.maxNodes && Number.isFinite(view.nodeCost)) {
-    candidates.push({ kind: "node", cost: view.nodeCost, deltaProduction: view.newNodeProduction });
+    candidates.push({
+      kind: "node",
+      cost: view.nodeCost,
+      deltaProduction: view.newNodeProduction,
+      progress: {
+        hacknetRam: 1,
+        hacknetCores: 1,
+        hacknetLevels: 1,
+        ...(view.newNodeHashCapacity ? { hashCapacity: view.newNodeHashCapacity } : {}),
+      },
+    });
   }
 
   const ranked = candidates
-    .map((option) => ({
-      ...option,
-      paybackSec: paybackSec(option),
-      netOverHorizon: netOverHorizon(option, view.horizonSec),
-    }))
+    .map((option): RankedUpgrade => {
+      let milestone: RankedUpgrade["milestone"];
+      for (const wanted of view.milestones ?? []) {
+        const delta = Math.max(0, option.progress?.[wanted.kind] ?? 0);
+        if (delta <= 0 || wanted.have >= wanted.target) continue;
+        const remaining = wanted.target - wanted.have;
+        const candidate = { ...wanted, delta, completion: Math.min(1, delta / remaining) };
+        if (!milestone || candidate.priority > milestone.priority ||
+          (candidate.priority === milestone.priority && candidate.completion / option.cost > milestone.completion / option.cost)) {
+          milestone = candidate;
+        }
+      }
+      return {
+        ...option,
+        paybackSec: paybackSec(option),
+        netOverHorizon: netOverHorizon(option, view.horizonSec),
+        ...(milestone ? { milestone } : {}),
+      };
+    })
     .sort((a, b) => {
-      // Best net over the horizon first; payback breaks ties, then a stable
-      // key so the order never depends on the probe's iteration order.
-      const net = b.netOverHorizon - a.netOverHorizon;
-      if (net !== 0) return net;
+      const ap = a.milestone?.priority ?? 0;
+      const bp = b.milestone?.priority ?? 0;
+      if (ap !== bp) return bp - ap;
+      if (ap > 0 && bp > 0) {
+        const av = a.milestone!.completion / a.cost;
+        const bv = b.milestone!.completion / b.cost;
+        if (av !== bv) return bv - av;
+      }
+      // The horizon is an eligibility gate. Among investments which can repay
+      // in time, fastest ROI wins. Net value only breaks an equal payback.
+      const aViable = a.netOverHorizon > 0;
+      const bViable = b.netOverHorizon > 0;
+      if (aViable !== bViable) return bViable ? 1 : -1;
       const payback = a.paybackSec - b.paybackSec;
       if (payback !== 0) return payback;
+      const net = b.netOverHorizon - a.netOverHorizon;
+      if (net !== 0) return net;
       return `${a.kind}${a.node ?? ""}` < `${b.kind}${b.node ?? ""}` ? -1 : 1;
     });
 
@@ -108,7 +165,7 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
   }
 
   const best = ranked[0]!;
-  if (best.netOverHorizon <= 0) {
+  if (!best.milestone && best.netOverHorizon <= 0) {
     return {
       ranked,
       why: "every upgrade loses money before the horizon ends",
@@ -128,8 +185,9 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
   return {
     buy: best,
     ranked,
-    why:
-      `${best.kind}${best.node !== undefined ? ` on node ${best.node}` : ""} nets ` +
-      `$${Math.round(best.netOverHorizon).toLocaleString()} over the remaining ${Math.round(view.horizonSec)}s`,
+    why: best.milestone
+      ? `${best.kind}${best.node !== undefined ? ` on node ${best.node}` : ""} advances ${best.milestone.kind}: ${best.milestone.why}`
+      : `${best.kind}${best.node !== undefined ? ` on node ${best.node}` : ""} has the fastest ROI ` +
+        `(${Math.round(best.paybackSec)}s payback; $${Math.round(best.netOverHorizon).toLocaleString()} net over the horizon)`,
   };
 }

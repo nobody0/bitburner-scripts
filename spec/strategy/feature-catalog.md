@@ -115,11 +115,33 @@ automatable** — the most consequential capability gate we have.
 | any | `money` | City factions $15m–$50m, Syndicate $10m, Silhouette $15m, Covenant $75b, Daedalus $100b, Illuminati $150b |
 | `hacknet` | `hacknetRam`/`Cores`/`Levels` | Netburners: 8 RAM, 4 cores, 100 levels |
 | `bladeburner` | `bladeburnerRank` | Bladeburners faction at rank 25 |
-| `side` | `infiltrations` | Shadows of Anarchy, 1 |
 | `progression` | `augCount` | Covenant 20, Daedalus 30 (BN-dependent), Illuminati 30 |
 
 **Gives** Augmentations — the only permanent multiplier source — and favor,
 which persists across installs. Grafting lives here.
+
+**Plans** A finite-horizon frontier of `(faction, reputation breakpoint,
+augmentation package)` choices. Package value counts each shared augmentation
+once, adds route-weighted multiplier utility, and includes the exact future
+favor gained at install. The best package is extended only while its next
+marginal value per second beats the best residual package at another faction.
+That runner-up remains the opportunity cost after an enemy join: once the
+promised breakpoint is complete, the feature recommends installing and chooses
+the enemy afresh next cycle. Immediately before that recommendation it drains
+every affordable joined-faction augmentation, including an exact donation when the
+donation plus purchase can both be reserved.
+
+**Chooses by value, pays by price.** Every queued non-SoA purchase multiplies the
+price of the next by 1.9, and an augmentation does nothing until it is installed —
+so there is no reason to want a cheap one early, and the dearest item belongs in
+the cheapest slot. Sets are selected on value and bought in `orderPurchases` order,
+and every cost estimate is taken from that ordered sequence. The budget behind both
+is `settlingMoney`: cash **plus the market book**, which is liquidated before every
+install. A cash shortfall on the dearest item therefore makes the feature wait
+rather than buy something cheaper out of order — bounded by money that has a
+settlement date, never by income over the horizon, and never on the run's first
+purchase, because the liquidation it would be waiting for needs a non-empty install
+queue to be triggered at all.
 
 **Contends** The work slot, hard. `ns.singularity.workForFaction` **cancels**
 whatever is running; the loser's progress is destroyed, not delayed. That is why
@@ -192,12 +214,30 @@ disableable by BitNode options).
 min-security ↓ and max-money ↑, corporation funds, Bladeburner rank/SP, contract
 generation. Hacknet Servers are also **fleet RAM**.
 
-**Contends** Money.
+**Contends** Money. One-step node/level/RAM/core/cache candidates are valued in
+`marginal $/sec / cost`. Candidates whose payback exceeds the planning horizon
+are discarded, then the fastest ROI competes directly with home RAM, home
+cores, and purchased-server purchases/upgrades through the shared money
+arbiter. Hacknet-server RAM is part of the hacking fleet; its value accounts
+for both hacking income and the hash production lost while that RAM is busy.
 
 **The interesting edge** Hash upgrades that lower a target's min security and
 raise its max money feed straight back into `hacking`'s target score, making
 `hacknet` → `hacking` an optimization loop rather than a one-way income line.
-Unmodelled today.
+The hash spender observes the live upgrade menu, reserves for the highest-value
+available goal, requests cache when that goal exceeds capacity, and otherwise
+sells hashes. It can serve faction Hacknet milestones, training/company needs,
+the active Bladeburner or corporation route, and ROI-positive mutations of the
+current farm target.
+
+**Legacy comparison** The 2023 controller had Hacknet entirely commented out;
+its saved policy bought any node/level/RAM/core quote below 1% of cash, without
+ROI, horizon, hashes, or BitNode handling. That predecessor bought fixed 8 GB
+servers, then doubled them only after filling every slot. The abandoned 2024
+rewrite introduced the useful candidate-ranking idea: compare home RAM, home
+cores, new servers, and server upgrades by capacity gained per dollar. The
+current arbiter migrates that idea using actual marginal farm income, makes each
+purchase atomic, and adds the missing run-horizon and cross-feature comparison.
 
 **Fragile to** `HacknetNodeMoney` — 0 in BN8, 0.05 in BN4. The feature needs an
 explicit "off" state, not a slower cadence.
@@ -206,16 +246,31 @@ explicit "off" state, not a slower cadence.
 
 ## `stock` — the market
 
-**Unlock** `stock.hasWseAccount()` (0.05 GB). Buy WSE + TIX in-node, or SF8.1
-permanently. Shorts need SF8.2, limit/stop orders SF8.3.
+**Unlock** Always — the market is money-gated, not capability-gated. WSE $200m →
+TIX API $5b buys positions; SF8.1 grants both permanently. Shorts need SF8.2,
+limit/stop orders SF8.3 (not modelled).
 
-**Needs** Money. 4S Market Data is a large one-off whose cost is multiplied
-heavily in BN9/BN11/BN13 (up to 10×), and is disableable by BitNode options.
+**Needs** Money. The **4S Market Data TIX API** ($25b, multiplied in BN9/BN11/
+BN13 and disableable by BitNode options) is the only 4S purchase worth making:
+`getForecast` and `getVolatility` check `has4SDataTixApi`, and buying it does not
+require the $1b `has4SData` first — so the $1b buys an automated player nothing.
+Without it, the forecast is recovered from up-tick frequency and the volatility
+from the shared per-tick roll (`shared/strategy/stock/history.ts`).
 
 **Gives** Money — and in BN8 it is the *only* money.
 
-**Contends** Money; and uniquely in BN8, **target choice** against `hacking`,
-because hack/grow move prices. The arbiter has no concept of this.
+**Contends** Money; and **target choice** against `hacking`, because hack/grow
+move prices. That contention is now priced: `stock` publishes a per-host
+manipulation intent and a dollar value per influencing op, and `solveCycle` adds
+it as a second income term to the same `$/GB/sec` score
+([spec/targeting.md](../targeting.md)).
+
+**Fragile to** `FourSigmaMarketDataApiCost` (whether the forecast is affordable),
+and to `ScriptHackMoney` / `ScriptHackMoneyGain` — which move the manipulation
+trade-off in OPPOSITE directions, since influence is measured before the player's
+cut. A position is also destroyed outright by an augmentation install
+(`prestigeAugmentation` → `initStockMarket`), so the portfolio must be liquid
+before `progression` resets.
 
 ---
 
@@ -304,8 +359,10 @@ model, not just add a driver.
 **Unlock** `go.getGameState()` — 0 GB, **available in every BitNode with no
 Source-File**. `go.cheat` needs SF14.2.
 
-**Needs** Nothing but time — and not the player's work slot. The cheapest
-feature in the graph.
+**Needs** Wall time and dodge RAM, but no money and not the player's work slot.
+The essential board/action calls cost 4 GB. The controller handcrafts the
+published WHRNG for seed-aware opponent forecasts without importing game source
+at runtime. It is still the cheapest feature in the graph by economic resources.
 
 **Gives** Node **power** (stat multipliers, ×4 in BN14, +100% with SF14.1) and
 **faction favor** from winstreaks, capped by SF14 level.
@@ -313,7 +370,9 @@ feature in the graph.
 Because favor survives installs and unlocks donations, a Go win is a
 *permanent* contribution to `factions` — one of very few things that is.
 
-**Contends** Nothing arbitrated.
+**Contends** Only dodge RAM. Opponent selection consumes the needs board but
+does not reserve what it improves: a Daedalus game can raise faction/company
+rep multipliers in parallel with faction work, for example.
 
 ---
 
@@ -352,22 +411,18 @@ except BN8, not just BN15.
 
 ---
 
-## `side` — contracts, infiltration, casino
+## `side` — coding contracts
 
-**Unlock** Always. Three unrelated income sources with no BitNode of their own.
+**Unlock** Always.
 
-**Needs** Contracts need only fleet scanning and CPU. Infiltration needs combat
-stats and is **DOM-driven** — the ns surface does not cover the minigames. The
-casino has no ns API at all.
+**Needs** Fleet scanning and CPU.
 
-**Gives** Contracts: money (`CodingContractMoney`) and faction rep.
-Infiltration: money and faction rep (`InfiltrationMoney` / `InfiltrationRep` —
-2.5× in BN11, 1.5× in BN5, 0 in BN8), plus Shadows of Anarchy after one.
-Casino: early money, once.
+**Gives** Money (`CodingContractMoney`) and occasional faction reputation.
 
-**Contends** Infiltration takes the work slot; contracts take none.
+**Contends** No player-time slot. Contract inspection and attempts use bounded
+fleet RAM dodges.
 
-**Honest position** `side` is `api: true` because contracts are fully
-automatable, but its infiltration half may not be automatable at all. BN11 makes
-infiltration worth 2.5× on both axes, so that is where the gap costs most, and
-it deserves an explicit decision rather than an idle tab.
+**Intentional boundary** Infiltration and the casino are manual UI gameplay.
+They are not probed, ranked, simulated, or presented as automation work.
+Shadows of Anarchy invitation/membership is accepted as evidence of the one
+manual infiltration the game requires.

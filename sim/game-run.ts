@@ -7,11 +7,15 @@ import type { SaveSeed } from "../shared/save/to-sim.ts";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../shared/telemetry/state-map.ts";
 import { Clock } from "./clock.ts";
+import type { SimPlayerOptions } from "./core/player.ts";
 import type { ServerSpec } from "./core/effects.ts";
-import { Engine } from "./engine.ts";
+import { mulberry32 } from "./core/rng.ts";
+import { Engine, initialCounters } from "./engine.ts";
 import { CrimeSystem } from "./features/crime.ts";
 import { FactionSystem } from "./features/factions.ts";
+import { GraftingSystem } from "./features/grafting.ts";
 import { HacknetSystem } from "./features/hacknet.ts";
+import { StockMarketSystem } from "./features/stock.ts";
 import { satisfiesAll, type SatisfyContext } from "./features/requirements.ts";
 import { DEFAULT_NETWORK } from "./network.ts";
 import { makeSingularity } from "./ns/singularity.ts";
@@ -19,7 +23,8 @@ import { launch, makeSimNs, type ScriptMain, type SimNsHost } from "./ns/api.ts"
 import { ProcessTable } from "./ns/process.ts";
 import { installVirtualTime } from "./realm/timers.ts";
 import { resetUnmodeled, setUnmodeledReporter, unmodeledCounts } from "./realm/unmodeled.ts";
-import { SimWorld, type GateFlags } from "./world.ts";
+import { SimWorld, type GateFlags, type SimOptions } from "./world.ts";
+import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 
 /** Run the REAL game/ controller against the synthetic world.
  *
@@ -47,6 +52,9 @@ export interface GameRunOptions {
   homeCores?: number;
   startingMoney?: number;
   network?: ServerSpec[];
+  person?: SimOptions["person"];
+  playerState?: SimPlayerOptions;
+  factions?: Record<string, { rep: number; favor: number }>;
   gates?: Partial<GateFlags>;
   /** Initial conditions from a real save (shared/save/to-sim.ts). Supplies the
    *  BitNode, source files, fleet, topology, player stats and gate flags —
@@ -98,25 +106,35 @@ function clearRealm(): void {
   for (const slot of REALM_SLOTS) delete (globalThis as Record<string, unknown>)[slot];
 }
 
-function buildResetInfo(bitnode: number, sourceFileLevel: number): ResetInfo {
-  const ownedSF = new Map<number, number>();
-  if (sourceFileLevel > 0) ownedSF.set(bitnode, sourceFileLevel);
+function buildResetInfo(
+  bitnode: number,
+  sourceFileLevel: number,
+  installedAugs: ReadonlyMap<string, number>,
+  save?: SaveSeed,
+): ResetInfo {
+  const ownedSF = new Map<number, number>(
+    Object.entries(save?.sourceFiles ?? {}).map(([sf, level]) => [Number(sf), level]),
+  );
+  if (ownedSF.size === 0 && sourceFileLevel > 0) ownedSF.set(bitnode, sourceFileLevel);
+  const savedOptions = save?.bitNodeOptions;
   return {
     lastAugReset: 0,
     lastNodeReset: 0,
     currentNode: bitnode,
-    ownedAugs: new Map<string, number>(),
+    ownedAugs: new Map(installedAugs),
     ownedSF,
     bitNodeOptions: {
-      sourceFileOverrides: new Map<number, number>(),
-      intelligenceOverride: undefined,
-      restrictHomePCUpgrade: false,
-      disableGang: false,
-      disableCorporation: false,
-      disableBladeburner: false,
-      disable4SData: false,
-      disableHacknetServer: false,
-      disableSleeveExpAndAugmentation: false,
+      sourceFileOverrides: new Map<number, number>(
+        Object.entries(savedOptions?.sourceFileOverrides ?? {}).map(([sf, level]) => [Number(sf), level]),
+      ),
+      intelligenceOverride: savedOptions?.intelligenceOverride,
+      restrictHomePCUpgrade: savedOptions?.restrictHomePCUpgrade ?? false,
+      disableGang: savedOptions?.disableGang ?? false,
+      disableCorporation: savedOptions?.disableCorporation ?? false,
+      disableBladeburner: savedOptions?.disableBladeburner ?? false,
+      disable4SData: savedOptions?.disable4SData ?? false,
+      disableHacknetServer: savedOptions?.disableHacknetServer ?? false,
+      disableSleeveExpAndAugmentation: savedOptions?.disableSleeveExpAndAugmentation ?? false,
     },
   };
 }
@@ -141,16 +159,21 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
 
   const ctx = initialContext();
   let recordCount = 0;
+  const person = options.person ?? save?.person;
+  const playerState = options.playerState ?? save?.playerState;
 
   const world = new SimWorld({
     seed,
+    clock,
     bitnode,
     sourceFileLevel,
     homeRam: goal.setup?.homeRam ?? options.homeRam ?? save?.homeRam ?? 8,
     homeCores: options.homeCores ?? save?.homeCores ?? 1,
     startingMoney: goal.setup?.startingMoney ?? options.startingMoney ?? save?.startingMoney ?? 1_000,
     network: options.network ?? DEFAULT_NETWORK,
-    ...(save ? { liveServers: save.servers, person: save.person, playerState: save.playerState } : {}),
+    ...(save ? { liveServers: save.servers } : {}),
+    ...(person ? { person } : {}),
+    ...(playerState ? { playerState } : {}),
     runId: options.runId ?? `${options.label ?? "game"}-seed${seed}`,
     verbose: options.verbose ?? false,
     ...(save || options.gates ? { gates: { ...save?.gates, ...options.gates } } : {}),
@@ -168,7 +191,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // a subsystem cannot be wired to a world that does not exist yet, and
   // retrofitting a second timebase under models written against the first
   // would mean redoing all of them.
-  const factions = new FactionSystem(world, world.player, save?.factions);
+  const factions = new FactionSystem(world, world.player, options.factions ?? save?.factions);
   const terminal = { host: "home" };
   const hasTor = { value: false };
   // Netburners' requirements are hacknet totals, so they have to be real
@@ -199,7 +222,30 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   });
 
   const crimes = new CrimeSystem(world, world.player, world.crimeRng);
-  const hacknet = new HacknetSystem(world, world.player);
+  // The closure is invoked only after `host` is constructed, when a graft
+  // actually completes. This lets program-granting augmentations update the
+  // same home file set observed by ns.ls.
+  const grafting = new GraftingSystem(world, world.player, () => host.files.get("home")!);
+  // The market gets its OWN seeded stream, offset like crimeRng: sharing the HGW
+  // stream would make a price tick shift every subsequent hack roll, so two runs
+  // differing only in trading activity would diverge in their farm results and
+  // the A/B comparison would be meaningless.
+  const stockRng = mulberry32(seed + 0x517cc1b7);
+  // BN8 and SF8.1 grant WSE + TIX permanently (Prestige.ts:149). SF8 specifically
+  // — `sourceFileLevel` is the level of the CURRENT node's file, which only
+  // implies stock access when that node IS 8.
+  const sf8 = save?.sourceFiles["8"] ?? (bitnode === 8 ? sourceFileLevel : 0);
+  const freeAccess = bitnode === 8 || sf8 > 0;
+  const stock = new StockMarketSystem(world, world.player, stockRng, {
+    hasWseAccount: freeAccess || world.gates.hasWseAccount,
+    hasTixApiAccess: freeAccess || world.gates.hasTixApiAccess,
+    has4SData: world.gates.has4SData,
+    has4SDataTixApi: world.gates.has4SDataTixApi,
+    disable4SData: save?.bitNodeOptions.disable4SData === true,
+  });
+  world.stockSystem = stock;
+  const hashMode = (bitnode === 9 || (save?.sourceFiles["9"] ?? 0) > 0) && save?.bitNodeOptions.disableHacknetServer !== true;
+  const hacknet = new HacknetSystem(world, world.player, hashMode, save?.hacknet);
 
   const engine: Engine = new Engine(clock, {
     // One work slot, so exactly one of these can be active — each returns
@@ -207,6 +253,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     processWork: (cycles) => {
       factions.processWork(cycles);
       crimes.processWork(cycles);
+      grafting.processWork(cycles);
     },
     checkFactionInvitations: () => factions.checkInvitations((reqs) => satisfiesAll(reqs, satisfyContext())),
     // The one counter that compensates for a fat catch-up tick, and the one
@@ -216,6 +263,16 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     // LINEAR in cycles, with no bonus-time cap — the one subsystem that needs
     // no CycleBuffer.
     processHacknetEarnings: (cycles) => hacknet.processEarnings(cycles),
+    // SECOND in updateGame's real order, right after processWork. The 6 s tick,
+    // the 4 s floor and the 75-tick cycle all live inside the vendored function.
+    processStockPrices: (cycles) => {
+      stock.processPrices(cycles);
+      // The 1 Hz rollup, driven from the engine rather than only from an HGW
+      // landing. Without it a run with no farm — market-only, hacknet-only —
+      // credits `moneyEarned` and never publishes it, so an `earn:` goal is
+      // unreachable however much the run actually makes.
+      world.pulse();
+    },
   });
   engine.start();
 
@@ -229,6 +286,9 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     network.set("home", others);
     for (const host of others) network.set(host, ["home"]);
   }
+  const prestigeNetwork = new Map(
+    [...network].map(([hostname, neighbours]) => [hostname, [...neighbours]] as const),
+  );
 
   const host: SimNsHost = {
     world,
@@ -241,11 +301,12 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     scripts: new Map<string, ScriptMain>(),
     network,
     ramCtx: { bitNode: bitnode, sf4Level: bitnode === 4 ? 0 : sourceFileLevel },
-    reset: buildResetInfo(bitnode, sourceFileLevel),
+    reset: buildResetInfo(bitnode, sourceFileLevel, world.player.augmentations, save),
     output: [],
     crashes: [],
     engine,
     hacknet,
+    stock,
     singularity: makeSingularity({
       world,
       player: world.player,
@@ -254,6 +315,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       bitNode: bitnode,
       terminal,
       crimes,
+      grafting,
       satisfyContext,
       // The real call resets the counter to force an immediate re-check
       // rather than waiting out the 2 s cycle.
@@ -261,6 +323,8 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       homeFiles: () => host.files.get("home")!,
       hasTor: () => hasTor.value,
       setTor: (value) => void (hasTor.value = value),
+      assertPrestigeSupported: () => world.assertPrestigeSupported(),
+      onPrestige: (cbScript, newlyInstalled) => host.onPrestige?.(cbScript, newlyInstalled),
     }),
     // An augmentation install kills every process, so game/'s module-level
     // dispatcher ledger and the realm rendezvous slots describe a world that
@@ -270,10 +334,11 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
 
   // Imported AFTER the flags are on globalThis, and dynamically so module
   // evaluation cannot outrun them.
-  const [{ runController }, { makeSink }, { resetHackingState }, dodgeStub, worker] = await Promise.all([
+  const [{ runController }, { makeSink }, { resetHackingState }, { resetAllFeatures }, dodgeStub, worker] = await Promise.all([
     import("../game/lib/controller.ts"),
     import("../game/lib/telemetry-sink.ts"),
     import("../game/lib/features/hacking.ts"),
+    import("../game/lib/features/index.ts"),
     import("../game/lib/dodge-stub.ts"),
     import("../game/worker/worker.ts"),
   ]);
@@ -288,11 +353,61 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // A prestige is the same problem as a second run in one process: module
   // state outlives the world it describes. The realm slots go too — every
   // worker was killed, so every op id in the registry is unreportable.
-  host.onPrestige = (): void => {
-    resetHackingState();
-    for (const slot of REALM_SLOTS) {
-      if (slot !== "controllerEpoch") delete (globalThis as Record<string, unknown>)[slot];
+  host.onPrestige = (cbScript, newlyInstalled): void => {
+    host.processes.killAll();
+    world.prestigeAugmentation(newlyInstalled);
+    hacknet.prestige();
+    stock.prestige();
+    grafting.prestige();
+    hasTor.value = false;
+
+    const state = realm["state"];
+    if (state && typeof state === "object") resetAllFeatures(state as never);
+
+    const homeFiles = new Set(
+      [...(host.files.get("home") ?? [])].filter((file) => !file.toLowerCase().endsWith(".exe")),
+    );
+    homeFiles.add("NUKE.exe");
+    for (const name of world.player.augmentations.keys()) {
+      for (const program of AUGMENTATION_TABLE[name]?.programs ?? []) homeFiles.add(program);
     }
+    host.files.clear();
+    host.files.set("home", homeFiles);
+    for (const key of [...host.contents.keys()]) {
+      const separator = key.indexOf("\0");
+      const hostname = key.slice(0, separator);
+      const filename = key.slice(separator + 1);
+      if (hostname !== "home" || filename.toLowerCase().endsWith(".exe")) host.contents.delete(key);
+    }
+
+    host.network.clear();
+    for (const [hostname, neighbours] of prestigeNetwork) {
+      if (!world.servers.has(hostname)) continue;
+      host.network.set(hostname, neighbours.filter((neighbour) => world.servers.has(neighbour)));
+    }
+    host.reset = {
+      ...host.reset,
+      lastAugReset: clock.now(),
+      ownedAugs: new Map(world.player.augmentations),
+    };
+    Object.assign(engine.counters, initialCounters());
+
+    for (const slot of REALM_SLOTS) delete realm[slot];
+
+    const callback = cbScript?.replace(/^\/+/, "");
+    if (!callback || !host.files.get("home")?.has(callback) || !host.scripts.has(callback)) return;
+    clock.in(500, () => {
+      const process = host.processes.start({
+        filename: callback,
+        host: "home",
+        args: [],
+        threads: 1,
+        ramPerThreadGb: 3.6,
+        temporary: false,
+      });
+      if (process) launch(host, process);
+      else host.crashes.push({ pid: 0, filename: callback, error: "home has too little RAM for install callback" });
+    });
   };
 
   // The sink is the real one; only the Telemetry underneath it is swapped for

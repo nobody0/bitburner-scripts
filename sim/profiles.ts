@@ -1,4 +1,7 @@
 import { only, type FeatureOverrides } from "../shared/features/profile.ts";
+import type { GameRunOptions } from "./game-run.ts";
+import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
+import { calculateExp } from "./vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 
 /** Named simulation runs.
  *
@@ -32,7 +35,50 @@ export interface SimProfile {
    *  A faction isolation profile has to declare `bitnode: 4`. */
   bitnode?: number;
   startingMoney?: number;
+  /** Focused synthetic initial conditions. Kept separate from the common CLI
+   * fields so profiles can pose a precise cross-feature experiment without
+   * teaching the simulator a magic scenario name. */
+  world?: Pick<GameRunOptions, "network" | "person" | "playerState" | "factions">;
 }
+
+export const FACTION_DONATION_TARGET = "Synaptic Enhancement Implant";
+
+const CYBERSEC_DONATION_WORLD: NonNullable<SimProfile["world"]> = {
+  network: [
+    {
+      hostname: "faction-farm",
+      hackDifficulty: 1,
+      moneyAvailable: 1e12,
+      requiredHackingSkill: 1,
+      serverGrowth: 100,
+      numOpenPortsRequired: 0,
+      maxRam: 512,
+    },
+  ],
+  person: {
+    skills: { hacking: 1_000 },
+    exp: { hacking: calculateExp(1_000) },
+  },
+  playerState: {
+    factions: ["CyberSec"],
+    augmentations: Object.values(AUGMENTATION_TABLE)
+      .filter((aug) => aug.name !== FACTION_DONATION_TARGET && aug.name !== "NeuroFlux Governor")
+      .map((aug) => ({ name: aug.name, level: 1 })),
+  },
+  factions: { CyberSec: { rep: 0, favor: 150 } },
+};
+
+const CYBERSEC_INSTALL_WORLD: NonNullable<SimProfile["world"]> = {
+  ...CYBERSEC_DONATION_WORLD,
+  playerState: {
+    ...CYBERSEC_DONATION_WORLD.playerState,
+    queuedAugmentations: [{ name: FACTION_DONATION_TARGET, level: 1 }],
+  },
+  // The queued package banks enough reputation to cross the donation gate.
+  // This makes the reset economically meaningful rather than merely a smoke
+  // test of installAugmentations.
+  factions: { CyberSec: { rep: 100_000, favor: 149 } },
+};
 
 export const PROFILES: readonly SimProfile[] = [
   {
@@ -79,6 +125,32 @@ export const PROFILES: readonly SimProfile[] = [
     seeds: [1, 2, 3],
   },
   {
+    id: "factions-donation",
+    description:
+      "Hacking must close CyberSec's exact donation-plus-purchase cash gap; measures time to one augmentation breakpoint.",
+    bitnode: 4,
+    features: only("hacking", "factions", "progression"),
+    goals: [`aug:${FACTION_DONATION_TARGET}`],
+    homeRam: 256,
+    startingMoney: 1.5e9,
+    world: CYBERSEC_DONATION_WORLD,
+    horizon: "30m",
+    seeds: [1, 2, 3],
+  },
+  {
+    id: "factions-install",
+    description:
+      "Faction + hacking install lifecycle: bank a favor breakpoint, prestige every reset-sensitive system, and restart the controller.",
+    bitnode: 4,
+    features: only("hacking", "factions", "progression"),
+    goals: ["installs:1"],
+    homeRam: 256,
+    startingMoney: 1.5e9,
+    world: CYBERSEC_INSTALL_WORLD,
+    horizon: "10m",
+    seeds: [1, 2, 3],
+  },
+  {
     id: "career-karma",
     description:
       "Career serving a posted karma need in isolation: how fast does crime reach the Slum Snakes threshold?",
@@ -87,6 +159,32 @@ export const PROFILES: readonly SimProfile[] = [
     goals: ["karma:-9"],
     horizon: "1h",
     seeds: [1, 2, 3],
+  },
+  {
+    id: "stock-only",
+    description:
+      "The market in isolation, in BN8 where it is the only income: how fast does $250m become $1b with hacking " +
+      "switched off entirely? Answers 'does the trading model make money on its own', with no farm to confound it.",
+    bitnode: 8,
+    features: only("stock", "progression"),
+    goals: ["earn:1e9"],
+    horizon: "6h",
+    seeds: [1, 2, 3],
+    // BN8's starting money (Prestige.ts: BitNode8StartingMoney). Below roughly
+    // this the $200k round trip dominates any position the bankroll can fund.
+    startingMoney: 250e6,
+  },
+  {
+    id: "stock-manipulation",
+    description:
+      "The market WITH the farm, in BN8 where hacked money is worth zero: does driving grow/hack at the held " +
+      "symbol beat trading alone? The A/B against `stock-only` is the whole value of the hacking tie-in.",
+    bitnode: 8,
+    features: only("stock", "hacking", "progression"),
+    goals: ["earn:1e9"],
+    horizon: "6h",
+    seeds: [1, 2, 3],
+    startingMoney: 250e6,
   },
 ] as const;
 

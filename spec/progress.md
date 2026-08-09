@@ -29,7 +29,7 @@ The acceptance bar for a feature is the full vertical slice:
 | 1 | factions | **done** |
 | 2 | career | **done** |
 | 3 | hacknet | **done** |
-| 4 | stock | **done** |
+| 4 | stock | **done** — rebuilt in phase 15; the first version could not place a trade |
 | 5 | gang | **done** |
 | 6 | corp | **done** |
 | 7 | bladeburner | **done** |
@@ -38,8 +38,9 @@ The acceptance bar for a feature is the full vertical slice:
 | 10 | stanek | **done** |
 | 11 | dnet | **done** |
 | 12 | side | **done** |
-| 13 | progression | **done*** — decision layer live (endgame route + horizon); the act half (install / destroy) is deliberately unwired |
+| 13 | progression | **done** — endgame route, install barrier, two-pass arm/execute, and post-install restart are live |
 | 14 | endgame route + refresh/act split | **done** — see below |
+| 15 | stock rebuild + hack/grow manipulation tie-in | **done** — see below |
 
 ## Completed work
 
@@ -133,8 +134,8 @@ could ever be discovered. `sim/tests/ns.test.ts` used to pin that as a known
 defect; it now pins the inverse, with the home-only arithmetic kept as a
 separate test so the motivation cannot quietly stop being true. In a live
 `earn:1e6` run the gate batch now runs 41 times, time-to-goal is unchanged
-(20.6 / 18.2 / 18.2 minutes on seeds 1–3), and the only probe still reported
-unaffordable is `side.infiltration` at a genuine 15 GB against a 13.9 GB budget.
+(20.6 / 18.2 / 18.2 minutes on seeds 1–3). Manual infiltration is deliberately
+outside the probe roster, so it consumes no dodge budget.
 
 *A second bug caught by running it:* `acquireDodge` treated "the heap has never
 seen this host" as "cannot place here". The heap is empty on the first sweep, so
@@ -248,6 +249,83 @@ table exists only so the SIMULATOR can answer the same query.
 | purchase ordering | brute force over all permutations, 40 random sets |
 | purchase ordering under prerequisites | brute force over all *legal* permutations, 30 random branching DAGs |
 
+**Choosing and paying are separate orders, and both are used.** Each queued
+non-SoA purchase multiplies the price of every later one by 1.9, and an
+augmentation does nothing until it is installed — so within a reset there is no
+reason to want a cheap one early, and the dearest item belongs in the cheapest
+slot. The set is therefore chosen by VALUE and bought by PRICE: `selectFactions`
+and the package frontier pick what is worth having, `orderPurchases` decides the
+sequence, and every cost estimate is taken from the ordered sequence rather than
+from today's queue depth. Pricing a batch in value order overstates it, which
+loses packages comparisons they should win and leaves the last purchases
+unaffordable after the first ones have inflated the multiplier.
+
+This was the ordering machinery's first production caller. `orderPurchases` and
+its brute-force oracles existed for several phases while every live path still
+walked value order — the tests were green and the behaviour was wrong, which is
+the failure mode a test suite cannot catch on its own.
+
+**What it is worth, measured on the real catalogue** — each faction's twelve
+best-scoring augmentations, prerequisites closed in, priced before and after:
+
+| Faction | Augs | Value order | Cost order | Saved |
+|---|---|---|---|---|
+| CyberSec | 5 | $0.45b | $0.45b | 0% |
+| NiteSec | 10 | $76.1b | $42.9b | **43.7%** |
+| The Black Hand | 12 | $1 482b | $635b | **57.1%** |
+| BitRunners | 14 | $6 959b | $4 609b | **33.8%** |
+
+CyberSec's value order was already cost-optimal, which is why the early game never
+exposed this. The saving grows with package size because the escalation is
+exponential in it.
+
+A caution the first attempt at this measurement earned: a baseline that sorts purely
+by value is **not** the prior behaviour and reports the fix as a *loss*. Bitburner's
+prerequisite chains run cheap-to-dear (Netburner Module $250m → Core Implant $2.5b →
+Core V2 $4.5b), so an unconstrained descending-cost order is illegal — those
+purchases simply fail in game. Production has always closed prerequisites in first,
+and both columns above are precedence-legal by assertion.
+
+**The budget includes the market book, and purchases wait for it.** Ordering only
+pays off against the bankroll the run will actually have, and a large part of that
+is usually not cash: `stock` holds a portfolio which is liquidated before every
+install, because `progression` will not reset while the book is open. So
+`settlingMoney` — cash plus the book, net of the exit spread and one commission per
+position — is what every affordability and ETA question in the feature uses. Two
+consequences:
+
+- **The objective no longer shrinks to fit cash.** The package frontier converts a
+  money shortfall into an ETA and rejects anything that misses the horizon; priced
+  against cash alone, a run with its wealth in the market plans a smaller package
+  than it can afford.
+- **A cash shortfall on the dearest item stops the walk instead of falling through
+  to a cheaper one.** Falling through *is* the ordering mistake, and it is
+  permanent — the skipped item now costs 1.9x more forever. Money left unspent is
+  also money the market keeps compounding, so waiting is not a sacrifice.
+
+**Patience has to be able to end, and two of its bounds exist only for that.**
+Waiting is bounded by money with a settlement date and never by income over the
+horizon — `horizonSec` is `Infinity` when the forecast has no answer, which is
+exactly when an income-based rule would wait for ever. Reputation shortfalls and
+gaps the book cannot close fall through rather than wait. And **the first purchase
+of a run is never held**, which is the subtle one: the book is liquidated when
+`progression` reaches its `ending` phase, and `phaseOf` requires a non-empty install
+queue to get there, so holding out for the book while nothing is queued waits for a
+liquidation the waiting itself prevents. Nothing else breaks that cycle —
+`installWanted` is gated on the same empty queue, so the install barrier is never
+even consulted. Buying one item bootstraps the phase machine, and since the walk is
+dearest-first it is the dearest item currently affordable. All four bounds are
+regression-tested in `tests/factions.test.ts`.
+
+**The exact ordering solver is used only where money changes hands.** It is
+exponential — 0.3 ms at ten items, 40 ms at sixteen — and the package frontier
+prices a candidate per (faction, reputation breakpoint), hundreds of times per
+decision. Wiring the solver in there cost seconds per decision to sharpen numbers
+that only ever feed a comparison against other estimates. `estimatedCost` (greedy,
+most-expensive-first) serves the estimates: exact without prerequisites, pessimistic
+with them, so the batch selector may drop a candidate the solver would have fitted
+but can never return a plan we cannot pay for.
+
 **The four predecessor bugs are named regression tests**, each of which made a
 whole branch of the game unreachable: the `not` case returning false because
 `[]` is truthy (the entire criminal ladder), `someCondition` returning false
@@ -302,7 +380,7 @@ Every feature now has a real driver module; `inert()` is gone from
 |---|---|---|---|
 | 2 | career | Serve the needs board; be the income floor | **Exhaustive argmax** over the 12-crime action set is the provable optimum for a fixed stat vector; exact time-to-karma integral. `career-karma` reaches karma -9 in **8.6 min**. |
 | 3 | hacknet | Cumulative production minus spend over the horizon | **0/1-knapsack DP** oracle; greedy matches the DP optimum. Beats the "level to 80 then RAM" baseline. |
-| 4 | stock | Risk-adjusted return net of commission and 4S | Commission-aware minimum trade size; refuses to trade without a forecast rather than paying $200k a round trip to guess. |
+| 4 | stock | Money at the end of the RUN, net of spread, commission and the regime cycle | Model of the real price engine (shared volatility roll, 75-tick cycle, second-order forecast), **pinned against the vendored source**; break-even derived rather than assumed; beats both buy-and-hold and the predecessor's forecast>0.6 rule at matched exposure; trades profitably **without 4S** off recovered signal; liquidates before every install. |
 | 5 | gang | Respect/money/territory without the wanted penalty | **Coupled** exact assignment — the wanted penalty is gang-wide, so per-member argmax optimises the wrong function. Analytic ascension crossover. |
 | 6 | corp | Sequence divisions, cities, products, investment | Staged script with per-stage precondition and expected effect. **Optimality boundary stated openly** — near-optimal *within the modelled stage graph*, not globally. |
 | 7 | bladeburner | Climb rank fastest **without dying** | Every decision uses the **pessimistic** end of the `[min,max]` chance interval; Black Ops refused below 95%. Stamina floor and chaos ceiling. |
@@ -310,7 +388,7 @@ Every feature now has a real driver module; `inert()` is gone from
 | 9 | go | Wins, territory, streaks | Depth-bounded negamax with liberty-aware evaluation; **exhaustive at 5x5**. |
 | 10 | stanek | Pack the grid, then charge | **Exhaustive packing is PROVABLY optimal** — the strongest evidence in the roster. Correctly leaves out a large fragment to fit two smaller ones. |
 | 11 | dnet | Traverse under a stasis-link budget | Exact max-reachable search; links spent where they unlock the most. |
-| 12 | side | Solve every contract; rank infiltrations | **17 solvers proven against known correct answers** — proof, not measurement. An unknown type returns `undefined`, never a guess. |
+| 12 | side | Solve every coding contract | **All 30 v3.0.1 contract types implemented** with exact registry coverage and known-answer tests. Discovery is ls-only; staged batches peak at `attempt` RAM, and a first rejection is logged and quarantined rather than retried. Infiltration stays manual. |
 | 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); exhaustive node ordering for a small set, measured against the predecessor's real 15-node ordering. |
 
 ### The hacking audit
@@ -433,23 +511,22 @@ What landed, in dependency order:
 - **The refresh/act split** (`FeatureModule.refresh`) — evaluation runs for
   every due module before any needs/claims/tick, with `progression` ordered
   LAST so its route decision reads the pass's refreshed state; drivers then
-  act with `{route, horizonSec}` in their context. This resolves the ordering
+  act with `{route, horizons: {install, node}}` in their context. This resolves the ordering
   circularity ("endgame needs enriched state; features need the route") the
   same way the needs→claims phases already resolved theirs.
 - **The progression driver is no longer decorative** — its refresh builds the
   `EndgameView` entirely from store topics (every input was already probed),
-  chooses the route, and publishes `{route, expectedEndAt, decidedAt,
-  routeWhy, routes[]}` on `progression.plan`. Its previously stubbed
+  chooses the route, and publishes the route plus independently anchored
+  install/node forecasts on `progression.plan`. Its previously stubbed
   `stepProgression` inputs are real now: `affordableValueProduct` from the
   offer catalog's multipliers, `earnedThisRun` from `getMoneySources` (all
   sources, not just hacking — in a non-hacking node the old farm-only figure
   kept the phase machine in `start` forever), `runSec` from `lastAugReset`,
   and `queued` is pending-not-installed rather than all owned.
-- **Horizon threading** — the `horizonSec` literals replaced with the derived
-  horizon; `stepEvaluator` gained a `horizonCapMs` that bounds the prep/switch
-  amortization window (binding only when the expected end is nearer than the
-  existing 30-minute ceiling — that parity claim is evaluator-only; the
-  hacknet/stock windows DID change, see the review round below).
+- **Forecast threading** — reset-sensitive consumers read the install forecast;
+  persistent consumers read the BitNode forecast. Neither has a fixed cap or
+  scalar fallback, and `stepEvaluator` bounds prep/switch amortization by the
+  relevant usable forecast.
 - **The sweep moved to `game/lib/fleet.ts`** — infrastructure with the shape
   of a feature refresh, owned by no feature; the controller keeps gating,
   phase ordering and the decide step.
@@ -463,7 +540,7 @@ What landed, in dependency order:
 route annihilated by Infinity — the unworkable-faction lesson, relearned
 deliberately this time), measured-vs-fallback marking, the shared-tail
 collapse once the pill is owned, parallel-track pricing, switch
-margin/dwell/incumbent-loss behaviour, and the horizon clamps. Full suite 534
+margin/dwell/incumbent-loss behaviour, and explicit uncapped/stale forecasts. Full suite 534
 pass. Typecheck clean.
 
 ### Phase 14 review round — 11 verified findings, all fixed
@@ -471,32 +548,27 @@ pass. Typecheck clean.
 An 8-angle review with adversarial verification (13 candidates, 3 refuted)
 ran over the slice before it merged. Every confirmed finding was fixed:
 
-- **The horizon was the wrong quantity for hacknet/stock** — the node-end ETA
-  spans augmentation installs, and installs destroy exactly what those
-  features buy; a fallback-guessed multi-day ETA also pinned it at the 24 h
-  ceiling from the first refresh (~24x looser than the replaced 3600 s
-  literals). `planningHorizonSec` now caps at `INSTALL_CADENCE_SEC` (3600, a
-  named heuristic until installs are modelled) and short expected ends still
-  pass through.
+- **One horizon was the wrong quantity for hacknet/stock** — the node-end ETA
+  spans augmentation installs, while installs destroy exactly what those
+  features buy. The final contract therefore carries separate install and
+  BitNode forecasts rather than capping one scalar.
 - **Stale topics survived a node reset** — `reset()` became `reset(state)`;
   every module clears its own published topics (progression field-level: the
   gate batch already wrote the new node's identity). Pinned by a new
   registry-walk test. The concrete bug: the new node's first route decision
   read the old run's Red Pill out of stale `factions.ownedAugs`.
-- **A complete route froze investment** — etaSec 0 published
-  `expectedEndAt = now`, flooring every horizon at 60 s indefinitely while
-  the unwired act half waits for a manual finish. A complete route now
-  publishes no expected end (`expectedEndFrom`), reading as the default.
-- **A quiet publisher decayed the horizon** — `refreshedAt` on the plan plus
-  a `PLAN_STALE_MS` guard: a plan whose refresh has died stops steering.
+- **Complete and quiet routes froze investment** — both are now represented by
+  an explicit zero estimate or unknown/stale evidence; no fixed floor or
+  default can silently steer consumers.
 - **`blackOpsComplete` fabricated 0 pre-probe** — now optional ("unknown"
   expressible), derived on the cheap core probe from `getBlackOpNames`
   (0 GB) + `nextBlackOp`, and rate sampling skips unknown series (also
   Daedalus rep and aug count) so a phantom 0→N jump cannot contaminate the
   30-minute rate window.
-- **`FactionsView.horizonSec` was dead** — declared, populated, read by
-  nothing, and the spec claimed a consumer; removed (the donate-vs-work
-  crossover is rate-based).
+- **`FactionsView.horizonSec` was dead at review time** — the final package
+  planner now consumes the usable BitNode forecast to reject work or grafting
+  that cannot finish in the current node. Unknown remains explicit as an
+  unbounded planning window, not an invented duration.
 - **`bitnode.reset` could be lost** — emitted after the awaited post-reset
   sweep, so a sweep failure dropped the node's one calibration record; now
   emitted first in the branch, which also deleted the snapshot local.
@@ -519,6 +591,147 @@ angle once sized.
 
 Suite after fixes: 539 pass, typecheck clean.
 
+### Phase 15 — the stock market, rebuilt, and the hacking tie-in
+
+The previous stock feature was marked done and **could not place a trade**. A
+review found the cause and eight further defects; all are fixed, and the feature
+now owns the second half of BN8's mechanic.
+
+**The deadlock.** The money claim was derived from what executed last pass, the
+execution from the grant, and the grant from the claim — with `moneyGranted` 0 on
+the first pass the cycle never closed, so no purchase of any kind was reachable.
+`stepStock` now returns a PLAN sized at full ambition with no reference to the
+grant; the claim is posted from the plan and `fundedActions` cuts it to what was
+granted afterwards.
+
+**The rest of the defect list.** Stale positions caused a duplicate buy (and a
+fresh $200k commission) on every 4 s tick until the 30 s probe caught up —
+`getPosition` now runs inside the trade stub. `has4SData` was inferred from
+whether `getForecast` threw, conflating the $1b ticker data with the $25b script
+API; both are probed directly at 0.05 GB, and the **$1b purchase is now never
+made at all**, because `getForecast` checks the API flag and buying the API does
+not require the data first. Shorts were emitted without checking BN8/SF8.2, and
+because the entry loop took only the top-ranked symbol and stopped, one bearish
+symbol blocked every long below it — the loop now walks the ranking and
+`canShort` gates the side. Nothing had ever bought WSE or TIX, which was
+unreachable by construction: see the always-playable note in
+[spec/features.md](features.md).
+
+**What the strategy models now**, all of it read out of the price engine rather
+than assumed: the shared per-tick volatility roll (so the mean move is half
+what `getVolatility` reports), the spread (10x–200x the commission on any
+position worth opening, and previously invisible — the probe wrote the mid price
+into both `ask` and `bid`), the 75-tick regime cycle (detected from simultaneous
+0.5 crossings, after which the period is known exactly), the second-order
+forecast as the leading indicator, and a position's own market impact. Break-even
+is derived from those rather than assumed at ten ticks, and a horizon shorter
+than break-even is answered with cash.
+
+**Two horizons, not one.** A position dies at the next install
+(`prestigeAugmentation` → `initStockMarket` zeroes every holding and credits no
+money, which the game's own warning states); WSE, TIX and 4S survive every
+install and die only with the BitNode. The old shared `horizonSec` was wrong for
+both — capped at the install cadence it made the 4S API unaffordable below ~$100b,
+which in BN8 is unreachable without it.
+
+**Without 4S it still trades.** `v` is one draw shared by all 33 symbols, so one
+symbol's step calibrates every other's volatility; and the tick sign is a
+Bernoulli draw on the forecast, so the up-tick frequency estimates it. Both are
+recovered in `history.ts` and verified against the real engine to within 2%. The
+probe cadence moved from 30 s to 4 s because none of it is observable at a
+sampling rate slower than the 6 s tick.
+
+**The hacking tie-in.** `stock` publishes a per-host intent and a dollar value per
+influencing op; `solveCycle` adds it as a second income term to the same
+`$/GB/sec` score, and the dispatcher sets `{stock: true}` on the grow for a long
+and the hack for a short — never both, since their successful steady-state
+influences oppose each other.
+`ScriptHackMoneyGain` entered `HackContext` at the same time: it scales the
+hacking term and NOT the manipulation term, because influence is measured from
+`moneyDrained` before the player's cut, and omitting it reported every BN8 target
+as profitable while it earned nothing. See [spec/targeting.md](targeting.md).
+
+*Evidence:* 129 new tests. `sim/tests/stock-parity.test.ts` pins the two shipped
+transcriptions field-by-field against the vendored source (including three
+constants that are inline literals upstream, matched against the source text).
+`stock-market.test.ts` asserts the model's claims against the real price engine —
+the half-volatility step to 4 decimal places, the shared roll to 1e-9, the exact
+75-tick period, that `moneyMax` cancels out of the manipulation rate, and that an
+install destroys the portfolio. `stock-strategy.test.ts` runs the solver against
+that engine across seven seeds: it beats buy-and-hold and the predecessor's
+`forecast > 0.6` rule at matched exposure, makes money with no 4S at all, gains
+from manipulation, and ends every liquidating run flat.
+
+**Five findings came out of the simulator and changed the code, not the test.**
+This is the whole reason the market is modelled from the real source rather than
+from the same transcription the strategy uses:
+
+1. **Cycle flips repeatedly UNDO a manipulation campaign.** 3000 ticks of maximum
+   pressure reach the extreme with cycles suppressed and do not with cycles
+   running, because a bull/bear flip turns accumulated `otlkMag` from an asset
+   into a liability. So a nudge cannot be priced at its theoretical value, and a
+   hold has to be bounded by the cycle clock.
+2. **The solver was losing to the naive rule — on exposure, not judgement.** 61%
+   invested against 98%: the portfolio cap was a fraction of CASH, which shrinks
+   as it is spent, so it converged on half its intended size. It is a fraction of
+   the bankroll now, concentration replaced equal weighting, and the baseline was
+   given the same capital policy so what remains measures the decision rule.
+3. **No probe could run faster than the 30 s sweep.** `runProbes` was only ever
+   called from the fleet sweep, which silently made 30 s the floor for every
+   `everyMs` in the table — the local tier had asked for 5 s and received 30 s for
+   the whole life of the project, and Go asks for 2 s. The market ticks at 6 s: the
+   first end-to-end run observed 39 of 200 ticks and measured JGN's volatility 3.5x
+   too high, because an aliased sample reports five ticks of compounded movement as
+   one. Fixed generally rather than for stock: the controller now DERIVES its
+   acquisition interval from the fastest `everyMs` anything declares
+   (`probeCadenceMs`), each probe's own `everyMs` gates it from there, and the
+   capability gate stays on the sweep because the reset walk keys off its delta.
+   199 of 200 ticks after the change, and the measurement landed dead centre of the
+   true range. Two tests pin the bargain — that the caller honours a declared
+   cadence, and that a probe declaring a fast one stays cheap enough to afford it.
+4. **The earnings rollup only fired on an HGW landing**, so a run with no farm
+   credited `moneyEarned` and never published it — an `earn:` goal was unreachable
+   however much the run made. `SimWorld.pulse()` drives it from the engine, which
+   covers hacknet too.
+5. **The manipulation loop needs BOTH halves to choose each other.** `hacking`
+   priced price impact correctly, but `stock` picked symbols on pure edge, landed
+   on three megacorps whose servers were out of skill range, and the tie-in idled
+   through 380 grows without moving a price. `stock` now prefers symbols whose host
+   the farm can drive (`MANIPULATION_PREFERENCE`), as a documented policy rather
+   than an invented dollar value.
+
+And one measured magnitude worth recording, because it bounds what the tie-in can
+ever be worth: an influencing op is worth a few THOUSAND dollars against tens of
+MILLIONS of hacked money per batch. So manipulation does not move target choice
+outside a node that nerfs hacking — and in BN8, where `ScriptHackMoneyGain` is
+exactly 0, it is the entire score. Both directions are pinned in
+`sim/tests/dispatch.test.ts`.
+
+### Phase 16 — Go strategy and independent time forecasts
+
+- Replaced the scalar, capped planning window with the typed
+  `PlanningHorizons` contract. The install and BitNode forecasts are uncapped,
+  anchored, recalculated every ten minutes or on structural milestones, and
+  preserve unknown/stale states plus critical-path component evidence.
+- The progression panel now shows both countdowns, expected wall-clock times,
+  confidence/recalibration age and parallel/sequential component tables.
+  Telemetry retains the same typed objects for later calibration.
+- Implemented rules-correct Go play with a fixed-budget tactical shortlist and a handcrafted
+  faction-reply forecast driven by the public `totalPlaytime` WHRNG seed. The
+  production bundle imports no game source. Simulator parity tests import the
+  pinned v3.0.1 board/RNG/effect implementations and detect drift.
+- Replaced fixed opponent selection with ETA valuation across every opponent
+  on the throughput-optimal 5x5 board. Node-power, difficulty, streak/comeback effects,
+  nonlinear rep-to-favor conversion and the SF14 cap are exact transcriptions;
+  win/score priors and shortlist ordering are fitted by upstream-AI tournaments.
+  Game-duration coefficients remain heuristic planning inputs.
+- Go telemetry records the public decision input, seed uncertainty, predicted
+  replies, observed support and all reward candidates. The UI exposes the
+  selected board/opponent and the transient/favor seconds behind its choice.
+
+*Evidence:* `bun run typecheck`; the full `bun test` suite, including Go rules,
+WHRNG/effect/favor parity and upstream faction-AI strategy tournaments.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
@@ -530,14 +743,60 @@ the *strategy* level without full end-to-end execution:
 - **Darknet authentication is refused, not faked.** `authenticate(host,
   password)` needs a password behind the darknet's own discovery mechanic; the
   driver reports that rather than calling with an invented credential.
-- **Sim models exist for factions, crime and hacknet only.** Gang, corp,
-  bladeburner, sleeves, go, stanek and dnet have pure strategy + driver +
-  tests, but no `sim/features/` model — so they are unit-proven, not yet
-  simulator-proven. Their ns calls report `unmodeled()` rather than
-  fabricating.
-- **UI tabs beyond `factions` do not yet render their `plan` digest.** The
-  digests are published; the panels show the underlying state. That now
-  includes the endgame route decision on `progression.plan`.
+- **Sim models exist for factions, crime, hacknet, stock and Go.** Gang, corp,
+  bladeburner, sleeves, stanek and dnet have pure strategy + driver + tests,
+  but no complete system model — so their ns calls report `unmodeled()` rather
+  than fabricating. Go additionally runs differential strategy tournaments
+  against the pinned upstream faction AI.
+- **Installs use an explicit barrier**, and `phase === "ending"` is not it. The
+  phase is the ANNOUNCEMENT — the signal to `stock` and `factions` that it is time
+  to convert everything. Permission to reset is the conjunction of four barriers,
+  each owned by the feature that knows: the book is flat (`stock.plan.flat`), the
+  faction purchase/donation sweep has finished, no augmentation is still
+  purchasable, and no paid graft is in flight. A ready plan is armed for exactly
+  one controller pass before `installAugmentations` executes, so the final state is
+  observable — and once the barriers clear there is nothing further to wait for.
+
+  Two details that are load-bearing rather than incidental:
+
+  - **`stock` publishes its own readiness**; progression does not scan positions.
+    A snapshot says nothing about INTENT, and an exit decided but not yet executed
+    or an entry wanted on the next pass are both invisible in one while both mean
+    the book is not flat. `flat` is the market's own answer, like
+    `factions.plan.recommendInstall`.
+  - **NeuroFlux Governor holds the barrier like anything else, and the barrier
+    still clears.** It is the one repeatable augmentation, which invites the
+    assumption that blocking on it can never end. It can: `getAugCost` scales both
+    its price and its reputation requirement by 1.14 per level on top of the
+    1.9-per-queued escalation, so every level bought makes the next strictly dearer
+    in BOTH currencies and the affordable set runs out. Money does not survive an
+    install and a permanent multiplier does, so buying as many levels as the cash
+    allows is the POINT of the last-chance drain, not a distraction from it.
+
+    The barrier (`nextPurchasableAugmentation`, over probed offers and cash) and
+    what `factions` actually buys (`nextPurchase`, over the catalogue and the
+    granted budget) are **two predicates, not one**, because a barrier blocking on
+    something `factions` declines to buy is a deadlock by construction. They
+    converge rather than match: the drain re-plans every tick against the cash
+    genuinely left, so an augmentation this pass's batch passed over is reconsidered
+    once the items ahead of it are bought and the budget has shrunk to fit it. That
+    convergence is the invariant to preserve, not field-by-field equality.
+
+    That deadlock was real, and the barrier is what exposed it: the driver's
+    `aug-fund` claim was derived from `plan.objective`, which is complete by the
+    time the drain runs, so the drain was granted nothing and bought nothing. Every
+    install had been silently discarding the cash on hand. The claim now comes from
+    `plan.nextBuy`, which the decision publishes at unlimited money — the purchase
+    needs a grant, the grant needs a claim, and a claim read off the already-funded
+    action can never bootstrap.
+- **Limit and stop orders are not used** (BN8 or SF8.3). The solver places none,
+  so the simulator's `processOrders` is a no-op and `ns.stock.placeOrder` reports
+  `unmodeled()` rather than filling an order that would never trigger.
+- **BN15's darknet volatility boost is a neutral 1x.** `getDarknetVolatilityMult`
+  genuinely raises a symbol's volatility upstream, decaying at each market cycle,
+  but `dnet` has no simulation model to drive it. The vendored price engine calls
+  through an adapter, so the day darknet lands the mechanic connects with no
+  further change.
 - **`ctx.route` has no consumer yet.** The chosen route reaches every driver's
   context, but no feature biases its priorities by it so far (bladeburner
   when it IS the route, combat stats for the Daedalus combat branch). The

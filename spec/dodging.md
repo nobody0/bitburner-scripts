@@ -20,7 +20,7 @@ caller pays only `ns.exec` (1.3 GB).
   `dodge(ns, fn, budgetGb)` sizes each call (default 2.5 GB dynamic; pass more
   for e.g. contract batches). One stub file serves every budget. The reference
   scripts default to 6.6 GB (5 + 1.6) and document their exceptions inline:
-  graft 7.5, `codingcontract.attempt` 10, `getInfiltration` 15,
+  graft 7.5, `codingcontract.attempt` 10,
   `destroyW0r1dD43m0n` 32, and a BN1 target of 3.5 to fit an 8 GB home.
 - Single-flight global mutex; 10 s watchdog; game-restart guard in the stub;
   promise results are forwarded (not awaited) so synchronous closures resolve

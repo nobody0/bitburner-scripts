@@ -57,7 +57,7 @@ export function coordinate(input: CoordinationInput): Coordination {
     arbitration,
     digest: {
       needs: input.board.needs.map(needDigest),
-      arbitration: arbitrationDigest(arbitration, input.now),
+      arbitration: arbitrationDigest(arbitration, input.now, input.claims),
     },
   };
 }
@@ -91,25 +91,44 @@ export function needDigest(need: Need): NeedDigest {
   };
 }
 
-export function arbitrationDigest(result: ArbiterResult, now: number): ArbitrationDigest {
+export function arbitrationDigest(result: ArbiterResult, now: number, claims: readonly Claim[] = []): ArbitrationDigest {
+  const claimsByKey = new Map(claims.map((claim) => [`${claim.by}\0${claim.id}\0${claim.resource}`, claim]));
   return {
-    grants: result.grants.map((grant) => ({
-      by: grant.by,
-      id: grant.claimId,
-      resource: grant.resource,
-      amount: grant.amount,
-      mode: grant.mode,
-      partial: grant.partial,
-    })),
-    denied: result.denied.map((denial) => ({
-      by: denial.by,
-      id: denial.claimId,
-      resource: denial.resource,
-      wanted: denial.wanted,
-      available: denial.available,
-      reason: denial.reason,
-      why: denial.why,
-    })),
+    grants: result.grants.map((grant) => {
+      const claim = claimsByKey.get(`${grant.by}\0${grant.claimId}\0${grant.resource}`);
+      return {
+        by: grant.by,
+        id: grant.claimId,
+        resource: grant.resource,
+        amount: grant.amount,
+        mode: grant.mode,
+        partial: grant.partial,
+        ...(claim ? {
+          wanted: claim.amount,
+          priority: claim.priority,
+          ...(claim.ratePerSec !== undefined ? { ratePerSec: claim.ratePerSec } : {}),
+          ...(claim.returnPerDollarSec !== undefined ? { returnPerDollarSec: claim.returnPerDollarSec } : {}),
+          why: claim.why,
+        } : {}),
+      };
+    }),
+    denied: result.denied.map((denial) => {
+      const claim = claimsByKey.get(`${denial.by}\0${denial.claimId}\0${denial.resource}`);
+      return {
+        by: denial.by,
+        id: denial.claimId,
+        resource: denial.resource,
+        wanted: denial.wanted,
+        available: denial.available,
+        reason: denial.reason,
+        why: denial.why,
+        ...(claim ? {
+          priority: claim.priority,
+          ...(claim.ratePerSec !== undefined ? { ratePerSec: claim.ratePerSec } : {}),
+          ...(claim.returnPerDollarSec !== undefined ? { returnPerDollarSec: claim.returnPerDollarSec } : {}),
+        } : {}),
+      };
+    }),
     ...(result.slot
       ? { slot: { by: result.slot.by, id: result.slot.claimId, priority: result.slot.priority, heldMs: now - result.slot.since } }
       : {}),

@@ -1,7 +1,13 @@
 import type { NS } from "@ns";
 import { armWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
+import { armSleeveCompletion } from "../sleeve-completion.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
-import { canSolve } from "../../../shared/strategy/side/contracts.ts";
+import {
+  canSolve,
+  CONTRACT_QUEUE_LIMIT,
+  CONTRACT_TELEMETRY_LIMIT,
+} from "../../../shared/strategy/side/contracts.ts";
+import { GO_REWARD_OPPONENTS, type GoObservedBoardSize } from "../../../shared/strategy/go/decide.ts";
 import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
 import type { ContractDigest } from "../../../shared/telemetry/topics/side.ts";
 import { emit, emitPartial, type DodgedProbe, type Emission, type ProbeContext } from "./index.ts";
@@ -25,6 +31,8 @@ import { fleetFrom } from "./local.ts";
  * multiplication pure (an operand could have a valueOf), so an arithmetic
  * initializer pins the whole probe object into --perf bundles instead of
  * letting it tree-shake away with the rest of the telemetry code. */
+const SEC_2 = 2_000;
+const SEC_4 = 4_000;
 const SEC_30 = 30_000;
 const MIN_1 = 60_000;
 const MIN_2 = 120_000;
@@ -44,11 +52,32 @@ const hackingCloud: DodgedProbe = {
   feature: "hacking",
   everyMs: SEC_30,
   merge: true,
-  methods: ["cloud.getServerLimit", "cloud.getRamLimit", "getTotalScriptIncome", "getTotalScriptExpGain", "getSharePower"],
+  methods: [
+    "cloud.getServerLimit", "cloud.getRamLimit", "cloud.getServerCost", "cloud.getServerUpgradeCost",
+    "getTotalScriptIncome", "getTotalScriptExpGain", "getSharePower",
+  ],
   run(stubNs: NS, { servers }: ProbeContext) {
     const fleet = fleetFrom(servers);
     fleet.purchased.limit = stubNs["cloud"]["getServerLimit"]();
     fleet.purchased.maxRamPerServer = stubNs["cloud"]["getRamLimit"]();
+    const options: NonNullable<typeof fleet.infrastructureOptions> = [];
+    const cloudServers = Object.values(servers).filter((server) =>
+      server.purchasedByPlayer && server.hostname !== "home" && !server.hostname.startsWith("hacknet-server-"),
+    );
+    if (cloudServers.length < fleet.purchased.limit) {
+      const targetRam = Math.min(8, fleet.purchased.maxRamPerServer);
+      const cost = stubNs["cloud"]["getServerCost"](targetRam);
+      if (targetRam >= 2 && Number.isFinite(cost)) options.push({ kind: "buyServer", cost, addedRam: targetRam, targetRam });
+    }
+    for (const server of cloudServers) {
+      const targetRam = Math.min(fleet.purchased.maxRamPerServer, server.maxRam * 2);
+      if (targetRam <= server.maxRam) continue;
+      const cost = stubNs["cloud"]["getServerUpgradeCost"](server.hostname, targetRam);
+      if (Number.isFinite(cost) && cost > 0) {
+        options.push({ kind: "upgradeServer", host: server.hostname, cost, addedRam: targetRam - server.maxRam, targetRam });
+      }
+    }
+    fleet.infrastructureOptions = options;
     fleet.scriptIncome = stubNs["getTotalScriptIncome"]();
     fleet.scriptExpGain = stubNs["getTotalScriptExpGain"]();
     fleet.sharePower = stubNs["getSharePower"]();
@@ -169,8 +198,8 @@ const factionStandings: DodgedProbe = {
       id: "enemies",
       methods: ["singularity.getFactionEnemies"],
       run(stubNs: NS, _ctx: ProbeContext, acc) {
-        // A join permanently BANS these, so the panel must be able to show
-        // what a join gives up before it happens.
+        // A join bans these for the current install cycle, so the panel must
+        // show what a join gives up before it happens.
         const enemies: Record<string, string[]> = {};
         for (const faction of Object.values(stubNs["enums"]["FactionName"]) as string[]) {
           try {
@@ -461,15 +490,17 @@ const careerWork: DodgedProbe = {
   requires: "factions", // singularity access, same SF4 gate
   everyMs: SEC_30,
   merge: true,
-  methods: ["singularity.getCurrentWork", "singularity.isFocused", "singularity.getCompanyRep", "singularity.getCompanyFavor"],
+  methods: ["singularity.getCurrentWork", "singularity.isFocused", "singularity.getCompanyRep", "singularity.getCompanyFavor", "singularity.getCompanyPositionInfo"],
   run(stubNs: NS, { player }: ProbeContext) {
     const work = stubNs["singularity"]["getCurrentWork"]() as (({ type: string } & Record<string, unknown>) & WorkTaskLike) | null;
     if (work) armWorkCompletion(work);
-    const companies: Record<string, { rep: number; favor: number }> = {};
+    const companies: Record<string, { rep: number; favor: number; salaryPerCycle?: number }> = {};
+    const jobs = player.jobs as unknown as Record<string, string>;
     for (const company of Object.keys(player.jobs)) {
       companies[company] = {
         rep: stubNs["singularity"]["getCompanyRep"](company as never),
         favor: stubNs["singularity"]["getCompanyFavor"](company as never),
+        salaryPerCycle: stubNs["singularity"]["getCompanyPositionInfo"](company as never, jobs[company] as never).salary,
       };
     }
     return [
@@ -478,6 +509,7 @@ const careerWork: DodgedProbe = {
           ? {
               type: work.type,
               detail: workDetail(work) ?? "",
+              ...(work.factionWorkType !== undefined ? { workType: String(work.factionWorkType) } : {}),
               focused: stubNs["singularity"]["isFocused"](),
               // How far in the activity already is. Load-bearing for the work
               // slot: without it a driver can only say "a crime is running",
@@ -516,6 +548,15 @@ const careerCrimes: DodgedProbe = {
         timeMs: stats.time,
         karma: stats.karma,
         kills: stats.kills,
+        difficulty: stats.difficulty,
+        weights: {
+          hacking: stats.hacking_success_weight,
+          strength: stats.strength_success_weight,
+          defense: stats.defense_success_weight,
+          dexterity: stats.dexterity_success_weight,
+          agility: stats.agility_success_weight,
+          charisma: stats.charisma_success_weight,
+        },
         // The planner scores actions by how fast they move POSTED NEEDS, and
         // several of those are stat thresholds — so the experience table is a
         // decision input, not decoration.
@@ -544,16 +585,20 @@ const hacknetCore: DodgedProbe = {
   feature: "hacknet",
   everyMs: SEC_30,
   merge: true,
-  methods: ["hacknet.numNodes", "hacknet.maxNumNodes", "hacknet.getNodeStats", "hacknet.getPurchaseNodeCost"],
-  run(stubNs: NS) {
+  methods: [
+    "hacknet.numNodes", "hacknet.maxNumNodes", "hacknet.getNodeStats", "hacknet.getPurchaseNodeCost",
+    "hacknet.numHashes", "hacknet.hashCapacity", "hacknet.hashCost",
+  ],
+  run(stubNs: NS, { caps }: ProbeContext) {
     const numNodes = stubNs["hacknet"]["numNodes"]();
     const nodes = [];
     let totalProduction = 0;
     let productionPerSec = 0;
-    let servers = false;
+    const servers =
+      caps.restrictions.disableHacknetServer !== true &&
+      (caps.bitNode === 9 || (caps.sourceFiles["9"] ?? 0) > 0);
     for (let i = 0; i < Math.min(numNodes, LIST_LIMIT); i++) {
       const stats = stubNs["hacknet"]["getNodeStats"](i);
-      if (stats.hashCapacity !== undefined) servers = true;
       totalProduction += stats.totalProduction;
       productionPerSec += stats.production;
       nodes.push({
@@ -569,15 +614,24 @@ const hacknetCore: DodgedProbe = {
         ramUsed: stats.ramUsed,
       });
     }
+    const hashes = servers
+      ? {
+          current: stubNs["hacknet"]["numHashes"](),
+          capacity: stubNs["hacknet"]["hashCapacity"](),
+          sellForMoneyCost: stubNs["hacknet"]["hashCost"]("Sell for Money"),
+        }
+      : undefined;
+    const reportedMax = stubNs["hacknet"]["maxNumNodes"]();
     return [
       emit("hacknet", {
         servers,
         numNodes,
-        maxNumNodes: stubNs["hacknet"]["maxNumNodes"](),
+        maxNumNodes: Number.isFinite(reportedMax) ? reportedMax : null,
         purchaseNodeCost: stubNs["hacknet"]["getPurchaseNodeCost"](),
         totalProduction,
         productionPerSec,
         nodes,
+        hashes,
       }),
     ];
   },
@@ -594,141 +648,193 @@ const hacknetUpgrades: DodgedProbe = {
     "hacknet.getLevelUpgradeCost",
     "hacknet.getRamUpgradeCost",
     "hacknet.getCoreUpgradeCost",
-    "hacknet.numHashes",
-    "hacknet.hashCapacity",
+    "hacknet.getCacheUpgradeCost",
+    "hacknet.getHashUpgrades",
+    "hacknet.getHashUpgradeLevel",
+    "hacknet.hashCost",
   ],
-  run(stubNs: NS) {
+  run(stubNs: NS, { caps }: ProbeContext) {
     const numNodes = stubNs["hacknet"]["numNodes"]();
+    const servers = caps.restrictions.disableHacknetServer !== true &&
+      (caps.bitNode === 9 || (caps.sourceFiles["9"] ?? 0) > 0);
     const kinds: { kind: string; cost: (i: number) => number }[] = [
       { kind: "level", cost: (i) => stubNs["hacknet"]["getLevelUpgradeCost"](i, 1) },
       { kind: "ram", cost: (i) => stubNs["hacknet"]["getRamUpgradeCost"](i, 1) },
       { kind: "core", cost: (i) => stubNs["hacknet"]["getCoreUpgradeCost"](i, 1) },
+      ...(servers ? [{ kind: "cache", cost: (i: number) => stubNs["hacknet"]["getCacheUpgradeCost"](i, 1) }] : []),
     ];
     const nextUpgrades = [];
     for (const { kind, cost } of kinds) {
-      let best: { kind: string; node: number; cost: number } | undefined;
       for (let i = 0; i < Math.min(numNodes, LIST_LIMIT); i++) {
         const value = cost(i);
-        if (Number.isFinite(value) && (!best || value < best.cost)) best = { kind, node: i, cost: value };
+        if (Number.isFinite(value)) nextUpgrades.push({ kind, node: i, cost: value });
       }
-      if (best) nextUpgrades.push(best);
     }
     // Hash economy exists only for hacknet servers (BN9/SF9). On plain nodes
     // these read as 0 — and in some BitNodes they throw — so the whole read is
     // optional and the panel simply omits the hash tiles.
-    let hashes: { current: number; capacity: number } | undefined;
-    try {
-      const capacity = stubNs["hacknet"]["hashCapacity"]();
-      if (capacity > 0) hashes = { current: stubNs["hacknet"]["numHashes"](), capacity };
-    } catch {
-      /* not a hacknet-server BitNode */
-    }
-    return [emitPartial("hacknet", { nextUpgrades, hashes })];
+    const hashUpgrades = servers
+      ? stubNs["hacknet"]["getHashUpgrades"]().map((name) => ({
+          name: String(name),
+          level: stubNs["hacknet"]["getHashUpgradeLevel"](name),
+          cost: stubNs["hacknet"]["hashCost"](name),
+        }))
+      : undefined;
+    return [emitPartial("hacknet", { nextUpgrades, ...(hashUpgrades ? { hashUpgrades } : {}) })];
+  },
+};
+
+const hackingInfrastructure: DodgedProbe = {
+  id: "hacking.infrastructure",
+  kind: "dodged",
+  feature: "hacking",
+  everyMs: SEC_30,
+  merge: true,
+  when: (caps) =>
+    caps.restrictions.restrictHomePCUpgrade !== true &&
+    (caps.bitNode === 4 || (caps.sourceFiles["4"] ?? 0) > 0),
+  methods: ["singularity.getUpgradeHomeRamCost", "singularity.getUpgradeHomeCoresCost"],
+  run(stubNs: NS) {
+    return [emitPartial("fleet", {
+      homeRamUpgradeCost: stubNs["singularity"]["getUpgradeHomeRamCost"](),
+      homeCoreUpgradeCost: stubNs["singularity"]["getUpgradeHomeCoresCost"](),
+    })];
   },
 };
 
 // --- stock -----------------------------------------------------------------
 
-const stockCore: DodgedProbe = {
-  id: "stock.core",
+/** The account ladder, at 0.05 GB per call — the cheapest probe in the table.
+ *
+ * Runs UNCONDITIONALLY, because these four flags are the only way to know where
+ * on the ladder we are, and every one of them is bought with money rather than
+ * granted by a source file. Read directly instead of inferred from whether
+ * `getForecast` threw: that call checks `has4SDataTixApi` (the $25b API), not
+ * `has4SData` (the $1b ticker data), so inferring conflated the two and left the
+ * driver unable to tell "bought the useless one" from "bought nothing". */
+const stockAccount: DodgedProbe = {
+  id: "stock.account",
   kind: "dodged",
   feature: "stock",
-  requires: "stock",
-  everyMs: SEC_30,
+  everyMs: MIN_1,
   merge: true,
-  methods: ["stock.getSymbols", "stock.getPrice", "stock.getPosition", "stock.getMaxShares"],
+  methods: ["stock.hasWseAccount", "stock.hasTixApiAccess", "stock.has4SData", "stock.has4SDataTixApi"],
   run(stubNs: NS) {
-    // The capability gate for this feature is hasWseAccount; positions need
-    // the separate TIX API, which throws rather than returning empty. Probe it
-    // once and degrade to a price-only view — the panel reports which we got.
-    let tix = true;
+    return [
+      emitPartial("stock", {
+        hasWseAccount: stubNs["stock"]["hasWseAccount"](),
+        hasTixApiAccess: stubNs["stock"]["hasTixApiAccess"](),
+        has4SData: stubNs["stock"]["has4SData"](),
+        has4SDataApi: stubNs["stock"]["has4SDataTixApi"](),
+      }),
+    ];
+  },
+};
+
+/** Prices and positions, at the market's own cadence.
+ *
+ * 4 s, and that is the whole point of this probe: the market updates every 6 s
+ * (4 s while burning stored cycles), and sampling slower than the tick makes the
+ * tick structure unobservable — no up-tick count, so no forecast without 4S; no
+ * per-tick magnitude, so no measured volatility; and no way to see the 45%-flip
+ * cycle boundary that ends every regime. The old 30 s cadence saw one tick in
+ * five and could recover none of it.
+ *
+ * `getAskPrice`/`getBidPrice` rather than `getPrice`: the mid is not a price
+ * anything trades at, and the spread it hides is 10x-200x the commission on any
+ * position worth opening. The mid is recovered as their mean, so nothing is lost
+ * by dropping `getPrice` and 2 GB is saved. */
+const stockTick: DodgedProbe = {
+  id: "stock.tick",
+  kind: "dodged",
+  feature: "stock",
+  everyMs: SEC_4,
+  merge: true,
+  when: (_caps, topics) => topics.stock?.hasTixApiAccess === true,
+  methods: ["stock.getSymbols", "stock.getAskPrice", "stock.getBidPrice", "stock.getPosition", "stock.getMaxShares"],
+  run(stubNs: NS) {
     const positions = [];
     let portfolioValue = 0;
     let portfolioCost = 0;
     for (const sym of stubNs["stock"]["getSymbols"]()) {
-      const price = stubNs["stock"]["getPrice"](sym);
-      let shares = 0;
-      let avgPx = 0;
-      let sharesShort = 0;
-      let avgPxShort = 0;
-      if (tix) {
-        try {
-          [shares, avgPx, sharesShort, avgPxShort] = stubNs["stock"]["getPosition"](sym);
-        } catch {
-          tix = false;
-        }
-      }
-      const value = shares * price + sharesShort * price;
+      const ask = stubNs["stock"]["getAskPrice"](sym);
+      const bid = stubNs["stock"]["getBidPrice"](sym);
+      const [shares, avgPx, sharesShort, avgPxShort] = stubNs["stock"]["getPosition"](sym);
+      // Mark to what we could actually GET: a long exits at the bid, and a
+      // short's value is its entry price less what buying back costs at the ask.
+      const value = shares * bid + sharesShort * (2 * avgPxShort - ask);
       portfolioValue += value;
-      portfolioCost += shares * avgPx + sharesShort * avgPxShort;
+      const costBasis = shares * avgPx + sharesShort * avgPxShort;
+      portfolioCost += costBasis;
       positions.push({
         sym,
-        price,
-        ask: price,
-        bid: price,
+        price: (ask + bid) / 2,
+        ask,
+        bid,
         maxShares: stubNs["stock"]["getMaxShares"](sym),
         shares,
         avgPx,
         sharesShort,
         avgPxShort,
         value,
-        costBasis: shares * avgPx + sharesShort * avgPxShort,
+        costBasis,
       });
     }
-    return [
-      emit("stock", {
-        hasWseAccount: true,
-        hasTixApiAccess: tix,
-        // has4SData/has4SDataApi belong to stock.forecast — see StockState.
-        positions,
-        portfolioValue,
-        portfolioCost,
-      }),
-    ];
+    return [emitPartial("stock", { positions, portfolioValue, portfolioCost })];
   },
 };
 
+/** The 4S signal. Gated on `has4SDataApi` rather than try/catch: the flag is
+ *  already probed for 0.05 GB, so launching a 7 GB stub to discover it throws is
+ *  pure waste. Same 4 s cadence as the prices, because the forecast is half of
+ *  each tick's observation and the two must describe the same tick. */
 const stockForecast: DodgedProbe = {
   id: "stock.forecast",
   kind: "dodged",
   feature: "stock",
-  requires: "stock",
-  everyMs: MIN_1,
+  everyMs: SEC_4,
   merge: true,
-  methods: ["stock.getSymbols", "stock.getForecast", "stock.getVolatility", "stock.getOrganization", "stock.getOrders"],
+  when: (_caps, topics) => topics.stock?.has4SDataApi === true,
+  methods: ["stock.getSymbols", "stock.getForecast", "stock.getVolatility"],
   run(stubNs: NS) {
-    // 4S-only. One try/catch around the lot: without market data every call
-    // throws identically, and the panel simply shows prices without signal.
-    try {
-      // Writes `signals`, never `positions`: this probe runs at half the rate
-      // of stock.core and has no position data, so sharing that field would
-      // replace real prices with stubs on every merge.
-      const signals: Record<string, { organization: string; forecast: number; volatility: number }> = {};
-      for (const sym of stubNs["stock"]["getSymbols"]()) {
-        signals[sym] = {
-          organization: stubNs["stock"]["getOrganization"](sym),
-          forecast: stubNs["stock"]["getForecast"](sym),
-          volatility: stubNs["stock"]["getVolatility"](sym),
-        };
-      }
-      let orders: Record<string, { type: string; position: string; shares: number; price: number }[]> | undefined;
-      try {
-        orders = {};
-        for (const [sym, list] of Object.entries(stubNs["stock"]["getOrders"]())) {
-          orders[sym] = list.map((o) => ({
-            type: String(o.type),
-            position: String(o.position),
-            shares: o.shares,
-            price: o.price,
-          }));
-        }
-      } catch {
-        orders = undefined; // BN8/SF8.2 only
-      }
-      return [emitPartial("stock", { has4SData: true, has4SDataApi: true, signals, orders })];
-    } catch {
-      return [emitPartial("stock", { has4SData: false, has4SDataApi: false })];
+    // Writes `signals`, never `positions`: this probe and stock.tick are gated
+    // separately, so sharing a field would let one clobber the other's data.
+    // `getOrganization` is deliberately absent — the symbol/organization/host
+    // mapping is static game data (shared/features/stocks.ts), and paying 2 GB
+    // every 4 s for a compile-time constant is the sort of thing the RAM budget
+    // exists to catch.
+    const signals: Record<string, { forecast: number; volatility: number }> = {};
+    for (const sym of stubNs["stock"]["getSymbols"]()) {
+      signals[sym] = {
+        forecast: stubNs["stock"]["getForecast"](sym),
+        volatility: stubNs["stock"]["getVolatility"](sym),
+      };
     }
+    return [emitPartial("stock", { signals })];
+  },
+};
+
+/** Open limit/stop orders — BN8 or SF8.3 only, and rare enough to be slow. */
+const stockOrders: DodgedProbe = {
+  id: "stock.orders",
+  kind: "dodged",
+  feature: "stock",
+  everyMs: MIN_5,
+  merge: true,
+  when: (caps, topics) =>
+    topics.stock?.hasTixApiAccess === true && (caps.bitNode === 8 || sfLevel(caps.sourceFiles, 8) >= 3),
+  methods: ["stock.getOrders"],
+  run(stubNs: NS) {
+    const orders: Record<string, { type: string; position: string; shares: number; price: number }[]> = {};
+    for (const [sym, list] of Object.entries(stubNs["stock"]["getOrders"]())) {
+      orders[sym] = list.map((o) => ({
+        type: String(o.type),
+        position: String(o.position),
+        shares: o.shares,
+        price: o.price,
+      }));
+    }
+    return [emitPartial("stock", { orders })];
   },
 };
 
@@ -1067,6 +1173,7 @@ const sleevesCore: DodgedProbe = {
     for (let i = 0; i < count; i++) {
       const s = stubNs["sleeve"]["getSleeve"](i);
       const task = stubNs["sleeve"]["getTask"](i) as ({ type: string } & Record<string, unknown>) | null;
+      armSleeveCompletion(i, task as (WorkTaskLike & Record<string, unknown>) | null);
       sleeves.push({
         index: i,
         shock: s.shock,
@@ -1078,9 +1185,15 @@ const sleevesCore: DodgedProbe = {
         skills: {
           hacking: s.skills.hacking, strength: s.skills.strength, defense: s.skills.defense,
           dexterity: s.skills.dexterity, agility: s.skills.agility, charisma: s.skills.charisma,
+          intelligence: s.skills.intelligence,
         },
+        mults: { ...s.mults },
         task: task
-          ? { type: task.type, detail: String(task.factionName ?? task.companyName ?? task.crimeType ?? task.classType ?? "") }
+          ? {
+              type: task.type,
+              detail: String(task.factionName ?? task.companyName ?? task.crimeType ?? task.classType ?? ""),
+              ...(task.factionWorkType !== undefined ? { workType: String(task.factionWorkType) } : {}),
+            }
           : undefined,
       });
     }
@@ -1090,33 +1203,49 @@ const sleevesCore: DodgedProbe = {
 
 // --- go --------------------------------------------------------------------
 
+function goBoardSize(board: string[]): GoObservedBoardSize {
+  const size = board.length;
+  if ((size !== 5 && size !== 7 && size !== 9 && size !== 13 && size !== 19) || board.some((column) => column.length !== size)) {
+    throw new Error(`unexpected Go board dimensions ${size}x${board[0]?.length ?? 0}`);
+  }
+  return size;
+}
+
 const goCore: DodgedProbe = {
   id: "go.core",
   kind: "dodged",
   feature: "go",
   requires: "go",
-  everyMs: SEC_30,
+  everyMs: SEC_2,
   merge: true,
-  methods: ["go.getGameState", "go.getCurrentPlayer", "go.getOpponent", "go.analysis.getStats"],
+  methods: ["go.getGameState", "go.getOpponent", "go.analysis.getStats"],
   run(stubNs: NS) {
     const state = stubNs["go"]["getGameState"]();
-    const stats = Object.entries(stubNs["go"]["analysis"]["getStats"]()).map(([opponent, s]) => ({
-      opponent,
-      wins: s.wins,
-      losses: s.losses,
-      winStreak: s.winStreak,
-      highestWinStreak: s.highestWinStreak,
-      rep: s.rep,
-      bonusPercent: s.bonusPercent,
-      bonusDescription: s.bonusDescription,
-    }));
+    const rawStats = stubNs["go"]["analysis"]["getStats"]();
+    const stats = GO_REWARD_OPPONENTS.flatMap((opponent) => {
+      const s = rawStats[opponent];
+      return s
+        ? [{
+            opponent,
+            wins: s.wins,
+            losses: s.losses,
+            winStreak: s.winStreak,
+            highestWinStreak: s.highestWinStreak,
+            rep: s.rep,
+            bonusPercent: s.bonusPercent,
+            bonusDescription: s.bonusDescription,
+          }]
+        : [];
+    });
     return [
       emitPartial("go", {
-        status: state.currentPlayer === "None" ? "gameOver" : "inProgress",
-        currentPlayer: stubNs["go"]["getCurrentPlayer"](),
-        opponent: String(stubNs["go"]["getOpponent"]()),
+        status: state.currentPlayer === "None" ? "gameOver" : state.currentPlayer === "White" ? "waitingOnAI" : "inProgress",
+        currentPlayer: state.currentPlayer,
+        opponent: stubNs["go"]["getOpponent"](),
         whiteScore: state.whiteScore,
         blackScore: state.blackScore,
+        komi: state.komi,
+        bonusCycles: state.bonusCycles,
         stats,
       }),
     ];
@@ -1128,11 +1257,34 @@ const goBoard: DodgedProbe = {
   kind: "dodged",
   feature: "go",
   requires: "go",
-  everyMs: MIN_1,
+  everyMs: SEC_2,
   merge: true,
-  methods: ["go.getBoardState", "go.getMoveHistory", "go.analysis.getControlledEmptyNodes"],
+  methods: ["go.getBoardState", "go.getMoveHistory"],
   run(stubNs: NS) {
     const board = stubNs["go"]["getBoardState"]();
+    const history = stubNs["go"]["getMoveHistory"]();
+    return [
+      emitPartial("go", {
+        board,
+        boardSize: goBoardSize(board),
+        moveCount: history.length,
+        previousBoards: history,
+      }),
+    ];
+  },
+};
+
+/** Territory is useful telemetry but costs 16 GB. It must not be bundled with
+ * the 4 GB board read that the player needs every turn. */
+const goTerritory: DodgedProbe = {
+  id: "go.territory",
+  kind: "dodged",
+  feature: "go",
+  requires: "go",
+  everyMs: SEC_30,
+  merge: true,
+  methods: ["go.analysis.getControlledEmptyNodes"],
+  run(stubNs: NS) {
     const controlled = stubNs["go"]["analysis"]["getControlledEmptyNodes"]();
     let black = 0;
     let white = 0;
@@ -1144,9 +1296,6 @@ const goBoard: DodgedProbe = {
     }
     return [
       emitPartial("go", {
-        board,
-        boardSize: board.length,
-        moveCount: stubNs["go"]["getMoveHistory"]().length,
         territory: { black, white },
       }),
     ];
@@ -1256,103 +1405,83 @@ const dnetCore: DodgedProbe = {
 
 // --- side ------------------------------------------------------------------
 
-/** Cap on the contract rows that reach the store and the wire.
+/** Contract discovery keeps a private bounded work queue and sends only its
+ * front batch. Counts, solver coverage and quarantine summaries describe the
+ * rest without repeating a network-sized file list on the wire.
  *
- * A long-lived save accumulates .cct files faster than one-per-minute solving
- * retires them, and every type without a solver stays forever: a real BN12
+ * A long-lived save can accumulate thousands of .cct files: a real BN12
  * save reached 8,557 contracts, of which 3,730 were unsolvable. Dumping that
  * list made a single `side` state record 1.66 MB — 88 MB across one run, and
  * the viewer's snapshot alone was then large enough to stall the browser
  * before first paint.
  *
- * The driver only ever attempts the HEAD of this list, once a minute, so a
- * hundred is already a queue nothing can drain. Unsolvable contracts are not
- * rows at all: they collapse to a count per type, which is the actionable
- * form, since the fix is a solver rather than a file listing.
+ * The list is only a work window. Discovery intentionally calls `ls` and the
+ * free type-registry getter—never a per-file codingcontract getter. The driver
+ * inspects and drains bounded batches under separate RAM dodges.
  *
- * Lives here rather than beside the topic because a `--perf` build must not
- * link anything under shared/telemetry (tests/build-perf.test.ts). */
-const CONTRACT_LIMIT = 100;
+ * The limits live with the solver registry because both probe and driver use
+ * them, and a drift between the two would stall or over-publish the queue. */
 
 const sideContracts: DodgedProbe = {
   id: "side.contracts",
   kind: "dodged",
   feature: "side",
-  everyMs: MIN_1,
+  everyMs: SEC_30,
   merge: true,
-  methods: ["ls", "codingcontract.getContractType", "codingcontract.getNumTriesRemaining"],
-  run(stubNs: NS, { servers }: ProbeContext) {
-    // PARTITION, DO NOT DUMP. The network can hold thousands of .cct files and
-    // every type without a solver stays there forever (see CONTRACT_LIMIT).
-    // Solvable ones are carried as rows because the driver attempts the head
-    // of that list; the rest collapse to a count per type, which is the only
-    // actionable form — the fix is a solver, not a file listing.
-    const solvable: ContractDigest[] = [];
-    const unsolvableByType: Record<string, number> = {};
+  methods: ["ls", "codingcontract.getContractTypes"],
+  run(stubNs: NS, { servers, state }: ProbeContext) {
+    const queue: ContractDigest[] = [];
+    // Track only quarantined keys, not every contract in a large save. Each
+    // discovered file removes itself; leftovers are stale failures to reap.
+    const staleQuarantine = new Set(Object.keys(state.contractQuarantine ?? {}));
     let contractTotal = 0;
-    let unsolvableTotal = 0;
-    for (const host of Object.keys(servers)) {
-      for (const file of stubNs["ls"](host, ".cct")) {
+    for (const host of Object.keys(servers).sort()) {
+      for (const file of stubNs["ls"](host, ".cct").sort()) {
         contractTotal++;
-        const type = stubNs["codingcontract"]["getContractType"](file, host);
-        if (!canSolve(type)) {
-          unsolvableTotal++;
-          unsolvableByType[type] = (unsolvableByType[type] ?? 0) + 1;
-          continue;
-        }
-        solvable.push({
-          host,
-          file,
-          type,
-          triesRemaining: stubNs["codingcontract"]["getNumTriesRemaining"](file, host),
-        });
+        const key = `${host}\0${file}`;
+        staleQuarantine.delete(key);
+        if (!state.contractQuarantine?.[key] && queue.length < CONTRACT_QUEUE_LIMIT) queue.push({ host, file });
       }
     }
-    // Most-at-risk first, so the capped window is the one worth working on;
-    // host/file breaks ties so the window is stable between sweeps.
-    solvable.sort(
-      (a, b) =>
-        a.triesRemaining - b.triesRemaining ||
-        a.host.localeCompare(b.host) ||
-        a.file.localeCompare(b.file),
-    );
+
+    // A manually solved/deleted quarantined contract is no longer a failure
+    // in the current world. This full-network ls sweep is the authoritative
+    // and cheapest place to reap it.
+    for (const key of staleQuarantine) delete state.contractQuarantine![key];
+    state.contractQueue = queue;
+    const contractTypes = stubNs["codingcontract"]["getContractTypes"]().map(String);
+    const unsupported = contractTypes.filter((type) => !canSolve(type));
+    const registryComplete = unsupported.length === 0;
+    const quarantine = Object.values(state.contractQuarantine ?? {});
+    const unsolvableByType = Object.fromEntries(unsupported.map((type) => [type, 0])) as Record<string, number>;
+    for (const failure of quarantine) {
+      if (failure.reason === "no solver registered") {
+        unsolvableByType[failure.type] = (unsolvableByType[failure.type] ?? 0) + 1;
+      }
+    }
+    const unsolvableTotal = Object.values(unsolvableByType).reduce((total, count) => total + count, 0);
+    const failures = quarantine
+      .sort((a, b) => b.at - a.at)
+      .slice(0, 8)
+      .map(({ data: _data, answer: _answer, ...summary }) => summary);
     return [
       emit("side", {
-        contracts: solvable.slice(0, CONTRACT_LIMIT),
+        contracts: queue.slice(0, CONTRACT_TELEMETRY_LIMIT),
         contractTotal,
-        solvableTotal: solvable.length,
+        // Types are intentionally unknown until the bounded driver inspection.
+        // This is therefore the unquarantined candidate count; unsupported
+        // files move out of it as their batches are inspected.
+        solvableTotal: Math.max(0, contractTotal - quarantine.length),
         unsolvableByType,
         unsolvableTotal,
+        registryComplete,
+        contractTypeTotal: contractTypes.length,
+        supportedTypeTotal: contractTypes.length - unsupported.length,
+        contractScannedAt: Date.now(),
+        failures,
+        quarantinedTotal: quarantine.length,
       }),
     ];
-  },
-};
-
-const sideInfiltration: DodgedProbe = {
-  id: "side.infiltration",
-  kind: "dodged",
-  feature: "side",
-  everyMs: MIN_10,
-  merge: true,
-  methods: ["infiltration.getPossibleLocations", "infiltration.getInfiltration"],
-  run(stubNs: NS) {
-    const locations = stubNs["infiltration"]["getPossibleLocations"]();
-    const infiltration = [];
-    for (const location of locations) {
-      const info = stubNs["infiltration"]["getInfiltration"](location.name);
-      infiltration.push({
-        location: String(location.name),
-        city: String(location.city),
-        difficulty: info.difficulty,
-        maxClearanceLevel: info.maxClearanceLevel,
-        startingSecurityLevel: info.startingSecurityLevel,
-        repReward: info.reward.tradeRep,
-        moneyReward: info.reward.sellCash,
-        moneyPerDifficulty: info.difficulty > 0 ? info.reward.sellCash / info.difficulty : 0,
-      });
-    }
-    infiltration.sort((a, b) => b.moneyPerDifficulty - a.moneyPerDifficulty);
-    return [emitPartial("side", { infiltration, infiltrationTotal: locations.length })];
   },
 };
 
@@ -1367,8 +1496,11 @@ export const DODGED_PROBES: readonly DodgedProbe[] = [
   careerCrimes,
   hacknetCore,
   hacknetUpgrades,
-  stockCore,
+  hackingInfrastructure,
+  stockAccount,
+  stockTick,
   stockForecast,
+  stockOrders,
   gangCore,
   gangDetail,
   corpCore,
@@ -1379,10 +1511,10 @@ export const DODGED_PROBES: readonly DodgedProbe[] = [
   sleevesCore,
   goCore,
   goBoard,
+  goTerritory,
   stanekCore,
   dnetCore,
   sideContracts,
-  sideInfiltration,
 ];
 
 export type { Emission };

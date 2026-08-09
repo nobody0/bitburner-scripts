@@ -21,32 +21,76 @@ export interface HacknetState {
   /** True in BN9/SF9, where nodes become RAM-bearing hash servers. */
   servers: boolean;
   numNodes: number;
-  maxNumNodes: number;
+  /** null means uncapped (plain Hacknet Nodes). */
+  maxNumNodes: number | null;
   purchaseNodeCost: number;
   totalProduction: number;
   productionPerSec: number;
   nodes: HacknetNodeDigest[];
-  /** Cheapest upgrade of each kind across all nodes, with its payback. */
+  /** Every available one-step upgrade. ROI, not sticker price, selects a node. */
   nextUpgrades?: { kind: string; node: number; cost: number }[];
   /** Hash economy — hacknet servers only. */
-  hashes?: { current: number; capacity: number };
+  hashes?: { current: number; capacity: number; sellForMoneyCost: number };
   hashUpgrades?: { name: string; level: number; cost: number }[];
   /** The decision digest: what to buy, why, and what was passed over. */
   plan?: HacknetPlan;
 }
 
 export interface HacknetPlan {
+  /** Decision inputs captured atomically with the ranking. */
+  evaluatedAt: number;
+  horizonSec: number;
+  moneyAvailable: number;
+  moneyGranted: number;
+  hashDollarValue: number;
+  fleetUtilization: number;
+  fleetDemanded: boolean;
+  candidate?: { kind: string; node?: number; cost: number };
   buy?: { kind: string; node?: number; cost: number };
   why: string;
   /** Set when nothing is worth buying, with the reason — an upgrade that
    *  cannot repay itself before the horizon ends is a decision, not a stall. */
   hold?: string;
+  rankedTotal: number;
   ranked: {
+    kind: string;
+    node?: number;
     label: string;
     cost: number;
     deltaProduction: number;
+    returnPerDollarSec: number;
     paybackSec: number;
     netOverHorizon: number;
+    worthBuying: boolean;
+    selected: boolean;
+    milestone?: { kind: string; target: number; have: number; delta: number; priority: number; why: string };
+    why: string;
   }[];
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
+  hashes?: {
+    current: number;
+    capacity: number;
+    productionPerSec: number;
+    sellForMoneyCost: number;
+    spend?: { name: string; target?: string; count: number; cost: number };
+    reserve?: { name: string; target?: string; cost: number; missing: number };
+    capacityTarget?: number;
+    why: string;
+    rankedTotal: number;
+    ranked: {
+      name: string;
+      target?: string;
+      cost: number;
+      priority: number;
+      affordable: boolean;
+      fitsCapacity: boolean;
+      valueDollars?: number;
+      saleValueDollars: number;
+      netDollars?: number;
+      eligible: boolean;
+      selected: boolean;
+      why: string;
+    }[];
+    lastResult?: { action: string; ok: boolean; detail: string; at: number };
+  };
 }

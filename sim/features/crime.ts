@@ -8,8 +8,8 @@ import { calculateIntelligenceBonus } from "../vendor/bitburner/src/PersonObject
  *
  * Crimes resolve on a SEEDED roll at completion, exactly as the game does, so
  * a run is reproducible while still exercising the failure path. The failure
- * path matters: a failed crime awards HALF experience and NO money, karma or
- * kills, so a planner that assumed every crime succeeded would over-value the
+ * path matters: a failed player crime awards one-quarter experience and karma,
+ * but no money or kills, so a planner that assumed every crime succeeded would over-value the
  * hard ones badly.
  *
  * Karma is stored positive in the table and SUBTRACTED here. */
@@ -93,30 +93,39 @@ export class CrimeSystem {
 
   #complete(crime: VendoredCrime): void {
     const person = this.#world.person;
+    const focused = this.#player.currentWork?.focused ?? true;
+    const focusBonus = focused || this.#player.augmentations.has("Neuroreceptor Management Implant") ? 1 : 0.8;
     const success = this.#rng() < this.successChance(crime);
     const exp = person.exp as unknown as Record<string, number>;
+    const mults = person.mults as unknown as Record<string, number>;
+    const addExp = (scale: number): void => {
+      for (const [skill, amount] of Object.entries(crime.exp)) {
+        if (amount <= 0 || (skill === "intelligence" && !success)) continue;
+        const mult = skill === "intelligence" ? 1 : mults[`${skill}_exp`] ?? 1;
+        exp[skill] = (exp[skill] ?? 0) + amount * mult * currentNodeMults.CrimeExpGain * focusBonus * scale;
+      }
+    };
 
     if (success) {
       const moneyMult = ((person.mults as unknown as Record<string, number>)["crime_money"] ?? 1) * currentNodeMults.CrimeMoney;
-      this.#player.money += crime.money * moneyMult;
+      const money = crime.money * moneyMult * focusBonus;
+      this.#player.money += money;
+      this.#world.moneyEarned += money;
+      this.#world.recordMoney("crime", money);
       // Karma is POSITIVE in the table and SUBTRACTED here.
-      this.#player.karma -= crime.karma;
+      this.#player.karma -= crime.karma * focusBonus;
       this.#player.numPeopleKilled += crime.kills;
-      for (const [skill, amount] of Object.entries(crime.exp)) {
-        if (amount > 0) exp[skill] = (exp[skill] ?? 0) + amount;
-      }
+      addExp(1);
       this.#world.emit({
         kind: "event",
         name: "crime.done",
-        data: { crime: crime.type, success: true, money: crime.money * moneyMult, karma: -crime.karma },
+        data: { crime: crime.type, success: true, money, karma: -crime.karma * focusBonus },
       });
     } else {
-      // Failure awards HALF experience and nothing else. Omitting this makes
-      // every hard crime look strictly better than it is.
-      for (const [skill, amount] of Object.entries(crime.exp)) {
-        if (amount > 0) exp[skill] = (exp[skill] ?? 0) + amount / 2;
-      }
-      this.#world.emit({ kind: "event", name: "crime.done", data: { crime: crime.type, success: false } });
+      // Player CrimeWork scales experience and karma to one quarter on failure.
+      this.#player.karma -= crime.karma * focusBonus / 4;
+      addExp(0.25);
+      this.#world.emit({ kind: "event", name: "crime.done", data: { crime: crime.type, success: false, karma: -crime.karma * focusBonus / 4 } });
     }
     this.#world.recalculateSkills();
     this.#player.completeWorkUnit();

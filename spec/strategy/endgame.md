@@ -25,20 +25,19 @@ Once per progression cadence (60 s) the `progression` module's **refresh**:
 2. runs `stepEndgame` for availability, completeness and blockers;
 3. estimates each route's remaining time (`eta.ts`, below);
 4. picks the fastest available route with hysteresis (`chooseRoute`);
-5. publishes the whole record on `progression.plan`:
-   `{route, expectedEndAt, decidedAt, refreshedAt, routeWhy, routes[]}`.
+5. publishes the route record plus independent forecasts for the next
+   augmentation installation and BitNode completion on `progression.plan`.
 
-Two deliberate absences in that record: a **complete** route publishes no
-`expectedEndAt` — it "ends now", but the act half that would end it is
-unwired, and now-as-the-end would floor every horizon at 60 s for the rest of
-the manually-ended run — and `refreshedAt` exists so a plan whose publisher
-has gone quiet (`PLAN_STALE_MS`) stops steering instead of decaying the
-horizon as it ages. `decidedAt` cannot serve as the freshness marker: it
-deliberately survives refreshes that keep the same route.
+Forecasts are anchored at `expectedAt`, not rewritten as a fresh duration on
+every controller pass. Their displayed remaining time counts down from that
+anchor. The model is recomputed every ten minutes, or immediately when a
+structural milestone changes (route, blocker, package, install phase, queue or
+readiness). After thirty minutes without a successful recalculation it becomes
+explicitly `stale`; absent evidence is `unknown`. Neither state is converted to
+a scalar default, and there is no floor or ceiling.
 
-The controller then derives `horizonSec` (below) and hands
-`{route, horizonSec}` to every driver's context. The decision is **cached and
-stable by construction**: it is recomputed only on the progression cadence,
+The controller hands `{route, horizons: {install, node}}` to every driver. The
+route decision is **cached and stable by construction**:
 a challenger must beat the incumbent's *current* estimate by
 `ROUTE_SWITCH_MARGIN` (25%) after `ROUTE_DWELL_MS` (10 min), and a stale plan
 is dropped on a node reset — each module clears its own published topics in
@@ -110,40 +109,27 @@ number: a heuristic estimate to be tuned from the log, never a known constant.
 
 ## How features consume the decision
 
-`DriverContext` carries both values every tick:
+`DriverContext` carries the route and both forecasts every tick:
 
-- **`horizonSec`** — `planningHorizonSec`: expected remaining run time,
-  **capped by `INSTALL_CADENCE_SEC`** and staleness-guarded, defaulting to
-  `DEFAULT_HORIZON_SEC` (3600) when no plan exists or the route is complete.
-  The install cap is load-bearing, not a convenience clamp: the node ETA
-  spans many augmentation installs, and an install destroys exactly what the
-  consumers buy (hacknet nodes, stock access, skills) — so their payoff
-  window is bounded by the NEXT install, while a fallback-guessed multi-day
-  node ETA would otherwise have widened every investment test ~24x from the
-  first refresh. A short expected end still passes through: the "run ends in
-  ten minutes, stop investing" signal survives the cap. Consumers:
-  - `hacknet` / `stock`: net-over-horizon investment tests — an upgrade or a
-    4S purchase that cannot repay itself within the horizon is refused.
-  - `hacking`: caps the evaluator's prep/switch amortization window
-    (`stepEvaluator`'s `horizonCapMs`) — a target that only pays off after
-    the expected end is not worth switching to. The cap binds only when the
-    expected end is nearer than the existing 30-minute ceiling.
-  - `factions` deliberately does NOT consume it: the donate-vs-work
-    crossover is rate-based (`incomePerSec`), and a horizon field it never
-    read was removed rather than left documented-but-dead.
+- **Install horizon** — reset-sensitive value. Hacknet upgrades, hacking pump
+  spending and stock positions must repay before augmentation prestige
+  destroys them.
+- **Node horizon** — persistent value. Faction packages, home infrastructure
+  and stock API access can repay across installations, so a multi-day estimate
+  remains multi-day.
 - **`route`** — a bias, never a gate: a driver may weight priorities by it
   (bladeburner when it *is* the route; combat stats for the Daedalus combat
   branch) but must not refuse to play because of it. Nothing consumes it yet;
   the field exists so the first consumer is a local change.
 
-Staleness is tolerated by design: the plan persists in the realm store across
-build handoffs, refreshes on the progression cadence, and every consumer sits
-behind the same hysteresis that keeps the route itself stable.
+Unknown or stale forecasts do not silently become a made-up hour. Each
+consumer chooses an explicit conservative behavior. Estimated forecasts carry
+parallel/sequential components, critical-path flags and measured-versus-model
+provenance; the UI and telemetry retain that same typed evidence.
 
 ## Deliberately not wired
 
-Acting on the decision — installing the queued augmentations, walking the
-labyrinth, calling `destroyW0r1dD43m0n` — ends the run, kills every process
-and is irreversible. The act half of the progression driver stays empty until
-the prestige path is proven end to end (see `spec/progress.md`). The decision
-is published and recorded; nothing executes it.
+The armed two-pass augmentation transaction is wired and simulator-tested.
+Walking the labyrinth and calling `destroyW0r1dD43m0n` still end the BitNode
+and remain outside this controller until their irreversible paths are proven
+end to end.

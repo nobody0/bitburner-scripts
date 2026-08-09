@@ -41,12 +41,12 @@ export interface GoalContext {
    *  without BN4/SF4 and a rep goal is simply unreachable there. */
   factions: Map<string, GoalFaction>;
   /** Augmentations OWNED — installed or queued, matching what
-   *  `ns.singularity.getOwnedAugmentations(true)` reports and what every
-   *  `numAugmentations` faction requirement counts. A goal like `augs:5` is
-   *  about acquisition, not installation: reputation converts to augmentations
-   *  at purchase time, and whether they have been installed yet is the
-   *  `progression` feature's separate decision. */
+   *  `ns.singularity.getOwnedAugmentations(true)` reports. These goals are
+   *  acquisition-oriented; positive faction augmentation gates differ and
+   *  count installed entries only. */
   augmentations: Set<string>;
+  /** Destructive augmentation installs observed in this run. */
+  installs: number;
 }
 
 /** Sim-only initial conditions a goal may demand. */

@@ -1,10 +1,23 @@
 /** Go (IPvGO) feature — BN14's theme. Problem: a board game. Maximise
  * territory captured per game against each faction opponent, since win streaks
- * grant escalating stat/hacking bonuses. The most self-contained feature in
- * the game: a pure adversarial search with no coupling to anything else. */
+ * grant escalating stat/hacking bonuses. Board play is self-contained; the
+ * opponent choice is intentionally coupled to the other features' needs. */
+
+import type {
+  GoAction,
+  GoCurrentPlayer,
+  GoFactionOpponent,
+  GoMove,
+  GoOpponent,
+  GoObservedBoardSize,
+  GoRewardOpponent,
+  GoStatus,
+} from "../../strategy/go/decide.ts";
+import type { GoEtaDemand, GoGameCandidate } from "../../strategy/go/rewards.ts";
+import type { GO_OPPONENT_MODEL } from "../../strategy/go/opponent.ts";
 
 export interface GoOpponentStats {
-  opponent: string;
+  opponent: GoRewardOpponent;
   wins: number;
   losses: number;
   winStreak: number;
@@ -15,28 +28,98 @@ export interface GoOpponentStats {
 }
 
 export interface GoState {
-  /** "gameOver" | "waitingOnAI" | "inProgress" plus the board metadata. */
-  status: string;
-  currentPlayer: string;
-  opponent: string;
-  boardSize?: number;
+  /** Core and board probes can land independently, so acquired fields are
+   * optional until their owning probe has succeeded at least once. */
+  status?: GoStatus;
+  currentPlayer?: GoCurrentPlayer;
+  opponent?: GoOpponent;
+  boardSize?: GoObservedBoardSize;
   /** Row strings exactly as ns.go.getBoardState returns them. Small: at most
    * 19 strings of 19 chars. */
   board?: string[];
+  /** Complete prior-position history for the game's positional superko rule. */
+  previousBoards?: string[][];
   whiteScore?: number;
   blackScore?: number;
+  komi?: number;
+  bonusCycles?: number;
   moveCount?: number;
   /** Controlled empty territory per colour, from ns.go.analysis. */
   territory?: { black: number; white: number };
-  stats: GoOpponentStats[];
+  stats?: GoOpponentStats[];
   plan?: GoPlan;
+  /** Outcome paired with the latest decision. Historical state records retain
+   * each pair, while the live topic stays bounded to one turn. */
+  lastTurn?: GoTurnResult;
 }
 
 export interface GoPlan {
-  action: { type: string; why: string; x?: number; y?: number };
-  ranked: { x: number; y: number; score: number; why: string }[];
+  action: GoAction;
+  ranked: GoMove[];
   why: string;
-  /** Opponent worth playing next, by bonus value. */
-  preferredOpponent: string;
-  lastResult?: { action: string; ok: boolean; detail: string; at: number };
+  /** Exact public state consumed by the pure planner. This avoids pairing a
+   * pre-move ranking with the post-move board emitted later in the same tick. */
+  input: {
+    at: number;
+    board: string[];
+    previousBoards: string[][];
+    status: GoStatus;
+    currentPlayer: GoCurrentPlayer;
+    opponent: GoRewardOpponent;
+    blackScore?: number;
+    whiteScore?: number;
+    komi?: number;
+    bonusCycles?: number;
+  };
+  planning: { finalistCount: number; positionValue: number };
+  prediction?: {
+    model: typeof GO_OPPONENT_MODEL;
+    sampledTotalPlaytime: number;
+    sampledAt: number;
+    decisionAt: number;
+    preparationMs: number;
+    finalizationMs: number;
+    totalPlanningMs: number;
+    engineCycleMs: number;
+    aiWaitMs: number;
+    seedCandidates: number[];
+    /** Public engine tick read immediately before the Go call. */
+    dispatchPlaytime: number;
+    /** Number of 10 ms retries after finalization crossed a tick boundary. */
+    boundaryRetries: number;
+  };
+  /** Full opponent/board comparison in the same ETA units used to decide. */
+  selection: {
+    preferred: GoGameCandidate;
+    candidates: GoGameCandidate[];
+    context: {
+      goPower: number;
+      hasSourceFile14: boolean;
+      favorRepCap: number;
+      installRemainingSec?: number;
+      joinedFactions: string[];
+      demands: Partial<Record<GoRewardOpponent, GoEtaDemand>>;
+      factionFavor: Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>>;
+    };
+  };
+}
+
+export type GoResponse =
+  | { type: "move"; x: number; y: number }
+  | { type: "pass" | "gameOver"; x: null; y: null };
+
+export interface GoTurnResult {
+  at: number;
+  durationMs: number;
+  action: GoAction;
+  opponentResponse?: GoResponse;
+  /** Expected seed support; an unseeded defense tie splits one seed's weight. */
+  predictionSupport?: { matching: number; total: number };
+  timing?: {
+    alignment: "none" | "same-slot" | "boundary-replan";
+    dispatchPlaytime?: number;
+    seed?: number;
+  };
+  ok: boolean;
+  detail: string;
 }

@@ -10,6 +10,7 @@ import {
   type CrimeStats,
 } from "../shared/strategy/career/crimes.ts";
 import { CAREER_KINDS, needValues, stepCareer, type CareerView } from "../shared/strategy/career/decide.ts";
+import { PORT_OPENER_PROGRAMS, programCreateTimeMs, preferProgramCreation } from "../shared/strategy/career/programs.ts";
 import { postNeeds, type Need } from "../shared/strategy/needs.ts";
 
 const CTX: CrimeContext = { crimeSuccessRate: 1, crimeMoney: 1 };
@@ -64,14 +65,14 @@ describe("crime math", () => {
     expect(secondsToKarma(crime({ chance: 1 }), person(), CTX, -50, -45)).toBe(0);
   });
 
-  test("an impossible crime reports an infinite time rather than a plausible number", () => {
-    expect(secondsToKarma(crime({ chance: 0 }), person(), CTX, 0, -45)).toBe(Infinity);
+  test("even an impossible crime earns failure karma at one-quarter rate", () => {
+    expect(secondsToKarma(crime({ chance: 0 }), person(), CTX, 0, -45)).toBeFinite();
   });
 
-  test("experience is awarded on SUCCESS only, so a hard crime trains slowly", () => {
+  test("failed crimes grant quarter experience", () => {
     const easy = expPerSec(crime({ chance: 1 }), person(), CTX);
     const hard = expPerSec(crime({ chance: 0.1 }), person(), CTX);
-    expect(hard["strength"]).toBeCloseTo(easy["strength"]! * 0.1, 10);
+    expect(hard["strength"]).toBeCloseTo(easy["strength"]! * 0.325, 10);
   });
 
   test("BitNode multipliers flow through money and chance", () => {
@@ -205,6 +206,108 @@ describe("career as the needs-board consumer", () => {
     const forward = stepCareer(view({ crimes: [a, b] }), postNeeds([]));
     const backward = stepCareer(view({ crimes: [b, a] }), postNeeds([]));
     expect(forward.action.subject).toBe(backward.action.subject!);
+  });
+
+  test("travel is administrative and may run while another feature holds crime work", () => {
+    const decision = stepCareer(
+      view({ crimes: [homicide], holdsWorkSlot: false, currentWork: { kind: "crime", subject: "Homicide" } }),
+      postNeeds([need({ kind: "city", subject: "Aevum", target: 1, have: 0 })]),
+    );
+    expect(decision.action).toMatchObject({ type: "travel", subject: "Aevum" });
+  });
+
+  test("jobs provide the fresh-install income floor until background hacking catches up", () => {
+    const early = stepCareer(
+      view({
+        crimes: [shoplift],
+        jobs: { FoodNStuff: "Employee" },
+        companies: [{ name: "FoodNStuff", rep: 0, moneyPerSec: 20_000 }],
+        externalIncomePerSec: 0,
+      }),
+      postNeeds([]),
+    );
+    expect(early.action).toMatchObject({ type: "company", subject: "FoodNStuff" });
+
+    const later = stepCareer(
+      view({
+        crimes: [shoplift],
+        courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 960, location: "Rothman University" }],
+        moneyGranted: 10_000,
+        externalIncomePerSec: 25_000,
+      }),
+      postNeeds([]),
+    );
+    expect(later.action).toMatchObject({ type: "class", subject: "Algorithms" });
+  });
+
+  test("the progression route can replace hacking as the training fallback", () => {
+    const decision = stepCareer(
+      view({
+        crimes: [shoplift],
+        courses: [
+          { name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 960, location: "Rothman University" },
+          { name: "Leadership", skill: "charisma", expPerSec: 8, costPerSec: 960, location: "Rothman University" },
+        ],
+        moneyGranted: 10_000,
+        externalIncomePerSec: 25_000,
+        defaultSkill: "charisma",
+      }),
+      postNeeds([]),
+    );
+    expect(decision.action).toMatchObject({ type: "class", subject: "Leadership" });
+    expect(decision.why).toContain("training charisma");
+  });
+
+  test("gym courses execute as gym work, not university classes", () => {
+    const decision = stepCareer(
+      view({
+        courses: [{ name: "strength", skill: "strength", expPerSec: 10, costPerSec: 2_400, location: "Powerhouse Gym" }],
+        moneyGranted: 10_000,
+      }),
+      postNeeds([need({ kind: "skill", subject: "strength", target: 100, have: 1 })]),
+    );
+    expect(decision.action).toMatchObject({ type: "gym", subject: "strength", location: "Powerhouse Gym" });
+  });
+
+  test("a requested port opener is written as resumable work", () => {
+    const decision = stepCareer(
+      view({ programs: [{ name: "BruteSSH.exe", timeMs: 600_000, purchaseCost: 500_000 }] }),
+      postNeeds([need({ kind: "file", subject: "BruteSSH.exe", target: 1, have: 0 })]),
+    );
+    expect(decision.action).toMatchObject({ type: "program", subject: "BruteSSH.exe" });
+  });
+
+  test("urgency is lexicographic: blocking work beats a larger nice score", () => {
+    const decision = stepCareer(
+      view({
+        courses: [
+          { name: "Algorithms", skill: "hacking", expPerSec: 1, costPerSec: 1, location: "Rothman University" },
+          { name: "Leadership", skill: "charisma", expPerSec: 1_000_000, costPerSec: 1, location: "Rothman University" },
+        ],
+        moneyGranted: 100,
+      }),
+      postNeeds([
+        need({ kind: "skill", subject: "hacking", target: 100, have: 0, weight: 1, urgency: "blocking" }),
+        need({ kind: "skill", subject: "charisma", target: 1, have: 0, weight: 1, urgency: "nice" }),
+      ]),
+    );
+    expect(decision.action.subject).toBe("Algorithms");
+  });
+});
+
+describe("program creation economics", () => {
+  test("matches the v3.0.1 work-rate equation and intelligence-adjusted requirement", () => {
+    const brute = PORT_OPENER_PROGRAMS[0]!;
+    expect(programCreateTimeMs(brute, 50, 0)).toBe(600_000);
+    expect(programCreateTimeMs(brute, 100, 0)).toBe(500_000);
+    expect(programCreateTimeMs(brute, 24, 50)).toBe(Infinity);
+    expect(programCreateTimeMs(brute, 25, 50)).toBeFinite();
+  });
+
+  test("compares player-slot opportunity cost with TOR plus purchase price", () => {
+    const brute = PORT_OPENER_PROGRAMS[0]!;
+    expect(preferProgramCreation(brute, 50, 0, 1_000, false)).toBe(true);
+    expect(preferProgramCreation(brute, 50, 0, 2_000, true)).toBe(false);
   });
 });
 

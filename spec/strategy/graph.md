@@ -99,8 +99,7 @@ graph TD
   hacknet -->|"hash: min-sec ↓, max-$ ↑"| hacking
   hacknet -->|hash: server RAM| RAM((fleet RAM))
 
-  side -->|contracts, infiltration| MONEY
-  side -->|infiltration rep| factions
+  side -->|contracts| MONEY
   bladeburner -->|rank 25| factions
   go -->|faction favor| factions
   go -->|node power → stats| career
@@ -185,8 +184,11 @@ side effect. So:
 - The gang's −54 000 is ~15 000 s of Homicide at the theoretical cap, so many
   hours in practice. Being banked per-node is what makes it survivable.
 
-Only twelve factions keep membership across an install: the ten megacorps,
-Church of the Machine God, and Shadows of Anarchy. The other 22 are re-earned.
+Faction membership does **not** survive an augmentation install. Eligible
+factions may preserve or regain an invitation, but `membership` and enemy bans
+are cleared, so the city/enemy choice is made again every install cycle.
+Installed augmentations and faction favor survive; faction reputation is banked
+into favor and then reset to zero.
 
 **Rep vs. favor** is what makes the reset loop non-obvious. Rep is destroyed on
 install and converted to favor; favor is permanent, compounds at +1% rep rate

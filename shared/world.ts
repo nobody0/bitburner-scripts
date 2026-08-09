@@ -47,6 +47,24 @@ export interface Prices {
   cloudServerLimit: number;
 }
 
+/** What the `stock` feature wants the farm to do to a host's symbol.
+ *
+ * `hack(host, {stock: true})` lowers the corresponding stock's second-order
+ * forecast and `grow(host, {stock: true})` raises it
+ * (StockMarket/PlayerInfluencing.ts), so a LONG is driven by grows and a SHORT by
+ * hacks. Setting the flag on BOTH sides of an HWGW batch would cancel out: in
+ * steady state the grow restores exactly what the hack took, so the two nudges
+ * are equal and opposite.
+ *
+ * `valuePerOp` is dollars of stock profit per influencing op at a steal fraction
+ * of 1, which is the unit the target solver can price — it scales by the steal
+ * fraction its own batch achieves. */
+export interface StockInfluence {
+  sym: string;
+  side: "long" | "short";
+  valuePerOp: number;
+}
+
 export interface WorldView {
   /** ms — wall clock in game, virtual clock in sim. */
   time: number;
@@ -56,6 +74,9 @@ export interface WorldView {
   /** BitNode multiplier subset for makeHackContext. Sim supplies real values;
    * the game driver supplies {} (BN1 defaults) until SF5 detection exists. */
   nodeMults?: HackNodeMults;
+  /** hostname -> stock manipulation intent, published by `stock`. Absent when
+   *  the market is not being played, which is the common case. */
+  stockInfluence?: Record<string, StockInfluence>;
 }
 
 export interface HgwAction {
@@ -68,13 +89,18 @@ export interface HgwAction {
   /** Extra landing delay for HWGW alignment: the op completes at
    * launch + duration + additionalMsec (both worlds honor it identically). */
   additionalMsec?: number;
+  /** Pass `{stock: true}` so this op moves the target organization's share
+   *  price. Set on grows for a long and hacks for a short, never both. */
+  stock?: boolean;
 }
 
 export type Action =
   | HgwAction
   | { type: "nuke"; target: string }
   | { type: "buyServer"; ram: number; name: string }
+  | { type: "upgradeServer"; host: string; ram: number }
   | { type: "upgradeHomeRam" }
+  | { type: "upgradeHomeCore" }
   | { type: "sleep"; ms: number };
 
 /** Delivered to the driver when a scheduled op settles. */

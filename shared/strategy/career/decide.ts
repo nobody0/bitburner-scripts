@@ -29,7 +29,7 @@ import {
  * a fixed view. The score itself remains the policy: exhaustive enumeration
  * prevents search shortcuts from obscuring which option won. */
 
-export type CareerActionType = "crime" | "class" | "gym" | "company" | "apply" | "promote" | "quit" | "travel" | "continue" | "idle";
+export type CareerActionType = "crime" | "class" | "gym" | "company" | "program" | "apply" | "promote" | "quit" | "travel" | "continue" | "idle";
 export type CareerPriorityBand = NeedUrgency | "income";
 
 export interface CareerAction {
@@ -38,6 +38,8 @@ export interface CareerAction {
   subject?: string;
   /** Job field for an application/promotion. */
   field?: string;
+  /** Exact university/gym used for a class action. */
+  location?: string;
   focus?: boolean;
   why: string;
 }
@@ -62,13 +64,15 @@ export interface CareerView {
   /** Crime stats from ns.singularity.getCrimeStats — never hardcoded here. */
   crimes: CrimeStats[];
   /** Courses available, with their cost and stat. */
-  courses: { name: string; skill: string; expPerSec: number; costPerSec: number }[];
+  courses: { name: string; skill: string; expPerSec: number; costPerSec: number; location: string }[];
+  /** Creatable programs requested by another feature. */
+  programs?: { name: string; timeMs: number; purchaseCost: number }[];
   karma: number;
   numPeopleKilled: number;
   skills: Record<string, number>;
   city: string;
   jobs?: Record<string, string>;
-  companies?: { name: string; rep: number; repPerSec?: number }[];
+  companies?: { name: string; rep: number; repPerSec?: number; moneyPerSec?: number }[];
   /** Whether this feature holds Player.currentWork this tick. */
   holdsWorkSlot: boolean;
   currentWork?: { kind: string; subject?: string };
@@ -76,6 +80,10 @@ export interface CareerView {
   allowProgressSwitch?: boolean;
   /** Money the arbiter granted, for paid courses. */
   moneyGranted: number;
+  /** Income that continues while player work runs (primarily the script farm). */
+  externalIncomePerSec?: number;
+  /** Best long-run training fallback for the current faction route. */
+  defaultSkill?: string;
 }
 
 export interface CareerDecision {
@@ -106,6 +114,7 @@ export const CAREER_KINDS: readonly NeedKind[] = [
   "employment",
   "quitCompany",
   "city",
+  "file",
 ];
 
 /** How much a unit of progress on each outstanding need is worth.
@@ -228,8 +237,9 @@ function scoreCourse(
   }
   return {
     action: {
-      type: course.costPerSec > 0 ? "class" : "gym",
+      type: course.location.includes("Gym") ? "gym" : "class",
       subject: course.name,
+      location: course.location,
       focus: true,
       why: `${course.expPerSec.toFixed(1)} ${course.skill} exp/sec at $${Math.round(course.costPerSec)}/sec`,
     },
@@ -266,9 +276,28 @@ function scoreCompany(
         : "company reputation requested; measuring its rate",
     },
     score,
-    moneyPerSec: 0,
+    moneyPerSec: company.moneyPerSec ?? 0,
     contributions,
     priority: priorityFor(contributions, values),
+  };
+}
+
+function scoreProgram(program: NonNullable<CareerView["programs"]>[number], values: ReturnType<typeof needValues>): ScoredAction {
+  const value = values.get(needKey({ kind: "file", subject: program.name }));
+  const seconds = Math.max(0.001, program.timeMs / 1_000);
+  const perSec = value ? value.remaining / seconds : 0;
+  const score = value ? (perSec / value.remaining) * value.weight : 0;
+  return {
+    action: {
+      type: "program",
+      subject: program.name,
+      focus: true,
+      why: `write in ${Math.ceil(seconds)}s instead of spending $${Math.round(program.purchaseCost).toLocaleString()}`,
+    },
+    score,
+    moneyPerSec: -program.purchaseCost / seconds,
+    contributions: value ? [{ kind: "file", subject: program.name, perSec, weight: value.weight, score }] : [],
+    priority: value?.urgency ?? "income",
   };
 }
 
@@ -313,6 +342,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     if (course.costPerSec > 0 && view.moneyGranted <= 0) continue;
     ranked.push(scoreCourse(course, view, values));
   }
+  for (const program of view.programs ?? []) ranked.push(scoreProgram(program, values));
 
   const jobs = view.jobs ?? {};
   for (const company of view.companies ?? []) {
@@ -369,7 +399,18 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // genuine objective rather than a filler — crime is how a fresh run pays for
   // its first port opener.
   const anyNeed = ranked.some((entry) => entry.score > 0);
-  const key = anyNeed ? (entry: ScoredAction) => entry.score : (entry: ScoredAction) => entry.moneyPerSec;
+  const defaultSkill = view.defaultSkill ?? "hacking";
+  const trainingSubject = defaultSkill === "hacking" ? "Algorithms" : defaultSkill === "charisma" ? "Leadership" : defaultSkill;
+  const trainingCourse = ranked
+    .filter((entry) => (entry.action.type === "class" || entry.action.type === "gym") && entry.action.subject === trainingSubject)
+    .sort((a, b) => b.score - a.score)[0];
+  const bestCareerIncome = Math.max(0, ...ranked.map((entry) => entry.moneyPerSec));
+  const trainByDefault = !anyNeed && trainingCourse !== undefined && (view.externalIncomePerSec ?? 0) >= bestCareerIncome;
+  const key = anyNeed
+    ? (entry: ScoredAction) => URGENCY_ORDER[entry.priority === "income" ? "nice" : entry.priority] * 1e12 + entry.score
+    : trainByDefault
+      ? (entry: ScoredAction) => entry === trainingCourse ? 1 : 0
+      : (entry: ScoredAction) => entry.moneyPerSec;
   ranked.sort((a, b) => {
     const diff = key(b) - key(a);
     if (diff !== 0) return diff;
@@ -378,7 +419,8 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   });
 
   const best = ranked[0]!;
-  if (!view.holdsWorkSlot) {
+  const needsSlot = actionUsesWorkSlot(best.action);
+  if (needsSlot && !view.holdsWorkSlot) {
     return {
       action: { type: "idle", why: "another feature holds Player.currentWork" },
       ranked,
@@ -392,7 +434,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // A repeatable task has already restarted itself at the completion boundary.
   // If it remains the best option, only re-arm the nextCompletion promise;
   // reissuing commitCrime here could throw away the first new 200 ms cycle.
-  if (sameWork(view.currentWork, best.action) && view.allowProgressSwitch) {
+  if (needsSlot && sameWork(view.currentWork, best.action) && view.allowProgressSwitch) {
     return {
       action: { type: "continue", subject: best.action.subject, why: `keep ${best.action.subject} and watch its next completion` },
       ranked,
@@ -405,7 +447,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // Reissuing the same work cancels and restarts it. At an ordinary review,
   // continuation is always the correct no-op; at an exact completion boundary
   // allowProgressSwitch deliberately bypasses this guard.
-  if (sameWork(view.currentWork, best.action) && !view.allowProgressSwitch) {
+  if (needsSlot && sameWork(view.currentWork, best.action) && !view.allowProgressSwitch) {
     return {
       action: { type: "idle", why: `already committing ${best.action.subject}` },
       ranked,
@@ -419,7 +461,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // Progress work is a transaction: until the completion promise resolves,
   // changing it destroys the partial unit. The arbiter also protects the slot,
   // but this strategy-side guard is the final defence against any stale grant.
-  if (careerWorkMode(view.currentWork?.kind) === "progress" && !view.allowProgressSwitch) {
+  if (needsSlot && careerWorkMode(view.currentWork?.kind) === "progress" && !view.allowProgressSwitch) {
     return {
       action: { type: "idle", why: `waiting for ${view.currentWork?.subject ?? view.currentWork?.kind ?? "progress work"} to complete` },
       ranked,
@@ -438,8 +480,16 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     incomeFallback: !anyNeed,
     why: anyNeed
       ? `best Σ needWeight·progress/sec (${best.score.toExponential(2)})`
-      : `no posted need career can serve — maximising income at $${Math.round(best.moneyPerSec)}/sec`,
+      : trainByDefault
+        ? `background income covers player work; training ${defaultSkill} for the current progression route`
+        : `no posted need career can serve — maximising income at $${Math.round(best.moneyPerSec)}/sec`,
   };
+}
+
+/** Calls that start player work consume the singleton slot. Administrative
+ * actions and player travel do not replace current work in v3.0.1. */
+export function actionUsesWorkSlot(action: Pick<CareerAction, "type">): boolean {
+  return action.type === "crime" || action.type === "class" || action.type === "gym" || action.type === "company" || action.type === "program";
 }
 
 function jobFieldForTitle(title: string): string {
@@ -456,6 +506,7 @@ function sameWork(current: CareerView["currentWork"], action: CareerAction): boo
   const kind = current.kind.toLowerCase();
   if (action.type === "crime") return kind === "crime" && current.subject === action.subject;
   if (action.type === "company") return kind === "company" && current.subject === action.subject;
+  if (action.type === "program") return kind === "create_program" && current.subject === action.subject;
   if (action.type === "class" || action.type === "gym") return kind === "class" && current.subject === action.subject;
   return false;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bitNodeMultipliers, worldDaemonSkill } from "../shared/features/bitnode.ts";
+import { bitNodeMultipliers, effectiveBitNodeMultipliers, worldDaemonSkill } from "../shared/features/bitnode.ts";
 import {
   BLACK_OP_COUNT,
   daedalusAugsRequired,
@@ -16,6 +16,13 @@ describe("per-node multipliers without the 4 GB getter", () => {
     expect(bitNodeMultipliers(14)!.HackingSpeedMultiplier).toBe(0.3);
     expect(bitNodeMultipliers(15)!.HackingSpeedMultiplier).toBe(0.6);
     expect(bitNodeMultipliers(1)!.HackingSpeedMultiplier).toBe(1);
+  });
+
+  test("the optional SF5 reading overrides rather than replaces the static baseline", () => {
+    const mults = effectiveBitNodeMultipliers(8, 0, { ScriptHackMoney: 0.123 })!;
+    expect(mults.ScriptHackMoney).toBe(0.123);
+    expect(mults.ScriptHackMoneyGain).toBe(0);
+    expect(mults.FourSigmaMarketDataCost).toBe(1);
   });
 
   test("w0r1d_d43m0n's requirement scales with the node", () => {
@@ -140,6 +147,7 @@ describe("BitNode goal presets", () => {
       totals: { moneyEarned: 0, hacks: 0 },
       factions: new Map(),
       augmentations: new Set(Array.from({ length: 30 }, (_, i) => `aug${i}`)),
+      installs: 0,
     };
     // 30 augs, the money and the skill, but no Red Pill: not done.
     expect(goal.done(ctx)).toBe(false);

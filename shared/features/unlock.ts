@@ -88,13 +88,22 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
   set("career", "yes", "");
   set("hacknet", "yes", "");
   set("side", "yes", "");
+  // The market is MONEY-gated, not capability-gated, which is why it belongs
+  // here rather than behind `hasWseAccount`. A WSE account costs $200m and the
+  // TIX API $5b, with no source file and no BitNode requirement — the same shape
+  // as buying a hacknet node. Gating the feature on the account instead made the
+  // purchase unreachable: a driver never runs while its own feature reads "no",
+  // so nothing could ever buy the thing that would unlock it. The account flags
+  // travel as ordinary state on the topic and the driver climbs the ladder
+  // itself; `restrictions.disable4SData` still tells it when the forecast cannot
+  // be bought at all.
+  set("stock", "yes", "");
 
   // Singularity gates the *automation*, not the game systems: without SF4 the
   // faction/augmentation getters cost 16x and are usually unaffordable, so we
   // treat SF4 as the unlock for the panel's data.
   set("factions", hasNode(r, 4), "requires BN4 or SF4 (Singularity) for the faction/augmentation API");
 
-  set("stock", fromFlag(r.hasWseAccount), "requires a WSE account (and TIX API access for positions)");
   set("gang", fromFlag(r.inGang), "requires a gang — BN2, or SF2 plus karma <= -54,000");
   set("corp", fromFlag(r.hasCorporation), "requires a corporation — BN3, or SF3 plus the seed money");
   // Both the division and its ns API are gated on BN6/SF6 OR BN7/SF7

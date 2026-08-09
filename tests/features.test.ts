@@ -5,6 +5,7 @@ import { changedMultipliers, BITNODES, DEFAULT_BITNODE_MULTIPLIERS } from "../sh
 import { FEATURE_IDS, type FeatureId } from "../shared/features/ids.ts";
 import { FEATURES, featureById, featureForBitNode } from "../shared/features/registry.ts";
 import { capsDelta, deriveCapabilities, sfLevel, unknownCapabilities } from "../shared/features/unlock.ts";
+import { MS_PER_TICK } from "../shared/strategy/stock/market.ts";
 import {
   FEATURE_DRIVERS,
   FEATURE_MODULES,
@@ -13,11 +14,16 @@ import {
   resetAllFeatures,
   selectDue,
 } from "../game/lib/features/index.ts";
+import { PROBE_EVERY_TICKS, TICK_MS } from "../game/lib/controller.ts";
+import { purchasableAugmentation } from "../game/lib/features/remaining.ts";
+import { NEUROFLUX } from "../shared/strategy/factions/augs.ts";
 import {
+  ALL_PROBES,
   DODGED_PROBES,
   GATE_PROBE,
   isStepped,
   LOCAL_PROBES,
+  probeCadenceMs,
   probeMethods,
   type ProbeAcc,
 } from "../game/lib/probes/index.ts";
@@ -109,8 +115,12 @@ describe("capability derivation", () => {
   test("nothing probed yields unknown everywhere, never a false lock", () => {
     const caps = unknownCapabilities();
     for (const id of FEATURE_IDS) {
-      // The always-on features are known without any reading.
-      if (["progression", "hacking", "career", "hacknet", "side"].includes(id)) {
+      // The always-on features are known without any reading. `stock` is one of
+      // them: the market is MONEY-gated, not capability-gated — a WSE account
+      // costs $200m and the TIX API $5b, with no source file and no BitNode
+      // requirement — so the account flags travel as ordinary state on the topic
+      // and the driver buys its own way in.
+      if (["progression", "hacking", "career", "hacknet", "side", "stock"].includes(id)) {
         expect(caps.unlocked[id]).toBe("yes");
       } else {
         expect(caps.unlocked[id], `${id} should be unknown, not locked`).toBe("unknown");
@@ -208,6 +218,7 @@ const probeContext = {
     home: { hostname: "home", maxRam: 64, ramUsed: 8, cpuCores: 1, hasAdminRights: true, purchasedByPlayer: false },
   },
   caps: deriveCapabilities({ bitNode: 1 }),
+  state: freshState(),
 } as never;
 
 async function runAllProbes(): Promise<{
@@ -219,6 +230,11 @@ async function runAllProbes(): Promise<{
   for (const probe of [...LOCAL_PROBES, ...DODGED_PROBES]) {
     try {
       let emitted: { key: string; data: unknown }[];
+      // The Go probe intentionally validates the game's finite board sizes;
+      // the generic two-element proxy is not a legal board fixture.
+      const stubNs = probe.id === "go.board"
+        ? ({ go: { getBoardState: () => Array<string>(5).fill("....."), getMoveHistory: () => [] } } as never)
+        : universal();
       if (probe.kind === "local") {
         emitted = probe.run(probeContext);
       } else if (isStepped(probe)) {
@@ -226,10 +242,10 @@ async function runAllProbes(): Promise<{
         // step against the shared accumulator, then finish(). That also
         // covers the rule that finish() must tolerate whatever the steps left.
         const acc: ProbeAcc = {};
-        for (const step of probe.steps) await step.run(universal(), probeContext, acc);
+        for (const step of probe.steps) await step.run(stubNs, probeContext, acc);
         emitted = probe.finish(acc);
       } else {
-        emitted = await probe.run(universal(), probeContext);
+        emitted = await probe.run(stubNs, probeContext);
       }
       emissions.set(probe.id, emitted);
     } catch (error) {
@@ -275,6 +291,41 @@ describe("probe table", () => {
     // Every feature except those with no ns surface must have a probe.
     for (const feature of FEATURES) {
       expect(probed.has(feature.id), `${feature.id} has no probe`).toBe(true);
+    }
+  });
+
+  test("no probe's declared cadence is silently coarsened by the caller", () => {
+    // The invariant this replaces a bug with. Acquisition used to run only inside
+    // the 30 s fleet sweep, which made 30 s the floor for the whole table however
+    // small a probe's `everyMs` — the local tier asked for 5 s and got 30 s for
+    // the life of the project, and the market's 4 s probe saw one price tick in
+    // five and measured volatility 3.5x too high off the aliased samples.
+    //
+    // So the controller derives its interval FROM the table instead of choosing
+    // one, and this pins that: whatever the fastest probe asks for, the caller
+    // runs at least that often. `everyMs` is the sole authority on cadence.
+    const fastest = probeCadenceMs(ALL_PROBES);
+    expect(fastest).toBeGreaterThan(0);
+    expect(PROBE_EVERY_TICKS * TICK_MS).toBeLessThanOrEqual(fastest);
+    // And at least one tick: nothing is read faster than the frame.
+    expect(PROBE_EVERY_TICKS).toBeGreaterThanOrEqual(1);
+  });
+
+  test("a fast probe is cheap, because it is paid for every time it runs", () => {
+    // A probe declaring a fast cadence is making a claim about its SUBJECT having
+    // a clock. It also commits to being affordable at that rate — the dodge budget
+    // stays near a few GB for most of a run, and an expensive probe asking to be
+    // read every couple of seconds would simply be skipped forever while starving
+    // the batch it shares a stub with.
+    const budgetish = 14; // roughly what a mid-game reserve can place in one stub
+    for (const probe of DODGED_PROBES) {
+      if (probe.everyMs > 10_000) continue;
+      const methods = new Set(probeMethods(probe));
+      expect(methods.size, `${probe.id} names no methods`).toBeGreaterThan(0);
+      // Counted as distinct functions, which is how Bitburner charges a stub.
+      expect(methods.size, `${probe.id} is too broad for a ${probe.everyMs}ms cadence`).toBeLessThanOrEqual(
+        budgetish / 2,
+      );
     }
   });
 
@@ -331,6 +382,79 @@ describe("feature modules", () => {
     for (const id of FEATURE_IDS) expect(featureModule(id).driver).toBe(FEATURE_MODULES[id].driver);
   });
 
+  describe("the install barrier's augmentation half", () => {
+    /** A state carrying exactly the fields `purchasableAugmentation` reads. */
+    function withOffers(
+      offers: { name: string; faction: string; price: number; affordableRep: boolean; owned?: boolean }[],
+      over: { money?: number; joined?: string[]; ownedAugs?: string[]; prereqs?: Record<string, string[]> } = {},
+    ) {
+      const state = freshState();
+      state.topics.player = { money: over.money ?? 1e12 } as unknown as GameState["topics"]["player"];
+      state.topics.factions = {
+        joined: over.joined ?? ["CyberSec"],
+        ownedAugs: over.ownedAugs ?? [],
+        offers: offers.map((offer) => ({ repReq: 0, owned: false, ...offer })),
+        ...(over.prereqs
+          ? { augMeta: Object.fromEntries(Object.entries(over.prereqs).map(([name, prereqs]) => [name, { prereqs }])) }
+          : {}),
+      } as unknown as GameState["topics"]["factions"];
+      return { state, caps: unknownCapabilities(), now: 0 };
+    }
+
+    const oneOff = { name: "Cranial Signal Processors - Gen I", faction: "CyberSec", price: 1e6, affordableRep: true };
+
+    test("NeuroFlux DOES hold the barrier, and holds it even when already owned", () => {
+      // It is the one repeatable augmentation, which invites the assumption that
+      // blocking on it can never clear. It can: `getAugCost` scales both its price
+      // and its reputation requirement by 1.14 per level, on top of the
+      // 1.9-per-queued escalation, so every level bought makes the next strictly
+      // dearer in BOTH currencies and the affordable set runs out. Buying as many
+      // levels as the cash allows is the POINT of the last-chance drain — money
+      // does not survive an install and a permanent multiplier does.
+      const offer = { name: NEUROFLUX, faction: "CyberSec", price: 1e6, affordableRep: true };
+      expect(purchasableAugmentation(withOffers([offer]))).toBe(NEUROFLUX);
+      // Exempt from the owned test, and from that alone: the next level is a fresh
+      // purchase, where every other augmentation is bought exactly once.
+      expect(purchasableAugmentation(withOffers([{ ...offer, owned: true }]))).toBe(NEUROFLUX);
+      // It still has to be affordable, which is what makes the barrier terminate.
+      expect(purchasableAugmentation(withOffers([offer], { money: 1 }))).toBeUndefined();
+      expect(purchasableAugmentation(withOffers([{ ...offer, affordableRep: false }]))).toBeUndefined();
+    });
+
+    test("a one-off augmentation DOES hold it — that is the point", () => {
+      expect(purchasableAugmentation(withOffers([oneOff]))).toBe(oneOff.name);
+    });
+
+    test("only offers that can actually be BOUGHT count", () => {
+      // `factions.offers` spans every faction the node defines, joined or not,
+      // filtered only by `owned`. So "affordable by price" alone is nowhere near
+      // "can be bought", and each of these would otherwise stall the reset forever.
+      expect(purchasableAugmentation(withOffers([oneOff], { money: 1 })), "too expensive").toBeUndefined();
+      expect(purchasableAugmentation(withOffers([oneOff], { joined: [] })), "faction not joined").toBeUndefined();
+      expect(
+        purchasableAugmentation(withOffers([{ ...oneOff, affordableRep: false }])),
+        "reputation not met",
+      ).toBeUndefined();
+      expect(purchasableAugmentation(withOffers([{ ...oneOff, owned: true }])), "already owned").toBeUndefined();
+      expect(
+        purchasableAugmentation(withOffers([oneOff], { prereqs: { [oneOff.name]: ["Something Else"] } })),
+        "prerequisite unowned",
+      ).toBeUndefined();
+      // ...and with the prerequisite owned it counts again.
+      expect(
+        purchasableAugmentation(
+          withOffers([oneOff], { prereqs: { [oneOff.name]: ["Something Else"] }, ownedAugs: ["Something Else"] }),
+        ),
+      ).toBe(oneOff.name);
+    });
+
+    test("no offers probed yet is not evidence of exhaustion", () => {
+      const ctx = withOffers([]);
+      delete (ctx.state.topics.factions as { offers?: unknown }).offers;
+      expect(purchasableAugmentation(ctx)).toBeUndefined();
+    });
+  });
+
   test("reset hooks are registered, not hardcoded in the controller", () => {
     // The property that matters: resetAllFeatures() reaches every module that
     // declares a reset, so adding a feature with cross-run state cannot
@@ -372,7 +496,21 @@ describe("feature modules", () => {
       lastAugReset: 0,
       lastNodeReset: 0,
       multipliers: { ScriptHackMoney: 0.2 },
-      plan: { phase: "start", install: false, homeRamBudgetFraction: 0.1, favorCrossings: [], why: "stale" },
+      plan: {
+        phase: "start",
+        installWanted: false,
+        installBlockers: [],
+        installReady: false,
+        queuedAugmentations: [],
+        install: false,
+        homeRamBudgetFraction: 0.1,
+        favorCrossings: [],
+        why: "stale",
+        forecasts: {
+          node: { state: "unknown", evaluatedAt: 0, nextRecalibrationAt: 1, basis: "test", reason: "test" },
+          install: { state: "unknown", evaluatedAt: 0, nextRecalibrationAt: 1, basis: "test", reason: "test" },
+        },
+      },
     };
     resetAllFeatures(state);
     expect(state.topics.factions).toBeUndefined();
@@ -453,14 +591,24 @@ describe("feature drivers", () => {
     }
   });
 
-  test("hacking runs at the HWGW spacer; nothing else is that hot", () => {
-    // Batch ops land on 200ms slots, so a slower cadence would miss them.
-    // Everything else is slower by orders of magnitude — which is the whole
-    // reason the frame schedules by cadence instead of running everything.
+  test("only hacking and stock run faster than the 5 s floor, each for a reason", () => {
+    // Batch ops land on 200ms slots, so a slower hacking cadence would miss them.
+    //
+    // `stock` is the one other exception, at 4 s, and it is not a preference: the
+    // market updates every 6 s (4 s while burning stored cycles), and the entire
+    // no-4S signal — measured volatility, the estimated forecast, and the 75-tick
+    // cycle clock — is recovered by observing every tick exactly once. A poller
+    // slower than the tick sees a fraction of them and can recover none of it.
+    // It must also be no slower than the price probe, or a tick the probe captured
+    // would be overwritten before the driver folded it into the history.
     const hacking = FEATURE_DRIVERS.find((d) => d.id === "hacking")!;
     expect(hacking.everyMs).toBe(200);
+    const stock = FEATURE_DRIVERS.find((d) => d.id === "stock")!;
+    expect(stock.everyMs).toBe(4_000);
+    expect(stock.everyMs).toBeLessThan(MS_PER_TICK);
     for (const driver of FEATURE_DRIVERS) {
-      if (driver.id !== "hacking") expect(driver.everyMs).toBeGreaterThanOrEqual(5_000);
+      if (driver.id === "hacking" || driver.id === "stock") continue;
+      expect(driver.everyMs, `${driver.id} is unexpectedly hot`).toBeGreaterThanOrEqual(5_000);
     }
   });
 });

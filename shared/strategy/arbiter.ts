@@ -45,6 +45,8 @@ export interface Claim {
   /** Tie-break, in the claimant's own units. Only compared between claims of
    *  equal priority, where "own units" is close enough to fair. */
   ratePerSec?: number;
+  /** Comparable economic return: marginal dollars/sec divided by cost. */
+  returnPerDollarSec?: number;
   /** Time claims: refuse pre-emption until this timestamp. Work that has
    *  already sunk cost into a partial reputation tick should not be thrown
    *  away by a marginally higher bidder. */
@@ -126,6 +128,8 @@ export const PREEMPT_MARGIN = 10;
  * the upgrade competes with it for the same dollars every tick and would
  * otherwise always win by being cheaper and always ready. */
 export const PRIORITY = {
+  /** Freeze every remaining dollar after the final augmentation sweep. */
+  "progression:install-freeze": 110,
   /** Money set aside to buy a planned augmentation set. */
   "factions:aug-fund": 90,
   /** Donating for reputation, once favor allows it. */
@@ -146,6 +150,11 @@ export const PRIORITY = {
    * priority change has the same result regardless of which side is incumbent. */
   "career:wanted-request": 45,
   "career:nice-request": 35,
+  /** Atomic Hacknet purchases that directly clear another feature's posted
+   * milestone. They outrank ordinary income only while that need is open. */
+  "hacknet:blocking-need": 75,
+  "hacknet:wanted-need": 45,
+  "hacknet:nice-need": 35,
   /** Temporary ownership while a completable task has unbanked progress. This
    * is a lock, not an assertion that its objective is more valuable. */
   "career:progress-lock": 100,
@@ -155,8 +164,16 @@ export const PRIORITY = {
   "corp:seed": 85,
   "corp:expand": 40,
   "gang:equipment": 35,
+  /** Economically interchangeable income investments compare by ROI. */
+  "income:investment": 25,
   "hacknet:upgrade": 25,
   "stock:position": 20,
+  /** A position in a node where hacked money arrives at ZERO value — BN8's
+   *  `ScriptHackMoneyGain: 0`. There the market is not one income source among
+   *  several, it is the only one, so a hacknet upgrade or a home-RAM investment
+   *  must not outbid it. Still below `factions:aug-fund`: even in BN8 the money
+   *  exists to become permanent multipliers. */
+  "stock:sole-income": 55,
   "hacking:infrastructure": 45,
   /** Probe RAM. Acquisition outranks spending, because a decision made on
    *  stale state is worse than a decision deferred. */
@@ -174,6 +191,9 @@ export function priorityOf(key: PriorityKey): number {
  * or on collection order, so the same claim set always resolves the same way. */
 function compareClaims(a: Claim, b: Claim): number {
   if (b.priority !== a.priority) return b.priority - a.priority;
+  const aReturn = a.returnPerDollarSec ?? 0;
+  const bReturn = b.returnPerDollarSec ?? 0;
+  if (bReturn !== aReturn) return bReturn - aReturn;
   const aRate = a.ratePerSec ?? 0;
   const bRate = b.ratePerSec ?? 0;
   if (bRate !== aRate) return bRate - aRate;

@@ -6,6 +6,11 @@ export type Range = [number, number];
 
 export interface VendoredServer {
   host: string;
+  /** The company this server belongs to. Load-bearing, not decorative: it
+   *  is the key hack/grow stock influence looks the symbol up by
+   *  (StockMarket/PlayerInfluencing.ts), so it is what maps a farm target
+   *  onto a tradeable stock. */
+  org: string;
   /** BASE money. The live `moneyMax` is `25 * roll * ServerMaxMoney`. */
   money?: Range;
   skill?: Range;
@@ -20,6 +25,7 @@ export interface VendoredServer {
 export const SERVER_METADATA: Record<string, VendoredServer> = {
   "ecorp": {
     "host": "ecorp",
+    "org": "ECorp",
     "money": [
       30000000000,
       70000000000
@@ -40,6 +46,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "megacorp": {
     "host": "megacorp",
+    "org": "MegaCorp",
     "money": [
       40000000000,
       60000000000
@@ -60,6 +67,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "b-and-a": {
     "host": "b-and-a",
+    "org": "Bachman & Associates",
     "money": [
       15000000000,
       30000000000
@@ -80,6 +88,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "blade": {
     "host": "blade",
+    "org": "Blade Industries",
     "money": [
       10000000000,
       40000000000
@@ -104,6 +113,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "nwo": {
     "host": "nwo",
+    "org": "NWO",
     "money": [
       20000000000,
       40000000000
@@ -124,6 +134,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "clarkinc": {
     "host": "clarkinc",
+    "org": "Clarke Incorporated",
     "money": [
       15000000000,
       25000000000
@@ -144,6 +155,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "omnitek": {
     "host": "omnitek",
+    "org": "OmniTek Incorporated",
     "money": [
       13000000000,
       22000000000
@@ -168,6 +180,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "4sigma": {
     "host": "4sigma",
+    "org": "Four Sigma",
     "money": [
       15000000000,
       25000000000
@@ -188,6 +201,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "kuai-gong": {
     "host": "kuai-gong",
+    "org": "KuaiGong International",
     "money": [
       20000000000,
       30000000000
@@ -208,6 +222,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "fulcrumtech": {
     "host": "fulcrumtech",
+    "org": "Fulcrum Technologies",
     "money": [
       1400000000,
       1800000000
@@ -232,6 +247,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "fulcrumassets": {
     "host": "fulcrumassets",
+    "org": "Fulcrum Technologies",
     "money": [
       1000000,
       1000000
@@ -252,6 +268,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "stormtech": {
     "host": "stormtech",
+    "org": "Storm Technologies",
     "money": [
       1000000000,
       1200000000
@@ -272,6 +289,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "defcomm": {
     "host": "defcomm",
+    "org": "DefComm",
     "money": [
       800000000,
       950000000
@@ -292,6 +310,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "infocomm": {
     "host": "infocomm",
+    "org": "InfoComm",
     "money": [
       600000000,
       900000000
@@ -312,6 +331,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "helios": {
     "host": "helios",
+    "org": "Helios Labs",
     "money": [
       550000000,
       750000000
@@ -336,6 +356,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "vitalife": {
     "host": "vitalife",
+    "org": "VitaLife",
     "money": [
       700000000,
       800000000
@@ -360,6 +381,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "icarus": {
     "host": "icarus",
+    "org": "Icarus Microsystems",
     "money": [
       900000000,
       1000000000
@@ -380,6 +402,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "univ-energy": {
     "host": "univ-energy",
+    "org": "Universal Energy",
     "money": [
       1100000000,
       1200000000
@@ -404,6 +427,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "titan-labs": {
     "host": "titan-labs",
+    "org": "Titan Laboratories",
     "money": [
       750000000,
       900000000
@@ -428,6 +452,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "microdyne": {
     "host": "microdyne",
+    "org": "Microdyne Technologies",
     "money": [
       500000000,
       700000000
@@ -452,6 +477,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "taiyang-digital": {
     "host": "taiyang-digital",
+    "org": "Taiyang Digital",
     "money": [
       800000000,
       900000000
@@ -472,6 +498,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "galactic-cyber": {
     "host": "galactic-cyber",
+    "org": "Galactic Cybersystems",
     "money": [
       750000000,
       850000000
@@ -492,6 +519,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "aerocorp": {
     "host": "aerocorp",
+    "org": "AeroCorp",
     "money": [
       1000000000,
       1200000000
@@ -512,6 +540,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "omnia": {
     "host": "omnia",
+    "org": "Omnia Cybersystems",
     "money": [
       900000000,
       1000000000
@@ -536,6 +565,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "zb-def": {
     "host": "zb-def",
+    "org": "ZB Defense Industries",
     "money": [
       900000000,
       1100000000
@@ -556,6 +586,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "applied-energetics": {
     "host": "applied-energetics",
+    "org": "Applied Energetics",
     "money": [
       700000000,
       1000000000
@@ -576,6 +607,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "solaris": {
     "host": "solaris",
+    "org": "Solaris Space Systems",
     "money": [
       700000000,
       900000000
@@ -600,6 +632,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "deltaone": {
     "host": "deltaone",
+    "org": "DeltaOne",
     "money": [
       1300000000,
       1700000000
@@ -620,6 +653,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "global-pharm": {
     "host": "global-pharm",
+    "org": "Global Pharmaceuticals",
     "money": [
       1500000000,
       1750000000
@@ -644,6 +678,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "nova-med": {
     "host": "nova-med",
+    "org": "Nova Medical",
     "money": [
       1100000000,
       1250000000
@@ -664,6 +699,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "zeus-med": {
     "host": "zeus-med",
+    "org": "Zeus Medical",
     "money": [
       1300000000,
       1500000000
@@ -684,6 +720,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "unitalife": {
     "host": "unitalife",
+    "org": "UnitaLife Group",
     "money": [
       1000000000,
       1100000000
@@ -708,6 +745,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "lexo-corp": {
     "host": "lexo-corp",
+    "org": "LexoCorp",
     "money": [
       700000000,
       800000000
@@ -732,6 +770,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "rho-construction": {
     "host": "rho-construction",
+    "org": "Rho Construction",
     "money": [
       500000000,
       700000000
@@ -756,6 +795,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "alpha-ent": {
     "host": "alpha-ent",
+    "org": "Alpha Enterprises",
     "money": [
       600000000,
       750000000
@@ -780,6 +820,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "aevum-police": {
     "host": "aevum-police",
+    "org": "Aevum Police Headquarters",
     "money": [
       200000000,
       400000000
@@ -804,6 +845,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "rothman-uni": {
     "host": "rothman-uni",
+    "org": "Rothman University",
     "money": [
       175000000,
       250000000
@@ -828,6 +870,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "zb-institute": {
     "host": "zb-institute",
+    "org": "ZB Institute of Technology",
     "money": [
       800000000,
       1100000000
@@ -852,6 +895,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "summit-uni": {
     "host": "summit-uni",
+    "org": "Summit University",
     "money": [
       200000000,
       350000000
@@ -876,6 +920,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "syscore": {
     "host": "syscore",
+    "org": "SysCore Securities",
     "money": [
       400000000,
       600000000
@@ -896,6 +941,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "catalyst": {
     "host": "catalyst",
+    "org": "Catalyst Ventures",
     "money": [
       300000000,
       550000000
@@ -920,6 +966,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "the-hub": {
     "host": "the-hub",
+    "org": "The Hub",
     "money": [
       150000000,
       200000000
@@ -944,6 +991,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "computek": {
     "host": "computek",
+    "org": "CompuTek",
     "money": [
       220000000,
       250000000
@@ -964,6 +1012,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "netlink": {
     "host": "netlink",
+    "org": "NetLink Technologies",
     "money": [
       275000000,
       275000000
@@ -988,6 +1037,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "johnson-ortho": {
     "host": "johnson-ortho",
+    "org": "Johnson Orthopedics",
     "money": [
       70000000,
       85000000
@@ -1008,6 +1058,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "n00dles": {
     "host": "n00dles",
+    "org": "Noodle Bar",
     "money": [
       70000,
       70000
@@ -1032,6 +1083,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "foodnstuff": {
     "host": "foodnstuff",
+    "org": "FoodNStuff",
     "money": [
       2000000,
       2000000
@@ -1056,6 +1108,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "sigma-cosmetics": {
     "host": "sigma-cosmetics",
+    "org": "Sigma Cosmetics",
     "money": [
       2300000,
       2300000
@@ -1080,6 +1133,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "joesguns": {
     "host": "joesguns",
+    "org": "Joe's Guns",
     "money": [
       2500000,
       2500000
@@ -1104,6 +1158,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "zer0": {
     "host": "zer0",
+    "org": "ZER0 Nightclub",
     "money": [
       7500000,
       7500000
@@ -1128,6 +1183,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "nectar-net": {
     "host": "nectar-net",
+    "org": "Nectar Nightclub Network",
     "money": [
       2750000,
       2750000
@@ -1152,6 +1208,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "neo-net": {
     "host": "neo-net",
+    "org": "Neo Nightclub Network",
     "money": [
       5000000,
       5000000
@@ -1176,6 +1233,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "silver-helix": {
     "host": "silver-helix",
+    "org": "Silver Helix",
     "money": [
       45000000,
       45000000
@@ -1200,6 +1258,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "hong-fang-tea": {
     "host": "hong-fang-tea",
+    "org": "HongFang Teahouse",
     "money": [
       3000000,
       3000000
@@ -1224,6 +1283,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "harakiri-sushi": {
     "host": "harakiri-sushi",
+    "org": "HaraKiri Sushi Bar Network",
     "money": [
       4000000,
       4000000
@@ -1248,6 +1308,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "phantasy": {
     "host": "phantasy",
+    "org": "Phantasy Club",
     "money": [
       24000000,
       24000000
@@ -1272,6 +1333,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "max-hardware": {
     "host": "max-hardware",
+    "org": "Max Hardware Store",
     "money": [
       10000000,
       10000000
@@ -1296,6 +1358,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "omega-net": {
     "host": "omega-net",
+    "org": "Omega Software",
     "money": [
       60000000,
       70000000
@@ -1320,6 +1383,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "crush-fitness": {
     "host": "crush-fitness",
+    "org": "Crush Fitness",
     "money": [
       40000000,
       60000000
@@ -1340,6 +1404,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "iron-gym": {
     "host": "iron-gym",
+    "org": "Iron Gym Network",
     "money": [
       20000000,
       20000000
@@ -1364,6 +1429,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "millenium-fitness": {
     "host": "millenium-fitness",
+    "org": "Millenium Fitness Network",
     "money": [
       250000000,
       250000000
@@ -1388,6 +1454,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "powerhouse-fitness": {
     "host": "powerhouse-fitness",
+    "org": "Powerhouse Fitness",
     "money": [
       900000000,
       900000000
@@ -1412,6 +1479,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "snap-fitness": {
     "host": "snap-fitness",
+    "org": "Snap Fitness",
     "money": [
       450000000,
       450000000
@@ -1432,6 +1500,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "run4theh111z": {
     "host": "run4theh111z",
+    "org": "The Runners",
     "money": [
       0,
       0
@@ -1456,6 +1525,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "I.I.I.I": {
     "host": "I.I.I.I",
+    "org": "I.I.I.I",
     "money": [
       0,
       0
@@ -1480,6 +1550,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "avmnite-02h": {
     "host": "avmnite-02h",
+    "org": "NiteSec",
     "money": [
       0,
       0
@@ -1504,6 +1575,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   ".": {
     "host": ".",
+    "org": ".",
     "money": [
       0,
       0
@@ -1528,6 +1600,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "CSEC": {
     "host": "CSEC",
+    "org": "CyberSec",
     "money": [
       0,
       0
@@ -1552,6 +1625,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "The-Cave": {
     "host": "The-Cave",
+    "org": "Helios",
     "money": [
       0,
       0
@@ -1572,6 +1646,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
   },
   "w0r1d_d43m0n": {
     "host": "w0r1d_d43m0n",
+    "org": "w0r1d_d43m0n",
     "money": [
       0,
       0

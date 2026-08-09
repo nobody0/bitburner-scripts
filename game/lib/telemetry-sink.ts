@@ -24,10 +24,20 @@ export function makeSink(tel: Telemetry): TelemetrySink {
   // rather than crowding everything else out of the event feed every sweep.
   const sentSkips = new Map<string, number>();
   const sentFailures = new Map<string, string>();
+  const sentContractFailures = new Set<string>();
   let sentBatch: string | undefined;
+  let sentInfrastructureDecision: string | undefined;
+  let sentHacknetDecision: string | undefined;
+  let sentHashDecision: string | undefined;
+  let sentFactionDecision: string | undefined;
+  let sentInfrastructureResultAt: number | undefined;
+  let sentHacknetResultAt: number | undefined;
+  let sentHashResultAt: number | undefined;
+  let sentFactionResultAt: number | undefined;
 
   return {
     flush(state: GameState): void {
+      const dirty = new Set(state.dirty);
       for (const key of state.dirty) {
         const value = state.topics[key];
         if (value === undefined) continue;
@@ -38,6 +48,121 @@ export function makeSink(tel: Telemetry): TelemetrySink {
         if (key === "player") tel.mirror(stateKey("getPlayer"), value);
       }
       state.dirty.clear();
+
+      // Topic state remains the complete, high-frequency audit trail. These
+      // transition events are its compact index: replays and the live UI can
+      // answer "what changed?" without diffing thousands of snapshots. The
+      // signatures intentionally ignore continuously moving inputs such as
+      // cash and the horizon; a new winner, hold reason or funding outcome is
+      // a decision transition, another second passing is not.
+      const moneyArbitration = state.topics.progression?.arbitration
+        ? {
+            grants: state.topics.progression.arbitration.grants.filter((grant) => grant.resource === "money"),
+            denied: state.topics.progression.arbitration.denied.filter((denial) => denial.resource === "money"),
+            remaining: state.topics.progression.arbitration.remaining.money,
+          }
+        : undefined;
+      const moneyArbitrationDecision = moneyArbitration
+        ? { grants: moneyArbitration.grants, denied: moneyArbitration.denied }
+        : undefined;
+      if (dirty.has("fleet")) {
+        const plan = state.topics.fleet?.infrastructurePlan;
+        if (plan) {
+          const signature = JSON.stringify({
+            buy: plan.buy,
+            why: plan.why,
+            hold: plan.hold,
+            funded: plan.buy ? plan.moneyGranted >= plan.buy.cost : false,
+            arbitration: moneyArbitrationDecision,
+          });
+          if (signature !== sentInfrastructureDecision) {
+            sentInfrastructureDecision = signature;
+            tel.event("investment.decision", { subsystem: "infrastructure", plan, arbitration: moneyArbitration });
+          }
+          if (plan.lastResult && plan.lastResult.at !== sentInfrastructureResultAt) {
+            sentInfrastructureResultAt = plan.lastResult.at;
+            tel.event("investment.result", { subsystem: "infrastructure", result: plan.lastResult });
+          }
+        }
+      }
+
+      if (dirty.has("hacknet")) {
+        const plan = state.topics.hacknet?.plan;
+        if (plan) {
+          const signature = JSON.stringify({
+            candidate: plan.candidate,
+            buy: plan.buy,
+            why: plan.why,
+            hold: plan.hold,
+            funded: plan.candidate ? plan.moneyGranted >= plan.candidate.cost : false,
+            arbitration: moneyArbitrationDecision,
+          });
+          if (signature !== sentHacknetDecision) {
+            sentHacknetDecision = signature;
+            tel.event("investment.decision", { subsystem: "hacknet", plan, arbitration: moneyArbitration });
+          }
+          if (plan.lastResult && plan.lastResult.at !== sentHacknetResultAt) {
+            sentHacknetResultAt = plan.lastResult.at;
+            tel.event("investment.result", { subsystem: "hacknet", result: plan.lastResult });
+          }
+
+          const hashes = plan.hashes;
+          if (hashes) {
+            const hashSignature = JSON.stringify({
+              spend: hashes.spend,
+              reserve: hashes.reserve,
+              capacityTarget: hashes.capacityTarget,
+              why: hashes.why,
+            });
+            if (hashSignature !== sentHashDecision) {
+              sentHashDecision = hashSignature;
+              tel.event("hash.decision", { plan: hashes });
+            }
+            if (hashes.lastResult && hashes.lastResult.at !== sentHashResultAt) {
+              sentHashResultAt = hashes.lastResult.at;
+              tel.event("hash.result", hashes.lastResult);
+            }
+          }
+        }
+      }
+
+      if (dirty.has("factions")) {
+        const plan = state.topics.factions?.plan;
+        if (plan) {
+          const signature = JSON.stringify({
+            intent: plan.objective?.intent
+              ? {
+                  faction: plan.objective.intent.faction,
+                  repTarget: plan.objective.intent.repTarget,
+                  augmentations: plan.objective.intent.augmentations,
+                }
+              : undefined,
+            runner: plan.objective?.runnerUp
+              ? {
+                  faction: plan.objective.runnerUp.faction,
+                  repTarget: plan.objective.runnerUp.repTarget,
+                }
+              : undefined,
+            action: {
+              type: plan.action.type,
+              faction: plan.action.faction,
+              augmentation: plan.action.augmentation,
+              city: plan.action.city,
+              amount: plan.action.amount,
+            },
+            blocked: plan.blocked,
+            recommendInstall: Boolean(plan.recommendInstall),
+          });
+          if (signature !== sentFactionDecision) {
+            sentFactionDecision = signature;
+            tel.event("faction.decision", { plan });
+          }
+          if (plan.lastResult && plan.lastResult.at !== sentFactionResultAt) {
+            sentFactionResultAt = plan.lastResult.at;
+            tel.event("faction.result", plan.lastResult);
+          }
+        }
+      }
 
       for (const key of state.mirrorDirty) {
         tel.mirror(key, state.mirrors[key]);
@@ -60,6 +185,20 @@ export function makeSink(tel: Telemetry): TelemetrySink {
       }
       for (const id of sentFailures.keys()) {
         if (state.probeFailures[id] === undefined) sentFailures.delete(id);
+      }
+
+      // Full contract inputs/answers are useful exactly once: when a file is
+      // quarantined. Repeating them in every Side state record made a single
+      // stubborn failure dominate JSONL. The topic carries compact summaries;
+      // this event preserves the reproducible replay.
+      const quarantine = state.contractQuarantine ?? {};
+      for (const [key, failure] of Object.entries(quarantine)) {
+        if (sentContractFailures.has(key)) continue;
+        sentContractFailures.add(key);
+        tel.event("contract.quarantined", failure);
+      }
+      for (const key of sentContractFailures) {
+        if (quarantine[key] === undefined) sentContractFailures.delete(key);
       }
 
       // In steady state the same handful of probes runs every sweep forever;

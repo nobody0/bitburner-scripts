@@ -26,6 +26,25 @@ export interface ProgressionView {
   affordableValueProduct: number;
   /** Is any faction work currently in progress? */
   factionWorkInProgress: boolean;
+  /** The faction planner has finished its last-chance purchase/donation sweep. */
+  factionsReadyToInstall: boolean;
+  /** The stock feature's OWN answer to "may an install destroy the book?" —
+   *  `stock.plan.flat`, not a scan of its positions. Nothing held, nothing
+   *  pending, nothing wanted. */
+  stockReadyToInstall: boolean;
+  /** An augmentation that could still be BOUGHT right now: joined faction,
+   *  reputation met, prerequisites owned, price affordable.
+   *
+   *  The other half of the barrier, and the reason the barrier is not simply "the
+   *  phase says ending". Cash does not survive an install, so every dollar that
+   *  could still have become a permanent multiplier is destroyed by resetting
+   *  early — which makes a purchasable augmentation a strictly better use of the
+   *  next pass than the reset. Named rather than boolean so the blocker can say
+   *  WHICH one is holding it up; a value that never clears is a factions bug made
+   *  visible instead of money silently thrown away. */
+  purchasableAugmentation?: string;
+  /** A graft has already paid its cash cost and must finish before reset. */
+  graftInProgress: boolean;
   /** Money on hand. */
   money: number;
   /** Money earned since the last install. */
@@ -41,10 +60,21 @@ export interface ProgressionView {
   runSec: number;
 }
 
+export type InstallBlockerKind = "factions" | "stock" | "graft" | "augmentations";
+
+export interface InstallBlocker {
+  kind: InstallBlockerKind;
+  why: string;
+}
+
 export interface ProgressionDecision {
   phase: RunPhase;
-  /** Should the run end now? */
-  install: boolean;
+  /** The economic cadence says this run should end, before safety barriers. */
+  installWanted: boolean;
+  /** Preconditions that must clear before the irreversible reset. */
+  installBlockers: InstallBlocker[];
+  /** The reset is economically wanted and every observed barrier is clear. */
+  installReady: boolean;
   /** Fraction of cash the home-RAM budget may take this phase. */
   homeRamBudgetFraction: number;
   /** Factions whose banked reputation would cross the donation threshold on
@@ -95,19 +125,39 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   // Install when the run is in `ending` AND there is something to install.
   // The favor crossing is the strongest single argument, so it is reported
   // even when it is not decisive.
-  const install = phase === "ending" && view.queued.length > 0;
-
-  const why = install
+  const installWanted = phase === "ending" && view.queued.length > 0;
+  const installBlockers: InstallBlocker[] = [];
+  if (installWanted && !view.factionsReadyToInstall) {
+    installBlockers.push({ kind: "factions", why: "factions has not finished its final purchase and donation sweep" });
+  }
+  if (installWanted && !view.stockReadyToInstall) {
+    installBlockers.push({ kind: "stock", why: "stock portfolio is not authoritatively flat" });
+  }
+  if (installWanted && view.purchasableAugmentation !== undefined) {
+    installBlockers.push({
+      kind: "augmentations",
+      why: `${view.purchasableAugmentation} is still affordable; cash does not survive the install`,
+    });
+  }
+  if (installWanted && view.graftInProgress) {
+    installBlockers.push({ kind: "graft", why: "an already-paid graft is still in progress" });
+  }
+  const installReady = installWanted && installBlockers.length === 0;
+  const why = installReady
     ? crossings.length > 0
-      ? `installing ${view.queued.length} augmentation(s); ${crossings.length} faction(s) cross the donation threshold`
-      : `installing ${view.queued.length} augmentation(s); cash exceeds half the run's earnings`
+      ? `ready to install ${view.queued.length} augmentation(s); ${crossings.length} faction(s) cross the donation threshold`
+      : `ready to install ${view.queued.length} augmentation(s); cash exceeds half the run's earnings`
+    : installWanted
+      ? `preparing install: ${installBlockers.map((blocker) => blocker.why).join("; ")}`
     : phase === "finishUp"
       ? `affordable set is worth x${view.affordableValueProduct.toFixed(2)} — converting reputation to augmentations`
       : `building: affordable set is only worth x${view.affordableValueProduct.toFixed(2)}`;
 
   return {
     phase,
-    install,
+    installWanted,
+    installBlockers,
+    installReady,
     homeRamBudgetFraction: HOME_RAM_BUDGET[phase],
     favorCrossings: crossings,
     why,

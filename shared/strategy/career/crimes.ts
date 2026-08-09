@@ -36,7 +36,16 @@ export interface CrimeStats {
 
 export interface CrimePerson {
   skills: Record<string, number>;
-  mults: { crime_success: number; crime_money: number };
+  mults: {
+    crime_success: number;
+    crime_money: number;
+    hacking_exp?: number;
+    strength_exp?: number;
+    defense_exp?: number;
+    dexterity_exp?: number;
+    agility_exp?: number;
+    charisma_exp?: number;
+  };
 }
 
 export interface CrimeContext {
@@ -44,6 +53,8 @@ export interface CrimeContext {
   crimeSuccessRate: number;
   /** currentNodeMults.CrimeMoney. */
   crimeMoney: number;
+  /** currentNodeMults.CrimeExpGain. */
+  crimeExp?: number;
 }
 
 function intelligenceBonus(intelligence: number, weight = 1): number {
@@ -79,28 +90,30 @@ export function moneyPerSec(crime: CrimeStats, person: CrimePerson, ctx: CrimeCo
 }
 
 /** Expected KARMA REDUCTION per second — a positive number meaning "karma
- * falls this fast". Only successes count. */
+ * falls this fast". Player crime failures still apply one-quarter karma. */
 export function karmaPerSec(crime: CrimeStats, person: CrimePerson, ctx: CrimeContext): number {
-  return (successChance(crime, person, ctx) * crime.karma) / (crime.timeMs / 1000);
+  const chance = successChance(crime, person, ctx);
+  return ((0.25 + 0.75 * chance) * crime.karma) / (crime.timeMs / 1000);
 }
 
 export function killsPerSec(crime: CrimeStats, person: CrimePerson, ctx: CrimeContext): number {
   return (successChance(crime, person, ctx) * crime.kills) / (crime.timeMs / 1000);
 }
 
-/** Experience per second, per skill. Granted on success only.
- *
- * Note the asymmetry the game has and this reproduces: experience is awarded
- * for a SUCCESSFUL crime only, so a crime the character is bad at trains them
- * far more slowly than its raw exp numbers suggest — which is why the ranking
- * has to go through `successChance` rather than the exp table. */
+/** Expected experience per second, per skill. Failure grants one quarter of
+ * ordinary stat experience; intelligence remains success-only. */
 export function expPerSec(crime: CrimeStats, person: CrimePerson, ctx: CrimeContext): Record<string, number> {
   const chance = successChance(crime, person, ctx);
+  const expected = 0.25 + 0.75 * chance;
   const seconds = crime.timeMs / 1000;
   const out: Record<string, number> = {};
   for (const [skill, amount] of Object.entries(crime.exp)) {
     if (amount === 0) continue;
-    out[skill] = (chance * amount) / seconds;
+    const successFactor = skill === "intelligence" ? chance : expected;
+    const expMult = skill === "intelligence"
+      ? 1
+      : person.mults[`${skill}_exp` as keyof CrimePerson["mults"]] ?? 1;
+    out[skill] = (successFactor * amount * expMult * (ctx.crimeExp ?? 1)) / seconds;
   }
   return out;
 }

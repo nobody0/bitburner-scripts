@@ -120,6 +120,72 @@ opId. It reads its descriptor from `worker_info` on globalThis (written
 reloads too. A fresh realm (game reload) has no descriptor: the worker exits
 silently and the controller rebuilds its ledger from the next sweep.
 
+## Stock manipulation: the second income term
+
+`hack(host, {stock: true})` lowers the corresponding stock's second-order
+forecast and `grow(host, {stock: true})` raises it
+(`StockMarket/PlayerInfluencing.ts`), so in a node where the market matters the
+best farm target is not the richest server but the one whose price movement is
+worth the most. `solveCycle` therefore scores TWO income terms into the same
+`$/GB/sec`:
+
+```
+score = (income + stockIncome) / ramSec
+income      = chance · steal · moneyMax · ScriptHackMoneyGain
+stockIncome = chance · steal · valuePerOp
+```
+
+Five things make this work rather than merely look plausible:
+
+- **Exactly one op per batch carries the flag.** A long is driven by the GROW, a
+  short by the HACK. On a successful steady-state batch the grow restores what
+  the hack took, so flagging both produces equal and opposite influence in
+  expectation.
+- **`moneyMax` cancels out of the manipulation rate.** The influence roll is
+  against `moneyMoved / server.moneyMax`, a FRACTION, so two servers with the
+  same steal fraction and batch time manipulate their symbols equally well
+  however rich they are. That inverts ordinary target selection: `joesguns` (JGN)
+  and `foodnstuff` (FNS) are among the cheapest manipulators in the game.
+  Measured in `sim/tests/stock-market.test.ts`.
+- **`ScriptHackMoneyGain` scales only the hacking term.** Influence is computed
+  from `moneyDrained`, before the player's cut. BN8 sets the cut to **0** and the
+  drain rate to 0.3, so hacking earns literally nothing while manipulating at
+  near-full strength — the farm still has to run, for experience and for prices.
+  Omitting this multiplier (as the solver did) reported every BN8 target as
+  profitable.
+- **Both steady-state sides are weighted by hack chance.** A failed hack leaves
+  the server at `moneyMax`; the later grow then adds no money, so neither op has
+  any influence probability. `solveCycle` currently omits this factor for longs
+  and therefore overvalues long-side manipulation below 100% hack chance.
+- **Prep grows are flagged too, for a long.** The op is launched either way, so
+  the nudge is free. Prep never hacks, so a short gets nothing from that path.
+
+`valuePerOp` comes from `stock` on its topic (`stock.manipulation`, keyed by
+hostname) and reaches the solver through `WorldView.stockInfluence`. A change in
+it bumps the evaluator's context generation exactly as a skill or fleet change
+does — a position opening or closing changes what a target is WORTH, and a stale
+cache would keep optimising for a position that no longer exists.
+
+### The magnitudes, measured
+
+Worth stating plainly, because it decides how much this term can ever matter. A
+nudge moves the equilibrium forecast by 0.001, so a $10b position on a 0.002 mean
+log step held for 100 ticks is worth a few **thousand** dollars per influencing
+op — against **tens of millions** of hacked money per batch. So:
+
+- **Outside a node that nerfs hacking, manipulation does not move target choice.**
+  It is a rounding error on the score, and that is the correct outcome: handing
+  the farm to a small server for a few thousand dollars would cost far more than
+  it earns. `sim/tests/dispatch.test.ts` pins that BN1 declines it.
+- **In BN8 the same intent wins the target outright**, because `income` is
+  *exactly* zero and any positive `stockIncome` is the whole score. Same test,
+  same intent, `bitnode: 8`.
+
+That asymmetry is why the two multipliers had to be separated rather than folded
+together, and why `stock` also biases its own choice toward symbols whose host the
+farm can reach (`MANIPULATION_PREFERENCE`) — the loop only closes if both halves
+choose each other.
+
 ## Telemetry
 
 One 1 Hz `farm` rollup (`shared/telemetry/state-map.ts`): target, prep target,

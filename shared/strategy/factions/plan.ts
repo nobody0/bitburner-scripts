@@ -13,17 +13,51 @@ export interface FactionObjective {
   augmentations: string[];
   /** Total value in the scoring units (Σ w·ln(mult)). */
   value: number;
-  /** Factions permanently foreclosed by this choice, and by which. */
+  /** Factions foreclosed for this install cycle, and by which membership. */
   foreclosed: { name: string; bannedBy: string }[];
+  why: string;
+  /** The one package being pursued now. The compatible faction set is not an
+   * actionable intent; this is what other features should prepare. */
+  intent?: FactionIntent;
+  /** Best alternative package at the same decision point. Its marginal rate
+   * is the opportunity cost that stops us pushing `intent` indefinitely. */
+  runnerUp?: FactionIntent;
+}
+
+export interface FactionIntent {
+  faction: string;
+  repTarget: number;
+  augmentations: string[];
+  /** Goal units gained by the whole package (count first, quality second). */
+  value: number;
+  etaSec: number;
+  /** Average value/time for entering and completing this package. */
+  rate: number;
+  /** Value/time of the last extension included in this package. */
+  marginalRate: number;
+  /** ETA decomposition. Unlock/player work is sequential; money production
+   * overlaps it, so `etaSec` is not the sum of all three. */
+  unlockSec: number;
+  repSec: number;
+  moneySec: number;
+  favorAfterInstall: number;
+  /** Donation plus escalated augmentation purchases. */
+  totalCost: number;
+  /** Escalated cash needed for the augmentation package itself. */
+  purchaseCost: number;
+  /** Exact reputation donation chosen by the ETA model, zero when working is
+   * faster. Kept separate so the arbiter can reserve both obligations. */
+  donationCost: number;
+  purpose: "augmentations" | "favor";
   why: string;
 }
 
 export type FactionAction =
-  | { type: "idle"; reason: "blocked" | "waiting" | "continue"; why: string }
+  | { type: "idle"; reason: "blocked" | "waiting" | "continue" | "slot"; why: string }
   | { type: "joinFaction"; faction: string; why: string }
   | { type: "workForFaction"; faction: string; workType: WorkType; focus: boolean; why: string }
   | { type: "stopWork"; why: string }
-  | { type: "donate"; faction: string; amount: number; why: string }
+  | { type: "donate"; faction: string; amount: number; purchaseCost?: number; why: string }
   | { type: "purchaseAugmentation"; faction: string; augmentation: string; why: string }
   | { type: "graft"; augmentation: string; why: string }
   | { type: "travelTo"; city: string; why: string }
@@ -69,6 +103,12 @@ export interface FactionDecision {
   /** Set when the run should end: nothing further is buyable and banked
    *  reputation is worth more as favor than as more of this run. */
   recommendInstall?: { why: string; augmentations: string[] };
+  /** The next augmentation this plan intends to buy, priced at ITS SLOT in the
+   *  purchase order rather than at today's queue depth. Published so the driver has
+   *  something to claim money against: the purchase needs a grant, the grant needs
+   *  a claim, and a claim read off the already-funded decision could never
+   *  bootstrap. Absent when nothing is buyable. */
+  nextBuy?: { name: string; price: number };
   /** Set when the feature genuinely cannot act — reported, never spun on. */
   blocked?: { why: string };
 }
@@ -86,14 +126,10 @@ export interface FactionMemory {
   /** When the current focus faction was chosen. */
   focusSince: number;
   focusFaction?: string;
-  /** How far through `purchaseOrder` we are. */
-  purchaseCursor: number;
   /** The action issued last tick, for the continuation guard. */
   lastAction?: FactionAction;
   /** Invalidation keys as of the last decision. */
   lastInvalidation: InvalidationKey[];
-  /** Do not reconsider before this timestamp (used after a skip). */
-  reconsiderAt: number;
 }
 
 export function initFactionMemory(): FactionMemory {
@@ -102,19 +138,16 @@ export function initFactionMemory(): FactionMemory {
     lastRep: {},
     lastRepAt: 0,
     focusSince: 0,
-    purchaseCursor: 0,
     lastInvalidation: [],
-    reconsiderAt: 0,
   };
 }
 
 /** Hysteresis constants, named so a change is a deliberate act.
  *
- * All three exist for the same reason and it is not aesthetics: switching
+ * Both exist for the same reason and it is not aesthetics: switching
  * faction work CANCELS the current activity outright
  * (`workForFaction` does not queue), so a planner that re-decided freely would
  * oscillate between two near-equal options and complete neither. */
-export const SWITCH_MARGIN = 1.1;
 export const FOCUS_DWELL_MS = 60_000;
 export const WORK_SWITCH_MARGIN = 1.05;
 

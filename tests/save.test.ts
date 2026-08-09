@@ -58,6 +58,8 @@ function buildSaveJson(options: FixtureOptions = {}): string {
     sleeves: [{ ctor: "Sleeve", data: {} }, { ctor: "Sleeve", data: {} }],
     playtimeSinceLastBitnode: 7_200_000,
     totalPlaytime: 99_000_000,
+    hacknetNodes: ["hacknet-server-0"],
+    hashManager: { ctor: "HashManager", data: { hashes: 37, upgrades: { "Sell for Money": 2 } } },
     sourceFiles: jsonMap(options.sourceFiles ?? [[1, 3]]),
     bitNodeOptions: {
       sourceFileOverrides: jsonMap(options.sourceFileOverrides ?? []),
@@ -113,8 +115,10 @@ function buildSaveJson(options: FixtureOptions = {}): string {
         requiredHackingSkill: 505,
         serversOnNetwork: ["home"],
       }),
-      // Not part of the hacking fleet.
-      "hacknet-server-0": { ctor: "HacknetServer", data: { hostname: "hacknet-server-0", maxRam: 8 } },
+      "hacknet-server-0": { ctor: "HacknetServer", data: {
+        hostname: "hacknet-server-0", maxRam: 8, cpuCores: 3, level: 42, cache: 4,
+        totalHashesGenerated: 1234, onlineTimeSeconds: 5678, hasAdminRights: true,
+      } },
     },
   );
 
@@ -279,9 +283,15 @@ describe("seeding a simulation from a save", () => {
     expect(seed.topology["n00dles"]).toEqual(["home"]);
   });
 
-  test("excludes hacknet servers from the fleet", () => {
-    expect(seed.servers.some((s) => s.hostname === "hacknet-server-0")).toBe(false);
+  test("keeps hacknet servers in the fleet and preserves their economy", () => {
+    expect(seed.servers.some((s) => s.hostname === "hacknet-server-0")).toBe(true);
     expect(seed.servers.some((s) => s.hostname === "home")).toBe(true);
+    expect(seed.hacknet.nodes[0]).toMatchObject({
+      hostname: "hacknet-server-0", level: 42, ram: 8, cores: 3, cache: 4,
+      totalProduction: 1234, onlineTimeSeconds: 5678,
+    });
+    expect(seed.hacknet.hashes).toBe(37);
+    expect(seed.hacknet.hashLevels["Sell for Money"]).toBe(2);
   });
 
   test("reproduces the open-port count as individual flags", () => {

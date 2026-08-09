@@ -7,6 +7,7 @@ import {
   solveCycle,
   solvePrep,
   type CycleSolution,
+  type ManipulationValue,
   type PrepPlan,
   type RamCaps,
   type TargetStatics,
@@ -70,6 +71,11 @@ export interface EvaluatorMemory {
   farmSince: number;
   /** Set when something invalidates scores before the next scheduled gate. */
   forceGate: boolean;
+  /** Fingerprint of the stock influence the cached solutions were scored under.
+   *  A position opening or closing changes what a target is WORTH, not what it
+   *  can do, so it has to invalidate the cache the same way a skill jump does —
+   *  otherwise the farm keeps optimising for a position that no longer exists. */
+  influenceKey: string;
 }
 
 export function initEvaluator(): EvaluatorMemory {
@@ -85,7 +91,27 @@ export function initEvaluator(): EvaluatorMemory {
     directive: { segments: [], ctxGeneration: -1, decidedAt: -Infinity },
     farmSince: -Infinity,
     forceGate: true,
+    influenceKey: "",
   };
+}
+
+/** Stable fingerprint of the stock feature's manipulation intent.
+ *
+ * The value is bucketed to half-decades (`round(log10(v) * 2)`, so ~3.2x per
+ * bucket) deliberately: a position drifting in mark-to-market value is not a
+ * reason to re-solve every target, but opening, closing or reversing one — or a
+ * change big enough to reorder the score — is. */
+export function influenceFingerprint(view: WorldView): string {
+  const influence = view.stockInfluence;
+  if (!influence) return "";
+  return Object.keys(influence)
+    .sort()
+    .map((host) => {
+      const entry = influence[host]!;
+      const magnitude = entry.valuePerOp > 0 ? Math.round(Math.log10(entry.valuePerOp) * 2) : -999;
+      return `${host}:${entry.side}:${magnitude}`;
+    })
+    .join(",");
 }
 
 export function staticsOf(server: ServerView): TargetStatics {
@@ -155,6 +181,20 @@ export function stepEvaluator(
     memory.forceGate = true;
   }
 
+  // A change in what `stock` wants re-prices every target, so it bumps the
+  // generation exactly as a skill or fleet change does. Cheap: the fingerprint
+  // is stable while a position is merely drifting in value.
+  const influenceKey = influenceFingerprint(view);
+  if (influenceKey !== memory.influenceKey) {
+    memory.influenceKey = influenceKey;
+    memory.generation++;
+    memory.forceGate = true;
+  }
+  const manipulationFor = (hostname: string): ManipulationValue | undefined => {
+    const entry = view.stockInfluence?.[hostname];
+    return entry && entry.valuePerOp > 0 ? { valuePerOp: entry.valuePerOp, side: entry.side } : undefined;
+  };
+
   // Candidate set (new roots appear here and get solved on their first slice).
   const candidates = view.servers.filter(isCandidate);
   if (candidates.length !== memory.order.length) {
@@ -177,7 +217,7 @@ export function stepEvaluator(
       const entry = memory.entries.get(hostname);
       if (!entry) continue;
       if (entry.generation !== memory.generation) {
-        entry.solution = isEligible(ctx, entry.statics) ? solveCycle(ctx, entry.statics, 1, caps) : undefined;
+        entry.solution = isEligible(ctx, entry.statics) ? solveCycle(ctx, entry.statics, 1, caps, manipulationFor(entry.statics.hostname)) : undefined;
         entry.generation = memory.generation;
       }
     }
@@ -193,7 +233,7 @@ export function stepEvaluator(
   // 100 targets ≈ 0.6ms) so the argmax never mixes generations.
   for (const entry of memory.entries.values()) {
     if (entry.generation !== memory.generation) {
-      entry.solution = isEligible(ctx, entry.statics) ? solveCycle(ctx, entry.statics, 1, caps) : undefined;
+      entry.solution = isEligible(ctx, entry.statics) ? solveCycle(ctx, entry.statics, 1, caps, manipulationFor(entry.statics.hostname)) : undefined;
       entry.generation = memory.generation;
     }
   }

@@ -125,7 +125,25 @@ function publish(state: GameState, emissions: Emission[], mergeTopic: boolean): 
 }
 
 /** The capability gate batch: cheap, and everything downstream depends on it —
- * probe gating AND feature-driver gating — so it runs first and every sweep. */
+ * probe gating AND feature-driver gating.
+ *
+ * Called by the controller from the SWEEP rather than from `runProbes`, and that
+ * separation is load-bearing in two directions. It must not run on the fast
+ * acquisition cadence: capabilities change on the scale of a BitNode, so reading
+ * them every few seconds would spend a 1.5 GB dodge to learn nothing. And it must
+ * run where the controller can act on what changed — the reset walk keys off the
+ * capability delta this produces, and a node change detected outside the sweep
+ * would leave the fleet, the heap and every cached decision describing a game
+ * that no longer exists. */
+export async function runGateProbe(
+  ns: NS,
+  state: GameState,
+  hosts: readonly HostRam[],
+  acquire: (budgetGb: number) => DodgeLease | undefined,
+): Promise<void> {
+  return runGateBatch(ns, state, dodgeBudget(hosts), acquire);
+}
+
 async function runGateBatch(
   ns: NS,
   state: GameState,
@@ -151,8 +169,15 @@ async function runGateBatch(
   }
 }
 
-/** One sweep's worth of acquisition. Requires `player` and `servers` to be in
- * the store already — the controller writes both before calling.
+/** One pass of acquisition. Requires `player` and `servers` to be in the store
+ * already — the controller writes both before calling.
+ *
+ * Runs on its OWN cadence, derived from the fastest `everyMs` in the table
+ * (`probeCadenceMs`), and every probe's own `everyMs` gates it from there. It used
+ * to be called only from the 30 s fleet sweep, which silently made 30 s the floor
+ * for the whole table — see the note on `ProbeBase.everyMs`. Nothing here is tied
+ * to the sweep any more: the capability gate, which genuinely is, moved out to
+ * `runGateProbe`.
  *
  * `hosts` describes where a stub may run and how much room each has; the
  * controller builds it from the scan plus the dispatcher's heap
@@ -174,9 +199,7 @@ export async function runProbes(
   const now = Date.now();
   const budget = dodgeBudget(hosts);
 
-  await runGateBatch(ns, state, budget, acquire);
-
-  const ctx: ProbeContext = { player, servers, caps: caps(state) };
+  const ctx: ProbeContext = { player, servers, caps: caps(state), state };
   const applicable = (probe: DodgedProbe | (typeof LOCAL_PROBES)[number]): boolean => {
     // A probe never runs while its OWN feature reads "no". Mirrors the same
     // rule in selectDue: `requires` is a dependency, this is the feature

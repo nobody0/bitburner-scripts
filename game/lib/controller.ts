@@ -5,7 +5,7 @@ import type { HostRam } from "../../shared/ram/placement.ts";
 import type { Claim, SlotState } from "../../shared/strategy/arbiter.ts";
 import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../shared/strategy/coordination.ts";
 import type { Need } from "../../shared/strategy/needs.ts";
-import { planningHorizonSec } from "../../shared/strategy/progression/eta.ts";
+import { forecastAt, unknownForecast } from "../../shared/strategy/progression/forecast.ts";
 import { FEATURE_IDS, type FeatureId } from "../../shared/features/ids.ts";
 import { homeReserveGb } from "../../shared/ram/reserve.ts";
 import { priceCalls } from "./dodge.ts";
@@ -17,7 +17,8 @@ import { driverEnabled, featureModule, featureRamDemand, grantsFor, resetAllFeat
 import type { ClaimContext, NeedContext } from "./features/index.ts";
 import { sweepFleet } from "./fleet.ts";
 import { gameGlobal } from "./globals.ts";
-import { dodgeBudget, homeDodgeBudget, initProbeRunner, runProbes } from "./probe-runner.ts";
+import { dodgeBudget, homeDodgeBudget, initProbeRunner, runGateProbe, runProbes } from "./probe-runner.ts";
+import { ALL_PROBES, probeCadenceMs } from "./probes/index.ts";
 import { acquireDodge, dodgeHosts } from "./ram.ts";
 import { caps, initState, merge, set, type GameState } from "./state.ts";
 import { republish, type TelemetrySink } from "./telemetry-sink.ts";
@@ -34,9 +35,24 @@ import type { Telemetry } from "./telemetry.ts";
  *
  * Dispatcher pass cadence: one HWGW spacer. Ticks use absolute deadlines with
  * a catch-up clamp so a game stall cannot produce a burst of passes. */
-const TICK_MS = 200;
+export const TICK_MS = 200;
 const PLAYER_EVERY_TICKS = 10; // 2s
+/** The fleet sweep: scan, root, deploy, and the capability gate whose delta the
+ *  reset walk keys off. Genuinely 30 s work — it is not the probe cadence, which
+ *  it used to be by accident. */
 const SWEEP_EVERY_TICKS = 150; // 30s
+/** Acquisition cadence, DERIVED from the probe table rather than chosen here.
+ *
+ *  Whatever the fastest `everyMs` in the table is, that is how often the runner is
+ *  called; each probe's own `everyMs` gates it from there. So a feature declares
+ *  the cadence its subject needs and gets it, instead of silently inheriting the
+ *  sweep's — which is what made the local tier ask for 5 s and receive 30 s for
+ *  the whole life of the project.
+ *
+ *  Floored at one tick: nothing can be read faster than the frame. A probe whose
+ *  cadence rounds down to a single tick will therefore be sampled more often than
+ *  it asked for, so a probe consumer must be idempotent under oversampling. */
+export const PROBE_EVERY_TICKS = Math.max(1, Math.floor(probeCadenceMs(ALL_PROBES) / TICK_MS));
 
 export async function runController(
   ns: NS,
@@ -104,27 +120,35 @@ export async function runController(
     }
     reportedRespawnFailure = undefined;
 
-    if (tick % PLAYER_EVERY_TICKS === 0) set(state, "player", ns.getPlayer());
+    if (tick % PLAYER_EVERY_TICKS === 0) {
+      set(state, "player", ns.getPlayer());
+      state.playerObservedAt = Date.now();
+    }
 
     if (tick % SWEEP_EVERY_TICKS === 0) {
       await sweepFleet(ns, state, tel, coldSweep);
       coldSweep = false;
 
-      // Acquisition, last in the sweep: pure observation, so it yields to
-      // rooting and deployment for the dodge mutex. The runner prices itself
-      // against the whole realm's spare RAM, not just home's — a probe that
-      // cannot fit a 4.5 GB home reserve may fit a rooted 64 GB client
-      // comfortably (shared/ram/placement.ts).
+      // The capability gate, last in the sweep: pure observation, so it yields to
+      // rooting and deployment for the dodge mutex. It prices itself against the
+      // whole realm's spare RAM, not just home's — a probe that cannot fit a
+      // 4.5 GB home reserve may fit a rooted 64 GB client comfortably
+      // (shared/ram/placement.ts).
       //
-      // Captured BEFORE the probes: the gate batch overwrites lastNodeReset
-      // with the NEW node's start the moment a reset is observed, so the old
-      // node's start — the thing its elapsed time is measured from — is only
-      // readable before runProbes lands.
+      // The gate belongs to the sweep and not to the acquisition cadence below,
+      // in both directions: capabilities change on the scale of a BitNode, and
+      // this is the one reading the controller must be able to ACT on — the reset
+      // walk keys off the delta, and a node change detected between sweeps would
+      // leave the fleet and every cached decision describing a dead game.
+      //
+      // Captured BEFORE it: the gate batch overwrites lastNodeReset with the NEW
+      // node's start the moment a reset is observed, so the old node's start —
+      // the thing its elapsed time is measured from — is only readable first.
       const nodeStartedAt = state.topics.progression?.lastNodeReset;
       const before = caps(state);
-      const probeHosts = placement(state);
-      await runProbes(ns, probes, state, probeHosts, (gb) =>
-        acquireDodge(probeHosts, hackingState().memory.dispatch.heap, gb),
+      const gateHosts = placement(state);
+      await runGateProbe(ns, state, gateHosts, (gb) =>
+        acquireDodge(gateHosts, hackingState().memory.dispatch.heap, gb),
       );
       const delta = capsDelta(before, caps(state));
 
@@ -145,7 +169,9 @@ export async function runController(
             ...(before.bitNode !== undefined ? { from: before.bitNode } : {}),
             ...(nodeStartedAt !== undefined ? { elapsedMs: Date.now() - nodeStartedAt } : {}),
             ...(endedPlan?.route !== undefined ? { route: endedPlan.route } : {}),
-            ...(endedPlan?.expectedEndAt !== undefined ? { guessedEndAt: endedPlan.expectedEndAt } : {}),
+            ...(endedPlan && endedPlan.forecasts.node.state !== "unknown"
+              ? { guessedEndAt: endedPlan.forecasts.node.expectedAt }
+              : {}),
             ...(endedPlan?.decidedAt !== undefined ? { decidedAt: endedPlan.decidedAt } : {}),
           });
         }
@@ -169,6 +195,25 @@ export async function runController(
       TELEMETRY: if (__TELEMETRY__ && delta.locked.length > 0) {
         tel!.event("feature.locked", { features: delta.locked });
       }
+    }
+
+    // Acquisition, on the probe table's OWN cadence rather than the sweep's.
+    //
+    // `PROBE_EVERY_TICKS` is derived from the fastest `everyMs` anything declares,
+    // and each probe's own `everyMs` gates it from there — so a feature whose
+    // subject has a clock of its own asks for that cadence and gets it, and a
+    // ten-minute probe costs nothing extra for being scheduled alongside a fast
+    // one. Adding a probe that needs to be read every second needs no change
+    // here.
+    //
+    // Runs AFTER the sweep block so that on a sweep tick the gate lands first and
+    // this pass sees fresh capabilities and a fresh scan — the ordering the sweep
+    // used to give it by construction.
+    if (tick % PROBE_EVERY_TICKS === 0) {
+      const probeHosts = placement(state);
+      await runProbes(ns, probes, state, probeHosts, (gb) =>
+        acquireDodge(probeHosts, hackingState().memory.dispatch.heap, gb),
+      );
     }
 
     // Feature pass, refresh/act: refresh (evaluate -> store) -> collect
@@ -215,13 +260,19 @@ export async function runController(
     }
 
     // The route decision just published (or the standing one from an earlier
-    // pass) is what every driver plans against below: the horizon bounds
-    // every investment's payoff window, the route biases priorities. The
-    // planning horizon is run-remaining CAPPED BY THE INSTALL CADENCE — an
-    // install destroys what the consumers buy — and guarded for staleness,
-    // so a publisher gone quiet stops steering (see eta.ts).
+    // pass) is what every driver plans against below. Reset-sensitive value
+    // reads the install forecast; persistent value reads the node forecast.
+    // Both count down from their anchor and preserve unknown/stale explicitly.
     const plan = state.topics.progression?.plan;
-    const horizonSec = planningHorizonSec(plan?.expectedEndAt, now, plan?.refreshedAt);
+    const horizons = plan?.forecasts
+      ? {
+          node: forecastAt(plan.forecasts.node, now),
+          install: forecastAt(plan.forecasts.install, now),
+        }
+      : {
+          node: unknownForecast(now, "unpublished-node", "progression has not produced a node forecast"),
+          install: unknownForecast(now, "unpublished-install", "progression has not produced an install forecast"),
+        };
 
     // 1) Needs first: a feature may bid harder BECAUSE another is blocked on
     //    it, so the board must be complete before any claim is collected.
@@ -246,7 +297,13 @@ export async function runController(
 
     // 2) Claims, collected against the completed board.
     const board = postNeeds(needs);
-    const claimContext: ClaimContext = { ...needContext, budgetGb, board, ramPrice: (methods) => priceCalls(ns, methods) };
+    const claimContext: ClaimContext = {
+      ...needContext,
+      budgetGb,
+      board,
+      horizons,
+      ramPrice: (methods) => priceCalls(ns, methods),
+    };
     const transientClaims: Claim[] = [];
     for (const module of dueModules) {
       if (!module.claims) {
@@ -292,7 +349,7 @@ export async function runController(
           tick,
           board,
           grants: grantsFor(coordination.arbitration, driver.id),
-          horizonSec,
+          horizons,
           ...(plan?.route !== undefined ? { route: plan.route } : {}),
           acquireDodge: (gb) => acquireDodge(hosts, hackingState().memory.dispatch.heap, gb),
         });

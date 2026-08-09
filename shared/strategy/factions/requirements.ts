@@ -27,9 +27,10 @@ import type { NeedKind } from "../needs.ts";
  *    a satisfiable OR reports as impossible;
  *  - `numAugmentations` treats "not yet" as unachievable rather than emitting a
  *    goal, so Daedalus can never be planned toward;
- *  - `hacknetRAM`/`Cores`/`Levels`, `bladeburnerRank` and `numInfiltrations`
- *    are `return false` TODOs, so Netburners, Bladeburners and Shadows of
- *    Anarchy are unreachable. */
+ *  - `hacknetRAM`/`Cores`/`Levels` and `bladeburnerRank` are `return false`
+ *    TODOs, so Netburners and Bladeburners are unreachable. Infiltration is
+ *    deliberately reported as a manual-only blocker until the resulting
+ *    Shadows of Anarchy invitation is observed. */
 
 /** Everything a requirement can be evaluated against. Flat and plain so the
  * strategy stays pure — the driver assembles it from GameState. */
@@ -63,7 +64,7 @@ export interface RequirementView {
 /** Blocker kinds extend the need kinds with three that no feature can deliver
  * inside a run. They are still reported — "you are in the wrong BitNode" is
  * useful — but they never become `Need`s, because there is nobody to ask. */
-export type BlockerKind = NeedKind | "location" | "bitNode" | "sourceFile";
+export type BlockerKind = NeedKind | "location" | "bitNode" | "sourceFile" | "infiltrations";
 
 export interface Blocker {
   kind: BlockerKind;
@@ -97,6 +98,7 @@ const OWNER: Record<BlockerKind, FeatureId> = {
   combatSkills: "career",
   charisma: "career",
   companyRep: "career",
+  factionRep: "factions",
   jobTitle: "career",
   employment: "career",
   quitCompany: "career",
@@ -309,7 +311,8 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
               "infiltrations",
               requirement.numInfiltrations,
               view.numInfiltrations,
-              `needs ${requirement.numInfiltrations} infiltrations`,
+              `needs ${requirement.numInfiltrations} manual infiltration${requirement.numInfiltrations === 1 ? "" : "s"}`,
+              { reachable: false },
             ),
           ];
 
@@ -512,6 +515,7 @@ const NOMINAL_SEC_PER_UNIT: Record<BlockerKind, number> = {
   combatSkills: 60,
   charisma: 60,
   companyRep: 0.1,
+  factionRep: 0.1,
   jobTitle: 600,
   employment: 600,
   quitCompany: 0,

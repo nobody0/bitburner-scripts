@@ -37,6 +37,31 @@ export interface TargetStatics {
   baseDifficulty: number;
 }
 
+/** Stock manipulation priced for the target solver.
+ *
+ * `valuePerOp` is dollars of stock profit per influencing op at a steal fraction
+ * of 1; the solver multiplies by the steal fraction its own batch achieves, which
+ * is exactly the probability `influenceStockThroughServer*` rolls against.
+ *
+ * The consequence that inverts ordinary target selection: that probability is
+ * `moneyMoved / server.moneyMax`, a FRACTION, so `moneyMax` cancels out of the
+ * manipulation rate entirely. Two servers with the same steal fraction and batch
+ * time manipulate their symbols equally well however much money they hold — which
+ * makes `joesguns` (JGN) and `foodnstuff` (FNS) the cheapest manipulators in the
+ * game, at a small fraction of `ecorp`'s threads and batch time.
+ *
+ * Not scaled by `ScriptHackMoneyGain`, and that is the point of keeping the two
+ * income terms apart: the player's cut applies to the hacking half only, because
+ * influence is computed from `moneyDrained` before the cut. In BN8 the cut is 0 —
+ * hacking earns literally nothing while manipulating at near-full strength — and
+ * that asymmetry is the node. */
+export interface ManipulationValue {
+  valuePerOp: number;
+  /** Long positions are driven by GROW, shorts by HACK. Determines which op
+   *  carries the flag, and therefore which op count the value multiplies. */
+  side: "long" | "short";
+}
+
 export interface CycleSolution {
   /** True when every feasible integer hack-thread count was evaluated. */
   exact: boolean;
@@ -56,6 +81,12 @@ export interface CycleSolution {
   ramPerBatch: number;
   /** Expected $ per batch (chance-weighted). */
   incomePerBatch: number;
+  /** Expected $ per batch from stock manipulation, when this target's
+   *  organization has a position riding on it. Reported separately from
+   *  `incomePerBatch` because the two respond to different BitNode multipliers
+   *  and a target that is worth farming ONLY for its price impact should be
+   *  visibly so. */
+  stockIncomePerBatch: number;
 }
 
 export interface PrepPlan {
@@ -88,6 +119,7 @@ interface CycleEval {
   weaken2: number;
   steal: number;
   income: number;
+  stockIncome: number;
   ram: number;
 }
 
@@ -113,6 +145,11 @@ export function solveCycle(
   statics: TargetStatics,
   cores = 1,
   caps: RamCaps = UNLIMITED_RAM,
+  /** Present when `stock` holds (or wants) a position in this target's
+   *  organization. Adds a second income term to the SAME `$/GB/sec` score, so
+   *  the two ways a target makes money are traded off on one scale instead of
+   *  the market silently commandeering the farm. */
+  manipulation?: ManipulationValue,
 ): CycleSolution | undefined {
   if (!isEligible(ctx, statics)) return undefined;
   const { minDifficulty, moneyMax, requiredHackingSkill, serverGrowth } = statics;
@@ -142,7 +179,21 @@ export function solveCycle(
     if (!Number.isFinite(growThreadCount)) return undefined;
     const weaken1 = Math.ceil((0.002 * hackThreads) / weakenPerThread);
     const weaken2 = Math.ceil((0.004 * growThreadCount) / weakenPerThread);
-    const income = chance * steal * moneyMax;
+    // ScriptHackMoneyGain, NOT ScriptHackMoney: the latter is already folded
+    // into `percent` (and therefore `steal`, which sizes the grow). This is the
+    // player's cut of what was drained, and it is 0 in BN8 — where the farm
+    // still has to run, for experience and for price manipulation, but earns
+    // nothing while doing it.
+    const income = chance * steal * moneyMax * ctx.scriptHackMoneyGain;
+    // One influencing op per batch, and only one: the hack takes what the grow
+    // puts back, so flagging both would cancel the nudges out. The roll is
+    // against the FRACTION of moneyMax moved, which is `steal` on either side —
+    // and it is unweighted by hack chance for a grow (a grow cannot fail) and
+    // weighted for a hack (a failed hack drains nothing, so it influences
+    // nothing).
+    const stockIncome = manipulation
+      ? (manipulation.side === "long" ? steal : chance * steal) * manipulation.valuePerOp
+      : 0;
     // RAM-seconds: op RAM held for its own duration (1x/3.2x/4x hack time).
     const ramSec =
       hackTimeS *
@@ -155,13 +206,14 @@ export function solveCycle(
     const ram = hackGb + WORKER_RAM.grow * growThreadCount + WORKER_RAM.weaken * (weaken1 + weaken2);
     if (ram > caps.batchGb) return undefined;
     return {
-      score: income / ramSec,
+      score: (income + stockIncome) / ramSec,
       hackThreads,
       growThreadCount,
       weaken1,
       weaken2,
       steal,
       income,
+      stockIncome,
       ram,
     };
   };
@@ -186,6 +238,7 @@ export function solveCycle(
     score: best.score,
     ramPerBatch: best.ram,
     incomePerBatch: best.income,
+    stockIncomePerBatch: best.stockIncome,
   });
 
   if (maxThreads <= EXACT_THREAD_LIMIT) {

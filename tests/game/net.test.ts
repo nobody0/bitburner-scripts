@@ -34,11 +34,11 @@ describe("canRoot", () => {
 });
 
 describe("isUseful", () => {
-  test("requires root and RAM, and skips hacknet servers", () => {
+  test("requires root and RAM, including RAM-bearing hacknet servers", () => {
     expect(isUseful(server({ hasAdminRights: true }))).toBe(true);
     expect(isUseful(server({ hasAdminRights: false }))).toBe(false);
     expect(isUseful(server({ hasAdminRights: true, maxRam: 0 }))).toBe(false);
-    expect(isUseful(server({ hasAdminRights: true, hostname: "hacknet-server-0" }))).toBe(false);
+    expect(isUseful(server({ hasAdminRights: true, hostname: "hacknet-server-0" }))).toBe(true);
   });
 });
 

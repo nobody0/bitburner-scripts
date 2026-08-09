@@ -73,6 +73,12 @@ export function gainHackingExp(person: Person, exp: number): void {
 export interface HackOutcome {
   success: boolean;
   moneyGained: number;
+  /** Money removed from the SERVER, before `ScriptHackMoneyGain` takes the
+   *  player's cut. Reported separately because stock manipulation rolls against
+   *  THIS as a fraction of moneyMax (NetscriptHelpers.tsx:615) — in BN8 the cut
+   *  is 0 and only this one is non-zero, which is why hacking still moves
+   *  prices there while earning nothing. */
+  moneyDrained: number;
   expGained: number;
 }
 
@@ -86,7 +92,7 @@ export function applyHack(server: SimServer, person: Person, threads: number, ra
 
   if (rand >= hackChance) {
     gainHackingExp(person, expGainedOnFailure);
-    return { success: false, moneyGained: 0, expGained: expGainedOnFailure };
+    return { success: false, moneyGained: 0, moneyDrained: 0, expGained: expGainedOnFailure };
   }
 
   const percentHacked = calculatePercentMoneyHacked(server, person);
@@ -104,11 +110,18 @@ export function applyHack(server: SimServer, person: Person, threads: number, ra
   const moneyGained = moneyDrained * currentNodeMults.ScriptHackMoneyGain;
   gainHackingExp(person, expGainedOnSuccess);
   fortify(server, ServerConstants.ServerFortifyAmount * Math.min(threads, maxThreadNeeded));
-  return { success: true, moneyGained, expGained: expGainedOnSuccess };
+  // moneyDrained is reported alongside moneyGained because stock manipulation
+  // rolls against the DRAINED fraction, before ScriptHackMoneyGain is applied
+  // (NetscriptHelpers.tsx:615). In BN8 the two differ absolutely: gained is 0
+  // and drained is not, which is why hacking still moves prices there.
+  return { success: true, moneyGained, moneyDrained, expGained: expGainedOnSuccess };
 }
 
 export interface GrowOutcome {
   growth: number;
+  /** `moneyAfter - moneyBefore` (NetscriptFunctions.ts:306). The grow-side stock
+   *  influence rolls against this as a fraction of moneyMax. */
+  moneyGrown: number;
   expGained: number;
 }
 
@@ -132,7 +145,7 @@ export function applyGrow(server: SimServer, person: Person, threads: number, co
   if (server.moneyAvailable === 0 && oldMoneyAvailable === 0) growth = 1;
   else if (oldMoneyAvailable === 0) growth = server.moneyAvailable;
   else growth = server.moneyAvailable / oldMoneyAvailable;
-  return { growth, expGained };
+  return { growth, moneyGrown: server.moneyAvailable - oldMoneyAvailable, expGained };
 }
 
 export interface WeakenOutcome {
@@ -172,12 +185,23 @@ export function getCloudServerCost(ram: number): number {
   );
 }
 
+export function getCloudServerUpgradeCost(currentRam: number, targetRam: number): number {
+  if (targetRam <= currentRam) return -1;
+  const target = getCloudServerCost(targetRam);
+  if (!Number.isFinite(target)) return -1;
+  return target - getCloudServerCost(currentRam);
+}
+
 // v3.0.1 src/PersonObjects/Player/PlayerObjectServerMethods.ts
 // getUpgradeHomeRamCost() (currentRam passed instead of getHomeComputer()).
 export function getUpgradeHomeRamCost(currentRam: number): number {
   const numUpgrades = Math.log2(currentRam);
   const mult = Math.pow(1.58, numUpgrades);
   return currentRam * ServerConstants.BaseCostFor1GBOfRamHome * mult * currentNodeMults.HomeComputerRamCost;
+}
+
+export function getUpgradeHomeCoresCost(currentCores: number): number {
+  return 1e9 * Math.pow(7.5, currentCores);
 }
 
 // v3.0.1 src/Server/Server.ts constructor — how metadata base values derive

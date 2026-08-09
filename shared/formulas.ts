@@ -29,6 +29,18 @@ export interface HackNodeMults {
   HackingSpeedMultiplier?: number;
   HackExpGain?: number;
   ScriptHackMoney?: number;
+  /** The fraction of DRAINED money the player actually receives.
+   *
+   *  Deliberately distinct from `ScriptHackMoney`, which scales how much is
+   *  drained from the server. Upstream applies them at different points:
+   *  `moneyDrained = moneyAvailable * percentHacked * threads` (percentHacked
+   *  carries ScriptHackMoney), the server loses that, and only then is
+   *  `moneyGained = moneyDrained * ScriptHackMoneyGain`. So in BN8, where it is
+   *  **0**, hacking drains the server at 30% strength and pays the player
+   *  nothing at all — which is also why stock manipulation is unaffected by it
+   *  (`influenceStockThroughServerHack` reads `moneyDrained`, not `moneyGained`).
+   *  Omitting it made every BN8 target look profitable. */
+  ScriptHackMoneyGain?: number;
   ServerGrowthRate?: number;
   ServerWeakenRate?: number;
 }
@@ -56,6 +68,10 @@ export interface HackContext {
   hackingChance: number;
   hackingMoney: number;
   scriptHackMoney: number;
+  /** Fraction of drained money the player keeps. NOT part of any vendored
+   *  formula — it is applied at the call site in NetscriptHelpers — so it lives
+   *  on the context for the target solver to price income with. */
+  scriptHackMoneyGain: number;
   /** (hacking_speed * HackingSpeedMultiplier) * intBonus — exact grouping of
    * the vendored time denominator. */
   speedDenom: number;
@@ -77,6 +93,7 @@ export function makeHackContext(player: HackPlayer, node: HackNodeMults = {}): H
     hackingChance: player.mults.hacking_chance,
     hackingMoney: player.mults.hacking_money,
     scriptHackMoney: node.ScriptHackMoney ?? 1,
+    scriptHackMoneyGain: node.ScriptHackMoneyGain ?? 1,
     speedDenom: player.mults.hacking_speed * speed * intBonus,
     hackingExp: player.mults.hacking_exp,
     hackExpGain: node.HackExpGain ?? 1,

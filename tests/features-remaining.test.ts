@@ -1,16 +1,29 @@
 import { describe, expect, test } from "bun:test";
+import { FEATURE_MODULES, type NeedContext } from "../game/lib/features/index.ts";
+import { initState } from "../game/lib/state.ts";
+import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { assignCoupled, assignIndependent } from "../shared/strategy/assignment.ts";
 import { BLACKOP_CONFIDENCE, STAMINA_FLOOR, stepBladeburner } from "../shared/strategy/bladeburner/decide.ts";
 import { CORP_STAGES, stepCorp, type CorpView } from "../shared/strategy/corp/stages.ts";
 import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet/decide.ts";
 import { ASCEND_THRESHOLD, CLASH_CONFIDENCE, stepGang } from "../shared/strategy/gang/decide.ts";
-import { evaluate, group, legalMoves, stepGo } from "../shared/strategy/go/decide.ts";
+import {
+  evaluate,
+  group,
+  legalMoves,
+  playMove,
+  prepareGoDecision,
+  finalizeGoDecision,
+  stepGo,
+  terminalGoRewardValue,
+} from "../shared/strategy/go/decide.ts";
+import { rankGoGames } from "../shared/strategy/go/rewards.ts";
 import { postNeeds } from "../shared/strategy/needs.ts";
 import { BASELINE_ORDER, bestOrdering, favorCrossings, orderingCost, phaseOf, stepProgression } from "../shared/strategy/progression/decide.ts";
-import { canSolve, rankInfiltrations, SOLVERS, solve } from "../shared/strategy/side/contracts.ts";
+import { canSolve, solve } from "../shared/strategy/side/contracts.ts";
 import { shockMultiplier, stepSleeves } from "../shared/strategy/sleeves/decide.ts";
 import { chargeOrder, distinctRotations, packFragments, rotate } from "../shared/strategy/stanek/pack.ts";
-import { COMMISSION, edge, evaluate4S, minProfitableShares, stepStock, type StockView } from "../shared/strategy/stock/decide.ts";
+// stock has outgrown this file — see tests/stock.test.ts
 import { mulberry32 } from "../sim/core/rng.ts";
 
 // --- assignment (shared by gang, sleeves, bladeburner) -----------------------
@@ -177,10 +190,10 @@ describe("bladeburner", () => {
 describe("sleeves", () => {
   const sleeve = (index: number, shock = 0, sync = 100) => ({ index, shock, sync, city: "Sector-12", skills: {} });
   const tasks = [
-    { type: "recovery" as const, rates: {}, moneyPerSec: 0 },
-    { type: "synchro" as const, rates: {}, moneyPerSec: 0 },
-    { type: "crime" as const, detail: "Homicide", rates: { karma: 1 }, moneyPerSec: 100 },
-    { type: "crime" as const, detail: "Heist", rates: { karma: 0.01 }, moneyPerSec: 10_000 },
+    { type: "recovery" as const, outcomes: [{ rates: {}, moneyPerSec: 0 }] },
+    { type: "synchro" as const, outcomes: [{ rates: {}, moneyPerSec: 0 }] },
+    { type: "crime" as const, detail: "Homicide", outcomes: [{ rates: { karma: 1 }, moneyPerSec: 100 }] },
+    { type: "crime" as const, detail: "Heist", outcomes: [{ rates: { karma: 0.01 }, moneyPerSec: 10_000 }] },
   ];
 
   test("shock scales output DOWN, so recovery dominates when it is high", () => {
@@ -203,6 +216,74 @@ describe("sleeves", () => {
   test("with nothing posted it falls back to income", () => {
     const decision = stepSleeves({ sleeves: [sleeve(0)], tasks, shockCeiling: 50, syncFloor: 50 }, postNeeds([]));
     expect(decision.assignments[0]!.task.detail).toBe("Heist");
+  });
+
+  test("does not cancel a running crime until its completion promise fires", () => {
+    const running = { ...sleeve(0), task: { type: "CRIME", detail: "Heist" } };
+    const board = postNeeds([{ by: "gang", kind: "karma", target: -100, have: 0, weight: 10, urgency: "blocking", why: "test" }]);
+    expect(stepSleeves({ sleeves: [running], tasks, shockCeiling: 50, syncFloor: 50 }, board).assignments).toEqual([]);
+    expect(stepSleeves({ sleeves: [{ ...running, allowCrimeSwitch: true }], tasks, shockCeiling: 50, syncFloor: 50 }, board).assignments[0]!.task.detail).toBe("Homicide");
+  });
+
+  test("crime karma bypasses shock but experience remains shock-scaled", () => {
+    const special = [{
+      type: "crime" as const,
+      detail: "Test",
+      outcomes: [{ rates: { combatSkills: 100 }, shockExemptRates: { karma: 1 }, moneyPerSec: 0 }],
+    }];
+    const shocked = sleeve(0, 100);
+    const karma = stepSleeves(
+      { sleeves: [shocked], tasks: special, shockCeiling: 101, syncFloor: 50 },
+      postNeeds([{ by: "gang", kind: "karma", target: -1, have: 0, weight: 1, urgency: "blocking", why: "test" }]),
+    );
+    expect(karma.assignment.total).toBeGreaterThan(0);
+    const combat = stepSleeves(
+      { sleeves: [shocked], tasks: special, shockCeiling: 101, syncFloor: 50 },
+      postNeeds([{ by: "bladeburner", kind: "combatSkills", target: 100, have: 0, weight: 1, urgency: "blocking", why: "test" }]),
+    );
+    expect(combat.assignment.total).toBe(0);
+  });
+
+  test("subject-aware sleeve experience serves a requested hacking skill", () => {
+    const skillTasks = [{
+      type: "crime" as const,
+      detail: "Cybercrime",
+      outcomes: [{
+        rates: {},
+        contributions: [{ kind: "skill" as const, subject: "hacking", perSec: 3 }],
+        moneyPerSec: 0,
+      }],
+    }];
+    const decision = stepSleeves(
+      { sleeves: [sleeve(0)], tasks: skillTasks, shockCeiling: 50, syncFloor: 50 },
+      postNeeds([{ by: "factions", kind: "skill", subject: "hacking", target: 100, have: 1, weight: 1, urgency: "blocking", why: "test" }]),
+    );
+    expect(decision.assignment.total).toBeGreaterThan(0);
+    expect(decision.assignments[0]!.task.detail).toBe("Cybercrime");
+  });
+
+  test("only one sleeve is assigned to a faction while the others keep producing", () => {
+    const capacityTasks = [
+      {
+        type: "faction" as const,
+        detail: "CyberSec",
+        workType: "hacking",
+        exclusiveKey: "faction:CyberSec",
+        outcomes: [{
+          rates: {},
+          contributions: [{ kind: "factionRep" as const, subject: "CyberSec", perSec: 1 }],
+          moneyPerSec: 0,
+        }],
+      },
+      { type: "crime" as const, detail: "Heist", outcomes: [{ rates: {}, moneyPerSec: 100 }] },
+    ];
+    const decision = stepSleeves(
+      { sleeves: [sleeve(0), sleeve(1)], tasks: capacityTasks, shockCeiling: 50, syncFloor: 50 },
+      postNeeds([{ by: "factions", kind: "factionRep", subject: "CyberSec", target: 100, have: 0, weight: 1, urgency: "blocking", why: "test" }]),
+    );
+    expect(decision.assignment.choices.filter((choice) => choice.task.type === "faction")).toHaveLength(1);
+    expect(decision.assignment.choices.filter((choice) => choice.task.type === "crime")).toHaveLength(1);
+    expect(decision.assignment.approximated).toBe(false);
   });
 });
 
@@ -283,11 +364,27 @@ describe("go", () => {
     // A group in atari is nearly worthless; ignoring liberties plays blind.
     const b = board(["XO.", "...", "..."]);
     expect(group(b, 0, 0).liberties).toBe(1);
-    expect(group(b, 1, 0).liberties).toBe(2);
+    expect(group(b, 0, 1).liberties).toBe(2);
   });
 
   test("legal moves are the empty points", () => {
-    expect(legalMoves(board(["X.", ".O"]))).toEqual([[1, 0], [0, 1]]);
+    expect(legalMoves(board(["X.", ".O"]))).toEqual([[0, 1], [1, 0]]);
+  });
+
+  test("board coordinates are column-major and captures are applied", () => {
+    // White at (1,1) has one liberty, (1,2). Black takes it.
+    const played = playMove(board([".X.", "XO.", ".X."]), 1, 2, "X");
+    expect(played?.captures).toBe(1);
+    expect(played?.board.rows[1]?.[1]).toBe(".");
+    expect(played?.board.rows[1]?.[2]).toBe("X");
+  });
+
+  test("suicide and repeated positions are not legal", () => {
+    const surrounded = board([".X.", "X.X", ".X."]);
+    expect(playMove(surrounded, 1, 1, "O")).toBeUndefined();
+    const empty = board(["...", "...", "..."]);
+    const once = playMove(empty, 1, 1, "X")!;
+    expect(playMove(empty, 1, 1, "X", new Set([once.board.rows.join("")]))).toBeUndefined();
   });
 
   test("evaluation prefers our stones and penalises atari", () => {
@@ -301,11 +398,80 @@ describe("go", () => {
       board: board([".....", ".....", ".....", ".....", "....."]),
       currentPlayer: "Black",
       opponent: "Netburners",
-      opponentValue: {},
-      maxDepth: 2,
+      status: "inProgress",
+      previousBoards: [],
     });
     expect(decision.action.type).toBe("move");
-    expect(decision.why).toContain("exhaustive");
+    expect(decision.why).toContain("fixed-budget tactical shortlist");
+  });
+
+  test("terminal evaluation treats a score tie as the game's black win", () => {
+    const empty = board([".....", ".....", ".....", ".....", "....."]);
+    expect(terminalGoRewardValue(empty, {
+      board: empty,
+      currentPlayer: "None",
+      opponent: "Netburners",
+      status: "gameOver",
+      previousBoards: [],
+      komi: 0,
+      currentWinStreak: 0,
+    })).toBe(1_000);
+  });
+
+  test("an aligned plan predicts the immediate reply from the exact dispatch seed", () => {
+    const view = {
+      board: board([".....", ".....", ".....", ".....", "....."]),
+      currentPlayer: "Black",
+      opponent: "Daedalus",
+      status: "inProgress",
+      previousBoards: [],
+      alignedDispatchPlaytime: 10_000,
+      bonusCycles: 0,
+      komi: 5.5,
+    } as const;
+    const decision = finalizeGoDecision(prepareGoDecision(view), [10_200]);
+    const best = decision.ranked[0]!;
+    expect(best.predictedReplies?.length).toBeGreaterThan(0);
+    expect(best.forecastCertainty).toBe("exact");
+  });
+
+  test("the ordinary exact-seed 5x5 plan stays near the 2 ms hot-path budget", () => {
+    const view = {
+      board: board([".....", ".....", ".....", ".....", "....."]),
+      currentPlayer: "Black",
+      opponent: "Daedalus",
+      status: "inProgress",
+      previousBoards: [],
+      alignedDispatchPlaytime: 10_000,
+      bonusCycles: 0,
+    } as const;
+    const plan = (seed: number) => finalizeGoDecision(prepareGoDecision(view, true), [seed]);
+    for (let index = 0; index < 5; index++) plan(10_200 + index * 200);
+    const samples = Array.from({ length: 31 }, (_, index) => {
+      const started = performance.now();
+      plan(20_200 + index * 200);
+      return performance.now() - started;
+    }).sort((a, b) => a - b);
+    // The measured local median is about 2 ms. Leave headroom for loaded CI
+    // while still catching an accidental return to per-legal-move expansion.
+    expect(samples[15]!).toBeLessThan(5);
+  });
+
+  test("an inherited 13x13 board stays under budget without the 5x5 exact forecast", () => {
+    const view = {
+      board: board(Array.from({ length: 13 }, () => ".".repeat(13))),
+      currentPlayer: "Black",
+      opponent: "Daedalus",
+      status: "inProgress",
+      previousBoards: [],
+    } as const;
+    for (let index = 0; index < 5; index++) finalizeGoDecision(prepareGoDecision(view, false));
+    const samples = Array.from({ length: 31 }, () => {
+      const started = performance.now();
+      finalizeGoDecision(prepareGoDecision(view, false));
+      return performance.now() - started;
+    }).sort((a, b) => a - b);
+    expect(samples[15]!).toBeLessThan(5);
   });
 
   test("a full board passes rather than crashing", () => {
@@ -313,17 +479,59 @@ describe("go", () => {
       board: board(["XX", "XX"]),
       currentPlayer: "Black",
       opponent: "Netburners",
-      opponentValue: {},
-      maxDepth: 2,
+      status: "inProgress",
+      previousBoards: [],
     });
     expect(decision.action.type).toBe("pass");
   });
+
+  test("a white turn resumes the public opponent promise after interruption", () => {
+    const decision = stepGo({
+      board: board([".....", ".....", ".....", ".....", "....."]),
+      currentPlayer: "White",
+      opponent: "Netburners",
+      status: "waitingOnAI",
+      previousBoards: [],
+    });
+    expect(decision.action.type).toBe("resume");
+  });
+
+  test("a completed game starts the most valuable 5x5 subnet", () => {
+    const decision = stepGo({
+      board: board([".....", ".....", ".....", ".....", "....."]),
+      currentPlayer: "None",
+      status: "gameOver",
+      opponent: "Netburners",
+      previousBoards: [],
+      nextGame: { opponent: "Daedalus", boardSize: 5, why: "largest ETA reduction" },
+    });
+    expect(decision.action).toMatchObject({ type: "newGame", opponent: "Daedalus", boardSize: 5 });
+  });
+
+  test("opponent choice follows feature needs and rewards a pending favor win", () => {
+    const ranked = rankGoGames({
+      opponents: ["Daedalus", "The Black Hand"],
+      stats: [{ opponent: "Daedalus", wins: 1, losses: 0, winStreak: 1, rep: 0, bonusPercent: 0 }],
+      joinedFactions: new Set(["Daedalus"]),
+      factionFavor: { Daedalus: { favor: 10, remainingWorkSec: 3_600 } },
+      demands: {
+        Daedalus: { seconds: 3_600, share: 1, why: "faction reputation bottleneck" },
+        "The Black Hand": { seconds: 600, share: 1, why: "small money tail" },
+      },
+      goPower: 1,
+      hasSourceFile14: false,
+      favorRepCap: 100_000,
+      installRemainingSec: 3_600,
+    });
+    expect(ranked[0]?.opponent).toBe("Daedalus");
+  });
+
 });
 
-// --- side: every contract type has a KNOWN CORRECT ANSWER ---------------------
+// --- side: every v3.0.1 contract type has a solver -----------------------------
 
-describe("coding contracts — proven, not measured", () => {
-  test("solvers are proven against known answers", () => {
+describe("coding contracts — known answers and exact release coverage", () => {
+  test("solvers match known answers for all 30 types", () => {
     const cases: [string, unknown, unknown][] = [
       ["Subarray with Maximum Sum", [-2, 1, -3, 4, -1, 2, 1, -5, 4], 6],
       ["Array Jumping Game", [2, 3, 1, 1, 4], 1],
@@ -331,8 +539,12 @@ describe("coding contracts — proven, not measured", () => {
       ["Array Jumping Game II", [2, 3, 1, 1, 4], 2],
       ["Array Jumping Game II", [3, 2, 1, 0, 4], 0],
       ["Merge Overlapping Intervals", [[1, 3], [8, 10], [2, 6], [15, 18]], [[1, 6], [8, 10], [15, 18]]],
+      ["Generate IP Addresses", "25525511135", ["255.255.11.135", "255.255.111.35"]],
       ["Unique Paths in a Grid I", [3, 7], 28],
       ["Unique Paths in a Grid II", [[0, 0, 0], [0, 1, 0], [0, 0, 0]], 2],
+      ["Shortest Path in a Grid", [[0, 1, 0, 0, 0], [0, 0, 0, 1, 0]], "DRRURRD"],
+      ["Sanitize Parentheses in Expression", "()())()", ["(())()", "()()()"]],
+      ["Find All Valid Math Expressions", ["123", 6], ["1+2+3", "1*2*3"]],
       ["Total Ways to Sum", 5, 6],
       ["Total Ways to Sum II", [10, [1, 2, 5]], 10],
       ["Algorithmic Stock Trader I", [7, 1, 5, 3, 6, 4], 5],
@@ -342,8 +554,17 @@ describe("coding contracts — proven, not measured", () => {
       ["Minimum Path Sum in a Triangle", [[2], [3, 4], [6, 5, 7], [4, 1, 8, 3]], 11],
       ["Find Largest Prime Factor", 13195, 29],
       ["Spiralize Matrix", [[1, 2, 3], [4, 5, 6], [7, 8, 9]], [1, 2, 3, 6, 9, 8, 7, 4, 5]],
+      ["HammingCodes: Integer to Encoded Binary", 8, "11110000"],
+      ["HammingCodes: Encoded Binary to Integer", "1001101010", 21],
+      ["Proper 2-Coloring of a Graph", [4, [[0, 2], [0, 3], [1, 2], [1, 3]]], [0, 0, 1, 1]],
+      ["Compression I: RLE Compression", "aaaaabccc", "5a1b3c"],
+      ["Compression II: LZ Decompression", "5aaabb450723abb", "aaabbaaababababaabb"],
+      ["Compression III: LZ Compression", "abracadabra", "7abracad47"],
       ["Encryption I: Caesar Cipher", ["MEDIUM", 1], "LDCHTL"],
       ["Encryption II: Vigenère Cipher", ["DASHBOARD", "LINUX"], "OIFBYZIEX"],
+      ["Square Root", 15n, 4n],
+      ["Total Number of Primes", [0, 20], 8],
+      ["Largest Rectangle in a Matrix", [[1, 0, 0], [0, 0, 0]], [[0, 1], [1, 2]]],
     ];
     for (const [type, data, expected] of cases) {
       expect(solve(type, data), `${type} produced the wrong answer`).toEqual(expected);
@@ -355,90 +576,20 @@ describe("coding contracts — proven, not measured", () => {
   });
 
   test("an unknown type returns undefined — never a guess", () => {
-    // A wrong answer burns one of three tries; the third destroys the
-    // contract. Not attempting is strictly better than attempting badly.
-    expect(solve("Proper 2-Coloring of a Graph", [])).toBeUndefined();
-    expect(canSolve("Proper 2-Coloring of a Graph")).toBe(false);
+    // Some types have only one attempt, so refusing an unknown remains part
+    // of the public solver contract even though v3.0.1 is fully covered.
+    expect(solve("Not A Real Contract Type", [])).toBeUndefined();
+    expect(canSolve("Not A Real Contract Type")).toBe(false);
+    expect(solve("toString", [])).toBeUndefined();
+    expect(canSolve("toString")).toBe(false);
   });
 
   test("a solver that throws on malformed data returns undefined, not a partial answer", () => {
     expect(solve("Merge Overlapping Intervals", null)).toBeUndefined();
   });
 
-  test("every registered solver is callable and declared", () => {
-    for (const type of Object.keys(SOLVERS)) expect(canSolve(type)).toBe(true);
-    expect(Object.keys(SOLVERS).length).toBeGreaterThanOrEqual(17);
-  });
-
-  test("infiltration ranks by reward per real-time minute, not raw reward", () => {
-    const ranked = rankInfiltrations([
-      { location: "Slow", city: "Aevum", difficulty: 3, maxClearanceLevel: 40, repReward: 0, moneyReward: 1_000_000 },
-      { location: "Fast", city: "Aevum", difficulty: 0.5, maxClearanceLevel: 5, repReward: 0, moneyReward: 200_000 },
-    ]);
-    expect(ranked[0]!.location).toBe("Fast");
-  });
 });
 
-// --- stock ---------------------------------------------------------------------
-
-describe("stock", () => {
-  const view = (over: Partial<StockView> = {}): StockView => ({
-    positions: [],
-    signals: {},
-    has4SData: true,
-    has4SDataApi: true,
-    hasTixApi: true,
-    moneyGranted: 1e9,
-    totalMoney: 1e9,
-    horizonSec: 3_600,
-    incomePerSec: 0,
-    ...over,
-  });
-
-  test("forecast 0.5 is exactly zero edge — no information means no trade", () => {
-    expect(edge({ forecast: 0.5, volatility: 0.01 }, false)).toBe(0);
-    expect(edge({ forecast: 0.6, volatility: 0.01 }, false)).toBeCloseTo(0.002, 10);
-    expect(edge({ forecast: 0.4, volatility: 0.01 }, false)).toBeCloseTo(-0.002, 10);
-  });
-
-  test("the position must clear BOTH commissions", () => {
-    // Both the buy and the sell are charged, so the round trip is $200k.
-    const shares = minProfitableShares(100, 0.001, 10);
-    expect(shares).toBeCloseTo((2 * COMMISSION) / (0.001 * 100 * 10), 6);
-    expect(minProfitableShares(100, 0, 10)).toBe(Infinity);
-  });
-
-  test("without a forecast it REFUSES to trade rather than guessing", () => {
-    const decision = stepStock(view({ has4SData: false, totalMoney: 100 }));
-    expect(decision.actions).toHaveLength(0);
-    expect(decision.hold).toContain("per round trip to guess");
-  });
-
-  test("without TIX it says so instead of silently doing nothing", () => {
-    expect(stepStock(view({ hasTixApi: false })).hold).toContain("TIX API");
-  });
-
-  test("4S is evaluated as an investment against the horizon", () => {
-    const rich = evaluate4S(view({ has4SData: false, totalMoney: 1e12, horizonSec: 86_400 }));
-    expect(rich.buy).toBe(true);
-    const shortHorizon = evaluate4S(view({ has4SData: false, totalMoney: 1e12, horizonSec: 1 }));
-    expect(shortHorizon.buy).toBe(false);
-    // Spending half the bankroll on data leaves nothing to trade with.
-    const broke = evaluate4S(view({ has4SData: false, totalMoney: 1.5e9 }));
-    expect(broke.buy).toBe(false);
-    expect(broke.why).toContain("still have capital");
-  });
-
-  test("it exits a position whose forecast turned", () => {
-    const decision = stepStock(
-      view({
-        positions: [{ sym: "ECP", price: 100, ask: 100, bid: 100, maxShares: 1e6, shares: 100, avgPx: 90, sharesShort: 0, avgPxShort: 0 }],
-        signals: { ECP: { forecast: 0.3, volatility: 0.01 } },
-      }),
-    );
-    expect(decision.actions.some((a) => a.type === "sell")).toBe(true);
-  });
-});
 
 // --- corp ---------------------------------------------------------------------
 
@@ -555,6 +706,9 @@ describe("progression", () => {
     queued: [],
     affordableValueProduct: 1,
     factionWorkInProgress: false,
+    factionsReadyToInstall: true,
+    stockReadyToInstall: true,
+    graftInProgress: false,
     money: 0,
     earnedThisRun: 0,
     factions: {},
@@ -590,8 +744,73 @@ describe("progression", () => {
   });
 
   test("installing is recommended only in `ending` with something queued", () => {
-    expect(stepProgression(view({ earnedThisRun: 100, money: 60 })).install).toBe(false);
-    expect(stepProgression(view({ earnedThisRun: 100, money: 60, queued: ["a"] })).install).toBe(true);
+    expect(stepProgression(view({ earnedThisRun: 100, money: 60 })).installReady).toBe(false);
+    expect(stepProgression(view({ earnedThisRun: 100, money: 60, queued: ["a"] })).installReady).toBe(true);
+  });
+
+  test("install waits for the factions final sweep", () => {
+    const decision = stepProgression(
+      view({ earnedThisRun: 100, money: 60, queued: ["a"], factionsReadyToInstall: false }),
+    );
+    expect(decision.installWanted).toBe(true);
+    expect(decision.installReady).toBe(false);
+    expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["factions"]);
+    expect(decision.why).toContain("final purchase and donation sweep");
+  });
+
+  test("install waits for stock liquidation and an ongoing graft", () => {
+    const decision = stepProgression(view({
+      earnedThisRun: 100,
+      money: 60,
+      queued: ["a"],
+      stockReadyToInstall: false,
+      graftInProgress: true,
+    }));
+    expect(decision.installWanted).toBe(true);
+    expect(decision.installReady).toBe(false);
+    expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["stock", "graft"]);
+  });
+
+  test("install waits while an augmentation is still purchasable", () => {
+    // Cash does not survive an install, so resetting while something is still
+    // affordable destroys money that could have become a permanent multiplier.
+    // The reset always loses that race, and the blocker names what is holding it.
+    const decision = stepProgression(view({
+      earnedThisRun: 100,
+      money: 60,
+      queued: ["a"],
+      purchasableAugmentation: "Cranial Signal Processors - Gen II",
+    }));
+    expect(decision.installWanted).toBe(true);
+    expect(decision.installReady).toBe(false);
+    expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["augmentations"]);
+    expect(decision.why).toContain("Cranial Signal Processors");
+    expect(decision.why).toContain("cash does not survive");
+  });
+
+  test("the phase ANNOUNCES the burn; the barriers are what gate the reset", () => {
+    // `ending` is the signal to stock and factions that it is time to convert
+    // everything. It is not itself permission to reset — that needs every barrier
+    // clear. And once they ARE clear there is nothing left to wait for, so the
+    // decision is ready immediately rather than after some settling delay.
+    const ending = view({ earnedThisRun: 100, money: 60, queued: ["a"] });
+    expect(stepProgression(ending).phase).toBe("ending");
+
+    const burning = stepProgression({ ...ending, stockReadyToInstall: false, purchasableAugmentation: "Rootkit" });
+    expect(burning.phase).toBe("ending");
+    expect(burning.installWanted).toBe(true);
+    expect(burning.installReady).toBe(false);
+    expect(burning.installBlockers.map((blocker) => blocker.kind)).toEqual(["stock", "augmentations"]);
+
+    // Everything burned: flat book, nothing left to buy. No further waiting.
+    const done = stepProgression({
+      ...ending,
+      stockReadyToInstall: true,
+      factionsReadyToInstall: true,
+      graftInProgress: false,
+    });
+    expect(done.installBlockers).toEqual([]);
+    expect(done.installReady).toBe(true);
   });
 
   test("BitNode ordering is exact for a small set and beats the baseline order", () => {
@@ -647,5 +866,97 @@ describe("every strategy is deterministic", () => {
       expect(a.value).toBe(b.value);
       expect(a.placements).toEqual(b.placements);
     }
+  });
+});
+
+describe("progression survives its own published plan", () => {
+  // THE BUG, from a live BN12 run: `progressionRefresh` read `plan.forecasts.node`
+  // unguarded. The plan outlives the bundle that wrote it — module state dies on a
+  // rebuild, the topic does not, which is the whole point of `previousChoice` — so
+  // after a build that ADDED `forecasts`, the refresh threw
+  // "Cannot read properties of undefined (reading 'node')" on every pass. It threw
+  // before publishing, so it could never replace the plan that was breaking it: the
+  // BitNode tab read "waiting for the progression planner" indefinitely while every
+  // other feature ran normally, and the only evidence was one `feature.failed`
+  // record in the log.
+  //
+  // A plan from an older bundle must be DISCARDED, not dereferenced.
+  function ctxWith(plan: unknown) {
+    const state = initState();
+    state.topics.player = {
+      money: 1e9,
+      skills: { hacking: 500, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1, intelligence: 0 },
+      mults: {}, jobs: {}, city: "Sector-12", location: "home", karma: 0, numPeopleKilled: 0, factions: [],
+    } as never;
+    state.topics.progression = {
+      bitNode: 1,
+      augCount: 0,
+      sourceFiles: {},
+      ownedAugs: {},
+      ...(plan !== undefined ? { plan } : {}),
+    } as never;
+    return { state, caps: deriveCapabilities({ bitNode: 1 }), now: 1_000 } as NeedContext;
+  }
+
+  const refresh = FEATURE_MODULES.progression.refresh!;
+
+  /** Exactly the plan shape the wedged run had on disk. */
+  const stalePlan = {
+    phase: "ending",
+    install: false,
+    why: "waiting for factions to finish its final purchase and donation sweep",
+    homeRamBudgetFraction: 0.5,
+    favorCrossings: [],
+    route: "daedalus",
+    routeWhy: "daedalus remains the fastest route",
+    decidedAt: 500,
+    routes: [],
+    expectedEndAt: 9e12,
+  };
+
+  test("a plan from an OLDER BUNDLE does not throw, and is replaced", () => {
+    const ctx = ctxWith(stalePlan);
+    expect(() => refresh(ctx)).not.toThrow();
+    const plan = ctx.state.topics.progression!.plan!;
+    // Recovery is the point: the new fields are present afterwards, so the next pass
+    // has a plan it can read and the feature is not wedged.
+    expect(plan.forecasts).toBeDefined();
+    expect(plan.forecasts.node).toBeDefined();
+    expect(plan.forecasts.install).toBeDefined();
+    expect(plan.queuedAugmentations).toBeDefined();
+    expect(plan.installBlockers).toBeDefined();
+  });
+
+  test("no plan at all is fine too", () => {
+    const ctx = ctxWith(undefined);
+    expect(() => refresh(ctx)).not.toThrow();
+    expect(ctx.state.topics.progression!.plan?.forecasts).toBeDefined();
+  });
+
+  test("a plan missing ONLY the newest field is still rejected", () => {
+    // Partial compatibility is the trap: `forecasts` present but
+    // `queuedAugmentations` absent would sail past a forecasts-only guard and then
+    // throw in the install path instead.
+    const ctx = ctxWith({
+      ...stalePlan,
+      forecasts: {
+        node: { state: "unknown", basis: "x", reason: "y", nextRecalibrationAt: 0, estimatedAt: 0 },
+        install: { state: "unknown", basis: "x", reason: "y", nextRecalibrationAt: 0, estimatedAt: 0 },
+      },
+    });
+    expect(() => refresh(ctx)).not.toThrow();
+    expect(ctx.state.topics.progression!.plan!.queuedAugmentations).toBeDefined();
+  });
+
+  test("a plan THIS bundle wrote is round-tripped, not discarded", () => {
+    // The guard must not throw away a live plan: `previousChoice` depends on reading
+    // it back to keep the route decision stable across a rebuild.
+    const ctx = ctxWith(undefined);
+    refresh(ctx);
+    const first = ctx.state.topics.progression!.plan!;
+    refresh(ctx);
+    const second = ctx.state.topics.progression!.plan!;
+    expect(second.route).toBe(first.route);
+    expect(second.decidedAt).toBe(first.decidedAt);
   });
 });

@@ -11,6 +11,7 @@ export interface WorkTaskLike {
   nextCompletion?: Promise<void>;
   cyclesWorked?: number;
   factionName?: unknown;
+  factionWorkType?: unknown;
   companyName?: unknown;
   crimeType?: unknown;
   classType?: unknown;

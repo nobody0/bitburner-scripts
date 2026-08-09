@@ -1,16 +1,29 @@
 import type { NS, PlayerRequirement } from "@ns";
+import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
+import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
-import { augCost, defaultWeights, type AugInfo, type PriceContext } from "../../../shared/strategy/factions/augs.ts";
+import {
+  NEUROFLUX,
+  augCost,
+  isSoA,
+  weightsForRoute,
+  type AugInfo,
+  type PriceContext,
+} from "../../../shared/strategy/factions/augs.ts";
 import { blockersFor, stepFactions } from "../../../shared/strategy/factions/decide.ts";
 import { initFactionMemory, type FactionAction, type FactionDecision, type FactionMemory } from "../../../shared/strategy/factions/plan.ts";
+import { donationForRep, repFromDonation } from "../../../shared/strategy/factions/rep.ts";
 import type { FactionStanding, FactionsView } from "../../../shared/strategy/factions/state.ts";
 import { isReachable, type RequirementView } from "../../../shared/strategy/factions/requirements.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
+import { COMMISSION } from "../../../shared/strategy/stock/market.ts";
+import { daedalusAugsRequired } from "../../../shared/strategy/progression/endgame.ts";
+import { usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import type { FactionGate, FactionPlan } from "../../../shared/telemetry/topics/factions.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge, type GameState } from "../state.ts";
-import { armWorkCompletion, disarmWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
+import { armWorkCompletion, disarmWorkCompletion, peekWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
@@ -35,6 +48,7 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
  * so it cannot drift from the probes. Two singularity methods in one step at
  * SF4 level 3 is ~10 GB; the augmentation probe's `rep` step is the widest. */
 const PEAK_STEP_GB = 12;
+const SHADOWS_OF_ANARCHY = "Shadows of Anarchy";
 
 let memory: FactionMemory = initFactionMemory();
 /** Last executed action's outcome, for the plan digest. */
@@ -59,7 +73,6 @@ function requirementView(state: GameState): RequirementView {
   const career = state.topics.career;
   const hacknet = state.topics.hacknet;
   const bladeburner = state.topics.bladeburner;
-  const side = state.topics.side;
   const progression = state.topics.progression;
 
   const backdoored = new Set<string>();
@@ -91,13 +104,40 @@ function requirementView(state: GameState): RequirementView {
     bitNode: progression?.bitNode ?? 1,
     sourceFiles: progression?.sourceFiles ?? {},
     bladeburnerRank: bladeburner?.rank ?? 0,
-    numInfiltrations: side?.infiltrationTotal ?? 0,
+    // The game does not expose a completion counter. Its own Shadows of
+    // Anarchy requirement treats the resulting invitation/membership as the
+    // authoritative proof that one infiltration was completed.
+    numInfiltrations: factions?.joined.includes(SHADOWS_OF_ANARCHY)
+      || factions?.invites?.includes(SHADOWS_OF_ANARCHY) ? 1 : 0,
   };
 }
 
 function incomeRate(value: number | [number, number] | undefined): number {
   if (value === undefined) return 0;
   return Array.isArray(value) ? (value[0] ?? 0) : value;
+}
+
+/** Cash the market book will hand back, net of getting out of it.
+ *
+ * The book is liquidated before every install — `progression` will not reset while
+ * it is open — so from the purchase plan's point of view this money is spoken for
+ * and merely late. Counting it changes both the SET we plan for and, more
+ * importantly, the ORDER: buying the one augmentation today's cash covers charges
+ * the 1.9x queue escalation to the dearer one the liquidation would have paid for
+ * outright, and no later correction can undo it.
+ *
+ * `position.value` is already marked at bid/ask, so the spread is priced in; what
+ * remains is one $100k commission per position on the way out. Netted, never
+ * negative — a book worth less than its exit costs is not a source of funds. */
+function liquidatableValue(ctx: DriverContext): number {
+  const stock = ctx.state.topics.stock;
+  if (!stock || ctx.caps.unlocked.stock === "no") return 0;
+  const positions = (stock.positions ?? []).filter(
+    (position) => position.shares > 0 || position.sharesShort > 0,
+  );
+  if (positions.length === 0) return 0;
+  const gross = positions.reduce((sum, position) => sum + position.value, 0);
+  return Math.max(0, gross - positions.length * COMMISSION);
 }
 
 /** Assemble everything the pure strategy decides from. */
@@ -107,8 +147,21 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
   const topic = state.topics.factions;
   if (!player || !topic) return undefined;
 
-  const owned = new Set(topic.ownedAugs ?? []);
+  const ownedList = topic.ownedAugs ?? [];
+  const owned = new Set(ownedList);
   const catalog = new Map<string, AugInfo>();
+  for (const [name, aug] of Object.entries(AUGMENTATIONS)) {
+    if (aug.factions.length === 0) continue;
+    catalog.set(name, {
+      name,
+      baseCost: aug.cost,
+      baseRepRequirement: aug.rep,
+      factions: [...aug.factions],
+      prereqs: [...(aug.prereqs ?? [])],
+      mults: { ...(aug.mults ?? {}) },
+      ...(aug.multsUnknown ? { multsUnknown: true } : {}),
+    });
+  }
   // Offers are (faction, augmentation) pairs; the per-augmentation facts live
   // once in `augMeta` and are joined back on by name here.
   const meta = topic.augMeta ?? {};
@@ -117,6 +170,10 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     if (existing) {
       // Several factions can offer the same augmentation; merge the sources.
       if (!existing.factions.includes(offer.faction)) existing.factions.push(offer.faction);
+      // The unstable augmentation is randomised for this save. Every other
+      // augmentation keeps the pinned static multiplier table.
+      const dynamicMults = meta[offer.name]?.mults;
+      if (dynamicMults && existing.multsUnknown) existing.mults = { ...dynamicMults };
       continue;
     }
     catalog.set(offer.name, {
@@ -161,13 +218,37 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
   });
 
   const mults = (player.mults ?? {}) as unknown as Record<string, number>;
-  const nodeMults = state.topics.progression?.multipliers ?? {};
+  // The SF5 getter is optional, but BitNode multipliers are not: donation
+  // conversion and augmentation prices are wrong in BN4 (and several other
+  // nodes) if absence of the getter is treated as BN1. The static table is
+  // identical to the getter; live readings override it when available.
+  const nodeMults = effectiveBitNodeMultipliers(
+    ctx.caps.bitNode,
+    sfLevel(ctx.caps.sourceFiles, 12),
+    state.topics.progression?.multipliers,
+  ) ?? {};
   const career = state.topics.career;
 
+  const installed = state.topics.progression?.ownedAugs ?? {};
+  const occurrences = new Map<string, number>();
+  for (const name of ownedList) occurrences.set(name, (occurrences.get(name) ?? 0) + 1);
+  const queuedAugs = new Set<string>();
+  let queuedNonSoA = 0;
+  for (const [name, count] of occurrences) {
+    const installedEntry = (installed[name] ?? 0) > 0 ? 1 : 0;
+    const queuedCount = Math.max(0, count - installedEntry);
+    if (queuedCount > 0) {
+      queuedAugs.add(name);
+      if (!isSoA(name)) queuedNonSoA += queuedCount;
+    }
+  }
+  const installedNeuroflux = installed[NEUROFLUX] ?? 0;
+  const neurofluxOccurrences = occurrences.get(NEUROFLUX) ?? 0;
+  const queuedNeuroflux = Math.max(0, neurofluxOccurrences - (installedNeuroflux > 0 ? 1 : 0));
   const priceContext: PriceContext = {
-    queuedNonSoA: 0,
-    ownedSoA: 0,
-    neurofluxLevel: state.topics.progression?.ownedAugs?.["NeuroFlux Governor"] ?? 0,
+    queuedNonSoA,
+    ownedSoA: [...owned].filter(isSoA).length,
+    neurofluxLevel: installedNeuroflux + queuedNeuroflux,
     sf11Level: sfLevel(caps.sourceFiles, 11),
     augMoneyCost: nodeMults["AugmentationMoneyCost"] ?? 1,
     augRepCost: nodeMults["AugmentationRepCost"] ?? 1,
@@ -190,15 +271,31 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     factions,
     catalog,
     owned,
-    weights: defaultWeights(),
+    queued: queuedAugs,
+    graftable: topic.graftable ?? [],
+    entropy: player.entropy ?? 0,
+    weights: weightsForRoute(ctx.route),
+    ...(ctx.route ? { route: ctx.route } : {}),
+    // Factions creates the package that will eventually trigger the install,
+    // so it plans against the node horizon rather than circularly depending
+    // on the not-yet-known install horizon. Unknown means no arbitrary cutoff.
+    horizonSec: usableForecastSec(ctx.horizons.node) ?? Infinity,
+    targetAugCount: daedalusAugsRequired(ctx.caps.bitNode, sfLevel(ctx.caps.sourceFiles, 12)) ?? Infinity,
     favorToDonate: topic.favorToDonate ?? 150,
     moneyGranted: ctx.grants.money,
+    moneyAvailable: player.money,
+    pendingProceeds: liquidatableValue(ctx),
+    proceedsSettling: state.topics.stock?.plan?.liquidate === true,
     holdsWorkSlot: ctx.grants.slot,
     ...(career?.currentWork
       ? {
           currentWork: {
             kind: career.currentWork.type === "FACTION" ? "faction" : String(career.currentWork.type).toLowerCase(),
             faction: career.currentWork.detail,
+            detail: career.currentWork.detail,
+            ...(career.currentWork.workType
+              ? { workType: career.currentWork.workType as "hacking" | "field" | "security" }
+              : {}),
             focused: true,
           },
         }
@@ -219,7 +316,7 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
  * Every branch reports what the game actually returned. `false` from a
  * singularity call is the game REFUSING — not enough money, not invited, wrong
  * city — and is a modelled outcome the plan reports rather than an exception. */
-async function execute(_ns: NS, ctx: DriverContext, action: FactionAction): Promise<void> {
+async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view: FactionsView): Promise<void> {
   const at = Date.now();
   const record = (ok: boolean, detail: string): void => {
     lastResult = { action: action.type, ok, detail, at };
@@ -268,6 +365,10 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction): Prom
     }
 
     case "travelTo": {
+      if (ctx.grants.money < 200_000) {
+        record(false, "waiting for $200,000 travel grant");
+        return;
+      }
       const ok = await run(["singularity.travelToCity"], (stubNs) =>
         stubNs["singularity"]["travelToCity"](action.city as never),
       );
@@ -277,11 +378,50 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction): Prom
     }
 
     case "donate": {
-      const ok = await run(["singularity.donateToFaction"], (stubNs) =>
-        stubNs["singularity"]["donateToFaction"](action.faction as never, action.amount),
+      // The decision can precede the arbiter grant that it causes. Keep the
+      // intent published so the next claims pass reserves the exact amount,
+      // but do not bypass that grant in the meantime.
+      const reserve = action.amount + (action.purchaseCost ?? 0);
+      if (ctx.grants.money < reserve) {
+        record(false, `waiting for $${Math.round(reserve)} donation and purchase grant`);
+        return;
+      }
+      const plannedRep = view.factions.find((standing) => standing.name === action.faction)?.rep ?? 0;
+      const repTarget = plannedRep
+        + repFromDonation(action.amount, view.person.mults.faction_rep, view.repContext.factionWorkRepGain);
+      const result = await run(
+        ["singularity.getFactionRep", "singularity.donateToFaction"],
+        (stubNs) => {
+          // A donation can wait behind its money grant while faction work or
+          // passive gain keeps raising reputation. Read BEFORE mutating, then
+          // preserve the planner's target with the smallest current donation.
+          const currentRep = stubNs["singularity"]["getFactionRep"](action.faction as never);
+          const amount = donationForRep(
+            Math.max(0, repTarget - currentRep),
+            view.person.mults.faction_rep,
+            view.repContext.factionWorkRepGain,
+          );
+          if (amount <= 0) return { ok: true, amount: 0, rep: currentRep };
+          const ok = stubNs["singularity"]["donateToFaction"](action.faction as never, amount);
+          return {
+            ok,
+            amount,
+            rep: ok
+              ? currentRep + repFromDonation(amount, view.person.mults.faction_rep, view.repContext.factionWorkRepGain)
+              : currentRep,
+          };
+        },
       );
-      if (ok === refused) return;
-      record(Boolean(ok), ok ? `donated $${Math.round(action.amount)}` : "donation refused (favor too low?)");
+      if (result === refused) return;
+      setFactionRep(ctx.state, action.faction, result.rep);
+      record(
+        result.ok,
+        result.ok
+          ? result.amount > 0
+            ? `donated $${Math.round(result.amount)}`
+            : `already reached ${Math.round(repTarget)} reputation`
+          : "donation refused (favor too low?)",
+      );
       return;
     }
 
@@ -290,14 +430,27 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction): Prom
         stubNs["singularity"]["purchaseAugmentation"](action.faction as never, action.augmentation as never),
       );
       if (ok === refused) return;
+      // `true` means the game has already queued the augmentation. Record that
+      // authoritative transition locally; the later catalogue probe merely
+      // reconciles external/manual changes. Appending also models another NFG
+      // level correctly.
+      if (ok) {
+        merge(ctx.state, "factions", {
+          ownedAugs: [...(ctx.state.topics.factions?.ownedAugs ?? []), action.augmentation],
+        });
+      }
       record(Boolean(ok), ok ? `bought ${action.augmentation}` : "purchase refused (rep or money short)");
       return;
     }
 
     case "graft": {
+      if (!ctx.grants.slot) {
+        record(false, "waiting for Player.currentWork");
+        return;
+      }
       const result = await run(["grafting.graftAugmentation", "singularity.getCurrentWork"], (stubNs) => {
         disarmWorkCompletion();
-        const ok = stubNs["grafting"]["graftAugmentation"](action.augmentation as never, false);
+        const ok = stubNs["grafting"]["graftAugmentation"](action.augmentation as never, true);
         const task = stubNs["singularity"]["getCurrentWork"]() as (Record<string, unknown> & WorkTaskLike) | null;
         if (task) armWorkCompletion(task);
         return {
@@ -327,20 +480,57 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction): Prom
   }
 }
 
+/** Apply a known reputation gain without disturbing favor or other factions. */
+function setFactionRep(state: GameState, faction: string, rep: number): void {
+  const standings = state.topics.factions?.standings ?? [];
+  let found = false;
+  const next = standings.map((standing) => {
+    if (standing.name !== faction) return standing;
+    found = true;
+    return { ...standing, rep };
+  });
+  if (!found) next.push({ name: faction, rep, favor: 0 });
+  merge(state, "factions", { standings: next });
+}
+
 // --- digest -----------------------------------------------------------------
 
-function planDigest(decision: FactionDecision): FactionPlan {
+function planDigest(decision: FactionDecision, view: FactionsView): FactionPlan {
   return {
+    context: {
+      evaluatedAt: view.time,
+      horizonSec: view.horizonSec,
+      ...(view.route ? { route: view.route } : {}),
+      ...(Number.isFinite(view.targetAugCount) ? { targetAugCount: view.targetAugCount } : {}),
+      ownedAugCount: view.owned.size,
+      queuedAugCount: view.queued.size,
+      incomePerSec: view.incomePerSec,
+      moneyAvailable: view.moneyAvailable,
+      moneyGranted: view.moneyGranted,
+      holdsWorkSlot: view.holdsWorkSlot,
+      favorToDonate: view.favorToDonate,
+      priceQueue: {
+        nonSoA: view.priceContext.queuedNonSoA,
+        ownedSoA: view.priceContext.ownedSoA,
+        neurofluxLevel: view.priceContext.neurofluxLevel,
+      },
+    },
     ...(decision.objective ? { objective: decision.objective } : {}),
     action: {
       type: decision.action.type,
+      ...(decision.action.type === "idle" ? { reason: decision.action.reason } : {}),
       why: decision.action.why,
       ...("faction" in decision.action ? { faction: decision.action.faction } : {}),
       ...("augmentation" in decision.action ? { augmentation: decision.action.augmentation } : {}),
       ...("city" in decision.action ? { city: decision.action.city } : {}),
       ...("workType" in decision.action ? { workType: decision.action.workType } : {}),
+      ...("amount" in decision.action ? { amount: decision.action.amount } : {}),
+      ...("purchaseCost" in decision.action && decision.action.purchaseCost !== undefined
+        ? { purchaseCost: decision.action.purchaseCost }
+        : {}),
     },
     alternatives: decision.alternatives,
+    invalidation: decision.invalidation,
     blockers: decision.blockers.map((blocker) => ({
       faction: blocker.faction,
       kind: blocker.kind,
@@ -357,6 +547,7 @@ function planDigest(decision: FactionDecision): FactionPlan {
     ...(lastResult ? { lastResult } : {}),
     ...(decision.blocked ? { blocked: decision.blocked.why } : {}),
     ...(decision.recommendInstall ? { recommendInstall: decision.recommendInstall } : {}),
+    ...(decision.nextBuy ? { nextBuy: decision.nextBuy } : {}),
   };
 }
 
@@ -412,6 +603,9 @@ function gatesFrom(view: FactionsView): Record<string, FactionGate> {
 const driver: FeatureDriver = {
   id: "factions",
   everyMs: 30_000,
+  // A released progress lock can hand this feature Player.currentWork now;
+  // do not wait for the ordinary 30-second planning cadence to use it.
+  wake: () => peekWorkCompletion() !== undefined,
   requires: "factions",
   async tick(ctx: DriverContext) {
     const now = Date.now();
@@ -422,16 +616,21 @@ const driver: FeatureDriver = {
     memory = next;
 
     annotateOffers(ctx.state, view);
-    merge(ctx.state, "factions", { plan: planDigest(decision), gates: gatesFrom(view) });
+    merge(ctx.state, "factions", { plan: planDigest(decision, view), gates: gatesFrom(view) });
 
     try {
-      await execute(ctx.ns, ctx, decision.action);
+      await execute(ctx.ns, ctx, decision.action, view);
+      // Publish the outcome in the same controller pass. Waiting until the
+      // next 30-second faction decision made result telemetry lag one action
+      // behind and could lose the final successful purchase when a goal/reset
+      // ended the run immediately afterward.
+      merge(ctx.state, "factions", { plan: planDigest(decision, view) });
     } catch (error) {
       // ScriptDeath is a kill, not a feature bug — rethrow so the controller
       // can shut down cleanly rather than looping on a corpse.
       if (isScriptDeath(error)) throw error;
       lastResult = { action: decision.action.type, ok: false, detail: String(error), at: now };
-      merge(ctx.state, "factions", { plan: planDigest(decision) });
+      merge(ctx.state, "factions", { plan: planDigest(decision, view) });
     }
   },
 };
@@ -482,6 +681,18 @@ function needs(ctx: NeedContext): Need[] {
       why: `${blocker.faction} ${blocker.why}`,
     });
   }
+  if (plan.until?.kind === "rep" && plan.until.faction && plan.until.have < plan.until.target) {
+    out.push({
+      by: "factions",
+      kind: "factionRep",
+      subject: plan.until.faction,
+      target: plan.until.target,
+      have: plan.until.have,
+      weight: 6,
+      urgency: "blocking",
+      why: `${plan.until.faction} reputation unlocks the current augmentation package`,
+    });
+  }
   return out;
 }
 
@@ -495,15 +706,20 @@ function nextWorkFaction(state: GameState): string | undefined {
   if (!topic?.standings) return undefined;
   const joined = new Set(topic.joined);
   const objective = new Set(topic.plan?.objective?.factions ?? []);
+  const intent = topic.plan?.objective?.intent;
   let best: { name: string; gap: number } | undefined;
   for (const standing of topic.standings) {
     if (!joined.has(standing.name)) continue;
     if (objective.size > 0 && !objective.has(standing.name)) continue;
-    // Highest outstanding reputation requirement among its offers.
-    let needed = 0;
-    for (const offer of topic.offers ?? []) {
-      if (offer.faction !== standing.name) continue;
-      if (offer.repReq > needed) needed = offer.repReq;
+    // The package frontier deliberately stops at a breakpoint. Asking for the
+    // faction's highest offer here would silently undo that decision and keep
+    // the shared work slot forever.
+    let needed = intent?.faction === standing.name ? intent.repTarget : 0;
+    if (needed === 0) {
+      for (const offer of topic.offers ?? []) {
+        if (offer.faction !== standing.name) continue;
+        if (offer.repReq > needed) needed = offer.repReq;
+      }
     }
     const gap = needed - standing.rep;
     if (gap <= 0) continue;
@@ -520,23 +736,116 @@ function claims(ctx: ClaimContext): Claim[] {
 
   if (!plan) return out;
 
+  // Work has a two-resource bootstrap: the previous plan could not select
+  // work without the time slot, but once this pass grants that slot the driver
+  // will immediately select workForFaction. Claim its RAM in the SAME pass or
+  // execution observes a slot grant with no matching dodge grant.
+  const working = plan.action.type === "workForFaction" ? plan.action.faction : undefined;
+  const wanted = working ?? nextWorkFaction(ctx.state);
+
   const methods = factionMethods(plan.action.type);
   if (methods.length > 0) {
     out.push(actionRamClaim(ctx, "factions", factionClaimId(plan.action.type), methods, `factions ${plan.action.type}`));
   }
+  if (plan.action.type === "idle" && plan.action.reason === "slot" && wanted) {
+    out.push(actionRamClaim(
+      ctx,
+      "factions",
+      factionClaimId("workForFaction"),
+      factionMethods("workForFaction"),
+      `start faction work at ${wanted} if the work slot is granted`,
+    ));
+  }
 
   const owned = new Set(topic?.ownedAugs ?? []);
   const objectiveAug = plan.objective?.augmentations.find((name) => !owned.has(name));
-  const next = (topic?.offers ?? []).find((offer) => offer.name === objectiveAug);
-  if (next) {
+  const graftOffer = (topic?.offers ?? []).find((offer) => offer.name === objectiveAug);
+  const graft = (topic?.graftable ?? []).find(
+    (offer) => offer.name === objectiveAug && graftOffer?.affordableRep !== true,
+  );
+
+  // Fund whatever the PLAN says it will buy next, not whichever objective
+  // augmentation happens to come first by value.
+  //
+  // THE BUG this replaces: the claim was derived from `plan.objective`, so by the
+  // time the last-chance drain ran — objective complete, nothing left to work
+  // toward — there was no objective augmentation, no claim, and no grant. The
+  // purchase tests the GRANTED budget, so the drain bought nothing and every
+  // install silently discarded the cash on hand. Once the install barrier began
+  // blocking on "an augmentation is still purchasable" that became a hard
+  // deadlock: progression waited for a purchase factions was never funded to make.
+  //
+  // `plan.nextBuy.price` is our own escalated price; the probed offer is the
+  // game's. Reserve the larger of the two — a reserve that is short by a rounding
+  // error buys nothing at all.
+  if (plan.nextBuy && !graft && plan.action.type !== "donate") {
+    const probed = (topic?.offers ?? []).find((offer) => offer.name === plan.nextBuy!.name);
     out.push({
       by: "factions",
       id: "aug-fund",
       resource: "money",
-      amount: next?.price ?? 0,
+      amount: Math.max(plan.nextBuy.price, probed?.price ?? 0),
       priority: PRIORITY["factions:aug-fund"],
       mode: "reserve",
-      why: `buying ${next.name}`,
+      divisible: true,
+      why: `buying ${plan.nextBuy.name}`,
+    });
+  }
+  if (graft) {
+    if (plan.action.type !== "graft") {
+      out.push(actionRamClaim(ctx, "factions", factionClaimId("graft"), factionMethods("graft"), `graft ${graft.name}`));
+    }
+    // Grafting is only started in New Tokyo. Reserve the travel call before
+    // the planner emits `travelTo`; otherwise the first travel decision cannot
+    // obtain a RAM lease until the following slow faction tick.
+    if (ctx.state.topics.player?.city !== "New Tokyo" && plan.action.type !== "travelTo") {
+      out.push(actionRamClaim(ctx, "factions", factionClaimId("travelTo"), factionMethods("travelTo"), "travel to New Tokyo for grafting"));
+    }
+    out.push(
+      {
+        by: "factions",
+        id: "graft-fund",
+        resource: "money",
+        amount: graft.price,
+        priority: PRIORITY["factions:aug-fund"],
+        mode: "reserve",
+        divisible: false,
+        why: `graft ${graft.name}`,
+      },
+      {
+        by: "factions",
+        id: `graft:${graft.name}`,
+        resource: "time",
+        amount: 1,
+        priority: PRIORITY["factions:work"],
+        mode: "spend",
+        why: `grafting ${graft.name} occupies Player.currentWork`,
+      },
+    );
+  }
+  if (plan.action.type === "travelTo") {
+    out.push({
+      by: "factions",
+      id: "travel-fund",
+      resource: "money",
+      amount: 200_000,
+      priority: PRIORITY["factions:aug-fund"],
+      mode: "spend",
+      divisible: false,
+      why: "travel costs $200,000",
+    });
+  }
+
+  if (plan.action.type === "donate" && plan.action.amount && plan.action.amount > 0) {
+    out.push({
+      by: "factions",
+      id: "donation-fund",
+      resource: "money",
+      amount: plan.action.amount + (plan.action.purchaseCost ?? 0),
+      priority: PRIORITY["factions:aug-fund"],
+      mode: "reserve",
+      divisible: true,
+      why: `donating exactly enough for ${plan.action.faction}'s reputation breakpoint and preserving its purchase`,
     });
   }
 
@@ -547,8 +856,6 @@ function claims(ctx: ClaimContext): Claim[] {
   // decision needs the slot, the slot needs the claim, and the claim was
   // waiting for the decision. The feature would sit at "another feature holds
   // Player.currentWork" forever with nobody actually holding it.
-  const working = plan.action.type === "workForFaction" ? plan.action.faction : undefined;
-  const wanted = working ?? nextWorkFaction(ctx.state);
   if (wanted) {
     out.push({
       by: "factions",
@@ -577,7 +884,7 @@ function factionMethods(type: string): readonly string[] {
     case "workForFaction": return ["singularity.workForFaction"];
     case "stopWork": return ["singularity.stopAction"];
     case "travelTo": return ["singularity.travelToCity"];
-    case "donate": return ["singularity.donateToFaction"];
+    case "donate": return ["singularity.getFactionRep", "singularity.donateToFaction"];
     case "purchaseAugmentation": return ["singularity.purchaseAugmentation"];
     case "graft": return ["grafting.graftAugmentation", "singularity.getCurrentWork"];
     default: return [];

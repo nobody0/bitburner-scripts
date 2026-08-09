@@ -8,7 +8,7 @@ import {
   type RootState,
 } from "../../../shared/features/servers.ts";
 import { bar, card, dataTable, dot, filters, meter, note, search, table, tiles, type Column } from "../lib/dom.ts";
-import { esc, fmtMoney, fmtNum, fmtPct, fmtRam } from "../lib/format.ts";
+import { esc, fmtMoney, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -251,6 +251,87 @@ export const hackingTab: Tab = {
         ])
       : note("waiting for the fleet probe");
 
+    const homeRamPlan = fleet?.homeRamPlan
+      ? note(esc(fleet.homeRamPlan.why)) +
+        table(
+          ["cost", "adds", "adds $/sec", "payback", "horizon net", "decision"],
+          [[
+            fmtMoney(fleet.homeRamPlan.cost),
+            fmtRam(fleet.homeRamPlan.addedRam),
+            fmtMoney(fleet.homeRamPlan.incomePerSec),
+            fmtTime(fleet.homeRamPlan.paybackSec * 1000),
+            fmtMoney(fleet.homeRamPlan.netOverHorizon),
+            fleet.homeRamPlan.worthBuying ? "buy" : "hold",
+          ]],
+        )
+      : "";
+
+    const infrastructurePlan = fleet?.infrastructurePlan
+      ? tiles([
+          { label: "horizon", value: fmtTime(fleet.infrastructurePlan.horizonSec * 1000) },
+          { label: "cash / grant", value: `${fmtMoney(fleet.infrastructurePlan.moneyAvailable)} / ${fmtMoney(fleet.infrastructurePlan.moneyGranted)}` },
+          { label: "farm value", value: `${fmtMoney(fleet.infrastructurePlan.incomePerSecPerGb)}/s/GB` },
+        ]) +
+        note(`${esc(fleet.infrastructurePlan.why)}${fleet.infrastructurePlan.hold ? ` — ${esc(fleet.infrastructurePlan.hold)}` : ""}`) +
+        (fleet.infrastructurePlan.lastResult
+          ? note(`${fleet.infrastructurePlan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${esc(fleet.infrastructurePlan.lastResult.detail)}`)
+          : "") +
+        (fleet.infrastructurePlan.ranked.length
+          ? table(
+              ["pick", "option", "adds", "cost", "adds $/sec", "return/$", "payback", "horizon net", "status"],
+              fleet.infrastructurePlan.ranked.map((entry) => [
+                entry.selected ? "▶" : "",
+                esc(entry.kind === "upgradeServer"
+                  ? `${entry.host ?? "server"} → ${fmtRam(entry.targetRam)}`
+                  : entry.kind === "buyServer"
+                    ? `new server ${fmtRam(entry.targetRam)}`
+                    : entry.kind === "homeRam"
+                      ? `home → ${fmtRam(entry.targetRam)}`
+                      : "home core"),
+                entry.addedRam === undefined ? "–" : entry.addedRam > 0 ? fmtRam(entry.addedRam) : "+1 core",
+                fmtMoney(entry.cost),
+                fmtMoney(entry.incomePerSec),
+                fmtNum(entry.returnPerDollarSec, 8),
+                fmtTime(entry.paybackSec * 1000),
+                fmtMoney(entry.netOverHorizon),
+                entry.worthBuying === true ? "repays" : entry.worthBuying === false ? "past horizon" : "–",
+              ]),
+              { left: [1, 8] },
+            )
+          : "") +
+        (fleet.infrastructurePlan.rankedTotal > fleet.infrastructurePlan.ranked.length
+          ? note(`showing ${fleet.infrastructurePlan.ranked.length} of ${fleet.infrastructurePlan.rankedTotal} scored options`)
+          : "")
+      : "";
+
+    const infrastructureHistory = state.events
+      .filter((event) => event.kind === "event" &&
+        (event.name === "investment.decision" || event.name === "investment.result") &&
+        (event.data as { subsystem?: string } | undefined)?.subsystem === "infrastructure")
+      .slice(-10)
+      .reverse()
+      .map((event) => {
+        const data = event.data as {
+          plan?: { why?: string };
+          result?: { detail?: string };
+          arbitration?: {
+            grants?: { by: string; id: string; amount: number }[];
+            denied?: { by: string; id: string; reason: string }[];
+          };
+        } | undefined;
+        const denied = data?.arbitration?.denied?.find((entry) => entry.by === "hacking" && entry.id.startsWith("infrastructure:"));
+        const winners = data?.arbitration?.grants?.filter((entry) => entry.by !== "hacking" || !entry.id.startsWith("infrastructure:")) ?? [];
+        const arbiter = denied
+          ? `${denied.reason}${winners.length ? `; funded ${winners.map((entry) => `${entry.by}:${entry.id} ${fmtMoney(entry.amount)}`).join(", ")}` : ""}`
+          : data?.arbitration ? "funded" : "–";
+        return [
+          fmtTime(event.t - (state.t0 ?? event.t)),
+          esc(event.kind === "event" ? event.name : ""),
+          esc(data?.plan?.why ?? data?.result?.detail ?? ""),
+          esc(arbiter),
+        ];
+      });
+
     // --- servers ---
     const all = buildRows(state);
     const counts = {
@@ -305,6 +386,11 @@ export const hackingTab: Tab = {
       `</div>` +
       `<div class="col">` +
       card("Fleet", fleetTiles) +
+      (infrastructurePlan ? card("Infrastructure ROI", infrastructurePlan) :
+        homeRamPlan ? card("Home RAM investment", homeRamPlan) : "") +
+      (infrastructureHistory.length
+        ? card("Infrastructure history", table(["at", "transition", "reason / outcome", "arbiter"], infrastructureHistory, { left: [1, 2, 3] }))
+        : "") +
       (pie ? card("RAM segments", pie) : "") +
       (health ? card("Dispatcher health", health) : "") +
       `</div>`

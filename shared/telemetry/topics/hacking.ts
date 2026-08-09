@@ -9,6 +9,8 @@ export interface FarmRollup {
   target?: string;
   /** Whether the target's integer batch solve exhausted its whole domain. */
   targetSolveExact?: boolean;
+  /** Current target's expected $/sec/GB, used to price added fleet RAM. */
+  moneyPerSecPerGb?: number;
   prepTarget?: string;
   segOrder?: string[];
   inFlight?: { hack: number; grow: number; weaken: number };
@@ -46,6 +48,57 @@ export interface FleetRollup {
    *  after it. Free, unlike asking the game for home's file list. */
   portOpeners?: number;
   home: { maxRam: number; usedRam: number; cores: number };
+  /** Singularity quote; absent when home upgrades are not scriptable. */
+  homeRamUpgradeCost?: number;
+  homeCoreUpgradeCost?: number;
+  /** Authoritative one-step cloud quotes. Hacknet servers are player-owned
+   * but deliberately absent: they have their own upgrade economy. */
+  infrastructureOptions?: {
+    kind: "buyServer" | "upgradeServer";
+    cost: number;
+    addedRam: number;
+    host?: string;
+    targetRam: number;
+  }[];
+  homeRamPlan?: {
+    cost: number;
+    addedRam: number;
+    incomePerSec: number;
+    paybackSec: number;
+    netOverHorizon: number;
+    worthBuying: boolean;
+    why: string;
+    lastResult?: { ok: boolean; detail: string; at: number };
+  };
+  infrastructurePlan?: {
+    /** Inputs captured with the decision, so an offline analysis does not
+     * have to time-join independently sampled player/farm topics. */
+    evaluatedAt: number;
+    horizonSec: number;
+    moneyAvailable: number;
+    moneyGranted: number;
+    incomePerSecPerGb: number;
+    buy?: { kind: string; cost: number; host?: string; targetRam?: number };
+    why: string;
+    hold?: string;
+    /** True candidate count; `ranked` is a bounded display/telemetry digest. */
+    rankedTotal: number;
+    ranked: {
+      kind: string;
+      host?: string;
+      targetRam?: number;
+      addedRam: number;
+      cost: number;
+      incomePerSec: number;
+      returnPerDollarSec: number;
+      paybackSec: number;
+      netOverHorizon: number;
+      worthBuying: boolean;
+      selected: boolean;
+      why: string;
+    }[];
+    lastResult?: { action: string; ok: boolean; detail: string; at: number };
+  };
   /** ns.getTotalScriptIncome() -> [$/sec since aug install, $/sec since start]. */
   scriptIncome?: [number, number];
   scriptExpGain?: number;

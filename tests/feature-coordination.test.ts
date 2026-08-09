@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { ContributionCache } from "../game/lib/features/contributions.ts";
+import { factionsModule } from "../game/lib/features/factions.ts";
+import type { ClaimContext } from "../game/lib/features/index.ts";
+import type { GameState } from "../game/lib/state.ts";
 import { holdsSlot, resolveClaims, type Claim } from "../shared/strategy/arbiter.ts";
+import { emptyBoard } from "../shared/strategy/needs.ts";
 
 const time = (by: Claim["by"], id: string, priority: number, holdUntil?: number): Claim => ({
   by, id, resource: "time", amount: 1, priority, mode: "reserve", why: "test", ...(holdUntil ? { holdUntil } : {}),
@@ -10,6 +14,52 @@ const money = (by: Claim["by"], id: string, amount: number, mode: Claim["mode"])
 });
 
 describe("standing feature contributions", () => {
+  test("faction work bootstraps its RAM claim with the work-slot claim", () => {
+    const state = {
+      topics: {
+        factions: {
+          joined: ["Slum Snakes"],
+          standings: [{ name: "Slum Snakes", rep: 0, favor: 0 }],
+          offers: [{
+            name: "Aug",
+            faction: "Slum Snakes",
+            price: 1,
+            repReq: 100,
+            affordableRep: false,
+            owned: false,
+          }],
+          ownedAugs: [],
+          plan: {
+            context: { holdsWorkSlot: false },
+            objective: { factions: ["Slum Snakes"], augmentations: [] },
+            action: { type: "idle", reason: "slot", why: "work slot held elsewhere" },
+            alternatives: [],
+            blockers: [],
+          },
+        },
+      },
+    } as unknown as GameState;
+    const claims = factionsModule.claims!({
+      state,
+      now: 0,
+      caps: {} as ClaimContext["caps"],
+      budgetGb: 8,
+      board: emptyBoard(),
+      horizons: {} as ClaimContext["horizons"],
+      ramPrice: () => 3.5,
+    });
+
+    expect(claims).toContainEqual(expect.objectContaining({
+      id: "work:Slum Snakes",
+      resource: "time",
+    }));
+    expect(claims).toContainEqual(expect.objectContaining({
+      id: "action:workForFaction",
+      resource: "ram",
+      amount: 3.5,
+    }));
+  });
+
   test("faction work survives hacking-only passes and career holdUntil remains effective", () => {
     const cache = new ContributionCache();
     cache.replaceClaims("factions", [time("factions", "work:CyberSec", 60)]);

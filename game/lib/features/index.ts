@@ -7,6 +7,7 @@ import type { HostRam } from "../../../shared/ram/placement.ts";
 import type { Need, NeedBoard } from "../../../shared/strategy/needs.ts";
 import { emptyBoard } from "../../../shared/strategy/needs.ts";
 import type { RouteId } from "../../../shared/strategy/progression/endgame.ts";
+import type { PlanningHorizons } from "../../../shared/strategy/progression/forecast.ts";
 import type { GameState } from "../state.ts";
 import type { DodgeLease } from "../ram.ts";
 import { careerModule } from "./career.ts";
@@ -19,10 +20,10 @@ import {
   gangModule,
   goModule,
   progressionModule,
-  sideModule,
   sleevesModule,
   stanekModule,
 } from "./remaining.ts";
+import { sideModule } from "./side.ts";
 import { stockModule } from "./stock.ts";
 import { hackingModule } from "./hacking.ts";
 
@@ -63,13 +64,10 @@ export interface DriverContext {
   board: NeedBoard;
   /** What this feature was actually granted. */
   grants: FeatureGrants;
-  /** Expected remaining run time in seconds, derived from the published
-   *  endgame route decision (shared/strategy/progression/eta.ts). This is THE
-   *  horizon every investment decision amortizes against: an upgrade that
-   *  cannot repay itself before the run ends is not worth buying, and a
-   *  hacking target that only pays off after it is not worth prepping. Falls
-   *  back to DEFAULT_HORIZON_SEC until a decision exists. */
-  horizonSec: number;
+  /** Explicit node-end and next-install clocks. Consumers choose the lifetime
+   * matching what they buy; unknown/stale is preserved rather than fabricated
+   * into a numeric default. */
+  horizons: PlanningHorizons;
   /** The chosen way to finish this BitNode, when decided. A driver may use it
    *  to bias priorities (bladeburner when it IS the route, combat stats for
    *  the Daedalus combat branch) — never to gate its whole tick. */
@@ -102,6 +100,8 @@ export interface NeedContext {
 
 export interface ClaimContext extends NeedContext {
   budgetGb: number;
+  /** Same typed payoff windows later handed to the drivers. */
+  horizons: PlanningHorizons;
   /** Runtime dynamic-RAM price supplied by the controller. The claim remains
    * decision-only: it receives the priced observation, never an ns handle. */
   ramPrice(methods: readonly string[]): number;

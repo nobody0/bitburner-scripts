@@ -2,7 +2,9 @@ import type { NS, Player, Server } from "@ns";
 import type { FeatureId } from "../../../shared/features/ids.ts";
 import type { Capabilities } from "../../../shared/features/unlock.ts";
 import type { StateKey, StateMap } from "../../../shared/telemetry/state-map.ts";
-import type { Topics } from "../state.ts";
+import type { GameState, Topics } from "../state.ts";
+import { DODGED_PROBES } from "./dodged.ts";
+import { LOCAL_PROBES } from "./local.ts";
 
 /** Feature probes: the read half of the feature axis. One probe collects the
  * state for one feature and returns typed topic emissions; the runner
@@ -25,6 +27,7 @@ export interface ProbeContext {
   player: Player;
   servers: Record<string, Server>;
   caps: Capabilities;
+  state: GameState;
 }
 
 /** A typed topic write. The mapped type keeps `key` and `data` in agreement,
@@ -47,7 +50,20 @@ interface ProbeBase {
   /** Stable id, used for scheduling and in probe.* telemetry. */
   id: string;
   feature: FeatureId;
-  /** Minimum interval between runs. */
+  /** Minimum interval between runs, and the SOLE authority on this probe's
+   *  cadence. The controller derives its acquisition interval from the fastest
+   *  value in the table (`probeCadenceMs`), so a feature that needs to be read
+   *  every 4 s declares 4 s and gets it.
+   *
+   *  This used to be a lie. Acquisition only ran inside the 30 s fleet sweep, so
+   *  30 s was the floor for every probe however small its `everyMs` — the local
+   *  tier has always asked for 5 s and always got 30. Harmless while every
+   *  subject changed on a minute scale, and actively wrong for one with a clock
+   *  of its own: under-sampling a 6 s subject does not give a coarser signal, it
+   *  gives a corrupted one, because a sample spanning several of its ticks
+   *  reports their compounded effect as a single step. A probe declaring a fast
+   *  cadence is making a claim about its SUBJECT, and it should be cheap enough
+   *  to honour that claim. */
   everyMs: number;
   /** Skipped unless capabilities report this feature as "yes". Omit for
    *  probes that are themselves the source of capability information. */
@@ -135,6 +151,21 @@ export function probeMethods(probe: DodgedProbe): string[] {
 
 export type Probe = LocalProbe | DodgedProbe;
 
+/** The fastest cadence anything in the table asks for.
+ *
+ * The controller schedules acquisition from this rather than from a constant of
+ * its own, so adding a probe that needs to be read every second needs no
+ * controller change — and no probe's declared `everyMs` can be silently ignored
+ * by a coarser caller. Each probe's own `everyMs` still gates it inside the pass,
+ * so a 10-minute probe costs nothing extra for being scheduled alongside a 4 s
+ * one. */
+export function probeCadenceMs(probes: readonly Probe[]): number {
+  return probes.reduce((fastest, probe) => Math.min(fastest, probe.everyMs), Infinity);
+}
+
 export { GATE_PROBE, type GateResult } from "./gates.ts";
-export { LOCAL_PROBES } from "./local.ts";
-export { DODGED_PROBES } from "./dodged.ts";
+export { LOCAL_PROBES, DODGED_PROBES };
+
+/** Every scheduled probe, both tiers. The one list `probeCadenceMs` is derived
+ *  from, so the controller's acquisition interval cannot drift from the table. */
+export const ALL_PROBES: readonly Probe[] = [...LOCAL_PROBES, ...DODGED_PROBES];

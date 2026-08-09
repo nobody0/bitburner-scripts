@@ -5,11 +5,14 @@ import {
   basePriceMultiplier,
   canAfford,
   closePrereqs,
+  entropyCost,
+  estimatedCost,
   EXACT_ORDER_LIMIT,
   MULTIPLE_AUG_MULTIPLIER,
   NEUROFLUX,
   orderPurchases,
   scoreAug,
+  selectAffordableBatch,
   totalCost,
   type AugInfo,
   type PriceContext,
@@ -86,14 +89,13 @@ describe("requirement interpreter — regressions from the predecessor scripts",
     expect(blockers[0]!.progress).toBeCloseTo(0.4, 10);
   });
 
-  test("hacknet, bladeburner and infiltration requirements are real (theirs were `return false` TODOs)", () => {
-    // Netburners, Bladeburners and Shadows of Anarchy were unreachable.
+  test("hacknet and bladeburner requirements are real (theirs were `return false` TODOs)", () => {
+    // Netburners and Bladeburners were unreachable.
     const cases: [PlayerRequirement, string][] = [
       [{ type: "hacknetRAM", hacknetRAM: 8 }, "hacknetRam"],
       [{ type: "hacknetCores", hacknetCores: 4 }, "hacknetCores"],
       [{ type: "hacknetLevels", hacknetLevels: 100 }, "hacknetLevels"],
       [{ type: "bladeburnerRank", bladeburnerRank: 25 }, "bladeburnerRank"],
-      [{ type: "numInfiltrations", numInfiltrations: 30 }, "infiltrations"],
     ];
     for (const [requirement, kind] of cases) {
       const blockers = evaluate(requirement, view());
@@ -101,6 +103,18 @@ describe("requirement interpreter — regressions from the predecessor scripts",
       expect(blockers[0]!.kind).toBe(kind as Blocker["kind"]);
       expect(blockers[0]!.reachable, `${kind} reported unreachable`).toBe(true);
     }
+  });
+
+  test("infiltration is explicit manual work, not a need Side pretends it can deliver", () => {
+    const requirement: PlayerRequirement = { type: "numInfiltrations", numInfiltrations: 1 };
+    expect(evaluate(requirement, view())[0]).toMatchObject({
+      kind: "infiltrations",
+      target: 1,
+      have: 0,
+      reachable: false,
+      why: "needs 1 manual infiltration",
+    });
+    expect(evaluate(requirement, view({ numInfiltrations: 1 }))).toEqual([]);
   });
 });
 
@@ -369,6 +383,119 @@ describe("purchase ordering — brute-force oracle", () => {
     expect(orderPurchases(set, ctx).map((c) => c.name)).toEqual(["dear", "cheap"]);
     expect(totalCost(orderPurchases(set, ctx), ctx)).toBeLessThan(totalCost([set[0]!, set[1]!], ctx));
   });
+
+  describe("choosing by value, paying by price", () => {
+    const none = new Set<string>();
+
+    test("the SET follows value, the ORDER follows price", () => {
+      // Value order is cheap-then-dear; buying in that order would charge the 1.9x
+      // escalation to the dear one. Both are chosen, and the order is reversed.
+      const ctx = priceCtx();
+      const cheapButBest = candidate("best", 1e6);
+      const dearButWorse = candidate("worse", 1e9);
+      const plan = selectAffordableBatch({
+        candidates: [cheapButBest, dearButWorse],
+        owned: none,
+        ctx,
+        money: 1e12,
+      });
+      expect(plan.order.map((c) => c.name)).toEqual(["worse", "best"]);
+      expect(plan.dropped).toEqual([]);
+      // And the quoted total is the one we will actually be charged.
+      expect(plan.totalCost).toBeCloseTo(totalCost(plan.order, ctx), 6);
+      expect(plan.totalCost).toBeLessThan(totalCost([cheapButBest, dearButWorse], ctx));
+    });
+
+    test("the budget is tested against the ORDERED cost, not the naive one", () => {
+      // Exactly the failure the ordering exists to prevent: a batch that is
+      // affordable when bought expensive-first and not affordable otherwise. Priced
+      // in value order it would be rejected, and the augmentation left behind.
+      const ctx = priceCtx();
+      const set = [candidate("cheap", 1e6), candidate("dear", 1e9)];
+      const naive = totalCost(set, ctx);
+      const ordered = totalCost(orderPurchases(set, ctx), ctx);
+      expect(ordered).toBeLessThan(naive);
+      const money = (naive + ordered) / 2; // affordable one way only
+      const plan = selectAffordableBatch({ candidates: set, owned: none, ctx, money });
+      expect(plan.order).toHaveLength(2);
+      expect(plan.totalCost).toBeLessThanOrEqual(money);
+    });
+
+    test("one unaffordable item does not veto everything cheaper behind it", () => {
+      const ctx = priceCtx();
+      const plan = selectAffordableBatch({
+        candidates: [candidate("unreachable", 1e12), candidate("affordable", 1e6)],
+        owned: none,
+        ctx,
+        money: 1e8,
+      });
+      expect(plan.order.map((c) => c.name)).toEqual(["affordable"]);
+      expect(plan.dropped.map((c) => c.name)).toEqual(["unreachable"]);
+    });
+
+    test("a dependant goes with its dropped prerequisite", () => {
+      // Buying the dependant would simply fail in game: the prerequisite is neither
+      // owned nor in the batch. Counting it as affordable would wedge the drain.
+      const ctx = priceCtx();
+      const plan = selectAffordableBatch({
+        candidates: [candidate("parent", 1e12), candidate("child", 1e6, ["parent"])],
+        owned: none,
+        ctx,
+        money: 1e8,
+      });
+      expect(plan.order).toEqual([]);
+      expect(plan.dropped.map((c) => c.name)).toEqual(["parent", "child"]);
+    });
+
+    test("the ESTIMATE screens and the SOLVER prices, and the plan never overspends", () => {
+      // The screen uses `estimatedCost` because it runs once per candidate and the
+      // exact ordering is exponential. With prerequisites the estimate can only be
+      // pessimistic, so the direction of the error is safe: a candidate may be
+      // dropped that the solver would have fitted, but the plan that comes back is
+      // never one we cannot pay for.
+      const ctx = priceCtx();
+      const rng = mulberry32(99);
+      for (let trial = 0; trial < 30; trial++) {
+        const size = 2 + Math.floor(rng() * 5);
+        const names = Array.from({ length: size }, (_, i) => `A${i}`);
+        const candidates = names.map((name, i) =>
+          candidate(name, Math.round(rng() * 1e9) + 1, names.slice(0, i).filter(() => rng() < 0.35)),
+        );
+        const money = rng() * 4e9;
+        const plan = selectAffordableBatch({ candidates, owned: none, ctx, money });
+        expect(plan.totalCost, `plan of ${plan.order.length} exceeds $${money}`).toBeLessThanOrEqual(money);
+        expect(totalCost(plan.order, ctx)).toBeCloseTo(plan.totalCost, 6);
+        // Every accepted item's prerequisites precede it, or the purchases fail.
+        for (const [at, entry] of plan.order.entries()) {
+          for (const prereq of entry.aug.prereqs) {
+            expect(plan.order.findIndex((c) => c.name === prereq)).toBeLessThan(at);
+          }
+        }
+      }
+    });
+
+    test("without prerequisites the estimate IS exact, so nothing is lost screening with it", () => {
+      const ctx = priceCtx();
+      const rng = mulberry32(5);
+      for (let trial = 0; trial < 20; trial++) {
+        const set = Array.from({ length: 2 + Math.floor(rng() * 6) }, (_, i) =>
+          candidate(`A${i}`, Math.round(rng() * 1e9) + 1),
+        );
+        expect(estimatedCost(set, ctx)).toBeCloseTo(totalCost(orderPurchases(set, ctx), ctx), 6);
+      }
+    });
+
+    test("an OWNED prerequisite does not block its dependant", () => {
+      const ctx = priceCtx();
+      const plan = selectAffordableBatch({
+        candidates: [candidate("child", 1e6, ["parent"])],
+        owned: new Set(["parent"]),
+        ctx,
+        money: 1e8,
+      });
+      expect(plan.order.map((c) => c.name)).toEqual(["child"]);
+    });
+  });
 });
 
 describe("prerequisite closure", () => {
@@ -588,8 +715,9 @@ describe("faction selection — brute-force oracle", () => {
 // --- never attempt work a faction does not offer ------------------------------
 
 import { stepFactions } from "../shared/strategy/factions/decide.ts";
+import { factionPackageFrontier, selectFactionPackage } from "../shared/strategy/factions/packages.ts";
 import { initFactionMemory } from "../shared/strategy/factions/plan.ts";
-import type { FactionsView } from "../shared/strategy/factions/state.ts";
+import type { FactionStanding, FactionsView } from "../shared/strategy/factions/state.ts";
 
 function factionsView(over: Partial<FactionsView> = {}): FactionsView {
   return {
@@ -604,9 +732,15 @@ function factionsView(over: Partial<FactionsView> = {}): FactionsView {
     factions: [],
     catalog: new Map(),
     owned: new Set(),
+    queued: new Set(),
     weights: { hacking: 1 },
+    horizonSec: 3_600,
+    targetAugCount: 30,
     favorToDonate: 150,
     moneyGranted: 0,
+    moneyAvailable: 0,
+    pendingProceeds: 0,
+    proceedsSettling: false,
     holdsWorkSlot: true,
     incomePerSec: 1000,
     sf4Level: 3,
@@ -654,14 +788,17 @@ describe("work type selection — found in the real game", () => {
 
   test("a faction offering NO work is never selected for work at all", () => {
     // Shadows of Anarchy gains reputation only by infiltrating.
+    const faction = standing("Shadows of Anarchy", { hacking: false, field: false, security: false });
+    const world = factionsView({
+      factions: [faction],
+      catalog: new Map([["PCMatrix", aug("PCMatrix", { factions: ["Shadows of Anarchy"], mults: { hacking: 1.5 } })]]),
+    });
     const { decision } = stepFactions(
-      factionsView({
-        factions: [standing("Shadows of Anarchy", { hacking: false, field: false, security: false })],
-        catalog: new Map([["PCMatrix", aug("PCMatrix", { factions: ["Shadows of Anarchy"], mults: { hacking: 1.5 } })]]),
-      }),
+      world,
       initFactionMemory(),
     );
     expect(decision.action.type).not.toBe("workForFaction");
+    expect(factionPackageFrontier(faction, [], world)).toEqual([]);
   });
 
   test("unknown work types mean DO NOT WORK, not 'try everything'", () => {
@@ -691,5 +828,569 @@ describe("work type selection — found in the real game", () => {
     );
     expect(decision.action.type).toBe("idle");
     expect(decision.action.why).toContain("only one activity can run");
+  });
+});
+
+describe("grafting economics", () => {
+  test("entropy cost uses only affected weighted fields and discounts experience", () => {
+    const cost = entropyCost({ hacking: 1, hacking_exp: 1, unrelated: 1 });
+    expect(cost).toBeCloseTo(1.5 * -Math.log(0.98), 12);
+  });
+});
+
+describe("faction breakpoint package planner", () => {
+  const hacking = { hacking: true, field: false, security: false };
+  const packageStanding = (
+    name: string,
+    over: Partial<FactionStanding> = {},
+  ): FactionStanding => ({ ...standing(name, hacking), ...over });
+
+  function enemyChoice() {
+    const firstA = packageStanding("A", { joined: false, invited: true, enemies: ["B"] });
+    const firstB = packageStanding("B", { joined: false, invited: true, enemies: ["A"] });
+    const catalog = new Map([
+      ["A-fast", aug("A-fast", { factions: ["A"], baseCost: 0, baseRepRequirement: 100 })],
+      ["A-deep", aug("A-deep", { factions: ["A"], baseCost: 0, baseRepRequirement: 1_000 })],
+      ["B-next", aug("B-next", { factions: ["B"], baseCost: 0, baseRepRequirement: 200 })],
+    ]);
+    const first = stepFactions(
+      factionsView({ factions: [firstA, firstB], catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      initFactionMemory(),
+    );
+    return { firstA, firstB, catalog, first };
+  }
+
+  test("switches to the runner-up before an unattractive deep breakpoint", () => {
+    const factions = [packageStanding("A"), packageStanding("B")];
+    const catalog = new Map([
+      ["A-fast", aug("A-fast", { factions: ["A"], baseCost: 0, baseRepRequirement: 100 })],
+      ["A-deep", aug("A-deep", { factions: ["A"], baseCost: 0, baseRepRequirement: 1_000 })],
+      ["B-next", aug("B-next", { factions: ["B"], baseCost: 0, baseRepRequirement: 200 })],
+    ]);
+    const world = factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 });
+    const selection = selectFactionPackage(world, new Map(factions.map((faction) => [faction.name, []])));
+
+    expect(selection.intent?.faction).toBe("A");
+    expect(selection.intent?.repTarget).toBe(100);
+    expect(selection.runnerUp?.faction).toBe("B");
+  });
+
+  test("pushes the best faction farther when switching is much worse", () => {
+    const factions = [packageStanding("A"), packageStanding("B")];
+    const catalog = new Map([
+      ["A-fast", aug("A-fast", { factions: ["A"], baseCost: 0, baseRepRequirement: 100 })],
+      ["A-deep", aug("A-deep", { factions: ["A"], baseCost: 0, baseRepRequirement: 1_000 })],
+      ["B-later", aug("B-later", { factions: ["B"], baseCost: 0, baseRepRequirement: 10_000 })],
+    ]);
+    const world = factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 });
+    const selection = selectFactionPackage(world, new Map(factions.map((faction) => [faction.name, []])));
+
+    expect(selection.intent?.faction).toBe("A");
+    expect(selection.intent?.repTarget).toBe(1_000);
+    expect(selection.intent?.augmentations).toContain("A-deep");
+  });
+
+  test("does not count a shared augmentation again as runner-up value", () => {
+    const factions = [packageStanding("A"), packageStanding("B")];
+    const catalog = new Map([
+      ["shared", aug("shared", { factions: ["A", "B"], baseCost: 0, baseRepRequirement: 100 })],
+      ["A-unique", aug("A-unique", { factions: ["A"], baseCost: 0, baseRepRequirement: 1_000 })],
+    ]);
+    const world = factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 });
+    const selection = selectFactionPackage(world, new Map(factions.map((faction) => [faction.name, []])));
+
+    expect(selection.intent?.faction).toBe("A");
+    expect(selection.intent?.repTarget).toBe(1_000);
+    expect(selection.runnerUp).toBeUndefined();
+  });
+
+  test("gives The Red Pill terminal value only on the Daedalus route", () => {
+    const factions = [packageStanding("Daedalus"), packageStanding("CyberSec")];
+    const catalog = new Map([
+      ["The Red Pill", aug("The Red Pill", { factions: ["Daedalus"], baseCost: 0, baseRepRequirement: 1_000 })],
+      ["quick", aug("quick", { factions: ["CyberSec"], baseCost: 0, baseRepRequirement: 100 })],
+    ]);
+    const blockers = new Map(factions.map((faction) => [faction.name, []]));
+    const labyrinth = selectFactionPackage(
+      factionsView({ factions, catalog, route: "labyrinth", horizonSec: 100_000, moneyAvailable: 1e15 }),
+      blockers,
+    );
+    const daedalus = selectFactionPackage(
+      factionsView({ factions, catalog, route: "daedalus", horizonSec: 100_000, moneyAvailable: 1e15 }),
+      blockers,
+    );
+    expect(labyrinth.intent?.faction).toBe("CyberSec");
+    expect(daedalus.intent?.faction).toBe("Daedalus");
+  });
+
+  test("enemy membership blocks only this install cycle", () => {
+    const west = packageStanding("Sector-12", { enemies: ["Chongqing"] });
+    const east = packageStanding("Chongqing", { joined: false, enemies: ["Sector-12"] });
+    const catalog = new Map([
+      ["East aug", aug("East aug", { factions: ["Chongqing"], baseCost: 0, baseRepRequirement: 100 })],
+    ]);
+    const thisCycle = factionsView({ factions: [west, east], catalog, horizonSec: 100_000 });
+    expect(factionPackageFrontier(east, [], thisCycle)).toEqual([]);
+
+    const nextCycleWest = { ...west, joined: false };
+    const nextCycle = factionsView({ factions: [nextCycleWest, east], catalog, horizonSec: 100_000 });
+    expect(factionPackageFrontier(east, [], nextCycle).length).toBeGreaterThan(0);
+  });
+
+  test("keeps the pre-join stopping point when joining forecloses the runner-up", () => {
+    const { firstA, firstB, catalog, first } = enemyChoice();
+    expect(first.decision.objective?.intent?.repTarget).toBe(100);
+
+    const afterJoin = stepFactions(
+      factionsView({
+        factions: [
+          { ...firstA, joined: true, invited: false, rep: 100 },
+          { ...firstB, invited: false },
+        ],
+        catalog,
+        owned: new Set(["A-fast"]),
+        queued: new Set(["A-fast"]),
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+      }),
+      first.memory,
+    );
+    expect(afterJoin.decision.objective?.intent?.repTarget).toBe(100);
+    expect(afterJoin.decision.objective?.intent?.augmentations).not.toContain("A-deep");
+    expect(afterJoin.decision.recommendInstall?.why).toContain("favor");
+  });
+
+  test("does not install when the completed package is already installed", () => {
+    const { firstA, firstB, catalog, first } = enemyChoice();
+    const afterJoin = stepFactions(
+      factionsView({
+        factions: [
+          { ...firstA, joined: true, invited: false, rep: 100 },
+          { ...firstB, invited: false },
+        ],
+        catalog,
+        owned: new Set(["A-fast"]),
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+      }),
+      first.memory,
+    );
+    expect(afterJoin.decision.recommendInstall).toBeUndefined();
+  });
+
+  test("drains other joined factions from highest priority downward before install", () => {
+    const { firstA, firstB, catalog: baseCatalog, first } = enemyChoice();
+    const catalog = new Map(baseCatalog);
+    catalog.set("low", aug("low", { factions: ["C"], baseCost: 1, baseRepRequirement: 0, mults: { hacking: 1.1 } }));
+    catalog.set("high", aug("high", { factions: ["C"], baseCost: 1, baseRepRequirement: 0, mults: { hacking: 2 } }));
+    const afterJoin = stepFactions(
+      factionsView({
+        factions: [
+          { ...firstA, joined: true, invited: false, rep: 100 },
+          { ...firstB, invited: false },
+          packageStanding("C", { rep: 1e9 }),
+        ],
+        catalog,
+        owned: new Set(["A-fast"]),
+        queued: new Set(["A-fast"]),
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+        moneyGranted: 1e15,
+      }),
+      first.memory,
+    );
+    expect(afterJoin.decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "high", faction: "C" });
+    expect(afterJoin.decision.recommendInstall).toBeUndefined();
+  });
+
+  test("the final sweep donates only while preserving the unlocked purchase", () => {
+    const { firstA, firstB, catalog: baseCatalog, first } = enemyChoice();
+    const catalog = new Map(baseCatalog);
+    catalog.set("last", aug("last", { factions: ["C"], baseCost: 1_000_000, baseRepRequirement: 1_000 }));
+    const afterJoin = stepFactions(
+      factionsView({
+        factions: [
+          { ...firstA, joined: true, invited: false, rep: 100 },
+          { ...firstB, invited: false },
+          packageStanding("C", { rep: 0, favor: 150 }),
+        ],
+        catalog,
+        owned: new Set(["A-fast"]),
+        queued: new Set(["A-fast"]),
+        horizonSec: 100_000,
+        moneyAvailable: 1_001_000_000,
+        moneyGranted: 0,
+      }),
+      first.memory,
+    );
+    expect(afterJoin.decision.action).toMatchObject({
+      type: "donate",
+      faction: "C",
+      amount: 1_000_000_000,
+      purchaseCost: 1_000_000,
+    });
+  });
+
+  test("creates exact favor breakpoints only while future augmentations remain", () => {
+    const faction = packageStanding("A", { rep: 0, favor: 0 });
+    const future = aug("Future", { factions: ["A"], baseCost: 0, baseRepRequirement: 1e9 });
+    const world = factionsView({
+      factions: [faction],
+      catalog: new Map([[future.name, future]]),
+      favorToDonate: 5,
+      horizonSec: 100_000,
+    });
+    const frontier = factionPackageFrontier(faction, [], world);
+    expect(frontier.some((pkg) => pkg.purpose === "favor" && pkg.favorAfterInstall >= 1)).toBe(true);
+
+    const finished = factionsView({ ...world, owned: new Set([future.name]) });
+    expect(factionPackageFrontier(faction, [], finished)).toEqual([]);
+  });
+
+  test("can push favor beyond donation unlock when the faction still dominates", () => {
+    const faction = packageStanding("A", { favor: 5 });
+    const future = aug("Future", { factions: ["A"], baseCost: 0, baseRepRequirement: 1e9 });
+    const frontier = factionPackageFrontier(
+      faction,
+      [],
+      factionsView({
+        factions: [faction],
+        catalog: new Map([[future.name, future]]),
+        favorToDonate: 5,
+        horizonSec: 100_000,
+      }),
+    );
+    expect(frontier.some((pkg) => pkg.purpose === "favor" && pkg.favorAfterInstall > 5)).toBe(true);
+  });
+
+  test("publishes the exact donation even before its arbiter grant arrives", () => {
+    const faction = packageStanding("A", { favor: 150 });
+    const wanted = aug("Wanted", { factions: ["A"], baseCost: 0, baseRepRequirement: 1_000 });
+    const { decision } = stepFactions(
+      factionsView({
+        factions: [faction],
+        catalog: new Map([[wanted.name, wanted]]),
+        horizonSec: 100_000,
+        incomePerSec: 10_000_000,
+        moneyAvailable: 1,
+        moneyGranted: 0,
+      }),
+      initFactionMemory(),
+    );
+    expect(decision.action).toMatchObject({ type: "donate", faction: "A", amount: 1_000_000_000 });
+  });
+
+  test("travels to New Tokyo, then protects a worthwhile graft until completion", () => {
+    const faction = packageStanding("CyberSec", { rep: 0 });
+    const wanted = aug("Graft target", {
+      factions: ["CyberSec"],
+      baseCost: 10_000_000,
+      baseRepRequirement: 1_000_000,
+      mults: { hacking: 100 },
+    });
+    const base = factionsView({
+      factions: [faction],
+      catalog: new Map([[wanted.name, wanted]]),
+      graftable: [{ name: wanted.name, price: 10_000_000, timeMs: 60_000 }],
+      moneyAvailable: 10_000_000,
+      moneyGranted: 10_000_000,
+      horizonSec: 1_000_000,
+      favorToDonate: 0,
+    });
+    const first = stepFactions(base, initFactionMemory());
+    expect(first.decision.action).toMatchObject({ type: "travelTo", city: "New Tokyo" });
+
+    const started = stepFactions(
+      { ...base, requirementView: { ...base.requirementView, city: "New Tokyo" } },
+      first.memory,
+    );
+    expect(started.decision.action).toMatchObject({ type: "graft", augmentation: wanted.name });
+
+    const running = stepFactions(
+      { ...base, currentWork: { kind: "grafting", detail: wanted.name, focused: false } },
+      started.memory,
+    );
+    expect(running.decision.action).toMatchObject({ type: "idle", reason: "continue" });
+  });
+});
+
+describe("the last-chance drain", () => {
+  // THE BUG: the driver's `aug-fund` money claim was derived from
+  // `plan.objective.augmentations`. By the time the drain runs the objective is
+  // complete, so there was no objective augmentation, no claim, no grant — and
+  // `nextPurchase` tests the GRANTED budget, so it bought nothing. Every install
+  // silently threw away the cash on hand, and once the install barrier started
+  // blocking on "an augmentation is still purchasable" the run deadlocked
+  // outright: progression waited for a purchase that factions was never funded to
+  // make. The decision has to publish what it WOULD buy so a claim can be derived
+  // from the plan rather than from the already-funded action.
+  const nfg = aug(NEUROFLUX, { baseCost: 750_000, baseRepRequirement: 0, factions: ["CyberSec"] });
+  const owned = aug("Owned Thing", { factions: ["CyberSec"] });
+
+  function drained(over: Partial<FactionsView> = {}) {
+    return stepFactions(
+      factionsView({
+        factions: [standing("CyberSec", { hacking: true, field: true, security: true })],
+        catalog: new Map([[NEUROFLUX, nfg], ["Owned Thing", owned]]),
+        owned: new Set(["Owned Thing"]),
+        // A non-empty queue is what makes an install worth recommending at all.
+        queued: new Set(["Owned Thing"]),
+        moneyGranted: 0,
+        moneyAvailable: 1e9,
+        ...over,
+      }),
+      initFactionMemory(),
+    ).decision;
+  }
+
+  test("publishes what it would buy even when nothing has been granted yet", () => {
+    const decision = drained();
+    expect(decision.recommendInstall).toBeDefined();
+    // Unfunded, so it cannot act — but it says what the money is for.
+    expect(decision.action.type).toBe("idle");
+    expect(decision.nextBuy).toMatchObject({ name: NEUROFLUX });
+    expect(decision.nextBuy!.price).toBeGreaterThan(0);
+  });
+
+  test("the published price is what the purchase will actually cost", () => {
+    const decision = drained();
+    const expected = augCost(nfg, priceCtx()).moneyCost;
+    expect(decision.nextBuy!.price).toBeCloseTo(expected, 6);
+  });
+
+  test("keeps publishing while the purchase is in flight, so the claim cannot blink out", () => {
+    // If `drain` only appeared on the idle tick, the claim would vanish the moment
+    // a purchase was decided, un-funding the very action it authorised.
+    const decision = drained({ moneyGranted: 1e9 });
+    expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: NEUROFLUX });
+    expect(decision.nextBuy).toMatchObject({ name: NEUROFLUX });
+  });
+
+  test("nothing is published when the run is not ending", () => {
+    // No queued augmentations means no install to drain for, and claiming money
+    // here would starve the objective it is still saving up for.
+    const decision = drained({ queued: new Set() });
+    expect(decision.recommendInstall).toBeUndefined();
+    expect(decision.nextBuy).toBeUndefined();
+  });
+
+  test("the most expensive item is bought first, whatever its value rank", () => {
+    // Selection is by value, execution is by price. `dear` scores worse, so value
+    // order would buy `best` first and charge the 1.9x escalation to the $500m
+    // item instead of to the $1m one.
+    const best = aug("best", { baseCost: 1e6, mults: { hacking: 2 }, factions: ["CyberSec"] });
+    const dear = aug("dear", { baseCost: 5e8, mults: { hacking: 1.01 }, factions: ["CyberSec"] });
+    const decision = drained({
+      catalog: new Map([["best", best], ["dear", dear], ["Owned Thing", owned]]),
+      factions: [{ ...standing("CyberSec", { hacking: true, field: true, security: true }), rep: 1e9 }],
+      moneyGranted: 1e12,
+      moneyAvailable: 1e12,
+    });
+    expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "dear" });
+  });
+});
+
+describe("patience — waiting for the bankroll before committing the order", () => {
+  // Buying the one augmentation today's cash covers charges the 1.9x queue
+  // escalation to the dearer one, permanently. When the dearer one is already paid
+  // for by money we merely have not received yet — the market book, which is
+  // liquidated before every install — waiting is free and jumping the queue is not.
+  const dear = aug("dear", { baseCost: 5e8, baseRepRequirement: 0, mults: { hacking: 1.01 } });
+  const cheap = aug("cheap", { baseCost: 1e6, baseRepRequirement: 0, mults: { hacking: 2 } });
+  const catalog = new Map([["dear", dear], ["cheap", cheap]]);
+
+  // Income high enough that the package is reachable inside the horizon, so the
+  // objective holds BOTH items and the only thing under test is whether we wait.
+  function step(over: Partial<FactionsView> = {}) {
+    return stepFactions(
+      factionsView({
+        factions: [{ ...standing("CyberSec", { hacking: true, field: true, security: true }), rep: 1e9 }],
+        catalog,
+        incomePerSec: 1e6,
+        horizonSec: 3_600,
+        moneyGranted: 1e6,
+        moneyAvailable: 1e6,
+        // Something already queued: the FIRST purchase of a run is deliberately
+        // never held, so patience is only observable past that point.
+        queued: new Set(["already queued"]),
+        // A liquidation actually under way. Without this the book is money with no
+        // settlement date and is deliberately not waited on — see the livelock test.
+        proceedsSettling: true,
+        ...over,
+      }),
+      initFactionMemory(),
+    ).decision;
+  }
+
+  test("the objective stays in VALUE order; the purchase site reorders it", () => {
+    // `cheap` scores better, so it leads the objective — and is nonetheless bought
+    // second. Keeping the objective in value order matters: `nextGraft` walks it to
+    // pick the most useful item to graft, and the panel presents it as a priority
+    // list. Only payment is reordered.
+    expect(step().objective?.augmentations).toEqual(["cheap", "dear"]);
+    expect(step({ moneyGranted: 1e12, moneyAvailable: 1e12 }).action).toMatchObject({
+      type: "purchaseAugmentation",
+      augmentation: "dear",
+    });
+  });
+
+  test("holds out for the dearer item while the book still covers it", () => {
+    const decision = step({ pendingProceeds: 6e8, proceedsSettling: true });
+    expect(decision.action.type).not.toBe("purchaseAugmentation");
+    // ...and it still says what the money is for, so the claim keeps accumulating.
+    expect(decision.nextBuy).toMatchObject({ name: "dear" });
+  });
+
+  test("buys the cheaper item once nothing is coming to cover the dearer one", () => {
+    // Income alone is not a settlement date: it is exactly the open-ended wait that
+    // would deadlock against the install barrier. A cheaper augmentation owned beats
+    // a dearer one admired.
+    const decision = step({ pendingProceeds: 0 });
+    expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap" });
+  });
+
+  test("a book too small to close the gap does not buy patience either", () => {
+    const decision = step({ pendingProceeds: 1e7, proceedsSettling: true });
+    expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap" });
+  });
+
+  test("a book NOBODY IS SELLING buys no patience — the second livelock", () => {
+    // `pendingProceeds` counts for planning whenever a book exists, but waiting on it
+    // is only sound while it is being converted. Mid-run nothing is being sold, and
+    // `factions` not finishing its objective is precisely what stops `stock` from
+    // ever being asked to sell — so holding out for those proceeds would hold out for
+    // ever, each feature waiting on the other.
+    const stuck = step({ pendingProceeds: 6e8, proceedsSettling: false });
+    expect(stuck.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap" });
+    // The same book, now actually settling, is worth waiting for.
+    const settling = step({ pendingProceeds: 6e8, proceedsSettling: true });
+    expect(settling.action.type).not.toBe("purchaseAugmentation");
+  });
+
+  test("an OPEN horizon does not become infinite patience", () => {
+    // `horizonSec` is Infinity when the forecast has no answer. If patience counted
+    // income over it, everything would be eventually affordable and the feature
+    // would hold out forever — and since `progression` refuses to install while any
+    // augmentation is still purchasable, that is a livelock rather than caution.
+    const decision = step({ pendingProceeds: 0, horizonSec: Infinity });
+    expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap" });
+  });
+
+  test("THE FIRST PURCHASE IS NEVER HELD — otherwise the hold cannot end", () => {
+    // The livelock this closes: the market book is liquidated when `progression`
+    // enters its `ending` phase, and `phaseOf` needs a non-empty install queue to
+    // get there. Holding out for the book while nothing is queued waits for a
+    // liquidation that the waiting itself prevents — queue stays empty, phase never
+    // turns, stock never sells, the proceeds never come. Nothing else breaks the
+    // cycle: `installWanted` is gated on the same empty queue, so the install
+    // barrier is never even consulted.
+    const bootstrap = step({ queued: new Set(), pendingProceeds: 6e8, proceedsSettling: true });
+    expect(bootstrap.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap" });
+    // ...and with one item queued the hold engages, on the very same numbers.
+    const held = step({ queued: new Set(["cheap"]), pendingProceeds: 6e8, proceedsSettling: true });
+    expect(held.action.type).not.toBe("purchaseAugmentation");
+  });
+
+  test("the wait ends when the money lands", () => {
+    const decision = step({ moneyGranted: 6e8, moneyAvailable: 6e8, pendingProceeds: 0 });
+    expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "dear" });
+  });
+
+  test("reputation shortfalls fall through — waiting at this step cannot fix them", () => {
+    // Nothing about holding cash buys reputation; work and donation are further
+    // down the decision tree, so blocking here would just stall the run.
+    const decision = step({
+      factions: [{ ...standing("CyberSec", { hacking: true, field: true, security: true }), rep: 1e5 }],
+      catalog: new Map([
+        ["dear", aug("dear", { baseCost: 5e8, baseRepRequirement: 1e9, mults: { hacking: 1.01 } })],
+        ["cheap", aug("cheap", { baseCost: 1e6, baseRepRequirement: 0, mults: { hacking: 2 } })],
+      ]),
+      moneyGranted: 1e9,
+      moneyAvailable: 1e9,
+      pendingProceeds: 1e12,
+    });
+    expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap" });
+  });
+});
+
+describe("the barrier and the drain converge", () => {
+  // Two predicates, not one: `progression` blocks on `nextPurchasableAugmentation`
+  // over probed offers and cash, while `factions` buys through `nextPurchase` over
+  // the catalogue and the granted budget. They cannot match field-for-field, so what
+  // has to hold is that the drain keeps buying until nothing is affordable — a
+  // barrier blocking on something factions declines to buy would wedge the run. The
+  // mechanism is re-planning: the batch is rebuilt each pass against the cash left.
+  const seed = aug("seed", { baseCost: 1e6, baseRepRequirement: 0 });
+  const dear = aug("dear", { baseCost: 4e8, baseRepRequirement: 0, mults: { hacking: 2 } });
+  const mid = aug("mid", { baseCost: 2e8, baseRepRequirement: 0, mults: { hacking: 1.5 } });
+  const cheap = aug("cheap", { baseCost: 1e6, baseRepRequirement: 0, mults: { hacking: 1.1 } });
+  const catalog = new Map([["seed", seed], ["dear", dear], ["mid", mid], ["cheap", cheap]]);
+
+  /** Run the drain to a standstill, spending real money at escalating prices. */
+  function drainToStandstill(start: number) {
+    let money = start;
+    // `seed` stands in for an already-queued purchase: `shouldRecommendInstall`
+    // filters the queue against the catalogue, so a sentinel name would be dropped
+    // and the drain would never engage at all.
+    const owned = new Set(["seed"]);
+    const bought: { name: string; cost: number }[] = [];
+
+    for (let pass = 0; pass < 12; pass++) {
+      const queuedNonSoA = owned.size; // every purchase makes the next dearer
+      const { decision } = stepFactions(
+        factionsView({
+          factions: [{ ...standing("CyberSec", { hacking: true, field: true, security: true }), rep: 1e9 }],
+          catalog,
+          owned: new Set(owned),
+          queued: new Set(["seed"]),
+          moneyGranted: money,
+          moneyAvailable: money,
+          pendingProceeds: 0,
+          incomePerSec: 0,
+          horizonSec: 60,
+          priceContext: priceCtx({ queuedNonSoA }),
+        }),
+        initFactionMemory(),
+      );
+      if (decision.action.type !== "purchaseAugmentation") break;
+      const name = decision.action.augmentation!;
+      const cost = augCost(catalog.get(name)!, priceCtx({ queuedNonSoA })).moneyCost;
+      expect(cost, `${name} was bought without the money for it`).toBeLessThanOrEqual(money);
+      money -= cost;
+      owned.add(name);
+      bought.push({ name, cost });
+    }
+    return { bought, left: money };
+  }
+
+  test("it drains to a standstill, dearest first, and never overspends", () => {
+    const { bought, left } = drainToStandstill(7e8);
+    // `dear` is skipped because at queue depth 1 — `seed` already occupies slot 0 —
+    // it costs $760m against a $700m budget, so it is unaffordable rather than
+    // merely expensive. Of what IS affordable, the dearest goes first: value order
+    // would have taken `cheap`, whose multiplier is the weakest of the three.
+    expect(bought.map((b) => b.name)).toEqual(["mid", "cheap"]);
+    expect(left).toBeGreaterThanOrEqual(0);
+    // It stops because nothing is affordable, NOT because it gave up: `dear` at the
+    // resulting queue depth genuinely costs more than the cash left, so the install
+    // barrier — which tests the same escalated price against the same cash — cannot
+    // block on it either. That agreement is what keeps the two from deadlocking.
+    const dearNow = augCost(dear, priceCtx({ queuedNonSoA: 3 })).moneyCost;
+    expect(dearNow).toBeGreaterThan(left);
+  });
+
+  test("more cash buys strictly more, and still in cost order", () => {
+    const rich = drainToStandstill(2e9);
+    expect(rich.bought.map((b) => b.name)).toEqual(["dear", "mid", "cheap"]);
+    // Each purchase is dearer at its slot than the next, which is the invariant the
+    // ordering exists to produce.
+    const paid = rich.bought.map((b) => b.cost);
+    expect(paid[0]).toBeGreaterThan(paid[2]!);
+  });
+
+  test("a drain with nothing affordable buys nothing and does not spin", () => {
+    const broke = drainToStandstill(1_000);
+    expect(broke.bought).toEqual([]);
+    expect(broke.left).toBe(1_000);
   });
 });

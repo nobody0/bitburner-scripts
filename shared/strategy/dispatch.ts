@@ -1,6 +1,6 @@
 import { growTimeSeconds, hackTimeSeconds, makeHackContext, weakenTimeSeconds, type HackContext } from "../formulas.ts";
 import { Heap } from "../ram/heap.ts";
-import type { Action, CompletionEvent, ServerView, WorldView } from "../world.ts";
+import type { Action, CompletionEvent, ServerView, StockInfluence, WorldView } from "../world.ts";
 import { WORKER_RAM } from "../world.ts";
 import type { SegmentKind, TargetDirective } from "./directive.ts";
 import {
@@ -71,6 +71,11 @@ export interface DispatchOptions {
   /** Expected remaining run time in ms (the endgame route's estimate). Caps
    *  the evaluator's amortization horizon alongside the goal. */
   horizonMs?: number;
+  /** Emit buyServer/upgradeHomeRam actions. In the live game the shared
+   *  investment arbiter owns home/cloud/Hacknet spending, so the driver leaves
+   *  this off; the sim's farm mode runs no feature drivers or arbiter, so the
+   *  dispatcher is its only owner and must keep emitting them. */
+  buyInfrastructure?: boolean;
 }
 
 export function initDispatch(): DispatchMemory {
@@ -193,23 +198,24 @@ export function dispatch(
     view.nodeMults ?? {},
   );
 
-  // Fleet upkeep. In the live game start.js owns rooting/purchases; the sim
-  // driver has no other owner, so the dispatcher emits them and the game
-  // driver simply ignores what it already did.
+  // Rooting is fleet upkeep. Infrastructure purchases are opt-in: in the live
+  // game the shared investment arbiter owns home/cloud/Hacknet spending, but
+  // the sim's farm mode has no other owner (see DispatchOptions).
   for (const server of view.servers) {
     if (!server.hasAdminRights && server.numOpenPortsRequired === 0) {
       actions.push({ type: "nuke", target: server.hostname });
     }
   }
-  const pservCost = view.prices.cloudServer[PSERV_RAM] ?? Infinity;
-  const owned = view.servers.filter((s) => s.purchasedByPlayer && s.hostname !== "home").length;
-  if (owned < view.prices.cloudServerLimit && view.player.money >= BUY_HEADROOM * pservCost) {
-    actions.push({ type: "buyServer", ram: PSERV_RAM, name: `pserv-${memory.nextServerIndex++}` });
+  if (options.buyInfrastructure) {
+    const pservCost = view.prices.cloudServer[PSERV_RAM] ?? Infinity;
+    const owned = view.servers.filter((s) => s.purchasedByPlayer && s.hostname !== "home").length;
+    if (owned < view.prices.cloudServerLimit && view.player.money >= BUY_HEADROOM * pservCost) {
+      actions.push({ type: "buyServer", ram: PSERV_RAM, name: `pserv-${memory.nextServerIndex++}` });
+    }
+    if (view.player.money >= BUY_HEADROOM * view.prices.upgradeHomeRam) {
+      actions.push({ type: "upgradeHomeRam" });
+    }
   }
-  if (view.player.money >= BUY_HEADROOM * view.prices.upgradeHomeRam) {
-    actions.push({ type: "upgradeHomeRam" });
-  }
-
   for (const segment of directive.segments) {
     const budget = segment.gb - memory.segmentGb[segment.kind];
     if (budget <= 0) continue;
@@ -218,7 +224,7 @@ export function dispatch(
       const server = byHost.get(directive.farm.host);
       if (!server) continue;
       if (isPrepped(server)) {
-        launchBatches(memory, actions, directive.farm.solution, server, now, budget, launchCtx);
+        launchBatches(memory, actions, directive.farm.solution, server, now, budget, launchCtx, view.stockInfluence?.[server.hostname]);
       } else {
         launchPrepWave(memory, actions, view, server, budget, "farm");
       }
@@ -236,13 +242,14 @@ function allocFor(
   memory: DispatchMemory,
   kind: "hack" | "grow" | "weaken",
   threads: number,
-): { blockSize: number; threads: number; policy: "contiguous" | "homeFirst" | "spread" } {
+): { blockSize: number; threads: number; policy: "contiguous" | "homeFirst" | "spread"; coreAware: boolean } {
   return {
     blockSize: WORKER_RAM[kind],
     threads,
     // hack must land as one call; grow prefers home for its core bonus;
     // weaken is perfectly divisible and eats fragments.
     policy: kind === "hack" ? "contiguous" : kind === "grow" ? "homeFirst" : "spread",
+    coreAware: kind !== "hack",
   };
 }
 
@@ -254,6 +261,12 @@ function launchBatches(
   now: number,
   budgetGb: number,
   ctx: HackContext,
+  /** What `stock` wants this host's symbol to do, when it wants anything.
+   *  Exactly ONE side of the batch carries the flag: a long is driven by the
+   *  grow and a short by the hack. Flagging both would cancel the nudges out —
+   *  in steady state the grow restores precisely what the hack took, so the two
+   *  influence rolls are equal and opposite. */
+  influence?: StockInfluence,
 ): void {
   const host = server.hostname;
   const difficulty = server.hackDifficulty;
@@ -273,10 +286,10 @@ function launchBatches(
     // INTERVAL after the previous batch (collision guard).
     const anchor = Math.max(now + weakenMs + SPACER_MS, memory.lastAnchor + INTERVAL_MS);
     const ops = [
-      { kind: "hack" as const, threads: solution.hackThreads, duration: hackMs, landing: anchor },
-      { kind: "weaken" as const, threads: solution.weaken1Threads, duration: weakenMs, landing: anchor + SPACER_MS },
-      { kind: "grow" as const, threads: solution.growThreads, duration: growMs, landing: anchor + 2 * SPACER_MS },
-      { kind: "weaken" as const, threads: solution.weaken2Threads, duration: weakenMs, landing: anchor + 3 * SPACER_MS },
+      { kind: "hack" as const, threads: solution.hackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
+      { kind: "weaken" as const, threads: solution.weaken1Threads, duration: weakenMs, landing: anchor + SPACER_MS, stock: false },
+      { kind: "grow" as const, threads: solution.growThreads, duration: growMs, landing: anchor + 2 * SPACER_MS, stock: influence?.side === "long" },
+      { kind: "weaken" as const, threads: solution.weaken2Threads, duration: weakenMs, landing: anchor + 3 * SPACER_MS, stock: false },
     ].filter((op) => op.threads >= 1);
 
     if (ops.some((op) => op.landing - now - op.duration < 0)) {
@@ -305,6 +318,7 @@ function launchBatches(
           threads: block.threads,
           opId,
           additionalMsec: op.landing - now - op.duration,
+          ...(op.stock ? { stock: true } : {}),
         });
         memory.tracked.set(opId, {
           hostname: block.hostname,
@@ -346,13 +360,18 @@ function launchPrepWave(
   const wanted = kind === "weaken" ? plan.weaken1Threads : plan.growThreads + plan.weaken2Threads;
   if (wanted < 1) return;
 
+  // Prep grows push the price UP for free: the op is launched either way, so for
+  // a LONG position the flag costs nothing and buys a nudge. Prep never hacks,
+  // so a short gets nothing from this path.
+  const growInfluences = view.stockInfluence?.[server.hostname]?.side === "long";
+
   // Prep work is divisible, so it always spreads (a 50-thread grow must not
   // demand one contiguous block) and is sized to what the fleet can place.
   const affordable = Math.floor(budgetGb / WORKER_RAM[kind]);
   const threads = Math.min(wanted, affordable, memory.heap.capacity(WORKER_RAM[kind]));
   if (threads < 1) return;
 
-  const allocation = memory.heap.allocate({ blockSize: WORKER_RAM[kind], threads, policy: "spread" });
+  const allocation = memory.heap.allocate({ blockSize: WORKER_RAM[kind], threads, policy: "spread", coreAware: true });
   if (!allocation.ok) {
     memory.stats.allocFails++;
     return;
@@ -366,7 +385,14 @@ function launchPrepWave(
       continue;
     }
     const opId = memory.nextOpId++;
-    actions.push({ type: kind, target: server.hostname, source: block.hostname, threads: block.threads, opId });
+    actions.push({
+      type: kind,
+      target: server.hostname,
+      source: block.hostname,
+      threads: block.threads,
+      opId,
+      ...(kind === "grow" && growInfluences ? { stock: true } : {}),
+    });
     memory.tracked.set(opId, {
       hostname: block.hostname,
       kind,

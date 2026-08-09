@@ -215,19 +215,31 @@ export class FactionSystem {
     if (!(amount > 0) || this.#player.money < amount) return 0;
     const gained = repFromDonation(amount, this.#world.person as never);
     this.#player.money -= amount;
+    this.#world.recordMoney("other", -amount);
     faction.rep += gained;
+    this.#world.emit({ kind: "event", name: "faction.donated", data: { faction: name, amount, reputation: gained } });
     return gained;
   }
 
-  /** Bank this run's reputation into favor. Happens ONLY at install — which is
-   * why a donation-gated faction is a reset decision, not something to wait
-   * for inside a run. */
-  bankFavor(): void {
+  /** Faction half of `prestigeAugmentation`.
+   * Reputation banks for every faction. Membership, bans, and ordinary
+   * invitations last for one install cycle; `keepOnInstall` invitations
+   * survive whether they came from membership or a pending invitation. */
+  prestigeAugmentation(): void {
+    const maintainedInvitations = new Set(
+      [...this.#player.factions, ...this.#player.factionInvitations].filter(
+        (name) => FACTION_TABLE[name]?.keepOnInstall,
+      ),
+    );
     for (const faction of this.factions.values()) {
-      if (!faction.joined) continue;
       faction.favor = addRepToFavor(faction.favor, faction.rep);
       faction.rep = 0;
+      faction.joined = false;
+      faction.banned = false;
+      faction.invited = maintainedInvitations.has(faction.name);
     }
+    this.#player.factions = [];
+    this.#player.factionInvitations = [...maintainedInvitations];
   }
 
   /** Augmentations a joined faction offers that are not owned. */

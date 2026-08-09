@@ -90,6 +90,15 @@ function harness(options: { seed?: number; homeRam?: number } = {}): Harness {
 }
 
 describe("HWGW dispatcher", () => {
+  test("never bypasses the shared investment arbiter with infrastructure buys", () => {
+    const world = new SimWorld({ seed: 5, network: DEFAULT_NETWORK, homeRam: 64, startingMoney: 1e15 });
+    const planned = planFarm(world.view(), initFarm(), []);
+    expect(planned.actions.some((action) =>
+      action.type === "buyServer" || action.type === "upgradeServer" ||
+      action.type === "upgradeHomeRam" || action.type === "upgradeHomeCore",
+    )).toBe(false);
+  });
+
   test("batches land in H -> W1 -> G -> W2 order, one spacer apart", () => {
     const h = harness({ homeRam: 256 });
     h.run(900_000);
@@ -180,5 +189,105 @@ describe("HWGW dispatcher", () => {
     }
     expect(worst).toBeLessThan(10);
     console.log(`bench: worst dispatcher pass ${worst.toFixed(3)}ms`);
+  });
+});
+
+// --- stock manipulation -------------------------------------------------------
+
+/** Plan one pass with a stock influence intent on `joesguns`, and report which
+ * target won and which op kinds carried `{stock: true}`.
+ *
+ * Two passes rather than one: the first solves and picks a target, the second
+ * launches against it. Every server is pre-rooted and pre-prepped so the pass
+ * emits BATCHES rather than a prep wave. */
+function withInfluence(options: {
+  side: "long" | "short";
+  valuePerOp: number;
+  bitnode?: number;
+  intent?: boolean;
+}): { host: string; flagged: Record<string, number>; income: number; stockIncome: number } {
+  const world = new SimWorld({
+    seed: 9,
+    ...(options.bitnode !== undefined ? { bitnode: options.bitnode } : {}),
+    network: DEFAULT_NETWORK,
+    homeRam: 4_096,
+    startingMoney: 1e12,
+  });
+  world.person.skills.hacking = 500;
+  for (const server of world.servers.values()) {
+    if (server.hostname === "home") continue;
+    server.hasAdminRights = true;
+    server.hackDifficulty = server.minDifficulty;
+    server.moneyAvailable = server.moneyMax;
+  }
+
+  const view = () => ({
+    ...world.view(),
+    ...(options.intent === false
+      ? {}
+      : { stockInfluence: { joesguns: { sym: "JGN", side: options.side, valuePerOp: options.valuePerOp } } }),
+  });
+  let memory = initFarm();
+  memory = planFarm(view(), memory, []).memory;
+  const result = planFarm(view(), memory, []);
+
+  const flags: Record<string, number> = {};
+  for (const action of result.actions) {
+    if (action.type !== "hack" && action.type !== "grow" && action.type !== "weaken") continue;
+    if (action.stock === true) flags[action.type] = (flags[action.type] ?? 0) + 1;
+  }
+  const farm = result.directive.farm;
+  return {
+    host: farm?.host ?? "",
+    flagged: flags,
+    income: farm?.solution.incomePerBatch ?? 0,
+    stockIncome: farm?.solution.stockIncomePerBatch ?? 0,
+  };
+}
+
+describe("stock manipulation reaches the ops", () => {
+  test("in BN1 a realistic intent does NOT move the target — hacking dominates", () => {
+    // The honest magnitude. A nudge moves the equilibrium forecast by 0.001, so a
+    // $10b position on a 0.002 mean step over a 100-tick hold is worth a few
+    // thousand dollars per influencing op — against tens of millions of hacked
+    // money per batch. Outside a node that nerfs hacking, manipulation is a
+    // rounding error on target CHOICE, and pretending otherwise would hand the
+    // farm to a small server for no reason.
+    const bn1 = withInfluence({ side: "long", valuePerOp: 5_000 });
+    expect(bn1.host).not.toBe("joesguns");
+    expect(bn1.income).toBeGreaterThan(1e6);
+  });
+
+  test("in BN8 the SAME intent wins the target, because hacked money is worth zero", () => {
+    // ScriptHackMoneyGain 0. The farm still drains, still gains experience, still
+    // moves prices — and earns nothing, so any positive stock income is the whole
+    // score. This is the relative-weight shift the node is built around.
+    const bn8 = withInfluence({ side: "long", valuePerOp: 5_000, bitnode: 8 });
+    expect(bn8.host).toBe("joesguns");
+    expect(bn8.income).toBe(0);
+    expect(bn8.stockIncome).toBeGreaterThan(0);
+  });
+
+  test("a LONG flags the grow and nothing else", () => {
+    // grow raises the second-order forecast. Flagging the hack as well would
+    // cancel it out: in steady state the grow restores exactly what the hack took,
+    // so the two influence rolls are equal and opposite.
+    const long = withInfluence({ side: "long", valuePerOp: 5_000, bitnode: 8 });
+    expect(long.flagged["grow"]).toBeGreaterThan(0);
+    expect(long.flagged["hack"]).toBeUndefined();
+    expect(long.flagged["weaken"]).toBeUndefined();
+  });
+
+  test("a SHORT flags the hack and nothing else", () => {
+    const short = withInfluence({ side: "short", valuePerOp: 5_000, bitnode: 8 });
+    expect(short.flagged["hack"]).toBeGreaterThan(0);
+    expect(short.flagged["grow"]).toBeUndefined();
+    expect(short.flagged["weaken"]).toBeUndefined();
+  });
+
+  test("with no intent, nothing is flagged and no stock income is claimed", () => {
+    const none = withInfluence({ side: "long", valuePerOp: 5_000, bitnode: 8, intent: false });
+    expect(none.flagged).toEqual({});
+    expect(none.stockIncome).toBe(0);
   });
 });

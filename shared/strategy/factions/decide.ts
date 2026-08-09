@@ -2,17 +2,17 @@ import {
   augCost,
   canAfford,
   closePrereqs,
+  entropyCost,
   isSoA,
   NEUROFLUX,
   orderPurchases,
   scoreAug,
-  type AugInfo,
+  selectAffordableBatch,
   type PurchaseCandidate,
 } from "./augs.ts";
 import {
   FOCUS_DWELL_MS,
   RATE_SMOOTHING,
-  SWITCH_MARGIN,
   WORK_SWITCH_MARGIN,
   type FactionAction,
   type FactionDecision,
@@ -22,10 +22,16 @@ import {
   type ScoredAlternative,
   type Until,
 } from "./plan.ts";
-import { selectFactions, type FactionCandidate } from "./objective.ts";
-import { bestWorkType, favorNeededToDonate, passiveRepPerSec, type WorkType } from "./rep.ts";
-import { combinedEtaSec, estimateBlockerSec, evaluateAll, isReachable, type Blocker } from "./requirements.ts";
-import type { FactionStanding, FactionsView } from "./state.ts";
+import { selectFactionPackage } from "./packages.ts";
+import {
+  bestWorkType,
+  donationCrossoverIncome,
+  donationForRep,
+  passiveRepPerSec,
+  type WorkType,
+} from "./rep.ts";
+import { evaluateAll, type Blocker } from "./requirements.ts";
+import { settlingMoney, type FactionStanding, type FactionsView } from "./state.ts";
 
 /** The faction decision.
  *
@@ -89,31 +95,6 @@ function invalidationKeys(view: FactionsView): InvalidationKey[] {
   ];
 }
 
-/** Augmentations a faction can supply that we do not own. */
-function offeredBy(faction: string, view: FactionsView): AugInfo[] {
-  const out: AugInfo[] = [];
-  for (const aug of view.catalog.values()) {
-    if (view.owned.has(aug.name)) continue;
-    if (!aug.factions.includes(faction)) continue;
-    out.push(aug);
-  }
-  return out;
-}
-
-/** Value of committing to one faction: the augmentations only it can give us,
- * scored, minus nothing — the cost side is the ETA, handled separately. */
-function factionValue(faction: string, view: FactionsView): { value: number; augs: string[] } {
-  let value = 0;
-  const augs: string[] = [];
-  for (const aug of offeredBy(faction, view)) {
-    const score = scoreAug(aug, view.weights);
-    if (score <= 0) continue;
-    value += score;
-    augs.push(aug.name);
-  }
-  return { value, augs };
-}
-
 /** Invite blockers for one faction.
  *
  * Exported so the driver can report the gate for EVERY faction rather than
@@ -140,68 +121,6 @@ export function blockersFor(standing: FactionStanding, view: FactionsView): Bloc
     ];
   }
   return evaluateAll(standing.requirements, view.requirementView);
-}
-
-/** Stand-in ETA for a faction whose reputation cannot be earned by working —
- * either it offers no work type we can use, or its work types have not been
- * probed yet. A day: heavy enough that any workable faction outranks it,
- * finite enough that it still appears in the objective. */
-const UNWORKABLE_REP_SEC = 86_400;
-
-/** Build one candidate per faction. */
-export function buildCandidates(view: FactionsView): {
-  candidates: FactionCandidate[];
-  blockers: Map<string, Blocker[]>;
-  augs: Map<string, string[]>;
-} {
-  const candidates: FactionCandidate[] = [];
-  const blockers = new Map<string, Blocker[]>();
-  const augs = new Map<string, string[]>();
-
-  for (const standing of view.factions) {
-    const missing = blockersFor(standing, view);
-    blockers.set(standing.name, missing);
-    const { value, augs: offered } = factionValue(standing.name, view);
-    augs.set(standing.name, offered);
-
-    // Score by VALUE PER SECOND, not raw value. The objective is least
-    // wall-clock to an augmentation set, so a faction worth twice as much but
-    // ten times further away is a worse commitment — and ranking on raw value
-    // alone makes a fresh run commit to Daedalus (30 augmentations, $100b)
-    // over CyberSec (one backdoor) and then idle for hours with nothing it can
-    // act on.
-    const joinSec = standing.joined
-      ? 0
-      : combinedEtaSec(missing, (blocker) => estimateBlockerSec(blocker, view.incomePerSec));
-    // Plus the time to earn the reputation the augmentations need.
-    //
-    // A faction we cannot WORK is not worthless — its augmentations are still
-    // real, and reputation can come from donation, or the faction may be worth
-    // joining for its own sake. Scoring an unworkable faction at Infinity
-    // divides its value to exactly zero, which drops it from the objective
-    // entirely; that emptied the whole plan the moment work types were probed
-    // properly, because an un-joined faction's work types are simply not known
-    // yet. Penalise heavily, never annihilate.
-    const rate = bestWorkType(standing.offers, view.person, standing.favor, view.repContext, true);
-    const repTarget = repNeeded(standing.name, view, offered);
-    const repSec =
-      repTarget <= standing.rep
-        ? 0
-        : rate && rate.repPerSec > 0
-          ? (repTarget - standing.rep) / rate.repPerSec
-          : UNWORKABLE_REP_SEC;
-    const etaSec = joinSec + repSec;
-
-    candidates.push({
-      name: standing.name,
-      // Per-second, floored so a zero-ETA faction does not divide by zero.
-      value: value / Math.max(1, etaSec),
-      enemies: standing.enemies,
-      // Already joined counts as reachable regardless of requirements.
-      reachable: standing.joined || standing.invited || isReachable(missing),
-    });
-  }
-  return { candidates, blockers, augs };
 }
 
 /** Measured reputation rate, EWMA over observed deltas. Reality beats the
@@ -253,7 +172,51 @@ function repNeeded(faction: string, view: FactionsView, wanted: readonly string[
   return highest;
 }
 
+/** The order to BUY an already-chosen set in.
+ *
+ * Selection and payment answer different questions. A set is chosen by value —
+ * which augmentations are worth having — and an augmentation does nothing until it
+ * is installed, so within one reset there is no reason to prefer getting a cheap
+ * one early. Payment order, on the other hand, changes the bill: each queued
+ * non-SoA purchase multiplies the price of every later one, so the dearest item
+ * belongs in the cheapest slot. Buying $1m before $500m pays the escalation on the
+ * $500m and can leave the batch unaffordable halfway through.
+ *
+ * This is the EXACT solver, and it is exponential in the set size — 0.3 ms at ten
+ * items, 40 ms at sixteen. That is affordable here and only here: an objective is a
+ * single faction's package, the feature decides every 30 s, and this is where money
+ * actually changes hands. Estimates that run per candidate on the package frontier
+ * use `estimatedCost` instead; using this one there costs seconds per decision. */
+function purchaseOrder(view: FactionsView, names: readonly string[]): string[] {
+  const candidates: PurchaseCandidate[] = [];
+  for (const name of names) {
+    const aug = view.catalog.get(name);
+    // `faction` is unused by the ordering — the caller resolves the seller.
+    if (aug && !view.owned.has(name)) candidates.push({ name, aug, faction: aug.factions[0] ?? "" });
+  }
+  return orderPurchases(candidates, view.priceContext).map((candidate) => candidate.name);
+}
+
 export function stepFactions(
+  view: FactionsView,
+  memoryIn: FactionMemory,
+): { decision: FactionDecision; memory: FactionMemory } {
+  const out = decideFactions(view, memoryIn);
+  // `nextBuy` is the money the driver has to claim. The drain fills it in itself
+  // (a different candidate set); otherwise it is the head of the objective's
+  // purchase order. Priced with unlimited money on purpose: `nextPurchase` tests
+  // the GRANTED budget, a grant only exists once something claimed it, and a claim
+  // read off the already-funded decision could never bootstrap.
+  if (out.decision.nextBuy) return out;
+  const intended = nextPurchase(view, purchaseOrder(view, out.decision.objective?.augmentations ?? []), Infinity);
+  if (!intended) return out;
+  return {
+    ...out,
+    decision: { ...out.decision, nextBuy: { name: intended.name, price: intended.price } },
+  };
+}
+
+function decideFactions(
   view: FactionsView,
   memoryIn: FactionMemory,
 ): { decision: FactionDecision; memory: FactionMemory } {
@@ -283,33 +246,60 @@ export function stepFactions(
     };
   }
 
-  const { candidates, blockers, augs } = buildCandidates(view);
+  const blockers = new Map(view.factions.map((standing) => [standing.name, blockersFor(standing, view)]));
 
   // --- objective ------------------------------------------------------------
-  const selection = selectFactions(candidates);
-  const objectiveAugs = closePrereqs(
-    selection.chosen.flatMap((name) => augs.get(name) ?? []),
-    view.catalog,
-    view.owned,
-  );
+  const selection = selectFactionPackage(view, blockers);
+  const objectiveAugs = closePrereqs(selection.intent?.augmentations ?? [], view.catalog, view.owned);
   const fresh: FactionObjective = {
-    factions: selection.chosen,
+    factions: selection.intent ? [selection.intent.faction] : [],
     augmentations: objectiveAugs,
-    value: selection.value,
+    value: selection.intent?.value ?? 0,
     foreclosed: selection.foreclosed,
-    why: selection.approximated
-      ? "greedy over a ban-graph component larger than the exact search limit"
-      : "exact max-weight independent set over the ban graph",
+    why: selection.intent
+      ? `finite-horizon package frontier; next target is ${selection.intent.faction} at ${Math.round(selection.intent.repTarget).toLocaleString()} rep`
+      : "no faction package fits the planning horizon",
+    ...(selection.intent ? { intent: selection.intent } : {}),
+    ...(selection.runnerUp ? { runnerUp: selection.runnerUp } : {}),
   };
 
-  // Hysteresis: only switch objective when the new one is clearly better.
-  const committed = memory.objective;
-  const objective =
-    committed && fresh.value <= committed.value * SWITCH_MARGIN && sameSet(committed.factions, fresh.factions)
-      ? committed
-      : fresh;
-  if (committed && objective !== committed) {
-    alternatives.push({ label: `keep ${committed.factions.join(", ")}`, value: committed.value, why: "previous objective" });
+  // Keep the promised breakpoint stable while it is in flight. In
+  // particular, joining a city faction makes its enemy disappear from the
+  // current-cycle frontier; recomputing freely at that moment would erase the
+  // runner-up opportunity cost and push the joined faction all the way to its
+  // deepest augmentation. Once the package is complete we may switch to a
+  // compatible runner immediately, but an enemy runner means "install, then
+  // join it next cycle".
+  const previous = memory.objective;
+  const previousIntent = previous?.intent;
+  const previousRunner = previous?.runnerUp;
+  const previousStanding = previousIntent
+    ? view.factions.find((standing) => standing.name === previousIntent.faction)
+    : undefined;
+  const previousComplete = Boolean(
+    previousIntent &&
+    previousStanding &&
+    previousStanding.rep >= previousIntent.repTarget &&
+    previousIntent.augmentations.every((name) => view.owned.has(name)),
+  );
+  const runnerBlockedThisCycle = Boolean(
+    previousRunner &&
+    view.factions.some(
+      (member) =>
+        member.joined &&
+        member.name !== previousRunner.faction &&
+        (member.enemies.includes(previousRunner.faction) ||
+          (view.factions.find((standing) => standing.name === previousRunner.faction)?.enemies.includes(member.name) ?? false)),
+    ),
+  );
+  const keepPrevious = Boolean(previousIntent && previousStanding && (!previousComplete || runnerBlockedThisCycle));
+  const objective = keepPrevious ? previous! : fresh;
+  if (objective.runnerUp) {
+    alternatives.push({
+      label: `${objective.runnerUp.faction} to ${Math.round(objective.runnerUp.repTarget).toLocaleString()} rep`,
+      value: objective.runnerUp.value / Math.max(1, objective.runnerUp.etaSec),
+      why: objective.runnerUp.why,
+    });
   }
 
   const allBlockers: (Blocker & { faction: string })[] = [];
@@ -320,8 +310,23 @@ export function stepFactions(
 
   const next = { ...memory, objective, lastInvalidation: invalidation };
 
+  if (view.currentWork?.kind === "grafting") {
+    const action: FactionAction = {
+      type: "idle",
+      reason: "continue",
+      why: `grafting ${view.currentWork.detail ?? "augmentation"} is protected until completion`,
+    };
+    return {
+      memory: { ...next, lastAction: action },
+      decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
+    };
+  }
+
   // --- 1) purchase ----------------------------------------------------------
-  const purchase = nextPurchase(view, objective.augmentations);
+  // Cost order, not the objective's value order: see `purchaseOrder`. Reputation
+  // still gates each item, and `nextPurchase` falls through to the next when it is
+  // short — so this buys the dearest item we can actually buy, never nothing.
+  const purchase = nextPurchase(view, purchaseOrder(view, objective.augmentations));
   if (purchase) {
     return {
       memory: { ...next, lastAction: purchase.action },
@@ -336,18 +341,29 @@ export function stepFactions(
     };
   }
 
+  const graft = nextGraft(view, objective.augmentations);
+  if (graft) {
+    const action: FactionAction = view.requirementView.city === "New Tokyo"
+      ? { type: "graft", augmentation: graft.name, why: graft.why }
+      : { type: "travelTo", city: "New Tokyo", why: `${graft.name} is worth grafting; VitaLife is in New Tokyo` };
+    return {
+      memory: { ...next, lastAction: action },
+      decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
+    };
+  }
+
   // --- 2) join --------------------------------------------------------------
   const invitation = view.factions.find(
     (standing) => standing.invited && !standing.joined && objective.factions.includes(standing.name),
   );
   if (invitation) {
-    const lost = selection.foreclosed.filter((entry) => entry.bannedBy === invitation.name);
+    const lost = objective.foreclosed.filter((entry) => entry.bannedBy === invitation.name);
     const action: FactionAction = {
       type: "joinFaction",
       faction: invitation.name,
       why:
         lost.length > 0
-          ? `joining ${invitation.name} permanently forecloses ${lost.map((e) => e.name).join(", ")}`
+          ? `joining ${invitation.name} forecloses ${lost.map((e) => e.name).join(", ")} until the next install`
           : `${invitation.name} is in the objective and has invited us`,
     };
     return {
@@ -379,12 +395,33 @@ export function stepFactions(
   const target = pickWorkFaction(view, next, objective, alternatives);
   if (!target) {
     const why = allBlockers.length > 0 ? "every objective faction is blocked" : "nothing left to work toward";
+    const recommend = shouldRecommendInstall(view, objective);
+    // Last-chance drain. This is intentionally broader than the objective:
+    // once progression is about to reset, every permanent augmentation we can
+    // still buy is better than carrying the cash and reputation into oblivion.
+    // Keep the same priority order, falling downward when a better item is not
+    // currently affordable; NeuroFlux is repeatable and comes last.
+    const wanted = recommend ? finalSweepWanted(view) : [];
+    // What the drain would buy if money were no object. Published on the decision
+    // so the driver can claim exactly that much: `nextPurchase` above tests the
+    // GRANTED budget, and a grant only exists once something claimed it. Derived
+    // from the plan rather than the funded action, it survives the whole drain —
+    // including the ticks where a purchase is in flight — so the claim does not
+    // blink out between buys.
+    const drainBuy = recommend ? nextPurchase(view, wanted, Infinity) : undefined;
+    const nextBuyDigest = drainBuy ? { nextBuy: { name: drainBuy.name, price: drainBuy.price } } : {};
+    const sweep = recommend ? nextSweepAction(view, wanted) : undefined;
+    if (sweep) {
+      return {
+        memory: { ...next, lastAction: sweep },
+        decision: { objective, action: sweep, alternatives, blockers: allBlockers, needOwners, invalidation, ...nextBuyDigest },
+      };
+    }
     const action: FactionAction = {
       type: "idle",
       reason: allBlockers.length > 0 ? "blocked" : "waiting",
       why,
     };
-    const recommend = shouldRecommendInstall(view, objective);
     return {
       memory: { ...next, lastAction: action },
       decision: {
@@ -394,6 +431,7 @@ export function stepFactions(
         blockers: allBlockers,
         needOwners,
         invalidation,
+        ...nextBuyDigest,
         ...(recommend ? { recommendInstall: recommend } : {}),
       },
     };
@@ -402,13 +440,34 @@ export function stepFactions(
   // Donation beats working once income exceeds the crossover — and only once
   // favor actually allows it. Favor cannot grow within a run, so a locked
   // route is a message to `progression`, not something to wait for.
-  const donateUnlocked = target.standing.favor >= favorNeededToDonate(view.favorToDonate / 150 || 1);
-  if (donateUnlocked && view.moneyGranted > 0) {
+  const donateUnlocked = target.standing.favor >= view.favorToDonate;
+  const repGap = Math.max(0, target.needed - target.standing.rep);
+  const donationNeeded = donationForRep(repGap, view.person.mults.faction_rep, view.repContext.factionWorkRepGain);
+  const crossover = donationCrossoverIncome(
+    target.repPerSec,
+    view.person.mults.faction_rep,
+    view.repContext.factionWorkRepGain,
+  );
+  const intent = objective.intent?.faction === target.faction ? objective.intent : undefined;
+  const packageCashNeeded = donationNeeded + (intent?.purchaseCost ?? 0);
+  const donationIsFaster = (intent?.donationCost ?? 0) > 0 || view.incomePerSec > crossover;
+  if (donateUnlocked && donationIsFaster) {
+    const amount = donationNeeded;
+    // The purchase this donation is reserving alongside itself is whichever one we
+    // will actually make next, which is the head of the COST order — not the head
+    // of the objective's value order. Reserving the cheaper one would let the
+    // donation eat the difference and leave the purchase unaffordable.
+    const nextAugmentation = purchaseOrder(view, objective.augmentations)[0];
+    const nextAug = nextAugmentation ? view.catalog.get(nextAugmentation) : undefined;
+    const nextPurchaseCost = nextAug ? augCost(nextAug, view.priceContext).moneyCost : 0;
     const action: FactionAction = {
       type: "donate",
       faction: target.faction,
-      amount: view.moneyGranted,
-      why: `donating beats working at $${Math.round(view.incomePerSec)}/sec income`,
+      amount,
+      ...(nextPurchaseCost > 0 ? { purchaseCost: nextPurchaseCost } : {}),
+      why:
+        `reserve $${Math.round(packageCashNeeded).toLocaleString()} for reputation and purchase; ` +
+        `income $${Math.round(view.incomePerSec)}/sec beats the $${Math.round(crossover)}/sec crossover`,
     };
     return {
       memory: { ...next, lastAction: action },
@@ -449,7 +508,7 @@ export function stepFactions(
     // read as a contradiction against the game's own display.
     const action: FactionAction = {
       type: "idle",
-      reason: "waiting",
+      reason: "slot",
       why:
         `would work ${target.faction} (${target.workType}) but another feature holds ` +
         `Player.currentWork — only one activity can run at a time`,
@@ -503,13 +562,6 @@ export function stepFactions(
     },
   };
 }
-
-function sameSet(a: readonly string[], b: readonly string[]): boolean {
-  if (a.length !== b.length) return false;
-  const set = new Set(a);
-  return b.every((entry) => set.has(entry));
-}
-
 function untilRep(faction: string, target: number, have: number, ratePerSec: number): Until {
   const remaining = Math.max(0, target - have);
   return {
@@ -537,49 +589,210 @@ function soleTravelBlocker(blockers: readonly (Blocker & { faction: string })[])
   return undefined;
 }
 
-/** The next augmentation we can actually buy right now. */
+function nextGraft(view: FactionsView, wanted: readonly string[]): { name: string; why: string } | undefined {
+  if (!view.holdsWorkSlot) return undefined;
+  const entropyPenalty = view.owned.has("violet Congruity Implant") ? 0 : entropyCost(view.weights);
+  for (const name of wanted) {
+    if (view.owned.has(name)) continue;
+    const offer = view.graftable?.find((entry) => entry.name === name);
+    const aug = view.catalog.get(name);
+    if (!offer || !aug || offer.timeMs / 1_000 >= view.horizonSec) continue;
+    if (aug.prereqs.some((prereq) => !view.owned.has(prereq))) continue;
+    const benefit = scoreAug(aug, view.weights);
+    if (benefit <= entropyPenalty || view.moneyGranted < offer.price) continue;
+    return {
+      name,
+      why: `graft value ${benefit.toFixed(3)} exceeds one-step entropy cost ${entropyPenalty.toFixed(3)} and completes within the run horizon`,
+    };
+  }
+  return undefined;
+}
+
+/** Everything the run may still spend, including income over what is left of the
+ * horizon. This chooses the SET, where guessing high costs only a re-plan.
+ *
+ * An unknown horizon contributes nothing rather than everything: `horizonSec` is
+ * `Infinity` when the forecast has no answer, and an infinite budget would "afford"
+ * the entire catalogue. */
+function plannedBudget(view: FactionsView): number {
+  const horizonSec = Number.isFinite(view.horizonSec) ? Math.max(0, view.horizonSec) : 0;
+  return settlingMoney(view) + Math.max(0, view.incomePerSec) * horizonSec;
+}
+
+/** The next augmentation we can actually buy right now.
+ *
+ * `money` defaults to the granted budget — what we may spend. Pass `Infinity` to
+ * ask the different question "what WOULD we buy", which is what a money claim has
+ * to be derived from: the purchase needs a grant, the grant needs a claim, and a
+ * claim read off the already-funded decision can never bootstrap.
+ *
+ * PATIENCE. `wanted` arrives dearest-first, and falling through to a cheaper item
+ * because the dearest is momentarily short of cash is not a graceful degradation —
+ * it is the ordering mistake this whole path exists to avoid, and it is permanent:
+ * the skipped item now costs 1.9x more forever. So a MONEY shortfall on an item we
+ * still expect to afford stops the walk. Two shortfalls do not:
+ *
+ *  - REPUTATION. We cannot buy it at any price today, and no amount of waiting at
+ *    this step changes that — work and donation are what move it, and they are the
+ *    actions further down the tree. Fall through.
+ *  - MONEY WITH NO SETTLEMENT DATE. Once {@link settlingMoney} — cash plus the
+ *    market book — cannot cover the item, there is nothing definite to wait for,
+ *    and a cheaper augmentation owned beats a dearer one admired. Fall through.
+ *
+ * AND THE FIRST PURCHASE OF A RUN IS NEVER HELD, which is not a nicety — without
+ * it the hold cannot end. The book is liquidated when `progression` enters its
+ * `ending` phase, and `phaseOf` requires a non-empty install queue to get there. So
+ * holding out for the market book while nothing is queued waits for a liquidation
+ * that our own waiting prevents: queue stays empty, phase never turns, stock never
+ * sells, the proceeds never arrive. Buying one item bootstraps the phase machine,
+ * and because the walk is dearest-first that item is the dearest we can currently
+ * afford — the best available choice, not merely a legal one. */
 function nextPurchase(
   view: FactionsView,
   wanted: readonly string[],
-): { action: FactionAction } | undefined {
-  const candidates: PurchaseCandidate[] = [];
+  money: number = view.moneyGranted,
+): { action: FactionAction; name: string; price: number } | undefined {
+  // `Infinity` marks the intent query, which asks what we would buy rather than
+  // whether to buy it yet, so it never waits. Nor does the run's first purchase.
+  const hold = money !== Infinity && view.queued.size > 0;
+  const settling = hold ? settlingMoney(view) : Infinity;
   for (const name of wanted) {
     const aug = view.catalog.get(name);
-    if (!aug || view.owned.has(name)) continue;
+    if (!aug || (name !== NEUROFLUX && view.owned.has(name))) continue;
     // Prerequisites must already be owned or queued.
     if (aug.prereqs.some((prereq) => !view.owned.has(prereq))) continue;
-    const source = view.factions.find(
+    const { moneyCost, repCost } = augCost(aug, view.priceContext);
+    const sellers = view.factions.filter(
       (standing) => standing.joined && aug.factions.includes(standing.name),
     );
-    if (!source) continue;
-    candidates.push({ name, aug, faction: source.name });
-  }
-  if (candidates.length === 0) return undefined;
-
-  for (const candidate of orderPurchases(candidates, view.priceContext)) {
-    const standing = view.factions.find((entry) => entry.name === candidate.faction)!;
-    const { moneyCost, repCost } = augCost(candidate.aug, view.priceContext);
-    const donationRate =
-      standing.favor >= view.favorToDonate
-        ? { factionRepMult: view.person.mults.faction_rep, factionWorkRepGain: view.repContext.factionWorkRepGain }
-        : undefined;
-    const verdict = canAfford({
-      moneyCost,
-      repCost,
-      factionRep: standing.rep,
-      money: view.moneyGranted,
-      ...(donationRate ? { donationRate } : {}),
-    });
-    if (!verdict.ok) continue;
+    const sources = sellers
+      .map((standing) => {
+        const verdict = canAfford({
+          moneyCost,
+          repCost,
+          factionRep: standing.rep,
+          money,
+        });
+        return { standing, verdict };
+      })
+      .filter((source) => source.verdict.ok)
+      .sort(
+        (a, b) =>
+          a.verdict.needDonation - b.verdict.needDonation ||
+          b.standing.rep - a.standing.rep ||
+          (a.standing.name < b.standing.name ? -1 : 1),
+      );
+    const source = sources[0];
+    if (!source) {
+      // Short of cash on something we still expect to afford: wait for it rather
+      // than jumping the queue. Anything cheaper stays cheap; this one would not.
+      // Reputation shortfalls and gaps the book cannot close fall through instead —
+      // see the note above.
+      if (hold && sellers.length > 0 && money < moneyCost && settling >= moneyCost) return undefined;
+      continue;
+    }
     return {
+      name,
+      price: moneyCost,
       action: {
         type: "purchaseAugmentation",
-        faction: candidate.faction,
-        augmentation: candidate.name,
-        why: `${verdict.reason}; $${Math.round(moneyCost).toLocaleString()} at ${
-          isSoA(candidate.name) ? "SoA" : candidate.name === NEUROFLUX ? "NeuroFlux" : "standard"
+        faction: source.standing.name,
+        augmentation: name,
+        why: `${source.verdict.reason}; $${Math.round(moneyCost).toLocaleString()} at ${
+          isSoA(name) ? "SoA" : name === NEUROFLUX ? "NeuroFlux" : "standard"
         } pricing`,
       },
+    };
+  }
+  return undefined;
+}
+/** All joined-faction purchases worth attempting before an install, in the order
+ * to BUY them.
+ *
+ * Selection is by value, execution is by price — see
+ * {@link selectAffordableBatch}. Ordering is not cosmetic: buying a $1m
+ * augmentation before a $500m one pays the 1.9x queue escalation on the $500m
+ * instead of on the $1m, and the batch that was affordable as a plan stops being
+ * affordable as a sequence. The drain re-plans every tick and always buys the head
+ * of this list, so executing one purchase per tick reproduces the planned order.
+ *
+ * NeuroFlux comes last, as the sink for whatever the batch leaves behind. */
+function finalSweepWanted(view: FactionsView): string[] {
+  const joined = new Set(view.factions.filter((standing) => standing.joined).map((standing) => standing.name));
+  const byValue = [...view.catalog.values()]
+    .filter(
+      (aug) =>
+        aug.name !== NEUROFLUX &&
+        !view.owned.has(aug.name) &&
+        aug.factions.some((faction) => joined.has(faction)),
+    )
+    .sort(
+      (a, b) =>
+        scoreAug(b, view.weights) - scoreAug(a, view.weights) ||
+        (a.name < b.name ? -1 : 1),
+    )
+    .map((aug) => aug.name);
+
+  const candidates: PurchaseCandidate[] = [];
+  for (const name of closePrereqs(byValue, view.catalog, view.owned)) {
+    const aug = view.catalog.get(name);
+    const faction = aug?.factions.find((candidate) => joined.has(candidate));
+    if (aug && faction) candidates.push({ name, aug, faction });
+  }
+  // The whole bankroll, not the granted slice, and not cash alone: this decides
+  // which SET is worth planning, and at this boundary the market book is about to
+  // become cash while the cash itself is about to be deleted by the install.
+  const plan = selectAffordableBatch({
+    candidates,
+    owned: view.owned,
+    ctx: view.priceContext,
+    money: plannedBudget(view),
+  });
+
+  const order = plan.order.map((candidate) => candidate.name);
+  const neuroflux = view.catalog.get(NEUROFLUX);
+  if (neuroflux?.factions.some((faction) => joined.has(faction))) order.push(NEUROFLUX);
+  return order;
+}
+
+function nextSweepAction(view: FactionsView, wanted: readonly string[]): FactionAction | undefined {
+  const purchase = nextPurchase(view, wanted);
+  if (purchase) return purchase.action;
+
+  // A high-priority item may be cash-affordable but reputation-locked. At the
+  // last-chance boundary donations are not compared with work time: there is
+  // no more work time. Reserve the donation and purchase together so the
+  // donation can never consume the dollars needed for its augmentation.
+  for (const name of wanted) {
+    const aug = view.catalog.get(name);
+    if (!aug || (name !== NEUROFLUX && view.owned.has(name))) continue;
+    if (aug.prereqs.some((prereq) => !view.owned.has(prereq))) continue;
+    const { moneyCost, repCost } = augCost(aug, view.priceContext);
+    const source = view.factions
+      .filter(
+        (standing) =>
+          standing.joined &&
+          standing.favor >= view.favorToDonate &&
+          aug.factions.includes(standing.name) &&
+          standing.rep < repCost,
+      )
+      .map((standing) => ({
+        standing,
+        donation: donationForRep(
+          repCost - standing.rep,
+          view.person.mults.faction_rep,
+          view.repContext.factionWorkRepGain,
+        ),
+      }))
+      .filter(({ donation }) => view.moneyAvailable >= donation + moneyCost)
+      .sort((a, b) => a.donation - b.donation || (a.standing.name < b.standing.name ? -1 : 1))[0];
+    if (!source) continue;
+    return {
+      type: "donate",
+      faction: source.standing.name,
+      amount: source.donation,
+      purchaseCost: moneyCost,
+      why: `final install sweep: donate exactly enough to unlock ${name}, while reserving its $${Math.round(moneyCost).toLocaleString()} purchase`,
     };
   }
   return undefined;
@@ -603,7 +816,9 @@ function pickWorkFaction(
     // that offers NOTHING (Shadows of Anarchy gains reputation only by
     // infiltrating) must never be selected for work at all.
     if (!standing.offers.hacking && !standing.offers.field && !standing.offers.security) continue;
-    const needed = repNeeded(name, view, objective.augmentations);
+    const needed = objective.intent?.faction === name
+      ? objective.intent.repTarget
+      : repNeeded(name, view, objective.augmentations);
     if (needed <= standing.rep) continue; // nothing left to earn here
     const rate = repRate(name, standing, view, memory);
     if (!rate) continue;
@@ -622,7 +837,9 @@ function pickWorkFaction(
     const withinDwell = view.time - memory.focusSince < FOCUS_DWELL_MS;
     if (incumbent && incumbent.joined && withinDwell) {
       const incumbentRate = repRate(incumbent.name, incumbent, view, memory);
-      const incumbentNeeded = repNeeded(incumbent.name, view, objective.augmentations);
+      const incumbentNeeded = objective.intent?.faction === incumbent.name
+        ? objective.intent.repTarget
+        : repNeeded(incumbent.name, view, objective.augmentations);
       if (incumbentRate && incumbentNeeded > incumbent.rep && best.repPerSec < incumbentRate.repPerSec * WORK_SWITCH_MARGIN) {
         return {
           faction: incumbent.name,
@@ -646,7 +863,7 @@ function shouldRecommendInstall(
   view: FactionsView,
   objective: FactionObjective,
 ): { why: string; augmentations: string[] } | undefined {
-  const queued = [...view.owned].filter((name) => view.catalog.has(name));
+  const queued = [...view.queued].filter((name) => view.catalog.has(name));
   if (queued.length === 0) return undefined;
   const unbuyable = objective.augmentations.filter((name) => !view.owned.has(name));
   if (unbuyable.length > 0) return undefined;
@@ -655,5 +872,3 @@ function shouldRecommendInstall(
     augmentations: queued,
   };
 }
-
-export { combinedEtaSec };

@@ -121,14 +121,15 @@ export class SimPlayer {
     return true;
   }
 
-  /** Owned means INSTALLED OR QUEUED, which is what
-   *  `ns.singularity.getOwnedAugmentations(true)` reports and what every
-   *  `numAugmentations` faction requirement counts. Getting this wrong makes
-   *  Daedalus unreachable on the run that actually qualifies for it. */
+  /** Exact getOwnedAugmentations shape: installed entries once, followed by
+   * every queued purchase. Repeated NeuroFlux levels therefore remain
+   * repeated, including when an installed level already exists. */
   ownedAugmentations(includeQueued = true): string[] {
     const names = [...this.augmentations.keys()];
     if (includeQueued) {
-      for (const name of this.queuedAugmentations.keys()) if (!this.augmentations.has(name)) names.push(name);
+      for (const [name, levels] of this.queuedAugmentations) {
+        for (let level = 0; level < levels; level++) names.push(name);
+      }
     }
     return names;
   }

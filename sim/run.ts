@@ -121,6 +121,9 @@ export function runSim(options: RunOptions): RunResult {
       pending = [];
       const result = planFarm(world.view(), farmMemory, completions, {
         goalRemaining: goal.remainingMoney?.(ctx) ?? Infinity,
+        // No feature drivers or arbiter run here — the dispatcher is the only
+        // owner of fleet growth in farm mode.
+        buyInfrastructure: true,
       });
       farmMemory = result.memory;
       const failed: number[] = [];
@@ -348,6 +351,7 @@ if (import.meta.main) {
         horizonMs: horizon,
         label: runLabel ?? gitRev,
         verbose,
+        ...(profile?.world ?? {}),
         ...(profileId !== undefined ? { profile: profileId } : {}),
         ...(save !== undefined ? { saveId: save } : {}),
         ...(seedData ? { save: seedData } : { bitnode: runBitnode }),

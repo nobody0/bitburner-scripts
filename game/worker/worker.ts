@@ -29,7 +29,18 @@ export async function main(ns: NS): Promise<void> {
     g.dispatch_wake?.();
   }, `op${opId}`);
 
-  const options = info.additionalMsec ? { additionalMsec: info.additionalMsec } : undefined;
+  // `stock: true` makes the op move the target organization's share price:
+  // hack pushes the second-order forecast DOWN, grow pushes it UP. The
+  // dispatcher sets it on exactly one side of a batch (grow for a long, hack for
+  // a short) because flagging both would cancel out. It costs no RAM and no
+  // time, so it is passed through rather than gated on anything here.
+  const options =
+    info.additionalMsec || info.stock
+      ? {
+          ...(info.additionalMsec ? { additionalMsec: info.additionalMsec } : {}),
+          ...(info.stock ? { stock: true } : {}),
+        }
+      : undefined;
   if (info.kind === "hack") result = await ns.hack(info.target, options);
   else if (info.kind === "grow") result = await ns.grow(info.target, options);
   else result = await ns.weaken(info.target, options);

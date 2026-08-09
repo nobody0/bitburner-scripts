@@ -88,7 +88,7 @@ export const FEATURES: readonly Feature[] = [
     bitnodes: [9],
     topics: ["hacknet"],
     problem:
-      "Schedule node purchases and level/RAM/core upgrades so cumulative production minus spend is maximised over the run horizon.",
+      "Buy the node or level/RAM/core upgrade with the fastest ROI that still repays before the run horizon, competing with other income investments in the same unit.",
     moneySources: ["hacknet", "hacknet_expenses"],
     api: true,
   },
@@ -98,7 +98,7 @@ export const FEATURES: readonly Feature[] = [
     bitnodes: [8],
     topics: ["stock"],
     problem:
-      "Allocate capital across symbols from forecast and volatility for the best risk-adjusted return, net of commission and the 4S data cost.",
+      "Allocate capital across symbols for the most money at the END OF THE RUN, net of the spread, the commission and the 75-tick regime cycle — and steer the hacking farm's hack/grow at the symbols held, since those move prices.",
     moneySources: ["stock"],
     api: true,
   },
@@ -148,7 +148,7 @@ export const FEATURES: readonly Feature[] = [
     bitnodes: [14],
     topics: ["go"],
     problem:
-      "Maximise territory captured per game against each faction opponent; win streaks grant escalating bonuses. A pure adversarial search, coupled to nothing.",
+      "Maximise subnet score with rules-correct adversarial search plus parity-proven seeded AI forecasts, then farm the bonus worth most to other features.",
     moneySources: [],
     api: true,
   },
@@ -178,8 +178,8 @@ export const FEATURES: readonly Feature[] = [
     bitnodes: [],
     topics: ["side"],
     problem:
-      "Solve every coding contract before it expires, and rank infiltration targets by reward per real-time minute. The casino belongs here too but has no ns API.",
-    moneySources: ["codingcontract", "infiltration", "casino"],
+      "Solve every coding contract in low-RAM batches and quarantine the first rejected answer for diagnosis without risking another attempt.",
+    moneySources: ["codingcontract"],
     api: true,
   },
 ];

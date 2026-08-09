@@ -1,8 +1,9 @@
 import type { NS, Player, Server } from "@ns";
 import { versionedScript } from "../../shared/deployment.ts";
 import { HOME_RESERVE_GB } from "../../shared/ram/heap.ts";
+import type { HackNodeMults } from "../../shared/formulas.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
-import type { CompletionEvent, HgwAction, ServerView, WorldView } from "../../shared/world.ts";
+import type { CompletionEvent, HgwAction, ServerView, StockInfluence, WorldView } from "../../shared/world.ts";
 import { WORKER_RAM } from "../../shared/world.ts";
 import { gameBuildId } from "./build-id.ts";
 import { workerGlobals, type WorkerGlobalThis } from "./worker-shared.ts";
@@ -58,6 +59,17 @@ export function buildView(
   servers: Record<string, Server>,
   player: Player,
   hotHosts: string[],
+  /** BitNode multipliers, when SF5 has let us read them. Two of the fields
+   *  matter here and they are NOT interchangeable: `ScriptHackMoney` scales what
+   *  is drained from a server (and so what a batch steals AND how strongly it
+   *  manipulates), while `ScriptHackMoneyGain` scales only the player's cut.
+   *  BN8 sets the second to 0 — hacking earns nothing while still moving prices —
+   *  and without this the farm would report every BN8 target as profitable. */
+  nodeMults?: Record<string, number>,
+  /** hostname -> what `stock` wants that host's symbol to do. Published by the
+   *  stock driver on its topic; read here so the target solver can price
+   *  manipulation into the same `$/GB/sec` score as hacked money. */
+  stockInfluence?: Record<string, StockInfluence>,
 ): WorldView {
   const hot = new Set(hotHosts);
   const views: ServerView[] = [];
@@ -101,6 +113,8 @@ export function buildView(
     // Purchases are start.js's business; quoting them as unavailable keeps the
     // dispatcher from emitting buy actions the game driver would ignore.
     prices: { upgradeHomeRam: Infinity, cloudServer: {}, cloudServerLimit: 0 },
+    ...(nodeMults ? { nodeMults: nodeMults as HackNodeMults } : {}),
+    ...(stockInfluence && Object.keys(stockInfluence).length > 0 ? { stockInfluence } : {}),
   };
 }
 
@@ -152,6 +166,7 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
     target: action.target,
     threads: action.threads,
     ...(action.additionalMsec !== undefined ? { additionalMsec: action.additionalMsec } : {}),
+    ...(action.stock ? { stock: true } : {}),
   });
 
   const pid = ns.exec(

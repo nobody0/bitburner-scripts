@@ -1,64 +1,55 @@
-/** Side feature — coding contracts and infiltration. Universal income with no
- * BitNode of its own. Two loosely related problems kept together because
- * neither justifies a tab alone:
- *  - contracts: solve every .cct on the network before it expires (pure
- *    algorithm work, zero strategy),
- *  - infiltration: rank locations by reward per real-time minute.
- * The casino (the other classic early-game money source) has no ns API — it
- * is DOM-driven only — so it is deliberately absent. */
+/** Side feature — coding contracts. Contracts persist until solved or
+ * destroyed by wrong answers, so the topic carries a bounded work window and
+ * enough totals to explain the solver without dumping the whole network. */
 
 export interface ContractDigest {
   host: string;
   file: string;
-  type: string;
-  triesRemaining: number;
 }
 
-export interface InfiltrationDigest {
-  location: string;
-  city: string;
-  difficulty: number;
-  maxClearanceLevel: number;
-  startingSecurityLevel: number;
-  repReward: number;
-  moneyReward: number;
-  /** Money per unit difficulty — the ranking that matters. */
-  moneyPerDifficulty: number;
+/** Diagnostic first-failure record. Strings are intentional: contract data
+ * can contain BigInts or huge answer arrays. The game caps each replay field
+ * and records the original length when truncated. */
+export interface ContractFailure {
+  host: string;
+  file: string;
+  type: string;
+  data: string;
+  answer: string;
+  triesBefore?: number;
+  reason: string;
+  at: number;
 }
+
+/** Repeated state records carry the actionable index, not the potentially
+ * large input and answer. The full replay is a report-once event. */
+export type ContractFailureSummary = Omit<ContractFailure, "data" | "answer">;
 
 export interface SideState {
-  /** Contracts we hold a solver for, most-at-risk first, capped by the probe
-   *  (see CONTRACT_LIMIT in game/lib/probes/dodged.ts, which carries the full
-   *  reasoning). NEVER the whole network: a long-lived save reached 8,557
+  /** Unquarantined contract work queue, capped by the probe
+   *  (see the Side limits in shared/strategy/side/contracts.ts). NEVER the
+   *  whole network: a long-lived save reached 8,557
    *  contracts, and dumping them made this one record 1.66 MB. */
   contracts: ContractDigest[];
   /** Every .cct on the network, solvable or not. */
   contractTotal?: number;
-  /** How many of `contractTotal` we can solve. `contracts.length` is the
-   *  capped window onto these, not the count. */
+  /** Unquarantined candidates. Types are filled by bounded driver inspection;
+   * unsupported files leave this count when quarantined. `contracts.length`
+   * is the capped work window, not the count. */
   solvableTotal?: number;
   /** Contracts with no registered solver, counted PER TYPE. One row per type
-   *  is the actionable shape: a gap in the registry is a missing solver, and
-   *  an unsolved contract expires, so this is a countdown, not a curiosity. */
+   *  is the actionable shape: a gap in the registry is a missing solver. */
   unsolvableByType?: Record<string, number>;
   unsolvableTotal?: number;
-  /** Ranked; the probe caps the list (getInfiltration is 15 GB per call, so
-   * the full sweep is rare and partial results are normal). */
-  infiltration?: InfiltrationDigest[];
-  infiltrationTotal?: number;
-  plan?: SidePlan;
-}
-
-export interface SidePlan {
-  /** The attempt queue, capped exactly as `SideState.contracts` is. */
-  solvable: { host: string; file: string; type: string }[];
-  solvableTotal: number;
-  /** Missing solvers, one row per type rather than one per file. */
-  unsolvable: { type: string; count: number }[];
-  unsolvableTotal: number;
-  infiltration: { location: string; city: string; valuePerMinute: number }[];
-  /** Permanent blocker, reported rather than omitted. */
-  casino: string;
-  why: string;
+  /** Whether every type reported by the running game has a local solver. */
+  registryComplete?: boolean;
+  contractTypeTotal?: number;
+  supportedTypeTotal?: number;
+  /** Wall-clock/virtual timestamp of the authoritative network ls sweep. */
+  contractScannedAt?: number;
+  /** First rejection per quarantined file, newest first and capped. Full
+   * replay data is emitted once as `contract.quarantined`. */
+  failures?: ContractFailureSummary[];
+  quarantinedTotal?: number;
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

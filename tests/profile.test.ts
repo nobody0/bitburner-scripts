@@ -142,6 +142,25 @@ describe("faction goals", () => {
     expect(parseGoals(["rep:CyberSec:1e6"]).done(ctx)).toBe(false);
   });
 
+  test("a new factions topic replaces cycle-scoped membership", () => {
+    const ctx = initialContext();
+    const record = (joined: string[], t: number): LogRecord => ({
+      kind: "state",
+      key: "factions",
+      data: { joined },
+      seq: t,
+      t,
+      run: "test",
+      src: "sim",
+    } as LogRecord);
+
+    reduceRecord(ctx, record(["CyberSec"], 0));
+    reduceRecord(ctx, record(["NiteSec"], 1));
+
+    expect(ctx.factions.get("CyberSec")?.joined).toBe(false);
+    expect(ctx.factions.get("NiteSec")?.joined).toBe(true);
+  });
+
   test("rejects a malformed faction spec", () => {
     expect(() => parseGoals(["faction:"])).toThrow();
     expect(() => parseGoals(["rep:1e5"])).toThrow();

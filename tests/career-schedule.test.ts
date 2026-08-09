@@ -6,11 +6,13 @@ import {
   resetWorkCompletion,
 } from "../game/lib/work-completion.ts";
 import { careerModule, resetCareerState } from "../game/lib/features/career.ts";
+import { factionsModule } from "../game/lib/features/factions.ts";
 import type { ClaimContext } from "../game/lib/features/index.ts";
 import type { GameState } from "../game/lib/state.ts";
 import { stepCareer, type CareerView } from "../shared/strategy/career/decide.ts";
 import type { CrimeContext, CrimePerson, CrimeStats } from "../shared/strategy/career/crimes.ts";
-import { careerSchedule, CONTINUOUS_REVIEW_MS, updateActivityRate } from "../shared/strategy/career/schedule.ts";
+import { careerSchedule, CONTINUOUS_REVIEW_MS, progressLockUntil, updateActivityRate } from "../shared/strategy/career/schedule.ts";
+import { PREEMPT_MARGIN, PRIORITY } from "../shared/strategy/arbiter.ts";
 import { postNeeds, type Need, type NeedUrgency } from "../shared/strategy/needs.ts";
 
 const person: CrimePerson = {
@@ -72,6 +74,11 @@ describe("career review scheduling", () => {
     expect(careerSchedule({ now: 1_001, lastReviewedAt: 1_000, currentWorkType: "CRIME", completionPending: true })).toMatchObject({ due: true, reason: "completion" });
   });
 
+  test("program creation is resumable and follows the five-second review policy", () => {
+    expect(careerSchedule({ now: 6_000, lastReviewedAt: 1_000, currentWorkType: "CREATE_PROGRAM", completionPending: false }))
+      .toMatchObject({ due: true, mode: "continuous", reason: "continuous-interval" });
+  });
+
   test("the v3 task promise produces one authoritative completion notice", async () => {
     resetWorkCompletion();
     let resolve!: () => void;
@@ -81,6 +88,8 @@ describe("career review scheduling", () => {
     resolve();
     await Promise.resolve();
     expect(peekWorkCompletion()).toMatchObject({ type: "CRIME", detail: "Homicide" });
+    expect(careerModule.driver.wake?.()).toBe(true);
+    expect(factionsModule.driver.wake?.()).toBe(true);
     expect(consumeWorkCompletion()).toBeDefined();
     expect(peekWorkCompletion()).toBeUndefined();
   });
@@ -140,6 +149,10 @@ describe("career review scheduling", () => {
       now: 1,
       caps: {} as ClaimContext["caps"],
       budgetGb: 100,
+      horizons: {
+        node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "test", reason: "test" },
+        install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "test", reason: "test" },
+      },
       ramPrice: (methods) => methods.length,
     });
 
@@ -193,5 +206,111 @@ describe("career request queue", () => {
   test("when the same crime stays best, completion re-arms without restarting it", () => {
     const working = view({ currentWork: { kind: "crime", subject: "Homicide" }, allowProgressSwitch: true });
     expect(stepCareer(working, postNeeds([])).action).toMatchObject({ type: "continue", subject: "Homicide" });
+  });
+});
+
+describe("the slot lock is bounded by the progress it protects", () => {
+  // THE BUG, from a live BN12 run: the lock was posted at `career:progress-lock`
+  // (100) with `holdUntil: Number.MAX_SAFE_INTEGER` and released only by the
+  // completion event. The arbiter refuses pre-emption until `holdUntil` passes, so a
+  // completion that never arrived — the watcher failing to arm is enough — held
+  // `Player.currentWork` for ever. `factions work:Tetrads` was denied `slot-held`
+  // every pass, so "factions has not finished its final purchase and donation sweep"
+  // never cleared and the run could not end. Career also re-committed the longest
+  // crime available the instant each one finished, so even a working event only
+  // opened a window career took straight back.
+  const HEIST_MS = 600_000;
+
+  function workClaim(over: {
+    type?: string | null;
+    detail?: string;
+    cyclesWorked?: number;
+    observedAt?: number;
+    crimes?: { name: string; timeMs: number }[];
+    now?: number;
+  } = {}) {
+    const state = {
+      topics: {
+        player: { money: 0, skills: {}, mults: {}, jobs: {}, city: "Sector-12" },
+        career: {
+          karma: 0, numPeopleKilled: 0, skills: {}, exp: {}, city: "Sector-12",
+          location: "home", entropy: 0, totalPlaytime: 0, jobs: {}, companies: {},
+          currentWork: over.type === null ? null : {
+            type: over.type ?? "CRIME",
+            detail: over.detail ?? "Heist",
+            cyclesWorked: over.cyclesWorked ?? 0,
+            observedAt: over.observedAt ?? 0,
+          },
+          crimes: over.crimes ?? [{ name: "Heist", timeMs: HEIST_MS }],
+        },
+      },
+      dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
+      probeFailures: {}, probeSkips: {}, featureLastRun: {},
+    } as unknown as GameState;
+    const claims = careerModule.claims!({
+      state,
+      board: postNeeds([]),
+      now: over.now ?? 0,
+      caps: {} as ClaimContext["caps"],
+      budgetGb: 100,
+      horizons: {
+        node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
+        install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
+      },
+      ramPrice: (methods) => methods.length,
+    });
+    resetCareerState();
+    return claims.find((claim) => claim.id === "work")!;
+  }
+
+  test("mid-crime it locks, and holdUntil is the moment progress banks", () => {
+    // Half done: 1500 cycles x 200ms = 5 minutes of a 10-minute heist.
+    const claim = workClaim({ cyclesWorked: 1_500, observedAt: 0, now: 0 });
+    expect(claim.priority).toBe(PRIORITY["career:progress-lock"]);
+    expect(claim.holdUntil).toBe(HEIST_MS / 2);
+    // Never the old unbounded value — that is what wedged the run.
+    expect(claim.holdUntil).not.toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  test("PAST the boundary the lock is gone and faction work can win the slot", () => {
+    // The heist's time has elapsed. Career drops to its income band, which is
+    // deliberately too weak to hold the slot against `factions:work`.
+    const claim = workClaim({ cyclesWorked: 0, observedAt: 0, now: HEIST_MS + 1 });
+    expect(claim.holdUntil).toBeUndefined();
+    expect(claim.priority).toBeLessThan(PRIORITY["factions:work"] - PREEMPT_MARGIN);
+  });
+
+  test("an unknown duration yields NO lock, not an unbounded one", () => {
+    // Before the crime table is probed we cannot bound the lock. A lock we cannot
+    // release is what stalled the run; one lost partial crime is recoverable.
+    expect(workClaim({ crimes: [] }).holdUntil, "crime table not probed yet").toBeUndefined();
+    expect(workClaim({ detail: "Not In The Table" }).holdUntil, "activity unidentifiable").toBeUndefined();
+    // The remaining unknowns are cleaner to state against the pure function than to
+    // fake through a topic whose defaults fill them in.
+    const base = { mode: "progress" as const, totalMs: 600_000, cyclesWorked: 0, observedAt: 0, completionPending: false, now: 0 };
+    expect(progressLockUntil({ ...base, observedAt: undefined }), "no observation timestamp").toBeUndefined();
+    expect(progressLockUntil({ ...base, totalMs: undefined }), "no known duration").toBeUndefined();
+  });
+
+  test("a banked-progress notice ends the lock immediately", () => {
+    // The event stays the authoritative early release; the deadline is only the
+    // backstop for when it never arrives.
+    const base = { mode: "progress" as const, totalMs: 600_000, cyclesWorked: 0, observedAt: 0, now: 0 };
+    expect(progressLockUntil({ ...base, completionPending: false })).toBe(600_000);
+    expect(progressLockUntil({ ...base, completionPending: true })).toBeUndefined();
+  });
+
+  test("continuous work is never locked — it banks every cycle", () => {
+    const claim = workClaim({ type: "COMPANY", detail: "ECorp" });
+    expect(claim.holdUntil).toBeUndefined();
+    expect(claim.priority).not.toBe(PRIORITY["career:progress-lock"]);
+  });
+
+  test("the lock still outranks faction work while progress is genuinely unbanked", () => {
+    // The protection has to be real, or a crime gets cancelled at 99% and the whole
+    // unit is thrown away.
+    const claim = workClaim({ cyclesWorked: 2_999, observedAt: 0, now: 0 });
+    expect(claim.priority).toBeGreaterThan(PRIORITY["factions:work"] + PREEMPT_MARGIN);
+    expect(claim.holdUntil).toBeGreaterThan(0);
   });
 });

@@ -27,6 +27,71 @@ export const NEUROFLUX = "NeuroFlux Governor";
 /** SF11 discounts the queue escalation. Index by SF11 level, capped at 3. */
 const SF11_DISCOUNT = [1, 0.96, 0.94, 0.93];
 
+/** One probed offer, as `factions.offers` carries it. */
+export interface PurchasableOffer {
+  name: string;
+  faction: string;
+  /** Price at the CURRENT queue depth. */
+  price: number;
+  affordableRep: boolean;
+  owned: boolean;
+}
+
+/** The cheapest augmentation that could ACTUALLY be bought right now.
+ *
+ * This is `progression`'s install barrier — "do not reset while a dollar could
+ * still become a permanent multiplier".
+ *
+ * IT IS NOT WHAT FACTIONS BUYS, and the difference is the interesting part. The
+ * drain decides through `nextPurchase` over the augmentation catalogue and the
+ * GRANTED budget; this reads the probed offers and cash on hand. Two predicates
+ * that must not disagree permanently, because a barrier blocking on something
+ * factions declines to buy is a deadlock. They converge rather than match exactly:
+ * the drain re-plans every tick against the cash that is actually left, so an
+ * augmentation the batch passed over this pass is reconsidered as soon as the items
+ * ahead of it have been bought and the budget has shrunk to fit it. Any change here
+ * has to preserve that, not just the field list.
+ *
+ * `offers` spans every faction the NODE defines, joined or not, filtered only by
+ * `owned`, so "affordable by price" is nowhere near "can be bought". Four
+ * conditions:
+ *  - the offering faction is joined;
+ *  - reputation is met there;
+ *  - every prerequisite is owned;
+ *  - the price is within `money`.
+ *
+ * **NeuroFlux Governor is exempt from the OWNED test and nothing else**, because
+ * it is bought again at the next level where everything else is bought once. It
+ * still terminates: `getAugCost` scales its price AND its reputation requirement
+ * by {@link NEUROFLUX_LEVEL_MULT} per level on top of the queue escalation, so
+ * every level makes the next strictly dearer in both currencies and the affordable
+ * set runs out. Draining cash into NFG levels before a reset is the single most
+ * valuable thing to do with money that is about to be deleted.
+ *
+ * Cheapest first, so a drain buys the most levels the cash allows rather than one
+ * expensive item and then nothing. */
+export function nextPurchasableAugmentation(input: {
+  offers: readonly PurchasableOffer[];
+  joined: ReadonlySet<string>;
+  owned: ReadonlySet<string>;
+  /** Augmentation -> prerequisites, when known. */
+  prereqs?: (name: string) => readonly string[];
+  /** Cash to test against. `Infinity` asks "what WOULD we buy", which is what a
+   *  claim needs — the arbiter decides what it can actually fund. */
+  money: number;
+}): PurchasableOffer | undefined {
+  let best: PurchasableOffer | undefined;
+  for (const offer of input.offers) {
+    if (offer.name !== NEUROFLUX && (offer.owned || input.owned.has(offer.name))) continue;
+    if (!input.joined.has(offer.faction)) continue;
+    if (!offer.affordableRep) continue;
+    if (offer.price > input.money) continue;
+    if ((input.prereqs?.(offer.name) ?? []).some((prereq) => !input.owned.has(prereq))) continue;
+    if (!best || offer.price < best.price) best = offer;
+  }
+  return best;
+}
+
 /** The nine Shadows of Anarchy augmentations, which price on their own curve. */
 export const SOA_AUGMENTATIONS: readonly string[] = [
   "Beauty of Aphrodite",
@@ -125,7 +190,7 @@ export const AUG_BONUS: Record<string, number> = {
   // Doubles the effective work rate by removing the unfocused penalty.
   "Neuroreceptor Management Implant": Math.log(1.1),
   // BitRunners' Neurolink grants a free port opener and +hacking.
-  "Neurolink": 0.1,
+  "BitRunners Neurolink": 0.1,
 };
 
 /** A multiplier on EXPERIENCE is worth less than the same multiplier on the
@@ -133,6 +198,28 @@ export const AUG_BONUS: Record<string, number> = {
  * predecessor scripts apply `sqrt` to the multiplier; in log space that is
  * exactly a factor of 0.5 on the contribution, which is how it lands here. */
 const EXP_DISCOUNT = 0.5;
+
+/** Fields multiplied by CONSTANTS.EntropyEffect for each completed graft in
+ * v3.0.1's `calculateEntropy`. */
+const ENTROPY_FIELDS = new Set([
+  "hacking_chance", "hacking_speed", "hacking_money", "hacking_grow",
+  "hacking", "strength", "defense", "dexterity", "agility", "charisma",
+  "hacking_exp", "strength_exp", "defense_exp", "dexterity_exp", "agility_exp", "charisma_exp",
+  "company_rep", "faction_rep", "crime_money", "crime_success", "dnet_money",
+  "hacknet_node_money", "work_money", "bladeburner_max_stamina", "bladeburner_stamina_gain",
+  "bladeburner_analysis", "bladeburner_success_chance",
+]);
+
+/** Marginal objective loss from one entropy stack. Existing stack count does
+ * not change this in log space; the violet Congruity Implant removes it. */
+export function entropyCost(weights: ObjectiveWeights, effect = 0.98): number {
+  let weighted = 0;
+  for (const [field, weight] of Object.entries(weights)) {
+    if (!ENTROPY_FIELDS.has(field) || weight <= 0) continue;
+    weighted += weight * (field.endsWith("_exp") ? EXP_DISCOUNT : 1);
+  }
+  return weighted * -Math.log(effect);
+}
 
 function contributionOf(field: string, multiplier: number, weights: ObjectiveWeights): number {
   const weight = weights[field] ?? 0;
@@ -163,7 +250,7 @@ export function scoreAug(aug: AugInfo, weights: ObjectiveWeights): number {
 export function defaultWeights(): ObjectiveWeights {
   return {
     hacking: 1,
-    hacking_exp: 0.5,
+    hacking_exp: 1,
     hacking_chance: 0.6,
     hacking_speed: 1,
     hacking_money: 1,
@@ -173,18 +260,46 @@ export function defaultWeights(): ObjectiveWeights {
     crime_money: 0.2,
     crime_success: 0.2,
     charisma: 0.1,
-    charisma_exp: 0.05,
+    charisma_exp: 0.1,
     strength: 0.1,
     defense: 0.1,
     dexterity: 0.1,
     agility: 0.1,
-    strength_exp: 0.05,
-    defense_exp: 0.05,
-    dexterity_exp: 0.05,
-    agility_exp: 0.05,
+    strength_exp: 0.1,
+    defense_exp: 0.1,
+    dexterity_exp: 0.1,
+    agility_exp: 0.1,
     hacknet_node_money: 0.2,
     work_money: 0.2,
   };
+}
+
+/** Bias multiplier utility toward the route that will actually end this node.
+ * The count objective remains route-independent; this only breaks ties toward
+ * augmentations that accelerate the chosen finish. */
+export function weightsForRoute(
+  route: "daedalus" | "labyrinth" | "bladeburner" | undefined,
+): ObjectiveWeights {
+  const weights = defaultWeights();
+  if (route === "bladeburner") {
+    weights.bladeburner_success_chance = 2;
+    weights.bladeburner_stamina_gain = 1;
+    weights.bladeburner_max_stamina = 1;
+    weights.bladeburner_analysis = 0.8;
+    weights.strength = 0.5;
+    weights.defense = 0.5;
+    weights.dexterity = 0.5;
+    weights.agility = 0.5;
+  } else if (route === "daedalus") {
+    weights.hacking = 1.2;
+    weights.hacking_exp = 1.2;
+    weights.faction_rep = 1.2;
+  } else if (route === "labyrinth") {
+    weights.hacking = 1.1;
+    weights.hacking_speed = 1.1;
+    weights.dnet_money = 0.8;
+  }
+  return weights;
 }
 
 // --- prerequisite closure ---------------------------------------------------
@@ -353,6 +468,83 @@ function exactOrder(candidates: readonly PurchaseCandidate[], ctx: PriceContext)
     mask &= ~(1 << i);
   }
   return order.reverse();
+}
+
+/** Pick the set to buy by VALUE, then order it for minimum COST.
+ *
+ * The two orders are different and both matter, which is the whole reason this
+ * function exists. Every queued non-SoA augmentation multiplies the price of the
+ * next by {@link MULTIPLE_AUG_MULTIPLIER}, so a batch's total depends on the order
+ * it is bought in — and an augmentation does nothing until it is installed, so
+ * within one reset the order has no benefit to trade against. We therefore
+ * *choose* greedily by value, best first, and *pay* in the order
+ * {@link orderPurchases} finds. Pricing a candidate at today's queue depth instead
+ * of at its position in the plan understates the batch and makes the last
+ * purchases unaffordable.
+ *
+ * `candidates` must arrive in value order, best first, with prerequisites already
+ * closed in (see {@link closePrereqs}).
+ *
+ * An unaffordable candidate is SKIPPED, not a stopping point: one $1.4b item
+ * should not veto every cheaper augmentation behind it. Its dependants go with it,
+ * since an augmentation whose prerequisite was dropped cannot be bought at all.
+ *
+ * NeuroFlux is deliberately not a candidate here. It is the residual sink — bought
+ * repeatedly with whatever survives the batch, so its count is not known until the
+ * money runs out, and its levels form a forced ascending-price chain that cannot
+ * be reordered. The drain re-plans each tick and buys NeuroFlux once the one-offs
+ * are done. That is a simplification: at high levels NeuroFlux is dear enough that
+ * it would ideally interleave into the batch rather than follow it, which costs at
+ * most part of one level's escalation. */
+export function selectAffordableBatch(input: {
+  candidates: readonly PurchaseCandidate[];
+  owned: ReadonlySet<string>;
+  ctx: PriceContext;
+  money: number;
+}): PurchasePlan {
+  const accepted: PurchaseCandidate[] = [];
+  const acceptedNames = new Set<string>();
+  const dropped: PurchaseCandidate[] = [];
+
+  for (const candidate of input.candidates) {
+    const reachable = candidate.aug.prereqs.every(
+      (prereq) => input.owned.has(prereq) || acceptedNames.has(prereq),
+    );
+    if (!reachable) {
+      dropped.push(candidate);
+      continue;
+    }
+    // Screen with the estimate, not the solver. Adding an item shifts every other
+    // item's slot, so each trial is a fresh ordering problem — solving all n of them
+    // exactly costs more than solving the one that survives, and the screen only
+    // has to decide "does this still fit".
+    if (estimatedCost([...accepted, candidate], input.ctx) > input.money) {
+      dropped.push(candidate);
+      continue;
+    }
+    accepted.push(candidate);
+    acceptedNames.add(candidate.name);
+  }
+
+  // Solved once, on the set we are actually going to buy.
+  const order = orderPurchases(accepted, input.ctx);
+  return { order, totalCost: totalCost(order, input.ctx), dropped };
+}
+
+/** What a set will cost, without solving the ordering exactly.
+ *
+ * For ESTIMATES — comparing packages, screening affordability — where the answer
+ * feeds a comparison rather than a purchase. {@link orderPurchases} is exponential
+ * by design and belongs only where we actually buy: at 14 items it is 7.6 ms a call,
+ * and the package frontier evaluates hundreds of candidates per tick, so using it
+ * here costs seconds per decision to refine a number that is about to be compared
+ * against another estimate.
+ *
+ * {@link greedyOrder} is exact without prerequisites — most-expensive-first is the
+ * optimum there — and close with them, which is well inside the error of the rest of
+ * a package estimate. */
+export function estimatedCost(candidates: readonly PurchaseCandidate[], ctx: PriceContext): number {
+  return totalCost(greedyOrder(candidates), ctx);
 }
 
 /** Most-expensive-ready-first. Optimal without prerequisites, and the starting

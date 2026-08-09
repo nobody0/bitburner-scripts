@@ -136,6 +136,16 @@ export class ProcessTable {
     return killed;
   }
 
+  /** prestigeWorkerScripts: kill every process on every host. */
+  killAll(): number {
+    let killed = 0;
+    for (const process of [...this.#processes.values()]) {
+      this.#stop(process, true);
+      killed++;
+    }
+    return killed;
+  }
+
   /** main() returned or threw: same teardown as a kill, minus the cancellation. */
   finish(pid: number): void {
     const process = this.#processes.get(pid);

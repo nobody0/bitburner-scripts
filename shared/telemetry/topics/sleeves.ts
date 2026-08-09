@@ -11,9 +11,10 @@ export interface SleeveDigest {
   storedCycles: number;
   city: string;
   hp: { current: number; max: number };
-  skills: { hacking: number; strength: number; defense: number; dexterity: number; agility: number; charisma: number };
+  skills: { hacking: number; strength: number; defense: number; dexterity: number; agility: number; charisma: number; intelligence?: number };
+  mults?: Partial<Record<string, number>>;
   /** SleeveTask digest — the union's `type` plus whichever detail applies. */
-  task?: { type: string; detail?: string };
+  task?: { type: string; detail?: string; workType?: string };
   augCount?: number;
   /** Cheapest augmentations still purchasable for this sleeve. */
   purchasableAugs?: { name: string; price: number }[];

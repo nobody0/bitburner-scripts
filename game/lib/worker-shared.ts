@@ -11,6 +11,10 @@ export interface WorkerInfo {
   kind: "hack" | "grow" | "weaken";
   target: string;
   additionalMsec?: number;
+  /** Pass `{stock: true}`, so this op moves the target organization's share
+   *  price. Set by the dispatcher on grows for a long position and hacks for a
+   *  short, never both — see shared/strategy/dispatch.ts#launchBatches. */
+  stock?: boolean;
 }
 
 export interface WorkerDone {

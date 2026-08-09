@@ -2,6 +2,7 @@ import type { PlayerRequirement } from "@ns";
 import type { AugInfo, ObjectiveWeights, PriceContext } from "./augs.ts";
 import type { RepContext, RepPerson, WorkType } from "./rep.ts";
 import type { RequirementView } from "./requirements.ts";
+import type { RouteId } from "../progression/endgame.ts";
 
 /** The flat snapshot `stepFactions` decides from.
  *
@@ -39,20 +40,59 @@ export interface FactionsView {
   catalog: ReadonlyMap<string, AugInfo>;
   /** Installed or queued. */
   owned: ReadonlySet<string>;
+  /** Bought during this install cycle but not installed yet. Kept separate
+   * because only this set makes an augmentation install possible. */
+  queued: ReadonlySet<string>;
+  graftable?: { name: string; price: number; timeMs: number }[];
+  entropy?: number;
 
   /** What the run is optimising for. */
   weights: ObjectiveWeights;
+  /** The chosen way to end the node. Route-specific augmentations only receive
+   * their terminal value when they belong to this route. */
+  route?: RouteId;
+  /** Remaining time in which a package can pay off. */
+  horizonSec: number;
+  /** The permanent augmentation-count target. Infinity means "take as many as
+   * the horizon permits" rather than inventing a count target. */
+  targetAugCount: number;
 
   /** Favor needed before donations unlock, from ns.getFavorToDonate(). */
   favorToDonate: number;
   /** Money the arbiter granted this feature this tick. */
   moneyGranted: number;
+  /** Actual cash on hand. Planning uses this; execution still obeys the
+   * arbiter's narrower `moneyGranted`. */
+  moneyAvailable: number;
+  /** Cash we do not hold yet but will, net of the spread and commission to get
+   *  it: the market book, which is liquidated before every install.
+   *
+   *  It belongs in the purchase plan for two reasons. Planning the batch against
+   *  cash alone understates the bankroll and picks a smaller set than the run can
+   *  afford. Worse, it picks the wrong ORDER — buying the one item today's cash
+   *  covers charges the 1.9x escalation to the dearer item that the liquidation
+   *  would have covered outright, and that mistake is permanent. Money left unspent
+   *  is also money the market can keep compounding, so waiting is not a sacrifice.
+   *
+   *  Zero when there is no market, no position, or no reason to expect a
+   *  liquidation. */
+  pendingProceeds: number;
+  /** Whether that book is actually being CONVERTED right now, rather than merely
+   *  existing.
+   *
+   *  The distinction is the difference between patience and a livelock. Planning
+   *  may count the book whenever it exists — it will be cash before the install,
+   *  whenever that comes. Waiting for it may not: mid-run nobody is selling, so
+   *  holding a purchase until the proceeds arrive would hold it for ever, and
+   *  `factions` not finishing is itself what keeps `stock` from being asked to
+   *  sell. Only a liquidation in progress has a settlement date. */
+  proceedsSettling: boolean;
   /** Whether this feature holds Player.currentWork. */
   holdsWorkSlot: boolean;
 
   /** What the player is doing right now, so the continuation guard can tell
    *  "our work is still running" from "something else took the slot". */
-  currentWork?: { kind: string; faction?: string; workType?: WorkType; focused: boolean };
+  currentWork?: { kind: string; faction?: string; detail?: string; workType?: WorkType; focused: boolean };
 
   /** Measured income per second, for the donate-vs-work crossover. */
   incomePerSec: number;
@@ -60,4 +100,30 @@ export interface FactionsView {
   /** SF4 level and BitNode, for the 80 GB single-call blocker. */
   sf4Level: number;
   bitNode: number;
+}
+
+/** Money that is ours already or will be within a bounded, known wait: cash plus
+ * the market book, which is liquidated before every install.
+ *
+ * This is the figure every "can we afford it / how long until we can" question in
+ * this feature should use, and it is deliberately NOT cash alone. Money parked in
+ * the market is money the run will spend on augmentations — `progression` refuses
+ * to reset while the book is open — so pricing plans against cash understates the
+ * bankroll, shrinks the objective to something smaller than the run can afford,
+ * and picks a worse purchase order than waiting would.
+ *
+ * It counts the book only while `proceedsSettling` — a liquidation actually under
+ * way. A book nobody is selling has no settlement date, and waiting on one is a
+ * livelock: mid-run `stock` has not been asked to sell, and `factions` not
+ * finishing is precisely what stops it being asked.
+ *
+ * It is also deliberately not "cash plus income over the horizon". Patience has to
+ * terminate. Waiting on income over an open-ended horizon does not: it would stall
+ * purchases indefinitely, and — because `progression` refuses to install while any
+ * augmentation is still purchasable — a factions feature that holds out forever and
+ * a progression feature waiting for it to buy are a livelock, not caution. A
+ * liquidation settles in bounded time, after which `pendingProceeds` is zero and
+ * the hold releases itself. */
+export function settlingMoney(view: FactionsView): number {
+  return view.moneyAvailable + (view.proceedsSettling ? Math.max(0, view.pendingProceeds) : 0);
 }

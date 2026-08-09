@@ -350,6 +350,21 @@ export function bitNodeMultipliers(
   return { ...DEFAULT_BITNODE_MULTIPLIERS, ...overrides };
 }
 
+/** Multipliers available to game strategy in every BitNode.
+ *
+ * `ns.getBitNodeMultipliers()` is gated behind BN5/SF5, but its absence does
+ * not mean all multipliers are 1. The pinned static table supplies the complete
+ * baseline; an observed getter result wins field-by-field when available. */
+export function effectiveBitNodeMultipliers(
+  n: number | undefined,
+  sf12Level = 0,
+  observed?: Record<string, number>,
+): Record<string, number> | undefined {
+  const known = bitNodeMultipliers(n, sf12Level);
+  if (!known) return observed ? { ...observed } : undefined;
+  return { ...known, ...(observed ?? {}) };
+}
+
 /** Required hacking level to reach `w0r1d_d43m0n` in this node: the server's
  * base 3000 scaled by `WorldDaemonDifficulty` (Server/ServerHelpers.ts). */
 export const WORLD_DAEMON_BASE_SKILL = 3000;

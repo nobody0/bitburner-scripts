@@ -60,9 +60,36 @@ describe("save-seeded faction and player state", () => {
 
     const augRequirement: PlayerRequirement = { type: "numAugmentations", numAugmentations: 2 };
     const sfRequirement: PlayerRequirement = { type: "sourceFile", sourceFile: 4 };
-    expect(satisfies(augRequirement, satisfyContext())).toBe(true);
+    expect(satisfies(augRequirement, satisfyContext())).toBe(false);
     expect(satisfies(sfRequirement, satisfyContext())).toBe(true);
     expect(factions.get("Tetrads")).toMatchObject({ rep: 789, favor: 7, invited: true });
     expect(factions.get("UnknownFaction")).toBeUndefined();
+  });
+
+  test("augmentation prestige banks all reputation and resets cycle-only faction state", () => {
+    const world = new SimWorld({
+      seed: 1,
+      bitnode: 4,
+      playerState: {
+        factions: ["Sector-12"],
+        factionInvitations: ["ECorp", "CyberSec"],
+      },
+    });
+    const factions = new FactionSystem(world, world.player, {
+      "Sector-12": { rep: 25_000, favor: 0 },
+      ECorp: { rep: 10_000, favor: 2 },
+      Chongqing: { rep: 5_000, favor: 0 },
+    });
+
+    expect(factions.get("Chongqing")?.banned).toBe(true);
+    factions.prestigeAugmentation();
+
+    expect(world.player.factions).toEqual([]);
+    expect(world.player.factionInvitations).toEqual(["ECorp"]);
+    expect(factions.get("ECorp")).toMatchObject({ invited: true, joined: false, rep: 0 });
+    expect(factions.get("CyberSec")?.invited).toBe(false);
+    expect(factions.get("Chongqing")).toMatchObject({ banned: false, rep: 0 });
+    expect(factions.get("Chongqing")?.favor ?? 0).toBeGreaterThan(0);
+    expect(factions.get("Sector-12")?.favor ?? 0).toBeGreaterThan(0);
   });
 });

@@ -1,14 +1,17 @@
 import type { NS } from "@ns";
+import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { stepCareer, type CareerDecision, type CareerPriorityBand, type CareerView } from "../../../shared/strategy/career/decide.ts";
 import type { CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import {
   careerSchedule,
   careerWorkMode,
+  progressLockUntil,
   updateActivityRate,
   type ActivityRateSample,
   type CareerWorkMode,
 } from "../../../shared/strategy/career/schedule.ts";
+import { PORT_OPENER_PROGRAMS, programCreateTimeMs } from "../../../shared/strategy/career/programs.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge, type GameState } from "../state.ts";
 import {
@@ -45,6 +48,7 @@ const JOB_FIELDS = [
   "Security", "Agent", "Employee", "Part-time Employee",
   "Waiter", "Part-time Waiter",
 ] as const;
+const TRAVEL_COST = 200_000;
 
 let lastDecision: CareerDecision | undefined;
 let lastResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
@@ -74,7 +78,48 @@ function buildCareerView(
   if (!player) return undefined;
 
   const mults = (player.mults ?? {}) as unknown as Record<string, number>;
-  const nodeMults = state.topics.progression?.multipliers ?? {};
+  const progression = state.topics.progression;
+  const nodeMults = effectiveBitNodeMultipliers(
+    progression?.bitNode,
+    progression?.sourceFiles["12"] ?? 0,
+    progression?.multipliers,
+  ) ?? {};
+  const skills = { ...(player.skills ?? {}) } as unknown as Record<string, number>;
+  const classExp = nodeMults["ClassGymExpGain"] ?? 1;
+  const courses = String(player.city ?? "Sector-12") === "Sector-12"
+    ? [
+        { name: "Algorithms", skill: "hacking", expPerSec: 8 * (mults["hacking_exp"] ?? 1) * classExp, costPerSec: 960, location: "Rothman University" },
+        { name: "Leadership", skill: "charisma", expPerSec: 8 * (mults["charisma_exp"] ?? 1) * classExp, costPerSec: 960, location: "Rothman University" },
+        ...(["strength", "defense", "dexterity", "agility"] as const).map((skill) => ({
+          name: skill,
+          skill,
+          expPerSec: 10 * (mults[`${skill}_exp`] ?? 1) * classExp,
+          costPerSec: 2_400,
+          location: "Powerhouse Gym",
+        })),
+      ]
+    : [];
+  const intelligence = skills["intelligence"] ?? 0;
+  const sf11Level = progression?.sourceFiles["11"] ?? 0;
+  const sf15Level = progression?.sourceFiles["15"] ?? 0;
+  const charisma = skills["charisma"] ?? 0;
+  const sf15SalaryMult = sf15Level > 1
+    ? 1 + 0.5 * (1 - Math.exp(-0.0002 * charisma)) + 0.9 * (1 - Math.exp(-0.00004 * charisma))
+    : 1;
+  const ownedOpeners = state.topics.fleet?.portOpeners ?? 0;
+  const programs = PORT_OPENER_PROGRAMS.slice(ownedOpeners)
+    .map((program) => ({ ...program, timeMs: programCreateTimeMs(program, skills["hacking"] ?? 0, intelligence) }))
+    .filter((program) => Number.isFinite(program.timeMs));
+  const factionWorkType = state.topics.factions?.plan?.action.workType;
+  const fallbackCandidates = factionWorkType === "security"
+    ? ["hacking", "strength", "defense", "dexterity", "agility"]
+    : factionWorkType === "field"
+      ? ["hacking", "strength", "defense", "dexterity", "agility", "charisma"]
+      : ["hacking"];
+  const defaultSkill = [...fallbackCandidates].sort((a, b) =>
+    (skills[a] ?? 0) - (skills[b] ?? 0)
+    || (a < b ? -1 : 1)
+  )[0] ?? "hacking";
 
   // Crime stats come from the game, never a hardcoded table — and the game's
   // own success chance comes with them, so the strategy never has to recompute
@@ -83,12 +128,12 @@ function buildCareerView(
     type: crime.name,
     timeMs: crime.timeMs,
     money: crime.money,
-    difficulty: 1,
+    difficulty: crime.difficulty ?? 1,
     // The probe reports karma as the game does (negative for the player);
     // the strategy wants the positive magnitude that gets subtracted.
     karma: Math.abs(crime.karma),
     kills: crime.kills ?? 0,
-    weights: {},
+    weights: crime.weights ?? {},
     exp: crime.exp ?? {},
     chance: crime.chance,
   }));
@@ -96,15 +141,26 @@ function buildCareerView(
   return {
     time: Date.now(),
     person: {
-      skills: { ...(player.skills ?? {}) } as unknown as Record<string, number>,
-      mults: { crime_success: mults["crime_success"] ?? 1, crime_money: mults["crime_money"] ?? 1 },
+      skills,
+      mults: {
+        crime_success: mults["crime_success"] ?? 1,
+        crime_money: mults["crime_money"] ?? 1,
+        hacking_exp: mults["hacking_exp"] ?? 1,
+        strength_exp: mults["strength_exp"] ?? 1,
+        defense_exp: mults["defense_exp"] ?? 1,
+        dexterity_exp: mults["dexterity_exp"] ?? 1,
+        agility_exp: mults["agility_exp"] ?? 1,
+        charisma_exp: mults["charisma_exp"] ?? 1,
+      },
     },
     crimeContext: {
       crimeSuccessRate: nodeMults["CrimeSuccessRate"] ?? 1,
       crimeMoney: nodeMults["CrimeMoney"] ?? 1,
+      crimeExp: nodeMults["CrimeExpGain"] ?? 1,
     },
     crimes,
-    courses: [],
+    courses,
+    programs,
     karma: player.karma ?? 0,
     numPeopleKilled: player.numPeopleKilled ?? 0,
     skills: { ...(player.skills ?? {}) } as unknown as Record<string, number>,
@@ -114,6 +170,15 @@ function buildCareerView(
       name,
       rep: company.rep,
       ...(companyRates.get(name)?.perSec !== undefined ? { repPerSec: companyRates.get(name)!.perSec } : {}),
+      ...(company.salaryPerCycle !== undefined
+        ? {
+            moneyPerSec: company.salaryPerCycle * 5
+              * (sf11Level > 0 ? 1 + company.favor / 100 : 1)
+              * (mults["work_money"] ?? 1)
+              * sf15SalaryMult
+              * (nodeMults["CompanyWorkMoney"] ?? 1),
+          }
+        : {}),
     })),
     holdsWorkSlot,
     ...(career?.currentWork
@@ -126,6 +191,8 @@ function buildCareerView(
       : {}),
     ...(allowProgressSwitch ? { allowProgressSwitch: true } : {}),
     moneyGranted,
+    externalIncomePerSec: state.topics.farm?.moneyRate ?? 0,
+    defaultSkill,
   };
 }
 
@@ -147,6 +214,7 @@ function taskDigest(task: ((Record<string, unknown> & WorkTaskLike) | null)): Wo
   return {
     type: String(task.type),
     detail: workDetail(task) ?? "",
+    ...(task.factionWorkType !== undefined ? { workType: String(task.factionWorkType) } : {}),
     cyclesWorked: typeof task.cyclesWorked === "number" ? task.cyclesWorked : 0,
     observedAt: Date.now(),
   };
@@ -209,7 +277,7 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
     }
     case "gym": {
       const result = await replaceWork(["singularity.gymWorkout"], (stubNs: NS) =>
-        stubNs["singularity"]["gymWorkout"]("Powerhouse Gym" as never, decision.action.subject as never, true),
+        stubNs["singularity"]["gymWorkout"](decision.action.location as never, decision.action.subject as never, true),
       );
       if (result === refused) return false;
       const ok = result.value;
@@ -218,14 +286,29 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
     }
     case "class": {
       const result = await replaceWork(["singularity.universityCourse"], (stubNs: NS) =>
-        stubNs["singularity"]["universityCourse"]("Rothman University" as never, decision.action.subject as never, true),
+        stubNs["singularity"]["universityCourse"](decision.action.location as never, decision.action.subject as never, true),
       );
       if (result === refused) return false;
       const ok = result.value;
       record(Boolean(ok), ok ? `studying ${decision.action.subject}` : "course refused");
       return true;
     }
+    case "program": {
+      const result = await replaceWork(["singularity.createProgram", "ls"], (stubNs: NS) => {
+        const started = stubNs["singularity"]["createProgram"](decision.action.subject as never, decision.action.focus);
+        const files = new Set(stubNs["ls"]("home", ".exe"));
+        return { started, openers: PORT_OPENER_PROGRAMS.filter((program) => files.has(program.name)).length };
+      });
+      if (result === refused) return false;
+      merge(ctx.state, "fleet", { portOpeners: result.value.openers });
+      record(Boolean(result.value.started), result.value.started ? `writing ${decision.action.subject}` : "program already present or creation refused");
+      return true;
+    }
     case "travel": {
+      if (ctx.grants.money < TRAVEL_COST) {
+        record(false, `waiting for $${TRAVEL_COST.toLocaleString()} travel grant`);
+        return false;
+      }
       const result = await replaceWork(["singularity.travelToCity"], (stubNs: NS) =>
         stubNs["singularity"]["travelToCity"](decision.action.subject as never),
       );
@@ -258,22 +341,20 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
       return true;
     }
     case "promote": {
-      const result = await replaceWork(["singularity.applyToCompany", "singularity.workForCompany"], (stubNs: NS) => {
-        const job = stubNs["singularity"]["applyToCompany"](decision.action.subject as never, decision.action.field as never);
-        const working = job
-          ? false
-          : stubNs["singularity"]["workForCompany"](decision.action.subject as never, true);
-        return { job, working };
-      });
+      // Applying for a promotion is administrative and does not consume the
+      // work slot. Never turn a failed promotion into company work here: that
+      // would silently cancel an in-progress crime even though the pure
+      // strategy correctly classified `promote` as slot-free.
+      const result = await replaceWork(["singularity.applyToCompany"], (stubNs: NS) => ({
+        job: stubNs["singularity"]["applyToCompany"](decision.action.subject as never, decision.action.field as never),
+      }));
       if (result === refused) return false;
-      const { job, working } = result.value;
+      const { job } = result.value;
       record(
-        Boolean(job || working),
+        Boolean(job),
         job
           ? `promoted to ${job} at ${decision.action.subject}`
-          : working
-            ? `not yet promotable on the ${decision.action.field} track; building company progress`
-            : `not eligible to work on the ${decision.action.field} track`,
+          : `not yet promotable on the ${decision.action.field} track`,
       );
       return true;
     }
@@ -306,8 +387,32 @@ const driver: FeatureDriver = {
     });
     if (!schedule.due) return;
 
+    // nextCompletion also resolves when a task is cancelled. Re-observe the
+    // live slot before treating the notice as a banked progress boundary; this
+    // prevents a manual replacement from being immediately cancelled using a
+    // stale CRIME digest. A repeating crime remains present with the same
+    // detail, while completed one-shot work leaves the slot empty.
+    let completionBoundary = false;
+    if (completion) {
+      const observed = await observeAndArm(ctx);
+      if (!observed) return;
+      const current = ctx.state.topics.career?.currentWork;
+      completionBoundary = current === null || (
+        current !== undefined &&
+        current.type === completion.type &&
+        (completion.detail === undefined || current.detail === completion.detail)
+      );
+      if (!completionBoundary) {
+        lastCompletion = completion;
+        lastReviewedAt = now;
+        lastWorkMode = careerWorkMode(current?.type);
+        consumeWorkCompletion();
+        return;
+      }
+    }
+
     sampleCompanyRates(ctx.state, now);
-    const view = buildCareerView(ctx.state, ctx.grants.slot, ctx.grants.money, completion !== undefined);
+    const view = buildCareerView(ctx.state, ctx.grants.slot, ctx.grants.money, completionBoundary);
     if (!view) return;
     const decision = stepCareer(view, ctx.board);
     lastDecision = decision;
@@ -355,7 +460,7 @@ const driver: FeatureDriver = {
 
     try {
       let handled = false;
-      if (decision.action.type === "idle" && needsCompletionWatcher(ctx.state) && !workCompletionArmed()) {
+      if (!completion && decision.action.type === "idle" && needsCompletionWatcher(ctx.state) && !workCompletionArmed()) {
         handled = await observeAndArm(ctx);
       }
       if (decision.action.type !== "idle") handled = (await execute(ctx.ns, ctx, decision)) || handled;
@@ -391,6 +496,34 @@ function claims(ctx: ClaimContext): Claim[] {
   if (actionType && methods.length > 0) {
     out.push(actionRamClaim(ctx, "career", actionClaimId(actionType), methods, `career ${actionType}`));
   }
+  if (actionType === "travel") {
+    out.push({
+      by: "career",
+      id: "travel-fund",
+      resource: "money",
+      amount: TRAVEL_COST,
+      priority: priorityForBand(candidate?.workPriority ?? "wanted"),
+      mode: "spend",
+      divisible: false,
+      why: `travel costs $${TRAVEL_COST.toLocaleString()}`,
+    });
+  }
+  if (actionType === "class" || actionType === "gym") {
+    const option = candidate?.ranked.find((entry) => entry.action === candidate?.action);
+    const fiveSeconds = Math.max(0, -(option?.moneyPerSec ?? 0) * 5);
+    if (fiveSeconds > 0) {
+      out.push({
+        by: "career",
+        id: "training-fund",
+        resource: "money",
+        amount: fiveSeconds,
+        priority: priorityForBand(candidate?.workPriority ?? "income"),
+        mode: "spend",
+        divisible: false,
+        why: "fund the next five-second training review window",
+      });
+    }
+  }
   // At a completion boundary another feature may win the work slot before
   // career ticks. Keep a separately-priced observation available even when
   // career also has a candidate action, so it records the replacement work
@@ -401,22 +534,33 @@ function claims(ctx: ClaimContext): Claim[] {
 
   // Queue bands are deliberately spaced around faction work: blocking can
   // preempt it, wanted/nice cannot, and income is the floor.
-  const progressLocked = careerWorkMode(ctx.state.topics.career?.currentWork?.type) === "progress" && completion === undefined;
   const band = candidate?.workPriority ?? "income";
 
-  // A completable task gets an administrative lock until its authoritative
-  // completion promise fires. Number.MAX_SAFE_INTEGER is intentional: the
-  // event removes the lock; a guessed wall-clock deadline cannot do so safely.
+  // A task with unbanked progress gets an administrative lock, bounded by the
+  // moment that progress banks — see `progressLockUntil` for why an unbounded one
+  // wedged the whole run. Before the boundary the lock is absolute: cancelling a
+  // crime at 99% throws the entire thing away. At the boundary career drops back to
+  // its ordinary band, so the end of a crime is a fair re-evaluation of what to work
+  // rather than an automatic renewal — which is what let a 10-minute Heist hold the
+  // slot against faction work indefinitely.
+  const lockUntil = progressLockUntil({
+    mode: careerWorkMode(ctx.state.topics.career?.currentWork?.type),
+    totalMs: progressTotalMs(ctx.state),
+    cyclesWorked: ctx.state.topics.career?.currentWork?.cyclesWorked,
+    observedAt: ctx.state.topics.career?.currentWork?.observedAt,
+    completionPending: completion !== undefined,
+    now: ctx.now,
+  });
   out.push({
     by: "career",
     id: "work",
     resource: "time",
     amount: 1,
-    priority: progressLocked ? PRIORITY["career:progress-lock"] : priorityForBand(band),
+    priority: lockUntil !== undefined ? PRIORITY["career:progress-lock"] : priorityForBand(band),
     mode: "spend",
-    ...(progressLocked ? { holdUntil: Number.MAX_SAFE_INTEGER } : {}),
-    why: progressLocked
-      ? "unbanked progress is in flight; wait for Task.nextCompletion"
+    ...(lockUntil !== undefined ? { holdUntil: lockUntil } : {}),
+    why: lockUntil !== undefined
+      ? `unbanked progress banks in ${Math.max(0, Math.round((lockUntil - ctx.now) / 1_000))}s`
       : band === "income"
         ? "early-game income"
         : `${band} career request selected from the queue`,
@@ -435,11 +579,32 @@ function careerMethods(type: string | undefined): readonly string[] {
     case "class": return ["singularity.universityCourse", "singularity.getCurrentWork"];
     case "company": return ["singularity.workForCompany", "singularity.getCurrentWork"];
     case "apply": return ["singularity.applyToCompany", "singularity.getCurrentWork"];
-    case "promote": return ["singularity.applyToCompany", "singularity.workForCompany", "singularity.getCurrentWork"];
+    case "promote": return ["singularity.applyToCompany", "singularity.getCurrentWork"];
     case "quit": return ["singularity.quitJob", "singularity.getCurrentWork"];
     case "travel": return ["singularity.travelToCity", "singularity.getCurrentWork"];
     case "continue": return ["singularity.getCurrentWork"];
+    case "program": return ["singularity.createProgram", "singularity.getCurrentWork", "ls"];
     default: return [];
+  }
+}
+
+/** How long the progress task in flight runs for, from whichever table describes
+ * it. Crimes are career's own; a graft is bought and timed by `factions`, and
+ * `Player.currentWork` reports GRAFTING for it because it occupies the same slot.
+ *
+ * `undefined` when the activity cannot be identified — before the table is probed,
+ * or a progress kind we do not model. `progressLockUntil` treats that as "no lock"
+ * on purpose. */
+function progressTotalMs(state: GameState): number | undefined {
+  const work = state.topics.career?.currentWork;
+  if (!work?.detail) return undefined;
+  switch (work.type?.toUpperCase()) {
+    case "CRIME":
+      return state.topics.career?.crimes?.find((crime) => crime.name === work.detail)?.timeMs;
+    case "GRAFTING":
+      return state.topics.factions?.graftable?.find((offer) => offer.name === work.detail)?.timeMs;
+    default:
+      return undefined;
   }
 }
 

@@ -17,6 +17,7 @@ const RED_PILL = "The Red Pill";
  *   rep:CyberSec:1e5    reputation with that faction >= 1e5
  *   daedalus / daedalus:6   Daedalus's invite gate for that BitNode
  *   redpill             owns The Red Pill
+ *   installs:2          two destructive augmentation installs
  *   wd / wd:14          hacking >= that node's w0r1d_d43m0n requirement
  *   bn / bn:6           the whole node: daedalus, then redpill, then wd
  * Repeat --goal to combine; they compose with allOf.
@@ -99,6 +100,14 @@ export function parseGoal(spec: string): Goal {
         done: (ctx) => (ctx.factions.get(name)?.favor ?? 0) >= amount,
       };
     }
+    case "installs": {
+      const count = parseAmount(rest[0], spec);
+      return {
+        id: spec,
+        describe: () => `${count} augmentation installs`,
+        done: (ctx) => ctx.installs >= count,
+      };
+    }
     case "rep": {
       const amount = parseAmount(rest[rest.length - 1], spec);
       const name = rest.slice(0, -1).join(":");
@@ -161,7 +170,7 @@ export function parseGoal(spec: string): Goal {
     default:
       throw new Error(
         `unknown goal spec: ${spec} ` +
-          `(want earn:|money:|skill:|ram:|only:|faction:|rep:|karma:|augs:|aug:|favor:|daedalus:|redpill|wd:|bn:)`,
+          `(want earn:|money:|skill:|ram:|only:|faction:|rep:|karma:|augs:|aug:|favor:|installs:|daedalus:|redpill|wd:|bn:)`,
       );
   }
 }

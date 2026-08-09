@@ -1,6 +1,7 @@
 import { applyOverrides, type FeatureOverrides } from "../../shared/features/profile.ts";
 import { unknownCapabilities, type Capabilities } from "../../shared/features/unlock.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
+import type { ContractFailure } from "../../shared/telemetry/topics/side.ts";
 import { gameGlobal } from "./globals.ts";
 
 /** The game-state copy: the script's own model of the world, and the single
@@ -48,6 +49,16 @@ export interface GameState {
   /** Last tick each feature driver ran, by feature id. Survives handoffs, so a
    *  build push does not restart every cadence. */
   featureLastRun: Record<string, number>;
+  /** Wall-clock time of the last unconditional ns.getPlayer snapshot. Kept
+   * private so time-sensitive strategies can advance totalPlaytime honestly. */
+  playerObservedAt?: number;
+  /** Coding contracts rejected once are never automatically retried. Kept
+   * outside topics so the full quarantine never reaches telemetry. */
+  contractQuarantine?: Record<string, ContractFailure>;
+  /** Private bounded work queue. The Side topic exposes only its front batch
+   * plus totals, so this never gets serialized into telemetry. */
+  contractQueue?: { host: string; file: string }[];
+  contractSolverVersion?: number;
   /** Injected feature switches. Empty in the real game; a simulation sets them
    *  to isolate a feature. Applied in caps(), so every consumer agrees. */
   featureOverrides?: FeatureOverrides;

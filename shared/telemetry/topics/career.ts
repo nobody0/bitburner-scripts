@@ -16,6 +16,8 @@ export interface CrimeOption {
   exp?: Record<string, number>;
   /** money * chance / time — the ranking the optimizer cares about. */
   moneyPerSec: number;
+  difficulty?: number;
+  weights?: Record<string, number>;
 }
 
 /** The career decision digest. */
@@ -71,6 +73,8 @@ export interface CareerState {
   currentWork?: {
     type: string;
     detail?: string;
+    /** Faction work subtype, when type is FACTION. */
+    workType?: string;
     focused?: boolean;
     /** Game cycles (200 ms each) already spent on this activity. */
     cyclesWorked?: number;
@@ -80,7 +84,7 @@ export interface CareerState {
   /** Ranked crimes — needs BN4/SF4 for chance/stats. */
   crimes?: CrimeOption[];
   /** Company name -> {rep, favor} for held jobs. Needs BN4/SF4. */
-  companies?: Record<string, { rep: number; favor: number }>;
+  companies?: Record<string, { rep: number; favor: number; salaryPerCycle?: number }>;
   /** The decision digest — what career chose and why. */
   plan?: CareerPlan;
 }

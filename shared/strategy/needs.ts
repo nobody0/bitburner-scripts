@@ -25,6 +25,7 @@ export type NeedKind =
   | "combatSkills"
   | "charisma"
   | "companyRep"
+  | "factionRep"
   | "jobTitle"
   | "employment"
   | "quitCompany"
@@ -34,7 +35,6 @@ export type NeedKind =
   | "hacknetCores"
   | "hacknetLevels"
   | "bladeburnerRank"
-  | "infiltrations"
   | "file"
   | "augCount";
 
@@ -46,6 +46,7 @@ export const NEED_KINDS: readonly NeedKind[] = [
   "combatSkills",
   "charisma",
   "companyRep",
+  "factionRep",
   "jobTitle",
   "employment",
   "quitCompany",
@@ -55,7 +56,6 @@ export const NEED_KINDS: readonly NeedKind[] = [
   "hacknetCores",
   "hacknetLevels",
   "bladeburnerRank",
-  "infiltrations",
   "file",
   "augCount",
 ] as const;
@@ -78,6 +78,7 @@ const DIRECTION: Record<NeedKind, NeedDirection> = {
   combatSkills: "atLeast",
   charisma: "atLeast",
   companyRep: "atLeast",
+  factionRep: "atLeast",
   jobTitle: "atLeast",
   employment: "atLeast",
   quitCompany: "atMost",
@@ -87,7 +88,6 @@ const DIRECTION: Record<NeedKind, NeedDirection> = {
   hacknetCores: "atLeast",
   hacknetLevels: "atLeast",
   bladeburnerRank: "atLeast",
-  infiltrations: "atLeast",
   file: "atLeast",
   augCount: "atLeast",
 };

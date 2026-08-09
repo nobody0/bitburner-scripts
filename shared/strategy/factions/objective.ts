@@ -1,6 +1,6 @@
 /** Which factions to commit to.
  *
- * Joining a faction permanently BANS its enemies (and prunes their pending
+ * Joining a faction BANS its enemies for the current install cycle (and prunes their pending
  * invitations), so faction selection is a maximum-weight independent set
  * problem over the ban graph — not a greedy "join everything useful" walk.
  * Getting it wrong is unrecoverable within a run: joining Sector-12 forecloses
@@ -177,7 +177,7 @@ export function selectFactions(candidates: readonly FactionCandidate[]): Objecti
 }
 
 /** Would joining `name` foreclose anything currently worth having? Used by the
- * driver to explain a join before it happens — a ban is permanent, so the UI
+ * driver to explain a join before it happens — an exclusion lasts for this install cycle, so the UI
  * should say what is being given up. */
 export function foreclosedBy(name: string, candidates: readonly FactionCandidate[]): FactionCandidate[] {
   const candidate = candidates.find((entry) => entry.name === name);

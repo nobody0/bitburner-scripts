@@ -240,6 +240,19 @@
   details { margin: 2px 0; }
   details > summary { cursor: pointer; color: var(--text-secondary); font-size: 12px; }
   details > summary:hover { color: var(--text-primary); }
+  .replay-value {
+    margin: 4px 0 8px;
+    padding: 6px 8px;
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    border: 1px solid var(--grid);
+    border-radius: 5px;
+    background: var(--surface-2);
+    color: var(--text-secondary);
+    font: 11px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
 
   dl.defs { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0; }
   dl.defs dt { color: var(--muted); font-size: 12px; }
@@ -305,10 +318,19 @@
 
   /* --- Go board and Stanek grid --- */
   .goboard, .gift { display: grid; gap: 2px; margin: 10px 0; max-width: 420px; }
+  .gocompare { display: grid; grid-template-columns: repeat(2, minmax(130px, 1fr)); gap: 12px; }
+  .gocompare h3 { margin: 8px 0 0; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .gocompare .goboard { margin-top: 5px; }
   .goboard .cell, .gift .cell { aspect-ratio: 1; border-radius: 2px; background: var(--grid); }
   .goboard .cell.black { background: #16161a; }
   .goboard .cell.white { background: #f2f2ef; box-shadow: inset 0 0 0 1px var(--baseline); }
   .goboard .cell.dead { background: transparent; }
+  .goboard .cell.chosen { outline: 3px solid var(--series-1); outline-offset: -3px; }
+  .goboard .cell.reply { box-shadow: inset 0 0 0 3px var(--series-3); }
+  .goboard .cell.chosen.reply { outline-color: var(--series-1); box-shadow: inset 0 0 0 3px var(--series-3); }
+  .go-mark { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .go-mark.chosen { border: 2px solid var(--series-1); }
+  .go-mark.reply { border: 2px solid var(--series-3); }
   .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; }
   .f0, .gift .cell.f0 { background: var(--series-1); }
   .f1, .gift .cell.f1 { background: var(--series-2); }

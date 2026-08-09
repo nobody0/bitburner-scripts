@@ -1,4 +1,5 @@
 import type { PlayerRequirement } from "@ns";
+import type { FactionObjective } from "../../strategy/factions/plan.ts";
 import type { FeatureId } from "../../features/ids.ts";
 
 /** Factions feature — reputation and augmentations (grafting included: it is
@@ -10,9 +11,6 @@ export interface FactionStanding {
   name: string;
   rep: number;
   favor: number;
-  /** @deprecated Legacy records may contain this; new probes emit it only at
-   * FactionsState.favorToDonate. */
-  favorToDonate?: number;
 }
 
 /** One (faction, augmentation) pair. Deliberately carries only what varies
@@ -76,6 +74,30 @@ export interface PlanBlocker {
  * belongs to is the key. */
 export type GateBlocker = Omit<PlanBlocker, "faction">;
 
+/** Inputs needed to reproduce and challenge a faction decision later. The
+ * full world state remains in the surrounding topic; these are the volatile
+ * strategy parameters that otherwise disappear behind the chosen package. */
+export interface FactionDecisionContext {
+  /** Time at which the planner evaluated this snapshot. */
+  evaluatedAt: number;
+  horizonSec: number;
+  route?: "daedalus" | "labyrinth" | "bladeburner";
+  targetAugCount?: number;
+  /** Owned augmentations as reported by the game, including queued purchases. */
+  ownedAugCount: number;
+  queuedAugCount: number;
+  incomePerSec: number;
+  moneyAvailable: number;
+  moneyGranted: number;
+  holdsWorkSlot: boolean;
+  favorToDonate: number;
+  priceQueue: {
+    nonSoA: number;
+    ownedSoA: number;
+    neurofluxLevel: number;
+  };
+}
+
 /** How close we are to an invitation from ONE faction, and what is in the way.
  *
  * Emitted for EVERY faction the game knows, not only the ones the current
@@ -97,17 +119,27 @@ export interface FactionGate {
 
 /** The decision digest: what we are doing, why, and what would change it. */
 export interface FactionPlan {
-  objective?: {
-    factions: string[];
-    augmentations: string[];
-    value: number;
-    foreclosed: { name: string; bannedBy: string }[];
+  context: FactionDecisionContext;
+  objective?: FactionObjective;
+  action: {
+    type: string;
+    /** Why an idle action was selected. `slot` is also consumed by the driver
+     * to bootstrap the matching time and RAM claims atomically. */
+    reason?: "blocked" | "waiting" | "continue" | "slot";
     why: string;
+    faction?: string;
+    augmentation?: string;
+    city?: string;
+    workType?: string;
+    amount?: number;
+    purchaseCost?: number;
   };
-  action: { type: string; why: string; faction?: string; augmentation?: string; city?: string; workType?: string };
   /** Scored runners-up, so a decision can be argued with rather than trusted. */
   alternatives: { label: string; value: number; why: string }[];
   blockers: PlanBlocker[];
+  /** Coarse facts that invalidate a continuing work order. Logged so a plan
+   * transition can be attributed to its changing input rather than guessed. */
+  invalidation?: { label: string; value: string | number | boolean }[];
   /** Expected next milestone. */
   until?: { kind: string; faction?: string; target: number; have: number; etaSec: number };
   /** What the last executed action actually returned. Every singularity call's
@@ -118,6 +150,13 @@ export interface FactionPlan {
   /** Set when factions thinks the run should end. Advisory: the reset cadence
    *  belongs to `progression`. */
   recommendInstall?: { why: string; augmentations: string[] };
+  /** The next augmentation the plan intends to buy, priced at its slot in the
+   *  purchase order — the dearest item first, so the 1.9x queue escalation lands on
+   *  the cheapest. The driver claims money against this. During the last-chance
+   *  drain it is whatever is still buyable at all: money does not survive an
+   *  install and a permanent multiplier does, so a dollar left unspent at that
+   *  boundary is a dollar thrown away. */
+  nextBuy?: { name: string; price: number };
 }
 
 export interface FactionsState {
