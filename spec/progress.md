@@ -317,6 +317,26 @@ even consulted. Buying one item bootstraps the phase machine, and since the walk
 dearest-first it is the dearest item currently affordable. All four bounds are
 regression-tested in `tests/factions.test.ts`.
 
+**The final-sweep drain spends DOWN from a frozen snapshot and never waits on
+income.** Measured on the `factions-install` profile (6.0m → 4.0s median, 3/3
+seeds, one order of magnitude twice over): the drain used to test each escalated
+NeuroFlux level against LIVE cash, so a fast farm out-earned the 1.9x price
+ladder level after level and the install landed only when the race was
+momentarily lost — worse, the install barrier tested the same live cash and held
+whenever income had caught up again. Now the drain freezes `drainCeiling` (cash
+on hand when the drain starts, cleared on any non-drain decision), each intent
+must clear `min(ceiling, cash on hand)`, and the published ceiling is what
+`purchasableAugmentation` tests too, with NeuroFlux judged by the drain's own
+locally-escalated intent rather than the stale probed offer. Three cadence fixes
+ride along: the purchase RAM claim is anticipated whenever the plan funds a buy
+(same contract as the workForFaction claim), a successful purchase or a pending
+affordable drain asks for an early wake instead of the 30-second cadence, and a
+concluded drain raises the install signal (`game/lib/install-signal.ts`) so
+progression's first evaluation does not wait out its 60-second cadence. A favor
+crossing plus a concluded faction sweep now count as `installWanted` directly —
+the crossing is a step change, and the `money > earned/2` phase gate protected a
+conversion that had already happened.
+
 **The exact ordering solver is used only where money changes hands.** It is
 exponential — 0.3 ms at ten items, 40 ms at sixteen — and the package frontier
 prices a candidate per (faction, reputation breakpoint), hundreds of times per

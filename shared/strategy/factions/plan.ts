@@ -109,6 +109,12 @@ export interface FactionDecision {
    *  a claim, and a claim read off the already-funded decision could never
    *  bootstrap. Absent when nothing is buyable. */
   nextBuy?: { name: string; price: number };
+  /** The drain's frozen budget, when a drain is running — published so the
+   *  install barrier (`purchasableAugmentation`) tests the same money the drain
+   *  itself is willing to spend. Without it the two predicates diverge on a
+   *  fast farm: the barrier sees the next NeuroFlux affordable out of fresh
+   *  income the drain has already declined to spend. */
+  drainCeiling?: number;
   /** Set when the feature genuinely cannot act — reported, never spun on. */
   blocked?: { why: string };
 }
@@ -130,6 +136,14 @@ export interface FactionMemory {
   lastAction?: FactionAction;
   /** Invalidation keys as of the last decision. */
   lastInvalidation: InvalidationKey[];
+  /** Cash on hand when the final-sweep drain began. The drain spends DOWN from
+   * this frozen snapshot: income earned while draining never funds further
+   * NeuroFlux escalation, because a fast farm otherwise turns the drain into a
+   * race between income and the 1.9x price ladder and the install only lands
+   * when the race is momentarily lost. Money made during the drain compounds
+   * better in the next run. Cleared on any decision that is not a recommending
+   * drain. */
+  drainCeiling?: number;
 }
 
 export function initFactionMemory(): FactionMemory {

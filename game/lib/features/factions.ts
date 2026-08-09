@@ -24,6 +24,7 @@ import { usableForecastSec } from "../../../shared/strategy/progression/forecast
 import type { FactionGate, FactionPlan } from "../../../shared/telemetry/topics/factions.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge, type GameState } from "../state.ts";
+import { signalInstallCheck } from "../install-signal.ts";
 import { armWorkCompletion, disarmWorkCompletion, peekWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
@@ -54,10 +55,16 @@ const SHADOWS_OF_ANARCHY = "Shadows of Anarchy";
 let memory: FactionMemory = initFactionMemory();
 /** Last executed action's outcome, for the plan digest. */
 let lastResult: FactionPlan["lastResult"];
+/** Set by a successful purchase: the next action is probably enabled RIGHT NOW
+ * (the next NeuroFlux level, a freed prerequisite), so the driver asks for an
+ * early wake instead of sleeping out the 30-second cadence. One-shot: cleared
+ * when the wake is served. */
+let chainWake = false;
 
 export function resetFactionsState(): void {
   memory = initFactionMemory();
   lastResult = undefined;
+  chainWake = false;
 }
 
 /** Exposed for tests and the sim harness. */
@@ -439,6 +446,11 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
         merge(ctx.state, "factions", {
           ownedAugs: [...(ctx.state.topics.factions?.ownedAugs ?? []), action.augmentation],
         });
+        // A successful purchase usually enables the next one immediately
+        // (NeuroFlux re-offers at the escalated price; a prereq unlocks its
+        // dependents). Waiting out the 30-second cadence between each level
+        // dominates time-to-install, so ask for an early wake instead.
+        chainWake = true;
       }
       record(Boolean(ok), ok ? `bought ${action.augmentation}` : "purchase refused (rep or money short)");
       return;
@@ -532,6 +544,7 @@ function planDigest(decision: FactionDecision, view: FactionsView): FactionPlan 
     },
     alternatives: decision.alternatives,
     invalidation: decision.invalidation,
+    ...(decision.drainCeiling !== undefined ? { drainCeiling: decision.drainCeiling } : {}),
     blockers: decision.blockers.map((blocker) => ({
       faction: blocker.faction,
       kind: blocker.kind,
@@ -605,16 +618,32 @@ const driver: FeatureDriver = {
   id: "factions",
   everyMs: 30_000,
   // A released progress lock can hand this feature Player.currentWork now;
-  // do not wait for the ordinary 30-second planning cadence to use it.
-  wake: () => peekWorkCompletion() !== undefined,
+  // do not wait for the ordinary 30-second planning cadence to use it. Same
+  // for a purchase chain: the follow-up buy is enabled the moment the last
+  // one succeeded.
+  wake: () => chainWake || peekWorkCompletion() !== undefined,
   requires: "factions",
   async tick(ctx: DriverContext) {
+    chainWake = false;
     const now = Date.now();
     const view = buildFactionsView(ctx, now);
     if (!view) return;
 
     const { decision, memory: next } = stepFactions(view, memory);
     memory = next;
+
+    // While the final-sweep drain is pending — an install is recommended and
+    // the next buy is affordable with cash on hand — keep waking at tick
+    // cadence. Each pass publishes the freshly escalated price, the next
+    // pass's claim funds it, and the whole drain completes in seconds instead
+    // of one 30-second cadence per NeuroFlux level.
+    if (decision.recommendInstall && decision.nextBuy && view.moneyAvailable >= decision.nextBuy.price) {
+      chainWake = true;
+    }
+    // Drain concluded: nothing left to buy and the run should end. Wake
+    // progression NOW — its 60-second cadence otherwise strands a finished
+    // drain for most of a minute before the install evaluation even runs.
+    if (decision.recommendInstall && !decision.nextBuy) signalInstallCheck();
 
     annotateOffers(ctx.state, view);
     merge(ctx.state, "factions", { plan: planDigest(decision, view), gates: gatesFrom(view) });
@@ -822,6 +851,21 @@ function claims(ctx: ClaimContext): Claim[] {
       divisible: true,
       why: `buying ${plan.nextBuy.name}`,
     });
+    // The decision is made at tick time, AFTER this pass's arbitration — so a
+    // purchase decided this pass would find no RAM grant and burn a whole
+    // 30-second cadence waiting for the next one (measured: one dead pass per
+    // NeuroFlux level on factions-install). Same anticipation contract as the
+    // workForFaction claim above: whenever the plan is funding a buy, reserve
+    // the dodge RAM that buy will need in the same pass.
+    if (plan.action.type !== "purchaseAugmentation") {
+      out.push(actionRamClaim(
+        ctx,
+        "factions",
+        factionClaimId("purchaseAugmentation"),
+        factionMethods("purchaseAugmentation"),
+        `purchase ${plan.nextBuy.name} when the fund grant lands`,
+      ));
+    }
   }
   if (graft) {
     if (plan.action.type !== "graft") {

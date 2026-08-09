@@ -165,6 +165,10 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
   // usable this pass (keeping ns.scp out of the controller's static RAM).
   if (!state.deployed.has(host)) return false;
   const globals = state.globals;
+  // A missing registry means the realm slots were swept out from under this
+  // epoch (augmentation install, build handoff) — every worker is dead and the
+  // successor owns the rendezvous. Fail the op instead of resurrecting the map.
+  if (!globals.worker_info || !globals.worker_jobs) return false;
 
   // Pooled job to an already-running serve worker: no exec at all — push the
   // job and poke the worker's parked resolver. A missing mailbox means the

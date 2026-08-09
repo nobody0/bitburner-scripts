@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
-import { nextPurchasableAugmentation } from "../../../shared/strategy/factions/augs.ts";
+import { NEUROFLUX, nextPurchasableAugmentation } from "../../../shared/strategy/factions/augs.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
@@ -51,6 +51,7 @@ import { successChance, type CrimeStats } from "../../../shared/strategy/career/
 import { workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
 import { stepSleeves, type SleevesView, type SleeveTask } from "../../../shared/strategy/sleeves/decide.ts";
 import { isScriptDeath } from "../errors.ts";
+import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
 import { merge, set, type GameState } from "../state.ts";
 import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions, resetSleeveCompletions } from "../sleeve-completion.ts";
 import type { WorkTaskLike } from "../work-completion.ts";
@@ -1423,12 +1424,27 @@ export function purchasableAugmentation(ctx: NeedContext): string | undefined {
   const money = ctx.state.topics.player?.money ?? 0;
   if (!factions?.offers) return undefined;
   const owned = new Set(factions.ownedAugs ?? []);
+  // During a drain, test the drain's own frozen budget, not live cash: income
+  // arriving while the drain runs must not hold the barrier up — the drain has
+  // already declined to spend it (see FactionPlan.drainCeiling).
+  const plan = factions.plan;
+  const ceiling = plan?.drainCeiling ?? Infinity;
+  // NeuroFlux's probed offer goes stale the moment the drain buys a level —
+  // its price and reputation requirement escalate per QUEUED level, which the
+  // probe only sees on its next pass. The drain's own locally-escalated intent
+  // (plan.nextBuy) is the accurate judgement, so while a drain is running the
+  // barrier defers to it for NeuroFlux and stays independent for everything
+  // else. Deferring can only RELEASE the barrier earlier, never block on
+  // something factions declines to buy.
+  const draining = plan?.drainCeiling !== undefined;
+  const drainWantsNfg = plan?.nextBuy?.name === NEUROFLUX;
+  const offers = draining && !drainWantsNfg ? factions.offers.filter((offer) => offer.name !== NEUROFLUX) : factions.offers;
   return nextPurchasableAugmentation({
-    offers: factions.offers,
+    offers,
     joined: new Set(factions.joined ?? []),
     owned,
     prereqs: (name) => factions.augMeta?.[name]?.prereqs ?? [],
-    money,
+    money: Math.min(money, ceiling),
   })?.name;
 }
 
@@ -1598,7 +1614,10 @@ function progressionRefresh(ctx: NeedContext): void {
 const progression: FeatureDriver = {
   id: "progression",
   everyMs: 60_000,
-  wake: () => progressionMemory.installArmedAt !== undefined,
+  // Armed installs carry themselves pass-to-pass; the install signal covers
+  // the FIRST evaluation after factions' drain concludes, which otherwise
+  // waits out the 60-second cadence (game/lib/install-signal.ts).
+  wake: () => progressionMemory.installArmedAt !== undefined || takeInstallSignal(),
   async tick(ctx: DriverContext) {
     const plan = readablePlan(ctx.state);
     if (!plan?.installReady) {
@@ -1824,6 +1843,7 @@ export const progressionModule: FeatureModule = {
     // one re-measures and re-decides from scratch.
     progressionMemory = freshProgressionMemory();
     routeChange = undefined;
+    resetInstallSignal();
     // Field-level, not the whole topic: the gate batch has ALREADY written
     // the new node's bitNode/sourceFiles/ownedAugs into it by the time the
     // reset walk runs. The plan (route, ETA, phase) and the multiplier latch

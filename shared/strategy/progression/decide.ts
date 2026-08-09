@@ -122,10 +122,15 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   const phase = phaseOf(view);
   const crossings = favorCrossings(view);
 
-  // Install when the run is in `ending` AND there is something to install.
-  // The favor crossing is the strongest single argument, so it is reported
-  // even when it is not decisive.
-  const installWanted = phase === "ending" && view.queued.length > 0;
+  // Install when the run is in `ending` AND there is something to install —
+  // or when a favor crossing exists and factions has concluded its sweep. The
+  // crossing is a step change (donations unlock, every future rep requirement
+  // becomes payable), so once the faction layer itself says the run should end
+  // there is nothing left for the cash-accumulation phase gate to protect:
+  // waiting for `money > earned/2` just strands banked favor behind a
+  // heuristic about a conversion that has already happened.
+  const installWanted =
+    view.queued.length > 0 && (phase === "ending" || (crossings.length > 0 && view.factionsReadyToInstall));
   const installBlockers: InstallBlocker[] = [];
   if (installWanted && !view.factionsReadyToInstall) {
     installBlockers.push({ kind: "factions", why: "factions has not finished its final purchase and donation sweep" });

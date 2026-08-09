@@ -157,6 +157,10 @@ export interface FactionPlan {
    *  install and a permanent multiplier does, so a dollar left unspent at that
    *  boundary is a dollar thrown away. */
   nextBuy?: { name: string; price: number };
+  /** The final-sweep drain's frozen budget (cash on hand when the drain began).
+   *  Published so `progression`'s install barrier tests the same money the drain
+   *  is willing to spend — fresh income beyond it must not hold the install. */
+  drainCeiling?: number;
 }
 
 export interface FactionsState {

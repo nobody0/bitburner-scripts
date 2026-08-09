@@ -308,7 +308,11 @@ function decideFactions(
   }
   const needOwners = [...new Set(allBlockers.filter((b) => b.reachable).map((b) => b.owner))];
 
-  const next = { ...memory, objective, lastInvalidation: invalidation };
+  // The drain ceiling survives ONLY through consecutive recommending-drain
+  // decisions (set again below); any other decision clears it, so an aborted
+  // drain can never leak a stale, lower snapshot into the next one.
+  const { drainCeiling: _staleCeiling, ...carried } = memory;
+  const next = { ...carried, objective, lastInvalidation: invalidation };
 
   if (view.currentWork?.kind === "grafting") {
     const action: FactionAction = {
@@ -402,19 +406,33 @@ function decideFactions(
     // Keep the same priority order, falling downward when a better item is not
     // currently affordable; NeuroFlux is repeatable and comes last.
     const wanted = recommend ? finalSweepWanted(view) : [];
+    // The drain spends the pile that exists when it STARTS. Frozen once, here:
+    // testing against live money instead lets a fast farm outrun the NeuroFlux
+    // price ladder level after level, and the install waits on a race.
+    const ceiling = recommend ? memory.drainCeiling ?? view.moneyAvailable : undefined;
+    const ceilingDigest = ceiling !== undefined ? { drainCeiling: ceiling } : {};
     // What the drain would buy if money were no object. Published on the decision
     // so the driver can claim exactly that much: `nextPurchase` above tests the
     // GRANTED budget, and a grant only exists once something claimed it. Derived
     // from the plan rather than the funded action, it survives the whole drain —
     // including the ticks where a purchase is in flight — so the claim does not
-    // blink out between buys.
-    const drainBuy = recommend ? nextPurchase(view, wanted, Infinity) : undefined;
+    // blink out between buys. An intent beyond the frozen ceiling is not an
+    // intent: the drain is over, and publishing it would keep the barrier up.
+    const drainIntent = recommend ? nextPurchase(view, wanted, Infinity) : undefined;
+    // Spend DOWN, never wait: an intent must clear both the frozen ceiling and
+    // the cash actually on hand. Testing the ceiling alone re-admits the race
+    // in miniature — a level priced just under the ceiling but just over the
+    // bank waits on income, which is the exact wait the ceiling exists to end.
+    const drainBudget = ceiling !== undefined ? Math.min(ceiling, view.moneyAvailable) : undefined;
+    const drainBuy = drainIntent && drainBudget !== undefined && drainIntent.price <= drainBudget ? drainIntent : undefined;
     const nextBuyDigest = drainBuy ? { nextBuy: { name: drainBuy.name, price: drainBuy.price } } : {};
-    const sweep = recommend ? nextSweepAction(view, wanted) : undefined;
+    // No sweep once the ceiling is exhausted; the donate leg still runs while
+    // nothing at all is rep-affordable (drainIntent undefined), as before.
+    const sweep = recommend && (drainBuy || !drainIntent) ? nextSweepAction(view, wanted) : undefined;
     if (sweep) {
       return {
-        memory: { ...next, lastAction: sweep },
-        decision: { objective, action: sweep, alternatives, blockers: allBlockers, needOwners, invalidation, ...nextBuyDigest },
+        memory: { ...next, lastAction: sweep, ...(ceiling !== undefined ? { drainCeiling: ceiling } : {}) },
+        decision: { objective, action: sweep, alternatives, blockers: allBlockers, needOwners, invalidation, ...nextBuyDigest, ...ceilingDigest },
       };
     }
     const action: FactionAction = {
@@ -423,7 +441,7 @@ function decideFactions(
       why,
     };
     return {
-      memory: { ...next, lastAction: action },
+      memory: { ...next, lastAction: action, ...(ceiling !== undefined ? { drainCeiling: ceiling } : {}) },
       decision: {
         objective,
         action,
@@ -432,6 +450,7 @@ function decideFactions(
         needOwners,
         invalidation,
         ...nextBuyDigest,
+        ...ceilingDigest,
         ...(recommend ? { recommendInstall: recommend } : {}),
       },
     };

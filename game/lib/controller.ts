@@ -353,7 +353,14 @@ export async function runController(
           grants: grantsFor(coordination.arbitration, driver.id),
           horizons,
           ...(plan?.route !== undefined ? { route: plan.route } : {}),
-          acquireDodge: (gb) => acquireDodge(hosts, hackingState().memory.dispatch.heap, gb),
+          // Placement is rebuilt AT CLAIM TIME, not from the pass-start
+          // snapshot: the farm driver ticks earlier in this same loop and
+          // re-packs every free fleet block, so a stale free-list best-fits
+          // onto a host that is already full again — the live reserveOn check
+          // then fails and the dodge starves for the whole pass (measured:
+          // half the install profile's time-to-goal). The live heap also lets
+          // the pick fall through to home's reserve, which exists for this.
+          acquireDodge: (gb) => acquireDodge(placement(state), hackingState().memory.dispatch.heap, gb),
         });
       } catch (error) {
         // One feature must never take the loop down with it — but a kill is

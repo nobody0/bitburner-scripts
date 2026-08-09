@@ -22,7 +22,8 @@ export async function featureDodge<T>(
   const budgetGb = priceCalls(ctx.ns, methods);
   const grant = grantFor(ctx.grants.result, by, claimId);
   if (!grant || grant.resource !== "ram" || grant.amount < budgetGb) {
-    return { ok: false, reason: `RAM claim ${by}:${claimId} was not granted ${budgetGb.toFixed(1)}GB` };
+    const detail = grant ? `granted ${grant.resource}:${grant.amount}` : "no grant";
+    return { ok: false, reason: `RAM claim ${by}:${claimId} was not granted ${budgetGb.toFixed(1)}GB (${detail})` };
   }
 
   const lease = ctx.acquireDodge(budgetGb);
