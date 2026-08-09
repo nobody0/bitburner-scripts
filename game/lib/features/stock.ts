@@ -219,6 +219,7 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     canShort: ctx.caps.bitNode === 8 || (ctx.caps.sourceFiles["8"] ?? 0) >= 2,
     fourSigmaDisabled: ctx.caps.restrictions.disable4SData === true,
     farmableHosts: farmableHosts(ctx),
+    ...(ctx.state.topics.farm?.target ? { farmTarget: ctx.state.topics.farm.target } : {}),
     ...(nodeMults ? { nodeMults } : {}),
     moneyGranted: ctx.grants.money,
     totalMoney: ctx.state.topics.player?.money ?? 0,

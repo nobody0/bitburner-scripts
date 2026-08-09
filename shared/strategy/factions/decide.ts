@@ -13,6 +13,7 @@ import {
 import {
   FOCUS_DWELL_MS,
   INTENT_STALL_MS,
+  NFG_MIN_PAYBACK_SEC,
   RATE_SMOOTHING,
   WORK_SWITCH_MARGIN,
   type FactionAction,
@@ -463,11 +464,17 @@ function decideFactions(
     const why = allBlockers.length > 0 ? "every objective faction is blocked" : "nothing left to work toward";
     const recommend = shouldRecommendInstall(view, objective);
     // Last-chance drain. This is intentionally broader than the objective:
-    // once progression is about to reset, every permanent augmentation we can
-    // still buy is better than carrying the cash and reputation into oblivion.
-    // Keep the same priority order, falling downward when a better item is not
-    // currently affordable; NeuroFlux is repeatable and comes last.
-    const wanted = recommend ? finalSweepWanted(view) : [];
+    // once progression is about to reset, every augmentation we can still buy
+    // beats carrying the cash into the reset — WITHIN the BitNode. The metric
+    // is BN completion time: augmentations are lost when the node ends, so a
+    // NeuroFlux level (~+1% mults) is only worth its acceleration of the
+    // REMAINING node. With minutes left it can never repay the drain and
+    // install overhead, so NFG drops out of the sweep; an unknown horizon
+    // (Infinity) keeps the full drain. Keep the same priority order, falling
+    // downward when a better item is not currently affordable; NeuroFlux is
+    // repeatable and comes last.
+    const sweepAll = recommend ? finalSweepWanted(view) : [];
+    const wanted = view.horizonSec > NFG_MIN_PAYBACK_SEC ? sweepAll : sweepAll.filter((name) => name !== NEUROFLUX);
     // The drain spends the pile that exists when it STARTS. Frozen once, here:
     // testing against live money instead lets a fast farm outrun the NeuroFlux
     // price ladder level after level, and the install waits on a race.

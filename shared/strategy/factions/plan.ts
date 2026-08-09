@@ -177,6 +177,11 @@ export const WORK_SWITCH_MARGIN = 1.05;
 /** How long a latched objective may make ZERO reputation progress before the
  * frontier is allowed to replace it with a different package. */
 export const INTENT_STALL_MS = 600_000;
+/** Minimum remaining NODE time for a NeuroFlux level to be worth draining
+ * into. Each level is ~+1% across the board, so it repays roughly 1% of the
+ * remainder; below this there is nothing left to accelerate and the drain
+ * only delays the node's end. */
+export const NFG_MIN_PAYBACK_SEC = 600;
 
 /** EWMA weight for the measured rep rate. */
 export const RATE_SMOOTHING = 0.3;

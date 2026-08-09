@@ -161,6 +161,10 @@ export interface StockView {
    *  loop — see MANIPULATION_PREFERENCE. Empty means no symbol is pushable, which
    *  is the honest early-game answer and leaves the ranking on pure edge. */
   farmableHosts: readonly string[];
+  /** The host the farm is dispatching against RIGHT NOW (its published
+   *  target). The speculative manipulation intent prefers its symbol: the
+   *  push starts immediately instead of waiting for a re-target. */
+  farmTarget?: string;
 
   /** `FourSigmaMarketData*Cost` scale the unlock; `ScriptHackMoney*` scale what
    *  manipulation is worth against hacking. See market.ts#StockNodeMults. */
@@ -997,6 +1001,40 @@ function planManipulation(params: {
   // position should start together, not a tick apart.
   if (entry && !view.symbols.some((s) => s.sym === entry.sym && (s.shares > 0 || s.sharesShort > 0))) {
     consider(entry.sym, entry.side, entry.cost - COMMISSION);
+  }
+
+  // SPECULATIVE intent — the chicken-and-egg breaker. The pushable symbols
+  // are the flattest on the board (that is what makes them pushable), so they
+  // never cross the entry band on their own, no position is ever held, and
+  // without a position no intent was published — the farm never pushed
+  // anything (measured: FNS/SGC/JGN held 3.6% of a 6h run, stockOps 0).
+  // Publishing an intent BEFORE the position lets the farm manufacture the
+  // edge: its ops (prep grows especially — each moves a large fraction of
+  // moneyMax, so nearly every one nudges) push the forecast, the estimator
+  // MEASURES the rising up-rate, the entry gate opens on real data, and the
+  // position buys the edge the farm created. Costs nothing — the ops fly
+  // anyway; the flag is free. One symbol only, so the push is concentrated:
+  // the farm's current target if it carries a symbol, else the first
+  // farmable one. Sized at the position we WOULD deploy.
+  if (out.length === 0 && farmable.size > 0) {
+    const pick = (): { sym: string; view: StockSymbolView; ranked: RankedSymbol } | undefined => {
+      const targetSym = view.farmTarget ? symbolForHost(view.farmTarget) : undefined;
+      const candidates = [...perSymbol.entries()].filter(([sym]) =>
+        (STOCK_METADATA[sym]?.hosts ?? []).some((host) => farmable.has(host)),
+      );
+      if (candidates.length === 0) return undefined;
+      const target = targetSym ? candidates.find(([sym]) => sym === targetSym) : undefined;
+      const [sym, entryView] = target ?? candidates[0]!;
+      return { sym, view: entryView.view, ranked: entryView.ranked };
+    };
+    const speculative = pick();
+    if (speculative) {
+      const notional = Math.min(view.totalMoney, view.totalMoney * MAX_SYMBOL_FRACTION);
+      // Push in the direction the symbol already leans, so the manufactured
+      // edge and the natural drift add instead of fighting.
+      const side: PositionSide = speculative.ranked.forecast >= 0.5 ? "long" : "short";
+      consider(speculative.sym, side, notional);
+    }
   }
   out.sort((a, b) => b.valuePerOp - a.valuePerOp || (a.hostname < b.hostname ? -1 : 1));
   return out;
