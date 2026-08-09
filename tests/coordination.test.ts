@@ -76,10 +76,13 @@ describe("the coordination pass", () => {
     expect(result.arbitration.slot).toMatchObject({ by: "factions" });
   });
 
-  test("the digest reports slot hold time relative to `now`", () => {
+  test("the digest reports slot hold time relative to `now`, bucketed to 10s", () => {
+    // Bucketing is deliberate: a per-pass-precise heldMs made the digest
+    // differ every 200ms tick, so the change-filtered store wrote ~5 records
+    // per second for as long as anyone held the slot.
     const board = postNeeds([]);
     const result = coordinate({
-      now: 5_000,
+      now: 65_000,
       money: 0,
       ramGb: 0,
       board,
@@ -90,7 +93,7 @@ describe("the coordination pass", () => {
       by: "factions",
       id: "work:CyberSec",
       priority: PRIORITY["factions:work"],
-      heldMs: 3_500,
+      heldMs: 60_000,
     });
   });
 
@@ -104,8 +107,9 @@ describe("the coordination pass", () => {
       slot: { claimId: "work:CyberSec", by: "factions", priority: PRIORITY["factions:work"], since: 1_000 },
     });
     // workForFaction silently cancels whatever was running, so losing the slot
-    // is a real loss of progress and has to be visible.
-    expect(result.digest!.arbitration.preempted).toEqual({ by: "factions", id: "work:CyberSec", heldMs: 4_000 });
+    // is a real loss of progress and has to be visible. heldMs is bucketed to
+    // 10s (see the slot test above); 4s of holding reads as 0.
+    expect(result.digest!.arbitration.preempted).toEqual({ by: "factions", id: "work:CyberSec", heldMs: 0 });
   });
 
   test("money and the work slot are allocated in the same pass", () => {

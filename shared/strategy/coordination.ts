@@ -91,6 +91,23 @@ export function needDigest(need: Need): NeedDigest {
   };
 }
 
+/** Round to 3 significant digits. The digest is a REPORT, not a ledger: the
+ * arbiter itself works on exact values, but publishing per-cent precision
+ * makes the digest differ on every pass a money amount drifts, and the
+ * change-filtered store then writes ~5 records per second for the whole run.
+ * Three digits is what any reader of the board actually consumes. */
+function sig3(value: number): number {
+  if (!Number.isFinite(value) || value === 0) return value;
+  const scale = 10 ** (Math.floor(Math.log10(Math.abs(value))) - 2);
+  return Math.round(value / scale) * scale;
+}
+
+/** Held time bucketed to 10s — "held 4m" is the reading; per-pass increments
+ * are pure churn. */
+function heldBucketMs(heldMs: number): number {
+  return Math.round(heldMs / 10_000) * 10_000;
+}
+
 export function arbitrationDigest(result: ArbiterResult, now: number, claims: readonly Claim[] = []): ArbitrationDigest {
   const claimsByKey = new Map(claims.map((claim) => [`${claim.by}\0${claim.id}\0${claim.resource}`, claim]));
   return {
@@ -100,14 +117,14 @@ export function arbitrationDigest(result: ArbiterResult, now: number, claims: re
         by: grant.by,
         id: grant.claimId,
         resource: grant.resource,
-        amount: grant.amount,
+        amount: sig3(grant.amount),
         mode: grant.mode,
         partial: grant.partial,
         ...(claim ? {
-          wanted: claim.amount,
+          wanted: sig3(claim.amount),
           priority: claim.priority,
-          ...(claim.ratePerSec !== undefined ? { ratePerSec: claim.ratePerSec } : {}),
-          ...(claim.returnPerDollarSec !== undefined ? { returnPerDollarSec: claim.returnPerDollarSec } : {}),
+          ...(claim.ratePerSec !== undefined ? { ratePerSec: sig3(claim.ratePerSec) } : {}),
+          ...(claim.returnPerDollarSec !== undefined ? { returnPerDollarSec: sig3(claim.returnPerDollarSec) } : {}),
           why: claim.why,
         } : {}),
       };
@@ -118,23 +135,23 @@ export function arbitrationDigest(result: ArbiterResult, now: number, claims: re
         by: denial.by,
         id: denial.claimId,
         resource: denial.resource,
-        wanted: denial.wanted,
-        available: denial.available,
+        wanted: sig3(denial.wanted),
+        available: sig3(denial.available),
         reason: denial.reason,
         why: denial.why,
         ...(claim ? {
           priority: claim.priority,
-          ...(claim.ratePerSec !== undefined ? { ratePerSec: claim.ratePerSec } : {}),
-          ...(claim.returnPerDollarSec !== undefined ? { returnPerDollarSec: claim.returnPerDollarSec } : {}),
+          ...(claim.ratePerSec !== undefined ? { ratePerSec: sig3(claim.ratePerSec) } : {}),
+          ...(claim.returnPerDollarSec !== undefined ? { returnPerDollarSec: sig3(claim.returnPerDollarSec) } : {}),
         } : {}),
       };
     }),
     ...(result.slot
-      ? { slot: { by: result.slot.by, id: result.slot.claimId, priority: result.slot.priority, heldMs: now - result.slot.since } }
+      ? { slot: { by: result.slot.by, id: result.slot.claimId, priority: result.slot.priority, heldMs: heldBucketMs(now - result.slot.since) } }
       : {}),
     ...(result.preempted
-      ? { preempted: { by: result.preempted.by, id: result.preempted.claimId, heldMs: result.preempted.heldMs } }
+      ? { preempted: { by: result.preempted.by, id: result.preempted.claimId, heldMs: heldBucketMs(result.preempted.heldMs) } }
       : {}),
-    remaining: result.remaining,
+    remaining: { money: sig3(result.remaining.money), ram: sig3(result.remaining.ram) },
   };
 }

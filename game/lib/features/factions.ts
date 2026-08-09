@@ -60,11 +60,18 @@ let lastResult: FactionPlan["lastResult"];
  * early wake instead of sleeping out the 30-second cadence. One-shot: cleared
  * when the wake is served. */
 let chainWake = false;
+/** The work-completion notice this driver last reacted to. The notice is a
+ * SHARED single slot (work-completion.ts) that career may take several passes
+ * to consume — without the latch, factions re-runs its full planner every
+ * 200ms pass of that window, for every crime completion, forever (measured:
+ * the factions-join profile spent most of its CPU in stepFactions at 5 Hz). */
+let seenCompletion: unknown;
 
 export function resetFactionsState(): void {
   memory = initFactionMemory();
   lastResult = undefined;
   chainWake = false;
+  seenCompletion = undefined;
 }
 
 /** Exposed for tests and the sim harness. */
@@ -620,11 +627,17 @@ const driver: FeatureDriver = {
   // A released progress lock can hand this feature Player.currentWork now;
   // do not wait for the ordinary 30-second planning cadence to use it. Same
   // for a purchase chain: the follow-up buy is enabled the moment the last
-  // one succeeded.
-  wake: () => chainWake || peekWorkCompletion() !== undefined,
+  // one succeeded. A notice already reacted to does NOT keep waking us —
+  // career can take a while to consume it, and one reaction is enough.
+  wake: () => {
+    if (chainWake) return true;
+    const notice = peekWorkCompletion();
+    return notice !== undefined && notice !== seenCompletion;
+  },
   requires: "factions",
   async tick(ctx: DriverContext) {
     chainWake = false;
+    seenCompletion = peekWorkCompletion();
     const now = Date.now();
     const view = buildFactionsView(ctx, now);
     if (!view) return;

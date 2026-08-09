@@ -481,7 +481,12 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   impl["go"] = namespace(
     {
       getGameState: () => {
-        if (!world.gates.goPlayable) unmodeled("subsystem", "go", "IPvGO has no simulation model");
+        // A profile that gates IPvGO off is a deliberate refusal, not a
+        // missing model — go IS simulated when the gate is open. A plain
+        // throw is what a locked API does in the real game, and it keeps the
+        // capability probe reading "unknown" without the unmodeled ledger
+        // counting one phantom gap per sweep for the whole run.
+        if (!world.gates.goPlayable) throw new Error("go.getGameState: IPvGO is gated off in this profile");
         return { currentPlayer: "None", whiteScore: 0, blackScore: 0, previousMove: null };
       },
     },

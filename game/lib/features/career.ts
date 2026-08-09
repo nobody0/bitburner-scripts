@@ -61,6 +61,15 @@ let lastReviewedAt: number | undefined;
 let lastWorkMode: CareerWorkMode | undefined;
 let lastCompletion: WorkCompletionNotice | undefined;
 const companyRates = new Map<string, ActivityRateSample>();
+/** action key -> earliest retry time, latched when EXECUTING that action
+ * THREW. The idle wake keeps this driver hot at frame rate so a freed slot is
+ * consumed immediately — but the same heat turns one throwing call into five
+ * stub spawns per second, forever (measured: 1,389 applyToCompany throws in
+ * five minutes against a world that refuses the call). A throw is not a
+ * refusal the next frame can cure; it gets a cool-down. Dodge refusals
+ * (no grant, no host) are NOT backed off — the next pass may fund them. */
+const executeBackoff = new Map<string, number>();
+export const EXECUTE_BACKOFF_MS = 30_000;
 
 export function resetCareerState(): void {
   lastDecision = undefined;
@@ -69,6 +78,7 @@ export function resetCareerState(): void {
   lastWorkMode = undefined;
   lastCompletion = undefined;
   companyRates.clear();
+  executeBackoff.clear();
   resetWorkCompletion();
 }
 
@@ -463,16 +473,20 @@ const driver: FeatureDriver = {
       },
     });
 
+    const actionKey = `${decision.action.type}:${decision.action.subject ?? ""}:${decision.action.field ?? ""}`;
     try {
       let handled = false;
       if (!completion && decision.action.type === "idle" && needsCompletionWatcher(ctx.state) && !workCompletionArmed()) {
         handled = await observeAndArm(ctx);
       }
-      if (decision.action.type !== "idle") handled = (await execute(ctx.ns, ctx, decision)) || handled;
+      if (decision.action.type !== "idle" && (executeBackoff.get(actionKey) ?? 0) <= now) {
+        handled = (await execute(ctx.ns, ctx, decision)) || handled;
+      }
       if (handled) lastWorkMode = careerWorkMode(ctx.state.topics.career?.currentWork?.type);
       if (completion && (handled || !ctx.grants.slot)) consumeWorkCompletion();
     } catch (error) {
       if (isScriptDeath(error)) throw error;
+      executeBackoff.set(actionKey, Date.now() + EXECUTE_BACKOFF_MS);
       lastResult = { action: decision.action.type, ok: false, detail: String(error), at: Date.now() };
     }
   },
