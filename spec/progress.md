@@ -839,13 +839,3 @@ value:
   80 GB and cannot be split further. Multi-step dodging does not help an
   indivisible call, so `factions` reports an explicit blocker rather than
   spinning. Fully fundable in BN4 or at SF4 level 3.
-
-## Open audit questions (hacking)
-
-Raised by the legacy review; none acted on without measurement, and a negative
-result is a valid outcome to record here.
-
-1. Does sizing a hack for the target's **predicted state at landing**
-   (`src/_lib/simulation.ts`) beat sizing from current state?
-2. Does `intervalFactor < 1` — the point where JIT cannot keep up — actually
-   occur in our runs, and is a shotgun fallback worth having?
