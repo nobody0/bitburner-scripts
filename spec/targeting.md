@@ -323,8 +323,20 @@ money bands held during farming.
 
 ## Known gaps
 
-- Share/exp segment is declared but not yet dispatched (leftover RAM idles).
+- Share/exp segment is declared but not yet dispatched. Its RAM (and an idle
+  prep segment's) now SPILLS to the farm instead of idling — measured −13%
+  median on hacking-early (18.5m → 16.1m, no seed worse) — but share work
+  itself still never runs.
+- The evaluator never invests in a target upgrade whose prep exceeds the
+  horizon, which on a small early fleet is every better target: joesguns
+  scores 6× n00dles at skill 30 but preps in hours on 92 GB, so the farm sits
+  on n00dles for the whole run. The ranking is right, the missing piece is
+  long-horizon prep amortization (skill growth shrinks prep time while the
+  run ages; treating prep time as a constant overprices it).
 - Port openers are acquired on demand for posted backdoor needs; general
-  infrastructure purchasing remains outside the target solver.
+  infrastructure purchasing remains outside the target solver. New cloud
+  servers are quoted as a bankroll-filtered size ladder (8 GB → max, ×4
+  steps), so fleet growth compounds once income allows instead of buying
+  8 GB forever.
 - The game driver quotes purchases as unavailable (start.js owns them); the
   sim dispatcher buys servers and upgrades home so the A/B includes economy.

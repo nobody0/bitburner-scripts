@@ -96,6 +96,28 @@ viewer's Overview tab, and is the roadmap.
   servers). A save-seeded run carries its real `openPortCount`.
 - Intelligence is 0 in the default fixture, matching a fresh character.
 
+## Run-length pathologies (found and FIXED by profiling factions-join)
+
+The 2-hour factions-join profile was unfinishable — 40+ minutes real per seed,
+~2 GB heap — while 10-minute profiles ran in a second. Three frame-rate churn
+sources compounded; the 10-minute repro dropped 102.8s → 12.1s real once fixed:
+
+- A career action whose execution THREW was re-decided and re-executed at
+  frame rate forever (1,389 `applyToCompany` throws in 5 virtual minutes;
+  26,643 `universityCourse` throws in one bn1-speedrun seed). Throws now latch
+  a 30s per-action backoff — a throw is not a refusal the next frame can cure.
+- The shared work-completion notice kept the factions wake hot for every pass
+  of the notice's multi-pass lifetime, re-running the full faction planner at
+  5 Hz. Factions now reacts once per notice.
+- The coordination digest carried per-cent-precise amounts and a per-pass
+  `heldMs`, so the change-filtered store wrote ~5 records per second for as
+  long as anyone held the work slot. Amounts are now reported at 3 significant
+  digits and hold time in 10s buckets.
+
+Related: `go.getGameState` under a profile that gates IPvGO off now throws a
+plain Error (a deliberate refusal), not `unmodeled` — it was counting one
+phantom gap per sweep in every isolated profile's report.
+
 ## Two findings this harness surfaced
 
 1. **The probe runner starves on a fresh 8 GB home** (not fixed). The sweep

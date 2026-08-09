@@ -769,6 +769,23 @@ exactly 0, it is the entire score. Both directions are pinned in
 *Evidence:* `bun run typecheck`; the full `bun test` suite, including Go rules,
 WHRNG/effect/favor parity and upstream faction-AI strategy tournaments.
 
+## Profile ledger (baseline `8995e17` → `328b7ce`, 2026-08-09)
+
+Virtual time-to-goal per profile, all listed seeds; runs archived under
+`runs/baseline-8995e17/` and `runs/final-328b7ce/`.
+
+| profile | baseline | final | note |
+|---|---|---|---|
+| factions-install | 6.0m ×3 | **4.0s ×3** | install-path convergence (drain ceiling, claim anticipation, wakes) |
+| factions-donation | 4.5m ×3 | **2.0m ×3** | same fixes carried over |
+| hacking-early | 18.5m median ×5 | **16.1m median** | idle-segment spillover; no seed worse |
+| hacking-only | NOT reached ×3 (earn:1e9) | 42–44m (earn:5e6) | goal recalibrated to fixture physics — the old goal was ~100× out of reach and gave no gradient |
+| career-karma | ~8.5m | ~8.9m | neutral; applyToCompany throw-spam 2,350 → ~18 per run |
+| factions-join | **unfinishable** (40+ min real/seed, killed) | completes (~2–4 min real); goal NOT reached ×3 | sim pathology fixed; joining CyberSec within 2h remains a strategy gap (skill growth too slow on the fresh fixture — see targeting.md long-horizon prep gap) |
+| stock-only | 5.95h / NOT / 5.26h | unchanged | untouched this pass |
+| stock-manipulation | NOT / NOT / 5.76h | NOT ×3 | ALREADY ANOMALOUS: the hacking-assisted profile trails stock-only, and the one borderline seed slipped past the horizon after the churn fixes shifted timing. Open investigation. |
+| bn1-speedrun | 2.83/3.02/2.83h | **2.53/2.43/2.71h** | −11% median; universityCourse throw-spam 26,643 → ~80 per run |
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
