@@ -786,6 +786,30 @@ Virtual time-to-goal per profile, all listed seeds; runs archived under
 | stock-manipulation | NOT / NOT / 5.76h | NOT ×3 | ALREADY ANOMALOUS: the hacking-assisted profile trails stock-only, and the one borderline seed slipped past the horizon after the churn fixes shifted timing. Open investigation. |
 | bn1-speedrun | 2.83/3.02/2.83h | **2.53/2.43/2.71h** | −11% median; universityCourse throw-spam 26,643 → ~80 per run |
 
+## Profile ledger, second pass (`328b7ce` → `4864d7f`, 2026-08-09)
+
+The open-items pass: NeuroFlux price parity, the stock-manipulation regression,
+and long-horizon prep investment. Runs under `runs/final3/`.
+
+| profile | before | after | note |
+|---|---|---|---|
+| factions-install | 4.0s, **9** NFG levels | 46.8s, **41** NFG levels | NFG parity: the plan compounded the 1.9x queue multiplier per LEVEL where the game charges it once per NAME; the drain now converts ~$1.4b that used to be deleted by the reset. The slower clock IS the win. |
+| factions-donation | 2.0m | 2.0m | unchanged |
+| hacking-early | 16.1m median | 16.1m median | unchanged after making the fleet reserve demand-driven (a standing reserve had cost +28%) |
+| hacking-only | 42.3m median | 44.0m median | −4%: occasional demand-driven reserve engagement, inside the acceptance bound; buys probe liveness |
+| career-karma | ~8.9m | ~8.9m | unchanged |
+| factions-join | goal unreached | goal unreached | still blocked on early skill growth; long-horizon prep correctly refuses a ~10h prep on a 23 GB share |
+| stock-only | 5.95h/NOT/5.26h | unchanged | untouched |
+| stock-manipulation | NOT/NOT/5.76h | NOT/NOT/**5.26h** | sampler starvation fixed (probe.skipped 374 → 0, market ticks 906 → full), influence filtered to real hosts, farm graduates to joesguns at 46.7m via long-horizon prep. `stockOps` still 0 — see the open item below. |
+| bn1-speedrun | 2.43–2.71h | 2.69–2.75h | mostly the honest cost of complete NFG drains at every install (the faster number rode the pricing bug); ~3% is the reserve, measured by disabling it |
+
+**Open (stock-manipulation, economic layer):** influence intents publish for
+hours but no influencing op ever launches (`stats.stockOps` = 0): positions
+deploy in the first minutes and entries never revisit the ranking head, so
+`promoteManipulable` is inert — verified by three byte-identical A/B runs
+(preference 0.25 → 0.6, and a farm-target preference). The next lever is the
+entry/rotation mechanic itself, not the ranking.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
