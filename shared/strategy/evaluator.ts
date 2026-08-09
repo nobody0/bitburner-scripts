@@ -1,4 +1,5 @@
 import { makeHackContext, type HackContext } from "../formulas.ts";
+import { evaluatePrep, farmIncomeRate } from "./economics.ts";
 import type { ServerView, WorldView } from "../world.ts";
 import type { Segment, TargetDirective } from "./directive.ts";
 import {
@@ -24,30 +25,34 @@ import {
 export const SLICE_MIN_MS = 2_000;
 export const GATE_MIN_MS = 5_000;
 export const SKILL_DELTA = 0.02;
-/** Prep candidate must beat the farm target by this much to be worth prepping. */
-export const PREP_MARGIN = 0.05;
 /** Farm switch hysteresis on same-generation scores. */
 export const SWITCH_MARGIN = 0.1;
 /** Minimum time on a target before switching away. */
 export const DWELL_MS = 60_000;
-/** Candidate this much better reorders segments so prep outranks farm. */
-export const REORDER_MARGIN = 0.25;
 export const HORIZON_MIN_MS = 60_000;
 export const HORIZON_MAX_MS = 1_800_000;
-/** Default segment shares (the reorder rule swaps farm/prep priority). */
+/** Segment shares. A larger prep share was A/B-tested and LOST: RAM-bound
+ * prep economics always prefer it in the model (the farm's loss is
+ * share-invariant), but the dispatcher's per-pass op cap means prep cannot
+ * actually use it — the farm just shrank for nothing. Median +14% time to
+ * earn:1e9 with the fixed 25% share vs the adaptive/reordering variants. */
 export const FARM_SHARE = 0.75;
 export const PREP_SHARE = 0.25;
-export const REORDER_PREP_SHARE = 0.6;
 /** Fleet RAM change that invalidates cached (RAM-capped) solutions. */
 export const FLEET_DELTA = 0.1;
 /** Smallest sensible batch cap: one hack thread plus its support. */
-const WORKER_RAM_FLOOR = 16;
+export const WORKER_RAM_FLOOR = 16;
 
 /** What the dispatcher knows about placeable RAM, from its heap. */
 export interface FleetCapacity {
   fleetGb: number;
-  /** Largest single host (hack must land as one call). */
+  /** Largest single FREE block (hack must land as one call; standing foreign
+   * usage like the controller's own footprint is already subtracted). */
   largestBlockGb: number;
+  /** Free GB per host, descending, bounded prefix — feeds the solver's
+   * pipeline-aware launch-rate bound. Optional so hand-built capacities in
+   * tests keep working; without it the solver scores per RAM-second only. */
+  hostBlocksGb?: number[];
 }
 
 export interface TargetEntry {
@@ -174,6 +179,11 @@ export function stepEvaluator(
   const caps: RamCaps = {
     batchGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SHARE),
     hackBlockGb: Math.max(WORKER_RAM_FLOOR, capacity.largestBlockGb),
+    // The farm segment is the launch-rate denominator; hostBlocksGb lets the
+    // solver count hack SLOTS, so a block only one host can hold is priced at
+    // the depth-1 pipeline it actually buys (the 32 GB-home stall).
+    ...(capacity.hostBlocksGb ? { hostBlocksGb: capacity.hostBlocksGb } : {}),
+    farmGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SHARE),
   };
   if (memory.fleetGb <= 0 || Math.abs(fleetGb - memory.fleetGb) / Math.max(1, memory.fleetGb) > FLEET_DELTA) {
     memory.fleetGb = fleetGb;
@@ -267,67 +277,83 @@ export function stepEvaluator(
   const goalHorizonMs = currentRate > 0 ? (goalRemaining / currentRate) * 1000 : HORIZON_MAX_MS;
   const horizonMs = Math.min(HORIZON_MAX_MS, Math.max(HORIZON_MIN_MS, Math.min(goalHorizonMs, horizonCapMs)));
 
-  // Farm pick: best PREPPED candidate, with hysteresis + dwell against the
-  // incumbent. An unprepped better candidate becomes the prep target instead.
+  // Farm pick: the best PREPPED candidate — `ranked` is sorted, so the first
+  // prepped one is it — with hysteresis + dwell against the incumbent. An
+  // unprepped better candidate becomes the prep target instead.
   let farmEntry: TargetEntry | undefined = current?.solution ? current : undefined;
   let switched: { from?: string; to: string } | undefined;
   const dwellOk = now - memory.farmSince >= DWELL_MS;
-  for (const candidate of ranked) {
-    const plan = prepOf(candidate);
-    if (!plan?.prepped) continue;
-    const better = candidate.solution!.score > currentScore * (1 + SWITCH_MARGIN);
-    if (!farmEntry || (better && dwellOk) || !current?.solution) {
-      if (candidate !== farmEntry) {
-        switched = { from: farmEntry?.statics.hostname, to: candidate.statics.hostname };
-        farmEntry = candidate;
-        memory.farmSince = now;
-      }
-      break;
+  const bestPrepped = ranked.find((candidate) => prepOf(candidate)?.prepped);
+  if (bestPrepped && bestPrepped !== farmEntry) {
+    const better = bestPrepped.solution!.score > currentScore * (1 + SWITCH_MARGIN);
+    const noIncumbent = !farmEntry || !current?.solution;
+    if (noIncumbent || (better && dwellOk)) {
+      switched = { from: farmEntry?.statics.hostname, to: bestPrepped.statics.hostname };
+      farmEntry = bestPrepped;
+      memory.farmSince = now;
     }
-    break;
   }
   if (!farmEntry) {
-    // Nothing prepped yet: farm the best eligible target anyway (the
-    // dispatcher will only fire hacks once it is actually prepped).
-    farmEntry = ranked[0];
+    // Nothing prepped yet: farm the best target anyway (the dispatcher preps
+    // it, then fires hacks). "Best" here MUST be prep-aware, not raw score:
+    // the pipeline-aware score can rank a 50M-money server above a small one,
+    // but on a small fleet its prep takes hours — hours of zero income. Weigh
+    // each candidate by the income it can deliver within the horizon AFTER
+    // its own prep finishes on the farm segment's budget.
+    const prepBudgetGb = Math.max(1, fleetGb * FARM_SHARE);
+    let bestValue = -1;
+    let best: TargetEntry | undefined;
+    for (const candidate of ranked) {
+      const plan = prepOf(candidate);
+      if (!plan) continue;
+      const value = candidate.solution!.score * Math.max(0, horizonMs - prepTimeSeconds(plan, prepBudgetGb) * 1000);
+      if (value > bestValue) {
+        bestValue = value;
+        best = candidate;
+      }
+    }
+    farmEntry = bestValue > 0 ? best : ranked[0];
     if (farmEntry && farmEntry.statics.hostname !== currentHost) {
       switched = { from: currentHost, to: farmEntry.statics.hostname };
       memory.farmSince = now;
     }
   }
 
-  // Prep pick: highest rate*(T - prepTime), must beat the farm target.
-  const farmScore = farmEntry?.solution?.score ?? 0;
+  // Prep pick: highest opportunity-cost NET over the horizon — income gained
+  // after the switch minus income the farm loses while the prep segment holds
+  // its share (shared/strategy/economics.ts; the legacy 15-minute rule
+  // generalized to the farm's depth cap). A flat score margin can't see that
+  // a 3-hour prep on a 30-minute horizon is worthless, or that a depth-capped
+  // farm preps for free. Measured: −14% median time to earn:1e9 vs the old
+  // 5%-margin rate·(T−prepTime) pick, 10/10 seeds.
+  const farmModel = farmEntry?.solution;
+  const currentRateNow = farmIncomeRate(farmModel, fleetGb);
   let prepEntry: TargetEntry | undefined;
   let prepPlan: PrepPlan | undefined;
-  let prepValue = 0;
-  const prepGbGuess = Math.max(1, fleetGb * 0.5);
+  let bestNet = 0.02 * currentRateNow * (horizonMs / 1_000); // churn epsilon
   for (const candidate of ranked) {
     if (candidate === farmEntry) continue;
-    if (candidate.solution!.score <= farmScore * (1 + PREP_MARGIN)) continue;
     const plan = prepOf(candidate);
     if (!plan || plan.prepped) continue;
-    const rate = candidate.solution!.score * fleetGb;
-    const value = rate * Math.max(0, horizonMs - prepTimeSeconds(plan, prepGbGuess) * 1000);
-    if (value > prepValue) {
-      prepValue = value;
-      prepEntry = candidate;
-      prepPlan = plan;
-    }
+    const economics = evaluatePrep({
+      current: farmModel,
+      candidate: candidate.solution!,
+      plan,
+      fleetGb,
+      horizonMs,
+      shares: [PREP_SHARE],
+    });
+    if (!economics || economics.net <= bestNet) continue;
+    bestNet = economics.net;
+    prepEntry = candidate;
+    prepPlan = plan;
   }
 
-  // Segment order: prep outranks farm when the candidate is much better.
-  const reorder = prepEntry !== undefined && prepEntry.solution!.score >= farmScore * (1 + REORDER_MARGIN);
-  const segments: Segment[] = [];
-  if (reorder) {
-    segments.push(
-      { kind: "prep", gb: fleetGb * REORDER_PREP_SHARE },
-      { kind: "farm", gb: fleetGb * (1 - REORDER_PREP_SHARE) },
-    );
-  } else {
-    segments.push({ kind: "farm", gb: fleetGb * FARM_SHARE }, { kind: "prep", gb: fleetGb * PREP_SHARE });
-  }
-  segments.push({ kind: "share", gb: 0 });
+  const segments: Segment[] = [
+    { kind: "farm", gb: fleetGb * FARM_SHARE },
+    { kind: "prep", gb: fleetGb * PREP_SHARE },
+    { kind: "share", gb: 0 },
+  ];
 
   memory.directive = {
     farm:

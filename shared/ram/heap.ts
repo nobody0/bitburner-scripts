@@ -352,6 +352,6 @@ export class Heap {
   }
 }
 
-function coreEffect(cores: number): number {
+export function coreEffect(cores: number): number {
   return 1 + (Math.max(1, cores) - 1) / 16;
 }

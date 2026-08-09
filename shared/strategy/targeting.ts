@@ -62,7 +62,15 @@ export interface ManipulationValue {
   side: "long" | "short";
 }
 
+/** Batch shape a solution was solved for. HWGW is the default; HGW drops the
+ * first weaken (the grow is overscaled to fight the hack's security rise, the
+ * single weaken covers both fortifies) — a worse $/GB/sec but 3 processes per
+ * batch instead of 4, which is what matters when the BROWSER's process count
+ * is the binding constraint. */
+export type CycleKind = "hwgw" | "hgw";
+
 export interface CycleSolution {
+  kind: CycleKind;
   /** True when every feasible integer hack-thread count was evaluated. */
   exact: boolean;
   /** Effective steal fraction per successful hack (H * percent, capped). */
@@ -128,6 +136,13 @@ const MAX_STEAL = 0.95;
 /** Exhaustive integer search is cheap enough below this inclusive boundary. */
 export const EXACT_THREAD_LIMIT = 1_024;
 
+/** One batch per pipeline lane per interval, in seconds. The dispatcher's
+ * INTERVAL_MS is derived from this (4 spacers of 200 ms), so the solver's
+ * launch-rate floor and the dispatcher's anchor spacing cannot drift apart. */
+export const BATCH_INTERVAL_S = 0.8;
+/** HGW batches have three landings, so their interval is 3 spacers. */
+export const HGW_INTERVAL_S = 0.6;
+
 /** RAM feasibility caps. A batch that cannot be placed is worthless however
  * well it scores, so the search only considers placeable thread counts:
  * `batchGb` bounds the whole batch, `hackBlockGb` bounds the hack op alone —
@@ -136,10 +151,27 @@ export const EXACT_THREAD_LIMIT = 1_024;
 export interface RamCaps {
   batchGb: number;
   hackBlockGb: number;
+  /** FREE GB per host, descending (a bounded prefix is fine). When present
+   * together with `farmGb`, the score becomes pipeline-aware: a hack block so
+   * large that only one host can hold one caps the LAUNCH RATE — however well
+   * the batch scores per RAM-second — because every op holds its RAM from
+   * launch until it lands ~weakenTime later. */
+  hostBlocksGb?: number[];
+  /** GB the farm segment actually gets; the launch-rate denominator. */
+  farmGb?: number;
 }
 
 export const UNLIMITED_RAM: RamCaps = { batchGb: Infinity, hackBlockGb: Infinity };
 
+/** Solve the steady-state HWGW cycle for one target.
+ *
+ * UNIT CONTRACT: thread counts are ONE-CORE EFFECT UNITS. The evaluator always
+ * solves at `cores = 1`; the heap's `coreAware` allocation converts effect
+ * units to real threads per host (grow/weaken get the core bonus, hack never
+ * does). Solving at home's core count instead would overshoot whenever an op
+ * spills to a 1-core host — do not "fix" the pessimism that way. The residual
+ * cost of the contract is scoring only: ramSec slightly overestimates
+ * grow/weaken RAM on a multi-core home, near-uniformly across targets. */
 export function solveCycle(
   ctx: HackContext,
   statics: TargetStatics,
@@ -150,6 +182,10 @@ export function solveCycle(
    *  the two ways a target makes money are traded off on one scale instead of
    *  the market silently commandeering the farm. */
   manipulation?: ManipulationValue,
+  /** Batch shape. "hgw" overscales the grow against the hack's security rise
+   *  and sizes ONE weaken to cover both fortifies; landing order H→G→W a
+   *  spacer apart, so the batch interval is 3 spacers instead of 4. */
+  kind: CycleKind = "hwgw",
 ): CycleSolution | undefined {
   if (!isEligible(ctx, statics)) return undefined;
   const { minDifficulty, moneyMax, requiredHackingSkill, serverGrowth } = statics;
@@ -160,6 +196,7 @@ export function solveCycle(
   if (k === -Infinity) return undefined;
   const hackTimeS = hackTimeSeconds(ctx, minDifficulty, requiredHackingSkill);
   const weakenPerThread = weakenEffect(ctx, 1, cores);
+  const intervalS = kind === "hgw" ? HGW_INTERVAL_S : BATCH_INTERVAL_S;
 
   const stealBound = Math.max(1, Math.floor(MAX_STEAL / percent));
   const hackBlockBound = Number.isFinite(caps.hackBlockGb)
@@ -175,10 +212,18 @@ export function solveCycle(
     if (hackThreads < 1) return undefined;
     const steal = Math.min(1, hackThreads * percent);
     const postHack = moneyMax * (1 - steal);
-    const growThreadCount = growThreads(k, moneyMax, postHack, moneyMax);
+    // HGW: no weaken lands between the hack and the grow, so the grow fires
+    // at min + 0.002·H — weaker growth per thread, hence the OVERSCALE. The
+    // single weaken covers both fortifies.
+    const growK = kind === "hgw" ? growthLogPerThread(ctx, minDifficulty + 0.002 * hackThreads, serverGrowth, cores) : k;
+    if (growK === -Infinity) return undefined;
+    const growThreadCount = growThreads(growK, moneyMax, postHack, moneyMax);
     if (!Number.isFinite(growThreadCount)) return undefined;
-    const weaken1 = Math.ceil((0.002 * hackThreads) / weakenPerThread);
-    const weaken2 = Math.ceil((0.004 * growThreadCount) / weakenPerThread);
+    const weaken1 = kind === "hgw" ? 0 : Math.ceil((0.002 * hackThreads) / weakenPerThread);
+    const weaken2 =
+      kind === "hgw"
+        ? Math.ceil((0.002 * hackThreads + 0.004 * growThreadCount) / weakenPerThread)
+        : Math.ceil((0.004 * growThreadCount) / weakenPerThread);
     // ScriptHackMoneyGain, NOT ScriptHackMoney: the latter is already folded
     // into `percent` (and therefore `steal`, which sizes the grow). This is the
     // player's cut of what was drained, and it is 0 in BN8 — where the farm
@@ -188,12 +233,11 @@ export function solveCycle(
     // One influencing op per batch, and only one: the hack takes what the grow
     // puts back, so flagging both would cancel the nudges out. The roll is
     // against the FRACTION of moneyMax moved, which is `steal` on either side —
-    // and it is unweighted by hack chance for a grow (a grow cannot fail) and
-    // weighted for a hack (a failed hack drains nothing, so it influences
-    // nothing).
-    const stockIncome = manipulation
-      ? (manipulation.side === "long" ? steal : chance * steal) * manipulation.valuePerOp
-      : 0;
+    // and BOTH sides carry the hack chance: a failed hack drains nothing (no
+    // short influence), and it leaves the server at moneyMax so the paired
+    // grow moves a zero fraction (no long influence either). Fixes the
+    // long-side overvaluation spec/targeting.md used to acknowledge.
+    const stockIncome = manipulation ? chance * steal * manipulation.valuePerOp : 0;
     // RAM-seconds: op RAM held for its own duration (1x/3.2x/4x hack time).
     const ramSec =
       hackTimeS *
@@ -205,8 +249,30 @@ export function solveCycle(
     if (hackGb > caps.hackBlockGb) return undefined;
     const ram = hackGb + WORKER_RAM.grow * growThreadCount + WORKER_RAM.weaken * (weaken1 + weaken2);
     if (ram > caps.batchGb) return undefined;
+    let score = (income + stockIncome) / ramSec;
+    if (caps.farmGb !== undefined && Number.isFinite(caps.farmGb) && caps.farmGb > 0 && caps.hostBlocksGb) {
+      // Pipeline-aware score. The dispatcher execs all four ops at launch, so
+      // each holds its RAM until it lands ~weakenTime later; a contiguous hack
+      // slot therefore serves at most one batch per weakenTime. With S slots
+      // the launch period cannot beat weakenTime/S no matter how much total
+      // RAM is free — the regime behind the 32 GB-home stall, where a hack
+      // block sized to the whole home had exactly one slot and the pipeline
+      // collapsed to depth 1. The period also floors at the batch interval
+      // and at the RAM-bound rate; when RAM binds, the score degenerates to
+      // exactly income/ramSec, so small fleets are unaffected.
+      const weakenTimeS = 4 * hackTimeS;
+      const slotsNeeded = Math.max(1, Math.ceil(weakenTimeS / intervalS));
+      let slots = 0;
+      for (const hostGb of caps.hostBlocksGb) {
+        slots += Math.floor(hostGb / hackGb);
+        if (slots >= slotsNeeded) break; // beyond full depth, slots are free
+      }
+      if (slots < 1) return undefined;
+      const period = Math.max(ramSec / caps.farmGb, weakenTimeS / slots, intervalS);
+      score = (income + stockIncome) / (period * caps.farmGb);
+    }
     return {
-      score: (income + stockIncome) / ramSec,
+      score,
       hackThreads,
       growThreadCount,
       weaken1,
@@ -225,6 +291,7 @@ export function solveCycle(
       (candidate.score === incumbent.score && candidate.hackThreads < incumbent.hackThreads));
 
   const finish = (best: CycleEval, exact: boolean): CycleSolution => ({
+    kind,
     exact,
     stealFraction: best.steal,
     hackThreads: best.hackThreads,

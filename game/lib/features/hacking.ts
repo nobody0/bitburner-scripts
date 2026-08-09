@@ -56,10 +56,18 @@ export function hackingState(): DriverState {
 export function resetHackingState(): void {
   const globals = workerGlobals();
   globals.worker_info!.clear();
+  globals.worker_jobs!.clear();
+  globals.worker_wake!.clear();
   globals.dispatch_done!.length = 0;
   state = initDriver();
   pumpMaxMs = 0;
   lastRollup = 0;
+  lastTotals = undefined;
+  moneyRateEma = 0;
+  expRateEma = 0;
+  lastPumpAt = 0;
+  wakesThisFrame = 0;
+  wakePumps = 0;
   switched = undefined;
   backdoorAttempted.clear();
   backdoorInFlight = false;
@@ -73,6 +81,20 @@ export function resetHackingState(): void {
  * slots. */
 let pumpMaxMs = 0;
 let lastRollup = 0;
+/** EMA-smoothed income rates over rollup deltas (~30 s time constant), so
+ * career's income comparison sees a stable figure instead of batch spikes. */
+let lastTotals: { money: number; exp: number; at: number } | undefined;
+let moneyRateEma = 0;
+let expRateEma = 0;
+/** Wake-pass throttles: a wake pump only runs when the last pump of ANY kind
+ * is at least this old, and at most this many wake pumps run per frame (the
+ * promise already coalesces same-instant completions; the cap covers a spread
+ * of landings inside one frame). */
+const WAKE_MIN_MS = 25;
+const WAKE_MAX_PER_FRAME = 4;
+let lastPumpAt = 0;
+let wakesThisFrame = 0;
+let wakePumps = 0;
 
 export function takePumpMaxMs(): number {
   const value = pumpMaxMs;
@@ -93,6 +115,25 @@ export function takeTargetSwitch(): { from: string; to: string } | undefined {
 function rollup(game: GameState, driver: DriverState, target: string, prepTarget?: string, segOrder?: string[]): void {
   const stats = driver.memory.dispatch.stats;
   const targetSolveExact = driver.memory.dispatch.evaluator.directive.farm?.solution.exact;
+
+  const now = Date.now();
+  if (lastTotals) {
+    const dtSec = (now - lastTotals.at) / 1_000;
+    if (dtSec > 0) {
+      const alpha = Math.min(1, dtSec / 30);
+      moneyRateEma += ((stats.moneyEarned - lastTotals.money) / dtSec - moneyRateEma) * alpha;
+      expRateEma += ((stats.expEarned - lastTotals.exp) / dtSec - expRateEma) * alpha;
+    }
+  }
+  lastTotals = { money: stats.moneyEarned, exp: stats.expEarned, at: now };
+
+  // Target vitals come from the sweep snapshot: the 1 Hz rollup must not add
+  // ns getters of its own, and the hot-path live reads already feed the
+  // dispatcher — this is display/telemetry, 30 s staleness is fine.
+  const targetServer = target ? game.topics.servers?.[target] : undefined;
+  const heap = driver.memory.dispatch.heap;
+  const segmentGb = driver.memory.dispatch.segmentGb;
+
   set(game, "farm", {
     target,
     ...(targetSolveExact !== undefined ? { targetSolveExact } : {}),
@@ -101,13 +142,30 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
       : {}),
     ...(prepTarget !== undefined ? { prepTarget } : {}),
     ...(segOrder !== undefined ? { segOrder } : {}),
+    mode: driver.memory.dispatch.mode,
+    modeWhy: driver.memory.dispatch.modeWhy,
     inFlight: { ...driver.memory.dispatch.inFlight },
     launched: { ...stats.launched },
     landed: { ...stats.landed },
+    moneyRate: moneyRateEma,
+    expRate: expRateEma,
+    ...(targetServer?.hackDifficulty !== undefined ? { security: targetServer.hackDifficulty } : {}),
+    ...(targetServer?.minDifficulty !== undefined ? { minSecurity: targetServer.minDifficulty } : {}),
+    ...(targetServer?.moneyAvailable !== undefined ? { money: targetServer.moneyAvailable } : {}),
+    ...(targetServer?.moneyMax !== undefined ? { moneyMax: targetServer.moneyMax } : {}),
+    ramPie: {
+      farm: segmentGb.farm,
+      prep: segmentGb.prep,
+      share: segmentGb.share,
+      free: heap.freeTotal(),
+      reserve: heap.reservedTotal,
+    },
     allocFails: stats.allocFails,
+    execs: stats.execs,
     execFails: driver.execFails,
     batchesSkipped: stats.batchesSkipped,
     pumpMaxMs: takePumpMaxMs(),
+    wakePumps,
     totals: { moneyEarned: stats.moneyEarned, hacks: stats.hacks },
   });
 }
@@ -395,41 +453,96 @@ async function buyPortOpener(ctx: DriverContext, portsRequired: number): Promise
   }
 }
 
+/** One dispatcher pump: build the view, drain completions, plan, launch, and
+ * track the target switch. Shared by the scheduled tick and the wake pass —
+ * the wake pass IS a pump, just triggered by a landing instead of the clock. */
+function runPump(
+  ns: NS,
+  game: GameState,
+  caps: DriverContext["caps"],
+  homeReserveGb: number,
+  installSec: number | undefined,
+): ReturnType<typeof pump> | undefined {
+  const servers = game.topics.servers;
+  const player = game.topics.player;
+  if (!servers || !player || Object.keys(servers).length === 0) return undefined;
+
+  const driver = hackingState();
+
+  // Only the farm and prep targets get live reads; everything else comes
+  // from the sweep snapshot.
+  const active = driver.memory.dispatch.evaluator.directive;
+  const hot = [active.farm?.host, active.prep?.host].filter((h): h is string => Boolean(h));
+  // The stock feature's manipulation intent rides along: hack pushes a
+  // symbol's forecast down and grow pushes it up, so in a node where the
+  // market matters the farm's best target is not the richest server but the
+  // one whose price movement is worth the most. See spec/targeting.md.
+  const view = buildView(
+    ns,
+    driver,
+    servers,
+    player,
+    hot,
+    effectiveBitNodeMultipliers(
+      caps.bitNode,
+      sfLevel(caps.sourceFiles, 12),
+      game.topics.progression?.multipliers,
+    ),
+    game.topics.stock?.manipulation,
+  );
+  const completions = drainCompletions(driver);
+
+  const started = Date.now();
+  // pooling: farm batch ops ride pooled serve workers (worker.ts serve mode),
+  // collapsing exec churn — the browser-side cost of a fresh WorkerScript per
+  // op — to near zero at depth.
+  const result = pump(ns, driver, view, completions, {
+    homeReserveGb,
+    pooling: true,
+    ...(installSec !== undefined ? { horizonMs: installSec * 1_000 } : {}),
+  });
+  const elapsed = Date.now() - started;
+  if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
+  lastPumpAt = Date.now();
+
+  const target = result.directive.farm?.host ?? "";
+  const current = gameGlobal.farmTarget ?? "";
+  if (target !== current) {
+    switched = { from: current, to: target };
+    gameGlobal.farmTarget = target;
+  }
+  return result;
+}
+
+/** The wake pass: a worker completion just landed (the controller raced its
+ * tick sleep against `dispatch_wake`). One trimmed pump — no rollup, no
+ * infrastructure, no board service. Its value is WHEN it runs: heap RAM frees
+ * up to a full spacer early, and after a W2 landing the hot-path live reads
+ * see the target provably at min security, so recomputed durations and
+ * isPrepped are exact. Throttled: never within WAKE_MIN_MS of any pump, at
+ * most WAKE_MAX_PER_FRAME per frame. */
+export function pumpOnWake(
+  ns: NS,
+  game: GameState,
+  caps: DriverContext["caps"],
+  homeReserveGb: number,
+  installSec: number | undefined,
+): void {
+  const now = Date.now();
+  if (now - lastPumpAt < WAKE_MIN_MS) return;
+  if (wakesThisFrame >= WAKE_MAX_PER_FRAME) return;
+  wakesThisFrame++;
+  wakePumps++;
+  runPump(ns, game, caps, homeReserveGb, installSec);
+}
+
 export const hacking: FeatureDriver = {
   id: "hacking",
   everyMs: 200,
   async tick(ctx: DriverContext) {
     const { ns, state: game, homeReserveGb } = ctx;
-    const servers = game.topics.servers;
-    const player = game.topics.player;
-    if (!servers || !player || Object.keys(servers).length === 0) return;
+    wakesThisFrame = 0;
 
-    const driver = hackingState();
-
-    // Only the farm and prep targets get live reads; everything else comes
-    // from the sweep snapshot.
-    const active = driver.memory.dispatch.evaluator.directive;
-    const hot = [active.farm?.host, active.prep?.host].filter((h): h is string => Boolean(h));
-    // The stock feature's manipulation intent rides along: hack pushes a
-    // symbol's forecast down and grow pushes it up, so in a node where the
-    // market matters the farm's best target is not the richest server but the
-    // one whose price movement is worth the most. See spec/targeting.md.
-    const view = buildView(
-      ns,
-      driver,
-      servers,
-      player,
-      hot,
-      effectiveBitNodeMultipliers(
-        ctx.caps.bitNode,
-        sfLevel(ctx.caps.sourceFiles, 12),
-        game.topics.progression?.multipliers,
-      ),
-      game.topics.stock?.manipulation,
-    );
-    const completions = drainCompletions(driver);
-
-    const started = Date.now();
     // The reserve is computed per pass, not constant: it grows to cover the
     // largest dodge step any unlocked feature declares, so an expensive
     // singularity probe stays affordable instead of being crowded out by the
@@ -442,19 +555,10 @@ export const hacking: FeatureDriver = {
     // finite bound the evaluator gets here. Converted to ms at this boundary:
     // everything below planFarm is ms-native.
     const installSec = usableForecastSec(ctx.horizons.install);
-    const result = pump(ns, driver, view, completions, {
-      homeReserveGb,
-      ...(installSec !== undefined ? { horizonMs: installSec * 1_000 } : {}),
-    });
-    const elapsed = Date.now() - started;
-    if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
-
+    const result = runPump(ns, game, ctx.caps, homeReserveGb, installSec);
+    if (!result) return;
+    const driver = hackingState();
     const target = result.directive.farm?.host ?? "";
-    const current = gameGlobal.farmTarget ?? "";
-    if (target !== current) {
-      switched = { from: current, to: target };
-      gameGlobal.farmTarget = target;
-    }
 
     // 1 Hz rollup — never per-op state (it would be ~3 writes per 16 ms).
     const now = Date.now();

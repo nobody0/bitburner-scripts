@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { makeHackContext, type HackContext } from "../../shared/formulas.ts";
+import { growThreads, growthLogPerThread, makeHackContext, type HackContext } from "../../shared/formulas.ts";
 import { prepTimeSeconds, solveCycle, solvePrep, type TargetStatics } from "../../shared/strategy/targeting.ts";
 import { applyGrow, applyHack, applyWeaken, serverFromSpec, type SimServer } from "../core/effects.ts";
 import { mockPerson, mockServer } from "../core/mocks.ts";
@@ -48,12 +48,104 @@ function resetPerson(person: ReturnType<typeof mockPerson>, skill: number): void
   person.exp.hacking = calculateExp(skill);
 }
 
+describe("pipeline-aware solve", () => {
+  test("a hack block that collapses the pipeline to one slot loses to multi-slot blocks", () => {
+    // Generous batch RAM so the total-RAM cap does not bind: the plain solve
+    // sizes the hack toward the whole 26 GB block (one slot -> one batch per
+    // weakenTime). With the pipeline inputs that candidate's launch rate is
+    // priced in and a smaller multi-slot block must win.
+    const { ctx } = makeScenario(300);
+    const plain = solveCycle(ctx, JOESGUNS, 1, { batchGb: 200, hackBlockGb: 26 })!;
+    const aware = solveCycle(ctx, JOESGUNS, 1, {
+      batchGb: 200,
+      hackBlockGb: 26,
+      hostBlocksGb: [26, 8, 8, 8, 4],
+      farmGb: 200,
+    })!;
+    expect(plain).toBeDefined();
+    expect(aware).toBeDefined();
+    const hackGb = (threads: number) => threads * 1.7;
+    const slots = (gb: number) => [26, 8, 8, 8, 4].reduce((sum, host) => sum + Math.floor(host / gb), 0);
+    // The plain solve takes (nearly) the whole big host: at most one slot.
+    expect(slots(hackGb(plain.hackThreads))).toBe(1);
+    // The aware solve keeps at least two slots' worth of launch rate.
+    expect(slots(hackGb(aware.hackThreads))).toBeGreaterThanOrEqual(2);
+    // And when RAM is the binding constraint the two scores agree exactly —
+    // the pipeline term degenerates to income/ramSec on small fleets.
+    const smallPlain = solveCycle(ctx, JOESGUNS, 1, { batchGb: 24, hackBlockGb: 8 })!;
+    const smallAware = solveCycle(ctx, JOESGUNS, 1, {
+      batchGb: 24,
+      hackBlockGb: 8,
+      hostBlocksGb: [8, 8, 8],
+      farmGb: 24,
+    })!;
+    expect(smallAware.hackThreads).toBe(smallPlain.hackThreads);
+  });
+
+  test("stock manipulation income is chance-weighted on BOTH sides", () => {
+    // Low skill vs joesguns -> chance well below 1. A failed hack moves no
+    // money and leaves the server at moneyMax, so the paired grow moves a zero
+    // fraction: long and short influence must be priced identically.
+    const { ctx } = makeScenario(30);
+    const long = solveCycle(ctx, JOESGUNS, 1, undefined, { valuePerOp: 5_000, side: "long" })!;
+    const short = solveCycle(ctx, JOESGUNS, 1, undefined, { valuePerOp: 5_000, side: "short" })!;
+    expect(long.chance).toBeLessThan(1);
+    expect(long.hackThreads).toBe(short.hackThreads);
+    expect(long.stockIncomePerBatch).toBeCloseTo(short.stockIncomePerBatch, 10);
+  });
+});
+
+describe("solveCycle hgw", () => {
+  test("an HGW batch round-trips exactly through the game effects", () => {
+    const skill = 300;
+    const { ctx, person, server } = makeScenario(skill);
+    const solution = solveCycle(ctx, JOESGUNS, 1, undefined, undefined, "hgw")!;
+    expect(solution).toBeDefined();
+    expect(solution.kind).toBe("hgw");
+    expect(solution.weaken1Threads).toBe(0);
+
+    // Land H -> G -> W: the grow fires at min + hack fortify (no weaken in
+    // between), the single weaken erases both fortifies.
+    applyHack(server, person, solution.hackThreads, 0);
+    resetPerson(person, skill);
+    expect(server.hackDifficulty).toBeCloseTo(server.minDifficulty + 0.002 * solution.hackThreads, 10);
+    applyGrow(server, person, solution.growThreads, 1);
+    resetPerson(person, skill);
+    expect(server.moneyAvailable).toBe(server.moneyMax); // overscaled grow restores at elevated sec
+    applyWeaken(server, person, solution.weaken2Threads, 1);
+    expect(server.hackDifficulty).toBe(server.minDifficulty);
+  });
+
+  test("the HGW weaken covers BOTH fortifies and the score never beats HWGW", () => {
+    const { ctx } = makeScenario(300);
+    const hwgw = solveCycle(ctx, JOESGUNS)!;
+    const hgw = solveCycle(ctx, JOESGUNS, 1, undefined, undefined, "hgw")!;
+    // The single weaken erases the hack fortify AND the (overscaled) grow
+    // fortify — 0.05/thread at one core.
+    expect(hgw.weaken2Threads).toBe(Math.ceil((0.002 * hgw.hackThreads + 0.004 * hgw.growThreads) / 0.05));
+    // The overscale, pinned against HWGW math at the SAME steal: growth is
+    // weaker at min + hack-fortify security, so restoring the same steal
+    // takes at least as many grow threads as it would from min security.
+    // (Scores are NOT ordered in general — HGW's single ceil'd weaken can
+    // save a thread that outweighs a small overscale, and the mode is chosen
+    // on process pressure, not score.)
+    const kAtMin = growthLogPerThread(ctx, JOESGUNS.minDifficulty, JOESGUNS.serverGrowth, 1);
+    const atMinGrow = growThreads(
+      kAtMin,
+      JOESGUNS.moneyMax,
+      JOESGUNS.moneyMax * (1 - hgw.stealFraction),
+      JOESGUNS.moneyMax,
+    );
+    expect(hgw.growThreads).toBeGreaterThanOrEqual(atMinGrow);
+    expect(Math.abs(hgw.score - hwgw.score) / hwgw.score).toBeLessThan(0.05);
+  });
+});
+
 describe("solveCycle", () => {
   test("one solved batch round-trips exactly through the game effects", () => {
     const skill = 300;
     const { ctx, person, server } = makeScenario(skill);
     const solution = solveCycle(ctx, JOESGUNS)!;
-    expect(solution).toBeDefined();
     // (100-minSec)/100 caps chance below 1 even at high skill.
     expect(solution.chance).toBeCloseTo(0.9319, 3);
 

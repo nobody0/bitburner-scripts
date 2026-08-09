@@ -5,13 +5,15 @@ import type { HostRam } from "../../shared/ram/placement.ts";
 import type { Claim, SlotState } from "../../shared/strategy/arbiter.ts";
 import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../shared/strategy/coordination.ts";
 import type { Need } from "../../shared/strategy/needs.ts";
-import { forecastAt, unknownForecast } from "../../shared/strategy/progression/forecast.ts";
+import { forecastAt, unknownForecast, usableForecastSec } from "../../shared/strategy/progression/forecast.ts";
 import { FEATURE_IDS, type FeatureId } from "../../shared/features/ids.ts";
 import { homeReserveGb } from "../../shared/ram/reserve.ts";
 import { priceCalls } from "./dodge.ts";
 import { isScriptDeath } from "./errors.ts";
 import { ContributionCache } from "./features/contributions.ts";
-import { hackingState, takeTargetSwitch } from "./features/hacking.ts";
+import { hackingState, pumpOnWake, takeTargetSwitch } from "./features/hacking.ts";
+import { armWake, sleepOrWake } from "./wake.ts";
+import { workerGlobals } from "./worker-shared.ts";
 import { takeRouteChange } from "./features/remaining.ts";
 import { driverEnabled, featureModule, featureRamDemand, grantsFor, resetAllFeatures, selectDueModules } from "./features/index.ts";
 import type { ClaimContext, NeedContext } from "./features/index.ts";
@@ -379,10 +381,31 @@ export async function runController(
 
     // Absolute deadline with catch-up clamp; a `sleep(TICK_MS)` loop
     // accumulates drift instead.
+    //
+    // The sleep is raced against the worker-completion wake (game/lib/wake.ts):
+    // a landing frees heap RAM immediately and — after a weaken — is the one
+    // provable min-security instant, so the hacking driver gets an extra
+    // trimmed pump right then instead of up to a full spacer later. The realm
+    // timer (never ns.sleep — concurrent ns calls kill the script) is
+    // sim-virtualized, so both worlds order this identically. Re-armed BEFORE
+    // pumping so a completion landing during the pump is never lost.
     nextTick += TICK_MS;
-    const clock = Date.now();
+    let clock = Date.now();
     if (nextTick < clock - TICK_MS) nextTick = clock;
-    await ns.sleep(Math.max(0, nextTick - clock));
+    let wakePromise = armWake(workerGlobals());
+    while ((clock = Date.now()) < nextTick) {
+      if ((await sleepOrWake(nextTick - clock, wakePromise)) === "tick") break;
+      wakePromise = armWake(workerGlobals());
+      if (active.unlocked["hacking"] !== "yes") continue;
+      try {
+        pumpOnWake(ns, state, active, reserveGb, usableForecastSec(horizons.install));
+      } catch (error) {
+        if (isScriptDeath(error)) throw error;
+        TELEMETRY: if (__TELEMETRY__) {
+          tel!.event("feature.failed", { feature: "hacking", phase: "wake", error: String(error) });
+        }
+      }
+    }
   }
 }
 

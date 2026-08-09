@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { SPACER_MS } from "../../shared/strategy/dispatch.ts";
+import { SPACER_MS, type DispatchOptions } from "../../shared/strategy/dispatch.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
 import { PREPPED_MONEY_FRACTION, PREPPED_SEC_TOLERANCE } from "../../shared/strategy/targeting.ts";
 import type { Action, CompletionEvent } from "../../shared/world.ts";
@@ -18,7 +18,7 @@ interface Harness {
   samples: { host: string; sec: number; minSec: number; money: number; maxMoney: number }[];
 }
 
-function harness(options: { seed?: number; homeRam?: number } = {}): Harness {
+function harness(options: { seed?: number; homeRam?: number; plan?: DispatchOptions } = {}): Harness {
   const world = new SimWorld({
     seed: options.seed ?? 1,
     network: DEFAULT_NETWORK,
@@ -45,7 +45,7 @@ function harness(options: { seed?: number; homeRam?: number } = {}): Harness {
     }
     const inbox = pending;
     pending = [];
-    const result = planFarm(world.view(), memory, inbox);
+    const result = planFarm(world.view(), memory, inbox, options.plan);
     memory = result.memory;
     const failed: number[] = [];
     let executed = 0;
@@ -120,6 +120,33 @@ describe("HWGW dispatcher", () => {
     }
   });
 
+  test("hgw mode lands H -> G -> W, one spacer apart, and stays in band", () => {
+    const h = harness({ homeRam: 256, plan: { modeOverride: "hgw" } });
+    h.run(900_000);
+    expect(h.memory.dispatch.mode).toBe("hgw");
+
+    const landings = h.completions.filter((c) => c.batched).sort((a, b) => a.at - b.at);
+    const hacks = landings.filter((l) => l.kind === "hack");
+    expect(hacks.length).toBeGreaterThan(3);
+    const at = (time: number, kind: string): boolean =>
+      landings.some((l) => l.kind === kind && Math.abs(l.at - time) < 1e-6);
+    for (const hack of hacks) {
+      // Three landings: the grow follows the hack DIRECTLY (no weaken slot),
+      // the single weaken lands last.
+      expect(at(hack.at + SPACER_MS, "grow")).toBe(true);
+      expect(at(hack.at + 2 * SPACER_MS, "weaken")).toBe(true);
+      expect(at(hack.at + SPACER_MS, "weaken")).toBe(false);
+    }
+
+    // The overscaled grow + double-cover weaken keep the bands exactly as
+    // HWGW does — that is what makes the mode swap safe.
+    const farmed = h.samples.filter((s) => s.maxMoney > 0);
+    for (const sample of farmed) {
+      expect(sample.sec).toBeLessThanOrEqual(sample.minSec + PREPPED_SEC_TOLERANCE);
+    }
+    expect(Math.max(...farmed.map((s) => s.money / s.maxMoney))).toBeGreaterThan(0.99);
+  });
+
   test("never overcommits RAM and never leaks reservations", () => {
     const h = harness({ homeRam: 128 });
     h.run(1_200_000);
@@ -189,6 +216,302 @@ describe("HWGW dispatcher", () => {
     }
     expect(worst).toBeLessThan(10);
     console.log(`bench: worst dispatcher pass ${worst.toFixed(3)}ms`);
+  });
+});
+
+// --- prep waves and the in-flight ledger --------------------------------------
+
+describe("prep waves", () => {
+  /** Pre-rooted world with every server at min security; `moneyFraction`
+   * controls whether targets start prepped. Returns a fresh plan closure. */
+  function prepWorld(moneyFraction: number) {
+    const world = new SimWorld({ seed: 3, network: DEFAULT_NETWORK, homeRam: 256, startingMoney: 1e9 });
+    world.person.skills.hacking = 500;
+    for (const server of world.servers.values()) {
+      if (server.hostname === "home") continue;
+      server.hasAdminRights = true;
+      server.hackDifficulty = server.minDifficulty;
+      server.moneyAvailable = server.moneyMax * moneyFraction;
+    }
+    let memory = initFarm();
+    const plan = (completions: CompletionEvent[] = []) => {
+      const result = planFarm(world.view(), memory, completions);
+      memory = result.memory;
+      return result;
+    };
+    return { world, plan, memory: () => memory };
+  }
+
+  test("the grow phase launches its weaken2 cover as weakens, not extra grows", () => {
+    // A modest deficit (85% money) keeps the whole wave inside the per-pass
+    // op cap, so the LAUNCHED thread ratio reflects the plan's G:W2 ratio
+    // instead of cap truncation.
+    const { plan } = prepWorld(0.85);
+    const launch = plan(); // gate + prep wave on the (unprepped) farm target, same pass
+    const farmHost = launch.directive.farm?.host;
+    expect(farmHost).toBeDefined();
+    const waveOps = launch.actions.filter(
+      (a): a is Extract<Action, { type: "hack" | "grow" | "weaken" }> =>
+        (a.type === "grow" || a.type === "weaken" || a.type === "hack") && a.target === farmHost,
+    );
+    const growThreads = waveOps.filter((a) => a.type === "grow").reduce((sum, a) => sum + a.threads, 0);
+    const weakenThreads = waveOps.filter((a) => a.type === "weaken").reduce((sum, a) => sum + a.threads, 0);
+    // At min security the wave is G + W2 TOGETHER: both kinds present, in
+    // roughly the 0.004·G/weakenEffect cover ratio (well under 20%).
+    expect(waveOps.some((a) => a.type === "hack")).toBe(false);
+    expect(growThreads).toBeGreaterThan(0);
+    expect(weakenThreads).toBeGreaterThan(0);
+    expect(weakenThreads).toBeLessThan(growThreads * 0.2);
+  });
+
+  test("transient batch landings cannot start prep before the restoring op", () => {
+    const { world, plan, memory } = prepWorld(1);
+    const batchPass = plan(); // prepped target -> real HWGW batches, first pass
+    const farmHost = batchPass.directive.farm!.host;
+    const batchOps = batchPass.actions.filter(
+      (a): a is Extract<Action, { type: "hack" | "grow" | "weaken" }> =>
+        "opId" in a && a.opId !== undefined && (a as { additionalMsec?: number }).additionalMsec !== undefined,
+    );
+    expect(batchOps.length).toBeGreaterThan(0);
+
+    const completion = (a: (typeof batchOps)[number]): CompletionEvent => ({
+      kind: a.type,
+      opId: a.opId!,
+      target: a.target,
+      threads: a.threads,
+      result: a.type === "hack" ? { success: true, moneyGained: 1 } : {},
+    });
+
+    // Model the live midpoint after an ordinary hack landing. The rest of the
+    // farm batch is still tracked, so this completion-driven pass must not
+    // mistake the deliberately low money/high security state for a prep need.
+    const server = world.servers.get(farmHost)!;
+    server.moneyAvailable = server.moneyMax * 0.2;
+    server.hackDifficulty = server.minDifficulty + 0.5;
+    const transientPass = plan([completion(batchOps[0]!)]);
+    expect(
+      transientPass.actions.filter((a) =>
+        (a.type === "grow" || a.type === "weaken") &&
+        a.target === farmHost &&
+        (a as { additionalMsec?: number }).additionalMsec === undefined
+      ),
+    ).toHaveLength(0);
+    expect(memory().dispatch.prepInFlight.get(farmHost) ?? 0).toBe(0);
+
+    // Once every normal batch op has settled, the same genuine desync may
+    // launch exactly one prep wave.
+    const wavePass = plan(batchOps.slice(1).map(completion));
+    const waveOps = wavePass.actions.filter(
+      (a) =>
+        (a.type === "grow" || a.type === "weaken") &&
+        a.target === farmHost &&
+        (a as { additionalMsec?: number }).additionalMsec === undefined,
+    );
+    expect(waveOps.length).toBeGreaterThan(0);
+    const inWave = memory().dispatch.prepInFlight.get(farmHost);
+    expect(inWave).toBe(waveOps.length);
+
+    const whileWave = plan();
+    expect(memory().dispatch.prepInFlight.get(farmHost)).toBe(inWave);
+    expect(
+      whileWave.actions.filter((a) => (a.type === "grow" || a.type === "weaken") && a.target === farmHost),
+    ).toHaveLength(0);
+
+    // Exp accrued for every landed batch op, not just successful hacks.
+    expect(memory().dispatch.stats.expEarned).toBeGreaterThan(0);
+
+    // Once the WAVE ops complete, the counter drains and the next wave fires.
+    const waveCompletions: CompletionEvent[] = waveOps.map((a) => ({
+      kind: a.type as "grow" | "weaken",
+      opId: (a as { opId?: number }).opId!,
+      target: farmHost,
+      threads: (a as { threads: number }).threads,
+      result: {},
+    }));
+    const afterWave = plan(waveCompletions);
+    expect(memory().dispatch.prepInFlight.get(farmHost) ?? 0).toBe(
+      afterWave.actions.filter((a) => (a.type === "grow" || a.type === "weaken") && a.target === farmHost).length,
+    );
+  });
+});
+
+// --- shotgun -------------------------------------------------------------------
+
+describe("shotgun mode", () => {
+  test("every op of a wave lands the same tick, in launch order H, G, W — and the bands hold", () => {
+    const h = harness({ homeRam: 512, plan: { modeOverride: "shotgun" } });
+    h.run(900_000);
+    expect(h.memory.dispatch.mode).toBe("shotgun");
+
+    const landings = h.completions.filter((c) => c.batched);
+    const hacks = landings.filter((l) => l.kind === "hack");
+    expect(hacks.length).toBeGreaterThan(3);
+
+    // Group by landing instant: each wave's hack/grow/weaken share ONE tick.
+    const byInstant = new Map<number, string[]>();
+    for (const l of landings) {
+      const group = byInstant.get(l.at) ?? [];
+      group.push(l.kind);
+      byInstant.set(l.at, group);
+    }
+    for (const [, kinds] of byInstant) {
+      expect(kinds).toContain("hack");
+      expect(kinds).toContain("grow");
+      expect(kinds).toContain("weaken");
+      // The tie-break proof: completions are recorded in EFFECT order, and a
+      // same-tick wave applies each batch as hack -> grows -> weakens before
+      // the NEXT batch's hack — the launch order, because equal-deadline
+      // timers fire in registration order. Any other transition means the
+      // per-batch interleave broke (ops split into blocks, so grows and
+      // weakens may repeat within a batch; the hack is always one block).
+      const allowed = new Set(["hack>grow", "grow>grow", "grow>weaken", "weaken>weaken", "weaken>hack"]);
+      expect(kinds[0]).toBe("hack");
+      expect(kinds[kinds.length - 1]).toBe("weaken");
+      for (let i = 1; i < kinds.length; i++) {
+        expect(allowed.has(`${kinds[i - 1]}>${kinds[i]}`)).toBe(true);
+      }
+    }
+
+    // After each wave the target is back at (minSec, ~moneyMax): the same-tick
+    // sequencing means the sampled state between waves never drifts.
+    const farmed = h.samples.filter((s) => s.maxMoney > 0);
+    for (const sample of farmed) {
+      expect(sample.sec).toBeLessThanOrEqual(sample.minSec + PREPPED_SEC_TOLERANCE);
+    }
+    expect(Math.max(...farmed.map((s) => s.money / s.maxMoney))).toBeGreaterThan(0.99);
+    expect(h.memory.dispatch.stats.hacks).toBeGreaterThan(0);
+  });
+
+  test("falls back to the four-op shape when no HGW solution fits", () => {
+    const world = new SimWorld({ seed: 7, network: DEFAULT_NETWORK, homeRam: 512, startingMoney: 1e9 });
+    world.person.skills.hacking = 500;
+    for (const server of world.servers.values()) {
+      if (server.hostname === "home") continue;
+      server.hasAdminRights = true;
+      server.hackDifficulty = server.minDifficulty;
+      server.moneyAvailable = server.moneyMax;
+    }
+
+    let memory = initFarm();
+    const initial = planFarm(world.view(), memory, [], { modeOverride: "shotgun" });
+    memory = initial.memory;
+    reportFailed(
+      memory,
+      initial.actions.flatMap((a) => "opId" in a && a.opId !== undefined ? [a.opId] : []),
+    );
+    const host = initial.directive.farm!.host;
+    // Cache the exact state hgwSolutionFor records when the larger H/G/W
+    // support shape cannot fit the current generation's RAM caps.
+    memory.dispatch.hgw = { host, generation: memory.dispatch.evaluator.generation };
+
+    const fallback = planFarm(world.view(), memory, [], { modeOverride: "shotgun" });
+    memory = fallback.memory;
+    const tracked = fallback.actions.flatMap((a) => {
+      if (!("opId" in a) || a.opId === undefined) return [];
+      const entry = memory.dispatch.tracked.get(a.opId);
+      return entry?.target === host && entry.landing !== undefined
+        ? [{ kind: entry.kind, landing: entry.landing }]
+        : [];
+    });
+    expect(tracked.some((op) => op.kind === "hack")).toBe(true);
+    const hackLanding = Math.min(...tracked.filter((op) => op.kind === "hack").map((op) => op.landing));
+    const kindsAt = (landing: number) => tracked.filter((op) => op.landing === landing).map((op) => op.kind);
+    expect(kindsAt(hackLanding + SPACER_MS)).toContain("weaken");
+    expect(kindsAt(hackLanding + 2 * SPACER_MS)).toContain("grow");
+    expect(kindsAt(hackLanding + 3 * SPACER_MS)).toContain("weaken");
+  });
+});
+
+// --- pooled workers ------------------------------------------------------------
+
+describe("worker pooling", () => {
+  test("repeat batches reuse workers; workerExit frees the reservation", () => {
+    // Pure-ledger test: completions are synthesized rather than executed, so
+    // it exercises exactly the pool accounting (the game path runs the real
+    // serve worker in sim/tests/ns.test.ts). Big home: pooling self-gates on
+    // the batch launch period, so the fleet must support full depth.
+    const world = new SimWorld({ seed: 3, network: DEFAULT_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+    world.person.skills.hacking = 500;
+    for (const server of world.servers.values()) {
+      if (server.hostname === "home") continue;
+      server.hasAdminRights = true;
+      server.hackDifficulty = server.minDifficulty;
+      server.moneyAvailable = server.moneyMax;
+    }
+    let memory = initFarm();
+    // Pooling engages only under live-op pressure (it is a browser-RAM relief
+    // valve, not a throughput win): seed the ledger past the threshold with
+    // inert entries on a host the heap does not know.
+    for (let i = 0; i < 1_100; i++) {
+      memory.dispatch.tracked.set(1_000_000 + i, {
+        hostname: "ghost",
+        target: "",
+        kind: "weaken",
+        segment: "share",
+        gb: 0,
+        wave: false,
+      } as never);
+    }
+    const plan = (completions: CompletionEvent[] = []) => {
+      const result = planFarm(world.view(), memory, completions, { pooling: true });
+      memory = result.memory;
+      return result;
+    };
+
+    const first = plan();
+    const firstOps = first.actions.filter(
+      (a): a is Extract<Action, { type: "hack" | "grow" | "weaken" }> & { worker: { id: number; spawn: boolean } } =>
+        (a.type === "hack" || a.type === "grow" || a.type === "weaken") && "worker" in a && a.worker !== undefined,
+    );
+    expect(firstOps.length).toBeGreaterThan(0);
+    // Cold pool: every op spawns.
+    expect(firstOps.every((a) => a.worker.spawn)).toBe(true);
+    const usedAfterSpawn = memory.dispatch.heap.usedTotal;
+    const spawnedWorkers = new Set(firstOps.map((a) => a.worker.id));
+    const execsAfterFirst = memory.dispatch.stats.execs;
+
+    // All jobs complete -> workers idle; the SECOND wave must reuse them:
+    // no new heap use, no new execs, spawn:false everywhere.
+    const done: CompletionEvent[] = firstOps.map((a) => ({
+      kind: a.type,
+      opId: a.opId!,
+      target: a.target,
+      threads: a.threads,
+      result: a.type === "hack" ? { success: true, moneyGained: 1 } : {},
+    }));
+    const second = plan(done);
+    const secondOps = second.actions.filter(
+      (a): a is Extract<Action, { type: "hack" | "grow" | "weaken" }> & { worker: { id: number; spawn: boolean } } =>
+        (a.type === "hack" || a.type === "grow" || a.type === "weaken") && "worker" in a && a.worker !== undefined,
+    );
+    expect(secondOps.length).toBeGreaterThan(0);
+    expect(secondOps.every((a) => !a.worker.spawn)).toBe(true);
+    expect(secondOps.every((a) => spawnedWorkers.has(a.worker.id))).toBe(true);
+    // Every serve loop is sequential: no worker may receive two timed jobs
+    // from the same atomic planning pass (notably both W1 and W2).
+    expect(new Set(secondOps.map((a) => a.worker.id)).size).toBe(secondOps.length);
+    expect(memory.dispatch.heap.usedTotal).toBe(usedAfterSpawn);
+    expect(memory.dispatch.stats.execs).toBe(execsAfterFirst);
+
+    // Workers exit (idle timeout): reservations come back, exactly once.
+    const secondDone: CompletionEvent[] = secondOps.map((a) => ({
+      kind: a.type,
+      opId: a.opId!,
+      target: a.target,
+      threads: a.threads,
+      result: a.type === "hack" ? { success: true, moneyGained: 1 } : {},
+    }));
+    const exits: CompletionEvent[] = [...spawnedWorkers].map((id) => ({ kind: "workerExit", opId: id }));
+    plan([...secondDone, ...exits]);
+    expect(memory.dispatch.pool.workers.size).toBeGreaterThanOrEqual(0);
+    // Everything the pool held is free again (the pass may have launched a
+    // fresh wave of spawns; subtract what is currently tracked).
+    const stillHeld = [...memory.dispatch.pool.workers.values()].reduce((sum, w) => sum + w.gb, 0);
+    expect(memory.dispatch.heap.usedTotal).toBeCloseTo(stillHeld, 6);
+    // A duplicate exit must not double-free.
+    const usedNow = memory.dispatch.heap.usedTotal;
+    plan([...exits]);
+    expect(memory.dispatch.heap.usedTotal).toBeGreaterThanOrEqual(usedNow);
   });
 });
 

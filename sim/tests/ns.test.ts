@@ -110,6 +110,38 @@ describe("running game/ in the synthetic world", () => {
     expect(farm?.totals?.["moneyEarned"]).toBeGreaterThan(1e6);
   });
 
+  test("worker completions wake the dispatcher between ticks", async () => {
+    // Farm records are dirty-field deltas, so track the running maximum
+    // rather than reading one arbitrary record.
+    let maxWakePumps = 0;
+    let landed = 0;
+    await runGame({
+      goal: parseGoals(["earn:1e6"]),
+      seed: 1,
+      horizonMs: 60 * 60_000,
+      homeRam: 16,
+      onRecord: (line) => {
+        const record = JSON.parse(line) as {
+          kind: string;
+          key?: string;
+          data?: { wakePumps?: number; landed?: Record<string, number> };
+        };
+        if (record.kind !== "state" || record.key !== "farm") return;
+        maxWakePumps = Math.max(maxWakePumps, record.data?.wakePumps ?? 0);
+        const l = record.data?.landed;
+        if (l) landed = Math.max(landed, (l["hack"] ?? 0) + (l["grow"] ?? 0) + (l["weaken"] ?? 0));
+      },
+    });
+
+    // Ops landed, so their atExit poked dispatch_wake — the controller must
+    // have run early pumps, not just the 200 ms tick. The throttle (25 ms,
+    // ≤4/frame) means wakePumps < landings, but it must be non-zero: zero
+    // means the wake resolver was never armed (the pre-wake bug, where
+    // spec/targeting.md documented a mechanism that did not exist).
+    expect(landed).toBeGreaterThan(0);
+    expect(maxWakePumps).toBeGreaterThan(0);
+  });
+
   test("the capability gate detects the BitNode and derives unlocks", async () => {
     let caps: { bitNode?: number; unlocked?: Record<string, string> } | undefined;
     await runGame({

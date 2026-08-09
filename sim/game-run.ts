@@ -94,6 +94,8 @@ const REALM_SLOTS = [
   "state",
   "farmTarget",
   "worker_info",
+  "worker_jobs",
+  "worker_wake",
   "dispatch_done",
   "dispatch_wake",
   "dodge_func",

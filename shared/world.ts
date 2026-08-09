@@ -92,6 +92,11 @@ export interface HgwAction {
   /** Pass `{stock: true}` so this op moves the target organization's share
    *  price. Set on grows for a long and hacks for a short, never both. */
   stock?: boolean;
+  /** Pooled-worker routing (game driver only; the sim's planner path ignores
+   *  it — landings are identical either way). `spawn: true` execs a new
+   *  serve-mode worker and queues this op as its first job; `spawn: false`
+   *  posts the job to an already-idle worker. Absent = one-shot worker. */
+  worker?: { id: number; spawn: boolean };
 }
 
 export type Action =
@@ -103,9 +108,11 @@ export type Action =
   | { type: "upgradeHomeCore" }
   | { type: "sleep"; ms: number };
 
-/** Delivered to the driver when a scheduled op settles. */
+/** Delivered to the driver when a scheduled op settles. `workerExit` reports a
+ * pooled serve-worker's process ending (idle timeout, kill, reload): its opId
+ * is the WORKER id and its arrival is when the worker's RAM actually frees. */
 export interface CompletionEvent {
-  kind: "hack" | "grow" | "weaken" | "sleep";
+  kind: "hack" | "grow" | "weaken" | "sleep" | "workerExit";
   opId?: number;
   target?: string;
   threads?: number;

@@ -408,11 +408,28 @@ real loss:
   integer candidates through 1,024 threads and labels larger-domain results
   heuristic via `exact: false`; an independent oracle compares scores in the
   same units, including `hackTimeSec`.
-- **Q1 — predictive sizing at landing?** **OPEN.** The strongest idea in the
-  predecessor repo; needs a measured A/B before adoption.
-- **Q4 — shotgun fallback?** **OPEN, low priority.** `intervalFactor < 1` does
-  occur on small early fleets, but that is also where total throughput is
-  tiny, so the upside is small.
+- **Q1 — predictive sizing at landing?** **CLOSED, adopted.**
+  `shared/strategy/prediction.ts` folds the dispatcher's own in-flight ledger
+  (tracked ops now carry landings and core-adjusted effect threads) to the
+  hack's landing instant; the batch skips outright when predicted security
+  exceeds the prepped tolerance and re-solves its grow/W2 cover from the
+  predicted post-hack money. Fold parity vs the vendored effects, tie-break
+  determinism and the resize/skip rules are pinned in
+  `sim/tests/prediction.test.ts`. The A/B (planner driver, earn:1e9 ×10 seeds,
+  earn:1e6 ×10) measured NEUTRAL on clean runs — the sim's steady bands rarely
+  enter the tolerance window — and it was adopted as the correctness net for
+  the states that do (90 % money admits, in-flight drift, desyncs). Unlike the
+  legacy `simulation.ts` timeline it replaces conceptually, there is NO cache
+  to invalidate: a fresh fold per launch is microseconds.
+- **Q4 — shotgun fallback?** **CLOSED, implemented.** `decideMode`
+  (`shared/strategy/mode.ts`) drops to shotgun when weakenTime holds fewer
+  than two interleaved batches; the wave lands every op in one engine tick in
+  launch order H → G → W (see spec/targeting.md, farm modes). The legacy
+  scripts' central trick — same-tick FIFO as the ordering mechanism, with
+  each op padded to weakenTime from its own start — carried over, minus their
+  empty hack-size guard and with the landing-state fold reproducing the
+  sequencing pure-side. Tie-break and band proofs pinned in
+  `sim/tests/dispatch.test.ts`.
 
 ### Found by running in the REAL GAME
 

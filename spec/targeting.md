@@ -45,6 +45,16 @@ the batch, `hackBlockGb` bounds the hack op alone (hack must land as ONE call
 fits, a bisection finds the largest feasible batch. Without this the solver
 happily returns a 240 GB batch for an 84 GB fleet and nothing ever launches.
 
+**The score is pipeline-aware when the caps carry `hostBlocksGb` + `farmGb`**
+(the dispatcher always passes them). Every op holds its RAM from launch until
+it lands ~weakenTime later, so a contiguous hack slot serves at most one batch
+per weakenTime: with `S = Σ floor(hostFreeGb/hackGb)` slots the launch period
+is `P = max(R/farmGb, weakenTime/S, INTERVAL)` and the score becomes
+`E/(P·farmGb)`. When RAM binds this degenerates to exactly `E/R`, so small
+fleets are unaffected; what it changes is the regime where one oversized hack
+block monopolises the largest host and collapses the pipeline to depth 1 — the
+32 GB-home stall (`spec/simulator.md`, finding 2, fixed).
+
 `solvePrep` returns W1→G→W2 from the *current* state plus a latency floor:
 `prepTime = max(weakenTime, ramSec / prepGb)`.
 
@@ -63,19 +73,71 @@ forces a re-score, so an argmax never mixes generations.
 `runRemaining` is the endgame route's expected remaining run time
 (`spec/strategy/endgame.md`) — in the game the goal term is ∞, so the run
 horizon is the only finite bound, and it binds once the expected end is
-nearer than 30 min. Prep pick maximizes `rate·(T − prepTime)` and must beat
-the farm target by 5 %.
+nearer than 30 min.
+
+**Prep pick is opportunity-cost based** (`shared/strategy/economics.ts` — the
+legacy scripts' 15-minute rule generalized): `net = gain − lost` where
+`gain = (rateNew − rateCur)·max(0, T − prepTime)` and
+`lost = [rateCur(fleet) − rateCur(fleet·(1−share))]·prepTime`, with rates
+saturating at the farm's **depth cap** (`ceil(weakenTime/INTERVAL)·ramPerBatch`
+GB) — so a depth-capped farm preps for free, and a 3-hour prep on a 30-minute
+horizon is visibly worthless. Highest positive `net` wins, over a 2%-of-horizon
+churn epsilon. `prepTime` uses the real prep segment share (25%), not a guess.
+Measured: −14% median time to earn:1e9 vs the old 5%-margin
+`rate·(T − prepTime)` pick (planner driver, 10/10 seeds faster).
+
+When NOTHING is prepped yet, the farm pick itself is prep-aware: candidates are
+ranked by `score·max(0, T − prepTime)` rather than raw score, because the
+pipeline-aware score can rank a rich server above a small one whose prep the
+early fleet can actually finish.
+
 A farm switch requires **all** of: candidate prepped (sec ≤ min+1, money ≥ 90 %
 max), +10 % hysteresis on same-generation scores, 60 s dwell.
-**Segment order** is `[farm, prep, share]`, flipping to `[prep, farm, share]`
-when the candidate beats the current target by ≥25 % — spend now to switch
-sooner.
+**Segment order** is fixed `[farm, prep, share]`. The old ≥25 % reorder rule
+(and an economics-driven 60 % prep share) was A/B-tested and LOST — the model
+prefers a big share because the farm's loss is share-invariant when RAM-bound,
+but the dispatcher's per-pass prep op cap means prep cannot actually use it.
 
 ## HWGW dispatcher (`shared/strategy/dispatch.ts`)
 
 Four ops land H → W1 → G → W2, `SPACER = 200 ms` apart; each batch is anchored
 at least `4·SPACER` after the previous one (collision guard, pure bookkeeping —
 no ns reads). `additionalMsec = landing − now − duration`.
+
+**Farm modes** (`shared/strategy/mode.ts`) are a separate axis from target
+choice: the evaluator answers WHICH target, `decideMode` answers HOW to farm
+it, per pass, with a 30 s dwell against flapping.
+
+- **hwgw** (default): the four-op batch above.
+- **hgw**: drop W1, overscale the grow against the hack's fortify (its growth
+  log is taken at `min + 0.002·H`), one weaken covers both fortifies; landings
+  H → G → W a spacer apart, batch interval `3·SPACER`. Score is near-parity
+  (±5 %, pinned) — the point is **3 processes per batch instead of 4**, for
+  when the BROWSER's process count, not game RAM, binds. Entered above 1,500
+  live ops, released below 1,000 (hysteresis). The HGW solution is solved
+  lazily for the chosen farm target only (`solveCycle(..., "hgw")`, cached per
+  context generation); target RANKING stays on the HWGW score — the orderings
+  track. Effects round-trip pinned in `sim/tests/targeting.test.ts`, landing
+  order + bands in `sim/tests/dispatch.test.ts` (`modeOverride: "hgw"`).
+- **shotgun**: when `weakenTime` holds fewer than 2 interleaved batches
+  (`intervalFactor < 1`, Q4 — the extreme-late-game regime where hack times
+  collapse below the spacer grid). Thread math is HGW's taken to the limit:
+  every op of every batch in a wave lands the SAME engine tick
+  (`additionalMsec = weakenTime − ownDuration`; the weakens land naturally),
+  and the engine's same-tick rule — equal-deadline timers fire in
+  registration order — turns LAUNCH order into arrival order. Batches are
+  therefore emitted **H, G, W** (hack-first, unlike batched modes'
+  weaken-first landings): after batch N's weaken the server is back at
+  (minSec, moneyMax), so batch N+1's sizing is exact at its own arrival, and
+  the landing-state fold reproduces the same sequencing pure-side (equal
+  landings sort by opId = launch order). No anchor, no depth cap — one wave is
+  everything the farm budget holds, up to 256 batches per pass — and always
+  one-shot workers (nothing repeats inside a pool window at that structure).
+  The tie-break proof (per-batch H → G+ → W+ effect order inside one tick,
+  bands held across waves) is pinned in `sim/tests/dispatch.test.ts`.
+
+`DispatchOptions.modeOverride` forces a mode (the sim's A/B lever); the rollup
+reports `mode` + `modeWhy`.
 
 **Durations are computed at launch from live state**, never from the cached
 solution: security drift or a level-up between solve and launch would otherwise
@@ -84,9 +146,23 @@ land ops off their slots. Our formulas are bit-identical to the game's
 engine exactly — verified by asserting observed landing times in
 `sim/tests/dispatch.test.ts`.
 
+**Thread counts are sized against the PREDICTED landing state** (Q1,
+`shared/strategy/prediction.ts`): every tracked op carries its landing and
+core-adjusted effect threads, and before each batch the dispatcher folds that
+in-flight ledger to the hack's landing. Predicted security above the prepped
+tolerance skips the batch (counted in `batchesSkipped`); otherwise the hack
+keeps its solved fraction and the grow/W2 cover is re-solved from the
+predicted post-hack money, so a target admitted at 90 % money no longer
+under-grows into a downward drift. Fold parity with the vendored effects is
+pinned in `sim/tests/prediction.test.ts`.
+
 Prep fires in **non-overlapping waves per host** (a new wave only when the host
-has nothing in flight), so plans can never overshoot. Prep work always spreads;
-only hack demands contiguity.
+has no WAVE ops in flight — the counter is kept symmetric on the tracked
+ledger, so farm-batch completions on a desynced farm host can never unlock an
+overlapping second wave), so plans can never overshoot. A security wave is W1
+alone; a money wave launches G and its W2 cover TOGETHER, the cover sized to
+the grow threads that actually launched under the op cap and budget. Prep work
+always spreads; only hack demands contiguity.
 
 ## RAM engine (`shared/ram/heap.ts`)
 
@@ -119,6 +195,36 @@ opId. It reads its descriptor from `worker_info` on globalThis (written
 `dispatch_done` mailbox and pokes `dispatch_wake`, so RAM frees on kills and
 reloads too. A fresh realm (game reload) has no descriptor: the worker exits
 silently and the controller rebuilds its ledger from the next sweep.
+
+**Pooled serve workers** (`worker.ts` serve mode + `shared/strategy/worker-pool.ts`):
+a serve worker has fixed kind and threads for its process's life, loops over
+jobs from the `worker_jobs` realm mailbox (parked on a `worker_wake` resolver
+raced against a 5 s idle timeout), and reports a `workerExit` completion when
+its process ends — the moment its heap reservation frees (the WORKER owns the
+RAM; job completions merely flip it idle). Ops compose from idle workers
+(exact-match for hack — one call — greedy largest-first for the divisible
+kinds) plus a batch-atomically allocated remainder that spawns new workers.
+Pooling is a BROWSER-RAM relief valve, not a throughput win: idle workers
+strand game RAM between jobs (measured −20 % time-to-goal with it always on),
+so it self-gates on live-op pressure (`POOL_PRESSURE_OPS`, just before HGW's
+threshold) AND on the batch launch period fitting the idle window
+(`POOL_REUSE_WINDOW_MS` — early-game depth-1 pipelines would strand every
+worker). `stats.execs` (fresh processes) against `launched` (ops) is the churn
+figure. Pinned by the pool-ledger test in `sim/tests/dispatch.test.ts` and the
+real serve-loop tests in `sim/tests/worker-serve.test.ts`.
+
+The `dispatch_wake` poke is the trigger for the **weaken-landing wake**
+(`game/lib/wake.ts`): the controller races its tick sleep against a promise
+armed over that slot and, when a completion wins the race, runs one trimmed
+dispatcher pump immediately (`pumpOnWake`). Landings free heap RAM up to a
+full spacer earlier, and the pump after a W2 landing reads the target at its
+provable min-security instant — the legacy scripts' `weakenFinishedProm` idea,
+realized without any new pure logic because durations are recomputed at launch
+from the live view anyway. Same-instant completions coalesce into one wake
+(the resolver disarms itself), wake pumps are throttled (25 ms since any pump,
+≤4 per frame), and the race uses the sim-virtualized realm timer, never
+`ns.sleep` — concurrent ns calls from one script are fatal. Cumulative count
+in the rollup as `wakePumps`.
 
 ## Stock manipulation: the second income term
 
@@ -155,8 +261,9 @@ Five things make this work rather than merely look plausible:
   profitable.
 - **Both steady-state sides are weighted by hack chance.** A failed hack leaves
   the server at `moneyMax`; the later grow then adds no money, so neither op has
-  any influence probability. `solveCycle` currently omits this factor for longs
-  and therefore overvalues long-side manipulation below 100% hack chance.
+  any influence probability. `solveCycle` weights both sides by `chance`
+  accordingly (pinned by the long/short parity test in
+  `sim/tests/targeting.test.ts`).
 - **Prep grows are flagged too, for a long.** The op is launched either way, so
   the nudge is free. Prep never hacks, so a short gets nothing from that path.
 

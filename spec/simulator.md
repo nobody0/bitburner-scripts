@@ -98,16 +98,22 @@ viewer's Overview tab, and is the roadmap.
 
 ## Two findings this harness surfaced
 
-Both are `game/`-side, reproduce outside the simulator, and are **not fixed**:
-
-1. **The probe runner starves on a fresh 8 GB home.** The sweep snapshots the
-   network from inside a 4.1 GB dodge stub, so `home.ramUsed` carries the stub's
-   own footprint. `dodgeBudget()` then reads
+1. **The probe runner starves on a fresh 8 GB home** (not fixed). The sweep
+   snapshots the network from inside a 4.1 GB dodge stub, so `home.ramUsed`
+   carries the stub's own footprint. `dodgeBudget()` then reads
    `8 - 3.6 (controller) - 4.1 (stub) - 1.6 - 0.5 < 0` and every probe —
    including the capability gate — is skipped on every sweep, forever. The farm
    runs normally, so nothing looks wrong from the outside. Pinned by
    `sim/tests/ns.test.ts`.
-2. **A 32 GB home stalls the dispatcher.** `earn:1e6` is reached at 8, 16 and
-   64 GB but not at 32, with `allocFails` climbing while `inFlight` stays at
-   zero. It reproduces under `--driver planner`, so it is in
-   `shared/strategy/`, not in the game driver or the synthetic ns.
+2. **A 32 GB home stalls the dispatcher** (FIXED). `earn:1e6` was reached at 8,
+   16 and 64 GB but not at 32 (30.2 m vs 20.7 m at 8 GB, planner driver,
+   seed 1), with `allocFails` climbing while `inFlight` stayed at zero. Two
+   defects, both in `shared/strategy/`: `syncTopology` sized the hack-block cap
+   from `maxRam − reserved`, ignoring standing foreign usage (the controller's
+   own footprint), so the solved block could never be placed in the game; and
+   `solveCycle` scored per RAM-second only, so a hack block that monopolised
+   the largest host — one slot, one batch per weakenTime — still won the
+   argmax. Fixed by free-RAM-based `largestBlockGb`/`hostBlocksGb` and the
+   pipeline-aware launch-rate term in the score (`spec/targeting.md`); after
+   the fix the same probe reads 16.0 m at 32 GB, monotonic in home RAM. Pinned
+   by the pipeline-aware solve test in `sim/tests/targeting.test.ts`.

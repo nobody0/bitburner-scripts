@@ -34,18 +34,22 @@ export function initDriver(): DriverState {
 export function drainCompletions(state: DriverState): CompletionEvent[] {
   const done = state.globals.dispatch_done ?? [];
   if (done.length === 0) return [];
-  const events: CompletionEvent[] = done.map((entry) => ({
-    kind: entry.kind,
-    opId: entry.opId,
-    target: entry.target,
-    threads: entry.threads,
-    result:
-      entry.kind === "hack"
-        ? { success: (entry.result ?? 0) > 0, moneyGained: entry.result ?? 0 }
-        : entry.kind === "weaken"
-          ? { securityReduced: entry.result ?? 0 }
-          : { growth: entry.result ?? 0 },
-  }));
+  const events: CompletionEvent[] = done.map((entry) =>
+    entry.kind === "workerExit"
+      ? { kind: "workerExit", opId: entry.opId, threads: entry.threads }
+      : {
+          kind: entry.kind,
+          opId: entry.opId,
+          target: entry.target,
+          threads: entry.threads,
+          result:
+            entry.kind === "hack"
+              ? { success: (entry.result ?? 0) > 0, moneyGained: entry.result ?? 0 }
+              : entry.kind === "weaken"
+                ? { securityReduced: entry.result ?? 0 }
+                : { growth: entry.result ?? 0 },
+        },
+  );
   done.length = 0;
   return events;
 }
@@ -134,11 +138,12 @@ export function pump(
    *  directly. Named options rather than a positional number tail, because
    *  three adjacent defaulted numbers in three different units transpose
    *  silently. */
-  options: { homeReserveGb?: number; horizonMs?: number } = {},
+  options: { homeReserveGb?: number; horizonMs?: number; pooling?: boolean } = {},
 ): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"] } {
   const result = planFarm(view, state.memory, completions, {
     homeReserveGb: options.homeReserveGb ?? HOME_RESERVE_GB,
     ...(options.horizonMs !== undefined ? { horizonMs: options.horizonMs } : {}),
+    ...(options.pooling ? { pooling: true } : {}),
   });
   state.memory = result.memory;
 
@@ -159,15 +164,46 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
   // Deployment is done by the dodged sweep; an undeployed host is simply not
   // usable this pass (keeping ns.scp out of the controller's static RAM).
   if (!state.deployed.has(host)) return false;
+  const globals = state.globals;
 
-  // Descriptor before exec: a worker can never find a missing entry.
-  state.globals.worker_info!.set(opId, {
+  // Pooled job to an already-running serve worker: no exec at all — push the
+  // job and poke the worker's parked resolver. A missing mailbox means the
+  // worker died (reload, kill); failing the op makes the pure layer respawn.
+  if (action.worker && !action.worker.spawn) {
+    const queue = globals.worker_jobs?.get(action.worker.id);
+    if (!queue || !globals.worker_info?.has(action.worker.id)) return false;
+    queue.push({
+      opId,
+      target: action.target,
+      ...(action.additionalMsec !== undefined ? { additionalMsec: action.additionalMsec } : {}),
+      ...(action.stock ? { stock: true } : {}),
+    });
+    globals.worker_wake?.get(action.worker.id)?.();
+    return true;
+  }
+
+  // Descriptor before exec: a worker can never find a missing entry. A serve
+  // spawn registers under the WORKER id and queues this op as its first job
+  // BEFORE exec, so the fresh loop finds work immediately.
+  const execId = action.worker ? action.worker.id : opId;
+  globals.worker_info!.set(execId, {
     kind: action.type,
     target: action.target,
     threads: action.threads,
-    ...(action.additionalMsec !== undefined ? { additionalMsec: action.additionalMsec } : {}),
-    ...(action.stock ? { stock: true } : {}),
+    ...(action.worker ? { mode: "serve" as const } : {}),
+    ...(!action.worker && action.additionalMsec !== undefined ? { additionalMsec: action.additionalMsec } : {}),
+    ...(!action.worker && action.stock ? { stock: true } : {}),
   });
+  if (action.worker) {
+    globals.worker_jobs!.set(action.worker.id, [
+      {
+        opId,
+        target: action.target,
+        ...(action.additionalMsec !== undefined ? { additionalMsec: action.additionalMsec } : {}),
+        ...(action.stock ? { stock: true } : {}),
+      },
+    ]);
+  }
 
   const pid = ns.exec(
     workerScript(),
@@ -176,13 +212,14 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
     // op it performs. One binary, deliberately — note that the predecessor
     // scripts moved the OTHER way, to a script per batch role
     // (src/workers/{hs,w1s,gs,w2s}.ts), to fix their shotgun batcher
-    // ("fixed shotgun by separating different workers", 8a8fb9c). Understand
-    // why that was needed before collapsing or splitting this.
+    // ("fixed shotgun by separating different workers", 8a8fb9c). The pooled
+    // serve mode answers the same need with per-role INSTANCES of one script.
     { threads: action.threads, temporary: true, ramOverride: WORKER_RAM[action.type] },
-    opId,
+    execId,
   );
   if (pid === 0) {
-    state.globals.worker_info!.delete(opId);
+    globals.worker_info!.delete(execId);
+    if (action.worker) globals.worker_jobs!.delete(action.worker.id);
     state.execFails++;
     return false;
   }
