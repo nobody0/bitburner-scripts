@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { MONEY_SPAN, REP_SPAN } from "../shared/strategy/income.ts";
 import {
   grantFor,
   grantedAmount,
@@ -244,6 +245,13 @@ describe("arbiter shape", () => {
     expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(PRIORITY["factions:work"] + PREEMPT_MARGIN);
     // ...while ordinary career income must NOT be able to.
     expect(PRIORITY["career:income"]).toBeLessThan(PRIORITY["factions:work"]);
+    // A blocking need must clear BOTH rates the slot can be scored on, not just
+    // reputation. It is usually the gate on a faction UNLOCK, and at 75 it sat below
+    // a best-in-game earner's 80 — so crime could outrank the unlock it was funding.
+    expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(MONEY_SPAN + PREEMPT_MARGIN);
+    expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(REP_SPAN + PREEMPT_MARGIN);
+    // ...and still below the lock that protects unbanked progress.
+    expect(PRIORITY["career:blocking-need"]).toBeLessThan(PRIORITY["career:progress-lock"]);
     // Wanted/nice requests stay queued behind faction reputation. The margin
     // is large enough that faction work can also take the slot back when one
     // of those requests was the incumbent.

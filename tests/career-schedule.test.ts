@@ -13,6 +13,7 @@ import { stepCareer, type CareerView } from "../shared/strategy/career/decide.ts
 import type { CrimeContext, CrimePerson, CrimeStats } from "../shared/strategy/career/crimes.ts";
 import { careerSchedule, CONTINUOUS_REVIEW_MS, progressLockUntil, updateActivityRate } from "../shared/strategy/career/schedule.ts";
 import { PREEMPT_MARGIN, PRIORITY } from "../shared/strategy/arbiter.ts";
+import { rateFraction, slotPriority } from "../shared/strategy/income.ts";
 import { postNeeds, type Need, type NeedUrgency } from "../shared/strategy/needs.ts";
 
 const person: CrimePerson = {
@@ -312,5 +313,166 @@ describe("the slot lock is bounded by the progress it protects", () => {
     const claim = workClaim({ cyclesWorked: 2_999, observedAt: 0, now: 0 });
     expect(claim.priority).toBeGreaterThan(PRIORITY["factions:work"] + PREEMPT_MARGIN);
     expect(claim.holdUntil).toBeGreaterThan(0);
+  });
+});
+
+describe("factions holds the slot across a breakpoint hand-off", () => {
+  // THE BUG, measured on a live BN12 run: reaching the objective's reputation
+  // breakpoint closed the only gap `nextWorkFaction` looks at, so factions posted no
+  // slot claim for one pass. Dropping the claim is how an incumbent RELEASES the slot
+  // (arbiter rule 3), and the planner only picks its next breakpoint on its own 30 s
+  // cadence — so at EVERY breakpoint the slot came free, `career` filled it with a
+  // 10-minute Heist, and faction work waited out the lock. The trace showed 91 s of
+  // reputation per 650 s cycle: a 14% duty cycle, turning a 14 h Daedalus grind
+  // into ~100 h.
+  function slotClaim(over: {
+    rep?: number;
+    repTarget?: number;
+    offers?: { faction: string; repReq: number; owned?: boolean }[];
+    joined?: string[];
+  } = {}) {
+    const rep = over.rep ?? 7_400;
+    const state = {
+      topics: {
+        player: { money: 0, skills: {}, mults: {}, jobs: {}, city: "Sector-12" },
+        factions: {
+          joined: over.joined ?? ["The Covenant"],
+          standings: [{ name: "The Covenant", rep, favor: 13, joined: true }],
+          offers: over.offers ?? [{ faction: "The Covenant", repReq: 50_000, owned: false }],
+          plan: {
+            action: { type: "idle", why: "breakpoint met" },
+            objective: {
+              factions: ["The Covenant"],
+              augmentations: [],
+              intent: { faction: "The Covenant", repTarget: over.repTarget ?? 7_340 },
+            },
+          },
+        },
+      },
+      dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
+      probeFailures: {}, probeSkips: {}, featureLastRun: {},
+    } as unknown as GameState;
+    const claims = factionsModule.claims!({
+      state,
+      board: postNeeds([]),
+      now: 0,
+      caps: {} as ClaimContext["caps"],
+      budgetGb: 100,
+      horizons: {
+        node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
+        install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
+      },
+      ramPrice: (methods) => methods.length,
+    });
+    return claims.find((claim) => claim.resource === "time" && claim.id.startsWith("work:"));
+  }
+
+  test("the breakpoint being MET does not release the slot", () => {
+    // rep 7,400 past a 7,340 target: the objective gap is closed, but 50,000 rep of
+    // unowned augmentations remain at a joined faction, so the work is not finished.
+    expect(slotClaim({ rep: 7_400 })).toBeDefined();
+    // Same id as while working, which is what preserves incumbency — a different id
+    // would hand the slot over exactly as dropping the claim did.
+    expect(slotClaim({ rep: 7_400 })!.id).toBe("work:The Covenant");
+  });
+
+  test("still claims while the breakpoint is UNMET, as before", () => {
+    expect(slotClaim({ rep: 100 })!.id).toBe("work:The Covenant");
+  });
+
+  test("nothing left to work toward DOES release the slot", () => {
+    // Otherwise factions would sit on the slot doing nothing and career could never
+    // earn again — the mirror image of the bug.
+    expect(slotClaim({ offers: [] }), "no offers at all").toBeUndefined();
+    expect(
+      slotClaim({ offers: [{ faction: "The Covenant", repReq: 50_000, owned: true }] }),
+      "every offer already owned",
+    ).toBeUndefined();
+    expect(
+      slotClaim({ offers: [{ faction: "The Covenant", repReq: 1_000, owned: false }] }),
+      "reputation already covers everything offered",
+    ).toBeUndefined();
+    expect(
+      slotClaim({ offers: [{ faction: "Daedalus", repReq: 1e9, owned: false }] }),
+      "the only rep worth earning is at a faction we have not joined",
+    ).toBeUndefined();
+  });
+});
+
+describe("the work slot is scored on what it yields", () => {
+  // A fixed `career:income` said the same thing whether crime out-earned the hacking
+  // farm tenfold or was a rounding error beside it, so the exclusive slot could not
+  // be allocated on merit. Priority is now `repFraction * 60 + moneyFraction * 80`,
+  // each fraction measured against the best rate anyone announced.
+  test("the spans reproduce the worked examples", () => {
+    // Best reputation, no salary — what `factions:work` was as a constant.
+    expect(slotPriority({ repFraction: 1 })).toBe(60);
+    // Best money, no reputation. ABOVE reputation work on purpose: our best earner
+    // takes the slot from rep work, which is a decision about what the run is for.
+    expect(slotPriority({ moneyFraction: 1 })).toBe(80);
+    // Best for reputation and half the best money — they ADD, because a job paying
+    // in both is worth both.
+    expect(slotPriority({ repFraction: 1, moneyFraction: 0.5 })).toBe(100);
+    expect(slotPriority({ moneyFraction: 1 })).toBeGreaterThan(slotPriority({ repFraction: 1 }));
+  });
+
+  test("fractions are clamped, and nothing announced is not a fraction of nothing", () => {
+    expect(rateFraction(500, 1_000)).toBe(0.5);
+    expect(rateFraction(2_000, 1_000), "cannot exceed the best").toBe(1);
+    // An absent or zero best must not silently promote a claim to the top: a feature
+    // with nothing honest to announce scores nothing, rather than 1.
+    expect(rateFraction(100, 0)).toBe(0);
+    expect(rateFraction(0, 1_000)).toBe(0);
+    expect(rateFraction(-5, 1_000)).toBe(0);
+    // Being the only announcer correctly yields the full span.
+    expect(rateFraction(1_000, 1_000)).toBe(1);
+  });
+
+  test("career's income claim rises and falls with its share of the best rate", () => {
+    function incomeClaim(over: { crimePerSec: number; farmPerSec?: number }) {
+      const state = {
+        topics: {
+          player: { money: 0, skills: {}, mults: {}, jobs: {}, city: "Sector-12" },
+          ...(over.farmPerSec !== undefined ? { fleet: { scriptIncome: [over.farmPerSec, 0] } } : {}),
+          career: {
+            karma: 0, numPeopleKilled: 0, skills: {}, exp: {}, city: "Sector-12",
+            location: "home", entropy: 0, totalPlaytime: 0, jobs: {}, companies: {},
+            currentWork: null,
+            crimes: [],
+            plan: { ranked: [{ label: "crime: Heist", score: 1, moneyPerSec: over.crimePerSec, priority: "income", contributions: [], why: "" }] },
+          },
+        },
+        dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
+        probeFailures: {}, probeSkips: {}, featureLastRun: {},
+      } as unknown as GameState;
+      const claims = careerModule.claims!({
+        state,
+        board: postNeeds([]),
+        now: 0,
+        caps: {} as ClaimContext["caps"],
+        budgetGb: 100,
+        horizons: {
+          node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
+          install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
+        },
+        ramPrice: (methods) => methods.length,
+      });
+      resetCareerState();
+      return claims.find((claim) => claim.id === "work" && claim.resource === "time")!;
+    }
+
+    // Sole earner: full span, and it outranks faction work.
+    expect(incomeClaim({ crimePerSec: 1_000 }).priority).toBe(80);
+    expect(incomeClaim({ crimePerSec: 1_000 }).priority).toBeGreaterThan(slotPriority({ repFraction: 1 }));
+
+    // Out-earned four to one by the farm: a quarter of the span, and now it loses to
+    // faction work — which is the behaviour a flat 30 could never express.
+    const outclassed = incomeClaim({ crimePerSec: 1_000, farmPerSec: 4_000 });
+    expect(outclassed.priority).toBeCloseTo(20, 10);
+    expect(outclassed.priority).toBeLessThan(slotPriority({ repFraction: 1 }));
+
+    // Matching the farm splits it evenly.
+    expect(incomeClaim({ crimePerSec: 4_000, farmPerSec: 4_000 }).priority).toBe(80);
+    expect(incomeClaim({ crimePerSec: 2_000, farmPerSec: 4_000 }).priority).toBeCloseTo(40, 10);
   });
 });

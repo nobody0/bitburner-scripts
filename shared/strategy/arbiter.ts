@@ -134,17 +134,28 @@ export const PRIORITY = {
   "factions:aug-fund": 90,
   /** Donating for reputation, once favor allows it. */
   "factions:donate": 70,
-  /** The player-time slot, working for a faction. */
+  /** The player-time slot, working for a faction.
+   *
+   *  DERIVED, not chosen: `factions` posts `slotPriority({ repFraction: 1 })`, which
+   *  is `REP_SPAN` — it is the only source of faction reputation, so whenever it wants
+   *  the slot it is the best reputation option available. The constant is kept for the
+   *  graft claim, which occupies the same slot to install an augmentation rather than
+   *  to earn a rate, and as the named point the ordering tests compare against. */
   "factions:work": 60,
   /** Career satisfying a BLOCKING need from the board (karma, stats).
    *
-   *  Deliberately more than PREEMPT_MARGIN above `factions:work`, and the test
-   *  suite pins that. Anything less and the number would be decorative: a
-   *  blocking need arising WHILE faction work is already running could never
-   *  interrupt it, so the feature that posted the need would wait for the
-   *  incumbent to give up on its own. Clearing something another feature is
-   *  blocked on genuinely outranks ordinary reputation grinding. */
-  "career:blocking-need": 75,
+   *  Deliberately more than PREEMPT_MARGIN above BOTH rates the slot can be scored
+   *  on, and the test suite pins that. Anything less and the number would be
+   *  decorative: a blocking need arising WHILE the slot is already busy could never
+   *  interrupt it, so the feature that posted the need would wait for the incumbent
+   *  to give up on its own.
+   *
+   *  It has to clear `MONEY_SPAN`, not just reputation. A blocking need is usually
+   *  the gate on something far more valuable than either rate — the karma, stats or
+   *  backdoor that UNLOCKS a faction, without which no amount of reputation or
+   *  income moves the run forward. At 75 it sat below a best-in-game earner's 80, so
+   *  crime could outrank the very unlock it was funding. */
+  "career:blocking-need": 95,
   /** Career's request queue. Blocking work may interrupt ordinary faction
    * reputation; wanted/nice work may not. The gaps exceed PREEMPT_MARGIN so a
    * priority change has the same result regardless of which side is incumbent. */
@@ -156,9 +167,23 @@ export const PRIORITY = {
   "hacknet:wanted-need": 45,
   "hacknet:nice-need": 35,
   /** Temporary ownership while a completable task has unbanked progress. This
-   * is a lock, not an assertion that its objective is more valuable. */
-  "career:progress-lock": 100,
-  /** Career earning money with no need outstanding. */
+   * is a lock, not an assertion that its objective is more valuable.
+   *
+   * Above the combined spans (`REP_SPAN + MONEY_SPAN` = 140) minus the pre-emption
+   * margin, so an ordinary claim cannot cancel a crime at 99% and throw the unit
+   * away. It is deliberately NOT out of reach: a claim that scores past 130 is
+   * simultaneously the best reputation AND very nearly the best money option
+   * available, and cancelling the partial task for that genuinely is the right
+   * trade. As more currencies get scored, the ceiling rises toward this and the lock
+   * becomes breakable on merit rather than by exception. */
+  "career:progress-lock": 120,
+  /** Career earning money with no need outstanding.
+   *
+   *  RETAINED AS A REFERENCE POINT, not as the live value: `career` now scores this
+   *  band from its earning rate against the best rate anyone announced (see
+   *  `shared/strategy/income.ts`), because a constant says the same thing whether
+   *  crime out-earns the farm tenfold or is a rounding error beside it. Kept so the
+   *  ordering tests have a named number to compare against. */
   "career:income": 30,
   /** Corp seed money — huge, rare, and gates the whole feature. */
   "corp:seed": 85,

@@ -17,6 +17,7 @@ import { donationForRep, repFromDonation } from "../../../shared/strategy/factio
 import type { FactionStanding, FactionsView } from "../../../shared/strategy/factions/state.ts";
 import { isReachable, type RequirementView } from "../../../shared/strategy/factions/requirements.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
+import { slotPriority } from "../../../shared/strategy/income.ts";
 import { COMMISSION } from "../../../shared/strategy/stock/market.ts";
 import { daedalusAugsRequired } from "../../../shared/strategy/progression/endgame.ts";
 import { usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
@@ -727,28 +728,28 @@ function nextWorkFaction(state: GameState): string | undefined {
   }
   if (best) return best.name;
 
-  // THE BREAKPOINT HAND-OFF, and it is worth a paragraph because losing it cost
-  // ~86% of this feature's work time.
+  // "Is there faction work worth doing" is a DURABLE fact, and the bug was deriving
+  // it from a momentary one.
   //
-  // Reaching the breakpoint closes the gap above, so every objective faction is
-  // skipped and this returned `undefined` — no claim. But dropping the claim is how
-  // an incumbent RELEASES the slot (arbiter rule 3), and the planner only chooses
-  // its next breakpoint on its own 30 s cadence. So at every breakpoint the slot
-  // came free for one pass, `career` filled it with a 10-minute Heist, and faction
-  // work waited out the lock: measured on a live BN12 run, 91 s of reputation per
-  // 650 s cycle, which turns a 14 h Daedalus grind into ~100 h.
+  // The gap above is the current breakpoint's, and reaching a breakpoint closes it.
+  // That made this return `undefined` for one pass — not because the answer had
+  // changed, but because the planner had not yet named the next target. Dropping a
+  // claim is how an incumbent RELEASES the slot (arbiter rule 3), so the feature
+  // forgot what it wanted between breakpoints and handed the slot away every time.
+  // Measured on a live BN12 run: 91 s of reputation per 650 s cycle, turning a 14 h
+  // Daedalus grind into ~100 h.
   //
-  // Reputation is not finished here — only this breakpoint is. So hold the slot for
-  // the hand-off when the node still has reputation worth earning anywhere we have
-  // joined. Deliberately the weak question the doc above describes, and it is safe
-  // to ask HERE because it cannot undo the breakpoint decision: it selects no
-  // target and changes no plan, it only keeps the reservation warm for the one pass
-  // until the planner names the next one. Re-issuing the SAME id is what preserves
-  // incumbency, so the intent's faction is preferred.
+  // So answer the durable question directly — is there reputation still worth
+  // earning at a faction we have joined — rather than inferring it from whichever
+  // breakpoint happens to be current. This is the weaker question the doc above
+  // describes, and asking it HERE cannot undo the breakpoint decision: it names no
+  // target and changes no plan. WHAT to work on stays entirely the planner's call;
+  // this only reports that the answer is not "nothing". Re-issuing the SAME claim id
+  // is what preserves incumbency, so the intent's faction is preferred.
   //
-  // When nothing is left to work toward at all, this still returns `undefined` and
-  // the slot is genuinely released — otherwise factions would sit on it doing
-  // nothing and `career` could never earn again.
+  // When there is genuinely nothing left, it still returns `undefined` and the slot
+  // is released — otherwise factions would sit on it doing nothing and `career`
+  // could never earn again.
   const stillWanted = (topic.offers ?? []).some((offer) => {
     if (offer.owned) return false;
     if (!joined.has(offer.faction)) return false;
@@ -895,7 +896,13 @@ function claims(ctx: ClaimContext): Claim[] {
       id: `work:${wanted}`,
       resource: "time",
       amount: 1,
-      priority: PRIORITY["factions:work"],
+      // Scored on what the slot yields, like every other claimant — see
+      // `shared/strategy/income.ts`. Faction work is the only source of faction
+      // reputation, so whenever it wants the slot it IS the best reputation option
+      // and takes the full `REP_SPAN`; it pays no salary, so its money fraction is
+      // zero. That arithmetic reproduces the constant this used to be, which is the
+      // point: the number stops being a magic 60 and becomes a consequence.
+      priority: slotPriority({ repFraction: 1 }),
       mode: "spend",
       ratePerSec: plan.until?.etaSec ? 1 / plan.until.etaSec : 0,
       why: working ? plan.action.why : `reputation still needed at ${wanted}`,

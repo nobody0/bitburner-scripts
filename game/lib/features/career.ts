@@ -12,7 +12,9 @@ import {
   type CareerWorkMode,
 } from "../../../shared/strategy/career/schedule.ts";
 import { PORT_OPENER_PROGRAMS, programCreateTimeMs } from "../../../shared/strategy/career/programs.ts";
+import { rateFraction, slotPriority } from "../../../shared/strategy/income.ts";
 import { isScriptDeath } from "../errors.ts";
+import { bestIncomePerSec, careerBestPerSec } from "../income.ts";
 import { merge, type GameState } from "../state.ts";
 import {
   armWorkCompletion,
@@ -36,9 +38,12 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * karma, kill, stat, charisma and city thresholds, and doubles as the
  * early-game income floor when nothing is outstanding.
  *
- * It also shares the single `Player.currentWork` slot with `factions`, which
- * makes it the arbiter's primary test case: `career:blocking-need` (75) can
- * PREEMPT `factions:work` (60), while `career:income` (30) cannot. */
+ * It also shares the single `Player.currentWork` slot with `factions`, which makes
+ * it the arbiter's primary test case. `career:blocking-need` (95) can PREEMPT faction
+ * work. The INCOME band no longer has a fixed answer: it is scored against the best
+ * earning rate anyone announced, so crime outranks reputation work exactly when it is
+ * genuinely our best earner, and loses when it is not. See
+ * `shared/strategy/income.ts`. */
 
 /** commitCrime + getCrimeStats + getCrimeChance, all SingularityFn3-ish. */
 const PEAK_STEP_GB = 12;
@@ -437,7 +442,7 @@ const driver: FeatureDriver = {
         },
         why: decision.why,
         incomeFallback: decision.incomeFallback,
-        priority: { band: decision.workPriority, value: priorityForBand(decision.workPriority) },
+        priority: { band: decision.workPriority, value: priorityForBand(decision.workPriority, ctx.state) },
         schedule: {
           mode: schedule.mode,
           reason: schedule.reason ?? "initial",
@@ -502,7 +507,7 @@ function claims(ctx: ClaimContext): Claim[] {
       id: "travel-fund",
       resource: "money",
       amount: TRAVEL_COST,
-      priority: priorityForBand(candidate?.workPriority ?? "wanted"),
+      priority: priorityForBand(candidate?.workPriority ?? "wanted", ctx.state),
       mode: "spend",
       divisible: false,
       why: `travel costs $${TRAVEL_COST.toLocaleString()}`,
@@ -517,7 +522,7 @@ function claims(ctx: ClaimContext): Claim[] {
         id: "training-fund",
         resource: "money",
         amount: fiveSeconds,
-        priority: priorityForBand(candidate?.workPriority ?? "income"),
+        priority: priorityForBand(candidate?.workPriority ?? "income", ctx.state),
         mode: "spend",
         divisible: false,
         why: "fund the next five-second training review window",
@@ -556,7 +561,7 @@ function claims(ctx: ClaimContext): Claim[] {
     id: "work",
     resource: "time",
     amount: 1,
-    priority: lockUntil !== undefined ? PRIORITY["career:progress-lock"] : priorityForBand(band),
+    priority: lockUntil !== undefined ? PRIORITY["career:progress-lock"] : priorityForBand(band, ctx.state),
     mode: "spend",
     ...(lockUntil !== undefined ? { holdUntil: lockUntil } : {}),
     why: lockUntil !== undefined
@@ -608,12 +613,27 @@ function progressTotalMs(state: GameState): number | undefined {
   }
 }
 
-function priorityForBand(band: CareerPriorityBand): number {
+/** What career's claim on the work slot is worth.
+ *
+ * The three REQUEST bands keep their fixed priorities: they are about unblocking
+ * another feature, and their worth is the urgency of that need rather than anything
+ * earned per second.
+ *
+ * The INCOME band is scored instead of fixed. A flat `career:income` said the same
+ * thing whether crime out-earned the hacking farm ten times over or was a rounding
+ * error beside it, so the slot could not be allocated on merit. It is now career's
+ * best money rate as a fraction of the best rate anyone announced, times
+ * `MONEY_SPAN` — the top earner is worth the full span, half as good is worth half.
+ * See `shared/strategy/income.ts`, including why that span exceeds reputation's. */
+function priorityForBand(band: CareerPriorityBand, state: GameState): number {
   switch (band) {
     case "blocking": return PRIORITY["career:blocking-need"];
     case "wanted": return PRIORITY["career:wanted-request"];
     case "nice": return PRIORITY["career:nice-request"];
-    case "income": return PRIORITY["career:income"];
+    case "income":
+      return slotPriority({
+        moneyFraction: rateFraction(careerBestPerSec(state), bestIncomePerSec(state)),
+      });
   }
 }
 
