@@ -254,7 +254,13 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     const queuedCount = Math.max(0, count - installedEntry);
     if (queuedCount > 0) {
       queuedAugs.add(name);
-      if (!isSoA(name)) queuedNonSoA += queuedCount;
+      // ONE per distinct name, not per level: the game's 1.9x queue escalation
+      // exponent is queuedAugmentations.length, and that array holds one entry
+      // per NAME with a level field — ten queued NeuroFlux levels contribute
+      // exactly one. Counting levels here charged the plan an extra x1.9 per
+      // level (x2.166 observed vs the game's x1.14), so the final-sweep drain
+      // priced itself out ~8 levels early and installed with cash unspent.
+      if (!isSoA(name)) queuedNonSoA += 1;
     }
   }
   const installedNeuroflux = installed[NEUROFLUX] ?? 0;
@@ -264,6 +270,7 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     queuedNonSoA,
     ownedSoA: [...owned].filter(isSoA).length,
     neurofluxLevel: installedNeuroflux + queuedNeuroflux,
+    ...(queuedNeuroflux > 0 ? { queuedNeuroflux: true } : {}),
     sf11Level: sfLevel(caps.sourceFiles, 11),
     augMoneyCost: nodeMults["AugmentationMoneyCost"] ?? 1,
     augRepCost: nodeMults["AugmentationRepCost"] ?? 1,
