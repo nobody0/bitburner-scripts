@@ -75,22 +75,26 @@ describe("work reputation parity", () => {
     { label: "high intelligence", ctx: CTX, favor: 100, p: person({ intelligence: 450 }) },
   ];
 
-  for (const { label, ctx, favor, p } of cases) {
-    test(`hacking work — ${label}`, () => {
+  test("hacking work matches across representative contexts", () => {
+    for (const { label, ctx, favor, p } of cases) {
       syncVendorContext(ctx);
-      expect(hackingWorkRepGain(p, favor, ctx)).toBe(getHackingWorkRepGain(p as never, favor));
-    });
+      expect(hackingWorkRepGain(p, favor, ctx), label).toBe(getHackingWorkRepGain(p as never, favor));
+    }
+  });
 
-    test(`security work — ${label}`, () => {
+  test("security work matches across representative contexts", () => {
+    for (const { label, ctx, favor, p } of cases) {
       syncVendorContext(ctx);
-      expect(securityWorkRepGain(p, favor, ctx)).toBe(getFactionSecurityWorkRepGain(p as never, favor));
-    });
+      expect(securityWorkRepGain(p, favor, ctx), label).toBe(getFactionSecurityWorkRepGain(p as never, favor));
+    }
+  });
 
-    test(`field work — ${label}`, () => {
+  test("field work matches across representative contexts", () => {
+    for (const { label, ctx, favor, p } of cases) {
       syncVendorContext(ctx);
-      expect(fieldWorkRepGain(p, favor, ctx)).toBe(getFactionFieldWorkRepGain(p as never, favor));
-    });
-  }
+      expect(fieldWorkRepGain(p, favor, ctx), label).toBe(getFactionFieldWorkRepGain(p as never, favor));
+    }
+  });
 
   test("BitNode FactionWorkRepGain flows through identically", () => {
     const original = { ...currentNodeMults };

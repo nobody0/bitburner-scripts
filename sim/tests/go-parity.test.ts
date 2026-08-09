@@ -108,12 +108,14 @@ describe("handcrafted Go rewards match pinned v3.0.1", () => {
 /** Test-oracle parity: production handcrafts this stream and derives a narrow
  * seed window from public playtime; only tests import the pinned game source. */
 describe("Go WHRNG parity with pinned game source", () => {
-  for (const totalPlaytime of [0, 1, 999, 1_000, 12_345_678, 30_000_000, 98_765_432.1]) {
-    test(`totalPlaytime ${totalPlaytime}`, () => {
+  test("matches upstream across representative playtimes", () => {
+    for (const totalPlaytime of [0, 1, 999, 1_000, 12_345_678, 30_000_000, 98_765_432.1]) {
       const upstream = new WHRNG(totalPlaytime);
-      expect(whrng(totalPlaytime, 12)).toEqual(Array.from({ length: 12 }, () => upstream.random()));
-    });
-  }
+      expect(whrng(totalPlaytime, 12), `totalPlaytime ${totalPlaytime}`).toEqual(
+        Array.from({ length: 12 }, () => upstream.random()),
+      );
+    }
+  });
 
   test("AI waits use the upstream engine-cycle constants", () => {
     expect(GO_ENGINE_CYCLE_MS).toBe(CONSTANTS.MilliPerCycle);

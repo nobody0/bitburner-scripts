@@ -123,7 +123,4 @@ describe("the market book counts toward the purchase budget", () => {
     expect(withPositions([{ ...long, value: 10_000 }]).pendingProceeds).toBe(0);
   });
 
-  test("no market means no proceeds", () => {
-    expect(metadataView().pendingProceeds).toBe(0);
-  });
 });

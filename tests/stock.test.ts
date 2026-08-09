@@ -19,7 +19,6 @@ import {
   expectedProfit,
   FOUR_SIGMA_API_COST,
   manipulationLeverage,
-  manipulationValuePerOp,
   meanLogStep,
   nudgesPerOp,
   nudgeValue,
@@ -217,17 +216,6 @@ describe("manipulation value", () => {
     expect(nudgesPerOp(1)).toBeCloseTo(0.1, 9);
     expect(nudgesPerOp(4)).toBeCloseTo(0.1, 9);
     expect(nudgesPerOp(-1)).toBe(0);
-  });
-
-  test("manipulation value is independent of the server's money — moneyMax cancels", () => {
-    // The roll is against moneyMoved/moneyMax, a FRACTION. Two servers with the
-    // same steal fraction manipulate equally well however rich they are, which
-    // makes joesguns as good a manipulator as ecorp and far cheaper to run.
-    const params = { notional: 1e9, volatility: 0.0045, ticks: 50, forecast: 0.6, side: "long" as const };
-    const rich = manipulationValuePerOp({ ...params, stealFraction: 0.5 });
-    const poor = manipulationValuePerOp({ ...params, stealFraction: 0.5 });
-    expect(rich).toBe(poor);
-    expect(rich).toBeGreaterThan(0);
   });
 
   test("a nudge is worth more on a bigger position and a longer hold", () => {

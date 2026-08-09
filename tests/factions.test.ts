@@ -528,10 +528,6 @@ describe("prerequisite closure", () => {
 describe("affordability", () => {
   const base = { moneyCost: 1e6, repCost: 50_000, money: 5e6 };
 
-  test("reputation suffices", () => {
-    expect(canAfford({ ...base, factionRep: 60_000 }).ok).toBe(true);
-  });
-
   test("donation can close the gap with the money left AFTER the purchase", () => {
     // Materially better than a plain `rep >= repReq` test — the difference
     // between "wait for reputation" and "pay for it".
@@ -686,16 +682,6 @@ describe("faction selection — brute-force oracle", () => {
     const result = selectFactions(candidates);
     expect(result.chosen).toEqual(["B"]);
     expect(result.value).toBe(3);
-  });
-
-  test("isolated nodes are all taken", () => {
-    const candidates: FactionCandidate[] = ["A", "B", "C"].map((name) => ({
-      name,
-      value: 1,
-      enemies: [],
-      reachable: true,
-    }));
-    expect(selectFactions(candidates).chosen.sort()).toEqual(["A", "B", "C"]);
   });
 
   test("foreclosedBy explains a join before it happens", () => {

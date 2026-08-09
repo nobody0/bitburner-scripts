@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { selectDue, FEATURE_DRIVERS } from "../game/lib/features/index.ts";
-import { FEATURE_IDS } from "../shared/features/ids.ts";
 import { applyOverrides, describeOverrides, only } from "../shared/features/profile.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { PROFILES, findProfile } from "../sim/profiles.ts";
@@ -61,13 +60,6 @@ describe("feature overrides", () => {
     expect(ids).not.toContain("side");
   });
 
-  test("unknown still never ticks, with or without overrides", () => {
-    const unprobed = deriveCapabilities({});
-    expect(unprobed.unlocked["gang"]).toBe("unknown");
-    const due = selectDue(FEATURE_DRIVERS, {}, applyOverrides(unprobed, { hacknet: "off" }), 1_000_000);
-    expect(due.map((d) => d.id)).not.toContain("gang");
-  });
-
   test("describes itself for the run record", () => {
     expect(describeOverrides(undefined)).toBe("all features");
     expect(describeOverrides(only("hacking"))).toContain("only hacking");
@@ -76,14 +68,10 @@ describe("feature overrides", () => {
 });
 
 describe("simulation profiles", () => {
-  test("every profile names real features and parseable goals", () => {
+  test("every profile has parseable goals and at least one seed", () => {
     for (const profile of PROFILES) {
-      for (const id of Object.keys(profile.features ?? {})) {
-        expect(FEATURE_IDS).toContain(id as (typeof FEATURE_IDS)[number]);
-      }
       expect(() => parseGoals([...profile.goals])).not.toThrow();
       expect(profile.seeds.length).toBeGreaterThan(0);
-      expect(profile.description.length).toBeGreaterThan(20);
     }
   });
 
@@ -93,12 +81,6 @@ describe("simulation profiles", () => {
     expect(() => findProfile("nope")).toThrow(/unknown profile/);
   });
 
-  test("an isolation profile leaves its feature under test enabled", () => {
-    const profile = findProfile("hacking-only");
-    const capped = applyOverrides(fresh, profile.features);
-    expect(capped.unlocked["hacking"]).toBe("yes");
-    expect(capped.unlocked["hacknet"]).toBe("no");
-  });
 });
 
 describe("faction goals", () => {

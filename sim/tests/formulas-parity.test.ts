@@ -112,8 +112,8 @@ const BITNODES: [number, number][] = [
 ];
 
 describe("hand-crafted formulas are bit-identical to vendored game formulas", () => {
-  for (const [bn, lvl] of BITNODES) {
-    test(`sweep of 250 random cases in BitNode ${bn} (sf level ${lvl})`, () => {
+  test("sweeps 250 random cases across representative BitNodes", () => {
+    for (const [bn, lvl] of BITNODES) {
       replaceCurrentNodeMults(getBitNodeMultipliers(bn, lvl));
       const rng = mulberry32(1000 + bn);
       for (let i = 0; i < 250; i++) {
@@ -121,8 +121,8 @@ describe("hand-crafted formulas are bit-identical to vendored game formulas", ()
         assertParity(c);
         assertGrowThreadsParity(c, rng);
       }
-    });
-  }
+    }
+  });
 
   test("edge cases", () => {
     replaceCurrentNodeMults(getBitNodeMultipliers(1, 1));

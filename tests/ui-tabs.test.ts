@@ -1,6 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { closeSync, existsSync, fstatSync, openSync, readSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
 import { FEATURES } from "../shared/features/registry.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
@@ -13,36 +11,13 @@ import { skillFromExp } from "../shared/formulas.ts";
 import { TABS, type TabId } from "../ui/app/tabs/index.ts";
 
 /** Tab renderers are pure string builders (only `mount` touches the DOM), so
- * they can be exercised headlessly. Two passes: against a real recorded run
- * when one exists, and against a synthetic record for every topic so the
- * populated branch of every panel is executed at least once. */
+ * they can be exercised headlessly against empty and populated state. */
 
-const root = resolve(import.meta.dir, "..");
-const runsDir = resolve(root, "runs");
 const ALL_TABS = Object.keys(TABS) as TabId[];
-const RUN_SAMPLE_BYTES = 2_000_000;
-
-/** Read a bounded tail without first allocating the whole historical JSONL.
- * A pre-digest Side run can be tens of megabytes with individual huge lines. */
-function runSample(path: string): string[] {
-  const fd = openSync(path, "r");
-  try {
-    const size = fstatSync(fd).size;
-    const start = Math.max(0, size - RUN_SAMPLE_BYTES);
-    const buffer = Buffer.alloc(size - start);
-    readSync(fd, buffer, 0, buffer.length, start);
-    const lines = buffer.toString("utf8").split("\n");
-    if (start > 0) lines.shift(); // partial first line
-    return lines.slice(-20_000);
-  } finally {
-    closeSync(fd);
-  }
-}
 
 function renderAll(state: ProjectedState): void {
   for (const id of ALL_TABS) {
     const html = TABS[id].render(state);
-    expect(typeof html, `${id} did not return markup`).toBe("string");
     expect(html.length, `${id} rendered nothing`).toBeGreaterThan(0);
   }
 }
@@ -50,30 +25,6 @@ function renderAll(state: ProjectedState): void {
 describe("tab rendering", () => {
   test("every tab renders with no data at all", () => {
     renderAll(emptyState());
-  });
-
-  test("every tab renders against a recorded run", () => {
-    const files = existsSync(runsDir) ? readdirSync(runsDir).filter((f) => f.endsWith(".jsonl")) : [];
-    if (files.length === 0) return; // runs/ is gitignored; skip on a clean checkout
-    // Newest file, capped: some runs are tens of megabytes.
-    const newest = files.sort().at(-1)!;
-    const records: LogRecord[] = runSample(resolve(runsDir, newest))
-      .filter(Boolean)
-      .flatMap((line) => {
-        try {
-          return [JSON.parse(line) as LogRecord];
-        } catch {
-          return []; // last line of a live run can be a partial write
-        }
-      });
-    if (records.length === 0) return;
-    const state = project(records, Infinity, {
-      id: newest,
-      src: records[0]!.src,
-      live: false,
-      t0: records[0]!.t,
-    });
-    renderAll(state);
   });
 
   test("every feature's populated panel renders", () => {

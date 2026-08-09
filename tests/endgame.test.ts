@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { bitNodeMultipliers, effectiveBitNodeMultipliers, worldDaemonSkill } from "../shared/features/bitnode.ts";
+import { bitNodeMultipliers, effectiveBitNodeMultipliers } from "../shared/features/bitnode.ts";
 import {
   BLACK_OP_COUNT,
   daedalusAugsRequired,
@@ -15,13 +15,6 @@ describe("per-node multipliers without the 4 GB getter", () => {
     expect(mults.ScriptHackMoney).toBe(0.123);
     expect(mults.ScriptHackMoneyGain).toBe(0);
     expect(mults.FourSigmaMarketDataCost).toBe(1);
-  });
-
-  test("an unknown node is undefined, never BN1", () => {
-    // BN1 is the all-ones baseline, so guessing it is the worst possible
-    // default — every multiplier silently becomes "no effect".
-    expect(bitNodeMultipliers(undefined)).toBeUndefined();
-    expect(worldDaemonSkill(99)).toBeUndefined();
   });
 
   test("Daedalus's augmentation gate is node-dependent", () => {

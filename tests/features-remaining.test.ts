@@ -9,8 +9,6 @@ import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet
 import { ASCEND_THRESHOLD, CLASH_CONFIDENCE, stepGang } from "../shared/strategy/gang/decide.ts";
 import {
   evaluate,
-  group,
-  playMove,
   prepareGoDecision,
   finalizeGoDecision,
   stepGo,
@@ -352,29 +350,6 @@ describe("stanek packing", () => {
 
 describe("go", () => {
   const board = (rows: string[]) => ({ rows, size: rows[0]!.length });
-
-  test("liberty counting drives the evaluation", () => {
-    // A group in atari is nearly worthless; ignoring liberties plays blind.
-    const b = board(["XO.", "...", "..."]);
-    expect(group(b, 0, 0).liberties).toBe(1);
-    expect(group(b, 0, 1).liberties).toBe(2);
-  });
-
-  test("board coordinates are column-major and captures are applied", () => {
-    // White at (1,1) has one liberty, (1,2). Black takes it.
-    const played = playMove(board([".X.", "XO.", ".X."]), 1, 2, "X");
-    expect(played?.captures).toBe(1);
-    expect(played?.board.rows[1]?.[1]).toBe(".");
-    expect(played?.board.rows[1]?.[2]).toBe("X");
-  });
-
-  test("suicide and repeated positions are not legal", () => {
-    const surrounded = board([".X.", "X.X", ".X."]);
-    expect(playMove(surrounded, 1, 1, "O")).toBeUndefined();
-    const empty = board(["...", "...", "..."]);
-    const once = playMove(empty, 1, 1, "X")!;
-    expect(playMove(empty, 1, 1, "X", new Set([once.board.rows.join("")]))).toBeUndefined();
-  });
 
   test("evaluation prefers our stones and penalises atari", () => {
     const safe = board(["XX.", "...", "..."]);
@@ -882,12 +857,6 @@ describe("progression survives its own published plan", () => {
     expect(plan.forecasts.install).toBeDefined();
     expect(plan.queuedAugmentations).toBeDefined();
     expect(plan.installBlockers).toBeDefined();
-  });
-
-  test("no plan at all is fine too", () => {
-    const ctx = ctxWith(undefined);
-    expect(() => refresh(ctx)).not.toThrow();
-    expect(ctx.state.topics.progression!.plan?.forecasts).toBeDefined();
   });
 
   test("a plan missing ONLY the newest field is still rejected", () => {

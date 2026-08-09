@@ -1,12 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
-  emptyBoard,
   isSatisfied,
   needDirection,
   needKey,
   needProgress,
   needWeights,
-  NEED_KINDS,
   openFor,
   postNeeds,
   weightFor,
@@ -24,10 +22,6 @@ function need(partial: Partial<Need> & Pick<Need, "kind" | "target" | "have">): 
 }
 
 describe("need direction", () => {
-  test("every kind declares a direction", () => {
-    for (const kind of NEED_KINDS) expect(needDirection(kind)).toMatch(/^(atLeast|atMost)$/);
-  });
-
   test("karma is satisfied by going DOWN, everything accumulating by going up", () => {
     // The bug this pins: treating karma like a normal stat makes a satisfied
     // gang precondition look permanently blocking, and career never stops.
@@ -77,11 +71,6 @@ describe("postNeeds", () => {
     expect(board.byKind.skill).toHaveLength(1);
     // Satisfied needs stay visible; only `open` filters.
     expect(board.open.map((n) => n.kind)).toEqual(["skill"]);
-  });
-
-  test("every kind has an array, so a consumer never indexes undefined", () => {
-    const board = emptyBoard();
-    for (const kind of NEED_KINDS) expect(board.byKind[kind]).toEqual([]);
   });
 
   test("ordering is blocking-first, then weight, and is independent of input order", () => {

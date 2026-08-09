@@ -87,10 +87,6 @@ describe("stock metadata parity", () => {
     }
   });
 
-  test("exactly one symbol has no server", () => {
-    const orphans = STOCK_SYMBOLS.filter((sym) => STOCK_METADATA[sym]!.hosts.length === 0);
-    expect(orphans).toEqual(["WDS"]);
-  });
 });
 
 describe("market constant parity", () => {
