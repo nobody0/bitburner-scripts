@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { depthCapGb, evaluatePrep, farmIncomeRate, type FarmRateModel } from "../shared/strategy/economics.ts";
+import { depthCapGb, evaluatePrep, farmIncomeRate, prepTimeDiscount, type FarmRateModel } from "../shared/strategy/economics.ts";
 import type { PrepPlan } from "../shared/strategy/targeting.ts";
 
 /** Prep opportunity-cost economics: the "3 hours of prep is 3 hours of lost
@@ -60,6 +60,45 @@ describe("evaluatePrep", () => {
     const result = evaluatePrep({ current, candidate, plan: p, fleetGb: 100, horizonMs: 1_800_000 })!;
     // Gain is zero (horizon ends before prep does) and the farm still paid.
     expect(result.net).toBeLessThan(0);
+  });
+
+  test("the skill-growth discount turns a horizon-breaking prep into a paying one", () => {
+    // Same 10x candidate; the prep quote exceeds the horizon at today's skill,
+    // but at the measured growth the ops will run ~2.5x faster by the end —
+    // the trapezoid discount ((1+0.4)/2 = 0.7) brings the prep inside the
+    // window and the upgrade pays.
+    const current = model({ score: 1, weakenTimeS: 1_000, ramPerBatch: 1_000 });
+    const candidate = model({ score: 10, weakenTimeS: 1_000, ramPerBatch: 1_000 });
+    // 120k GB·s on the 0.6 share of 100 GB = 2,000s — just past the 1,800s
+    // horizon at today's speed, inside it at the discounted 1,400s.
+    const p = plan({ ramSec: 120_000, weakenTimeS: 1_000 });
+    const blocked = evaluatePrep({ current, candidate, plan: p, fleetGb: 100, horizonMs: 1_800_000 })!;
+    expect(blocked.net).toBeLessThan(0);
+    const scale = prepTimeDiscount({ prepSeconds: 0.7 * 3600, futureOpTimeScale: 0.4 });
+    expect(scale).toBeCloseTo(0.7, 10);
+    const discounted = evaluatePrep({
+      current,
+      candidate,
+      plan: p,
+      fleetGb: 100,
+      horizonMs: 1_800_000,
+      prepTimeScale: scale,
+    })!;
+    expect(discounted.prepSeconds).toBeLessThan(blocked.prepSeconds);
+    expect(discounted.net).toBeGreaterThan(0);
+  });
+
+  test("prepTimeDiscount is bounded and inert without growth", () => {
+    // No growth measured (future ops as slow as today's) -> no discount.
+    expect(prepTimeDiscount({ prepSeconds: 1_000, futureOpTimeScale: 1 })).toBe(1);
+    // Faster growth -> deeper discount, floored at half (ops cannot finish
+    // before they start; the trapezoid never drops below 0.5).
+    const mild = prepTimeDiscount({ prepSeconds: 1_000, futureOpTimeScale: 0.8 });
+    const steep = prepTimeDiscount({ prepSeconds: 1_000, futureOpTimeScale: 0.2 });
+    expect(mild).toBeGreaterThan(steep);
+    expect(steep).toBeGreaterThanOrEqual(0.5);
+    // A degenerate quote is left alone.
+    expect(prepTimeDiscount({ prepSeconds: 0, futureOpTimeScale: 0.2 })).toBe(1);
   });
 
   test("a depth-capped farm preps for free: surplus RAM has no opportunity cost", () => {

@@ -43,6 +43,9 @@ const PLAYER_EVERY_TICKS = 10; // 2s
  *  reset walk keys off. Genuinely 30 s work — it is not the probe cadence, which
  *  it used to be by accident. */
 const SWEEP_EVERY_TICKS = 150; // 30s
+/** How long the demand-driven fleet reserve stays engaged after the last
+ * probe-starvation report, so it cannot flap at probe cadence. */
+const FLEET_RESERVE_HOLD_MS = 600_000;
 /** Acquisition cadence, DERIVED from the probe table rather than chosen here.
  *
  *  Whatever the fastest `everyMs` in the table is, that is how often the runner is
@@ -85,6 +88,13 @@ export async function runController(
   // Last coordination digest written to the store, so an unchanged board is
   // not rewritten every pass. `undefined` means "nothing posted".
   let publishedCoordination: string | undefined;
+  // The fleet reserve (home-reserve shortfall spilled onto a fleet host) is
+  // DEMAND-DRIVEN: it engages only while probes actually report themselves
+  // unaffordable, and holds for a while so it does not flap at probe cadence.
+  // A standing reserve taxed every small-fleet profile ~10-25% of its farm for
+  // insurance most runs never needed; a starving profile (BN8's market
+  // sampler) latches it within one sweep.
+  let fleetReserveHoldUntil = 0;
   // Standing needs, by poster. Replaced wholesale when that feature next
   // runs, so a satisfied need disappears the moment its poster stops asking.
   const contributions = new ContributionCache();
@@ -228,7 +238,11 @@ export async function runController(
     const active = caps(state);
     const hosts = placement(state);
     const budgetGb = dodgeBudget(hosts);
-    const reserveGb = computeReserve(state, active);
+    const { reserveGb, fleetReserveGb: reserveShortfallGb } = computeReserve(state, active);
+    if (reserveShortfallGb > 0 && Object.keys(state.probeSkips).length > 0) {
+      fleetReserveHoldUntil = Date.now() + FLEET_RESERVE_HOLD_MS;
+    }
+    const fleetReserveGb = reserveShortfallGb > 0 && Date.now() < fleetReserveHoldUntil ? reserveShortfallGb : 0;
     const dueModules = selectDueModules(state.featureLastRun, active, now);
 
     // A locked/disabled feature cannot leave a stale need, reservation or slot
@@ -348,6 +362,7 @@ export async function runController(
           budgetGb,
           dodgeHosts: hosts,
           homeReserveGb: reserveGb,
+          fleetReserveGb,
           tick,
           board,
           grants: grantsFor(coordination.arbitration, driver.id),
@@ -405,7 +420,7 @@ export async function runController(
       wakePromise = armWake(workerGlobals());
       if (active.unlocked["hacking"] !== "yes") continue;
       try {
-        pumpOnWake(ns, state, active, reserveGb, usableForecastSec(horizons.install));
+        pumpOnWake(ns, state, active, reserveGb, fleetReserveGb, usableForecastSec(horizons.install));
       } catch (error) {
         if (isScriptDeath(error)) throw error;
         TELEMETRY: if (__TELEMETRY__) {
@@ -437,7 +452,7 @@ function placement(state: GameState): HostRam[] {
  * to cover the biggest of them or that feature's probe is unaffordable forever
  * (see shared/ram/reserve.ts). A reserve that had to be capped is written to
  * the store as a blocker — the feature is not silently starved. */
-function computeReserve(state: GameState, active: Capabilities): number {
+function computeReserve(state: GameState, active: Capabilities): { reserveGb: number; fleetReserveGb: number } {
   const home = state.topics.servers?.["home"];
   const result = homeReserveGb({
     enabled: FEATURE_IDS.filter((id) => active.unlocked[id] === "yes"),
@@ -455,7 +470,12 @@ function computeReserve(state: GameState, active: Capabilities): number {
       },
     });
   }
-  return result.reserveGb;
+  // A capped reserve is not just REPORTED any more: the shortfall spills onto
+  // the largest fleet host (dispatch syncTopology), so the feature step that
+  // outgrew a small home still has a launch site. This is what keeps the
+  // 10 GB market sampler alive on an 8 GB home once the farm fills the fleet.
+  const fleetReserveGb = result.capped ? Math.max(0, result.wantedGb - result.reserveGb) : 0;
+  return { reserveGb: result.reserveGb, fleetReserveGb };
 }
 
 /** Write the coordination digest into the store, but only when it changed.

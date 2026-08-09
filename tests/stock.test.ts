@@ -492,18 +492,27 @@ describe("stepStock", () => {
     expect(later.plan.exits[0]!.why).toContain("turned against the long");
   });
 
-  test("it publishes manipulation intent for a held symbol, on the right op", () => {
+  test("it publishes manipulation intent for a held symbol, on the right op — FARMABLE hosts only", () => {
     const held = symbol({ shares: 1_000_000, avgPx: 19_000, forecast: 0.7, volatility: 0.0045 });
     const memory = initStockMemory();
     memory.intent["ECP"] = { side: "long", sinceTick: 0 };
     memory.history.tick = 5;
-    const { plan } = stepStock(view({ symbols: [held] }), memory);
+    const { plan } = stepStock(view({ symbols: [held], farmableHosts: ["ecorp"] }), memory);
     const byHost = manipulationByHost(plan.manipulation);
     expect(byHost["ecorp"]).toBeDefined();
     // grow pushes the second-order forecast UP, so a long is driven by grows.
     expect(byHost["ecorp"]!.side).toBe("long");
     expect(byHost["ecorp"]!.why).toContain("grow ecorp");
     expect(byHost["ecorp"]!.valuePerOp).toBeGreaterThan(0);
+
+    // A host the farm cannot work gets NO intent: publishing the metadata host
+    // list unfiltered broadcast intents for servers that did not exist in the
+    // run's network, and the manipulation profile influenced nobody all run.
+    const memory2 = initStockMemory();
+    memory2.intent["ECP"] = { side: "long", sinceTick: 0 };
+    memory2.history.tick = 5;
+    const { plan: unreachable } = stepStock(view({ symbols: [held], farmableHosts: [] }), memory2);
+    expect(manipulationByHost(unreachable.manipulation)["ecorp"]).toBeUndefined();
   });
 
   test("it prefers a symbol the farm can push, when the edge is close", () => {

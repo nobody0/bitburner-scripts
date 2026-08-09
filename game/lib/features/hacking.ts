@@ -162,6 +162,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     },
     allocFails: stats.allocFails,
     execs: stats.execs,
+    ...(stats.stockOps > 0 ? { stockOps: stats.stockOps } : {}),
     execFails: driver.execFails,
     batchesSkipped: stats.batchesSkipped,
     pumpMaxMs: takePumpMaxMs(),
@@ -467,6 +468,7 @@ function runPump(
   game: GameState,
   caps: DriverContext["caps"],
   homeReserveGb: number,
+  fleetReserveGb: number,
   installSec: number | undefined,
 ): ReturnType<typeof pump> | undefined {
   const servers = game.topics.servers;
@@ -495,6 +497,7 @@ function runPump(
       game.topics.progression?.multipliers,
     ),
     game.topics.stock?.manipulation,
+    expRateEma,
   );
   const completions = drainCompletions(driver);
 
@@ -504,6 +507,7 @@ function runPump(
   // op — to near zero at depth.
   const result = pump(ns, driver, view, completions, {
     homeReserveGb,
+    ...(fleetReserveGb > 0 ? { fleetReserveGb } : {}),
     pooling: true,
     ...(installSec !== undefined ? { horizonMs: installSec * 1_000 } : {}),
   });
@@ -532,6 +536,7 @@ export function pumpOnWake(
   game: GameState,
   caps: DriverContext["caps"],
   homeReserveGb: number,
+  fleetReserveGb: number,
   installSec: number | undefined,
 ): void {
   const now = Date.now();
@@ -539,7 +544,7 @@ export function pumpOnWake(
   if (wakesThisFrame >= WAKE_MAX_PER_FRAME) return;
   wakesThisFrame++;
   wakePumps++;
-  runPump(ns, game, caps, homeReserveGb, installSec);
+  runPump(ns, game, caps, homeReserveGb, fleetReserveGb, installSec);
 }
 
 export const hacking: FeatureDriver = {
@@ -561,7 +566,7 @@ export const hacking: FeatureDriver = {
     // finite bound the evaluator gets here. Converted to ms at this boundary:
     // everything below planFarm is ms-native.
     const installSec = usableForecastSec(ctx.horizons.install);
-    const result = runPump(ns, game, ctx.caps, homeReserveGb, installSec);
+    const result = runPump(ns, game, ctx.caps, homeReserveGb, ctx.fleetReserveGb, installSec);
     if (!result) return;
     const driver = hackingState();
     const target = result.directive.farm?.host ?? "";

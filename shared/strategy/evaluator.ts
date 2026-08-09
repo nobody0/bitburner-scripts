@@ -1,5 +1,5 @@
-import { makeHackContext, type HackContext } from "../formulas.ts";
-import { evaluatePrep, farmIncomeRate } from "./economics.ts";
+import { makeHackContext, skillFromExp, weakenTimeSeconds, type HackContext } from "../formulas.ts";
+import { evaluatePrep, farmIncomeRate, prepTimeDiscount } from "./economics.ts";
 import type { ServerView, WorldView } from "../world.ts";
 import type { Segment, TargetDirective } from "./directive.ts";
 import {
@@ -31,6 +31,12 @@ export const SWITCH_MARGIN = 0.1;
 export const DWELL_MS = 60_000;
 export const HORIZON_MIN_MS = 60_000;
 export const HORIZON_MAX_MS = 1_800_000;
+/** Prep INVESTMENT may amortize further out than the 30-minute farming
+ * horizon: a target upgrade pays for the rest of the run, and capping its
+ * window at 30 minutes priced every multi-hour prep on a small fleet out of
+ * existence permanently (the n00dles lock-in). Bounded so an unbounded run
+ * forecast cannot justify arbitrarily speculative preps. */
+export const PREP_HORIZON_MAX_MS = 4 * 3_600_000;
 /** Segment shares. A larger prep share was A/B-tested and LOST: RAM-bound
  * prep economics always prefer it in the model (the farm's loss is
  * share-invariant), but the dispatcher's per-pass op cap means prep cannot
@@ -274,8 +280,33 @@ export function stepEvaluator(
   // Two ceilings apply: how long the GOAL still needs at the current rate,
   // and how long the RUN is expected to last at all — whichever ends first.
   const currentRate = currentScore * fleetGb;
-  const goalHorizonMs = currentRate > 0 ? (goalRemaining / currentRate) * 1000 : HORIZON_MAX_MS;
+  const goalHorizonMs = currentRate > 0 ? (goalRemaining / currentRate) * 1000 : PREP_HORIZON_MAX_MS;
   const horizonMs = Math.min(HORIZON_MAX_MS, Math.max(HORIZON_MIN_MS, Math.min(goalHorizonMs, horizonCapMs)));
+  // Prep INVESTMENT amortizes over the run, not the 30-minute farm window.
+  const prepHorizonMs = Math.min(PREP_HORIZON_MAX_MS, Math.max(HORIZON_MIN_MS, Math.min(goalHorizonMs, horizonCapMs)));
+
+  // Skill growth DURING a prep shrinks the prep: at the measured exp rate,
+  // estimate the skill when the prep would finish and average the candidate's
+  // weaken-time ratio over the window (shared/strategy/economics.ts). Without
+  // this a 3-hour quote at today's skill vetoes an upgrade that would in fact
+  // finish in half that.
+  const expRate = view.player.hackingExpRate ?? 0;
+  const prepScaleOf = (entry: TargetEntry, prepSeconds: number): number => {
+    if (expRate <= 0 || !Number.isFinite(prepSeconds) || prepSeconds <= 0) return 1;
+    const futureSkill = skillFromExp(
+      view.player.hackingExp + expRate * prepSeconds,
+      view.player.mults.hacking ?? 1,
+    );
+    if (futureSkill <= view.player.hackingSkill) return 1;
+    const futureCtx = makeHackContext(
+      { skill: futureSkill, intelligence: view.player.intelligence, mults: view.player.mults },
+      view.nodeMults ?? {},
+    );
+    const nowSec = weakenTimeSeconds(ctx, entry.statics.baseDifficulty, entry.statics.requiredHackingSkill);
+    const futureSec = weakenTimeSeconds(futureCtx, entry.statics.baseDifficulty, entry.statics.requiredHackingSkill);
+    if (!(nowSec > 0)) return 1;
+    return prepTimeDiscount({ prepSeconds, futureOpTimeScale: futureSec / nowSec });
+  };
 
   // Farm pick: the best PREPPED candidate — `ranked` is sorted, so the first
   // prepped one is it — with hysteresis + dwell against the incumbent. An
@@ -293,28 +324,58 @@ export function stepEvaluator(
       memory.farmSince = now;
     }
   }
-  if (!farmEntry) {
-    // Nothing prepped yet: farm the best target anyway (the dispatcher preps
-    // it, then fires hacks). "Best" here MUST be prep-aware, not raw score:
-    // the pipeline-aware score can rank a 50M-money server above a small one,
-    // but on a small fleet its prep takes hours — hours of zero income. Weigh
-    // each candidate by the income it can deliver within the horizon AFTER
-    // its own prep finishes on the farm segment's budget.
+  if (!bestPrepped) {
+    // Nothing prepped anywhere: farm the best target anyway (the dispatcher
+    // preps it, then fires hacks). "Best" here MUST be prep-aware, not raw
+    // score: the pipeline-aware score can rank a 50M-money server above a
+    // small one, but on a small fleet its prep takes hours — hours of zero
+    // income. Weigh each candidate by the income it can deliver within the
+    // prep horizon AFTER its own (skill-discounted) prep finishes.
+    //
+    // The INCUMBENT competes on the same terms — this is not only the cold
+    // start. A 0-score incumbent used to hold the slot forever while nothing
+    // was prepped, which is how a BN8 farm spent six hours prepping a
+    // worthless target while the only positive-score (manipulated) hosts sat
+    // ignored.
     const prepBudgetGb = Math.max(1, fleetGb * FARM_SHARE);
+    const valueOf = (candidate: TargetEntry): number => {
+      const plan = prepOf(candidate);
+      if (!plan) return -1;
+      const rawSec = prepTimeSeconds(plan, prepBudgetGb);
+      const scaledSec = rawSec * prepScaleOf(candidate, rawSec);
+      return candidate.solution!.score * Math.max(0, prepHorizonMs - scaledSec * 1000);
+    };
     let bestValue = -1;
     let best: TargetEntry | undefined;
     for (const candidate of ranked) {
-      const plan = prepOf(candidate);
-      if (!plan) continue;
-      const value = candidate.solution!.score * Math.max(0, horizonMs - prepTimeSeconds(plan, prepBudgetGb) * 1000);
+      const value = valueOf(candidate);
       if (value > bestValue) {
         bestValue = value;
         best = candidate;
       }
     }
-    farmEntry = bestValue > 0 ? best : ranked[0];
-    if (farmEntry && farmEntry.statics.hostname !== currentHost) {
-      switched = { from: currentHost, to: farmEntry.statics.hostname };
+    if (!farmEntry) {
+      farmEntry = bestValue > 0 ? best : ranked[0];
+      if (farmEntry && farmEntry.statics.hostname !== currentHost) {
+        switched = { from: currentHost, to: farmEntry.statics.hostname };
+        memory.farmSince = now;
+      }
+    } else if (
+      // Contest the incumbent ONLY when it earns nothing at all. An earning
+      // farm target dips out of `prepped` for a moment after every hack lands,
+      // and contesting it in those windows yanks the farm onto a cold target
+      // (measured: hacking-early 16.1m -> 20.6m). A worthwhile upgrade of an
+      // EARNING farm goes through the prep pick below and switches when
+      // prepped; only a zero-score incumbent (BN8's worthless-money targets)
+      // has nothing to lose by switching cold.
+      best &&
+      best !== farmEntry &&
+      currentScore <= 0 &&
+      dwellOk &&
+      bestValue > 0
+    ) {
+      switched = { from: farmEntry.statics.hostname, to: best.statics.hostname };
+      farmEntry = best;
       memory.farmSince = now;
     }
   }
@@ -330,17 +391,19 @@ export function stepEvaluator(
   const currentRateNow = farmIncomeRate(farmModel, fleetGb);
   let prepEntry: TargetEntry | undefined;
   let prepPlan: PrepPlan | undefined;
-  let bestNet = 0.02 * currentRateNow * (horizonMs / 1_000); // churn epsilon
+  let bestNet = 0.02 * currentRateNow * (prepHorizonMs / 1_000); // churn epsilon
   for (const candidate of ranked) {
     if (candidate === farmEntry) continue;
     const plan = prepOf(candidate);
     if (!plan || plan.prepped) continue;
+    const rawPrepSec = prepTimeSeconds(plan, Math.max(1, fleetGb * PREP_SHARE));
     const economics = evaluatePrep({
       current: farmModel,
       candidate: candidate.solution!,
       plan,
       fleetGb,
-      horizonMs,
+      horizonMs: prepHorizonMs,
+      prepTimeScale: prepScaleOf(candidate, rawPrepSec),
       shares: [PREP_SHARE],
     });
     if (!economics || economics.net <= bestNet) continue;

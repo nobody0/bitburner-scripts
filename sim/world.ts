@@ -331,11 +331,29 @@ export class SimWorld {
     });
   }
 
+  /** Measured hacking exp/sec for the evaluator's prep discount — the same
+   * signal the game driver's EMA provides. Sampled on each view build. */
+  private expRateEma = 0;
+  private expRateLastAt = 0;
+  private expRateLastExp = 0;
+
   playerView(): PlayerView {
+    const now = Date.now();
+    const dtSec = (now - this.expRateLastAt) / 1_000;
+    if (this.expRateLastAt === 0) {
+      this.expRateLastAt = now;
+      this.expRateLastExp = this.person.exp.hacking;
+    } else if (dtSec >= 1) {
+      const sample = Math.max(0, (this.person.exp.hacking - this.expRateLastExp) / dtSec);
+      this.expRateEma = this.expRateEma === 0 ? sample : this.expRateEma * 0.9 + sample * 0.1;
+      this.expRateLastAt = now;
+      this.expRateLastExp = this.person.exp.hacking;
+    }
     return {
       money: this.money,
       hackingSkill: this.person.skills.hacking,
       hackingExp: this.person.exp.hacking,
+      ...(this.expRateEma > 0 ? { hackingExpRate: this.expRateEma } : {}),
       intelligence: this.person.skills.intelligence,
       mults: {
         hacking: this.person.mults.hacking,

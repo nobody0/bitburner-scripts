@@ -29,8 +29,13 @@ export function dodgeHosts(
     if (!server.hasAdminRights) continue;
     const isHome = server.hostname === "home";
     const known = heap?.host(server.hostname) !== undefined;
+    // Reserves are FOR dodge stubs, wherever they live: home's always, and the
+    // spilled fleet reserve (dispatch syncTopology places the home shortfall
+    // on the largest fleet host when the 40% home cap truncated it). No other
+    // writer sets a fleet host's reserve, so including it never spends
+    // someone else's headroom.
     const freeGb = known
-      ? heap!.freeOn(server.hostname, isHome)
+      ? heap!.freeOn(server.hostname, true)
       : Math.max(0, server.maxRam - server.ramUsed);
     hosts.push({
       hostname: server.hostname,
@@ -76,7 +81,10 @@ export function acquireDodge(
   // budget plainly covered.
   if (!heap || heap.host(host) === undefined) return { host, release: () => {} };
 
-  const lease = heap.reserveOn(host, STUB_BASE_GB + budgetGb, host === "home");
+  // includeReserved on EVERY host, matching dodgeHosts above: a reserve only
+  // exists where we put one (home, or the spilled fleet-reserve host), and it
+  // exists precisely so a stub can launch there.
+  const lease = heap.reserveOn(host, STUB_BASE_GB + budgetGb, true);
   // The heap knows this host and says it is fuller than the snapshot placement
   // was built from. Rather than guess a different host, decline: the next
   // sweep rebuilds placement from the fresher ledger.

@@ -106,6 +106,10 @@ export interface DispatchStats {
   /** Ops that needed a fresh process (one-shots + pool spawns). The pooling
    * win is this staying flat while `launched` keeps climbing. */
   execs: number;
+  /** Ops launched carrying a `{stock:true}` influence flag. The only visible
+   * link between "manipulation intended" and "nudges actually rolled" — a
+   * manipulation run where this stays 0 has an open influence loop. */
+  stockOps: number;
 }
 
 export interface DispatchMemory {
@@ -135,6 +139,11 @@ export interface DispatchMemory {
 export interface DispatchOptions {
   /** GB kept free on home for the controller and dodge stubs. */
   homeReserveGb?: number;
+  /** Home-reserve SHORTFALL to keep free on the largest fleet host instead —
+   *  nonzero only when the 40% home cap truncated the wanted reserve
+   *  (shared/ram/reserve.ts `capped`). Dodge placement may spend it exactly
+   *  like home's reserve. */
+  fleetReserveGb?: number;
   /** Money still needed for the active goal — sets the switch horizon. */
   goalRemaining?: number;
   /** Expected remaining run time in ms (the endgame route's estimate). Caps
@@ -179,6 +188,7 @@ export function initDispatch(): DispatchMemory {
       allocFails: 0,
       batchesSkipped: 0,
       execs: 0,
+      stockOps: 0,
     },
   };
 }
@@ -187,7 +197,12 @@ export function initDispatch(): DispatchMemory {
  * the slot count is saturated anyway. */
 const HOST_BLOCKS_LIMIT = 64;
 
-function syncTopology(memory: DispatchMemory, view: WorldView, homeReserveGb: number): FleetCapacity {
+function syncTopology(
+  memory: DispatchMemory,
+  view: WorldView,
+  homeReserveGb: number,
+  fleetReserveGb = 0,
+): FleetCapacity {
   // Our own in-flight ops are transient — their RAM frees within one batch
   // cycle, so they must NOT shrink what the solver may plan with. Foreign
   // usage (the controller's own footprint, anything else running) is standing
@@ -198,12 +213,32 @@ function syncTopology(memory: DispatchMemory, view: WorldView, homeReserveGb: nu
   for (const tracked of memory.tracked.values()) {
     ours.set(tracked.hostname, (ours.get(tracked.hostname) ?? 0) + tracked.gb);
   }
+  // A home too small to hold the full feature-step reserve (the 40% cap in
+  // shared/ram/reserve.ts) spills the SHORTFALL onto the largest fleet host,
+  // so the biggest declared probe step stays affordable somewhere. Without
+  // this the farm packs every fleet block and the probe that is a feature's
+  // only signal source starves — measured: stock-manipulation observed
+  // 906/3600 market ticks because the 10 GB sampler lost every sweep.
+  let reserveHost: string | undefined;
+  if (fleetReserveGb > 0) {
+    for (const server of view.servers) {
+      if (!server.hasAdminRights || server.hostname === "home" || server.maxRam < 2) continue;
+      if (reserveHost === undefined) reserveHost = server.hostname;
+      else {
+        const best = view.servers.find((s) => s.hostname === reserveHost)!;
+        if (server.maxRam > best.maxRam || (server.maxRam === best.maxRam && server.hostname < best.hostname)) {
+          reserveHost = server.hostname;
+        }
+      }
+    }
+  }
   let fleetGb = 0;
   let largestBlockGb = 0;
   const hostBlocksGb: number[] = [];
   for (const server of view.servers) {
     if (!server.hasAdminRights || server.maxRam < 2) continue;
-    const reserved = server.hostname === "home" ? homeReserveGb : 0;
+    const reserved =
+      server.hostname === "home" ? homeReserveGb : server.hostname === reserveHost ? fleetReserveGb : 0;
     const existing = memory.heap.host(server.hostname);
     // The heap owns `used` (reservation ledger); topology comes from the view.
     memory.heap.upsert(
@@ -317,7 +352,7 @@ export function dispatch(
     }
   }
 
-  const capacity = syncTopology(memory, view, homeReserveGb);
+  const capacity = syncTopology(memory, view, homeReserveGb, options.fleetReserveGb ?? 0);
   const stepped = stepEvaluator(
     view,
     memory.evaluator,
@@ -638,6 +673,7 @@ function launchBatches(
       });
       memory.inFlight[op.kind]++;
       memory.stats.launched[op.kind]++;
+      if (op.stock) memory.stats.stockOps++;
       if (!worker || worker.spawn) memory.stats.execs++;
     };
 
@@ -816,6 +852,7 @@ function launchPrepWave(
       memory.inFlight[kind]++;
       memory.stats.launched[kind]++;
       memory.stats.execs++;
+      if (kind === "grow" && growInfluences) memory.stats.stockOps++;
       memory.segmentGb[segment] += block.threads * WORKER_RAM[kind];
       memory.prepInFlight.set(server.hostname, (memory.prepInFlight.get(server.hostname) ?? 0) + 1);
       realThreads += block.threads;

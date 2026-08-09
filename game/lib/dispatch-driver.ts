@@ -74,6 +74,9 @@ export function buildView(
    *  stock driver on its topic; read here so the target solver can price
    *  manipulation into the same `$/GB/sec` score as hacked money. */
   stockInfluence?: Record<string, StockInfluence>,
+  /** Measured hacking exp/sec (the driver's EMA), for the evaluator's
+   *  skill-growth prep discount. */
+  hackingExpRate?: number,
 ): WorldView {
   const hot = new Set(hotHosts);
   const views: ServerView[] = [];
@@ -103,6 +106,7 @@ export function buildView(
       money: player.money,
       hackingSkill: player.skills.hacking,
       hackingExp: player.exp.hacking,
+      ...(hackingExpRate !== undefined && hackingExpRate > 0 ? { hackingExpRate } : {}),
       intelligence: player.skills.intelligence,
       mults: {
         hacking: player.mults.hacking,
@@ -138,10 +142,11 @@ export function pump(
    *  directly. Named options rather than a positional number tail, because
    *  three adjacent defaulted numbers in three different units transpose
    *  silently. */
-  options: { homeReserveGb?: number; horizonMs?: number; pooling?: boolean } = {},
+  options: { homeReserveGb?: number; fleetReserveGb?: number; horizonMs?: number; pooling?: boolean } = {},
 ): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"] } {
   const result = planFarm(view, state.memory, completions, {
     homeReserveGb: options.homeReserveGb ?? HOME_RESERVE_GB,
+    ...(options.fleetReserveGb ? { fleetReserveGb: options.fleetReserveGb } : {}),
     ...(options.horizonMs !== undefined ? { horizonMs: options.horizonMs } : {}),
     ...(options.pooling ? { pooling: true } : {}),
   });

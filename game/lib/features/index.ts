@@ -57,6 +57,10 @@ export interface DriverContext {
   /** Home RAM the dispatcher must leave free this pass, already accounting for
    *  every unlocked feature's declared dodge step (shared/ram/reserve.ts). */
   homeReserveGb: number;
+  /** The part of the wanted reserve the home cap truncated, kept free on the
+   *  largest fleet host instead (dispatch syncTopology). Zero when home holds
+   *  the full reserve. */
+  fleetReserveGb: number;
   /** Controller tick counter, for drivers that want a phase offset. */
   tick: number;
   /** What everyone wants, this tick. A driver satisfying another feature's

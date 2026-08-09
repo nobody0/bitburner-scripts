@@ -36,6 +36,28 @@ export function farmIncomeRate(model: FarmRateModel | undefined, farmGb: number)
   return model.score * Math.min(farmGb, depthCapGb(model));
 }
 
+/** How much of a prep's clock the player's OWN growth gives back.
+ *
+ * Prep time is quoted at today's skill, but weaken/grow times shrink as the
+ * player levels DURING the prep — on a small early fleet that error prices
+ * every upgrade out of reach forever. Estimate the skill after `prepSeconds`
+ * at the measured exp rate and average the op-time ratio over the window
+ * (trapezoid: the prep starts at today's speed and ends at the future one).
+ *
+ * `opTimeScaleAt` maps a skill to the relative op time (1 = today); callers
+ * derive it from the same formulas the solver uses so the discount can never
+ * disagree with the clock it discounts. Returns a multiplier in (0, 1]. */
+export function prepTimeDiscount(args: {
+  prepSeconds: number;
+  /** Relative op time at the projected future skill (weakenTime(future) /
+   * weakenTime(now) for the candidate). 1 = no growth measured. */
+  futureOpTimeScale: number;
+}): number {
+  const scale = Math.min(1, Math.max(0, args.futureOpTimeScale));
+  if (!Number.isFinite(args.prepSeconds) || args.prepSeconds <= 0) return 1;
+  return (1 + scale) / 2;
+}
+
 export interface PrepEconomics {
   /** $ over the horizon: gain after the switch minus income lost during prep.
    * The decision value — prep only when positive (plus a churn epsilon). */
@@ -52,6 +74,9 @@ export function evaluatePrep(args: {
   plan: PrepPlan;
   fleetGb: number;
   horizonMs: number;
+  /** Multiplier on the quoted prep time, from prepTimeDiscount — skill growth
+   * during the prep shrinks it. Default 1: no growth assumed. */
+  prepTimeScale?: number;
   /** Candidate fleet shares for the prep segment. Defaults let the caller's
    * segment split follow the winning share. */
   shares?: readonly number[];
@@ -59,13 +84,14 @@ export function evaluatePrep(args: {
   const { current, candidate, plan, fleetGb, horizonMs } = args;
   if (plan.prepped || fleetGb <= 0) return undefined;
   const shares = args.shares ?? [0.25, 0.6];
+  const timeScale = args.prepTimeScale ?? 1;
   const horizonS = horizonMs / 1_000;
   const currentRate = farmIncomeRate(current, fleetGb);
   const candidateRate = farmIncomeRate(candidate, fleetGb);
 
   let best: PrepEconomics | undefined;
   for (const share of shares) {
-    const prepSeconds = prepTimeSeconds(plan, Math.max(1, fleetGb * share));
+    const prepSeconds = prepTimeSeconds(plan, Math.max(1, fleetGb * share)) * timeScale;
     if (!Number.isFinite(prepSeconds)) continue;
     // Income lost while prepping: only the RAM the farm could actually USE
     // counts — when the farm is depth-capped below (1−share)·fleet, the prep

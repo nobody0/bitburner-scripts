@@ -945,6 +945,13 @@ function planManipulation(params: {
   if (holdTicks <= 0) return [];
   const out: ManipulationIntent[] = [];
 
+  // Only hosts the farm can actually work: rooted, skill-reachable, present in
+  // THIS world. Publishing the full metadata host list broadcast intents for
+  // servers that did not exist in the run's network, and the "manipulation"
+  // profile spent the whole run influencing nobody (measured: influence keys
+  // fulcrumassets/4sigma/... against a network whose only symbol hosts were
+  // foodnstuff, sigma-cosmetics and joesguns).
+  const farmable = new Set(view.farmableHosts);
   const consider = (sym: string, side: PositionSide, notional: number): void => {
     const entryView = perSymbol.get(sym);
     if (!entryView || notional <= 0) return;
@@ -953,6 +960,7 @@ function planManipulation(params: {
     const forecast = entryView.ranked.forecast;
     const volatility = entryView.ranked.volatility;
     for (const hostname of meta.hosts) {
+      if (!farmable.has(hostname)) continue;
       // stealFraction 1 is the per-op UNIT: `hacking` scales by the steal
       // fraction its own solved batch achieves, which it knows and we do not.
       const valuePerOp = manipulationValuePerOp({

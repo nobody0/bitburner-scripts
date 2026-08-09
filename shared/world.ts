@@ -34,6 +34,11 @@ export interface PlayerView {
   money: number;
   hackingSkill: number;
   hackingExp: number;
+  /** Measured hacking exp/sec (EMA), when the driver tracks one. Lets the
+   * evaluator discount a candidate's prep time by the skill growth that will
+   * happen DURING the prep — treating prep time as a constant overprices
+   * every long prep on a small fleet. */
+  hackingExpRate?: number;
   intelligence: number;
   mults: PlayerMults;
 }
