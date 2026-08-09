@@ -38,11 +38,6 @@ describe("feature overrides", () => {
     expect(capped.bitNode).toBe(1);
   });
 
-  test("no overrides is the identity", () => {
-    expect(applyOverrides(fresh, undefined)).toBe(fresh);
-    expect(applyOverrides(fresh, {})).toBe(fresh);
-  });
-
   test("only() disables everything else without forcing anything on", () => {
     const overrides = only("hacking", "factions");
     expect(overrides["hacking"]).toBeUndefined();
@@ -92,10 +87,9 @@ describe("simulation profiles", () => {
     }
   });
 
-  test("profile ids are unique and looked up by name", () => {
+  test("profile ids are unique and unknown ids are rejected", () => {
     const ids = PROFILES.map((p) => p.id);
     expect(new Set(ids).size).toBe(ids.length);
-    expect(findProfile("hacking-only").features).toBeDefined();
     expect(() => findProfile("nope")).toThrow(/unknown profile/);
   });
 

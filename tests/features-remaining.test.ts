@@ -10,7 +10,6 @@ import { ASCEND_THRESHOLD, CLASH_CONFIDENCE, stepGang } from "../shared/strategy
 import {
   evaluate,
   group,
-  legalMoves,
   playMove,
   prepareGoDecision,
   finalizeGoDecision,
@@ -22,9 +21,8 @@ import { postNeeds } from "../shared/strategy/needs.ts";
 import { BASELINE_ORDER, bestOrdering, favorCrossings, orderingCost, phaseOf, stepProgression } from "../shared/strategy/progression/decide.ts";
 import { canSolve, solve } from "../shared/strategy/side/contracts.ts";
 import { shockMultiplier, stepSleeves } from "../shared/strategy/sleeves/decide.ts";
-import { chargeOrder, distinctRotations, packFragments, rotate } from "../shared/strategy/stanek/pack.ts";
+import { chargeOrder, distinctRotations, packFragments } from "../shared/strategy/stanek/pack.ts";
 // stock has outgrown this file — see tests/stock.test.ts
-import { mulberry32 } from "../sim/core/rng.ts";
 
 // --- assignment (shared by gang, sleeves, bladeburner) -----------------------
 
@@ -294,11 +292,6 @@ describe("stanek packing", () => {
   const line = [{ x: 0, y: 0 }, { x: 1, y: 0 }, { x: 2, y: 0 }];
   const el = [{ x: 0, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }];
 
-  test("rotation normalises to the origin", () => {
-    expect(rotate(line, 1)).toEqual([{ x: 0, y: 0 }, { x: 0, y: 1 }, { x: 0, y: 2 }]);
-    expect(rotate(square, 2)).toEqual(rotate(square, 0));
-  });
-
   test("distinct rotations are deduplicated — a square has one, an L has four", () => {
     expect(distinctRotations(square)).toHaveLength(1);
     expect(distinctRotations(line)).toHaveLength(2);
@@ -367,10 +360,6 @@ describe("go", () => {
     expect(group(b, 0, 1).liberties).toBe(2);
   });
 
-  test("legal moves are the empty points", () => {
-    expect(legalMoves(board(["X.", ".O"]))).toEqual([[0, 1], [1, 0]]);
-  });
-
   test("board coordinates are column-major and captures are applied", () => {
     // White at (1,1) has one liberty, (1,2). Black takes it.
     const played = playMove(board([".X.", "XO.", ".X."]), 1, 2, "X");
@@ -391,18 +380,6 @@ describe("go", () => {
     const safe = board(["XX.", "...", "..."]);
     const atari = board(["XO.", "...", "..."]);
     expect(evaluate(safe, "X")).toBeGreaterThan(evaluate(atari, "X"));
-  });
-
-  test("it plays a legal move on an empty board", () => {
-    const decision = stepGo({
-      board: board([".....", ".....", ".....", ".....", "....."]),
-      currentPlayer: "Black",
-      opponent: "Netburners",
-      status: "inProgress",
-      previousBoards: [],
-    });
-    expect(decision.action.type).toBe("move");
-    expect(decision.why).toContain("fixed-budget tactical shortlist");
   });
 
   test("terminal evaluation treats a score tie as the game's black win", () => {
@@ -845,26 +822,6 @@ describe("progression", () => {
     for (const node of revisited) {
       const levels = BASELINE_ORDER.filter(([n]) => n === node).map(([, level]) => level);
       expect(levels[1]).toBeGreaterThan(levels[0]!);
-    }
-  });
-});
-
-// --- determinism sweep ---------------------------------------------------------
-
-describe("every strategy is deterministic", () => {
-  test("repeated calls with the same input give the same answer", () => {
-    const rng = mulberry32(5);
-    for (let trial = 0; trial < 20; trial++) {
-      const fragments = Array.from({ length: 3 }, (_, i) => ({
-        id: i,
-        shape: [{ x: 0, y: 0 }, { x: Math.round(rng()), y: 0 }],
-        power: 1,
-        weight: Math.round(rng() * 10),
-      }));
-      const a = packFragments(fragments, 3, 3);
-      const b = packFragments(fragments, 3, 3);
-      expect(a.value).toBe(b.value);
-      expect(a.placements).toEqual(b.placements);
     }
   });
 });

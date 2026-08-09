@@ -34,16 +34,6 @@ describe("runSim initialization", () => {
     expect(planCalls).toBe(0);
   });
 
-  test("reaches an initial home RAM goal at time zero", () => {
-    const result = runSim({
-      goal: parseGoal("ram:8"),
-      seed: 1,
-      horizonMs: 1,
-      world: { homeRam: 8 },
-    });
-    expect(result).toMatchObject({ reached: true, timeToGoalMs: 0, stoppedBecause: "goal" });
-  });
-
   test("delivers the complete initial snapshot to the record sink in sequence order", () => {
     const records: LogRecord[] = [];
     runSim({

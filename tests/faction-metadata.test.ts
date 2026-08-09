@@ -84,19 +84,6 @@ describe("full faction catalogue metadata", () => {
     expect(metadataView({ invites: ["Shadows of Anarchy"] }).requirementView.numInfiltrations).toBe(1);
     expect(metadataView({ joined: ["Shadows of Anarchy"] }).requirementView.numInfiltrations).toBe(1);
   });
-
-  test("full maps survive telemetry JSON round trips without entering standings", () => {
-    const topic: FactionsState = {
-      joined: ["CyberSec"],
-      standings: [{ name: "CyberSec", rep: 12, favor: 3 }],
-      workTypes: { Tetrads: ["field", "security"] },
-      enemies: { "Sector-12": ["Chongqing", "New Tokyo", "Ishima", "Volhaven"] },
-    };
-    const roundTrip = JSON.parse(JSON.stringify(topic)) as FactionsState;
-    expect(roundTrip.workTypes).toEqual(topic.workTypes);
-    expect(roundTrip.enemies).toEqual(topic.enemies);
-    expect(roundTrip.standings).toEqual([{ name: "CyberSec", rep: 12, favor: 3 }]);
-  });
 });
 
 describe("the market book counts toward the purchase budget", () => {

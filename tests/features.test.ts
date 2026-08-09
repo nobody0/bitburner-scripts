@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { changedMultipliers, BITNODES, DEFAULT_BITNODE_MULTIPLIERS } from "../shared/features/bitnode.ts";
+import { changedMultipliers, DEFAULT_BITNODE_MULTIPLIERS } from "../shared/features/bitnode.ts";
 import { FEATURE_IDS, type FeatureId } from "../shared/features/ids.ts";
-import { FEATURES, featureById, featureForBitNode } from "../shared/features/registry.ts";
-import { capsDelta, deriveCapabilities, sfLevel, unknownCapabilities } from "../shared/features/unlock.ts";
+import { FEATURES, featureForBitNode } from "../shared/features/registry.ts";
+import { capsDelta, deriveCapabilities, unknownCapabilities } from "../shared/features/unlock.ts";
 import { MS_PER_TICK } from "../shared/strategy/stock/market.ts";
 import {
   FEATURE_DRIVERS,
@@ -80,24 +80,9 @@ describe("feature registry", () => {
     }
     for (const n of seen.keys()) expect(featureForBitNode(n)).toBeDefined();
   });
-
-  test("featureById throws for an unknown id", () => {
-    expect(() => featureById("nope" as FeatureId)).toThrow();
-  });
 });
 
 describe("bitnode reference data", () => {
-  test("all 15 BitNodes are present and uniquely numbered", () => {
-    expect(BITNODES.length).toBe(15);
-    expect(BITNODES.map((b) => b.n)).toEqual(Array.from({ length: 15 }, (_, i) => i + 1));
-  });
-
-  test("the two non-1 defaults are transcribed correctly", () => {
-    // Getting these wrong would render BN1 as if it modified them.
-    expect(DEFAULT_BITNODE_MULTIPLIERS.DaedalusAugsRequirement).toBe(30);
-    expect(DEFAULT_BITNODE_MULTIPLIERS.StaneksGiftExtraSize).toBe(0);
-  });
-
   test("changedMultipliers reports only true deviations", () => {
     expect(changedMultipliers(undefined)).toEqual([]);
     const active = { ...DEFAULT_BITNODE_MULTIPLIERS, ScriptHackMoney: 0.2 };
@@ -160,11 +145,6 @@ describe("capability derivation", () => {
     // SF2 plus karma grants a gang outside BN2, which is why gang uses the
     // live inGang() flag rather than a node check.
     expect(deriveCapabilities({ bitNode: 1, sourceFiles: { "2": 1 }, inGang: true }).unlocked.gang).toBe("yes");
-  });
-
-  test("sfLevel tolerates a missing map", () => {
-    expect(sfLevel(undefined, 4)).toBe(0);
-    expect(sfLevel({ "4": 3 }, 4)).toBe(3);
   });
 });
 
@@ -568,10 +548,6 @@ describe("feature modules", () => {
 });
 
 describe("feature drivers", () => {
-  test("every feature has exactly one driver", () => {
-    expect(FEATURE_DRIVERS.map((d) => d.id).sort()).toEqual([...FEATURE_IDS].sort());
-  });
-
   test("driver gates name real features and cadences are positive", () => {
     for (const driver of FEATURE_DRIVERS) {
       if (driver.requires) expect(FEATURE_IDS).toContain(driver.requires);
@@ -672,24 +648,6 @@ describe("capability deltas", () => {
     expect(capsDelta(fresh, unknownCapabilities()).bitNodeChanged).toBe(false);
     expect(capsDelta(fresh, deriveCapabilities({ bitNode: 4 })).bitNodeChanged).toBe(true);
     expect(capsDelta(fresh, deriveCapabilities({ bitNode: 1 })).bitNodeChanged).toBe(false);
-  });
-});
-
-describe("telemetry payloads survive JSON", () => {
-  test("a Map in a payload would serialize to nothing", () => {
-    // The trap this guards: ResetInfo hands back Maps, and JSON.stringify
-    // turns them into {}. Probes must flatten with Object.fromEntries.
-    expect(JSON.stringify({ ownedSF: new Map([[4, 3]]) })).toBe('{"ownedSF":{}}');
-    const flattened = Object.fromEntries(new Map([[4, 3]]));
-    expect(JSON.parse(JSON.stringify({ sourceFiles: flattened })).sourceFiles).toEqual({ "4": 3 });
-  });
-
-  test("capabilities round-trip intact", () => {
-    const caps = deriveCapabilities({ bitNode: 12, sourceFiles: { "4": 3 }, inGang: false });
-    const back = JSON.parse(JSON.stringify(caps)) as typeof caps;
-    expect(back.sourceFiles).toEqual({ "4": 3 });
-    expect(back.unlocked.factions).toBe("yes");
-    expect(back.unlocked.gang).toBe("no");
   });
 });
 

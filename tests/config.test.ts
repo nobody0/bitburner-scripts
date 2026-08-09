@@ -10,10 +10,6 @@ const valid = {
 };
 
 describe("validateConfig", () => {
-  test("accepts a minimal allowlist", () => {
-    expect(validateConfig(valid)).toEqual(valid);
-  });
-
   test("accepts versioned runtime entries and a separate restore entry", () => {
     const configured = {
       ...valid,

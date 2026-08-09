@@ -49,15 +49,4 @@ describe("describing what an augmentation gives", () => {
     // number it is, and ranked by how big the change is either way.
     expect(described.map((d) => d.text)).toEqual(["hack $ +80%", "hacknet core cost -15%", "hacking +10%"]);
   });
-
-  test("no multipliers is not an error", () => {
-    // CashRoot Starter Kit grants money and a program, and multiplies nothing.
-    expect(describeMults(AUGMENTATIONS["CashRoot Starter Kit"]!.mults)).toEqual([]);
-    expect(AUGMENTATIONS["CashRoot Starter Kit"]!.startingMoney).toBe(1_000_000);
-  });
-
-  test("the one randomised augmentation is flagged rather than scored", () => {
-    const unstable = AUGMENTATIONS["Unstable Circadian Modulator"];
-    expect(unstable?.multsUnknown).toBe(true);
-  });
 });

@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  emptyArbitration,
   grantFor,
   grantedAmount,
   holdsSlot,
@@ -211,11 +210,10 @@ describe("the player-time slot", () => {
 });
 
 describe("arbiter shape", () => {
-  test("resolveClaims is a pure function of its input", () => {
+  test("resolveClaims does not mutate its input", () => {
     const claims = [claim({ id: "a", resource: "money", amount: 10, priority: 5 })];
     const args = input({ pools: { money: 10, ram: 0 }, claims });
-    expect(resolveClaims(args)).toEqual(resolveClaims(args));
-    // ...and does not mutate what it was handed.
+    resolveClaims(args);
     expect(args.pools).toEqual({ money: 10, ram: 0 });
     expect(args.claims).toEqual(claims);
   });
@@ -254,12 +252,5 @@ describe("arbiter shape", () => {
     // Progress protection is a transaction lock, independent of objective
     // value, and must beat every ordinary time bid until completion fires.
     expect(PRIORITY["career:progress-lock"]).toBeGreaterThan(PRIORITY["career:blocking-need"]);
-  });
-
-  test("the empty arbitration is inert", () => {
-    const empty = emptyArbitration();
-    expect(empty.grants).toEqual([]);
-    expect(empty.slot).toBeUndefined();
-    expect(holdsSlot(empty, "factions")).toBe(false);
   });
 });

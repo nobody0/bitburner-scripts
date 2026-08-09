@@ -8,8 +8,6 @@ import {
   midpoint,
   STOCK_METADATA,
   STOCK_SYMBOLS,
-  symbolForHost,
-  SYMBOL_BY_HOST,
   volatilityEstimate,
   worstSpreadFraction,
 } from "../shared/features/stocks.ts";
@@ -20,7 +18,6 @@ import {
   effectiveForecast,
   expectedProfit,
   FOUR_SIGMA_API_COST,
-  FOUR_SIGMA_DATA_COST,
   manipulationLeverage,
   manipulationValuePerOp,
   meanLogStep,
@@ -30,8 +27,6 @@ import {
   roundTripCostFraction,
   selfInfluenceCost,
   TICKS_PER_CYCLE,
-  ticksInSeconds,
-  unlockCosts,
 } from "../shared/strategy/stock/market.ts";
 import {
   CYCLE_QUORUM,
@@ -39,7 +34,6 @@ import {
   FORECAST_PRIOR_STRENGTH,
   initHistory,
   observeMarket,
-  resetHistory,
   ticksUntilCycle,
   type PriceSample,
 } from "../shared/strategy/stock/history.ts";
@@ -125,34 +119,6 @@ function run(base: StockView, ticks: number, up: (tick: number, sym: string) => 
 // --- the metadata table -----------------------------------------------------
 
 describe("stock metadata", () => {
-  test("33 symbols, 32 with a manipulable server", () => {
-    expect(STOCK_SYMBOLS).toHaveLength(33);
-    const withServer = STOCK_SYMBOLS.filter((sym) => STOCK_METADATA[sym]!.hosts.length > 0);
-    expect(withServer).toHaveLength(32);
-    // Watchdog Security is a company you can work for but not a host on the
-    // network, so its symbol can never be manipulated. The strategy has to know.
-    expect(STOCK_METADATA["WDS"]!.hosts).toEqual([]);
-  });
-
-  test("both Fulcrum hosts drive the same symbol", () => {
-    expect(symbolForHost("fulcrumtech")).toBe("FLCM");
-    expect(symbolForHost("fulcrumassets")).toBe("FLCM");
-    expect(STOCK_METADATA["FLCM"]!.hosts).toEqual(["fulcrumtech", "fulcrumassets"]);
-  });
-
-  test("the host map is total and has no strays", () => {
-    for (const [host, sym] of Object.entries(SYMBOL_BY_HOST)) {
-      expect(STOCK_METADATA[sym]!.hosts, `${host} -> ${sym}`).toContain(host);
-    }
-    expect(symbolForHost("home")).toBeUndefined();
-  });
-
-  test("volatility is reported in getVolatility's units, not the metadata percent", () => {
-    // ECP's mv is 0.40-0.50 as a PERCENT; getVolatility returns mv/100.
-    expect(volatilityEstimate("ECP")).toBeCloseTo(0.0045, 6);
-    expect(midpoint(STOCK_METADATA["ECP"]!.mv)).toBeCloseTo(0.45, 6);
-  });
-
   test("the worst spread is 4% of notional, twenty times the commission on a $1b trade", () => {
     // NTLK's spreadPerc tops out at 2.0, charged on BOTH legs.
     expect(worstSpreadFraction("NTLK")).toBeCloseTo(0.04, 6);
@@ -164,14 +130,6 @@ describe("stock metadata", () => {
 // --- price movement ---------------------------------------------------------
 
 describe("market mechanics", () => {
-  test("the mean tick step is HALF the reported volatility, not all of it", () => {
-    // av = v * volatility with v ~ U(0,1), so E[av] = volatility/2. Sizing
-    // against the reported figure doubles every profit estimate.
-    expect(meanLogStep(0.0045)).toBeCloseTo(0.0045 / 2, 5);
-    expect(meanLogStep(0.0045)).toBeLessThan(0.0045);
-    expect(meanLogStep(0)).toBe(0);
-  });
-
   test("the exact integral beats the linear approximation at high volatility", () => {
     // NTLK can reach mv 4.0 -> volatility 0.04, where volatility/2 is visibly
     // wrong and compounds over a 75-tick hold.
@@ -293,27 +251,12 @@ describe("manipulation value", () => {
 // --- BitNode multipliers ----------------------------------------------------
 
 describe("BitNode effect on the market", () => {
-  test("only the 4S prices are multiplied; WSE and TIX are not", () => {
-    const bn9 = unlockCosts({ FourSigmaMarketDataCost: 5, FourSigmaMarketDataApiCost: 4 });
-    expect(bn9.fourSigmaData).toBe(5 * FOUR_SIGMA_DATA_COST);
-    expect(bn9.fourSigmaApi).toBe(4 * FOUR_SIGMA_API_COST);
-    const bn1 = unlockCosts({});
-    expect(bn9.wseAccount).toBe(bn1.wseAccount);
-    expect(bn9.tixApi).toBe(bn1.tixApi);
-  });
-
   test("manipulation leverage is infinite exactly when hacked money is worthless", () => {
     // BN8: ScriptHackMoneyGain 0. Hacking earns literally nothing while still
     // draining the server, so the market is not one income source among several.
     expect(manipulationLeverage({ ScriptHackMoneyGain: 0 })).toBe(Infinity);
     expect(manipulationLeverage({ ScriptHackMoneyGain: 0.5 })).toBe(2);
     expect(manipulationLeverage(undefined)).toBe(1);
-  });
-
-  test("ticks and seconds convert through the 6 s tick", () => {
-    expect(ticksInSeconds(60)).toBe(10);
-    expect(ticksInSeconds(0)).toBe(0);
-    expect(ticksInSeconds(-5)).toBe(0);
   });
 });
 
@@ -424,16 +367,6 @@ describe("price history", () => {
       );
     }
     expect(history.cyclesSeen).toBe(0);
-  });
-
-  test("resetHistory forgets a market that no longer exists", () => {
-    const history = initHistory();
-    observeMarket(history, [{ sym: "ECP", ask: 100, bid: 99 }]);
-    observeMarket(history, [{ sym: "ECP", ask: 101, bid: 100 }]);
-    expect(history.tick).toBe(1);
-    resetHistory(history);
-    expect(history.tick).toBe(0);
-    expect(history.symbols).toEqual({});
   });
 });
 

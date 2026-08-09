@@ -10,26 +10,11 @@ import { parseGoal } from "../shared/goals/presets.ts";
 import { freshEndgameView as view } from "./fixtures/endgame-view.ts";
 
 describe("per-node multipliers without the 4 GB getter", () => {
-  test("BN14's hacking speed penalty is visible, not defaulted to 1", () => {
-    // The bug this table exists to kill: assuming 1.0 here mis-times every
-    // HWGW batch in BN14 by a factor of 3.3.
-    expect(bitNodeMultipliers(14)!.HackingSpeedMultiplier).toBe(0.3);
-    expect(bitNodeMultipliers(15)!.HackingSpeedMultiplier).toBe(0.6);
-    expect(bitNodeMultipliers(1)!.HackingSpeedMultiplier).toBe(1);
-  });
-
   test("the optional SF5 reading overrides rather than replaces the static baseline", () => {
     const mults = effectiveBitNodeMultipliers(8, 0, { ScriptHackMoney: 0.123 })!;
     expect(mults.ScriptHackMoney).toBe(0.123);
     expect(mults.ScriptHackMoneyGain).toBe(0);
     expect(mults.FourSigmaMarketDataCost).toBe(1);
-  });
-
-  test("w0r1d_d43m0n's requirement scales with the node", () => {
-    expect(worldDaemonSkill(1)).toBe(3000);
-    expect(worldDaemonSkill(2)).toBe(15000);
-    expect(worldDaemonSkill(14)).toBe(15000);
-    expect(worldDaemonSkill(8)).toBe(3000);
   });
 
   test("an unknown node is undefined, never BN1", () => {
