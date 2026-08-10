@@ -1,6 +1,7 @@
 import type { EventRecord, LogRecord } from "../shared/telemetry/schema.ts";
 import { formatDuration } from "./run.ts";
 import type { RunValidity, ScenarioClass } from "./fidelity.ts";
+import { assertComparable } from "./compare-policy.ts";
 
 /** A/B compare stored sim runs:
  *   bun run sim:compare runs/a.jsonl runs/b.jsonl [more...]
@@ -16,13 +17,14 @@ interface RunInfo {
   timeToGoalMs: number;
   driver: string;
   scenario: ScenarioClass | string;
+  scenarioFingerprint?: string;
   validity: RunValidity;
   gaps: string[];
 }
 
 async function readRun(file: string): Promise<RunInfo> {
   const text = await Bun.file(file).text();
-  let meta: { goal?: string; label?: string; seed?: number; driver?: string; scenario?: string } = {};
+  let meta: { goal?: string; label?: string; seed?: number; driver?: string; scenario?: string; scenarioFingerprint?: string } = {};
   let result: {
     goal?: string;
     reached?: boolean;
@@ -49,6 +51,7 @@ async function readRun(file: string): Promise<RunInfo> {
     timeToGoalMs: result.timeToGoalMs ?? Infinity,
     driver: meta.driver ?? "legacy-unknown",
     scenario: result.scenario ?? meta.scenario ?? "legacy-unknown",
+    scenarioFingerprint: meta.scenarioFingerprint,
     validity: result.validity ?? "invalid-for-goal",
     gaps: Object.keys(result.unmodeled ?? {}).sort(),
   };
@@ -62,19 +65,7 @@ if (files.length < 2) {
 }
 
 const runs = await Promise.all(files.map(readRun));
-const goals = new Set(runs.map((r) => r.goal));
-if (goals.size > 1) throw new Error(`refusing to compare different goals: ${[...goals].join(" vs ")}`);
-
-const drivers = new Set(runs.map((r) => r.driver));
-if (drivers.size > 1) throw new Error(`refusing to compare different drivers: ${[...drivers].join(" vs ")}`);
-const scenarios = new Set(runs.map((r) => r.scenario));
-if (scenarios.size > 1) throw new Error(`refusing to compare different scenario classes: ${[...scenarios].join(" vs ")}`);
-const gapSets = new Set(runs.map((r) => r.gaps.join("\0")));
-if (gapSets.size > 1) throw new Error("refusing to compare runs with different unmodeled gap sets");
-const invalid = runs.filter((r) => r.validity === "invalid-for-goal");
-if (invalid.length > 0 && !allowInvalid) {
-  throw new Error("refusing invalid-for-goal run(s); inspect their gaps or pass --allow-invalid for diagnostics only");
-}
+assertComparable(runs, allowInvalid);
 
 const baseline = runs[0]!;
 console.log(`goal: ${baseline.goal}  driver: ${baseline.driver}  scenario: ${baseline.scenario}\n`);

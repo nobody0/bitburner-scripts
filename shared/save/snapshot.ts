@@ -11,6 +11,8 @@ export interface SaveServer {
   organizationName: string;
   programs: string[];
   messages: string[];
+  /** Coding-contract filenames present on this server. */
+  contracts: string[];
   hasAdminRights: boolean;
   backdoorInstalled: boolean;
   purchasedByPlayer: boolean;
@@ -85,6 +87,7 @@ export interface SavePlayer {
   hasBladeburner: boolean;
   bladeburnerRank?: number;
   sleeveCount: number;
+  playtimeSinceLastAug: number;
   playtimeSinceLastBitnode: number;
   totalPlaytime: number;
   focus: boolean;
@@ -161,6 +164,7 @@ export const SERVER_DEFAULTS: Omit<SaveServer, "hostname"> = {
   organizationName: "",
   programs: [],
   messages: [],
+  contracts: [],
   hasAdminRights: false,
   backdoorInstalled: false,
   purchasedByPlayer: false,

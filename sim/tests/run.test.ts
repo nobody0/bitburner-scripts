@@ -64,6 +64,30 @@ describe("runSim initialization", () => {
     expect(records.at(-1)).toMatchObject({ kind: "event", name: "sim.result" });
   });
 
+  test("scenario identity includes the horizon and declarative world inputs", () => {
+    const fingerprint = (horizonMs: number, hasWseAccount = false): string => {
+      let value: string | undefined;
+      runSim({
+        goal: parseGoal("money:1000"),
+        seed: 7,
+        horizonMs,
+        world: { gates: { hasWseAccount } },
+        onRecord: (line) => {
+          const record = JSON.parse(line) as LogRecord;
+          if (record.kind === "event" && record.name === "sim.meta") {
+            value = (record.data as { scenarioFingerprint?: string }).scenarioFingerprint;
+          }
+        },
+      });
+      if (!value) throw new Error("run emitted no scenario fingerprint");
+      return value;
+    };
+
+    const baseline = fingerprint(1);
+    expect(fingerprint(2)).not.toBe(baseline);
+    expect(fingerprint(1, true)).not.toBe(baseline);
+  });
+
   test("continues emitting and evaluating records after an unsatisfied initial state", () => {
     const records: LogRecord[] = [];
     const goal = goalFrom("root-n00dles", { servers: { n00dles: { hasAdminRights: true } } });

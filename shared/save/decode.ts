@@ -141,6 +141,14 @@ function ownedAugList(value: unknown): { name: string; level: number }[] {
   });
 }
 
+function contractNames(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): string[] => {
+    const filename = asBag(entry)["fn"];
+    return typeof filename === "string" ? [filename] : [];
+  });
+}
+
 /** ramUsed is excluded from the save (BaseServer.getIncludedKeys) and rebuilt
  * on load from the scripts that were running.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L293-L323 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L381-L384 */
@@ -161,6 +169,7 @@ function decodeServer(hostname: string, raw: unknown): SaveServer {
   server.organizationName = str(bag["organizationName"], SERVER_DEFAULTS.organizationName);
   server.programs = strList(bag["programs"]);
   server.messages = strList(bag["messages"]);
+  server.contracts = contractNames(bag["contracts"]);
   server.hasAdminRights = bool(bag["hasAdminRights"]);
   server.backdoorInstalled = bool(bag["backdoorInstalled"]);
   server.purchasedByPlayer = bool(bag["purchasedByPlayer"]);
@@ -265,6 +274,7 @@ function decodePlayer(raw: unknown): SavePlayer {
       ? { bladeburnerRank: bladeburner["rank"] }
       : {}),
     sleeveCount: Array.isArray(sleeves) ? sleeves.length : 0,
+    playtimeSinceLastAug: num(bag["playtimeSinceLastAug"], 0),
     playtimeSinceLastBitnode: num(bag["playtimeSinceLastBitnode"], 0),
     totalPlaytime: num(bag["totalPlaytime"], 0),
     focus: bool(bag["focus"]),

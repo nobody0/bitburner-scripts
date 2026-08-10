@@ -411,6 +411,13 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
 
 const driver: FeatureDriver = {
   id: "career",
+  // Every action this driver can execute is a Singularity call. `career` is
+  // conceptually always useful (and stays visible as a strategy feature), but
+  // automation is impossible on a fresh character until BN4/SF4 unlocks the
+  // same API surface that powers `factions`. Without this dependency a cold
+  // BN1 controller repeatedly bid for 40.5 GB university stubs and the shared
+  // work slot even though every call was guaranteed to throw.
+  requires: "factions",
   everyMs: 5_000,
   // Progress completions bypass the wall-clock cadence. An idle decision also
   // stays hot so a newly available slot is consumed on the next 200 ms frame.

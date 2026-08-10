@@ -102,6 +102,18 @@ describe("Netscript contract fidelity", () => {
     expect(ns.getServer("home").moneyAvailable).toBe(123_456);
   });
 
+  test("the universally available Go capability getter returns the real fresh-board state", () => {
+    const { ns } = harness();
+    expect(ns.go.getGameState()).toEqual({
+      currentPlayer: "Black",
+      whiteScore: 1.5,
+      blackScore: 0,
+      previousMove: null,
+      komi: 1.5,
+      bonusCycles: 0,
+    });
+  });
+
   test("script totals report live per-process rates and since-install hacking separately", () => {
     const { ns, host, world } = harness();
     const running = [...host.processes.values()][0]!;

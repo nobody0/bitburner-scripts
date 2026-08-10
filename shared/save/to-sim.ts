@@ -33,6 +33,7 @@ export interface SaveSeedServer {
   sqlPortOpen: boolean;
   isHacknetServer?: boolean;
   simKind?: "Server" | "HacknetServer" | "DarknetServer";
+  contractFiles: string[];
 }
 
 export interface SaveSeedHacknetNode {
@@ -51,6 +52,9 @@ export interface SaveSeed {
    *  the capability gates key off. */
   sourceFileLevel: number;
   sourceFiles: Record<string, number>;
+  /** Reset ages are mapped onto the simulator's deterministic epoch. */
+  playtimeSinceLastAug: number;
+  playtimeSinceLastBitnode: number;
   companies: Record<string, number>;
   bladeburnerRank?: number;
   homeFiles: string[];
@@ -100,7 +104,6 @@ export interface SaveSeed {
      *  save is the only way to study a run that already owns them. */
     has4SData: boolean;
     has4SDataTixApi: boolean;
-    goPlayable: boolean;
   };
 }
 
@@ -143,8 +146,9 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
       purchasedByPlayer: server.purchasedByPlayer,
       backdoorInstalled: server.backdoorInstalled,
       maxRam: server.maxRam,
-      // Scripts are not restored into the simulation, so nothing is running.
-      ramUsed: 0,
+      // Preserve the observed occupancy. game-run marks the absent process
+      // lifecycle as unmodelled instead of granting fabricated free RAM.
+      ramUsed: server.ramUsed,
       cpuCores: server.cpuCores,
       moneyAvailable: server.moneyAvailable,
       moneyMax: server.moneyMax,
@@ -158,6 +162,7 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
       ...portFlags(server),
       ...(server.kind === "HacknetServer" ? { isHacknetServer: true } : {}),
       simKind: server.kind === "HacknetServer" ? "HacknetServer" : "Server",
+      contractFiles: [...server.contracts],
     });
   }
 
@@ -166,13 +171,15 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
     bitnode: snapshot.bitNode,
     sourceFileLevel: sfLevel(snapshot.activeSourceFiles, snapshot.bitNode),
     sourceFiles: snapshot.activeSourceFiles,
+    playtimeSinceLastAug: snapshot.player.playtimeSinceLastAug,
+    playtimeSinceLastBitnode: snapshot.player.playtimeSinceLastBitnode,
     companies: Object.fromEntries(
       Object.entries(snapshot.companies).map(([name, standing]) => [name, standing.playerReputation ?? 0]),
     ),
     ...(snapshot.player.bladeburnerRank !== undefined
       ? { bladeburnerRank: snapshot.player.bladeburnerRank }
       : {}),
-    homeFiles: home ? [...home.programs, ...home.messages] : [],
+    homeFiles: home ? [...home.programs, ...home.messages, ...home.contracts] : [],
     bitNodeOptions: snapshot.bitNodeOptions,
     homeRam: home?.maxRam ?? 8,
     homeCores: home?.cpuCores ?? 1,
@@ -233,9 +240,6 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
       hasTixApiAccess: snapshot.player.hasTixApiAccess,
       has4SData: snapshot.player.has4SData,
       has4SDataTixApi: snapshot.player.has4SDataTixApi,
-      // IPvGO is always reachable; the simulator has no model for it, so the
-      // ns call still reports itself as unmodelled when a probe asks.
-      goPlayable: true,
     },
   };
 }

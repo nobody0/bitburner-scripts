@@ -33,9 +33,24 @@ import { ProcessTable, ScriptDeath, type SimProcess } from "./process.ts";
 
 export type ScriptMain = (ns: NS) => unknown;
 
+export interface SimGoState {
+  currentPlayer: "White" | "Black" | "None";
+  whiteScore: number;
+  blackScore: number;
+  previousMove: [number, number] | null;
+  komi: number;
+  bonusCycles: number;
+}
+
 export interface SimNsHost {
   world: SimWorld;
   clock: Clock;
+  /** Wall-clock domain used by Date.now()/ResetInfo. Test harnesses without
+   * virtual time may omit this and remain in the relative clock domain. */
+  nowMs?: () => number;
+  /** null means a save supplied an unknown live board; undefined means the
+   * exact fresh-game state used by synthetic/unit worlds. */
+  goState?: SimGoState | null;
   processes: ProcessTable;
   /** host -> filenames present on it. */
   files: Map<string, Set<string>>;
@@ -374,7 +389,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       for (const running of host.processes.values()) {
         current += running.onlineMoneyMade / running.onlineRunningTimeSeconds;
       }
-      const sinceInstallSec = Math.max(0, host.clock.now() - host.reset.lastAugReset) / 1_000;
+      const sinceInstallSec = Math.max(0, (host.nowMs?.() ?? host.clock.now()) - host.reset.lastAugReset) / 1_000;
       const sinceInstall = sinceInstallSec > 0 ? world.moneySources.sinceInstall.hacking / sinceInstallSec : 0;
       return [current, sinceInstall];
     },
@@ -574,17 +589,25 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   impl["go"] = namespace(
     {
       getGameState: () => {
-        // A profile that gates IPvGO off is a deliberate refusal, not a
-        // missing model. A plain throw is what a locked API does in the real
-        // game, and it keeps the
-        // capability probe reading "unknown" without the unmodeled ledger
-        // counting one phantom gap per sweep for the whole run.
-        if (!world.gates.goPlayable) throw new Error("go.getGameState: IPvGO is gated off in this profile");
-        return unmodeled(
-          "subsystem",
-          "IPvGO runtime",
-          "rule/oracle tests exist, but the Netscript game lifecycle is not wired to the controller",
-        );
+        // Exact fresh-game state: GoObject.currentGame starts as an empty 7x7
+        // Netburners board. This getter is universally reachable, so the
+        // capability probe must succeed. Deeper Go calls still fall through
+        // to unmodeled(), invalidating an enabled Go lifecycle.
+        if (host.goState === null) {
+          return unmodeled(
+            "initial-state",
+            "IPvGO game state",
+            "the save decoder does not yet retain the live board, opponent, history, scores, and stored cycles",
+          );
+        }
+        return structuredClone(host.goState ?? {
+          currentPlayer: "Black",
+          whiteScore: 1.5,
+          blackScore: 0,
+          previousMove: null,
+          komi: 1.5,
+          bonusCycles: 0,
+        });
       },
     },
     "go",

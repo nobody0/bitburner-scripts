@@ -88,7 +88,6 @@ export interface GateFlags {
    *  two are bought independently and only the API is readable from a script. */
   has4SData: boolean;
   has4SDataTixApi: boolean;
-  goPlayable: boolean;
 }
 
 /** The simulated world. Durations come from the vendored game formulas at
@@ -176,7 +175,6 @@ export class SimWorld {
       hasTixApiAccess: false,
       has4SData: false,
       has4SDataTixApi: false,
-      goPlayable: false,
       ...opts.gates,
     };
 

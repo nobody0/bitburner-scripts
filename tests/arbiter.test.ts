@@ -375,4 +375,12 @@ describe("cross-feature investments", () => {
     expect(decision.buy?.kind).toBe("homeCore");
     expect(decision.ranked.map((entry) => entry.kind)).toEqual(["homeCore", "upgradeServer", "buyServer"]);
   });
+
+  test("equal-return cloud RAM is concentrated into the larger host", () => {
+    const decision = stepInfrastructure([
+      { kind: "buyServer", cost: 440_000, addedRam: 8, targetRam: 8, incomePerSec: 80 },
+      { kind: "upgradeServer", host: "pserv", cost: 440_000, addedRam: 8, targetRam: 16, incomePerSec: 80 },
+    ], 10_000);
+    expect(decision.buy).toMatchObject({ kind: "upgradeServer", host: "pserv", targetRam: 16 });
+  });
 });

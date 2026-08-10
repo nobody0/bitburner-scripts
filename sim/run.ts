@@ -12,6 +12,7 @@ import type { CompletionEvent, Planner } from "../shared/world.ts";
 import { DEFAULT_NETWORK } from "./network.ts";
 import { SimWorld, type SimOptions } from "./world.ts";
 import { SIM_FEATURE_COVERAGE, type RunValidity, type ScenarioClass } from "./fidelity.ts";
+import { scenarioFingerprint } from "./scenario.ts";
 
 export interface RunOptions {
   goal: Goal;
@@ -97,7 +98,44 @@ export function runSim(options: RunOptions): RunResult {
   world.emit({
     kind: "event",
     name: "sim.meta",
-    data: { goal: goal.id, label: options.label, seed, driver: "planner", scenario: "synthetic-early-game", coverage: SIM_FEATURE_COVERAGE },
+    data: {
+      goal: goal.id,
+      label: options.label,
+      seed,
+      driver: "planner",
+      scenario: "synthetic-early-game",
+      scenarioFingerprint: scenarioFingerprint({
+        driver: "planner",
+        goal: goal.id,
+        goalSetup: goal.setup ?? null,
+        horizonMs,
+        seed,
+        farm: options.farm ?? false,
+        // Keep the caller's full declarative world input in the identity. The
+        // normalized projection below is useful evidence, but intentionally
+        // does not expose every SimOptions field (for example topology and
+        // capability gates).
+        worldInput: options.world ?? {},
+        bitnode: world.bitnode,
+        gates: world.gates,
+        person: { skills: world.person.skills, exp: world.person.exp, mults: world.person.mults },
+        player: { money: world.player.money },
+        servers: [...world.servers.values()]
+          .map((server) => ({
+            hostname: server.hostname,
+            maxRam: server.maxRam,
+            moneyAvailable: server.moneyAvailable,
+            moneyMax: server.moneyMax,
+            hackDifficulty: server.hackDifficulty,
+            minDifficulty: server.minDifficulty,
+            requiredHackingSkill: server.requiredHackingSkill,
+            serverGrowth: server.serverGrowth,
+            numOpenPortsRequired: server.numOpenPortsRequired,
+          }))
+          .sort((a, b) => a.hostname.localeCompare(b.hostname)),
+      }),
+      coverage: SIM_FEATURE_COVERAGE,
+    },
   });
 
   if (goal.done(ctx)) {

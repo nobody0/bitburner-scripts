@@ -314,7 +314,7 @@ if (vendorStatusDirty() && !process.argv.includes("--force")) {
   throw new Error(`${OUT_DIR} has uncommitted changes; commit or discard them (or pass --force)`);
 }
 
-const written: { path: string; sha256: string }[] = [];
+const written: { path: string; output: string; sha256: string }[] = [];
 for (const file of MANIFEST) {
   let content = gitShow(file.path);
   for (const patch of file.patches ?? []) {
@@ -339,7 +339,7 @@ for (const file of MANIFEST) {
   mkdirSync(path.dirname(outPath), { recursive: true });
   const header = `// Vendored from bitburner-src ${TAG}:${file.path} by tools/vendor.ts — DO NOT EDIT\n`;
   writeFileSync(outPath, header + content, "utf8");
-  written.push({ path: file.path, sha256: createHash("sha256").update(header + content).digest("hex") });
+  written.push({ path: file.path, output: file.path, sha256: createHash("sha256").update(header + content).digest("hex") });
   console.log(`vendored ${file.path}`);
 }
 
@@ -372,7 +372,7 @@ const goOracleStubPath = "src/Go/OracleStubs.ts";
 const goOracleStubOut = path.join(OUT_DIR, goOracleStubPath);
 mkdirSync(path.dirname(goOracleStubOut), { recursive: true });
 writeFileSync(goOracleStubOut, goOracleStubs, "utf8");
-written.push({ path: goOracleStubPath, sha256: createHash("sha256").update(goOracleStubs).digest("hex") });
+written.push({ path: goOracleStubPath, output: goOracleStubPath, sha256: createHash("sha256").update(goOracleStubs).digest("hex") });
 
 // Contract validators call this only for impossible internal states. Keep
 // those failures loud without pulling React, Player, or the live UI into sim.
@@ -387,6 +387,7 @@ mkdirSync(path.dirname(contractExceptionOut), { recursive: true });
 writeFileSync(contractExceptionOut, contractExceptionStub, "utf8");
 written.push({
   path: contractExceptionPath,
+  output: contractExceptionPath,
   sha256: createHash("sha256").update(contractExceptionStub).digest("hex"),
 });
 
@@ -481,7 +482,7 @@ const marketAdapterPath = "src/StockMarket/MarketAdapter.ts";
 const marketAdapterOut = path.join(OUT_DIR, marketAdapterPath);
 mkdirSync(path.dirname(marketAdapterOut), { recursive: true });
 writeFileSync(marketAdapterOut, marketAdapter, "utf8");
-written.push({ path: marketAdapterPath, sha256: createHash("sha256").update(marketAdapter).digest("hex") });
+written.push({ path: marketAdapterPath, output: marketAdapterPath, sha256: createHash("sha256").update(marketAdapter).digest("hex") });
 
 /** Is this line a complete declaration on its own? A one-line
  * `export const MaxFavor = 35331;` has no column-zero closer to look for. */
@@ -542,6 +543,7 @@ function extractSymbols(
   writeFileSync(outPath, synthesized, "utf8");
   written.push({
     path: `${sourcePath}#${names.join(",")}`,
+    output: outRelPath,
     sha256: createHash("sha256").update(synthesized).digest("hex"),
   });
   console.log(`vendored ${sourcePath}#${names.join(",")} -> ${outRelPath}`);
@@ -714,6 +716,7 @@ async function extractDataTable(spec: DataTableSpec): Promise<void> {
   writeFileSync(outPath, synthesized, "utf8");
   written.push({
     path: `${spec.sources.map((s) => s.path).join("+")}#${spec.exportName}`,
+    output: spec.outRelPath,
     sha256: createHash("sha256").update(synthesized).digest("hex"),
   });
   console.log(`vendored data table ${spec.exportName} -> ${spec.outRelPath}`);

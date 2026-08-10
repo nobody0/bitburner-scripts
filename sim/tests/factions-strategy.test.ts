@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { runGame } from "../game-run.ts";
 import { FACTION_DONATION_TARGET, findProfile } from "../profiles.ts";
+import { DEFAULT_EPOCH_MS } from "../realm/timers.ts";
 
 describe("faction and hacking strategy simulation", () => {
   test("the armed reset prestiges the world and restarts the real controller", async () => {
@@ -10,6 +11,8 @@ describe("faction and hacking strategy simulation", () => {
     let installed = 0;
     let prestiged = 0;
     let resetDetected = 0;
+    let prestigeAt: number | undefined;
+    const resetSamples: { t: number; lastAugReset: number }[] = [];
     const installGoal = parseGoals([...profile.goals]);
     let satisfiedAt: number | undefined;
 
@@ -41,12 +44,19 @@ describe("faction and hacking strategy simulation", () => {
           kind: string;
           key?: string;
           name?: string;
-          data?: { plan?: { install?: boolean; installArmedAt?: number } };
+          t: number;
+          data?: { lastAugReset?: number; plan?: { install?: boolean; installArmedAt?: number } };
         };
         if (record.key === "progression" && record.data?.plan?.installArmedAt !== undefined) armed = true;
         if (record.name === "aug.installed") installed++;
-        if (record.name === "sim.prestige") prestiged++;
+        if (record.name === "sim.prestige") {
+          prestiged++;
+          prestigeAt = record.t;
+        }
         if (record.name === "augmentation.reset") resetDetected++;
+        if (record.key === "progression" && typeof record.data?.lastAugReset === "number") {
+          resetSamples.push({ t: record.t, lastAugReset: record.data.lastAugReset });
+        }
       },
     });
 
@@ -56,6 +66,9 @@ describe("faction and hacking strategy simulation", () => {
     expect(installed).toBe(1);
     expect(prestiged).toBe(1);
     expect(resetDetected).toBe(1);
+    expect(resetSamples[0]?.lastAugReset).toBe(DEFAULT_EPOCH_MS);
+    expect(prestigeAt).toBeDefined();
+    expect(resetSamples.some((sample) => sample.lastAugReset === DEFAULT_EPOCH_MS + prestigeAt!)).toBe(true);
     expect(result.output.filter((line) => line.includes("start.js online"))).toHaveLength(2);
     expect(Object.keys(result.unmodeled)).not.toContain("ns getMoneySources");
   }, 10_000);

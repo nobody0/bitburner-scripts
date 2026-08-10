@@ -651,6 +651,17 @@ describe("feature drivers", () => {
     }
   });
 
+  test("career automation follows the Singularity capability, not its always-visible strategy feature", () => {
+    const career = FEATURE_MODULES.career.driver;
+    expect(career.requires).toBe("factions");
+
+    const cold = deriveCapabilities({ bitNode: 1, sourceFiles: {} });
+    expect(selectDue([career], {}, cold, 10_000)).toEqual([]);
+
+    const singularity = deriveCapabilities({ bitNode: 1, sourceFiles: { "4": 1 } });
+    expect(selectDue([career], {}, singularity, 10_000)).toEqual([career]);
+  });
+
   test("only hacking and stock run faster than the 5 s floor, each for a reason", () => {
     // Batch ops land on 200ms slots, so a slower hacking cadence would miss them.
     //

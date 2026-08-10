@@ -57,14 +57,20 @@ function statusChips(state: ProjectedState): string {
  * definition. */
 function fidelityRows(state: ProjectedState): string[][] {
   const counts = new Map<string, { kind: string; name: string; count: number; detail?: string }>();
-  for (const event of state.events) {
-    if (event.kind !== "event" || event.name !== "sim.unmodeled") continue;
-    const data = event.data as { kind?: string; name?: string; detail?: string } | undefined;
-    if (!data?.name) continue;
-    const key = `${data.kind ?? "ns"} ${data.name}`;
-    const existing = counts.get(key);
-    if (existing) existing.count++;
-    else counts.set(key, { kind: data.kind ?? "ns", name: data.name, count: 1, ...(data.detail ? { detail: data.detail } : {}) });
+  const authoritative = state.simResult?.unmodeled;
+  if (authoritative) {
+    for (const [key, count] of Object.entries(authoritative)) {
+      const detail = state.simGapDetails.get(key);
+      const separator = key.indexOf(" ");
+      counts.set(key, {
+        kind: detail?.kind ?? (separator < 0 ? "ns" : key.slice(0, separator)),
+        name: detail?.name ?? (separator < 0 ? key : key.slice(separator + 1)),
+        count,
+        ...(detail?.detail ? { detail: detail.detail } : {}),
+      });
+    }
+  } else {
+    for (const [key, gap] of state.simGapDetails) counts.set(key, { ...gap, count: 1 });
   }
   return [...counts.values()]
     .sort((a, b) => b.count - a.count)
@@ -104,6 +110,16 @@ export const overviewTab: Tab = {
 
     const income = incomeRows(state);
     const gaps = fidelityRows(state);
+    const simStatus = state.simResult
+      ? tiles([
+          { label: "validity", value: state.simResult.validity ?? "unknown" },
+          { label: "goal", value: state.simResult.reached ? "reached" : "not reached" },
+          { label: "stopped", value: state.simResult.stoppedBecause ?? "unknown" },
+          { label: "driver", value: state.simMeta?.driver ?? "unknown" },
+          { label: "scenario", value: state.simResult.scenario ?? state.simMeta?.scenario ?? "unknown" },
+          { label: "seed", value: state.simMeta?.seed !== undefined ? String(state.simMeta.seed) : "unknown" },
+        ])
+      : note("simulation is still running; final validity is not available yet");
 
     // The feed is mostly `probe.batch` debug in steady state, which buries the
     // handful of records that mean something went wrong. Filtering is the
@@ -178,11 +194,14 @@ export const overviewTab: Tab = {
       `</div>` +
       `<div class="col">` +
       (state.src === "sim"
-        ? card(
+        ? card("Simulation result", simStatus) +
+          card(
             "Not modelled",
             gaps.length
               ? table(["kind", "what was asked for", "times", "note"], gaps, { left: [0, 1, 3] })
-              : note("this run stayed inside what the simulator models"),
+              : state.simResult?.validity === "valid"
+                ? note("this run stayed inside what the simulator models")
+                : note("no gap summary is available yet"),
           )
         : "") +
       card("Events", compactNote + events, eventControls) +

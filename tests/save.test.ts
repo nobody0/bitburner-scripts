@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { decodeSaveJson, SaveFormatError, unwrap } from "../shared/save/decode.ts";
 import { saveToSeed } from "../shared/save/to-sim.ts";
+import { only } from "../shared/features/profile.ts";
+import { parseGoals } from "../shared/goals/presets.ts";
+import { runGame } from "../sim/game-run.ts";
+import { DEFAULT_EPOCH_MS } from "../sim/realm/timers.ts";
 import { decodeSaveData, prepareIndexedDbSave } from "../tools/save-io.ts";
 
 /** The save parser's job is to be boring and exactly right. Every test here
@@ -62,6 +66,7 @@ function buildSaveJson(options: FixtureOptions = {}): string {
     corporation: null,
     bladeburner: { ctor: "Bladeburner", data: { rank: 40 } },
     sleeves: [{ ctor: "Sleeve", data: {} }, { ctor: "Sleeve", data: {} }],
+    playtimeSinceLastAug: 3_600_000,
     playtimeSinceLastBitnode: 7_200_000,
     totalPlaytime: 99_000_000,
     hacknetNodes: ["hacknet-server-0"],
@@ -89,6 +94,7 @@ function buildSaveJson(options: FixtureOptions = {}): string {
         hostname: "home",
         programs: ["NUKE.exe", "BruteSSH.exe"],
         messages: ["hackers-starting-handbook.lit", "j0.msg"],
+        contracts: [{ ctor: "CodingContract", data: { fn: "saved.cct", type: "Find Largest Prime Factor" } }],
         maxRam: 64,
         cpuCores: 4,
         hasAdminRights: true,
@@ -291,9 +297,9 @@ describe("seeding a simulation from a save", () => {
     expect(n00dles.hasAdminRights).toBe(true);
   });
 
-  test("starts every host with no RAM in use", () => {
-    // Scripts are not restored, so home's 21.1 GB of workers are not either.
-    expect(seed.servers.every((s) => s.ramUsed === 0)).toBe(true);
+  test("preserves occupied RAM instead of granting fabricated capacity", () => {
+    expect(seed.servers.find((server) => server.hostname === "home")?.ramUsed).toBeCloseTo(21.1, 6);
+    expect(seed.servers.find((server) => server.hostname === "n00dles")?.ramUsed).toBe(0);
   });
 
   test("uses the save's own topology", () => {
@@ -348,7 +354,10 @@ describe("seeding a simulation from a save", () => {
     expect(seed.factions["CyberSec"]).toEqual({ rep: 1_000_000, favor: 20 });
     expect(seed.companies["Noodle Bar"]).toBe(100_000);
     expect(seed.bladeburnerRank).toBe(40);
-    expect(seed.homeFiles).toEqual(["NUKE.exe", "BruteSSH.exe", "hackers-starting-handbook.lit", "j0.msg"]);
+    expect(seed.homeFiles).toEqual(["NUKE.exe", "BruteSSH.exe", "hackers-starting-handbook.lit", "j0.msg", "saved.cct"]);
+    expect(seed.servers.find((server) => server.hostname === "home")?.contractFiles).toEqual(["saved.cct"]);
+    expect(seed.playtimeSinceLastAug).toBe(3_600_000);
+    expect(seed.playtimeSinceLastBitnode).toBe(7_200_000);
     expect(seed.servers.find((server) => server.hostname === "n00dles")?.organizationName).toBe("Noodle Bar");
   });
 
@@ -375,5 +384,26 @@ describe("seeding a simulation from a save", () => {
     expect(seed.playerState.focus).toBe(true);
     expect(seed.currentWork?.kind).toBe("crime");
     expect(seed.stockMarket?.stocks["ECorp"]?.["price"]).toBe(12_345);
+  });
+
+  test("maps reset ages to virtual wall time and invalidates unsupported saved state", async () => {
+    let progression: { lastAugReset?: number; lastNodeReset?: number } | undefined;
+    const result = await runGame({
+      goal: parseGoals(["earn:1e99"]),
+      seed: 1,
+      horizonMs: 2_000,
+      save: seed,
+      features: only("hacking", "progression"),
+      onRecord: (line) => {
+        const record = JSON.parse(line) as { kind: string; key?: string; data?: unknown };
+        if (record.kind === "state" && record.key === "progression") progression = record.data as typeof progression;
+      },
+    });
+
+    expect(progression?.lastAugReset).toBe(DEFAULT_EPOCH_MS - 3_600_000);
+    expect(progression?.lastNodeReset).toBe(DEFAULT_EPOCH_MS - 7_200_000);
+    expect(result.unmodeled["initial-state running scripts"]).toBe(1);
+    expect(result.unmodeled["initial-state coding contracts"]).toBe(1);
+    expect(result.validity).toBe("invalid-for-goal");
   });
 });

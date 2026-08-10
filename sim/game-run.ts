@@ -23,6 +23,7 @@ import { ProcessTable } from "./ns/process.ts";
 import { installVirtualTime } from "./realm/timers.ts";
 import { noteUnmodeled, resetUnmodeled, setUnmodeledReporter, unmodeled, unmodeledCounts } from "./realm/unmodeled.ts";
 import { SimWorld, type GateFlags, type SimOptions } from "./world.ts";
+import { scenarioFingerprint } from "./scenario.ts";
 import { SIM_FEATURE_COVERAGE, scenarioClass, type RunValidity, type ScenarioClass } from "./fidelity.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 
@@ -125,6 +126,7 @@ function buildResetInfo(
   bitnode: number,
   sourceFileLevel: number,
   installedAugs: ReadonlyMap<string, number>,
+  nowMs: number,
   save?: SaveSeed,
 ): ResetInfo {
   const ownedSF = new Map<number, number>(
@@ -133,8 +135,8 @@ function buildResetInfo(
   if (ownedSF.size === 0 && sourceFileLevel > 0) ownedSF.set(bitnode, sourceFileLevel);
   const savedOptions = save?.bitNodeOptions;
   return {
-    lastAugReset: 0,
-    lastNodeReset: 0,
+    lastAugReset: nowMs - (save?.playtimeSinceLastAug ?? 0),
+    lastNodeReset: nowMs - (save?.playtimeSinceLastBitnode ?? 0),
     currentNode: bitnode,
     ownedAugs: new Map(installedAugs),
     ownedSF,
@@ -314,6 +316,19 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     // LINEAR in cycles, with no bonus-time cap — the one subsystem that needs
     // no CycleBuffer.
     processHacknetEarnings: (cycles) => hacknet.processEarnings(cycles),
+    // The real engine makes three coding-contract generation attempts every
+    // ten minutes. Until the generated contract/reward lifecycle is modelled,
+    // reaching that boundary with side automation enabled must be visible in
+    // validity instead of silently deleting a progression source.
+    generateContracts: () => {
+      if (options.features?.side !== "off") {
+        noteUnmodeled(
+          "subsystem",
+          "coding contract generation",
+          "the v3.0.1 generation interval fired, but generated contracts and rewards are not modelled",
+        );
+      }
+    },
     // SECOND in updateGame's real order, right after processWork. The 6 s tick,
     // the 4 s floor and the 75-tick cycle all live inside the vendored function.
     processStockPrices: (cycles) => {
@@ -344,15 +359,24 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   const host: SimNsHost = {
     world,
     clock,
+    nowMs: virtualTime.nowMs,
+    goState: save ? null : undefined,
     processes: new ProcessTable(world.servers, clock),
-    files: new Map([["home", initialHomeFiles]]),
+    files: new Map(
+      save
+        ? save.servers.map((server) => [
+            server.hostname,
+            new Set(server.hostname === "home" ? initialHomeFiles : server.contractFiles),
+          ] as const)
+        : [["home", initialHomeFiles]],
+    ),
     // Empty build id: the controller's self-update branch compares against its
     // own __BUILD_ID__ and skips when the pushed value is blank.
     contents: new Map([["home\0build-id.txt", ""]]),
     scripts: new Map<string, ScriptMain>(),
     network,
     ramCtx: ramCostContext(bitnode, world.player.sourceFiles),
-    reset: buildResetInfo(bitnode, sourceFileLevel, world.player.augmentations, save),
+    reset: buildResetInfo(bitnode, sourceFileLevel, world.player.augmentations, virtualTime.nowMs(), save),
     output: [],
     crashes: [],
     engine,
@@ -382,6 +406,21 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     // realm. The successor controller must detect and invalidate the stale
     // module/global state itself, exactly as it does in the game.
   };
+
+  if (save?.servers.some((server) => server.ramUsed > 0)) {
+    noteUnmodeled(
+      "initial-state",
+      "running scripts",
+      "saved RAM occupancy is preserved, but those processes and their future effects are not advanced",
+    );
+  }
+  if (save?.servers.some((server) => server.contractFiles.length > 0)) {
+    noteUnmodeled(
+      "initial-state",
+      "coding contracts",
+      "saved filenames are discoverable, but contract data, tries, and rewards are not modelled",
+    );
+  }
 
   // Imported AFTER the flags are on globalThis, and dynamically so module
   // evaluation cannot outrun them.
@@ -435,7 +474,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     }
     host.reset = {
       ...host.reset,
-      lastAugReset: clock.now(),
+      lastAugReset: virtualTime.nowMs(),
       ownedAugs: new Map(world.player.augmentations),
     };
     Object.assign(engine.counters, initialCounters());
@@ -486,6 +525,79 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   host.scripts.set(WORKER_SCRIPT, worker.main as ScriptMain);
   host.scripts.set(START_SCRIPT, ((ns: NS) => startMain(ns, options.features)) as ScriptMain);
 
+  const scenarioId = scenarioFingerprint({
+    driver: "game",
+    goal: goal.id,
+    horizonMs,
+    seed,
+    scenario: scenarioClass(save !== undefined),
+    bitnode,
+    sourceFileLevel,
+    features: options.features ?? {},
+    // Preserve every explicit scenario input as well as the normalized world
+    // below. Some modeled state lives outside SimWorld (faction reputation,
+    // the stock market, Hacknet, current work), so hashing only its visible
+    // player/server projection could incorrectly bless different save seeds
+    // as the same A/B experiment.
+    inputs: {
+      goalSetup: goal.setup ?? null,
+      save: save ?? null,
+      overrides: {
+        bitnode: options.bitnode,
+        sourceFileLevel: options.sourceFileLevel,
+        homeRam: options.homeRam,
+        homeCores: options.homeCores,
+        startingMoney: options.startingMoney,
+        network: options.network,
+        person: options.person,
+        playerState: options.playerState,
+        factions: options.factions,
+        companies: options.companies,
+        bladeburnerRank: options.bladeburnerRank,
+        homeFiles: options.homeFiles,
+        gates: options.gates,
+      },
+    },
+    resetAgeMs: {
+      augmentation: virtualTime.nowMs() - host.reset.lastAugReset,
+      bitnode: virtualTime.nowMs() - host.reset.lastNodeReset,
+    },
+    person: { skills: world.person.skills, exp: world.person.exp, mults: world.person.mults },
+    player: {
+      money: world.player.money,
+      karma: world.player.karma,
+      factions: [...world.player.factions].sort(),
+      augmentations: [...world.player.augmentations].sort(([a], [b]) => a.localeCompare(b)),
+      sourceFiles: world.player.sourceFiles,
+    },
+    gates: world.gates,
+    servers: [...world.servers.values()]
+      .map((server) => ({
+        hostname: server.hostname,
+        organizationName: server.organizationName,
+        hasAdminRights: server.hasAdminRights,
+        purchasedByPlayer: server.purchasedByPlayer,
+        backdoorInstalled: server.backdoorInstalled,
+        maxRam: server.maxRam,
+        ramUsed: server.ramUsed,
+        cpuCores: server.cpuCores,
+        moneyAvailable: server.moneyAvailable,
+        moneyMax: server.moneyMax,
+        hackDifficulty: server.hackDifficulty,
+        minDifficulty: server.minDifficulty,
+        requiredHackingSkill: server.requiredHackingSkill,
+        serverGrowth: server.serverGrowth,
+        numOpenPortsRequired: server.numOpenPortsRequired,
+      }))
+      .sort((a, b) => a.hostname.localeCompare(b.hostname)),
+    topology: [...host.network]
+      .map(([hostname, neighbours]) => [hostname, [...neighbours].sort()] as const)
+      .sort(([a], [b]) => a.localeCompare(b)),
+    files: [...host.files]
+      .map(([hostname, files]) => [hostname, [...files].sort()] as const)
+      .sort(([a], [b]) => a.localeCompare(b)),
+  });
+
   world.emit({
     kind: "event",
     name: "sim.meta",
@@ -495,6 +607,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       seed,
       driver: "game",
       scenario: scenarioClass(save !== undefined),
+      scenarioFingerprint: scenarioId,
       coverage: SIM_FEATURE_COVERAGE,
       bitnode,
       features: describeOverrides(options.features),

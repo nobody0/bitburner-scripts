@@ -93,6 +93,11 @@ export function stepInfrastructure(options: readonly InfrastructureOption[], hor
       if (a.worthBuying !== b.worthBuying) return b.worthBuying ? 1 : -1;
       if (b.returnPerDollarSec !== a.returnPerDollarSec) return b.returnPerDollarSec - a.returnPerDollarSec;
       if (b.incomePerSec !== a.incomePerSec) return b.incomePerSec - a.incomePerSec;
+      // Equal dollars buy equal aggregate capacity, but the larger resulting
+      // host can place every job the smaller one can plus indivisible hack
+      // calls that do not fit there. It also preserves a purchased-server
+      // slot, so concentration strictly dominates scattering in this tie.
+      if ((b.targetRam ?? 0) !== (a.targetRam ?? 0)) return (b.targetRam ?? 0) - (a.targetRam ?? 0);
       const ak = `${a.kind}:${a.host ?? ""}:${a.targetRam ?? 0}`;
       const bk = `${b.kind}:${b.host ?? ""}:${b.targetRam ?? 0}`;
       return ak < bk ? -1 : ak > bk ? 1 : 0;

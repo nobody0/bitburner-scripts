@@ -24,6 +24,16 @@ describe("game source pin", () => {
     const definitions = readFileSync(new URL("../../types/NetscriptDefinitions.d.ts", import.meta.url));
     expect(createHash("sha256").update(definitions).digest("hex")).toBe(manifest.definitionsSha256);
   });
+
+  test("every checked-in generated vendor file matches its manifest hash", () => {
+    for (const file of manifest.files) {
+      const contents = readFileSync(new URL(`../vendor/bitburner/${file.output}`, import.meta.url));
+      expect(
+        createHash("sha256").update(contents).digest("hex"),
+        `${file.output} drifted from tools/vendor.ts output for ${file.path}`,
+      ).toBe(file.sha256);
+    }
+  });
 });
 
 describe("faction table", () => {

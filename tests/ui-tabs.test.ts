@@ -513,6 +513,36 @@ describe("stream projection", () => {
     expect(state.events.some((record) => record.kind === "event" && record.name === "contract.quarantined")).toBe(false);
     expect(state.contractReplay).toEqual(replay);
   });
+
+  test("sim validity and authoritative gap counts survive event-ring eviction", () => {
+    const records: LogRecord[] = [
+      { ...base, kind: "event", name: "sim.meta", data: { driver: "game", seed: 7, scenario: "synthetic-early-game" } },
+      { ...base, seq: 1, kind: "event", name: "sim.unmodeled", data: { kind: "ns", name: "go.getBoardState", detail: "runtime missing" } },
+      ...Array.from({ length: EVENT_RING + 1 }, (_, index) => ({
+        ...base, seq: index + 2, t: index + 2, kind: "debug" as const, msg: "noise",
+      })),
+      {
+        ...base,
+        seq: EVENT_RING + 3,
+        t: EVENT_RING + 3,
+        kind: "event",
+        name: "sim.result",
+        data: {
+          validity: "invalid-for-goal", reached: false, stoppedBecause: "horizon",
+          scenario: "synthetic-early-game", unmodeled: { "ns go.getBoardState": 7 },
+        },
+      },
+    ] as LogRecord[];
+    const state = project(records, Infinity, { id: "r", src: "sim", live: false, t0: 0 });
+
+    expect(state.events.some((record) => record.kind === "event" && record.name === "sim.unmodeled")).toBe(false);
+    expect(state.simResult?.validity).toBe("invalid-for-goal");
+    const html = TABS["overview"].render(state);
+    expect(html).toContain("invalid-for-goal");
+    expect(html).toContain("go.getBoardState");
+    expect(html).toContain(">7<");
+    expect(html).not.toContain("this run stayed inside what the simulator models");
+  });
 });
 
 describe("incremental projection", () => {

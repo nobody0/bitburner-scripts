@@ -84,8 +84,9 @@ Every result is also classified:
 - `invalid-for-goal` — an unmodeled call, incomplete seeded state, or script
   crash could have changed the outcome. The CLI exits non-zero for this class.
 
-`sim.meta` includes the driver, scenario class and static per-feature coverage.
-`sim:compare` refuses different drivers, scenarios, goals or gap sets, and
+`sim.meta` includes the driver, scenario class, static per-feature coverage and
+a versioned fingerprint of the complete experimental input. `sim:compare`
+refuses different fingerprints, drivers, scenarios, goals or gap sets, and
 refuses invalid runs unless `--allow-invalid` is supplied for diagnostics.
 
 ## Known gaps
@@ -136,9 +137,11 @@ sources compounded; the 10-minute repro dropped 102.8s → 12.1s real once fixed
   long as anyone held the work slot. Amounts are now reported at 3 significant
   digits and hold time in 10s buckets.
 
-Related: `go.getGameState` under a profile that gates IPvGO off now throws a
-plain Error (a deliberate refusal), not `unmodeled` — it was counting one
-phantom gap per sweep in every isolated profile's report.
+Related: IPvGO is not capability-gated in Bitburner v3.0.1. The simulator now
+returns the exact fresh 7x7 Netburners state from `go.getGameState`, so the
+controller's universal capability probe succeeds without inventing a profile
+flag. Save-seeded runs fail loudly when that getter is reached because the save
+decoder does not yet retain the live board, history, scores, or stored cycles.
 
 ## Two findings this harness surfaced
 

@@ -19,6 +19,30 @@ import type { ContractFailure } from "../../shared/telemetry/topics/side.ts";
 
 export type Topics = { [K in StateKey]?: StateMap[K] };
 
+export interface SimRunMeta {
+  goal?: string;
+  label?: string;
+  seed?: number;
+  driver?: string;
+  scenario?: string;
+  scenarioFingerprint?: string;
+  bitnode?: number;
+  features?: string;
+  profile?: string;
+  save?: string;
+}
+
+export interface SimRunResult {
+  reached?: boolean;
+  timeToGoalMs?: number;
+  stoppedBecause?: string;
+  validity?: "valid" | "partial" | "invalid-for-goal";
+  scenario?: string;
+  engineCycles?: number;
+  unmodeled?: Record<string, number>;
+  crashes?: { pid: number; filename: string; error: string }[];
+}
+
 /** Discrete records retained for the event feed. The feed shows the last 200;
  * keeping an unbounded array of everything a 12-hour run emitted just to slice
  * the tail off it is how a viewer tab reaches a gigabyte. */
@@ -46,6 +70,10 @@ export interface ProjectedState {
   /** Latest full contract replay. Held separately from the bounded event feed
    * so ordinary debug traffic cannot evict the actionable failure details. */
   contractReplay: ContractFailure | null;
+  /** Run-level simulator records must outlive the bounded event feed. */
+  simMeta: SimRunMeta | null;
+  simResult: SimRunResult | null;
+  simGapDetails: Map<string, { kind: string; name: string; detail?: string }>;
   /** Money earned by hacking and successful hack count. */
   earned: number;
   hacks: number;
@@ -81,6 +109,9 @@ export function emptyState(): ProjectedState {
     caps: unknownCapabilities(),
     events: [],
     contractReplay: null,
+    simMeta: null,
+    simResult: null,
+    simGapDetails: new Map(),
     earned: 0,
     hacks: 0,
     hasTotals: false,
@@ -169,6 +200,23 @@ function foldOne(state: ProjectedState, record: LogRecord, cutoff: number): bool
   }
   if (record.kind === "event" && record.name === "contract.quarantined") {
     state.contractReplay = record.data as ContractFailure;
+  }
+  if (record.kind === "event" && record.name === "sim.meta") {
+    state.simMeta = record.data as SimRunMeta;
+  }
+  if (record.kind === "event" && record.name === "sim.result") {
+    state.simResult = record.data as SimRunResult;
+  }
+  if (record.kind === "event" && record.name === "sim.unmodeled") {
+    const gap = record.data as { kind?: string; name?: string; detail?: string } | undefined;
+    if (gap?.name) {
+      const kind = gap.kind ?? "ns";
+      state.simGapDetails.set(`${kind} ${gap.name}`, {
+        kind,
+        name: gap.name,
+        ...(gap.detail ? { detail: gap.detail } : {}),
+      });
+    }
   }
   state.events.push(record);
   if (state.events.length > EVENT_RING) state.events.splice(0, state.events.length - EVENT_RING);

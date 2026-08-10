@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Server } from "@ns";
 import { homeDodgeBudget } from "../../game/lib/probe-runner.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
+import { only } from "../../shared/features/profile.ts";
 import { ramCostContext, runGame } from "../game-run.ts";
 import { getFunctionRamCost, getRamCost } from "../ns/ram-costs.ts";
 
@@ -77,6 +78,7 @@ describe("running game/ in the synthetic world", () => {
       horizonMs: 60 * 60_000,
       homeRam: 16,
       label: "test",
+      features: only("hacking", "progression"),
     });
 
     expect(result.reached).toBe(true);
@@ -170,6 +172,7 @@ describe("running game/ in the synthetic world", () => {
     // Always-playable five.
     expect(caps?.unlocked?.["hacking"]).toBe("yes");
     expect(caps?.unlocked?.["progression"]).toBe("yes");
+    expect(caps?.unlocked?.["go"]).toBe("yes");
     // A fresh BN1 save holds no source files, so the node-gated features lock.
     expect(caps?.unlocked?.["factions"]).toBe("no");
     expect(caps?.unlocked?.["gang"]).toBe("no");
@@ -201,7 +204,6 @@ describe("running game/ in the synthetic world", () => {
       horizonMs: 60 * 60_000,
       homeRam: 16,
       label: "gaps",
-      gates: { goPlayable: true },
     });
 
     // Probes for features we do not simulate hit the wall and say so...
@@ -219,6 +221,19 @@ describe("running game/ in the synthetic world", () => {
     expect(result.crashes).toEqual([]);
     expect(result.validity).toBe("invalid-for-goal");
     expect(result.scenario).toBe("synthetic-early-game");
+  });
+
+  test("the ten-minute coding-contract interval cannot pass silently", async () => {
+    const result = await runGame({
+      goal: parseGoals(["earn:1e99"]),
+      seed: 1,
+      horizonMs: 10 * 60_000 + 1,
+      homeRam: 16,
+      features: only("hacking", "progression", "side"),
+    });
+
+    expect(result.unmodeled["subsystem coding contract generation"]).toBe(1);
+    expect(result.validity).toBe("invalid-for-goal");
   });
 
   test("a fresh 8GB home still cannot fund a dodge on home ALONE", () => {
