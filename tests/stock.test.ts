@@ -17,7 +17,6 @@ import {
   driftPerTick,
   effectiveForecast,
   expectedProfit,
-  FOUR_SIGMA_API_COST,
   manipulationLeverage,
   meanLogStep,
   nudgesPerOp,

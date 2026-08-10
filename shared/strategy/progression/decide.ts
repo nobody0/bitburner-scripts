@@ -317,18 +317,6 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
 
 // --- BitNode ordering -------------------------------------------------------
 
-export interface BitNodeEntry {
-  node: number;
-  /** Target source-file level. */
-  level: number;
-  /** HEURISTIC hours to complete — an estimate from ./eta.ts and the recorded
-   *  runs, never a known constant. We optimise to reduce it; the telemetry log
-   *  (estimate at decision time, actual at reset) is what tunes it. */
-  hours?: number;
-  /** Source files that make this node materially easier. */
-  wants: number[];
-}
-
 /** The predecessor scripts' explicit ordering, with their stated rationale:
  * "build hack power to get hacknet, use hacknet to get Stanek, then do all the
  * Bladeburners" (src/main.ts:1483-1511).

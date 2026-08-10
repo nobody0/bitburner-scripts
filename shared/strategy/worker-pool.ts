@@ -91,10 +91,3 @@ export function noteExit(pool: WorkerPoolMemory, workerId: number): PoolWorker |
   pool.workers.delete(workerId);
   return worker;
 }
-
-/** GB currently stranded in idle workers (telemetry). */
-export function idleGb(pool: WorkerPoolMemory): number {
-  let gb = 0;
-  for (const worker of pool.workers.values()) if (!worker.busy) gb += worker.gb;
-  return gb;
-}

@@ -67,12 +67,6 @@ export interface SleeveDecision {
   why: string;
 }
 
-/** Above this shock, everything the sleeve does is scaled down enough that
- * recovery pays for itself almost immediately. */
-export const DEFAULT_SHOCK_CEILING = 50;
-/** Below this sync, the player receives little of what the sleeve earns. */
-export const DEFAULT_SYNC_FLOOR = 50;
-
 /** Shock scales output DOWN linearly: a sleeve at 90 shock produces 10%. */
 export function shockMultiplier(shock: number): number {
   return Math.max(0, 1 - shock / 100);

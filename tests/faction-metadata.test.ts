@@ -4,7 +4,6 @@ import { emptyBoard, noGrants, type DriverContext } from "../game/lib/features/i
 import { DODGED_PROBES, isStepped, type ProbeAcc } from "../game/lib/probes/index.ts";
 import { initState } from "../game/lib/state.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
-import { selectFactions } from "../shared/strategy/factions/objective.ts";
 import { unknownForecast } from "../shared/strategy/progression/forecast.ts";
 import type { FactionsState } from "../shared/telemetry/topics/factions.ts";
 
@@ -69,14 +68,12 @@ describe("full faction catalogue metadata", () => {
     expect(tetrads.offers).toEqual({ hacking: false, field: true, security: true });
   });
 
-  test("the objective sees city conflicts before either invitation exists", () => {
+  test("city conflicts are visible before either invitation exists", () => {
     const view = metadataView();
-    const candidates = view.factions
-      .filter((faction) => faction.name === "Sector-12" || faction.name === "Chongqing")
-      .map((faction) => ({ name: faction.name, value: faction.name === "Sector-12" ? 10 : 9, enemies: faction.enemies, reachable: true }));
-    const selected = selectFactions(candidates);
-    expect(selected.chosen).toEqual(["Sector-12"]);
-    expect(selected.foreclosed).toContainEqual({ name: "Chongqing", bannedBy: "Sector-12" });
+    const sector12 = view.factions.find((faction) => faction.name === "Sector-12")!;
+    const chongqing = view.factions.find((faction) => faction.name === "Chongqing")!;
+    expect(sector12).toMatchObject({ joined: false, invited: false, enemies: ["Chongqing"] });
+    expect(chongqing).toMatchObject({ joined: false, invited: false, enemies: ["Sector-12"] });
   });
 
   test("only a Shadows of Anarchy invitation or membership proves an infiltration", () => {

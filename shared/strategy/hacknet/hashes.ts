@@ -17,8 +17,6 @@ export const HASH_UPGRADE = {
   companyFavor: "Company Favor",
 } as const;
 
-export type HashUpgradeName = (typeof HASH_UPGRADE)[keyof typeof HASH_UPGRADE];
-
 export interface HashUpgradeQuote {
   name: string;
   level: number;

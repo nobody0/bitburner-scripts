@@ -33,7 +33,7 @@ function singleStep(id: string): SingleStepProbe {
 }
 
 /** Enough of an ns for ls-only contract discovery. */
-function contractNs(hosts: string[], perHost: number): NS {
+function contractNs(perHost: number): NS {
   return {
     ls: (host: string, ext: string) =>
       ext === ".cct" ? Array.from({ length: perHost }, (_, i) => `contract-${host}-${i}.cct`) : [],
@@ -147,7 +147,7 @@ describe("telemetry record size", () => {
     const hosts = Array.from({ length: 60 }, (_, i) => `host-${i}`);
     const servers = Object.fromEntries(hosts.map((h) => [h, { hostname: h } as Server]));
     const state = {} as GameState;
-    const emissions = singleStep("side.contracts").run(contractNs(hosts, 200), {
+    const emissions = singleStep("side.contracts").run(contractNs(200), {
       servers,
       player: {} as never,
       caps: {} as never,
@@ -183,7 +183,7 @@ describe("telemetry record size", () => {
         },
       },
     } as unknown as GameState;
-    const emissions = singleStep("side.contracts").run(contractNs(hosts, 40), {
+    const emissions = singleStep("side.contracts").run(contractNs(40), {
       servers,
       player: {} as never,
       caps: {} as never,

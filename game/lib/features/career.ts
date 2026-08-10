@@ -696,10 +696,6 @@ async function observeAndArm(ctx: DriverContext): Promise<boolean> {
   return true;
 }
 
-export function careerDecision(): CareerDecision | undefined {
-  return lastDecision;
-}
-
 export const careerModule: FeatureModule = {
   driver,
   reset: (state) => {

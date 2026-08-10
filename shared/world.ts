@@ -144,7 +144,3 @@ export interface Planner<M> {
 /** Per-thread worker script RAM — fidelity constants matching the in-game
  * cost of a worker that calls one of hack/grow/weaken (1.6 base + fn cost). */
 export const WORKER_RAM = { hack: 1.7, grow: 1.75, weaken: 1.75 } as const;
-
-export function serverByName(view: WorldView, hostname: string): ServerView | undefined {
-  return view.servers.find((s) => s.hostname === hostname);
-}

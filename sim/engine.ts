@@ -52,17 +52,6 @@ export function initialCounters(): Record<string, number> {
   };
 }
 
-/** The counters that checkCounters() actually acts on. The rest are dead. */
-export const LIVE_COUNTERS = [
-  "checkFactionInvitations",
-  "passiveFactionGrowth",
-  "messages",
-  "mechanicProcess",
-  "contractGeneration",
-  "achievementsCounter",
-  "autoSaveCounter",
-] as const;
-
 /** Hooks for subsystems, called in updateGame's real order. Absent hooks are
  * simply not modelled — the gap surfaces where a driver reaches for the ns API,
  * not here, so an unmodelled subsystem costs nothing per tick. */

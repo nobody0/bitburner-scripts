@@ -176,9 +176,6 @@ export const AUGMENTATIONS: Readonly<Record<string, AugmentationInfo>> = {
   "violet Congruity Implant": { rep: Infinity, cost: 50000000000000, factions: [] },
 };
 
-export function augmentationInfo(name: string): AugmentationInfo | undefined {
-  return AUGMENTATIONS[name];
-}
 
 /** Which factions offer an augmentation. Empty for one the table has not met
  * (a modded or newer aug), which is different from "no faction offers it". */

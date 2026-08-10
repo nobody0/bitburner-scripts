@@ -565,7 +565,6 @@ function hgwSolutionFor(
 }
 
 function allocFor(
-  memory: DispatchMemory,
   kind: "hack" | "grow" | "weaken",
   threads: number,
 ): { blockSize: number; threads: number; policy: "contiguous" | "homeFirst" | "spread"; coreAware: boolean } {
@@ -722,7 +721,7 @@ function launchBatches(
     };
 
     if (!pooling) {
-      const allocation = memory.heap.allocateAll(ops.map((op) => allocFor(memory, op.kind, op.threads)));
+      const allocation = memory.heap.allocateAll(ops.map((op) => allocFor(op.kind, op.threads)));
       if (!allocation.ok) {
         memory.stats.allocFails++;
         return;
@@ -768,7 +767,7 @@ function launchBatches(
     const missRequests = ops
       .map((op, i) => ({ op, miss: plans[i]!.missThreads }))
       .filter((entry) => entry.miss >= 1)
-      .map((entry) => allocFor(memory, entry.op.kind, entry.miss));
+      .map((entry) => allocFor(entry.op.kind, entry.miss));
     let reservations: { blocks: { hostname: string; threads: number }[]; gb: number }[] = [];
     if (missRequests.length > 0) {
       const allocation = memory.heap.allocateAll(missRequests);

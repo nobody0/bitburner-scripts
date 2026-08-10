@@ -18,7 +18,6 @@ import {
   type PriceContext,
   type PurchaseCandidate,
 } from "../shared/strategy/factions/augs.ts";
-import { EXACT_SEARCH_LIMIT, foreclosedBy, selectFactions, type FactionCandidate } from "../shared/strategy/factions/objective.ts";
 import {
   combinedEtaSec,
   evaluate,
@@ -618,124 +617,6 @@ describe("augmentation scoring", () => {
 
   test("The Red Pill is valued for ending the BitNode, which no multiplier expresses", () => {
     expect(scoreAug(aug("The Red Pill"), {})).toBeGreaterThan(5);
-  });
-});
-
-// --- objective selection ----------------------------------------------------
-
-describe("faction selection — brute-force oracle", () => {
-  function bruteForce(candidates: FactionCandidate[]): number {
-    const usable = candidates.filter((c) => c.reachable && c.value > 0);
-    const banned = new Map(usable.map((c) => [c.name, new Set(c.enemies)]));
-    let best = 0;
-    for (let mask = 0; mask < 1 << usable.length; mask++) {
-      const picked: FactionCandidate[] = [];
-      let ok = true;
-      for (let i = 0; i < usable.length && ok; i++) {
-        if ((mask & (1 << i)) === 0) continue;
-        const entry = usable[i]!;
-        for (const other of picked) {
-          if (banned.get(entry.name)!.has(other.name) || banned.get(other.name)!.has(entry.name)) {
-            ok = false;
-            break;
-          }
-        }
-        if (ok) picked.push(entry);
-      }
-      if (!ok) continue;
-      best = Math.max(best, picked.reduce((sum, c) => sum + c.value, 0));
-    }
-    return best;
-  }
-
-  test("is EXACT against all 2^n subsets on seeded random graphs", () => {
-    const rng = mulberry32(11);
-    for (let trial = 0; trial < 60; trial++) {
-      const size = 2 + Math.floor(rng() * 9); // up to 10
-      const names = Array.from({ length: size }, (_, i) => `F${i}`);
-      const candidates: FactionCandidate[] = names.map((name) => ({
-        name,
-        value: Math.round(rng() * 100) / 10,
-        enemies: [],
-        reachable: rng() > 0.15,
-      }));
-      for (let i = 0; i < size; i++) {
-        for (let j = i + 1; j < size; j++) {
-          if (rng() < 0.3) {
-            (candidates[i]!.enemies as string[]).push(names[j]!);
-          }
-        }
-      }
-      expect(selectFactions(candidates).value).toBeCloseTo(bruteForce(candidates), 9);
-    }
-  });
-
-  test("models the real city ban graph correctly", () => {
-    // Sector-12/Aevum are compatible; Chongqing/New Tokyo/Ishima are
-    // compatible; Volhaven excludes all five. The optimum is therefore one of
-    // those three groups, never a mix.
-    const city = (name: string, value: number, enemies: string[]): FactionCandidate => ({
-      name,
-      value,
-      enemies,
-      reachable: true,
-    });
-    const WEST = ["Sector-12", "Aevum"];
-    const EAST = ["Chongqing", "New Tokyo", "Ishima"];
-    const candidates: FactionCandidate[] = [
-      city("Sector-12", 6, [...EAST, "Volhaven"]),
-      city("Aevum", 5, [...EAST, "Volhaven"]),
-      city("Chongqing", 3, [...WEST, "Volhaven"]),
-      city("New Tokyo", 3, [...WEST, "Volhaven"]),
-      city("Ishima", 3, [...WEST, "Volhaven"]),
-      city("Volhaven", 8, [...WEST, ...EAST]),
-    ];
-    const result = selectFactions(candidates);
-    // West = 11, East = 9, Volhaven alone = 8. The west pair wins outright,
-    // and — the point of the test — a MIX is never chosen.
-    expect(result.value).toBe(11);
-    expect(result.chosen.sort()).toEqual(["Aevum", "Sector-12"]);
-    expect(result.foreclosed.map((f) => f.name).sort()).toEqual(["Chongqing", "Ishima", "New Tokyo", "Volhaven"]);
-    expect(result.approximated).toBe(false);
-  });
-
-  test("a tie is resolved deterministically, not by input order", () => {
-    // Sector-12 + Aevum = 9 exactly ties the eastern trio at 3+3+3. Either is
-    // optimal; what must not happen is the answer depending on iteration
-    // order, because the objective would then thrash between them every tick.
-    const build = (): FactionCandidate[] => [
-      { name: "Sector-12", value: 5, enemies: ["Chongqing"], reachable: true },
-      { name: "Aevum", value: 4, enemies: ["New Tokyo"], reachable: true },
-      { name: "Chongqing", value: 5, enemies: ["Sector-12"], reachable: true },
-      { name: "New Tokyo", value: 4, enemies: ["Aevum"], reachable: true },
-    ];
-    const forward = selectFactions(build());
-    const backward = selectFactions([...build()].reverse());
-    expect(forward.value).toBe(backward.value);
-    expect(forward.chosen).toEqual(backward.chosen);
-  });
-
-  test("unreachable factions foreclose nothing — you never joined them", () => {
-    const candidates: FactionCandidate[] = [
-      { name: "A", value: 10, enemies: ["B"], reachable: false },
-      { name: "B", value: 3, enemies: ["A"], reachable: true },
-    ];
-    const result = selectFactions(candidates);
-    expect(result.chosen).toEqual(["B"]);
-    expect(result.value).toBe(3);
-  });
-
-  test("foreclosedBy explains a join before it happens", () => {
-    const candidates: FactionCandidate[] = [
-      { name: "Sector-12", value: 5, enemies: ["Volhaven"], reachable: true },
-      { name: "Volhaven", value: 8, enemies: ["Sector-12"], reachable: true },
-    ];
-    expect(foreclosedBy("Sector-12", candidates).map((c) => c.name)).toEqual(["Volhaven"]);
-  });
-
-  test("the exact search limit is above the real graph's largest component", () => {
-    // The real ban graph's largest component is the six city factions.
-    expect(EXACT_SEARCH_LIMIT).toBeGreaterThanOrEqual(6);
   });
 });
 

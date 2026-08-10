@@ -23,10 +23,6 @@ export function scoreInvestment(investment: Investment, horizonSec: number): Sco
   };
 }
 
-export function paysBackWithin(investment: Investment, horizonSec: number): boolean {
-  return scoreInvestment(investment, horizonSec).netOverHorizon > 0;
-}
-
 /** Horizon for REPORTS (digests, why-strings): 2 significant figures.
  *
  * Decisions keep the exact number; publishing it raw made every digest whose

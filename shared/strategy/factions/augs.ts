@@ -616,38 +616,6 @@ function improveOrder(
   return order;
 }
 
-/** Greedy-by-value with a price-descending affordability recheck.
- *
- * The shape is taken from the predecessor scripts
- * (src/_lib/augmentations.ts:170-199): add the next-best augmentation, re-sort
- * the whole set most-expensive-first, recompute the total under the escalation,
- * and stop when it stops being affordable. Recomputing the TOTAL each time is
- * the part that matters — the escalation means adding one augmentation raises
- * the price of everything after it, so an incremental sum is simply wrong. */
-export function planPurchases(
-  ranked: readonly PurchaseCandidate[],
-  budget: number,
-  ctx: PriceContext,
-): PurchasePlan {
-  const chosen: PurchaseCandidate[] = [];
-  const dropped: PurchaseCandidate[] = [];
-  let best: { order: PurchaseCandidate[]; cost: number } = { order: [], cost: 0 };
-
-  for (const candidate of ranked) {
-    const attempt = [...chosen, candidate];
-    const order = orderPurchases(attempt, ctx);
-    const cost = totalCost(order, ctx);
-    if (cost > budget) {
-      dropped.push(candidate);
-      continue;
-    }
-    chosen.push(candidate);
-    best = { order, cost };
-  }
-
-  return { order: best.order, totalCost: best.cost, dropped };
-}
-
 /** Can this augmentation be bought right now?
  *
  * Reputation suffices, OR donation can close the gap with the money left AFTER

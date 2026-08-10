@@ -99,10 +99,6 @@ export const STOCK_METADATA: Readonly<Record<string, StockMetadata>> = {
 
 export const STOCK_SYMBOLS: readonly string[] = Object.keys(STOCK_METADATA);
 
-export function stockMetadata(symbol: string): StockMetadata | undefined {
-  return STOCK_METADATA[symbol];
-}
-
 /** hostname -> symbol. Two Fulcrum hosts collapse onto FLCM. */
 export const SYMBOL_BY_HOST: Readonly<Record<string, string>> = Object.fromEntries(
   Object.entries(STOCK_METADATA).flatMap(([symbol, meta]) => meta.hosts.map((host) => [host, symbol])),

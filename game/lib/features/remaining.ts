@@ -10,7 +10,6 @@ import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
 import { stepGang } from "../../../shared/strategy/gang/decide.ts";
 import {
   GO_OPPONENTS,
-  evaluate,
   isGoRewardOpponent,
   playMove,
   prepareGoDecision,

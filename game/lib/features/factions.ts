@@ -84,11 +84,6 @@ function moneyGrantFor(ctx: Pick<DriverContext, "grants">, claimId: string): num
   return grant && grant.resource === "money" ? grant.amount : 0;
 }
 
-/** Exposed for tests and the sim harness. */
-export function factionsMemory(): FactionMemory {
-  return memory;
-}
-
 // --- view assembly ----------------------------------------------------------
 
 function requirementView(state: GameState): RequirementView {

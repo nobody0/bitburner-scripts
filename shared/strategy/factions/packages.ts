@@ -5,7 +5,6 @@ import {
   closePrereqs,
   estimatedCost,
   scoreAug,
-  totalCost,
   type AugInfo,
   type PurchaseCandidate,
 } from "./augs.ts";

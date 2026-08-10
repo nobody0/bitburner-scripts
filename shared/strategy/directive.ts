@@ -21,14 +21,3 @@ export interface TargetDirective {
   ctxGeneration: number;
   decidedAt: number;
 }
-
-export interface FleetState {
-  fleetGb: number;
-  freeGb: number;
-  inFlight: { hack: number; grow: number; weaken: number };
-  /** Live security/money for the hot set, kept fresh by the dispatcher. */
-  live: Map<string, { hackDifficulty: number; moneyAvailable: number }>;
-  prepped: boolean;
-}
-
-export const EMPTY_DIRECTIVE: TargetDirective = { segments: [], ctxGeneration: -1, decidedAt: -Infinity };

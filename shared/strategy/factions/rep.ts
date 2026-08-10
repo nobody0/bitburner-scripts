@@ -28,8 +28,6 @@ export const DONATE_MONEY_TO_REP_DIVISOR = 1e6;
 export const BASE_FAVOR_TO_DONATE = 150;
 /** CONSTANTS.BaseFocusBonus @ v3.0.1 — the penalty for UNfocused work. */
 export const BASE_FOCUS_BONUS = 0.8;
-/** The augmentation that removes the unfocused penalty. */
-export const FOCUS_PENALTY_EXEMPT_AUG = "Neuroreceptor Management Implant";
 /** Nearest representable log(1.02); NOT Math.log(1.02), which lacks the
  * precision (the game says so in a comment, and the difference shows up in
  * favor at high reputation). */

@@ -1,6 +1,5 @@
 import type { NS, Server } from "@ns";
 import { isScriptVersion } from "../../shared/deployment.ts";
-import { HOME_RESERVE_GB } from "../../shared/ram/heap.ts";
 
 /** Network bootstrap closures — every function here runs INSIDE a dodge stub
  * (bracket-notation ns calls, so importing bundles pay nothing). Budgets are

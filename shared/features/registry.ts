@@ -184,14 +184,6 @@ export const FEATURES: readonly Feature[] = [
   },
 ];
 
-const BY_ID = new Map<FeatureId, Feature>(FEATURES.map((f) => [f.id, f]));
-
-export function featureById(id: FeatureId): Feature {
-  const feature = BY_ID.get(id);
-  if (!feature) throw new Error(`unknown feature: ${id}`);
-  return feature;
-}
-
 /** The feature a BitNode is themed around, if any. */
 export function featureForBitNode(n: number): Feature | undefined {
   return FEATURES.find((f) => f.bitnodes.includes(n));

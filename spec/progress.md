@@ -240,12 +240,11 @@ function. No faction table is hardcoded in `shared/` — requirements are read a
 runtime from `ns.singularity.getFactionInviteRequirements`, and the vendored
 table exists only so the SIMULATOR can answer the same query.
 
-**Evidence — four exact oracles, not heuristics:**
+**Evidence — exact oracles for the reusable math:**
 
 | Claim | Oracle |
 |---|---|
 | rep/favor/donation math | bit-identical to the vendored originals (`toBe`, 30 cases incl. share bonus, SF15, BitNode mults) |
-| faction selection | exhaustive over all 2^n subsets, 60 seeded random ban graphs |
 | purchase ordering | brute force over all permutations, 40 random sets |
 | purchase ordering under prerequisites | brute force over all *legal* permutations, 30 random branching DAGs |
 
@@ -253,8 +252,8 @@ table exists only so the SIMULATOR can answer the same query.
 non-SoA purchase multiplies the price of every later one by 1.9, and an
 augmentation does nothing until it is installed — so within a reset there is no
 reason to want a cheap one early, and the dearest item belongs in the cheapest
-slot. The set is therefore chosen by VALUE and bought by PRICE: `selectFactions`
-and the package frontier pick what is worth having, `orderPurchases` decides the
+slot. The set is therefore chosen by VALUE and bought by PRICE: the package
+frontier picks what is worth having, `orderPurchases` decides the
 sequence, and every cost estimate is taken from the ordered sequence rather than
 from today's queue depth. Pricing a batch in value order overstates it, which
 loses packages comparisons they should win and leaves the last purchases

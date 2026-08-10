@@ -15,7 +15,6 @@ import {
   evaluateMove,
   eyesByChain,
   legalPoints,
-  neighboringChains,
   pointKey,
   weakestNeighborChain,
   type GoAnalysis,
@@ -124,7 +123,6 @@ function expansionMoves(board: GoBoard, analysis: GoAnalysis, available: readonl
 }
 
 function libertyGrowthMoves(
-  board: GoBoard,
   analysis: GoAnalysis,
   player: Stone,
   available: readonly GoPoint[],
@@ -158,7 +156,6 @@ function defendCandidates(moves: readonly MoveOption[]): MoveOption[] {
 }
 
 function surroundMove(
-  board: GoBoard,
   analysis: GoAnalysis,
   player: Stone,
   available: readonly GoPoint[],
@@ -274,9 +271,9 @@ function prepareOptionSpace(
   const contested = disputedMoves(analysis, available);
   const endGame = contested.length === 0 && passCount > 0;
   const expansions = memo(() => expansionMoves(board, analysis, available));
-  const growthMoves = memo(() => libertyGrowthMoves(board, analysis, player, available));
+  const growthMoves = memo(() => libertyGrowthMoves(analysis, player, available));
   const defenses = memo(() => defendCandidates(growthMoves()));
-  const surround = memo(() => surroundMove(board, analysis, player, available, smart));
+  const surround = memo(() => surroundMove(analysis, player, available, smart));
   const eyes = memo(() => endGame ? [] : eyeCreationMoves(board, analysis, player, available));
   const eyeBlock = memo(() => endGame ? undefined : eyeBlockMove(board, analysis, player, available));
   const patterns = memo(() => endGame ? [] : patternMoves(board, player, available, smart));

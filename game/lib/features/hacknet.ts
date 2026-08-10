@@ -6,7 +6,6 @@ import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { installHorizonSec } from "../../../shared/strategy/progression/forecast.ts";
 import {
   stepHacknet,
-  type HacknetDecision,
   type HacknetMilestone,
   type HacknetView,
   type UpgradeOption,
@@ -44,14 +43,10 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
 /** ns.hacknet.* is cheap; this covers the whole read + one purchase. */
 const PEAK_STEP_GB = 5;
 
-let lastDecision: HacknetDecision | undefined;
-let lastHashDecision: HashDecision | undefined;
 let lastResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
 let lastHashResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
 
 export function resetHacknetState(): void {
-  lastDecision = undefined;
-  lastHashDecision = undefined;
   lastResult = undefined;
   lastHashResult = undefined;
 }
@@ -354,8 +349,6 @@ const driver: FeatureDriver = {
     if (!view) return;
     const decision = stepHacknet(view);
     const hashDecision = decideHashes(ctx);
-    lastDecision = decision;
-    lastHashDecision = hashDecision;
 
     const topic = ctx.state.topics.hacknet!;
     const hashDollarValue = view.hashMode && topic.hashes && topic.hashes.sellForMoneyCost > 0
@@ -508,14 +501,6 @@ function hacknetMethods(kind: string): readonly string[] {
     case "cache": return ["hacknet.upgradeCache"];
     default: return [];
   }
-}
-
-export function hacknetDecision(): HacknetDecision | undefined {
-  return lastDecision;
-}
-
-export function hacknetHashDecision(): HashDecision | undefined {
-  return lastHashDecision;
 }
 
 export const hacknetModule: FeatureModule = {

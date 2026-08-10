@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
-import { allOf, goalFrom } from "../shared/goals/goal.ts";
+import { goalFrom } from "../shared/goals/goal.ts";
 import { parseGoal, parseGoals } from "../shared/goals/presets.ts";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
 

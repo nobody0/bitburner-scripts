@@ -35,10 +35,6 @@ export const BITNODES: readonly BitNodeInfo[] = [
 
 export const BITNODE_COUNT = BITNODES.length;
 
-export function bitNodeInfo(n: number): BitNodeInfo | undefined {
-  return BITNODES.find((b) => b.n === n);
-}
-
 /** Every BitNodeMultipliers field at its BN1 value. Two fields are NOT 1 —
  * transcribing them as 1 would make BN1 look like it modifies them. */
 export const DEFAULT_BITNODE_MULTIPLIERS: Readonly<Record<string, number>> = {

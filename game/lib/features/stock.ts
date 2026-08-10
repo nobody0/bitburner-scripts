@@ -79,12 +79,6 @@ export function resetStockState(): void {
   lastResult = undefined;
 }
 
-/** Exposed for the simulator's strategy tests, which drive the solver directly
- *  against the vendored market without going through a controller pass. */
-export function stockMemory(): StockMemory {
-  return memory;
-}
-
 /** Hosts the farm could actually drive right now — the other half of the
  * manipulation loop.
  *
@@ -527,11 +521,6 @@ function stockMethods(actions: readonly StockAction[]): readonly string[] {
     }
   }
   return [...methods];
-}
-
-/** The plan, for the simulator's strategy tests and the UI's replay. */
-export function stockPlan(): StockPlan | undefined {
-  return lastPlan;
 }
 
 export const stockModule: FeatureModule = {

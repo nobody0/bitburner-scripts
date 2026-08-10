@@ -6,7 +6,7 @@ import type { Claim, SlotState } from "../../shared/strategy/arbiter.ts";
 import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../shared/strategy/coordination.ts";
 import type { Need } from "../../shared/strategy/needs.ts";
 import { forecastAt, unknownForecast, usableForecastSec } from "../../shared/strategy/progression/forecast.ts";
-import { FEATURE_IDS, type FeatureId } from "../../shared/features/ids.ts";
+import { FEATURE_IDS } from "../../shared/features/ids.ts";
 import { homeReserveGb } from "../../shared/ram/reserve.ts";
 import { priceCalls } from "./dodge.ts";
 import { isScriptDeath } from "./errors.ts";
@@ -19,7 +19,7 @@ import { driverEnabled, featureModule, featureRamDemand, grantsFor, resetAllFeat
 import type { ClaimContext, NeedContext } from "./features/index.ts";
 import { sweepFleet } from "./fleet.ts";
 import { gameGlobal } from "./globals.ts";
-import { dodgeBudget, homeDodgeBudget, initProbeRunner, runGateProbe, runProbes } from "./probe-runner.ts";
+import { dodgeBudget, initProbeRunner, runGateProbe, runProbes } from "./probe-runner.ts";
 import { ALL_PROBES, probeCadenceMs } from "./probes/index.ts";
 import { acquireDodge, dodgeHosts } from "./ram.ts";
 import { caps, initState, merge, set, type GameState } from "./state.ts";

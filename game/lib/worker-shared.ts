@@ -1,5 +1,3 @@
-import type { NS } from "@ns";
-
 /** Rendezvous between the dispatcher and its puppet workers (same JS realm,
  * same trick as dodge-shared.ts). Type-only module: nothing exists at runtime.
  *
@@ -64,6 +62,3 @@ export function workerGlobals(): WorkerGlobalThis {
   g.dispatch_done ??= [];
   return g;
 }
-
-/** ns type re-export so the worker bundle stays import-light. */
-export type WorkerNS = NS;

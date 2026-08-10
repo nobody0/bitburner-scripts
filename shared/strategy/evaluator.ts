@@ -31,7 +31,6 @@ export const SWITCH_MARGIN = 0.1;
 /** Minimum time on a target before switching away. */
 export const DWELL_MS = 60_000;
 export const HORIZON_MIN_MS = 60_000;
-export const HORIZON_MAX_MS = 1_800_000;
 /** Prep INVESTMENT may amortize further out than the 30-minute farming
  * horizon: a target upgrade pays for the rest of the run, and capping its
  * window at 30 minutes priced every multi-hour prep on a small fleet out of
@@ -340,7 +339,6 @@ export function stepEvaluator(
   // and how long the RUN is expected to last at all — whichever ends first.
   const currentRate = currentScore * fleetGb;
   const goalHorizonMs = currentRate > 0 ? (goalRemaining / currentRate) * 1000 : PREP_HORIZON_MAX_MS;
-  const horizonMs = Math.min(HORIZON_MAX_MS, Math.max(HORIZON_MIN_MS, Math.min(goalHorizonMs, horizonCapMs)));
   // Prep INVESTMENT amortizes over the run, not the 30-minute farm window.
   const prepHorizonMs = Math.min(PREP_HORIZON_MAX_MS, Math.max(HORIZON_MIN_MS, Math.min(goalHorizonMs, horizonCapMs)));
 
