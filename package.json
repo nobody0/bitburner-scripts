@@ -12,6 +12,7 @@
     "sync": "bun run tools/rfa-server.ts --sync",
     "types": "bun run tools/rfa-server.ts --types-only",
     "vendor": "bun run tools/vendor.ts",
+    "bands": "bun run tools/gen-target-bands.ts",
     "sim": "bun run sim/run.ts",
     "sim:compare": "bun run sim/compare.ts",
     "saves": "bun run tools/save-io.ts list",

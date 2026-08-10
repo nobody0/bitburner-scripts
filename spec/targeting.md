@@ -66,6 +66,64 @@ plans of the hot set. A context **generation** guards every cached solution —
 a >2 % skill change, a fleet-RAM change >10 %, or a new root bumps it and
 forces a re-score, so an argmax never mixes generations.
 
+### Provable candidate pruning (`shared/strategy/bounds.ts`)
+
+The per-generation re-score is the evaluator's only real cost (up to 1,024
+Newton grow-solves per target). Most of it is provably wasted: the world's
+servers are rolled ONCE per BitNode from `{min,max}` metadata ranges
+(`initForeignServers` → `getRandomIntInclusive`; ranges transcribed in
+`shared/features/servers.ts`, parity-pinned), and at any given skill only a
+handful can contest the optimum. `scoreUpperBound` is a ~10-flop closed form
+proven ≥ `solveCycle`'s score for **every** thread count, batch shape
+(hwgw/hgw), `RamCaps` (caps only shrink the feasible set) and the
+pipeline-aware period (which never beats `ramSec/farmGb`); stock manipulation
+value is a numerator term, so manipulated hosts need no exemption. The
+derivation (s cancels between income and the per-s floor of each RAM term; the
+grow floor `G ≥ s/(k + 1/m₀)` handles grow's $1/thread additive credit, which
+otherwise falsifies the bound on money-poor servers) lives in bounds.ts; the
+machine check is `sim/tests/bounds.test.ts` — a seeded adversarial sweep
+asserting `score ≤ UB` with **exact** `<=`, plus the `growThreads`
+post-conditions and formula monotonicities the interval arithmetic rests on.
+
+The evaluator prunes with it: a candidate whose bound cannot reach the
+incumbent farm score is skipped without solving — a farm switch needs
+score > incumbent·1.1 and a prep pick needs positive net (score strictly above
+the incumbent), so the skip is decision-free by construction. Guards: the
+threshold only comes from an incumbent solved at the *current* generation, the
+incumbent itself is never pruned, and when the incumbent earns nothing
+(cold start, BN8's zero-gain targets) pruning stands down entirely — those
+fallbacks rank by prep-aware value, where a low-score fast-prep target can
+legitimately win. `sim/tests/evaluator-prune.test.ts` walks randomized rolled
+timelines (skill/fleet jumps, roots appearing, prepped states flapping, stock
+positions opening/closing, a BN8 scenario) twice — prune on vs off — and
+asserts byte-identical decisions; measured ~2–3× on evaluator time with
+174–617 solves skipped per 400-step timeline.
+
+**What is deliberately NOT claimed:** component-wise dominance ("richer +
+easier + faster-growing always wins") is false in general — near the 95 %
+steal cap the solver's granularity is `floor(0.95/p)·p`, discontinuous in p,
+and in the interval/slot-floored pipeline regime a marginally better server
+can lose more steal to that floor than its chance advantage recovers. Static
+removal therefore never rests on dominance; everything reduces to
+UB-vs-achieved-score at the live roll.
+
+### The contention table (`shared/strategy/target-bands.ts`, generated)
+
+`computeTargetBands` answers the roll-independent question: per skill band,
+which hosts can contest the RAM-unbound optimum for ANY roll of the world
+RNG? A host is excluded only when its best-possible-roll upper bound cannot
+reach the worst-possible-roll guaranteed floor (the always-feasible one-thread
+batch, priced by interval arithmetic over the pinned-monotone formulas) of
+some always-eligible host. Contract: BN1 mults, neutral player, RAM unbound,
+root assumed, no stock influence. It never gates the runtime evaluator (which
+prunes exactly, from live rolls) — it exists for the question asked *before*
+servers are scanned: progression planning, port-opener pricing, UI. Bands are
+tight early (2–4 contenders below skill 30) and honestly wide late (~40 at
+1,500 — real roll variance, the req≈skill/2 regime). Regenerate with
+`bun run bands` after a vendor bump; `sim/tests/target-bands.test.ts` pins
+staleness and rolls whole worlds asserting every argmax is a listed
+contender.
+
 ## Switching (in the gate)
 
 `rate = score × fleetGb`; horizon

@@ -1,4 +1,5 @@
 import { makeHackContext, skillFromExp, weakenTimeSeconds, type HackContext } from "../formulas.ts";
+import { scoreUpperBound } from "./bounds.ts";
 import { evaluatePrep, farmIncomeRate, prepTimeDiscount } from "./economics.ts";
 import type { ServerView, WorldView } from "../world.ts";
 import type { Segment, TargetDirective } from "./directive.ts";
@@ -66,6 +67,11 @@ export interface TargetEntry {
   solution?: CycleSolution;
   /** ctx generation `solution` was computed under. */
   generation: number;
+  /** Solve skipped this generation because the score upper bound cannot reach
+   * the incumbent farm score (bounds.ts). Distinct from ineligible: a pruned
+   * target IS farmable, it just provably cannot win any decision this
+   * generation. */
+  pruned?: boolean;
 }
 
 export interface EvaluatorMemory {
@@ -87,6 +93,8 @@ export interface EvaluatorMemory {
    *  can do, so it has to invalidate the cache the same way a skill jump does —
    *  otherwise the farm keeps optimising for a position that no longer exists. */
   influenceKey: string;
+  /** Cumulative count of exhaustive solves skipped by the upper-bound prune. */
+  prunedSolves: number;
 }
 
 export function initEvaluator(): EvaluatorMemory {
@@ -103,6 +111,7 @@ export function initEvaluator(): EvaluatorMemory {
     farmSince: -Infinity,
     forceGate: true,
     influenceKey: "",
+    prunedSolves: 0,
   };
 }
 
@@ -163,6 +172,9 @@ export function stepEvaluator(
    *  run is expected to end is not worth switching to, however good its
    *  steady-state rate. Infinity preserves the goal-only behaviour. */
   horizonCapMs = Infinity,
+  /** `prune: false` disables the upper-bound solve skip — the A/B lever the
+   * invariance suite uses to prove pruning changes no decision. */
+  opts?: { prune?: boolean },
 ): { memory: EvaluatorMemory; directive: TargetDirective; switched?: { from?: string; to: string } } {
   const now = view.time;
 
@@ -223,6 +235,46 @@ export function stepEvaluator(
     else memory.entries.set(server.hostname, { statics: staticsOf(server), generation: -1 });
   }
 
+  // One solve choke point, shared by the slice and the gate. The prune is
+  // PROVABLY decision-free: a farm switch needs score > incumbent·1.1 and a
+  // prep pick needs positive net (score strictly above the incumbent's), so a
+  // candidate whose upper bound (bounds.ts — ≥ its score under every cap and
+  // batch shape, stock value included) cannot reach the incumbent score cannot
+  // be chosen by any path, and its exhaustive solve is skipped. Guards, each
+  // load-bearing:
+  //  - threshold only from an incumbent solved at the CURRENT generation (a
+  //    stale score could overstate the fleet's worth and over-prune);
+  //  - no pruning when the incumbent earns nothing (currentScore ≤ 0): the
+  //    cold-start and BN8 fallbacks rank by prep-aware value, where a
+  //    low-score fast-prep target can legitimately win;
+  //  - the incumbent itself is never pruned (its solution feeds the
+  //    directive);
+  //  - the bound is nudged up one part in 1e9 before the comparison, so a
+  //    float-rounding shortfall in the bound can only make pruning less
+  //    aggressive, never wrong.
+  const pruneEnabled = opts?.prune ?? true;
+  const incumbentEntry = memory.directive.farm ? memory.entries.get(memory.directive.farm.host) : undefined;
+  const solveEntry = (entry: TargetEntry): void => {
+    if (entry.generation === memory.generation) return;
+    entry.generation = memory.generation;
+    entry.pruned = false;
+    if (!isEligible(ctx, entry.statics)) {
+      entry.solution = undefined;
+      return;
+    }
+    const manipulation = manipulationFor(entry.statics.hostname);
+    if (pruneEnabled && entry !== incumbentEntry && incumbentEntry?.generation === memory.generation) {
+      const threshold = incumbentEntry.solution?.score ?? 0;
+      if (threshold > 0 && scoreUpperBound(ctx, entry.statics, manipulation?.valuePerOp ?? 0) * (1 + 1e-9) <= threshold) {
+        entry.solution = undefined;
+        entry.pruned = true;
+        memory.prunedSolves++;
+        return;
+      }
+    }
+    entry.solution = solveCycle(ctx, entry.statics, 1, caps, manipulation);
+  };
+
   // Round-robin slice: B = clamp(ceil(N/10), 1, 8) targets per tick.
   if (now - memory.lastSliceAt >= SLICE_MIN_MS && memory.order.length > 0) {
     memory.lastSliceAt = now;
@@ -231,11 +283,7 @@ export function stepEvaluator(
       const hostname = memory.order[memory.cursor % memory.order.length]!;
       memory.cursor++;
       const entry = memory.entries.get(hostname);
-      if (!entry) continue;
-      if (entry.generation !== memory.generation) {
-        entry.solution = isEligible(ctx, entry.statics) ? solveCycle(ctx, entry.statics, 1, caps, manipulationFor(entry.statics.hostname)) : undefined;
-        entry.generation = memory.generation;
-      }
+      if (entry) solveEntry(entry);
     }
   }
 
@@ -245,14 +293,11 @@ export function stepEvaluator(
   memory.lastGateAt = now;
   memory.forceGate = false;
 
-  // Gate: score everything at the current generation (cheap — see the bench;
-  // 100 targets ≈ 0.6ms) so the argmax never mixes generations.
-  for (const entry of memory.entries.values()) {
-    if (entry.generation !== memory.generation) {
-      entry.solution = isEligible(ctx, entry.statics) ? solveCycle(ctx, entry.statics, 1, caps, manipulationFor(entry.statics.hostname)) : undefined;
-      entry.generation = memory.generation;
-    }
-  }
+  // Gate: score everything at the current generation so the argmax never
+  // mixes generations. The incumbent goes first — its fresh score is the
+  // prune threshold for everyone else.
+  if (incumbentEntry) solveEntry(incumbentEntry);
+  for (const entry of memory.entries.values()) solveEntry(entry);
 
   const byHost = new Map(view.servers.map((s) => [s.hostname, s]));
   const ranked = [...memory.entries.values()]

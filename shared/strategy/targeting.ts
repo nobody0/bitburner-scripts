@@ -132,7 +132,9 @@ interface CycleEval {
 }
 
 const GOLDEN = (Math.sqrt(5) - 1) / 2;
-const MAX_STEAL = 0.95;
+/** Steal-fraction ceiling; exported so the score bounds (bounds.ts) share the
+ * solver's exact thread-domain edge instead of re-declaring it. */
+export const MAX_STEAL = 0.95;
 /** Exhaustive integer search is cheap enough below this inclusive boundary. */
 export const EXACT_THREAD_LIMIT = 1_024;
 
