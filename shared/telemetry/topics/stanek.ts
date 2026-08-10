@@ -41,6 +41,5 @@ export interface StanekPlan {
    *  entire evidence claim. */
   approximated: boolean;
   chargeOrder: number[];
-  why: string;
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

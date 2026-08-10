@@ -147,7 +147,6 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     ...(prepTarget !== undefined ? { prepTarget } : {}),
     ...(segOrder !== undefined ? { segOrder } : {}),
     mode: driver.memory.dispatch.mode,
-    modeWhy: driver.memory.dispatch.modeWhy,
     inFlight: { ...driver.memory.dispatch.inFlight },
     launched: { ...stats.launched },
     landed: { ...stats.landed },
@@ -694,7 +693,6 @@ export const hacking: FeatureDriver = {
             paybackSec: homeRam.paybackSec,
             netOverHorizon: homeRam.netOverHorizon,
             worthBuying: homeRam.worthBuying,
-            why: homeRam.why,
             ...(lastInfrastructureResult?.action === "homeRam" ? { lastResult: lastInfrastructureResult } : {}),
           } } : {}),
           infrastructurePlan: {
@@ -711,8 +709,6 @@ export const hacking: FeatureDriver = {
               ...(infrastructure.buy.host ? { host: infrastructure.buy.host } : {}),
               ...(infrastructure.buy.targetRam ? { targetRam: infrastructure.buy.targetRam } : {}),
             } } : {}),
-            why: infrastructure.why,
-            ...(infrastructure.hold ? { hold: infrastructure.hold } : {}),
             rankedTotal: infrastructure.ranked.length,
             ranked: infrastructure.ranked.slice(0, 8).map((entry, index) => ({
               kind: entry.kind,
@@ -726,7 +722,6 @@ export const hacking: FeatureDriver = {
               netOverHorizon: entry.netOverHorizon,
               worthBuying: entry.worthBuying,
               selected: index === 0 && Boolean(infrastructure.buy),
-              why: entry.why,
             })),
             ...(lastInfrastructureResult ? { lastResult: lastInfrastructureResult } : {}),
           },

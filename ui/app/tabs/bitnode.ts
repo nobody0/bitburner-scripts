@@ -10,6 +10,7 @@ import { formatScientific } from "../../../shared/format.ts";
 import { attachChartHover, drawSeries } from "../lib/chart.ts";
 import { card, collapsible, definitions, dot, filters, note, table, tiles } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtTime } from "../lib/format.ts";
+import { html } from "../lib/html.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -122,12 +123,15 @@ function routeCard(plan: Plan, now: number): string {
     return note("waiting for the endgame route estimates");
   }
   const chosen = plan.route;
+  const selected = plan.routes.find((route) => route.id === chosen);
   const header = chosen
     ? tiles([
         {
           label: "chosen route",
           value: chosen,
-          sub: plan.routeWhy ?? "",
+          sub: selected
+            ? `${Number.isFinite(selected.etaSec) ? fmtTime(selected.etaSec * 1_000) : "∞"} ETA · ${selected.available ? "available" : "blocked"}`
+            : "",
         },
         {
           label: "decided",
@@ -184,8 +188,8 @@ function cadenceCard(plan: Plan, hasSeries: boolean): string {
   const header = tiles([
     {
       label: "verdict",
-      value: `${verdictDot} ${decision.effective}`,
-      sub: decision.why,
+      value: html`${verdictDot} ${decision.effective}`,
+      sub: `${decision.verdict} before latch${decision.remainingSec !== undefined ? ` · ${fmtTime(decision.remainingSec * 1_000)} remaining` : ""}`,
     },
     {
       label: "accrued value",
@@ -277,7 +281,7 @@ export const bitnodeTab: Tab = {
                     : lifecycle.phase,
               sub: lifecycle.installArmedAt !== undefined
                 ? `armed ${fmtTime(Math.max(0, now - lifecycle.installArmedAt))} ago`
-                : lifecycle.why,
+                : `wanted ${lifecycle.installWanted ? "yes" : "no"} · ready ${lifecycle.installReady ? "yes" : "no"}`,
             },
             {
               label: "queued augmentations",
@@ -287,9 +291,9 @@ export const bitnodeTab: Tab = {
           ]) +
           (lifecycle.installBlockers.length
             ? table(
-                ["barrier", "why"],
-                lifecycle.installBlockers.map((blocker) => [esc(blocker.kind), esc(blocker.why)]),
-                { left: [0, 1] },
+                ["barrier"],
+                lifecycle.installBlockers.map((blocker) => [esc(blocker.kind)]),
+                { left: [0] },
               )
             : note(lifecycle.installWanted
                 ? "all destructive-reset barriers acknowledged"
@@ -371,7 +375,6 @@ export const bitnodeTab: Tab = {
         grant.resource === "money" ? fmtMoney(grant.amount) : fmtNum(grant.amount, 2),
         fmtNum(grant.priority),
         grant.returnPerDollarSec !== undefined ? fmtNum(grant.returnPerDollarSec, 8) : "–",
-        esc(grant.why ?? ""),
       ]),
       ...(p.arbitration?.denied ?? []).map((denial) => [
         `denied: ${esc(denial.reason)}`,
@@ -381,25 +384,24 @@ export const bitnodeTab: Tab = {
         denial.resource === "money" ? fmtMoney(denial.wanted) : fmtNum(denial.wanted, 2),
         fmtNum(denial.priority),
         denial.returnPerDollarSec !== undefined ? fmtNum(denial.returnPerDollarSec, 8) : "–",
-        esc(denial.why),
       ]),
     ];
     const coordination =
       (needs.length
         ? table(
-            ["urgency", "requested by", "need", "progress", "why"],
+            ["urgency", "requested by", "need", "progress", "weight"],
             needs.map((need) => [
               esc(need.urgency),
               esc(need.by),
               esc(`${need.kind}${need.subject ? `: ${need.subject}` : ""}`),
               `${fmtNum(need.have, 1)} / ${fmtNum(need.target, 1)}`,
-              esc(need.why),
+              fmtNum(need.weight, 2),
             ]),
-            { left: [0, 1, 2, 4] },
+            { left: [0, 1, 2] },
           )
         : note("no open cross-feature needs")) +
       (arbitrationRows.length
-        ? table(["outcome", "feature", "claim", "resource", "amount", "priority", "return/$", "why"], arbitrationRows, { left: [0, 1, 2, 3, 7] })
+        ? table(["outcome", "feature", "claim", "resource", "amount", "priority", "return/$"], arbitrationRows, { left: [0, 1, 2, 3] })
         : note("no contended resource claims"));
 
     return (

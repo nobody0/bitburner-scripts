@@ -50,11 +50,11 @@ export interface Progression {
    * the pure results in shared/strategy/{needs,arbiter}.ts. */
   needs?: NeedDigest[];
   arbitration?: ArbitrationDigest;
-  /** How much home RAM the dispatcher is being told to leave free, and why.
+  /** How much home RAM the dispatcher is being told to leave free.
    *  `capped: true` is a real blocker — a feature's probe cannot be afforded
    *  on this home no matter how long we wait, and the answer is more home RAM
    *  (or a bigger rooted host to place the dodge on). */
-  homeReserve?: { gb: number; capped: boolean; driver?: FeatureId; why: string };
+  homeReserve?: { gb: number; capped: boolean; driver?: FeatureId };
   plan?: ProgressionPlan;
 }
 
@@ -71,7 +71,6 @@ export interface NeedDigest {
   weight: number;
   urgency: NeedUrgency;
   satisfied: boolean;
-  why: string;
 }
 
 export interface GrantDigest {
@@ -86,7 +85,6 @@ export interface GrantDigest {
   priority?: number;
   ratePerSec?: number;
   returnPerDollarSec?: number;
-  why?: string;
 }
 
 export interface DenialDigest {
@@ -96,7 +94,6 @@ export interface DenialDigest {
   wanted: number;
   available: number;
   reason: DenyReason;
-  why: string;
   priority?: number;
   ratePerSec?: number;
   returnPerDollarSec?: number;
@@ -119,7 +116,7 @@ export interface ProgressionPlan {
    * bootstrap that is not itself permission to install. */
   liquidationWanted: boolean;
   /** Why the reset cannot execute yet. */
-  installBlockers: { kind: "factions" | "stock" | "graft" | "augmentations"; why: string }[];
+  installBlockers: { kind: "factions" | "stock" | "graft" | "augmentations" }[];
   /** Every reset-sensitive subsystem has acknowledged readiness. */
   installReady: boolean;
   /** First safe pass has been published; execution occurs on the next pass. */
@@ -131,7 +128,6 @@ export interface ProgressionPlan {
   /** Factions that would cross the donation threshold on install — the
    *  strongest single argument for resetting now. */
   favorCrossings: { faction: string; favorNow: number; favorAfter: number }[];
-  why: string;
   /** The install-vs-push cadence verdict: value accrues while pushing but
    *  only activates at an install, so install when the accrued value clears
    *  the renewal threshold sqrt(2·overhead·pushRate). `effective` folds in
@@ -149,7 +145,6 @@ export interface ProgressionPlan {
     pushEtaSec?: number;
     remainingSec?: number;
     latched: boolean;
-    why: string;
   };
   /** The chosen way to finish this BitNode, with the estimate it was chosen
    *  on. Everything below is the decision record the calibration loop reads
@@ -158,7 +153,6 @@ export interface ProgressionPlan {
   route?: "daedalus" | "labyrinth" | "bladeburner";
   /** When the current route was chosen (survives refreshes that keep it). */
   decidedAt?: number;
-  routeWhy?: string;
   /** Every route's estimate with its per-part breakdown, so a wrong total can
    *  be attributed to the specific sub-heuristic that produced it. */
   routes?: RouteEtaDigest[];

@@ -53,7 +53,7 @@ export function makeSink(tel: Telemetry): TelemetrySink {
       // transition events are its compact index: replays and the live UI can
       // answer "what changed?" without diffing thousands of snapshots. The
       // signatures intentionally ignore continuously moving inputs such as
-      // cash and the horizon; a new winner, hold reason or funding outcome is
+      // cash and the horizon; a new winner, eligibility or funding outcome is
       // a decision transition, another second passing is not.
       const moneyArbitration = state.topics.progression?.arbitration
         ? {
@@ -70,8 +70,6 @@ export function makeSink(tel: Telemetry): TelemetrySink {
         if (plan) {
           const signature = JSON.stringify({
             buy: plan.buy,
-            why: plan.why,
-            hold: plan.hold,
             funded: plan.buy ? plan.moneyGranted >= plan.buy.cost : false,
             arbitration: moneyArbitrationDecision,
           });
@@ -92,8 +90,6 @@ export function makeSink(tel: Telemetry): TelemetrySink {
           const signature = JSON.stringify({
             candidate: plan.candidate,
             buy: plan.buy,
-            why: plan.why,
-            hold: plan.hold,
             funded: plan.candidate ? plan.moneyGranted >= plan.candidate.cost : false,
             arbitration: moneyArbitrationDecision,
           });
@@ -112,7 +108,6 @@ export function makeSink(tel: Telemetry): TelemetrySink {
               spend: hashes.spend,
               reserve: hashes.reserve,
               capacityTarget: hashes.capacityTarget,
-              why: hashes.why,
             });
             if (hashSignature !== sentHashDecision) {
               sentHashDecision = hashSignature;

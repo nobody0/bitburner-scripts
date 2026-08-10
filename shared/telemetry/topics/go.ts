@@ -4,7 +4,6 @@
  * opponent choice is intentionally coupled to the other features' needs. */
 
 import type {
-  GoAction,
   GoCurrentPlayer,
   GoFactionOpponent,
   GoMove,
@@ -26,6 +25,16 @@ export interface GoOpponentStats {
   bonusPercent: number;
   bonusDescription: string;
 }
+
+export type GoActionDigest =
+  | { type: "move"; x: number; y: number }
+  | { type: "pass" | "resume" }
+  | { type: "newGame"; opponent: GoRewardOpponent; boardSize: 5 | 7 | 9 | 13 };
+export type GoMoveDigest = Omit<GoMove, "why">;
+export type GoEtaDemandDigest = Omit<GoEtaDemand, "why">;
+export type GoGameCandidateDigest = Omit<GoGameCandidate, "why" | "transientDemand"> & {
+  transientDemand?: GoEtaDemandDigest;
+};
 
 export interface GoState {
   /** Core and board probes can land independently, so acquired fields are
@@ -54,9 +63,8 @@ export interface GoState {
 }
 
 export interface GoPlan {
-  action: GoAction;
-  ranked: GoMove[];
-  why: string;
+  action: GoActionDigest;
+  ranked: GoMoveDigest[];
   /** Exact public state consumed by the pure planner. This avoids pairing a
    * pre-move ranking with the post-move board emitted later in the same tick. */
   input: {
@@ -90,15 +98,15 @@ export interface GoPlan {
   };
   /** Full opponent/board comparison in the same ETA units used to decide. */
   selection: {
-    preferred: GoGameCandidate;
-    candidates: GoGameCandidate[];
+    preferred: GoGameCandidateDigest;
+    candidates: GoGameCandidateDigest[];
     context: {
       goPower: number;
       hasSourceFile14: boolean;
       favorRepCap: number;
       installRemainingSec?: number;
       joinedFactions: string[];
-      demands: Partial<Record<GoRewardOpponent, GoEtaDemand>>;
+      demands: Partial<Record<GoRewardOpponent, GoEtaDemandDigest>>;
       factionFavor: Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>>;
     };
   };
@@ -111,7 +119,7 @@ export type GoResponse =
 export interface GoTurnResult {
   at: number;
   durationMs: number;
-  action: GoAction;
+  action: GoActionDigest;
   opponentResponse?: GoResponse;
   /** Expected seed support; an unseeded defense tie splits one seed's weight. */
   predictionSupport?: { matching: number; total: number };

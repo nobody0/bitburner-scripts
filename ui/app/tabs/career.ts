@@ -11,9 +11,10 @@ import type { Tab } from "./index.ts";
  * The panel is organised around what the feature is DOING, not around the
  * shape of its data structures. The old layout put "selected: idle" in one
  * card, the work it was actually running in another, and the twenty-five
- * requests behind the decision in a third — so answering "why is it idle"
+ * requests behind the decision in a third — so explaining an idle selection
  * meant reading three tables and joining them by eye. Now: what we are doing
- * and why, then what is asking for it, then what else was considered. */
+ * means showing the action and its scores, then what is asking for it, then
+ * what else was considered. */
 
 const GANG_KARMA = -54_000;
 
@@ -74,7 +75,6 @@ interface RequestGroup {
   finalTarget?: number;
   weight: number;
   askers: string[];
-  whys: string[];
 }
 
 const URGENCY_ORDER: Record<string, number> = { blocking: 0, wanted: 1, nice: 2, income: 3 };
@@ -97,13 +97,11 @@ function groupRequests(plan: CareerPlan | undefined): RequestGroup[] {
         ...(request.target !== undefined ? { finalTarget: request.target } : {}),
         weight: request.weight,
         askers: request.by ? [request.by] : [],
-        whys: request.why ? [request.why] : [],
       });
       continue;
     }
     existing.weight = Math.max(existing.weight, request.weight);
     if (request.by && !existing.askers.includes(request.by)) existing.askers.push(request.by);
-    if (request.why && !existing.whys.includes(request.why)) existing.whys.push(request.why);
     // The furthest target is worth keeping — it is where this work ends — but
     // only as a note beside the milestone actually being shown.
     if (request.target !== undefined) {
@@ -164,7 +162,7 @@ const REQUEST_COLUMNS: Column<RequestGroup>[] = [
       // One asker names itself; many collapse to a count with the list behind
       // a hover, because the interesting fact is "eleven of them want this".
       if (r.askers.length <= 2) return `<span class="muted">${esc(r.askers.join(", "))}</span>`;
-      return `<span class="muted" title="${esc(r.whys.join("\n"))}">${r.askers.length} requesters</span>`;
+      return `<span class="muted" title="${esc(r.askers.join("\n"))}">${r.askers.length} requesters</span>`;
     },
   },
   { id: "weight", label: "weight", sort: (r) => r.weight, cell: (r) => fmtNum(r.weight, 2) },
@@ -176,7 +174,7 @@ export const careerTab: Tab = {
     const c = state.topics.career;
     if (!c) return note("waiting for the career probe");
 
-    // --- what we are doing, and why ---
+    // --- observed work and the structured decision beside it ---
     const work = c.currentWork;
     const plan = c.plan;
     const nowParts: string[] = [];
@@ -200,15 +198,9 @@ export const careerTab: Tab = {
       nowParts.push(
         `<div class="row"><span class="muted">chose</span> ` +
           `<strong>${esc(plan.action.type)}${plan.action.subject ? `: ${esc(plan.action.subject)}` : ""}</strong>` +
-          `${plan.priority ? ` <span class="muted">(${esc(plan.priority.band)} ${fmtNum(plan.priority.value, 2)})</span>` : ""}</div>` +
-          `<div class="muted">${esc(plan.action.why)}</div>`,
+          `${plan.action.field ? ` <span class="muted">${esc(plan.action.field)}</span>` : ""}` +
+          `${plan.priority ? ` <span class="muted">(${esc(plan.priority.band)} ${fmtNum(plan.priority.value, 2)})</span>` : ""}</div>`,
       );
-      // The decision rationale and the action rationale are different things
-      // and the old layout showed them as two anonymous rows of a definition
-      // list; when they disagree, that is the interesting case.
-      if (plan.why && plan.why !== plan.action.why) {
-        nowParts.push(`<div class="muted">${esc(plan.why)}</div>`);
-      }
       if (plan.incomeFallback) {
         nowParts.push(note("no posted need could be served — this is the income fallback"));
       }
@@ -297,12 +289,17 @@ export const careerTab: Tab = {
               cell: (o) => `${fmtMoney(o.moneyPerSec)}/s`,
             },
             {
-              id: "why",
-              label: "why",
+              id: "contributions",
+              label: "scored inputs",
               left: true,
               wrap: true,
-              sort: (o) => o.why,
-              cell: (o) => `<span class="muted">${esc(o.why)}</span>`,
+              sort: (o) => o.contributions?.length ?? 0,
+              cell: (o) => o.contributions?.length
+                ? o.contributions.map((part) =>
+                    `${esc(part.kind)}${part.subject ? `:${esc(part.subject)}` : ""} ` +
+                    `${fmtNum(part.perSec, 4)}/s × ${fmtNum(part.weight, 2)} = ${fmtNum(part.score, 4)}`,
+                  ).join("<br>")
+                : `<span class="muted">income only</span>`,
             },
           ],
           { defaultSort: { key: "score", dir: -1 }, limit: 12, empty: "no viable career options" },

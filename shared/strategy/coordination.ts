@@ -88,7 +88,6 @@ export function needDigest(need: Need): NeedDigest {
     weight: need.weight,
     urgency: need.urgency,
     satisfied: isSatisfied(need),
-    why: need.why,
   };
 }
 
@@ -124,7 +123,6 @@ export function arbitrationDigest(result: ArbiterResult, now: number, claims: re
           priority: claim.priority,
           ...(claim.ratePerSec !== undefined ? { ratePerSec: sig3(claim.ratePerSec) } : {}),
           ...(claim.returnPerDollarSec !== undefined ? { returnPerDollarSec: sig3(claim.returnPerDollarSec) } : {}),
-          why: claim.why,
         } : {}),
       };
     }),
@@ -137,7 +135,6 @@ export function arbitrationDigest(result: ArbiterResult, now: number, claims: re
         wanted: sig3(denial.wanted),
         available: sig3(denial.available),
         reason: denial.reason,
-        why: denial.why,
         ...(claim ? {
           priority: claim.priority,
           ...(claim.ratePerSec !== undefined ? { ratePerSec: sig3(claim.ratePerSec) } : {}),

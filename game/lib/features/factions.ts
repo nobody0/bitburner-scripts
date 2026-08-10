@@ -361,9 +361,8 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
           },
         }
       : {}),
-    // ns.getTotalScriptIncome returns a [sinceInstall, sinceStart] tuple; the
-    // first element is the rate this run, which is the one the donate-vs-work
-    // crossover is about.
+    // ns.getTotalScriptIncome returns [current live-script rate,
+    // since-last-install hacking rate]. The crossover needs the first one.
     incomePerSec: incomeRate(state.topics.fleet?.scriptIncome),
     sf4Level: sfLevel(caps.sourceFiles, 4),
     bitNode: caps.bitNode ?? 1,
@@ -575,6 +574,21 @@ function setFactionRep(state: GameState, faction: string, rep: number): void {
 
 // --- digest -----------------------------------------------------------------
 
+function intentDigest(intent: NonNullable<FactionDecision["objective"]>["intent"]): NonNullable<FactionPlan["objective"]>["intent"] {
+  if (!intent) return undefined;
+  const { why: _why, ...facts } = intent;
+  return facts;
+}
+
+function objectiveDigest(objective: NonNullable<FactionDecision["objective"]>): NonNullable<FactionPlan["objective"]> {
+  const { why: _why, intent, runnerUp, ...facts } = objective;
+  return {
+    ...facts,
+    ...(intent ? { intent: intentDigest(intent) } : {}),
+    ...(runnerUp ? { runnerUp: intentDigest(runnerUp) } : {}),
+  };
+}
+
 function planDigest(decision: FactionDecision, view: FactionsView): FactionPlan {
   return {
     context: {
@@ -595,11 +609,10 @@ function planDigest(decision: FactionDecision, view: FactionsView): FactionPlan 
         neurofluxLevel: view.priceContext.neurofluxLevel,
       },
     },
-    ...(decision.objective ? { objective: decision.objective } : {}),
+    ...(decision.objective ? { objective: objectiveDigest(decision.objective) } : {}),
     action: {
       type: decision.action.type,
-      ...(decision.action.type === "idle" ? { reason: decision.action.reason } : {}),
-      why: decision.action.why,
+      ...(decision.action.type === "idle" && decision.action.reason === "slot" ? { awaitingWorkSlot: true } : {}),
       ...("faction" in decision.action ? { faction: decision.action.faction } : {}),
       ...("augmentation" in decision.action ? { augmentation: decision.action.augmentation } : {}),
       ...("city" in decision.action ? { city: decision.action.city } : {}),
@@ -609,7 +622,7 @@ function planDigest(decision: FactionDecision, view: FactionsView): FactionPlan 
         ? { purchaseCost: decision.action.purchaseCost }
         : {}),
     },
-    alternatives: decision.alternatives,
+    alternatives: decision.alternatives.map(({ label, value }) => ({ label, value })),
     invalidation: decision.invalidation,
     ...(decision.drainCeiling !== undefined ? { drainCeiling: decision.drainCeiling } : {}),
     blockers: decision.blockers.map((blocker) => ({
@@ -622,13 +635,17 @@ function planDigest(decision: FactionDecision, view: FactionsView): FactionPlan 
       owner: blocker.owner,
       reachable: blocker.reachable,
       ...(blocker.negated ? { negated: true } : {}),
-      why: blocker.why,
     })),
     ...(decision.until ? { until: decision.until } : {}),
     ...(lastResult ? { lastResult } : {}),
-    ...(decision.blocked ? { blocked: decision.blocked.why } : {}),
-    ...(decision.recommendInstall ? { recommendInstall: decision.recommendInstall } : {}),
-    ...(decision.liquidationNeeded ? { liquidationNeeded: decision.liquidationNeeded } : {}),
+    ...(decision.blocked ? { blocked: { kind: "singularityRam", bitNode: view.bitNode, sf4Level: view.sf4Level, callRamGb: 80 } } : {}),
+    ...(decision.recommendInstall ? { recommendInstall: { augmentations: decision.recommendInstall.augmentations } } : {}),
+    ...(decision.liquidationNeeded ? { liquidationNeeded: {
+      augmentation: decision.liquidationNeeded.augmentation,
+      price: decision.liquidationNeeded.price,
+      cash: decision.liquidationNeeded.cash,
+      pendingProceeds: decision.liquidationNeeded.pendingProceeds,
+    } } : {}),
     ...(decision.nextBuy ? { nextBuy: decision.nextBuy } : {}),
   };
 }
@@ -673,7 +690,6 @@ function gatesFrom(view: FactionsView): Record<string, FactionGate> {
         owner: blocker.owner,
         reachable: blocker.reachable,
         ...(blocker.negated ? { negated: true } : {}),
-        why: blocker.why,
       })),
     };
   }
@@ -786,7 +802,7 @@ function needs(ctx: NeedContext): Need[] {
       // speculative.
       weight: 1 + blocker.progress * 4,
       urgency: (remaining.get(blocker.faction) ?? 0) <= 1 ? "blocking" : "wanted",
-      why: `${blocker.faction} ${blocker.why}`,
+      why: `${blocker.faction} ${blocker.kind} ${blocker.subject ?? ""} ${blocker.have}/${blocker.target}`,
     });
   }
   // Near-complete NON-OBJECTIVE gates: a faction sitting ONE reachable,
@@ -814,7 +830,7 @@ function needs(ctx: NeedContext): Need[] {
       have: blocker.have,
       weight: 1 + blocker.progress * 2,
       urgency: "wanted",
-      why: `${faction} ${blocker.why} — one step from an invite`,
+      why: `${faction} ${blocker.kind} ${blocker.subject ?? ""} ${blocker.have}/${blocker.target}`,
     });
   }
   if (plan.until?.kind === "rep" && plan.until.faction && plan.until.have < plan.until.target) {
@@ -914,7 +930,8 @@ function claims(ctx: ClaimContext): Claim[] {
   if (methods.length > 0) {
     out.push(actionRamClaim(ctx, "factions", factionClaimId(plan.action.type), methods, `factions ${plan.action.type}`));
   }
-  if (plan.action.type === "idle" && plan.action.reason === "slot" && wanted) {
+  const legacyReason = (plan.action as typeof plan.action & { reason?: string }).reason;
+  if (plan.action.type === "idle" && (plan.action.awaitingWorkSlot || legacyReason === "slot") && wanted) {
     out.push(actionRamClaim(
       ctx,
       "factions",
@@ -1065,7 +1082,7 @@ function claims(ctx: ClaimContext): Claim[] {
       priority: slotPriority({ repFraction: 1 }),
       mode: "spend",
       ratePerSec: plan.until?.etaSec ? 1 / plan.until.etaSec : 0,
-      why: working ? plan.action.why : `reputation still needed at ${wanted}`,
+      why: working ? `${wanted} reputation work` : `reputation still needed at ${wanted}`,
     });
   }
 

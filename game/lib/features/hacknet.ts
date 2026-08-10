@@ -373,8 +373,6 @@ const driver: FeatureDriver = {
         fleetDemanded,
         ...(candidate ? { candidate: { kind: candidate.kind, node: candidate.node, cost: candidate.cost } } : {}),
         ...(decision.buy ? { buy: { kind: decision.buy.kind, node: decision.buy.node, cost: decision.buy.cost } } : {}),
-        why: decision.why,
-        ...(decision.hold ? { hold: decision.hold } : {}),
         rankedTotal: decision.ranked.length,
         ranked: decision.ranked.slice(0, 6).map((entry, index) => ({
           kind: entry.kind,
@@ -393,11 +391,7 @@ const driver: FeatureDriver = {
             have: entry.milestone.have,
             delta: entry.milestone.delta,
             priority: entry.milestone.priority,
-            why: entry.milestone.why,
           } } : {}),
-          why: entry.milestone?.why ?? (entry.netOverHorizon > 0
-            ? `repays within the ${Math.round(installHorizonSec(ctx.horizons))}s horizon`
-            : `does not repay within the ${Math.round(installHorizonSec(ctx.horizons))}s horizon`),
         })),
         ...(lastResult ? { lastResult } : {}),
         ...(hashDecision ? { hashes: {
@@ -418,7 +412,6 @@ const driver: FeatureDriver = {
             missing: hashDecision.reserve.missing,
           } } : {}),
           ...(hashDecision.capacityTarget !== undefined ? { capacityTarget: hashDecision.capacityTarget } : {}),
-          why: hashDecision.why,
           rankedTotal: hashDecision.ranked.length,
           ranked: hashDecision.ranked.slice(0, 8).map((entry) => ({
             name: entry.name,
@@ -435,7 +428,6 @@ const driver: FeatureDriver = {
               (hashDecision.spend?.name === entry.name && hashDecision.spend.target === entry.target) ||
               (hashDecision.reserve?.name === entry.name && hashDecision.reserve.target === entry.target)
             ),
-            why: entry.why,
           })),
           ...(lastHashResult ? { lastResult: lastHashResult } : {}),
         } } : {}),

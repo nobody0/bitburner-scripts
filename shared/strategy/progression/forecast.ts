@@ -163,7 +163,7 @@ export interface InstallForecastView {
   installNow: boolean;
   queuedCount: number;
   phase: "start" | "finishUp" | "ending";
-  intent?: FactionIntent;
+  intent?: Omit<FactionIntent, "why">;
   workMeasured: boolean;
   moneyMeasured: boolean;
   finalSweepReady: boolean;

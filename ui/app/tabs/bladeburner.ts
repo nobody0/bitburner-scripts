@@ -72,9 +72,38 @@ export const bladeburnerTab: Tab = {
         )
       : note("city intel needs the cities probe");
 
+    const plan = b.plan;
+    const decision = plan
+      ? tiles([
+          {
+            label: "selected",
+            value: plan.action.type,
+            sub: plan.action.name
+              ? `${plan.action.actionType ?? "action"}: ${plan.action.name}`
+              : plan.action.skill ?? undefined,
+          },
+          { label: "candidates", value: String(plan.ranked.length) },
+        ]) +
+        table(
+          ["pick", "type", "action", "rank/sec", "min success"],
+          plan.ranked.map((entry) => [
+            entry.name === plan.action.name && entry.actionType === plan.action.actionType ? "▶" : "",
+            esc(entry.actionType),
+            esc(entry.name),
+            fmtNum(entry.rankPerSec, 3),
+            fmtPct(entry.chanceLow),
+          ]),
+          { empty: "no viable rank actions", left: [1, 2] },
+        ) +
+        (plan.lastResult
+          ? note(`${plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${plan.lastResult.detail}`)
+          : "")
+      : note("waiting for the first Bladeburner decision");
+
     return (
       `<div class="col wide">` +
       card("Bladeburner", summary + staminaBar) +
+      card("Decision", decision) +
       card("Actions", actions) +
       `</div>` +
       `<div class="col">` +

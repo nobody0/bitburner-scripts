@@ -47,7 +47,15 @@ import {
   usableForecastSec,
 } from "../../../shared/strategy/progression/forecast.ts";
 import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/topics/progression.ts";
-import type { GoPlan, GoResponse, GoTurnResult } from "../../../shared/telemetry/topics/go.ts";
+import type {
+  GoActionDigest,
+  GoEtaDemandDigest,
+  GoGameCandidateDigest,
+  GoMoveDigest,
+  GoPlan,
+  GoResponse,
+  GoTurnResult,
+} from "../../../shared/telemetry/topics/go.ts";
 import { packFragments } from "../../../shared/strategy/stanek/pack.ts";
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { addRepToFavor, workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
@@ -177,9 +185,21 @@ const gang: FeatureDriver = {
 
     merge(ctx.state, "gang", {
       plan: {
-        actions: decision.actions.map((action) => ({ type: action.type, why: action.why })),
-        why: decision.why,
-        ...(decision.wantedWarning ? { warning: decision.wantedWarning } : {}),
+        actions: decision.actions.map((action) => ({
+          type: action.type,
+          ...("member" in action ? { member: action.member } : {}),
+          ...("task" in action ? { task: action.task } : {}),
+          ...("engage" in action ? { engage: action.engage } : {}),
+        })),
+        assignment: {
+          total: decision.assignment.total,
+          approximated: decision.assignment.approximated,
+          choices: decision.assignment.choices.map((choice) => ({
+            member: choice.agent.name,
+            task: choice.task.name,
+            score: choice.score,
+          })),
+        },
         ...(results["gang"] ? { lastResult: results["gang"] } : {}),
       },
     });
@@ -242,10 +262,19 @@ const corp: FeatureDriver = {
 
     merge(ctx.state, "corp", {
       plan: {
-        action: { type: decision.action.type, why: decision.action.why },
+        action: {
+          type: decision.action.type,
+          ...(decision.action.type === "expandIndustry" ? { industry: decision.action.industry, division: decision.action.division } : {}),
+          ...("division" in decision.action ? { division: decision.action.division } : {}),
+          ...("city" in decision.action ? { city: decision.action.city } : {}),
+          ...("size" in decision.action ? { size: decision.action.size } : {}),
+          ...("job" in decision.action ? { job: decision.action.job } : {}),
+          ...("material" in decision.action ? { material: decision.action.material } : {}),
+          ...("round" in decision.action ? { round: decision.action.round } : {}),
+          ...("name" in decision.action ? { name: decision.action.name } : {}),
+        },
         stage: decision.stage,
         completed: decision.completed,
-        why: decision.why,
         ...(results["corp"] ? { lastResult: results["corp"] } : {}),
       },
     });
@@ -292,9 +321,17 @@ const bladeburner: FeatureDriver = {
 
     merge(ctx.state, "bladeburner", {
       plan: {
-        action: decision.action,
-        ranked: decision.ranked.slice(0, 8),
-        why: decision.why,
+        action: {
+          type: decision.action.type,
+          ...(decision.action.type === "act" ? { actionType: decision.action.actionType, name: decision.action.name } : {}),
+          ...(decision.action.type === "upgrade" ? { skill: decision.action.skill } : {}),
+        },
+        ranked: decision.ranked.slice(0, 8).map((entry) => ({
+          name: entry.name,
+          actionType: entry.actionType,
+          rankPerSec: entry.rankPerSec,
+          chanceLow: entry.chanceLow,
+        })),
         ...(results["bladeburner"] ? { lastResult: results["bladeburner"] } : {}),
       },
     });
@@ -519,9 +556,13 @@ const sleeves: FeatureDriver = {
         assignments: decision.assignments.map((entry) => ({
           index: entry.index,
           task: `${entry.task.type}${entry.task.detail ? `:${entry.task.detail}` : ""}${entry.task.workType ? `:${entry.task.workType}` : ""}`,
-          why: entry.why,
         })),
-        why: decision.why,
+        selection: decision.assignment.choices.map((entry) => ({
+          index: entry.agent.index,
+          task: `${entry.task.type}${entry.task.detail ? `:${entry.task.detail}` : ""}${entry.task.workType ? `:${entry.task.workType}` : ""}`,
+          score: entry.score,
+        })),
+        totalScore: decision.assignment.total,
         ...(results["sleeves"] ? { lastResult: results["sleeves"] } : {}),
       },
     });
@@ -582,6 +623,32 @@ const sleeves: FeatureDriver = {
 };
 
 // --- go ---------------------------------------------------------------------
+
+function goActionDigest(action: GoAction): GoActionDigest {
+  switch (action.type) {
+    case "move": return { type: action.type, x: action.x, y: action.y };
+    case "newGame": return { type: action.type, opponent: action.opponent, boardSize: action.boardSize };
+    case "pass":
+    case "resume": return { type: action.type };
+  }
+}
+
+function goMoveDigest(move: GoDecision["ranked"][number]): GoMoveDigest {
+  const { why: _why, ...facts } = move;
+  return facts;
+}
+
+function goDemandDigest(demand: GoEtaDemand): GoEtaDemandDigest {
+  return { seconds: demand.seconds, share: demand.share };
+}
+
+function goGameCandidateDigest(candidate: ReturnType<typeof rankGoGames>[number]): GoGameCandidateDigest {
+  const { why: _why, transientDemand, ...facts } = candidate;
+  return {
+    ...facts,
+    ...(transientDemand ? { transientDemand: goDemandDigest(transientDemand) } : {}),
+  };
+}
 
 function addGoDemand(
   demands: Partial<Record<ReturnType<typeof goRewardOpponent>, GoEtaDemand>>,
@@ -811,9 +878,8 @@ const go: FeatureDriver = {
     decision = prepared.immediate ?? finalizeGoDecision(prepared);
     const decisionAt = Date.now();
     const plan: GoPlan = {
-      action: decision.action,
-      ranked: decision.ranked,
-      why: decision.why,
+      action: goActionDigest(decision.action),
+      ranked: decision.ranked.map(goMoveDigest),
       input: {
         at: decisionAt,
         board: [...view.board.rows],
@@ -828,15 +894,17 @@ const go: FeatureDriver = {
       },
       planning: { finalistCount: decision.finalists, positionValue: decision.positionValue },
       selection: {
-        preferred,
-        candidates,
+        preferred: goGameCandidateDigest(preferred),
+        candidates: candidates.map(goGameCandidateDigest),
         context: {
           goPower: rewardView.goPower,
           hasSourceFile14: rewardView.hasSourceFile14,
           favorRepCap: rewardView.favorRepCap,
           ...(installRemainingSec !== undefined ? { installRemainingSec } : {}),
           joinedFactions: [...joined].sort(),
-          demands: rewardView.demands,
+          demands: Object.fromEntries(
+            Object.entries(rewardView.demands).map(([opponent, demand]) => [opponent, goDemandDigest(demand)]),
+          ),
           factionFavor: rewardView.factionFavor,
         },
       },
@@ -865,7 +933,7 @@ const go: FeatureDriver = {
       const lastTurn: GoTurnResult = {
         at: result.at,
         durationMs: Date.now() - actionStartedAt,
-        action,
+        action: goActionDigest(action),
         ok: result.ok,
         detail: result.detail,
       };
@@ -1015,9 +1083,8 @@ const go: FeatureDriver = {
     if (rawOutcome?.action && rawOutcome.decision) {
       action = rawOutcome.action;
       decision = rawOutcome.decision;
-      plan.action = decision.action;
-      plan.ranked = decision.ranked;
-      plan.why = decision.why;
+      plan.action = goActionDigest(decision.action);
+      plan.ranked = decision.ranked.map(goMoveDigest);
       plan.planning = { finalistCount: decision.finalists, positionValue: decision.positionValue };
       if (rawOutcome.prediction) plan.prediction = rawOutcome.prediction;
     }
@@ -1031,7 +1098,7 @@ const go: FeatureDriver = {
         lastTurn: {
           at: result.at,
           durationMs: Date.now() - actionStartedAt,
-          action,
+          action: goActionDigest(action),
           timing: {
             alignment: rawOutcome?.alignment ?? "none",
             ...(rawOutcome?.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
@@ -1091,7 +1158,7 @@ const go: FeatureDriver = {
       lastTurn: {
         at: result.at,
         durationMs: Date.now() - actionStartedAt,
-        action,
+        action: goActionDigest(action),
         opponentResponse: response,
         timing: {
           alignment: rawOutcome.alignment,
@@ -1150,9 +1217,6 @@ const stanek: FeatureDriver = {
         value: packed.value,
         approximated: packed.approximated,
         chargeOrder: order,
-        why: packed.approximated
-          ? "packing search was capped — this may not be optimal"
-          : `exhaustive packing over ${fragments.length} fragments in ${topic.width}x${topic.height} (provably optimal)`,
         ...(results["stanek"] ? { lastResult: results["stanek"] } : {}),
       },
     });
@@ -1206,9 +1270,15 @@ const dnet: FeatureDriver = {
 
     merge(ctx.state, "dnet", {
       plan: {
-        action: decision.action,
-        ranked: decision.ranked.slice(0, 8),
-        why: decision.why,
+        action: {
+          type: decision.action.type,
+          ...(decision.action.type !== "idle" ? { hostname: decision.action.hostname } : {}),
+        },
+        ranked: decision.ranked.slice(0, 8).map((entry) => ({
+          hostname: entry.hostname,
+          depth: entry.depth,
+          unlocks: entry.unlocks,
+        })),
         ...(decision.charismaNeeded !== undefined ? { charismaNeeded: decision.charismaNeeded } : {}),
         ...(results["dnet"] ? { lastResult: results["dnet"] } : {}),
       },
@@ -1321,7 +1391,7 @@ let progressionMemory = freshProgressionMemory();
  * telemetry event — the takeTargetSwitch pattern: recorded here, emitted by
  * the controller, which is the only module that touches Telemetry. */
 let routeChange:
-  | { from?: RouteId; to: RouteId; etaSec: number; expectedEndAt: number; why: string; routes: RouteEtaDigest[] }
+  | { from?: RouteId; to: RouteId; etaSec: number; expectedEndAt: number; routes: RouteEtaDigest[] }
   | undefined;
 
 /** What the last emitted `endgame.route` event said, so recalibration can be
@@ -1486,7 +1556,7 @@ function previousChoice(ctx: NeedContext): RouteChoice | undefined {
     route: plan.route,
     etaSec: node.state === "unknown" ? 0 : Math.max(0, (node.expectedAt - ctx.now) / 1_000),
     decidedAt: plan.decidedAt,
-    why: plan.routeWhy ?? "",
+    why: "",
   };
 }
 
@@ -1591,7 +1661,6 @@ function progressionRefresh(ctx: NeedContext): void {
       to: choice.route,
       etaSec: Math.round(choice.etaSec),
       expectedEndAt: nextNodeForecast.expectedAt,
-      why: switched ? choice.why : `recalibrated: ${choice.why}`,
       routes: routesDigest,
     };
     lastRouteEmit = { at: ctx.now, etaSec: choice.etaSec, partsKey };
@@ -1845,14 +1914,13 @@ function progressionRefresh(ctx: NeedContext): void {
       phase: decision.phase,
       installWanted: decision.installWanted,
       liquidationWanted: decision.liquidationWanted,
-      installBlockers: decision.installBlockers,
+      installBlockers: decision.installBlockers.map((blocker) => ({ kind: blocker.kind })),
       installReady: decision.installReady,
       ...(armedAt !== undefined ? { installArmedAt: armedAt } : {}),
       queuedAugmentations: pending,
       install: decision.installReady && armedAt !== undefined,
       homeRamBudgetFraction: decision.homeRamBudgetFraction,
       favorCrossings: decision.favorCrossings,
-      why: decision.why,
       installDecision: {
         verdict: rawVerdict.verdict,
         effective: marginalInstall === undefined ? "legacy" : marginalInstall ? "install" : "push",
@@ -1863,13 +1931,11 @@ function progressionRefresh(ctx: NeedContext): void {
         ...(intent?.etaSec !== undefined ? { pushEtaSec: Math.round(intent.etaSec) } : {}),
         ...(selectedEta !== undefined ? { remainingSec: Math.round(selectedEta.etaSec) } : {}),
         latched: pastPointOfNoReturn,
-        why: rawVerdict.why,
       },
       ...(choice
         ? {
             route: choice.route,
             decidedAt: choice.decidedAt,
-            routeWhy: choice.why,
           }
         : {}),
       routes: routesDigest,
@@ -1920,7 +1986,7 @@ const progression: FeatureDriver = {
       progressionMemory.installQueueKey = undefined;
       const { installArmedAt: _armed, ...disarmed } = plan;
       merge(ctx.state, "progression", {
-        plan: { ...disarmed, install: false, why: outcome.reason },
+        plan: { ...disarmed, install: false },
       });
     }
     return;

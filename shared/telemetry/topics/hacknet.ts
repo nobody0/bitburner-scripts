@@ -32,7 +32,7 @@ export interface HacknetState {
   /** Hash economy — hacknet servers only. */
   hashes?: { current: number; capacity: number; sellForMoneyCost: number };
   hashUpgrades?: { name: string; level: number; cost: number }[];
-  /** The decision digest: what to buy, why, and what was passed over. */
+  /** The decision digest: what to buy and what was passed over. */
   plan?: HacknetPlan;
 }
 
@@ -47,10 +47,7 @@ export interface HacknetPlan {
   fleetDemanded: boolean;
   candidate?: { kind: string; node?: number; cost: number };
   buy?: { kind: string; node?: number; cost: number };
-  why: string;
-  /** Set when nothing is worth buying, with the reason — an upgrade that
-   *  cannot repay itself before the horizon ends is a decision, not a stall. */
-  hold?: string;
+  /** A missing `buy` plus the ranked economics exposes a deliberate hold. */
   rankedTotal: number;
   ranked: {
     kind: string;
@@ -63,8 +60,7 @@ export interface HacknetPlan {
     netOverHorizon: number;
     worthBuying: boolean;
     selected: boolean;
-    milestone?: { kind: string; target: number; have: number; delta: number; priority: number; why: string };
-    why: string;
+    milestone?: { kind: string; target: number; have: number; delta: number; priority: number };
   }[];
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
   hashes?: {
@@ -75,7 +71,6 @@ export interface HacknetPlan {
     spend?: { name: string; target?: string; count: number; cost: number };
     reserve?: { name: string; target?: string; cost: number; missing: number };
     capacityTarget?: number;
-    why: string;
     rankedTotal: number;
     ranked: {
       name: string;
@@ -89,7 +84,6 @@ export interface HacknetPlan {
       netDollars?: number;
       eligible: boolean;
       selected: boolean;
-      why: string;
     }[];
     lastResult?: { action: string; ok: boolean; detail: string; at: number };
   };

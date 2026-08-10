@@ -488,7 +488,6 @@ function computeReserve(state: GameState, active: Capabilities): { reserveGb: nu
         gb: result.reserveGb,
         capped: result.capped,
         ...(result.driver !== undefined ? { driver: result.driver } : {}),
-        why: result.why,
       },
     });
   }

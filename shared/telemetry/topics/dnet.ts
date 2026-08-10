@@ -28,9 +28,8 @@ export interface DarknetState {
 }
 
 export interface DarknetPlan {
-  action: { type: string; why: string; hostname?: string };
-  ranked: { hostname: string; depth: number; unlocks: number; why: string }[];
-  why: string;
+  action: { type: string; hostname?: string };
+  ranked: { hostname: string; depth: number; unlocks: number }[];
   /** Charisma the traversal is blocked on, posted to the needs board. */
   charismaNeeded?: number;
   lastResult?: { action: string; ok: boolean; detail: string; at: number };

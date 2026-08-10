@@ -217,7 +217,7 @@ describe("anchored uncapped forecasts", () => {
       intent: {
         faction: "Daedalus", repTarget: 1_000, augmentations: ["a"], value: 1, etaSec: 700, rate: 1,
         marginalRate: 1, unlockSec: 100, repSec: 500, moneySec: 300, favorAfterInstall: 0,
-        totalCost: 1, purchaseCost: 1, donationCost: 0, purpose: "augmentations", why: "test",
+        totalCost: 1, purchaseCost: 1, donationCost: 0, purpose: "augmentations",
       },
     }, "package");
     expect(forecast).toMatchObject({

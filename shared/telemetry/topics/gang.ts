@@ -47,9 +47,11 @@ export interface GangState {
 }
 
 export interface GangPlan {
-  actions: { type: string; why: string }[];
-  why: string;
-  /** Set when the wanted penalty is eating most of the gang's output. */
-  warning?: string;
+  actions: { type: string; member?: string; task?: string; engage?: boolean }[];
+  assignment: {
+    total: number;
+    approximated: boolean;
+    choices: { member: string; task: string; score: number }[];
+  };
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

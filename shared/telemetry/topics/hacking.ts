@@ -13,9 +13,8 @@ export interface FarmRollup {
   moneyPerSecPerGb?: number;
   prepTarget?: string;
   segOrder?: string[];
-  /** Farm scheduling mode (hwgw | hgw | shotgun) and the policy's reason. */
+  /** Farm scheduling mode (hwgw | hgw | shotgun). */
   mode?: string;
-  modeWhy?: string;
   inFlight?: { hack: number; grow: number; weaken: number };
   launched?: { hack: number; grow: number; weaken: number };
   landed?: { hack: number; grow: number; weaken: number };
@@ -83,7 +82,6 @@ export interface FleetRollup {
     paybackSec: number;
     netOverHorizon: number;
     worthBuying: boolean;
-    why: string;
     lastResult?: { ok: boolean; detail: string; at: number };
   };
   infrastructurePlan?: {
@@ -95,8 +93,6 @@ export interface FleetRollup {
     moneyGranted: number;
     incomePerSecPerGb: number;
     buy?: { kind: string; cost: number; host?: string; targetRam?: number };
-    why: string;
-    hold?: string;
     /** True candidate count; `ranked` is a bounded display/telemetry digest. */
     rankedTotal: number;
     ranked: {
@@ -111,11 +107,10 @@ export interface FleetRollup {
       netOverHorizon: number;
       worthBuying: boolean;
       selected: boolean;
-      why: string;
     }[];
     lastResult?: { action: string; ok: boolean; detail: string; at: number };
   };
-  /** ns.getTotalScriptIncome() -> [$/sec since aug install, $/sec since start]. */
+  /** ns.getTotalScriptIncome() -> [current live-script $/sec, $/sec since aug install]. */
   scriptIncome?: [number, number];
   scriptExpGain?: number;
   sharePower?: number;

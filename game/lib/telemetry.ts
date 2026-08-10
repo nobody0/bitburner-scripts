@@ -1,5 +1,6 @@
 import type { NS } from "@ns";
 import {
+  factsOnly,
   TELEMETRY_PORT,
   WIRE_VERSION,
   type LogRecord,
@@ -11,9 +12,9 @@ import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
  * `new WebSocket()` (browser global — 0 GB ns RAM).
  * Source (only `window`/`document` trigger DOM RAM): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L180-L193
  *
- * Its only caller is ./telemetry-sink.ts, which publishes the game-state
- * store. Nothing else in game/ may reference it: acquisition runs in every
- * build, and every reference to this module sits behind
+ * The sink publishes the game-state store; controller lifecycle events use
+ * the same client. Acquisition runs in every build, and every reference to
+ * this module sits behind
  * `TELEMETRY: if (__TELEMETRY__)` so --perf builds eliminate it entirely
  * (see game/flags.d.ts). */
 
@@ -97,10 +98,10 @@ export function initTelemetry(ns: NS, script: string): Telemetry {
   connect();
 
   const telemetry: Telemetry = {
-    state: (key, data) => push({ ...base(), kind: "state", key, data }),
-    mirror: (key, data) => push({ ...base(), kind: "state", key, data }),
-    event: (name, data) => push({ ...base(), kind: "event", name, data }),
-    debug: (msg, data) => push({ ...base(), kind: "debug", msg, data }),
+    state: (key, data) => push({ ...base(), kind: "state", key, data: factsOnly(data) }),
+    mirror: (key, data) => push({ ...base(), kind: "state", key, data: factsOnly(data) }),
+    event: (name, data) => push({ ...base(), kind: "event", name, data: factsOnly(data) }),
+    debug: (msg, data) => push({ ...base(), kind: "debug", msg, data: factsOnly(data) }),
     flush,
     dispose: () => {
       flush();

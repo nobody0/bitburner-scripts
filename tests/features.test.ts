@@ -572,7 +572,6 @@ describe("feature modules", () => {
         install: false,
         homeRamBudgetFraction: 0.1,
         favorCrossings: [],
-        why: "stale",
         forecasts: {
           node: { state: "unknown", evaluatedAt: 0, nextRecalibrationAt: 1, basis: "test", reason: "test" },
           install: { state: "unknown", evaluatedAt: 0, nextRecalibrationAt: 1, basis: "test", reason: "test" },

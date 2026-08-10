@@ -28,8 +28,9 @@ import type { Tab } from "./index.ts";
 
 /** Factions tab: three questions, three cards.
  *
- *  1. **Plan** — what the driver is doing and why. A faction run spends most
- *     of its time doing ONE long thing, so "what and why" beats a live number,
+ *  1. **Plan** — what the driver selected and the inputs it selected from. A
+ *     faction run spends most of its time doing one long thing, so the action
+ *     belongs beside its target, ETA, package economics, and alternatives,
  *     and a blocked feature must name the feature it is waiting on.
  *  2. **Factions** — every faction the game has, whether we are in, how close
  *     an invitation is, and exactly what is still missing. This replaces what
@@ -58,7 +59,6 @@ const ACTION_LABELS: Record<string, string> = {
 
 interface FactionPlanAction {
   type: string;
-  why: string;
   faction?: string;
   augmentation?: string;
   city?: string;
@@ -90,16 +90,21 @@ function planCard(state: ProjectedState): string {
   const parts: string[] = [];
 
   if (plan.blocked) {
-    // An explicit blocker, not a spinner. The SF4 RAM wall is real and
-    // unfixable inside the run, so the panel says so instead of showing an
-    // idle feature that looks merely slow.
-    parts.push(`<div class="bad"><strong>blocked:</strong> ${esc(plan.blocked)}</div>`);
+    if (typeof plan.blocked === "object") {
+      parts.push(tiles([
+        { label: "blocker", value: esc(plan.blocked.kind) },
+        { label: "BitNode", value: String(plan.blocked.bitNode) },
+        { label: "SF4", value: String(plan.blocked.sf4Level) },
+        { label: "RAM / call", value: `${fmtNum(plan.blocked.callRamGb)} GB` },
+      ]));
+    } else {
+      // Old JSONL can contain the former prose-only shape. Do not repeat it;
+      // there are no structured facts to recover from that record.
+      parts.push(note("legacy blocked record (no structured RAM facts)"));
+    }
   }
 
-  parts.push(
-    `<div class="row"><span class="muted">next</span> ${actionLine(plan.action as FactionPlanAction)}</div>` +
-      `<div class="muted">${esc(plan.action.why)}</div>`,
-  );
+  parts.push(`<div class="row"><span class="muted">next</span> ${actionLine(plan.action as FactionPlanAction)}</div>`);
 
   {
     const context = plan.context;
@@ -151,8 +156,7 @@ function planCard(state: ProjectedState): string {
         `<div class="chips">${
           objective.factions.map((name) => `<span class="chip idle">${esc(name)}</span>`).join("") ||
           `<span class="muted">none</span>`
-        }</div>` +
-        `<div class="muted">${esc(objective.why)}</div>`,
+        }</div>`,
     );
     if (objective.intent) {
       const intent = objective.intent;
@@ -160,7 +164,7 @@ function planCard(state: ProjectedState): string {
         `<div class="row"><span class="muted">breakpoint</span> ` +
           `<strong>${esc(intent.faction)}</strong> to ${fmtNum(intent.repTarget, 0)} rep ` +
           `(${intent.augmentations.length} aug, ${esc(fmtTime(intent.etaSec * 1000))})</div>` +
-          `<div class="muted">favor after install ${fmtNum(intent.favorAfterInstall, 1)}; ${esc(intent.why)}</div>` +
+          `<div class="muted">favor after install ${fmtNum(intent.favorAfterInstall, 1)}</div>` +
           table(
             ["package", "value", "avg/sec", "marginal/sec", "ETA", "cash"],
             [
@@ -188,12 +192,6 @@ function planCard(state: ProjectedState): string {
           `<div class="muted">ETA: unlock ${esc(fmtTime(intent.unlockSec * 1000))}, rep ${esc(fmtTime(intent.repSec * 1000))}, ` +
           `money ${esc(fmtTime(intent.moneySec * 1000))}; cash: ${fmtMoney(intent.purchaseCost)} purchase` +
           `${intent.donationCost > 0 ? ` + ${fmtMoney(intent.donationCost)} donation` : ""}</div>`,
-      );
-    }
-    if (objective.runnerUp) {
-      const runner = objective.runnerUp;
-      parts.push(
-        `<div class="muted">runner-up rationale: ${esc(runner.why)}</div>`,
       );
     }
     if (objective.foreclosed.length > 0) {
@@ -236,7 +234,7 @@ function planCard(state: ProjectedState): string {
 
   if (plan.recommendInstall) {
     parts.push(
-      `<div class="good"><strong>recommends install:</strong> ${esc(plan.recommendInstall.why)}</div>` +
+      `<div class="good"><strong>install candidate:</strong> ${plan.recommendInstall.augmentations.length} augmentation(s) acquired</div>` +
         note("advisory — the reset cadence belongs to the BitNode feature"),
     );
   }
@@ -260,12 +258,11 @@ function decisionHistory(state: ProjectedState): string {
         esc(when),
         actionLine(plan.action),
         target ? `${esc(target.faction)} @ ${fmtNum(target.repTarget, 0)} rep` : `<span class="muted">none</span>`,
-        esc(plan.action.why),
       ];
     })
     .filter((row): row is string[] => row !== undefined);
   return decisions.length > 0
-    ? table(["when", "decision", "target", "why"], decisions, { left: [0, 1, 2], wrap: [3] })
+    ? table(["when", "decision", "target"], decisions, { left: [0, 1, 2] })
     : note("decision transitions will appear here as the plan changes");
 }
 
@@ -346,11 +343,11 @@ function factionRows(state: ProjectedState): FactionRow[] {
   });
 }
 
-function factionStatus(row: FactionRow): { status: Status; why: string } {
-  if (row.joined) return { status: "good", why: "joined" };
-  if (row.invited) return { status: "ready", why: "invitation pending — join it" };
-  if (!row.reachable) return { status: "bad", why: "not reachable in this run" };
-  return { status: "wait", why: `${row.missing.length} requirement(s) still missing` };
+function factionStatus(row: FactionRow): { status: Status; tooltip: string } {
+  if (row.joined) return { status: "good", tooltip: "joined" };
+  if (row.invited) return { status: "ready", tooltip: "invitation pending — join it" };
+  if (!row.reachable) return { status: "bad", tooltip: "not reachable in this run" };
+  return { status: "wait", tooltip: `${row.missing.length} requirement(s) still missing` };
 }
 
 const FACTION_COLUMNS: Column<FactionRow>[] = [
@@ -360,9 +357,9 @@ const FACTION_COLUMNS: Column<FactionRow>[] = [
     left: true,
     sort: (r) => r.name,
     cell: (r) => {
-      const { status, why } = factionStatus(r);
+      const { status, tooltip } = factionStatus(r);
       const star = r.inObjective ? ` <span class="warn" title="in the current objective">★</span>` : "";
-      return `${dot(status, why)}${esc(r.name)}${star}`;
+      return `${dot(status, tooltip)}${esc(r.name)}${star}`;
     },
   },
   {
@@ -387,7 +384,7 @@ const FACTION_COLUMNS: Column<FactionRow>[] = [
         .slice(0, 4)
         .map(
           (blocker) =>
-            `<span class="need ${blocker.reachable ? "" : "bad"}" title="${esc(blocker.why)}">` +
+            `<span class="need ${blocker.reachable ? "" : "bad"}">` +
             `${esc(describeBlocker(blocker))}` +
             `<span class="owner">${esc(blocker.owner)}</span></span>`,
         )
@@ -490,7 +487,7 @@ const AUG_COLUMNS: Column<AugRow>[] = [
     sort: (r) => r.name,
     cell: (r) => {
       const status: Status = r.owned ? "good" : r.offer?.affordableRep ? "ready" : r.fromJoined.length ? "wait" : "off";
-      const why = r.owned
+      const tooltip = r.owned
         ? "owned"
         : r.offer?.affordableRep
           ? "reputation met — purchasable"
@@ -501,7 +498,7 @@ const AUG_COLUMNS: Column<AugRow>[] = [
       const pre = r.prereqs.length
         ? ` <span class="muted" title="${esc(`needs ${r.prereqs.join(", ")}`)}">(needs ${r.prereqs.length})</span>`
         : "";
-      return `${dot(status, why)}${esc(r.name)}${plan}${pre}`;
+      return `${dot(status, tooltip)}${esc(r.name)}${plan}${pre}`;
     },
   },
   {
@@ -660,13 +657,13 @@ export const factionsTab: Tab = {
     const alternatives =
       f.plan && f.plan.alternatives.length > 0
         ? table(
-            ["alternative", "value", "why"],
+            ["alternative", "value"],
             f.plan.alternatives
               .slice()
               .sort((a, b) => b.value - a.value)
               .slice(0, 6)
-              .map((entry) => [esc(entry.label), fmtNum(entry.value, 3), esc(entry.why)]),
-            { wrap: [2], left: [0] },
+              .map((entry) => [esc(entry.label), fmtNum(entry.value, 3)]),
+            { left: [0] },
           )
         : note("no scored alternatives");
 

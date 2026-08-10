@@ -89,14 +89,12 @@ export interface StockManipulation {
    *  of 1. `hacking` scales by its own solved steal fraction. */
   valuePerOp: number;
   notional: number;
-  why: string;
 }
 
-/** The decision digest: what was traded, what was ranked, and — when nothing
- * happened — why not. A stock feature that holds because no edge clears the
- * spread is WORKING, and the panel has to be able to say so. */
+/** The decision digest: what was traded and what was ranked. Candidate edge,
+ * spread, horizon and affordability expose a hold without narration. */
 export interface StockPlan {
-  actions: { type: string; why: string }[];
+  actions: { type: string; sym?: string; shares?: number; short?: boolean; cost?: number }[];
   ranked: {
     sym: string;
     side: string;
@@ -106,7 +104,6 @@ export interface StockPlan {
     exact: boolean;
     breakEvenTicks: number;
     expectedProfit: number;
-    why: string;
   }[];
   entry?: {
     sym: string;
@@ -117,7 +114,7 @@ export interface StockPlan {
     holdTicks: number;
     breakEvenTicks: number;
   };
-  unlock?: { type: string; cost: number; gainPerSec: number; paybackSec: number; netOverHorizon: number; why: string };
+  unlock?: { type: string; cost: number; gainPerSec: number; paybackSec: number; netOverHorizon: number };
   /** Nothing held, nothing pending, nothing wanted. `progression` reads THIS as
    *  its install barrier rather than scanning `positions`: a snapshot says nothing
    *  about intent, and a position about to be opened or an exit not yet executed
@@ -127,10 +124,7 @@ export interface StockPlan {
    *  merely while `progression` is in its `ending` phase, which is an economic test
    *  that can hold for an entire run. */
   liquidate?: boolean;
-  why: string;
-  hold?: string;
   /** Something outside our control: no WSE account, 4S disabled by the node's
    *  options, shorts without SF8.2. Distinct from `hold`, which is a choice. */
-  blocker?: string;
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

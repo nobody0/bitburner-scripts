@@ -56,8 +56,7 @@ export interface BladeburnerState {
 }
 
 export interface BladeburnerPlan {
-  action: { type: string; why: string; actionType?: string; name?: string; skill?: string };
-  ranked: { name: string; actionType: string; rankPerSec: number; chanceLow: number; why: string }[];
-  why: string;
+  action: { type: string; actionType?: string; name?: string; skill?: string };
+  ranked: { name: string; actionType: string; rankPerSec: number; chanceLow: number }[];
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

@@ -40,10 +40,10 @@ interface Row {
   secRoll?: number;
 }
 
-const ROOT_DOT: Record<RootState, { status: "good" | "ready" | "bad"; why: string }> = {
-  rooted: { status: "good", why: "rooted" },
-  ready: { status: "ready", why: "can be rooted now" },
-  blocked: { status: "bad", why: "not enough skill or port openers yet" },
+const ROOT_DOT: Record<RootState, { status: "good" | "ready" | "bad"; label: string }> = {
+  rooted: { status: "good", label: "rooted" },
+  ready: { status: "ready", label: "can be rooted now" },
+  blocked: { status: "bad", label: "not enough skill or port openers yet" },
 };
 
 function buildRows(state: ProjectedState): Row[] {
@@ -105,8 +105,8 @@ const COLUMNS: Column<Row>[] = [
     left: true,
     sort: (r) => r.server.hostname,
     cell: (r) => {
-      const { status, why } = ROOT_DOT[r.root];
-      return `${dot(status, why)}${esc(r.server.hostname)}`;
+      const { status, label } = ROOT_DOT[r.root];
+      return `${dot(status, label)}${esc(r.server.hostname)}`;
     },
   },
   {
@@ -252,8 +252,7 @@ export const hackingTab: Tab = {
       : note("waiting for the fleet probe");
 
     const homeRamPlan = fleet?.homeRamPlan
-      ? note(fleet.homeRamPlan.why) +
-        table(
+      ? table(
           ["cost", "adds", "adds $/sec", "payback", "horizon net", "decision"],
           [[
             fmtMoney(fleet.homeRamPlan.cost),
@@ -272,7 +271,6 @@ export const hackingTab: Tab = {
           { label: "cash / grant", value: `${fmtMoney(fleet.infrastructurePlan.moneyAvailable)} / ${fmtMoney(fleet.infrastructurePlan.moneyGranted)}` },
           { label: "farm value", value: `${fmtMoney(fleet.infrastructurePlan.incomePerSecPerGb)}/s/GB` },
         ]) +
-        note(`${fleet.infrastructurePlan.why}${fleet.infrastructurePlan.hold ? ` — ${fleet.infrastructurePlan.hold}` : ""}`) +
         (fleet.infrastructurePlan.lastResult
           ? note(`${fleet.infrastructurePlan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${fleet.infrastructurePlan.lastResult.detail}`)
           : "") +
@@ -312,7 +310,7 @@ export const hackingTab: Tab = {
       .reverse()
       .map((event) => {
         const data = event.data as {
-          plan?: { why?: string };
+          plan?: { buy?: { kind?: string }; candidate?: { kind?: string } };
           result?: { detail?: string };
           arbitration?: {
             grants?: { by: string; id: string; amount: number }[];
@@ -327,7 +325,9 @@ export const hackingTab: Tab = {
         return [
           fmtTime(event.t - (state.t0 ?? event.t)),
           esc(event.kind === "event" ? event.name : ""),
-          esc(data?.plan?.why ?? data?.result?.detail ?? ""),
+          data?.result?.detail
+            ? esc(data.result.detail)
+            : esc(data?.plan?.buy?.kind ?? data?.plan?.candidate?.kind ?? "hold"),
           esc(arbiter),
         ];
       });
@@ -389,7 +389,7 @@ export const hackingTab: Tab = {
       (infrastructurePlan ? card("Infrastructure ROI", infrastructurePlan) :
         homeRamPlan ? card("Home RAM investment", homeRamPlan) : "") +
       (infrastructureHistory.length
-        ? card("Infrastructure history", table(["at", "transition", "reason / outcome", "arbiter"], infrastructureHistory, { left: [1, 2, 3] }))
+        ? card("Infrastructure history", table(["at", "transition", "selection / outcome", "arbiter"], infrastructureHistory, { left: [1, 2, 3] }))
         : "") +
       (pie ? card("RAM segments", pie) : "") +
       (health ? card("Dispatcher health", health) : "") +

@@ -1,5 +1,5 @@
 import { card, note, table, tiles } from "../lib/dom.ts";
-import { esc, fmtMoney, fmtPct } from "../lib/format.ts";
+import { esc, fmtMoney, fmtNum, fmtPct } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
@@ -51,6 +51,30 @@ export const sleevesTab: Tab = {
       )
       .join("");
 
-    return `<div class="col wide">` + card("Sleeves", summary + rows) + `</div>` + (augs ? `<div class="col">${augs}</div>` : "");
+    const plan = s.plan;
+    const decision = plan?.selection
+      ? tiles([
+          { label: "solver", value: "exact" },
+          { label: "total score", value: fmtNum(plan.totalScore, 4) },
+          { label: "task changes", value: String(plan.assignments.length) },
+        ]) +
+        table(
+          ["sleeve", "selected task", "score", "change"],
+          plan.selection.map((entry) => [
+            String(entry.index),
+            esc(entry.task),
+            fmtNum(entry.score, 4),
+            plan.assignments.some((change) => change.index === entry.index) ? "queued" : "unchanged",
+          ]),
+          { empty: "no task candidates", left: [1, 3] },
+        ) +
+        (plan.lastResult
+          ? note(`${plan.lastResult.ok ? "last batch succeeded" : "last batch failed"}: ${plan.lastResult.detail}`)
+          : "")
+      : plan
+        ? note("this replay predates structured sleeve scores")
+        : note("waiting for the first sleeve decision");
+
+    return `<div class="col wide">` + card("Sleeves", summary + rows) + card("Assignment decision", decision) + `</div>` + (augs ? `<div class="col">${augs}</div>` : "");
   },
 };

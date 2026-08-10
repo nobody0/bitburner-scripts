@@ -39,24 +39,36 @@ export const stockTab: Tab = {
 
     const plan = s.plan;
     const planCard = plan
-      ? note(plan.why) +
-        (plan.blocker ? note(html`<span class="bad">blocked:</span> ${plan.blocker}`) : "") +
-        (plan.hold ? note(`holding: ${plan.hold}`) : "") +
+      ? tiles([
+          { label: "book", value: plan.flat ? "flat" : "open", sub: `${positions.filter((p) => p.shares > 0 || p.sharesShort > 0).length} position(s)` },
+          { label: "mode", value: plan.liquidate ? "liquidate" : "trade" },
+          { label: "actions", value: String(plan.actions.length) },
+        ]) +
         // What progression gates the irreversible reset on. Worth showing next to
         // the plan, because a run that cannot install is often waiting on this.
         note(plan.flat
           ? html`book is <b>flat</b> — an install may proceed`
           : html`book is <b>not flat</b> — an install would destroy it`) +
         (plan.unlock
-          ? note(html`next unlock <b>${plan.unlock.type}</b> at ${fmtMoney(plan.unlock.cost)} — ${plan.unlock.why}`)
+          ? table(
+              ["unlock", "cost", "gain/sec", "payback", "horizon net"],
+              [[esc(plan.unlock.type), fmtMoney(plan.unlock.cost), fmtMoney(plan.unlock.gainPerSec), `${fmtNum(plan.unlock.paybackSec, 0)}s`, fmtMoney(plan.unlock.netOverHorizon)]],
+              { left: [0] },
+            )
           : "") +
         (plan.entry
           ? note(html`entry <b>${plan.entry.side} ${plan.entry.sym}</b>: ${fmtNum(plan.entry.shares, 0)} shares for ${fmtMoney(plan.entry.cost)}, breaks even in ${plan.entry.breakEvenTicks.toFixed(1)} of ${plan.entry.holdTicks} ticks, expected ${fmtMoney(plan.entry.expectedProfit)}`)
           : "") +
         table(
-          ["action", "why"],
-          plan.actions.map((a) => [esc(a.type), esc(a.why)]),
-          { empty: "no actions this tick", left: [0, 1] },
+          ["action", "symbol", "side", "shares", "cost"],
+          plan.actions.map((action) => [
+            esc(action.type),
+            esc(action.sym ?? "-"),
+            action.short === undefined ? "-" : action.short ? "short" : "long",
+            action.shares === undefined ? "-" : fmtNum(action.shares, 0),
+            action.cost === undefined ? "-" : fmtMoney(action.cost),
+          ]),
+          { empty: "no actions this tick", left: [0, 1, 2] },
         ) +
         (plan.lastResult
           ? note(html`last: <span class="${plan.lastResult.ok ? "good" : "bad"}">${plan.lastResult.action}</span> — ${plan.lastResult.detail}`)
@@ -146,15 +158,15 @@ export const stockTab: Tab = {
     );
 
     const manipulation = table(
-      ["host", "sym", "op", "$/op", "why"],
+      ["host", "sym", "op", "$/op", "notional"],
       Object.entries(s.manipulation ?? {}).map(([host, m]) => [
         esc(host),
         esc(m.sym),
         m.side === "long" ? "grow" : "hack",
         fmtMoney(m.valuePerOp),
-        esc(m.why),
+        fmtMoney(m.notional),
       ]),
-      { empty: "no symbol worth manipulating", left: [0, 1, 2, 4] },
+      { empty: "no symbol worth manipulating", left: [0, 1, 2] },
     );
 
     return (

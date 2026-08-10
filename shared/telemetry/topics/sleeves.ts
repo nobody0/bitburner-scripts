@@ -36,7 +36,8 @@ export interface SleevesState {
 }
 
 export interface SleevesPlan {
-  assignments: { index: number; task: string; why: string }[];
-  why: string;
+  assignments: { index: number; task: string }[];
+  selection: { index: number; task: string; score: number }[];
+  totalScore: number;
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

@@ -64,10 +64,19 @@ export interface CorpState {
 }
 
 export interface CorpPlan {
-  action: { type: string; why: string };
+  action: {
+    type: string;
+    industry?: string;
+    division?: string;
+    city?: string;
+    size?: number;
+    job?: string;
+    material?: string;
+    round?: number;
+    name?: string;
+  };
   /** Which stage produced the action, so a stall is attributable. */
   stage: string;
   completed: string[];
-  why: string;
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
 }

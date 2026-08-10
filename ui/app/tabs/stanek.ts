@@ -54,9 +54,38 @@ export const stanekTab: Tab = {
         )
       : "";
 
+    const plan = s.plan;
+    const decision = plan
+      ? tiles([
+          { label: "packing", value: plan.approximated ? "capped" : "exact" },
+          { label: "objective value", value: fmtNum(plan.value, 3) },
+          { label: "placements", value: String(plan.placements.length) },
+          { label: "charge queue", value: String(plan.chargeOrder.length) },
+        ]) +
+        table(
+          ["order", "fragment", "planned at", "rotation", "observed charges"],
+          plan.chargeOrder.map((id, index) => {
+            const placement = plan.placements.find((entry) => entry.id === id);
+            const observed = s.fragments.find((entry) => entry.id === id);
+            return [
+              String(index + 1),
+              String(id),
+              placement ? `${placement.x},${placement.y}` : "observed only",
+              placement ? String(placement.rotation) : "–",
+              observed ? fmtNum(observed.numCharge, 0) : "–",
+            ];
+          }),
+          { empty: "no chargeable fragments selected", left: [2] },
+        ) +
+        (plan.lastResult
+          ? note(`${plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${plan.lastResult.detail}`)
+          : "")
+      : note("waiting for the first packing decision");
+
     return (
       `<div class="col">` +
       card("Gift", summary + grid) +
+      card("Packing decision", decision) +
       `</div>` +
       `<div class="col wide">` +
       card("Placed fragments", fragments) +

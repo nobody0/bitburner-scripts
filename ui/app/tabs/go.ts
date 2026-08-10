@@ -1,8 +1,7 @@
 import { card, note, table, tiles } from "../lib/dom.ts";
 import { esc, fmtNum, fmtPct } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
-import type { GoMove } from "../../../shared/strategy/go/decide.ts";
-import type { GoResponse, GoState } from "../../../shared/telemetry/topics/go.ts";
+import type { GoMoveDigest, GoResponse, GoState } from "../../../shared/telemetry/topics/go.ts";
 import type { Tab } from "./index.ts";
 
 /** Go (IPvGO). Game coordinates are column-major, with y increasing upward. */
@@ -23,7 +22,7 @@ function coordinate(x: number | null, y: number | null): string {
   return x === null || y === null ? "pass" : `${x},${y}`;
 }
 
-function predictions(move: GoMove): string {
+function predictions(move: GoMoveDigest): string {
   const replies = move.predictedReplies ?? [];
   const total = replies.reduce((sum, reply) => sum + reply.count, 0);
   if (!total) return "-";
@@ -184,17 +183,21 @@ function decisionMarkup(g: GoState): string {
     ? `${fmtNum(result.predictionSupport.matching, 2)}/${fmtNum(result.predictionSupport.total, 0)} expected seed support`
     : "not applicable";
   const timing = result?.timing;
+  const selectedAction = plan.action.type === "move" ? plan.action : undefined;
+  const selectedMove = selectedAction
+    ? plan.ranked.find((move) => move.x === selectedAction.x && move.y === selectedAction.y)
+    : undefined;
   const timingDetail = timing
     ? `${timing.alignment}; dispatch ${timing.dispatchPlaytime === undefined ? "-" : (timing.dispatchPlaytime / 1_000).toFixed(3) + "s"}; seed ${timing.seed === undefined ? "-" : (timing.seed / 1_000).toFixed(3) + "s"}; full turn ${result!.durationMs.toFixed(0)} ms`
     : result ? `${result.durationMs.toFixed(0)} ms` : "waiting";
   return (
     tiles([
-      { label: "selected", value: action, sub: plan.action.why },
+      { label: "selected", value: action, sub: selectedMove ? `score ${fmtNum(selectedMove.score, 2)} · ${selectedMove.captures} capture(s)` : undefined },
       { label: "planner", value: `${plan.planning.finalistCount} finalists`, sub: `position ${fmtNum(plan.planning.positionValue, 2)}; history ${plan.input.previousBoards.length}` },
       { label: "actual reply", value: response, sub: timingDetail },
       { label: "forecast support", value: support, sub: seedDetail },
     ]) +
-    note(`${plan.why}; next game ${plan.selection.preferred.opponent} ${plan.selection.preferred.observedBoardSize}x${plan.selection.preferred.observedBoardSize}`) +
+    note(`next game ${plan.selection.preferred.opponent} ${plan.selection.preferred.observedBoardSize}x${plan.selection.preferred.observedBoardSize}; ${fmtNum(plan.selection.preferred.utilityPerSec * 60, 2)} seconds saved/minute`) +
     (result ? note(`${result.ok ? "completed" : "failed"}: ${result.detail}`) : "")
   );
 }
@@ -202,7 +205,7 @@ function decisionMarkup(g: GoState): string {
 function rankingMarkup(g: GoState): string {
   const ranked = g.plan?.ranked ?? [];
   return table(
-    ["#", "move", "blended", "tactical", "forecast", "certainty", "take", "predicted reply", "reason"],
+    ["#", "move", "blended", "tactical", "forecast", "certainty", "take", "predicted reply"],
     ranked.map((move, index) => [
       String(index + 1),
       esc(coordinate(move.x, move.y)),
@@ -212,9 +215,8 @@ function rankingMarkup(g: GoState): string {
       move.forecastCertainty ?? "-",
       String(move.captures),
       esc(predictions(move)),
-      esc(move.why),
     ]),
-    { empty: "no legal candidates for this decision", wrap: [7, 8] },
+    { empty: "no legal candidates for this decision", wrap: [7] },
   );
 }
 
@@ -230,7 +232,7 @@ function opponentMarkup(g: GoState): string {
       ])
     : "";
   return evidence + table(
-    ["opponent", "board", "win", "streak", "horizon", "node power", "transient saved", "favor event", "favor gain", "favor saved", "saved/min", "reason"],
+    ["opponent", "board", "win", "streak", "horizon", "node power", "transient saved", "favor event", "favor gain", "favor saved", "saved/min"],
     candidates.map((candidate) => [
       esc(candidate.opponent),
       `${candidate.observedBoardSize}x${candidate.observedBoardSize}`,
@@ -243,9 +245,8 @@ function opponentMarkup(g: GoState): string {
       fmtNum(candidate.expectedFavorGain, 2),
       `${fmtNum(candidate.favorSecSaved, 1)}s now / ${fmtNum(candidate.horizonFavorSecSaved, 1)}s horizon`,
       `${fmtNum(candidate.utilityPerSec * 60, 2)}s`,
-      esc(candidate.why),
     ]),
-    { empty: "waiting for ETA-valued game candidates", wrap: [11] },
+    { empty: "waiting for ETA-valued game candidates" },
   );
 }
 

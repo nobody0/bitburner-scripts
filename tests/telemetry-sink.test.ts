@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { makeSink } from "../game/lib/telemetry-sink.ts";
 import type { GameState } from "../game/lib/state.ts";
 import type { Telemetry } from "../game/lib/telemetry.ts";
+import { factsOnly } from "../shared/telemetry/schema.ts";
 import type { ContractFailure } from "../shared/telemetry/topics/side.ts";
 
 function failure(at: number): ContractFailure {
@@ -16,6 +17,17 @@ function failure(at: number): ContractFailure {
     at,
   };
 }
+
+test("wire payloads recursively omit planner narration and keep outcome codes", () => {
+  expect(factsOnly({
+    why: "authored",
+    modeWhy: "authored",
+    hold: "authored",
+    warning: "authored",
+    reason: "outbid",
+    nested: [{ score: 7, why: "authored" }],
+  })).toEqual({ reason: "outbid", nested: [{ score: 7 }] });
+});
 
 describe("contract failure telemetry", () => {
   test("full replay is emitted once while repeated Side state stays compact", () => {
@@ -51,7 +63,7 @@ describe("contract failure telemetry", () => {
       probeSkips: {},
       featureLastRun: {},
       contractQuarantine: { ["n00dles\0bad.cct"]: first },
-    } as GameState;
+    } as unknown as GameState;
     const sink = makeSink(tel);
 
     sink.flush(state);
@@ -114,7 +126,7 @@ describe("faction decision telemetry", () => {
       probeFailures: {},
       probeSkips: {},
       featureLastRun: {},
-    } as GameState;
+    } as unknown as GameState;
     const sink = makeSink(tel);
 
     sink.flush(state);
@@ -126,7 +138,6 @@ describe("faction decision telemetry", () => {
       type: "purchaseAugmentation",
       faction: "CyberSec",
       augmentation: "BitWire",
-      why: "reputation reached",
     };
     state.dirty.add("factions");
     sink.flush(state);
@@ -204,7 +215,7 @@ describe("decision telemetry", () => {
       probeFailures: {},
       probeSkips: {},
       featureLastRun: {},
-    } as GameState;
+    } as unknown as GameState;
     const sink = makeSink(tel);
 
     sink.flush(state);
@@ -222,8 +233,6 @@ describe("decision telemetry", () => {
       ...state.topics.hacknet!.plan!,
       moneyGranted: 1_000,
       buy: { kind: "level", node: 0, cost: 1_000 },
-      why: "level has the fastest ROI",
-      hold: undefined,
       lastResult: { action: "level", ok: true, detail: "bought level", at: 3 },
     };
     state.dirty.add("hacknet");

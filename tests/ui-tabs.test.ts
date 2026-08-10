@@ -30,7 +30,9 @@ describe("tab rendering", () => {
   test("every feature's populated panel renders", () => {
     // One synthetic record per topic, so no panel's data branch is untested
     // just because the local save cannot reach that feature.
-    const topics: { [K in StateKey]?: StateMap[K] } = {
+    // Keep the former prose-bearing shapes here as legacy replay coverage:
+    // feature panels must render old JSONL without displaying those fields.
+    const topics = {
       farm: { target: "n00dles", totals: { moneyEarned: 1e6, hacks: 12 }, inFlight: { hack: 1, grow: 2, weaken: 3 }, ramPie: { farm: 10, prep: 5, share: 0, free: 2, reserve: 4 } },
       fleet: { rootedHosts: 3, totalHosts: 9, maxRam: 64, usedRam: 32, purchased: { count: 1, totalRam: 8, limit: 25 }, home: { maxRam: 32, usedRam: 8, cores: 2 }, portOpeners: 2 },
       progression: { bitNode: 12, sourceFiles: { "4": 3 }, ownedAugs: { NeuroFlux: 5 }, augCount: 1, lastAugReset: 1, lastNodeReset: 1, multipliers: { ScriptHackMoney: 0.2 } },
@@ -137,7 +139,7 @@ describe("tab rendering", () => {
 
     const state = emptyState();
     state.runId = "synthetic";
-    state.topics = topics;
+    state.topics = topics as unknown as { [K in StateKey]?: StateMap[K] };
     state.caps = deriveCapabilities({
       bitNode: 1,
       sourceFiles: Object.fromEntries(FEATURES.flatMap((f) => f.bitnodes.map((n) => [String(n), 1]))),
@@ -151,6 +153,87 @@ describe("tab rendering", () => {
     renderAll(state);
   });
 
+  test("structured plans expose decision evidence without authored rationale", () => {
+    const state = emptyState();
+    state.topics.bladeburner = {
+      rank: 100, skillPoints: 3, stamina: [50, 100], city: "Sector-12",
+      plan: {
+        action: { type: "act", actionType: "contract", name: "Tracking" },
+        ranked: [{ name: "Tracking", actionType: "contract", rankPerSec: 2.5, chanceLow: 0.8 }],
+      },
+    };
+    state.topics.corp = {
+      name: "Acme", funds: 1e9, revenue: 1e6, expenses: 5e5, public: false,
+      valuation: 1e10, sharePrice: 10, totalShares: 1e9, numShares: 9e8,
+      issuedShares: 0, dividendRate: 0, dividendEarnings: 0, state: "START",
+      plan: {
+        action: { type: "expandCity", division: "Agriculture", city: "Aevum" },
+        stage: "agriculture-cities", completed: ["found", "agriculture"],
+      },
+    };
+    state.topics.dnet = {
+      reachable: 2, maxDepth: 1, stasisLinkLimit: 2, stasisLinked: [], topologyComplete: true,
+      instability: { authenticationDurationMultiplier: 1, authenticationTimeoutChance: 0.1 },
+      servers: [{ hostname: "dn-1", depth: 1, blockedRam: 8, isOnline: true, requiredCharisma: 50 }],
+      plan: {
+        action: { type: "stasis", hostname: "dn-1" },
+        ranked: [{ hostname: "dn-1", depth: 1, unlocks: 3 }],
+        charismaNeeded: 50,
+      },
+    };
+    state.topics.gang = {
+      faction: "Slum Snakes", isHacking: false, respect: 100, respectGainRate: 1,
+      wantedLevel: 2, wantedLevelGainRate: 0.1, wantedPenalty: 0.9, moneyGainRate: 500,
+      power: 10, territory: 0.2, territoryClashChance: 0.1, territoryWarfareEngaged: false,
+      respectForNextRecruit: 200, recruitsAvailable: 0, canRecruit: false, members: [],
+      plan: {
+        actions: [{ type: "assign", member: "m-1", task: "Mug People" }],
+        assignment: { total: 12.5, approximated: false, choices: [{ member: "m-1", task: "Mug People", score: 12.5 }] },
+      },
+    };
+    state.topics.sleeves = {
+      count: 1,
+      sleeves: [{ index: 0, shock: 0, sync: 100, memory: 1, storedCycles: 0, city: "Aevum", hp: { current: 10, max: 10 }, skills: { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 } }],
+      plan: {
+        assignments: [{ index: 0, task: "crime:Mug" }],
+        selection: [{ index: 0, task: "crime:Mug", score: 4.2 }],
+        totalScore: 4.2,
+      },
+    };
+    state.topics.stanek = {
+      width: 2, height: 2, occupied: {}, fragments: [],
+      plan: {
+        placements: [{ id: 1, x: 0, y: 0, rotation: 0 }], value: 9,
+        approximated: false, chargeOrder: [1],
+      },
+    };
+
+    const rendered = ["bladeburner", "corp", "dnet", "gang", "sleeves", "stanek"]
+      .map((id) => TABS[id as TabId].render(state))
+      .join("\n");
+    expect(rendered).toContain("rank/sec");
+    expect(rendered).toContain("agriculture-cities");
+    expect(rendered).toContain("servers kept reachable");
+    expect(rendered).toContain("raw score");
+    expect(rendered).toContain("total score");
+    expect(rendered).toContain("objective value");
+    expect(rendered).not.toContain("invented");
+  });
+
+  test("the raw event view drops planner prose but keeps observed codes", () => {
+    const state = emptyState();
+    state.runId = "test";
+    state.events.push({
+      kind: "event", name: "feature.decision", data: { why: "invented summary", score: 7, reason: "insufficient-money" },
+      seq: 1, t: 1_000, run: "test", src: "game",
+    });
+    const html = TABS.overview.render(state);
+    expect(html).toContain("score");
+    expect(html).toContain("insufficient-money");
+    expect(html).not.toContain("invented summary");
+    expect(html).not.toContain('"why"');
+  });
+
   test("Go shows reproducible decision inputs, forecast support, and the observed reply", () => {
     const state = emptyState();
     state.topics.go = {
@@ -162,13 +245,11 @@ describe("tab rendering", () => {
       previousBoards: [],
       stats: [],
       plan: {
-        action: { type: "move", x: 1, y: 1, why: "best line" },
+        action: { type: "move", x: 1, y: 1 },
         ranked: [{
           x: 1, y: 1, score: 4.2, tacticalScore: 3.5, forecastScore: 5.5, captures: 1,
           predictedReplies: [{ x: 2, y: 2, count: 5 }, { x: null, y: null, count: 1 }],
-          why: "fixed-budget tactical shortlist",
         }],
-        why: "ranked 20 legal moves",
         input: { at: 1_000, board: [".....", ".....", ".....", ".....", "....."], previousBoards: [], status: "inProgress", currentPlayer: "Black", opponent: "Netburners" },
         planning: { finalistCount: 4, positionValue: 0.25 },
         prediction: {
@@ -193,7 +274,7 @@ describe("tab rendering", () => {
             multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
             favorEventProbability: 0, favorBefore: 0, favorAfter: 0, favorRemainingWorkSec: 0,
             expectedFavorGain: 0, favorSecSaved: 0, totalSecSaved: 20, utilityPerSec: 20 / 70,
-            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0, why: "hacking throughput",
+            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0,
           },
           candidates: [{
             opponent: "Netburners", boardSize: 5, observedBoardSize: 5, winProbability: 0.8,
@@ -202,7 +283,7 @@ describe("tab rendering", () => {
             multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
             favorEventProbability: 0, favorBefore: 0, favorAfter: 0, favorRemainingWorkSec: 0,
             expectedFavorGain: 0, favorSecSaved: 0, totalSecSaved: 20, utilityPerSec: 20 / 70,
-            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0, why: "hacking throughput",
+            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0,
           }],
           context: {
             goPower: 1, hasSourceFile14: false, favorRepCap: 100_000, installRemainingSec: 3_600,
@@ -213,7 +294,7 @@ describe("tab rendering", () => {
       lastTurn: {
         at: 1_100,
         durationMs: 205,
-        action: { type: "move", x: 1, y: 1, why: "best line" },
+        action: { type: "move", x: 1, y: 1 },
         opponentResponse: { type: "move", x: 2, y: 2 },
         predictionSupport: { matching: 5, total: 6 },
         ok: true,
@@ -502,13 +583,12 @@ describe("panel view state", () => {
         phase: "finishUp",
         installWanted: true,
         liquidationWanted: true,
-        installBlockers: [{ kind: "factions", why: "finish package" }],
+        installBlockers: [{ kind: "factions" }],
         installReady: false,
         queuedAugmentations: ["BitWire"],
         install: false,
         homeRamBudgetFraction: 0.1,
         favorCrossings: [],
-        why: "finish the committed package",
         forecasts: {
           install: {
             state: "estimated", estimatedAt: now, nextRecalibrationAt: now + 600_000,
@@ -558,10 +638,8 @@ describe("panel view state", () => {
         install: false,
         homeRamBudgetFraction: 0.1,
         favorCrossings: [{ faction: "CyberSec", favorNow: 120, favorAfter: 152 }],
-        why: "building",
         route: "daedalus",
         decidedAt: now - 300_000,
-        routeWhy: "fastest measured ending",
         routes: [
           {
             id: "daedalus", available: true, complete: false, blocker: "2.5m Daedalus rep",
@@ -584,7 +662,6 @@ describe("panel view state", () => {
           pushEtaSec: 4_700,
           remainingSec: 7_200,
           latched: false,
-          why: "accrued value below the cadence threshold",
         },
         forecasts: {
           install: { state: "unknown", reason: "no data", evaluatedAt: now, nextRecalibrationAt: now + 600_000, basis: "none" },
@@ -596,11 +673,13 @@ describe("panel view state", () => {
     const html = TABS["progression"].render(state);
     expect(html).toContain("Endgame route");
     expect(html).toContain("daedalus");
-    expect(html).toContain("fastest measured ending");
+    expect(html).toContain("2.00h ETA · available");
     expect(html).toContain("2.5m Daedalus rep");
     expect(html).toContain("daedalus reputation");
     expect(html).toContain("Install cadence");
-    expect(html).toContain("accrued value below the cadence threshold");
+    expect(html).toContain("push before latch");
+    expect(html).not.toContain("fastest measured ending");
+    expect(html).not.toContain("accrued value below the cadence threshold");
     expect(html).toContain("cadencechart");
     expect(html).toContain("CyberSec");
     // A plan recorded before these fields existed still renders.
@@ -876,7 +955,8 @@ describe("faction decision review", () => {
     expect(html).toContain("marginal/sec");
     expect(html).toContain("forecloses this install cycle");
     expect(html).toContain("Decision history");
-    expect(html).toContain("income beats work");
+    expect(html).toContain("$2.667e9 to CyberSec");
+    expect(html).not.toContain("income beats work");
   });
 });
 

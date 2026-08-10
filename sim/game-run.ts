@@ -4,7 +4,7 @@ import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import type { Goal } from "../shared/goals/goal.ts";
 import { describeOverrides, type FeatureOverrides } from "../shared/features/profile.ts";
 import type { SaveSeed } from "../shared/save/to-sim.ts";
-import type { LogRecord } from "../shared/telemetry/schema.ts";
+import { factsOnly, type LogRecord } from "../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../shared/telemetry/state-map.ts";
 import { Clock } from "./clock.ts";
 import type { SimPlayerOptions } from "./core/player.ts";
@@ -431,10 +431,10 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // The sink is the real one; only the Telemetry underneath it is swapped for
   // the world's record stream instead of a WebSocket.
   const telemetry = {
-    state: <K extends StateKey>(key: K, data: StateMap[K]) => world.emit({ kind: "state", key, data }),
-    mirror: (key: string, data: unknown) => world.emit({ kind: "state", key, data }),
-    event: (name: string, data?: unknown) => world.emit({ kind: "event", name, data }),
-    debug: (msg: string, data?: unknown) => world.emit({ kind: "debug", msg, data }),
+    state: <K extends StateKey>(key: K, data: StateMap[K]) => world.emit({ kind: "state", key, data: factsOnly(data) }),
+    mirror: (key: string, data: unknown) => world.emit({ kind: "state", key, data: factsOnly(data) }),
+    event: (name: string, data?: unknown) => world.emit({ kind: "event", name, data: factsOnly(data) }),
+    debug: (msg: string, data?: unknown) => world.emit({ kind: "debug", msg, data: factsOnly(data) }),
     flush: () => {},
     dispose: () => {},
   };

@@ -1,4 +1,5 @@
 import { FEATURES } from "../../../shared/features/registry.ts";
+import { factsOnly } from "../../../shared/telemetry/schema.ts";
 import { attachChartHover, drawChart } from "../lib/chart.ts";
 import { card, filters, meter, note, search, table, tiles } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtTime } from "../lib/format.ts";
@@ -70,6 +71,15 @@ function fidelityRows(state: ProjectedState): string[][] {
     .map((gap) => [esc(gap.kind), esc(gap.name), String(gap.count), esc(gap.detail ?? "")]);
 }
 
+/** Event payloads are a coder-facing fact dump, not a second prose log.
+ * Planner annotations are deliberately omitted here; the feature panels show
+ * the structured action, candidates, scores, thresholds and outcomes that
+ * support the decision. Observed `reason` fields (API failures, arbiter denial
+ * codes, scheduler triggers) remain because they are data from the system. */
+function factJson(value: unknown): string {
+  return JSON.stringify(factsOnly(value));
+}
+
 export const overviewTab: Tab = {
   id: "overview",
   render(state) {
@@ -116,7 +126,7 @@ export const overviewTab: Tab = {
         if (mode === "failures" && !isFailure(name)) return false;
         if (mode === "decisions" && !isDecision(name)) return false;
         if (needle) {
-          const data = record.data ? JSON.stringify(record.data).toLowerCase() : "";
+          const data = record.data ? factJson(record.data).toLowerCase() : "";
           if (!name.toLowerCase().includes(needle) && !data.includes(needle)) return false;
         }
         return true;
@@ -139,7 +149,7 @@ export const overviewTab: Tab = {
     const events = feed.length
       ? `<ul id="events">${feed
           .map(({ record, name }) => {
-            const data = record.data ? JSON.stringify(record.data) : "";
+            const data = record.data ? factJson(record.data) : "";
             return `<li><span class="t">${esc(fmtTime(record.t - (state.t0 ?? record.t)))}</span><span class="${
               isFailure(name) ? "fail" : ""
             }">${esc(name)}</span><span class="data" title="${esc(data.slice(0, 600))}">${esc(

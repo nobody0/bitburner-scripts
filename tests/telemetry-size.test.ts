@@ -8,8 +8,7 @@ import {
   SOLVERS,
 } from "../shared/strategy/side/contracts.ts";
 import type { SideState } from "../shared/telemetry/topics/side.ts";
-import type { GoState } from "../shared/telemetry/topics/go.ts";
-import type { GoGameCandidate } from "../shared/strategy/go/rewards.ts";
+import type { GoGameCandidateDigest, GoState } from "../shared/telemetry/topics/go.ts";
 
 /** State records are last-write-wins and rare, which makes it tempting to put
  * a whole subsystem in one. That is exactly what went wrong: the `side` topic
@@ -61,11 +60,10 @@ describe("telemetry record size", () => {
       forecastScore: 11 - i,
       captures: i,
       predictedReplies: Array.from({ length: 6 }, (_, seed) => ({ x: seed % 5, y: i % 5, count: 1 })),
-      why: `depth-3 candidate ${i}`,
     }));
     const opponents = ["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati"] as const;
     const sizes = [5, 7, 9, 13] as const;
-    const candidates: GoGameCandidate[] = opponents.flatMap((opponent) => sizes.map((boardSize, index) => ({
+    const candidates: GoGameCandidateDigest[] = opponents.flatMap((opponent) => sizes.map((boardSize, index) => ({
       opponent,
       boardSize,
       observedBoardSize: boardSize,
@@ -92,11 +90,9 @@ describe("telemetry record size", () => {
       horizonNodePower: 80,
       horizonTransientSecSaved: 60,
       horizonFavorSecSaved: opponent === "Daedalus" ? 10 : 0,
-      why: `${opponent} ETA attribution and exact streak/favor evidence`,
     })));
     candidates.push({
       ...candidates[0]!, opponent: "????????????", boardSize: 5, observedBoardSize: 19,
-      why: "world-daemon hacking-level reward evidence",
     });
     const data: GoState = {
       status: "inProgress",
@@ -107,9 +103,8 @@ describe("telemetry record size", () => {
       previousBoards: history,
       stats: [],
       plan: {
-        action: { type: "move", x: 0, y: 0, why: "best line" },
+        action: { type: "move", x: 0, y: 0 },
         ranked,
-        why: "bounded analysis",
         input: { at: 1, board: empty, previousBoards: history, status: "inProgress", currentPlayer: "Black", opponent: "Netburners" },
         planning: { finalistCount: 4, positionValue: 1 },
         prediction: {
@@ -135,7 +130,7 @@ describe("telemetry record size", () => {
           },
         },
       },
-      lastTurn: { at: 2, durationMs: 200, action: { type: "move", x: 0, y: 0, why: "best line" }, opponentResponse: { type: "move", x: 1, y: 1 }, predictionSupport: { matching: 4, total: 6 }, ok: true, detail: "move; opponent move" },
+      lastTurn: { at: 2, durationMs: 200, action: { type: "move", x: 0, y: 0 }, opponentResponse: { type: "move", x: 1, y: 1 }, predictionSupport: { matching: 4, total: 6 }, ok: true, detail: "move; opponent move" },
     };
     const encoded = JSON.stringify(data);
     expect(JSON.parse(encoded).plan.input.previousBoards).toHaveLength(100);

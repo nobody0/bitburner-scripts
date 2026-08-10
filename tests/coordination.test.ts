@@ -55,7 +55,6 @@ describe("the coordination pass", () => {
       target: -45,
       progress: 0,
       satisfied: false,
-      why: karmaNeed.why,
     });
   });
 
@@ -145,18 +144,17 @@ describe("the coordination pass", () => {
     expect(result.digest!.arbitration.grants).toEqual([
       {
         by: "factions", id: "aug-fund", resource: "money", amount: 5e6, mode: "reserve", partial: false,
-        wanted: 5e6, priority: PRIORITY["factions:aug-fund"], why: "Cranial Signal Processors G1",
+        wanted: 5e6, priority: PRIORITY["factions:aug-fund"],
       },
       {
         by: "factions", id: "work:CyberSec", resource: "time", amount: 1, mode: "spend", partial: false,
-        wanted: 1, priority: PRIORITY["factions:work"], why: "hacking contracts for CyberSec",
+        wanted: 1, priority: PRIORITY["factions:work"],
       },
     ]);
     expect(result.digest!.arbitration.denied[0]).toMatchObject({
       by: "hacknet",
       id: "level",
       priority: PRIORITY["hacknet:upgrade"],
-      why: "node 0 level 40->50",
     });
     expect(result.digest!.arbitration.remaining.money).toBe(1e6);
   });

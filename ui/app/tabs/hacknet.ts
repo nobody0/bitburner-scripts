@@ -72,7 +72,6 @@ export const hacknetTab: Tab = {
           { label: "hash value", value: `${fmtMoney(h.plan.hashDollarValue)}/hash` },
           { label: "fleet load", value: `${fmtNum(h.plan.fleetUtilization * 100, 1)}%`, sub: h.plan.fleetDemanded === true ? "Hacknet RAM has farm value" : h.plan.fleetDemanded === false ? "RAM demand not saturated" : "basis unavailable" },
         ]) +
-        note(`${h.plan.why}${h.plan.hold ? ` — ${h.plan.hold}` : ""}`) +
         (h.plan.lastResult ? note(`${h.plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${h.plan.lastResult.detail}`) : "") +
         upgrades +
         (h.plan.rankedTotal > h.plan.ranked.length ? note(`showing ${h.plan.ranked.length} of ${h.plan.rankedTotal} scored upgrades`) : "")
@@ -87,15 +86,14 @@ export const hacknetTab: Tab = {
       : "";
 
     const hashPlan = h.plan?.hashes
-      ? note(h.plan.hashes.why) +
-        tiles([
+      ? tiles([
           { label: "bank", value: `${fmtNum(h.plan.hashes.current, 0)} / ${fmtNum(h.plan.hashes.capacity, 0)}` },
           { label: "production", value: `${fmtNum(h.plan.hashes.productionPerSec, 3)}/s` },
           { label: "cash quote", value: h.plan.hashes.sellForMoneyCost > 0 ? `${fmtNum(h.plan.hashes.sellForMoneyCost, 0)} / $1m` : "unavailable" },
         ]) +
         (h.plan.hashes.ranked.length
           ? table(
-              ["pick", "goal", "cost", "priority", "cash alternative", "net value", "status", "why"],
+              ["pick", "goal", "cost", "priority", "cash alternative", "net value", "status"],
               h.plan.hashes.ranked.map((action) => [
                 action.selected ? "▶" : "",
                 esc(`${action.name}${action.target ? ` @ ${action.target}` : ""}`),
@@ -104,9 +102,8 @@ export const hacknetTab: Tab = {
                 fmtMoney(action.saleValueDollars),
                 action.netDollars !== undefined ? fmtMoney(action.netDollars) : "goal",
                 action.eligible === false ? "worse than cash" : action.fitsCapacity === false ? "needs cache" : action.affordable ? "ready" : "saving",
-                esc(action.why),
               ]),
-              { left: [1, 6, 7] },
+              { left: [1, 6] },
             )
           : "") +
         (h.plan.hashes.rankedTotal > h.plan.hashes.ranked.length
@@ -127,7 +124,12 @@ export const hacknetTab: Tab = {
       .reverse()
       .map((event) => {
         const data = event.data as {
-          plan?: { why?: string };
+          plan?: {
+            buy?: { kind?: string };
+            candidate?: { kind?: string };
+            spend?: { name?: string };
+            reserve?: { name?: string };
+          };
           result?: { detail?: string };
           detail?: string;
           arbitration?: {
@@ -143,7 +145,9 @@ export const hacknetTab: Tab = {
         return [
           fmtTime(event.t - (state.t0 ?? event.t)),
           esc(event.kind === "event" ? event.name : ""),
-          esc(data?.plan?.why ?? data?.result?.detail ?? data?.detail ?? ""),
+          data?.result?.detail || data?.detail
+            ? esc(data.result?.detail ?? data.detail ?? "")
+            : esc(data?.plan?.spend?.name ?? data?.plan?.reserve?.name ?? data?.plan?.buy?.kind ?? data?.plan?.candidate?.kind ?? "hold"),
           esc(arbiter),
         ];
       });
@@ -155,7 +159,7 @@ export const hacknetTab: Tab = {
       `<div class="col">` +
       card("ROI plan", decision) +
       (hashPlan ? card("Hash spending plan", hashPlan) : "") +
-      (historyRows.length ? card("Decision history", table(["at", "transition", "reason / outcome", "arbiter"], historyRows, { left: [1, 2, 3] })) : "") +
+      (historyRows.length ? card("Decision history", table(["at", "transition", "selection / outcome", "arbiter"], historyRows, { left: [1, 2, 3] })) : "") +
       (hashUpgrades ? card("Hash upgrades", hashUpgrades) : "") +
       `</div>`
     );

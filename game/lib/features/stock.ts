@@ -365,7 +365,6 @@ function manipulationDigest(plan: StockPlan): Record<string, StockManipulation> 
       side: intent.side,
       valuePerOp: intent.valuePerOp,
       notional: intent.notional,
-      why: intent.why,
     };
   }
   return out;
@@ -373,7 +372,11 @@ function manipulationDigest(plan: StockPlan): Record<string, StockManipulation> 
 
 function planDigest(plan: StockPlan, actions: readonly StockAction[], liquidate: boolean): StockPlanDigest {
   return {
-    actions: actions.map((action) => ({ type: action.type, why: action.why })),
+    actions: actions.map((action) => ({
+      type: action.type,
+      ...(action.type === "buy" || action.type === "sell" ? { sym: action.sym, shares: action.shares, short: action.short } : {}),
+      ...(action.type === "buy4SApi" ? { cost: action.cost } : {}),
+    })),
     ranked: plan.ranked.slice(0, 8).map((entry) => ({
       sym: entry.sym,
       side: entry.side,
@@ -382,7 +385,6 @@ function planDigest(plan: StockPlan, actions: readonly StockAction[], liquidate:
       exact: entry.exact,
       breakEvenTicks: Number.isFinite(entry.breakEvenTicks) ? entry.breakEvenTicks : -1,
       expectedProfit: entry.expectedProfit,
-      why: entry.why,
     })),
     ...(plan.entry
       ? {
@@ -405,7 +407,6 @@ function planDigest(plan: StockPlan, actions: readonly StockAction[], liquidate:
             gainPerSec: plan.unlock.gainPerSec,
             paybackSec: plan.unlock.paybackSec,
             netOverHorizon: plan.unlock.netOverHorizon,
-            why: plan.unlock.why,
           },
         }
       : {}),
@@ -415,9 +416,6 @@ function planDigest(plan: StockPlan, actions: readonly StockAction[], liquidate:
     // committing a purchase order, and waiting on money nobody is converting is a
     // livelock rather than patience.
     liquidate,
-    why: plan.why,
-    ...(plan.hold ? { hold: plan.hold } : {}),
-    ...(plan.blocker ? { blocker: plan.blocker } : {}),
     ...(lastResult ? { lastResult } : {}),
   };
 }

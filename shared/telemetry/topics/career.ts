@@ -25,8 +25,7 @@ export interface CrimeOption {
 
 /** The career decision digest. */
 export interface CareerPlan {
-  action: { type: string; subject?: string; field?: string; why: string };
-  why: string;
+  action: { type: string; subject?: string; field?: string };
   /** True when no posted need could be served and career fell back to income. */
   incomeFallback: boolean;
   /** Queue band and the arbiter value assigned to the chosen option. */
@@ -45,7 +44,6 @@ export interface CareerPlan {
     moneyPerSec: number;
     priority?: "blocking" | "wanted" | "nice" | "income";
     contributions?: { kind: string; subject?: string; perSec: number; weight: number; score: number }[];
-    why: string;
   }[];
   /** Needs from the board this feature is currently working toward. */
   serving: {
@@ -56,7 +54,6 @@ export interface CareerPlan {
     have?: number;
     weight: number;
     urgency?: "blocking" | "wanted" | "nice";
-    why?: string;
     progress: number;
   }[];
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
@@ -89,6 +86,6 @@ export interface CareerState {
   crimes?: CrimeOption[];
   /** Company name -> {rep, favor} for held jobs. Needs BN4/SF4. */
   companies?: Record<string, { rep: number; favor: number; salaryPerCycle?: number }>;
-  /** The decision digest — what career chose and why. */
+  /** The decision digest — what career chose and the scored inputs. */
   plan?: CareerPlan;
 }

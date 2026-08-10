@@ -1,5 +1,5 @@
 import type { PlayerRequirement } from "@ns";
-import type { FactionObjective } from "../../strategy/factions/plan.ts";
+import type { FactionIntent, FactionObjective } from "../../strategy/factions/plan.ts";
 import type { FeatureId } from "../../features/ids.ts";
 
 /** Factions feature — reputation and augmentations (grafting included: it is
@@ -67,7 +67,6 @@ export interface PlanBlocker {
   owner: FeatureId;
   reachable: boolean;
   negated?: boolean;
-  why: string;
 }
 
 /** One unmet invite requirement, without the faction name — the gate it
@@ -117,16 +116,21 @@ export interface FactionGate {
   missing: GateBlocker[];
 }
 
-/** The decision digest: what we are doing, why, and what would change it. */
+export type FactionIntentDigest = Omit<FactionIntent, "why">;
+export type FactionObjectiveDigest = Omit<FactionObjective, "why" | "intent" | "runnerUp"> & {
+  intent?: FactionIntentDigest;
+  runnerUp?: FactionIntentDigest;
+};
+
+/** The decision digest: what we are doing and what would change it. */
 export interface FactionPlan {
   context: FactionDecisionContext;
-  objective?: FactionObjective;
+  objective?: FactionObjectiveDigest;
   action: {
     type: string;
-    /** Why an idle action was selected. `slot` is also consumed by the driver
-     * to bootstrap the matching time and RAM claims atomically. */
-    reason?: "blocked" | "waiting" | "continue" | "slot";
-    why: string;
+    /** The action is idle only because its player-work claim has not landed.
+     * Consumed by the driver to bootstrap matching time and RAM claims. */
+    awaitingWorkSlot?: boolean;
     faction?: string;
     augmentation?: string;
     city?: string;
@@ -134,8 +138,8 @@ export interface FactionPlan {
     amount?: number;
     purchaseCost?: number;
   };
-  /** Scored runners-up, so a decision can be argued with rather than trusted. */
-  alternatives: { label: string; value: number; why: string }[];
+  /** Scored runners-up, so a decision can be compared rather than trusted. */
+  alternatives: { label: string; value: number }[];
   blockers: PlanBlocker[];
   /** Coarse facts that invalidate a continuing work order. Logged so a plan
    * transition can be attributed to its changing input rather than guessed. */
@@ -146,17 +150,16 @@ export interface FactionPlan {
    * `false` is a modelled outcome, not an error. */
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
   /** Set when the feature cannot act at all (the SF4 RAM wall). */
-  blocked?: string;
+  blocked?: { kind: "singularityRam"; bitNode: number; sf4Level: number; callRamGb: number };
   /** Set when factions thinks the run should end. Advisory: the reset cadence
    *  belongs to `progression`. */
-  recommendInstall?: { why: string; augmentations: string[] };
+  recommendInstall?: { augmentations: string[] };
   /** The first end-loaded purchase needs proceeds from the stock book. */
   liquidationNeeded?: {
     augmentation: string;
     price: number;
     cash: number;
     pendingProceeds: number;
-    why: string;
   };
   /** The next augmentation the plan intends to buy, priced at its slot in the
    *  purchase order — the dearest item first, so the 1.9x queue escalation lands on

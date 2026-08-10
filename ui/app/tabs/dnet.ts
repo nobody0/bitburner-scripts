@@ -33,9 +33,32 @@ export const dnetTab: Tab = {
       { empty: "nothing probed", left: [0] },
     );
 
+    const plan = d.plan;
+    const decision = plan
+      ? tiles([
+          { label: "selected", value: plan.action.type, sub: plan.action.hostname },
+          { label: "charisma gate", value: plan.charismaNeeded === undefined ? "clear" : fmtNum(plan.charismaNeeded, 0) },
+          { label: "topology", value: d.topologyComplete ? "complete" : "partial" },
+        ]) +
+        table(
+          ["pick", "host", "depth", "servers kept reachable"],
+          plan.ranked.map((entry) => [
+            entry.hostname === plan.action.hostname ? "▶" : "",
+            esc(entry.hostname),
+            String(entry.depth),
+            String(entry.unlocks),
+          ]),
+          { empty: "no stasis candidates", left: [1] },
+        ) +
+        (plan.lastResult
+          ? note(`${plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${plan.lastResult.detail}`)
+          : "")
+      : note("waiting for the first darknet decision");
+
     return (
       `<div class="col wide">` +
       card("Darknet", summary + servers) +
+      card("Traversal decision", decision) +
       `</div>` +
       `<div class="col">` +
       card(

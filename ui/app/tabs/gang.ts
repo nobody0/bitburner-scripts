@@ -61,9 +61,32 @@ export const gangTab: Tab = {
       { label: "rivals", value: Math.max(0, 1 - g.territory), className: "s4" },
     ]);
 
+    const plan = g.plan;
+    const decision = plan?.assignment
+      ? tiles([
+          { label: "search", value: plan.assignment.approximated ? "greedy" : "exact" },
+          { label: "objective", value: fmtNum(plan.assignment.total, 4) },
+          { label: "changes", value: String(plan.actions.filter((action) => action.type !== "idle").length) },
+        ]) +
+        table(
+          ["member", "selected task", "raw score", "change"],
+          plan.assignment.choices.map((choice) => {
+            const change = plan.actions.find((action) => action.type === "assign" && action.member === choice.member);
+            return [esc(choice.member), esc(choice.task), fmtNum(choice.score, 4), change ? "queued" : "unchanged"];
+          }),
+          { empty: "no priced assignment", left: [0, 1, 3] },
+        ) +
+        (plan.lastResult
+          ? note(`${plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${plan.lastResult.detail}`)
+          : "")
+      : plan
+        ? note("this replay predates structured gang assignment scores")
+        : note("waiting for the first gang decision");
+
     return (
       `<div class="col wide">` +
       card("Gang", summary + members) +
+      card("Assignment decision", decision) +
       `</div>` +
       `<div class="col">` +
       card("Territory", territoryBar + note(g.territoryWarfareEngaged ? "warfare engaged" : "warfare disengaged")) +
