@@ -393,6 +393,7 @@ describe("the install barrier", () => {
       affordableValueProduct: 3,
       factionWorkInProgress: false,
       factionsReadyToInstall: true,
+      factionsNeedLiquidation: false,
       stockReadyToInstall: plan.flat,
       graftInProgress: false,
       money: world.player.money,
@@ -402,6 +403,7 @@ describe("the install barrier", () => {
       homeRam: 8,
       homeRamUpgradeCost: Infinity,
       runSec: 10_000,
+      routeRequiresInstall: false,
     });
     return {
       flat: plan.flat,

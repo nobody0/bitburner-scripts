@@ -186,10 +186,10 @@ export function buildView(ctx: DriverContext): StockView | undefined {
   // `progression` will not reset while the book is open (`stockReadyToInstall`
   // requires `plan.flat`), so an install cannot slip past an unliquidated portfolio.
   const blockers = plan?.installBlockers;
-  const liquidate = plan?.installWanted === true
+  const liquidate = plan?.liquidationWanted === true
     && blockers !== undefined
     && blockers.every((blocker) => blocker.kind === "stock" || blocker.kind === "augmentations");
-  const liquidateWhy = "every barrier except the book itself is clear — an install is next";
+  const liquidateWhy = "progression requested liquidation and no unrelated safety barrier remains";
 
   const nodeMults = effectiveBitNodeMultipliers(
     ctx.caps.bitNode,

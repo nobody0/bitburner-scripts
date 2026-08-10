@@ -709,6 +709,7 @@ describe("when to liquidate — the signal, not the solver", () => {
     } as never;
     state.topics.player = { money: 1e9, skills: { hacking: 1 } } as never;
     if (plan !== undefined) state.topics.progression = { plan } as never;
+    else delete state.topics.progression;
     return {
       state,
       caps: unknownCapabilities(),
@@ -721,7 +722,7 @@ describe("when to liquidate — the signal, not the solver", () => {
     } as unknown as Parameters<typeof buildView>[0];
   }
 
-  const ending = { phase: "ending", installWanted: true };
+  const ending = { phase: "ending", installWanted: true, liquidationWanted: true };
 
   test("the ENDING PHASE ALONE does not liquidate", () => {
     // The regression, stated directly: factions still has reputation to earn, so
@@ -767,8 +768,23 @@ describe("when to liquidate — the signal, not the solver", () => {
   });
 
   test("an install not wanted never liquidates", () => {
-    const view = buildView(ctxWith({ phase: "start", installWanted: false, installBlockers: [] }));
+    const view = buildView(ctxWith({
+      phase: "start",
+      installWanted: false,
+      liquidationWanted: false,
+      installBlockers: [],
+    }));
     expect(view?.liquidate).toBe(false);
+  });
+
+  test("an empty-queue purchase bootstrap liquidates without install intent", () => {
+    const view = buildView(ctxWith({
+      phase: "start",
+      installWanted: false,
+      liquidationWanted: true,
+      installBlockers: [],
+    }));
+    expect(view?.liquidate).toBe(true);
   });
 
   test("unknown means keep trading, and that is the safe direction", () => {

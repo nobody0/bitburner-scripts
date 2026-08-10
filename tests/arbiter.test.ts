@@ -294,14 +294,65 @@ describe("reinvestment preference — the return tolerance band", () => {
     }));
     expect(result.grants[0]!.claimId).toBe("big");
   });
+
+  test("return tiers are transitive and independent of input permutation", () => {
+    const claims = [
+      band({ id: "A", ratePerSec: 1, returnPerDollarSec: 1 }),
+      band({ id: "B", ratePerSec: 2, returnPerDollarSec: 0.86 }),
+      band({ id: "C", ratePerSec: 3, returnPerDollarSec: 0.74 }),
+    ];
+    const permutations = [
+      [0, 1, 2], [0, 2, 1], [1, 0, 2],
+      [1, 2, 0], [2, 0, 1], [2, 1, 0],
+    ];
+    const winners = permutations.map((order) =>
+      resolveClaims(input({
+        pools: { money: 100, ram: 0 },
+        claims: order.map((index) => claims[index]!),
+      })).grants[0]!.claimId
+    );
+    expect(winners).toEqual(["B", "B", "B", "B", "B", "B"]);
+  });
 });
 
 describe("the imminent-install band sits where the endgame needs it", () => {
-  test("above every investment band, below the endgame conversion", () => {
+  test("brakes investments but not a prerequisite needed before the install", () => {
     expect(PRIORITY["progression:imminent-install"]).toBeGreaterThan(PRIORITY["income:investment"]);
-    expect(PRIORITY["progression:imminent-install"]).toBeGreaterThan(PRIORITY["hacking:infrastructure"]);
+    expect(PRIORITY["hacking:blocking-prerequisite"]).toBeGreaterThan(PRIORITY["progression:imminent-install"]);
     expect(PRIORITY["progression:imminent-install"]).toBeLessThan(PRIORITY["factions:donate"]);
     expect(PRIORITY["progression:imminent-install"]).toBeLessThan(PRIORITY["factions:aug-fund"]);
     expect(PRIORITY["progression:imminent-install"]).toBeLessThan(PRIORITY["career:blocking-need"]);
+
+    const result = resolveClaims(input({
+      pools: { money: 100, ram: 0 },
+      claims: [
+        claim({
+          id: "ordinary-investment",
+          by: "hacknet",
+          resource: "money",
+          amount: 10,
+          priority: PRIORITY["income:investment"],
+        }),
+        claim({
+          id: "imminent-install",
+          by: "progression",
+          resource: "money",
+          amount: 100,
+          priority: PRIORITY["progression:imminent-install"],
+          mode: "reserve",
+          divisible: true,
+        }),
+        claim({
+          id: "port-opener",
+          by: "hacking",
+          resource: "money",
+          amount: 40,
+          priority: PRIORITY["hacking:blocking-prerequisite"],
+        }),
+      ],
+    }));
+    expect(grantedAmount(result, "hacking", "money")).toBe(40);
+    expect(grantedAmount(result, "progression", "money")).toBe(60);
+    expect(grantedAmount(result, "hacknet", "money")).toBe(0);
   });
 });

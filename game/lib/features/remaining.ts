@@ -1388,7 +1388,7 @@ function affordableValueProduct(ctx: NeedContext): number {
 function readablePlan(state: GameState): ProgressionPlan | undefined {
   const plan = state.topics.progression?.plan;
   if (!plan?.forecasts?.node || !plan.forecasts.install) return undefined;
-  if (!plan.queuedAugmentations || !plan.installBlockers) return undefined;
+  if (!plan.queuedAugmentations || !plan.installBlockers || typeof plan.liquidationWanted !== "boolean") return undefined;
   return plan;
 }
 
@@ -1474,6 +1474,12 @@ function progressionRefresh(ctx: NeedContext): void {
     parts: eta.parts.map((entry) => ({ what: entry.what, sec: Math.round(entry.sec), measured: entry.measured })),
   }));
   const selectedEta = choice ? etas.find((eta) => eta.id === choice.route) : undefined;
+  const routeRequiresInstall = Boolean(
+    choice
+    && (choice.route === "daedalus" || choice.route === "labyrinth")
+    && view.ownsRedPill
+    && !view.redPillInstalled
+  );
   const nodeBasis = JSON.stringify({
     route: choice?.route,
     complete: selectedEta?.complete,
@@ -1521,6 +1527,7 @@ function progressionRefresh(ctx: NeedContext): void {
     // progression may reset only after the last-chance drain reports ready.
     factionsReadyToInstall:
       ctx.caps.unlocked.factions === "no" || Boolean(factions?.plan?.recommendInstall),
+    factionsNeedLiquidation: Boolean(factions?.plan?.liquidationNeeded),
     // The market's OWN answer, not a scan of its positions: `flat` accounts for
     // an exit decided but not yet executed and for an entry wanted on the next
     // pass, neither of which a position snapshot can show. A market that has
@@ -1541,6 +1548,7 @@ function progressionRefresh(ctx: NeedContext): void {
     homeRamUpgradeCost: Infinity,
     runSec: prog?.lastAugReset ? Math.max(0, (ctx.now - prog.lastAugReset) / 1000) : 0,
     ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
+    routeRequiresInstall,
   });
 
   const queueKey = pending.join("\0");
@@ -1563,6 +1571,7 @@ function progressionRefresh(ctx: NeedContext): void {
   const installBasis = JSON.stringify({
     phase: decision.phase,
     wanted: decision.installWanted,
+    liquidate: decision.liquidationWanted,
     ready: decision.installReady,
     blockers: decision.installBlockers.map((blocker) => blocker.kind),
     queue: pending,
@@ -1592,6 +1601,7 @@ function progressionRefresh(ctx: NeedContext): void {
     plan: {
       phase: decision.phase,
       installWanted: decision.installWanted,
+      liquidationWanted: decision.liquidationWanted,
       installBlockers: decision.installBlockers,
       installReady: decision.installReady,
       ...(armedAt !== undefined ? { installArmedAt: armedAt } : {}),
@@ -1859,11 +1869,11 @@ export const progressionModule: FeatureModule = {
     if (!plan?.installReady) {
       // The IMMINENT-install brake: when the install forecast says the reset
       // is minutes away, everything with an install lifetime stops buying —
-      // its ROI window is about to close. Priority 50 sits above every
-      // investment band (25/45) and below donations (70) / the aug fund (90)
-      // / blocking needs (95), so the endgame conversion keeps its money
-      // while pservs, hacknet and positions stop. `installReady` then takes
-      // over with the full freeze at 110.
+      // its ROI window is about to close. Priority 50 sits above ordinary
+      // investments (25) and below blocking prerequisites (65), donations
+      // (70), the aug fund (90), and blocking needs (95), so anything needed
+      // to reach the reset remains fundable while pservs, hacknet and positions
+      // stop. `installReady` then takes over with the full freeze at 110.
       const installSec = usableForecastSec(ctx.horizons.install);
       if (installSec !== undefined && installSec < IMMINENT_INSTALL_SEC) {
         return [{

@@ -130,10 +130,10 @@ export const PREEMPT_MARGIN = 10;
 export const PRIORITY = {
   /** Freeze every remaining dollar after the final augmentation sweep. */
   "progression:install-freeze": 110,
-  /** The reset is FORECAST minutes away: every install-lifetime investment's
-   *  ROI window is closed, so their bands (25/45) stop being funded — while
-   *  the endgame conversion (donate 70, aug-fund 90, blocking needs 95)
-   *  still outbids this. */
+  /** The reset is FORECAST minutes away: ordinary reset-lifetime investments
+   *  at band 25 stop being funded, while prerequisites needed to clear the
+   *  forecast (65) and endgame conversion (donate 70, aug-fund 90, blocking
+   *  needs 95) still outbid this. */
   "progression:imminent-install": 50,
   /** Money set aside to buy a planned augmentation set. */
   "factions:aug-fund": 90,
@@ -209,10 +209,11 @@ export const PRIORITY = {
    *  must not outbid it. Still below `factions:aug-fund`: even in BN8 the money
    *  exists to become permanent multipliers. */
   "stock:sole-income": 55,
-  /** Port openers and TOR (unblock rooting/backdoors). The home/cloud RAM
-   *  purchases do NOT use this — they post at income:investment so ROI
-   *  decides; the name predates that split. */
-  "hacking:infrastructure": 45,
+  /** Port openers and TOR that unblock requested rooting/backdoors. They must
+   *  remain fundable through the imminent-install reserve: until the backdoor
+   *  clears, the faction sweep that forecast is waiting on cannot finish.
+   *  Home/cloud RAM posts at income:investment so ROI decides. */
+  "hacking:blocking-prerequisite": 65,
   /** Probe RAM. Acquisition outranks spending, because a decision made on
    *  stale state is worse than a decision deferred. */
   "probe:core": 75,
@@ -236,16 +237,62 @@ export function priorityOf(key: PriorityKey): number {
  * but slower stream (a 5-minute payback at $5/s beats an hour at $6/s). */
 export const RETURN_TOLERANCE = 0.15;
 
-function compareClaims(a: Claim, b: Claim): number {
+function normalizedReturn(claim: Claim): number {
+  const value = claim.returnPerDollarSec ?? 0;
+  return value > 0 ? value : 0;
+}
+
+/** Assign deterministic return tiers before sorting. Pairwise similarity is
+ * not transitive, so it cannot be evaluated inside a comparator. Each tier is
+ * anchored to its highest return; every member is within the tolerance of that
+ * one leader, and all comparisons then use the same integer key. */
+function returnTiers(claims: readonly Claim[]): ReadonlyMap<Claim, number> {
+  const tiers = new Map<Claim, number>();
+  const byPriority = new Map<number, Claim[]>();
+  for (const claim of claims) {
+    const group = byPriority.get(claim.priority) ?? [];
+    group.push(claim);
+    byPriority.set(claim.priority, group);
+  }
+
+  for (const group of byPriority.values()) {
+    const positive = group
+      .filter((claim) => normalizedReturn(claim) > 0)
+      .sort((a, b) =>
+        normalizedReturn(b) - normalizedReturn(a)
+        || (a.by < b.by ? -1 : a.by > b.by ? 1 : 0)
+        || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    let tier = -1;
+    let leader = Infinity;
+    for (const claim of positive) {
+      const value = normalizedReturn(claim);
+      if (
+        tier < 0
+        || (leader === Infinity ? value !== Infinity : value < leader * (1 - RETURN_TOLERANCE))
+      ) {
+        tier += 1;
+        leader = value;
+      }
+      tiers.set(claim, tier);
+    }
+    const noReturnTier = tier + 1;
+    for (const claim of group) {
+      if (normalizedReturn(claim) === 0) tiers.set(claim, noReturnTier);
+    }
+  }
+  return tiers;
+}
+
+function compareClaims(a: Claim, b: Claim, tiers: ReadonlyMap<Claim, number>): number {
   if (b.priority !== a.priority) return b.priority - a.priority;
-  const aReturn = a.returnPerDollarSec ?? 0;
-  const bReturn = b.returnPerDollarSec ?? 0;
-  const similar =
-    aReturn > 0 && bReturn > 0 && Math.abs(aReturn - bReturn) <= Math.max(aReturn, bReturn) * RETURN_TOLERANCE;
-  if (!similar && bReturn !== aReturn) return bReturn - aReturn;
+  const aTier = tiers.get(a) ?? 0;
+  const bTier = tiers.get(b) ?? 0;
+  if (aTier !== bTier) return aTier - bTier;
   const aRate = a.ratePerSec ?? 0;
   const bRate = b.ratePerSec ?? 0;
   if (bRate !== aRate) return bRate - aRate;
+  const aReturn = normalizedReturn(a);
+  const bReturn = normalizedReturn(b);
   if (bReturn !== aReturn) return bReturn - aReturn;
   if (a.by !== b.by) return a.by < b.by ? -1 : 1;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
@@ -257,7 +304,9 @@ export function resolveClaims(input: ArbiterInput): ArbiterResult {
 
   const pools = { money: Math.max(0, input.pools.money), ram: Math.max(0, input.pools.ram) };
   for (const resource of ["money", "ram"] as const) {
-    const claims = input.claims.filter((claim) => claim.resource === resource).sort(compareClaims);
+    const claims = input.claims.filter((claim) => claim.resource === resource);
+    const tiers = returnTiers(claims);
+    claims.sort((a, b) => compareClaims(a, b, tiers));
     for (const claim of claims) {
       const available = pools[resource];
       const wanted = Math.max(0, claim.amount);
@@ -327,7 +376,9 @@ function resolveSlot(input: ArbiterInput): {
   slot?: SlotState;
   preempted?: { claimId: string; by: FeatureId; heldMs: number };
 } {
-  const claims = input.claims.filter((claim) => claim.resource === "time").sort(compareClaims);
+  const claims = input.claims.filter((claim) => claim.resource === "time");
+  const tiers = returnTiers(claims);
+  claims.sort((a, b) => compareClaims(a, b, tiers));
   if (claims.length === 0) return { grants: [], denied: [] };
 
   const previous = input.slot;

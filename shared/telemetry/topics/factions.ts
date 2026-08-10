@@ -150,6 +150,14 @@ export interface FactionPlan {
   /** Set when factions thinks the run should end. Advisory: the reset cadence
    *  belongs to `progression`. */
   recommendInstall?: { why: string; augmentations: string[] };
+  /** The first end-loaded purchase needs proceeds from the stock book. */
+  liquidationNeeded?: {
+    augmentation: string;
+    price: number;
+    cash: number;
+    pendingProceeds: number;
+    why: string;
+  };
   /** The next augmentation the plan intends to buy, priced at its slot in the
    *  purchase order — the dearest item first, so the 1.9x queue escalation lands on
    *  the cheapest. The driver claims money against this. During the last-chance

@@ -475,6 +475,7 @@ describe("feature modules", () => {
       plan: {
         phase: "start",
         installWanted: false,
+        liquidationWanted: false,
         installBlockers: [],
         installReady: false,
         queuedAugmentations: [],

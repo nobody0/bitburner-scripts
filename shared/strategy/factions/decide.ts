@@ -209,13 +209,42 @@ export function stepFactions(
   // purchase order. Priced with unlimited money on purpose: `nextPurchase` tests
   // the GRANTED budget, a grant only exists once something claimed it, and a claim
   // read off the already-funded decision could never bootstrap.
-  if (out.decision.nextBuy) return out;
-  const intended = nextPurchase(view, purchaseOrder(view, out.decision.objective?.augmentations ?? []), Infinity);
-  if (!intended) return out;
-  return {
-    ...out,
-    decision: { ...out.decision, nextBuy: { name: intended.name, price: intended.price } },
-  };
+  let decision = out.decision;
+  const intended = nextPurchase(view, purchaseOrder(view, decision.objective?.augmentations ?? []), Infinity);
+  if (!decision.nextBuy) {
+    if (intended) decision = { ...decision, nextBuy: { name: intended.name, price: intended.price } };
+  }
+
+  // End-loaded buying can reach its first purchase with most of the bankroll
+  // still in stocks. Publish the bootstrap separately so progression may ask
+  // stock to liquidate without treating an empty queue as installable.
+  const endgameDrain = decision.recommendInstall !== undefined || decision.drainCeiling !== undefined;
+  const nextBuy = decision.nextBuy;
+  if (
+    endgameDrain &&
+    view.queued.size === 0 &&
+    nextBuy &&
+    view.moneyAvailable < nextBuy.price &&
+    view.moneyAvailable + Math.max(0, view.pendingProceeds) >= nextBuy.price
+  ) {
+    decision = {
+      ...decision,
+      nextBuy,
+      action: {
+        type: "idle",
+        reason: "waiting",
+        why: "waiting for stock liquidation before the first queued purchase",
+      },
+      liquidationNeeded: {
+        augmentation: nextBuy.name,
+        price: nextBuy.price,
+        cash: view.moneyAvailable,
+        pendingProceeds: Math.max(0, view.pendingProceeds),
+        why: nextBuy.name + " needs stock proceeds to bootstrap the first queued purchase",
+      },
+    };
+  }
+  return decision === out.decision ? out : { ...out, decision };
 }
 
 function decideFactions(
@@ -295,6 +324,22 @@ function decideFactions(
           (view.factions.find((standing) => standing.name === previousRunner.faction)?.enemies.includes(member.name) ?? false)),
     ),
   );
+  const runnerStanding = previousRunner
+    ? view.factions.find((standing) => standing.name === previousRunner.faction)
+    : undefined;
+  const promotedRunner: FactionObjective | undefined =
+    previousComplete && previousRunner && runnerStanding && !runnerBlockedThisCycle
+      ? {
+          factions: [previousRunner.faction],
+          augmentations: closePrereqs(previousRunner.augmentations, view.catalog, view.owned),
+          value: previousRunner.value,
+          foreclosed: fresh.foreclosed,
+          why:
+            "advanced from completed " + previousIntent!.faction + " package to its recorded frontier runner " +
+            previousRunner.faction + " at " + Math.round(previousRunner.repTarget).toLocaleString() + " rep",
+          intent: previousRunner,
+        }
+      : undefined;
   let keepPrevious = Boolean(previousIntent && previousStanding && (!previousComplete || runnerBlockedThisCycle));
   // Stall escape for the latch: zero reputation progress for INTENT_STALL_MS
   // while the frontier prefers a DIFFERENT package means the latched intent
@@ -318,7 +363,7 @@ function decideFactions(
       keepPrevious = false;
     }
   }
-  const objective = keepPrevious ? previous! : fresh;
+  const objective = keepPrevious ? previous! : promotedRunner ?? fresh;
   if (!keepPrevious) {
     intentKey = objective.intent?.faction;
     intentRepSeen = undefined;
@@ -701,7 +746,9 @@ function nextGraft(view: FactionsView, wanted: readonly string[]): { name: strin
  * the entire catalogue. */
 function plannedBudget(view: FactionsView): number {
   const horizonSec = Number.isFinite(view.horizonSec) ? Math.max(0, view.horizonSec) : 0;
-  return settlingMoney(view) + Math.max(0, view.incomePerSec) * horizonSec;
+  return view.moneyAvailable
+    + Math.max(0, view.pendingProceeds)
+    + Math.max(0, view.incomePerSec) * horizonSec;
 }
 
 /** The next augmentation we can actually buy right now.
@@ -724,14 +771,13 @@ function plannedBudget(view: FactionsView): number {
  *    market book — cannot cover the item, there is nothing definite to wait for,
  *    and a cheaper augmentation owned beats a dearer one admired. Fall through.
  *
- * AND THE FIRST PURCHASE OF A RUN IS NEVER HELD, which is not a nicety — without
- * it the hold cannot end. The book is liquidated when `progression` enters its
- * `ending` phase, and `phaseOf` requires a non-empty install queue to get there. So
- * holding out for the market book while nothing is queued waits for a liquidation
- * that our own waiting prevents: queue stays empty, phase never turns, stock never
- * sells, the proceeds never arrive. Buying one item bootstraps the phase machine,
- * and because the walk is dearest-first that item is the dearest we can currently
- * afford — the best available choice, not merely a legal one. */
+  * AN EMPTY QUEUE NEEDS A DIFFERENT HANDSHAKE. This function cannot wait on an
+  * inactive liquidation: outside the final drain it falls through to an affordable
+  * item, avoiding the old factions/stock deadlock. At the final drain boundary,
+  * `stepFactions` may instead publish `liquidationNeeded` when the book covers the
+  * dearest planned item. Progression then starts liquidation without pretending an
+  * empty queue is installable, and this function can safely hold once settlement is
+  * actually under way. */
 function nextPurchase(
   view: FactionsView,
   wanted: readonly string[],

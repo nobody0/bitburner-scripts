@@ -28,6 +28,9 @@ export interface ProgressionView {
   factionWorkInProgress: boolean;
   /** The faction planner has finished its last-chance purchase/donation sweep. */
   factionsReadyToInstall: boolean;
+  /** The faction sweep needs the stock book converted before it can make the
+   * first queued purchase. This may request liquidation, never installation. */
+  factionsNeedLiquidation: boolean;
   /** The stock feature's OWN answer to "may an install destroy the book?" —
    *  `stock.plan.flat`, not a scan of its positions. Nothing held, nothing
    *  pending, nothing wanted. */
@@ -62,6 +65,9 @@ export interface ProgressionView {
    * is decided. Nothing persists past the node, so an install this close to
    * the end only delays it. */
   nodeRemainingSec?: number;
+  /** The selected route cannot complete without installing its already-owned
+   * route augmentation (currently The Red Pill). */
+  routeRequiresInstall: boolean;
 }
 
 export type InstallBlockerKind = "factions" | "stock" | "graft" | "augmentations";
@@ -75,6 +81,9 @@ export interface ProgressionDecision {
   phase: RunPhase;
   /** The economic cadence says this run should end, before safety barriers. */
   installWanted: boolean;
+  /** Stock should convert its book. Broader than installWanted only for the
+   * empty-queue first-purchase bootstrap. */
+  liquidationWanted: boolean;
   /** Preconditions that must clear before the irreversible reset. */
   installBlockers: InstallBlocker[];
   /** The reset is economically wanted and every observed barrier is clear. */
@@ -139,11 +148,16 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   // ...unless the NODE itself is nearly over: nothing survives the node, so
   // an install whose payoff window is shorter than its own overhead only
   // delays the finish. Unknown route ETA keeps installs allowed.
-  const nodeAllowsInstall = view.nodeRemainingSec === undefined || view.nodeRemainingSec > INSTALL_MIN_PAYBACK_SEC;
-  const installWanted =
-    nodeAllowsInstall &&
+  const nodeAllowsOptionalInstall =
+    view.nodeRemainingSec === undefined || view.nodeRemainingSec > INSTALL_MIN_PAYBACK_SEC;
+  const routeInstallWanted = view.routeRequiresInstall && view.queued.length > 0;
+  const optionalInstallWanted =
+    nodeAllowsOptionalInstall &&
     view.queued.length > 0 &&
     (phase === "ending" || (crossings.length > 0 && view.factionsReadyToInstall));
+  const installWanted = routeInstallWanted || optionalInstallWanted;
+  const liquidationWanted =
+    installWanted || ((view.routeRequiresInstall || nodeAllowsOptionalInstall) && view.factionsNeedLiquidation);
   const installBlockers: InstallBlocker[] = [];
   if (installWanted && !view.factionsReadyToInstall) {
     installBlockers.push({ kind: "factions", why: "factions has not finished its final purchase and donation sweep" });
@@ -162,7 +176,9 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   }
   const installReady = installWanted && installBlockers.length === 0;
   const why = installReady
-    ? crossings.length > 0
+    ? routeInstallWanted
+      ? `ready to install ${view.queued.length} augmentation(s); the selected endgame route requires this reset`
+      : crossings.length > 0
       ? `ready to install ${view.queued.length} augmentation(s); ${crossings.length} faction(s) cross the donation threshold`
       : `ready to install ${view.queued.length} augmentation(s); cash exceeds half the run's earnings`
     : installWanted
@@ -174,6 +190,7 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   return {
     phase,
     installWanted,
+    liquidationWanted,
     installBlockers,
     installReady,
     homeRamBudgetFraction: HOME_RAM_BUDGET[phase],

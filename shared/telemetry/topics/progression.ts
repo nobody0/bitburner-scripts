@@ -112,6 +112,9 @@ export interface ProgressionPlan {
   phase: "start" | "finishUp" | "ending";
   /** Economic reset decision before safety barriers. */
   installWanted: boolean;
+  /** Whether stock should liquidate, including an empty-queue first-purchase
+   * bootstrap that is not itself permission to install. */
+  liquidationWanted: boolean;
   /** Why the reset cannot execute yet. */
   installBlockers: { kind: "factions" | "stock" | "graft" | "augmentations"; why: string }[];
   /** Every reset-sensitive subsystem has acknowledged readiness. */

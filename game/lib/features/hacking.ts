@@ -728,7 +728,7 @@ export const hackingModule: FeatureModule = {
             id: `port-opener:${program.name}`,
             resource: "money",
             amount: program.purchaseCost + 200_000,
-            priority: PRIORITY["hacking:infrastructure"],
+            priority: PRIORITY["hacking:blocking-prerequisite"],
             mode: "spend",
             divisible: false,
             why: `buy TOR and ${program.name} to reach a requested backdoor`,

@@ -475,6 +475,7 @@ describe("panel view state", () => {
       plan: {
         phase: "finishUp",
         installWanted: true,
+        liquidationWanted: true,
         installBlockers: [{ kind: "factions", why: "finish package" }],
         installReady: false,
         queuedAugmentations: ["BitWire"],

@@ -906,6 +906,34 @@ describe("faction breakpoint package planner", () => {
     expect(selection.runnerUp?.faction).toBe("B");
   });
 
+  test("advances to the recorded runner after banking the first package reputation", () => {
+    const factions = [packageStanding("A"), packageStanding("B")];
+    const catalog = new Map([
+      ["A-fast", aug("A-fast", { factions: ["A"], baseCost: 1, baseRepRequirement: 100 })],
+      ["A-deep", aug("A-deep", { factions: ["A"], baseCost: 1, baseRepRequirement: 1_000 })],
+      ["B-next", aug("B-next", { factions: ["B"], baseCost: 1, baseRepRequirement: 200 })],
+    ]);
+    const first = stepFactions(
+      factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      initFactionMemory(),
+    );
+    expect(first.decision.objective?.intent?.faction).toBe("A");
+    expect(first.decision.objective?.runnerUp?.faction).toBe("B");
+
+    const advanced = stepFactions(
+      factionsView({
+        factions: [{ ...factions[0]!, rep: 100 }, factions[1]!],
+        catalog,
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+      }),
+      first.memory,
+    );
+    expect(advanced.decision.objective?.intent?.faction).toBe("B");
+    expect(advanced.decision.action).toMatchObject({ type: "workForFaction", faction: "B" });
+    expect(advanced.decision.recommendInstall).toBeUndefined();
+  });
+
   test("pushes the best faction farther when switching is much worse", () => {
     const factions = [packageStanding("A"), packageStanding("B")];
     const catalog = new Map([
@@ -1307,19 +1335,16 @@ describe("patience — waiting for the bankroll before committing the order", ()
     expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap" });
   });
 
-  test("THE FIRST PURCHASE IS NEVER HELD — otherwise the hold cannot end", () => {
-    // The livelock this closes: the market book is liquidated when `progression`
-    // enters its `ending` phase, and `phaseOf` needs a non-empty install queue to
-    // get there. Holding out for the book while nothing is queued waits for a
-    // liquidation that the waiting itself prevents — queue stays empty, phase never
-    // turns, stock never sells, the proceeds never come. Nothing else breaks the
-    // cycle: `installWanted` is gated on the same empty queue, so the install
-    // barrier is never even consulted.
-    const bootstrap = step({ queued: new Set(), pendingProceeds: 6e8, proceedsSettling: true });
-    expect(bootstrap.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap" });
+  test("an empty queue requests liquidation before the first purchase", () => {
+    // A separate liquidation signal breaks the empty-queue cycle without
+    // buying a cheaper item first and escalating the intended expensive one.
+    const bootstrap = step({ queued: new Set(), pendingProceeds: 6e8, proceedsSettling: false });
+    expect(bootstrap.action).toMatchObject({ type: "idle", reason: "waiting" });
+    expect(bootstrap.liquidationNeeded).toMatchObject({ augmentation: "dear", pendingProceeds: 6e8 });
     // ...and with one item queued the hold engages, on the very same numbers.
     const held = step({ queued: new Set(["cheap"]), pendingProceeds: 6e8, proceedsSettling: true });
     expect(held.action.type).not.toBe("purchaseAugmentation");
+    expect(held.liquidationNeeded).toBeUndefined();
   });
 
   test("the wait ends when the money lands", () => {

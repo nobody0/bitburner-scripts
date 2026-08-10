@@ -600,6 +600,7 @@ function planDigest(decision: FactionDecision, view: FactionsView): FactionPlan 
     ...(lastResult ? { lastResult } : {}),
     ...(decision.blocked ? { blocked: decision.blocked.why } : {}),
     ...(decision.recommendInstall ? { recommendInstall: decision.recommendInstall } : {}),
+    ...(decision.liquidationNeeded ? { liquidationNeeded: decision.liquidationNeeded } : {}),
     ...(decision.nextBuy ? { nextBuy: decision.nextBuy } : {}),
   };
 }
@@ -685,10 +686,10 @@ const driver: FeatureDriver = {
     if (decision.recommendInstall && decision.nextBuy && view.moneyAvailable >= decision.nextBuy.price) {
       chainWake = true;
     }
-    // Drain concluded: nothing left to buy and the run should end. Wake
-    // progression NOW — its 60-second cadence otherwise strands a finished
-    // drain for most of a minute before the install evaluation even runs.
-    if (decision.recommendInstall && !decision.nextBuy) signalInstallCheck();
+    // Drain concluded, or its first purchase needs the stock book converted.
+    // Wake progression NOW — its 60-second cadence otherwise delays either
+    // the liquidation handshake or the finished drain for most of a minute.
+    if ((decision.recommendInstall && !decision.nextBuy) || decision.liquidationNeeded) signalInstallCheck();
 
     annotateOffers(ctx.state, view);
     merge(ctx.state, "factions", { plan: planDigest(decision, view), gates: gatesFrom(view) });

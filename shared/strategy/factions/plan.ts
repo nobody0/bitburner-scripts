@@ -103,6 +103,17 @@ export interface FactionDecision {
   /** Set when the run should end: nothing further is buyable and banked
    *  reputation is worth more as favor than as more of this run. */
   recommendInstall?: { why: string; augmentations: string[] };
+  /** The final sweep cannot make its first purchase from cash alone, but the
+   *  stock book can close the gap. Published separately from recommendInstall
+   *  so progression may ask stock to liquidate without treating an empty
+   *  augmentation queue as installable. */
+  liquidationNeeded?: {
+    augmentation: string;
+    price: number;
+    cash: number;
+    pendingProceeds: number;
+    why: string;
+  };
   /** The next augmentation this plan intends to buy, priced at ITS SLOT in the
    *  purchase order rather than at today's queue depth. Published so the driver has
    *  something to claim money against: the purchase needs a grant, the grant needs

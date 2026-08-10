@@ -659,6 +659,7 @@ describe("progression", () => {
     affordableValueProduct: 1,
     factionWorkInProgress: false,
     factionsReadyToInstall: true,
+    factionsNeedLiquidation: false,
     stockReadyToInstall: true,
     graftInProgress: false,
     money: 0,
@@ -668,6 +669,7 @@ describe("progression", () => {
     homeRam: 8,
     homeRamUpgradeCost: Infinity,
     runSec: 0,
+    routeRequiresInstall: false,
     ...over,
   });
 
@@ -698,6 +700,31 @@ describe("progression", () => {
   test("installing is recommended only in `ending` with something queued", () => {
     expect(stepProgression(view({ earnedThisRun: 100, money: 60 })).installReady).toBe(false);
     expect(stepProgression(view({ earnedThisRun: 100, money: 60, queued: ["a"] })).installReady).toBe(true);
+  });
+
+  test("a selected route's required install bypasses optional cadence and payback", () => {
+    const optional = stepProgression(view({
+      queued: ["The Red Pill"],
+      nodeRemainingSec: 599,
+    }));
+    expect(optional.installWanted).toBe(false);
+
+    const required = stepProgression(view({
+      queued: ["The Red Pill"],
+      nodeRemainingSec: 599,
+      routeRequiresInstall: true,
+      stockReadyToInstall: false,
+    }));
+    expect(required.installWanted).toBe(true);
+    expect(required.installReady).toBe(false);
+    expect(required.installBlockers.map((blocker) => blocker.kind)).toEqual(["stock"]);
+  });
+
+  test("empty-queue liquidation is requested without making an install possible", () => {
+    const decision = stepProgression(view({ factionsNeedLiquidation: true }));
+    expect(decision.liquidationWanted).toBe(true);
+    expect(decision.installWanted).toBe(false);
+    expect(decision.installReady).toBe(false);
   });
 
   test("install waits for the factions final sweep", () => {
