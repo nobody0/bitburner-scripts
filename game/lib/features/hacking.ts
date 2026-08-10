@@ -180,7 +180,7 @@ const backdoorAttempted = new Set<string>();
 /** ns functions each dodged closure calls. PRICED at runtime rather than
  * guessed: a constant budget has to be at least the sum of the call costs, and
  * getting that wrong kills the stub outright (see dodge.ts#priceCalls). */
-const BACKDOOR_CALLS = ["singularity.connect", "singularity.installBackdoor"] as const;
+const BACKDOOR_CALLS = ["scan", "singularity.connect", "singularity.installBackdoor"] as const;
 const PORT_OPENER_CALLS = ["ls", "singularity.purchaseTor", "singularity.purchaseProgram"] as const;
 let backdoorInFlight = false;
 let lastBackdoorAt = 0;
@@ -379,7 +379,30 @@ async function serveBackdoorNeeds(ctx: DriverContext): Promise<void> {
   lastBackdoorAt = now;
   try {
     const outcome = await featureDodge(ctx, "hacking", "action:backdoor", BACKDOOR_CALLS, async (stubNs: NS) => {
-      stubNs["singularity"]["connect"](host as never);
+      const parents = new Map<string, string | undefined>([["home", undefined]]);
+      const queue = ["home"];
+      for (let index = 0; index < queue.length && !parents.has(host); index++) {
+        const current = queue[index]!;
+        for (const neighbour of stubNs.scan(current)) {
+          if (parents.has(neighbour)) continue;
+          parents.set(neighbour, current);
+          queue.push(neighbour);
+        }
+      }
+      if (!parents.has(host)) throw new Error(`no network route from home to ${host}`);
+
+      const route: string[] = [];
+      for (let current: string | undefined = host; current && current !== "home"; current = parents.get(current)) {
+        route.push(current);
+      }
+      if (!stubNs["singularity"]["connect"]("home" as never)) {
+        throw new Error("could not return terminal connection to home");
+      }
+      for (const hop of route.reverse()) {
+        if (!stubNs["singularity"]["connect"](hop as never)) {
+          throw new Error(`network route to ${host} failed at ${hop}`);
+        }
+      }
       await stubNs["singularity"]["installBackdoor"]();
     });
     if (outcome.ok) {

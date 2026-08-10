@@ -8,6 +8,8 @@
 export interface SaveServer {
   hostname: string;
   organizationName: string;
+  programs: string[];
+  messages: string[];
   hasAdminRights: boolean;
   backdoorInstalled: boolean;
   purchasedByPlayer: boolean;
@@ -78,6 +80,7 @@ export interface SavePlayer {
   hasGang: boolean;
   hasCorporation: boolean;
   hasBladeburner: boolean;
+  bladeburnerRank?: number;
   sleeveCount: number;
   playtimeSinceLastBitnode: number;
   totalPlaytime: number;
@@ -124,6 +127,8 @@ export interface SaveSnapshot {
  * Source: bitburner-src/src/Server/BaseServer.ts and Server.ts @ v3.0.1. */
 export const SERVER_DEFAULTS: Omit<SaveServer, "hostname"> = {
   organizationName: "",
+  programs: [],
+  messages: [],
   hasAdminRights: false,
   backdoorInstalled: false,
   purchasedByPlayer: false,

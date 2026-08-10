@@ -99,7 +99,17 @@ function filesOn(host: SimNsHost, hostname: string): Set<string> {
 
 /** An unimplemented ns path. Callable AND traversable, so `ns.hacknet` resolves
  * but `ns.hacknet.getNodeStats()` reports the full dotted name. */
-function unknownNode(path: string): unknown {
+function concurrentCall(host: SimNsHost, process: SimProcess, path: string): void {
+  if (process.killed) throw new ScriptDeath(process.pid);
+  if (!process.runningFn || path === "asleep") return;
+  const running = process.runningFn;
+  host.processes.kill(process.pid);
+  throw new Error(
+    `Concurrent calls to Netscript functions are not allowed! Currently running: ${running}; tried to run: ${path}`,
+  );
+}
+
+function unknownNode(path: string, host: SimNsHost, process: SimProcess): unknown {
   const target = (): never => unmodeled("ns", path);
   return new Proxy(target, {
     get(_t, prop): unknown {
@@ -108,32 +118,48 @@ function unknownNode(path: string): unknown {
       // game/lib/dodge-stub.ts must not be fooled into treating this as a
       // thenable.
       if (prop === "then" || prop === "constructor" || prop === "catch" || prop === "finally") return undefined;
-      return unknownNode(`${path}.${prop}`);
+      return unknownNode(`${path}.${prop}`, host, process);
     },
-    apply: (): never => unmodeled("ns", path),
+    apply: (): never => {
+      concurrentCall(host, process, path);
+      return unmodeled("ns", path);
+    },
   });
 }
 
 /** Wrap an implemented namespace so its unimplemented siblings still report.
  * `path` is "" at the ns root, so children there are bare names. */
-function namespace(impl: Record<string, unknown>, path: string): unknown {
+function namespace(impl: Record<string, unknown>, path: string, host: SimNsHost, process: SimProcess): unknown {
   return new Proxy(impl, {
     get(target, prop): unknown {
       if (typeof prop === "string" && !(prop in target)) {
-        return unknownNode(path === "" ? prop : `${path}.${prop}`);
+        return unknownNode(path === "" ? prop : `${path}.${prop}`, host, process);
       }
-      return Reflect.get(target, prop) as unknown;
+      const value = Reflect.get(target, prop) as unknown;
+      if (typeof prop !== "string" || typeof value !== "function") return value;
+      const functionPath = path === "" ? prop : `${path}.${prop}`;
+      return (...args: unknown[]): unknown => {
+        concurrentCall(host, process, functionPath);
+        const result = (value as (...inner: unknown[]) => unknown)(...args);
+        if (functionPath === "asleep" || !(result instanceof Promise) || process.runningFn) return result;
+        process.runningFn = functionPath;
+        return result.finally(() => {
+          if (process.runningFn === functionPath) process.runningFn = undefined;
+        });
+      };
     },
   });
 }
 
 /** Suspend this process on the virtual clock, exactly as netscriptDelay does:
  * the timer is cancellable, and a kill rejects the await with ScriptDeath. */
-function netscriptDelay(host: SimNsHost, process: SimProcess, ms: number): Promise<void> {
+function netscriptDelay(host: SimNsHost, process: SimProcess, ms: number, functionName: string): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    process.runningFn = functionName;
     process.delay = host.clock.in(Math.max(0, ms), () => {
       process.delay = undefined;
       process.delayReject = undefined;
+      process.runningFn = undefined;
       if (process.killed) reject(new ScriptDeath(process.pid));
       else resolve();
     });
@@ -185,12 +211,13 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   function hgw(kind: "hack" | "grow" | "weaken") {
     return (target: string, opts?: { additionalMsec?: number; threads?: number; stock?: boolean }): Promise<number> => {
       const server = requireServer(host, target);
+      if (server.purchasedByPlayer) throw new Error(`${kind}: cannot target a purchased server`);
+      if (!server.hasAdminRights) throw new Error(`${kind}: no admin rights on ${target}`);
       const threads = opts?.threads ?? process.threads;
       // Duration from CALL-time state, additionalMsec folded in before the
       // delay starts — one longer timer, never two.
       const durationMs = world.hgwDurationMs(kind, server) + (opts?.additionalMsec ?? 0);
       if (kind === "hack") {
-        if (!server.hasAdminRights) throw new Error(`hack: no admin rights on ${target}`);
         if (world.person.skills.hacking < server.requiredHackingSkill) {
           throw new Error(`hack: hacking skill too low for ${target}`);
         }
@@ -200,10 +227,24 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       // roll is against the money actually moved, which is not known until the
       // op lands (NetscriptHelpers.tsx:614, NetscriptFunctions.ts:305).
       const stock = opts?.stock === true;
-      return netscriptDelay(host, process, durationMs).then(
+      return netscriptDelay(host, process, durationMs, kind).then(
         () => world.land(kind, target, threads, cores, stock).nsValue,
       );
     };
+  }
+
+  function openPort(
+    hostname: string,
+    program: string,
+    flag: "sshPortOpen" | "ftpPortOpen" | "smtpPortOpen" | "httpPortOpen" | "sqlPortOpen",
+  ): boolean {
+    const server = requireServer(host, hostname);
+    if (!filesOn(host, "home").has(program)) return false;
+    if (!server[flag]) {
+      server[flag] = true;
+      server.openPortCount = (server.openPortCount ?? 0) + 1;
+    }
+    return true;
   }
 
   const impl: Record<string, unknown> = {
@@ -222,7 +263,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     toast: () => {},
 
     // --- scheduling -----------------------------------------------------
-    sleep: (ms = 0): Promise<boolean> => netscriptDelay(host, process, ms).then(() => true),
+    sleep: (ms = 0): Promise<boolean> => netscriptDelay(host, process, ms, "sleep").then(() => true),
     // asleep is NOT cancellable and does not block concurrent ns calls.
     asleep: (ms = 0): Promise<boolean> =>
       new Promise<boolean>((resolve) => void host.clock.in(Math.max(0, ms), () => resolve(true))),
@@ -325,33 +366,26 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     weaken: hgw("weaken"),
 
     // --- rooting --------------------------------------------------------
-    brutessh: (hostname: string) => void (requireServer(host, hostname).sshPortOpen = true),
-    ftpcrack: (hostname: string) => void (requireServer(host, hostname).ftpPortOpen = true),
-    relaysmtp: (hostname: string) => void (requireServer(host, hostname).smtpPortOpen = true),
-    httpworm: (hostname: string) => void (requireServer(host, hostname).httpPortOpen = true),
-    sqlinject: (hostname: string) => void (requireServer(host, hostname).sqlPortOpen = true),
-    nuke: (hostname: string) => {
+    brutessh: (hostname: string): boolean => openPort(hostname, "BruteSSH.exe", "sshPortOpen"),
+    ftpcrack: (hostname: string): boolean => openPort(hostname, "FTPCrack.exe", "ftpPortOpen"),
+    relaysmtp: (hostname: string): boolean => openPort(hostname, "relaySMTP.exe", "smtpPortOpen"),
+    httpworm: (hostname: string): boolean => openPort(hostname, "HTTPWorm.exe", "httpPortOpen"),
+    sqlinject: (hostname: string): boolean => openPort(hostname, "SQLInject.exe", "sqlPortOpen"),
+    nuke: (hostname: string): boolean => {
       const server = requireServer(host, hostname);
-      const open = [
-        server.sshPortOpen,
-        server.ftpPortOpen,
-        server.smtpPortOpen,
-        server.httpPortOpen,
-        server.sqlPortOpen,
-      ].filter(Boolean).length;
-      if (open < (server.numOpenPortsRequired ?? 0)) {
-        throw new Error(`nuke: not enough open ports on ${hostname}`);
-      }
-      server.openPortCount = open;
+      if (server.hasAdminRights) return true;
+      if (!filesOn(host, "home").has("NUKE.exe")) return false;
+      if ((server.openPortCount ?? 0) < (server.numOpenPortsRequired ?? 0)) return false;
       server.hasAdminRights = true;
+      return true;
     },
   };
 
   // Partially-implemented namespaces: the gate batch reads exactly these, and
   // every other member of each reports itself.
-  impl["gang"] = namespace({ inGang: () => world.gates.inGang }, "gang");
-  impl["bladeburner"] = namespace({ inBladeburner: () => world.gates.inBladeburner }, "bladeburner");
-  impl["corporation"] = namespace({ hasCorporation: () => world.gates.hasCorporation }, "corporation");
+  impl["gang"] = namespace({ inGang: () => world.gates.inGang }, "gang", host, process);
+  impl["bladeburner"] = namespace({ inBladeburner: () => world.gates.inBladeburner }, "bladeburner", host, process);
+  impl["corporation"] = namespace({ hasCorporation: () => world.gates.hasCorporation }, "corporation", host, process);
   // The market, when a run wires one. Every getter reads the vendored `Stock`
   // objects directly, so a price, a spread or a forecast the strategy sees is
   // the same value the vendored price engine just wrote.
@@ -364,7 +398,6 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   if (host.stock) {
     const stock = host.stock;
     const requireTix = (fn: string): void => {
-      if (!stock.hasWseAccount) throw new Error(`${fn}: no WSE account`);
       if (!stock.hasTixApiAccess) throw new Error(`${fn}: no TIX API access`);
     };
     const requireForecast = (fn: string): void => {
@@ -431,7 +464,10 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         purchaseWseAccount: () => stock.purchaseWseAccount(),
         purchaseTixApi: () => stock.purchaseTixApi(),
         purchase4SMarketData: () => stock.purchase4SMarketData(),
-        purchase4SMarketDataTixApi: () => stock.purchase4SMarketDataTixApi(),
+        purchase4SMarketDataTixApi: () => {
+          requireTix("purchase4SMarketDataTixApi");
+          return stock.purchase4SMarketDataTixApi();
+        },
         // Not modelled: `processOrders` in the vendored price engine is a no-op,
         // so an order book would silently never fill. Reporting it is the honest
         // answer, and nothing in shared/strategy places one.
@@ -440,6 +476,8 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         cancelOrder: () => unmodeled("ns", "stock.cancelOrder", "limit/stop orders have no simulation model"),
       },
       "stock",
+      host,
+      process,
     );
   } else {
     impl["stock"] = namespace(
@@ -450,6 +488,8 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         has4SDataTixApi: () => world.gates.has4SDataTixApi,
       },
       "stock",
+      host,
+      process,
     );
   }
   impl["cloud"] = namespace({
@@ -477,7 +517,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       return name;
     },
     upgradeServer: (hostname: string, ram: number) => world.execute({ type: "upgradeServer", host: hostname, ram }),
-  }, "cloud");
+  }, "cloud", host, process);
   impl["go"] = namespace(
     {
       getGameState: () => {
@@ -491,6 +531,8 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       },
     },
     "go",
+    host,
+    process,
   );
 
   if (host.hacknet) {
@@ -538,21 +580,23 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         getHashUpgradeLevel: (name: string) => hacknet.hashLevels[name] ?? 0,
       },
       "hacknet",
+      host,
+      process,
     );
   }
 
   // Singularity, when the host wired a faction system. Absent in harnesses
   // that drive ns without one, where every member reports itself as usual.
   if (host.singularity) {
-    impl["singularity"] = namespace(host.singularity.singularity as Record<string, unknown>, "singularity");
-    impl["grafting"] = namespace(host.singularity.grafting, "grafting");
+    impl["singularity"] = namespace(host.singularity.singularity as Record<string, unknown>, "singularity", host, process);
+    impl["grafting"] = namespace(host.singularity.grafting, "grafting", host, process);
     impl["getFavorToDonate"] = host.singularity.getFavorToDonate;
     // `ns.enums` is a PROPERTY, not a function — a 0 GB read, and the
     // planner's only way to enumerate factions it has not been invited to.
     impl["enums"] = host.singularity.enums;
   }
 
-  return namespace(impl, "") as NS;
+  return namespace(impl, "", host, process) as NS;
 }
 
 export { ProcessTable, ScriptDeath, launch };

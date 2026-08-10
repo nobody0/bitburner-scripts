@@ -87,14 +87,14 @@ export class StockMarketSystem {
     // rolls its price, cap, spread, volatility and shareTxForMovement, and
     // `lastUpdate` is stamped from the clock.
     setMarketContext({ random: rng, now: () => world.clock.now() });
-    if (this.hasWseAccount) initStockMarket();
+    if (this.hasWseAccount || this.hasTixApiAccess) initStockMarket();
   }
 
   /** Engine hook, in updateGame's real order (second, right after processWork).
    *  Buffering, the 4 s floor and the 75-tick cycle all live inside the vendored
    *  function — this only forwards the cycles. */
   processPrices(cycles: number): void {
-    if (!this.hasWseAccount) return;
+    if (!this.hasWseAccount && !this.hasTixApiAccess) return;
     processStockPrices(cycles);
   }
 
@@ -112,7 +112,7 @@ export class StockMarketSystem {
    * and the single most important fact the strategy has to respect: a position
    * held through an install is destroyed, not sold. */
   prestige(): void {
-    if (this.hasWseAccount) initStockMarket();
+    if (this.hasWseAccount || this.hasTixApiAccess) initStockMarket();
   }
 
   // --- transactions (transcribed from BuyingAndSelling.tsx @ v3.0.1) --------
@@ -245,6 +245,7 @@ export class StockMarketSystem {
     const cost = getStockMarketTixApiCost();
     if (this.#player.money < cost) return false;
     this.hasTixApiAccess = true;
+    if (this.symbols().length === 0) initStockMarket();
     this.#player.money -= cost;
     this.#world.recordMoney("stock", -cost);
     this.#world.emit({ kind: "event", name: "stock.unlock", data: { what: "tix", cost } });
@@ -284,13 +285,13 @@ export class StockMarketSystem {
    *  figure, which is why BN8's zero player-cut leaves manipulation at full
    *  strength — the roll is against the fraction of `moneyMax` removed. */
   influenceHack(server: { organizationName: string; moneyMax: number }, moneyDrained: number): void {
-    if (!this.hasWseAccount) return;
+    if (!this.hasWseAccount && !this.hasTixApiAccess) return;
     influenceStockThroughServerHack(server, moneyDrained);
   }
 
   /** `grow(host, {stock: true})`. */
   influenceGrow(server: { organizationName: string; moneyMax: number }, moneyGrown: number): void {
-    if (!this.hasWseAccount) return;
+    if (!this.hasWseAccount && !this.hasTixApiAccess) return;
     influenceStockThroughServerGrow(server, moneyGrown);
   }
 

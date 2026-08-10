@@ -38,7 +38,7 @@ export interface SimProfile {
   /** Focused synthetic initial conditions. Kept separate from the common CLI
    * fields so profiles can pose a precise cross-feature experiment without
    * teaching the simulator a magic scenario name. */
-  world?: Pick<GameRunOptions, "network" | "person" | "playerState" | "factions">;
+  world?: Pick<GameRunOptions, "network" | "person" | "playerState" | "factions" | "companies" | "bladeburnerRank" | "homeFiles">;
 }
 
 export const FACTION_DONATION_TARGET = "Synaptic Enhancement Implant";

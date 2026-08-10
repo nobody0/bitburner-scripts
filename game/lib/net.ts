@@ -45,8 +45,7 @@ export function rootServers(stubNs: NS, hosts: string[], openers: string[]): str
     if (have.has("HTTPWorm.exe")) stubNs["httpworm"](host);
     if (have.has("SQLInject.exe")) stubNs["sqlinject"](host);
     try {
-      stubNs["nuke"](host);
-      rooted.push(host);
+      if (stubNs["nuke"](host)) rooted.push(host);
     } catch {
       /* not enough open ports after all — skip */
     }

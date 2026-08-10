@@ -14,6 +14,7 @@ import { StockMarket } from "../vendor/bitburner/src/StockMarket/MarketAdapter.t
 import { replaceCurrentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { getBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { SimWorld } from "../world.ts";
+import { DEFAULT_NETWORK } from "../network.ts";
 
 /** Our MODEL of the market, against the market.
  *
@@ -61,6 +62,39 @@ beforeEach(() => {
 });
 
 describe("the price tick", () => {
+  test("TIX access alone initializes and advances the market, as canAccessStockMarket permits", () => {
+    const world = makeWorld(43);
+    const market = new StockMarketSystem(world, world.player, mulberry32(12), { hasTixApiAccess: true });
+    expect(market.hasWseAccount).toBe(false);
+    expect(market.symbols().length).toBeGreaterThan(0);
+    const stock = market.stock(market.symbols()[0]!)!;
+    const before = stock.price;
+    tick(world, market);
+    expect(stock.price).not.toBe(before);
+  });
+
+  test("real default-network HGW manipulation reaches the matching organization stock", () => {
+    const world = new SimWorld({ seed: 41, network: DEFAULT_NETWORK });
+    const market = new StockMarketSystem(world, world.player, mulberry32(99), {
+      hasWseAccount: true,
+      hasTixApiAccess: true,
+      has4SDataTixApi: true,
+    });
+    world.stockSystem = market;
+    const server = world.servers.get("foodnstuff")!;
+    const stock = market.symbols().map((symbol) => market.stock(symbol)!).find((entry) => entry.name === "FoodNStuff")!;
+    expect(server.organizationName).toBe("FoodNStuff");
+    server.hasAdminRights = true;
+    server.moneyAvailable = server.moneyMax;
+    server.hackDifficulty = server.minDifficulty;
+    const before = stock.otlkMagForecast;
+
+    world.person.skills.hacking = 1_000_000_000;
+    world.land("hack", "foodnstuff", 1_000_000, 1, true);
+
+    expect(stock.otlkMagForecast).toBeLessThan(before);
+  });
+
   test("a tick needs BOTH the buffered cycles and the 4 s floor, and cycles BUFFER", () => {
     const { world, market } = makeMarket();
     const before = market.stock("ECP")!.price;

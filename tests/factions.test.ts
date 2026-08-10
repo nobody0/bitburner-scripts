@@ -292,33 +292,27 @@ describe("augmentation pricing", () => {
     expect(owned2.repCost).toBeCloseTo(1000 * 1.69, 10);
   });
 
-  test("a NeuroFlux chain pays the queue multiplier ONCE, then 1.14 per level", () => {
-    // The game's 1.9^queued exponent is queuedAugmentations.length — one entry
-    // per NAME with a level field, so ten queued NFG levels contribute exactly
-    // one. Simulate the drain's ladder the way the driver evolves the context:
-    // one non-NFG aug already queued, then successive NFG purchases.
+  test("every NeuroFlux purchase pays both the queue and level multipliers", () => {
+    // queueAugmentation appends a distinct PlayerOwnedAugmentation for every
+    // NeuroFlux level, so each purchase increases both exponents.
     const nfg = aug(NEUROFLUX, { baseCost: 750_000, baseRepRequirement: 500 });
     const prices: number[] = [];
     for (let level = 0; level < 5; level++) {
       const ctx = priceCtx({
-        // 1 for the pre-queued non-NFG aug, +1 for NFG once any level is queued.
-        queuedNonSoA: 1 + (level > 0 ? 1 : 0),
+        queuedNonSoA: 1 + level,
         neurofluxLevel: level,
-        ...(level > 0 ? { queuedNeuroflux: true } : {}),
       });
       prices.push(augCost(nfg, ctx).moneyCost);
     }
-    // First purchase joins the queue: x1.9 x1.14 = x2.166. Every later level
-    // pays only its own 1.14. This is the exact ladder the sim charges
-    // (sim/ns/singularity.ts priceOf); the old per-level 1.9 compounding made
-    // the drain price itself out ~8 levels early.
+    // Every adjacent level is x1.14 for NFG level and x1.9 for the new queue
+    // entry (before the Source File 11 discount).
     expect(prices[1]! / prices[0]!).toBeCloseTo(1.9 * 1.14, 10);
-    expect(prices[2]! / prices[1]!).toBeCloseTo(1.14, 10);
-    expect(prices[3]! / prices[2]!).toBeCloseTo(1.14, 10);
-    expect(prices[4]! / prices[3]!).toBeCloseTo(1.14, 10);
+    expect(prices[2]! / prices[1]!).toBeCloseTo(1.9 * 1.14, 10);
+    expect(prices[3]! / prices[2]!).toBeCloseTo(1.9 * 1.14, 10);
+    expect(prices[4]! / prices[3]!).toBeCloseTo(1.9 * 1.14, 10);
   });
 
-  test("totalCost counts NeuroFlux into the queue exponent at most once", () => {
+  test("totalCost counts every NeuroFlux purchase in the queue exponent", () => {
     const nfg = aug(NEUROFLUX, { baseCost: 750_000, baseRepRequirement: 500 });
     const order = [
       { name: NEUROFLUX, aug: nfg, faction: "CyberSec" },
@@ -326,14 +320,16 @@ describe("augmentation pricing", () => {
       { name: NEUROFLUX, aug: nfg, faction: "CyberSec" },
     ];
     // Fresh context: level 0, nothing queued. Expected:
-    //   level 0 at 1.9^0, then levels 1 and 2 at 1.9^1 (NFG now queued once).
+    //   level 0 at 1.9^0, level 1 at 1.9^1, level 2 at 1.9^2.
     const fresh = totalCost(order, priceCtx());
-    const expectedFresh = 750_000 * (1 + 1.14 * 1.9 + 1.14 ** 2 * 1.9);
+    const expectedFresh = 750_000 * (1 + 1.14 * 1.9 + 1.14 ** 2 * 1.9 ** 2);
     expect(fresh).toBeCloseTo(expectedFresh, 6);
-    // NFG already queued in the context: its 1.9 is already inside
-    // queuedNonSoA, so no placed level may add another.
-    const queued = totalCost(order, priceCtx({ queuedNonSoA: 1, neurofluxLevel: 1, queuedNeuroflux: true }));
-    const expectedQueued = 750_000 * 1.9 * (1.14 + 1.14 ** 2 + 1.14 ** 3);
+    // One NFG already queued in the context; projected purchases continue to
+    // add one queue entry apiece.
+    const queued = totalCost(order, priceCtx({ queuedNonSoA: 1, neurofluxLevel: 1 }));
+    const expectedQueued = 750_000 * (
+      1.14 * 1.9 + 1.14 ** 2 * 1.9 ** 2 + 1.14 ** 3 * 1.9 ** 3
+    );
     expect(queued).toBeCloseTo(expectedQueued, 6);
   });
 });

@@ -123,19 +123,13 @@ export interface AugInfo {
 }
 
 export interface PriceContext {
-  /** Non-SoA augmentation NAMES already queued this run. One per name: the
-   * game's 1.9x escalation exponent is `queuedAugmentations.length`, and that
-   * array holds one entry per name with a level field — ten queued NeuroFlux
-   * levels contribute exactly one. */
+  /** Non-SoA augmentation purchases already queued this run. Every NeuroFlux
+   * purchase is a separate queue entry and contributes to the exponent. */
   queuedNonSoA: number;
   /** SoA augmentations already OWNED. */
   ownedSoA: number;
   /** Current NeuroFlux level. */
   neurofluxLevel: number;
-  /** True when NeuroFlux is already among the queued names — its single 1.9x
-   * contribution is then already inside `queuedNonSoA`, and a projection that
-   * places further levels must not add another. */
-  queuedNeuroflux?: boolean;
   sf11Level: number;
   /** currentNodeMults.AugmentationMoneyCost / AugmentationRepCost. */
   augMoneyCost: number;
@@ -365,21 +359,11 @@ export function totalCost(order: readonly PurchaseCandidate[], ctx: PriceContext
   let total = 0;
   let nonSoA = 0;
   let neuroflux = ctx.neurofluxLevel;
-  // NeuroFlux joins the queue-escalation exponent ONCE, on its first placed
-  // level — and not even then when it is already queued in the context.
-  let nfgCounted = ctx.queuedNeuroflux === true;
   for (const candidate of order) {
     const local: PriceContext = { ...ctx, neurofluxLevel: neuroflux };
     total += augCost(candidate.aug, local, nonSoA).moneyCost;
-    if (candidate.name === NEUROFLUX) {
-      neuroflux++;
-      if (!nfgCounted) {
-        nfgCounted = true;
-        nonSoA++;
-      }
-    } else if (!isSoA(candidate.name)) {
-      nonSoA++;
-    }
+    if (candidate.name === NEUROFLUX) neuroflux++;
+    if (!isSoA(candidate.name)) nonSoA++;
   }
   return total;
 }
@@ -429,21 +413,11 @@ function costAt(
 ): number {
   let nonSoA = 0;
   let neuroflux = ctx.neurofluxLevel;
-  // Same single-count rule as totalCost: placed NeuroFlux levels raise the
-  // level multiplier each, but the queue exponent at most once.
-  let nfgCounted = ctx.queuedNeuroflux === true;
   for (let i = 0; i < candidates.length; i++) {
     if ((mask & (1 << i)) === 0) continue;
     const name = candidates[i]!.name;
-    if (name === NEUROFLUX) {
-      neuroflux++;
-      if (!nfgCounted) {
-        nfgCounted = true;
-        nonSoA++;
-      }
-    } else if (!isSoA(name)) {
-      nonSoA++;
-    }
+    if (name === NEUROFLUX) neuroflux++;
+    if (!isSoA(name)) nonSoA++;
   }
   return augCost(candidates[index]!.aug, { ...ctx, neurofluxLevel: neuroflux }, nonSoA).moneyCost;
 }

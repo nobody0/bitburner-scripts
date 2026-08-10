@@ -189,6 +189,8 @@ export interface FactionsState {
    *  string. The strategy must INTERPRET these (an OR branch is not an AND),
    *  so a stringified form would be useless to it. */
   requirements?: Record<string, PlayerRequirement[]>;
+  /** Home literature/message filenames used by file invitation requirements. */
+  files?: string[];
   /** Evaluated invite requirements, per faction. The strategy's own reading of
    *  `requirements` against the current player — reported rather than
    *  re-derived in the viewer, so there is one interpretation of an OR branch

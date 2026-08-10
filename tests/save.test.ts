@@ -81,6 +81,8 @@ function buildSaveJson(options: FixtureOptions = {}): string {
     {
       home: server({
         hostname: "home",
+        programs: ["NUKE.exe", "BruteSSH.exe"],
+        messages: ["hackers-starting-handbook.lit", "j0.msg"],
         maxRam: 64,
         cpuCores: 4,
         hasAdminRights: true,
@@ -94,6 +96,7 @@ function buildSaveJson(options: FixtureOptions = {}): string {
       }),
       n00dles: server({
         hostname: "n00dles",
+        organizationName: "Noodle Bar",
         maxRam: 4,
         moneyAvailable: 70_000,
         moneyMax: 1_750_000,
@@ -210,6 +213,7 @@ describe("decoding a save", () => {
     expect(snapshot.player.hasGang).toBe(false);
     expect(snapshot.player.hasCorporation).toBe(false);
     expect(snapshot.player.hasBladeburner).toBe(true);
+    expect(snapshot.player.bladeburnerRank).toBe(40);
     expect(snapshot.player.sleeveCount).toBe(2);
   });
 
@@ -328,5 +332,9 @@ describe("seeding a simulation from a save", () => {
     expect(seed.playerState.queuedAugmentations).toEqual([{ name: "PCMatrix", level: 1 }]);
     expect(seed.playerState.sourceFiles).toEqual({ "1": 3 });
     expect(seed.factions["CyberSec"]).toEqual({ rep: 1_000_000, favor: 20 });
+    expect(seed.companies["Noodle Bar"]).toBe(100_000);
+    expect(seed.bladeburnerRank).toBe(40);
+    expect(seed.homeFiles).toEqual(["NUKE.exe", "BruteSSH.exe", "hackers-starting-handbook.lit", "j0.msg"]);
+    expect(seed.servers.find((server) => server.hostname === "n00dles")?.organizationName).toBe("Noodle Bar");
   });
 });

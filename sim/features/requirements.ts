@@ -24,8 +24,7 @@ export interface SatisfyContext {
   companyRep: (name: string) => number;
   bitNode: number;
   hacknet: { ram: number; cores: number; levels: number };
-  bladeburnerRank: number;
-  numInfiltrations: number;
+  bladeburnerRank: () => number;
   files: ReadonlySet<string>;
 }
 
@@ -98,10 +97,10 @@ export function satisfies(requirement: PlayerRequirement, ctx: SatisfyContext): 
       return (player.sourceFiles[String(requirement.sourceFile)] ?? 0) > 0;
 
     case "bladeburnerRank":
-      return ctx.bladeburnerRank >= requirement.bladeburnerRank;
+      return ctx.bladeburnerRank() >= requirement.bladeburnerRank;
 
     case "numInfiltrations":
-      return ctx.numInfiltrations >= requirement.numInfiltrations;
+      return [...player.factions, ...player.factionInvitations].includes("Shadows of Anarchy");
 
     case "not":
       return !satisfies(requirement.condition, ctx);

@@ -17,6 +17,7 @@ import { JobName } from "../vendor/bitburner/src/Work/Enums.ts";
 import { AugmentationName } from "../vendor/bitburner/src/Augmentation/Enums.ts";
 import { calculateHackingTime } from "../vendor/bitburner/src/Hacking.ts";
 import { getUpgradeHomeRamCost } from "../core/effects.ts";
+import { CONSTANTS } from "../vendor/bitburner/src/Constants.ts";
 
 /** The `ns.singularity` namespace, plus `ns.getFavorToDonate` and `ns.enums`.
  *
@@ -38,6 +39,8 @@ export interface SingularityDeps {
   bitNode: number;
   /** Current hostname of the terminal's connection, for backdoors. */
   terminal: { host: string };
+  /** The actual server graph. Singularity.connect is a terminal hop, not a teleport. */
+  network: Map<string, string[]>;
   crimes: CrimeSystem;
   grafting?: GraftingSystem;
   satisfyContext(): SatisfyContext;
@@ -91,15 +94,20 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
   };
 
   const queuedNonSoA = (): number =>
-    [...player.queuedAugmentations.keys()].filter((name) => !SOA_SET.has(name)).length;
+    [...player.queuedAugmentations].reduce(
+      (total, [name, purchases]) => total + (SOA_SET.has(name) ? 0 : purchases),
+      0,
+    );
 
   const priceOf = (name: string): { moneyCost: number; repCost: number } => {
     const aug = AUGMENTATION_TABLE[name];
     if (!aug) return { moneyCost: Infinity, repCost: Infinity };
-    const generic = Math.pow(1.9, queuedNonSoA());
+    const sf11 = Math.min(3, Math.max(0, player.sourceFiles["11"] ?? 0));
+    const genericBase = CONSTANTS.MultipleAugMultiplier * [1, 0.96, 0.94, 0.93][sf11]!;
+    const generic = Math.pow(genericBase, queuedNonSoA());
     if (name === "NeuroFlux Governor") {
       const level = (player.augmentations.get(name) ?? 0) + (player.queuedAugmentations.get(name) ?? 0);
-      const multiplier = Math.pow(1.14, level);
+      const multiplier = Math.pow(CONSTANTS.NeuroFluxGovernorLevelMult, level);
       return {
         repCost: aug.baseRepRequirement * multiplier * currentNodeMults.AugmentationRepCost,
         moneyCost: aug.baseCost * multiplier * currentNodeMults.AugmentationMoneyCost * generic,
@@ -357,17 +365,20 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
     connect: (hostname: string): boolean => {
       const server = world.servers.get(hostname);
       if (!server) return false;
-      // The game requires adjacency or a backdoor; the sim network is a star
-      // from home, so adjacency is "home or a neighbour of the current host".
+      const adjacent = deps.network.get(deps.terminal.host)?.includes(hostname) ?? false;
+      if (!adjacent && !server.backdoorInstalled && !server.purchasedByPlayer) return false;
       deps.terminal.host = hostname;
       return true;
     },
 
     installBackdoor: async (): Promise<void> => {
       const server = world.servers.get(deps.terminal.host);
-      if (!server) return;
-      if (!server.hasAdminRights) return;
-      if (world.person.skills.hacking < (server.requiredHackingSkill ?? 0)) return;
+      if (!server) throw new Error(`installBackdoor: server '${deps.terminal.host}' does not exist`);
+      if (server.purchasedByPlayer) throw new Error("installBackdoor: cannot backdoor a purchased server");
+      if (!server.hasAdminRights) throw new Error(`installBackdoor: no root access on '${server.hostname}'`);
+      if (world.person.skills.hacking < (server.requiredHackingSkill ?? 0)) {
+        throw new Error(`installBackdoor: hacking level is too low for '${server.hostname}'`);
+      }
       // Backdoor takes hackingTime/4 (src/Terminal/commands/backdoor.ts).
       const ms = (calculateHackingTime(server, world.person) * 1000) / 4;
       await new Promise<void>((resolve) => clock.in(ms, resolve));

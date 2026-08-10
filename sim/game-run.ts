@@ -22,7 +22,7 @@ import { makeSingularity } from "./ns/singularity.ts";
 import { launch, makeSimNs, type ScriptMain, type SimNsHost } from "./ns/api.ts";
 import { ProcessTable } from "./ns/process.ts";
 import { installVirtualTime } from "./realm/timers.ts";
-import { resetUnmodeled, setUnmodeledReporter, unmodeledCounts } from "./realm/unmodeled.ts";
+import { resetUnmodeled, setUnmodeledReporter, unmodeled, unmodeledCounts } from "./realm/unmodeled.ts";
 import { SimWorld, type GateFlags, type SimOptions } from "./world.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 
@@ -55,6 +55,11 @@ export interface GameRunOptions {
   person?: SimOptions["person"];
   playerState?: SimPlayerOptions;
   factions?: Record<string, { rep: number; favor: number }>;
+  /** Synthetic equivalents of save-only invitation state. A genuinely fresh
+   * world has exact zero/empty defaults. */
+  companies?: Record<string, number>;
+  bladeburnerRank?: number;
+  homeFiles?: string[];
   gates?: Partial<GateFlags>;
   /** Initial conditions from a real save (shared/save/to-sim.ts). Supplies the
    *  BitNode, source files, fleet, topology, player stats and gate flags —
@@ -70,6 +75,12 @@ export interface GameRunOptions {
   label?: string;
   verbose?: boolean;
   onRecord?: (line: string) => void;
+}
+
+/** Singularity RAM is governed only by active SF4 (or BN4 inside getRamCost),
+ * never by the Source File associated with the current BitNode. */
+export function ramCostContext(bitNode: number, sourceFiles: Readonly<Record<string, number>>) {
+  return { bitNode, sf4Level: sourceFiles["4"] ?? 0 };
 }
 
 export interface GameRunResult {
@@ -196,6 +207,11 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   const factions = new FactionSystem(world, world.player, options.factions ?? save?.factions);
   const terminal = { host: "home" };
   const hasTor = { value: false };
+  const initialHomeFiles = new Set(
+    save
+      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
+      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
+  );
   // Netburners' requirements are hacknet totals, so they have to be real
   // rather than the zeros a stub would report.
   const hacknetTotals = (): { ram: number; cores: number; levels: number } =>
@@ -209,7 +225,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     person: world.person,
     servers: world.servers,
     factionRep: (name) => factions.get(name)?.rep ?? 0,
-    companyRep: () => 0,
+    companyRep: (name) => options.companies?.[name] ?? save?.companies[name] ?? 0,
     bitNode: bitnode,
     // Not modelled yet; these feed requirements only, and reporting 0 is the
     // truth for a run with no hacknet rather than a fabricated value.
@@ -218,9 +234,13 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       cores: hacknetTotals().cores,
       levels: hacknetTotals().levels,
     },
-    bladeburnerRank: 0,
-    numInfiltrations: 0,
-    files: new Set<string>(),
+    bladeburnerRank: () => {
+      if (!world.gates.inBladeburner) return 0;
+      if (options.bladeburnerRank !== undefined) return options.bladeburnerRank;
+      if (save?.bladeburnerRank !== undefined) return save.bladeburnerRank;
+      return unmodeled("subsystem", "bladeburner.rank", "Bladeburner exists but its rank was not seeded");
+    },
+    files: initialHomeFiles,
   });
 
   const crimes = new CrimeSystem(world, world.player, world.crimeRng);
@@ -296,13 +316,13 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     world,
     clock,
     processes: new ProcessTable(world.servers, clock),
-    files: new Map([["home", new Set([START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt"])]]),
+    files: new Map([["home", initialHomeFiles]]),
     // Empty build id: the controller's self-update branch compares against its
     // own __BUILD_ID__ and skips when the pushed value is blank.
     contents: new Map([["home\0build-id.txt", ""]]),
     scripts: new Map<string, ScriptMain>(),
     network,
-    ramCtx: { bitNode: bitnode, sf4Level: bitnode === 4 ? 0 : sourceFileLevel },
+    ramCtx: ramCostContext(bitnode, world.player.sourceFiles),
     reset: buildResetInfo(bitnode, sourceFileLevel, world.player.augmentations, save),
     output: [],
     crashes: [],
@@ -316,6 +336,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       clock,
       bitNode: bitnode,
       terminal,
+      network,
       crimes,
       grafting,
       satisfyContext,

@@ -208,6 +208,7 @@ export function getUpgradeHomeCoresCost(currentCores: number): number {
 // the live fields at world creation.
 export interface ServerSpec {
   hostname: string;
+  organizationName?: string;
   hackDifficulty: number;
   moneyAvailable: number;
   requiredHackingSkill: number;
@@ -219,6 +220,7 @@ export interface ServerSpec {
 export function serverFromSpec(spec: ServerSpec, base: SimServer): SimServer {
   const realDifficulty = spec.hackDifficulty * currentNodeMults.ServerStartingSecurity;
   base.hostname = spec.hostname;
+  base.organizationName = spec.organizationName ?? "";
   base.maxRam = spec.maxRam;
   base.requiredHackingSkill = spec.requiredHackingSkill;
   base.moneyAvailable = spec.moneyAvailable * currentNodeMults.ServerStartingMoney;

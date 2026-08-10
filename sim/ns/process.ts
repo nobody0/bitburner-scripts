@@ -40,6 +40,8 @@ export interface SimProcess {
   /** Clock id of the netscriptDelay this process is currently blocked in. */
   delay?: number;
   delayReject?: (err: unknown) => void;
+  /** Netscript function currently suspended in netscriptDelay. */
+  runningFn?: string;
 }
 
 export interface ProcessInfo {
@@ -82,7 +84,7 @@ export class ProcessTable {
    * unknown or out of RAM — the caller turns that into exec's `0` pid. */
   start(spec: StartSpec): SimProcess | undefined {
     const server = this.#servers.get(spec.host);
-    if (!server) return undefined;
+    if (!server?.hasAdminRights) return undefined;
     const ramGb = spec.ramPerThreadGb * spec.threads;
     // roundToTwo, as the game does, so float drift cannot make a host look full.
     const used = Math.round((server.ramUsed + ramGb) * 100) / 100;
@@ -164,6 +166,7 @@ export class ProcessTable {
     }
     if (cancelled) process.delayReject?.(new ScriptDeath(process.pid));
     process.delayReject = undefined;
+    process.runningFn = undefined;
 
     // Cleared before iterating: calling exit from inside atExit would recurse.
     const handlers = [...process.atExit.values()];

@@ -93,7 +93,13 @@ export class SimPlayer {
     this.factionInvitations = [...(options.factionInvitations ?? [])];
     this.sourceFiles = { ...(options.sourceFiles ?? {}) };
     this.augmentations = new Map((options.augmentations ?? []).map((a) => [a.name, a.level]));
-    this.queuedAugmentations = new Map((options.queuedAugmentations ?? []).map((a) => [a.name, a.level]));
+    this.queuedAugmentations = new Map();
+    for (const augmentation of options.queuedAugmentations ?? []) {
+      this.queuedAugmentations.set(
+        augmentation.name,
+        (this.queuedAugmentations.get(augmentation.name) ?? 0) + 1,
+      );
+    }
   }
 
   startWork(work: Omit<SimWork, "nextCompletion" | "resolveNextCompletion">): void {

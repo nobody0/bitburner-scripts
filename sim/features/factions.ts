@@ -194,17 +194,34 @@ export class FactionSystem {
     faction.rep += this.workRepGain(type, faction.favor) * focusPenalty * cycles;
     work.cyclesWorked += cycles;
 
-    // Experience AFTER reputation, matching FactionWork.tsx.
+    // FactionWorkStats -> calculateFactionExp -> applyWorkStats, including the
+    // 5-cycle-per-second divisor, stat-specific exp multipliers, node
+    // multiplier, focus penalty, and immediate skill recalculation.
     const person = this.#world.person;
-    const expRate = 0.15 * cycles;
-    if (type === "hacking") person.exp.hacking += expRate;
-    else {
-      person.exp.strength += expRate;
-      person.exp.defense += expRate;
-      person.exp.dexterity += expRate;
-      person.exp.agility += expRate;
-      if (type === "field") person.exp.charisma += expRate;
+    const base = type === "hacking"
+      ? { hacking: 2 }
+      : type === "field"
+        ? { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 }
+        : { hacking: 0.5, strength: 1.5, defense: 1.5, dexterity: 1.5, agility: 1.5 };
+    const expMults: Record<string, string> = {
+      hacking: "hacking_exp",
+      strength: "strength_exp",
+      defense: "defense_exp",
+      dexterity: "dexterity_exp",
+      agility: "agility_exp",
+      charisma: "charisma_exp",
+    };
+    const exp = person.exp as unknown as Record<string, number>;
+    const mults = person.mults as unknown as Record<string, number>;
+    for (const [skill, amount] of Object.entries(base)) {
+      exp[skill] = (exp[skill] ?? 0) + amount
+        * (mults[expMults[skill]!] ?? 1)
+        * currentNodeMults.FactionWorkExpGain
+        / 5
+        * focusPenalty
+        * cycles;
     }
+    this.#world.recalculateSkills();
   }
 
   /** `donate` @ v3.0.1. Returns the reputation gained, or 0 when refused. */

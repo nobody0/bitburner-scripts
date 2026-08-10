@@ -149,6 +149,8 @@ function decodeServer(hostname: string, raw: unknown): SaveServer {
   const server: SaveServer = { ...SERVER_DEFAULTS, hostname, serversOnNetwork: [] };
   server.kind = str(bag["__ctor"], "Server");
   server.organizationName = str(bag["organizationName"], SERVER_DEFAULTS.organizationName);
+  server.programs = strList(bag["programs"]);
+  server.messages = strList(bag["messages"]);
   server.hasAdminRights = bool(bag["hasAdminRights"]);
   server.backdoorInstalled = bool(bag["backdoorInstalled"]);
   server.purchasedByPlayer = bool(bag["purchasedByPlayer"]);
@@ -201,6 +203,8 @@ function decodePlayer(raw: unknown): SavePlayer {
   const hp = asBag(bag["hp"]);
   const sleeves = bag["sleeves"];
   const hashManager = asBag(bag["hashManager"]);
+  const bladeburner = asBag(bag["bladeburner"]);
+  const hasBladeburner = bag["bladeburner"] !== null && bag["bladeburner"] !== undefined;
   const hacknetNodes = Array.isArray(bag["hacknetNodes"])
     ? (bag["hacknetNodes"] as unknown[]).flatMap((rawNode): (string | SaveHacknetNode)[] => {
         if (typeof rawNode === "string") return [rawNode];
@@ -243,7 +247,10 @@ function decodePlayer(raw: unknown): SavePlayer {
     // null when the mechanic was never started; a wrapped object otherwise.
     hasGang: bag["gang"] !== null && bag["gang"] !== undefined,
     hasCorporation: bag["corporation"] !== null && bag["corporation"] !== undefined,
-    hasBladeburner: bag["bladeburner"] !== null && bag["bladeburner"] !== undefined,
+    hasBladeburner,
+    ...(hasBladeburner && typeof bladeburner["rank"] === "number"
+      ? { bladeburnerRank: bladeburner["rank"] }
+      : {}),
     sleeveCount: Array.isArray(sleeves) ? sleeves.length : 0,
     playtimeSinceLastBitnode: num(bag["playtimeSinceLastBitnode"], 0),
     totalPlaytime: num(bag["totalPlaytime"], 0),

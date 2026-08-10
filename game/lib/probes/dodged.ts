@@ -279,11 +279,19 @@ const factionRequirements: DodgedProbe = {
         acc["requirements"] = requirements;
       },
     },
+    {
+      id: "files",
+      methods: ["ls"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        acc["files"] = stubNs.ls("home").filter((file) => file.endsWith(".lit") || file.endsWith(".msg"));
+      },
+    },
   ],
   finish(acc) {
     return [
       emitPartial("factions", {
         requirements: (acc["requirements"] ?? {}) as never,
+        files: (acc["files"] ?? []) as string[],
       }),
     ];
   },

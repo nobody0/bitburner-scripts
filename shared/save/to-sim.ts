@@ -10,6 +10,7 @@ import type { SaveSnapshot, SaveServer } from "./snapshot.ts";
 
 export interface SaveSeedServer {
   hostname: string;
+  organizationName: string;
   hasAdminRights: boolean;
   purchasedByPlayer: boolean;
   backdoorInstalled: boolean;
@@ -49,6 +50,9 @@ export interface SaveSeed {
    *  the capability gates key off. */
   sourceFileLevel: number;
   sourceFiles: Record<string, number>;
+  companies: Record<string, number>;
+  bladeburnerRank?: number;
+  homeFiles: string[];
   bitNodeOptions: SaveSnapshot["bitNodeOptions"];
   homeRam: number;
   homeCores: number;
@@ -129,6 +133,7 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
     });
     servers.push({
       hostname: server.hostname,
+      organizationName: server.organizationName,
       hasAdminRights: server.hasAdminRights,
       purchasedByPlayer: server.purchasedByPlayer,
       backdoorInstalled: server.backdoorInstalled,
@@ -155,6 +160,13 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
     bitnode: snapshot.bitNode,
     sourceFileLevel: sfLevel(snapshot.activeSourceFiles, snapshot.bitNode),
     sourceFiles: snapshot.activeSourceFiles,
+    companies: Object.fromEntries(
+      Object.entries(snapshot.companies).map(([name, standing]) => [name, standing.playerReputation ?? 0]),
+    ),
+    ...(snapshot.player.bladeburnerRank !== undefined
+      ? { bladeburnerRank: snapshot.player.bladeburnerRank }
+      : {}),
+    homeFiles: home ? [...home.programs, ...home.messages] : [],
     bitNodeOptions: snapshot.bitNodeOptions,
     homeRam: home?.maxRam ?? 8,
     homeCores: home?.cpuCores ?? 1,

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { Server } from "@ns";
 import { homeDodgeBudget } from "../../game/lib/probe-runner.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
-import { runGame } from "../game-run.ts";
+import { ramCostContext, runGame } from "../game-run.ts";
 import { getRamCost } from "../ns/ram-costs.ts";
 
 /** The synthetic ns exists to run game/ for real. These pin the mechanics that
@@ -47,6 +47,12 @@ describe("ram costs", () => {
     expect(getRamCost("singularity.getFactionRep", { sf4Level: 2 })).toBe(4);
     expect(getRamCost("singularity.getFactionRep", { sf4Level: 3 })).toBe(1);
     expect(getRamCost("singularity.getFactionRep", { bitNode: 4 })).toBe(1);
+  });
+
+  test("the game harness does not confuse the current node's Source File with SF4", () => {
+    expect(getRamCost("singularity.getFactionRep", ramCostContext(5, { "5": 3 }))).toBe(16);
+    expect(getRamCost("singularity.getFactionRep", ramCostContext(5, { "4": 2, "5": 3 }))).toBe(4);
+    expect(getRamCost("singularity.getFactionRep", ramCostContext(4, {}))).toBe(1);
   });
 
   test("an unknown name costs 0, exactly as getRamCost reports it", () => {

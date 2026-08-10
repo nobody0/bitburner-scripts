@@ -30,6 +30,8 @@ import {
 import { currentNodeMults, replaceCurrentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { getBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { mockPerson } from "../core/mocks.ts";
+import { FactionSystem } from "../features/factions.ts";
+import { SimWorld } from "../world.ts";
 
 /** Bit-identity against the vendored originals, with `toBe` rather than
  * `toBeCloseTo`.
@@ -213,4 +215,44 @@ describe("focus penalty", () => {
     const ctx = { ...CTX, hasFocusAug: true };
     expect(workRepPerSec("hacking", p, 0, ctx, false)).toBe(workRepPerSec("hacking", p, 0, ctx, true));
   });
+});
+
+describe("simulated faction work experience", () => {
+  for (const [type, base] of Object.entries({
+    hacking: { hacking: 2 },
+    field: { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 },
+    security: { hacking: 0.5, strength: 1.5, defense: 1.5, dexterity: 1.5, agility: 1.5 },
+  })) {
+    test(`${type} uses the upstream stat table, multipliers, focus, and immediate skill gain`, () => {
+      replaceCurrentNodeMults(getBitNodeMultipliers(1, 1));
+      const world = new SimWorld({ seed: 9, playerState: { factions: ["CyberSec"] } });
+      const factions = new FactionSystem(world, world.player);
+      const focused = type !== "field";
+      const beforeExp = { ...world.person.exp } as unknown as Record<string, number>;
+      const beforeSkills = { ...world.person.skills } as unknown as Record<string, number>;
+      world.player.startWork({
+        kind: "faction",
+        subject: "CyberSec",
+        workType: type as "hacking" | "field" | "security",
+        startedAt: 0,
+        cyclesWorked: 0,
+        focused,
+      });
+
+      factions.processWork(5);
+
+      const exp = world.person.exp as unknown as Record<string, number>;
+      const mults = world.person.mults as unknown as Record<string, number>;
+      const multName: Record<string, string> = {
+        hacking: "hacking_exp", strength: "strength_exp", defense: "defense_exp",
+        dexterity: "dexterity_exp", agility: "agility_exp", charisma: "charisma_exp",
+      };
+      for (const [skill, amount] of Object.entries(base)) {
+        const expected = amount * (mults[multName[skill]!] ?? 1) * (focused ? 1 : 0.8);
+        expect(exp[skill]! - beforeExp[skill]!, skill).toBeCloseTo(expected, 12);
+      }
+      expect(world.player.currentWork?.cyclesWorked).toBe(5);
+      expect((world.person.skills as unknown as Record<string, number>).hacking).toBeGreaterThanOrEqual(beforeSkills.hacking!);
+    });
+  }
 });

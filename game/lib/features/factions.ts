@@ -103,8 +103,7 @@ function requirementView(state: GameState): RequirementView {
   for (const server of Object.values(servers)) {
     if (server.backdoorInstalled) backdoored.add(server.hostname);
   }
-  // Literature and message files live on home.
-  const files = new Set<string>();
+  const files = new Set(factions?.files ?? []);
 
   const owned = new Set(factions?.ownedAugs ?? []);
   return {
@@ -263,13 +262,9 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     const queuedCount = Math.max(0, count - installedEntry);
     if (queuedCount > 0) {
       queuedAugs.add(name);
-      // ONE per distinct name, not per level: the game's 1.9x queue escalation
-      // exponent is queuedAugmentations.length, and that array holds one entry
-      // per NAME with a level field — ten queued NeuroFlux levels contribute
-      // exactly one. Counting levels here charged the plan an extra x1.9 per
-      // level (x2.166 observed vs the game's x1.14), so the final-sweep drain
-      // priced itself out ~8 levels early and installed with cash unspent.
-      if (!isSoA(name)) queuedNonSoA += 1;
+      // Player.queueAugmentation appends one queue entry per NeuroFlux level,
+      // so repeated purchases each increase the generic price exponent.
+      if (!isSoA(name)) queuedNonSoA += queuedCount;
     }
   }
   const installedNeuroflux = installed[NEUROFLUX] ?? 0;
@@ -279,7 +274,6 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     queuedNonSoA,
     ownedSoA: [...owned].filter(isSoA).length,
     neurofluxLevel: installedNeuroflux + queuedNeuroflux,
-    ...(queuedNeuroflux > 0 ? { queuedNeuroflux: true } : {}),
     sf11Level: sfLevel(caps.sourceFiles, 11),
     augMoneyCost: nodeMults["AugmentationMoneyCost"] ?? 1,
     augRepCost: nodeMults["AugmentationRepCost"] ?? 1,
