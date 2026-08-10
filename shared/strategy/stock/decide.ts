@@ -1033,8 +1033,12 @@ function planManipulation(params: {
     if (speculative) {
       const notional = Math.min(view.totalMoney, view.totalMoney * MAX_SYMBOL_FRACTION);
       // Push in the direction the symbol already leans, so the manufactured
-      // edge and the natural drift add instead of fighting.
-      const side: PositionSide = speculative.ranked.forecast >= 0.5 ? "long" : "short";
+      // edge and the natural drift add instead of fighting — unless shorting
+      // is locked (no BN8/SF8.2): the entry gate can never open a short
+      // then, and a standing down-push would manufacture an edge nobody can
+      // buy while keeping the long side below the entry band all run.
+      const side: PositionSide =
+        speculative.ranked.forecast >= 0.5 || !view.canShort ? "long" : "short";
       consider(speculative.sym, side, notional);
     }
   }

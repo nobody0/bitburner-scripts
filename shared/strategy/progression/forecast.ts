@@ -121,17 +121,18 @@ export function usableForecastSec(forecast: TimeForecast): number | undefined {
 /** The planning horizon for INSTALL-lifetime purchases (cloud servers,
  * hacknet, stock positions — everything prestigeAugmentation wipes).
  *
- * The fallback never exceeds the NODE's own horizon: with both forecasts
- * unusable the two horizons used to collapse to the same default hour, and
- * install-lifetime purchases were silently priced against node-lifetime time.
- * An install can never outlive its node. */
+ * Never exceeds the NODE's own horizon, on EITHER path: the two forecasts
+ * are computed independently, so a usable 2-hour install estimate can
+ * coexist with a route that ends the node in 20 minutes — and an install
+ * can never outlive its node. */
 /** Below this many forecast seconds to the install, investment spending is
  * braked (the `progression:imminent-install` reserve). */
 export const IMMINENT_INSTALL_SEC = 300;
 
 export function installHorizonSec(horizons: PlanningHorizons): number {
   const node = usableForecastSec(horizons.node) ?? DEFAULT_PLANNING_HORIZON_SEC;
-  return usableForecastSec(horizons.install) ?? Math.min(node, DEFAULT_PLANNING_HORIZON_SEC);
+  const install = usableForecastSec(horizons.install);
+  return install !== undefined ? Math.min(install, node) : Math.min(node, DEFAULT_PLANNING_HORIZON_SEC);
 }
 
 export function shouldReforecast(previous: TimeForecast | undefined, now: number, basis: string): boolean {

@@ -239,6 +239,13 @@ export async function runController(
     const hosts = placement(state);
     const budgetGb = dodgeBudget(hosts);
     const { reserveGb, fleetReserveGb: reserveShortfallGb } = computeReserve(state, active);
+    // A live starvation re-records its skip on every retry; an entry that has
+    // stopped refreshing is a need that went away without a successful retry
+    // (dodge.ts only deletes on grant+lease). Age those out here, or one dead
+    // entry re-arms the reserve hold for the rest of the run.
+    for (const [id, skip] of Object.entries(state.probeSkips)) {
+      if (skip.at !== undefined && Date.now() - skip.at > FLEET_RESERVE_HOLD_MS) delete state.probeSkips[id];
+    }
     if (reserveShortfallGb > 0 && Object.keys(state.probeSkips).length > 0) {
       fleetReserveHoldUntil = Date.now() + FLEET_RESERVE_HOLD_MS;
     }

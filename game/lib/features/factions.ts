@@ -668,10 +668,14 @@ const driver: FeatureDriver = {
   requires: "factions",
   async tick(ctx: DriverContext) {
     chainWake = false;
-    seenCompletion = peekWorkCompletion();
     const now = Date.now();
     const view = buildFactionsView(ctx, now);
+    // The completion notice latches only once planning can actually react to
+    // it: latching before the view guard marked a notice as reacted-to while
+    // topics were momentarily unreadable (early boot, right after a reset),
+    // and the freed work slot then idled until the ordinary cadence.
     if (!view) return;
+    seenCompletion = peekWorkCompletion();
 
     const { decision, memory: next } = stepFactions(view, memory);
     memory = next;

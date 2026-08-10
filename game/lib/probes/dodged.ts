@@ -73,7 +73,16 @@ const hackingCloud: DodgedProbe = {
       // pass would freeze the whole infrastructure lane behind it). Measured
       // before this: an hour-long run bought fifteen 8 GB servers while the
       // bank could long since have carried 512 GB ones.
-      for (let targetRam = 8; targetRam <= fleet.purchased.maxRamPerServer; targetRam *= 4) {
+      // The ladder starts at the cap when the cap is below the 8 GB starter
+      // (a node multiplier can push it there — with no rung the fleet would
+      // silently lose the ability to buy servers at all), and always includes
+      // the cap itself: 8·4^k only visits odd exponents, so the game's
+      // even-exponent maximum (2^20) was otherwise never quoted.
+      const maxRam = fleet.purchased.maxRamPerServer;
+      const rungs = new Set<number>();
+      for (let targetRam = Math.min(8, maxRam); targetRam <= maxRam; targetRam *= 4) rungs.add(targetRam);
+      if (maxRam >= 2) rungs.add(maxRam);
+      for (const targetRam of [...rungs].sort((a, b) => a - b)) {
         const cost = stubNs["cloud"]["getServerCost"](targetRam);
         if (targetRam >= 2 && Number.isFinite(cost)) options.push({ kind: "buyServer", cost, addedRam: targetRam, targetRam });
       }

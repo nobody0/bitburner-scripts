@@ -825,14 +825,19 @@ function nextPurchase(
     if (!source) {
       // Short of cash on something we still expect to afford: wait for it rather
       // than jumping the queue. Anything cheaper stays cheap; this one would not.
-      // Reputation shortfalls and gaps the book cannot close fall through instead —
-      // and that check must be EXPLICIT: an item that is both rep-short and
-      // money-short is a rep problem money cannot cure, and holding for its
-      // settlement deadlocked the whole sweep behind a faction joined at
-      // reputation 1 (measured: the drain sat idle for a full run while a
-      // funded NeuroFlux waited behind CashRoot's 12,500-rep wall).
-      const repMet = sellers.some((standing) => standing.rep >= repCost);
-      if (hold && repMet && money < moneyCost && settling >= moneyCost) return undefined;
+      // Reputation shortfalls the book cannot close fall through instead — and
+      // that check must be EXPLICIT: an item that is both rep-short and
+      // money-short with no donation path is a rep problem money cannot cure,
+      // and holding for its settlement deadlocked the whole sweep behind a
+      // faction joined at reputation 1 (measured: the drain sat idle for a
+      // full run while a funded NeuroFlux waited behind CashRoot's 12,500-rep
+      // wall). A DONATION-CLOSABLE gap is a money problem, though: skipping
+      // it buys something cheaper first and pays 1.9x escalation on the dear
+      // item the settlement would have funded.
+      const settleable = sellers.some(
+        (standing) => standing.rep >= repCost || standing.favor >= view.favorToDonate,
+      );
+      if (hold && settleable && money < moneyCost && settling >= moneyCost) return undefined;
       continue;
     }
     return {

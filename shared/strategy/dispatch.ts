@@ -143,8 +143,11 @@ export interface DispatchMemory {
    * RAM beyond it earns nothing on THIS target; infrastructure valuation
    * reads it so a purchase past saturation prices at its true marginal
    * income (~0) instead of the linear per-GB rate (measured: a $450m 16 TB
-   * server bought half-idle on bn1-speedrun). */
+   * server bought half-idle on bn1-speedrun). Cleared when the farm stops or
+   * retargets — a dead target's ceiling must not price live purchases. */
   depthCapGb?: number;
+  /** Which host depthCapGb was computed for, so a retarget invalidates it. */
+  depthCapHost?: string;
   stats: DispatchStats;
 }
 
@@ -236,8 +239,11 @@ function syncTopology(
   // contiguous call, so carving the reserve out of the biggest host shrinks
   // `largestBlockGb` for every solve (measured on bn1-speedrun: fleet
   // utilization fell ~90% → ~72% with the reserve parked on the top host).
-  // Same best-fit policy as dodgeHost. Largest only as the fallback when
-  // nothing else fits.
+  // Same best-fit policy as dodgeHost. The largest host is a fallback ONLY
+  // while the reserve itself still fits on it (the dodge is placeable, just
+  // without the churn margin): a reserve larger than the host it lands on
+  // zeroes that host's farm income without making the starved dodge
+  // placeable, which is pure loss.
   let reserveHost: string | undefined;
   if (fleetReserveGb > 0) {
     const fitsGb = fleetReserveGb + 4; // stub base + a couple of threads of churn
@@ -259,7 +265,7 @@ function syncTopology(
         smallestFitRam = server.maxRam;
       }
     }
-    reserveHost = smallestFit ?? largest;
+    reserveHost = smallestFit ?? (largestRam >= fleetReserveGb ? largest : undefined);
   }
   let fleetGb = 0;
   let largestBlockGb = 0;
@@ -430,6 +436,13 @@ export function dispatch(
   // in-flight farm ops beyond the nominal share drain within one weakenTime.
   const prepServer = directive.prep ? byHost.get(directive.prep.host) : undefined;
   const prepActive = prepServer !== undefined && !isPrepped(prepServer);
+  // The demand ceiling describes the CURRENT farm target; without one (or on
+  // a retarget) the stale value would keep pricing infrastructure against a
+  // target no longer farmed. The farm branch below re-derives it each pass.
+  if (!directive.farm || memory.depthCapHost !== directive.farm.host) {
+    memory.depthCapGb = undefined;
+    memory.depthCapHost = undefined;
+  }
   let spillGb = 0;
   for (const segment of directive.segments) {
     if (segment.kind === "share") spillGb += Math.max(0, segment.gb - memory.segmentGb.share);
@@ -483,6 +496,7 @@ export function dispatch(
         // of stranded RAM (measured: +11 % time-to-goal on a 16 GB start).
         const interval = solution.kind === "hgw" ? 3 * SPACER_MS : INTERVAL_MS;
         memory.depthCapGb = Math.max(1, Math.floor(weakenMs / interval)) * solution.ramPerBatch;
+        memory.depthCapHost = directive.farm.host;
         const depth = Math.max(
           1,
           Math.min(Math.floor(weakenMs / interval), Math.floor(segmentCap / solution.ramPerBatch)),

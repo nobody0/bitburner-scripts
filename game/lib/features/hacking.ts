@@ -429,6 +429,17 @@ type BackdoorAction = {
   server: NonNullable<GameState["topics"]["servers"]>[string];
 };
 
+/** Dear openers only buy for targets within this many multiples of current
+ * skill: near enough that the blocking-priority spend is actually imminent.
+ * Cheap openers stay unbounded — buying BruteSSH the moment CSEC's need
+ * exists is what keeps the window open before the bankroll is spent on
+ * fleet (measured: gating it cost factions-join ~5%). */
+const OPENER_SKILL_ANTICIPATION = 4;
+/** An opener at or below this price is "cheap": always bought ahead. Above
+ * it, the skill-proximity bound applies — a $250m SQLInject for a 505-skill
+ * target must not outbid compounding investment hours ahead of use. */
+const OPENER_ANTICIPATION_COST_CAP = 10e6;
+
 /** Select the exact board action both claim collection and execution use. */
 function nextBackdoorAction(ctx: Pick<ClaimContext, "board" | "state">): BackdoorAction | undefined {
   const servers = ctx.state.topics.servers ?? {};
@@ -451,9 +462,18 @@ function nextBackdoorAction(ctx: Pick<ClaimContext, "board" | "state">): Backdoo
     // so the root is ready when the skill arrives. Gating the purchase behind
     // the skill check closed the buying window on factions-join — by the time
     // hacking crossed CSEC's requirement, the bankroll had been spent on
-    // fleet and BruteSSH stayed unaffordable for the rest of the run.
+    // fleet and BruteSSH stayed unaffordable for the rest of the run. But the
+    // anticipation is BOUNDED: the opener claim runs at blocking priority,
+    // and a target whose skill requirement is many multiples away (505-skill
+    // run4theh111z early in a run) would divert a $250m opener spend from
+    // compounding investment hours before the backdoor is actionable.
     if (!server.hasAdminRights) {
       if ((server.numOpenPortsRequired ?? 0) === 0) continue;
+      const program = programForPortNeed(ctx.state, server.numOpenPortsRequired ?? 0);
+      const dear = (program?.purchaseCost ?? 0) > OPENER_ANTICIPATION_COST_CAP;
+      if (dear && (server.requiredHackingSkill ?? Infinity) > player.skills.hacking * OPENER_SKILL_ANTICIPATION) {
+        continue;
+      }
       if (!opener || (server.numOpenPortsRequired ?? 0) < (opener.server.numOpenPortsRequired ?? 0)) {
         opener = { action: "port-opener", host, server };
       }

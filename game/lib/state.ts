@@ -26,6 +26,11 @@ export type Topics = { [K in StateKey]?: StateMap[K] };
 export interface ProbeSkip {
   cost: number;
   budget: number;
+  /** When the skip was last observed. A skip that stops being re-recorded is
+   *  a need that went away without a successful retry (the invite arrived
+   *  another way, the decision moved on) — consumers age those out rather
+   *  than letting a dead entry hold the fleet reserve forever. */
+  at: number;
 }
 
 export interface ProbeBatch {
@@ -141,5 +146,5 @@ export function clearProbeFailure(state: GameState, id: string): void {
 }
 
 export function recordProbeSkip(state: GameState, id: string, cost: number, budget: number): void {
-  state.probeSkips[id] = { cost, budget };
+  state.probeSkips[id] = { cost, budget, at: Date.now() };
 }

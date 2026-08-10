@@ -1354,9 +1354,17 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
   // and reports 0 whenever bladeburner is idle — but the bladeburner plan
   // already SCORES its best action's rank/sec before ever executing it. Using
   // that forward estimate ahead of the static prior marks the route's
-  // bladeburner leg `measured` as soon as the feature plans, instead of
-  // pricing the route off a fallback constant for the first half hour.
-  const plannedRank = ctx.state.topics.bladeburner?.plan?.ranked?.[0]?.rankPerSec;
+  // bladeburner leg `measured` as soon as the feature RUNS, instead of
+  // pricing the route off a fallback constant for the first half hour. The
+  // execution evidence matters: the tracker also reads 0 when the plan never
+  // executes at all (no work slot, stamina gate), and pricing the route at a
+  // planned rate while actual progress is zero forecast the node's end hours
+  // early — an action in flight or a recent successful result is required.
+  const blade = ctx.state.topics.bladeburner;
+  const bladeExecuting =
+    blade?.current !== undefined
+    || (blade?.plan?.lastResult?.ok === true && t - blade.plan.lastResult.at < 300_000);
+  const plannedRank = bladeExecuting ? blade?.plan?.ranked?.[0]?.rankPerSec : undefined;
   const sampledRank = trackers.rank.perSec();
   return {
     ...noRates(),
