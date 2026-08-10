@@ -71,7 +71,7 @@ distinction matters because only one is still on disk:
 3. In Bitburner, open **Options → Remote API** and configure the game to connect
    to `127.0.0.1:12525` — hostname `localhost`, port `12525`, **Use wss OFF**,
    reconnection delay `5`.
-4. In **Options → System**, set the autoexec script to `start.js main` so it
+4. In **Options → System**, set the autoexec script to `start.js` so it
    starts whenever the game loads (cold boot: scan, root, redeploy).
 5. Edit TypeScript under `game/` (and `shared/`), then click **sync to game** in
    the dashboard. You can instead run `bun run sync` from a terminal.

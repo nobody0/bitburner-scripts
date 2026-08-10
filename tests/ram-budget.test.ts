@@ -5,10 +5,10 @@ import type { BitburnerConfig } from "../tools/config.ts";
 import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
 import type { NS } from "@ns";
 
-/** Static RAM is the fresh-game constraint: start.js plus a transient dodge
- * stub must fit an 8 GB home. Bitburner charges a script for every ns member
- * its source references with dot notation, so this test pins that surface —
- * an accidental `ns.foo` in the controller shows up here, not in-game. */
+/** Declared RAM is the fresh-game constraint: start.js plus a transient dodge
+ * stub must fit an 8 GB home. The source-level override makes the allocation
+ * explicit; the direct-call scan independently proves the controller's dynamic
+ * RAM can never exceed that declaration. */
 
 const RAM_COSTS: Record<string, number> = {
   // Only the members the controller is allowed to touch directly.
@@ -53,7 +53,7 @@ afterAll(async () => {
   await rm(config.buildDir, { recursive: true, force: true });
 });
 
-/** Approximate Bitburner's static parser: dotted ns member references. */
+/** Approximate the dynamic RAM surface: direct dotted ns member references. */
 function staticRam(source: string): { total: number; members: string[] } {
   const members = new Set<string>();
   for (const [member] of Object.entries(RAM_COSTS)) {
@@ -65,6 +65,13 @@ function staticRam(source: string): { total: number; members: string[] } {
   return { total, members: [...members].sort() };
 }
 
+/** v3.0.1 recognises a numeric-literal ramOverride only when it is the first
+ * statement in main. Match the built artifact, not merely the TypeScript. */
+function declaredRam(source: string): number | undefined {
+  const match = source.match(/function main\([^)]*\)\s*\{\s*ns\.ramOverride\((\d+(?:\.\d+)?)\);/);
+  return match ? Number(match[1]) : undefined;
+}
+
 describe("in-game static RAM budget", () => {
   test("an unpriceable dodged method cannot be mistaken for a cheap call", () => {
     const ns = { getFunctionRamCost: () => { throw new Error("unknown method"); } } as unknown as NS;
@@ -74,7 +81,8 @@ describe("in-game static RAM budget", () => {
   test("start.js stays within its fresh-game budget", async () => {
     const [start] = await buildScripts(config, { telemetry: true });
     const { total, members } = staticRam(start!.content);
-    console.log(`start.js static RAM ~${total.toFixed(2)}GB via ${members.join(", ")}`);
+    expect(declaredRam(start!.content)).toBe(START_BUDGET_GB);
+    console.log(`start.js dynamic RAM <=${total.toFixed(2)}GB via ${members.join(", ")}`);
     expect(total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
     // The hot path must never dodge, so these two live reads are expected...
     expect(members).toContain("ns.getServerSecurityLevel");
@@ -94,6 +102,8 @@ describe("in-game static RAM budget", () => {
     const [telemetryBuild] = await buildScripts(config, { telemetry: true });
     const [perfBuild] = await buildScripts(config, { telemetry: false });
     const perf = staticRam(perfBuild!.content);
+    expect(declaredRam(telemetryBuild!.content)).toBe(START_BUDGET_GB);
+    expect(declaredRam(perfBuild!.content)).toBe(START_BUDGET_GB);
     expect(perf.total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
     expect(perf.members).toEqual(staticRam(telemetryBuild!.content).members);
   });

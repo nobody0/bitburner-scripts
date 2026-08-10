@@ -294,6 +294,19 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       new Promise<boolean>((resolve) => void host.clock.in(Math.max(0, ms), () => resolve(true))),
     atExit: (callback: () => void, id = "default") => void process.atExit.set(id, callback),
 
+    ramOverride: (ram?: number): number => {
+      const currentPerThread = Math.round((process.ramGb / process.threads) * 100) / 100;
+      if (ram === undefined) return currentPerThread;
+      const wanted = Math.round(Number(ram) * 100) / 100;
+      if (!Number.isFinite(wanted)) throw new Error("ram must be a finite number");
+      if (wanted === currentPerThread) return currentPerThread;
+      return unmodeled(
+        "ns",
+        "ramOverride",
+        "changing an allocation requires per-process dynamic RAM accounting",
+      );
+    },
+
     // --- files ----------------------------------------------------------
     read: (filename: string): string => host.contents.get(fileKey(process.host, filename)) ?? "",
     write: (filename: string, data = "", mode = "a") => {

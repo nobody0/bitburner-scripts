@@ -139,6 +139,15 @@ describe("Netscript contract fidelity", () => {
     expect(() => ns.getFunctionRamCost("does.not.exist")).toThrow();
   });
 
+  test("ramOverride reports an unchanged allocation and refuses to invent dynamic RAM headroom", () => {
+    const { ns, host } = harness();
+    const process = [...host.processes.values()][0]!;
+    expect(ns.ramOverride()).toBe(1);
+    expect(ns.ramOverride(1)).toBe(1);
+    expect(() => ns.ramOverride(3.6)).toThrow("changing an allocation requires per-process dynamic RAM accounting");
+    expect(process.ramGb).toBe(1);
+  });
+
   test("exec refuses a server without root even when the script is present", () => {
     const { ns } = harness();
     expect(ns.exec("child.js", "n00dles", 1)).toBe(0);

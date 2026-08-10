@@ -4,8 +4,7 @@ import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import type { Goal } from "../shared/goals/goal.ts";
 import { describeOverrides, type FeatureOverrides } from "../shared/features/profile.ts";
 import type { SaveSeed } from "../shared/save/to-sim.ts";
-import { factsOnly, type LogRecord } from "../shared/telemetry/schema.ts";
-import type { StateKey, StateMap } from "../shared/telemetry/state-map.ts";
+import type { LogRecord, WireMessage } from "../shared/telemetry/schema.ts";
 import { Clock } from "./clock.ts";
 import type { SimPlayerOptions } from "./core/player.ts";
 import type { ServerSpec } from "./core/effects.ts";
@@ -386,9 +385,8 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
 
   // Imported AFTER the flags are on globalThis, and dynamically so module
   // evaluation cannot outrun them.
-  const [{ runController }, { makeSink }, { resetAllFeatures }, { initState }, dodgeStub, worker] = await Promise.all([
-    import("../game/lib/controller.ts"),
-    import("../game/lib/telemetry-sink.ts"),
+  const [{ main: startMain }, { resetAllFeatures }, { initState }, dodgeStub, worker] = await Promise.all([
+    import("../game/start.ts"),
     import("../game/lib/features/index.ts"),
     import("../game/lib/state.ts"),
     import("../game/lib/dodge-stub.ts"),
@@ -458,25 +456,35 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     });
   };
 
-  // The sink is the real one; only the Telemetry underneath it is swapped for
-  // the world's record stream instead of a WebSocket.
-  const telemetry = {
-    state: <K extends StateKey>(key: K, data: StateMap[K]) => world.emit({ kind: "state", key, data: factsOnly(data) }),
-    mirror: (key: string, data: unknown) => world.emit({ kind: "state", key, data: factsOnly(data) }),
-    event: (name: string, data?: unknown) => world.emit({ kind: "event", name, data: factsOnly(data) }),
-    debug: (msg: string, data?: unknown) => world.emit({ kind: "debug", msg, data: factsOnly(data) }),
-    flush: () => {},
-    dispose: () => {},
-  };
-  const sink = makeSink(telemetry);
+  // Exercise start.ts itself, including telemetry construction, argument
+  // parsing, RAM declaration and epoch ownership. The transport is replaced
+  // underneath it: every wire record is fed straight into the simulated world.
+  class SimTelemetrySocket {
+    static readonly OPEN = 1;
+    readyState = SimTelemetrySocket.OPEN;
+    onopen: (() => void) | null = null;
+    onclose: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+
+    constructor() {
+      queueMicrotask(() => this.onopen?.());
+    }
+
+    send(raw: unknown): void {
+      const message = JSON.parse(String(raw)) as WireMessage;
+      if ("records" in message) for (const record of message.records) world.emit(record);
+    }
+
+    close(): void {
+      if (this.readyState !== SimTelemetrySocket.OPEN) return;
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
 
   host.scripts.set(DODGE_STUB, dodgeStub.main as ScriptMain);
   host.scripts.set(WORKER_SCRIPT, worker.main as ScriptMain);
-  host.scripts.set(START_SCRIPT, ((ns: NS) => {
-    const epoch = ((realm["controllerEpoch"] as number | undefined) ?? 0) + 1;
-    realm["controllerEpoch"] = epoch;
-    return runController(ns, telemetry, sink, "cold", epoch, options.features);
-  }) as ScriptMain);
+  host.scripts.set(START_SCRIPT, ((ns: NS) => startMain(ns, options.features)) as ScriptMain);
 
   world.emit({
     kind: "event",
@@ -507,12 +515,16 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   if (!controller) throw new Error("home has too little RAM to start the controller");
 
   let stoppedBecause: GameRunResult["stoppedBecause"];
+  const originalWebSocket = globalThis.WebSocket;
   try {
+    globalThis.WebSocket = SimTelemetrySocket as unknown as typeof WebSocket;
     launch(host, controller);
     stoppedBecause = await clock.runAsync(() => goal.done(ctx), horizonMs);
   } finally {
+    host.processes.killAll();
     engine.stop();
     virtualTime.restore();
+    globalThis.WebSocket = originalWebSocket;
     setUnmodeledReporter(undefined);
   }
 
