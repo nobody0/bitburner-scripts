@@ -59,6 +59,10 @@ export interface FactionsView {
 
   /** Favor needed before donations unlock, from ns.getFavorToDonate(). */
   favorToDonate: number;
+  /** Progression's install-cadence verdict says the reset should happen NOW
+   * (published installWanted). This feature must conclude: stop pushing the
+   * objective and run the final sweep with the reputation already banked. */
+  installRequested?: boolean;
   /** Money the arbiter granted the AUGMENTATION FUND this tick — the per-claim
    * amount, never the feature's summed grants (a travel grant must not top up
    * a purchase). */

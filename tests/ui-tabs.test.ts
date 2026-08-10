@@ -511,6 +511,80 @@ describe("panel view state", () => {
     expect(html).toContain("2.0d");
   });
 
+  test("progression renders the endgame route and the cadence verdict", () => {
+    const state = emptyState();
+    const now = Date.now();
+    state.cadenceAccrued = [[0, 0.1], [60_000, 0.4]];
+    state.topics.progression = {
+      bitNode: 4,
+      sourceFiles: {},
+      ownedAugs: {},
+      augCount: 0,
+      lastAugReset: now - 60_000,
+      lastNodeReset: now - 120_000,
+      plan: {
+        phase: "start",
+        installWanted: false,
+        liquidationWanted: false,
+        installBlockers: [],
+        installReady: false,
+        queuedAugmentations: [],
+        install: false,
+        homeRamBudgetFraction: 0.1,
+        favorCrossings: [{ faction: "CyberSec", favorNow: 120, favorAfter: 152 }],
+        why: "building",
+        route: "daedalus",
+        decidedAt: now - 300_000,
+        routeWhy: "fastest measured ending",
+        routes: [
+          {
+            id: "daedalus", available: true, complete: false, blocker: "2.5m Daedalus rep",
+            etaSec: 7_200,
+            parts: [{ what: "daedalus reputation", sec: 7_000, measured: true }, { what: "install overhead", sec: 200, measured: false }],
+          },
+          {
+            id: "bladeburner", available: false, complete: false, blocker: "join Bladeburner",
+            etaSec: 90_000,
+            parts: [{ what: "bladeburner rank", sec: 90_000, measured: false }],
+          },
+        ],
+        installDecision: {
+          verdict: "push",
+          effective: "push",
+          pushRate: 9.1e-3,
+          threshold: 2.9,
+          resetValueMult: 1.2,
+          resetFavorValue: 0.3,
+          pushEtaSec: 4_700,
+          remainingSec: 7_200,
+          latched: false,
+          why: "accrued value below the cadence threshold",
+        },
+        forecasts: {
+          install: { state: "unknown", reason: "no data", evaluatedAt: now, nextRecalibrationAt: now + 600_000, basis: "none" },
+          node: { state: "unknown", reason: "no data", evaluatedAt: now, nextRecalibrationAt: now + 600_000, basis: "none" },
+        },
+      },
+    };
+
+    const html = TABS["progression"].render(state);
+    expect(html).toContain("Endgame route");
+    expect(html).toContain("daedalus");
+    expect(html).toContain("fastest measured ending");
+    expect(html).toContain("2.5m Daedalus rep");
+    expect(html).toContain("daedalus reputation");
+    expect(html).toContain("Install cadence");
+    expect(html).toContain("accrued value below the cadence threshold");
+    expect(html).toContain("cadencechart");
+    expect(html).toContain("CyberSec");
+    // A plan recorded before these fields existed still renders.
+    delete state.topics.progression!.plan!.routes;
+    delete state.topics.progression!.plan!.installDecision;
+    const bare = TABS["progression"].render(state);
+    expect(bare).toContain("waiting for the endgame route estimates");
+    expect(bare).toContain("waiting for the cadence verdict");
+  });
+
   test("a filter chip changes what the panel renders", () => {
     const state = emptyState();
     state.runId = "r";

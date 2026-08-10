@@ -496,7 +496,14 @@ function decideFactions(
   }
 
   // --- 4) work / donate -----------------------------------------------------
-  const target = pickWorkFaction(view, next, objective, alternatives);
+  // Progression owns the install CADENCE. When its marginal-value rule says
+  // the reset now beats pushing further, this feature must CONCLUDE — stop
+  // working toward the objective and run the final sweep with whatever
+  // reputation is banked. Without this the install waits on "factions has not
+  // finished its sweep" while factions keeps pushing a multi-hour objective
+  // it was never told to abandon (measured: 0 installs in 30 minutes on the
+  // cadence fixture while progression wanted one from minute 2).
+  const target = view.installRequested ? undefined : pickWorkFaction(view, next, objective, alternatives);
   if (!target) {
     const why = allBlockers.length > 0 ? "every objective faction is blocked" : "nothing left to work toward";
     const recommend = shouldRecommendInstall(view, objective);
@@ -819,8 +826,13 @@ function nextPurchase(
       // Short of cash on something we still expect to afford: wait for it rather
       // than jumping the queue. Anything cheaper stays cheap; this one would not.
       // Reputation shortfalls and gaps the book cannot close fall through instead —
-      // see the note above.
-      if (hold && sellers.length > 0 && money < moneyCost && settling >= moneyCost) return undefined;
+      // and that check must be EXPLICIT: an item that is both rep-short and
+      // money-short is a rep problem money cannot cure, and holding for its
+      // settlement deadlocked the whole sweep behind a faction joined at
+      // reputation 1 (measured: the drain sat idle for a full run while a
+      // funded NeuroFlux waited behind CashRoot's 12,500-rep wall).
+      const repMet = sellers.some((standing) => standing.rep >= repCost);
+      if (hold && repMet && money < moneyCost && settling >= moneyCost) return undefined;
       continue;
     }
     return {
@@ -1001,20 +1013,27 @@ function shouldRecommendInstall(
   // money is the drain's business, and the final sweep buys the package
   // dearest-first once this fires.
   const outstanding = objective.augmentations.filter((name) => !view.owned.has(name));
-  for (const name of outstanding) {
-    const aug = view.catalog.get(name);
-    if (!aug) continue;
-    const { repCost } = augCost(aug, view.priceContext);
-    const seller = view.factions.some(
-      (standing) => standing.joined && aug.factions.includes(standing.name) && standing.rep >= repCost,
-    );
-    if (!seller) return undefined;
+  // When progression has REQUESTED the install, unmet reputation does not
+  // veto: the sweep converts whatever is buyable and the rest waits for the
+  // next cycle — that is exactly what "install now beats pushing" means.
+  if (!view.installRequested) {
+    for (const name of outstanding) {
+      const aug = view.catalog.get(name);
+      if (!aug) continue;
+      const { repCost } = augCost(aug, view.priceContext);
+      const seller = view.factions.some(
+        (standing) => standing.joined && aug.factions.includes(standing.name) && standing.rep >= repCost,
+      );
+      if (!seller) return undefined;
+    }
   }
   // An install needs SOMETHING to convert: already queued, or buyable now.
   const queued = [...view.queued].filter((name) => view.catalog.has(name));
   if (queued.length === 0 && outstanding.length === 0) return undefined;
   return {
-    why: "the objective's work is done; the sweep converts cash to augmentations and banked reputation to favor at install",
+    why: view.installRequested
+      ? "progression requested the reset; the sweep converts what is buyable and the rest waits for the next cycle"
+      : "the objective's work is done; the sweep converts cash to augmentations and banked reputation to favor at install",
     augmentations: [...queued, ...outstanding],
   };
 }

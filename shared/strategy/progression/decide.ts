@@ -1,3 +1,4 @@
+import { formatScientific } from "../../format.ts";
 import { addRepToFavor } from "../factions/rep.ts";
 
 /** Progression: install timing, reset cadence and BitNode ordering.
@@ -68,6 +69,25 @@ export interface ProgressionView {
   /** The selected route cannot complete without installing its already-owned
    * route augmentation (currently The Red Pill). */
   routeRequiresInstall: boolean;
+  /** Σ multiplier-only log-value of the QUEUED augmentations (scoreAugMults —
+   * no flat bonuses). What the reset would ACTIVATE. */
+  resetValueMult?: number;
+  /** value/sec of pushing the next faction package increment — the frontier's
+   * own marginalRate, which already prices escalation, rep walls and donation
+   * crossovers. */
+  pushMarginalRate?: number;
+  /** That package's acquisition ETA, for the published digest. */
+  pushEtaSec?: number;
+  /** The DWELLED marginal verdict, resolved by the driver (hysteresis + latch
+   * live in progressionMemory): true = install beats pushing, false = keep
+   * pushing, undefined = no route ETA — the legacy cash gate decides. */
+  marginalInstall?: boolean;
+  /** The final sweep could still convert at least one rep-met, affordable
+   * offer. Purchases are end-loaded, so mid-cycle the queue is empty BY
+   * DESIGN — this is the "an install would activate something" signal that
+   * opens the install gate; the sweep then turns it into a real queue before
+   * the purchasable-augmentation blocker lets the reset execute. */
+  resetRealizable?: boolean;
 }
 
 export type InstallBlockerKind = "factions" | "stock" | "graft" | "augmentations";
@@ -105,6 +125,78 @@ export const HOME_RAM_BUDGET = { start: 0.1, finishUp: 0.5, ending: 0.5 };
 /** Minimum remaining NODE time for an install cycle to repay its overhead
  * (kill everything, reboot, regrow). Below this, finish the node instead. */
 export const INSTALL_MIN_PAYBACK_SEC = 600;
+/** The accrued value must clear the renewal threshold by this margin before
+ * the verdict flips to "install" — the push rate re-measures constantly and
+ * an install is irreversible. */
+export const PUSH_MARGIN = 1.25;
+/** A raw verdict flip must hold this long before it takes effect: rates
+ * re-measure constantly and an unhysteresed rule would thrash the endgame
+ * machinery (the final sweep and the stock liquidation both key off it). */
+export const VERDICT_DWELL_MS = 90_000;
+/** Flat time cost a reset spends before the activated queue earns anything
+ * (kill/reboot/re-sweep). Matches the route model's install overhead. */
+export const INSTALL_VERDICT_OVERHEAD_SEC = 300;
+
+export interface InstallVerdict {
+  verdict: "push" | "install" | "no-data";
+  /** value/sec of continuing to push (frontier marginalRate). */
+  pushRate?: number;
+  /** The renewal threshold the accrued value must clear: sqrt(2·O·pushRate). */
+  threshold?: number;
+  why: string;
+}
+
+/** The install-vs-push cadence, as a renewal problem.
+ *
+ * The metric is BitNode completion time. Value accrues while pushing (at the
+ * frontier's marginalRate, which already prices 1.9x escalation, rep walls
+ * and donation crossovers) but only ACTIVATES at an install — so every cycle
+ * pays two deadweights: accrued value sitting inactive (≈ p·T²/2 over a
+ * cycle of length T) and the flat install overhead O. The per-second loss
+ * p·T/2 + O/T is minimized at T* = sqrt(2·O/p), i.e. install when the
+ * accrued value p·T reaches sqrt(2·O·p). Crucially this is INDEPENDENT of
+ * the remaining node time — a long node wants frequent small installs, not
+ * none; the too-close-to-the-end case is INSTALL_MIN_PAYBACK_SEC's job in
+ * stepProgression, not this rule's. Flat score bonuses (Red Pill's route
+ * marker) are excluded from the accrued side — they mark necessity, not
+ * rate — and the route-mandatory install path is routeRequiresInstall's. */
+export function installVerdict(view: {
+  nodeRemainingSec?: number;
+  resetValueMult?: number;
+  pushMarginalRate?: number;
+  /** The frontier has published a plan and it names NO push target — the
+   * honest "nothing left to push for". A missing rate WITHOUT this flag just
+   * means the frontier has not run yet (cycle start, feature booting), and
+   * concluding "install" there latches before any work begins. */
+  frontierIdle?: boolean;
+}): InstallVerdict {
+  if (view.nodeRemainingSec === undefined) {
+    return { verdict: "no-data", why: "no route ETA; the legacy cash gate decides" };
+  }
+  const accrued = Math.max(0, view.resetValueMult ?? 0);
+  const pushRate = view.pushMarginalRate;
+  if (pushRate === undefined || pushRate <= 0) {
+    if (view.frontierIdle === true) {
+      return { verdict: "install", why: "nothing left worth pushing for" };
+    }
+    return { verdict: "no-data", why: "the frontier has not published a push target yet" };
+  }
+  const threshold = Math.sqrt(2 * INSTALL_VERDICT_OVERHEAD_SEC * pushRate) * PUSH_MARGIN;
+  if (accrued > threshold) {
+    return {
+      verdict: "install",
+      pushRate,
+      threshold,
+      why: `accrued value ${formatScientific(accrued)} clears the cadence threshold ${formatScientific(threshold)} at push rate ${formatScientific(pushRate)}/s`,
+    };
+  }
+  return {
+    verdict: "push",
+    pushRate,
+    threshold,
+    why: `accrued value ${formatScientific(accrued)} below the cadence threshold ${formatScientific(threshold)} at push rate ${formatScientific(pushRate)}/s`,
+  };
+}
 
 export function phaseOf(view: ProgressionView): RunPhase {
   // `ending` once cash exceeds half of what the run earned: at that point the
@@ -151,10 +243,19 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   const nodeAllowsOptionalInstall =
     view.nodeRemainingSec === undefined || view.nodeRemainingSec > INSTALL_MIN_PAYBACK_SEC;
   const routeInstallWanted = view.routeRequiresInstall && view.queued.length > 0;
+  // The marginal-value rule is the PRIMARY driver when a route ETA exists;
+  // the legacy cash-ratio phase gate covers the no-data case. The favor
+  // crossing stays as an independent fast-path — a step change (donations
+  // unlock) the smooth rate comparison cannot represent.
+  const endingArm = view.marginalInstall === undefined ? phase === "ending" : view.marginalInstall;
+  // End-loaded purchasing keeps the queue empty until the sweep runs, and the
+  // sweep is triggered BY installWanted — so a realizable sweep set must open
+  // this gate as well or cycles after the first can never conclude.
+  const somethingToActivate = view.queued.length > 0 || view.resetRealizable === true;
   const optionalInstallWanted =
     nodeAllowsOptionalInstall &&
-    view.queued.length > 0 &&
-    (phase === "ending" || (crossings.length > 0 && view.factionsReadyToInstall));
+    somethingToActivate &&
+    (endingArm || (crossings.length > 0 && view.factionsReadyToInstall));
   const installWanted = routeInstallWanted || optionalInstallWanted;
   const liquidationWanted =
     installWanted || ((view.routeRequiresInstall || nodeAllowsOptionalInstall) && view.factionsNeedLiquidation);
@@ -173,6 +274,13 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   }
   if (installWanted && view.graftInProgress) {
     installBlockers.push({ kind: "graft", why: "an already-paid graft is still in progress" });
+  }
+  if (installWanted && view.queued.length === 0) {
+    // The game's installAugmentations is a NO-OP with nothing queued — an
+    // armed empty install would sit forever. The realizable signal may open
+    // the gate, but the sweep must convert something before the reset can
+    // actually execute.
+    installBlockers.push({ kind: "augmentations", why: "nothing queued yet; the sweep must convert something first" });
   }
   const installReady = installWanted && installBlockers.length === 0;
   const why = installReady

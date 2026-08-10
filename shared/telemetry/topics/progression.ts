@@ -129,6 +129,25 @@ export interface ProgressionPlan {
    *  strongest single argument for resetting now. */
   favorCrossings: { faction: string; favorNow: number; favorAfter: number }[];
   why: string;
+  /** The install-vs-push cadence verdict: value accrues while pushing but
+   *  only activates at an install, so install when the accrued value clears
+   *  the renewal threshold sqrt(2·overhead·pushRate). `effective` folds in
+   *  the driver's hysteresis/latch; "legacy" means no route ETA existed and
+   *  the cash-ratio phase gate decided. */
+  installDecision?: {
+    verdict: "push" | "install" | "no-data";
+    effective: "push" | "install" | "legacy";
+    pushRate?: number;
+    /** The cadence threshold resetValueMult must clear to flip to install. */
+    threshold?: number;
+    resetValueMult: number;
+    /** Portion of the reset value from banked-but-unrealized favor. */
+    resetFavorValue?: number;
+    pushEtaSec?: number;
+    remainingSec?: number;
+    latched: boolean;
+    why: string;
+  };
   /** The chosen way to finish this BitNode, with the estimate it was chosen
    *  on. Everything below is the decision record the calibration loop reads
    *  back out of runs/*.jsonl: which route, guessed for how long, decided

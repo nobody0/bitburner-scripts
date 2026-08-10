@@ -57,6 +57,47 @@ describe("faction and hacking strategy simulation", () => {
     expect(Object.keys(result.unmodeled)).not.toContain("ns getMoneySources");
   }, 10_000);
 
+  test("two consecutive installs prestige cleanly and the cadence verdict drives the second", async () => {
+    const profile = findProfile("install-cadence");
+    let installed = 0;
+    let prestiged = 0;
+    let verdictInstalls = 0;
+
+    const result = await runGame({
+      goal: parseGoals([...profile.goals]),
+      seed: 1,
+      horizonMs: 2 * 60 * 60_000,
+      bitnode: profile.bitnode,
+      homeRam: profile.homeRam,
+      startingMoney: profile.startingMoney,
+      features: profile.features,
+      ...profile.world,
+      onRecord: (line) => {
+        const record = JSON.parse(line) as {
+          kind: string;
+          key?: string;
+          name?: string;
+          data?: { plan?: { installDecision?: { verdict?: string } } };
+        };
+        if (record.name === "aug.installed") installed++;
+        if (record.name === "sim.prestige") prestiged++;
+        if (record.key === "progression" && record.data?.plan?.installDecision?.verdict === "install") verdictInstalls++;
+      },
+    });
+
+    expect(result.reached).toBe(true);
+    expect(result.crashes).toEqual([]);
+    expect(installed).toBe(2);
+    expect(prestiged).toBe(2);
+    // The SECOND install must come from the marginal cadence verdict, not the
+    // legacy cash gate: cycle 2 has no pre-queued augmentations, so only the
+    // realizable-sweep signal and the renewal threshold can conclude it.
+    expect(verdictInstalls).toBeGreaterThan(0);
+    // The first reset restarted the controller; the run ends AT the second
+    // install, before its restart can log.
+    expect(result.output.filter((line) => line.includes("start.js online")).length).toBeGreaterThanOrEqual(2);
+  }, 120_000);
+
   test("hacking funds an exact donation breakpoint and the unlocked augmentation", async () => {
     const profile = findProfile("factions-donation");
     if (!profile.bitnode || !profile.homeRam || !profile.startingMoney || !profile.features) {

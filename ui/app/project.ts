@@ -53,6 +53,11 @@ export interface ProjectedState {
    *  When neither source is present the tiles show "–" instead of a wrong 0. */
   hasTotals: boolean;
   moneySeries: [number, number][];
+  /** The install-cadence decision over time, from progression state records:
+   *  accrued reset value vs the renewal threshold it must clear. Two series
+   *  because they cross — the crossing IS the install decision. */
+  cadenceAccrued: [number, number][];
+  cadenceThreshold: [number, number][];
   /** Running totals behind `earned`/`hacks` when the farm rollup is absent.
    *  Held on the state so an incremental fold can continue them. */
   hackDoneEarned: number;
@@ -80,6 +85,8 @@ export function emptyState(): ProjectedState {
     hacks: 0,
     hasTotals: false,
     moneySeries: [],
+    cadenceAccrued: [],
+    cadenceThreshold: [],
     hackDoneEarned: 0,
     hackDoneCount: 0,
     sawHackDone: false,
@@ -125,6 +132,17 @@ function foldOne(state: ProjectedState, record: LogRecord, cutoff: number): bool
       if (typeof money === "number") {
         state.moneySeries.push([record.t, money]);
         if (state.moneySeries.length > SERIES_LIMIT) decimate(state.moneySeries);
+      }
+    } else if (record.key === "progression") {
+      const decision = (record.data as { plan?: { installDecision?: { resetValueMult?: number; threshold?: number } } } | undefined)
+        ?.plan?.installDecision;
+      if (typeof decision?.resetValueMult === "number") {
+        state.cadenceAccrued.push([record.t, Math.max(0, decision.resetValueMult)]);
+        if (state.cadenceAccrued.length > SERIES_LIMIT) decimate(state.cadenceAccrued);
+      }
+      if (typeof decision?.threshold === "number") {
+        state.cadenceThreshold.push([record.t, decision.threshold]);
+        if (state.cadenceThreshold.length > SERIES_LIMIT) decimate(state.cadenceThreshold);
       }
     } else if (record.key.startsWith("getServer:")) {
       state.servers.set(record.key.slice("getServer:".length), record.data as Server);

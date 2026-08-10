@@ -1,7 +1,8 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
-import { NEUROFLUX, nextPurchasableAugmentation } from "../../../shared/strategy/factions/augs.ts";
+import { NEUROFLUX, nextPurchasableAugmentation, scoreAugMults, weightsForRoute } from "../../../shared/strategy/factions/augs.ts";
+import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
@@ -27,7 +28,7 @@ import { sfLevel } from "../../../shared/features/unlock.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
-import { stepProgression } from "../../../shared/strategy/progression/decide.ts";
+import { installVerdict, stepProgression, VERDICT_DWELL_MS } from "../../../shared/strategy/progression/decide.ts";
 import { RED_PILL, stepEndgame, type EndgameView, type RouteId } from "../../../shared/strategy/progression/endgame.ts";
 import {
   chooseRoute,
@@ -49,7 +50,7 @@ import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/
 import type { GoPlan, GoResponse, GoTurnResult } from "../../../shared/telemetry/topics/go.ts";
 import { chargeOrder, packFragments } from "../../../shared/strategy/stanek/pack.ts";
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
-import { workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
+import { addRepToFavor, workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
 import { stepSleeves, type SleevesView, type SleeveTask } from "../../../shared/strategy/sleeves/decide.ts";
 import { isScriptDeath } from "../errors.ts";
 import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
@@ -1240,6 +1241,14 @@ interface ProgressionMemory {
   choice?: RouteChoice;
   installArmedAt?: number;
   installQueueKey?: string;
+  /** Marginal install-vs-push hysteresis: the candidate verdict, when it
+   * first held, and the dwelled effective verdict. A raw verdict flip must
+   * hold for VERDICT_DWELL_MS (either direction) before it takes effect; the
+   * only permanent latch is the sweep reaching ready/armed, which is read
+   * from the published plan rather than held here. */
+  verdictCandidate?: "push" | "install";
+  verdictCandidateSince?: number;
+  effectiveVerdict?: "push" | "install";
 }
 
 function freshProgressionMemory(): ProgressionMemory {
@@ -1264,6 +1273,14 @@ let progressionMemory = freshProgressionMemory();
 let routeChange:
   | { from?: RouteId; to: RouteId; etaSec: number; expectedEndAt: number; why: string; routes: RouteEtaDigest[] }
   | undefined;
+
+/** What the last emitted `endgame.route` event said, so recalibration can be
+ * reported when it becomes MATERIAL (>25% eta movement or a part flipping to
+ * measured) without spamming an event per refresh. */
+let lastRouteEmit: { at: number; etaSec: number; partsKey: string } | undefined;
+
+const ROUTE_REEMIT_MOVE = 0.25;
+const ROUTE_REEMIT_MIN_MS = 600_000;
 
 export function takeRouteChange(): typeof routeChange {
   const value = routeChange;
@@ -1333,6 +1350,14 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
   if (ctx.state.topics.factions?.standings !== undefined) trackers.daedalusRep.sample(t, view.daedalusRep);
   if (view.blackOpsComplete !== undefined) trackers.blackOps.sample(t, view.blackOpsComplete);
   if (view.bladeburnerRank !== undefined) trackers.rank.sample(t, view.bladeburnerRank);
+  // The rank tracker needs two samples 30s apart before it reports anything,
+  // and reports 0 whenever bladeburner is idle — but the bladeburner plan
+  // already SCORES its best action's rank/sec before ever executing it. Using
+  // that forward estimate ahead of the static prior marks the route's
+  // bladeburner leg `measured` as soon as the feature plans, instead of
+  // pricing the route off a fallback constant for the first half hour.
+  const plannedRank = ctx.state.topics.bladeburner?.plan?.ranked?.[0]?.rankPerSec;
+  const sampledRank = trackers.rank.perSec();
   return {
     ...noRates(),
     moneyPerSec: trackers.moneyEarned.perSec(),
@@ -1341,7 +1366,7 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
     augsPerSec: trackers.augs.perSec(),
     daedalusRepPerSec: trackers.daedalusRep.perSec(),
     blackOpsPerSec: trackers.blackOps.perSec(),
-    bladeburnerRankPerSec: trackers.rank.perSec(),
+    bladeburnerRankPerSec: sampledRank > 0 ? sampledRank : plannedRank ?? 0,
   };
 }
 
@@ -1490,15 +1515,32 @@ function progressionRefresh(ctx: NeedContext): void {
   const nextNodeForecast = shouldReforecast(previousNodeForecast, ctx.now, nodeBasis)
     ? nodeForecast(ctx.now, selectedEta, nodeBasis)
     : forecastAt(previousNodeForecast!, ctx.now);
-  if (switched && choice && nextNodeForecast.state !== "unknown") {
+  // Emit on switch, and ALSO on material recalibration of the kept route:
+  // the topic self-corrects continuously, but the decision record in
+  // runs/*.jsonl only shows what was emitted — a single all-priors event per
+  // run made every calibration look unrevised. Rate-limited so a noisy rate
+  // tracker cannot flood the event ring.
+  const partsKey = selectedEta?.parts.map((part) => `${part.what}:${part.measured}`).join("|") ?? "";
+  const materialMove =
+    choice !== undefined
+    && lastRouteEmit !== undefined
+    && ctx.now - lastRouteEmit.at >= ROUTE_REEMIT_MIN_MS
+    && (Math.abs(choice.etaSec - lastRouteEmit.etaSec) > lastRouteEmit.etaSec * ROUTE_REEMIT_MOVE
+      || partsKey !== lastRouteEmit.partsKey);
+  if ((switched || materialMove) && choice && nextNodeForecast.state !== "unknown") {
     routeChange = {
-      ...(previous ? { from: previous.route } : {}),
+      ...(switched && previous ? { from: previous.route } : {}),
       to: choice.route,
       etaSec: Math.round(choice.etaSec),
       expectedEndAt: nextNodeForecast.expectedAt,
-      why: choice.why,
+      why: switched ? choice.why : `recalibrated: ${choice.why}`,
       routes: routesDigest,
     };
+    lastRouteEmit = { at: ctx.now, etaSec: choice.etaSec, partsKey };
+  } else if (switched === false && choice !== undefined && lastRouteEmit === undefined) {
+    // A choice that predates this bundle (plan read back from the store)
+    // seeds the baseline without emitting.
+    lastRouteEmit = { at: ctx.now, etaSec: choice.etaSec, partsKey };
   }
 
   // --- install cadence, on real inputs rather than the stubbed constants the
@@ -1519,6 +1561,102 @@ function progressionRefresh(ctx: NeedContext): void {
     (factions?.standings ?? []).map((standing) => [standing.name, { rep: standing.rep, favor: standing.favor }]),
   );
   const purchasable = purchasableAugmentation(ctx);
+
+  // --- install-vs-push: the marginal-value verdict --------------------------
+  // Value the reset would ACTIVATE: multiplier-only score (flat bonuses mark
+  // necessity, not rate, and the route-mandatory case is routeRequiresInstall's
+  // job) of the queue PLUS what the final sweep would still convert — offers
+  // whose reputation is met and price is within the bankroll. Purchases are
+  // end-loaded, so mid-cycle the queue is empty by design; without the
+  // realizable set the reset side reads zero and the verdict pushes forever.
+  const verdictWeights = weightsForRoute(choice?.route);
+  // Clamped at zero per augmentation: cost-reduction multipliers sit BELOW 1,
+  // so a beneficial aug can carry a negative log-score — the accrued signal
+  // measures what an install would activate, and that is never negative.
+  const scoreMults = (name: string): number => {
+    const aug = AUGMENTATIONS[name];
+    if (!aug) return 0;
+    return Math.max(0, scoreAugMults(
+      { name, baseCost: aug.cost, baseRepRequirement: aug.rep, factions: [...aug.factions], prereqs: [...(aug.prereqs ?? [])], mults: { ...(aug.mults ?? {}) }, ...(aug.multsUnknown ? { multsUnknown: true } : {}) },
+      verdictWeights,
+    ));
+  };
+  const realizable = new Set<string>();
+  const sweepBudget = player.money;
+  const unownedByFaction = new Map<string, number>();
+  // Joined factions only: the sweep can only buy from a faction we are IN,
+  // and after a prestige the offers list can briefly describe factions the
+  // reset just removed — counting those manufactured install pressure in a
+  // cycle with nothing joined and deadlocked it (installRequested stops the
+  // very faction work that would have made something realizable).
+  const joinedSet = new Set(factions?.joined ?? []);
+  for (const offer of factions?.offers ?? []) {
+    if (offer.owned || offer.name === NEUROFLUX || !joinedSet.has(offer.faction)) continue;
+    unownedByFaction.set(offer.faction, (unownedByFaction.get(offer.faction) ?? 0) + 1);
+    if (!offer.affordableRep || offer.price > sweepBudget) continue;
+    realizable.add(offer.name);
+  }
+  for (const name of pending) realizable.delete(name);
+  // Banked-but-unrealized favor, priced with packageValue's OWN favor terms
+  // (futureRateGain + crossesDonation) at current rep. The frontier's favor
+  // packages accrue value that only an install banks — without this term the
+  // push stream counts that value as income while the reset side never sees
+  // it, and a favor-purpose objective can never conclude.
+  const favorDonateAt = factions?.favorToDonate ?? 150;
+  let bankedFavorValue = 0;
+  for (const standing of factions?.standings ?? []) {
+    if (!joinedSet.has(standing.name)) continue;
+    const future = unownedByFaction.get(standing.name) ?? 0;
+    if (future === 0) continue;
+    const favorAfter = addRepToFavor(standing.favor, standing.rep);
+    const rateGain = future * Math.max(0, (1 + favorAfter / 100) / (1 + standing.favor / 100) - 1);
+    const crosses = standing.favor < favorDonateAt && favorAfter >= favorDonateAt ? future * 0.5 : 0;
+    bankedFavorValue += rateGain + crosses;
+  }
+  // Unit-consistent with packageValue (count + quality + favor terms): the
+  // push rate is denominated in package value, where every augmentation
+  // carries a flat +1 count on top of its multiplier quality — an accrued
+  // side without the count term could never clear the threshold on cheap
+  // augs however many of them an install would activate.
+  const resetValueMult =
+    pending.length + realizable.size
+    + pending.reduce((sum, name) => sum + scoreMults(name), 0)
+    + [...realizable].reduce((sum, name) => sum + scoreMults(name), 0)
+    + bankedFavorValue;
+  const intent = factions?.plan?.objective?.intent;
+  const rawVerdict = installVerdict({
+    ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
+    resetValueMult,
+    ...(intent?.marginalRate !== undefined ? { pushMarginalRate: intent.marginalRate } : {}),
+    // A published factions plan naming no intent is a concluded frontier; a
+    // missing plan is a frontier that has not run yet (see installVerdict).
+    frontierIdle: factions?.plan !== undefined && intent === undefined,
+  });
+  // Symmetric dwell: a raw flip must hold for VERDICT_DWELL_MS in EITHER
+  // direction. An early "install" verdict is often boot noise (the frontier
+  // publishes a near-zero rate before its first real package), so a
+  // permanent latch on the verdict alone locked entire cycles; the only
+  // point of no return is the sweep actually reaching ready/armed, at which
+  // point un-flipping would thrash factions and stock mid-conversion.
+  const pastPointOfNoReturn =
+    prog?.plan?.installReady === true || progressionMemory.installArmedAt !== undefined;
+  let marginalInstall: boolean | undefined;
+  if (pastPointOfNoReturn) {
+    marginalInstall = true;
+  } else if (rawVerdict.verdict === "no-data") {
+    marginalInstall = undefined;
+  } else {
+    if (progressionMemory.verdictCandidate !== rawVerdict.verdict) {
+      progressionMemory.verdictCandidate = rawVerdict.verdict;
+      progressionMemory.verdictCandidateSince = ctx.now;
+    }
+    const held = ctx.now - (progressionMemory.verdictCandidateSince ?? ctx.now) >= VERDICT_DWELL_MS;
+    if (held || progressionMemory.effectiveVerdict === undefined) {
+      progressionMemory.effectiveVerdict = rawVerdict.verdict;
+    }
+    marginalInstall = progressionMemory.effectiveVerdict === "install";
+  }
+
   const decision = stepProgression({
     queued: pending,
     affordableValueProduct: affordableValueProduct(ctx),
@@ -1549,6 +1687,11 @@ function progressionRefresh(ctx: NeedContext): void {
     runSec: prog?.lastAugReset ? Math.max(0, (ctx.now - prog.lastAugReset) / 1000) : 0,
     ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
     routeRequiresInstall,
+    resetValueMult,
+    resetRealizable: realizable.size > 0 || bankedFavorValue > 0.01,
+    ...(intent?.marginalRate !== undefined ? { pushMarginalRate: intent.marginalRate } : {}),
+    ...(intent?.etaSec !== undefined ? { pushEtaSec: intent.etaSec } : {}),
+    ...(marginalInstall !== undefined ? { marginalInstall } : {}),
   });
 
   const queueKey = pending.join("\0");
@@ -1610,6 +1753,18 @@ function progressionRefresh(ctx: NeedContext): void {
       homeRamBudgetFraction: decision.homeRamBudgetFraction,
       favorCrossings: decision.favorCrossings,
       why: decision.why,
+      installDecision: {
+        verdict: rawVerdict.verdict,
+        effective: marginalInstall === undefined ? "legacy" : marginalInstall ? "install" : "push",
+        ...(rawVerdict.pushRate !== undefined ? { pushRate: rawVerdict.pushRate } : {}),
+        ...(rawVerdict.threshold !== undefined ? { threshold: rawVerdict.threshold } : {}),
+        resetValueMult,
+        ...(bankedFavorValue > 0 ? { resetFavorValue: bankedFavorValue } : {}),
+        ...(intent?.etaSec !== undefined ? { pushEtaSec: Math.round(intent.etaSec) } : {}),
+        ...(selectedEta !== undefined ? { remainingSec: Math.round(selectedEta.etaSec) } : {}),
+        latched: pastPointOfNoReturn,
+        why: rawVerdict.why,
+      },
       ...(choice
         ? {
             route: choice.route,
@@ -1852,6 +2007,7 @@ export const progressionModule: FeatureModule = {
     // one re-measures and re-decides from scratch.
     progressionMemory = freshProgressionMemory();
     routeChange = undefined;
+    lastRouteEmit = undefined;
     resetInstallSignal();
     // Field-level, not the whole topic: the gate batch has ALREADY written
     // the new node's bitNode/sourceFiles/ownedAugs into it by the time the

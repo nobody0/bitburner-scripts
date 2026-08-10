@@ -875,6 +875,83 @@ factions-join liked it (−3.4%). The demand-driven latch stays: it BECOMES the
 dedicated dodge host exactly when starvation is observed, now for feature
 actions as well as probes.
 
+## Profile ledger, fifth pass (install cadence & route heuristics, 2026-08-10)
+
+The install-timing pass: when is a reset worth it, decided marginally rather
+than by the cash-ratio proxy. Runs under `final7` (baseline `runs/final6`).
+
+**The cadence rule is a renewal problem, not an amortization.** The first cut
+compared the frontier's marginal push rate against `queuedValue/(nodeRemaining
++overhead)` — which makes a LONG node forbid installs. That has the physics
+backwards: an activated multiplier accelerates all of the remaining node, so a
+long node wants frequent small installs. Value accrues while pushing (rate p,
+the frontier's own `marginalRate`) but only activates at an install; a cycle
+of length T pays `p·T²/2` in inactive accrual plus the flat overhead O, and
+the per-second loss is minimized at `T* = sqrt(2·O/p)`. So: **install when
+the accrued reset value clears `sqrt(2·O·p)`** (× the 1.25 margin), with
+`INSTALL_MIN_PAYBACK_SEC` still protecting the node's very end and
+`routeRequiresInstall`/favor-crossings unchanged as fast-paths
+(`installVerdict` in shared/strategy/progression/decide.ts).
+
+**The accrued side is unit-consistent with the frontier.** `packageValue` is
+`count + quality + favor terms`, so the reset side counts the same three:
+each queued or SWEEP-REALIZABLE augmentation (joined faction, rep met, price
+within the bankroll — purchases are end-loaded, so mid-cycle the queue is
+empty by design and the realizable set is what opens the gate) contributes
+1 + its mult-only log score (clamped ≥ 0; cost mults sit below 1), plus
+banked-but-unrealized favor priced with packageValue's own
+futureRateGain/crossesDonation at current rep. Without the favor term a
+favor-purpose objective could never conclude; without the count term cheap
+augs could never clear the threshold.
+
+**Liveness class fixed, four members:** (1) empty-queue gate deadlock — the
+sweep is triggered BY installWanted, which required a queue, which only the
+sweep fills (`resetRealizable` opens the gate; a new `augmentations` blocker
+holds the reset until the sweep converts something, because the game's
+`installAugmentations` is a NO-OP with nothing queued and an armed empty
+install sat forever); (2) frontier boot noise — a missing push rate now
+verdicts "install" only when a published factions plan names no intent
+(`frontierIdle`), not while the feature is still booting; (3) the permanent
+verdict latch replaced by a symmetric 90s dwell — the only point of no return
+is the sweep reaching ready/armed (a boot-noise latch had locked whole
+cycles); (4) stale offers from factions a prestige just removed manufactured
+install pressure in a cycle with nothing joined — the realizable scan now
+filters to joined factions, which is all the sweep can buy from anyway.
+
+**Route measurement:** bladeburner's leg now falls back to the plan's own
+scored `rankPerSec` (forward estimate, marked measured) before the static
+prior when the rank tracker has no signal; `endgame.route` re-emits on
+MATERIAL recalibration (>25% eta movement or a part flipping to measured,
+≤1/10min) so the decision record shows the self-correction the topic always
+had. Deferred, still tracked in Known gaps: route-aware feature biasing
+beyond factions (`ctx.route` consumers), grafting's push-without-reset role
+(sim-unmodelled).
+
+**UI:** the progression tab gains the endgame-route card (all routes, chosen
+marked, per-part measured-vs-model breakdown), the install-cadence card
+(verdict, accrued vs threshold, banked-favor component, favor-crossings
+table — previously published but rendered nowhere), and an accrued-vs-
+threshold time chart; `ui/app/lib/chart.ts` generalized to multi-series,
+injectable y-formatter, per-canvas geometry (the module-level geom singleton
+would have corrupted hover on any second chart).
+
+**New profiles** (both BN4): `install-cadence` — banked-rep fixture (owns
+nothing, rep banked at CyberSec/Sector-12/Aevum), goal `installs:2`, 2h.
+The first fixture owned every augmentation, and the rule correctly refused
+to install for 5 favor — a fixture where later installs are worthless cannot
+prove cadence, so the fixture was redesigned until each install is genuinely
+optimal. `install-favor` — fresh-ish start, CashRoot only, goal
+`favor:CyberSec:75, installs:2`, 6h; the honest favor-conversion experiment.
+A sim regression test (sim/tests/factions-strategy.test.ts) pins two
+consecutive installs prestiging cleanly with the second driven by the
+marginal verdict.
+
+| profile | old rule | new rule |
+|---|---|---|
+| install-cadence | 1 install, then push-forever (0/3 seeds) | **reached ×3: 2 installs in 70.2m** — boot noise self-corrects at 20m via the dwell, value accrues while the Tian Di Hui package is worked, its landing clears the ~2.9 threshold and the verdict concludes the cycle |
+| install-favor | NOT ×3 (6h): one install, cycles never conclude | 2 installs on seeds 1/3 (72m+280m, 42m+249m), 1 on seed 2; favor:75 still NOT in 6h — favor conversion works and late cycles stay alive (verdict honestly "push" at zero accrued value), but the goal is rep-physics-bound (recorded, kept as the stretch profile) |
+| all nine existing profiles | — | per-seed parity with final6 (bn1 2.44–2.46h, join 85.1/90.1/85.1m, stock-only 5.95h/NOT/5.26h, hacking/career identical); stock-manipulation stays 1-of-3 with the reaching seed swapped (known decision-timing noise); factions-install 48s → 4.0s — the conclude-signal converts the cash in hand instead of waiting out the farm |
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to

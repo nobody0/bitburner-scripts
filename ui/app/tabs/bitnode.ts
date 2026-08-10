@@ -6,7 +6,9 @@ import {
   type MultiplierGroup,
 } from "../../../shared/features/bitnode.ts";
 import { featureForBitNode } from "../../../shared/features/registry.ts";
-import { card, definitions, filters, note, table, tiles } from "../lib/dom.ts";
+import { formatScientific } from "../../../shared/format.ts";
+import { attachChartHover, drawSeries } from "../lib/chart.ts";
+import { card, collapsible, definitions, dot, filters, note, table, tiles } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
@@ -111,6 +113,112 @@ function forecastCard(forecast: TimeForecast, now: number): string {
   );
 }
 
+type Plan = NonNullable<NonNullable<ProjectedState["topics"]["progression"]>["plan"]>;
+
+/** The chosen ending and every route's estimate, with per-part attribution so
+ * a wrong total points at the sub-heuristic that produced it. */
+function routeCard(plan: Plan, now: number): string {
+  if (!plan.routes || plan.routes.length === 0) {
+    return note("waiting for the endgame route estimates");
+  }
+  const chosen = plan.route;
+  const header = chosen
+    ? tiles([
+        {
+          label: "chosen route",
+          value: chosen,
+          sub: plan.routeWhy ?? "",
+        },
+        {
+          label: "decided",
+          value: plan.decidedAt !== undefined ? `${fmtTime(Math.max(0, now - plan.decidedAt))} ago` : "–",
+        },
+      ])
+    : note("no route decided yet");
+  const rows = table(
+    ["", "route", "status", "blocker", "eta"],
+    [...plan.routes]
+      .sort((a, b) => a.etaSec - b.etaSec)
+      .map((route) => [
+        route.id === chosen ? "▶" : "",
+        esc(route.id),
+        route.complete
+          ? dot("good", "complete") + " complete"
+          : route.available
+            ? dot("good", "available") + " available"
+            : dot("wait", "blocked") + " blocked",
+        esc(route.blocker || "–"),
+        Number.isFinite(route.etaSec) ? fmtTime(route.etaSec * 1_000) : "∞",
+      ]),
+    { left: [1, 2, 3] },
+  );
+  const parts = plan.routes
+    .map((route) =>
+      collapsible(
+        `${esc(route.id)} — ${route.parts.length} component(s)`,
+        table(
+          ["component", "time", "source"],
+          route.parts.map((part) => [
+            esc(part.what),
+            Number.isFinite(part.sec) ? fmtTime(part.sec * 1_000) : "∞",
+            part.measured ? "measured" : "model/fallback",
+          ]),
+          { empty: "no components", left: [0, 2] },
+        ),
+        false,
+      ),
+    )
+    .join("");
+  return header + rows + parts;
+}
+
+/** The install-vs-push cadence: what has accrued, what it must clear, and
+ * which way the dwelled verdict points. The chart draws the two series whose
+ * crossing IS the decision. */
+function cadenceCard(plan: Plan, hasSeries: boolean): string {
+  const decision = plan.installDecision;
+  if (!decision) return note("waiting for the cadence verdict (needs a route ETA and a factions frontier)");
+  const verdictDot =
+    decision.effective === "install" ? dot("ready", "install") : decision.effective === "push" ? dot("good", "push") : dot("off", "legacy");
+  const header = tiles([
+    {
+      label: "verdict",
+      value: `${verdictDot} ${decision.effective}`,
+      sub: decision.why,
+    },
+    {
+      label: "accrued value",
+      value: fmtNum(decision.resetValueMult, 2),
+      sub: decision.resetFavorValue !== undefined ? `${fmtNum(decision.resetFavorValue, 2)} from banked favor` : "",
+    },
+    {
+      label: "threshold",
+      value: decision.threshold !== undefined ? fmtNum(decision.threshold, 2) : "–",
+      sub: decision.pushRate !== undefined ? `push rate ${formatScientific(decision.pushRate)}/s` : "no push target",
+    },
+    {
+      label: "latched",
+      value: decision.latched ? "yes" : "no",
+      sub: decision.pushEtaSec !== undefined ? `next package ${fmtTime(decision.pushEtaSec * 1_000)}` : "",
+    },
+  ]);
+  const crossings = plan.favorCrossings?.length
+    ? table(
+        ["faction", "favor now", "favor after install"],
+        plan.favorCrossings.map((crossing) => [
+          esc(crossing.faction),
+          fmtNum(crossing.favorNow, 0),
+          fmtNum(crossing.favorAfter, 0),
+        ]),
+        { left: [0] },
+      )
+    : note("no faction crosses the donation threshold on install");
+  const chart = hasSeries
+    ? `<div id="cadencewrap"><canvas id="cadencechart" class="minichart"></canvas><div id="cadencetip"></div></div>`
+    : "";
+  return header + chart + crossings;
+}
+
 export const bitnodeTab: Tab = {
   id: "progression",
   render(state: ProjectedState) {
@@ -187,6 +295,10 @@ export const bitnodeTab: Tab = {
                 : "install is not economically due yet")),
         )
       : "";
+    // Both cards read only optional plan fields (they postdate recorded runs).
+    const hasCadenceSeries = state.cadenceAccrued.length >= 2;
+    const cadence = p.plan ? card("Install cadence", cadenceCard(p.plan, hasCadenceSeries)) : "";
+    const route = p.plan ? card("Endgame route", routeCard(p.plan, now)) : "";
     const summary = tiles([
       { label: "current BitNode", value: current ? `BN${p.bitNode} ${current.name}` : `BN${p.bitNode}` },
       { label: "source files", value: String(completed.length), sub: `${BITNODES.length} nodes exist` },
@@ -292,6 +404,8 @@ export const bitnodeTab: Tab = {
     return (
       `<div class="col wide">` +
       card("Progression", summary + grid) +
+      route +
+      cadence +
       installLifecycle +
       forecasts +
       card("BitNode multipliers", multipliers, multiplierFilters) +
@@ -316,5 +430,22 @@ export const bitnodeTab: Tab = {
       card("Needs & investment arbiter", coordination) +
       `</div>`
     );
+  },
+  mount(state, el) {
+    const canvas = el.querySelector<HTMLCanvasElement>("#cadencechart");
+    const tooltip = el.querySelector<HTMLElement>("#cadencetip");
+    if (!canvas || !tooltip) return;
+    drawSeries(
+      canvas,
+      [
+        { pts: state.cadenceAccrued, color: "--series-1", label: "accrued" },
+        { pts: state.cadenceThreshold, color: "--series-2", label: "threshold" },
+      ],
+      state.t0,
+      (v) => fmtNum(v, 2),
+    );
+    // The canvas node is recreated by each render, so its listeners go with
+    // it; attaching per mount keeps exactly one set on the live node.
+    attachChartHover(canvas, tooltip);
   },
 };

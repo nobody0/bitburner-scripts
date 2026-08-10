@@ -308,6 +308,9 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     horizonSec: usableForecastSec(ctx.horizons.node) ?? Infinity,
     targetAugCount: daedalusAugsRequired(ctx.caps.bitNode, sfLevel(ctx.caps.sourceFiles, 12)) ?? Infinity,
     favorToDonate: topic.favorToDonate ?? 150,
+    // Progression owns the install cadence: when its published plan wants the
+    // reset, this feature concludes (stops working, runs the final sweep).
+    ...(ctx.state.topics.progression?.plan?.installWanted === true ? { installRequested: true } : {}),
     // PER-CLAIM, not the feature sum: `ctx.grants.money` adds aug-fund +
     // donation + graft + travel together, so a partial aug-fund grant plus a
     // $200k travel grant could fund a purchase the arbiter never allocated

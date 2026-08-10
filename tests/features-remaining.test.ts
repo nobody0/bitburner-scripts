@@ -16,7 +16,18 @@ import {
 } from "../shared/strategy/go/decide.ts";
 import { rankGoGames } from "../shared/strategy/go/rewards.ts";
 import { postNeeds } from "../shared/strategy/needs.ts";
-import { BASELINE_ORDER, bestOrdering, favorCrossings, orderingCost, phaseOf, stepProgression } from "../shared/strategy/progression/decide.ts";
+import {
+  BASELINE_ORDER,
+  INSTALL_VERDICT_OVERHEAD_SEC,
+  PUSH_MARGIN,
+  bestOrdering,
+  favorCrossings,
+  installVerdict,
+  orderingCost,
+  phaseOf,
+  stepProgression,
+} from "../shared/strategy/progression/decide.ts";
+import { scoreAugMults, weightsForRoute } from "../shared/strategy/factions/augs.ts";
 import { canSolve, solve } from "../shared/strategy/side/contracts.ts";
 import { shockMultiplier, stepSleeves } from "../shared/strategy/sleeves/decide.ts";
 import { chargeOrder, distinctRotations, packFragments } from "../shared/strategy/stanek/pack.ts";
@@ -700,6 +711,69 @@ describe("progression", () => {
   test("installing is recommended only in `ending` with something queued", () => {
     expect(stepProgression(view({ earnedThisRun: 100, money: 60 })).installReady).toBe(false);
     expect(stepProgression(view({ earnedThisRun: 100, money: 60, queued: ["a"] })).installReady).toBe(true);
+  });
+
+  test("the cadence verdict is a renewal rule: no route ETA falls back to legacy", () => {
+    expect(installVerdict({}).verdict).toBe("no-data");
+    expect(installVerdict({ resetValueMult: 100, pushMarginalRate: 1e-9 }).verdict).toBe("no-data");
+  });
+
+  test("a missing push rate installs only when the frontier itself is idle", () => {
+    // No rate + no frontier conclusion is a booting cycle, not an exhausted
+    // one — concluding "install" there latches before any work begins.
+    expect(installVerdict({ nodeRemainingSec: 10_000 }).verdict).toBe("no-data");
+    expect(installVerdict({ nodeRemainingSec: 10_000, frontierIdle: true }).verdict).toBe("install");
+    expect(installVerdict({ nodeRemainingSec: 10_000, resetValueMult: 0.5, pushMarginalRate: 0, frontierIdle: true }).verdict).toBe("install");
+    expect(installVerdict({ nodeRemainingSec: 10_000, resetValueMult: 0.5, pushMarginalRate: 0 }).verdict).toBe("no-data");
+  });
+
+  test("accrued value must clear sqrt(2·O·p) with the margin", () => {
+    const p = 1e-4;
+    const threshold = Math.sqrt(2 * INSTALL_VERDICT_OVERHEAD_SEC * p) * PUSH_MARGIN;
+    const below = installVerdict({ nodeRemainingSec: 10_000, resetValueMult: threshold * 0.9, pushMarginalRate: p });
+    expect(below.verdict).toBe("push");
+    const above = installVerdict({ nodeRemainingSec: 10_000, resetValueMult: threshold * 1.1, pushMarginalRate: p });
+    expect(above.verdict).toBe("install");
+    expect(above.threshold).toBeCloseTo(threshold, 10);
+  });
+
+  test("a long node does NOT suppress the cadence — it wants frequent installs", () => {
+    // The old rule amortized the accrued value over the remaining node, so a
+    // distant ending forbade every optional install. The renewal form is
+    // independent of remaining time; only INSTALL_MIN_PAYBACK_SEC (a
+    // stepProgression gate) protects the too-close-to-the-end case.
+    const week = 7 * 24 * 3600;
+    const verdict = installVerdict({ nodeRemainingSec: week, resetValueMult: 0.5, pushMarginalRate: 1e-4 });
+    expect(verdict.verdict).toBe("install");
+  });
+
+  test("flat score bonuses do not leak into the accrued side", () => {
+    // The Red Pill carries AUG_BONUS flats in scoreAug (route necessity) but
+    // has NO multipliers — its mult-only score must be exactly zero, so a
+    // queued Red Pill alone never manufactures cadence pressure.
+    const redPill = {
+      name: "The Red Pill",
+      baseCost: 0,
+      baseRepRequirement: 2_500_000,
+      factions: ["Daedalus"],
+      prereqs: [],
+      mults: {},
+    };
+    expect(scoreAugMults(redPill, weightsForRoute("daedalus"))).toBe(0);
+  });
+
+  test("a realizable sweep set opens the install gate despite the empty queue", () => {
+    // Purchases are end-loaded: mid-cycle the queue is empty BY DESIGN, and
+    // the sweep that fills it is triggered by installWanted itself. The
+    // realizable signal breaks that cycle; the purchasable-augmentation
+    // blocker still holds the reset until the sweep converts it.
+    const closed = stepProgression(view({ marginalInstall: true }));
+    expect(closed.installWanted).toBe(false);
+    const open = stepProgression(view({ marginalInstall: true, resetRealizable: true }));
+    expect(open.installWanted).toBe(true);
+    // ...and the dwelled push verdict keeps the gate shut either way.
+    const pushing = stepProgression(view({ marginalInstall: false, resetRealizable: true, earnedThisRun: 100, money: 60, queued: ["a"] }));
+    expect(pushing.installWanted).toBe(false);
   });
 
   test("a selected route's required install bypasses optional cadence and payback", () => {

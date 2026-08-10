@@ -247,6 +247,21 @@ export function scoreAug(aug: AugInfo, weights: ObjectiveWeights): number {
   return score;
 }
 
+/** Multiplier-only score: the log-mult contributions WITHOUT the AUG_BONUS
+ * flats. The install-vs-push rule compares value STREAMS, and the flats are
+ * ranking devices (The Red Pill's 9 marks route necessity, not a 8000x rate
+ * gain) — leaking them into a rate comparison makes any package containing
+ * one look infinitely worth pushing for. */
+export function scoreAugMults(aug: AugInfo, weights: ObjectiveWeights): number {
+  if (aug.multsUnknown) return 0;
+  let score = 0;
+  for (const [field, value] of Object.entries(aug.mults)) {
+    if (value <= 0) continue;
+    score += contributionOf(field, value, weights);
+  }
+  return score;
+}
+
 /** Default weights: a balanced hacking-first run. */
 export function defaultWeights(): ObjectiveWeights {
   return {

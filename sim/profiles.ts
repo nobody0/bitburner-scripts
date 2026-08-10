@@ -80,6 +80,27 @@ const CYBERSEC_INSTALL_WORLD: NonNullable<SimProfile["world"]> = {
   factions: { CyberSec: { rep: 100_000, favor: 149 } },
 };
 
+/** Multi-install fixture. Owns NOTHING (an aug-saturated world makes later
+ * installs objectively worthless, and the cadence rule then correctly
+ * refuses them — the first version of this fixture proved exactly that).
+ * Instead reputation is BANKED at three factions, so each cycle has a real
+ * set of multiplier augmentations to convert and an install that is
+ * genuinely optimal: cycle 1 sweeps CyberSec on the starting bankroll,
+ * cycles 2-3 rejoin the city factions, earn the join cash, and convert the
+ * banked rep as soon as the accrued value clears the cadence threshold. */
+const CYBERSEC_CADENCE_WORLD: NonNullable<SimProfile["world"]> = {
+  ...CYBERSEC_INSTALL_WORLD,
+  playerState: {
+    ...CYBERSEC_INSTALL_WORLD.playerState,
+    augmentations: [],
+  },
+  factions: {
+    CyberSec: { rep: 100_000, favor: 149 },
+    "Sector-12": { rep: 60_000, favor: 0 },
+    Aevum: { rep: 50_000, favor: 0 },
+  },
+};
+
 export const PROFILES: readonly SimProfile[] = [
   {
     id: "bn1-speedrun",
@@ -154,6 +175,45 @@ export const PROFILES: readonly SimProfile[] = [
     startingMoney: 1.5e9,
     world: CYBERSEC_INSTALL_WORLD,
     horizon: "10m",
+    seeds: [1, 2, 3],
+  },
+  {
+    id: "install-cadence",
+    description:
+      "Two consecutive install resets on the banked-rep fixture: prestige soundness and the install-vs-push cadence at speed.",
+    bitnode: 4,
+    features: only("hacking", "factions", "progression"),
+    goals: ["installs:2"],
+    homeRam: 256,
+    startingMoney: 1.5e9,
+    world: CYBERSEC_CADENCE_WORLD,
+    // Cycle 1 converts the banked rep in ~3 min. Cycle 2 is real physics: the
+    // frontier's next package (Tian Di Hui, 4 augs at 6,250 rep) takes ~80
+    // minutes of rep work at cycle-2 rates, and the cadence verdict flips
+    // when that package's value lands. installs:3 would need ~2.5h and prove
+    // nothing more about the machinery.
+    horizon: "2h",
+    seeds: [1, 2, 3],
+  },
+  {
+    id: "install-favor",
+    description:
+      "The honest cadence experiment: fresh-ish BN4 on the default network, two installs banking CyberSec favor to 75 — exercises favor conversion, route recalibration and the install-vs-push heuristic across cycles.",
+    bitnode: 4,
+    features: only("hacking", "factions", "career", "progression"),
+    goals: ["favor:CyberSec:75", "installs:2"],
+    homeRam: 64,
+    startingMoney: 1_000_000,
+    world: {
+      playerState: {
+        factions: ["CyberSec"],
+        // CashRoot re-grants $1m + BruteSSH.exe on EVERY reset, so cycle 2+
+        // does not restart from an unopenable network at $1,000.
+        augmentations: [{ name: "CashRoot Starter Kit", level: 1 }],
+      },
+      factions: { CyberSec: { rep: 15_000, favor: 0 } },
+    },
+    horizon: "6h",
     seeds: [1, 2, 3],
   },
   {
