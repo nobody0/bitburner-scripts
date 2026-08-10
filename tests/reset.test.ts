@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { resetHackingState } from "../game/lib/features/hacking.ts";
+import { workerGlobals } from "../game/lib/worker-shared.ts";
 import { classifyReset, type ResetIdentity } from "../shared/reset.ts";
 
 const OLD: ResetIdentity = { currentNode: 1, lastAugReset: 100, lastNodeReset: 10 };
@@ -24,5 +26,16 @@ describe("game reset classification", () => {
   test("a backwards epoch is a loaded-world discontinuity, not continuity", () => {
     expect(classifyReset(OLD, { ...OLD, lastAugReset: 50 })).toBe("augmentation");
     expect(classifyReset(OLD, { ...OLD, lastAugReset: 50, lastNodeReset: 5 })).toBe("bitnode");
+  });
+});
+
+describe("prestige invalidation", () => {
+  test("hacking drops the dispatcher wake rendezvous with the dead worker fleet", () => {
+    const globals = workerGlobals();
+    globals.dispatch_wake = () => undefined;
+
+    resetHackingState();
+
+    expect(globals.dispatch_wake).toBeUndefined();
   });
 });

@@ -246,11 +246,12 @@ classifies the tuple `(currentNode, lastAugReset, lastNodeReset)` as `none`,
 advances the augmentation timestamp. Comparing `lastNodeReset` also catches
 re-entering the same BitNode, which a node-number comparison cannot.
 
-On augmentation or BitNode prestige everything derived from the world we left is dropped — the
-server snapshot, every feature's published topics, the multiplier cache, the
-dispatcher ledger and heap, and the realm worker registry — and the controller
-rescans and reclaims immediately rather than waiting for the next sweep.
-`reset(state)` takes the store precisely so each module clears its OWN
+On augmentation or BitNode prestige everything derived from the world we left
+is dropped — the server snapshot, every feature's published topics, the
+multiplier cache, the dispatcher ledger and heap, and the realm worker registry
+— and the controller rescans and reclaims immediately rather than waiting for
+the next sweep.
+`reset(state, kind)` takes the store precisely so each module clears its OWN
 topics: a per-field delete blacklist in the controller cannot keep up with
 what features publish, and a topic that survives the reset is live data from
 a dead node (a stale aug list once handed the new node's first endgame route

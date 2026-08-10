@@ -371,7 +371,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // This is deliberately NOT done in onPrestige below: installs preserve the
   // live realm and must be detected by the successor controller.
   resetAllFeatures(initState(), "bitnode");
-  delete realm["state"];
+  clearRealm();
 
   // Match the game: prestige kills scripts without creating a new browser
   // realm. Keeping the slots is load-bearing; otherwise the simulator masks
