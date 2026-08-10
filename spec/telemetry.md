@@ -73,6 +73,10 @@ heartbeats — with `{from?, to, etaSec, expectedEndAt, why, routes[]}`, where
 `bitnode.reset` carries the outcome half: `{to, from?, elapsedMs?, route?,
 guessedEndAt?, decidedAt?}` — the actual elapsed time next to the last guess,
 which is what makes the ETA heuristic tunable from these files at all.
+`augmentation.reset` records the other prestige boundary with
+`{elapsedMs?, fromAugCount, toAugCount}`. Both are detected from
+`getResetInfo()` epochs in the successor controller, after Bitburner has killed
+the predecessor and every worker.
 
 `progression.plan.forecasts` carries the live planning half as two typed,
 independently anchored forecasts: `install` and `node`. Estimated records retain

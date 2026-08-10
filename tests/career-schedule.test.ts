@@ -273,6 +273,21 @@ describe("the slot lock is bounded by the progress it protects", () => {
     expect(claim.holdUntil).not.toBe(Number.MAX_SAFE_INTEGER);
   });
 
+  test("a repeating crime locks on progress within its current unit, not cumulative work time", () => {
+    // Upstream CrimeWork never resets cyclesWorked; only its private
+    // unitCompleted wraps after each completion.
+    const lock = progressLockUntil({
+      mode: "progress",
+      totalMs: 4_000,
+      cyclesWorked: 27, // one full 20-cycle crime plus 7 cycles
+      observedAt: 10_000,
+      repeating: true,
+      completionPending: false,
+      now: 10_000,
+    });
+    expect(lock).toBe(12_600);
+  });
+
   test("PAST the boundary the lock is gone and faction work can win the slot", () => {
     // The heist's time has elapsed. Career drops to its income band, which is
     // deliberately too weak to hold the slot against `factions:work`.

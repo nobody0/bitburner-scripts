@@ -22,6 +22,9 @@
  *   save-file corruption are dead weight here.
  * - `calculateHackingTime`'s typeof checks and the vendored DarknetServer
  *   special case do not exist (we never target darknet servers... yet).
+ *
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking.ts#L8-L94
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/formulas/grow.ts#L7-L57
  */
 
 /** BitNode multiplier subset the hacking formulas read. All default 1 (BN1). */
@@ -39,7 +42,8 @@ export interface HackNodeMults {
    *  **0**, hacking drains the server at 30% strength and pays the player
    *  nothing at all — which is also why stock manipulation is unaffected by it
    *  (`influenceStockThroughServerHack` reads `moneyDrained`, not `moneyGained`).
-   *  Omitting it made every BN8 target look profitable. */
+   *  Omitting it made every BN8 target look profitable.
+   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L568-L616 */
   ScriptHackMoneyGain?: number;
   ServerGrowthRate?: number;
   ServerWeakenRate?: number;
@@ -103,7 +107,8 @@ export function makeHackContext(player: HackPlayer, node: HackNodeMults = {}): H
   };
 }
 
-/** = vendored calculateHackingChance (admin-rights guard as a parameter). */
+/** = vendored calculateHackingChance (admin-rights guard as a parameter).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking.ts#L8-L24 */
 export function hackChance(ctx: HackContext, hackDifficulty: number, requiredHackingSkill: number, hasAdminRights = true): number {
   if (!hasAdminRights || hackDifficulty >= 100) return 0;
   const difficultyMult = (100 - hackDifficulty) / 100;
@@ -113,7 +118,8 @@ export function hackChance(ctx: HackContext, hackDifficulty: number, requiredHac
   return Math.max(Math.min(chance, 1), 0);
 }
 
-/** = vendored calculatePercentMoneyHacked (decimal fraction per thread). */
+/** = vendored calculatePercentMoneyHacked (decimal fraction per thread).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking.ts#L40-L57 */
 export function hackPercent(ctx: HackContext, hackDifficulty: number, requiredHackingSkill: number): number {
   if (hackDifficulty >= 100) return 0;
   const difficultyMult = (100 - hackDifficulty) / 100;
@@ -122,7 +128,8 @@ export function hackPercent(ctx: HackContext, hackDifficulty: number, requiredHa
   return Math.min(1, Math.max(percent, 0));
 }
 
-/** = vendored calculateHackingTime, in SECONDS. Grow/weaken derive from it. */
+/** = vendored calculateHackingTime, in SECONDS. Grow/weaken derive from it.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking.ts#L59-L94 */
 export function hackTimeSeconds(ctx: HackContext, hackDifficulty: number, requiredHackingSkill: number): number {
   let skillFactor = 2.5 * (requiredHackingSkill * hackDifficulty) + 500;
   skillFactor /= ctx.skillPlus50;
@@ -137,7 +144,8 @@ export function weakenTimeSeconds(ctx: HackContext, hackDifficulty: number, requ
   return 4 * hackTimeSeconds(ctx, hackDifficulty, requiredHackingSkill);
 }
 
-/** = vendored calculateHackingExpGain (per thread). */
+/** = vendored calculateHackingExpGain (per thread).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking.ts#L26-L38 */
 export function hackExpGain(ctx: HackContext, baseDifficulty: number): number {
   if (!baseDifficulty) return 0;
   let expGain = 3;
@@ -149,14 +157,16 @@ export function coreBonus(cores = 1): number {
   return 1 + (cores - 1) / 16;
 }
 
-/** = vendored getWeakenEffect. */
+/** = vendored getWeakenEffect.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/ServerHelpers.ts#L287-L295 */
 export function weakenEffect(ctx: HackContext, threads: number, cores = 1): number {
   return 0.05 * threads * coreBonus(cores) * ctx.serverWeakenRate;
 }
 
 /** = vendored calculateServerGrowthLog with threads = 1: the per-thread
  * growth log `k`. Precompute per (target, difficulty, cores); growThreads and
- * money projections reuse it. */
+ * money projections reuse it.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/formulas/grow.ts#L7-L29 */
 export function growthLogPerThread(ctx: HackContext, hackDifficulty: number, serverGrowth: number, cores = 1): number {
   if (!serverGrowth) return -Infinity;
   let adjGrowthLog = Math.log1p(0.03 / hackDifficulty);
@@ -170,7 +180,8 @@ export function growthLogPerThread(ctx: HackContext, hackDifficulty: number, ser
  * precomputed by the caller instead of re-derived per invocation. Same
  * Newton-Raphson iteration, verbatim — see the vendored original for the
  * extensive derivation comments. Returns integer threads for one grow call
- * to take startMoney to targetMoney. */
+ * to take startMoney to targetMoney.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/ServerHelpers.ts#L80-L198 */
 export function growThreads(k: number, targetMoney: number, startMoney: number, moneyMax: number): number {
   if (k === -Infinity) return Infinity;
   if (startMoney < 0) startMoney = 0;
@@ -210,7 +221,8 @@ export function growThreads(k: number, targetMoney: number, startMoney: number, 
  * through its current level. A raw experience total cannot answer that: 855
  * defense at 1.2m exp is nearly a level away or nearly there, and the number
  * alone does not say which. Pinned against the vendored original by
- * `sim/tests/formulas-parity.test.ts`. */
+ * `sim/tests/formulas-parity.test.ts`.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/formulas/skill.ts#L7-L15 */
 export function skillFromExp(exp: number, mult = 1): number {
   // Mult can be 0 in BN12 at a high SF12 level, where the stat never moves.
   if (mult === 0) return 1;

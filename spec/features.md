@@ -235,14 +235,18 @@ feature, because a rooted fleet is what every feature spends. Hacking is only
 its first customer, so the sweep belongs to none of them, takes no part in
 needs/claims arbitration, and the controller runs it first.
 
-### BitNode resets
+### Runtime continuity and prestige
 
-`capsDelta` (`shared/features/unlock.ts`) reports `bitNodeChanged` only when
-*both* readings are known: `undefined -> 1` is the first successful gate
-batch, not a node reset, and treating it as one would wipe the fleet on every
-cold boot.
+Startup and game-world reset are independent. A build handoff and a loaded
+save are both `none` at the game-world level, but only the handoff inherits a
+live realm and worker registry. A fresh page load has no previous identity and
+bootstraps from observation. Under a surviving realm, `shared/reset.ts`
+classifies the tuple `(currentNode, lastAugReset, lastNodeReset)` as `none`,
+`augmentation`, or `bitnode`; BitNode wins because source-file prestige also
+advances the augmentation timestamp. Comparing `lastNodeReset` also catches
+re-entering the same BitNode, which a node-number comparison cannot.
 
-On a real change everything derived from the world we left is dropped — the
+On augmentation or BitNode prestige everything derived from the world we left is dropped — the
 server snapshot, every feature's published topics, the multiplier cache, the
 dispatcher ledger and heap, and the realm worker registry — and the controller
 rescans and reclaims immediately rather than waiting for the next sweep.

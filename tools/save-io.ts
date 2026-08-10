@@ -43,6 +43,19 @@ function isSteamCloud(bytes: Uint8Array): boolean {
   return new TextDecoder().decode(bytes.subarray(0, 4)) === "H4sI";
 }
 
+/** Convert any accepted file encoding to the exact SaveData variant that
+ * v3.0.1 expects in IndexedDB. Binary saves must be raw gzip bytes; the
+ * browser fallback must remain a base64 string (a Uint8Array containing that
+ * string is interpreted as gzip by decodeSaveData).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/utils/SaveDataUtils.ts#L37-L70 */
+export function prepareIndexedDbSave(bytes: Uint8Array): { storage: "binary" | "text"; bytes: Uint8Array } {
+  if (isGzip(bytes)) return { storage: "binary", bytes };
+  if (isSteamCloud(bytes)) {
+    return { storage: "binary", bytes: new Uint8Array(Buffer.from(new TextDecoder().decode(bytes), "base64")) };
+  }
+  return { storage: "text", bytes };
+}
+
 /** Raw export bytes -> the save's JSON string. */
 export function decodeSaveData(bytes: Uint8Array<ArrayBuffer>): string {
   if (isGzip(bytes)) return new TextDecoder().decode(Bun.gunzipSync(bytes));

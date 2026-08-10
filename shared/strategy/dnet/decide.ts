@@ -21,6 +21,8 @@ export interface DarknetServer {
 }
 
 export interface DarknetView {
+  /** True only when every server's neighbor list has been observed. */
+  topologyComplete: boolean;
   servers: DarknetServer[];
   reachable: number;
   maxDepth: number;
@@ -77,6 +79,18 @@ export function unlockValue(view: DarknetView, hostname: string): number {
 
 export function stepDarknet(view: DarknetView): DarknetDecision {
   const linked = new Set(view.stasisLinked);
+
+  // ns.dnet.probe() is local to the script execution host. Ranking stasis
+  // links from one local neighbor list would present a partial graph as an
+  // exact reachability answer, so refuse until acquisition traverses it.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L314-L335
+  if (!view.topologyComplete) {
+    return {
+      action: { type: "idle", why: "darknet topology is only partially observed" },
+      ranked: [],
+      why: "waiting for a complete per-host neighbor graph",
+    };
+  }
 
   const ranked = view.servers
     .filter((server) => !server.stasisLinked)

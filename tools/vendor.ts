@@ -9,6 +9,7 @@ import path from "node:path";
  * string is absent — that is the drift detector when bumping TAG. */
 
 const TAG = "v3.0.1";
+const COMMIT = "3162fd2590e221eadd0c0fbd46151913f7c4c41c";
 // Keep machine-specific checkout locations out of the repository. A sibling
 // checkout is the zero-config convention on every OS; BITBURNER_SRC remains
 // available for layouts that do not follow it.
@@ -274,7 +275,28 @@ const MANIFEST: VendorFile[] = [
 ];
 
 function gitShow(objectPath: string): string {
-  return execFileSync("git", ["-C", SRC_REPO, "show", `${TAG}:${objectPath}`], { encoding: "utf8" });
+  return execFileSync("git", ["-C", SRC_REPO, "show", `${COMMIT}:${objectPath}`], { encoding: "utf8" });
+}
+
+function gitRevParse(revision: string): string {
+  return execFileSync("git", ["-C", SRC_REPO, "rev-parse", revision], { encoding: "utf8" }).trim();
+}
+
+/** Refuse a moving tag or a checkout on another revision before it can become
+ * the evidence base for a vendor refresh.
+ * Source: https://github.com/bitburner-official/bitburner-src/releases/tag/v3.0.1 */
+function assertPinnedCheckout(): void {
+  const taggedCommit = gitRevParse(`${TAG}^{commit}`);
+  if (taggedCommit !== COMMIT) {
+    throw new Error(`${TAG} resolves to ${taggedCommit}, expected pinned commit ${COMMIT}`);
+  }
+  const head = gitRevParse("HEAD");
+  if (head !== COMMIT) {
+    throw new Error(
+      `bitburner-src checkout is at ${head}, expected ${TAG} (${COMMIT}); ` +
+        `check out the pinned release before inspecting or vendoring it`,
+    );
+  }
 }
 
 function vendorStatusDirty(): boolean {
@@ -284,6 +306,8 @@ function vendorStatusDirty(): boolean {
     return false;
   }
 }
+
+assertPinnedCheckout();
 
 if (vendorStatusDirty() && !process.argv.includes("--force")) {
   throw new Error(`${OUT_DIR} has uncommitted changes; commit or discard them (or pass --force)`);
@@ -1403,7 +1427,18 @@ function gangFactionNames(): string[] {
 
 writeFileSync(
   path.join("sim/vendor", "manifest.json"),
-  JSON.stringify({ tag: TAG, files: written }, null, 2) + "\n",
+  JSON.stringify(
+    {
+      tag: TAG,
+      commit: COMMIT,
+      definitionsSha256: createHash("sha256")
+        .update(gitShow("src/ScriptEditor/NetscriptDefinitions.d.ts"))
+        .digest("hex"),
+      files: written,
+    },
+    null,
+    2,
+  ) + "\n",
   "utf8",
 );
-console.log(`wrote sim/vendor/manifest.json (${written.length} files @ ${TAG})`);
+console.log(`wrote sim/vendor/manifest.json (${written.length} files @ ${TAG}, ${COMMIT})`);

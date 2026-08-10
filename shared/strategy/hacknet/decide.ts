@@ -15,7 +15,12 @@ import { coarseHorizonSec, scoreInvestment } from "../investment.ts";
  * hacknet cost multipliers are already folded into what the game reports.
  *
  * Hacknet Servers are converted to dollars/sec through the observed
- * "Sell for Money" hash price before they reach this pure decision. */
+ * "Sell for Money" hash price before they reach this pure decision.
+ * Pinned upstream API and formula sources:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Hacknet.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/HacknetHelpers.tsx
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/formulas/HacknetNodes.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/formulas/HacknetServers.ts */
 
 export interface HacknetNodeState {
   index: number;

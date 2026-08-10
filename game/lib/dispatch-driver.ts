@@ -44,6 +44,10 @@ export function drainCompletions(state: DriverState): CompletionEvent[] {
           threads: entry.threads,
           result:
             entry.kind === "hack"
+              // ns.hack returns money gained, not a success bit. Positive is
+              // definitive success; $0 is ambiguous in BN8 and is treated as
+              // failure for conservative exp/success telemetry.
+              // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L561-L635
               ? { success: (entry.result ?? 0) > 0, moneyGained: entry.result ?? 0 }
               : entry.kind === "weaken"
                 ? { securityReduced: entry.result ?? 0 }
@@ -56,7 +60,8 @@ export function drainCompletions(state: DriverState): CompletionEvent[] {
 
 /** Build the planner's view: static fields from the last dodged scan, live
  * security/money for the hot targets (two cheap direct getters — the hot path
- * never dodges), live used RAM from our own ledger. */
+ * never dodges), live used RAM from our own ledger.
+ * Source getters: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L989-L1002 */
 export function buildView(
   ns: NS,
   state: DriverState,
@@ -68,7 +73,8 @@ export function buildView(
    *  is drained from a server (and so what a batch steals AND how strongly it
    *  manipulates), while `ScriptHackMoneyGain` scales only the player's cut.
    *  BN8 sets the second to 0 — hacking earns nothing while still moving prices —
-   *  and without this the farm would report every BN8 target as profitable. */
+   *  and without this the farm would report every BN8 target as profitable.
+   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking.ts#L40-L57 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L575-L616 */
   nodeMults?: Record<string, number>,
   /** hostname -> what `stock` wants that host's symbol to do. Published by the
    *  stock driver on its topic; read here so the target solver can price
@@ -157,17 +163,18 @@ export function pump(
   for (const action of result.actions) {
     if (action.type !== "hack" && action.type !== "grow" && action.type !== "weaken") continue;
     if (action.opId === undefined) continue;
-    if (startOp(ns, state, action, action.opId)) launched++;
+    if (startOp(ns, state, action, action.opId, view.time)) launched++;
     else failed.push(action.opId);
   }
   if (failed.length > 0) reportFailed(state.memory, failed);
   return { launched, failed: failed.length, directive: result.directive };
 }
 
-function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): boolean {
+function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, plannedAt: number): boolean {
   const host = action.source;
   // Deployment is done by the dodged sweep; an undeployed host is simply not
   // usable this pass (keeping ns.scp out of the controller's static RAM).
+  // Source (imports participate in static dependency/RAM analysis): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L448-L480
   if (!state.deployed.has(host)) return false;
   const globals = state.globals;
   // A missing registry means the realm slots were swept out from under this
@@ -175,6 +182,10 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
   // successor owns the rendezvous. Fail the op instead of resurrecting the map.
   if (!globals.worker_info || !globals.worker_jobs) return false;
 
+  // The pure action's additionalMsec was measured at `plannedAt`; workers turn
+  // this absolute padding deadline back into a relative delay immediately
+  // before their Netscript call, after async exec/module startup.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L48-L66
   // Pooled job to an already-running serve worker: no exec at all — push the
   // job and poke the worker's parked resolver. A missing mailbox means the
   // worker died (reload, kill); failing the op makes the pure layer respawn.
@@ -184,7 +195,7 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
     queue.push({
       opId,
       target: action.target,
-      ...(action.additionalMsec !== undefined ? { additionalMsec: action.additionalMsec } : {}),
+      ...(action.additionalMsec !== undefined ? { delayUntil: plannedAt + action.additionalMsec } : {}),
       ...(action.stock ? { stock: true } : {}),
     });
     globals.worker_wake?.get(action.worker.id)?.();
@@ -200,7 +211,9 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
     target: action.target,
     threads: action.threads,
     ...(action.worker ? { mode: "serve" as const } : {}),
-    ...(!action.worker && action.additionalMsec !== undefined ? { additionalMsec: action.additionalMsec } : {}),
+    ...(!action.worker && action.additionalMsec !== undefined
+      ? { delayUntil: plannedAt + action.additionalMsec }
+      : {}),
     ...(!action.worker && action.stock ? { stock: true } : {}),
   });
   if (action.worker) {
@@ -208,7 +221,7 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
       {
         opId,
         target: action.target,
-        ...(action.additionalMsec !== undefined ? { additionalMsec: action.additionalMsec } : {}),
+        ...(action.additionalMsec !== undefined ? { delayUntil: plannedAt + action.additionalMsec } : {}),
         ...(action.stock ? { stock: true } : {}),
       },
     ]);
@@ -223,6 +236,7 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number): b
     // (src/workers/{hs,w1s,gs,w2s}.ts), to fix their shotgun batcher
     // ("fixed shotgun by separating different workers", 8a8fb9c). The pooled
     // serve mode answers the same need with per-role INSTANCES of one script.
+    // Source (ramOverride is the per-thread RunningScript allocation): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L275-L310
     { threads: action.threads, temporary: true, ramOverride: WORKER_RAM[action.type] },
     execId,
   );

@@ -7,7 +7,9 @@ import type { GameState } from "./state.ts";
  *
  * The realm outlives any single start.js instance, which is what makes a build
  * handoff cheap: the incoming controller inherits the whole world instead of
- * re-probing it. */
+ * re-probing it. Scripts are page-realm ES modules; a page reload creates the
+ * fresh realm used by the cold path.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptJSEvaluator.ts#L208-L223 */
 export interface GameGlobals {
   /** Newest start.js instance bumps this; older loops see it and exit. */
   controllerEpoch?: number;

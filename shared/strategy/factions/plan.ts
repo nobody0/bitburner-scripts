@@ -186,7 +186,8 @@ export function initFactionMemory(): FactionMemory {
  * Both exist for the same reason and it is not aesthetics: switching
  * faction work CANCELS the current activity outright
  * (`workForFaction` does not queue), so a planner that re-decided freely would
- * oscillate between two near-equal options and complete neither. */
+ * oscillate between two near-equal options and complete neither.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22 */
 export const FOCUS_DWELL_MS = 60_000;
 export const WORK_SWITCH_MARGIN = 1.05;
 /** How long a latched objective may make ZERO reputation progress before the
@@ -195,7 +196,8 @@ export const INTENT_STALL_MS = 600_000;
 /** Minimum remaining NODE time for a NeuroFlux level to be worth draining
  * into. Each level is ~+1% across the board, so it repays roughly 1% of the
  * remainder; below this there is nothing left to accelerate and the drain
- * only delays the node's end. */
+ * only delays the node's end.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/Augmentations.ts#L1159-L1209 */
 export const NFG_MIN_PAYBACK_SEC = 600;
 
 /** EWMA weight for the measured rep rate. */

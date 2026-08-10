@@ -79,6 +79,15 @@ describe("crime math", () => {
     const doubled = moneyPerSec(crime({ chance: 1 }), person(), { crimeSuccessRate: 1, crimeMoney: 2 });
     expect(doubled).toBeCloseTo(moneyPerSec(crime({ chance: 1 }), person(), CTX) * 2, 6);
   });
+
+  test("live getCrimeStats gains are not multiplied a second time", () => {
+    const p = person();
+    p.mults.crime_money = 3;
+    p.mults.strength_exp = 4;
+    const observed = crime({ chance: 1, money: 108_000, exp: { strength: 12 }, gainsAreEffective: true });
+    expect(moneyPerSec(observed, p, { crimeSuccessRate: 9, crimeMoney: 5, crimeExp: 7 })).toBe(27_000);
+    expect(expPerSec(observed, p, { crimeSuccessRate: 9, crimeMoney: 5, crimeExp: 7 }).strength).toBe(3);
+  });
 });
 
 // --- the needs-board consumer ------------------------------------------------

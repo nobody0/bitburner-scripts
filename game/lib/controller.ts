@@ -3,6 +3,7 @@ import type { FeatureOverrides } from "../../shared/features/profile.ts";
 import { capsDelta, type Capabilities } from "../../shared/features/unlock.ts";
 import type { HostRam } from "../../shared/ram/placement.ts";
 import type { Claim, SlotState } from "../../shared/strategy/arbiter.ts";
+import { classifyReset, type PrestigeKind, type ResetIdentity } from "../../shared/reset.ts";
 import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../shared/strategy/coordination.ts";
 import type { Need } from "../../shared/strategy/needs.ts";
 import { forecastAt, unknownForecast, usableForecastSec } from "../../shared/strategy/progression/forecast.ts";
@@ -150,21 +151,25 @@ export async function runController(
       // The gate belongs to the sweep and not to the acquisition cadence below,
       // in both directions: capabilities change on the scale of a BitNode, and
       // this is the one reading the controller must be able to ACT on — the reset
-      // walk keys off the delta, and a node change detected between sweeps would
+      // walk keys off the prestige epochs, and a reset detected between sweeps would
       // leave the fleet and every cached decision describing a dead game.
       //
       // Captured BEFORE it: the gate batch overwrites lastNodeReset with the NEW
       // node's start the moment a reset is observed, so the old node's start —
       // the thing its elapsed time is measured from — is only readable first.
-      const nodeStartedAt = state.topics.progression?.lastNodeReset;
+      const previousProgression = state.topics.progression;
+      const previousReset = resetIdentity(previousProgression);
+      const nodeStartedAt = previousProgression?.lastNodeReset;
       const before = caps(state);
       const gateHosts = placement(state);
       await runGateProbe(ns, state, gateHosts, (gb) =>
         acquireDodge(gateHosts, hackingState().memory.dispatch.heap, gb),
       );
       const delta = capsDelta(before, caps(state));
+      const currentReset = resetIdentity(state.topics.progression);
+      const resetKind = classifyReset(previousReset, currentReset);
 
-      if (delta.bitNodeChanged) {
+      if (resetKind !== "none") {
         // Emitted FIRST — before the reset walk deletes the plan and before
         // the awaited rescan below gets a chance to throw. This is the one
         // record that closes the guess-vs-actual calibration loop for the
@@ -175,19 +180,27 @@ export async function runController(
         // change — and the plan still describes the node that just ended,
         // because the gate batch merges only gate fields.
         TELEMETRY: if (__TELEMETRY__) {
-          const endedPlan = state.topics.progression?.plan;
-          tel!.event("bitnode.reset", {
-            to: caps(state).bitNode,
-            ...(before.bitNode !== undefined ? { from: before.bitNode } : {}),
-            ...(nodeStartedAt !== undefined ? { elapsedMs: Date.now() - nodeStartedAt } : {}),
-            ...(endedPlan?.route !== undefined ? { route: endedPlan.route } : {}),
-            ...(endedPlan && endedPlan.forecasts.node.state !== "unknown"
-              ? { guessedEndAt: endedPlan.forecasts.node.expectedAt }
-              : {}),
-            ...(endedPlan?.decidedAt !== undefined ? { decidedAt: endedPlan.decidedAt } : {}),
-          });
+          if (resetKind === "bitnode") {
+            const endedPlan = previousProgression?.plan;
+            tel!.event("bitnode.reset", {
+              to: currentReset!.currentNode,
+              ...(previousReset !== undefined ? { from: previousReset.currentNode } : {}),
+              ...(nodeStartedAt !== undefined ? { elapsedMs: Date.now() - nodeStartedAt } : {}),
+              ...(endedPlan?.route !== undefined ? { route: endedPlan.route } : {}),
+              ...(endedPlan && endedPlan.forecasts.node.state !== "unknown"
+                ? { guessedEndAt: endedPlan.forecasts.node.expectedAt }
+                : {}),
+              ...(endedPlan?.decidedAt !== undefined ? { decidedAt: endedPlan.decidedAt } : {}),
+            });
+          } else {
+            tel!.event("augmentation.reset", {
+              ...(previousReset !== undefined ? { elapsedMs: Date.now() - previousReset.lastAugReset } : {}),
+              fromAugCount: previousProgression?.augCount ?? 0,
+              toAugCount: state.topics.progression?.augCount ?? 0,
+            });
+          }
         }
-        onBitNodeReset(state);
+        onWorldReset(state, resetKind);
         merge(state, "progression", emptyDigest());
         workSlot = undefined;
         publishedCoordination = undefined;
@@ -390,6 +403,7 @@ export async function runController(
         // driver was awaiting when the script was killed; swallowing it would
         // turn "we were killed" into a retry loop that reports a crash every
         // tick until the next await happens to rethrow.
+        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91
         if (isScriptDeath(error)) throw error;
         TELEMETRY: if (__TELEMETRY__) {
           tel!.event("feature.failed", { feature: driver.id, error: String(error) });
@@ -418,6 +432,7 @@ export async function runController(
     // timer (never ns.sleep — concurrent ns calls kill the script) is
     // sim-virtualized, so both worlds order this identically. Re-armed BEFORE
     // pumping so a completion landing during the pump is never lost.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L398-L431
     nextTick += TICK_MS;
     let clock = Date.now();
     if (nextTick < clock - TICK_MS) nextTick = clock;
@@ -513,7 +528,7 @@ function publishCoordination(
   return encoded;
 }
 
-/** A node reset under a live realm: everything derived from the world we left
+/** Prestige under a live realm: everything derived from the world we left
  * describes a game that no longer exists. Drop all of it and re-arm the
  * multiplier latch.
  *
@@ -522,17 +537,31 @@ function publishCoordination(
  * depends on exactly when the reset landed — and a snapshot that is only
  * probably fresh is the same class of bug as the heap describing a dead fleet.
  * The caller rescans immediately rather than keeping it. */
-function onBitNodeReset(state: GameState): void {
+function onWorldReset(state: GameState, kind: PrestigeKind): void {
   // Every module's own reset, by registry walk rather than by name — module
   // state AND each feature's published topics, which is why the walk takes
   // the state. Naming features (or their topic fields) here is exactly the
   // coupling the registry removes: the per-field delete blacklist this used
   // to carry left one feature's topic alive across a reset, and the new
   // node's first route decision read the old run's Red Pill out of it.
-  resetAllFeatures(state);
+  resetAllFeatures(state, kind);
   state.featureLastRun = {};
+  state.mirrors = {};
+  state.mirrorDirty.clear();
+  state.probeFailures = {};
+  state.probeSkips = {};
+  delete state.probeBatch;
   gameGlobal.farmTarget = undefined;
   // The server snapshot is the fleet substrate's, owned by no feature; the
   // caller rescans immediately rather than keeping it.
   delete state.topics.servers;
+}
+
+function resetIdentity(progression: GameState["topics"]["progression"]): ResetIdentity | undefined {
+  if (!progression) return undefined;
+  return {
+    currentNode: progression.bitNode,
+    lastAugReset: progression.lastAugReset,
+    lastNodeReset: progression.lastNodeReset,
+  };
 }

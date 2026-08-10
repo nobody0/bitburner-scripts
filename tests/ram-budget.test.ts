@@ -2,6 +2,8 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
+import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
+import type { NS } from "@ns";
 
 /** Static RAM is the fresh-game constraint: start.js plus a transient dodge
  * stub must fit an 8 GB home. Bitburner charges a script for every ns member
@@ -11,6 +13,7 @@ import type { BitburnerConfig } from "../tools/config.ts";
 const RAM_COSTS: Record<string, number> = {
   // Only the members the controller is allowed to touch directly.
   "ns.getPlayer": 0.5,
+  "ns.getResetInfo": 1,
   "ns.exec": 1.3,
   "ns.getServerSecurityLevel": 0.1,
   "ns.getServerMoneyAvailable": 0.1,
@@ -63,6 +66,11 @@ function staticRam(source: string): { total: number; members: string[] } {
 }
 
 describe("in-game static RAM budget", () => {
+  test("an unpriceable dodged method cannot be mistaken for a cheap call", () => {
+    const ns = { getFunctionRamCost: () => { throw new Error("unknown method"); } } as unknown as NS;
+    expect(priceCalls(ns, ["renamed.method"])).toBe(UNKNOWN_CALL_GB + 0.5);
+  });
+
   test("start.js stays within its fresh-game budget", async () => {
     const [start] = await buildScripts(config, { telemetry: true });
     const { total, members } = staticRam(start!.content);
@@ -107,8 +115,8 @@ describe("in-game static RAM budget", () => {
     // It only inspects the live game to describe what it is about to
     // overwrite; everything destructive goes through browser globals, which
     // cost no ns RAM.
-    expect(members).toEqual([]);
-    expect(total).toBe(BASE_GB);
+    expect(members).toEqual(["ns.getResetInfo"]);
+    expect(total).toBe(BASE_GB + 1);
     expect(restore.content).toContain("indexedDB");
   });
 

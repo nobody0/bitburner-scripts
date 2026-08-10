@@ -349,33 +349,33 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       assertPrestigeSupported: () => world.assertPrestigeSupported(),
       onPrestige: (cbScript, newlyInstalled) => host.onPrestige?.(cbScript, newlyInstalled),
     }),
-    // An augmentation install kills every process, so game/'s module-level
-    // dispatcher ledger and the realm rendezvous slots describe a world that
-    // no longer exists. game/ stays unaware it is simulated, so the cleanup
-    // lives here. Wired below, once the modules are imported.
+    // An augmentation install kills every process but preserves the browser
+    // realm. The successor controller must detect and invalidate the stale
+    // module/global state itself, exactly as it does in the game.
   };
 
   // Imported AFTER the flags are on globalThis, and dynamically so module
   // evaluation cannot outrun them.
-  const [{ runController }, { makeSink }, { resetHackingState }, { resetAllFeatures }, dodgeStub, worker] = await Promise.all([
+  const [{ runController }, { makeSink }, { resetAllFeatures }, { initState }, dodgeStub, worker] = await Promise.all([
     import("../game/lib/controller.ts"),
     import("../game/lib/telemetry-sink.ts"),
-    import("../game/lib/features/hacking.ts"),
     import("../game/lib/features/index.ts"),
+    import("../game/lib/state.ts"),
     import("../game/lib/dodge-stub.ts"),
     import("../game/worker/worker.ts"),
   ]);
 
-  // game/ keeps its hacking ledger in MODULE state, not realm state, so that a
-  // build handoff gives the new controller a clean one. Bun caches modules for
-  // the life of the process, so a second run in the same process would inherit
-  // the first one's heap and dispatcher stats. Clearing it here is what makes
-  // this call equivalent to a fresh realm.
-  resetHackingState();
+  // Bun caches every feature module for the process lifetime, while each
+  // runGame call represents a genuinely fresh browser realm. Reset all module
+  // state at this boundary, then discard the temporary store used by the hooks.
+  // This is deliberately NOT done in onPrestige below: installs preserve the
+  // live realm and must be detected by the successor controller.
+  resetAllFeatures(initState(), "bitnode");
+  delete realm["state"];
 
-  // A prestige is the same problem as a second run in one process: module
-  // state outlives the world it describes. The realm slots go too — every
-  // worker was killed, so every op id in the registry is unreportable.
+  // Match the game: prestige kills scripts without creating a new browser
+  // realm. Keeping the slots is load-bearing; otherwise the simulator masks
+  // stale-state bugs in the install callback path.
   host.onPrestige = (cbScript, newlyInstalled): void => {
     host.processes.killAll();
     world.prestigeAugmentation(newlyInstalled);
@@ -383,9 +383,6 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     stock.prestige();
     grafting.prestige();
     hasTor.value = false;
-
-    const state = realm["state"];
-    if (state && typeof state === "object") resetAllFeatures(state as never);
 
     const homeFiles = new Set(
       [...(host.files.get("home") ?? [])].filter((file) => !file.toLowerCase().endsWith(".exe")),
@@ -414,8 +411,6 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       ownedAugs: new Map(world.player.augmentations),
     };
     Object.assign(engine.counters, initialCounters());
-
-    for (const slot of REALM_SLOTS) delete realm[slot];
 
     const callback = cbScript?.replace(/^\/+/, "");
     if (!callback || !host.files.get("home")?.has(callback) || !host.scripts.has(callback)) return;

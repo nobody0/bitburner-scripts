@@ -62,7 +62,8 @@ export interface CareerView {
   time: number;
   person: CrimePerson;
   crimeContext: CrimeContext;
-  /** Crime stats from ns.singularity.getCrimeStats — never hardcoded here. */
+  /** Crime stats from ns.singularity.getCrimeStats — never hardcoded here.
+   * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L1068-L1090 */
   crimes: CrimeStats[];
   /** Courses available, with their cost and stat. */
   courses: { name: string; skill: string; expPerSec: number; costPerSec: number; location: string }[];
@@ -256,7 +257,8 @@ function scoreCourse(
  * available before Formulas.exe. An unmeasured company gets a deliberately
  * neutral exploration rate of one rep/sec; after one sample the measured rate
  * replaces it. This affects ordering only and is called out in the option's
- * explanation rather than presented as a measured prediction. */
+ * explanation rather than presented as a measured prediction.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Formulas.ts#L449-L461 */
 function scoreCompany(
   company: NonNullable<CareerView["companies"]>[number],
   values: ReturnType<typeof needValues>,
@@ -455,6 +457,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // Reissuing the same work cancels and restarts it. At an ordinary review,
   // continuation is always the correct no-op; at an exact completion boundary
   // allowProgressSwitch deliberately bypasses this guard.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22
   if (needsSlot && sameWork(view.currentWork, best.action) && !view.allowProgressSwitch) {
     return {
       action: { type: "idle", why: `already committing ${best.action.subject}` },
@@ -469,6 +472,8 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // Progress work is a transaction: until the completion promise resolves,
   // changing it destroys the partial unit. The arbiter also protects the slot,
   // but this strategy-side guard is the final defence against any stale grant.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Work.ts#L7-L22
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22
   if (needsSlot && careerWorkMode(view.currentWork?.kind) === "progress" && !view.allowProgressSwitch) {
     return {
       action: { type: "idle", why: `waiting for ${view.currentWork?.subject ?? view.currentWork?.kind ?? "progress work"} to complete` },
@@ -495,7 +500,9 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
 }
 
 /** Calls that start player work consume the singleton slot. Administrative
- * actions and player travel do not replace current work in v3.0.1. */
+ * actions and player travel do not replace current work in v3.0.1.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L226-L405
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L668-L746 */
 export function actionUsesWorkSlot(action: Pick<CareerAction, "type">): boolean {
   return action.type === "crime" || action.type === "class" || action.type === "gym" || action.type === "company" || action.type === "program";
 }

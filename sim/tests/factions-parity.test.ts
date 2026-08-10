@@ -190,6 +190,21 @@ describe("the work-vs-idle crossover", () => {
     expect(workRepPerSec("hacking", above, 0, ctx, true)).toBeGreaterThan(passiveRepPerSec(above, 0, ctx));
   });
 
+  test("passive gain uses the best upstream work formula, floor, and its own BitNode multiplier", () => {
+    const ctx: RepContext = { ...CTX, factionPassiveRepGain: 0.37 };
+    const p = person({ hacking: 410, strength: 33, defense: 44, dexterity: 55, agility: 66, charisma: 77 });
+    syncVendorContext(ctx);
+    const favor = 42;
+    const passiveFavor = Math.min(0.1, favor / 1000 + 0.01);
+    const expected = Math.max(
+      getHackingWorkRepGain(p as never, favor) * passiveFavor,
+      getFactionSecurityWorkRepGain(p as never, favor) * passiveFavor,
+      getFactionFieldWorkRepGain(p as never, favor) * passiveFavor,
+      1 / 120,
+    ) * 0.37 * 5;
+    expect(passiveRepPerSec(p, favor, ctx)).toBe(expected);
+  });
+
   test("the crossover moves with the BitNode's FactionWorkRepGain", () => {
     // Both sides scale with it, but not identically — passive rep is driven by
     // the best skill while work is driven by the relevant one, so the node

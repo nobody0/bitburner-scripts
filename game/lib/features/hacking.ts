@@ -62,6 +62,7 @@ export function resetHackingState(): void {
   globals.worker_jobs!.clear();
   globals.worker_wake!.clear();
   globals.dispatch_done!.length = 0;
+  globals.dispatch_wake = undefined;
   state = initDriver();
   pumpMaxMs = 0;
   lastRollup = 0;
@@ -203,6 +204,8 @@ function homeCoreIncomeDelta(ctx: Pick<ClaimContext, "state">): number {
   const hackCtx = driver.memory.dispatch.evaluator.ctx;
   const target = farm ? ctx.state.topics.servers?.[farm.host] : undefined;
   const home = driver.memory.dispatch.heap.host("home");
+  // The game hard-caps home at eight cores.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L595-L618
   if (!farm || !hackCtx || !target || !home || home.cores >= 8) return 0;
   const usable = Math.max(0, home.maxRam - home.reserved);
   if (usable < 2) return 0;
@@ -313,6 +316,10 @@ async function executeInfrastructure(ctx: DriverContext, decision: ScoredInfrast
       infrastructureClaimId(decision.kind),
       infrastructureMethods(decision.kind),
       (stubNs: NS) => {
+        // Home upgrades return booleans; cloud purchase returns the assigned
+        // hostname (empty on refusal), while cloud upgrade returns a boolean.
+        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Cloud.ts#L35-L113
+        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L553-L618
         if (decision.kind === "homeRam") return stubNs["singularity"]["upgradeHomeRam"]();
         if (decision.kind === "homeCore") return stubNs["singularity"]["upgradeHomeCores"]();
         if (decision.kind === "buyServer") {
@@ -353,7 +360,8 @@ async function executeInfrastructure(ctx: DriverContext, decision: ScoredInfrast
  *
  * Deliberately conservative — one attempt per host, throttled, and skipped
  * entirely while a batch-critical pass is running: a backdoor takes
- * hackingTime/4 and would otherwise be launched on every 200 ms tick. */
+ * hackingTime/4 and would otherwise be launched on every 200 ms tick.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L518-L533 */
 async function serveBackdoorNeeds(ctx: DriverContext): Promise<void> {
   if (backdoorInFlight) return;
   const now = Date.now();
@@ -486,7 +494,9 @@ function nextBackdoorAction(ctx: Pick<ClaimContext, "board" | "state">): Backdoo
   return opener;
 }
 
-/** Darkweb port openers, cheapest first — the order the game unlocks ports in. */
+/** Darkweb port openers, cheapest first — the order the game unlocks ports in.
+ * Source prices: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/DarkWeb/DarkWebItems.ts#L5-L10
+ * Source effects: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L549-L620 */
 const PORT_OPENERS = ["BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe", "SQLInject.exe"] as const;
 
 function programForPortNeed(game: GameState, portsRequired: number): ProgramOption | undefined {
@@ -531,6 +541,7 @@ async function buyPortOpener(ctx: DriverContext, portsRequired: number): Promise
         const missing = PORT_OPENERS.filter((program) => !files.has(program));
         if (owned.length >= portsRequired || missing.length === 0) return false;
         // TOR first; it is a precondition and idempotent.
+        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L401-L442
         if (!stubNs["singularity"]["purchaseTor"]()) return false;
         return stubNs["singularity"]["purchaseProgram"](missing[0] as never);
       },
@@ -568,6 +579,7 @@ function runPump(
   // symbol's forecast down and grow pushes it up, so in a node where the
   // market matters the farm's best target is not the richest server but the
   // one whose price movement is worth the most. See spec/targeting.md.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/PlayerInfluencing.ts#L17-L60
   const view = buildView(
     ns,
     driver,

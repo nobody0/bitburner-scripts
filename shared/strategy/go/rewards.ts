@@ -7,6 +7,9 @@ import type {
 } from "./decide.ts";
 import { addRepToFavor } from "../factions/rep.ts";
 
+/** `bonusPower` and `komi` are v3.0.1 game data; the remaining fields are
+ * simulator-fitted policy estimates as noted below.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/Constants.ts */
 export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   bonusPower: number;
   komi: number;
@@ -121,6 +124,7 @@ export function goFavorRepCap(sourceFile14Level: number): number {
 
 /** The API exposes only bonusPercent. The effect curve is monotonic, so raw
  * Node Power can be recovered without hidden state. */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/effects/effect.ts
 export function inferGoNodePower(
   bonusPercent: number,
   opponent: GoRewardOpponent,
@@ -259,6 +263,7 @@ function goHorizon(
 /** Exact v3.0.1 conversion performed when a joined-faction opponent reaches
  * an even positive streak. `earnedRep` is the Go-specific cap counter, not
  * ordinary faction reputation. */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/effects/effect.ts
 export function goFavorReward(favor: number, earnedRep: number, maxRep: number): {
   repGranted: number;
   favorAfter: number;

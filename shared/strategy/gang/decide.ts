@@ -68,15 +68,17 @@ export interface GangDecision {
   why: string;
 }
 
-/** The threshold at which ascending is worth the reset.
- *
- * Ascension wipes a member's stats and upgrades in exchange for a permanent
- * multiplier. The crossover is analytic: the multiplier gain has to repay the
- * time to re-train, so a gain below this is strictly negative. */
+/** Policy threshold for accepting an ascension reset. Ascension clears member
+ * experience and non-augmentation upgrades in exchange for the reported
+ * multiplier gain; 1.15 is deliberately a strategy choice, not an upstream
+ * formula.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Gang/GangMember.ts#L273-L339 */
 export const ASCEND_THRESHOLD = 1.15;
 
-/** Engage territory warfare only above this win chance. Losing a clash costs
- * members, and a dead member is a far larger loss than the territory is worth. */
+/** Engage territory warfare only above this win chance. Any clash can kill a
+ * warfare-assigned member, even on a win, and a dead member is a far larger
+ * loss than the territory is worth.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Gang/Gang.ts#L281-L302 */
 export const CLASH_CONFIDENCE = 0.6;
 
 export function stepGang(view: GangView): GangDecision {
@@ -87,7 +89,7 @@ export function stepGang(view: GangView): GangDecision {
     actions.push({ type: "recruit", why: `respect ${formatNumber(view.respect)} clears the next recruit` });
   }
 
-  // Ascension: analytic crossover, checked per member.
+  // Ascension policy threshold, checked per member.
   for (const member of view.members) {
     const gain = view.ascensionGain(member);
     if (gain >= ASCEND_THRESHOLD) {
@@ -99,9 +101,15 @@ export function stepGang(view: GangView): GangDecision {
     }
   }
 
-  // Task assignment. COUPLED, because wanted level is gang-wide: the penalty
-  // one member's task creates multiplies every other member's output.
-  const tasksFor = view.members.length > 0 ? view.taskOptions(view.members[0]!) : [];
+  // Only compare task names priced for EVERY member. getMemberInformation
+  // exposes the current task's exact rates, not a hypothetical task matrix;
+  // borrowing member A's measured rate for member B would fabricate data.
+  // A full Formulas-backed caller may still supply a complete matrix.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Gang.ts#L151-L164
+  const tasksFor = view.members.length > 0
+    ? view.taskOptions(view.members[0]!).filter((task) =>
+        view.members.every((member) => view.taskOptions(member).some((option) => option.name === task.name)))
+    : [];
   const assignment = assignCoupled(
     view.members,
     tasksFor,
@@ -111,7 +119,7 @@ export function stepGang(view: GangView): GangDecision {
       let wanted = 0;
       for (const { agent, task } of choices) {
         const options = view.taskOptions(agent);
-        const priced = options.find((option) => option.name === task.name) ?? task;
+        const priced = options.find((option) => option.name === task.name)!;
         respect += priced.respectGain;
         money += priced.moneyGain;
         wanted += priced.wantedGain;
@@ -122,7 +130,7 @@ export function stepGang(view: GangView): GangDecision {
       return (respect * view.weights.respect + money * view.weights.money) * penalty;
     },
     (member, task) => {
-      const priced = view.taskOptions(member).find((option) => option.name === task.name) ?? task;
+      const priced = view.taskOptions(member).find((option) => option.name === task.name)!;
       return priced.respectGain * view.weights.respect + priced.moneyGain * view.weights.money;
     },
     (task) => task.name,
@@ -164,7 +172,7 @@ export function stepGang(view: GangView): GangDecision {
     assignment,
     ...(wantedWarning ? { wantedWarning } : {}),
     why: assignment.approximated
-      ? `greedy assignment (${view.members.length} members x ${tasksFor.length} tasks exceeds the exact search budget)`
-      : `exact assignment over ${view.members.length} members x ${tasksFor.length} tasks`,
+      ? `greedy search (${view.members.length} members x ${tasksFor.length} fully priced tasks exceeds the search budget)`
+      : `exact search over ${view.members.length} members x ${tasksFor.length} fully priced tasks`,
   };
 }

@@ -87,7 +87,7 @@ describe("predictAtLanding", () => {
     expect(full.hackDifficulty).toBe(JOESGUNS.minDifficulty);
   });
 
-  test("equal landings fold in opId order — the engine's registration-order tie-break", () => {
+  test("equal modeled landings fold in deterministic opId order", () => {
     const { ctx } = scenario(300);
     const start = { hackDifficulty: 5, moneyAvailable: 62_500_000 };
     const hack: Omit<LedgerOp, "opId"> = { kind: "hack", threads: 10, effectThreads: 10, landing: 500 };
@@ -109,6 +109,26 @@ describe("predictAtLanding", () => {
     const start = { hackDifficulty: 6, moneyAvailable: 1_000 };
     const later: LedgerOp[] = [{ kind: "weaken", threads: 100, effectThreads: 100, landing: 900, opId: 1 }];
     expect(predictAtLanding(ctx, JOESGUNS, start, later, 800)).toEqual(start);
+  });
+
+  test("split grow calls preserve the upstream per-call additive term", () => {
+    const skill = 300;
+    const { ctx, person, server } = scenario(skill);
+    server.moneyAvailable = 1_000;
+    const start = { hackDifficulty: server.hackDifficulty, moneyAvailable: server.moneyAvailable };
+    const ops: LedgerOp[] = [
+      { kind: "grow", threads: 7, effectThreads: 7 * (1 + 7 / 16), landing: 100, opId: 1 },
+      { kind: "grow", threads: 11, effectThreads: 11, landing: 100, opId: 2 },
+    ];
+
+    const predicted = predictAtLanding(ctx, JOESGUNS, start, ops, 100);
+    applyGrow(server, person, 7, 8);
+    person.skills.hacking = skill;
+    person.exp.hacking = calculateExp(skill);
+    applyGrow(server, person, 11, 1);
+
+    relClose(predicted.moneyAvailable, server.moneyAvailable, 1e-12);
+    relClose(predicted.hackDifficulty, server.hackDifficulty, 1e-12);
   });
 });
 

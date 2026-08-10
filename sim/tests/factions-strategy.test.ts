@@ -9,6 +9,7 @@ describe("faction and hacking strategy simulation", () => {
     let armed = false;
     let installed = 0;
     let prestiged = 0;
+    let resetDetected = 0;
     const installGoal = parseGoals([...profile.goals]);
     let satisfiedAt: number | undefined;
 
@@ -45,6 +46,7 @@ describe("faction and hacking strategy simulation", () => {
         if (record.key === "progression" && record.data?.plan?.installArmedAt !== undefined) armed = true;
         if (record.name === "aug.installed") installed++;
         if (record.name === "sim.prestige") prestiged++;
+        if (record.name === "augmentation.reset") resetDetected++;
       },
     });
 
@@ -53,6 +55,7 @@ describe("faction and hacking strategy simulation", () => {
     expect(armed).toBe(true);
     expect(installed).toBe(1);
     expect(prestiged).toBe(1);
+    expect(resetDetected).toBe(1);
     expect(result.output.filter((line) => line.includes("start.js online"))).toHaveLength(2);
     expect(Object.keys(result.unmodeled)).not.toContain("ns getMoneySources");
   }, 10_000);

@@ -9,6 +9,7 @@ import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
 
 /** In-game telemetry client. Streams LogRecords to the ui/ process over a bare
  * `new WebSocket()` (browser global — 0 GB ns RAM).
+ * Source (only `window`/`document` trigger DOM RAM): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L180-L193
  *
  * Its only caller is ./telemetry-sink.ts, which publishes the game-state
  * store. Nothing else in game/ may reference it: acquisition runs in every

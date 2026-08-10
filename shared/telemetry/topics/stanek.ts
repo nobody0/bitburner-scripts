@@ -15,6 +15,8 @@ export interface StanekFragment {
   numCharge: number;
   highestCharge: number;
   chargedEffect: number;
+  /** Booster fragments cannot be charged through the API. */
+  chargeable?: boolean;
 }
 
 export interface StanekState {
@@ -24,8 +26,10 @@ export interface StanekState {
    * without re-deriving shapes. */
   occupied: Record<string, number>;
   fragments: StanekFragment[];
-  /** Fragment ids that exist but are not placed. */
-  availableTypes?: { id: number; type: string; power: number; limit: number }[];
+  /** Fragment definitions expose rotation-0 grids; the probe normalizes them
+   * to occupied cells for the pure packer.
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L58-L73 */
+  availableTypes?: { id: number; type: string; power: number; limit: number; shape?: { x: number; y: number }[] }[];
   plan?: StanekPlan;
 }
 

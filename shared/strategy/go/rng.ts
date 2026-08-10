@@ -1,5 +1,7 @@
 /** Exact Wichmann-Hill stream used by IPvGO v3.0.1. The seed accepted by the
- * game is Player.totalPlaytime in milliseconds. */
+ * game is Player.totalPlaytime in milliseconds.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Casino/RNG.ts
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts */
 export function whrng(totalPlaytimeMs: number, count = 1): number[] {
   const seed = (totalPlaytimeMs / 1000) % 30000;
   let s1 = seed;
@@ -15,11 +17,13 @@ export function whrng(totalPlaytimeMs: number, count = 1): number[] {
   return values;
 }
 
-/** Player.totalPlaytime advances by this amount in Engine.updateGame(). */
+/** Player.totalPlaytime advances by this amount in Engine.updateGame().
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts */
 export const GO_ENGINE_CYCLE_MS = 200;
 
 /** The AI waits once before constructing WHRNG. Bonus time shortens this wall
- * wait, but it does not change totalPlaytime's 200 ms engine-cycle quantum. */
+ * wait, but it does not change totalPlaytime's 200 ms engine-cycle quantum.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts */
 export function goAiWaitMs(bonusCycles = 0): number {
   return bonusCycles > 0 ? 40 : 200;
 }
@@ -30,7 +34,8 @@ export interface GoWaitResult {
 }
 
 /** Apply the game's waitCycle rule exactly: a positive stored-cycle balance
- * buys a 40 ms wait and is decremented by two (and may therefore reach -1). */
+ * buys a 40 ms wait and is decremented by two (and may therefore reach -1).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts */
 export function consumeGoWaits(bonusCycles: number, count: number): GoWaitResult {
   let remaining = bonusCycles;
   let wallMs = 0;

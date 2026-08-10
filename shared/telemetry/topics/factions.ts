@@ -142,8 +142,8 @@ export interface FactionPlan {
   invalidation?: { label: string; value: string | number | boolean }[];
   /** Expected next milestone. */
   until?: { kind: string; faction?: string; target: number; have: number; etaSec: number };
-  /** What the last executed action actually returned. Every singularity call's
-   *  `false` is a MODELLED OUTCOME, not an error, so it is reported as one. */
+  /** What the last executed action actually returned. A boolean mutation's
+   * `false` is a modelled outcome, not an error. */
   lastResult?: { action: string; ok: boolean; detail: string; at: number };
   /** Set when the feature cannot act at all (the SF4 RAM wall). */
   blocked?: string;
@@ -197,9 +197,9 @@ export interface FactionsState {
    *  in the repository, not two. */
   gates?: Record<string, FactionGate>;
   ownedAugs?: string[];
-  /** Not-yet-owned augmentations offered by joined factions. Capped by the
-   * probe (see FACTION_AUG_LIMIT) so a late-game save cannot balloon the
-   * record; `augTotal` reports the true count. */
+  /** Live offers across every faction. Owned non-repeatables are omitted, but
+   * repeatable NeuroFlux remains. Capped by the probe (see
+   * FACTION_AUG_LIMIT); `augTotal` reports the uncapped pair count. */
   offers?: AugmentationOffer[];
   /** Per-augmentation facts for everything named in `offers`, deduped by name. */
   augMeta?: Record<string, AugmentationMeta>;

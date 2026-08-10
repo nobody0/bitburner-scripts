@@ -45,7 +45,8 @@ import {
  *
  * RAM: batch-atomic allocation (all four ops or none) from the shared heap.
  * Reservations are released when the matching completion arrives, so an op
- * that never lands cannot leak. */
+ * that never lands cannot leak.
+ * Source (additionalMsec is added to each duration at invocation): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L537-L561 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L266-L286 */
 
 export const SPACER_MS = 200;
 export const INTERVAL_MS = 4 * SPACER_MS; // == targeting's BATCH_INTERVAL_S · 1000
@@ -368,10 +369,12 @@ export function dispatch(
       memory.stats.moneyEarned += completion.result.moneyGained ?? 0;
       memory.stats.hacks++;
     }
-    // Exp is ESTIMATED from the formulas rather than read off the completion:
-    // the game's worker return value carries no exp figure, and estimating in
-    // the pure layer keeps game and sim stats identical. All three ops award
-    // the same per-thread exp; a failed hack awards a quarter.
+    // Exp is ESTIMATED because the worker return carries no exp figure. All
+    // three ops award the same per-thread exp; a failed hack awards a quarter.
+    // Live success is inferred from a positive hack return, so in BN8 (where a
+    // successful hack also returns $0) this telemetry estimate is conservative:
+    // Netscript exposes no success bit that distinguishes the two zero results.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L561-L637 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L286-L308
     if (memory.evaluator.ctx && completion.threads) {
       const base = completion.target ? byHost.get(completion.target)?.baseDifficulty : undefined;
       if (base !== undefined) {
@@ -413,6 +416,9 @@ export function dispatch(
   // game the shared investment arbiter owns home/cloud/Hacknet spending, but
   // the sim's farm mode has no other owner (see DispatchOptions).
   for (const server of view.servers) {
+    // nuke checks only open-port count; hacking skill is checked later by hack,
+    // so zero-port servers can be rooted as fleet upkeep immediately.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L531-L547
     if (!server.hasAdminRights && server.numOpenPortsRequired === 0) {
       actions.push({ type: "nuke", target: server.hostname });
     }
@@ -571,8 +577,12 @@ function allocFor(
   return {
     blockSize: WORKER_RAM[kind],
     threads,
-    // hack must land as one call; grow prefers home for its core bonus;
-    // weaken is perfectly divisible and eats fragments.
+    // hack must land as one call; grow prefers home for its core bonus and may
+    // split when no single host fits; weaken is exactly additive and eats
+    // fragments. Split grow calls are folded separately by prediction because
+    // upstream's additive $1/thread term is per call. Cores amplify grow and
+    // weaken through the same 1 + (cores - 1) / 16 bonus; hack has no core term.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/formulas/grow.ts#L20-L28 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/ServerHelpers.ts#L287-L295
     policy: kind === "hack" ? "contiguous" : kind === "grow" ? "homeFirst" : "spread",
     coreAware: kind !== "hack",
   };
@@ -632,11 +642,14 @@ function launchBatches(
     // and at least one interval after the previous batch (collision guard).
     // Shotgun: every op of every batch this pass lands at the SAME instant —
     // now + weakenTime, the weakens' natural landing — and the engine's
-    // same-tick rule (equal-deadline timers fire in registration order) turns
-    // LAUNCH order into arrival order. Batches are emitted H, G, W: after
+    // observed equal-deadline FIFO behavior is intended to turn launch order
+    // into arrival order. Batches are emitted H, G, W: after
     // batch N's W the server is back at (minSec, moneyMax), so batch N+1's
     // sizing is exact at its own arrival. That is also why the emit order
-    // here is hack-first, unlike batched modes' weaken-first landings.
+    // here is hack-first, unlike batched modes' weaken-first landings. Upstream
+    // preserves exec/start order through cached-module promise continuations,
+    // but does not expose same-deadline ordering as a Netscript API contract.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L48-L66
     const anchor = shotgun ? now + weakenMs : Math.max(now + weakenMs + SPACER_MS, memory.lastAnchor + intervalMs);
 
     // Landing-state prediction (Q1): fold the in-flight ledger to the hack's

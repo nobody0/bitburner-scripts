@@ -31,6 +31,10 @@
  * oversampling — the price probe runs faster than the 6 s tick precisely so it
  * cannot MISS one, which means it will often see the same tick twice. */
 
+/** Pinned source for the shared volatility draw, forecast probability, and
+ * periodic cycle mechanics described above:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarket.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/Stock.ts */
 import { midpoint, STOCK_METADATA } from "../../features/stocks.ts";
 import { TICKS_PER_CYCLE } from "./market.ts";
 

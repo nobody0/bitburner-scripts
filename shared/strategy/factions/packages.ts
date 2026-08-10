@@ -21,7 +21,9 @@ import { settlingMoney, type FactionStanding, type FactionsView } from "./state.
 
 /** A breakpoint package is the smallest useful planning unit. Reputation is
  * continuous, but decisions only change when it buys another augmentation or
- * banks another point of useful favor at install. */
+ * banks another point of useful favor at install.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/Faction.ts#L77-L85
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L55-L141 */
 export type FactionPackage = FactionIntent;
 
 export interface PackageSelection {
@@ -41,6 +43,7 @@ export interface PackageSelection {
 const ROUTE_MANDATORY_VALUE = 100;
 
 function cycleCompatible(standing: FactionStanding, standings: readonly FactionStanding[]): boolean {
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L35-L51
   if (standing.joined) return true;
   for (const member of standings) {
     if (!member.joined || member.name === standing.name) continue;
@@ -69,6 +72,7 @@ function usableAt(
   const names = new Set(under.map((aug) => aug.name));
   // A package may include its own prerequisites, but it cannot promise a
   // dependent whose prerequisite must first come from another faction.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L52-L108
   return under
     .filter((aug) => aug.prereqs.every((name) => owned.has(name) || names.has(name)))
     // This is policy order, not the price-minimising order. Immediately
@@ -94,6 +98,7 @@ function candidateCost(faction: string, augs: readonly AugInfo[], view: Factions
   // sequence charges the 1.9x queue escalation to whichever items happen to be
   // most valuable, which can overstate a package by a wide margin and lose it a
   // comparison it should win.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38
   //
   // Estimated, not solved: this runs once per (faction, reputation breakpoint) on
   // the frontier, hundreds of times a tick, and the exact ordering DP is
@@ -121,6 +126,8 @@ function packageValue(
   // Favor matters only through future work it can accelerate. Weight the rate
   // improvement by how many residual augmentations this faction could still
   // provide; this makes a favor-only push worthless once the faction is done.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/formulas/reputation.ts#L11-L55
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/formulas/donation.ts#L7-L30
   const acquired = new Set(augs.map((aug) => aug.name));
   const future = allOffered.filter((aug) => !acquired.has(aug.name)).length;
   const beforeRate = 1 + standing.favor / 100;
@@ -184,6 +191,7 @@ export function factionPackageFrontier(
   // NeuroFlux is deliberately not an unlock objective: nearly every faction
   // offers it, so counting it here makes every otherwise-empty faction appear
   // valuable. It belongs in the final repeatable purchase sweep.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/Augmentations.ts#L1159-L1209
   const offered = [...view.catalog.values()].filter(
     (aug) => aug.name !== NEUROFLUX && !view.owned.has(aug.name) && aug.factions.includes(standing.name),
   );

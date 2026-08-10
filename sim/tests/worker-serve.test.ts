@@ -21,14 +21,15 @@ function cleanupRealm(): void {
 }
 
 interface MockOp {
+  opts?: { additionalMsec?: number; stock?: boolean };
   resolve(value: number): void;
 }
 
 function mockNs(pending: MockOp[]): { ns: unknown; exitCbs: (() => void)[] } {
   const exitCbs: (() => void)[] = [];
-  const op = () =>
+  const op = (_target: string, opts?: { additionalMsec?: number; stock?: boolean }) =>
     new Promise<number>((resolve) => {
-      pending.push({ resolve });
+      pending.push({ resolve, ...(opts ? { opts } : {}) });
     });
   const ns = {
     args: [WORKER_ID],
@@ -122,5 +123,25 @@ describe("serve-mode worker", () => {
     pending.shift()!.resolve(1);
     await drainMicrotasks();
     expect(done).toHaveLength(2);
+  });
+
+  test("converts an absolute padding deadline at the actual Netscript call", async () => {
+    const clock = new Clock();
+    vt = installVirtualTime(clock);
+    cleanupRealm();
+    const g = workerGlobals();
+    const deadline = Date.now() + 200;
+    // Model planning/exec/module startup consuming 75 ms before main() runs.
+    clock.in(75, () => {});
+    clock.run();
+
+    const pending: MockOp[] = [];
+    const { ns } = mockNs(pending);
+    g.worker_info!.set(WORKER_ID, { kind: "hack", target: "delta", threads: 1, delayUntil: deadline });
+    void workerMain(ns as never);
+    await drainMicrotasks();
+
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.opts?.additionalMsec).toBe(125);
   });
 });

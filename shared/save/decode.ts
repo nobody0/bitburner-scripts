@@ -14,8 +14,7 @@ import {
  * Takes a STRING, not bytes: gunzip is a Bun API and shared/ must stay pure
  * (tests/boundaries.test.ts). tools/save-io.ts owns the decompression.
  *
- * The format, confirmed against bitburner-src @ v3.0.1
- * (src/SaveObject.ts, src/utils/JSONReviver.ts):
+ * The format, confirmed against bitburner-src @ v3.0.1:
  *
  *   {"ctor":"BitburnerSaveObject","data":{"PlayerSave":"<json>", ...}}
  *
@@ -29,7 +28,15 @@ import {
  *   2. Missing keys mean class defaults, not undefined (SERVER_DEFAULTS).
  *   3. `ramUsed` is not saved at all; it is recomputed from runningScripts.
  *   4. Faction and company reputation live in their own top-level saves, not
- *      in PlayerSave, and both are sparse. */
+ *      in PlayerSave, and both are sparse.
+ *
+ * Sources: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/SaveObject.ts#L191-L230
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/SaveObject.ts#L448-L453
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/utils/JSONReviver.ts#L11-L43
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Types/Jsonable.ts#L5-L18
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L293-L323
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/Factions.ts#L70-L79
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Company/Companies.ts#L42-L49 */
 
 export class SaveFormatError extends Error {}
 
@@ -133,7 +140,8 @@ function ownedAugList(value: unknown): { name: string; level: number }[] {
 }
 
 /** ramUsed is excluded from the save (BaseServer.getIncludedKeys) and rebuilt
- * on load from the scripts that were running. */
+ * on load from the scripts that were running.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L293-L323 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L381-L384 */
 function ramUsedFrom(runningScripts: unknown): number {
   if (!Array.isArray(runningScripts)) return 0;
   let total = 0;
@@ -221,6 +229,7 @@ function decodePlayer(raw: unknown): SavePlayer {
     : [];
   return {
     // loadPlayer parses money through parseFloat, so a string is legal here.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Player.ts#L13-L22
     money: typeof bag["money"] === "string" ? Number.parseFloat(bag["money"]) : num(bag["money"], 0),
     karma: num(bag["karma"], 0),
     entropy: num(bag["entropy"], 0),
@@ -274,7 +283,8 @@ function decodeStandings(raw: unknown): Record<string, SaveFactionStanding> {
 }
 
 /** Parse one of the double-encoded sub-saves. Absent or empty is not an error:
- * StaneksGiftSave and StockMarketSave default to "". */
+ * StaneksGiftSave and StockMarketSave default to "".
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/SaveObject.ts#L191-L205 */
 function subSave(data: Bag, key: string): unknown {
   const raw = data[key];
   if (typeof raw !== "string" || raw === "") return undefined;
@@ -307,6 +317,7 @@ export function decodeSaveJson(json: string): SaveSnapshot {
 
   // activeSourceFiles is a getter, never stored: overrides win outright, and a
   // level of 0 means "not active" rather than "present at zero".
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObject.ts#L81-L95 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1486-L1500
   const activeSourceFiles: Record<string, number> = { ...sourceFiles };
   for (const [sf, level] of Object.entries(bitNodeOptions.sourceFileOverrides)) {
     if (level === 0) delete activeSourceFiles[sf];
@@ -317,6 +328,7 @@ export function decodeSaveJson(json: string): SaveSnapshot {
   const serversRaw = subSave(data, "AllServersSave");
   // Object.entries, never spread: "__proto__" appears as a hostname in the
   // game's own save corpus.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/test/jest/Save.test.ts#L20-L29
   for (const [hostname, raw] of Object.entries(asBag(serversRaw))) {
     servers.set(hostname, decodeServer(hostname, raw));
   }

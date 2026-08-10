@@ -78,4 +78,15 @@ describe("career parity with Bitburner v3.0.1", () => {
     grafting.processWork(duration / 400);
     expect(world.player.augmentations.has("BitWire")).toBe(false);
   });
+
+  test("an augmentation already queued for installation is not graftable", () => {
+    const world = new SimWorld({
+      seed: 1,
+      startingMoney: 100_000_000,
+      playerState: { city: "New Tokyo", queuedAugmentations: [{ name: "BitWire", level: 1 }] },
+    });
+    const grafting = new GraftingSystem(world, world.player);
+    expect(grafting.available()).not.toContain("BitWire");
+    expect(grafting.start("BitWire", true)).toBe(false);
+  });
 });

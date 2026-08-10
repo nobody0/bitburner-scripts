@@ -1,6 +1,7 @@
 import { STOCK_METADATA } from "../../../shared/features/stocks.ts";
 import { card, dataTable, meter, note, table, tiles } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct } from "../lib/format.ts";
+import { html } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
@@ -38,24 +39,19 @@ export const stockTab: Tab = {
 
     const plan = s.plan;
     const planCard = plan
-      ? note(esc(plan.why)) +
-        (plan.blocker ? note(`<span class="bad">blocked:</span> ${esc(plan.blocker)}`) : "") +
-        (plan.hold ? note(`holding: ${esc(plan.hold)}`) : "") +
+      ? note(plan.why) +
+        (plan.blocker ? note(html`<span class="bad">blocked:</span> ${plan.blocker}`) : "") +
+        (plan.hold ? note(`holding: ${plan.hold}`) : "") +
         // What progression gates the irreversible reset on. Worth showing next to
         // the plan, because a run that cannot install is often waiting on this.
-        note(plan.flat ? "book is <b>flat</b> — an install may proceed" : "book is <b>not flat</b> — an install would destroy it") +
+        note(plan.flat
+          ? html`book is <b>flat</b> — an install may proceed`
+          : html`book is <b>not flat</b> — an install would destroy it`) +
         (plan.unlock
-          ? note(
-              `next unlock <b>${esc(plan.unlock.type)}</b> at ${fmtMoney(plan.unlock.cost)} — ` +
-                `${esc(plan.unlock.why)}`,
-            )
+          ? note(html`next unlock <b>${plan.unlock.type}</b> at ${fmtMoney(plan.unlock.cost)} — ${plan.unlock.why}`)
           : "") +
         (plan.entry
-          ? note(
-              `entry <b>${esc(plan.entry.side)} ${esc(plan.entry.sym)}</b>: ${fmtNum(plan.entry.shares, 0)} shares ` +
-                `for ${fmtMoney(plan.entry.cost)}, breaks even in ${plan.entry.breakEvenTicks.toFixed(1)} of ` +
-                `${plan.entry.holdTicks} ticks, expected ${fmtMoney(plan.entry.expectedProfit)}`,
-            )
+          ? note(html`entry <b>${plan.entry.side} ${plan.entry.sym}</b>: ${fmtNum(plan.entry.shares, 0)} shares for ${fmtMoney(plan.entry.cost)}, breaks even in ${plan.entry.breakEvenTicks.toFixed(1)} of ${plan.entry.holdTicks} ticks, expected ${fmtMoney(plan.entry.expectedProfit)}`)
           : "") +
         table(
           ["action", "why"],
@@ -63,10 +59,7 @@ export const stockTab: Tab = {
           { empty: "no actions this tick", left: [0, 1] },
         ) +
         (plan.lastResult
-          ? note(
-              `last: <span class="${plan.lastResult.ok ? "good" : "bad"}">${esc(plan.lastResult.action)}</span> — ` +
-                esc(plan.lastResult.detail),
-            )
+          ? note(html`last: <span class="${plan.lastResult.ok ? "good" : "bad"}">${plan.lastResult.action}</span> — ${plan.lastResult.detail}`)
           : "")
       : note("no plan yet");
 

@@ -102,7 +102,8 @@ export interface ServerGenMults {
  * one concrete roll of the metadata ranges to the statics the solver reads.
  * Single choke point: the roll-extreme helpers and every test that fabricates
  * a rolled server go through here, so a future upstream change to (say) the
- * 25× money factor breaks one function and its parity pins, not five copies. */
+ * 25× money factor breaks one function and its parity pins, not five copies.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/Server.ts#L67-L87 */
 export function staticsFromRolls(
   hostname: string,
   rolls: { money: number; sec: number; skill: number; growth: number },
@@ -159,7 +160,8 @@ export function rollExtremes(hostname: string, ranges: ServerRanges, mults: Serv
  * M/m₀, so x ≤ −ln(1−s)/k, and the implementation returns at most ceil(x)+1
  * (pinned). W bounds use ceil(x) ≤ x+1. Used only by the band table, whose
  * contract is unlimited RAM — under a real cap the H = 1 batch of a rich
- * server may not fit, and no static floor exists at all. */
+ * server may not fit, and no static floor exists at all.
+ * Source grow equation: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/ServerHelpers.ts#L80-L198 */
 export function scoreLowerBoundH1(ctx: HackContext, worst: TargetStatics, best: TargetStatics): number {
   if (!(worst.moneyMax > 0) || !(worst.serverGrowth > 0) || worst.requiredHackingSkill > ctx.skill) return 0;
   const pWorst = hackPercent(ctx, worst.minDifficulty, worst.requiredHackingSkill);

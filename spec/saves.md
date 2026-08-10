@@ -73,10 +73,13 @@ port 12525, so wait for any in-progress sync to finish first.) Normal builds and
 syncs do not build or push `restore.js` at all.
 
 `game/restore.ts` does the destructive half. The save lives in IndexedDB under
-database `bitburnerSave` v2, store `savestring`, key `save`, holding exactly the
-bytes Export writes — so restoring is: write them back, then reload, which is
-what the game's own `importGame` does. `indexedDB`, `atob` and `location` are
-browser globals, so it costs 0 GB of ns RAM beyond the 1.6 GB base.
+database `bitburnerSave` v2, store `savestring`, key `save`; its `SaveData` is
+either raw gzip bytes or a base64 string. The delivery tool normalizes Steam
+Cloud's base64-of-gzip form before the game writes it. [Database layout](https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/db.ts#L12-L36), [save encodings](https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/utils/SaveDataUtils.ts#L37-L70).
+The entrypoint mirrors importGame's durable write and scheduled reload, while
+deliberately bypassing its UI validation path. It costs 2.6 GB: the 1.6 GB base
+plus 1 GB for `ns.getResetInfo`; its browser globals and other ns calls are
+free. [Import write/reload](https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/SaveObject.ts#L323-L335), [RAM costs](https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L646-L654).
 
 It is a **separate entrypoint on purpose**. `tests/ram-budget.test.ts` asserts
 that `start.js` contains no reference to `indexedDB`, `location.reload` or the

@@ -10,10 +10,10 @@ import { needKey } from "../needs.ts";
  * otherwise monopolise `Player.currentWork` can be handed to a sleeve instead
  * while the player does something else entirely.
  *
- * Shock and sync make early recovery dominate, and that is not a heuristic:
- * shock MULTIPLIES down everything a sleeve earns, so a sleeve at 90 shock is
- * contributing almost nothing and recovering it is worth more than any task
- * it could be doing. */
+ * Shock and sync make early recovery dominate. Shock multiplies WorkStats and
+ * faction reputation down, while crime karma/kills are applied separately.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/SleeveCrimeWork.ts#L31-L50
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/SleeveFactionWork.ts#L30-L48 */
 
 export interface SleeveState {
   index: number;
@@ -25,6 +25,7 @@ export interface SleeveState {
   skills: Record<string, number>;
   task?: { type: string; detail?: string; workType?: string };
   /** A running crime may only be replaced when its nextCompletion resolves. */
+  /** Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/SleeveCrimeWork.ts */
   allowCrimeSwitch?: boolean;
 }
 
@@ -67,7 +68,8 @@ export interface SleeveDecision {
   why: string;
 }
 
-/** Shock scales output DOWN linearly: a sleeve at 90 shock produces 10%. */
+/** Shock scales WorkStats output down linearly: 90 shock leaves 10%.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Sleeve.ts#L173-L179 */
 export function shockMultiplier(shock: number): number {
   return Math.max(0, 1 - shock / 100);
 }
@@ -75,6 +77,8 @@ export function shockMultiplier(shock: number): number {
 /** Exact dynamic program for repeatable tasks plus a small set of capacity-one
  * tasks (notably faction work: Bitburner permits only one sleeve per faction).
  * Complexity is O(sleeves * tasks * 2^exclusiveKeys), not tasks^sleeves. */
+// Capacity-one faction assignment mirrors the public API's one-sleeve-per-faction rule.
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Sleeve.ts
 function assignSleeves(
   agents: readonly SleeveState[],
   tasks: readonly SleeveTask[],

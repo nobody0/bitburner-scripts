@@ -7,7 +7,12 @@
  *
  * The one thing to get right: KARMA IS STORED POSITIVE and SUBTRACTED. A crime
  * with `karma: 0.1` moves the player's karma DOWN by 0.1 on success. Treating
- * it as an addition inverts every karma decision the game has. */
+ * it as an addition inverts every karma decision the game has.
+ *
+ * Upstream implementations (pinned v3.0.1):
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Crime/Crime.ts#L120-L137
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Formulas.ts#L58-L79
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/CrimeWork.ts#L56-L85 */
 
 /** CONSTANTS.IntelligenceCrimeWeight @ v3.0.1. */
 export const INTELLIGENCE_CRIME_WEIGHT = 0.025;
@@ -32,6 +37,9 @@ export interface CrimeStats {
    *  is the one that is actually true. The formula stays for the simulator and
    *  for planning hypotheticals the game cannot be asked about. */
   chance?: number;
+  /** `getCrimeStats` has already applied player/BitNode money and experience
+   * multipliers. Set for live observations; omitted for base-table inputs. */
+  gainsAreEffective?: boolean;
 }
 
 export interface CrimePerson {
@@ -62,7 +70,8 @@ function intelligenceBonus(intelligence: number, weight = 1): number {
 }
 
 /** `Crime.successRate` @ v3.0.1, capped at 1 — or the game's own answer when
- * the caller supplied one. */
+ * the caller supplied one.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Crime/Crime.ts#L120-L137 */
 export function successChance(crime: CrimeStats, person: CrimePerson, ctx: CrimeContext): number {
   if (crime.chance !== undefined) return Math.min(1, Math.max(0, crime.chance));
   const skills = person.skills;
@@ -86,7 +95,8 @@ export function successChance(crime: CrimeStats, person: CrimePerson, ctx: Crime
  * tiny and every term is known: `chance x reward / time`. */
 export function moneyPerSec(crime: CrimeStats, person: CrimePerson, ctx: CrimeContext): number {
   const chance = successChance(crime, person, ctx);
-  return (chance * crime.money * person.mults.crime_money * ctx.crimeMoney) / (crime.timeMs / 1000);
+  const effectiveMult = crime.gainsAreEffective ? 1 : person.mults.crime_money * ctx.crimeMoney;
+  return (chance * crime.money * effectiveMult) / (crime.timeMs / 1000);
 }
 
 /** Expected KARMA REDUCTION per second — a positive number meaning "karma
@@ -110,10 +120,11 @@ export function expPerSec(crime: CrimeStats, person: CrimePerson, ctx: CrimeCont
   for (const [skill, amount] of Object.entries(crime.exp)) {
     if (amount === 0) continue;
     const successFactor = skill === "intelligence" ? chance : expected;
-    const expMult = skill === "intelligence"
+    const expMult = crime.gainsAreEffective || skill === "intelligence"
       ? 1
       : person.mults[`${skill}_exp` as keyof CrimePerson["mults"]] ?? 1;
-    out[skill] = (successFactor * amount * expMult * (ctx.crimeExp ?? 1)) / seconds;
+    const nodeMult = crime.gainsAreEffective ? 1 : (ctx.crimeExp ?? 1);
+    out[skill] = (successFactor * amount * expMult * nodeMult) / seconds;
   }
   return out;
 }

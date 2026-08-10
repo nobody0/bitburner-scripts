@@ -42,15 +42,18 @@ import {
  * already folds in the singularity 16/4/1 multiplier), pack what fits, and
  * record what did not with its price. A feature panel that stays empty should
  * say why.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L82-L95 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1501-L1507
  *
- * Cadence per sweep (30 s): one gate batch, then at most one packed feature
- * batch. Bounding it to one keeps the dodge mutex — single-flight, ~2 game
- * ticks per launch — out of the dispatcher's way. */
+ * Each acquisition pass launches at most one packed single-step feature batch;
+ * the capability gate runs separately on the 30 s fleet sweep. Bounding the
+ * packed batch keeps the single-flight dodge mutex out of the dispatcher's
+ * way (stepped probes necessarily launch once per step). */
 
 /** Left free on top of the stub so ns.exec of the stub itself never fails. */
 export const SAFETY_GB = 0.5;
-/** Fallback when getFunctionRamCost cannot price a name (renamed API, typo). */
-const UNKNOWN_METHOD_GB = 4;
+/** Fallback when getFunctionRamCost cannot price a name (renamed API, typo).
+ * Matches dodge.ts's conservative SF4-level-1 SingularityFn3 ceiling. */
+const UNKNOWN_METHOD_GB = 80;
 
 export interface ProbeRunner {
   readonly lastRunAt: Map<string, number>;
@@ -64,9 +67,9 @@ export function initProbeRunner(): ProbeRunner {
 
 function methodCost(ns: NS, method: string): number {
   try {
-    // Returns 0 both for genuinely-free functions and for names it does not
-    // know; the free ones are all in the gate batch, so a 0 on a detail probe
-    // is treated as free and simply costs nothing.
+    // Free functions return 0; an unknown name throws because
+    // getFunctionRamCost asks getRamCost to reject undefined paths.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1501-L1507 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L743-L763
     return ns.getFunctionRamCost(method);
   } catch {
     return UNKNOWN_METHOD_GB;
@@ -76,7 +79,8 @@ function methodCost(ns: NS, method: string): number {
 /** Sum of the distinct method costs in one closure. Bitburner charges a script
  * for each ns function it references once, however many times it calls it, so a
  * probe that reads 12 gang members still pays getMemberInformation a single
- * time. */
+ * time.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L403-L440 */
 function priceMethods(ns: NS, methods: readonly string[]): number {
   let total = 0;
   for (const method of new Set(methods)) total += methodCost(ns, method);
@@ -287,6 +291,7 @@ export async function runProbes(
         for (const probe of batch) {
           // Per-probe isolation: ns.gang.* and ns.bladeburner.* throw outside
           // their BitNode, and one throw must not cost the whole batch.
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Gang.ts#L18-L23 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L30-L42
           try {
             out.push({ id: probe.id, emissions: await probe.run(stubNs, ctx) });
           } catch (error) {

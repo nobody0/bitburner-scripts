@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { MONEY_SPAN, REP_SPAN } from "../shared/strategy/income.ts";
+import { scoreHomeRam, stepInfrastructure } from "../shared/strategy/infrastructure.ts";
 import {
   grantFor,
   grantedAmount,
@@ -354,5 +355,24 @@ describe("the imminent-install band sits where the endgame needs it", () => {
     expect(grantedAmount(result, "hacking", "money")).toBe(40);
     expect(grantedAmount(result, "progression", "money")).toBe(60);
     expect(grantedAmount(result, "hacknet", "money")).toBe(0);
+  });
+});
+
+describe("cross-feature investments", () => {
+  test("home RAM is rejected when its payoff is beyond the run horizon", () => {
+    const short = scoreHomeRam({ currentRam: 64, upgradeCost: 1_000_000, incomePerSecPerGb: 1, horizonSec: 1_000 });
+    expect(short.worthBuying).toBe(false);
+    const long = scoreHomeRam({ currentRam: 64, upgradeCost: 1_000_000, incomePerSecPerGb: 1_000, horizonSec: 1_000 });
+    expect(long.worthBuying).toBe(true);
+  });
+
+  test("cloud purchases, cloud upgrades and home cores share one ROI ranking", () => {
+    const decision = stepInfrastructure([
+      { kind: "buyServer", cost: 800, addedRam: 8, targetRam: 8, incomePerSec: 8 },
+      { kind: "upgradeServer", host: "pserv-0", cost: 400, addedRam: 8, targetRam: 16, incomePerSec: 8 },
+      { kind: "homeCore", cost: 1_000, addedRam: 0, incomePerSec: 30 },
+    ], 10_000);
+    expect(decision.buy?.kind).toBe("homeCore");
+    expect(decision.ranked.map((entry) => entry.kind)).toEqual(["homeCore", "upgradeServer", "buyServer"]);
   });
 });

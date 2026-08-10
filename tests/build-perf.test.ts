@@ -64,6 +64,7 @@ describe("compile-time telemetry elimination", () => {
       "feature.unlocked",
       "feature.locked",
       "feature.failed",
+      "augmentation.reset",
       "bitnode.reset",
       "probe.skipped",
       "probe.failed",

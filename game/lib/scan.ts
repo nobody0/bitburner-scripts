@@ -4,6 +4,7 @@ import type { StateMap } from "../../shared/telemetry/state-map.ts";
 /** Full-network snapshot, built to run INSIDE a dodge closure: every ns call
  * uses bracket notation on the stub's ns, so the importing bundle is charged
  * nothing (dynamic cost in the stub: scan 0.2 + getServer 2.0 < 2.5 budget).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L22-L29 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L607-L609
  * Return type flows from ns.getServer — this is the source of truth that
  * types the telemetry topic, the global cache, and the UI reduction. */
 export function collectServers(stubNs: NS): StateMap["servers"] {

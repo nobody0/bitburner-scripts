@@ -3,6 +3,10 @@ import type { HackContext } from "../../formulas.ts";
 import { formatNumber } from "../../format.ts";
 import { solveCycle, type RamCaps, type TargetStatics } from "../targeting.ts";
 
+/** Pinned v3.0.1 registry for hash upgrade names, costs, targets, and effects:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/HashUpgrades.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Hacknet.ts */
+
 export const HASH_UPGRADE = {
   money: "Sell for Money",
   corpFunds: "Sell for Corporation Funds",

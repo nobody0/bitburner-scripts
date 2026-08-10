@@ -4,7 +4,8 @@ import { bestAnnounced } from "../../shared/strategy/income.ts";
 import { MS_PER_TICK } from "../../shared/strategy/stock/market.ts";
 import type { GameState } from "./state.ts";
 
-/** Engine cycles per real second: rates the game reports "per cycle" need this. */
+/** Engine cycles per real second: rates the game reports "per cycle" need this.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts#L17-L20 */
 const CYCLES_PER_SEC = 1_000 / ENGINE_CYCLE_MS;
 
 /** Who earns what, per second, as each feature reports it.
@@ -37,13 +38,14 @@ const CYCLES_PER_SEC = 1_000 / ENGINE_CYCLE_MS;
 export function announcedIncome(state: GameState): IncomeAnnouncement[] {
   const out: IncomeAnnouncement[] = [];
 
-  // The hacking farm, measured: ns.getTotalScriptIncome() reports [$/sec since this
-  // install, $/sec since the run began]. The since-install figure is the one that
-  // describes what the fleet is earning NOW.
+  // The hacking farm, measured: ns.getTotalScriptIncome() reports [$/sec from
+  // currently running scripts, $/sec since the last augmentation]. The first
+  // figure describes what the live fleet is earning now.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1278-L1290
   const scriptIncome = state.topics.fleet?.scriptIncome;
   const farmed = Array.isArray(scriptIncome) ? scriptIncome[0] : undefined;
   if (farmed !== undefined && farmed > 0) {
-    out.push({ by: "hacking", perSec: farmed, why: "measured script income since install" });
+    out.push({ by: "hacking", perSec: farmed, why: "measured current script income" });
   }
 
   // Hacknet, measured — but only when it pays in money. On hacknet SERVERS the
@@ -58,6 +60,7 @@ export function announcedIncome(state: GameState): IncomeAnnouncement[] {
   // cycle" upstream, and a cycle is 200 ms — so it is five times smaller than a
   // per-second figure. Announcing it raw would understate the gang fivefold and hand
   // career a priority it did not earn.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Gang/Gang.ts#L125-L142 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts#L17-L20
   const gangRate = state.topics.gang?.moneyGainRate;
   if (gangRate !== undefined && gangRate > 0) {
     out.push({ by: "gang", perSec: gangRate * CYCLES_PER_SEC, why: "measured gang money gain" });
@@ -66,13 +69,14 @@ export function announcedIncome(state: GameState): IncomeAnnouncement[] {
   // The corporation, measured, and DIVIDENDS rather than revenue: revenue is the
   // company's, dividends are the player's. `dividendEarnings` is documented upstream
   // as "your earnings as a shareholder per second", so no conversion.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Corporation.ts#L724-L737
   const dividends = state.topics.corp?.dividendEarnings;
   if (dividends !== undefined && dividends > 0) {
     out.push({ by: "corp", perSec: dividends, why: "measured shareholder dividends" });
   }
 
   // The market, EXPECTED: the profit the planned entry expects, spread over the hold
-  // it expects to need. Not measured — the game reports no realised rate for trading —
+  // it expects to need. Not measured — this state stores no realised trading rate —
   // but an expectation is what this comparison is for, and a market that intends to
   // make $1b over ten minutes should not look like it earns nothing.
   const entry = state.topics.stock?.plan?.entry;

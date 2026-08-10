@@ -12,10 +12,12 @@ import { setMirror, type GameState } from "./state.ts";
  * budget, runs one closure with ITS ns, hands the raw result back through
  * globalThis, and dies. The caller pays only ns.exec (1.3 GB), not the cost of
  * the dodged functions.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L10-L29 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L434-L474
  *
  * Inside a dodged closure, call ns members with bracket notation on the
  * closure's own ns argument — `stubNs["getServer"](host)` — otherwise the
- * static parser charges the calling bundle and the saving evaporates. */
+ * static parser charges the calling bundle and the saving evaporates.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L405-L440 */
 
 const g = globalThis as DodgeGlobalThis;
 
@@ -48,12 +50,17 @@ export { STUB_BASE_GB };
  * was not listed — or a rounding difference between our sum and the engine's —
  * is fatal. Half a gigabyte is cheap next to losing the action. */
 const PRICE_MARGIN_GB = 0.5;
+/** Conservative v3.0.1 fallback for a name the runtime cannot price: the
+ * largest ordinary API cost is SF4-level-1 SingularityFn3, 5 * 16 = 80 GB.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L82-L95 */
+export const UNKNOWN_CALL_GB = 80;
 
 /** Price a dodged closure from the ns functions it will call.
  *
  * `ns.getFunctionRamCost` is itself FREE (0 GB) and it already folds in the
  * singularity 16/4/1 multiplier, so this is correct at every SF4 level and
  * inside BN4 without the caller knowing which it is in.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L82-L95 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1501-L1507
  *
  * Guessing instead is a real bug, and it was found by RUNNING IN THE GAME, not
  * by any test: a hardcoded 2.5 GB budget for `singularity.joinFaction` gives a
@@ -74,10 +81,9 @@ export function priceCalls(ns: NS, methods: readonly string[]): number {
     try {
       total += ns.getFunctionRamCost(method);
     } catch {
-      // An unknown name (renamed API, typo) prices as the most expensive
-      // singularity tier rather than as free — being over-allocated costs
-      // headroom, being under-allocated loses the call entirely.
-      total += 5;
+      // A renamed API or typo must not price as free: under-allocation kills
+      // the stub, while this conservative price merely postpones the action.
+      total += UNKNOWN_CALL_GB;
     }
   }
   return total + PRICE_MARGIN_GB;
@@ -155,7 +161,10 @@ export async function dodge<T>(
     g.dodge_cb = undefined;
     g.dodge_reject = undefined;
     g.dodge_running = undefined;
-    // One microtask tick so the game reaps the stub before the caller resumes.
+    // The engine awaits main() and only then queues its cleanup handler, so
+    // two microtask turns are required before that handler has synchronously
+    // returned the stub's RAM. Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L48-L66 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L143-L159
+    await Promise.resolve();
     await Promise.resolve();
   }
 }

@@ -57,17 +57,18 @@ export class CrimeSystem {
     return Math.min(chance, 1);
   }
 
-  /** Start a crime. Returns its duration in ms, or 0 when refused —
-   * `commitCrime`'s real contract. */
+  /** Start a valid crime and return its duration. Enum validation throws for
+   * an unknown crime; there is no ordinary-refusal sentinel. */
   start(type: string, focus = true): number {
     const crime = CRIME_TABLE[type];
-    if (!crime) return 0;
+    if (!crime) throw new Error(`Invalid crime: '${type}'`);
     // Silently CANCELS whatever was running, like every other work start.
     this.#player.startWork({
       kind: "crime",
       subject: type,
       startedAt: this.#world.clock.now(),
       cyclesWorked: 0,
+      unitCycles: 0,
       focused: focus,
     });
     this.#player.focus = focus;
@@ -84,9 +85,10 @@ export class CrimeSystem {
     if (!crime) return;
 
     work.cyclesWorked += cycles;
+    work.unitCycles = (work.unitCycles ?? 0) + cycles;
     const cyclesNeeded = crime.timeMs / 200;
-    while (work.cyclesWorked >= cyclesNeeded) {
-      work.cyclesWorked -= cyclesNeeded;
+    while (work.unitCycles >= cyclesNeeded) {
+      work.unitCycles -= cyclesNeeded;
       this.#complete(crime);
     }
   }

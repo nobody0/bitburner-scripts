@@ -1,5 +1,11 @@
 import type { WorkTaskLike } from "./work-completion.ts";
 
+/** Sleeve tasks inherit the same cached nextCompletion promise as player work;
+ * getTask returns the current work's API copy containing that live promise.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Work.ts#L7-L22
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/Work.ts#L27-L38
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Sleeve.ts#L184-L192 */
+
 interface SleeveCompletionState {
   tokens: Map<number, number>;
   promises: Map<number, Promise<void>>;

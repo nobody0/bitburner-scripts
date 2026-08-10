@@ -32,7 +32,8 @@ export interface GateReadings {
   bitNode?: number;
   /** ResetInfo.ownedSF flattened (Map does not survive JSON). SF n -> level.
    *  Already ACTIVE levels — the game folds `sourceFileOverrides` in before
-   *  handing this over, so callers must not apply the overrides again. */
+   *  handing this over, so callers must not apply the overrides again.
+   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L716-L733 */
   sourceFiles?: Record<string, number>;
   /** ResetInfo.bitNodeOptions, the per-run feature switches. */
   bitNodeOptions?: BitNodeDisables;
@@ -43,6 +44,10 @@ export interface GateReadings {
   hasTixApiAccess?: boolean;
   /** ns.go.getGameState() succeeded — IPvGO is reachable. */
   goPlayable?: boolean;
+  /** ResetInfo confirms that Stanek's Gift - Genesis is installed. */
+  hasStaneksGift?: boolean;
+  /** DarkscapeNavigator.exe exists on home, the alternative to BN15/SF15. */
+  hasDarknetProgram?: boolean;
 }
 
 export interface Capabilities {
@@ -62,8 +67,9 @@ export function sfLevel(sourceFiles: Record<string, number> | undefined, n: numb
   return sourceFiles?.[String(n)] ?? 0;
 }
 
-/** In BitNode n, or holding its source file. This is the standard "can I use
- * this API" test for the node-gated features. */
+/** In BitNode n, or holding its active source file. This is the game's standard
+ * node-feature access rule.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/BitNode/BitNodeUtils.ts#L19-L21 */
 function hasNode(r: GateReadings, n: number): UnlockState {
   if (r.bitNode === undefined) return "unknown";
   if (r.bitNode === n || sfLevel(r.sourceFiles, n) > 0) return "yes";
@@ -90,13 +96,16 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
   set("side", "yes", "");
   // The market is MONEY-gated, not capability-gated, which is why it belongs
   // here rather than behind `hasWseAccount`. A WSE account costs $200m and the
-  // TIX API $5b, with no source file and no BitNode requirement — the same shape
-  // as buying a hacknet node. Gating the feature on the account instead made the
+  // TIX API $5b; BN8/SF8 also grants both on prestige, but neither flag is a
+  // prerequisite for the driver to begin climbing the ladder. Gating the
+  // feature on the account instead made the
   // purchase unreachable: a driver never runs while its own feature reads "no",
   // so nothing could ever buy the thing that would unlock it. The account flags
   // travel as ordinary state on the topic and the driver climbs the ladder
   // itself; `restrictions.disable4SData` still tells it when the forecast cannot
   // be bought at all.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts#L3-L12
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts#L163-L168
   set("stock", "yes", "");
 
   // Singularity gates the *automation*, not the game systems: without SF4 the
@@ -106,13 +115,26 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
 
   set("gang", fromFlag(r.inGang), "requires a gang — BN2, or SF2 plus karma <= -54,000");
   set("corp", fromFlag(r.hasCorporation), "requires a corporation — BN3, or SF3 plus the seed money");
-  // Both the division and its ns API are gated on BN6/SF6 OR BN7/SF7
-  // (NetscriptFunctions/Bladeburner.ts). SF7 adds multipliers, not access.
+  // Both the division and its ns API are gated on BN6/SF6 OR BN7/SF7.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L43-L57
   set("bladeburner", fromFlag(r.inBladeburner), "requires the Bladeburner division — BN6/BN7, or SF6/SF7");
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Sleeve.ts
   set("sleeves", hasNode(r, 10), "requires BN10 or SF10 (Digital Carbon)");
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Go.ts
   set("go", fromFlag(r.goPlayable), "IPvGO is unreachable");
-  set("stanek", hasNode(r, 13), "requires BN13 or SF13 (Stanek's Gift)");
-  set("dnet", hasNode(r, 15), "requires BN15 or SF15 (the Dark Net)");
+  // Every Stanek getter/action except acceptGift checks the installed Genesis
+  // augmentation, not BN13/SF13. A node/source file only makes accepting the
+  // gift possible; it does not make the rest of the API callable.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L17-L22
+  set("stanek", fromFlag(r.hasStaneksGift), "requires the installed Stanek's Gift - Genesis augmentation");
+
+  // Darknet access is granted by BN15/SF15 OR DarkscapeNavigator.exe.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/DarkNet/utils/darknetAuthUtils.ts#L5-L8
+  const dnetNode = hasNode(r, 15);
+  const dnetAccess: UnlockState = dnetNode === "yes" || r.hasDarknetProgram === true
+    ? "yes"
+    : dnetNode === "unknown" || r.hasDarknetProgram === undefined ? "unknown" : "no";
+  set("dnet", dnetAccess, "requires BN15, active SF15, or DarkscapeNavigator.exe");
 
   // BitNode options veto LAST, and only where the option removes the feature
   // outright. A run may hold SF2 and still forbid gangs, so a source file is
@@ -122,6 +144,7 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
   // playable without hacknet servers, stock without 4S, sleeves without exp
   // and augmentations — so they travel in `restrictions` for the drivers to
   // read, and are deliberately NOT allowed to flip a feature to "no".
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/BitNode/BitNode.tsx
   const options = r.bitNodeOptions ?? {};
   const veto = (id: FeatureId, disabled: boolean | undefined, why: string) => {
     if (disabled === true) set(id, "no", why);
@@ -155,18 +178,15 @@ export interface CapsDelta {
   unlocked: FeatureId[];
   /** Features that stopped being playable (a reset dropped a gang, say). */
   locked: FeatureId[];
-  /** The active BitNode changed under a live realm — everything the controller
-   *  cached about the world is now about a game that no longer exists. */
-  bitNodeChanged: boolean;
 }
 
 /** What changed between two capability readings. Pure, so the controller and
  * the simulator agree on what counts as an unlock.
  *
  * Only `no | unknown -> yes` is an unlock: `unknown -> no` is the gate finally
- * reporting, not a feature being taken away. `bitNodeChanged` needs BOTH
- * readings known — `undefined -> 1` is the first successful gate batch, not a
- * node reset, and treating it as one would wipe the fleet on every cold boot. */
+ * reporting, not a feature being taken away. Prestige classification is
+ * deliberately separate: node number alone misses augmentation installs and
+ * same-node Source-File resets; shared/reset.ts compares the reset epochs. */
 export function capsDelta(before: Capabilities, after: Capabilities): CapsDelta {
   const unlocked: FeatureId[] = [];
   const locked: FeatureId[] = [];
@@ -177,7 +197,5 @@ export function capsDelta(before: Capabilities, after: Capabilities): CapsDelta 
     if (now === "yes") unlocked.push(id);
     else if (was === "yes") locked.push(id);
   }
-  const bitNodeChanged =
-    before.bitNode !== undefined && after.bitNode !== undefined && before.bitNode !== after.bitNode;
-  return { unlocked, locked, bitNodeChanged };
+  return { unlocked, locked };
 }

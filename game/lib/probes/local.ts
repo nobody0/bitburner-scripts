@@ -26,6 +26,7 @@ export function fleetFrom(servers: Record<string, Server>): FleetRollup {
   // it touches, so the most ports opened anywhere is the size of our toolkit.
   // A lower bound before the first rooting attempt, exact after — and free,
   // where `ns.ls("home", ".exe")` would cost dodge budget every sweep.
+  // Source (each cracker increments openPortCount once): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L549-L622
   let portOpeners = 0;
   for (const server of Object.values(servers)) {
     totalHosts++;

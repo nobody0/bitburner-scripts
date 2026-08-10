@@ -142,5 +142,6 @@ export interface Planner<M> {
 }
 
 /** Per-thread worker script RAM — fidelity constants matching the in-game
- * cost of a worker that calls one of hack/grow/weaken (1.6 base + fn cost). */
+ * cost of a worker that calls one of hack/grow/weaken (1.6 base + fn cost).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L10-L20 */
 export const WORKER_RAM = { hack: 1.7, grow: 1.75, weaken: 1.75 } as const;

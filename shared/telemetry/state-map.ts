@@ -28,7 +28,8 @@ import type { StockState } from "./topics/stock.ts";
  *    what the panel shows.
  *  - NO Map IN A PAYLOAD. The wire is JSON and `JSON.stringify(new Map())` is
  *    `{}`. ResetInfo.ownedSF, ownedAugs and bitNodeOptions.sourceFileOverrides
- *    are all Maps upstream; probes flatten them with Object.fromEntries. */
+ *    are all Maps upstream; probes flatten them with Object.fromEntries.
+ *    Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1486-L1500 */
 export interface StateMap {
   player: Player;
   servers: Record<string, Server>;

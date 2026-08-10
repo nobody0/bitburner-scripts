@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { formatMoney, formatNumber, formatScientific } from "../shared/format.ts";
+import { collapsible, note } from "../ui/app/lib/dom.ts";
 import { fmtMoney, fmtNum } from "../ui/app/lib/format.ts";
+import { html } from "../ui/app/lib/html.ts";
 
 describe("scientific number output", () => {
   test("matches Bitburner v3.0.1's scientific formatter", () => {
@@ -21,5 +23,22 @@ describe("scientific number output", () => {
     expect(fmtMoney(Number.NaN)).toBe("–");
     expect(fmtNum(31_305)).toBe("3.131e4");
     expect(fmtMoney(945_200_000)).toBe("$9.452e8");
+  });
+});
+
+describe("HTML text slots", () => {
+  test("plain prose is escaped while explicit templates preserve markup", () => {
+    expect(note('book is <b>flat</b> & "quoted"')).toBe(
+      '<p class="muted">book is &lt;b&gt;flat&lt;/b&gt; &amp; &quot;quoted&quot;</p>',
+    );
+    expect(note(html`book is <b>${"<flat>"}</b>`)).toBe(
+      '<p class="muted">book is <b>&lt;flat&gt;</b></p>',
+    );
+  });
+
+  test("disclosure summaries are text slots with persistent view keys", () => {
+    expect(collapsible("review.details", "<details>", "<p>body</p>")).toContain(
+      '<details data-open-key="review.details"><summary>&lt;details&gt;</summary><p>body</p></details>',
+    );
   });
 });

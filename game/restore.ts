@@ -8,14 +8,17 @@ import type { NS } from "@ns";
  * never carries a code path that can clobber real progress, and never pays RAM
  * for one.
  *
- * How it works (bitburner-src/src/db.ts and SaveObject.ts @ v3.0.1): the save
- * lives in IndexedDB under database `bitburnerSave` version 2, object store
- * `savestring`, key `save`, holding exactly the bytes Export Game writes. So
- * restoring is: write those bytes back, then reload — which is what the game's
- * own importGame does.
+ * How it works: the save lives in IndexedDB under database `bitburnerSave`
+ * version 2, object store `savestring`, key `save`, as either a base64 string
+ * or gzip bytes. Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/db.ts#L12-L36
+ * This entrypoint mirrors the database-write and reload portion of importGame;
+ * unlike importGame it deliberately bypasses the game's validation/dialog/UI
+ * path because the repository tooling has already selected the raw exported
+ * payload. Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/SaveObject.ts#L323-L335
  *
- * RAM: 0 GB beyond the 1.6 GB base. indexedDB, atob and location are browser
- * globals, and ns.read / ns.prompt / ns.getResetInfo are all free.
+ * RAM: 1 GB beyond the 1.6 GB base. indexedDB, atob and location are browser
+ * globals, and ns.read / ns.prompt are free; ns.getResetInfo costs 1 GB.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L646-L654
  *
  * Usage:  bun run save:restore <id>     (pushes the payload, prints this)
  *         run restore.js <id>           (in the game's terminal) */
@@ -31,6 +34,9 @@ interface PayloadHeader {
   bitNode: number;
   playtimeSinceLastBitnode: number;
   capturedAt: number;
+  /** IndexedDB SaveData variant. Omitted by older payload tooling, whose
+   * exports were raw gzip bytes. */
+  storage?: "binary" | "text";
 }
 
 function decodeBase64(text: string): Uint8Array {
@@ -45,6 +51,7 @@ function openDb(): Promise<IDBDatabase> {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(new Error(`could not open ${DB_NAME}`));
+    request.onblocked = () => reject(new Error(`${DB_NAME} is open in another tab`));
     // The store already exists in any real game; creating it here only matters
     // if the version bump fires on a database that predates it.
     request.onupgradeneeded = () => {
@@ -54,12 +61,13 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-function writeSave(db: IDBDatabase, data: Uint8Array): Promise<void> {
+function writeSave(db: IDBDatabase, data: Uint8Array | string): Promise<void> {
   return new Promise((resolve, reject) => {
     const transaction = db.transaction([STORE], "readwrite");
     transaction.objectStore(STORE).put(data, KEY);
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(new Error("could not write the save"));
+    transaction.onabort = () => reject(new Error("save write was aborted"));
   });
 }
 
@@ -108,10 +116,12 @@ export async function main(ns: NS): Promise<void> {
   }
 
   const bytes = decodeBase64(raw.slice(newline + 1).trim());
+  const saveData = header.storage === "text" ? new TextDecoder().decode(bytes) : bytes;
   const db = await openDb();
-  await writeSave(db, bytes);
+  await writeSave(db, saveData);
   db.close();
   ns.tprint(`restored "${header.id}" — reloading...`);
-  // importGame does exactly this: write, then a hard reload.
-  location.reload();
+  // Import schedules the reload after the durable transaction completes.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/SaveObject.ts#L323-L335
+  setTimeout(() => location.reload(), 0);
 }

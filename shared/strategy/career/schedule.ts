@@ -7,7 +7,11 @@
  *
  * Keep this pure. The game-side completion watcher supplies the event; this
  * module only decides whether that event (or the wall clock) makes a review
- * due. */
+ * due.
+ *
+ * CrimeWork's `cyclesWorked` is cumulative across its repeating units; the
+ * unexposed `unitCompleted` is reduced after each completion.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/CrimeWork.ts#L34-L49 */
 
 export const CONTINUOUS_REVIEW_MS = 5_000;
 
@@ -21,9 +25,10 @@ export const ENGINE_CYCLE_MS = 200;
  * which the job should be re-chosen. `undefined` means we cannot tell — see
  * `progressLockUntil` for why that must NOT be treated as "hold for ever".
  *
- * Not a guess: `totalMs` is the duration the game reports for this exact activity
- * and `cyclesWorked` is how much of it the game says is already spent, so the
- * remainder is arithmetic on observed values. */
+ * Not a guess: `totalMs` is the duration the game reports for this exact
+ * activity and `cyclesWorked` is the work object's observed cycle count. For
+ * repeating CrimeWork, cumulative cycles are reduced modulo one unit before
+ * computing the remainder. */
 export function progressBanksAt(input: {
   mode: CareerWorkMode;
   /** Duration of the activity in flight, from the crime or graft table. */
@@ -31,10 +36,13 @@ export function progressBanksAt(input: {
   cyclesWorked: number | undefined;
   /** When `getCurrentWork` produced the observation the cycles came from. */
   observedAt: number | undefined;
+  /** Repeating work exposes cumulative cycles, so progress is modulo one unit. */
+  repeating?: boolean;
 }): number | undefined {
   if (input.mode !== "progress") return undefined;
   if (input.totalMs === undefined || input.observedAt === undefined) return undefined;
-  const spentMs = Math.max(0, input.cyclesWorked ?? 0) * ENGINE_CYCLE_MS;
+  let spentMs = Math.max(0, input.cyclesWorked ?? 0) * ENGINE_CYCLE_MS;
+  if (input.repeating && input.totalMs > 0) spentMs %= input.totalMs;
   return input.observedAt + Math.max(0, input.totalMs - spentMs);
 }
 
@@ -68,6 +76,7 @@ export function progressLockUntil(input: {
   totalMs: number | undefined;
   cyclesWorked: number | undefined;
   observedAt: number | undefined;
+  repeating?: boolean;
   /** A banked-progress notice already in hand ends the lock immediately. */
   completionPending: boolean;
   now: number;

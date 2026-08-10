@@ -7,6 +7,7 @@
  * is realm-wide: a stub on n00dles returns its value exactly as a stub on home
  * does. That dissolves most of the RAM problem outright, because the fleet has
  * orders of magnitude more RAM than home ever will.
+ * Source (scripts are imported into the page realm): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptJSEvaluator.ts#L208-L223
  *
  * Two things this must not do, and both are why placement is a policy rather
  * than "pick the biggest host":
@@ -40,7 +41,8 @@ export interface PlacementOptions {
 }
 
 /** Base cost of the stub script itself, on top of the dynamic budget. Must
- * match game/lib/dodge.ts. */
+ * match game/lib/dodge.ts.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L10-L20 */
 export const STUB_BASE_GB = 1.6;
 
 export const DEFAULT_HOME_PREFERENCE_GB = 4;

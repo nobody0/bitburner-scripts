@@ -13,11 +13,13 @@ import type { WorkerGlobalThis } from "./worker-shared.ts";
  * The race deliberately uses the REALM timer, never `ns.sleep`: Bitburner
  * forbids concurrent ns calls from one script, so racing `ns.sleep` against
  * the wake and then issuing ns calls while the sleep is still pending would
- * kill the controller. A realm `setTimeout` is cancellable, and the simulator
+ * kill the controller. `ns.asleep` is concurrency-exempt but still cannot be
+ * canceled; a realm `setTimeout` is cancellable, and the simulator
  * virtualizes it (sim/realm/timers.ts), so both worlds behave identically. A
  * script parked on a foreign promise is only interrupted at its next ns call —
  * the controller makes ns calls every pass, so a kill still surfaces within
  * one tick.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L398-L431 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L250-L265
  */
 
 /** Install a fresh resolver into `dispatch_wake`. Resolving disarms it, so N

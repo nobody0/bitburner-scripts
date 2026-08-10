@@ -3,7 +3,7 @@ import path from "node:path";
 import { buildScript } from "./build.ts";
 import { loadConfig } from "./config.ts";
 import { waitForRfaConnection } from "./rfa-connect.ts";
-import { findSave, readSnapshot, SAVES_DIR } from "./save-io.ts";
+import { findSave, prepareIndexedDbSave, readSnapshot, SAVES_DIR } from "./save-io.ts";
 
 /** Push a registered save into the game, ready for restore.js to apply.
  *
@@ -27,15 +27,17 @@ async function main(): Promise<void> {
   const entry = findSave(id);
   // Decoded here purely to fail early: a corrupt blob should not reach the game.
   const snapshot = readSnapshot(entry.file);
-  const bytes = readFileSync(path.join(SAVES_DIR, entry.file));
+  const fileBytes = new Uint8Array(readFileSync(path.join(SAVES_DIR, entry.file)));
+  const prepared = prepareIndexedDbSave(fileBytes);
 
   const header = JSON.stringify({
     id: entry.id,
     bitNode: snapshot.bitNode,
     playtimeSinceLastBitnode: snapshot.player.playtimeSinceLastBitnode,
     capturedAt: entry.capturedAt,
+    storage: prepared.storage,
   });
-  const payload = `${header}\n${bytes.toString("base64")}`;
+  const payload = `${header}\n${Buffer.from(prepared.bytes).toString("base64")}`;
 
   const config = await loadConfig();
   if (!config.restoreEntry) {

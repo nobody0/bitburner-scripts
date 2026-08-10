@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { waitForRfaConnection } from "../tools/rfa-connect.ts";
 import { RfaSession, type JsonSocket } from "../tools/rfa-session.ts";
 
 class FakeSocket implements JsonSocket {
@@ -29,4 +30,8 @@ test("pushFile sends the Bitburner JSON-RPC shape", async () => {
       params: { server: "home", filename: "start.js", content: "export async function main() {}\n" },
     },
   ]);
+});
+
+test("an unanswered Remote API listener times out instead of becoming stale", async () => {
+  await expect(waitForRfaConnection({ host: "127.0.0.1", port: 0 }, 20)).rejects.toThrow("timed out after 20ms");
 });

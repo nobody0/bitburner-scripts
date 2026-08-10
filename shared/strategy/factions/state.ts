@@ -17,12 +17,14 @@ export interface FactionStanding {
   invited: boolean;
   rep: number;
   favor: number;
-  /** Requirements for an invitation, straight from the game. */
+  /** Requirements for an invitation, straight from the game.
+   * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L759-L766 */
   requirements: PlayerRequirement[];
   enemies: string[];
   offers: { hacking: boolean; field: boolean; security: boolean };
   /** Special factions (Bladeburners, Church of the Machine God) are joined
-   *  through their own mechanic, never by satisfying invite requirements. */
+   *  through their own mechanic, never by satisfying invite requirements.
+   * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionInfo.tsx#L695-L813 */
   special: boolean;
 }
 
@@ -38,7 +40,8 @@ export interface FactionsView {
   factions: FactionStanding[];
   /** Every augmentation the game knows about, by name. */
   catalog: ReadonlyMap<string, AugInfo>;
-  /** Installed or queued. */
+  /** Installed or queued.
+   * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L79-L92 */
   owned: ReadonlySet<string>;
   /** Bought during this install cycle but not installed yet. Kept separate
    * because only this set makes an augmentation install possible. */
@@ -57,7 +60,8 @@ export interface FactionsView {
    * the horizon permits" rather than inventing a count target. */
   targetAugCount: number;
 
-  /** Favor needed before donations unlock, from ns.getFavorToDonate(). */
+  /** Favor needed before donations unlock, from ns.getFavorToDonate().
+   * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1414-L1416 */
   favorToDonate: number;
   /** Progression's install-cadence verdict says the reset should happen NOW
    * (published installWanted). This feature must conclude: stop pushing the

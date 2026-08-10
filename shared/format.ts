@@ -1,10 +1,12 @@
 /**
  * Numeric display shared by telemetry producers and the external UI.
  *
- * Bitburner v3.0.1 formats its exponential branch with an English
- * `Intl.NumberFormat` configured for scientific notation and three fractional
- * digits. Keep this small, dependency-free copy aligned with
- * `src/ui/formatNumber.ts`; game bundles cannot import the upstream UI module.
+ * Bitburner v3.0.1 formats its exponential branch with an
+ * `Intl.NumberFormat` configured for scientific (or optional engineering)
+ * notation and three fractional digits. This dependency-free copy fixes the
+ * locale to English for stable telemetry; game bundles cannot import the
+ * upstream UI module.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/ui/formatNumber.ts#L29-L56
  */
 const scientificFormatter = new Intl.NumberFormat(["en"], {
   minimumFractionDigits: 3,
@@ -12,7 +14,8 @@ const scientificFormatter = new Intl.NumberFormat(["en"], {
   notation: "scientific",
 });
 
-/** Bitburner's scientific display, including its lowercase exponent marker. */
+/** Bitburner's scientific display, including its lowercase exponent marker.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/ui/formatNumber.ts#L29-L56 */
 export function formatScientific(n: number): string {
   if (Number.isNaN(n)) return "NaN";
   if (Math.abs(n) === Infinity) return n < 0 ? "-∞" : "∞";
@@ -20,8 +23,10 @@ export function formatScientific(n: number): string {
 }
 
 /**
- * Fixed-point for ordinary values; Bitburner's scientific form replaces all
- * compact k/m/b/t/q suffixes from 1e3 onward.
+ * Fixed-point for ordinary values; this stable telemetry form switches to
+ * Bitburner's exponential formatter from 1e3 onward. The game UI normally
+ * uses compact suffixes below 1e33 unless suffixes are disabled.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/ui/formatNumber.ts#L122-L157
  */
 export function formatNumber(n: number, fractionalDigits = 0): string {
   if (Number.isNaN(n)) return "NaN";

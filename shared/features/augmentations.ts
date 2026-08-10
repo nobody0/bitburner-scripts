@@ -3,19 +3,24 @@
  * copy `sim/vendor/.../AugmentationTable.ts`).
  *
  * The telemetry `offers` list cannot answer "what does this give me, and where
- * do I get it?" on its own: it only ever contains augmentations offered by
- * factions we have already JOINED, and the whole point of the panel is to
- * decide which factions are worth joining. The static facts — price, rep, the
- * offering factions, prerequisites and the multipliers — never change within a
- * release, so they belong in the bundle rather than on the wire.
+ * do I get it?" on its own: it is a capped live catalogue that omits owned
+ * non-repeatable augmentations. The static facts — price, rep, the ordinary
+ * offering factions, prerequisites and multipliers — never change within a
+ * release, so they belong in the bundle rather than on the wire. The live
+ * catalogue remains authoritative for node- and gang-dependent sellers.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L79-L92
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L172-L210
  *
  * What is NOT static, and must still come from telemetry: the escalated price
- * at the current queue depth (1.9^queued), the reputation actually held, and
+ * at the current queue depth (`(1.9 * SF11 discount)^queued`), the reputation actually held, and
  * whether it is owned. Those overlay this table; they do not replace it.
  *
  * Lives here rather than being read from the vendored copy because `ui/` may
  * not import `sim/` (tests/boundaries.test.ts). Pinned entry-by-entry by
- * `sim/tests/augmentation-parity.test.ts`. */
+ * `sim/tests/augmentation-parity.test.ts`.
+ *
+ * Pinned upstream definition:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/Augmentations.ts */
 
 export interface AugmentationInfo {
   /** Reputation required. Does NOT scale with the purchase queue. */
@@ -32,7 +37,8 @@ export interface AugmentationInfo {
   /** Programs granted on install. NOT multipliers. */
   programs?: readonly string[];
   /** Upstream randomises this one's multipliers at load time, so `mults` is
-   *  NOT the truth for this save and must not be shown as if it were. */
+   *  NOT the truth for this save and must not be shown as if it were.
+   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/Augmentations.ts */
   multsUnknown?: boolean;
 }
 

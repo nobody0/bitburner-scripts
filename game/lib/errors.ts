@@ -1,8 +1,9 @@
 /** ScriptDeath is Bitburner's normal cancellation marker: it is thrown out of
- * any pending ns call when the script is killed, the game reloads, or a build
- * handoff kills the old instance. It is not a failure, and nothing may swallow
- * it — a caught ScriptDeath that does not propagate turns "this script was
- * killed" into a silent retry loop. */
+ * a pending delaying ns call when the script is killed, and every later ns call
+ * checks the same stop flag. It is not a failure, and nothing may swallow it —
+ * a caught ScriptDeath that does not propagate turns "this script was killed"
+ * into a silent retry loop.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L398-L431 */
 export function isScriptDeath(error: unknown): boolean {
   return error instanceof Error && error.name === "ScriptDeath";
 }

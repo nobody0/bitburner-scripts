@@ -31,7 +31,10 @@ import type { NeedKind } from "../needs.ts";
  *  - `hacknetRAM`/`Cores`/`Levels` and `bladeburnerRank` are `return false`
  *    TODOs, so Netburners and Bladeburners are unreachable. Infiltration is
  *    deliberately reported as a manual-only blocker until the resulting
- *    Shadows of Anarchy invitation is observed. */
+ *    Shadows of Anarchy invitation is observed.
+ *
+ * Upstream requirement predicates and serialized shapes (pinned v3.0.1):
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts#L45-L381 */
 
 /** Everything a requirement can be evaluated against. Flat and plain so the
  * strategy stays pure — the driver assembles it from GameState. */
@@ -41,8 +44,11 @@ export interface RequirementView {
   /** Negative and decreasing. */
   karma: number;
   numPeopleKilled: number;
-  /** Installed OR queued — what `numAugmentations` counts. */
+  /** Installed augmentations, which positive `numAugmentations` targets count. */
   augCount: number;
+  /** Installed or queued non-NeuroFlux augmentations. Upstream uses this only
+   * for the special zero-augmentation predicate. */
+  purchasedAugCount?: number;
   /** Company name -> job title. */
   jobs: Record<string, string>;
   /** Company name -> reputation. */
@@ -213,19 +219,20 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
         ? []
         : [blocker("file", 1, 0, `needs the file ${requirement.file}`, { subject: requirement.file })];
 
-    case "numAugmentations":
+    case "numAugmentations": {
+      // Zero is special: installed + queued, excluding NeuroFlux. Positive
+      // targets count installed augmentations only.
+      // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts#L119-L132
+      const counted = requirement.numAugmentations === 0 ? (view.purchasedAugCount ?? view.augCount) : view.augCount;
+      if (requirement.numAugmentations === 0) {
+        return counted === 0 ? [] : [blocker("augCount", 0, counted, "needs no purchased augmentations")];
+      }
       // A goal, never "unachievable": this is exactly how Daedalus is planned
       // toward, and treating "not yet" as impossible removes the endgame.
-      return view.augCount >= requirement.numAugmentations
+      return counted >= requirement.numAugmentations
         ? []
-        : [
-            blocker(
-              "augCount",
-              requirement.numAugmentations,
-              view.augCount,
-              `needs ${requirement.numAugmentations} augmentations`,
-            ),
-          ];
+        : [blocker("augCount", requirement.numAugmentations, counted, `needs ${requirement.numAugmentations} augmentations`)];
+    }
 
     case "employedBy":
       return Object.hasOwn(view.jobs, requirement.company)

@@ -72,8 +72,8 @@ export const hacknetTab: Tab = {
           { label: "hash value", value: `${fmtMoney(h.plan.hashDollarValue)}/hash` },
           { label: "fleet load", value: `${fmtNum(h.plan.fleetUtilization * 100, 1)}%`, sub: h.plan.fleetDemanded === true ? "Hacknet RAM has farm value" : h.plan.fleetDemanded === false ? "RAM demand not saturated" : "basis unavailable" },
         ]) +
-        note(`${esc(h.plan.why)}${h.plan.hold ? ` — ${esc(h.plan.hold)}` : ""}`) +
-        (h.plan.lastResult ? note(`${h.plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${esc(h.plan.lastResult.detail)}`) : "") +
+        note(`${h.plan.why}${h.plan.hold ? ` — ${h.plan.hold}` : ""}`) +
+        (h.plan.lastResult ? note(`${h.plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${h.plan.lastResult.detail}`) : "") +
         upgrades +
         (h.plan.rankedTotal > h.plan.ranked.length ? note(`showing ${h.plan.ranked.length} of ${h.plan.rankedTotal} scored upgrades`) : "")
       : upgrades;
@@ -87,7 +87,7 @@ export const hacknetTab: Tab = {
       : "";
 
     const hashPlan = h.plan?.hashes
-      ? note(esc(h.plan.hashes.why)) +
+      ? note(h.plan.hashes.why) +
         tiles([
           { label: "bank", value: `${fmtNum(h.plan.hashes.current, 0)} / ${fmtNum(h.plan.hashes.capacity, 0)}` },
           { label: "production", value: `${fmtNum(h.plan.hashes.productionPerSec, 3)}/s` },
@@ -113,7 +113,7 @@ export const hacknetTab: Tab = {
           ? note(`showing ${h.plan.hashes.ranked.length} of ${h.plan.hashes.rankedTotal} scored hash goals`)
           : "") +
         (h.plan.hashes.lastResult
-          ? note(`${h.plan.hashes.lastResult.ok ? "last spend succeeded" : "last spend failed"}: ${esc(h.plan.hashes.lastResult.detail)}`)
+          ? note(`${h.plan.hashes.lastResult.ok ? "last spend succeeded" : "last spend failed"}: ${h.plan.hashes.lastResult.detail}`)
           : "")
       : "";
 

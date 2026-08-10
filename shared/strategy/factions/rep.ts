@@ -18,7 +18,15 @@
  *  3. **Passive rep has a floor and skips the faction you are working.** Below
  *     a threshold skill, working is strictly WORSE than idling.
  *  4. **Unfocused work is x0.8** unless Neuroreceptor Management Implant is
- *     owned. */
+ *     owned.
+ *
+ * Upstream implementations (pinned v3.0.1):
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts#L25-L43
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts#L77-L105
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/formulas/reputation.ts#L11-L55
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L143-L176
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/formulas/donation.ts#L7-L30
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/formulas/favor.ts#L7-L24 */
 
 /** CONSTANTS.MaxSkillLevel @ v3.0.1. */
 export const MAX_SKILL_LEVEL = 975;
@@ -44,6 +52,8 @@ export interface RepPerson {
 export interface RepContext {
   /** currentNodeMults.FactionWorkRepGain. */
   factionWorkRepGain: number;
+  /** currentNodeMults.FactionPassiveRepGain. */
+  factionPassiveRepGain?: number;
   /** `calculateCurrentShareBonus()` — 1 when nothing is sharing. */
   shareBonus: number;
   /** SF15 level; at 3+ charisma contributes to faction work. */
@@ -56,7 +66,8 @@ function clamp(value: number, min: number, max = Infinity): number {
   return Math.max(min, Math.min(max, value));
 }
 
-/** `calculateIntelligenceBonus(intelligence, weight)` @ v3.0.1. */
+/** `calculateIntelligenceBonus(intelligence, weight)` @ v3.0.1.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/formulas/intelligence.ts#L1-L3 */
 export function intelligenceBonus(intelligence: number, weight = 1): number {
   return 1 + (weight * Math.pow(intelligence, 0.8)) / 600;
 }
@@ -149,23 +160,27 @@ export function bestWorkType(
   return best;
 }
 
-/** Passive reputation per CYCLE for one faction.
+/** Passive reputation per SECOND for one faction.
  *
- * `max(hacking, strength, ...) * min(0.1, favor/1000 + 0.01)` in the game, and
- * the faction you are CURRENTLY WORKING is skipped. That skip is what creates
- * the work-vs-idle crossover: with a 1/120-per-cycle floor, working a faction
- * below a threshold skill earns LESS than the passive tick you gave up. */
+ * The best actual work-reputation formula is reduced by the passive favor
+ * fraction, then floored at 1/120 rep per cycle. The faction currently being
+ * worked is skipped by the caller. That skip creates the work-vs-idle
+ * crossover: below a threshold skill, working earns less than the passive tick
+ * it suppresses. */
 export function passiveRepPerSec(person: RepPerson, favor: number, ctx: RepContext): number {
-  const best = Math.max(
-    person.skills.hacking,
-    person.skills.strength,
-    person.skills.defense,
-    person.skills.dexterity,
-    person.skills.agility,
-    person.skills.charisma,
+  // The game takes the best ACTUAL work-reputation formula (not the largest
+  // raw skill), applies the passive favor fraction, then floors the result at
+  // 1/120 rep/cycle before the separate passive BitNode multiplier.
+  const passiveFavor = Math.min(0.1, favor / 1000 + 0.01);
+  const bestPerCycle = Math.max(
+    hackingWorkRepGain(person, favor, ctx) * passiveFavor,
+    securityWorkRepGain(person, favor, ctx) * passiveFavor,
+    fieldWorkRepGain(person, favor, ctx) * passiveFavor,
+    1 / 120,
   );
-  // The game runs this every 5 cycles (1s) and compensates for missed cycles.
-  return best * Math.min(0.1, favor / 1000 + 0.01) * ctx.factionWorkRepGain * 0.001;
+  return bestPerCycle
+    * (ctx.factionPassiveRepGain ?? 1)
+    * 5;
 }
 
 /** The skill at which working a faction first beats idling on passive rep.
@@ -180,29 +195,53 @@ export function workBeatsIdleSkill(
   ctx: RepContext,
   focused: boolean,
 ): number {
-  const passive = passiveRepPerSec(person, favor, ctx);
-  if (passive <= 0) return 0;
-  // Both rates are linear in the driving skill, so one probe gives the slope.
-  const probe = { ...person, skills: { ...person.skills, hacking: 1000, strength: 1000, defense: 1000, dexterity: 1000, agility: 1000 } };
-  const slope = workRepPerSec(type, probe, favor, ctx, focused) / 1000;
-  if (slope <= 0) return Infinity;
-  return passive / slope;
+  const at = (skill: number): number => {
+    const skills = { ...person.skills };
+    if (type === "hacking") skills.hacking = skill;
+    else if (type === "security") {
+      skills.strength = skill;
+      skills.defense = skill;
+      skills.dexterity = skill;
+      skills.agility = skill;
+    } else {
+      skills.strength = skill;
+      skills.defense = skill;
+      skills.dexterity = skill;
+      skills.agility = skill;
+      skills.charisma = skill;
+    }
+    const probe = { ...person, skills };
+    return workRepPerSec(type, probe, favor, ctx, focused) - passiveRepPerSec(probe, favor, ctx);
+  };
+  if (at(0) > 0) return 0;
+  let low = 0;
+  let high = MAX_SKILL_LEVEL;
+  if (at(high) <= 0) return Infinity;
+  for (let i = 0; i < 64; i++) {
+    const mid = (low + high) / 2;
+    if (at(mid) > 0) high = mid;
+    else low = mid;
+  }
+  return high;
 }
 
 // --- favor -----------------------------------------------------------------
 
-/** `favorToRep` @ v3.0.1. */
+/** `favorToRep` @ v3.0.1.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/formulas/favor.ts#L7-L15 */
 export function favorToRep(favor: number): number {
   return clamp(25000 * Math.expm1(LOG_1_POINT_02 * favor), 0);
 }
 
-/** `repToFavor` @ v3.0.1. */
+/** `repToFavor` @ v3.0.1.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/formulas/favor.ts#L17-L24 */
 export function repToFavor(rep: number): number {
   return clamp(Math.log1p(rep / 25000) / LOG_1_POINT_02, 0, MAX_FAVOR);
 }
 
 /** Favor after an install banks this run's reputation. The ONLY way favor
- * grows — which is why a donation-gated faction is a reset decision. */
+ * grows — which is why a donation-gated faction is a reset decision.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/Faction.ts#L77-L85 */
 export function addRepToFavor(favor: number, playerReputation: number): number {
   return repToFavor(favorToRep(favor) + playerReputation);
 }

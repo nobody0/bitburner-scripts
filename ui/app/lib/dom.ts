@@ -1,20 +1,27 @@
 import { esc } from "./format.ts";
+import { Html, html, inline, raw, type Markup } from "./html.ts";
 import { sortOf, view, type Sort } from "./viewstate.ts";
 
 /** Markup helpers. Tabs return HTML strings rather than building nodes: the
- * panels are small, fully re-rendered on each frame, and string templates keep
- * each tab readable as a description of its layout. Everything dynamic goes
- * through esc().
+ * panels are small, re-rendered on each frame, and string templates keep each
+ * tab readable as a description of its layout.
+ *
+ * Two kinds of slot, and the type says which:
+ *  - `Markup` (`string | Html`) is a TEXT slot. A plain string is escaped; an
+ *    `Html` — from html`` or `raw()` — is inserted as-is. Prose is safe by
+ *    default and markup is opt-in.
+ *  - Places documented as pre-escaped fragments (table cells, a card body)
+ *    take whatever the caller built and insert it verbatim; use `esc()` there.
  *
  * Anything interactive here is declarative — a `data-*` attribute that the
  * delegated listeners in main.ts recognise — so a helper never has to hold a
- * node reference across a re-render that will destroy it. */
+ * node reference across a re-render that could destroy it. */
 
 export interface Tile {
-  label: string;
-  value: string;
+  label: Markup;
+  value: Markup;
   /** Optional smaller line under the value. */
-  sub?: string;
+  sub?: Markup;
 }
 
 export function tiles(items: Tile[]): string {
@@ -22,24 +29,24 @@ export function tiles(items: Tile[]): string {
   return `<div class="tiles">${items
     .map(
       (t) =>
-        `<div class="tile"><div class="v">${esc(t.value)}</div><div class="l">${esc(t.label)}</div>${
-          t.sub ? `<div class="l">${esc(t.sub)}</div>` : ""
+        `<div class="tile"><div class="v">${inline(t.value)}</div><div class="l">${inline(t.label)}</div>${
+          t.sub ? `<div class="l">${inline(t.sub)}</div>` : ""
         }</div>`,
     )
     .join("")}</div>`;
 }
 
-export function card(title: string, body: string, actions = ""): string {
+export function card(title: Markup, body: Markup, actions: Markup = ""): string {
   return (
     `<section class="card">` +
-    `<h2>${esc(title)}${actions ? `<span class="acts">${actions}</span>` : ""}</h2>` +
+    `<h2>${inline(title)}${actions ? `<span class="acts">${actions}</span>` : ""}</h2>` +
     body +
     `</section>`
   );
 }
 
 export interface TableOptions {
-  empty?: string;
+  empty?: Markup;
   /** Column indices that carry prose and must WRAP rather than force the card
    *  into horizontal scroll. Cells are `nowrap` by default because most
    *  columns are numeric and should stay aligned; a requirement tree or a
@@ -54,12 +61,15 @@ export interface TableOptions {
 /** A table. Cells are pre-escaped HTML fragments so a column can carry a
  * class; use esc() when building them. */
 export function table(
-  headers: string[],
-  rows: string[][],
-  emptyOrOptions: string | TableOptions = "no data",
+  headers: Markup[],
+  rows: readonly Markup[][],
+  emptyOrOptions: Markup | TableOptions = "no data",
 ): string {
-  const options: TableOptions = typeof emptyOrOptions === "string" ? { empty: emptyOrOptions } : emptyOrOptions;
-  if (rows.length === 0) return `<p class="muted">${esc(options.empty ?? "no data")}</p>`;
+  const options: TableOptions =
+    typeof emptyOrOptions === "object" && !(emptyOrOptions instanceof Html)
+      ? emptyOrOptions
+      : { empty: emptyOrOptions };
+  if (rows.length === 0) return note(options.empty ?? "no data");
   const wrap = new Set(options.wrap ?? []);
   const left = new Set(options.left ?? []);
   const cls = (index: number): string => {
@@ -68,23 +78,24 @@ export function table(
   };
   return (
     `<table><thead><tr>${headers
-      .map((h, i) => `<th${cls(i)}>${options.rawHeaders ? h : esc(h)}</th>`)
+      .map((h, i) => `<th${cls(i)}>${options.rawHeaders ? h : inline(h)}</th>`)
       .join("")}</tr></thead><tbody>` +
     rows.map((cells) => `<tr>${cells.map((c, i) => `<td${cls(i)}>${c}</td>`).join("")}</tr>`).join("") +
     `</tbody></table>`
   );
 }
 
-/** Label/value pairs for the "one object, many fields" panels. */
-export function definitions(pairs: [string, string][]): string {
-  if (pairs.length === 0) return `<p class="muted">no data</p>`;
+/** Label/value pairs for the "one object, many fields" panels. Values are
+ * pre-escaped fragments; labels are prose. */
+export function definitions(pairs: [Markup, Markup][]): string {
+  if (pairs.length === 0) return note("no data");
   return `<dl class="defs">${pairs
-    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`)
+    .map(([k, v]) => `<dt>${inline(k)}</dt><dd>${v}</dd>`)
     .join("")}</dl>`;
 }
 
-export function note(text: string): string {
-  return `<p class="muted">${esc(text)}</p>`;
+export function note(text: Markup): string {
+  return `<p class="muted">${inline(text)}</p>`;
 }
 
 /** Horizontal proportional bar — used for the RAM pie and territory splits. */
@@ -117,8 +128,8 @@ export function bar(segments: { label: string; value: number; className?: string
  *  - `off`   — not applicable */
 export type Status = "good" | "ready" | "wait" | "bad" | "off";
 
-export function dot(status: Status, title = ""): string {
-  return `<span class="dot ${status}"${title ? ` title="${esc(title)}"` : ""}>●</span>`;
+export function dot(status: Status, title = ""): Html {
+  return html`<span class="dot ${status}"${title ? raw(` title="${esc(title)}"`) : ""}>●</span>`;
 }
 
 /** Inline progress meter for a table cell: a bar behind a label.
@@ -126,14 +137,11 @@ export function dot(status: Status, title = ""): string {
  * `atTarget` is separate from `value >= max` on purpose — "security is at its
  * minimum" is a target reached at the BOTTOM of the range, and the caller is
  * the only one that knows which end counts as done. */
-export function meter(fraction: number, label: string, atTarget = false, title = ""): string {
+export function meter(fraction: number, label: Markup, atTarget = false, title = ""): Html {
   const pct = Math.max(0, Math.min(1, Number.isFinite(fraction) ? fraction : 0)) * 100;
-  return (
-    `<span class="meter${atTarget ? " done" : ""}"${title ? ` title="${esc(title)}"` : ""}>` +
-    `<span class="fill" style="width:${pct.toFixed(1)}%"></span>` +
-    `<span class="lab">${label}</span>` +
-    `</span>`
-  );
+  return html`<span class="meter${atTarget ? " done" : ""}"${title ? raw(` title="${esc(title)}"`) : ""}>${raw(
+    `<span class="fill" style="width:${pct.toFixed(1)}%"></span>`,
+  )}<span class="lab">${label}</span></span>`;
 }
 
 /** A ratio against a baseline, coloured by whether it HELPS us.
@@ -141,12 +149,12 @@ export function meter(fraction: number, label: string, atTarget = false, title =
  * The sign alone is meaningless: `CrimeMoney 0.70` and `AugmentationMoneyCost
  * 1.43` are both bad news, and colouring by direction would paint them
  * opposite ways. `harderWhen` says which end hurts. */
-export function ratio(value: number, base: number, harderWhen: "higher" | "lower" = "lower"): string {
-  if (!Number.isFinite(value) || !Number.isFinite(base) || base === 0) return `<span class="muted">–</span>`;
+export function ratio(value: number, base: number, harderWhen: "higher" | "lower" = "lower"): Html {
+  if (!Number.isFinite(value) || !Number.isFinite(base) || base === 0) return html`<span class="muted">–</span>`;
   const pct = (value / base) * 100;
   const harder = harderWhen === "higher" ? value > base : value < base;
   const cls = value === base ? "muted" : harder ? "bad" : "good";
-  return `<span class="${cls}">${pct.toFixed(0)}%</span>`;
+  return html`<span class="${cls}">${pct.toFixed(0)}%</span>`;
 }
 
 // --- interactive -----------------------------------------------------------
@@ -177,8 +185,8 @@ export function filters(key: string, options: FilterOption[], fallback: string):
   );
 }
 
-/** A search box that survives the panel being rebuilt under it — main.ts
- * restores focus and selection by id after each render. */
+/** A search box. The panel is patched in place rather than rebuilt, so the
+ * caret and any selection stay where the operator left them. */
 export function search(key: string, placeholder: string): string {
   return (
     `<input class="search" type="search" id="search-${esc(key)}" data-view-key="${esc(key)}" ` +
@@ -186,8 +194,20 @@ export function search(key: string, placeholder: string): string {
   );
 }
 
-export function collapsible(summary: string, body: string, open = false): string {
-  return `<details${open ? " open" : ""}><summary>${summary}</summary>${body}</details>`;
+/** A disclosure whose open/closed state belongs to the OPERATOR, not to the
+ * frame that drew it.
+ *
+ * `key` names the disclosure in viewstate (main.ts records every toggle), so a
+ * section opened by hand stays open across the re-renders a live run fires
+ * twice a second — and across leaving the tab and coming back. Without it the
+ * markup would assert `defaultOpen` again on every frame and snap the section
+ * shut under the reader. */
+export function collapsible(key: string, summary: Markup, body: Markup, defaultOpen = false): string {
+  const open = view(`open.${key}`, defaultOpen ? "1" : "0") === "1";
+  return (
+    `<details data-open-key="${esc(key)}"${open ? " open" : ""}>` +
+    `<summary>${inline(summary)}</summary>${body}</details>`
+  );
 }
 
 // --- data tables -----------------------------------------------------------
@@ -196,7 +216,7 @@ export interface Column<T> {
   /** Stable id, used as the sort key. */
   id: string;
   label: string;
-  cell(row: T): string;
+  cell(row: T): Markup;
   /** Omit to make the column unsortable. */
   sort?(row: T): number | string;
   wrap?: boolean;
@@ -204,7 +224,7 @@ export interface Column<T> {
 }
 
 export interface DataTableOptions<T> {
-  empty?: string;
+  empty?: Markup;
   /** Applied when no sort has been chosen. */
   defaultSort: Sort;
   /** Rows past this are dropped, with a note saying how many. */

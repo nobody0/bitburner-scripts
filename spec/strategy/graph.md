@@ -154,7 +154,7 @@ reset. Three levels: *install* (buying augs), *node* (destroying a BitNode),
 | **Augmentations owned** | `factions`, grafting, `gang`, `dnet` labyrinth | `progression`; counts toward Daedalus | **Yes** | No |
 | **Home RAM** | money | our scripts, dodges, probes, the farm | **Yes** | No |
 | **Fleet RAM** | purchased + rooted + hacknet servers, `dnet` | dispatch, dodge placement, `stanek` charging | **No** | No |
-| **Programs** (port openers) | darkweb ($) or creation (work slot + skill) | rooting, therefore the whole fleet | **Yes** | No |
+| **Programs** (port openers) | darkweb ($) or creation (work slot + skill) | rooting, therefore the whole fleet | **No** → NUKE plus augmentation/SF-granted programs (and BitFlume) | No → the new node's grants (and BitFlume) |
 | **City** | travel, $200 000 | city factions, Tetrads, Dark Army, Syndicate, Tian Di Hui | **No** → Sector-12 | No |
 | **Source-File levels** | destroying BitNodes | everything on graph 1 | Yes | **Yes** |
 

@@ -1,5 +1,9 @@
 /** Handwritten v3.0.1 program-creation economics. The simulator parity suite
- * compares this table with upstream; game/shared never imports upstream. */
+ * compares this table with upstream; game/shared never imports upstream.
+ *
+ * Pinned upstream table, access requirement, and work-rate formula:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Programs/Programs.ts#L19-L193
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/CreateProgramWork.ts#L51-L75 */
 export interface ProgramOption {
   name: string;
   level: number;

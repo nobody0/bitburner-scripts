@@ -36,7 +36,9 @@ export class GraftingSystem {
   available(): string[] {
     const bladeburner = this.#player.factions.includes("Bladeburners");
     return Object.values(AUGMENTATION_TABLE)
-      .filter((aug) => !this.#player.augmentations.has(aug.name))
+      // Player.hasAugmentation includes queued purchases by default.
+      // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Grafting/GraftingHelpers.ts#L9-L23
+      .filter((aug) => !this.#player.hasAugmentation(aug.name))
       .filter((aug) => !aug.isSpecial || (bladeburner && aug.factions.includes("Bladeburners")))
       .map((aug) => aug.name);
   }

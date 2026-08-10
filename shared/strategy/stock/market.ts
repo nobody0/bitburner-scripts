@@ -6,6 +6,13 @@
  * transcription, pinned constant-by-constant by `sim/tests/stock-parity.test.ts`
  * (see the table in spec/game-source.md).
  *
+ * Pinned upstream sources:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarket.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/Stock.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarketHelpers.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/PlayerInfluencing.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts
+ *
  * The tick, in full:
  *
  * ```
@@ -47,6 +54,10 @@
  */
 
 // --- constants (v3.0.1) -----------------------------------------------------
+// Sources: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts
+// https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/Stock.ts
+// https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarket.ts
+// https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/PlayerInfluencing.ts
 
 /** `StockMarketConstants.msPerStockUpdate`. */
 export const MS_PER_TICK = 6_000;
@@ -310,7 +321,8 @@ export interface UnlockCosts {
 }
 
 /** `getStockMarket4SDataCost` and friends: the base cost times the node's
- *  multiplier. WSE and TIX are NOT multiplied by anything upstream. */
+ *  multiplier. WSE and TIX are NOT multiplied by anything upstream.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/StockMarket.ts */
 export function unlockCosts(mults: StockNodeMults | undefined): UnlockCosts {
   return {
     wseAccount: WSE_ACCOUNT_COST,

@@ -8,11 +8,17 @@ The canonical upstream is
 - Steam app ID: `1812820`
 - Steam target build ID observed during installation: `23272653`
 - Installed game version: `3.0.1` (Steam build `23272653`)
-- Pinned upstream ref: `v3.0.1`
+- Pinned upstream release: [`v3.0.1` (17 May 2026)](https://github.com/bitburner-official/bitburner-src/releases/tag/v3.0.1)
+- Pinned upstream commit: [`3162fd2590e221eadd0c0fbd46151913f7c4c41c`](https://github.com/bitburner-official/bitburner-src/commit/3162fd2590e221eadd0c0fbd46151913f7c4c41c)
 
 Do not follow the moving `dev` branch for compatibility decisions. The Steam
 manifest's target build maps to the 3.0.1 release, and the upstream worktree is
 checked out directly at its matching release tag.
+
+`bun run vendor` verifies that both `v3.0.1` and the checkout's `HEAD` resolve
+to that exact commit before reading any source. The generated manifest records
+both values, preventing a moved tag or a checkout on `dev` from silently
+changing the simulator's evidence base.
 
 For type safety, prefer the definition file returned by the running game's
 Remote File API. The source checkout remains the authoritative place to inspect

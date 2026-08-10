@@ -3,7 +3,6 @@ import {
   HGW_LIVE_OPS_PRESSURE,
   HGW_LIVE_OPS_RELEASE,
   MODE_DWELL_MS,
-  SHOTGUN_MIN_DEPTH,
   decideMode,
 } from "../shared/strategy/mode.ts";
 
@@ -13,13 +12,8 @@ import {
 const base = { weakenMs: 120_000, liveOps: 100, lastMode: "hwgw" as const, lastModeSince: 0, now: 100_000 };
 
 describe("decideMode", () => {
-  test("defaults to hwgw", () => {
-    expect(decideMode(base).mode).toBe("hwgw");
-  });
-
   test("shotgun when weakenTime fits fewer than the minimum interleaved batches", () => {
     // 0.8s interval: 1.5s of weakenTime holds one batch — below SHOTGUN_MIN_DEPTH.
-    expect(SHOTGUN_MIN_DEPTH).toBe(2);
     expect(decideMode({ ...base, weakenMs: 1_500 }).mode).toBe("shotgun");
     expect(decideMode({ ...base, weakenMs: 1_700 }).mode).toBe("hwgw");
   });

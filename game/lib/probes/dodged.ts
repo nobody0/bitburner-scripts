@@ -8,6 +8,7 @@ import {
   CONTRACT_TELEMETRY_LIMIT,
 } from "../../../shared/strategy/side/contracts.ts";
 import { GO_REWARD_OPPONENTS, type GoObservedBoardSize } from "../../../shared/strategy/go/decide.ts";
+import { rotate } from "../../../shared/strategy/stanek/pack.ts";
 import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
 import type { ContractDigest } from "../../../shared/telemetry/topics/side.ts";
 import { emit, emitPartial, type DodgedProbe, type Emission, type ProbeContext } from "./index.ts";
@@ -147,6 +148,8 @@ const progressionMults: DodgedProbe = {
 };
 
 // --- factions (singularity) ------------------------------------------------
+
+const NEUROFLUX_GOVERNOR = "NeuroFlux Governor";
 
 /** Standing at every joined faction, plus pending invitations and enemies.
  *
@@ -340,6 +343,7 @@ const factionAugs: DodgedProbe = {
         // require membership, and restricting it to joined factions would
         // leave the planner unable to value a faction it has not joined —
         // which is precisely the decision it needs to make.
+        // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L128-L133
         const owned = new Set((acc["owned"] as string[]) ?? []);
         const byFaction: Record<string, string[]> = {};
         let total = 0;
@@ -347,7 +351,10 @@ const factionAugs: DodgedProbe = {
           try {
             const names = stubNs["singularity"]["getAugmentationsFromFaction"](faction as never)
               .map(String)
-              .filter((name) => !owned.has(name));
+              // NeuroFlux is repeatable: owning/queueing one level must not
+              // remove the next level from the final purchase sweep.
+              // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L73-L91
+              .filter((name) => name === NEUROFLUX_GOVERNOR || !owned.has(name));
             if (names.length === 0) continue;
             byFaction[faction] = names;
             total += names.length;
@@ -395,6 +402,7 @@ const factionAugs: DodgedProbe = {
           // stable stats (upstream randomises them at load), so the simulator
           // refuses rather than inventing a value. One refusal must not cost
           // the other ~200 augmentations their multipliers.
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/CircadianModulator.ts#L9-L25 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts#L108-L120
           try {
             mults[name] = { ...stubNs["singularity"]["getAugmentationStats"](name as never) } as Record<string, number>;
           } catch {
@@ -572,6 +580,10 @@ const careerCrimes: DodgedProbe = {
       return {
         name,
         chance,
+        // getCrimeStats returns calculateCrimeWorkStats(), not base table
+        // gains: money and exp already include player and BitNode multipliers.
+        // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L1068-L1090
+        gainsAreEffective: true,
         money: stats.money,
         timeMs: stats.time,
         karma: stats.karma,
@@ -622,6 +634,9 @@ const hacknetCore: DodgedProbe = {
     const nodes = [];
     let totalProduction = 0;
     let productionPerSec = 0;
+    // Hacknet Servers are selected by the BN9/SF9 feature gate, unless the
+    // BitNode option disables them.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/HacknetHelpers.tsx#L34-L36
     const servers =
       caps.restrictions.disableHacknetServer !== true &&
       (caps.bitNode === 9 || (caps.sourceFiles["9"] ?? 0) > 0);
@@ -698,9 +713,10 @@ const hacknetUpgrades: DodgedProbe = {
         if (Number.isFinite(value)) nextUpgrades.push({ kind, node: i, cost: value });
       }
     }
-    // Hash economy exists only for hacknet servers (BN9/SF9). On plain nodes
-    // these read as 0 — and in some BitNodes they throw — so the whole read is
-    // optional and the panel simply omits the hash tiles.
+    // Hash economy exists only for Hacknet Servers (BN9/SF9). On plain nodes
+    // these APIs return 0/Infinity/[]/false; omitting them keeps the topic's
+    // semantics explicit rather than publishing an unusable hash economy.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Hacknet.ts#L164-L224
     const hashUpgrades = servers
       ? stubNs["hacknet"]["getHashUpgrades"]().map((name) => ({
           name: String(name),
@@ -735,11 +751,13 @@ const hackingInfrastructure: DodgedProbe = {
 /** The account ladder, at 0.05 GB per call — the cheapest probe in the table.
  *
  * Runs UNCONDITIONALLY, because these four flags are the only way to know where
- * on the ladder we are, and every one of them is bought with money rather than
- * granted by a source file. Read directly instead of inferred from whether
+ * on the ladder we are. BN8/SF8 grants WSE and TIX on prestige; the two 4S
+ * products are purchases. Read directly instead of inferred from whether
  * `getForecast` threw: that call checks `has4SDataTixApi` (the $25b API), not
  * `has4SData` (the $1b ticker data), so inferring conflated the two and left the
- * driver unable to tell "bought the useless one" from "bought nothing". */
+ * driver unable to tell "bought the useless one" from "bought nothing".
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts#L163-L168
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/StockMarket.ts#L226-L246 */
 const stockAccount: DodgedProbe = {
   id: "stock.account",
   kind: "dodged",
@@ -767,6 +785,8 @@ const stockAccount: DodgedProbe = {
  * per-tick magnitude, so no measured volatility; and no way to see the 45%-flip
  * cycle boundary that ends every regime. The old 30 s cadence saw one tick in
  * five and could recover none of it.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarket.ts#L218-L258
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts#L3-L8
  *
  * `getAskPrice`/`getBidPrice` rather than `getPrice`: the mid is not a price
  * anything trades at, and the spread it hides is 10x-200x the commission on any
@@ -887,7 +907,8 @@ const gangCore: DodgedProbe = {
     const info = stubNs["gang"]["getGangInformation"]();
     const members = stubNs["gang"]["getMemberNames"]().map((name) => {
       const m = stubNs["gang"]["getMemberInformation"](name);
-      // undefined until the member has enough exp to gain anything.
+      // Undefined until the member has enough exp to gain anything.
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Gang.ts#L283-L302
       const ascension = stubNs["gang"]["getAscensionResult"](name);
       return {
         ascensionResult: ascension
@@ -916,6 +937,23 @@ const gangCore: DodgedProbe = {
         augmentations: m.augmentations.length,
       };
     });
+    const taskRates = Object.fromEntries(members.map((member) => [member.name, [{
+      name: member.task,
+      respect: member.respectGain,
+      money: member.moneyGain,
+      wanted: member.wantedLevelGain,
+    }]]));
+    // The API exposes exact rates only for each member's CURRENT task. We do
+    // not pretend these are rates for unobserved tasks; without Formulas.exe
+    // there is no side-effect-free API that prices every member/task pair.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Gang.ts#L151-L164
+    const ascensionGain = Object.fromEntries(members.map((member) => {
+      const result = member.ascensionResult;
+      if (!result) return [member.name, 0];
+      return [member.name, info.isHacking
+        ? result.hack
+        : Math.min(result.str, result.def, result.dex, result.agi)];
+    }));
     return [
       emit("gang", {
         faction: String(info.faction),
@@ -934,6 +972,8 @@ const gangCore: DodgedProbe = {
         recruitsAvailable: stubNs["gang"]["getRecruitsAvailable"](),
         canRecruit: stubNs["gang"]["canRecruitMember"](),
         members,
+        taskRates,
+        ascensionGain,
       }),
     ];
   },
@@ -971,13 +1011,13 @@ const corpCore: DodgedProbe = {
   methods: ["corporation.getCorporation", "corporation.getInvestmentOffer"],
   run(stubNs: NS) {
     const c = stubNs["corporation"]["getCorporation"]();
-    let investmentOffer;
-    try {
-      const offer = stubNs["corporation"]["getInvestmentOffer"]();
-      investmentOffer = { round: offer.round, funds: offer.funds, shares: offer.shares };
-    } catch {
-      /* no offer available (already public, or round exhausted) */
-    }
+    const offer = stubNs["corporation"]["getInvestmentOffer"]();
+    // Public/exhausted corporations receive a zero-valued offer rather than
+    // an exception. Keep the optional topic field for an actionable offer.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Corporation/Corporation.ts#L333-L354
+    const investmentOffer = offer.funds > 0 && offer.shares > 0
+      ? { round: offer.round, funds: offer.funds, shares: offer.shares }
+      : undefined;
     return [
       emit("corp", {
         name: c.name,
@@ -1124,6 +1164,9 @@ const bladeActions: DodgedProbe = {
     "bladeburner.getActionCountRemaining",
     "bladeburner.getActionCurrentLevel",
     "bladeburner.getActionMaxLevel",
+    "bladeburner.getActionRankGain",
+    "bladeburner.getActionRankLoss",
+    "bladeburner.getBlackOpRank",
     "bladeburner.getSkillNames",
     "bladeburner.getSkillLevel",
     "bladeburner.getSkillUpgradeCost",
@@ -1146,6 +1189,16 @@ const bladeActions: DodgedProbe = {
           countRemaining: stubNs["bladeburner"]["getActionCountRemaining"](type as never, name as never),
           level: stubNs["bladeburner"]["getActionCurrentLevel"](type as never, name as never),
           maxLevel: stubNs["bladeburner"]["getActionMaxLevel"](type as never, name as never),
+          // Both values are public in v3.0.1. Reading them prevents a made-up
+          // rank reward and enforces each Black Op's hard rank gate.
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L165-L171
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L94-L99
+          rankGain: stubNs["bladeburner"]["getActionRankGain"](type as never, name as never),
+          // Failure rank loss is independently level-adjusted; expected-rank
+          // scheduling must not treat a failed action as a zero-rank outcome.
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L164-L181
+          rankLoss: stubNs["bladeburner"]["getActionRankLoss"](type as never, name as never),
+          ...(type === "blackop" ? { rankNeeded: stubNs["bladeburner"]["getBlackOpRank"](name as never) } : {}),
         });
       }
     }
@@ -1344,13 +1397,13 @@ const stanekCore: DodgedProbe = {
     const active = stubNs["stanek"]["activeFragments"]();
     const occupied: Record<string, number> = {};
     const fragments = active.map((f) => {
-      // shape is the unrotated footprint; the exact cells matter less to the
-      // panel than "this fragment sits here", so anchor + shape is enough.
-      for (let dy = 0; dy < f.shape.length; dy++) {
-        for (let dx = 0; dx < (f.shape[dy]?.length ?? 0); dx++) {
-          if (f.shape[dy]![dx]) occupied[`${f.x + dx},${f.y + dy}`] = f.id;
-        }
-      }
+      const shape = f.shape.flatMap((row, y) => row.flatMap((full, x) => full ? [{ x, y }] : []));
+      // activeFragments merges the ActiveFragment rotation with the base
+      // Fragment's unrotated shape. Apply Fragment.fullAt's quarter-turn
+      // convention before publishing occupied world cells.
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L63-L73
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/CotMG/Fragment.ts#L24-L41
+      for (const cell of rotate(shape, f.rotation)) occupied[`${f.x + cell.x},${f.y + cell.y}`] = f.id;
       return {
         id: f.id,
         type: String(f.type),
@@ -1363,6 +1416,9 @@ const stanekCore: DodgedProbe = {
         numCharge: f.numCharge,
         highestCharge: f.highestCharge,
         chargedEffect: f.chargedEffect,
+        // chargeFragment rejects FragmentType.Booster (numeric value 18).
+        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L34-L43
+        chargeable: f.type !== 18,
       };
     });
     return [
@@ -1376,6 +1432,7 @@ const stanekCore: DodgedProbe = {
           type: String(f.type),
           power: f.power,
           limit: f.limit,
+          shape: f.shape.flatMap((row, y) => row.flatMap((full, x) => full ? [{ x, y }] : [])),
         })),
       }),
     ];
@@ -1392,6 +1449,7 @@ const dnetCore: DodgedProbe = {
   everyMs: MIN_1,
   merge: true,
   methods: [
+    "getHostname",
     "dnet.probe",
     "dnet.getServerDetails",
     "dnet.getDepth",
@@ -1402,6 +1460,10 @@ const dnetCore: DodgedProbe = {
     "dnet.getServerRequiredCharismaLevel",
   ],
   run(stubNs: NS) {
+    const observedFrom = stubNs["getHostname"]();
+    // probe() returns only Darknet neighbors of the SCRIPT EXECUTION host and
+    // shuffles their order. One launch is not a complete graph traversal.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L314-L335
     const hosts = stubNs["dnet"]["probe"]();
     const linked = new Set(stubNs["dnet"]["getStasisLinkedServers"]().map(String));
     let maxDepth = 0;
@@ -1420,6 +1482,8 @@ const dnetCore: DodgedProbe = {
     }
     return [
       emit("dnet", {
+        observedFrom,
+        topologyComplete: false,
         reachable: hosts.length,
         maxDepth,
         stasisLinkLimit: stubNs["dnet"]["getStasisLinkLimit"](),

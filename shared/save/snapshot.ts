@@ -3,7 +3,8 @@
  * Deliberately not the game's shape. A save is a serialised object graph with
  * class wrappers, sparse keys, two Map encodings and several fields that are
  * derived rather than stored; a snapshot is the flat subset that seeding a
- * simulation actually needs, with every default already applied. */
+ * simulation actually needs, with every default already applied.
+ * Sources: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/SaveObject.ts#L191-L230 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/utils/JSONReviver.ts#L24-L43 */
 
 export interface SaveServer {
   hostname: string;
@@ -14,7 +15,8 @@ export interface SaveServer {
   backdoorInstalled: boolean;
   purchasedByPlayer: boolean;
   maxRam: number;
-  /** NOT stored in the save — recomputed from the running-script list. */
+  /** NOT stored in the save — recomputed from the running-script list.
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L293-L323 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L381-L384 */
   ramUsed: number;
   cpuCores: number;
   moneyAvailable: number;
@@ -69,7 +71,8 @@ export interface SavePlayer {
   /** Pending invitations. Distinct from `factions` and NOT derivable from it:
    *  an invitation is revoked by joining an enemy, so a planner that treated
    *  "not joined" as "invitable" would commit to a faction set the save can no
-   *  longer reach. */
+   *  longer reach.
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L29-L51 */
   factionInvitations: string[];
   numPeopleKilled: number;
   jobs: Record<string, string>;
@@ -102,18 +105,21 @@ export interface SaveBitNodeOptions {
 }
 
 export interface SaveSnapshot {
-  /** CONSTANTS.VersionNumber the save was written by (51 at v3.0.1). */
+  /** CONSTANTS.VersionNumber the save was written by (51 at v3.0.1).
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts#L6-L10 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/SaveObject.ts#L217-L224 */
   version: number | undefined;
   bitNode: number;
   /** As stored. */
   sourceFiles: Record<string, number>;
   /** sourceFiles merged with bitNodeOptions.sourceFileOverrides — what the
-   *  game actually plays with, and what ns.getResetInfo().ownedSF reports. */
+   *  game actually plays with, and what ns.getResetInfo().ownedSF reports.
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObject.ts#L81-L95 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1486-L1500 */
   activeSourceFiles: Record<string, number>;
   bitNodeOptions: SaveBitNodeOptions;
   player: SavePlayer;
   /** Keyed by hostname. A Map, never an object: "__proto__" is a legitimate
-   *  hostname in the game's own test corpus. */
+   *  hostname in the game's own test corpus.
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/test/jest/Save.test.ts#L20-L29 */
   servers: Map<string, SaveServer>;
   factions: Record<string, SaveFactionStanding>;
   companies: Record<string, SaveFactionStanding>;
@@ -124,7 +130,9 @@ export interface SaveSnapshot {
  * these wrong is the single biggest source of quiet divergence, so they live
  * in one table.
  *
- * Source: bitburner-src/src/Server/BaseServer.ts and Server.ts @ v3.0.1. */
+ * Sources: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L44-L125
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/Server.ts#L26-L57
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L381-L384 */
 export const SERVER_DEFAULTS: Omit<SaveServer, "hostname"> = {
   organizationName: "",
   programs: [],
@@ -142,7 +150,7 @@ export const SERVER_DEFAULTS: Omit<SaveServer, "hostname"> = {
   baseDifficulty: 1,
   requiredHackingSkill: 1,
   serverGrowth: 1,
-  numOpenPortsRequired: 0,
+  numOpenPortsRequired: 5,
   openPortCount: 0,
   serversOnNetwork: [],
   kind: "Server",

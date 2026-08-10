@@ -1,6 +1,8 @@
 /** BitNode reference data, transcribed from the pinned upstream checkout
  * (bitburner-src @ v3.0.1: src/BitNode/BitNode.tsx and
  * src/BitNode/BitNodeMultipliers.ts — see spec/game-source.md).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/BitNode/BitNode.tsx#L570-L1128
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/BitNode/BitNodeMultipliers.ts
  *
  * Two things live here because both are static game data the UI needs but no
  * ns getter provides cheaply:
@@ -106,7 +108,8 @@ export const DEFAULT_BITNODE_MULTIPLIERS: Readonly<Record<string, number>> = {
  * level rather than a table, so it is computed in `bitNodeMultipliers` below.
  *
  * Pinned field-by-field against the vendored original by
- * `sim/tests/bitnode-parity.test.ts`. Do not hand-edit without rerunning it. */
+ * `sim/tests/bitnode-parity.test.ts`. Do not hand-edit without rerunning it.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/BitNode/BitNode.tsx#L570-L1128 */
 const BITNODE_OVERRIDES: Readonly<Record<number, Readonly<Record<string, number>>>> = {
   1: {},
   2: {
@@ -298,6 +301,7 @@ const BITNODE_OVERRIDES: Readonly<Record<number, Readonly<Record<string, number>
 
 /** BN12's multipliers, which are derived from the source-file level rather
  * than tabulated. `lvl` is the SF12 level (0 on a first visit). */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/BitNode/BitNode.tsx
 function bitNode12(lvl: number): Record<string, number> {
   const inc = Math.pow(1.02, lvl);
   const dec = 1 / inc;
@@ -363,6 +367,8 @@ export function effectiveBitNodeMultipliers(
 
 /** Required hacking level to reach `w0r1d_d43m0n` in this node: the server's
  * base 3000 scaled by `WorldDaemonDifficulty` (Server/ServerHelpers.ts). */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/data/servers.ts
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/ServerHelpers.ts
 export const WORLD_DAEMON_BASE_SKILL = 3000;
 
 export function worldDaemonSkill(n: number | undefined, sf12Level = 0): number | undefined {

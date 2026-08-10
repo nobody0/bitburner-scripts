@@ -48,7 +48,7 @@ import {
 } from "../../../shared/strategy/progression/forecast.ts";
 import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/topics/progression.ts";
 import type { GoPlan, GoResponse, GoTurnResult } from "../../../shared/telemetry/topics/go.ts";
-import { chargeOrder, packFragments } from "../../../shared/strategy/stanek/pack.ts";
+import { packFragments } from "../../../shared/strategy/stanek/pack.ts";
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { addRepToFavor, workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
 import { stepSleeves, type SleevesView, type SleeveTask } from "../../../shared/strategy/sleeves/decide.ts";
@@ -72,6 +72,7 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
 /** Every driver here reports its own peak dodge step so the home reserve can
  * cover it (shared/ram/reserve.ts). */
 const STEP_GB = { gang: 6, corp: 24, bladeburner: 10, sleeves: 12, go: 4, stanek: 6, dnet: 8, progression: 8 };
+const BLADES_SIMULACRUM = "The Blade's Simulacrum";
 
 type Result = { action: string; ok: boolean; detail: string; at: number } | undefined;
 const results: Record<string, Result> = {};
@@ -278,9 +279,11 @@ const bladeburner: FeatureDriver = {
         timeMs: action.timeMs,
         countRemaining: action.countRemaining ?? Infinity,
         level: action.level ?? 1,
-        // The probe reports rank gain when it has it; 1 is the conservative
-        // floor, never a fabricated estimate.
-        rankGain: action.rankGain ?? 1,
+        // v3.0.1 exposes the level-adjusted base rank gain directly; action
+        // completion applies its random offset around that base.
+        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L165-L171
+        rankGain: action.rankGain ?? 0,
+        rankLoss: action.rankLoss ?? 0,
         ...(action.rankNeeded !== undefined ? { rankNeeded: action.rankNeeded } : {}),
       })),
       skills: topic.skills ?? {},
@@ -296,7 +299,15 @@ const bladeburner: FeatureDriver = {
       },
     });
 
-    if (decision.action.type === "rest") return;
+    if (decision.action.type === "continue") return;
+    const hasSimulacrum = (ctx.state.topics.progression?.ownedAugs?.[BLADES_SIMULACRUM] ?? 0) > 0;
+    if (decision.action.type === "act" && !hasSimulacrum && !ctx.grants.slot) {
+      // Starting a Bladeburner action cancels Player.currentWork unless the
+      // installed Blade's Simulacrum exempts it. Wait for the arbiter's slot.
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Bladeburner/Bladeburner.ts#L173-L182
+      record("bladeburner", "act", false, "waiting for Player.currentWork slot");
+      return;
+    }
     await act(
       ctx,
       "bladeburner",
@@ -304,6 +315,13 @@ const bladeburner: FeatureDriver = {
       bladeMethods(decision.action.type),
       (stubNs: NS) => {
         const action = decision.action;
+        if (action.type === "stop") {
+          // Stopping is a separate API call; merely declining to start a new
+          // action leaves the current Bladeburner action running.
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L108-L124
+          stubNs["bladeburner"]["stopBladeburnerAction"]();
+          return true;
+        }
         if (action.type === "upgrade") return stubNs["bladeburner"]["upgradeSkill"](action.skill as never, 1);
         if (action.type === "act") {
           return stubNs["bladeburner"]["startAction"](action.actionType as never, action.name as never);
@@ -317,7 +335,7 @@ const bladeburner: FeatureDriver = {
 
 // --- sleeves ----------------------------------------------------------------
 
-function sleeveView(state: GameState): SleevesView | undefined {
+export function sleeveView(state: GameState): SleevesView | undefined {
   const topic = state.topics.sleeves;
   if (!topic) return undefined;
   const completed = pendingSleeveCompletions();
@@ -344,23 +362,48 @@ function sleeveView(state: GameState): SleevesView | undefined {
     sfLevel(progression?.sourceFiles, 12),
     progression?.multipliers,
   ) ?? {};
+  const playerMults = (state.topics.player?.mults ?? {}) as unknown as Record<string, number>;
+  // This per-run option zeros every sleeve experience field in
+  // calculateCrimeWorkStats/calculateFactionExp, but leaves money, reputation,
+  // karma, and kills intact.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Formulas.ts#L24-L35
+  const sleeveExpEnabled = state.topics.capabilities?.restrictions.disableSleeveExpAndAugmentation !== true;
   const crimes = state.topics.career?.crimes ?? [];
   const tasks: SleeveTask[] = [
     { type: "recovery", outcomes: [{ rates: {}, moneyPerSec: 0 }] },
     { type: "synchro", outcomes: [{ rates: {}, moneyPerSec: 0 }] },
   ];
   for (const crime of crimes) {
+    // getCrimeStats replaces the base money/experience with gains calculated
+    // for the current PLAYER. Undo those factors before applying each sleeve's
+    // own multipliers; otherwise player augmentations are counted once and
+    // sleeve augmentations a second time.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L1068-L1090
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Formulas.ts#L58-L79
+    const baseGain = (value: number, factor: number): number =>
+      crime.gainsAreEffective ? (factor > 0 ? value / factor : 0) : value;
+    const baseMoney = baseGain(
+      crime.money,
+      (playerMults["crime_money"] ?? 1) * (node["CrimeMoney"] ?? 1),
+    );
+    const baseExp = Object.fromEntries(Object.entries(crime.exp ?? {}).map(([skill, value]) => [
+      skill,
+      baseGain(
+        value,
+        (skill === "intelligence" ? 1 : (playerMults[`${skill}_exp`] ?? 1)) * (node["CrimeExpGain"] ?? 1),
+      ),
+    ]));
     const outcomes = (topic.sleeves ?? []).map((sleeve) => {
       const mults = sleeve.mults ?? {};
       const stats: CrimeStats = {
         type: crime.name,
         timeMs: crime.timeMs,
-        money: crime.money,
+        money: baseMoney,
         difficulty: crime.difficulty ?? 1,
         karma: Math.abs(crime.karma),
         kills: crime.kills ?? 0,
         weights: crime.weights ?? {},
-        exp: crime.exp ?? {},
+        exp: baseExp,
       };
       const chance = successChance(
         stats,
@@ -370,9 +413,11 @@ function sleeveView(state: GameState): SleevesView | undefined {
       const seconds = crime.timeMs / 1_000;
       const sync = sleeve.sync / 100;
       const expectedExp = 0.25 + 0.75 * chance;
-      const exp = crime.exp ?? {};
+      const exp = baseExp;
       const expRate = (skill: string): number =>
-        expectedExp * sync * (exp[skill] ?? 0) * (mults[`${skill}_exp`] ?? 1) * (node["CrimeExpGain"] ?? 1) / seconds;
+        sleeveExpEnabled
+          ? expectedExp * sync * (exp[skill] ?? 0) * (mults[`${skill}_exp`] ?? 1) * (node["CrimeExpGain"] ?? 1) / seconds
+          : 0;
       const rates = {
         combatSkills: Math.min(expRate("strength"), expRate("defense"), expRate("dexterity"), expRate("agility")),
         charisma: expRate("charisma"),
@@ -380,13 +425,18 @@ function sleeveView(state: GameState): SleevesView | undefined {
       const contributions = Object.keys(exp)
         .map((skill) => ({ kind: "skill" as const, subject: skill, perSec: expRate(skill) }))
         .filter((entry) => entry.perSec > 0);
-      // SleeveCrimeWork changes karma/kills directly. Unlike WorkStats gains,
-      // these two outcomes are not multiplied by sleeve shock.
+      // SleeveCrimeWork changes karma/kills directly. Neither is multiplied by
+      // shock; karma is multiplied by sync, while kills are not.
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/SleeveCrimeWork.ts#L37-L50
       const shockExemptRates = {
         karma: chance * Math.abs(crime.karma) * sync / seconds,
         kills: chance * (crime.kills ?? 0) / seconds,
       };
-      const moneyPerSec = chance * crime.money * (mults["crime_money"] ?? 1) * (node["CrimeMoney"] ?? 1) / seconds;
+      // Outcomes are deliberately pre-shock: stepSleeves applies shock once
+      // while comparing every task. SleeveCrimeWork shocks these WorkStats
+      // before paying them, while only karma/kills bypass that scaling.
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/SleeveCrimeWork.ts#L31-L50
+      const moneyPerSec = chance * baseMoney * (mults["crime_money"] ?? 1) * (node["CrimeMoney"] ?? 1) / seconds;
       return { sleeve: sleeve.index, rates, contributions, shockExemptRates, moneyPerSec };
     });
     tasks.push({
@@ -412,6 +462,9 @@ function sleeveView(state: GameState): SleevesView | undefined {
         const contributions = [{
           kind: "factionRep" as const,
           subject: repTarget.faction,
+          // Outcomes are pre-shock; stepSleeves applies the exact shock factor
+          // once. Sleeve faction reputation is not scaled by sync.
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Sleeve/Work/SleeveFactionWork.ts#L30-L38
           perSec: workRepPerSec(
             workType as WorkType,
             {
@@ -1058,25 +1111,36 @@ const go: FeatureDriver = {
 
 const stanek: FeatureDriver = {
   id: "stanek",
-  everyMs: 30_000,
+  // Normal charging takes 1,000 ms; stored cycles shorten the API delay to
+  // 200 ms. A one-second cadence never overlaps a normal charge and avoids
+  // leaving the Gift idle for the old 30-second review interval.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L45-L54
+  everyMs: 1_000,
   requires: "stanek",
   async tick(ctx: DriverContext) {
     const topic = ctx.state.topics.stanek;
     if (!topic) return;
 
-    const fragments = (topic.availableTypes ?? []).map((entry) => ({
+    // Old telemetry records did not include shape. Skip those definitions;
+    // treating an unknown footprint as one cell would fabricate a packing.
+    const fragments = (topic.availableTypes ?? []).flatMap((entry) => entry.shape ? [{
       id: entry.id,
-      // Shape comes from the probe when it has it; a single cell is the
-      // conservative fallback and is marked as such in the plan digest.
-      shape: (entry as { shape?: { x: number; y: number }[] }).shape ?? [{ x: 0, y: 0 }],
+      shape: entry.shape,
       power: entry.power,
       // Charging value comes from the board: a run that needs hacking charges
       // the hacking fragment.
       weight: entry.power,
-    }));
+    }] : []);
 
     const packed = packFragments(fragments, topic.width, topic.height);
-    const order = chargeOrder(fragments, packed.placements);
+    // Packing is advisory until clear/place execution is modeled. Charging a
+    // hypothetical root can throw or charge the wrong fragment; use observed
+    // active roots and exclude boosters, which the API rejects.
+    const order = (topic.fragments ?? [])
+      .filter((fragment) => fragment.chargeable !== false)
+      .slice()
+      .sort((a, b) => b.power - a.power || a.id - b.id)
+      .map((fragment) => fragment.id);
 
     merge(ctx.state, "stanek", {
       plan: {
@@ -1094,7 +1158,7 @@ const stanek: FeatureDriver = {
     // Charge the highest-value placed fragment.
     const first = order[0];
     if (first === undefined) return;
-    const placement = packed.placements.find((entry) => entry.id === first);
+    const placement = topic.fragments.find((entry) => entry.id === first && entry.chargeable !== false);
     if (!placement) return;
     await act(
       ctx,
@@ -1117,6 +1181,7 @@ const dnet: FeatureDriver = {
     const topic = ctx.state.topics.dnet;
     if (!topic) return;
     const decision = stepDarknet({
+      topologyComplete: topic.topologyComplete === true,
       servers: (topic.servers ?? []).map((server) => ({
         hostname: server.hostname,
         depth: server.depth,
@@ -1148,34 +1213,17 @@ const dnet: FeatureDriver = {
     });
 
     if (decision.action.type === "idle") return;
-    await act(
-      ctx,
-      "dnet",
-      decision.action.type,
-      dnetMethods(decision.action.type),
-      async (stubNs: NS) => {
-        const action = decision.action;
-        if (action.type === "idle") return false;
-        // `setStasisLink` is a TOGGLE on the CURRENTLY CONNECTED server, not a
-        // per-host call — so a link or release has to connect first. Getting
-        // this backwards would silently stasis the wrong server.
-        stubNs["singularity"]["connect"](action.hostname as never);
-        switch (action.type) {
-          case "authenticate":
-            // `authenticate(host, password)` needs a PASSWORD, which the
-            // darknet hides behind its own discovery mechanic (server models,
-            // hints, brute force). That is not modelled, so this refuses
-            // rather than calling with an invented credential — a wrong
-            // password costs a timeout and raises instability.
-            return "password discovery is not implemented";
-          case "stasis":
-            return await stubNs["dnet"]["setStasisLink"](true);
-          case "releaseStasis":
-            return await stubNs["dnet"]["setStasisLink"](false);
-        }
-      },
-      (value) => ({ ok: Boolean(value), detail: String(value) }),
-    );
+    // Authentication needs discovered credentials and a direct connection
+    // from the script host. Stasis is stricter: setStasisLink targets
+    // ctx.workerScript.getServer(), not the host selected by
+    // singularity.connect(), and then waits 30 seconds. Refuse both until the
+    // dispatcher can lease and execute on the intended Darknet host.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L104-L157
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L337-L374
+    const detail = decision.action.type === "authenticate"
+      ? "password discovery and direct-host authentication are not implemented"
+      : "stasis actions require execution on the target Darknet host";
+    record("dnet", decision.action.type, false, detail);
   },
 };
 
@@ -1924,7 +1972,20 @@ export const bladeburnerModule: FeatureModule = {
   reset: resetWithTopic("bladeburner"),
   claims: (ctx) => {
     const action = ctx.state.topics.bladeburner?.plan?.action.type;
-    return maybeActionClaim("bladeburner", ctx, action, bladeMethods(action));
+    const claims = maybeActionClaim("bladeburner", ctx, action, bladeMethods(action));
+    const hasSimulacrum = (ctx.state.topics.progression?.ownedAugs?.[BLADES_SIMULACRUM] ?? 0) > 0;
+    if (action === "act" && !hasSimulacrum) {
+      claims.push({
+        by: "bladeburner",
+        id: "work",
+        resource: "time",
+        amount: 1,
+        priority: PRIORITY["factions:work"],
+        mode: "spend",
+        why: "Bladeburner action occupies Player.currentWork without The Blade's Simulacrum",
+      });
+    }
+    return claims;
   },
   needs: (ctx) => {
     // Bladeburner needs 100 in every combat stat to join at all, which career
@@ -2012,6 +2073,7 @@ function gangMethods(action: string | undefined): readonly string[] {
 }
 
 function bladeMethods(action: string | undefined): readonly string[] {
+  if (action === "stop") return ["bladeburner.stopBladeburnerAction"];
   if (action === "upgrade") return ["bladeburner.upgradeSkill"];
   if (action === "act") return ["bladeburner.startAction"];
   return [];
@@ -2043,9 +2105,9 @@ function sleeveBatchMethods(actions: readonly string[]): readonly string[] {
   return [...methods];
 }
 
-function dnetMethods(action: string | undefined): readonly string[] {
-  if (action === "authenticate") return ["singularity.connect"];
-  if (action === "stasis" || action === "releaseStasis") return ["singularity.connect", "dnet.setStasisLink"];
+function dnetMethods(_action: string | undefined): readonly string[] {
+  // Every planned Darknet action currently refuses locally; none should
+  // reserve RAM or launch a misleading no-op dodge.
   return [];
 }
 

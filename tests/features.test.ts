@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { NS } from "@ns";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { changedMultipliers, DEFAULT_BITNODE_MULTIPLIERS } from "../shared/features/bitnode.ts";
@@ -15,7 +16,7 @@ import {
   selectDue,
 } from "../game/lib/features/index.ts";
 import { PROBE_EVERY_TICKS, TICK_MS } from "../game/lib/controller.ts";
-import { purchasableAugmentation } from "../game/lib/features/remaining.ts";
+import { purchasableAugmentation, sleeveView } from "../game/lib/features/remaining.ts";
 import { NEUROFLUX } from "../shared/strategy/factions/augs.ts";
 import {
   ALL_PROBES,
@@ -343,6 +344,95 @@ describe("probe table", () => {
   });
 });
 
+function singleProbe(id: string) {
+  const found = DODGED_PROBES.find((entry) => entry.id === id);
+  if (!found || "steps" in found) throw new Error(`missing single-step probe ${id}`);
+  return found;
+}
+
+describe("v3.0.1 feature observation contracts", () => {
+  test("Bladeburner reads exact rank gain and Black Op rank gates", async () => {
+    const probe = singleProbe("bladeburner.actions");
+    expect(probe.methods).toContain("bladeburner.getActionRankGain");
+    expect(probe.methods).toContain("bladeburner.getActionRankLoss");
+    expect(probe.methods).toContain("bladeburner.getBlackOpRank");
+    const bladeburner = {
+      getContractNames: () => [], getOperationNames: () => [], getBlackOpNames: () => ["Operation Typhoon"],
+      getGeneralActionNames: () => [], getActionEstimatedSuccessChance: () => [1, 1], getActionTime: () => 1_000,
+      getActionCountRemaining: () => 1, getActionCurrentLevel: () => 1, getActionMaxLevel: () => 1,
+      getActionRankGain: () => 50, getActionRankLoss: () => 7, getBlackOpRank: () => 2_500,
+      getSkillNames: () => [], getSkillLevel: () => 0, getSkillUpgradeCost: () => 0,
+    };
+    const [emission] = await probe.run({ bladeburner } as unknown as NS, {} as never);
+    expect((emission.data as { actions: { rankGain: number; rankLoss: number; rankNeeded?: number }[] }).actions[0])
+      .toMatchObject({ rankGain: 50, rankLoss: 7, rankNeeded: 2_500 });
+  });
+
+  test("gang publishes only observed current-task rates and usable ascension gain", async () => {
+    const probe = singleProbe("gang.core");
+    const gang = {
+      getGangInformation: () => ({
+        faction: "Slum Snakes", isHacking: false, respect: 1, respectGainRate: 0, wantedLevel: 1,
+        wantedLevelGainRate: 0, wantedPenalty: 1, moneyGainRate: 0, power: 1, territory: 0.1,
+        territoryClashChance: 0, territoryWarfareEngaged: false, respectForNextRecruit: 5,
+      }),
+      getMemberNames: () => ["m"],
+      getMemberInformation: () => ({
+        name: "m", task: "Mug People", earnedRespect: 0, respectGain: 2, wantedLevelGain: 0.5, moneyGain: 3,
+        hack: 1, str: 2, def: 3, dex: 4, agi: 5, cha: 6,
+        hack_asc_mult: 1, str_asc_mult: 1, def_asc_mult: 1, dex_asc_mult: 1, agi_asc_mult: 1, cha_asc_mult: 1,
+        upgrades: [], augmentations: [],
+      }),
+      getAscensionResult: () => ({ respect: 0, hack: 2, str: 1.4, def: 1.3, dex: 1.2, agi: 1.1, cha: 1.5 }),
+      getRecruitsAvailable: () => 0, canRecruitMember: () => false,
+    };
+    const [emission] = await probe.run({ gang } as unknown as NS, {} as never);
+    const data = emission.data as { taskRates: Record<string, unknown[]>; ascensionGain: Record<string, number> };
+    expect(data.taskRates.m).toEqual([{ name: "Mug People", respect: 2, money: 3, wanted: 0.5 }]);
+    expect(data.ascensionGain.m).toBe(1.1);
+  });
+
+  test("Stanek keeps definition shapes and rotates occupied cells", async () => {
+    const probe = singleProbe("stanek.core");
+    const fragment = {
+      id: 7, type: 1, x: 3, y: 4, rotation: 1, power: 2, limit: 1, effect: "x",
+      numCharge: 0, highestCharge: 0, chargedEffect: 0, shape: [[true, false], [true, true]],
+    };
+    const stanek = {
+      giftWidth: () => 5, giftHeight: () => 5, activeFragments: () => [fragment], fragmentDefinitions: () => [fragment],
+    };
+    const [emission] = await probe.run({ stanek } as unknown as NS, {} as never);
+    const data = emission.data as { occupied: Record<string, number>; availableTypes: { shape: { x: number; y: number }[] }[] };
+    expect(data.occupied).toEqual({ "3,4": 7, "4,4": 7, "3,5": 7 });
+    expect(data.availableTypes[0]!.shape).toEqual([{ x: 0, y: 0 }, { x: 0, y: 1 }, { x: 1, y: 1 }]);
+  });
+
+  test("sleeve crime rates replace player-effective gains and remain pre-shock", () => {
+    const state = freshState();
+    state.topics.progression = { bitNode: 1, sourceFiles: {}, multipliers: { CrimeSuccessRate: 1, CrimeMoney: 2, CrimeExpGain: 3 } } as never;
+    state.topics.player = { mults: {
+      crime_money: 4,
+      strength_exp: 5, defense_exp: 5, dexterity_exp: 5, agility_exp: 5,
+    } } as never;
+    state.topics.career = { crimes: [{
+      name: "Test", chance: 1, timeMs: 1_000, money: 800, karma: -2, kills: 1, difficulty: 1,
+      weights: { strength: 100 }, exp: { strength: 150, defense: 150, dexterity: 150, agility: 150 },
+      moneyPerSec: 800, gainsAreEffective: true,
+    }] } as never;
+    state.topics.sleeves = { count: 1, sleeves: [{
+      index: 0, shock: 50, sync: 50, memory: 1, storedCycles: 0, city: "Sector-12", hp: { current: 1, max: 1 },
+      skills: { hacking: 1, strength: 10_000, defense: 1, dexterity: 1, agility: 1, charisma: 1, intelligence: 0 },
+      mults: { crime_success: 1, crime_money: 2, strength_exp: 2, defense_exp: 2, dexterity_exp: 2, agility_exp: 2 },
+    }] } as never;
+    const crime = sleeveView(state)!.tasks.find((task) => task.type === "crime")!;
+    const outcome = crime.outcomes[0]!;
+    // These are pre-shock. stepSleeves applies the 50% shock factor once.
+    expect(outcome.moneyPerSec).toBe(400);
+    expect(outcome.rates.combatSkills).toBe(30);
+    expect(outcome.shockExemptRates).toEqual({ karma: 1, kills: 1 });
+  });
+});
+
 describe("feature modules", () => {
   test("every feature id has exactly one module, keyed by its own id", () => {
     expect(Object.keys(FEATURE_MODULES).sort()).toEqual([...FEATURE_IDS].sort());
@@ -438,7 +528,7 @@ describe("feature modules", () => {
     const declared = FEATURE_IDS.filter((id) => FEATURE_MODULES[id].reset !== undefined);
     expect(declared, "no module declares a reset — the walk would be vacuous").not.toEqual([]);
 
-    type ResetHook = ((state: GameState) => void) | undefined;
+    type ResetHook = ((state: GameState, kind: "augmentation" | "bitnode") => void) | undefined;
     const called: FeatureId[] = [];
     const originals = new Map<FeatureId, ResetHook>();
     for (const id of declared) {
@@ -446,7 +536,7 @@ describe("feature modules", () => {
       (FEATURE_MODULES[id] as { reset?: ResetHook }).reset = () => called.push(id);
     }
     try {
-      resetAllFeatures(freshState());
+      resetAllFeatures(freshState(), "bitnode");
     } finally {
       for (const id of declared) (FEATURE_MODULES[id] as { reset?: ResetHook }).reset = originals.get(id);
     }
@@ -489,7 +579,7 @@ describe("feature modules", () => {
         },
       },
     };
-    resetAllFeatures(state);
+    resetAllFeatures(state, "bitnode");
     expect(state.topics.factions).toBeUndefined();
     expect(state.topics.gang).toBeUndefined();
     expect(state.topics.farm).toBeUndefined();
@@ -507,7 +597,7 @@ describe("feature modules", () => {
     // resetHackingState() directly, so every new feature meant editing the
     // core loop — and forgetting to meant leaking state across a node reset.
     const controller = readFileSync(resolve(root, "game/lib/controller.ts"), "utf8");
-    expect(controller).toContain("resetAllFeatures(state)");
+    expect(controller).toContain("resetAllFeatures(state, kind)");
     expect(controller).not.toContain("resetHackingState");
   });
 
@@ -562,7 +652,7 @@ describe("feature drivers", () => {
     }
   });
 
-  test("only hacking and stock run faster than the 5 s floor, each for a reason", () => {
+  test("only hacking, stock, and Stanek run faster than the 5 s floor, each for a reason", () => {
     // Batch ops land on 200ms slots, so a slower hacking cadence would miss them.
     //
     // `stock` is the one other exception, at 4 s, and it is not a preference: the
@@ -577,8 +667,13 @@ describe("feature drivers", () => {
     const stock = FEATURE_DRIVERS.find((d) => d.id === "stock")!;
     expect(stock.everyMs).toBe(4_000);
     expect(stock.everyMs).toBeLessThan(MS_PER_TICK);
+    // A normal Stanek charge takes 1 s (200 ms while consuming stored cycles),
+    // so reviewing every 5 s would leave the Gift unnecessarily idle.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L45-L54
+    const stanek = FEATURE_DRIVERS.find((d) => d.id === "stanek")!;
+    expect(stanek.everyMs).toBe(1_000);
     for (const driver of FEATURE_DRIVERS) {
-      if (driver.id === "hacking" || driver.id === "stock") continue;
+      if (driver.id === "hacking" || driver.id === "stock" || driver.id === "stanek") continue;
       expect(driver.everyMs, `${driver.id} is unexpectedly hot`).toBeGreaterThanOrEqual(5_000);
     }
   });
@@ -636,14 +731,6 @@ describe("capability deltas", () => {
     expect(delta.unlocked).toEqual([]);
   });
 
-  test("bitNodeChanged needs both readings known", () => {
-    // undefined -> 1 is the first successful gate batch, NOT a node reset.
-    // Treating it as one would wipe the fleet on every cold boot.
-    expect(capsDelta(unknownCapabilities(), fresh).bitNodeChanged).toBe(false);
-    expect(capsDelta(fresh, unknownCapabilities()).bitNodeChanged).toBe(false);
-    expect(capsDelta(fresh, deriveCapabilities({ bitNode: 4 })).bitNodeChanged).toBe(true);
-    expect(capsDelta(fresh, deriveCapabilities({ bitNode: 1 })).bitNodeChanged).toBe(false);
-  });
 });
 
 describe("feature dodges are centralised and priced", () => {

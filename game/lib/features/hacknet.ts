@@ -38,7 +38,8 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * MONEY, and it competes for that with the augmentation fund — which is why
  * income investments (25) sit deliberately below `factions:aug-fund` (90).
  * Without that ordering hacknet would win every time simply by being cheaper
- * and always ready. */
+ * and always ready.
+ * API RAM costs: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts */
 
 /** ns.hacknet.* is cheap; this covers the whole read + one purchase. */
 const PEAK_STEP_GB = 5;

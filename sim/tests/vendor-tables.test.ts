@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import manifest from "../vendor/manifest.json";
 import { AUGMENTATION_TABLE } from "../vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 import { FACTION_TABLE } from "../vendor/bitburner/src/Faction/FactionTable.ts";
 
@@ -10,6 +13,18 @@ import { FACTION_TABLE } from "../vendor/bitburner/src/Faction/FactionTable.ts";
  * faithful, so a bad re-vendor fails here rather than silently handing the
  * planner wrong prices and unreachable factions. Every assertion below is a
  * fact an incorrect extraction would get wrong in a plausible-looking way. */
+
+describe("game source pin", () => {
+  test("the vendor extract names the immutable v3.0.1 release commit", () => {
+    expect(manifest.tag).toBe("v3.0.1");
+    expect(manifest.commit).toBe("3162fd2590e221eadd0c0fbd46151913f7c4c41c");
+  });
+
+  test("the checked-in Netscript definitions are byte-identical to that release", () => {
+    const definitions = readFileSync(new URL("../../types/NetscriptDefinitions.d.ts", import.meta.url));
+    expect(createHash("sha256").update(definitions).digest("hex")).toBe(manifest.definitionsSha256);
+  });
+});
 
 describe("faction table", () => {
   test("has all 34 factions", () => {

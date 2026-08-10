@@ -15,7 +15,13 @@
  *     scales `1.14^level` on BOTH rep and money (and then also takes the queue
  *     multiplier), while the Shadows-of-Anarchy set uses `7^ownedSoA` /
  *     `1.3^ownedSoA` and is EXCLUDED from the queue count entirely — so buying
- *     SoA augmentations does not inflate anything else. */
+ *     SoA augmentations does not inflate anything else.
+ *
+ * Pinned upstream pricing and purchase rules:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts#L25-L43
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts#L94-L105
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L161
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L55-L141 */
 
 /** CONSTANTS @ v3.0.1. */
 export const MULTIPLE_AUG_MULTIPLIER = 1.9;
@@ -52,8 +58,9 @@ export interface PurchasableOffer {
  * ahead of it have been bought and the budget has shrunk to fit it. Any change here
  * has to preserve that, not just the field list.
  *
- * `offers` spans every faction the NODE defines, joined or not, filtered only by
- * `owned`, so "affordable by price" is nowhere near "can be bought". Four
+ * `offers` spans every faction the NODE defines, joined or not. Owned
+ * non-repeatables are filtered while repeatable NeuroFlux remains, so
+ * "affordable by price" is nowhere near "can be bought". Four
  * conditions:
  *  - the offering faction is joined;
  *  - reputation is met there;
@@ -118,13 +125,15 @@ export interface AugInfo {
   factions: string[];
   prereqs: string[];
   mults: Record<string, number>;
-  /** Upstream randomises these at load time; they must not be scored. */
+  /** Upstream randomises these at load time; they must not be scored.
+   * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/CircadianModulator.ts#L9-L117 */
   multsUnknown?: boolean;
 }
 
 export interface PriceContext {
   /** Non-SoA augmentation purchases already queued this run. Every NeuroFlux
-   * purchase is a separate queue entry and contributes to the exponent. */
+   * purchase is a separate queue entry and contributes to the exponent.
+   * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectGeneralMethods.ts#L473-L496 */
   queuedNonSoA: number;
   /** SoA augmentations already OWNED. */
   ownedSoA: number;
@@ -141,7 +150,8 @@ export function basePriceMultiplier(sf11Level: number): number {
 }
 
 /** `getAugCost` @ v3.0.1, transcribed. `queuedOffset` lets a planner ask "what
- * would this cost as the Nth purchase" without mutating the context. */
+ * would this cost as the Nth purchase" without mutating the context.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L120-L161 */
 export function augCost(
   aug: AugInfo,
   ctx: PriceContext,
@@ -201,7 +211,8 @@ export const AUG_BONUS: Record<string, number> = {
 const EXP_DISCOUNT = 0.5;
 
 /** Fields multiplied by CONSTANTS.EntropyEffect for each completed graft in
- * v3.0.1's `calculateEntropy`. */
+ * v3.0.1's `calculateEntropy`.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Grafting/EntropyAccumulation.ts#L6-L47 */
 const ENTROPY_FIELDS = new Set([
   "hacking_chance", "hacking_speed", "hacking_money", "hacking_grow",
   "hacking", "strength", "defense", "dexterity", "agility", "charisma",
@@ -236,7 +247,8 @@ function contributionOf(field: string, multiplier: number, weights: ObjectiveWei
  * problem, which is what makes the purchase planning tractable at all.
  *
  * An augmentation whose multipliers upstream randomises scores 0 rather than
- * being guessed at — see AUGMENTATION_TABLE.multsUnknown. */
+ * being guessed at — see AUGMENTATION_TABLE.multsUnknown.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/CircadianModulator.ts#L9-L117 */
 export function scoreAug(aug: AugInfo, weights: ObjectiveWeights): number {
   return (AUG_BONUS[aug.name] ?? 0) + scoreAugMults(aug, weights);
 }
@@ -401,7 +413,10 @@ export const EXACT_ORDER_LIMIT = 16;
  * So: exact subset DP up to EXACT_ORDER_LIMIT, heuristic above it. The DP is
  * cheap because the price of an item depends only on WHICH items precede it,
  * never on their order — non-SoA count drives the escalation and NeuroFlux
- * level drives its own — so the placed set is a sufficient state. */
+ * level drives its own — so the placed set is a sufficient state.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/Augmentations.ts#L425-L500
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L52-L108
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L120-L161 */
 export function orderPurchases(
   candidates: readonly PurchaseCandidate[],
   ctx: PriceContext,

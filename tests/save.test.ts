@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { decodeSaveJson, SaveFormatError, unwrap } from "../shared/save/decode.ts";
 import { saveToSeed } from "../shared/save/to-sim.ts";
-import { decodeSaveData } from "../tools/save-io.ts";
+import { decodeSaveData, prepareIndexedDbSave } from "../tools/save-io.ts";
 
 /** The save parser's job is to be boring and exactly right. Every test here
  * corresponds to a real encoding decision in bitburner-src @ v3.0.1 that a
@@ -182,6 +182,10 @@ describe("decoding a save", () => {
   test("keeps a __proto__ hostname as an ordinary server", () => {
     expect(snapshot.servers.has("__proto__")).toBe(true);
     expect(snapshot.servers.get("__proto__")?.maxRam).toBe(4);
+    // The field is absent in this sparse fixture, so decoding must restore the
+    // Server class default rather than make it rootable without port openers.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/Server.ts#L43-L75
+    expect(snapshot.servers.get("__proto__")?.numOpenPortsRequired).toBe(5);
     // And the Map is genuinely unpolluted.
     expect(snapshot.servers.get("home")?.maxRam).toBe(64);
   });
@@ -245,17 +249,20 @@ describe("save file encodings", () => {
   test("reads the gzip format Export Game writes", () => {
     const bytes = Bun.gzipSync(new TextEncoder().encode(json));
     expect(decodeSaveData(bytes)).toBe(json);
+    expect(prepareIndexedDbSave(bytes)).toEqual({ storage: "binary", bytes });
   });
 
   test("reads the base64 fallback format", () => {
     const bytes = new TextEncoder().encode(Buffer.from(json, "utf8").toString("base64"));
     expect(decodeSaveData(bytes)).toBe(json);
+    expect(prepareIndexedDbSave(bytes)).toEqual({ storage: "text", bytes });
   });
 
   test("reads the Steam Cloud format", () => {
     const gz = Bun.gzipSync(new TextEncoder().encode(json));
     const bytes = new TextEncoder().encode(Buffer.from(gz).toString("base64"));
     expect(decodeSaveData(bytes)).toBe(json);
+    expect(prepareIndexedDbSave(bytes)).toEqual({ storage: "binary", bytes: new Uint8Array(gz) });
   });
 
   test("explains itself when handed an already-decompressed save", () => {

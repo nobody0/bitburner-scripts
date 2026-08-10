@@ -34,6 +34,11 @@ import { formatMoney } from "../../format.ts";
  * no plan), which is exactly how the previous version deadlocked and never
  * placed a single trade. */
 
+/** Pinned sources for prestige survival, market access, transactions, and
+ * short-sale gates described by this solver:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/StockMarket.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarket.ts */
 import { STOCK_METADATA, midpoint, symbolForHost, worstSpreadFraction } from "../../features/stocks.ts";
 import {
   breakEvenTicks,
@@ -775,7 +780,9 @@ function isConfident(candidate: RankedSymbol): boolean {
  * `prestigeAugmentation`. Pricing them against the install cadence (as the old
  * shared `horizonSec` did) made the highest-leverage purchase in the feature look
  * unaffordable at any bankroll below ~$100b, which in BN8 is unreachable without
- * it: a deadlock dressed as prudence. */
+ * it: a deadlock dressed as prudence.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/StockMarket.ts
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts */
 function unlockLadder(
   view: StockView,
   costs: UnlockCosts,

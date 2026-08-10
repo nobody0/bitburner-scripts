@@ -8,7 +8,8 @@
  *
  * The registry is keyed by the contract type string the game reports. An
  * unknown type returns `undefined` — never a guess — because a wrong answer
- * costs a try, and some contracts allow only one. */
+ * costs a try, and some contracts allow only one.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/CodingContract/ContractTypes.ts */
 
 export type ContractSolver = (data: unknown) => unknown;
 

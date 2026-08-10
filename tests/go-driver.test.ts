@@ -158,7 +158,7 @@ describe("Go live seed observation", () => {
 
   test("the makeMove promise wakes the next controller pass without waiting five seconds", async () => {
     const state = goState();
-    goModule.reset?.({ ...goState(), topics: {} } as GameState);
+    goModule.reset?.({ ...goState(), topics: {} } as GameState, "bitnode");
     let makeMoves = 0;
     let opponentTurns = 0;
     const stubNs = {
@@ -190,7 +190,7 @@ describe("Go live seed observation", () => {
       restrictions: {},
     } as never;
     expect(selectDue([goModule.driver], { go: 9_999 }, caps, 10_000)).toEqual([goModule.driver]);
-    goModule.reset?.(state);
+    goModule.reset?.(state, "bitnode");
     expect(goModule.driver.wake?.()).toBe(false);
   });
 
@@ -198,7 +198,7 @@ describe("Go live seed observation", () => {
     const state = goState();
     state.topics.go!.status = "waitingOnAI";
     state.topics.go!.currentPlayer = "White";
-    goModule.reset?.({ ...goState(), topics: {} } as GameState);
+    goModule.reset?.({ ...goState(), topics: {} } as GameState, "bitnode");
     const calls: unknown[][] = [];
     const stubNs = {
       go: {
@@ -214,6 +214,6 @@ describe("Go live seed observation", () => {
     expect(calls).toEqual([[false, false]]);
     expect(state.topics.go?.lastTurn?.action.type).toBe("resume");
     expect(goModule.driver.wake?.()).toBe(true);
-    goModule.reset?.(state);
+    goModule.reset?.(state, "bitnode");
   });
 });

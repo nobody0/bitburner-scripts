@@ -252,7 +252,7 @@ export const hackingTab: Tab = {
       : note("waiting for the fleet probe");
 
     const homeRamPlan = fleet?.homeRamPlan
-      ? note(esc(fleet.homeRamPlan.why)) +
+      ? note(fleet.homeRamPlan.why) +
         table(
           ["cost", "adds", "adds $/sec", "payback", "horizon net", "decision"],
           [[
@@ -272,9 +272,9 @@ export const hackingTab: Tab = {
           { label: "cash / grant", value: `${fmtMoney(fleet.infrastructurePlan.moneyAvailable)} / ${fmtMoney(fleet.infrastructurePlan.moneyGranted)}` },
           { label: "farm value", value: `${fmtMoney(fleet.infrastructurePlan.incomePerSecPerGb)}/s/GB` },
         ]) +
-        note(`${esc(fleet.infrastructurePlan.why)}${fleet.infrastructurePlan.hold ? ` — ${esc(fleet.infrastructurePlan.hold)}` : ""}`) +
+        note(`${fleet.infrastructurePlan.why}${fleet.infrastructurePlan.hold ? ` — ${fleet.infrastructurePlan.hold}` : ""}`) +
         (fleet.infrastructurePlan.lastResult
-          ? note(`${fleet.infrastructurePlan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${esc(fleet.infrastructurePlan.lastResult.detail)}`)
+          ? note(`${fleet.infrastructurePlan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${fleet.infrastructurePlan.lastResult.detail}`)
           : "") +
         (fleet.infrastructurePlan.ranked.length
           ? table(

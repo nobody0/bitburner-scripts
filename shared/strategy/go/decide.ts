@@ -2,7 +2,9 @@
  *
  * The public board format is column-major: `rows[x][y]`.  Keeping that fact in
  * this module is important because the visual examples look row-major while
- * `go.makeMove(x, y)` and every analysis grid use the former convention. */
+ * `go.makeMove(x, y)` and every analysis grid use the former convention.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Go.ts
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardState/boardState.ts */
 
 import {
   predictPreparedOpponentReplies,
@@ -186,6 +188,7 @@ function write(board: GoBoard, x: number, y: number, cell: Cell): GoBoard {
 }
 
 /** Apply the game's capture, suicide and repetition rules. */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardState/boardState.ts
 export function playMove(
   board: GoBoard,
   x: number,
@@ -257,6 +260,7 @@ export function territory(board: GoBoard): { X: number; O: number } {
 }
 
 /** Exact IPvGO area score before opponent-specific komi is applied. */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/scoring.ts
 export function scoreBoard(board: GoBoard, komi = 0): { X: number; O: number } {
   const owned = territory(board);
   let black = owned.X;

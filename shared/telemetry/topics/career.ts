@@ -8,6 +8,9 @@ import type { Skills } from "@ns";
 export interface CrimeOption {
   name: string;
   chance: number;
+  /** Money and experience came from getCrimeStats and already include the
+   * current player/BitNode multipliers. */
+  gainsAreEffective?: boolean;
   money: number;
   timeMs: number;
   karma: number;
@@ -76,7 +79,8 @@ export interface CareerState {
     /** Faction work subtype, when type is FACTION. */
     workType?: string;
     focused?: boolean;
-    /** Game cycles (200 ms each) already spent on this activity. */
+    /** Game cycles (200 ms each) reported by the work object. CrimeWork keeps
+     * this cumulative across repeated crime completions. */
     cyclesWorked?: number;
     /** When getCurrentWork produced this observation. */
     observedAt?: number;

@@ -1,4 +1,5 @@
 import { formatMoney, formatNumber } from "../../../shared/format.ts";
+import { escapeText } from "./html.ts";
 
 /** Formatting + escaping helpers shared by every tab. */
 
@@ -33,13 +34,10 @@ export function fmtPct(fraction: number | undefined | null, digits = 1): string 
   return `${(fraction * 100).toFixed(digits)}%`;
 }
 
-/** Every value interpolated into a template goes through this. Telemetry
- * payloads are game-controlled strings (server names, faction names, error
- * messages); none of it should be able to inject markup into the viewer. */
-export function esc(value: unknown): string {
-  return String(value ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
+/** Escape a value for interpolation into a RAW slot — a table cell, a card
+ * body, an attribute inside a hand-built fragment.
+ *
+ * Do NOT call it on the way into a TEXT slot (`note`, a tile value, a `title`
+ * argument, an html`` interpolation): those escape for you, so a second pass
+ * prints `&amp;quot;` in the middle of a server name. See lib/html.ts. */
+export const esc = escapeText;

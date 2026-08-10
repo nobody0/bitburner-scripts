@@ -1,5 +1,7 @@
 {
   "tag": "v3.0.1",
+  "commit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
+  "definitionsSha256": "bfabb0f495cc89133ba042420f5d6d514c7f068502565e3bc5f90da5e60242ed",
   "files": [
     {
       "path": "src/Hacking.ts",

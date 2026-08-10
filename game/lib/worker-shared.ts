@@ -3,15 +3,23 @@
  *
  * The descriptor is written BEFORE ns.exec, so a worker can never observe a
  * missing entry; the worker registers ns.atExit before awaiting its op, so
- * every exit path (completion, kill, error) reports back and frees RAM. */
+ * every engine cleanup path (completion, kill, error) reports back and frees
+ * RAM.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91 */
 
 export interface WorkerInfo {
   kind: "hack" | "grow" | "weaken";
   target: string;
   additionalMsec?: number;
+  /** Absolute wall-clock deadline for the padding portion of an HGW call.
+   * The worker converts this to `additionalMsec` immediately before invoking
+   * Netscript, removing the time spent planning, execing, and loading main().
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L537-L561 */
+  delayUntil?: number;
   /** Pass `{stock: true}`, so this op moves the target organization's share
    *  price. Set by the dispatcher on grows for a long position and hacks for a
-   *  short, never both — see shared/strategy/dispatch.ts#launchBatches. */
+   *  short, never both — see shared/strategy/dispatch.ts#launchBatches.
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/PlayerInfluencing.ts#L17-L60 */
   stock?: boolean;
   /** "serve": a POOLED worker. Fixed kind and threads for the process's life;
    *  jobs arrive through `worker_jobs` (target may vary), the loop parks on a
@@ -26,6 +34,7 @@ export interface WorkerJob {
   opId: number;
   target: string;
   additionalMsec?: number;
+  delayUntil?: number;
   stock?: boolean;
 }
 

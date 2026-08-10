@@ -28,11 +28,12 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
 /** The stock driver.
  *
  * Degrades honestly at three levels, because the game gates them separately and
- * every one of them is bought with MONEY rather than granted by a source file: a
- * WSE account ($200m) shows prices, the TIX API ($5b) allows positions, and the
+ * the first two may also be granted by BN8/SF8: a WSE account ($200m) exposes
+ * the exchange UI, the TIX API ($5b) allows scripted positions, and the
  * 4S Market Data TIX API ($25b x the node's multiplier) supplies the exact
  * forecast. Nothing here is capability-gated, which is why `stock` is an
  * always-playable feature and the ladder is the driver's own job.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts#L163-L168
  *
  * Cadence is 4 s and that is load-bearing, not a preference: the market updates
  * every 6 s (4 s while burning stored cycles) and the whole no-4S signal —
@@ -233,7 +234,8 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
   // both the money and the position the next one sees, and the position topic is
   // up to 30 s stale. Reading it here is what makes a buy idempotent — without
   // it the 4 s driver re-bought the same symbol until the probe caught up,
-  // paying a fresh $200k commission each time.
+  // paying a fresh $100k entry commission each time.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts#L3-L12
   //
   // `claimId` is built from the full PLANNED set, not the funded subset:
   // claims() posted the RAM claim under the planned set's id and featureDodge
@@ -270,9 +272,10 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
         case "sell": {
           touched.add(action.sym);
           // Sell what is actually there: the plan was formed against a stale
-          // snapshot, and selling more than we hold is silently clamped upstream
-          // but selling a position that already closed pays commission for
-          // nothing.
+          // snapshot. Upstream clamps an oversized sale to the live holding and
+          // refuses a zero-share sale; reading the holding here also lets us
+          // distinguish "already flat" from a generic refusal.
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/BuyingAndSelling.tsx#L139-L168 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/BuyingAndSelling.tsx#L316-L344
           const [long, , short] = stubNs["stock"]["getPosition"](action.sym as never);
           const held = Math.min(action.shares, action.short ? short : long);
           if (held <= 0) {

@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { FEATURE_MODULES, type NeedContext } from "../game/lib/features/index.ts";
+import type { NS } from "@ns";
+import { FEATURE_MODULES, type ClaimContext, type NeedContext } from "../game/lib/features/index.ts";
+import { DODGED_PROBES } from "../game/lib/probes/index.ts";
 import { initState } from "../game/lib/state.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { assignCoupled, assignIndependent } from "../shared/strategy/assignment.ts";
@@ -109,11 +111,24 @@ describe("gang", () => {
     // Wanted level is gang-wide, so one member's task multiplies down
     // everyone's output. The decision reports an exact search over the pair.
     const decision = stepGang(view({ members: [member("a"), member("b")] }));
-    expect(decision.why).toContain("exact assignment");
+    expect(decision.why).toContain("exact search");
     expect(decision.assignment.approximated).toBe(false);
   });
 
-  test("ascension fires only above the analytic crossover", () => {
+  test("sparse live task rates are never borrowed across members", () => {
+    const a = member("a", "Mug People");
+    const b = member("b", "Train Combat");
+    const decision = stepGang(view({
+      members: [a, b],
+      taskOptions: (candidate) => candidate.name === "a"
+        ? [{ name: "Mug People", respectGain: 1, moneyGain: 100, wantedGain: 0.5, training: false }]
+        : [{ name: "Train Combat", respectGain: 0, moneyGain: 0, wantedGain: 0, training: true }],
+    }));
+    expect(decision.assignment.choices).toEqual([]);
+    expect(decision.actions.some((action) => action.type === "assign")).toBe(false);
+  });
+
+  test("ascension fires only above the explicit policy threshold", () => {
     expect(stepGang(view({ ascensionGain: () => ASCEND_THRESHOLD - 0.01 })).actions.some((a) => a.type === "ascend")).toBe(false);
     expect(stepGang(view({ ascensionGain: () => ASCEND_THRESHOLD + 0.01 })).actions.some((a) => a.type === "ascend")).toBe(true);
   });
@@ -141,6 +156,7 @@ describe("bladeburner", () => {
     countRemaining: 100,
     level: 1,
     rankGain: 5,
+    rankLoss: 1,
     ...over,
   });
   const view = (over: Partial<Parameters<typeof stepBladeburner>[0]> = {}) => ({
@@ -155,7 +171,7 @@ describe("bladeburner", () => {
   });
 
   test("resting below the stamina floor beats pushing through", () => {
-    expect(stepBladeburner(view({ stamina: [40, 100] })).action.type).toBe("rest");
+    expect(stepBladeburner(view({ stamina: [40, 100] })).action.type).toBe("stop");
     expect(stepBladeburner(view({ stamina: [STAMINA_FLOOR * 100 + 1, 100] })).action.type).toBe("act");
   });
 
@@ -164,6 +180,50 @@ describe("bladeburner", () => {
     // the optimistic end is exactly how a Black Op gets failed.
     const decision = stepBladeburner(view({ actions: [action({ chance: [0.1, 0.99] })] }));
     expect(decision.ranked[0]!.chanceLow).toBe(0.1);
+  });
+
+  test("failed-action rank loss is included in expected rank", () => {
+    const decision = stepBladeburner(view({ actions: [action({ chance: [0.5, 0.9], rankGain: 10, rankLoss: 6, timeMs: 2_000 })] }));
+    expect(decision.ranked[0]!.rankPerSec).toBe(1);
+  });
+
+  test("the live probe reads base rank loss instead of assuming failure is free", async () => {
+    const probe = DODGED_PROBES.find((entry) => entry.id === "bladeburner.actions")!;
+    if ("steps" in probe) throw new Error("bladeburner.actions unexpectedly stepped");
+    const bladeburner = {
+      getContractNames: () => ["Tracking"], getOperationNames: () => [], getBlackOpNames: () => [],
+      getGeneralActionNames: () => [], getActionEstimatedSuccessChance: () => [1, 1], getActionTime: () => 1_000,
+      getActionCountRemaining: () => 1, getActionCurrentLevel: () => 1, getActionMaxLevel: () => 1,
+      getActionRankGain: () => 50, getActionRankLoss: () => 7,
+      getSkillNames: () => [], getSkillLevel: () => 0, getSkillUpgradeCost: () => 0,
+    };
+    const [emission] = await probe.run({ bladeburner } as unknown as NS, {} as never);
+    expect((emission.data as { actions: { rankGain: number; rankLoss: number }[] }).actions[0]).toMatchObject({ rankGain: 50, rankLoss: 7 });
+  });
+
+  test("continuing and stopping are distinct decisions", () => {
+    expect(stepBladeburner(view({ current: { type: "Contract", name: "Tracking" } })).action.type).toBe("continue");
+    expect(stepBladeburner(view({ stamina: [40, 100], current: { type: "Contract", name: "Tracking" } })).action.type).toBe("stop");
+  });
+
+  test("a Bladeburner action claims Player.currentWork only without the installed Simulacrum", () => {
+    const module = FEATURE_MODULES.bladeburner;
+    const state = initState();
+    state.topics.bladeburner = { plan: { action: { type: "act", why: "test" }, ranked: [], why: "test" } } as never;
+    const progression = { ownedAugs: {} as Record<string, number> };
+    state.topics.progression = progression as never;
+    const context = {
+      state,
+      caps: deriveCapabilities({ bitNode: 6 }),
+      now: 0,
+      budgetGb: 100,
+      horizons: {},
+      board: postNeeds([]),
+      ramPrice: () => 1,
+    } as unknown as ClaimContext;
+    expect(module.claims?.(context).some((claim) => claim.resource === "time")).toBe(true);
+    progression.ownedAugs["The Blade's Simulacrum"] = 1;
+    expect(module.claims?.(context).some((claim) => claim.resource === "time")).toBe(false);
   });
 
   test("a Black Op below the confidence bar is REFUSED, not gambled on", () => {
@@ -601,6 +661,21 @@ describe("corp staged script", () => {
     );
     expect(done.why).toContain("no optimality claim");
   });
+
+  test("a zero-valued upstream investment offer is unavailable", async () => {
+    const probe = DODGED_PROBES.find((entry) => entry.id === "corp.core")!;
+    if ("steps" in probe) throw new Error("corp.core unexpectedly stepped");
+    const corporation = {
+      getCorporation: () => ({
+        name: "Acme", funds: 1, revenue: 0, expenses: 0, public: true,
+        valuation: 1, sharePrice: 1, totalShares: 1, numShares: 1,
+        issuedShares: 0, dividendRate: 0, dividendEarnings: 0, nextState: "START",
+      }),
+      getInvestmentOffer: () => ({ round: 5, funds: 0, shares: 0 }),
+    };
+    const [emission] = await probe.run({ corporation } as unknown as NS, {} as never);
+    expect((emission.data as { investmentOffer?: unknown }).investmentOffer).toBeUndefined();
+  });
 });
 
 // --- dnet ----------------------------------------------------------------------
@@ -620,6 +695,7 @@ describe("darknet", () => {
   test("stasis links are spent where they unlock the most", () => {
     expect(unlockValue({ servers, stasisLinked: [] } as never, "mid")).toBe(2);
     const decision = stepDarknet({
+      topologyComplete: true,
       servers,
       reachable: 1,
       maxDepth: 2,
@@ -635,6 +711,7 @@ describe("darknet", () => {
 
   test("high instability stops backdooring instead of making it worse", () => {
     const decision = stepDarknet({
+      topologyComplete: true,
       servers,
       reachable: 1,
       maxDepth: 2,
@@ -649,6 +726,7 @@ describe("darknet", () => {
 
   test("charisma blocks become a NEED for career, not a grind here", () => {
     const decision = stepDarknet({
+      topologyComplete: true,
       servers: [{ ...servers[0]!, requiredCharisma: 500 }],
       reachable: 0,
       maxDepth: 0,

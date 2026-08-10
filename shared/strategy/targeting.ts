@@ -26,7 +26,8 @@ import { WORKER_RAM } from "../world.ts";
  *
  * RAM-seconds are UNWEIGHTED by hack chance: our HWGW batches always launch
  * all four ops (the RAM is spent whether the hack lands or not); only income
- * carries the chance factor. */
+ * carries the chance factor.
+ * Source formulas: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking.ts#L8-L94 */
 
 export interface TargetStatics {
   hostname: string;
@@ -54,7 +55,9 @@ export interface TargetStatics {
  * income terms apart: the player's cut applies to the hacking half only, because
  * influence is computed from `moneyDrained` before the cut. In BN8 the cut is 0 —
  * hacking earns literally nothing while manipulating at near-full strength — and
- * that asymmetry is the node. */
+ * that asymmetry is the node.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/PlayerInfluencing.ts#L17-L60
+ * Source (hack passes drained, not gained, money): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L575-L616 */
 export interface ManipulationValue {
   valuePerOp: number;
   /** Long positions are driven by GROW, shorts by HACK. Determines which op
@@ -173,7 +176,8 @@ export const UNLIMITED_RAM: RamCaps = { batchGb: Infinity, hackBlockGb: Infinity
  * does). Solving at home's core count instead would overshoot whenever an op
  * spills to a 1-core host — do not "fix" the pessimism that way. The residual
  * cost of the contract is scoring only: ramSec slightly overestimates
- * grow/weaken RAM on a multi-core home, near-uniformly across targets. */
+ * grow/weaken RAM on a multi-core home, near-uniformly across targets.
+ * Source (cores affect grow and weaken, not hack): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/formulas/grow.ts#L20-L28 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/ServerHelpers.ts#L287-L295 */
 export function solveCycle(
   ctx: HackContext,
   statics: TargetStatics,
@@ -241,6 +245,7 @@ export function solveCycle(
     // long-side overvaluation spec/targeting.md used to acknowledge.
     const stockIncome = manipulation ? chance * steal * manipulation.valuePerOp : 0;
     // RAM-seconds: op RAM held for its own duration (1x/3.2x/4x hack time).
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking.ts#L59-L94
     const ramSec =
       hackTimeS *
       (WORKER_RAM.hack * hackThreads +

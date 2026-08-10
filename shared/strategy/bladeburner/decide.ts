@@ -2,20 +2,25 @@ import { formatNumber, formatScientific } from "../../format.ts";
 
 /** Bladeburner action selection.
  *
- * Objective: climb rank fastest WITHOUT DYING. The second half is a hard
- * constraint, not a preference — failing a Black Op hospitalises the player,
- * which costs far more time than the operation was worth, and a planner that
- * maximised expected rank alone would take those odds happily.
+ * Objective: climb rank quickly while keeping risky Black Ops behind an
+ * explicit confidence policy. Failed Black Ops can lose rank and deal enough
+ * damage to hospitalise the player, but failure does not consume the op.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Bladeburner/Bladeburner.ts#L1014-L1080
  *
  * Three constraints shape every choice:
  *  - **stamina**, which multiplies success chance below a threshold, so acting
  *    while exhausted is worse than resting;
  *  - **chaos**, which rises with activity and lowers success chance, and is
- *    reduced only by Diplomacy;
+ *    actively managed here with Diplomacy;
  *  - **the success-chance INTERVAL**. The game reports `[min, max]` because
  *    the player's estimate is imprecise, and acting on the optimistic end is
  *    exactly how a Black Op gets failed. Every decision here uses the LOWER
- *    bound. */
+ *    bound.
+ *
+ * Pinned upstream mechanics:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Bladeburner/Bladeburner.ts#L166-L169
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Bladeburner/Actions/Action.ts#L90-L101
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L138-L181 */
 
 export interface BladeburnerAction {
   type: "general" | "contract" | "operation" | "blackop";
@@ -26,8 +31,10 @@ export interface BladeburnerAction {
   /** Remaining count; Infinity for general actions. */
   countRemaining: number;
   level: number;
-  /** Rank gained on success. */
+  /** Level-adjusted base rank gained on success, before completion variance. */
   rankGain: number;
+  /** Level-adjusted base rank lost on failure, before completion variance. */
+  rankLoss: number;
   /** Rank required to attempt (Black Ops only). */
   rankNeeded?: number;
 }
@@ -46,14 +53,15 @@ export interface BladeburnerView {
 }
 
 export type BladeburnerDecision =
-  | { action: { type: "rest"; why: string }; ranked: ScoredBladeburner[]; why: string }
+  | { action: { type: "stop"; why: string }; ranked: ScoredBladeburner[]; why: string }
+  | { action: { type: "continue"; why: string }; ranked: ScoredBladeburner[]; why: string }
   | { action: { type: "act"; actionType: string; name: string; why: string }; ranked: ScoredBladeburner[]; why: string }
   | { action: { type: "upgrade"; skill: string; why: string }; ranked: ScoredBladeburner[]; why: string };
 
 export interface ScoredBladeburner {
   name: string;
   actionType: string;
-  /** Expected rank per second at the PESSIMISTIC chance. */
+  /** Pessimistic expected net rank per second, including failure loss. */
   rankPerSec: number;
   chanceLow: number;
   why: string;
@@ -64,8 +72,8 @@ export interface ScoredBladeburner {
 export const STAMINA_FLOOR = 0.5;
 /** Chaos above this materially degrades every action in the city. */
 export const CHAOS_CEILING = 50;
-/** A Black Op is irreversible and failing one hospitalises. Only attempt above
- * this PESSIMISTIC success chance. */
+/** Strategy confidence threshold for a Black Op. Failure can lose rank and
+ * deal damage, while success permanently advances the ordered operation list. */
 export const BLACKOP_CONFIDENCE = 0.95;
 
 export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
@@ -77,9 +85,11 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
       return {
         name: action.name,
         actionType: action.type,
-        rankPerSec: seconds > 0 ? (chanceLow * action.rankGain) / seconds : 0,
+        rankPerSec: seconds > 0
+          ? (chanceLow * action.rankGain - (1 - chanceLow) * action.rankLoss) / seconds
+          : 0,
         chanceLow,
-        why: `${(chanceLow * 100).toFixed(0)}% (pessimistic) for ${formatNumber(action.rankGain)} rank in ${Math.round(seconds)}s`,
+        why: `${(chanceLow * 100).toFixed(0)}% pessimistic; +${formatNumber(action.rankGain)}/-${formatNumber(action.rankLoss)} rank in ${Math.round(seconds)}s`,
       };
     })
     .sort((a, b) => b.rankPerSec - a.rankPerSec || (a.name < b.name ? -1 : 1));
@@ -90,7 +100,7 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
   if (max > 0 && current / max < STAMINA_FLOOR) {
     return {
       action: {
-        type: "rest",
+        type: "stop",
         why: `stamina ${Math.round(current)}/${Math.round(max)} is below the ${STAMINA_FLOOR * 100}% floor, which penalises every action`,
       },
       ranked,
@@ -98,8 +108,9 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
     };
   }
 
-  // Chaos suppresses success chance across the city; Diplomacy is the only
-  // thing that reduces it.
+  // Chaos suppresses success chance across the city; this policy switches to
+  // Diplomacy once it crosses the upstream difficulty threshold.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Bladeburner/Actions/Action.ts#L90-L101
   if (view.chaos > CHAOS_CEILING) {
     const diplomacy = view.actions.find((action) => action.name === "Diplomacy");
     if (diplomacy) {
@@ -116,7 +127,8 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
     }
   }
 
-  // Skill points are free rank once spent, so never sit on them.
+  // Skill upgrades improve Bladeburner performance. Spending the cheapest
+  // available level first is a strategy policy, not an upstream optimum.
   const affordable = Object.entries(view.skills)
     .filter(([, skill]) => skill.upgradeCost <= view.skillPoints)
     .sort((a, b) => a[1].upgradeCost - b[1].upgradeCost || (a[0] < b[0] ? -1 : 1));
@@ -129,7 +141,7 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
     };
   }
 
-  // Black Ops only above the confidence bar, and only at the PESSIMISTIC end.
+  // Black Ops only above the policy confidence bar, using the pessimistic end.
   const blackOp = view.actions.find(
     (action) => action.type === "blackop" && action.countRemaining > 0 && (action.rankNeeded ?? 0) <= view.rank,
   );
@@ -147,10 +159,10 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
 
   const best = ranked.find((entry) => entry.actionType !== "blackop");
   if (!best) {
-    return { action: { type: "rest", why: "no action available" }, ranked, why: "idle" };
+    return { action: { type: "stop", why: "no action available" }, ranked, why: "idle" };
   }
   if (view.current?.name === best.name) {
-    return { action: { type: "rest", why: `already running ${best.name}` }, ranked, why: "continuing" };
+    return { action: { type: "continue", why: `already running ${best.name}` }, ranked, why: "continuing" };
   }
   return {
     action: { type: "act", actionType: best.actionType, name: best.name, why: best.why },

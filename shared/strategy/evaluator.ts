@@ -143,6 +143,9 @@ export function staticsOf(server: ServerView): TargetStatics {
 }
 
 export function isCandidate(server: ServerView): boolean {
+  // Netscript rejects purchased targets and requires root for every HGW op;
+  // only hack adds the skill requirement, enforced by isEligible below.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking/netscriptCanHack.ts#L12-L55
   return server.hasAdminRights && !server.purchasedByPlayer && server.hostname !== "home" && server.moneyMax > 0;
 }
 

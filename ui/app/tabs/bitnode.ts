@@ -89,7 +89,7 @@ function multiplierGrid(changed: ChangedMultiplier[]): string {
 
 function forecastCard(forecast: TimeForecast, now: number): string {
   if (forecast.state === "unknown") {
-    return note(`unknown: ${esc(forecast.reason)}; next review in ${fmtTime(Math.max(0, forecast.nextRecalibrationAt - now))}`);
+    return note(`unknown: ${forecast.reason}; next review in ${fmtTime(Math.max(0, forecast.nextRecalibrationAt - now))}`);
   }
   const remainingMs = Math.max(0, forecast.expectedAt - now);
   return (
@@ -155,6 +155,7 @@ function routeCard(plan: Plan, now: number): string {
   const parts = plan.routes
     .map((route) =>
       collapsible(
+        `bitnode.route.${route.id}`,
         `${esc(route.id)} — ${route.parts.length} component(s)`,
         table(
           ["component", "time", "source"],

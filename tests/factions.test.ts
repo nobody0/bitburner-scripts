@@ -311,6 +311,17 @@ describe("augmentation pricing", () => {
     expect(prices[4]! / prices[3]!).toBeCloseTo(1.9 * 1.14, 10);
   });
 
+  test("positive augmentation requirements count installed only; zero also sees queued non-NeuroFlux", () => {
+    expect(evaluate(
+      { type: "numAugmentations", numAugmentations: 30 },
+      view({ augCount: 29, purchasedAugCount: 30 }),
+    )[0]).toMatchObject({ target: 30, have: 29 });
+    expect(evaluate(
+      { type: "numAugmentations", numAugmentations: 0 },
+      view({ augCount: 0, purchasedAugCount: 1 }),
+    )).toHaveLength(1);
+  });
+
   test("totalCost counts every NeuroFlux purchase in the queue exponent", () => {
     const nfg = aug(NEUROFLUX, { baseCost: 750_000, baseRepRequirement: 500 });
     const order = [

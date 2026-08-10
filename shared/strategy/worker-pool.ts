@@ -1,16 +1,21 @@
 /** Pure pooled-worker accounting for the dispatcher.
  *
  * A serve-mode worker is a process with FIXED (kind, threads) that performs
- * many ops over its life. Within one farm regime every batch has identical
- * thread counts (they come from one cached CycleSolution), so batch N+1's ops
- * reuse batch N's workers and exec churn collapses to ~zero. Heap RAM belongs
+ * many ops over its life. A cached CycleSolution keeps hack counts stable;
+ * landing-state correction may resize grow/weaken support, so those workers
+ * are reused when their block sizes happen to compose the corrected request.
+ * Heap RAM belongs
  * to the WORKER (reserved at spawn, freed on its workerExit completion); job
  * completions merely flip it idle.
  *
- * Reuse rules mirror the op semantics: a hack must land as ONE call, so only
- * a worker with exactly the op's thread count qualifies; grow/weaken are
- * divisible, so an op is composed greedily from idle workers (largest first)
- * plus a freshly allocated remainder. */
+ * Reuse rules mirror dispatcher placement: a hack must land as ONE call, so
+ * only a worker with exactly the op's thread count qualifies; grow/weaken may
+ * be emitted as several calls, so an op is composed greedily from idle workers
+ * (largest first) plus a freshly allocated remainder. Grow calls are not
+ * algebraically interchangeable with one combined call because upstream adds
+ * $1 per thread inside each individual call; prediction therefore folds every
+ * block separately.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/formulas/grow.ts#L36-L57 */
 
 export type OpKind = "hack" | "grow" | "weaken";
 

@@ -358,7 +358,7 @@ export const careerTab: Tab = {
       card("Career", summary + karma) +
       card("Skills", table(["skill", "level", "next"], skillRows, { left: [0] })) +
       card("Employment", jobs) +
-      card("Ranked options", collapsible(`${plan?.ranked.length ?? 0} option(s) scored`, options)) +
+      card("Ranked options", collapsible("career.ranked", `${plan?.ranked.length ?? 0} option(s) scored`, options)) +
       `</div>`
     );
   },

@@ -2,10 +2,9 @@
  *
  * Two separable problems, and separating them is the point:
  *
- *  1. **Packing** — 2D bin packing with rotation into a small grid. The grid
- *     is small enough that EXHAUSTIVE search is provably optimal, which makes
- *     this the strongest evidence available anywhere in the roster: not "our
- *     packing beats first-fit", but "no packing exists that is better".
+ *  1. **Packing** — 2D bin packing with rotation, searched exhaustively until
+ *     an explicit node cap. An uncapped result is provably optimal for the
+ *     stated weight objective; a capped result is marked approximate.
  *  2. **Charging** — an ordering problem over the placed fragments, weighted
  *     by the run's objective. Independent of the packing once it is fixed. */
 
@@ -35,7 +34,8 @@ export interface PackResult {
   approximated: boolean;
 }
 
-/** Rotate a shape by `rotation` quarter-turns and normalise to the origin. */
+/** Rotate a shape by `rotation` quarter-turns and normalise to the origin.
+ * Source convention: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/CotMG/Fragment.ts#L24-L51 */
 export function rotate(shape: readonly { x: number; y: number }[], rotation: number): { x: number; y: number }[] {
   let cells = shape.map((cell) => ({ ...cell }));
   for (let turn = 0; turn < (((rotation % 4) + 4) % 4); turn++) {
@@ -67,10 +67,10 @@ export function distinctRotations(shape: readonly { x: number; y: number }[]): n
 /** Exhaustive maximum-weight packing.
  *
  * Provably optimal: it enumerates every (fragment subset x rotation x
- * position) combination and keeps the best. The grid is at most 9x9 and the
- * fragment count small, so this terminates — and when it does not, the caller
- * is TOLD via `approximated` rather than handed a greedy answer dressed as an
- * exact one. */
+ * position) combination and keeps the best. v3.0.1 permits gifts up to 25x25,
+ * so the node cap is material; when reached, the caller is told through
+ * `approximated` rather than receiving a capped answer labeled exact.
+ * Source size bound: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/CotMG/data/Constants.ts#L1-L5 */
 export function packFragments(
   fragments: readonly Fragment[],
   width: number,
@@ -139,6 +139,7 @@ export function packFragments(
  * Charging raises a fragment's effect, so the run's objective weights decide
  * which fragment is worth the charge time. Read from the needs board by the
  * driver, so a run that needs hacking charges the hacking fragment. */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/CotMG/formulas/effect.ts
 export function chargeOrder(fragments: readonly Fragment[], placed: readonly Placement[]): number[] {
   const placedIds = new Set(placed.map((placement) => placement.id));
   return fragments

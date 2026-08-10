@@ -1,6 +1,9 @@
 /** The 33 stock symbols, transcribed from
  * `bitburner-src v3.0.1 src/StockMarket/data/InitStockMetadata.ts` and
  * `src/Server/data/servers.ts` (see spec/game-source.md).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/InitStockMetadata.ts
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/data/servers.ts
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/Stock.ts
  *
  * Two things live here, and both are static game data no ns getter provides:
  *
@@ -17,6 +20,7 @@
  *     (`StockMarket/PlayerInfluencing.ts`), so the organization is the join key
  *     between a farm target and a tradeable symbol. Computed here rather than
  *     through `ns.stock.getOrganization` (2 GB) because it cannot change.
+ *     Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/PlayerInfluencing.ts
  *
  * Two facts about that mapping the strategy has to respect:
  *  - **WDS has no server.** Watchdog Security is a company you can work for but

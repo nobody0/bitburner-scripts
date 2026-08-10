@@ -185,28 +185,31 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
 
     getCrimeChance: (type: string): number => {
       const crime = deps.crimes.get(type);
-      return crime ? deps.crimes.successChance(crime) : 0;
+      if (!crime) throw new Error(`Invalid crime: '${type}'`);
+      return deps.crimes.successChance(crime);
     },
 
     getCrimeStats: (type: string): Record<string, unknown> => {
       const crime = deps.crimes.get(type);
-      if (!crime) return {};
+      if (!crime) throw new Error(`Invalid crime: '${type}'`);
+      const mults = world.person.mults as unknown as Record<string, number>;
       return {
-        // The game reports karma NEGATIVE here (what the player gains), while
-        // the table stores the positive amount it subtracts.
+        // Object.assign({}, crime, calculateCrimeWorkStats(...)) leaves karma
+        // positive and returns multiplier-adjusted money and experience.
+        // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L1068-L1090
         difficulty: crime.difficulty,
-        karma: -crime.karma,
+        karma: crime.karma,
         kills: crime.kills,
-        money: crime.money,
+        money: crime.money * (mults["crime_money"] ?? 1) * currentNodeMults.CrimeMoney,
         time: crime.timeMs,
         type: crime.type,
-        hacking_exp: crime.exp["hacking"] ?? 0,
-        strength_exp: crime.exp["strength"] ?? 0,
-        defense_exp: crime.exp["defense"] ?? 0,
-        dexterity_exp: crime.exp["dexterity"] ?? 0,
-        agility_exp: crime.exp["agility"] ?? 0,
-        charisma_exp: crime.exp["charisma"] ?? 0,
-        intelligence_exp: crime.exp["intelligence"] ?? 0,
+        hacking_exp: (crime.exp["hacking"] ?? 0) * (mults["hacking_exp"] ?? 1) * currentNodeMults.CrimeExpGain,
+        strength_exp: (crime.exp["strength"] ?? 0) * (mults["strength_exp"] ?? 1) * currentNodeMults.CrimeExpGain,
+        defense_exp: (crime.exp["defense"] ?? 0) * (mults["defense_exp"] ?? 1) * currentNodeMults.CrimeExpGain,
+        dexterity_exp: (crime.exp["dexterity"] ?? 0) * (mults["dexterity_exp"] ?? 1) * currentNodeMults.CrimeExpGain,
+        agility_exp: (crime.exp["agility"] ?? 0) * (mults["agility_exp"] ?? 1) * currentNodeMults.CrimeExpGain,
+        charisma_exp: (crime.exp["charisma"] ?? 0) * (mults["charisma_exp"] ?? 1) * currentNodeMults.CrimeExpGain,
+        intelligence_exp: (crime.exp["intelligence"] ?? 0) * currentNodeMults.CrimeExpGain,
       };
     },
 
@@ -242,10 +245,12 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       factions.donate(name, amount, favorToDonate()) > 0,
 
     travelToCity: (city: string): boolean => {
-      // $200k, and it fails rather than going negative.
+      // Invalid enum input throws; valid travel costs $200k and insufficient
+      // funds returns false.
+      // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L378-L405
       const cost = 200_000;
+      if (!Object.values(CityName).includes(city as never)) throw new Error(`Invalid city name: '${city}'`);
       if (player.money < cost) return false;
-      if (!Object.values(CityName).includes(city as never)) return false;
       player.money -= cost;
       world.recordMoney("other", -cost);
       player.city = city;
@@ -262,6 +267,9 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
     getAugmentationsFromFaction: (name: string): string[] =>
       Object.values(AUGMENTATION_TABLE)
         .filter((aug) => aug.factions.includes(name))
+        // Upstream removes The Red Pill from Daedalus in BN15.
+        // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L204-L208
+        .filter((aug) => !(deps.bitNode === 15 && name === "Daedalus" && aug.name === "The Red Pill"))
         .map((aug) => aug.name),
 
     getAugmentationPrice: (name: string): number => priceOf(name).moneyCost,

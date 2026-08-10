@@ -13,6 +13,11 @@ export interface DarknetServerDigest {
 }
 
 export interface DarknetState {
+  /** Script host from which the latest local probe was made. */
+  observedFrom?: string;
+  /** False until probes have collected neighbor lists from every graph node. */
+  topologyComplete?: boolean;
+  /** Currently the number of direct neighbors of observedFrom, not a graph-wide count. */
   reachable: number;
   maxDepth: number;
   stasisLinkLimit: number;

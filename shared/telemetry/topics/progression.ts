@@ -15,8 +15,10 @@ import type { PlanningHorizons } from "../../strategy/progression/forecast.ts";
 
 export interface Progression {
   bitNode: number;
-  /** SF number -> active level. Level n on SF k means BN k was completed n
-   * times, so this doubles as "which BitNodes are done". */
+  /** SF number -> active level. Advanced per-run overrides are already folded
+   * in, so this is capability truth but cannot reconstruct permanently owned
+   * levels for an overridden SF.
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObject.ts#L93-L95 */
   sourceFiles: Record<string, number>;
   /** Augmentation name -> level (level matters for NeuroFlux Governor). */
   ownedAugs: Record<string, number>;
@@ -31,6 +33,7 @@ export interface Progression {
     disableGang?: boolean;
     disableCorporation?: boolean;
     disableBladeburner?: boolean;
+    disable4SData?: boolean;
     disableHacknetServer?: boolean;
     disableSleeveExpAndAugmentation?: boolean;
   };

@@ -21,7 +21,8 @@ import { LOCAL_PROBES } from "./local.ts";
  * A dodged probe body must call ns through BRACKET NOTATION on its own stub
  * ns (`stubNs["gang"]["getGangInformation"]()`); a dotted call would be seen
  * by the static RAM parser and charged to start.js, which is exactly what the
- * dodge exists to avoid (spec/dodging.md). */
+ * dodge exists to avoid (spec/dodging.md).
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L405-L440 */
 
 export interface ProbeContext {
   player: Player;
@@ -95,7 +96,8 @@ export interface SingleStepProbe extends ProbeBase {
    *  ns.getFunctionRamCost expects them ("gang.getMemberInformation").
    *  Bitburner charges each distinct function once per script, so the probe's
    *  cost is the sum over this list however many times each is called.
-   *  tests/features.test.ts checks every name against the type definitions. */
+   *  tests/features.test.ts checks every name against the type definitions.
+   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L434-L448 */
   methods: string[];
   run(stubNs: NS, ctx: ProbeContext): Emission[] | Promise<Emission[]>;
 }

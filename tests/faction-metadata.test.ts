@@ -76,10 +76,59 @@ describe("full faction catalogue metadata", () => {
     expect(chongqing).toMatchObject({ joined: false, invited: false, enemies: ["Sector-12"] });
   });
 
+  test("the live catalogue keeps repeatable NeuroFlux after one level is owned", async () => {
+    const probe = DODGED_PROBES.find((entry) => entry.id === "factions.augs")!;
+    expect(isStepped(probe)).toBe(true);
+    if (!isStepped(probe)) return;
+    const stub = {
+      enums: { FactionName: { CyberSec: "CyberSec" } },
+      singularity: {
+        getOwnedAugmentations: () => ["BitWire", "NeuroFlux Governor"],
+        getAugmentationsFromFaction: () => ["BitWire", "NeuroFlux Governor"],
+      },
+    };
+    const acc: ProbeAcc = {};
+    await probe.steps.find((step) => step.id === "owned")!.run(stub as never, {} as never, acc);
+    await probe.steps.find((step) => step.id === "catalog")!.run(stub as never, {} as never, acc);
+    expect(acc.byFaction).toEqual({ CyberSec: ["NeuroFlux Governor"] });
+  });
+
   test("only a Shadows of Anarchy invitation or membership proves an infiltration", () => {
     expect(metadataView().requirementView.numInfiltrations).toBe(0);
     expect(metadataView({ invites: ["Shadows of Anarchy"] }).requirementView.numInfiltrations).toBe(1);
     expect(metadataView({ joined: ["Shadows of Anarchy"] }).requirementView.numInfiltrations).toBe(1);
+  });
+
+  test("special factions are excluded from the ordinary invitation/work planner", () => {
+    const view = metadataView({
+      requirements: {
+        Bladeburners: [],
+        "Church of the Machine God": [],
+        "Shadows of Anarchy": [],
+      },
+    });
+    expect(view.factions.map(({ name, special }) => [name, special])).toEqual([
+      ["Bladeburners", true],
+      ["Church of the Machine God", true],
+      ["Shadows of Anarchy", true],
+    ]);
+  });
+
+  test("a complete live offer catalogue replaces static sellers", () => {
+    const view = metadataView({
+      ownedAugs: ["NeuroFlux Governor"],
+      offers: [
+        { name: "BitWire", faction: "CyberSec", price: 1, repReq: 0, affordableRep: true, owned: false },
+        { name: "NeuroFlux Governor", faction: "CyberSec", price: 2, repReq: 0, affordableRep: true, owned: false },
+      ],
+      augTotal: 2,
+      requirements: { CyberSec: [], Daedalus: [] },
+    });
+    expect(view.catalog.get("BitWire")?.factions).toEqual(["CyberSec"]);
+    expect(view.catalog.get("NeuroFlux Governor")?.factions).toEqual(["CyberSec"]);
+    // Static v3 metadata says Daedalus, but a complete live getter result that
+    // omits it is authoritative (as happens for The Red Pill in BN15).
+    expect(view.catalog.get("The Red Pill")?.factions).toEqual([]);
   });
 });
 

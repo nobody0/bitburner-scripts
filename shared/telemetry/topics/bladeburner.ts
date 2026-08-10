@@ -15,7 +15,10 @@ export interface BladeActionDigest {
   autolevel?: boolean;
   successes?: number;
   repGain?: number;
+  /** Level-adjusted base rank gain before completion variance. */
   rankGain?: number;
+  /** Level-adjusted base rank loss before completion variance. */
+  rankLoss?: number;
   /** Rank required to attempt — Black Ops only. */
   rankNeeded?: number;
   /** Black ops only: rank required to attempt. */

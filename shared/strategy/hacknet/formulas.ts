@@ -1,6 +1,8 @@
 /** Formula shapes transcribed from Bitburner v3.0.1. Costs still come from
  * ns; these production shapes let us value a first node and exact one-step
- * deltas without buying it as a probe. Pinned against the vendor in sim. */
+ * deltas without buying it as a probe. Pinned against the vendor in sim.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/formulas/HacknetNodes.ts
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/formulas/HacknetServers.ts */
 
 export interface ProductionNode {
   level: number;
@@ -53,4 +55,6 @@ export function productionDeltaWithAddedRamOccupied(node: ProductionNode): numbe
   return node.production * (1.07 * (newFreeRatio / oldFreeRatio) - 1);
 }
 
+/** "Sell for Money" awards this many dollars per purchase.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/HashUpgrades.ts */
 export const HASH_SALE_DOLLARS = 1_000_000;

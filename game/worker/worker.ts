@@ -5,6 +5,7 @@ import { workerGlobals, type WorkerJob } from "../lib/worker-shared.ts";
  * `{ threads, temporary: true, ramOverride: perThreadCost }` so its RAM bill
  * matches exactly the op it performs. It holds no logic — the dispatcher owns
  * the descriptor and the accounting.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L275-L310 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L434-L474
  *
  * Two modes, selected by the descriptor:
  * - one-shot (default): perform one op, exit. Used for prep waves and shotgun.
@@ -14,10 +15,13 @@ import { workerGlobals, type WorkerJob } from "../lib/worker-shared.ts";
  *   collapses exec churn — the browser-side (V8) cost of a fresh
  *   WorkerScript + ns object + RAM recalc per op, ~5/sec at depth, forever.
  *
- * atExit is registered BEFORE any await, so a kill, a game reload, or an
- * error still reports the in-flight op AND (for serve) the worker's own exit,
- * freeing the reservation. The idle race uses the REALM timer, which is free
- * of RAM cost and virtualized identically by the simulator. */
+ * atExit is registered BEFORE any await, so normal completion, a kill/reset
+ * teardown, or an error reports the in-flight op AND (for serve) the worker's
+ * own exit, freeing the reservation. A hard browser reload simply discards the
+ * whole realm, including both sides of this mailbox. The idle race uses the
+ * REALM timer, which is free of Netscript RAM cost and virtualized identically
+ * by the simulator.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L143-L159 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91 */
 
 const IDLE_MS = 5_000;
 
@@ -29,13 +33,23 @@ export async function main(ns: NS): Promise<void> {
   // controller will rebuild its ledger.
   if (!info) return;
 
-  const options = (job: { additionalMsec?: number; stock?: boolean }) =>
-    job.additionalMsec || job.stock
+  const options = (job: { additionalMsec?: number; delayUntil?: number; stock?: boolean }) => {
+    // additionalMsec is added to the duration from the instant hack/grow/weaken
+    // is actually invoked. Exec and module startup are asynchronous, so the
+    // driver sends an absolute padding deadline and we remove launch skew here.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L537-L561
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L266-L286
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L342-L362
+    const additionalMsec = job.delayUntil === undefined
+      ? job.additionalMsec
+      : Math.max(0, job.delayUntil - Date.now());
+    return additionalMsec || job.stock
       ? {
-          ...(job.additionalMsec ? { additionalMsec: job.additionalMsec } : {}),
+          ...(additionalMsec ? { additionalMsec } : {}),
           ...(job.stock ? { stock: true } : {}),
         }
       : undefined;
+  };
   const run = (target: string, opts?: { additionalMsec?: number; stock?: boolean }): Promise<number> => {
     if (info.kind === "hack") return ns.hack(target, opts);
     if (info.kind === "grow") return ns.grow(target, opts);
@@ -71,6 +85,7 @@ export async function main(ns: NS): Promise<void> {
     // The realm registry is the liveness authority: a kill (or reset) already
     // ran atExit and deleted the entry — a continuation that observes that
     // must fall through without touching the mailboxes again.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91
     if (!g.worker_info?.has(id)) return;
     const job = g.worker_jobs?.get(id)?.shift();
     if (!job) {
@@ -91,6 +106,7 @@ export async function main(ns: NS): Promise<void> {
     // A kill normally surfaces as the op rejecting (ScriptDeath), but if the
     // continuation somehow outlives the process teardown, atExit has already
     // reported this job — re-check liveness before reporting it again.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91
     if (!g.worker_info?.has(id)) return;
     g.dispatch_done?.push({ opId: job.opId, kind: info.kind, target: job.target, threads: info.threads, result });
     g.dispatch_wake?.();

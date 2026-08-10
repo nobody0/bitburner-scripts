@@ -1,7 +1,8 @@
 import type { GoBoard, Stone } from "./decide.ts";
 import { analyzeBoard, cellAt, effectiveLiberties, pointKey, type GoPoint } from "./analysis.ts";
 
-/** Independently transcribed IPvGO 3x3 tactical vocabulary. */
+/** Independently transcribed IPvGO 3x3 tactical vocabulary.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/patternMatching.ts */
 const BASE_PATTERNS: readonly (readonly string[])[] = [
   ["XOX", "...", "???"],
   ["XO.", "...", "?.?"],
@@ -30,6 +31,7 @@ const vertical = (pattern: readonly string[]): string[] => [pattern[2]!, pattern
 // Upstream's horizontal transform uses Array.join() without a separator. That
 // observable comma is intentional here: it makes those transformed patterns
 // fail just as they do in the game rather than silently "fixing" its AI.
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/patternMatching.ts
 const horizontal = (pattern: readonly string[]): string[] => pattern.map((row) => [...row].reverse().join());
 
 export function expandedGoPatterns(): string[][] {

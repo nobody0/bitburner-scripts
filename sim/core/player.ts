@@ -31,6 +31,9 @@ export interface SimWork {
   startedAt: number;
   /** Accumulated toward whatever this work produces (rep, exp, crime time). */
   cyclesWorked: number;
+  /** Repeating-unit progress when it differs from upstream's cumulative
+   * `cyclesWorked` counter (currently crimes). */
+  unitCycles?: number;
   /** Unfocused work is ×0.8 unless NeuroreceptorManager is owned. */
   focused: boolean;
   /** Modeled Task.nextCompletion. Kept live across the NS API copy. */

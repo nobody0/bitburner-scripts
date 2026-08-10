@@ -2,7 +2,11 @@
  *
  * This module deliberately depends only on our public board representation.
  * Differential simulator tests import the pinned game separately and keep this
- * transcription honest without shipping any game implementation. */
+ * transcription honest without shipping any game implementation.
+ * Pinned upstream AI and scoring sources:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/boardAnalysis.ts
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/scoring.ts */
 import type { GoBoard, GoRewardOpponent, Stone } from "./decide.ts";
 import {
   allEyes,
@@ -209,6 +213,7 @@ function eyeCreationMoves(
       const neighborhood = cardinal(board, point.x, point.y);
       // Missing cardinal points count as friendly/off-board in the upstream
       // four-slot neighborhood, while offline nodes are present and hostile.
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts
       const friendlyOrEdge = 4 - neighborhood.length
         + neighborhood.filter((neighbor) => cellAt(board, neighbor.x, neighbor.y) === player).length;
       return friendlyOrEdge >= 2
@@ -468,7 +473,8 @@ export function prepareOpponentPosition(
 
 /** Finish a prepared forecast for one exact seed. The only unseeded choice in
  * the upstream AI is a uniform defense tie-break, whose multiplicity is kept
- * as probability instead of being flattened into a set. */
+ * as probability instead of being flattened into a set.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts */
 export function predictPreparedOpponentReplies(
   prepared: PreparedOpponentPosition,
   totalPlaytimeMs: number,
@@ -511,7 +517,8 @@ export function predictPreparedOpponentReplies(
 }
 
 /** Predict the exact seeded faction response. Production uses only this
- * clean-room model; simulator parity tests import upstream independently. */
+ * clean-room model; simulator parity tests import upstream independently.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts */
 export function predictOpponentReplies(
   board: GoBoard,
   opponent: GoRewardOpponent,

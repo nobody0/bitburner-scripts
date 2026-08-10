@@ -3,6 +3,7 @@ import { attachChartHover, drawChart } from "../lib/chart.ts";
 import { card, filters, meter, note, search, table, tiles } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
+import type { Markup } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
@@ -10,7 +11,7 @@ import type { Tab } from "./index.ts";
  * that says which feature to work on next — per-feature income attribution
  * from ns.getMoneySources(). */
 
-function incomeRows(state: ProjectedState): string[][] {
+function incomeRows(state: ProjectedState): Markup[][] {
   const sources = state.topics.progression?.moneySources?.sinceInstall;
   if (!sources) return [];
   const rows: { label: string; value: number }[] = [];

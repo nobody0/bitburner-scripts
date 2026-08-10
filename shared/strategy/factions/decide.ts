@@ -52,6 +52,7 @@ import { settlingMoney, type FactionStanding, type FactionsView } from "./state.
  * reputation. Joins come next because an invitation can be REVOKED by joining
  * an enemy. Travel is last among the cheap actions and heavily guarded — see
  * below.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L35-L51
  *
  * `installAugmentations` is deliberately never selected. spec/features.md
  * gives the reset cadence to `progression`; this feature emits
@@ -65,7 +66,8 @@ import { settlingMoney, type FactionStanding, type FactionsView } from "./state.
  * restart the activity each time and accumulate almost no reputation, while
  * looking entirely healthy in the logs. If the last action was long-running,
  * the game still shows it running, its `until` is unmet, and nothing
- * invalidated the plan, the only correct answer is "keep going". */
+ * invalidated the plan, the only correct answer is "keep going".
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22 */
 function shouldContinue(view: FactionsView, memory: FactionMemory, invalidation: InvalidationKey[]): boolean {
   const last = memory.lastAction;
   if (!last || last.type !== "workForFaction") return false;
@@ -184,6 +186,8 @@ function repNeeded(faction: string, view: FactionsView, wanted: readonly string[
  * non-SoA purchase multiplies the price of every later one, so the dearest item
  * belongs in the cheapest slot. Buying $1m before $500m pays the escalation on the
  * $500m and can leave the batch unaffordable halfway through.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L109-L141
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38
  *
  * This is the EXACT solver, and it is exponential in the set size — 0.3 ms at ten
  * items, 40 ms at sixteen. That is affordable here and only here: an objective is a
@@ -315,6 +319,7 @@ function decideFactions(
   // deepest augmentation. Once the package is complete we may switch to a
   // compatible runner immediately, but an enemy runner means "install, then
   // join it next cycle".
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L35-L51
   const previous = memory.objective;
   const previousIntent = previous?.intent;
   const previousRunner = previous?.runnerUp;
@@ -411,6 +416,7 @@ function decideFactions(
   };
 
   if (view.currentWork?.kind === "grafting") {
+    // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/GraftingWork.tsx#L26-L98
     const action: FactionAction = {
       type: "idle",
       reason: "continue",
@@ -430,9 +436,12 @@ function decideFactions(
   // purchases happen in the final-sweep drain (below), dearest-first, once
   // the objective work is done and the whole bankroll is known. The old
   // buy-as-soon-as-rep-and-money-allow path lived here.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L109-L141
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38
 
   const graft = nextGraft(view, objective.augmentations);
   if (graft) {
+    // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Grafting.ts#L17-L103
     const action: FactionAction = view.requirementView.city === "New Tokyo"
       ? { type: "graft", augmentation: graft.name, why: graft.why }
       : { type: "travelTo", city: "New Tokyo", why: `${graft.name} is worth grafting; VitaLife is in New Tokyo` };
@@ -470,6 +479,7 @@ function decideFactions(
   // half an hour left in the run and sat unaccepted because the objective had
   // moved on — the entire backdoor chain completed for nothing. Enemy-bearing
   // invitations still wait for the objective to want them.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L35-L51
   const freeInvite = view.factions.find(
     (standing) =>
       standing.invited &&
@@ -495,6 +505,7 @@ function decideFactions(
   // produces a loop: travel for A, which breaks B, travel back for B, which
   // breaks A. The predecessor scripts hit exactly this and added the same
   // guard (src/_lib/factions.ts:256-262).
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts#L196-L214
   const travel = soleTravelBlocker(allBlockers);
   if (travel) {
     const action: FactionAction = {
@@ -536,6 +547,8 @@ function decideFactions(
     // exists to convert. Frozen once, here: testing against live money instead
     // lets a fast farm outrun the NeuroFlux price ladder level after level,
     // and the install waits on a race.
+    // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/Augmentations.ts#L1159-L1209
+    // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38
     const ceiling = recommend ? memory.drainCeiling ?? view.moneyAvailable + view.pendingProceeds : undefined;
     const ceilingDigest = ceiling !== undefined ? { drainCeiling: ceiling } : {};
     // The spend-down bound applies to the NEUROFLUX LADDER ONLY: it is the
@@ -591,6 +604,8 @@ function decideFactions(
   // Donation beats working once income exceeds the crossover — and only once
   // favor actually allows it. Favor cannot grow within a run, so a locked
   // route is a message to `progression`, not something to wait for.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/Faction.ts#L77-L85
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/formulas/donation.ts#L7-L30
   const donateUnlocked = target.standing.favor >= view.favorToDonate;
   const repGap = Math.max(0, target.needed - target.standing.rep);
   const donationNeeded = donationForRep(repGap, view.person.mults.faction_rep, view.repContext.factionWorkRepGain);
@@ -657,6 +672,7 @@ function decideFactions(
     // The player can only do ONE thing. Saying so explicitly matters: the
     // panel previously showed the intended work as if it were running, which
     // read as a contradiction against the game's own display.
+    // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22
     const action: FactionAction = {
       type: "idle",
       reason: "slot",
@@ -673,6 +689,7 @@ function decideFactions(
   // Below the crossover, working a faction SUPPRESSES its passive tick and
   // earns less than it gave up. Idling is strictly better, and saying so is
   // the whole point of modelling it.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L143-L176
   const passive = passiveRepPerSec(view.person, target.standing.favor, view.repContext);
   if (target.repPerSec <= passive) {
     const action: FactionAction = {
@@ -798,7 +815,8 @@ function plannedBudget(view: FactionsView): number {
   * `stepFactions` may instead publish `liquidationNeeded` when the book covers the
   * dearest planned item. Progression then starts liquidation without pretending an
   * empty queue is installable, and this function can safely hold once settlement is
-  * actually under way. */
+  * actually under way.
+  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38 */
 function nextPurchase(
   view: FactionsView,
   wanted: readonly string[],
@@ -812,6 +830,7 @@ function nextPurchase(
     const aug = view.catalog.get(name);
     if (!aug || (name !== NEUROFLUX && view.owned.has(name))) continue;
     // Prerequisites must already be owned or queued.
+    // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L52-L108
     if (aug.prereqs.some((prereq) => !view.owned.has(prereq))) continue;
     const { moneyCost, repCost } = augCost(aug, view.priceContext);
     const sellers = view.factions.filter(
@@ -878,7 +897,8 @@ function nextPurchase(
  * affordable as a sequence. The drain re-plans every tick and always buys the head
  * of this list, so executing one purchase per tick reproduces the planned order.
  *
- * NeuroFlux comes last, as the sink for whatever the batch leaves behind. */
+ * NeuroFlux comes last, as the sink for whatever the batch leaves behind.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38 */
 function finalSweepWanted(view: FactionsView, budgetCap = Infinity): string[] {
   const joined = new Set(view.factions.filter((standing) => standing.joined).map((standing) => standing.name));
   const byValue = [...view.catalog.values()]

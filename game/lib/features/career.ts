@@ -44,7 +44,12 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * work. The INCOME band no longer has a fixed answer: it is scored against the best
  * earning rate anyone announced, so crime outranks reputation work exactly when it is
  * genuinely our best earner, and loses when it is not. See
- * `shared/strategy/income.ts`. */
+ * `shared/strategy/income.ts`.
+ *
+ * Pinned upstream work-start and administrative call contracts:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L226-L405
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L668-L746
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L965-L1065 */
 
 /** commitCrime + getCrimeStats + getCrimeChance, all SingularityFn3-ish. */
 const PEAK_STEP_GB = 12;
@@ -107,15 +112,26 @@ function buildCareerView(
   ) ?? {};
   const skills = { ...(player.skills ?? {}) } as unknown as Record<string, number>;
   const classExp = nodeMults["ClassGymExpGain"] ?? 1;
+  // ClassWork applies the location multiplier, the matching Hacknet hash
+  // multiplier, and a 10% cost discount when the location's server is
+  // backdoored. These are the exact Rothman/Powerhouse base rates after that
+  // overlay, not unconditional constants.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Formulas.ts#L99-L121
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/HashManager.ts#L34-L58
+  const hashLevel = (name: string): number => state.topics.hacknet?.hashUpgrades?.find((upgrade) => upgrade.name === name)?.level ?? 0;
+  const studyMult = 1 + 0.2 * hashLevel("Improve Studying");
+  const gymMult = 1 + 0.2 * hashLevel("Improve Gym Training");
+  const rothmanCostMult = state.topics.servers?.["rothman-uni"]?.backdoorInstalled ? 0.9 : 1;
+  const powerhouseCostMult = state.topics.servers?.["powerhouse-fitness"]?.backdoorInstalled ? 0.9 : 1;
   const courses = String(player.city ?? "Sector-12") === "Sector-12"
     ? [
-        { name: "Algorithms", skill: "hacking", expPerSec: 8 * (mults["hacking_exp"] ?? 1) * classExp, costPerSec: 960, location: "Rothman University" },
-        { name: "Leadership", skill: "charisma", expPerSec: 8 * (mults["charisma_exp"] ?? 1) * classExp, costPerSec: 960, location: "Rothman University" },
+        { name: "Algorithms", skill: "hacking", expPerSec: 8 * studyMult * (mults["hacking_exp"] ?? 1) * classExp, costPerSec: 960 * rothmanCostMult, location: "Rothman University" },
+        { name: "Leadership", skill: "charisma", expPerSec: 8 * studyMult * (mults["charisma_exp"] ?? 1) * classExp, costPerSec: 960 * rothmanCostMult, location: "Rothman University" },
         ...(["strength", "defense", "dexterity", "agility"] as const).map((skill) => ({
           name: skill,
           skill,
-          expPerSec: 10 * (mults[`${skill}_exp`] ?? 1) * classExp,
-          costPerSec: 2_400,
+          expPerSec: 10 * gymMult * (mults[`${skill}_exp`] ?? 1) * classExp,
+          costPerSec: 2_400 * powerhouseCostMult,
           location: "Powerhouse Gym",
         })),
       ]
@@ -157,6 +173,7 @@ function buildCareerView(
     weights: crime.weights ?? {},
     exp: crime.exp ?? {},
     chance: crime.chance,
+    gainsAreEffective: crime.gainsAreEffective,
   }));
 
   return {
@@ -287,7 +304,9 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
       return true;
     }
     case "crime": {
-      // commitCrime returns the crime's duration in ms, or 0 when refused.
+      // A valid crime starts unconditionally and returns its duration; invalid
+      // enum input throws before this point.
+      // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L1037-L1065
       const result = await replaceWork(["singularity.commitCrime"], (stubNs: NS) =>
         stubNs["singularity"]["commitCrime"](decision.action.subject as never, decision.action.focus),
       );
@@ -591,6 +610,7 @@ function claims(ctx: ClaimContext): Claim[] {
     totalMs: progressTotalMs(ctx.state),
     cyclesWorked: ctx.state.topics.career?.currentWork?.cyclesWorked,
     observedAt: ctx.state.topics.career?.currentWork?.observedAt,
+    repeating: ctx.state.topics.career?.currentWork?.type?.toUpperCase() === "CRIME",
     completionPending: completion !== undefined,
     now: ctx.now,
   });

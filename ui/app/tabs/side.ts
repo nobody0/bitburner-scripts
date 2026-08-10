@@ -120,11 +120,13 @@ export const sideTab: Tab = {
           ["when", esc(age(state.lastT || replay.at, replay.at))],
         ])
         + collapsible(
+          "side.replay.input",
           `input · ${replay.data.length} chars`,
           `<div class="replay-value">${esc(replay.data)}</div>`,
           true,
         )
         + collapsible(
+          "side.replay.answer",
           `submitted answer · ${replay.answer.length} chars`,
           `<div class="replay-value">${esc(replay.answer)}</div>`,
         )

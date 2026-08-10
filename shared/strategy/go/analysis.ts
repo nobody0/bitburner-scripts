@@ -30,7 +30,9 @@ export function cellAt(board: GoBoard, x: number, y: number): Cell {
 }
 
 /** Cardinal order used throughout the upstream AI. Ordering is observable:
- * several option builders choose the first equally-ranked point. */
+ * several option builders choose the first equally-ranked point.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/boardAnalysis.ts */
 export function cardinal(board: GoBoard, x: number, y: number): GoPoint[] {
   return [[x, y + 1], [x + 1, y], [x, y - 1], [x - 1, y]]
     .filter(([nx, ny]) => cellAt(board, nx, ny) !== "#")
@@ -76,6 +78,7 @@ export function analyzeBoard(board: GoBoard): GoAnalysis {
           }
           // `assigned` is not sufficient for an empty chain currently being
           // analyzed; coordinate membership is the actual upstream check.
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/boardAnalysis.ts
           if (points.some((member) => member.x === neighbor.x && member.y === neighbor.y)) continue;
           seenLiberties.add(neighborKey);
           liberties.push(neighbor);
@@ -141,7 +144,8 @@ function replace(board: GoBoard, x: number, y: number, color: Cell): GoBoard {
   return { rows, size: board.size };
 }
 
-/** Upstream evaluateMoveResult semantics: enemy captures win over suicide. */
+/** Upstream evaluateMoveResult semantics: enemy captures win over suicide.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/boardAnalysis.ts */
 export function evaluateMove(board: GoBoard, x: number, y: number, player: Stone): GoBoard {
   if (cellAt(board, x, y) === "#") return board;
   let result = replace(board, x, y, player);

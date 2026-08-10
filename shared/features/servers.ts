@@ -2,6 +2,7 @@ import type { Server } from "@ns";
 
 /** Base ranges for every generated server, transcribed from
  * `bitburner-src v3.0.1 src/Server/data/servers.ts`.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/data/servers.ts
  *
  * The network is NOT fixed. Upstream declares most fields as `{min, max}` and
  * rolls each one once at world generation (`ServerHelpers.toNumber` ->
@@ -125,6 +126,7 @@ export function rollPercentile(value: number, range: Range | undefined): number 
  * factors have to be undone or the comparison is off by more than an order of
  * magnitude — a BN12 megacorp reads $720b against a documented $40-60b range,
  * which looks like the table is wrong rather than like a 25x and a 0.7x. */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/Server.ts
 export function rolledMoney(moneyMax: number | undefined, serverMaxMoneyMult = 1): number | undefined {
   if (moneyMax === undefined || !(serverMaxMoneyMult > 0)) return undefined;
   return moneyMax / (25 * serverMaxMoneyMult);
@@ -135,6 +137,7 @@ export function rolledMoney(moneyMax: number | undefined, serverMaxMoneyMult = 1
  * `Server.ts` v3.0.1 sets `hackDifficulty = min(roll * ServerStartingSecurity,
  * 100)`, so a server whose scaled security clipped at 100 cannot be inverted —
  * hence `undefined` rather than a wrong answer. */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/Server.ts
 export function rolledSecurity(baseDifficulty: number | undefined, startingSecurityMult = 1): number | undefined {
   if (baseDifficulty === undefined || !(startingSecurityMult > 0)) return undefined;
   if (baseDifficulty >= 100) return undefined;

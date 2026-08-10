@@ -120,7 +120,7 @@ function planCard(state: ProjectedState): string {
       ["NeuroFlux level", String(context.priceQueue.neurofluxLevel)],
       ...(plan.invalidation ?? []).map((entry) => [`replan: ${entry.label}`, esc(entry.value)]),
     ];
-    parts.push(collapsible("decision inputs", table(["input", "value"], inputRows, { left: [0, 1] })));
+    parts.push(collapsible("factions.inputs", "decision inputs", table(["input", "value"], inputRows, { left: [0, 1] })));
   }
 
   if (plan.until) {
@@ -207,6 +207,7 @@ function planCard(state: ProjectedState): string {
     if (objective.augmentations.length > 0) {
       parts.push(
         collapsible(
+          "factions.shopping",
           `shopping list — ${objective.augmentations.length} augmentation(s)`,
           table(
             ["#", "augmentation", "gives"],

@@ -42,16 +42,24 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
  *    purchase run, which loops the affordable prefix inside a single stub —
  *    because each purchase changes the price of the next, so they have to see
  *    each other's effects.
- *  - **A `false` return is an OUTCOME, not an error.** Every singularity call
- *    returns false when the game refuses (not enough money, not invited, wrong
- *    city). That is a modelled result the plan digest reports, not something
- *    to throw on and certainly not something to retry blindly. */
+ *  - **A `false` return is an OUTCOME, not an error.** Boolean mutation calls
+ *    use false for ordinary refusals (funds, membership, prerequisites).
+ *    Invalid enum input and grafting outside New Tokyo throw instead; both are
+ *    reported without conflating a refusal with a stub failure.
+ *
+ * Pinned upstream Singularity action contracts:
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L771-L967
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Grafting.ts#L17-L103 */
 
 /** Largest single dodge step this feature needs, declared next to the driver
  * so it cannot drift from the probes. Two singularity methods in one step at
  * SF4 level 3 is ~10 GB; the augmentation probe's `rep` step is the widest. */
 const PEAK_STEP_GB = 12;
 const SHADOWS_OF_ANARCHY = "Shadows of Anarchy";
+/** These factions are joined/progressed through their own mechanics, not by
+ * satisfying the ordinary invitation/work loop.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionInfo.tsx#L695-L813 */
+const SPECIAL_FACTIONS = new Set(["Bladeburners", "Church of the Machine God", SHADOWS_OF_ANARCHY]);
 
 let memory: FactionMemory = initFactionMemory();
 /** Last executed action's outcome, for the plan digest. */
@@ -101,13 +109,18 @@ function requirementView(state: GameState): RequirementView {
   }
   const files = new Set(factions?.files ?? []);
 
-  const owned = new Set(factions?.ownedAugs ?? []);
+  // Invitation requirements count INSTALLED augmentations for positive
+  // targets; queued purchases do not qualify. getResetInfo().ownedAugs is the
+  // installed list, while singularity.getOwnedAugmentations(true) also contains
+  // the queue.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts#L119-L132
   return {
     money: player?.money ?? 0,
     skills: { ...(player?.skills ?? {}) } as Record<string, number>,
     karma: player?.karma ?? 0,
     numPeopleKilled: player?.numPeopleKilled ?? 0,
-    augCount: owned.size,
+    augCount: progression?.augCount ?? 0,
+    purchasedAugCount: new Set((factions?.ownedAugs ?? []).filter((name) => name !== NEUROFLUX)).size,
     jobs: { ...(player?.jobs ?? {}) } as Record<string, string>,
     companyRep: Object.fromEntries(
       Object.entries(career?.companies ?? {}).map(([name, standing]) => [name, standing.rep]),
@@ -205,6 +218,23 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     });
   }
 
+  // The live getter is authoritative for node- and gang-dependent offers
+  // (notably The Red Pill is removed from Daedalus in BN15, while gang
+  // factions can gain a different filtered catalogue). Replace static seller
+  // lists only after the stepped probe proves its capped result is complete.
+  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L172-L210
+  if (topic.offers && topic.augTotal !== undefined && topic.offers.length === topic.augTotal) {
+    const dynamicSellers = new Map<string, string[]>();
+    for (const offer of topic.offers) {
+      const sellers = dynamicSellers.get(offer.name) ?? [];
+      if (!sellers.includes(offer.faction)) sellers.push(offer.faction);
+      dynamicSellers.set(offer.name, sellers);
+    }
+    for (const [name, aug] of catalog) {
+      if (!owned.has(name) || name === NEUROFLUX) aug.factions = dynamicSellers.get(name) ?? [];
+    }
+  }
+
   const joined = new Set(topic.joined);
   const invited = new Set(topic.invites ?? []);
   const standingByName = new Map((topic.standings ?? []).map((standing) => [standing.name, standing]));
@@ -232,7 +262,7 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
         field: topic.workTypes?.[name]?.includes("field") ?? false,
         security: topic.workTypes?.[name]?.includes("security") ?? false,
       },
-      special: false,
+      special: SPECIAL_FACTIONS.has(name),
     };
   });
 
@@ -284,6 +314,7 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     requirementView: requirementView(state),
     repContext: {
       factionWorkRepGain: nodeMults["FactionWorkRepGain"] ?? 1,
+      factionPassiveRepGain: nodeMults["FactionPassiveRepGain"] ?? 1,
       shareBonus: state.topics.fleet?.sharePower ?? 1,
       sf15Level: sfLevel(caps.sourceFiles, 15),
       hasFocusAug: owned.has("Neuroreceptor Management Implant"),
@@ -344,8 +375,7 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
 /** Turn one decided action into one dodged singularity call.
  *
  * Every branch reports what the game actually returned. `false` from a
- * singularity call is the game REFUSING — not enough money, not invited, wrong
- * city — and is a modelled outcome the plan reports rather than an exception. */
+ * boolean Singularity mutation is a modelled refusal rather than an exception. */
 async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view: FactionsView): Promise<void> {
   const at = Date.now();
   const record = (ok: boolean, detail: string): void => {
@@ -390,7 +420,7 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
     case "stopWork": {
       const ok = await run(["singularity.stopAction"], (stubNs) => stubNs["singularity"]["stopAction"]());
       if (ok === refused) return;
-      record(true, "stopped");
+      record(Boolean(ok), ok ? "stopped" : "nothing was running");
       return;
     }
 

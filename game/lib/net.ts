@@ -5,7 +5,8 @@ import { isScriptVersion } from "../../shared/deployment.ts";
  * (bracket-notation ns calls, so importing bundles pay nothing). Budgets are
  * noted per closure; keep them under the dodge budget you pass. */
 
-/** Cracker programs in the order the game defines them. */
+/** Cracker programs in the order the game exposes their port operations.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L549-L622 */
 const CRACKERS = [
   { file: "BruteSSH.exe", portFlag: "sshPortOpen" },
   { file: "FTPCrack.exe", portFlag: "ftpPortOpen" },
@@ -22,7 +23,8 @@ export function listPortOpeners(stubNs: NS): string[] {
   return CRACKERS.filter((c) => files.has(c.file)).map((c) => c.file);
 }
 
-/** Ports-only test: hacking level is irrelevant to nuking. */
+/** Ports-only test: hacking level is irrelevant to nuking.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L531-L547 */
 export function canRoot(server: Server, openers: string[]): boolean {
   const have = new Set(openers);
   let openable = 0;
@@ -54,7 +56,8 @@ export function rootServers(stubNs: NS, hosts: string[], openers: string[]): str
 
 /** Usable as a worker host: rooted and has RAM. Hacknet Servers are genuine
  * player-owned servers; using their RAM reduces hash production, and that
- * opportunity cost is accounted for by the Hacknet investment model. */
+ * opportunity cost is accounted for by the Hacknet investment model.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/HacknetServer.ts#L121-L126 */
 export function isUseful(server: Server): boolean {
   return server.hasAdminRights && server.maxRam >= 2;
 }
@@ -67,7 +70,8 @@ export function isUseful(server: Server): boolean {
  * rooted host (shared/ram/placement.ts), and `ns.exec` of a file that is not
  * there returns 0 — indistinguishable from "the host is full", so a missing
  * stub would burn every retry and look like a RAM shortage. One `scp` call
- * takes an array, so carrying the stub costs nothing extra. */
+ * takes an array, so carrying the stub costs nothing extra.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L634-L651 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L766-L825 */
 export function deployFleet(stubNs: NS, scripts: string[], servers: Record<string, Server>): string[] {
   const deployed: string[] = ["home"];
   for (const server of Object.values(servers)) {
@@ -84,14 +88,13 @@ export function deployFleet(stubNs: NS, scripts: string[], servers: Record<strin
  * session can never report completion (their descriptor map died with the old
  * realm), so their RAM would be held forever and the dispatcher would starve.
  *
- * Two hosts are handled PER-PROCESS rather than wholesale, and the second one
- * is the subtle half:
+ * Two hosts are handled PER-PROCESS rather than wholesale:
  *  - **home**, so we never kill the controller itself;
- *  - **whichever host this stub is running on**, because since dodges can be
- *    placed on the fleet this reclaim may itself be executing on a client. A
- *    blanket `killall` there would kill the very stub doing the killing, and
- *    the dodge would hang until its 10 s watchdog fired — every cold boot,
- *    non-deterministically, depending only on where placement put it.
+ *  - **whichever host this stub is running on**, so the survivor set is
+ *    explicit. `killall`'s default safety guard also protects its caller; the
+ *    per-process path is retained because it handles home and the remote stub
+ *    uniformly.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L742-L759
  *
  * Returns the hosts that had something to reclaim. */
 export function reclaimFleet(stubNs: NS, servers: Record<string, Server>, controllerPid: number): string[] {
