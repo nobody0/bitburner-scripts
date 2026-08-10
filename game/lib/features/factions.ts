@@ -1,6 +1,7 @@
 import type { NS, PlayerRequirement } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
+import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { grantFor, PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import {
@@ -414,7 +415,7 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
       // but do not bypass that grant in the meantime.
       const reserve = action.amount + (action.purchaseCost ?? 0);
       if (moneyGrantFor(ctx, "donation-fund") < reserve) {
-        record(false, `waiting for $${Math.round(reserve)} donation and purchase grant`);
+        record(false, `waiting for ${formatMoney(reserve)} donation and purchase grant`);
         return;
       }
       const plannedRep = view.factions.find((standing) => standing.name === action.faction)?.rep ?? 0;
@@ -449,8 +450,8 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
         result.ok,
         result.ok
           ? result.amount > 0
-            ? `donated $${Math.round(result.amount)}`
-            : `already reached ${Math.round(repTarget)} reputation`
+            ? `donated ${formatMoney(result.amount)}`
+            : `already reached ${formatNumber(repTarget)} reputation`
           : "donation refused (favor too low?)",
       );
       return;
@@ -464,7 +465,7 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
       const offer = (ctx.state.topics.factions?.offers ?? []).find((entry) => entry.name === action.augmentation);
       const fundNeeded = offer?.price ?? 0;
       if (fundNeeded > 0 && moneyGrantFor(ctx, "aug-fund") < fundNeeded) {
-        record(false, `waiting for the $${Math.round(fundNeeded).toLocaleString()} augmentation fund grant`);
+        record(false, `waiting for the ${formatMoney(fundNeeded)} augmentation fund grant`);
         return;
       }
       const ok = await run(["singularity.purchaseAugmentation"], (stubNs) =>

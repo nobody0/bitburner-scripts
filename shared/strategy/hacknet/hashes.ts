@@ -1,5 +1,6 @@
 import type { Need, NeedUrgency } from "../needs.ts";
 import type { HackContext } from "../../formulas.ts";
+import { formatNumber } from "../../format.ts";
 import { solveCycle, type RamCaps, type TargetStatics } from "../targeting.ts";
 
 export const HASH_UPGRADE = {
@@ -147,14 +148,14 @@ export function stepHashes(view: HashView): HashDecision {
         ranked,
         reserve: { name: goal.name, target: goal.target, cost: goal.cost, missing: Math.max(0, goal.cost - view.current), why: goal.why },
         capacityTarget: goal.cost,
-        why: `${goal.name} serves the highest-value goal but needs ${Math.ceil(goal.cost)} hash capacity`,
+        why: `${goal.name} serves the highest-value goal but needs ${formatNumber(Math.ceil(goal.cost))} hash capacity`,
       };
     }
     if (!goal.affordable) {
       return {
         ranked,
         reserve: { name: goal.name, target: goal.target, cost: goal.cost, missing: goal.cost - view.current, why: goal.why },
-        why: `saving ${Math.ceil(goal.cost - view.current)} more hashes for ${goal.name}`,
+        why: `saving ${formatNumber(Math.ceil(goal.cost - view.current))} more hashes for ${goal.name}`,
       };
     }
     return {

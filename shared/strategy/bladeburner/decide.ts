@@ -1,3 +1,5 @@
+import { formatNumber, formatScientific } from "../../format.ts";
+
 /** Bladeburner action selection.
  *
  * Objective: climb rank fastest WITHOUT DYING. The second half is a hard
@@ -77,7 +79,7 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
         actionType: action.type,
         rankPerSec: seconds > 0 ? (chanceLow * action.rankGain) / seconds : 0,
         chanceLow,
-        why: `${(chanceLow * 100).toFixed(0)}% (pessimistic) for ${action.rankGain} rank in ${Math.round(seconds)}s`,
+        why: `${(chanceLow * 100).toFixed(0)}% (pessimistic) for ${formatNumber(action.rankGain)} rank in ${Math.round(seconds)}s`,
       };
     })
     .sort((a, b) => b.rankPerSec - a.rankPerSec || (a.name < b.name ? -1 : 1));
@@ -153,6 +155,6 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
   return {
     action: { type: "act", actionType: best.actionType, name: best.name, why: best.why },
     ranked,
-    why: `${best.rankPerSec.toExponential(2)} rank/sec at the pessimistic chance`,
+    why: `${formatScientific(best.rankPerSec)} rank/sec at the pessimistic chance`,
   };
 }

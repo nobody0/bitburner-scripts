@@ -1,5 +1,6 @@
 ﻿import type { NS } from "@ns";
 import { bitNodeMultipliers, effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
+import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { makeHackContext } from "../../../shared/formulas.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { installHorizonSec } from "../../../shared/strategy/progression/forecast.ts";
@@ -141,7 +142,7 @@ function hashGoals(ctx: HacknetViewContext): HashGoalCandidate[] {
       goals.push({
         name: HASH_UPGRADE.bladeRank,
         priority: 58,
-        why: `${state.bladeburner.nextBlackOp.name} still needs ${Math.ceil(state.bladeburner.nextBlackOp.rank - state.bladeburner.rank)} rank`,
+        why: `${state.bladeburner.nextBlackOp.name} still needs ${formatNumber(Math.ceil(state.bladeburner.nextBlackOp.rank - state.bladeburner.rank))} rank`,
       });
     }
     if (state.bladeburner.plan?.action.type === "upgradeSkill") {
@@ -298,7 +299,7 @@ async function execute(_ns: NS, ctx: DriverContext, buy: UpgradeOption): Promise
   lastResult = {
     action: buy.kind,
     ok: Boolean(ok),
-    detail: ok ? `bought ${buy.kind} for $${Math.round(buy.cost).toLocaleString()}` : "purchase refused",
+    detail: ok ? `bought ${buy.kind} for ${formatMoney(buy.cost)}` : "purchase refused",
     at,
   };
   const publishedPlan = ctx.state.topics.hacknet?.plan;
@@ -326,7 +327,7 @@ async function spendHashes(ctx: DriverContext, decision: HashDecision): Promise<
     action: spend.name,
     ok,
     detail: ok
-      ? `spent ${Math.round(spend.cost).toLocaleString()} hashes on ${spend.name}${spend.target ? ` for ${spend.target}` : ""}`
+      ? `spent ${formatNumber(spend.cost)} hashes on ${spend.name}${spend.target ? ` for ${spend.target}` : ""}`
       : outcome.ok ? "hash spend refused" : outcome.reason,
     at,
   };

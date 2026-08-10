@@ -1,28 +1,15 @@
-/** Formatting + escaping helpers shared by every tab. Lifted verbatim in
- * behaviour from the original inline dashboard script so charts and tables
- * keep reading identically. */
+import { formatMoney, formatNumber } from "../../../shared/format.ts";
+
+/** Formatting + escaping helpers shared by every tab. */
 
 export function fmtMoney(n: number | undefined | null): string {
   if (n === undefined || n === null || Number.isNaN(n)) return "–";
-  const sign = n < 0 ? "-" : "";
-  const abs = Math.abs(n);
-  const units: [string, number][] = [
-    ["q", 1e15],
-    ["t", 1e12],
-    ["b", 1e9],
-    ["m", 1e6],
-    ["k", 1e3],
-  ];
-  for (const [suffix, size] of units) if (abs >= size) return `${sign}$${(abs / size).toFixed(2)}${suffix}`;
-  return `${sign}$${abs.toFixed(0)}`;
+  return formatMoney(n);
 }
 
 export function fmtNum(n: number | undefined | null, digits = 0): string {
   if (n === undefined || n === null || Number.isNaN(n)) return "–";
-  const abs = Math.abs(n);
-  if (abs >= 1e6) return `${(n / 1e6).toFixed(2)}m`;
-  if (abs >= 1e3) return `${(n / 1e3).toFixed(2)}k`;
-  return n.toFixed(digits);
+  return formatNumber(n, digits);
 }
 
 export function fmtRam(gb: number | undefined | null): string {

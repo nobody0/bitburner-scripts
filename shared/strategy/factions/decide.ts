@@ -1,3 +1,4 @@
+import { formatMoney, formatNumber } from "../../format.ts";
 import {
   augCost,
   canAfford,
@@ -288,7 +289,7 @@ function decideFactions(
     value: selection.intent?.value ?? 0,
     foreclosed: selection.foreclosed,
     why: selection.intent
-      ? `finite-horizon package frontier; next target is ${selection.intent.faction} at ${Math.round(selection.intent.repTarget).toLocaleString()} rep`
+      ? `finite-horizon package frontier; next target is ${selection.intent.faction} at ${formatNumber(selection.intent.repTarget)} rep`
       : "no faction package fits the planning horizon",
     ...(selection.intent ? { intent: selection.intent } : {}),
     ...(selection.runnerUp ? { runnerUp: selection.runnerUp } : {}),
@@ -336,7 +337,7 @@ function decideFactions(
           foreclosed: fresh.foreclosed,
           why:
             "advanced from completed " + previousIntent!.faction + " package to its recorded frontier runner " +
-            previousRunner.faction + " at " + Math.round(previousRunner.repTarget).toLocaleString() + " rep",
+            previousRunner.faction + " at " + formatNumber(previousRunner.repTarget) + " rep",
           intent: previousRunner,
         }
       : undefined;
@@ -371,7 +372,7 @@ function decideFactions(
   }
   if (objective.runnerUp) {
     alternatives.push({
-      label: `${objective.runnerUp.faction} to ${Math.round(objective.runnerUp.repTarget).toLocaleString()} rep`,
+      label: `${objective.runnerUp.faction} to ${formatNumber(objective.runnerUp.repTarget)} rep`,
       value: objective.runnerUp.value / Math.max(1, objective.runnerUp.etaSec),
       why: objective.runnerUp.why,
     });
@@ -596,8 +597,8 @@ function decideFactions(
       amount,
       ...(nextPurchaseCost > 0 ? { purchaseCost: nextPurchaseCost } : {}),
       why:
-        `reserve $${Math.round(packageCashNeeded).toLocaleString()} for reputation and purchase; ` +
-        `income $${Math.round(view.incomePerSec)}/sec beats the $${Math.round(crossover)}/sec crossover`,
+        `reserve ${formatMoney(packageCashNeeded)} for reputation and purchase; ` +
+        `income ${formatMoney(view.incomePerSec)}/sec beats the ${formatMoney(crossover)}/sec crossover`,
     };
     return {
       memory: { ...next, lastAction: action },
@@ -677,7 +678,7 @@ function decideFactions(
     faction: target.faction,
     workType: target.workType,
     focus: true,
-    why: `${target.repPerSec.toFixed(3)} rep/sec toward ${Math.round(target.needed)} needed`,
+    why: `${target.repPerSec.toFixed(3)} rep/sec toward ${formatNumber(target.needed)} needed`,
   };
   return {
     memory: { ...next, lastAction: action, focusFaction: target.faction, focusSince: view.time },
@@ -829,7 +830,7 @@ function nextPurchase(
         type: "purchaseAugmentation",
         faction: source.standing.name,
         augmentation: name,
-        why: `${source.verdict.reason}; $${Math.round(moneyCost).toLocaleString()} at ${
+        why: `${source.verdict.reason}; ${formatMoney(moneyCost)} at ${
           isSoA(name) ? "SoA" : name === NEUROFLUX ? "NeuroFlux" : "standard"
         } pricing`,
       },
@@ -923,7 +924,7 @@ function nextSweepAction(view: FactionsView, wanted: readonly string[]): Faction
       faction: source.standing.name,
       amount: source.donation,
       purchaseCost: moneyCost,
-      why: `final install sweep: donate exactly enough to unlock ${name}, while reserving its $${Math.round(moneyCost).toLocaleString()} purchase`,
+      why: `final install sweep: donate exactly enough to unlock ${name}, while reserving its ${formatMoney(moneyCost)} purchase`,
     };
   }
   return undefined;
@@ -955,7 +956,7 @@ function pickWorkFaction(
     if (!rate) continue;
     // Rank by how much of the remaining gap this closes per second.
     const value = rate.repPerSec;
-    alternatives.push({ label: `work ${name} (${rate.type})`, value, why: `${Math.round(needed - standing.rep)} rep short` });
+    alternatives.push({ label: `work ${name} (${rate.type})`, value, why: `${formatNumber(needed - standing.rep)} rep short` });
     if (!best || value > best.repPerSec) {
       best = { faction: name, standing, workType: rate.type, repPerSec: value, needed };
     }

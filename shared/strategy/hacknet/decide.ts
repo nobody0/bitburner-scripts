@@ -1,3 +1,4 @@
+import { formatMoney } from "../../format.ts";
 import { coarseHorizonSec, scoreInvestment } from "../investment.ts";
 
 /** Hacknet purchase scheduling.
@@ -178,7 +179,7 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
     return {
       ranked,
       why: "waiting for funds",
-      hold: `${best.kind} costs $${Math.round(best.cost).toLocaleString()}, granted $${Math.round(view.moneyGranted).toLocaleString()}`,
+      hold: `${best.kind} costs ${formatMoney(best.cost)}, granted ${formatMoney(view.moneyGranted)}`,
     };
   }
 
@@ -188,6 +189,6 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
     why: best.milestone
       ? `${best.kind}${best.node !== undefined ? ` on node ${best.node}` : ""} advances ${best.milestone.kind}: ${best.milestone.why}`
       : `${best.kind}${best.node !== undefined ? ` on node ${best.node}` : ""} has the fastest ROI ` +
-        `(${Math.round(best.paybackSec)}s payback; $${Math.round(best.netOverHorizon).toLocaleString()} net over the horizon)`,
+        `(${Math.round(best.paybackSec)}s payback; ${formatMoney(best.netOverHorizon)} net over the horizon)`,
   };
 }

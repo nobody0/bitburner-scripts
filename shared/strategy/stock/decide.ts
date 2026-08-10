@@ -1,3 +1,5 @@
+import { formatMoney } from "../../format.ts";
+
 /** The stock market solver.
  *
  * Objective: maximise money at the end of the RUN, not at the end of the
@@ -743,7 +745,7 @@ function planEntry(params: {
       why:
         `${candidate.side} ${candidate.sym} at forecast ${candidate.forecast.toFixed(3)}: ` +
         `breaks even in ${be.toFixed(1)} ticks of ${guaranteedTicks} guaranteed (${Math.round(holdTicks)} expected), ` +
-        `expected $${Math.round(profit).toLocaleString()}`,
+        `expected ${formatMoney(profit)}`,
     };
   }
   return undefined;
@@ -857,8 +859,8 @@ function propose(
     paybackSec,
     netOverHorizon,
     why:
-      `${rationale}; $${Math.round(gainPerSec).toLocaleString()}/sec pays back ` +
-      `$${cost.toExponential(1)} in ${Math.round(paybackSec)}s of ${Math.round(horizonSec)}s left`,
+      `${rationale}; ${formatMoney(gainPerSec)}/sec pays back ` +
+      `${formatMoney(cost)} in ${Math.round(paybackSec)}s of ${Math.round(horizonSec)}s left`,
   };
 }
 
@@ -984,7 +986,7 @@ function planManipulation(params: {
         notional,
         why:
           `${side === "long" ? "grow" : "hack"} ${hostname} to push ${sym} ` +
-          `${side === "long" ? "up" : "down"} for a $${Math.round(notional).toLocaleString()} position`,
+          `${side === "long" ? "up" : "down"} for a ${formatMoney(notional)} position`,
       });
     }
   };
@@ -1143,5 +1145,5 @@ function holdReason(view: StockView, best: RankedSymbol | undefined, holdTicks: 
   if (best.breakEvenTicks * BREAK_EVEN_MARGIN > holdTicks) {
     return `${best.sym} needs ${best.breakEvenTicks.toFixed(1)} ticks to clear its round trip, ${holdTicks} available`;
   }
-  return `best expected profit $${Math.round(best.expectedProfit).toLocaleString()} does not clear the round trip`;
+  return `best expected profit ${formatMoney(best.expectedProfit)} does not clear the round trip`;
 }

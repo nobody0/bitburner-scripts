@@ -1,4 +1,5 @@
 import type { AssignmentResult } from "../assignment.ts";
+import { formatScientific } from "../../format.ts";
 import type { NeedBoard, NeedKind } from "../needs.ts";
 import { needKey } from "../needs.ts";
 
@@ -189,7 +190,7 @@ export function stepSleeves(view: SleevesView, board: NeedBoard): SleeveDecision
           ? `shock ${Math.round(choice.agent.shock)} scales output to ${(shockMultiplier(choice.agent.shock) * 100).toFixed(0)}%`
           : choice.task.type === "synchro"
             ? `sync ${Math.round(choice.agent.sync)} is below the ${view.syncFloor} floor`
-            : `best weighted need progress (${choice.score.toExponential(2)})`,
+            : `best weighted need progress (${formatScientific(choice.score)})`,
     }));
 
   return {

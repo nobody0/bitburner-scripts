@@ -1,5 +1,6 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
+import { formatMoney } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import {
@@ -324,7 +325,7 @@ async function executeInfrastructure(ctx: DriverContext, decision: ScoredInfrast
     lastInfrastructureResult = {
       action: decision.kind,
       ok,
-      detail: ok ? `bought ${decision.kind} for $${Math.round(decision.cost).toLocaleString()}` : outcome.ok ? "purchase refused" : outcome.reason,
+      detail: ok ? `bought ${decision.kind} for ${formatMoney(decision.cost)}` : outcome.ok ? "purchase refused" : outcome.reason,
       at,
     };
     const publishedPlan = ctx.state.topics.fleet?.infrastructurePlan;

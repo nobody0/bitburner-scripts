@@ -1,3 +1,4 @@
+import { formatMoney, formatScientific } from "../../format.ts";
 import type { Need, NeedBoard, NeedKind, NeedUrgency } from "../needs.ts";
 import { needKey, needProgress, URGENCY_ORDER } from "../needs.ts";
 import { careerWorkMode } from "./schedule.ts";
@@ -198,7 +199,7 @@ function scoreCrime(
       type: "crime",
       subject: crime.type,
       focus: true,
-      why: `${(successChance(crime, view.person, view.crimeContext) * 100).toFixed(0)}% success, $${Math.round(money)}/sec`,
+      why: `${(successChance(crime, view.person, view.crimeContext) * 100).toFixed(0)}% success, ${formatMoney(money)}/sec`,
     },
     score,
     moneyPerSec: money,
@@ -241,7 +242,7 @@ function scoreCourse(
       subject: course.name,
       location: course.location,
       focus: true,
-      why: `${course.expPerSec.toFixed(1)} ${course.skill} exp/sec at $${Math.round(course.costPerSec)}/sec`,
+      why: `${course.expPerSec.toFixed(1)} ${course.skill} exp/sec at ${formatMoney(course.costPerSec)}/sec`,
     },
     // Courses COST money, so a course competes with the income it forgoes.
     score,
@@ -292,7 +293,7 @@ function scoreProgram(program: NonNullable<CareerView["programs"]>[number], valu
       type: "program",
       subject: program.name,
       focus: true,
-      why: `write in ${Math.ceil(seconds)}s instead of spending $${Math.round(program.purchaseCost).toLocaleString()}`,
+      why: `write in ${Math.ceil(seconds)}s instead of spending ${formatMoney(program.purchaseCost)}`,
     },
     score,
     moneyPerSec: -program.purchaseCost / seconds,
@@ -486,10 +487,10 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     workPriority: best.priority,
     incomeFallback: !anyNeed,
     why: anyNeed
-      ? `best Σ needWeight·progress/sec (${best.score.toExponential(2)})`
+      ? `best Σ needWeight·progress/sec (${formatScientific(best.score)})`
       : trainByDefault
         ? `background income covers player work; training ${defaultSkill} for the current progression route`
-        : `no posted need career can serve — maximising income at $${Math.round(best.moneyPerSec)}/sec`,
+        : `no posted need career can serve — maximising income at ${formatMoney(best.moneyPerSec)}/sec`,
   };
 }
 

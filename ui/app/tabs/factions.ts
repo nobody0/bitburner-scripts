@@ -6,6 +6,7 @@ import type {
   FactionStanding,
   GateBlocker,
 } from "../../../shared/telemetry/topics/factions.ts";
+import { formatScientific } from "../../../shared/format.ts";
 import {
   card,
   collapsible,
@@ -79,7 +80,7 @@ function actionLine(action: FactionPlanAction): string {
 
 function fmtRate(value: number | undefined): string {
   if (value === undefined || Number.isNaN(value)) return "–";
-  return Math.abs(value) >= 0.001 ? fmtNum(value, 3) : value.toExponential(2);
+  return Math.abs(value) >= 0.001 ? fmtNum(value, 3) : formatScientific(value);
 }
 
 function planCard(state: ProjectedState): string {

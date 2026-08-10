@@ -1,4 +1,5 @@
 import type { FeatureId } from "../features/ids.ts";
+import { formatNumber } from "../format.ts";
 import { HOME_RESERVE_GB } from "./heap.ts";
 
 /** How much home RAM to keep out of the dispatcher's hands.
@@ -99,7 +100,7 @@ function describe(d: {
   if (!d.capped) return `${wanted} = ${d.reserveGb} GB`;
   return (
     `${wanted} = ${d.wantedGb} GB, capped to ${round(d.reserveGb)} GB ` +
-    `(${Math.round(MAX_RESERVE_FRACTION * 100)}% of a ${d.homeMaxRam} GB home) — ${d.driver} needs more home RAM`
+    `(${Math.round(MAX_RESERVE_FRACTION * 100)}% of a ${formatNumber(d.homeMaxRam)} GB home) — ${d.driver} needs more home RAM`
   );
 }
 

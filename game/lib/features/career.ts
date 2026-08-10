@@ -1,5 +1,6 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
+import { formatMoney } from "../../../shared/format.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { stepCareer, TRAINING_FUND_WINDOW_SEC, type CareerDecision, type CareerPriorityBand, type CareerView } from "../../../shared/strategy/career/decide.ts";
 import type { CrimeStats } from "../../../shared/strategy/career/crimes.ts";
@@ -326,7 +327,7 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
     }
     case "travel": {
       if (ctx.grants.money < TRAVEL_COST) {
-        record(false, `waiting for $${TRAVEL_COST.toLocaleString()} travel grant`);
+        record(false, `waiting for ${formatMoney(TRAVEL_COST)} travel grant`);
         return false;
       }
       const result = await replaceWork(["singularity.travelToCity"], (stubNs: NS) =>
@@ -529,7 +530,7 @@ function claims(ctx: ClaimContext): Claim[] {
       priority: priorityForBand(candidate?.workPriority ?? "wanted", ctx.state),
       mode: "spend",
       divisible: false,
-      why: `travel costs $${TRAVEL_COST.toLocaleString()}`,
+      why: `travel costs ${formatMoney(TRAVEL_COST)}`,
     });
   }
   if (actionType === "class" || actionType === "gym") {

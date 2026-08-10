@@ -1,5 +1,6 @@
 import type { PlayerRequirement } from "@ns";
 import type { FeatureId } from "../../features/ids.ts";
+import { formatMoney } from "../../format.ts";
 import type { NeedKind } from "../needs.ts";
 
 /** Interpreter for the game's own `PlayerRequirement` tree.
@@ -163,7 +164,7 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
     case "money":
       return view.money >= requirement.money
         ? []
-        : [blocker("money", requirement.money, view.money, `needs $${requirement.money.toLocaleString()}`)];
+        : [blocker("money", requirement.money, view.money, `needs ${formatMoney(requirement.money)}`)];
 
     case "skills": {
       const out: Blocker[] = [];

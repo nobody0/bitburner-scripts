@@ -1,3 +1,4 @@
+import { formatNumber, formatScientific } from "../../format.ts";
 import {
   NEUROFLUX,
   augCost,
@@ -247,8 +248,8 @@ export function factionPackageFrontier(
     const marginalSec = Math.max(1, pkg.etaSec - (previous?.etaSec ?? 0));
     pkg.marginalRate = marginalValue / marginalSec;
     pkg.why = previous
-      ? `${pkg.augmentations.length} augmentation(s) by ${Math.round(pkg.repTarget).toLocaleString()} rep; marginal ${pkg.marginalRate.toExponential(2)} value/sec`
-      : `${pkg.augmentations.length} augmentation(s) in ${Math.round(pkg.etaSec)}s; ${pkg.rate.toExponential(2)} value/sec`;
+      ? `${pkg.augmentations.length} augmentation(s) by ${formatNumber(pkg.repTarget)} rep; marginal ${formatScientific(pkg.marginalRate)} value/sec`
+      : `${pkg.augmentations.length} augmentation(s) in ${Math.round(pkg.etaSec)}s; ${formatScientific(pkg.rate)} value/sec`;
     frontier.push(pkg);
     bestValue = pkg.value;
   }
@@ -386,7 +387,7 @@ export function selectFactionPackage(
   intent = {
     ...intent,
     why: runner
-      ? `${intent.why}; stop before the next extension falls below ${runner.faction} at ${runnerRate.toExponential(2)} value/sec`
+      ? `${intent.why}; stop before the next extension falls below ${runner.faction} at ${formatScientific(runnerRate)} value/sec`
       : `${intent.why}; no competing faction package fits the horizon`,
   };
 

@@ -1,3 +1,4 @@
+import { formatMoney, formatNumber } from "../format.ts";
 import { coarseHorizonSec, scoreInvestment, type ScoredInvestment } from "./investment.ts";
 
 export interface HomeRamView {
@@ -59,8 +60,8 @@ export function scoreHomeRam(view: HomeRamView): HomeRamDecision {
     incomePerSec,
     worthBuying,
     why: worthBuying
-      ? `${addedRam} GB adds about $${Math.round(incomePerSec).toLocaleString()}/sec and pays back in ${Math.round(scored.paybackSec)}s`
-      : `home RAM does not repay $${Math.round(view.upgradeCost).toLocaleString()} within ${coarseHorizonSec(view.horizonSec)}s`,
+      ? `${formatNumber(addedRam)} GB adds about ${formatMoney(incomePerSec)}/sec and pays back in ${Math.round(scored.paybackSec)}s`
+      : `home RAM does not repay ${formatMoney(view.upgradeCost)} within ${coarseHorizonSec(view.horizonSec)}s`,
   };
 }
 
@@ -71,15 +72,15 @@ export function scoreInfrastructure(option: InfrastructureOption, horizonSec: nu
   const worthBuying = Number.isFinite(option.cost) && option.cost > 0 && scored.netOverHorizon > 0;
   const label = option.kind === "homeRam" ? "home RAM"
     : option.kind === "homeCore" ? "a home core"
-    : option.kind === "buyServer" ? `${option.targetRam ?? option.addedRam} GB cloud server`
-    : `${option.host ?? "cloud server"} to ${option.targetRam ?? 0} GB`;
+    : option.kind === "buyServer" ? `${formatNumber(option.targetRam ?? option.addedRam)} GB cloud server`
+    : `${option.host ?? "cloud server"} to ${formatNumber(option.targetRam ?? 0)} GB`;
   return {
     ...option,
     ...scored,
     worthBuying,
     why: worthBuying
-      ? `${label} adds about $${Math.round(option.incomePerSec).toLocaleString()}/sec and pays back in ${Math.round(scored.paybackSec)}s`
-      : `${label} does not repay $${Math.round(option.cost).toLocaleString()} within ${coarseHorizonSec(horizon)}s`,
+      ? `${label} adds about ${formatMoney(option.incomePerSec)}/sec and pays back in ${Math.round(scored.paybackSec)}s`
+      : `${label} does not repay ${formatMoney(option.cost)} within ${coarseHorizonSec(horizon)}s`,
   };
 }
 

@@ -1,4 +1,5 @@
 import { bitNodeMultipliers, worldDaemonSkill } from "../../features/bitnode.ts";
+import { formatMoney, formatScientific } from "../../format.ts";
 
 /** How a BitNode actually ends, and what is still missing.
  *
@@ -145,10 +146,10 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
     if (augsNeeded === undefined) blocker = "BitNode unknown";
     else if (view.ownsRedPill) blocker = tail.blocker;
     else if (view.augCount < augsNeeded) blocker = `${view.augCount} of ${augsNeeded} augmentations`;
-    else if (view.money < DAEDALUS_MONEY) blocker = `$${view.money.toExponential(2)} of $1.00e+11`;
+    else if (view.money < DAEDALUS_MONEY) blocker = `${formatMoney(view.money)} of ${formatMoney(DAEDALUS_MONEY)}`;
     else if (!meetsSkills) blocker = `hacking ${DAEDALUS_HACKING} or combat ${DAEDALUS_COMBAT}`;
     else if (view.daedalusRep < RED_PILL_REP) {
-      blocker = `Daedalus reputation ${view.daedalusRep.toExponential(2)} of 2.50e+6`;
+      blocker = `Daedalus reputation ${formatScientific(view.daedalusRep)} of ${formatScientific(RED_PILL_REP)}`;
     } else blocker = tail.blocker;
     routes.push({
       id: "daedalus",

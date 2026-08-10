@@ -1,3 +1,4 @@
+import { formatNumber, formatScientific } from "../../format.ts";
 import { assignCoupled, type AssignmentResult } from "../assignment.ts";
 
 /** Gang management.
@@ -83,7 +84,7 @@ export function stepGang(view: GangView): GangDecision {
 
   // Recruiting is free respect-wise and strictly additive — always take it.
   if (view.canRecruit) {
-    actions.push({ type: "recruit", why: `respect ${Math.round(view.respect)} clears the next recruit` });
+    actions.push({ type: "recruit", why: `respect ${formatNumber(view.respect)} clears the next recruit` });
   }
 
   // Ascension: analytic crossover, checked per member.
@@ -133,7 +134,7 @@ export function stepGang(view: GangView): GangDecision {
       type: "assign",
       member: choice.agent.name,
       task: choice.task.name,
-      why: `${choice.task.name} scores ${choice.score.toExponential(2)} under the wanted penalty`,
+      why: `${choice.task.name} scores ${formatScientific(choice.score)} under the wanted penalty`,
     });
   }
 
