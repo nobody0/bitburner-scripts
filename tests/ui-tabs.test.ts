@@ -228,12 +228,38 @@ describe("tab rendering", () => {
     expect(html).toContain("200 ms cycles");
     expect(html).toContain("same-slot dispatch");
     expect(html).toContain("AI cycle 200 ms");
-    expect(html).toContain("class=\"cell black chosen\"");
-    expect(html).toContain("class=\"cell white reply\"");
+    expect(html).toContain("class=\"go-point black chosen\"");
+    expect(html).toContain("class=\"go-point white reply\"");
+    expect(html).toContain("class=\"go-point empty chosen\"");
+    expect(html).toContain("class=\"go-marker chosen\"");
+    expect(html).toContain("class=\"go-marker reply\"");
+    expect(html).toContain("class=\"go-link north black\"");
+    expect(html).toContain("class=\"go-link east black\"");
+    expect(html).toContain("aria-label=\"5 by 5 IPvGO board\"");
+    expect(html.indexOf("A5 (0,4)")).toBeLessThan(html.indexOf("A1 (0,0)"));
     expect(html).toContain("Opponent reward choice");
     expect(html).toContain("GoPower");
     expect(html).toContain("install runway");
     expect(html).toContain("favor event");
+  });
+
+  test("Go renders controlled and broken nodes without inventing another probe", () => {
+    const state = emptyState();
+    state.topics.go = {
+      status: "inProgress",
+      currentPlayer: "Black",
+      opponent: "Netburners",
+      boardSize: 5,
+      board: ["XXXXX", "X...X", "X.#.X", "X...X", "XXXXX"],
+      previousBoards: [],
+      stats: [],
+    };
+
+    const html = TABS.go.render(state);
+    expect(html).toContain("go-point empty territory-black");
+    expect(html).toContain("go-point dead");
+    expect(html).toContain("go-link north black");
+    expect(html).toContain("C3 (2,2) - no signal");
   });
 
   test("Side shows compact status plus the latest report-once replay", () => {

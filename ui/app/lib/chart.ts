@@ -70,7 +70,7 @@ export function drawSeries(
   const sy = (v: number) => h - pad.b - (v / y1) * (h - pad.t - pad.b);
   geoms.set(canvas, { series: drawn, sx, sy, t0: base, pad, w, h, fmtY });
 
-  ctx.font = "11px system-ui, sans-serif";
+  ctx.font = '11px JetBrainsMono, "Courier New", monospace';
   for (let i = 0; i <= 4; i++) {
     const v = (y1 / 4) * i;
     const y = sy(v);

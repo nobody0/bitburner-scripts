@@ -7,7 +7,17 @@ import type { Tab } from "./index.ts";
 
 /** Go (IPvGO). Game coordinates are column-major, with y increasing upward. */
 
-const CELL_CLASS: Record<string, string> = { X: "black", O: "white", ".": "empty", "#": "dead" };
+type PointColor = "black" | "white";
+
+const POINT_CLASS: Record<string, string> = { X: "black", O: "white", ".": "empty", "#": "dead" };
+const STONE_COLOR: Partial<Record<string, PointColor>> = { X: "black", O: "white" };
+const DIRECTIONS = [
+  { name: "north", dx: 0, dy: 1 },
+  { name: "east", dx: 1, dy: 0 },
+  { name: "south", dx: 0, dy: -1 },
+  { name: "west", dx: -1, dy: 0 },
+] as const;
+const GO_COLUMNS = "ABCDEFGHJKLMNOPQRST";
 
 function coordinate(x: number | null, y: number | null): string {
   return x === null || y === null ? "pass" : `${x},${y}`;
@@ -22,11 +32,91 @@ function predictions(move: GoMove): string {
     .join("; ");
 }
 
+function pointAt(board: readonly string[], x: number, y: number): string {
+  return board[x]?.[y] ?? "#";
+}
+
+/** Assign empty regions only when every bordering stone has one colour. This
+ * mirrors the useful part of IPvGO's controlled-space presentation without
+ * asking telemetry for another probe: it is derived from the exact board the
+ * viewer already holds. */
+function territoryOwners(board: readonly string[]): Map<string, PointColor> {
+  const owners = new Map<string, PointColor>();
+  const visited = new Set<string>();
+  const size = board.length;
+
+  for (let x = 0; x < size; x++) {
+    for (let y = 0; y < size; y++) {
+      const startKey = `${x}:${y}`;
+      if (visited.has(startKey) || pointAt(board, x, y) !== ".") continue;
+
+      const region: [number, number][] = [];
+      const border = new Set<PointColor>();
+      const queue: [number, number][] = [[x, y]];
+      visited.add(startKey);
+
+      for (let cursor = 0; cursor < queue.length; cursor++) {
+        const [qx, qy] = queue[cursor]!;
+        region.push([qx, qy]);
+        for (const direction of DIRECTIONS) {
+          const nx = qx + direction.dx;
+          const ny = qy + direction.dy;
+          if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+          const neighbor = pointAt(board, nx, ny);
+          const stone = STONE_COLOR[neighbor];
+          if (stone) {
+            border.add(stone);
+            continue;
+          }
+          if (neighbor !== ".") continue;
+          const key = `${nx}:${ny}`;
+          if (visited.has(key)) continue;
+          visited.add(key);
+          queue.push([nx, ny]);
+        }
+      }
+
+      if (border.size !== 1) continue;
+      const owner = border.values().next().value;
+      if (owner) for (const [rx, ry] of region) owners.set(`${rx}:${ry}`, owner);
+    }
+  }
+  return owners;
+}
+
+function linkColor(
+  board: readonly string[],
+  owners: ReadonlyMap<string, PointColor>,
+  x: number,
+  y: number,
+  dx: number,
+  dy: number,
+): PointColor | undefined {
+  const size = board.length;
+  const nx = x + dx;
+  const ny = y + dy;
+  if (nx < 0 || ny < 0 || nx >= size || ny >= size) return undefined;
+
+  const point = pointAt(board, x, y);
+  const neighbor = pointAt(board, nx, ny);
+  if (neighbor === "#") return undefined;
+  const stone = STONE_COLOR[point];
+  // A stone's network reaches allies and open liberties. The opposite half of
+  // a contested empty node may use the other colour, as it does in the game.
+  if (stone && (neighbor === point || neighbor === ".")) return stone;
+
+  const owner = point === "." ? owners.get(`${x}:${y}`) : undefined;
+  if (!owner) return undefined;
+  const neighborOwner = STONE_COLOR[neighbor] ?? (neighbor === "." ? owners.get(`${nx}:${ny}`) : undefined);
+  return neighborOwner === owner ? owner : undefined;
+}
+
 function gridMarkup(
   board: string[],
   chosen: { x: number; y: number } | undefined,
   actual: Extract<GoResponse, { type: "move" }> | undefined,
 ): string {
+  const owners = territoryOwners(board);
   const cells = Array.from({ length: board.length }, (_, row) => board.length - 1 - row)
     .map((y) => board.map((column, x) => {
       const cell = column[y] ?? "#";
@@ -34,13 +124,26 @@ function gridMarkup(
         chosen?.x === x && chosen.y === y ? "chosen" : "",
         actual?.x === x && actual.y === y ? "reply" : "",
       ].filter(Boolean);
-      const title = [`${x},${y}`, flags.includes("chosen") ? "our selected move" : "", flags.includes("reply") ? "observed reply" : ""]
+      const coordinateLabel = `${GO_COLUMNS[x] ?? x}${y + 1} (${x},${y})`;
+      const pointLabel = cell === "X" ? "black stone" : cell === "O" ? "white stone" : cell === "." ? "empty node" : "no signal";
+      const title = [coordinateLabel, pointLabel, flags.includes("chosen") ? "our selected move" : "", flags.includes("reply") ? "observed reply" : ""]
         .filter(Boolean)
         .join(" - ");
-      return `<span class="cell ${CELL_CLASS[cell] ?? "empty"} ${flags.join(" ")}" title="${esc(title)}"></span>`;
+      const owner = cell === "." ? owners.get(`${x}:${y}`) : undefined;
+      const links = DIRECTIONS.map((direction) => {
+        const color = linkColor(board, owners, x, y, direction.dx, direction.dy);
+        return color ? `<span class="go-link ${direction.name} ${color}" aria-hidden="true"></span>` : "";
+      }).join("");
+      const markers =
+        (flags.includes("chosen") ? `<span class="go-marker chosen" aria-hidden="true"></span>` : "") +
+        (flags.includes("reply") ? `<span class="go-marker reply" aria-hidden="true"></span>` : "");
+      const classes = ["go-point", POINT_CLASS[cell] ?? "empty", owner ? `territory-${owner}` : "", ...flags]
+        .filter(Boolean)
+        .join(" ");
+      return `<span class="${classes}" role="img" aria-label="${esc(title)}" title="${esc(title)}">${links}<span class="go-core" aria-hidden="true"></span>${markers}</span>`;
     }).join(""))
     .join("");
-  return `<div class="goboard" style="grid-template-columns:repeat(${board.length},1fr)">${cells}</div>`;
+  return `<div class="goboard" role="group" aria-label="${board.length} by ${board.length} IPvGO board" style="grid-template-columns:repeat(${board.length},1fr)">${cells}</div>`;
 }
 
 function boardMarkup(g: GoState): string {
@@ -50,9 +153,9 @@ function boardMarkup(g: GoState): string {
   const actual = response?.type === "move" ? response : undefined;
   const input = g.plan?.input.board;
   const comparison = input
-    ? `<div class="gocompare"><div><h3>decision input</h3>${gridMarkup(input, chosen, undefined)}</div>` +
-      `<div><h3>after turn</h3>${gridMarkup(g.board, chosen, actual)}</div></div>`
-    : gridMarkup(g.board, chosen, actual);
+    ? `<div class="gocompare"><div class="go-snapshot input"><h3>decision input</h3>${gridMarkup(input, chosen, undefined)}</div>` +
+      `<div class="go-snapshot current"><h3>after turn</h3>${gridMarkup(g.board, chosen, actual)}</div></div>`
+    : `<div class="go-snapshot current">${gridMarkup(g.board, chosen, actual)}</div>`;
   const legend = `<div class="barkey"><span class="go-mark chosen"></span>selected move` +
     `<span class="go-mark reply"></span>observed reply</div>`;
   const territory = g.territory
@@ -184,7 +287,7 @@ export const goTab: Tab = {
       card("Subnet", summary + boardMarkup(g)) +
       card("Latest turn", decisionMarkup(g)) +
       `</div>` +
-      `<div class="col wide">` +
+      `<div class="col go-analysis">` +
       card("Candidate analysis", rankingMarkup(g)) +
       card("Opponent reward choice", opponentMarkup(g)) +
       card("Record", stats) +
