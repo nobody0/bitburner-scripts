@@ -828,6 +828,53 @@ horizon** (`NFG_MIN_PAYBACK_SEC`) — a +1% level repays ~1% of the remainder,
 so a minutes-long remainder drains nothing. Unknown horizons keep the full
 drain.
 
+## Profile ledger, fourth pass (`30972c9` → `ac65d1b`, 2026-08-10)
+
+The money pass: the two-loop money model, the arbitration/horizon audit, and
+the fixes both surfaced. Runs under `runs/final6/`.
+
+**The two-loop money model, now encoded.** BitNodes: nothing survives the
+node — installs are suppressed when the remaining node time cannot repay the
+install overhead (`INSTALL_MIN_PAYBACK_SEC`). Installs: only augmentations
+survive, and every queued purchase escalates later ones 1.9x — so purchases
+are END-LOADED: no mid-run buying, no mid-run aug-fund reserve; the money
+compounds in investments; at the endgame the final sweep converts the whole
+bankroll (plus the stock book's liquidation value) dearest-first. Package
+completion and `shouldRecommendInstall` are REP-based: the frontier moves to
+the next package while finished ones stay unbought until the sweep.
+
+**Audit fixes** (details in the commit messages of `a83d40f`/`ac65d1b`):
+corp's unspendable standing $150b reserve removed; career training runs
+under a standing 30s-window reserve with a real admission bar; factions reads
+per-claim grants (aug/graft/donation/travel) and verifies the fund before a
+purchase; donations post at their own 70 band; install-lifetime horizons
+never fall back above the node's (`installHorizonSec`); a
+`progression:imminent-install` reserve (50) brakes investment bands when the
+reset is forecast within `IMMINENT_INSTALL_SEC`; `HOME_RAM_BUDGET` is finally
+consumed; the arbiter's `RETURN_TOLERANCE` band makes "similar payback →
+bigger earner" real while fast payback stays the primary key.
+
+**Fixes the sweep itself surfaced:** the backdoor service head-of-line block
+(a $250m opener for a far faction queued ahead of CSEC's ready backdoor);
+dodge-stub EXEC failures now typed (`DodgeExecError`) and retryable instead
+of silently latching one-attempt actions — and they feed the same starvation
+signal probes use, so the demand-driven fleet reserve serves ACTIONS too;
+reported horizons are 2-significant-figure coarse so forecast ticking cannot
+re-publish digests every second.
+
+| profile | third pass | fourth pass |
+|---|---|---|
+| factions-join | 88.1m/93m/88.1m | **85.1m/90m/85.1m** |
+| factions-donation | 2.0m | **1.5m** (donations at 70, end-loaded flow) |
+| factions-install / hacking-early / hacking-only / career-karma / bn1-speedrun / stock-only | — | unchanged (46.8s / 16.1m / 44.0m / ~8.9m / 2.44–2.46h / 5.95h-NOT-5.26h) |
+| stock-manipulation | NOT/NOT/5.25h | NOT/NOT/5.79h — decision-timing noise on the known-volatile pair |
+
+**Losing A/B, recorded:** an always-on small-home fleet reserve (vs the
+demand-driven latch) — hacking-early 16.1m → 20.6m, bn1 +3%; only
+factions-join liked it (−3.4%). The demand-driven latch stays: it BECOMES the
+dedicated dodge host exactly when starvation is observed, now for feature
+actions as well as probes.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
