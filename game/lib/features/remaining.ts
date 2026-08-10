@@ -1112,10 +1112,12 @@ const go: FeatureDriver = {
 const stanek: FeatureDriver = {
   id: "stanek",
   // Normal charging takes 1,000 ms; stored cycles shorten the API delay to
-  // 200 ms. A one-second cadence never overlaps a normal charge and avoids
-  // leaving the Gift idle for the old 30-second review interval.
+  // 200 ms. This driver is awaited in the controller's serial feature loop,
+  // so charging on that same one-second cadence would monopolise the loop and
+  // starve the 200 ms hacking dispatcher. Thirty seconds is a policy tradeoff:
+  // it charges opportunistically without making a long Netscript call hot.
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L45-L54
-  everyMs: 1_000,
+  everyMs: 30_000,
   requires: "stanek",
   async tick(ctx: DriverContext) {
     const topic = ctx.state.topics.stanek;

@@ -652,7 +652,7 @@ describe("feature drivers", () => {
     }
   });
 
-  test("only hacking, stock, and Stanek run faster than the 5 s floor, each for a reason", () => {
+  test("only hacking and stock run faster than the 5 s floor, each for a reason", () => {
     // Batch ops land on 200ms slots, so a slower hacking cadence would miss them.
     //
     // `stock` is the one other exception, at 4 s, and it is not a preference: the
@@ -667,11 +667,14 @@ describe("feature drivers", () => {
     const stock = FEATURE_DRIVERS.find((d) => d.id === "stock")!;
     expect(stock.everyMs).toBe(4_000);
     expect(stock.everyMs).toBeLessThan(MS_PER_TICK);
-    // A normal Stanek charge takes 1 s (200 ms while consuming stored cycles),
-    // so reviewing every 5 s would leave the Gift unnecessarily idle.
+    // A normal Stanek charge takes 1 s (200 ms while consuming stored cycles).
+    // The controller awaits feature drivers serially, so it must remain a
+    // deliberately cold action rather than occupying every hot-path pass.
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Stanek.ts#L45-L54
     const stanek = FEATURE_DRIVERS.find((d) => d.id === "stanek")!;
-    expect(stanek.everyMs).toBe(1_000);
+    // chargeFragment itself awaits for 1 s, and feature ticks are serial. Keep
+    // it off the hot path so Stanek cannot throttle the 200 ms dispatcher.
+    expect(stanek.everyMs).toBe(30_000);
     for (const driver of FEATURE_DRIVERS) {
       if (driver.id === "hacking" || driver.id === "stock" || driver.id === "stanek") continue;
       expect(driver.everyMs, `${driver.id} is unexpectedly hot`).toBeGreaterThanOrEqual(5_000);
