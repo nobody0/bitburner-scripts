@@ -224,14 +224,14 @@ describe("solveCycle", () => {
 });
 
 describe("solvePrep", () => {
-  test("next-wave demand reserves one phase, never both phases statically", () => {
+  test("timed wave demand includes every concurrently in-flight prep phase", () => {
     const base = {
       ramSec: 1,
       weakenTimeS: 1,
       totalRamGb: 1,
       prepped: false,
     };
-    expect(prepWaveRamGb({ ...base, weaken1Threads: 10, growThreads: 20, weaken2Threads: 3 })).toBe(17.5);
+    expect(prepWaveRamGb({ ...base, weaken1Threads: 10, growThreads: 20, weaken2Threads: 3 })).toBe(57.75);
     expect(prepWaveRamGb({ ...base, weaken1Threads: 0, growThreads: 20, weaken2Threads: 3 })).toBe(40.25);
     expect(prepWaveRamGb({ ...base, weaken1Threads: 0, growThreads: 0, weaken2Threads: 0, prepped: true })).toBe(0);
   });
@@ -265,7 +265,7 @@ describe("solvePrep", () => {
     expect(prepTimeSeconds(done, 100)).toBe(0);
 
     const cold = solvePrep(ctx, JOESGUNS, { hackDifficulty: 42, moneyAvailable: 1 });
-    expect(prepTimeSeconds(cold, 1e9)).toBeCloseTo(cold.weakenTimeS + cold.growWeakenTimeS!, 10); // sequential phase floors
+    expect(prepTimeSeconds(cold, 1e9)).toBeCloseTo(Math.max(cold.weakenTimeS, cold.growWeakenTimeS!), 10);
     const fixedFleet = prepTimeSeconds(cold, 1);
     expect(fixedFleet).toBeGreaterThan(cold.weakenTimeS); // RAM-bound
     const growingFleet = prepTimeSeconds(cold, 1, 0.001);

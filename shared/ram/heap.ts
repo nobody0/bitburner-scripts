@@ -149,6 +149,21 @@ export class Heap {
     return threads;
   }
 
+  /** Largest effect-thread request one host can hold. Prep grow, like hack,
+   * must be one Netscript call: splitting grow makes later same-tick calls
+   * observe the security raised by earlier ones. */
+  contiguousCapacity(blockSize: number, coreAware = false): number {
+    let best = 0;
+    for (const host of this.#hosts.values()) {
+      const realThreads = Math.floor(this.#free(host) / blockSize);
+      const effectThreads = coreAware
+        ? Math.floor(realThreads * coreEffect(host.cores) + 1e-12)
+        : realThreads;
+      if (effectThreads > best) best = effectThreads;
+    }
+    return best;
+  }
+
   /** Release part of a reservation. Ops of one allocation can complete
    * independently (a spread weaken lands per host), so the dispatcher frees
    * per block rather than per reservation. */
@@ -232,16 +247,16 @@ export class Heap {
       }
     }
 
-    // grow (homeFirst) is divisible, so when home is full it spreads rather
-    // than demanding one contiguous block; only hack must stay contiguous.
+    // Steady-state grow (homeFirst) is divisible and prediction folds each
+    // block separately. Prep grow asks for contiguous explicitly below.
     if (policy === "spread" || policy === "homeFirst") {
       if (coreAware) {
         const blocks: Block[] = [];
         let remainingEffect = threads;
         // Highest cores first is the minimum-RAM allocation for a fixed grow
         // or weaken effect — but the heap's other two invariants still hold:
-        // home stays the LAST resort (grow's homeFirst and hack's contiguous
-        // fallback depend on it), and equal-core hosts keep the ascending-slab
+        // home stays the LAST resort (grow's homeFirst fallback depends on it),
+        // and equal-core hosts keep the ascending-slab
         // order so fragments are eaten before large contiguous blocks. Stable
         // hostname tie-break keeps replay exact.
         const hosts = [...this.#hosts.values()]
@@ -285,24 +300,34 @@ export class Heap {
       return remaining <= 0 ? blocks : undefined;
     }
 
-    // contiguous (and homeFirst fallback): best fit within the smallest slab
-    // that yields any fit; home scanned last.
-    let best: HeapHost | undefined;
-    let bestFree = Infinity;
-    const startSlab = Math.max(0, slabIndex(Math.max(1, wanted)) - 0);
-    for (let slab = startSlab; slab < SLABS; slab++) {
-      for (const host of this.#slabs[slab]!) {
+    // Contiguous: one call on one host. For a core-aware prep grow request
+    // compare the REAL RAM each host needs; among equal costs retain ordinary
+    // best-fit. Home remains the fallback so a remote block that can do the
+    // job does not consume controller headroom.
+    const choose = (hosts: Iterable<HeapHost>): { host: HeapHost; realThreads: number } | undefined => {
+      let best: { host: HeapHost; realThreads: number; gb: number; free: number } | undefined;
+      for (const host of hosts) {
         const free = this.#free(host, tentative);
-        if (free >= wanted && free < bestFree) {
-          best = host;
-          bestFree = free;
+        const realThreads = coreAware
+          ? Math.ceil(threads / coreEffect(host.cores) - 1e-12)
+          : threads;
+        const gb = realThreads * blockSize;
+        if (free < gb) continue;
+        if (
+          !best ||
+          gb < best.gb ||
+          (gb === best.gb && free < best.free) ||
+          (gb === best.gb && free === best.free && host.hostname < best.host.hostname)
+        ) {
+          best = { host, realThreads, gb, free };
         }
       }
-      if (best) break;
-    }
-    if (!best && this.#home && this.#free(this.#home, tentative) >= wanted) best = this.#home;
-    if (!best) return undefined;
-    return [{ hostname: best.hostname, threads, cores: best.cores }];
+      return best ? { host: best.host, realThreads: best.realThreads } : undefined;
+    };
+    const remote = choose([...this.#hosts.values()].filter((host) => host !== this.#home));
+    const picked = remote ?? (this.#home ? choose([this.#home]) : undefined);
+    if (!picked) return undefined;
+    return [{ hostname: picked.host.hostname, threads: picked.realThreads, cores: picked.host.cores }];
   }
 
   #commit(blocks: Block[], blockSize: number): Reservation {

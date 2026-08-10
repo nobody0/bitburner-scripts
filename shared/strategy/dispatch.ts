@@ -7,7 +7,7 @@ import {
   weakenTimeSeconds,
   type HackContext,
 } from "../formulas.ts";
-import { Heap } from "../ram/heap.ts";
+import { Heap, type Reservation } from "../ram/heap.ts";
 import type { Action, CompletionEvent, ServerView, StockInfluence, WorldView } from "../world.ts";
 import { WORKER_RAM } from "../world.ts";
 import type { SegmentKind, TargetDirective } from "./directive.ts";
@@ -49,18 +49,22 @@ import {
  * Source (additionalMsec is added to each duration at invocation): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L537-L561 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L266-L286 */
 
 export const SPACER_MS = 200;
+/** Distinct prep effects use the same proven timer guard as farm effects. This
+ * is landing precision, not a minimum time for staying on a target. */
+export const PREP_ORDER_MS = SPACER_MS;
 export const INTERVAL_MS = 4 * SPACER_MS; // == targeting's BATCH_INTERVAL_S · 1000
 /** Cap launches per pass so one scheduler call stays inside the tick budget. */
 export const MAX_BATCHES_PER_PASS = 8;
 /** Shotgun emits a whole wave per pass — every batch lands the same engine
  * tick, so there is no interleave to protect, only the pump budget. */
 export const SHOTGUN_BATCHES_PER_PASS = 256;
-/** Raised from 6: with long-horizon prep the segment is ACTIVE for hours, and
- * a 6-op wave left most of its demand-sized reservation idle while also blocking the
- * idle-segment spillover — measured as the bn1-speedrun utilization drop
- * (90% → ~75%). The budget still bounds each wave; this only stops the op
- * count from being the binding constraint. */
-export const MAX_PREP_OPS_PER_PASS = 24;
+/** Up to 24 source slabs per prep phase. A correct distributed grow needs an
+ * atomic grow plus its own interleaved weaken, hence two calls per slab; using
+ * the old 24-CALL ceiling would halve grow concurrency merely because the
+ * cover became explicit. W1 may use the whole call ceiling for fragments,
+ * and RAM remains the primary bound in either phase. */
+export const MAX_PREP_SLABS_PER_PASS = 24;
+export const MAX_PREP_OPS_PER_PASS = 2 * MAX_PREP_SLABS_PER_PASS;
 /** Pooled workers idle out after this long (worker.ts IDLE_MS — keep the two
  * in agreement): pooling is only worth it when the batch launch period fits
  * inside it, so a worker's next job arrives before its process exits. */
@@ -616,11 +620,11 @@ function allocFor(
   return {
     blockSize: WORKER_RAM[kind],
     threads,
-    // hack must land as one call; grow prefers home for its core bonus and may
-    // split when no single host fits; weaken is exactly additive and eats
-    // fragments. Split grow calls are folded separately by prediction because
-    // upstream's additive $1/thread term is per call. Cores amplify grow and
-    // weaken through the same 1 + (cores - 1) / 16 bonus; hack has no core term.
+    // Hack must land as one call; steady-state grow prefers home for its core
+    // bonus and may spread when no single host fits. Prediction folds those
+    // blocks separately. Prep grow uses an explicit contiguous request. Weaken
+    // is exactly additive and consumes fragments. Cores amplify grow/weaken;
+    // hack has no core term.
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/formulas/grow.ts#L20-L28 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/ServerHelpers.ts#L287-L295
     policy: kind === "hack" ? "contiguous" : kind === "grow" ? "homeFirst" : "spread",
     coreAware: kind !== "hack",
@@ -909,32 +913,30 @@ function launchPrepWave(
   // so a short gets nothing from this path.
   const growInfluences = view.stockInfluence?.[server.hostname]?.side === "long";
 
-  // Prep work is divisible, so it always spreads (a 50-thread grow must not
-  // demand one contiguous block) and is sized to what the budget, the fleet
-  // and the per-pass op cap can actually place. Returns REAL threads launched
-  // (post core adjustment), because security fortify scales with real threads.
-  // Prep ops carry no additionalMsec: they land at launch + duration at the
-  // target's CURRENT security. Recorded on the ledger so the landing-state
-  // prediction sees prep money/security arriving.
-  const prepLanding = {
+  // Weaken work is divisible and spreads across slabs. Grow is deliberately
+  // different: one grow wave is ONE call on ONE host. Same-landing grow calls
+  // execute sequentially, so a split grow makes every call after the first
+  // observe raised security and produce less money than the solver priced.
+  // Returns REAL threads launched (post core adjustment), because grow's
+  // security fortify scales with real threads.
+  // W1 lands at its native duration. The grow phase below uses padding to
+  // alternate G -> W2 -> G -> W2, so every atomic grow observes min security.
+  // Every landing is recorded so prediction sees the whole prep pipeline.
+  const nativeLanding = {
     weaken: view.time + weakenTimeSeconds(ctx, server.hackDifficulty, server.requiredHackingSkill) * 1_000,
     grow: view.time + growTimeSeconds(ctx, server.hackDifficulty, server.requiredHackingSkill) * 1_000,
   };
 
   let ops = 0;
   let budgetRemainingGb = budgetGb;
-  const launchKind = (kind: "weaken" | "grow", wantedThreads: number, opCap: number): number => {
-    if (wantedThreads < 1 || ops >= opCap) return 0;
-    const affordable = Math.floor(budgetRemainingGb / WORKER_RAM[kind]);
-    const threads = Math.min(wantedThreads, affordable, memory.heap.capacity(WORKER_RAM[kind]));
-    if (threads < 1) return 0;
-    const allocation = memory.heap.allocate({ blockSize: WORKER_RAM[kind], threads, policy: "spread", coreAware: true });
-    if (!allocation.ok) {
-      memory.stats.allocFails++;
-      return 0;
-    }
-    let realThreads = 0;
-    for (const block of allocation.reservation.blocks) {
+  const emitReservation = (
+    kind: "weaken" | "grow",
+    reservation: Reservation,
+    opCap: number,
+    landing = nativeLanding[kind],
+  ): number => {
+    let effectThreads = 0;
+    for (const block of reservation.blocks) {
       if (ops >= opCap) {
         // Never launched -> never completes -> free it now (the rewrite's leak).
         memory.heap.free(block.hostname, block.threads * WORKER_RAM[kind]);
@@ -947,6 +949,8 @@ function launchPrepWave(
         source: block.hostname,
         threads: block.threads,
         opId,
+        phase: "prep",
+        ...(landing > nativeLanding[kind] ? { additionalMsec: landing - nativeLanding[kind] } : {}),
         ...(kind === "grow" && growInfluences ? { stock: true } : {}),
       });
       memory.tracked.set(opId, {
@@ -956,7 +960,7 @@ function launchPrepWave(
         segment,
         gb: block.threads * WORKER_RAM[kind],
         wave: true,
-        landing: prepLanding[kind],
+        landing,
         effectThreads: block.threads * coreEffect(memory.heap.host(block.hostname)?.cores ?? 1),
       });
       memory.inFlight[kind]++;
@@ -965,27 +969,143 @@ function launchPrepWave(
       if (kind === "grow" && growInfluences) memory.stats.stockOps++;
       memory.segmentGb[segment] += block.threads * WORKER_RAM[kind];
       memory.prepInFlight.set(server.hostname, (memory.prepInFlight.get(server.hostname) ?? 0) + 1);
-      realThreads += block.threads;
+      effectThreads += block.threads * coreEffect(block.cores);
       budgetRemainingGb -= block.threads * WORKER_RAM[kind];
       ops++;
     }
-    return realThreads;
+    return effectThreads;
+  };
+  const launchKind = (kind: "weaken" | "grow", wantedThreads: number, opCap: number): number => {
+    if (wantedThreads < 1 || ops >= opCap) return 0;
+    const affordable = Math.floor(budgetRemainingGb / WORKER_RAM[kind]);
+    const threads = Math.min(wantedThreads, affordable, memory.heap.capacity(WORKER_RAM[kind]));
+    if (threads < 1) return 0;
+    const allocation = memory.heap.allocate({
+      blockSize: WORKER_RAM[kind],
+      threads,
+      policy: "spread",
+      coreAware: true,
+    });
+    if (!allocation.ok) {
+      memory.stats.allocFails++;
+      return 0;
+    }
+    return emitReservation(kind, allocation.reservation, opCap);
   };
 
-  // The wave is W1 alone (grows at high security are weak, so security comes
-  // first), or G and its W2 cover TOGETHER. Launching the W2 threads as extra
+  // W1, G and W2 may share one in-flight wave; padding, not launch time,
+  // makes security land first. If the complete W1 cannot be reserved, launch
+  // only the partial weaken and defer every grow rather than grow at high
+  // security. Launching the W2 threads as extra
   // grows — the old behaviour — over-grew the target and left the grow's
   // security for the NEXT wave's W1 to clean up: self-correcting, but a whole
   // extra weaken-time of prep latency and wasted grow RAM. The cover is sized
   // to the grow that ACTUALLY launched (op cap and budget truncate the plan),
-  // with one op slot held back so the grow's spread blocks cannot starve it;
-  // with no additionalMsec the weaken still lands last (4x vs grow's 3.2x).
+  // with one op slot held back so the grow cannot starve its weaken cover.
   if (plan.weaken1Threads > 0) {
-    launchKind("weaken", plan.weaken1Threads, MAX_PREP_OPS_PER_PASS);
-    return;
+    const weakened = launchKind("weaken", plan.weaken1Threads, MAX_PREP_OPS_PER_PASS);
+    if (weakened + 1e-9 < plan.weaken1Threads) return;
   }
-  const realGrow = launchKind("grow", plan.growThreads, MAX_PREP_OPS_PER_PASS - 1);
-  if (realGrow < 1) return;
-  const cover = Math.ceil((0.004 * realGrow) / weakenEffect(ctx, 1, 1));
-  launchKind("weaken", cover, MAX_PREP_OPS_PER_PASS);
+
+  interface GrowWaveReservation {
+    grow: Reservation;
+    weaken: Reservation;
+    effectGrowThreads: number;
+  }
+  let firstGrowLanding: number;
+  if (plan.weaken1Threads > 0) {
+    firstGrowLanding = nativeLanding.weaken + PREP_ORDER_MS;
+  } else {
+    firstGrowLanding = Math.max(nativeLanding.grow, nativeLanding.weaken - PREP_ORDER_MS);
+  }
+  const firstWeakenLanding = Math.max(nativeLanding.weaken, firstGrowLanding + PREP_ORDER_MS);
+  const pairLandings = (index: number): { grow: number; weaken: number } => ({
+    grow: index === 0 ? firstGrowLanding : firstWeakenLanding + (2 * index - 1) * PREP_ORDER_MS,
+    weaken: index === 0 ? firstWeakenLanding : firstWeakenLanding + 2 * index * PREP_ORDER_MS,
+  });
+  const reserveGrowWave = (
+    effectThreads: number,
+    maxGb: number,
+    maxOps: number,
+  ): GrowWaveReservation | undefined => {
+    if (effectThreads < 1) return undefined;
+    const growResult = memory.heap.allocate({
+      blockSize: WORKER_RAM.grow,
+      threads: effectThreads,
+      policy: "contiguous",
+      coreAware: true,
+    });
+    if (!growResult.ok) return undefined;
+    const grow = growResult.reservation;
+    const growBlock = grow.blocks[0];
+    const realGrowThreads = growBlock?.threads ?? 0;
+    const effectGrowThreads = realGrowThreads * coreEffect(growBlock?.cores ?? 1);
+    const coverEffectThreads = Math.ceil((0.004 * realGrowThreads) / weakenEffect(ctx, 1, 1));
+    const weakenResult = memory.heap.allocate({
+      blockSize: WORKER_RAM.weaken,
+      threads: coverEffectThreads,
+      policy: "spread",
+      coreAware: true,
+    });
+    const weaken = weakenResult.ok ? weakenResult.reservation : undefined;
+    if (
+      !weaken ||
+      weaken.blocks.length + 1 > maxOps ||
+      grow.gb + weaken.gb > maxGb + 1e-9
+    ) {
+      if (weaken) weaken.release();
+      grow.release();
+      return undefined;
+    }
+    return { grow, weaken, effectGrowThreads };
+  };
+
+  const pairs: GrowWaveReservation[] = [];
+  let remainingEffectThreads = plan.growThreads;
+  let reservedGb = 0;
+  let reservedOps = 0;
+  while (remainingEffectThreads >= 1 && reservedOps + 2 <= MAX_PREP_OPS_PER_PASS) {
+    // Find the largest safe atomic pair on the remaining heap. Feasibility is
+    // monotone for a fixed remaining topology: a smaller grow needs no more
+    // contiguous RAM and no more weaken cover. Trial reservations are
+    // released exactly before the next probe.
+    let low = 1;
+    let high = Math.min(
+      Math.ceil(remainingEffectThreads),
+      memory.heap.contiguousCapacity(WORKER_RAM.grow, true),
+    );
+    let best = 0;
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const trial = reserveGrowWave(mid, budgetRemainingGb - reservedGb, MAX_PREP_OPS_PER_PASS - reservedOps);
+      if (trial) {
+        best = mid;
+        trial.weaken.release();
+        trial.grow.release();
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    if (best < 1) break;
+    const pair = reserveGrowWave(best, budgetRemainingGb - reservedGb, MAX_PREP_OPS_PER_PASS - reservedOps);
+    if (!pair) break;
+    pairs.push(pair);
+    reservedGb += pair.grow.gb + pair.weaken.gb;
+    reservedOps += pair.grow.blocks.length + pair.weaken.blocks.length;
+    remainingEffectThreads -= pair.effectGrowThreads;
+  }
+  if (pairs.length === 0) return;
+
+  // Each grow is one call, but the fleet can carry several pairs at once.
+  // Alternate their landings so pair i's weaken has restored min security
+  // before pair i+1 grows. This is the distributed/slab-friendly equivalent
+  // of one huge atomic grow and avoids the 8 GB-home utilization cliff.
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i]!;
+    const { grow: growLanding, weaken: weakenLanding } = pairLandings(i);
+    // Cover first in launch order; landing order is still G -> W2.
+    emitReservation("weaken", pair.weaken, MAX_PREP_OPS_PER_PASS, weakenLanding);
+    emitReservation("grow", pair.grow, MAX_PREP_OPS_PER_PASS, growLanding);
+  }
 }

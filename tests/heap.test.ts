@@ -23,6 +23,30 @@ describe("Heap", () => {
     expect(result.reservation.blocks[0]!.hostname).toBe("foodnstuff");
   });
 
+  test("core-aware contiguous grow stays one call and uses real host cores", () => {
+    const heap = new Heap();
+    heap.upsert("home", 64, 0, 8, 0);
+    heap.upsert("quad", 64, 0, 4, 0);
+    heap.upsert("one-core", 64, 0, 1, 0);
+    const result = heap.allocate({ blockSize: 1.75, threads: 34, policy: "contiguous", coreAware: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    // quad needs ceil(34 / 1.1875) = 29 real threads. The one-core host
+    // needs 34, and home remains the fallback despite its stronger cores.
+    expect(result.reservation.blocks).toEqual([{ hostname: "quad", threads: 29, cores: 4 }]);
+    expect(heap.contiguousCapacity(1.75, true)).toBeGreaterThanOrEqual(34);
+  });
+
+  test("core-aware contiguous can fit on home when raw effect threads cannot", () => {
+    const heap = new Heap();
+    heap.upsert("home", 64, 0, 8, 0);
+    heap.upsert("small", 32, 0, 1, 0);
+    const result = heap.allocate({ blockSize: 1.75, threads: 40, policy: "contiguous", coreAware: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("unreachable");
+    expect(result.reservation.blocks).toEqual([{ hostname: "home", threads: 28, cores: 8 }]);
+  });
+
   test("homeFirst prefers home while it fits, then falls back", () => {
     const heap = makeFleet();
     const onHome = heap.allocate({ blockSize: 1.75, threads: 10, policy: "homeFirst" }); // 17.5 <= 32-8

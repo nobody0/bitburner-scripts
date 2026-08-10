@@ -94,6 +94,10 @@ export interface HgwAction {
   /** Extra landing delay for HWGW alignment: the op completes at
    * launch + duration + additionalMsec (both worlds honor it identically). */
   additionalMsec?: number;
+  /** Preparation pipeline rather than a steady-state farm batch. Prep may
+   * also carry landing padding, so delay presence alone cannot distinguish
+   * the two. */
+  phase?: "prep";
   /** Pass `{stock: true}` so this op moves the target organization's share
    *  price. Set on grows for a long and hacks for a short, never both. */
   stock?: boolean;

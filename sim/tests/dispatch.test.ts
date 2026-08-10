@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { SPACER_MS, type DispatchOptions } from "../../shared/strategy/dispatch.ts";
+import { PREP_ORDER_MS, SPACER_MS, type DispatchOptions } from "../../shared/strategy/dispatch.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
 import { PREPPED_MONEY_FRACTION, PREPPED_SEC_TOLERANCE, solvePrep } from "../../shared/strategy/targeting.ts";
+import { coreEffect } from "../../shared/ram/heap.ts";
 import type { Action, CompletionEvent } from "../../shared/world.ts";
 import { DEFAULT_NETWORK } from "../network.ts";
 import { SimWorld } from "../world.ts";
@@ -53,7 +54,12 @@ function harness(options: { seed?: number; homeRam?: number; plan?: DispatchOpti
       if (world.execute(action)) {
         executed++;
         launches.push({ action, at: world.clock.now() });
-        if ("additionalMsec" in action && action.additionalMsec !== undefined && action.opId !== undefined) {
+        if (
+          "additionalMsec" in action &&
+          action.additionalMsec !== undefined &&
+          action.phase !== "prep" &&
+          action.opId !== undefined
+        ) {
           batchedOps.add(action.opId);
         }
       } else if ("opId" in action && action.opId !== undefined) {
@@ -108,7 +114,8 @@ describe("HWGW dispatcher", () => {
     const landings = h.completions
       .filter((c) => c.batched)
       .sort((a, b) => a.at - b.at);
-    const hacks = landings.filter((l) => l.kind === "hack");
+    const lastLanding = landings.at(-1)?.at ?? -Infinity;
+    const hacks = landings.filter((l) => l.kind === "hack" && l.at + 3 * SPACER_MS <= lastLanding);
     expect(hacks.length).toBeGreaterThan(3);
 
     const at = (time: number, kind: string): boolean =>
@@ -126,7 +133,8 @@ describe("HWGW dispatcher", () => {
     expect(h.memory.dispatch.mode).toBe("hgw");
 
     const landings = h.completions.filter((c) => c.batched).sort((a, b) => a.at - b.at);
-    const hacks = landings.filter((l) => l.kind === "hack");
+    const lastLanding = landings.at(-1)?.at ?? -Infinity;
+    const hacks = landings.filter((l) => l.kind === "hack" && l.at + 2 * SPACER_MS <= lastLanding);
     expect(hacks.length).toBeGreaterThan(3);
     const at = (time: number, kind: string): boolean =>
       landings.some((l) => l.kind === kind && Math.abs(l.at - time) < 1e-6);
@@ -242,26 +250,112 @@ describe("prep waves", () => {
     return { world, plan, memory: () => memory };
   }
 
-  test("the grow phase launches its weaken2 cover as weakens, not extra grows", () => {
+  test("the grow phase pipelines atomic grows with weaken cover between them", () => {
     // A modest deficit (85% money) keeps the whole wave inside the per-pass
     // op cap, so the LAUNCHED thread ratio reflects the plan's G:W2 ratio
     // instead of cap truncation.
-    const { plan } = prepWorld(0.85);
+    const { world, plan } = prepWorld(0.85);
     const launch = plan(); // gate + prep wave on the (unprepped) farm target, same pass
     const farmHost = launch.directive.farm?.host;
     expect(farmHost).toBeDefined();
-    const waveOps = launch.actions.filter(
+    const actions = launch.actions.filter(
       (a): a is Extract<Action, { type: "hack" | "grow" | "weaken" }> =>
         (a.type === "grow" || a.type === "weaken" || a.type === "hack") && a.target === farmHost,
     );
-    const growThreads = waveOps.filter((a) => a.type === "grow").reduce((sum, a) => sum + a.threads, 0);
-    const weakenThreads = waveOps.filter((a) => a.type === "weaken").reduce((sum, a) => sum + a.threads, 0);
+    const waveOps = actions.map((action) => ({
+      type: action.type,
+      target: action.target,
+      source: action.source,
+      threads: action.threads,
+      landing: world.hgwDurationMs(action.type, world.servers.get(farmHost!)!) + (action.additionalMsec ?? 0),
+    }));
+    const grows = waveOps.filter((a) => a.type === "grow");
+    const weakens = waveOps.filter((a) => a.type === "weaken");
+    const growThreads = grows.reduce((sum, a) => sum + a.threads, 0);
+    const weakenThreads = weakens.reduce((sum, a) => sum + a.threads, 0);
     // At min security the wave is G + W2 TOGETHER: both kinds present, in
     // roughly the 0.004·G/weakenEffect cover ratio (well under 20%).
     expect(waveOps.some((a) => a.type === "hack")).toBe(false);
     expect(growThreads).toBeGreaterThan(0);
     expect(weakenThreads).toBeGreaterThan(0);
     expect(weakenThreads).toBeLessThan(growThreads * 0.2);
+
+    const target = world.servers.get(farmHost!)!;
+    const byLanding = new Map<number, typeof waveOps>();
+    for (const action of waveOps) {
+      const landing = action.landing;
+      const group = byLanding.get(landing) ?? [];
+      group.push(action);
+      byLanding.set(landing, group);
+    }
+    const landings = [...byLanding.entries()].sort((a, b) => a[0] - b[0]);
+    expect(landings.length % 2).toBe(0);
+    for (let i = 0; i < landings.length; i += 2) {
+      const growLanding = landings[i]![1];
+      const weakenLanding = landings[i + 1]![1];
+      // Each money step is ONE grow call. Its covering weaken(s) land before
+      // the next grow, so every grow observes minimum security.
+      expect(growLanding).toHaveLength(1);
+      expect(growLanding[0]!.type).toBe("grow");
+      expect(weakenLanding.every((action) => action.type === "weaken")).toBe(true);
+      const growSecurity = growLanding[0]!.threads * 0.004;
+      const weakenSecurity = weakenLanding.reduce(
+        (sum, action) => sum + action.threads * 0.05 * coreEffect(
+          world.servers.get(action.source)?.cpuCores ?? 1,
+        ),
+        0,
+      );
+      expect(weakenSecurity).toBeGreaterThanOrEqual(growSecurity);
+    }
+  });
+
+  test("the initial weaken spreads across slabs before any grow launches", () => {
+    const { world, plan } = prepWorld(1);
+    for (const server of world.servers.values()) {
+      if (server.hostname === "home") continue;
+      server.hackDifficulty = server.minDifficulty + 50;
+    }
+    const launch = plan();
+    const farmHost = launch.directive.farm?.host;
+    expect(farmHost).toBeDefined();
+    const prepOps = launch.actions.filter(
+      (action): action is Extract<Action, { type: "hack" | "grow" | "weaken" }> =>
+        (action.type === "grow" || action.type === "weaken" || action.type === "hack") &&
+        action.target === farmHost &&
+        action.phase === "prep",
+    );
+    expect(prepOps.some((action) => action.type === "grow")).toBe(false);
+    const weakens = prepOps.filter((action) => action.type === "weaken");
+    expect(weakens.length).toBeGreaterThan(1);
+    expect(new Set(weakens.map((action) => action.source)).size).toBeGreaterThan(1);
+    expect(new Set(weakens.map((action) => action.additionalMsec ?? 0))).toEqual(new Set([0]));
+  });
+
+  test("a complete W1 overlaps in flight and lands immediately before G and W2", () => {
+    const { world, plan } = prepWorld(0.85);
+    for (const server of world.servers.values()) {
+      if (server.hostname === "home") continue;
+      server.hackDifficulty = server.minDifficulty + 0.25;
+    }
+    const launch = plan();
+    const farmHost = launch.directive.farm!.host;
+    const target = world.servers.get(farmHost)!;
+    const prepOps = launch.actions.filter(
+      (action): action is Extract<Action, { type: "hack" | "grow" | "weaken" }> =>
+        (action.type === "grow" || action.type === "weaken" || action.type === "hack") &&
+        action.target === farmHost &&
+        action.phase === "prep",
+    );
+    const landings = prepOps
+      .map((action) => ({
+        kind: action.type,
+        at: world.hgwDurationMs(action.type, target) + (action.additionalMsec ?? 0),
+      }))
+      .sort((a, b) => a.at - b.at);
+    const instants = [...new Map(landings.map((landing) => [landing.at, landing.kind])).entries()];
+    expect(instants.slice(0, 3).map(([, kind]) => kind)).toEqual(["weaken", "grow", "weaken"]);
+    expect(instants[1]![0] - instants[0]![0]).toBe(PREP_ORDER_MS);
+    expect(instants[2]![0] - instants[1]![0]).toBe(PREP_ORDER_MS);
   });
 
   test("transient batch landings cannot start prep before the restoring op", () => {
@@ -270,7 +364,7 @@ describe("prep waves", () => {
     const farmHost = batchPass.directive.farm!.host;
     const batchOps = batchPass.actions.filter(
       (a): a is Extract<Action, { type: "hack" | "grow" | "weaken" }> =>
-        "opId" in a && a.opId !== undefined && (a as { additionalMsec?: number }).additionalMsec !== undefined,
+        "opId" in a && a.opId !== undefined && a.phase !== "prep" && a.additionalMsec !== undefined,
     );
     expect(batchOps.length).toBeGreaterThan(0);
 
@@ -293,7 +387,7 @@ describe("prep waves", () => {
       transientPass.actions.filter((a) =>
         (a.type === "grow" || a.type === "weaken") &&
         a.target === farmHost &&
-        (a as { additionalMsec?: number }).additionalMsec === undefined
+        a.phase === "prep"
       ),
     ).toHaveLength(0);
     expect(memory().dispatch.prepInFlight.get(farmHost) ?? 0).toBe(0);
@@ -305,7 +399,7 @@ describe("prep waves", () => {
       (a) =>
         (a.type === "grow" || a.type === "weaken") &&
         a.target === farmHost &&
-        (a as { additionalMsec?: number }).additionalMsec === undefined,
+        a.phase === "prep",
     );
     expect(waveOps.length).toBeGreaterThan(0);
     const inWave = memory().dispatch.prepInFlight.get(farmHost);

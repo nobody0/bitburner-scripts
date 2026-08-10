@@ -118,14 +118,13 @@ export interface PrepPlan {
   prepped: boolean;
 }
 
-/** RAM the NEXT non-overlapping prep wave can actually consume. Security is
- * removed before growth, so W1 is one wave; once security is ready, G and its
- * W2 cover form the next. Summing both phases would reserve RAM that cannot be
- * used concurrently. */
+/** RAM the next timed prep wave can consume. W1, G and W2 may all be in
+ * flight together: padding makes them land W1 -> G -> W2 even though they
+ * launched on the same controller pass. */
 export function prepWaveRamGb(plan: PrepPlan): number {
   if (plan.prepped) return 0;
-  if (plan.weaken1Threads > 0) return WORKER_RAM.weaken * plan.weaken1Threads;
-  return WORKER_RAM.grow * plan.growThreads + WORKER_RAM.weaken * plan.weaken2Threads;
+  return WORKER_RAM.weaken * (plan.weaken1Threads + plan.weaken2Threads) +
+    WORKER_RAM.grow * plan.growThreads;
 }
 
 export function isEligible(ctx: HackContext, statics: TargetStatics): boolean {
@@ -487,9 +486,10 @@ function growingRamWorkSeconds(ramSec: number, initialGb: number, growthPerSec: 
     : untilCap + (ramSec - workUntilCap) / demand;
 }
 
-/** Phase-aware prep time. W1 must land before G+W2 starts, so each phase has
- * its own latency/RAM lower bound and the two durations add. `ramGrowthPerSec`
- * is the central arbiter's observed productive growth translated into future
+/** Timed prep-wave duration. W1, G and W2 overlap in flight and padding
+ * enforces their landing order, so the latency floor is one weaken rather
+ * than two. RAM work remains the throughput bound. `ramGrowthPerSec` is the
+ * central arbiter's observed productive growth translated into future
  * executable capacity; `operationTimeScale` prices faster HGW operations
  * inside that integration rather than granting capacity growth for time the
  * faster operation did not consume. */
@@ -508,22 +508,14 @@ export function prepTimeSeconds(
     plan.growWeakenRamSec !== undefined &&
     plan.growWeakenTimeS !== undefined
   ) {
-    const weaken1DemandGb = WORKER_RAM.weaken * plan.weaken1Threads;
-    const growWeakenDemandGb = WORKER_RAM.grow * plan.growThreads + WORKER_RAM.weaken * plan.weaken2Threads;
-    const weaken1Sec = plan.weaken1Threads > 0
-      ? Math.max(
-          plan.weakenTimeS * timeScale,
-          growingRamWorkSeconds(plan.weaken1RamSec * timeScale, prepGb, growth, weaken1DemandGb),
-        )
-      : 0;
-    const secondPhaseGb = prepGb * Math.exp(growth * weaken1Sec);
-    const growWeakenSec = plan.growThreads > 0 || plan.weaken2Threads > 0
-      ? Math.max(
-          plan.growWeakenTimeS * timeScale,
-          growingRamWorkSeconds(plan.growWeakenRamSec * timeScale, secondPhaseGb, growth, growWeakenDemandGb),
-        )
-      : 0;
-    return weaken1Sec + growWeakenSec;
+    const latency = Math.max(
+      plan.weaken1Threads > 0 ? plan.weakenTimeS : 0,
+      plan.growThreads > 0 || plan.weaken2Threads > 0 ? plan.growWeakenTimeS : 0,
+    ) * timeScale;
+    return Math.max(
+      latency,
+      growingRamWorkSeconds(plan.ramSec * timeScale, prepGb, growth, plan.totalRamGb),
+    );
   }
   return Math.max(plan.weakenTimeS * timeScale, (plan.ramSec * timeScale) / prepGb);
 }
