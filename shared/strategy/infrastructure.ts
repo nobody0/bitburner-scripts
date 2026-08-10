@@ -1,4 +1,4 @@
-import { scoreInvestment, type ScoredInvestment } from "./investment.ts";
+import { coarseHorizonSec, scoreInvestment, type ScoredInvestment } from "./investment.ts";
 
 export interface HomeRamView {
   currentRam: number;
@@ -60,7 +60,7 @@ export function scoreHomeRam(view: HomeRamView): HomeRamDecision {
     worthBuying,
     why: worthBuying
       ? `${addedRam} GB adds about $${Math.round(incomePerSec).toLocaleString()}/sec and pays back in ${Math.round(scored.paybackSec)}s`
-      : `home RAM does not repay $${Math.round(view.upgradeCost).toLocaleString()} within ${Math.round(view.horizonSec)}s`,
+      : `home RAM does not repay $${Math.round(view.upgradeCost).toLocaleString()} within ${coarseHorizonSec(view.horizonSec)}s`,
   };
 }
 
@@ -79,7 +79,7 @@ export function scoreInfrastructure(option: InfrastructureOption, horizonSec: nu
     worthBuying,
     why: worthBuying
       ? `${label} adds about $${Math.round(option.incomePerSec).toLocaleString()}/sec and pays back in ${Math.round(scored.paybackSec)}s`
-      : `${label} does not repay $${Math.round(option.cost).toLocaleString()} within ${Math.round(horizon)}s`,
+      : `${label} does not repay $${Math.round(option.cost).toLocaleString()} within ${coarseHorizonSec(horizon)}s`,
   };
 }
 

@@ -24,7 +24,7 @@ import {
   productionDelta,
   productionDeltaWithAddedRamOccupied,
 } from "../../../shared/strategy/hacknet/formulas.ts";
-import { scoreInvestment } from "../../../shared/strategy/investment.ts";
+import { coarseHorizonSec, scoreInvestment } from "../../../shared/strategy/investment.ts";
 import type { NeedUrgency } from "../../../shared/strategy/needs.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge } from "../state.ts";
@@ -369,7 +369,8 @@ const driver: FeatureDriver = {
     merge(ctx.state, "hacknet", {
       plan: {
         evaluatedAt,
-        horizonSec: installHorizonSec(ctx.horizons),
+        // Coarse for the digest — the raw forecast ticks every second.
+        horizonSec: coarseHorizonSec(installHorizonSec(ctx.horizons)),
         moneyAvailable: ctx.state.topics.player?.money ?? 0,
         moneyGranted: ctx.grants.money,
         hashDollarValue,

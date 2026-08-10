@@ -1,7 +1,8 @@
 import type { NS } from "@ns";
 import type { FeatureId } from "../../../shared/features/ids.ts";
 import { grantFor, PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
-import { dodge, priceCalls } from "../dodge.ts";
+import { dodge, DodgeExecError, priceCalls } from "../dodge.ts";
+import { recordProbeSkip } from "../state.ts";
 import type { ClaimContext, DriverContext } from "./index.ts";
 
 /** The only path a feature driver may use to launch a dodge.
@@ -27,9 +28,30 @@ export async function featureDodge<T>(
   }
 
   const lease = ctx.acquireDodge(budgetGb);
-  if (!lease) return { ok: false, reason: `no host can serve a ${budgetGb.toFixed(1)}GB dodge` };
+  if (!lease) {
+    // Feed the SAME starvation signal probes use: the demand-driven fleet
+    // reserve engages on state.probeSkips, and an action dodge that cannot
+    // find a host is the identical starvation — measured: a granted
+    // action:backdoor retried silently every 10s for 30 minutes while the
+    // farm kept every block full, because only probe skips could summon the
+    // reserve.
+    recordProbeSkip(ctx.state, `action:${by}:${claimId}`, budgetGb, 0);
+    return { ok: false, reason: `no host can serve a ${budgetGb.toFixed(1)}GB dodge` };
+  }
+  delete ctx.state.probeSkips[`action:${by}:${claimId}`];
   try {
     return { ok: true, value: await dodge(ctx.ns, body, budgetGb, { host: lease.host }) };
+  } catch (error) {
+    // Exec failure = the host was not actually free (heap drift, a race with
+    // a just-launched batch). That is a RETRYABLE refusal, not an outcome of
+    // the action — one such throw used to latch a backdoor as "attempted"
+    // forever and cost a whole join. It also feeds the starvation signal so
+    // the fleet reserve can open room. Body throws keep propagating.
+    if (error instanceof DodgeExecError) {
+      recordProbeSkip(ctx.state, `action:${by}:${claimId}`, budgetGb, 0);
+      return { ok: false, reason: String(error) };
+    }
+    throw error;
   } finally {
     lease.release();
   }

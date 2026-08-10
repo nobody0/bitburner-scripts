@@ -10,13 +10,14 @@ import {
   type ScoredInfrastructure,
 } from "../../../shared/strategy/infrastructure.ts";
 import { FARM_SHARE } from "../../../shared/strategy/evaluator.ts";
+import { coarseHorizonSec } from "../../../shared/strategy/investment.ts";
 import { solveCycle } from "../../../shared/strategy/targeting.ts";
 import { PORT_OPENER_PROGRAMS, preferProgramCreation, type ProgramOption } from "../../../shared/strategy/career/programs.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
 import { DEFAULT_PLANNING_HORIZON_SEC, installHorizonSec, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { gameGlobal } from "../globals.ts";
 import { buildView, drainCompletions, initDriver, pump, type DriverState } from "../dispatch-driver.ts";
-import { merge, set, type GameState } from "../state.ts";
+import { merge, recordProbeFailure, set, type GameState } from "../state.ts";
 import { workerGlobals } from "../worker-shared.ts";
 import { isScriptDeath } from "../errors.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
@@ -389,7 +390,10 @@ async function serveBackdoorNeeds(ctx: DriverContext): Promise<void> {
     if (isScriptDeath(error)) throw error;
     backdoorAttempted.add(host);
     // No singularity access, or the connection failed. Recorded by the
-    // attempt set so we do not retry forever.
+    // attempt set so we do not retry forever — and REPORTED through the
+    // probe-failure channel: a silent latch here cost a whole join (the
+    // error was invisible for two hours of run).
+    recordProbeFailure(ctx.state, `backdoor:${host}`, error);
   } finally {
     backdoorInFlight = false;
   }
@@ -406,6 +410,13 @@ function nextBackdoorAction(ctx: Pick<ClaimContext, "board" | "state">): Backdoo
   const servers = ctx.state.topics.servers ?? {};
   const player = ctx.state.topics.player;
   if (!player) return undefined;
+  // Two-tier walk over the WHOLE board: a backdoor that is ready RIGHT NOW
+  // always beats buying another opener, and among opener purchases the
+  // lowest-port host wins (its next program is the cheapest). Returning the
+  // first opener in board order head-of-line-blocked the entire service —
+  // measured: run4theh111z's $250m SQLInject ahead of CSEC's ready backdoor
+  // for 30 minutes straight, and the join never happened.
+  let opener: BackdoorAction | undefined;
   for (const need of ctx.board.byKind.backdoor) {
     if (need.have >= need.target) continue;
     const host = need.subject;
@@ -419,13 +430,16 @@ function nextBackdoorAction(ctx: Pick<ClaimContext, "board" | "state">): Backdoo
     // fleet and BruteSSH stayed unaffordable for the rest of the run.
     if (!server.hasAdminRights) {
       if ((server.numOpenPortsRequired ?? 0) === 0) continue;
-      return { action: "port-opener", host, server };
+      if (!opener || (server.numOpenPortsRequired ?? 0) < (opener.server.numOpenPortsRequired ?? 0)) {
+        opener = { action: "port-opener", host, server };
+      }
+      continue;
     }
     // The backdoor itself DOES need the skill (and the connect chain).
     if (player.skills.hacking < (server.requiredHackingSkill ?? Infinity)) continue;
     return { action: "backdoor", host, server };
   }
-  return undefined;
+  return opener;
 }
 
 /** Darkweb port openers, cheapest first — the order the game unlocks ports in. */
@@ -629,7 +643,9 @@ export const hacking: FeatureDriver = {
           } } : {}),
           infrastructurePlan: {
             evaluatedAt: now,
-            horizonSec: usableForecastSec(ctx.horizons.node) ?? DEFAULT_PLANNING_HORIZON_SEC,
+            // Coarse for the DIGEST: the raw forecast ticks down every second
+            // and re-published one store record per second all run.
+            horizonSec: coarseHorizonSec(usableForecastSec(ctx.horizons.node) ?? DEFAULT_PLANNING_HORIZON_SEC),
             moneyAvailable: game.topics.player?.money ?? 0,
             moneyGranted: ctx.grants.money,
             incomePerSecPerGb: game.topics.farm?.moneyPerSecPerGb ?? 0,

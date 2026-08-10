@@ -83,6 +83,11 @@ export function priceCalls(ns: NS, methods: readonly string[]): number {
   return total + PRICE_MARGIN_GB;
 }
 
+/** The stub could not be exec'd at all — an INFRASTRUCTURE failure (heap
+ * drift, a race with a just-launched batch), not a game refusal. Callers may
+ * treat it as retryable; a body throw keeps its own type. */
+export class DodgeExecError extends Error {}
+
 export interface DodgeOptions {
   /** Where to run the stub. Defaults to home.
    *
@@ -136,7 +141,7 @@ export async function dodge<T>(
       if (pid === 0) await ns.sleep(0);
     }
     if (pid === 0) {
-      const error = new Error(
+      const error = new DodgeExecError(
         `failed to exec ${stubScript} on ${host} after ${EXEC_RETRIES} attempts ` +
           `— is it synced there, and is ${STUB_BASE_GB + budgetGb}GB free?`,
       );

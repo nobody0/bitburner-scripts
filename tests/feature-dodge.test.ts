@@ -36,6 +36,9 @@ function harness(grantedId = "action:join", acquire = true) {
   });
   const ctx = {
     ns,
+    // Starvation reporting writes probeSkips (see featureDodge); real
+    // GameState always carries it via initState.
+    state: { probeSkips: {} },
     grants: { money: 0, ram: 1.5, slot: false, result },
     acquireDodge: () => {
       acquired++;

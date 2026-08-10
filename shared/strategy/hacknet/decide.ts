@@ -1,4 +1,4 @@
-import { scoreInvestment } from "../investment.ts";
+import { coarseHorizonSec, scoreInvestment } from "../investment.ts";
 
 /** Hacknet purchase scheduling.
  *
@@ -171,7 +171,7 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
       why: "every upgrade loses money before the horizon ends",
       hold:
         `best option (${best.kind}) pays back in ${Number.isFinite(best.paybackSec) ? Math.round(best.paybackSec) : "never"}s ` +
-        `against ${Math.round(view.horizonSec)}s left`,
+        `against ${coarseHorizonSec(view.horizonSec)}s left`,
     };
   }
   if (best.cost > view.moneyGranted) {
