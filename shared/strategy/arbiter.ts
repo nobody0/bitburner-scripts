@@ -130,6 +130,11 @@ export const PREEMPT_MARGIN = 10;
 export const PRIORITY = {
   /** Freeze every remaining dollar after the final augmentation sweep. */
   "progression:install-freeze": 110,
+  /** The reset is FORECAST minutes away: every install-lifetime investment's
+   *  ROI window is closed, so their bands (25/45) stop being funded — while
+   *  the endgame conversion (donate 70, aug-fund 90, blocking needs 95)
+   *  still outbids this. */
+  "progression:imminent-install": 50,
   /** Money set aside to buy a planned augmentation set. */
   "factions:aug-fund": 90,
   /** Donating for reputation, once favor allows it. */
@@ -189,8 +194,13 @@ export const PRIORITY = {
   "corp:seed": 85,
   "corp:expand": 40,
   "gang:equipment": 35,
-  /** Economically interchangeable income investments compare by ROI. */
+  /** Economically interchangeable income investments compare by ROI. This is
+   *  THE shared band: hacking infrastructure, hacknet upgrades and stock
+   *  unlocks all post here so returnPerDollarSec decides between them. */
   "income:investment": 25,
+  /** Alias of income:investment kept for the table's readability — hacknet's
+   *  ordinary upgrades post at income:investment; only milestone-clearing
+   *  ones escalate to the hacknet:*-need bands. */
   "hacknet:upgrade": 25,
   "stock:position": 20,
   /** A position in a node where hacked money arrives at ZERO value — BN8's
@@ -199,6 +209,9 @@ export const PRIORITY = {
    *  must not outbid it. Still below `factions:aug-fund`: even in BN8 the money
    *  exists to become permanent multipliers. */
   "stock:sole-income": 55,
+  /** Port openers and TOR (unblock rooting/backdoors). The home/cloud RAM
+   *  purchases do NOT use this — they post at income:investment so ROI
+   *  decides; the name predates that split. */
   "hacking:infrastructure": 45,
   /** Probe RAM. Acquisition outranks spending, because a decision made on
    *  stale state is worse than a decision deferred. */
@@ -214,14 +227,26 @@ export function priorityOf(key: PriorityKey): number {
 
 /** Total ordering over claims. Fully specified — no reliance on sort stability
  * or on collection order, so the same claim set always resolves the same way. */
+/** Two returns within this relative band count as "the same growth rate" and
+ * fall through to absolute rate. Without it the ratePerSec tiebreak was
+ * unreachable — exact float equality on returnPerDollarSec never happens — so
+ * "similar payback speed, prefer the bigger earner" never fired. Outside the
+ * band the faster payback still wins outright: getting the money back sooner
+ * means reinvesting it sooner, which is worth more than a slightly larger
+ * but slower stream (a 5-minute payback at $5/s beats an hour at $6/s). */
+export const RETURN_TOLERANCE = 0.15;
+
 function compareClaims(a: Claim, b: Claim): number {
   if (b.priority !== a.priority) return b.priority - a.priority;
   const aReturn = a.returnPerDollarSec ?? 0;
   const bReturn = b.returnPerDollarSec ?? 0;
-  if (bReturn !== aReturn) return bReturn - aReturn;
+  const similar =
+    aReturn > 0 && bReturn > 0 && Math.abs(aReturn - bReturn) <= Math.max(aReturn, bReturn) * RETURN_TOLERANCE;
+  if (!similar && bReturn !== aReturn) return bReturn - aReturn;
   const aRate = a.ratePerSec ?? 0;
   const bRate = b.ratePerSec ?? 0;
   if (bRate !== aRate) return bRate - aRate;
+  if (bReturn !== aReturn) return bReturn - aReturn;
   if (a.by !== b.by) return a.by < b.by ? -1 : 1;
   return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }

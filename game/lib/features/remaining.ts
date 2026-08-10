@@ -38,6 +38,7 @@ import {
 } from "../../../shared/strategy/progression/eta.ts";
 import {
   forecastAt,
+  IMMINENT_INSTALL_SEC,
   installForecast,
   nodeForecast,
   shouldReforecast,
@@ -1691,18 +1692,15 @@ export const gangModule: FeatureModule = {
 export const corpModule: FeatureModule = {
   driver: corp,
   reset: resetWithTopic("corp"),
-  claims: (_ctx) => [
-    // The single largest money claim in the roster: $150b in BN3.
-    {
-      by: "corp",
-      id: "seed",
-      resource: "money",
-      amount: 150e9,
-      priority: PRIORITY["corp:seed"],
-      mode: "reserve",
-      why: "founding a corporation costs $150b",
-    },
-  ],
+  // NO money claim while corporation actions are unimplemented (the driver's
+  // own contract: the stage machine plans but never executes). The old $150b
+  // `corp:seed` reserve at priority 85 was doubly wrong: the corp feature only
+  // unlocks once a corporation ALREADY exists (`hasCorporation` gates it), so
+  // the claim could never fund the founding it named — and being a standing
+  // reserve it permanently starved every investment band below 85 the moment
+  // the bankroll crossed $150b. Re-post it (at `corp:seed`) the day execute()
+  // spends money.
+  claims: () => [],
   peakStepGb: STEP_GB.corp,
 };
 
@@ -1858,7 +1856,29 @@ export const progressionModule: FeatureModule = {
   refresh: progressionRefresh,
   claims: (ctx) => {
     const plan = readablePlan(ctx.state);
-    if (!plan?.installReady) return [];
+    if (!plan?.installReady) {
+      // The IMMINENT-install brake: when the install forecast says the reset
+      // is minutes away, everything with an install lifetime stops buying —
+      // its ROI window is about to close. Priority 50 sits above every
+      // investment band (25/45) and below donations (70) / the aug fund (90)
+      // / blocking needs (95), so the endgame conversion keeps its money
+      // while pservs, hacknet and positions stop. `installReady` then takes
+      // over with the full freeze at 110.
+      const installSec = usableForecastSec(ctx.horizons.install);
+      if (installSec !== undefined && installSec < IMMINENT_INSTALL_SEC) {
+        return [{
+          by: "progression",
+          id: "imminent-install",
+          resource: "money",
+          amount: ctx.state.topics.player?.money ?? 0,
+          priority: PRIORITY["progression:imminent-install"],
+          mode: "reserve",
+          divisible: true,
+          why: `install expected in ${Math.round(installSec)}s; investment ROI windows are closed`,
+        }];
+      }
+      return [];
+    }
     const claims: Claim[] = [{
       by: "progression",
       id: "install-freeze",

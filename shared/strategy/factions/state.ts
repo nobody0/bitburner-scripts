@@ -59,8 +59,13 @@ export interface FactionsView {
 
   /** Favor needed before donations unlock, from ns.getFavorToDonate(). */
   favorToDonate: number;
-  /** Money the arbiter granted this feature this tick. */
+  /** Money the arbiter granted the AUGMENTATION FUND this tick — the per-claim
+   * amount, never the feature's summed grants (a travel grant must not top up
+   * a purchase). */
   moneyGranted: number;
+  /** Money granted the graft fund, when grafting is planned. Defaults to
+   * `moneyGranted` where a caller (tests) does not distinguish. */
+  graftGranted?: number;
   /** Actual cash on hand. Planning uses this; execution still obeys the
    * arbiter's narrower `moneyGranted`. */
   moneyAvailable: number;

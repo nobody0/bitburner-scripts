@@ -1,8 +1,8 @@
-import type { NS } from "@ns";
+﻿import type { NS } from "@ns";
 import { bitNodeMultipliers, effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { makeHackContext } from "../../../shared/formulas.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
-import { DEFAULT_PLANNING_HORIZON_SEC, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
+import { installHorizonSec } from "../../../shared/strategy/progression/forecast.ts";
 import {
   stepHacknet,
   type HacknetDecision,
@@ -117,7 +117,7 @@ function hashGoals(ctx: HacknetViewContext): HashGoalCandidate[] {
       requiredHackingSkill: target.requiredHackingSkill ?? Infinity,
       serverGrowth: target.serverGrowth ?? 0,
       baseDifficulty: target.baseDifficulty ?? 1,
-    }, { batchGb: fleetGb, hackBlockGb: largest }, fleetGb, usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC);
+    }, { batchGb: fleetGb, hackBlockGb: largest }, fleetGb, installHorizonSec(ctx.horizons));
     goals.push(
       { name: HASH_UPGRADE.maxMoney, target: targetName, priority: 30, valueDollars: values.maxMoney, why: `increase ${targetName}'s farm value over the remaining horizon` },
       { name: HASH_UPGRADE.minSecurity, target: targetName, priority: 30, valueDollars: values.minSecurity, why: `reduce ${targetName}'s minimum security over the remaining horizon` },
@@ -261,7 +261,7 @@ function buildView(ctx: HacknetViewContext, moneyGranted: number): HacknetView |
     // Expected remaining run time from the endgame route decision. This is
     // the number that makes "worth buying?" a real question: an upgrade that
     // cannot repay itself before the run ends is a loss, not an investment.
-    horizonSec: usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC,
+    horizonSec: installHorizonSec(ctx.horizons),
     hashMode,
     milestones,
   };
@@ -369,7 +369,7 @@ const driver: FeatureDriver = {
     merge(ctx.state, "hacknet", {
       plan: {
         evaluatedAt,
-        horizonSec: usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC,
+        horizonSec: installHorizonSec(ctx.horizons),
         moneyAvailable: ctx.state.topics.player?.money ?? 0,
         moneyGranted: ctx.grants.money,
         hashDollarValue,
@@ -400,8 +400,8 @@ const driver: FeatureDriver = {
             why: entry.milestone.why,
           } } : {}),
           why: entry.milestone?.why ?? (entry.netOverHorizon > 0
-            ? `repays within the ${Math.round(usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC)}s horizon`
-            : `does not repay within the ${Math.round(usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC)}s horizon`),
+            ? `repays within the ${Math.round(installHorizonSec(ctx.horizons))}s horizon`
+            : `does not repay within the ${Math.round(installHorizonSec(ctx.horizons))}s horizon`),
         })),
         ...(lastResult ? { lastResult } : {}),
         ...(hashDecision ? { hashes: {
@@ -471,7 +471,7 @@ function claims(ctx: ClaimContext): Claim[] {
   if (best) {
     const scored = scoreInvestment(
       { cost: best.cost, incomePerSec: best.deltaProduction },
-      usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC,
+      installHorizonSec(ctx.horizons),
     );
     const priority = best.milestone?.priority ?? PRIORITY["income:investment"];
     out.push({

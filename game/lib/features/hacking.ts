@@ -13,7 +13,7 @@ import { FARM_SHARE } from "../../../shared/strategy/evaluator.ts";
 import { solveCycle } from "../../../shared/strategy/targeting.ts";
 import { PORT_OPENER_PROGRAMS, preferProgramCreation, type ProgramOption } from "../../../shared/strategy/career/programs.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
-import { DEFAULT_PLANNING_HORIZON_SEC, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
+import { DEFAULT_PLANNING_HORIZON_SEC, installHorizonSec, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { gameGlobal } from "../globals.ts";
 import { buildView, drainCompletions, initDriver, pump, type DriverState } from "../dispatch-driver.ts";
 import { merge, set, type GameState } from "../state.ts";
@@ -225,7 +225,9 @@ function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): 
   // install to repay — pricing them against the node horizon buys servers
   // that are wiped before they break even.
   const nodeHorizonSec = usableForecastSec(ctx.horizons.node) ?? DEFAULT_PLANNING_HORIZON_SEC;
-  const installHorizonSec = usableForecastSec(ctx.horizons.install) ?? DEFAULT_PLANNING_HORIZON_SEC;
+  // Install-lifetime purchases use the shared conservative rule: the fallback
+  // never exceeds the node's own horizon (forecast.ts installHorizonSec).
+  const installLifetimeSec = installHorizonSec(ctx.horizons);
   const fleet = ctx.state.topics.fleet;
   if (!fleet) return stepInfrastructure([], nodeHorizonSec);
   const perGb = Math.max(0, ctx.state.topics.farm?.moneyPerSecPerGb ?? 0);
@@ -240,7 +242,13 @@ function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): 
   const marginalIncome = (addedRam: number): number =>
     perGb * Math.max(0, Math.min(fleetGb + addedRam, demandCeiling) - Math.min(fleetGb, demandCeiling));
   const options: InfrastructureOption[] = [];
-  if (fleet.homeRamUpgradeCost !== undefined) {
+  const money = ctx.state.topics.player?.money ?? 0;
+  // The phase budget finally does what its name says: home RAM may take at
+  // most this fraction of cash per run phase (HOME_RAM_BUDGET, published by
+  // progression as homeRamBudgetFraction). Early phases keep the bankroll
+  // liquid for the endgame conversion; finishUp/ending loosen it.
+  const homeRamBudget = (ctx.state.topics.progression?.plan?.homeRamBudgetFraction ?? 1) * money;
+  if (fleet.homeRamUpgradeCost !== undefined && fleet.homeRamUpgradeCost <= homeRamBudget) {
     options.push({
       kind: "homeRam",
       cost: fleet.homeRamUpgradeCost,
@@ -261,10 +269,9 @@ function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): 
   // bankroll covers may compete. The winner executes in this same pass, so an
   // aspirational quote would not merely lose — it would win the ranking and
   // then block the whole infrastructure lane until the money materialized.
-  const money = ctx.state.topics.player?.money ?? 0;
   for (const quote of fleet.infrastructureOptions ?? []) {
     if (quote.kind === "buyServer" && quote.cost > money) continue;
-    options.push({ ...quote, incomePerSec: marginalIncome(quote.addedRam), horizonSec: installHorizonSec });
+    options.push({ ...quote, incomePerSec: marginalIncome(quote.addedRam), horizonSec: installLifetimeSec });
   }
   return stepInfrastructure(options, nodeHorizonSec);
 }

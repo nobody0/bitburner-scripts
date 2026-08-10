@@ -684,7 +684,7 @@ function nextGraft(view: FactionsView, wanted: readonly string[]): { name: strin
     if (!offer || !aug || offer.timeMs / 1_000 >= view.horizonSec) continue;
     if (aug.prereqs.some((prereq) => !view.owned.has(prereq))) continue;
     const benefit = scoreAug(aug, view.weights);
-    if (benefit <= entropyPenalty || view.moneyGranted < offer.price) continue;
+    if (benefit <= entropyPenalty || (view.graftGranted ?? view.moneyGranted) < offer.price) continue;
     return {
       name,
       why: `graft value ${benefit.toFixed(3)} exceeds one-step entropy cost ${entropyPenalty.toFixed(3)} and completes within the run horizon`,

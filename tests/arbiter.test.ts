@@ -262,3 +262,46 @@ describe("arbiter shape", () => {
     expect(PRIORITY["career:progress-lock"]).toBeGreaterThan(PRIORITY["career:blocking-need"]);
   });
 });
+
+describe("reinvestment preference — the return tolerance band", () => {
+  const band = (over: Partial<Claim> & Pick<Claim, "id">): Claim =>
+    claim({ resource: "money", amount: 100, priority: PRIORITY["income:investment"], ...over });
+
+  test("a clearly faster payback wins regardless of absolute rate", () => {
+    // The canonical example: a 5-minute payback at $5/s beats a 60-minute
+    // payback at $6/s — the early money reinvests. returnPerDollarSec is
+    // 1/paybackSec, so 12x apart is far outside the tolerance band.
+    const result = resolveClaims(input({
+      pools: { money: 100, ram: 0 },
+      claims: [
+        band({ id: "slow-big", ratePerSec: 6, returnPerDollarSec: 1 / 3600 }),
+        band({ id: "fast-small", ratePerSec: 5, returnPerDollarSec: 1 / 300 }),
+      ],
+    }));
+    expect(result.grants[0]!.claimId).toBe("fast-small");
+  });
+
+  test("within the band, the bigger absolute earner wins", () => {
+    // Near-equal growth rates: prefer the larger stream. This tiebreak was
+    // unreachable before the band — float-exact returnPerDollarSec equality
+    // never happens.
+    const result = resolveClaims(input({
+      pools: { money: 100, ram: 0 },
+      claims: [
+        band({ id: "small", ratePerSec: 5, returnPerDollarSec: 1 / 300 }),
+        band({ id: "big", ratePerSec: 50, returnPerDollarSec: 1 / 330 }),
+      ],
+    }));
+    expect(result.grants[0]!.claimId).toBe("big");
+  });
+});
+
+describe("the imminent-install band sits where the endgame needs it", () => {
+  test("above every investment band, below the endgame conversion", () => {
+    expect(PRIORITY["progression:imminent-install"]).toBeGreaterThan(PRIORITY["income:investment"]);
+    expect(PRIORITY["progression:imminent-install"]).toBeGreaterThan(PRIORITY["hacking:infrastructure"]);
+    expect(PRIORITY["progression:imminent-install"]).toBeLessThan(PRIORITY["factions:donate"]);
+    expect(PRIORITY["progression:imminent-install"]).toBeLessThan(PRIORITY["factions:aug-fund"]);
+    expect(PRIORITY["progression:imminent-install"]).toBeLessThan(PRIORITY["career:blocking-need"]);
+  });
+});

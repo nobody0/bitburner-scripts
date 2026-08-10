@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+﻿import { describe, expect, test } from "bun:test";
 import {
   expPerSec,
   karmaPerSec,
@@ -232,7 +232,8 @@ describe("career as the needs-board consumer", () => {
       view({
         crimes: [shoplift],
         courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 960, location: "Rothman University" }],
-        moneyGranted: 10_000,
+        // A course must be funded for a full training window (30s), not any positive grant.
+        moneyGranted: 30_000,
         externalIncomePerSec: 25_000,
       }),
       postNeeds([]),
@@ -248,7 +249,7 @@ describe("career as the needs-board consumer", () => {
           { name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 960, location: "Rothman University" },
           { name: "Leadership", skill: "charisma", expPerSec: 8, costPerSec: 960, location: "Rothman University" },
         ],
-        moneyGranted: 10_000,
+        moneyGranted: 30_000,
         externalIncomePerSec: 25_000,
         defaultSkill: "charisma",
       }),
@@ -262,7 +263,7 @@ describe("career as the needs-board consumer", () => {
     const decision = stepCareer(
       view({
         courses: [{ name: "strength", skill: "strength", expPerSec: 10, costPerSec: 2_400, location: "Powerhouse Gym" }],
-        moneyGranted: 10_000,
+        moneyGranted: 80_000,
       }),
       postNeeds([need({ kind: "skill", subject: "strength", target: 100, have: 1 })]),
     );

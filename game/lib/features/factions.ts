@@ -2,7 +2,7 @@ import type { NS, PlayerRequirement } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
-import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
+import { grantFor, PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import {
   NEUROFLUX,
   augCost,
@@ -72,6 +72,15 @@ export function resetFactionsState(): void {
   lastResult = undefined;
   chainWake = false;
   seenCompletion = undefined;
+}
+
+/** The grant won by ONE of this feature's money claims — never the sum.
+ * Same contract as hacking's moneyGrantFor and stock's StockGrants: four
+ * claims at one priority summed together would let a travel grant top up a
+ * purchase the arbiter never funded. */
+function moneyGrantFor(ctx: Pick<DriverContext, "grants">, claimId: string): number {
+  const grant = grantFor(ctx.grants.result, "factions", claimId);
+  return grant && grant.resource === "money" ? grant.amount : 0;
 }
 
 /** Exposed for tests and the sim harness. */
@@ -304,7 +313,13 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     horizonSec: usableForecastSec(ctx.horizons.node) ?? Infinity,
     targetAugCount: daedalusAugsRequired(ctx.caps.bitNode, sfLevel(ctx.caps.sourceFiles, 12)) ?? Infinity,
     favorToDonate: topic.favorToDonate ?? 150,
-    moneyGranted: ctx.grants.money,
+    // PER-CLAIM, not the feature sum: `ctx.grants.money` adds aug-fund +
+    // donation + graft + travel together, so a partial aug-fund grant plus a
+    // $200k travel grant could fund a purchase the arbiter never allocated
+    // (the failure hacking's moneyGrantFor and stock's StockGrants exist to
+    // prevent). Purchases spend the aug fund; grafting spends its own.
+    moneyGranted: moneyGrantFor(ctx, "aug-fund"),
+    graftGranted: moneyGrantFor(ctx, "graft-fund"),
     moneyAvailable: player.money,
     pendingProceeds: liquidatableValue(ctx),
     proceedsSettling: state.topics.stock?.plan?.liquidate === true,
@@ -387,7 +402,7 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
     }
 
     case "travelTo": {
-      if (ctx.grants.money < 200_000) {
+      if (moneyGrantFor(ctx, "travel-fund") < 200_000) {
         record(false, "waiting for $200,000 travel grant");
         return;
       }
@@ -404,7 +419,7 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
       // intent published so the next claims pass reserves the exact amount,
       // but do not bypass that grant in the meantime.
       const reserve = action.amount + (action.purchaseCost ?? 0);
-      if (ctx.grants.money < reserve) {
+      if (moneyGrantFor(ctx, "donation-fund") < reserve) {
         record(false, `waiting for $${Math.round(reserve)} donation and purchase grant`);
         return;
       }
@@ -448,6 +463,16 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
     }
 
     case "purchaseAugmentation": {
+      // The purchase spends the AUG FUND's own grant, never the feature sum —
+      // a partial fund grant topped up by a travel/donation grant would spend
+      // money the arbiter allocated elsewhere. Priced from the probed offer,
+      // falling back to the plan's own escalated estimate.
+      const offer = (ctx.state.topics.factions?.offers ?? []).find((entry) => entry.name === action.augmentation);
+      const fundNeeded = offer?.price ?? 0;
+      if (fundNeeded > 0 && moneyGrantFor(ctx, "aug-fund") < fundNeeded) {
+        record(false, `waiting for the $${Math.round(fundNeeded).toLocaleString()} augmentation fund grant`);
+        return;
+      }
       const ok = await run(["singularity.purchaseAugmentation"], (stubNs) =>
         stubNs["singularity"]["purchaseAugmentation"](action.faction as never, action.augmentation as never),
       );
@@ -973,7 +998,10 @@ function claims(ctx: ClaimContext): Claim[] {
       id: "donation-fund",
       resource: "money",
       amount: plan.action.amount + (plan.action.purchaseCost ?? 0),
-      priority: PRIORITY["factions:aug-fund"],
+      // The band the table names for donations — 70, deliberately below the
+      // aug fund (90): converting cash to reputation waits behind converting
+      // it to augmentations.
+      priority: PRIORITY["factions:donate"],
       mode: "reserve",
       divisible: true,
       why: `donating exactly enough for ${plan.action.faction}'s reputation breakpoint and preserving its purchase`,

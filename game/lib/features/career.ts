@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
-import { stepCareer, type CareerDecision, type CareerPriorityBand, type CareerView } from "../../../shared/strategy/career/decide.ts";
+import { stepCareer, TRAINING_FUND_WINDOW_SEC, type CareerDecision, type CareerPriorityBand, type CareerView } from "../../../shared/strategy/career/decide.ts";
 import type { CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import {
   careerSchedule,
@@ -70,8 +70,13 @@ const companyRates = new Map<string, ActivityRateSample>();
  * (no grant, no host) are NOT backed off — the next pass may fund them. */
 const executeBackoff = new Map<string, number>();
 export const EXECUTE_BACKOFF_MS = 30_000;
+/** The running course's $/sec, latched when the class/gym claim is first
+ * posted so the STANDING reserve stays correctly sized for the course's
+ * whole life (the ranked option that priced it is only in scope at start). */
+let trainingCostPerSec = 0;
 
 export function resetCareerState(): void {
+  trainingCostPerSec = 0;
   lastDecision = undefined;
   lastResult = undefined;
   lastReviewedAt = undefined;
@@ -529,19 +534,37 @@ function claims(ctx: ClaimContext): Claim[] {
   }
   if (actionType === "class" || actionType === "gym") {
     const option = candidate?.ranked.find((entry) => entry.action === candidate?.action);
-    const fiveSeconds = Math.max(0, -(option?.moneyPerSec ?? 0) * 5);
-    if (fiveSeconds > 0) {
+    const costPerSec = Math.max(0, -(option?.moneyPerSec ?? 0));
+    if (costPerSec > 0) {
+      trainingCostPerSec = costPerSec;
       out.push({
         by: "career",
         id: "training-fund",
         resource: "money",
-        amount: fiveSeconds,
+        amount: costPerSec * TRAINING_FUND_WINDOW_SEC,
         priority: priorityForBand(candidate?.workPriority ?? "income", ctx.state),
-        mode: "spend",
+        mode: "reserve",
         divisible: false,
-        why: "fund the next five-second training review window",
+        why: "fund the next training window",
       });
     }
+  } else if (ctx.state.topics.career?.currentWork?.type === "CLASS" && trainingCostPerSec > 0) {
+    // A RUNNING course drains money continuously ($960-2,400/s), and the old
+    // claim existed only on the pass the course STARTED — the steady-state
+    // spend was invisible to the arbiter, silently eating other features'
+    // reservations. Standing reserve for one window, at the latched rate.
+    out.push({
+      by: "career",
+      id: "training-fund",
+      resource: "money",
+      amount: trainingCostPerSec * TRAINING_FUND_WINDOW_SEC,
+      priority: priorityForBand(candidate?.workPriority ?? "income", ctx.state),
+      mode: "reserve",
+      divisible: false,
+      why: "an active course drains continuously; keep its window funded",
+    });
+  } else if (ctx.state.topics.career?.currentWork?.type !== "CLASS") {
+    trainingCostPerSec = 0;
   }
   // At a completion boundary another feature may win the work slot before
   // career ticks. Keep a separately-priced observation available even when

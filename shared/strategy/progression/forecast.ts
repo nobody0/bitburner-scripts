@@ -118,6 +118,22 @@ export function usableForecastSec(forecast: TimeForecast): number | undefined {
   return forecast.state === "estimated" ? forecast.remainingSec : undefined;
 }
 
+/** The planning horizon for INSTALL-lifetime purchases (cloud servers,
+ * hacknet, stock positions — everything prestigeAugmentation wipes).
+ *
+ * The fallback never exceeds the NODE's own horizon: with both forecasts
+ * unusable the two horizons used to collapse to the same default hour, and
+ * install-lifetime purchases were silently priced against node-lifetime time.
+ * An install can never outlive its node. */
+/** Below this many forecast seconds to the install, investment spending is
+ * braked (the `progression:imminent-install` reserve). */
+export const IMMINENT_INSTALL_SEC = 300;
+
+export function installHorizonSec(horizons: PlanningHorizons): number {
+  const node = usableForecastSec(horizons.node) ?? DEFAULT_PLANNING_HORIZON_SEC;
+  return usableForecastSec(horizons.install) ?? Math.min(node, DEFAULT_PLANNING_HORIZON_SEC);
+}
+
 export function shouldReforecast(previous: TimeForecast | undefined, now: number, basis: string): boolean {
   if (!previous) return true;
   return previous.basis !== basis || now >= previous.nextRecalibrationAt;

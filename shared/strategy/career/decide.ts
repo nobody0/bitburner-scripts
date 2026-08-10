@@ -332,14 +332,21 @@ function priorityFor(
   return best ?? "income";
 }
 
+/** Seconds of a course's continuous drain one training-fund reserve covers —
+ * both the claim size (game driver) and the admission bar here, so the two
+ * cannot drift. */
+export const TRAINING_FUND_WINDOW_SEC = 30;
+
 export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   const values = needValues(board);
   const ranked: ScoredAction[] = [];
 
   for (const crime of view.crimes) ranked.push(scoreCrime(crime, view, values));
   for (const course of view.courses) {
-    // Never start a course we cannot pay for.
-    if (course.costPerSec > 0 && view.moneyGranted <= 0) continue;
+    // Never start a course we cannot pay for — a full funding window, not
+    // merely "any positive grant": the course drains continuously, and a $1
+    // grant used to admit a $2,400/s class.
+    if (course.costPerSec > 0 && view.moneyGranted < course.costPerSec * TRAINING_FUND_WINDOW_SEC) continue;
     ranked.push(scoreCourse(course, view, values));
   }
   for (const program of view.programs ?? []) ranked.push(scoreProgram(program, values));
