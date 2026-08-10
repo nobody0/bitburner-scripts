@@ -278,11 +278,12 @@ function decideFactions(
   const previousStanding = previousIntent
     ? view.factions.find((standing) => standing.name === previousIntent.faction)
     : undefined;
+  // Complete = the WORK is done (reputation banked). Ownership is not part of
+  // it any more: purchases are end-loaded, so a finished package's
+  // augmentations stay unbought until the final sweep while the frontier
+  // moves on to the next package.
   const previousComplete = Boolean(
-    previousIntent &&
-    previousStanding &&
-    previousStanding.rep >= previousIntent.repTarget &&
-    previousIntent.augmentations.every((name) => view.owned.has(name)),
+    previousIntent && previousStanding && previousStanding.rep >= previousIntent.repTarget,
   );
   const runnerBlockedThisCycle = Boolean(
     previousRunner &&
@@ -362,24 +363,14 @@ function decideFactions(
     };
   }
 
-  // --- 1) purchase ----------------------------------------------------------
-  // Cost order, not the objective's value order: see `purchaseOrder`. Reputation
-  // still gates each item, and `nextPurchase` falls through to the next when it is
-  // short — so this buys the dearest item we can actually buy, never nothing.
-  const purchase = nextPurchase(view, purchaseOrder(view, objective.augmentations));
-  if (purchase) {
-    return {
-      memory: { ...next, lastAction: purchase.action },
-      decision: {
-        objective,
-        action: purchase.action,
-        alternatives,
-        blockers: allBlockers,
-        needOwners,
-        invalidation,
-      },
-    };
-  }
+  // --- 1) purchase: DELIBERATELY ABSENT mid-run -------------------------------
+  // The two-loop money rule: an augmentation does nothing until the install
+  // reset, and every queued purchase escalates every LATER purchase 1.9x. So
+  // buying mid-run both pulls money out of compounding investments and pays
+  // the escalation on items a later package would have wanted cheap. ALL
+  // purchases happen in the final-sweep drain (below), dearest-first, once
+  // the objective work is done and the whole bankroll is known. The old
+  // buy-as-soon-as-rep-and-money-allow path lived here.
 
   const graft = nextGraft(view, objective.augmentations);
   if (graft) {
@@ -473,31 +464,37 @@ function decideFactions(
     // (Infinity) keeps the full drain. Keep the same priority order, falling
     // downward when a better item is not currently affordable; NeuroFlux is
     // repeatable and comes last.
-    const sweepAll = recommend ? finalSweepWanted(view) : [];
-    const wanted = view.horizonSec > NFG_MIN_PAYBACK_SEC ? sweepAll : sweepAll.filter((name) => name !== NEUROFLUX);
-    // The drain spends the pile that exists when it STARTS. Frozen once, here:
-    // testing against live money instead lets a fast farm outrun the NeuroFlux
-    // price ladder level after level, and the install waits on a race.
-    const ceiling = recommend ? memory.drainCeiling ?? view.moneyAvailable : undefined;
+    // The drain spends the pile that exists when it STARTS — cash on hand PLUS
+    // the stock book's liquidation value, because the book only converts once
+    // the endgame begins and its proceeds are exactly the money this drain
+    // exists to convert. Frozen once, here: testing against live money instead
+    // lets a fast farm outrun the NeuroFlux price ladder level after level,
+    // and the install waits on a race.
+    const ceiling = recommend ? memory.drainCeiling ?? view.moneyAvailable + view.pendingProceeds : undefined;
     const ceilingDigest = ceiling !== undefined ? { drainCeiling: ceiling } : {};
+    // The spend-down bound applies to the NEUROFLUX LADDER ONLY: it is the
+    // repeatable item whose price escalation can race income forever. It
+    // drops out of the sweep when the next level exceeds min(frozen ceiling,
+    // cash on hand) — or when the remaining node cannot repay it. One-shot
+    // augmentations keep nextPurchase's own patience rules (hold only while
+    // liquidation proceeds with a settlement date cover the gap).
+    const sweepAll = recommend ? finalSweepWanted(view) : [];
+    const drainBudget = ceiling !== undefined ? Math.min(ceiling, view.moneyAvailable) : 0;
+    const nfgAug = view.catalog.get(NEUROFLUX);
+    const nfgAffordable = nfgAug !== undefined && augCost(nfgAug, view.priceContext).moneyCost <= drainBudget;
+    const wanted =
+      view.horizonSec > NFG_MIN_PAYBACK_SEC && nfgAffordable
+        ? sweepAll
+        : sweepAll.filter((name) => name !== NEUROFLUX);
     // What the drain would buy if money were no object. Published on the decision
     // so the driver can claim exactly that much: `nextPurchase` above tests the
     // GRANTED budget, and a grant only exists once something claimed it. Derived
     // from the plan rather than the funded action, it survives the whole drain —
     // including the ticks where a purchase is in flight — so the claim does not
-    // blink out between buys. An intent beyond the frozen ceiling is not an
-    // intent: the drain is over, and publishing it would keep the barrier up.
+    // blink out between buys.
     const drainIntent = recommend ? nextPurchase(view, wanted, Infinity) : undefined;
-    // Spend DOWN, never wait: an intent must clear both the frozen ceiling and
-    // the cash actually on hand. Testing the ceiling alone re-admits the race
-    // in miniature — a level priced just under the ceiling but just over the
-    // bank waits on income, which is the exact wait the ceiling exists to end.
-    const drainBudget = ceiling !== undefined ? Math.min(ceiling, view.moneyAvailable) : undefined;
-    const drainBuy = drainIntent && drainBudget !== undefined && drainIntent.price <= drainBudget ? drainIntent : undefined;
-    const nextBuyDigest = drainBuy ? { nextBuy: { name: drainBuy.name, price: drainBuy.price } } : {};
-    // No sweep once the ceiling is exhausted; the donate leg still runs while
-    // nothing at all is rep-affordable (drainIntent undefined), as before.
-    const sweep = recommend && (drainBuy || !drainIntent) ? nextSweepAction(view, wanted) : undefined;
+    const nextBuyDigest = drainIntent ? { nextBuy: { name: drainIntent.name, price: drainIntent.price } } : {};
+    const sweep = recommend ? nextSweepAction(view, wanted) : undefined;
     if (sweep) {
       return {
         memory: { ...next, lastAction: sweep, ...(ceiling !== undefined ? { drainCeiling: ceiling } : {}) },
@@ -951,12 +948,26 @@ function shouldRecommendInstall(
   view: FactionsView,
   objective: FactionObjective,
 ): { why: string; augmentations: string[] } | undefined {
+  // Purchases are END-LOADED (the two-loop money rule), so the endgame begins
+  // when the objective's WORK is done — every augmentation owned or its
+  // reputation requirement met at a joined seller. Ownership is NOT required:
+  // money is the drain's business, and the final sweep buys the package
+  // dearest-first once this fires.
+  const outstanding = objective.augmentations.filter((name) => !view.owned.has(name));
+  for (const name of outstanding) {
+    const aug = view.catalog.get(name);
+    if (!aug) continue;
+    const { repCost } = augCost(aug, view.priceContext);
+    const seller = view.factions.some(
+      (standing) => standing.joined && aug.factions.includes(standing.name) && standing.rep >= repCost,
+    );
+    if (!seller) return undefined;
+  }
+  // An install needs SOMETHING to convert: already queued, or buyable now.
   const queued = [...view.queued].filter((name) => view.catalog.has(name));
-  if (queued.length === 0) return undefined;
-  const unbuyable = objective.augmentations.filter((name) => !view.owned.has(name));
-  if (unbuyable.length > 0) return undefined;
+  if (queued.length === 0 && outstanding.length === 0) return undefined;
   return {
-    why: "every augmentation in the objective is owned; banked reputation converts to favor only at install",
-    augmentations: queued,
+    why: "the objective's work is done; the sweep converts cash to augmentations and banked reputation to favor at install",
+    augmentations: [...queued, ...outstanding],
   };
 }

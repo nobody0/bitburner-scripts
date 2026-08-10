@@ -1539,6 +1539,7 @@ function progressionRefresh(ctx: NeedContext): void {
     // No probe prices the home upgrade yet; Infinity keeps the budget advisory.
     homeRamUpgradeCost: Infinity,
     runSec: prog?.lastAugReset ? Math.max(0, (ctx.now - prog.lastAugReset) / 1000) : 0,
+    ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
   });
 
   const queueKey = pending.join("\0");

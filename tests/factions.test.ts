@@ -1327,9 +1327,12 @@ describe("patience — waiting for the bankroll before committing the order", ()
     expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "dear" });
   });
 
-  test("reputation shortfalls fall through — waiting at this step cannot fix them", () => {
-    // Nothing about holding cash buys reputation; work and donation are further
-    // down the decision tree, so blocking here would just stall the run.
+  test("reputation shortfalls mean the run is NOT over — work continues, nothing is bought", () => {
+    // End-loaded purchasing: while any objective augmentation still needs
+    // reputation, the endgame has not begun. The feature keeps working (or
+    // idles toward it) rather than buying the cheap item early — an early buy
+    // would charge the 1.9x queue escalation to everything the rest of the
+    // run still plans to buy.
     const decision = step({
       factions: [{ ...standing("CyberSec", { hacking: true, field: true, security: true }), rep: 1e5 }],
       catalog: new Map([
@@ -1340,7 +1343,8 @@ describe("patience — waiting for the bankroll before committing the order", ()
       moneyAvailable: 1e9,
       pendingProceeds: 1e12,
     });
-    expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap" });
+    expect(decision.action.type).not.toBe("purchaseAugmentation");
+    expect(decision.recommendInstall).toBeUndefined();
   });
 });
 

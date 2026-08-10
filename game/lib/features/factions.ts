@@ -887,7 +887,14 @@ function claims(ctx: ClaimContext): Claim[] {
   // `plan.nextBuy.price` is our own escalated price; the probed offer is the
   // game's. Reserve the larger of the two — a reserve that is short by a rounding
   // error buys nothing at all.
-  if (plan.nextBuy && !graft && plan.action.type !== "donate") {
+  // ENDGAME ONLY: purchases are end-loaded (the two-loop money rule — an aug
+  // does nothing before the install reset, so mid-run the money compounds in
+  // investments instead of sitting in a 90-priority reserve). The fund claim
+  // therefore exists only while the final-sweep drain is live: install
+  // recommended, drain running, or a purchase actually in flight.
+  const endgame =
+    plan.recommendInstall !== undefined || plan.drainCeiling !== undefined || plan.action.type === "purchaseAugmentation";
+  if (endgame && plan.nextBuy && !graft && plan.action.type !== "donate") {
     const probed = (topic?.offers ?? []).find((offer) => offer.name === plan.nextBuy!.name);
     out.push({
       by: "factions",

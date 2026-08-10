@@ -58,6 +58,10 @@ export interface ProgressionView {
   homeRamUpgradeCost: number;
   /** Seconds elapsed this run. */
   runSec: number;
+  /** The chosen endgame route's estimate of REMAINING node time, when a route
+   * is decided. Nothing persists past the node, so an install this close to
+   * the end only delays it. */
+  nodeRemainingSec?: number;
 }
 
 export type InstallBlockerKind = "factions" | "stock" | "graft" | "augmentations";
@@ -89,6 +93,9 @@ export const FINISH_UP_VALUE = 2.0;
 export const FINISH_UP_IDLE_VALUE = 1.5;
 /** Home RAM budget as a fraction of cash, per phase. */
 export const HOME_RAM_BUDGET = { start: 0.1, finishUp: 0.5, ending: 0.5 };
+/** Minimum remaining NODE time for an install cycle to repay its overhead
+ * (kill everything, reboot, regrow). Below this, finish the node instead. */
+export const INSTALL_MIN_PAYBACK_SEC = 600;
 
 export function phaseOf(view: ProgressionView): RunPhase {
   // `ending` once cash exceeds half of what the run earned: at that point the
@@ -129,8 +136,14 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   // there is nothing left for the cash-accumulation phase gate to protect:
   // waiting for `money > earned/2` just strands banked favor behind a
   // heuristic about a conversion that has already happened.
+  // ...unless the NODE itself is nearly over: nothing survives the node, so
+  // an install whose payoff window is shorter than its own overhead only
+  // delays the finish. Unknown route ETA keeps installs allowed.
+  const nodeAllowsInstall = view.nodeRemainingSec === undefined || view.nodeRemainingSec > INSTALL_MIN_PAYBACK_SEC;
   const installWanted =
-    view.queued.length > 0 && (phase === "ending" || (crossings.length > 0 && view.factionsReadyToInstall));
+    nodeAllowsInstall &&
+    view.queued.length > 0 &&
+    (phase === "ending" || (crossings.length > 0 && view.factionsReadyToInstall));
   const installBlockers: InstallBlocker[] = [];
   if (installWanted && !view.factionsReadyToInstall) {
     installBlockers.push({ kind: "factions", why: "factions has not finished its final purchase and donation sweep" });
