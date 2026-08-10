@@ -5,6 +5,8 @@ import { ProcessTable, ScriptDeath } from "../ns/process.ts";
 import { makeSimNs, type SimNsHost } from "../ns/api.ts";
 import { StockMarketSystem } from "../features/stock.ts";
 import { mulberry32 } from "../core/rng.ts";
+import { FactionSystem } from "../features/factions.ts";
+import { makeSingularity } from "../ns/singularity.ts";
 
 function harness(programs: string[] = [], withStock = false): { ns: NS; host: SimNsHost; world: SimWorld } {
   const world = new SimWorld({
@@ -83,6 +85,60 @@ describe("Netscript contract fidelity", () => {
     expect(() => ns.weaken("n00dles")).toThrow("purchased server");
   });
 
+  test("HGW validates thread and delay options like validateHGWOptions", () => {
+    const { ns, world } = harness();
+    world.servers.get("n00dles")!.hasAdminRights = true;
+    expect(() => ns.grow("n00dles", { threads: 2 })).toThrow("Too many threads");
+    expect(() => ns.grow("n00dles", { threads: -1 })).toThrow("positive number");
+    expect(() => ns.grow("n00dles", { additionalMsec: -1 })).toThrow("non-negative");
+    expect(() => ns.grow("n00dles", { additionalMsec: 1e9 + 1 })).toThrow("too large");
+    expect(() => (ns.grow as (host: string, opts: unknown) => unknown)("n00dles", 1)).toThrow("must be an object");
+  });
+
+  test("home money reads player money through both public APIs", () => {
+    const { ns, world } = harness();
+    world.player.money = 123_456;
+    expect(ns.getServerMoneyAvailable("home")).toBe(123_456);
+    expect(ns.getServer("home").moneyAvailable).toBe(123_456);
+  });
+
+  test("script totals report live per-process rates and since-install hacking separately", () => {
+    const { ns, host, world } = harness();
+    const running = [...host.processes.values()][0]!;
+    running.onlineMoneyMade = 20;
+    running.onlineExpGained = 7;
+    running.onlineRunningTimeSeconds = 1;
+    host.reset.lastAugReset = 0;
+    world.recordMoney("hacking", 50);
+    host.clock.in(1_000, () => {});
+    host.clock.run();
+    expect(ns.getTotalScriptIncome()).toEqual([20, 50]);
+    expect(ns.getTotalScriptExpGain()).toBe(7);
+  });
+
+  test("engine-time accounting starts at 0.01s and finished children transfer earnings to their parent", () => {
+    const { host } = harness();
+    const parent = [...host.processes.values()][0]!;
+    expect(parent.onlineRunningTimeSeconds).toBe(0.01);
+    host.processes.updateOnlineTimes(5);
+    expect(parent.onlineRunningTimeSeconds).toBe(1.01);
+    const child = host.processes.start({
+      filename: "child.js", host: "home", args: [], threads: 1,
+      ramPerThreadGb: 1, temporary: true, parentPid: parent.pid,
+    })!;
+    child.onlineMoneyMade = 123;
+    child.onlineExpGained = 45;
+    host.processes.finish(child.pid);
+    expect(parent.onlineMoneyMade).toBe(123);
+    expect(parent.onlineExpGained).toBe(45);
+  });
+
+  test("the public RAM-cost API rejects unknown paths", () => {
+    const { ns } = harness();
+    expect(ns.getFunctionRamCost("baseCost")).toBe(1.6);
+    expect(() => ns.getFunctionRamCost("does.not.exist")).toThrow();
+  });
+
   test("exec refuses a server without root even when the script is present", () => {
     const { ns } = harness();
     expect(ns.exec("child.js", "n00dles", 1)).toBe(0);
@@ -94,6 +150,35 @@ describe("Netscript contract fidelity", () => {
     expect(() => ns.getPlayer()).toThrow("Concurrent calls to Netscript functions");
     expect(host.processes.size).toBe(0);
     expect(await pending).toBeInstanceOf(ScriptDeath);
+  });
+
+  test("killing installBackdoor cancels its timer and world mutation", async () => {
+    const { ns, host, world } = harness();
+    const target = world.servers.get("n00dles")!;
+    target.hasAdminRights = true;
+    const factions = new FactionSystem(world, world.player);
+    host.singularity = makeSingularity({
+      world,
+      player: world.player,
+      factions,
+      clock: world.clock,
+      bitNode: 4,
+      terminal: { host: "n00dles" },
+      network: host.network,
+      crimes: { start: () => 0 } as never,
+      satisfyContext: () => ({
+        player: world.player, person: world.person, servers: world.servers,
+        factionRep: () => 0, companyRep: () => 0, bitNode: 4,
+        hacknet: { ram: 0, cores: 0, levels: 0 }, bladeburnerRank: () => 0, files: new Set(),
+      }),
+      pokeInvitationCounter: () => {}, homeFiles: () => new Set(), hasTor: () => false, setTor: () => {},
+    });
+    const processNs = makeSimNs(host, [...host.processes.values()][0]!);
+    const pending = processNs.singularity.installBackdoor().catch((error) => error);
+    expect(host.processes.kill(processNs.pid)).toBe(true);
+    host.clock.run();
+    expect(await pending).toBeInstanceOf(ScriptDeath);
+    expect(target.backdoorInstalled).toBe(false);
   });
 
   test("the 4S script API purchase requires TIX access", () => {

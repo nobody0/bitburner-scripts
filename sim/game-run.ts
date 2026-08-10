@@ -22,8 +22,9 @@ import { makeSingularity } from "./ns/singularity.ts";
 import { launch, makeSimNs, type ScriptMain, type SimNsHost } from "./ns/api.ts";
 import { ProcessTable } from "./ns/process.ts";
 import { installVirtualTime } from "./realm/timers.ts";
-import { resetUnmodeled, setUnmodeledReporter, unmodeled, unmodeledCounts } from "./realm/unmodeled.ts";
+import { noteUnmodeled, resetUnmodeled, setUnmodeledReporter, unmodeled, unmodeledCounts } from "./realm/unmodeled.ts";
 import { SimWorld, type GateFlags, type SimOptions } from "./world.ts";
+import { SIM_FEATURE_COVERAGE, scenarioClass, type RunValidity, type ScenarioClass } from "./fidelity.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 
 /** Run the REAL game/ controller against the synthetic world.
@@ -95,6 +96,8 @@ export interface GameRunResult {
   unmodeled: Record<string, number>;
   crashes: { pid: number; filename: string; error: string }[];
   output: string[];
+  validity: RunValidity;
+  scenario: ScenarioClass;
 }
 
 /** Realm slots game/ owns. Cleared before and after a run so a process that
@@ -248,6 +251,28 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // actually completes. This lets program-granting augmentations update the
   // same home file set observed by ns.ls.
   const grafting = new GraftingSystem(world, world.player, () => host.files.get("home")!);
+  const savedWork = save?.currentWork;
+  if (savedWork) {
+    const focused = save?.playerState.focus ?? true;
+    if (savedWork.kind === "faction" || savedWork.kind === "crime" || savedWork.kind === "graft") {
+      world.player.startWork({
+        kind: savedWork.kind,
+        subject: savedWork.subject,
+        ...(savedWork.workType ? { workType: savedWork.workType } : {}),
+        startedAt: clock.now() - savedWork.cyclesWorked * 200,
+        cyclesWorked: savedWork.cyclesWorked,
+        ...(savedWork.kind === "crime" ? { unitCycles: (savedWork.unitCompleted ?? 0) / 200 } : {}),
+        focused,
+      });
+      if (savedWork.kind === "graft") grafting.restoreProgress(savedWork.unitCompleted ?? 0);
+    } else {
+      noteUnmodeled(
+        "initial-state",
+        `currentWork.${savedWork.kind}`,
+        `serialized ${savedWork.ctor} cannot be advanced by the simulator`,
+      );
+    }
+  }
   // The market gets its OWN seeded stream, offset like crimeRng: sharing the HGW
   // stream would make a price tick shift every subsequent hack roll, so two runs
   // differing only in trading activity would diverge in their farm results and
@@ -264,12 +289,17 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     has4SData: world.gates.has4SData,
     has4SDataTixApi: world.gates.has4SDataTixApi,
     disable4SData: save?.bitNodeOptions.disable4SData === true,
+    ...(save?.stockMarket ? { seed: save.stockMarket } : {}),
   });
+  if (save?.stockMarket?.hasOrders) {
+    noteUnmodeled("initial-state", "stock.orders", "the save contains limit/stop orders, whose fill engine is not modeled");
+  }
   world.stockSystem = stock;
   const hashMode = (bitnode === 9 || (save?.sourceFiles["9"] ?? 0) > 0) && save?.bitNodeOptions.disableHacknetServer !== true;
   const hacknet = new HacknetSystem(world, world.player, hashMode, save?.hacknet);
 
   const engine: Engine = new Engine(clock, {
+    updateOnlineScriptTimes: (cycles) => host.processes.updateOnlineTimes(cycles),
     // One work slot, so exactly one of these can be active — each returns
     // immediately unless it owns `currentWork`.
     processWork: (cycles) => {
@@ -456,6 +486,8 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       label: options.label,
       seed,
       driver: "game",
+      scenario: scenarioClass(save !== undefined),
+      coverage: SIM_FEATURE_COVERAGE,
       bitnode,
       features: describeOverrides(options.features),
       ...(options.saveId !== undefined ? { save: options.saveId } : {}),
@@ -468,7 +500,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     host: "home",
     args: [],
     threads: 1,
-    // start.js's real static cost, so home RAM accounting matches the game.
+    // start.js's declared allocation, matching its first-statement ramOverride.
     ramPerThreadGb: 3.6,
     temporary: false,
   });
@@ -485,6 +517,8 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   }
 
   const reached = stoppedBecause === "goal";
+  const gaps = unmodeledCounts();
+  const validity: RunValidity = Object.keys(gaps).length > 0 || host.crashes.length > 0 ? "invalid-for-goal" : "valid";
   const result: GameRunResult = {
     seed,
     reached,
@@ -492,9 +526,11 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     records: recordCount,
     stoppedBecause,
     engineCycles: engine.cyclesProcessed,
-    unmodeled: unmodeledCounts(),
+    unmodeled: gaps,
     crashes: host.crashes,
     output: host.output,
+    validity,
+    scenario: scenarioClass(save !== undefined),
   };
   world.emit({ kind: "event", name: "sim.result", data: { goal: goal.id, ...result } });
   clearRealm();

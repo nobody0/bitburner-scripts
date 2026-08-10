@@ -11,6 +11,7 @@ import { defaultPlanner } from "../shared/strategy/planner.ts";
 import type { CompletionEvent, Planner } from "../shared/world.ts";
 import { DEFAULT_NETWORK } from "./network.ts";
 import { SimWorld, type SimOptions } from "./world.ts";
+import { SIM_FEATURE_COVERAGE, type RunValidity, type ScenarioClass } from "./fidelity.ts";
 
 export interface RunOptions {
   goal: Goal;
@@ -30,6 +31,8 @@ export interface RunResult {
   timeToGoalMs: number;
   records: number;
   stoppedBecause: "goal" | "empty" | "horizon";
+  validity: RunValidity;
+  scenario: ScenarioClass;
 }
 
 /** Drive one simulated run: planner replans whenever an action settles; the
@@ -91,7 +94,11 @@ export function runSim(options: RunOptions): RunResult {
     },
   });
 
-  world.emit({ kind: "event", name: "sim.meta", data: { goal: goal.id, label: options.label, seed } });
+  world.emit({
+    kind: "event",
+    name: "sim.meta",
+    data: { goal: goal.id, label: options.label, seed, driver: "planner", scenario: "synthetic-early-game", coverage: SIM_FEATURE_COVERAGE },
+  });
 
   if (goal.done(ctx)) {
     const result: RunResult = {
@@ -100,6 +107,8 @@ export function runSim(options: RunOptions): RunResult {
       timeToGoalMs: 0,
       records: world.records.length,
       stoppedBecause: "goal",
+      validity: "partial",
+      scenario: "synthetic-early-game",
     };
     world.emit({ kind: "event", name: "sim.result", data: { goal: goal.id, ...result } });
     return result;
@@ -172,6 +181,8 @@ export function runSim(options: RunOptions): RunResult {
     timeToGoalMs: reached ? world.clock.now() : Infinity,
     records: world.records.length,
     stoppedBecause,
+    validity: "partial",
+    scenario: "synthetic-early-game",
   };
   world.emit({ kind: "event", name: "sim.result", data: { goal: goal.id, ...result } });
   return result;
@@ -305,16 +316,16 @@ if (import.meta.main) {
   // game driver cannot be run twice in one process.
   if (driver === "game" && runSeeds.length > 1 && !child) {
     const base = args.filter((a, i) => a !== "--seeds" && args[i - 1] !== "--seeds");
-    let reached = 0;
+    let validProcesses = 0;
     for (const seed of runSeeds) {
       const proc = Bun.spawn(["bun", "run", "sim/run.ts", ...base, "--child", "--seed", String(seed)], {
         stdout: "inherit",
         stderr: "inherit",
       });
-      if ((await proc.exited) === 0) reached++;
+      if ((await proc.exited) === 0) validProcesses++;
     }
-    console.log(`\n${reached}/${runSeeds.length} seed processes completed`);
-    process.exit(0);
+    console.log(`\n${validProcesses}/${runSeeds.length} seed processes completed without invalid results`);
+    process.exit(validProcesses === runSeeds.length ? 0 : 2);
   }
 
   const times: number[] = [];
@@ -326,7 +337,14 @@ if (import.meta.main) {
     const file = path.join(outDir, `${name}.jsonl`);
     const sink = Bun.file(file).writer();
 
-    let result: { reached: boolean; timeToGoalMs: number; records: number; stoppedBecause: string };
+    let result: {
+      reached: boolean;
+      timeToGoalMs: number;
+      records: number;
+      stoppedBecause: string;
+      validity: RunValidity;
+      scenario: ScenarioClass;
+    };
     if (driver === "planner") {
       result = runSim({
         goal,
@@ -373,9 +391,10 @@ if (import.meta.main) {
     void sink.end();
     times.push(result.timeToGoalMs);
     console.log(
-      `seed ${seed}: ${result.reached ? `reached in ${formatDuration(result.timeToGoalMs)}` : `NOT reached (${result.stoppedBecause})`}  ` +
+      `seed ${seed}: [${result.validity}] ${result.reached ? `reached in ${formatDuration(result.timeToGoalMs)}` : `NOT reached (${result.stoppedBecause})`}  ` +
         `records=${result.records}  -> ${file}`,
     );
+    if (result.validity === "invalid-for-goal") process.exitCode = 2;
   }
 
   if (runSeeds.length > 1) {

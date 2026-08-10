@@ -32,7 +32,7 @@ export type SimServer = Server &
       | "serverGrowth"
       | "numOpenPortsRequired"
     >
-  >;
+  > & { simKind?: "Server" | "HacknetServer" | "DarknetServer" };
 
 // v3.0.1 src/Server/Server.ts capDifficulty()/fortify()/weaken()
 export function capDifficulty(server: SimServer): void {
@@ -216,6 +216,7 @@ export interface ServerSpec {
   serverGrowth: number;
   numOpenPortsRequired: number;
   maxRam: number;
+  simKind?: SimServer["simKind"];
 }
 
 export function serverFromSpec(spec: ServerSpec, base: SimServer): SimServer {
@@ -229,6 +230,7 @@ export function serverFromSpec(spec: ServerSpec, base: SimServer): SimServer {
     { ServerMaxMoney: currentNodeMults.ServerMaxMoney, ServerStartingSecurity: currentNodeMults.ServerStartingSecurity },
   );
   base.hostname = spec.hostname;
+  base.simKind = spec.simKind ?? "Server";
   base.organizationName = spec.organizationName ?? "";
   base.maxRam = spec.maxRam;
   base.requiredHackingSkill = statics.requiredHackingSkill;

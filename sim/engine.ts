@@ -11,11 +11,9 @@ import type { Clock } from "./clock.ts";
  *      gang, corporation, bladeburner, sleeves, hacknet, stock, faction rep,
  *      and the thirteen Engine.Counters.
  *
- * Only `hacking` is implemented in game/ today, so no subsystem is wired yet.
- * The machinery lands now anyway: every feature that follows (hacknet's linear
- * production, factions' passive rep, gang's 25x bonus time) is defined in terms
- * of these cycles, and retrofitting a second timebase under models already
- * written against the first would mean redoing all of them.
+ * The simulator currently wires work, stocks, Hacknet, faction invitations and
+ * passive faction reputation here. Later subsystems must use the same engine
+ * hooks rather than creating their own clock.
  *
  * Three quirks that are NOT approximations — code depends on each:
  *
@@ -56,6 +54,7 @@ export function initialCounters(): Record<string, number> {
  * simply not modelled — the gap surfaces where a driver reaches for the ns API,
  * not here, so an unmodelled subsystem costs nothing per tick. */
 export interface EngineSubsystems {
+  updateOnlineScriptTimes?(cycles: number): void;
   processWork?(cycles: number): void;
   processStockPrices?(cycles: number): void;
   gangProcess?(cycles: number): void;
@@ -127,6 +126,7 @@ export class Engine {
     }
     s.bladeburnerStoreCycles?.(numCycles);
     s.sleeveProcess?.(numCycles);
+    s.updateOnlineScriptTimes?.(numCycles);
     s.processHacknetEarnings?.(numCycles);
 
     this.decrementAllCounters(numCycles);

@@ -57,8 +57,9 @@ const MANIFEST: VendorFile[] = [
   {
     path: "src/Hacking.ts",
     patches: [
-      // DarknetServer's import graph detonates into the whole game UI. Cost:
-      // we lose the "darknet servers hack in a flat 16s" special case.
+      // DarknetServer's import graph detonates into the whole game UI. Branded
+      // Darknet values are refused at the simulator boundary until that
+      // subsystem is modeled, so this removed special case cannot run silently.
       { find: `import { DarknetServer } from "./Server/DarknetServer";\n`, replace: "" },
       { find: `  if (server instanceof DarknetServer) return 16;\n`, replace: "" },
     ],

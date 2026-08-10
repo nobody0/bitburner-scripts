@@ -71,6 +71,12 @@ export class GraftingSystem {
     return true;
   }
 
+  /** Restore serialized GraftingWork progress without charging for the graft
+   * a second time. Player.currentWork is restored by game-run. */
+  restoreProgress(unitCompleted: number): void {
+    this.#unitCompleted = Math.max(0, unitCompleted);
+  }
+
   processWork(cycles: number): void {
     const work = this.#player.currentWork;
     if (!work || work.kind !== "graft") return;

@@ -5,10 +5,11 @@ import type { Engine } from "../engine.ts";
 import type { HacknetSystem } from "../features/hacknet.ts";
 import type { StockMarketSystem } from "../features/stock.ts";
 import { StockMarketConstants as STOCK_CONSTANTS } from "../vendor/bitburner/src/StockMarket/data/Constants.ts";
+import { CodingContractName } from "../vendor/bitburner/src/CodingContract/Enums.ts";
 import { unmodeled } from "../realm/unmodeled.ts";
 import type { SimWorld } from "../world.ts";
 import { getCloudServerCost, getCloudServerLimit, getCloudServerMaxRam, getCloudServerUpgradeCost } from "../core/effects.ts";
-import { getRamCost, SCRIPT_BASE_RAM_GB, type RamCostContext } from "./ram-costs.ts";
+import { getFunctionRamCost, SCRIPT_BASE_RAM_GB, type RamCostContext } from "./ram-costs.ts";
 import { ProcessTable, ScriptDeath, type SimProcess } from "./process.ts";
 
 /** A synthetic Netscript runtime over SimWorld, faithful enough to run
@@ -65,6 +66,7 @@ export interface SimNsHost {
     grafting: Record<string, unknown>;
     getFavorToDonate: () => number;
     enums: Record<string, unknown>;
+    installBackdoorWithDelay: (delay: (ms: number) => Promise<void>) => Promise<void>;
   };
   hacknet?: HacknetSystem;
   /** The World Stock Exchange, when a run wires one. Absent means the whole
@@ -209,14 +211,32 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   const world = host.world;
 
   function hgw(kind: "hack" | "grow" | "weaken") {
-    return (target: string, opts?: { additionalMsec?: number; threads?: number; stock?: boolean }): Promise<number> => {
+    return (target: string, rawOpts?: unknown): Promise<number> => {
+      if (rawOpts != null && typeof rawOpts !== "object") {
+        throw new Error(`${kind}: BasicHGWOptions must be an object if specified`);
+      }
+      const opts = (rawOpts ?? {}) as { additionalMsec?: unknown; threads?: unknown; stock?: unknown };
+      const asNumber = (name: string, value: unknown): number => {
+        const parsed = typeof value === "string" ? Number.parseFloat(value) : value;
+        if (typeof parsed !== "number" || Number.isNaN(parsed)) throw new Error(`${kind}: '${name}' must be a number`);
+        return parsed;
+      };
+      const additionalMsec = asNumber("opts.additionalMsec", opts.additionalMsec ?? 0);
+      if (additionalMsec < 0) throw new Error(`${kind}: additionalMsec must be non-negative`);
+      if (additionalMsec > 1e9) throw new Error(`${kind}: additionalMsec too large (>1e9)`);
+      const requested = opts.threads;
+      const threads = !requested ? process.threads : asNumber("opts.threads", requested);
+      if (threads <= 0) throw new Error(`${kind}: opts.threads must be a positive number`);
+      if (threads > process.threads) {
+        throw new Error(`${kind}: Too many threads requested. Requested: ${threads}. Has: ${process.threads}.`);
+      }
       const server = requireServer(host, target);
+      if (server.simKind === "DarknetServer") throw new Error(`${kind}: the server must not be a darknet server`);
       if (server.purchasedByPlayer) throw new Error(`${kind}: cannot target a purchased server`);
       if (!server.hasAdminRights) throw new Error(`${kind}: no admin rights on ${target}`);
-      const threads = opts?.threads ?? process.threads;
       // Duration from CALL-time state, additionalMsec folded in before the
       // delay starts — one longer timer, never two.
-      const durationMs = world.hgwDurationMs(kind, server) + (opts?.additionalMsec ?? 0);
+      const durationMs = world.hgwDurationMs(kind, server) + additionalMsec;
       if (kind === "hack") {
         if (world.person.skills.hacking < server.requiredHackingSkill) {
           throw new Error(`hack: hacking skill too low for ${target}`);
@@ -226,9 +246,14 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       // `stock: true` is honoured at COMPLETION, not at call time: the influence
       // roll is against the money actually moved, which is not known until the
       // op lands (NetscriptHelpers.tsx:614, NetscriptFunctions.ts:305).
-      const stock = opts?.stock === true;
+      const stock = !!opts.stock;
       return netscriptDelay(host, process, durationMs, kind).then(
-        () => world.land(kind, target, threads, cores, stock).nsValue,
+        () => {
+          const landed = world.land(kind, target, threads, cores, stock);
+          process.onlineExpGained += landed.result?.expGained ?? 0;
+          if (kind === "hack") process.onlineMoneyMade += landed.nsValue;
+          return landed.nsValue;
+        },
       );
     };
   }
@@ -311,6 +336,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         threads,
         ramPerThreadGb: options?.ramOverride ?? DEFAULT_SCRIPT_RAM_GB,
         temporary: options?.temporary ?? false,
+        parentPid: process.pid,
       });
       if (!started) return 0;
       launch(host, started);
@@ -319,22 +345,32 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     kill: (pid: number): boolean => host.processes.kill(pid),
     killall: (hostname: string): boolean => host.processes.killall(hostname, process.pid) > 0,
     ps: (hostname = process.host) => host.processes.ps(hostname),
-    getFunctionRamCost: (name: string): number => getRamCost(name, host.ramCtx),
+    getFunctionRamCost: (name: unknown): number => {
+      if (typeof name !== "string" && typeof name !== "number") {
+        throw new Error("getFunctionRamCost: 'name' must be a string");
+      }
+      return getFunctionRamCost(String(name), host.ramCtx);
+    },
 
     // --- world reads ----------------------------------------------------
     getPlayer: (): Player => world.playerRecord(),
     getResetInfo: (): ResetInfo => host.reset,
     getMoneySources: () => structuredClone(world.moneySources),
     getTotalScriptIncome: (): [number, number] => {
+      let current = 0;
+      for (const running of host.processes.values()) {
+        current += running.onlineMoneyMade / running.onlineRunningTimeSeconds;
+      }
       const sinceInstallSec = Math.max(0, host.clock.now() - host.reset.lastAugReset) / 1_000;
-      const sinceStartSec = host.clock.now() / 1_000;
       const sinceInstall = sinceInstallSec > 0 ? world.moneySources.sinceInstall.hacking / sinceInstallSec : 0;
-      const sinceStart = sinceStartSec > 0 ? world.moneySources.sinceStart.hacking / sinceStartSec : 0;
-      return [sinceInstall, sinceStart];
+      return [current, sinceInstall];
     },
     getTotalScriptExpGain: (): number => {
-      const elapsedSec = host.clock.now() / 1_000;
-      return elapsedSec > 0 ? world.scriptExpEarned / elapsedSec : 0;
+      let current = 0;
+      for (const running of host.processes.values()) {
+        current += running.onlineExpGained / running.onlineRunningTimeSeconds;
+      }
+      return current;
     },
     // Share is not an executable action in this simulator yet, so the exact
     // power is its game default rather than an invented bonus.
@@ -342,7 +378,10 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     getHostname: (): string => process.host,
     // A copy, like the game: the controller mutates its snapshot (setting
     // hasAdminRights after a root pass) and must not reach into the world.
-    getServer: (hostname = process.host): Server => ({ ...requireServer(host, hostname) }),
+    getServer: (hostname = process.host): Server => {
+      const server = requireServer(host, hostname);
+      return { ...server, ...(server.hostname === "home" ? { moneyAvailable: world.player.money } : {}) };
+    },
     scan: (hostname = process.host): string[] => {
       const known = new Set(host.network.get(hostname) ?? []);
       if (hostname === "home") {
@@ -355,7 +394,8 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       return [...known];
     },
     hasRootAccess: (hostname: string): boolean => requireServer(host, hostname).hasAdminRights,
-    getServerMoneyAvailable: (hostname: string): number => requireServer(host, hostname).moneyAvailable ?? 0,
+    getServerMoneyAvailable: (hostname: string): number =>
+      hostname === "home" ? world.player.money : (requireServer(host, hostname).moneyAvailable ?? 0),
     getServerSecurityLevel: (hostname: string): number => requireServer(host, hostname).hackDifficulty ?? 0,
     getServerMaxRam: (hostname: string): number => requireServer(host, hostname).maxRam,
     getServerUsedRam: (hostname: string): number => requireServer(host, hostname).ramUsed,
@@ -522,15 +562,25 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     {
       getGameState: () => {
         // A profile that gates IPvGO off is a deliberate refusal, not a
-        // missing model — go IS simulated when the gate is open. A plain
-        // throw is what a locked API does in the real game, and it keeps the
+        // missing model. A plain throw is what a locked API does in the real
+        // game, and it keeps the
         // capability probe reading "unknown" without the unmodeled ledger
         // counting one phantom gap per sweep for the whole run.
         if (!world.gates.goPlayable) throw new Error("go.getGameState: IPvGO is gated off in this profile");
-        return { currentPlayer: "None", whiteScore: 0, blackScore: 0, previousMove: null };
+        return unmodeled(
+          "subsystem",
+          "IPvGO runtime",
+          "rule/oracle tests exist, but the Netscript game lifecycle is not wired to the controller",
+        );
       },
     },
     "go",
+    host,
+    process,
+  );
+  impl["codingcontract"] = namespace(
+    { getContractTypes: () => Object.values(CodingContractName) },
+    "codingcontract",
     host,
     process,
   );
@@ -588,7 +638,13 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   // Singularity, when the host wired a faction system. Absent in harnesses
   // that drive ns without one, where every member reports itself as usual.
   if (host.singularity) {
-    impl["singularity"] = namespace(host.singularity.singularity as Record<string, unknown>, "singularity", host, process);
+    const singularity = {
+      ...host.singularity.singularity,
+      installBackdoor: () => host.singularity!.installBackdoorWithDelay(
+        (ms) => netscriptDelay(host, process, ms, "singularity.installBackdoor"),
+      ),
+    };
+    impl["singularity"] = namespace(singularity, "singularity", host, process);
     impl["grafting"] = namespace(host.singularity.grafting, "grafting", host, process);
     impl["getFavorToDonate"] = host.singularity.getFavorToDonate;
     // `ns.enums` is a PROPERTY, not a function — a 0 GB read, and the

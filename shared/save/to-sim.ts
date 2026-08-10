@@ -1,5 +1,5 @@
 import { sfLevel } from "../features/unlock.ts";
-import type { SaveSnapshot, SaveServer } from "./snapshot.ts";
+import type { SaveSnapshot, SaveServer, SaveStockMarket, SaveCurrentWork } from "./snapshot.ts";
 
 /** Turn a save snapshot into simulator initial conditions.
  *
@@ -32,6 +32,7 @@ export interface SaveSeedServer {
   httpPortOpen: boolean;
   sqlPortOpen: boolean;
   isHacknetServer?: boolean;
+  simKind?: "Server" | "HacknetServer" | "DarknetServer";
 }
 
 export interface SaveSeedHacknetNode {
@@ -77,7 +78,11 @@ export interface SaveSeed {
     augmentations: { name: string; level: number }[];
     queuedAugmentations: { name: string; level: number }[];
     sourceFiles: Record<string, number>;
+    gangFaction?: string;
+    focus?: boolean;
   };
+  currentWork?: SaveCurrentWork;
+  stockMarket?: SaveStockMarket;
   /** Faction name -> reputation and favor. Favor is the one thing that CANNOT
    *  be earned within a run — it is banked only at install — so a save is the
    *  only way to study donation-gated strategy at all. */
@@ -152,6 +157,7 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
       openPortCount: server.openPortCount,
       ...portFlags(server),
       ...(server.kind === "HacknetServer" ? { isHacknetServer: true } : {}),
+      simKind: server.kind === "HacknetServer" ? "HacknetServer" : "Server",
     });
   }
 
@@ -190,7 +196,11 @@ export function saveToSeed(snapshot: SaveSnapshot): SaveSeed {
       augmentations: snapshot.player.augmentations,
       queuedAugmentations: snapshot.player.queuedAugmentations,
       sourceFiles: { ...snapshot.activeSourceFiles },
+      ...(snapshot.player.gangFaction ? { gangFaction: snapshot.player.gangFaction } : {}),
+      focus: snapshot.player.focus,
     },
+    ...(snapshot.player.currentWork ? { currentWork: snapshot.player.currentWork } : {}),
+    ...(snapshot.stockMarket ? { stockMarket: snapshot.stockMarket } : {}),
     factions: Object.fromEntries(
       Object.entries(snapshot.factions).map(([name, standing]) => [
         name,

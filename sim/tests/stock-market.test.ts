@@ -423,6 +423,35 @@ describe("hack/grow manipulation", () => {
 });
 
 describe("transactions", () => {
+  test("a save seed restores prices, forecasts, positions, and cycle progress", () => {
+    const { world, market } = makeMarket(700);
+    const stock = market.stock("ECP")!;
+    const marketKey = Object.entries(StockMarket).find(([, value]) => value === stock)?.[0]!;
+    const restored = new StockMarketSystem(world, world.player, mulberry32(701), {
+      hasWseAccount: true,
+      hasTixApiAccess: true,
+      seed: {
+        stocks: {
+          [marketKey]: {
+            symbol: "ECP", price: 12_345, lastPrice: 12_000, b: false,
+            otlkMag: 31, otlkMagForecast: 27, playerShares: 77,
+            playerAvgPx: 11_111, playerShortShares: 4, playerAvgShortPx: 13_000,
+          },
+        },
+        storedCycles: 19,
+        ticksUntilCycle: 7,
+        hasOrders: false,
+      },
+    });
+    expect(restored.stock("ECP")).toMatchObject({
+      price: 12_345, lastPrice: 12_000, b: false, otlkMag: 31,
+      otlkMagForecast: 27, playerShares: 77, playerAvgPx: 11_111,
+      playerShortShares: 4, playerAvgShortPx: 13_000,
+    });
+    expect(StockMarket.storedCycles).toBe(19);
+    expect(StockMarket.ticksUntilCycle).toBe(7);
+  });
+
   test("an immediate round trip loses exactly roundTripCost", () => {
     // The cost the previous solver could not see at all: both commissions PLUS
     // the spread, crossed on both legs. On a position worth opening the spread

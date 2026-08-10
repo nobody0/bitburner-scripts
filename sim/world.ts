@@ -413,6 +413,9 @@ export class SimWorld {
    * snapshots this before the delay starts, so a weaken landing mid-flight
    * never speeds up an op already in the air. */
   hgwDurationMs(kind: HgwAction["type"], server: SimServer): number {
+    if (server.simKind === "DarknetServer") {
+      return unmodeled("subsystem", "Darknet HGW", "normal Netscript HGW rejects Darknet; its own mechanics are not modeled");
+    }
     const seconds =
       kind === "hack"
         ? calculateHackingTime(server, this.person)

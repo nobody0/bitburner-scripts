@@ -153,19 +153,19 @@ export class FactionSystem {
    * work-vs-idle crossover the strategy tests for. */
   passiveGain(cycles: number, workingFaction: string | undefined): void {
     const person = this.#world.person;
-    const best = Math.max(
-      person.skills.hacking,
-      person.skills.strength,
-      person.skills.defense,
-      person.skills.dexterity,
-      person.skills.agility,
-      person.skills.charisma,
-    );
     for (const faction of this.factions.values()) {
       if (!faction.joined) continue;
       if (faction.name === workingFaction) continue;
-      const rate = best * Math.min(0.1, faction.favor / 1000 + 0.01) * currentNodeMults.FactionWorkRepGain;
-      faction.rep += (rate * cycles) / 1000;
+      if (FACTION_TABLE[faction.name]?.special) continue;
+      if (faction.name === this.#player.gangFaction) continue;
+      const favorMult = Math.min(0.1, faction.favor / 1000 + 0.01);
+      const rate = Math.max(
+        getHackingWorkRepGain(person as never, faction.favor) * favorMult,
+        getFactionSecurityWorkRepGain(person as never, faction.favor) * favorMult,
+        getFactionFieldWorkRepGain(person as never, faction.favor) * favorMult,
+        1 / 120,
+      );
+      faction.rep += rate * cycles * currentNodeMults.FactionPassiveRepGain;
     }
   }
 

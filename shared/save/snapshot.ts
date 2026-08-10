@@ -87,9 +87,32 @@ export interface SavePlayer {
   sleeveCount: number;
   playtimeSinceLastBitnode: number;
   totalPlaytime: number;
+  focus: boolean;
   hacknetNodes: (string | SaveHacknetNode)[];
   hashes: number;
   hashUpgrades: Record<string, number>;
+  /** Serialized Player.currentWork, normalized without importing game work
+   * classes. Unknown kinds are retained so the simulator can invalidate the
+   * run instead of silently starting idle. */
+  currentWork?: SaveCurrentWork;
+  gangFaction?: string;
+}
+
+export interface SaveCurrentWork {
+  kind: "faction" | "crime" | "graft" | "company" | "class" | "createProgram" | "unknown";
+  subject: string;
+  workType?: string;
+  cyclesWorked: number;
+  /** Crime/grafting progress is stored in milliseconds, not cycles. */
+  unitCompleted?: number;
+  ctor: string;
+}
+
+export interface SaveStockMarket {
+  stocks: Record<string, Record<string, string | number | boolean>>;
+  storedCycles: number;
+  ticksUntilCycle: number;
+  hasOrders: boolean;
 }
 
 export interface SaveBitNodeOptions {
@@ -123,6 +146,7 @@ export interface SaveSnapshot {
   servers: Map<string, SaveServer>;
   factions: Record<string, SaveFactionStanding>;
   companies: Record<string, SaveFactionStanding>;
+  stockMarket?: SaveStockMarket;
 }
 
 /** Absent keys mean "class default", not undefined: Generic_toJSON prunes via

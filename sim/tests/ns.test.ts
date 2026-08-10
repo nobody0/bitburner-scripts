@@ -3,7 +3,7 @@ import type { Server } from "@ns";
 import { homeDodgeBudget } from "../../game/lib/probe-runner.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { ramCostContext, runGame } from "../game-run.ts";
-import { getRamCost } from "../ns/ram-costs.ts";
+import { getFunctionRamCost, getRamCost } from "../ns/ram-costs.ts";
 
 /** The synthetic ns exists to run game/ for real. These pin the mechanics that
  * make that possible, and the end-to-end proof that it does. */
@@ -55,13 +55,17 @@ describe("ram costs", () => {
     expect(getRamCost("singularity.getFactionRep", ramCostContext(4, {}))).toBe(1);
   });
 
-  test("an unknown name costs 0, exactly as getRamCost reports it", () => {
+  test("the internal lookup defaults unknown names to 0, but the public API is strict", () => {
     // probe-runner relies on this: 0 means free, not missing.
     expect(getRamCost("noSuchFunction")).toBe(0);
     expect(getRamCost("gang.noSuchFunction")).toBe(0);
     expect(getRamCost("sleep")).toBe(0);
     expect(getRamCost("atExit")).toBe(0);
     expect(getRamCost("getFunctionRamCost")).toBe(0);
+    expect(getFunctionRamCost("baseCost")).toBe(1.6);
+    expect(getFunctionRamCost("sleep")).toBe(0);
+    expect(() => getFunctionRamCost("noSuchFunction")).toThrow();
+    expect(() => getFunctionRamCost("gang.noSuchFunction")).toThrow();
   });
 });
 
@@ -82,6 +86,7 @@ describe("running game/ in the synthetic world", () => {
     // The controller announces itself, which proves start.js's main ran.
     expect(result.output[0]).toContain("start.js online");
     expect(result.records).toBeGreaterThan(100);
+    expect(result.validity).toBe("valid");
   });
 
   test("the run is deterministic for a fixed seed", async () => {
@@ -196,6 +201,7 @@ describe("running game/ in the synthetic world", () => {
       horizonMs: 60 * 60_000,
       homeRam: 16,
       label: "gaps",
+      gates: { goPlayable: true },
     });
 
     // Probes for features we do not simulate hit the wall and say so...
@@ -211,6 +217,8 @@ describe("running game/ in the synthetic world", () => {
     // ...and the run still completes, because probe-runner isolates each probe.
     expect(result.reached).toBe(true);
     expect(result.crashes).toEqual([]);
+    expect(result.validity).toBe("invalid-for-goal");
+    expect(result.scenario).toBe("synthetic-early-game");
   });
 
   test("a fresh 8GB home still cannot fund a dodge on home ALONE", () => {

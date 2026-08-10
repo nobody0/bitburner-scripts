@@ -51,13 +51,19 @@ export function resetUnmodeled(): void {
   reporter = undefined;
 }
 
-/** Report a gap and throw. Reports only the first hit of each kind+name, so the
- * record stream stays a digest; `unmodeledCounts()` carries the totals. */
-export function unmodeled(kind: string, name: string, detail?: string): never {
+/** Record an incomplete initial condition. Unlike an invoked unimplemented
+ * API there is no caller to reject, so this only marks the run invalid. */
+export function noteUnmodeled(kind: string, name: string, detail?: string): void {
   const key = `${kind} ${name}`;
   const seen = counts.get(key) ?? 0;
   counts.set(key, seen + 1);
+  if (seen === 0) reporter?.(detail === undefined ? { kind, name } : { kind, name, detail });
+}
+
+/** Report a gap and throw. Reports only the first hit of each kind+name, so the
+ * record stream stays a digest; `unmodeledCounts()` carries the totals. */
+export function unmodeled(kind: string, name: string, detail?: string): never {
   const report: UnmodeledReport = detail === undefined ? { kind, name } : { kind, name, detail };
-  if (seen === 0) reporter?.(report);
+  noteUnmodeled(kind, name, detail);
   throw new UnmodeledError(report);
 }

@@ -37,6 +37,13 @@ export interface SimProcess {
   ramGb: number;
   atExit: Map<string, () => void>;
   killed: boolean;
+  /** Running-script accounting used by getTotalScriptIncome/ExpGain. The game
+   * reports each live script's lifetime average, not a global historical
+   * average. */
+  onlineMoneyMade: number;
+  onlineExpGained: number;
+  onlineRunningTimeSeconds: number;
+  parentPid?: number;
   /** Clock id of the netscriptDelay this process is currently blocked in. */
   delay?: number;
   delayReject?: (err: unknown) => void;
@@ -59,6 +66,7 @@ export interface StartSpec {
   threads: number;
   ramPerThreadGb: number;
   temporary: boolean;
+  parentPid?: number;
 }
 
 export class ProcessTable {
@@ -101,6 +109,10 @@ export class ProcessTable {
       ramGb,
       atExit: new Map(),
       killed: false,
+      onlineMoneyMade: 0,
+      onlineExpGained: 0,
+      onlineRunningTimeSeconds: 0.01,
+      ...(spec.parentPid !== undefined ? { parentPid: spec.parentPid } : {}),
     };
     this.#processes.set(process.pid, process);
     return process;
@@ -138,6 +150,16 @@ export class ProcessTable {
     return killed;
   }
 
+  values(): IterableIterator<SimProcess> {
+    return this.#processes.values();
+  }
+
+  /** updateOnlineScriptTimes, called from the 200 ms engine cycle. */
+  updateOnlineTimes(cycles: number): void {
+    const seconds = cycles * 0.2;
+    for (const process of this.#processes.values()) process.onlineRunningTimeSeconds += seconds;
+  }
+
   /** prestigeWorkerScripts: kill every process on every host. */
   killAll(): number {
     let killed = 0;
@@ -167,6 +189,14 @@ export class ProcessTable {
     if (cancelled) process.delayReject?.(new ScriptDeath(process.pid));
     process.delayReject = undefined;
     process.runningFn = undefined;
+
+    // NetscriptWorker transfers a terminating child's earnings to its live
+    // parent, including when the child was killed.
+    const parent = process.parentPid === undefined ? undefined : this.#processes.get(process.parentPid);
+    if (parent && !parent.killed) {
+      parent.onlineMoneyMade += process.onlineMoneyMade;
+      parent.onlineExpGained += process.onlineExpGained;
+    }
 
     // Cleared before iterating: calling exit from inside atExit would recurse.
     const handlers = [...process.atExit.values()];

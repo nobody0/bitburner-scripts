@@ -59,9 +59,9 @@ Ordering that is reproduced because code depends on it:
   into the whole game. It is therefore **not** drift-detected — re-read it when
   bumping the tag. These numbers decide which probes the runner can afford, so
   getting them wrong makes the probe schedule fiction.
-- **Randomness**: only hack success rolls; seeded mulberry32. `Date.now()` is
-  virtual and starts from a fixed epoch, so a `(seed, profile, save)` triple is
-  fully reproducible.
+- **Randomness**: hacking, crime and stock each use deterministic, independent
+  seeded streams. `Date.now()` is virtual, so a `(seed, profile, save)` triple
+  is fully reproducible.
 
 ## Not modelling something is a first-class result
 
@@ -76,15 +76,37 @@ the controller isolates each driver — so a run degrades to "that probe failed"
 rather than dying. The gap list is reported by `sim/run.ts`, surfaced in the
 viewer's Overview tab, and is the roadmap.
 
+Every result is also classified:
+
+- `valid` — controller driver, with no unmodeled calls or script crashes;
+- `partial` — the planner-only driver, which intentionally does not exercise
+  the shipped controller or Netscript lifecycle;
+- `invalid-for-goal` — an unmodeled call, incomplete seeded state, or script
+  crash could have changed the outcome. The CLI exits non-zero for this class.
+
+`sim.meta` includes the driver, scenario class and static per-feature coverage.
+`sim:compare` refuses different drivers, scenarios, goals or gap sets, and
+refuses invalid runs unless `--allow-invalid` is supplied for diagnostics.
+
 ## Known gaps
 
 - **One run per process.** `currentNodeMults` is module state in the vendored
   core, `game/` keeps its hacking ledger in module state, and the dodge/worker
   rendezvous lives on `globalThis`. `sim/run.ts` fans multi-seed runs out to one
   child process per seed.
-- No subsystem is wired to the engine cycle yet — only `hacking` exists in
-  `game/`. The machinery and the bonus-time contract are in place
-  (`sim/engine.ts`), so each feature lands against the right clock.
+- Controller-facing models currently cover hacking, factions, crimes,
+  grafting, Hacknet and stocks. Career, progression and stocks are partial;
+  gang, corporation, Bladeburner, sleeves, Stanek and Darknet remain
+  unmodeled. Go and coding-contract rules have oracle tests but their Netscript
+  lifecycles are not wired, so they report a gap instead of returning synthetic
+  gameplay state.
+- The default network is an eight-server deterministic early-game fixture, not
+  Bitburner's generated whole-node network. Save-seeded runs use the real saved
+  topology and live server state. The scenario class prevents accidental
+  comparisons between the two.
+- Save seeding restores supported current work and the stock market's prices,
+  forecasts, positions and cycle state. Unsupported work kinds and nonempty
+  stock order books invalidate the run rather than being silently discarded.
 - Cold-module compile latency is not modelled, so the simulator will not
   reproduce the desynced first batch a real cold start produces.
 - Stock's update gate reads real `Date.now()` in the game; under the virtual

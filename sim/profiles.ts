@@ -104,7 +104,7 @@ const CYBERSEC_CADENCE_WORLD: NonNullable<SimProfile["world"]> = {
 export const PROFILES: readonly SimProfile[] = [
   {
     id: "bn1-speedrun",
-    description: "Everything enabled: how fast does a fresh BN1 reach $1b?",
+    description: "Synthetic early-game fixture: how fast does the small deterministic BN1 network reach $1b?",
     goals: ["earn:1e9"],
     horizon: "8h",
     seeds: [1, 2, 3],

@@ -595,9 +595,9 @@ function sf4Multiplier(ctx: RamCostContext): number {
   return 1;
 }
 
-/** Cost of `ns.<path>`, dotted. Matches getRamCost's contract: an unknown name
- * costs 0, exactly as the game reports it — which is why probe-runner treats a
- * 0 as "free" rather than "missing". */
+/** Cost of an internal `ns.<path>`, dotted. The game's internal getRamCost
+ * defaults an unknown path to 0 when its strict flag is absent. Public
+ * `ns.getFunctionRamCost`, however, passes that strict flag and throws. */
 function isSf4(node: CostNode): node is Sf4Cost {
   return typeof node === "object" && typeof (node as Sf4Cost).sf4 === "number";
 }
@@ -612,4 +612,25 @@ export function getRamCost(path: string, ctx: RamCostContext = {}): number {
   if (typeof node === "number") return node;
   if (isSf4(node)) return node.sf4 * sf4Multiplier(ctx);
   return 0;
+}
+
+/** Public `ns.getFunctionRamCost` semantics. `baseCost` is a documented
+ * special name; an unknown or namespace-only path is an API error, never free
+ * RAM (NetscriptFunctions.ts:1501, RamCostGenerator.ts:743 @ v3.0.1). */
+export function getFunctionRamCost(path: string, ctx: RamCostContext = {}): number {
+  if (path === "baseCost") return SCRIPT_BASE_RAM_GB;
+  let node: CostNode = RAM_COSTS;
+  for (const branch of path.split(".")) {
+    const next: CostNode | undefined = typeof node === "object" && !isSf4(node) ? node[branch] : undefined;
+    if (next === undefined) {
+      // Upstream deliberately throws a string for a missing leaf.
+      throw `No ram cost is defined for (ns.${path})`;
+    }
+    if (typeof next === "object" && !isSf4(next)) {
+      node = next;
+      continue;
+    }
+    return typeof next === "number" ? next : next.sf4 * sf4Multiplier(ctx);
+  }
+  throw new Error(`Tried to get ram cost for ns.${path} but the value was an invalid type`);
 }

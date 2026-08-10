@@ -29,7 +29,13 @@ describe("runSim initialization", () => {
       world: { startingMoney: 1_000 },
     });
 
-    expect(result).toMatchObject({ reached: true, timeToGoalMs: 0, stoppedBecause: "goal" });
+    expect(result).toMatchObject({
+      reached: true,
+      timeToGoalMs: 0,
+      stoppedBecause: "goal",
+      validity: "partial",
+      scenario: "synthetic-early-game",
+    });
     expect(initCalls).toBe(0);
     expect(planCalls).toBe(0);
   });

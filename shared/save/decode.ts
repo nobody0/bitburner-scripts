@@ -7,6 +7,8 @@ import {
   type SavePlayer,
   type SaveServer,
   type SaveSnapshot,
+  type SaveCurrentWork,
+  type SaveStockMarket,
 } from "./snapshot.ts";
 
 /** Parse a decompressed Bitburner save into a SaveSnapshot.
@@ -227,6 +229,8 @@ function decodePlayer(raw: unknown): SavePlayer {
         }];
       })
     : [];
+  const gang = asBag(bag["gang"]);
+  const currentWork = decodeCurrentWork(bag["currentWork"]);
   return {
     // loadPlayer parses money through parseFloat, so a string is legal here.
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Player.ts#L13-L22
@@ -263,9 +267,56 @@ function decodePlayer(raw: unknown): SavePlayer {
     sleeveCount: Array.isArray(sleeves) ? sleeves.length : 0,
     playtimeSinceLastBitnode: num(bag["playtimeSinceLastBitnode"], 0),
     totalPlaytime: num(bag["totalPlaytime"], 0),
+    focus: bool(bag["focus"]),
     hacknetNodes,
     hashes: num(hashManager["hashes"], 0),
     hashUpgrades: numberMap(hashManager["upgrades"], true),
+    ...(currentWork ? { currentWork } : {}),
+    ...(typeof gang["facName"] === "string" ? { gangFaction: gang["facName"] } : {}),
+  };
+}
+
+function decodeCurrentWork(raw: unknown): SaveCurrentWork | undefined {
+  if (raw == null) return undefined;
+  const work = asBag(raw);
+  const ctor = str(work["__ctor"], str(work["type"], "unknown"));
+  const common = { cyclesWorked: num(work["cyclesWorked"], 0), ctor };
+  if (ctor === "FactionWork") return {
+    ...common, kind: "faction", subject: str(work["factionName"]), workType: str(work["factionWorkType"]),
+  };
+  if (ctor === "CrimeWork") return {
+    ...common, kind: "crime", subject: str(work["crimeType"]), unitCompleted: num(work["unitCompleted"], 0),
+  };
+  if (ctor === "GraftingWork") return {
+    ...common, kind: "graft", subject: str(work["augmentation"]), unitCompleted: num(work["unitCompleted"], 0),
+  };
+  if (ctor === "CompanyWork") return { ...common, kind: "company", subject: str(work["companyName"]) };
+  if (ctor === "ClassWork") return {
+    ...common, kind: "class", subject: str(work["location"]), workType: str(work["classType"]),
+  };
+  if (ctor === "CreateProgramWork") return { ...common, kind: "createProgram", subject: str(work["programName"]) };
+  return { ...common, kind: "unknown", subject: "" };
+}
+
+function decodeStockMarket(raw: unknown): SaveStockMarket | undefined {
+  if (raw == null) return undefined;
+  const market = asBag(raw);
+  const stocks: SaveStockMarket["stocks"] = {};
+  for (const [name, value] of Object.entries(market)) {
+    if (name === "Orders" || name === "storedCycles" || name === "lastUpdate" || name === "ticksUntilCycle") continue;
+    const stock = asBag(value);
+    if (typeof stock["symbol"] !== "string") continue;
+    stocks[name] = Object.fromEntries(
+      Object.entries(stock).filter((entry): entry is [string, string | number | boolean] =>
+        typeof entry[1] === "string" || typeof entry[1] === "number" || typeof entry[1] === "boolean"),
+    );
+  }
+  const orders = asBag(market["Orders"]);
+  return {
+    stocks,
+    storedCycles: num(market["storedCycles"], 0),
+    ticksUntilCycle: num(market["ticksUntilCycle"], 0),
+    hasOrders: Object.values(orders).some((ordersForSymbol) => Array.isArray(ordersForSymbol) && ordersForSymbol.length > 0),
   };
 }
 
@@ -334,6 +385,7 @@ export function decodeSaveJson(json: string): SaveSnapshot {
   }
 
   const versionRaw = subSave(data, "VersionSave");
+  const stockMarket = decodeStockMarket(subSave(data, "StockMarketSave"));
   return {
     version: typeof versionRaw === "number" ? versionRaw : Number(versionRaw) || undefined,
     bitNode: num(playerRaw["bitNodeN"], 1),
@@ -344,5 +396,6 @@ export function decodeSaveJson(json: string): SaveSnapshot {
     servers,
     factions: decodeStandings(subSave(data, "FactionsSave")),
     companies: decodeStandings(subSave(data, "CompaniesSave")),
+    ...(stockMarket ? { stockMarket } : {}),
   };
 }

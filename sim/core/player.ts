@@ -53,6 +53,10 @@ export interface SimPlayerOptions {
   queuedAugmentations?: { name: string; level: number }[];
   sourceFiles?: Record<string, number>;
   jobs?: Record<string, string>;
+  /** Player.gang.facName. Needed because that faction receives no passive
+   * reputation while it is the player's gang. */
+  gangFaction?: string;
+  focus?: boolean;
 }
 
 export class SimPlayer {
@@ -82,6 +86,7 @@ export class SimPlayer {
   queuedAugmentations: Map<string, number> = new Map();
   /** SF number (as string) -> level. */
   sourceFiles: Record<string, number>;
+  gangFaction: string | undefined;
   currentWork: SimWork | undefined;
   focus = true;
 
@@ -95,6 +100,8 @@ export class SimPlayer {
     this.factions = [...(options.factions ?? [])];
     this.factionInvitations = [...(options.factionInvitations ?? [])];
     this.sourceFiles = { ...(options.sourceFiles ?? {}) };
+    this.gangFaction = options.gangFaction;
+    this.focus = options.focus ?? true;
     this.augmentations = new Map((options.augmentations ?? []).map((a) => [a.name, a.level]));
     this.queuedAugmentations = new Map();
     for (const augmentation of options.queuedAugmentations ?? []) {

@@ -26,6 +26,10 @@ interface FixtureOptions {
   bitNodeN?: number;
   sourceFiles?: [number, number][];
   sourceFileOverrides?: [number, number][];
+  currentWork?: unknown;
+  gang?: unknown;
+  focus?: boolean;
+  stockMarket?: unknown;
 }
 
 function buildSaveJson(options: FixtureOptions = {}): string {
@@ -52,7 +56,9 @@ function buildSaveJson(options: FixtureOptions = {}): string {
     hasTixApiAccess: true,
     has4SData: false,
     has4SDataTixApi: false,
-    gang: null,
+    gang: options.gang ?? null,
+    currentWork: options.currentWork ?? null,
+    focus: options.focus ?? false,
     corporation: null,
     bladeburner: { ctor: "Bladeburner", data: { rank: 40 } },
     sleeves: [{ ctor: "Sleeve", data: {} }, { ctor: "Sleeve", data: {} }],
@@ -138,6 +144,7 @@ function buildSaveJson(options: FixtureOptions = {}): string {
       AliasesSave: "{}",
       GlobalAliasesSave: "{}",
       VersionSave: JSON.stringify(51),
+      ...(options.stockMarket !== undefined ? { StockMarketSave: JSON.stringify(options.stockMarket) } : {}),
     },
   });
 }
@@ -343,5 +350,30 @@ describe("seeding a simulation from a save", () => {
     expect(seed.bladeburnerRank).toBe(40);
     expect(seed.homeFiles).toEqual(["NUKE.exe", "BruteSSH.exe", "hackers-starting-handbook.lit", "j0.msg"]);
     expect(seed.servers.find((server) => server.hostname === "n00dles")?.organizationName).toBe("Noodle Bar");
+  });
+
+  test("preserves gang identity, focus, current work progress, and stock state", () => {
+    const detailed = decodeSaveJson(buildSaveJson({
+      gang: { ctor: "Gang", data: { facName: "Slum Snakes" } },
+      focus: true,
+      currentWork: { ctor: "CrimeWork", data: { crimeType: "Homicide", cyclesWorked: 12, unitCompleted: 400 } },
+      stockMarket: {
+        ECorp: { ctor: "Stock", data: { symbol: "ECP", price: 12_345, playerShares: 77, playerAvgPx: 12_000 } },
+        Orders: { ECP: [{ shares: 5 }] }, storedCycles: 19, lastUpdate: 123, ticksUntilCycle: 7,
+      },
+    }));
+    expect(detailed.player.gangFaction).toBe("Slum Snakes");
+    expect(detailed.player.focus).toBe(true);
+    expect(detailed.player.currentWork).toMatchObject({
+      kind: "crime", subject: "Homicide", cyclesWorked: 12, unitCompleted: 400,
+    });
+    expect(detailed.stockMarket).toMatchObject({ storedCycles: 19, ticksUntilCycle: 7, hasOrders: true });
+    expect(detailed.stockMarket?.stocks["ECorp"]).toMatchObject({ symbol: "ECP", price: 12_345, playerShares: 77 });
+
+    const seed = saveToSeed(detailed);
+    expect(seed.playerState.gangFaction).toBe("Slum Snakes");
+    expect(seed.playerState.focus).toBe(true);
+    expect(seed.currentWork?.kind).toBe("crime");
+    expect(seed.stockMarket?.stocks["ECorp"]?.["price"]).toBe(12_345);
   });
 });

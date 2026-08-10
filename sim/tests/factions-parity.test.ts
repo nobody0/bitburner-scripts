@@ -205,6 +205,34 @@ describe("the work-vs-idle crossover", () => {
     expect(passiveRepPerSec(p, favor, ctx)).toBe(expected);
   });
 
+  test("FactionSystem applies that formula and skips special, gang, and actively worked factions", () => {
+    const world = new SimWorld({
+      seed: 17,
+      playerState: {
+        factions: ["CyberSec", "NiteSec", "Slum Snakes", "Church of the Machine God"],
+        gangFaction: "Slum Snakes",
+      },
+    });
+    const factions = new FactionSystem(world, world.player, {
+      CyberSec: { rep: 0, favor: 42 }, NiteSec: { rep: 0, favor: 0 },
+      "Slum Snakes": { rep: 0, favor: 0 }, "Church of the Machine God": { rep: 0, favor: 0 },
+    });
+    const favor = 42;
+    const favorMult = Math.min(0.1, favor / 1000 + 0.01);
+    const expected = Math.max(
+      getHackingWorkRepGain(world.person as never, favor) * favorMult,
+      getFactionSecurityWorkRepGain(world.person as never, favor) * favorMult,
+      getFactionFieldWorkRepGain(world.person as never, favor) * favorMult,
+      1 / 120,
+    ) * 5 * currentNodeMults.FactionPassiveRepGain;
+
+    factions.passiveGain(5, "NiteSec");
+    expect(factions.get("CyberSec")?.rep).toBe(expected);
+    expect(factions.get("NiteSec")?.rep).toBe(0);
+    expect(factions.get("Slum Snakes")?.rep).toBe(0);
+    expect(factions.get("Church of the Machine God")?.rep).toBe(0);
+  });
+
   test("the crossover moves with the BitNode's FactionWorkRepGain", () => {
     // Both sides scale with it, but not identically — passive rep is driven by
     // the best skill while work is driven by the relevant one, so the node

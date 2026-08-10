@@ -1,5 +1,6 @@
 import type { SimPlayer } from "../core/player.ts";
 import type { SimWorld } from "../world.ts";
+import type { SaveStockMarket } from "../../shared/save/snapshot.ts";
 import { PositionType } from "../vendor/bitburner/src/StockMarket/Enums.ts";
 import { setMarketContext, StockMarket, SymbolToStockMap } from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
 import {
@@ -74,6 +75,7 @@ export class StockMarketSystem {
       has4SData?: boolean;
       has4SDataTixApi?: boolean;
       disable4SData?: boolean;
+      seed?: SaveStockMarket;
     } = {},
   ) {
     this.#world = world;
@@ -87,7 +89,23 @@ export class StockMarketSystem {
     // rolls its price, cap, spread, volatility and shareTxForMovement, and
     // `lastUpdate` is stamped from the clock.
     setMarketContext({ random: rng, now: () => world.clock.now() });
-    if (this.hasWseAccount || this.hasTixApiAccess) initStockMarket();
+    if (this.hasWseAccount || this.hasTixApiAccess) {
+      initStockMarket();
+      if (opts.seed) this.#restore(opts.seed);
+    }
+  }
+
+  #restore(seed: SaveStockMarket): void {
+    for (const [name, state] of Object.entries(seed.stocks)) {
+      const stock = StockMarket[name];
+      if (!(stock instanceof Stock)) throw new Error(`save stock market contains unknown stock ${name}`);
+      Object.assign(stock, state);
+    }
+    StockMarket.storedCycles = seed.storedCycles;
+    StockMarket.ticksUntilCycle = seed.ticksUntilCycle;
+    // A run starts at virtual t=0. Preserve buffered/cycle state, but rebase
+    // the wall-clock gate exactly as loading into a new runtime does.
+    StockMarket.lastUpdate = this.#world.clock.now();
   }
 
   /** Engine hook, in updateGame's real order (second, right after processWork).

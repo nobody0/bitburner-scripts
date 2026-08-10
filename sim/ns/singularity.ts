@@ -82,6 +82,9 @@ export interface SingularityNamespace {
   grafting: Record<string, unknown>;
   getFavorToDonate: () => number;
   enums: Record<string, unknown>;
+  /** Process-aware adapter used by makeSimNs so a script kill cancels the
+   * same delay that gates the world mutation. */
+  installBackdoorWithDelay: (delay: (ms: number) => Promise<void>) => Promise<void>;
 }
 
 export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
@@ -127,6 +130,24 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
   };
 
   const favorToDonate = (): number => Math.floor(150 * currentNodeMults.FavorToDonateToFaction);
+
+  const installBackdoorWithDelay = async (delay: (ms: number) => Promise<void>): Promise<void> => {
+    const server = world.servers.get(deps.terminal.host);
+    if (!server) throw new Error(`installBackdoor: server '${deps.terminal.host}' does not exist`);
+    if (server.simKind === "DarknetServer") {
+      return unmodeled("subsystem", "Darknet backdoor", "Darknet authentication/backdoor effects are not modeled");
+    }
+    if (server.purchasedByPlayer) throw new Error("installBackdoor: cannot backdoor a purchased server");
+    if (!server.hasAdminRights) throw new Error(`installBackdoor: no root access on '${server.hostname}'`);
+    if (world.person.skills.hacking < (server.requiredHackingSkill ?? 0)) {
+      throw new Error(`installBackdoor: hacking level is too low for '${server.hostname}'`);
+    }
+    const ms = (calculateHackingTime(server, world.person) * 1000) / 4;
+    await delay(ms);
+    server.backdoorInstalled = true;
+    deps.pokeInvitationCounter();
+    world.emit({ kind: "event", name: "backdoor", data: { host: server.hostname } });
+  };
 
   const singularity: Record<string, unknown> = {
     // --- factions -----------------------------------------------------
@@ -379,23 +400,8 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       return true;
     },
 
-    installBackdoor: async (): Promise<void> => {
-      const server = world.servers.get(deps.terminal.host);
-      if (!server) throw new Error(`installBackdoor: server '${deps.terminal.host}' does not exist`);
-      if (server.purchasedByPlayer) throw new Error("installBackdoor: cannot backdoor a purchased server");
-      if (!server.hasAdminRights) throw new Error(`installBackdoor: no root access on '${server.hostname}'`);
-      if (world.person.skills.hacking < (server.requiredHackingSkill ?? 0)) {
-        throw new Error(`installBackdoor: hacking level is too low for '${server.hostname}'`);
-      }
-      // Backdoor takes hackingTime/4 (src/Terminal/commands/backdoor.ts).
-      const ms = (calculateHackingTime(server, world.person) * 1000) / 4;
-      await new Promise<void>((resolve) => clock.in(ms, resolve));
-      server.backdoorInstalled = true;
-      // A backdoor can complete a faction requirement, so re-check now rather
-      // than up to 2 s later.
-      deps.pokeInvitationCounter();
-      world.emit({ kind: "event", name: "backdoor", data: { host: server.hostname } });
-    },
+    installBackdoor: (): Promise<void> =>
+      installBackdoorWithDelay((ms) => new Promise<void>((resolve) => void clock.in(ms, resolve))),
 
     b1tflum3: (): never => unmodeled("ns", "singularity.b1tflum3", "one BitNode per process (see spec/simulator.md)"),
     destroyW0r1dD43m0n: (): never =>
@@ -434,6 +440,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       },
     },
     getFavorToDonate: favorToDonate,
+    installBackdoorWithDelay,
     enums: makeEnums(),
   };
 }
