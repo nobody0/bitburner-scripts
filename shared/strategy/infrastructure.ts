@@ -42,8 +42,45 @@ export interface ScoredInfrastructure extends InfrastructureOption, ScoredInvest
 export interface InfrastructureDecision {
   buy?: ScoredInfrastructure;
   ranked: ScoredInfrastructure[];
+  /** Best productive income/sec per dollar, including temporarily
+   * unaffordable quotes. Used to value the compounding option of money now. */
+  reinvestmentReturnPerDollarSec: number;
   why: string;
   hold?: string;
+}
+
+/** The purchased-server aggregate carried by the fleet topic. Kept structural
+ * here so the pure strategy does not depend on a telemetry schema. */
+export interface PurchasedInfrastructure {
+  count: number;
+  totalRam: number;
+  limit?: number;
+  maxRamPerServer?: number;
+}
+
+/** Advance a probed one-step frontier after the game confirms a purchase.
+ *
+ * A mutation invalidates only its own next-step quote. Quotes for unrelated
+ * hosts remain authoritative, so discarding the whole frontier needlessly
+ * serialises independent purchases on the next probe. The new host/next level
+ * still waits for observation; this function never invents a quote. */
+export function advanceInfrastructureFrontier<T extends Pick<InfrastructureOption, "kind" | "host" | "addedRam">>(
+  options: readonly T[],
+  purchased: PurchasedInfrastructure | undefined,
+  bought: Pick<InfrastructureOption, "kind" | "host" | "addedRam">,
+): { options: T[]; purchased?: PurchasedInfrastructure } {
+  let next = [...options];
+  let nextPurchased = purchased;
+  if (bought.kind === "upgradeServer") {
+    next = next.filter((option) => option.kind !== "upgradeServer" || option.host !== bought.host);
+    if (purchased) nextPurchased = { ...purchased, totalRam: purchased.totalRam + bought.addedRam };
+  } else if (bought.kind === "buyServer") {
+    if (!purchased) return { options: next.filter((option) => option.kind !== "buyServer") };
+    const count = purchased.count + 1;
+    nextPurchased = { ...purchased, count, totalRam: purchased.totalRam + bought.addedRam };
+    next = next.filter((option) => option.kind !== "buyServer");
+  }
+  return { options: next, ...(nextPurchased ? { purchased: nextPurchased } : {}) };
 }
 
 /** Doubling home adds `currentRam` GB. Score that capacity in exactly the
@@ -86,9 +123,23 @@ export function scoreInfrastructure(option: InfrastructureOption, horizonSec: nu
 
 /** Choose at most one atomic infrastructure purchase per pass. The arbiter
  * then compares this winner directly with Hacknet's winner. */
-export function stepInfrastructure(options: readonly InfrastructureOption[], horizonSec: number): InfrastructureDecision {
-  const ranked = options
-    .map((option) => scoreInfrastructure(option, horizonSec))
+export function stepInfrastructure(
+  options: readonly InfrastructureOption[],
+  horizonSec: number,
+  availableMoney = Infinity,
+): InfrastructureDecision {
+  const scored = options.map((option) => scoreInfrastructure(option, horizonSec));
+  const reinvestmentReturnPerDollarSec = scored.reduce(
+    (best, option) => option.worthBuying ? Math.max(best, option.returnPerDollarSec) : best,
+    0,
+  );
+  const ranked = scored
+    // These are mutually exclusive one-step actions: the feature publishes
+    // one winner to the central arbiter. An unaffordable winner would be
+    // denied there, but the affordable alternatives hidden behind it would
+    // never become claims. Keep the local frontier executable so the arbiter
+    // can compare its winner with every other feature's real investment.
+    .filter((option) => option.cost <= availableMoney)
     .sort((a, b) => {
       if (a.worthBuying !== b.worthBuying) return b.worthBuying ? 1 : -1;
       if (b.returnPerDollarSec !== a.returnPerDollarSec) return b.returnPerDollarSec - a.returnPerDollarSec;
@@ -103,9 +154,9 @@ export function stepInfrastructure(options: readonly InfrastructureOption[], hor
       return ak < bk ? -1 : ak > bk ? 1 : 0;
     });
   const best = ranked[0];
-  if (!best) return { ranked, why: "no infrastructure quotes available", hold: "nothing to buy" };
+  if (!best) return { ranked, reinvestmentReturnPerDollarSec, why: "no infrastructure quotes available", hold: "nothing to buy" };
   if (!best.worthBuying) {
-    return { ranked, why: "every infrastructure purchase loses money before the horizon", hold: best.why };
+    return { ranked, reinvestmentReturnPerDollarSec, why: "every infrastructure purchase loses money before the horizon", hold: best.why };
   }
-  return { buy: best, ranked, why: best.why };
+  return { buy: best, ranked, reinvestmentReturnPerDollarSec, why: best.why };
 }

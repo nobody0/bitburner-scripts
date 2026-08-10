@@ -112,3 +112,22 @@ export function careerBestPerSec(state: GameState): number {
 export function bestIncomePerSec(state: GameState): number {
   return bestAnnounced(announcedIncome(state));
 }
+
+/** Best productive marginal return currently known to the central money
+ * arbiter. Both grants and denials matter: money earned now can fund an
+ * attractive investment even when the present bankroll cannot. Hacking's
+ * infrastructure frontier also publishes its best productive quote because
+ * it deliberately submits only an affordable alternative to arbitration. */
+export function bestReinvestmentReturnPerDollarSec(state: GameState): number {
+  let best = 0;
+  const consider = (value: number | undefined): void => {
+    if (value !== undefined && Number.isFinite(value) && value > best) best = value;
+  };
+
+  consider(state.topics.fleet?.infrastructurePlan?.reinvestmentReturnPerDollarSec);
+  const arbitration = state.topics.progression?.arbitration;
+  for (const claim of [...(arbitration?.grants ?? []), ...(arbitration?.denied ?? [])]) {
+    if (claim.resource === "money") consider(claim.returnPerDollarSec);
+  }
+  return best;
+}

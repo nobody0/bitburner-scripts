@@ -12,7 +12,7 @@ import type { Action, CompletionEvent, ServerView, StockInfluence, WorldView } f
 import { WORKER_RAM } from "../world.ts";
 import type { SegmentKind, TargetDirective } from "./directive.ts";
 import {
-  FARM_SHARE,
+  FARM_SOLVE_SHARE,
   WORKER_RAM_FLOOR,
   initEvaluator,
   staticsOf,
@@ -56,7 +56,7 @@ export const MAX_BATCHES_PER_PASS = 8;
  * tick, so there is no interleave to protect, only the pump budget. */
 export const SHOTGUN_BATCHES_PER_PASS = 256;
 /** Raised from 6: with long-horizon prep the segment is ACTIVE for hours, and
- * a 6-op wave left most of its 25% reservation idle while also blocking the
+ * a 6-op wave left most of its demand-sized reservation idle while also blocking the
  * idle-segment spillover — measured as the bn1-speedrun utilization drop
  * (90% → ~75%). The budget still bounds each wave; this only stops the op
  * count from being the binding constraint. */
@@ -165,6 +165,8 @@ export interface DispatchOptions {
   /** Expected remaining run time in ms (the endgame route's estimate). Caps
    *  the evaluator's amortization horizon alongside the goal. */
   horizonMs?: number;
+  /** Best observed marginal income/sec per invested dollar. */
+  reinvestmentReturnPerDollarSec?: number;
   /** Emit buyServer/upgradeHomeRam actions. In the live game the shared
    *  investment arbiter owns home/cloud/Hacknet spending, so the driver leaves
    *  this off; the sim's farm mode runs no feature drivers or arbiter, so the
@@ -271,6 +273,7 @@ function syncTopology(
   let fleetGb = 0;
   let largestBlockGb = 0;
   const hostBlocksGb: number[] = [];
+  const freeNowBlocksGb: number[] = [];
   for (const server of view.servers) {
     if (!server.hasAdminRights || server.maxRam < 2) continue;
     const reserved =
@@ -291,10 +294,21 @@ function syncTopology(
     const placeable = Math.max(0, server.maxRam - reserved - externalUsed);
     if (placeable > largestBlockGb) largestBlockGb = placeable;
     if (placeable >= WORKER_RAM.hack) hostBlocksGb.push(placeable);
+    const freeNow = memory.heap.freeOn(server.hostname);
+    if (freeNow >= WORKER_RAM.grow) freeNowBlocksGb.push(freeNow);
   }
   hostBlocksGb.sort((a, b) => b - a);
+  freeNowBlocksGb.sort((a, b) => b - a);
+  const prepWaveGb = hostBlocksGb
+    .slice(0, MAX_PREP_OPS_PER_PASS)
+    .reduce((sum, blockGb) => sum + Math.floor(blockGb / WORKER_RAM.grow) * WORKER_RAM.grow, 0);
+  const prepFreeGb = freeNowBlocksGb
+    .slice(0, MAX_PREP_OPS_PER_PASS)
+    .reduce((sum, blockGb) => sum + Math.floor(blockGb / WORKER_RAM.grow) * WORKER_RAM.grow, 0);
+  const previousPrepHost = memory.evaluator.directive.prep?.host;
+  const prepWaveInFlight = previousPrepHost !== undefined && (memory.prepInFlight.get(previousPrepHost) ?? 0) > 0;
   if (hostBlocksGb.length > HOST_BLOCKS_LIMIT) hostBlocksGb.length = HOST_BLOCKS_LIMIT;
-  return { fleetGb, largestBlockGb, hostBlocksGb };
+  return { fleetGb, largestBlockGb, hostBlocksGb, prepWaveGb, prepFreeGb, prepWaveInFlight };
 }
 
 function release(memory: DispatchMemory, opId: number): void {
@@ -397,6 +411,11 @@ export function dispatch(
     capacity,
     options.goalRemaining ?? Infinity,
     options.horizonMs ?? Infinity,
+    {
+      ...(options.reinvestmentReturnPerDollarSec !== undefined
+        ? { reinvestmentReturnPerDollarSec: options.reinvestmentReturnPerDollarSec }
+        : {}),
+    },
   );
   memory.evaluator = stepped.memory;
   const directive = stepped.directive;
@@ -433,13 +452,9 @@ export function dispatch(
       actions.push({ type: "upgradeHomeRam" });
     }
   }
-  // Idle-segment spillover: RAM reserved for a segment with NOTHING TO DO
-  // farms instead of idling. The 25% prep share on a 92 GB fleet is ~23 GB —
-  // a whole extra batch — and it sat free whenever no target was worth
-  // prepping (measured on hacking-early: ramPie {farm 61.65, prep 0, free
-  // 26.15} for the entire run). The spill is recomputed per pass, so the
-  // moment the evaluator names a prep target the farm stops drawing on it;
-  // in-flight farm ops beyond the nominal share drain within one weakenTime.
+  // RAM with no current owner farms instead of idling. A live prep wave is
+  // handled below: unused prep demand may be borrowed only until its landing,
+  // so the next preparation wave is never delayed by speculative farm work.
   const prepServer = directive.prep ? byHost.get(directive.prep.host) : undefined;
   const prepActive = prepServer !== undefined && !isPrepped(prepServer);
   // The demand ceiling describes the CURRENT farm target; without one (or on
@@ -456,7 +471,26 @@ export function dispatch(
   }
 
   for (const segment of directive.segments) {
-    const segmentCap = segment.kind === "farm" ? segment.gb + spillGb : segment.gb;
+    let segmentCap = segment.kind === "farm" ? segment.gb + spillGb : segment.gb;
+    let borrow: { gb: number; landingDeadline: number } | undefined;
+    if (segment.kind === "farm" && prepActive && directive.prep) {
+      let landingDeadline = -Infinity;
+      for (const tracked of memory.tracked.values()) {
+        if (tracked.wave && tracked.target === directive.prep.host && tracked.landing !== undefined) {
+          landingDeadline = Math.max(landingDeadline, tracked.landing);
+        }
+      }
+      if (Number.isFinite(landingDeadline)) {
+        const prepSegment = directive.segments.find((candidate) => candidate.kind === "prep");
+        const unusedPrepGb = Math.max(0, (prepSegment?.gb ?? 0) - memory.segmentGb.prep);
+        const alreadyBorrowedGb = Math.max(0, memory.segmentGb.farm - segmentCap);
+        const borrowGb = Math.max(0, unusedPrepGb - alreadyBorrowedGb);
+        if (borrowGb > 0) {
+          segmentCap += borrowGb;
+          borrow = { gb: borrowGb, landingDeadline };
+        }
+      }
+    }
     const budget = segmentCap - memory.segmentGb[segment.kind];
     if (budget <= 0) continue;
 
@@ -511,6 +545,10 @@ export function dispatch(
         // ops make pooling pointless (nothing repeats within a worker's idle
         // window at that structure).
         const pooling =
+          // Borrowed prep RAM has a hard return deadline. Reusing an idle
+          // pooled worker costs no NEW allocation, but keeps its existing RAM
+          // alive past that deadline; let such workers idle out instead.
+          borrow === undefined &&
           memory.mode !== "shotgun" &&
           options.pooling === true &&
           memory.tracked.size > POOL_PRESSURE_OPS &&
@@ -526,6 +564,7 @@ export function dispatch(
           view.stockInfluence?.[server.hostname],
           pooling,
           shotgun,
+          borrow,
         );
       } else {
         launchPrepWave(memory, actions, view, server, budget, "farm");
@@ -557,10 +596,10 @@ function hgwSolutionFor(
   if (!ctx || !server) return undefined;
   const fleetGb = capacity.fleetGb;
   const caps: RamCaps = {
-    batchGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SHARE),
+    batchGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SOLVE_SHARE),
     hackBlockGb: Math.max(WORKER_RAM_FLOOR, capacity.largestBlockGb),
     ...(capacity.hostBlocksGb ? { hostBlocksGb: capacity.hostBlocksGb } : {}),
-    farmGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SHARE),
+    farmGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SOLVE_SHARE),
   };
   const influence = view.stockInfluence?.[host];
   const manipulation =
@@ -604,6 +643,9 @@ function launchBatches(
   influence?: StockInfluence,
   pooling = false,
   shotgun = false,
+  /** Extra prep RAM this pass may borrow. Every op of a batch using it must
+   * land before the current prep wave, so the next wave can reclaim it. */
+  borrow?: { gb: number; landingDeadline: number },
 ): void {
   const host = server.hostname;
   const difficulty = server.hackDifficulty;
@@ -615,6 +657,11 @@ function launchBatches(
   const intervalMs = solution.kind === "hgw" ? 3 * SPACER_MS : INTERVAL_MS;
   const maxDepth = Math.max(1, Math.floor(weakenMs / intervalMs));
   let remaining = budgetGb;
+  let nominalRemaining = Math.max(0, budgetGb - (borrow?.gb ?? 0));
+  const consumeAllocation = (gb: number): void => {
+    remaining -= gb;
+    nominalRemaining = Math.max(0, nominalRemaining - gb);
+  };
 
   // The in-flight ledger for THIS target, rebuilt per batch (tracked grows as
   // batches launch, so batch N+1's prediction sees batch N's ops).
@@ -692,6 +739,12 @@ function launchBatches(
           ]
     ).filter((op) => op.threads >= 1);
 
+    const finalLanding = ops.reduce((latest, op) => Math.max(latest, op.landing), -Infinity);
+    const oneCoreBatchGb = ops.reduce((gb, op) => gb + op.threads * WORKER_RAM[op.kind], 0);
+    if (!pooling && borrow && oneCoreBatchGb > nominalRemaining && finalLanding >= borrow.landingDeadline) {
+      return;
+    }
+
     if (ops.some((op) => op.landing - now - op.duration < 0)) {
       memory.stats.batchesSkipped++;
       return;
@@ -754,7 +807,7 @@ function launchBatches(
             block.threads * WORKER_RAM[op.kind],
           );
         }
-        remaining -= reservation.gb;
+        consumeAllocation(reservation.gb);
         memory.segmentGb.farm += reservation.gb;
       });
       continue;
@@ -777,6 +830,7 @@ function launchBatches(
     });
     const missGb = plans.reduce((sum, plan, i) => sum + plan.missThreads * WORKER_RAM[ops[i]!.kind], 0);
     if (remaining < missGb) return;
+    if (borrow && missGb > nominalRemaining && finalLanding >= borrow.landingDeadline) return;
     const missRequests = ops
       .map((op, i) => ({ op, miss: plans[i]!.missThreads }))
       .filter((entry) => entry.miss >= 1)
@@ -815,7 +869,7 @@ function launchBatches(
           );
           trackOp(op, block.hostname, block.threads, effectThreads, gb, { id: workerId, spawn: true });
         }
-        remaining -= reservation.gb;
+        consumeAllocation(reservation.gb);
         memory.segmentGb.farm += reservation.gb;
       }
     });

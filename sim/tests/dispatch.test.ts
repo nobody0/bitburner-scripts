@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { SPACER_MS, type DispatchOptions } from "../../shared/strategy/dispatch.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
-import { PREPPED_MONEY_FRACTION, PREPPED_SEC_TOLERANCE } from "../../shared/strategy/targeting.ts";
+import { PREPPED_MONEY_FRACTION, PREPPED_SEC_TOLERANCE, solvePrep } from "../../shared/strategy/targeting.ts";
 import type { Action, CompletionEvent } from "../../shared/world.ts";
 import { DEFAULT_NETWORK } from "../network.ts";
 import { SimWorld } from "../world.ts";
@@ -512,6 +512,94 @@ describe("worker pooling", () => {
     const usedNow = memory.dispatch.heap.usedTotal;
     plan([...exits]);
     expect(memory.dispatch.heap.usedTotal).toBeGreaterThanOrEqual(usedNow);
+  });
+
+  test("does not keep borrowed prep RAM alive past its return deadline", () => {
+    const world = new SimWorld({ seed: 4, network: DEFAULT_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+    world.person.skills.hacking = 500;
+    for (const server of world.servers.values()) {
+      if (server.hostname === "home") continue;
+      server.hasAdminRights = true;
+      server.hackDifficulty = server.minDifficulty;
+      server.moneyAvailable = server.moneyMax;
+    }
+    let memory = initFarm();
+    for (let i = 0; i < 1_100; i++) {
+      memory.dispatch.tracked.set(2_000_000 + i, {
+        hostname: "ghost",
+        target: "",
+        kind: "weaken",
+        segment: "share",
+        gb: 0,
+        wave: false,
+      } as never);
+    }
+
+    const first = planFarm(world.view(), memory, [], { pooling: true });
+    memory = first.memory;
+    const spawned = first.actions.filter(
+      (action): action is Extract<Action, { type: "hack" | "grow" | "weaken" }> & { worker: { id: number } } =>
+        (action.type === "hack" || action.type === "grow" || action.type === "weaken") &&
+        "worker" in action && action.worker !== undefined,
+    );
+    expect(spawned.length).toBeGreaterThan(0);
+
+    // Make the spawned pool idle without releasing its heap reservations.
+    // This is the exact state in which reuse would extend their lifetime.
+    for (const action of spawned) {
+      const worker = memory.dispatch.pool.workers.get(action.worker.id)!;
+      worker.busy = false;
+      worker.idleSince = world.clock.now();
+      memory.dispatch.tracked.delete(action.opId!);
+    }
+    memory.dispatch.inFlight = { hack: 0, grow: 0, weaken: 0 };
+
+    const farmHost = memory.dispatch.evaluator.directive.farm!.host;
+    const prepServer = [...world.servers.values()].find(
+      (server) => server.hostname !== farmHost && server.hostname !== "home" && server.moneyMax > 0,
+    )!;
+    prepServer.hackDifficulty = prepServer.minDifficulty + 10;
+    prepServer.moneyAvailable = 1;
+    const prepEntry = memory.dispatch.evaluator.entries.get(prepServer.hostname)!;
+    const ctx = memory.dispatch.evaluator.ctx!;
+    const prepPlan = solvePrep(ctx, prepEntry.statics, {
+      hackDifficulty: prepServer.hackDifficulty,
+      moneyAvailable: prepServer.moneyAvailable,
+    });
+    const fleetGb = memory.dispatch.evaluator.directive.segments.reduce((sum, segment) => sum + segment.gb, 0);
+    const prepGb = Math.min(512, fleetGb);
+    memory.dispatch.evaluator.directive = {
+      ...memory.dispatch.evaluator.directive,
+      prep: { host: prepServer.hostname, statics: prepEntry.statics, plan: prepPlan },
+      segments: [
+        { kind: "prep", gb: prepGb },
+        { kind: "farm", gb: fleetGb - prepGb },
+        { kind: "share", gb: 0 },
+      ],
+    };
+    memory.dispatch.evaluator.forceGate = false;
+    memory.dispatch.evaluator.lastGateAt = world.clock.now();
+    const waveId = 9_000_000;
+    memory.dispatch.tracked.set(waveId, {
+      hostname: "home",
+      target: prepServer.hostname,
+      kind: "weaken",
+      segment: "prep",
+      gb: 1.75,
+      wave: true,
+      landing: world.clock.now() + 60_000,
+    } as never);
+    memory.dispatch.prepInFlight.set(prepServer.hostname, 1);
+    memory.dispatch.segmentGb.prep = 1.75;
+
+    const borrowed = planFarm(world.view(), memory, [], { pooling: true });
+    const farmActions = borrowed.actions.filter(
+      (action) =>
+        (action.type === "hack" || action.type === "grow" || action.type === "weaken") &&
+        action.target === farmHost,
+    );
+    expect(farmActions.length).toBeGreaterThan(0);
+    expect(farmActions.every((action) => !("worker" in action) || action.worker === undefined)).toBe(true);
   });
 });
 

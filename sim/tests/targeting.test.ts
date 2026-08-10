@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { growThreads, growthLogPerThread, makeHackContext, type HackContext } from "../../shared/formulas.ts";
-import { prepTimeSeconds, solveCycle, solvePrep, type TargetStatics } from "../../shared/strategy/targeting.ts";
+import { prepTimeSeconds, prepWaveRamGb, solveCycle, solvePrep, type TargetStatics } from "../../shared/strategy/targeting.ts";
 import { applyGrow, applyHack, applyWeaken, serverFromSpec, type SimServer } from "../core/effects.ts";
 import { mockPerson, mockServer } from "../core/mocks.ts";
 import { mulberry32 } from "../core/rng.ts";
@@ -224,6 +224,18 @@ describe("solveCycle", () => {
 });
 
 describe("solvePrep", () => {
+  test("next-wave demand reserves one phase, never both phases statically", () => {
+    const base = {
+      ramSec: 1,
+      weakenTimeS: 1,
+      totalRamGb: 1,
+      prepped: false,
+    };
+    expect(prepWaveRamGb({ ...base, weaken1Threads: 10, growThreads: 20, weaken2Threads: 3 })).toBe(17.5);
+    expect(prepWaveRamGb({ ...base, weaken1Threads: 0, growThreads: 20, weaken2Threads: 3 })).toBe(40.25);
+    expect(prepWaveRamGb({ ...base, weaken1Threads: 0, growThreads: 0, weaken2Threads: 0, prepped: true })).toBe(0);
+  });
+
   test("prep plan lands the target at (minSec, moneyMax)", () => {
     const skill = 200;
     const { ctx, person, server } = makeScenario(skill);
@@ -253,8 +265,13 @@ describe("solvePrep", () => {
     expect(prepTimeSeconds(done, 100)).toBe(0);
 
     const cold = solvePrep(ctx, JOESGUNS, { hackDifficulty: 42, moneyAvailable: 1 });
-    expect(prepTimeSeconds(cold, 1e9)).toBe(cold.weakenTimeS); // latency floor
-    expect(prepTimeSeconds(cold, 1)).toBeGreaterThan(cold.weakenTimeS); // RAM-bound
+    expect(prepTimeSeconds(cold, 1e9)).toBeCloseTo(cold.weakenTimeS + cold.growWeakenTimeS!, 10); // sequential phase floors
+    const fixedFleet = prepTimeSeconds(cold, 1);
+    expect(fixedFleet).toBeGreaterThan(cold.weakenTimeS); // RAM-bound
+    const growingFleet = prepTimeSeconds(cold, 1, 0.001);
+    expect(growingFleet).toBeLessThan(fixedFleet); // observed reinvestment grows capacity
+    expect(prepTimeSeconds(cold, 1, 0.001, 0.7)).toBeGreaterThan(growingFleet * 0.7);
+    expect(prepTimeSeconds(cold, 1, Number.NaN)).toBe(fixedFleet); // bad quote is inert, never contagious
     expect(prepTimeSeconds(cold, 0)).toBe(Infinity);
   });
 });

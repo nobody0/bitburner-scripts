@@ -1,11 +1,17 @@
 import { makeHackContext, skillFromExp, weakenTimeSeconds, type HackContext } from "../formulas.ts";
 import { scoreUpperBound } from "./bounds.ts";
-import { evaluatePrep, farmIncomeRate, prepTimeDiscount } from "./economics.ts";
+import {
+  evaluatePrep,
+  farmIncomeRate,
+  incomePresentValue,
+  prepTimeDiscount,
+} from "./economics.ts";
 import type { ServerView, WorldView } from "../world.ts";
 import type { Segment, TargetDirective } from "./directive.ts";
 import {
   isEligible,
   prepTimeSeconds,
+  prepWaveRamGb,
   solveCycle,
   solvePrep,
   type CycleSolution,
@@ -37,17 +43,43 @@ export const HORIZON_MIN_MS = 60_000;
  * existence permanently (the n00dles lock-in). Bounded so an unbounded run
  * forecast cannot justify arbitrarily speculative preps. */
 export const PREP_HORIZON_MAX_MS = 4 * 3_600_000;
-/** Segment shares. A larger prep share was A/B-tested and LOST: RAM-bound
- * prep economics always prefer it in the model (the farm's loss is
- * share-invariant), but the dispatcher's per-pass op cap means prep cannot
- * actually use it — the farm just shrank for nothing. Median +14% time to
- * earn:1e9 with the fixed 25% share vs the adaptive/reordering variants. */
-export const FARM_SHARE = 0.75;
-export const PREP_SHARE = 0.25;
+/** Keep cached batch shapes conservative across demand-driven segment
+ * rebalancing. This is a solver cap, not an allocation: the directive below
+ * gives prep its executable wave demand and farming every remaining GB. */
+export const FARM_SOLVE_SHARE = 0.75;
 /** Fleet RAM change that invalidates cached (RAM-capped) solutions. */
 export const FLEET_DELTA = 0.1;
 /** Smallest sensible batch cap: one hack thread plus its support. */
 export const WORKER_RAM_FLOOR = 16;
+
+/** Turn an economic yes/no prep decision into executable RAM budgets.
+ * Preparation receives only its next placeable wave; farming receives the
+ * entire remainder and may deadline-borrow idle prep RAM. Keeping this tiny
+ * policy pure makes the no-static-ratio invariant explicit and independently
+ * testable. */
+export function allocateSegments(fleetGb: number, prepDemandGb = 0): Segment[] {
+  const fleet = Math.max(0, fleetGb);
+  const prep = Math.min(fleet, Math.max(0, prepDemandGb));
+  return prep > 0
+    ? [
+        { kind: "prep", gb: prep },
+        { kind: "farm", gb: fleet - prep },
+        { kind: "share", gb: 0 },
+      ]
+    : [
+        { kind: "farm", gb: fleet },
+        { kind: "prep", gb: 0 },
+        { kind: "share", gb: 0 },
+      ];
+}
+
+/** Keep an atomic prep wave's capacity claim stable between its grow landing
+ * and its covering weaken landing. Outside a live wave, the newly solved next
+ * demand replaces it immediately. */
+export function retainPrepReservation(nextGb: number, previousGb: number, waveInFlight: boolean): number {
+  const next = Math.max(0, nextGb);
+  return waveInFlight ? Math.max(next, Math.max(0, previousGb)) : next;
+}
 
 /** What the dispatcher knows about placeable RAM, from its heap. */
 export interface FleetCapacity {
@@ -59,6 +91,16 @@ export interface FleetCapacity {
    * pipeline-aware launch-rate bound. Optional so hand-built capacities in
    * tests keep working; without it the solver scores per RAM-second only. */
   hostBlocksGb?: number[];
+  /** Maximum GB one prep wave can place after host fragmentation and the
+   * dispatcher's per-pass op cap. Optional test fixtures fall back to fleetGb. */
+  prepWaveGb?: number;
+  /** Portion of prepWaveGb physically free on this pass. Economics starts
+   * from this executable amount; the directive reserves prepWaveGb so farming
+   * cannot starve the following deterministic phase. */
+  prepFreeGb?: number;
+  /** True until every op of the active prep wave has landed. The reservation
+   * must survive transient G-before-W2 state during that atomic wave. */
+  prepWaveInFlight?: boolean;
 }
 
 export interface TargetEntry {
@@ -174,7 +216,10 @@ export function stepEvaluator(
   horizonCapMs = Infinity,
   /** `prune: false` disables the upper-bound solve skip — the A/B lever the
    * invariance suite uses to prove pruning changes no decision. */
-  opts?: { prune?: boolean },
+  opts?: {
+    prune?: boolean;
+    reinvestmentReturnPerDollarSec?: number;
+  },
 ): { memory: EvaluatorMemory; directive: TargetDirective; switched?: { from?: string; to: string } } {
   const now = view.time;
 
@@ -195,13 +240,13 @@ export function stepEvaluator(
   // worthless however well it scores. A big fleet change re-solves everything.
   const fleetGb = capacity.fleetGb;
   const caps: RamCaps = {
-    batchGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SHARE),
+    batchGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SOLVE_SHARE),
     hackBlockGb: Math.max(WORKER_RAM_FLOOR, capacity.largestBlockGb),
     // The farm segment is the launch-rate denominator; hostBlocksGb lets the
     // solver count hack SLOTS, so a block only one host can hold is priced at
     // the depth-1 pipeline it actually buys (the 32 GB-home stall).
     ...(capacity.hostBlocksGb ? { hostBlocksGb: capacity.hostBlocksGb } : {}),
-    farmGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SHARE),
+    farmGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SOLVE_SHARE),
   };
   if (memory.fleetGb <= 0 || Math.abs(fleetGb - memory.fleetGb) / Math.max(1, memory.fleetGb) > FLEET_DELTA) {
     memory.fleetGb = fleetGb;
@@ -367,6 +412,11 @@ export function stepEvaluator(
     if (!(nowSec > 0)) return 1;
     return prepTimeDiscount(futureSec / nowSec);
   };
+  const prepPlaceableGb = Math.max(0, Math.min(fleetGb, capacity.prepWaveGb ?? fleetGb));
+  const prepFreeGb = Math.max(0, Math.min(prepPlaceableGb, capacity.prepFreeGb ?? prepPlaceableGb));
+  const prepGbFor = (plan: PrepPlan): number => Math.min(prepFreeGb, prepWaveRamGb(plan));
+  const prepReservationGbFor = (plan: PrepPlan): number => Math.min(prepPlaceableGb, prepWaveRamGb(plan));
+  const reinvestmentRate = opts?.reinvestmentReturnPerDollarSec ?? 0;
 
   // Farm pick: the best PREPPED candidate — `ranked` is sorted, so the first
   // prepped one is it — with hysteresis + dwell against the incumbent. An
@@ -402,13 +452,19 @@ export function stepEvaluator(
     // was prepped, which is how a BN8 farm spent six hours prepping a
     // worthless target while the only positive-score (manipulated) hosts sat
     // ignored.
-    const prepBudgetGb = Math.max(1, fleetGb * FARM_SHARE);
     const valueOf = (candidate: TargetEntry): number => {
       const plan = prepOf(candidate);
       if (!plan) return -1;
-      const rawSec = prepTimeSeconds(plan, prepBudgetGb);
+      const prepGb = prepGbFor(plan);
+      const rawSec = prepTimeSeconds(plan, prepGb);
       const scaledSec = rawSec * prepScaleOf(candidate, rawSec);
-      return candidate.solution!.score * Math.max(0, prepHorizonMs - scaledSec * 1000);
+      const horizonSec = prepHorizonMs / 1_000;
+      return incomePresentValue(
+        farmIncomeRate(candidate.solution, fleetGb),
+        scaledSec,
+        horizonSec,
+        reinvestmentRate,
+      );
     };
     let bestValue = -1;
     let best: TargetEntry | undefined;
@@ -461,7 +517,11 @@ export function stepEvaluator(
     if (candidate === farmEntry) continue;
     const plan = prepOf(candidate);
     if (!plan || plan.prepped) continue;
-    const rawPrepSec = prepTimeSeconds(plan, Math.max(1, fleetGb * PREP_SHARE));
+    const candidatePrepGb = prepGbFor(plan);
+    if (candidatePrepGb <= 0) continue;
+    const retainedFarmRate = farmIncomeRate(farmModel, fleetGb - candidatePrepGb);
+    const ramGrowthRate = reinvestmentRate * (currentRateNow > 0 ? retainedFarmRate / currentRateNow : 0);
+    const rawPrepSec = prepTimeSeconds(plan, candidatePrepGb, ramGrowthRate);
     const economics = evaluatePrep({
       current: farmModel,
       candidate: candidate.solution!,
@@ -469,7 +529,8 @@ export function stepEvaluator(
       fleetGb,
       horizonMs: prepHorizonMs,
       prepTimeScale: prepScaleOf(candidate, rawPrepSec),
-      shares: [PREP_SHARE],
+      prepGb: candidatePrepGb,
+      reinvestmentReturnPerDollarSec: reinvestmentRate,
     });
     if (!economics || economics.net <= bestNet) continue;
     bestNet = economics.net;
@@ -477,11 +538,32 @@ export function stepEvaluator(
     prepPlan = plan;
   }
 
-  const segments: Segment[] = [
-    { kind: "farm", gb: fleetGb * FARM_SHARE },
-    { kind: "prep", gb: fleetGb * PREP_SHARE },
-    { kind: "share", gb: 0 },
-  ];
+  const previousPrepHost = memory.directive.prep?.host;
+  if (previousPrepHost) {
+    const previous = memory.entries.get(previousPrepHost);
+    const plan = previous ? prepOf(previous) : undefined;
+    if (previous && plan && !plan.prepped) {
+      // Prep is a deterministic investment, not a one-pass auction. Once its
+      // economics win, finish it: stopping after a weaken wave and asking the
+      // same question again prices the remaining grow against a sunk cost and
+      // can strand the target half-prepared for minutes. All inputs that made
+      // the original choice were already knowable, so a later candidate is
+      // not new information. Reconsider only when the target is ready or no
+      // longer exists/has a feasible plan.
+      prepEntry = previous;
+      prepPlan = plan;
+    }
+  }
+  // Binary economic decision, continuous utilization: if future income wins,
+  // prep claims exactly what its next wave can execute and runs first; the
+  // current best server receives every remaining GB. With no paying prep,
+  // farming receives the entire fleet.
+  let prepReservationGb = prepEntry && prepPlan ? prepReservationGbFor(prepPlan) : 0;
+  if (prepEntry?.statics.hostname === previousPrepHost && capacity.prepWaveInFlight) {
+    const previousReservation = memory.directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
+    prepReservationGb = retainPrepReservation(prepReservationGb, previousReservation, true);
+  }
+  const segments = allocateSegments(fleetGb, prepReservationGb);
 
   memory.directive = {
     farm:

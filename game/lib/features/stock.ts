@@ -486,6 +486,8 @@ function claims(ctx: ClaimContext): Claim[] {
       // the reduced size still clears its round trip before buying it.
       divisible: true,
       ratePerSec: plan.entry.expectedProfit / Math.max(1, plan.entry.holdTicks * 6),
+      returnPerDollarSec:
+        plan.entry.expectedProfit / Math.max(1, plan.entry.cost * plan.entry.holdTicks * 6),
       why: plan.entry.why,
     });
   }

@@ -10,10 +10,10 @@ import { prepTimeSeconds, type PrepPlan } from "./targeting.ts";
  * prep actually gets, and (b) the farm's DEPTH CAP — RAM beyond what the
  * pipeline can absorb earns nothing, so handing it to prep is free.
  *
- * Deliberately NOT modelled here: "money could buy more RAM instead". The
- * infrastructure arbiter already prices fleet RAM against farm income
- * (game/lib/features/hacking.ts); double-counting it would bias toward
- * hoarding.
+ * "Money now" is also an input from the infrastructure arbiter: its best
+ * observed income/sec/dollar quote prices how much an earlier dollar can earn
+ * before a later target comes online. Keeping that quote outside this module
+ * avoids duplicating purchase policy while still accounting for reinvestment.
  */
 
 /** What the rate model needs from a CycleSolution. */
@@ -55,9 +55,23 @@ export interface PrepEconomics {
   /** $ over the horizon: gain after the switch minus income lost during prep.
    * The decision value — prep only when positive (plus a churn epsilon). */
   net: number;
-  /** The fleet share that maximised `net` (one of `shares`). */
+  /** The fleet share that maximised `net` (one of `shares`, or exact prepGb). */
   prepShare: number;
+  /** Exact executable allocation evaluated, after demand/placement caps. */
+  prepGb: number;
   prepSeconds: number;
+}
+
+/** Value an income window using the arbiter's continuously refreshed marginal
+ * income/sec/dollar. Normalizing terminal value by the common horizon factor
+ * keeps comparisons bounded; at r=0 this is exactly rate times duration. */
+export function incomePresentValue(ratePerSec: number, fromSec: number, toSec: number, reinvestmentRate: number): number {
+  const from = Math.max(0, fromSec);
+  const to = Math.max(from, toSec);
+  const rate = Math.max(0, ratePerSec);
+  const r = Number.isFinite(reinvestmentRate) ? Math.max(0, reinvestmentRate) : 0;
+  if (r <= 1e-12) return rate * (to - from);
+  return rate * (Math.exp(-r * from) - Math.exp(-r * to)) / r;
 }
 
 export function evaluatePrep(args: {
@@ -73,26 +87,51 @@ export function evaluatePrep(args: {
   /** Candidate fleet shares for the prep segment. Defaults let the caller's
    * segment split follow the winning share. */
   shares?: readonly number[];
+  /** Exact demand-driven allocation. When supplied, replaces `shares`. */
+  prepGb?: number;
+  /** Best currently observed marginal income/sec per invested dollar. */
+  reinvestmentReturnPerDollarSec?: number;
 }): PrepEconomics | undefined {
   const { current, candidate, plan, fleetGb, horizonMs } = args;
   if (plan.prepped || fleetGb <= 0) return undefined;
-  const shares = args.shares ?? [0.25, 0.6];
+  const allocations = args.prepGb === undefined
+    ? (args.shares ?? [0.25, 0.6]).map((share) => fleetGb * share)
+    : [Math.min(fleetGb, Math.max(0, args.prepGb))];
   const timeScale = args.prepTimeScale ?? 1;
   const horizonS = horizonMs / 1_000;
   const currentRate = farmIncomeRate(current, fleetGb);
   const candidateRate = farmIncomeRate(candidate, fleetGb);
+  const reinvestmentRate = args.reinvestmentReturnPerDollarSec ?? 0;
 
   let best: PrepEconomics | undefined;
-  for (const share of shares) {
-    const prepSeconds = prepTimeSeconds(plan, Math.max(1, fleetGb * share)) * timeScale;
-    if (!Number.isFinite(prepSeconds)) continue;
+  for (const prepGb of allocations) {
+    if (prepGb <= 0) continue;
+    const share = prepGb / fleetGb;
     // Income lost while prepping: only the RAM the farm could actually USE
     // counts — when the farm is depth-capped below (1−share)·fleet, the prep
     // segment is funded entirely by surplus and costs nothing.
-    const lost = (currentRate - farmIncomeRate(current, fleetGb * (1 - share))) * prepSeconds;
-    const gain = (candidateRate - currentRate) * Math.max(0, horizonS - prepSeconds);
-    const net = gain - lost;
-    if (!best || net > best.net) best = { net, prepShare: share, prepSeconds };
+    const duringPrepRate = farmIncomeRate(current, fleetGb - prepGb);
+    // Productive infrastructure makes the executable prep allocation grow
+    // during a long investment. Scale the arbiter's marginal growth by the
+    // income retained while prepping: RAM diverted from farming cannot also
+    // fund the fleet growth that shortens the prep.
+    const ramGrowthRate = reinvestmentRate * (currentRate > 0 ? duringPrepRate / currentRate : 0);
+    const prepSeconds = prepTimeSeconds(plan, prepGb, ramGrowthRate, timeScale);
+    if (!Number.isFinite(prepSeconds)) continue;
+    const prepEnd = Math.min(horizonS, prepSeconds);
+    // The dispatcher lends every unused reserved GB to batches that land
+    // before the prep wave. Opportunity cost is therefore the work actually
+    // executed by prep, not `reservation * wall time`. Existing farm surplus
+    // above its depth cap absorbs that work first at zero lost income.
+    const effectiveRamSec = Math.max(0, plan.ramSec * timeScale);
+    const surplusGb = current ? Math.max(0, fleetGb - depthCapGb(current)) : fleetGb;
+    const paidRamSec = Math.max(0, effectiveRamSec - surplusGb * prepSeconds);
+    const averageLostRate = current && prepSeconds > 0 ? current.score * paidRamSec / prepSeconds : 0;
+    const upgradeGain = incomePresentValue(candidateRate, prepEnd, horizonS, reinvestmentRate) -
+      incomePresentValue(currentRate, prepEnd, horizonS, reinvestmentRate);
+    const prepCost = incomePresentValue(averageLostRate, 0, prepEnd, reinvestmentRate);
+    const net = upgradeGain - prepCost;
+    if (!best || net > best.net) best = { net, prepShare: share, prepGb, prepSeconds };
   }
   return best;
 }

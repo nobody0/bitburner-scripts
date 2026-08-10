@@ -4,19 +4,20 @@ import { formatMoney } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import {
+  advanceInfrastructureFrontier,
   scoreHomeRam,
   stepInfrastructure,
   type InfrastructureDecision,
   type InfrastructureOption,
   type ScoredInfrastructure,
 } from "../../../shared/strategy/infrastructure.ts";
-import { FARM_SHARE } from "../../../shared/strategy/evaluator.ts";
 import { coarseHorizonSec } from "../../../shared/strategy/investment.ts";
 import { solveCycle } from "../../../shared/strategy/targeting.ts";
 import { PORT_OPENER_PROGRAMS, preferProgramCreation, type ProgramOption } from "../../../shared/strategy/career/programs.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
 import { DEFAULT_PLANNING_HORIZON_SEC, installHorizonSec, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { gameGlobal } from "../globals.ts";
+import { bestReinvestmentReturnPerDollarSec } from "../income.ts";
 import { buildView, drainCompletions, initDriver, pump, type DriverState } from "../dispatch-driver.ts";
 import { merge, recordProbeFailure, set, type GameState } from "../state.ts";
 import { workerGlobals } from "../worker-shared.ts";
@@ -137,6 +138,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   const targetServer = target ? game.topics.servers?.[target] : undefined;
   const heap = driver.memory.dispatch.heap;
   const segmentGb = driver.memory.dispatch.segmentGb;
+  const prepBudgetGb = driver.memory.dispatch.evaluator.directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
 
   set(game, "farm", {
     target,
@@ -145,6 +147,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
       ? { moneyPerSecPerGb: driver.memory.dispatch.evaluator.directive.farm.solution.score }
       : {}),
     ...(prepTarget !== undefined ? { prepTarget } : {}),
+    prepBudgetGb,
     ...(segOrder !== undefined ? { segOrder } : {}),
     mode: driver.memory.dispatch.mode,
     inFlight: { ...driver.memory.dispatch.inFlight },
@@ -242,7 +245,11 @@ function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): 
   // fill (measured on bn1-speedrun: fleet utilization 90% -> 72%).
   const depthCap = ctx.state.topics.farm?.depthCapGb;
   const fleetGb = fleet.maxRam ?? 0;
-  const demandCeiling = depthCap !== undefined ? depthCap / FARM_SHARE : Infinity;
+  // Prep is demand-sized rather than a fixed fleet percentage. Total fleet
+  // demand saturates once the farm reaches its pipeline depth AND the current
+  // prep wave has its full executable reservation.
+  const prepBudgetGb = ctx.state.topics.farm?.prepBudgetGb ?? 0;
+  const demandCeiling = depthCap !== undefined ? depthCap + prepBudgetGb : Infinity;
   const marginalIncome = (addedRam: number): number =>
     perGb * Math.max(0, Math.min(fleetGb + addedRam, demandCeiling) - Math.min(fleetGb, demandCeiling));
   const options: InfrastructureOption[] = [];
@@ -269,15 +276,13 @@ function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): 
       incomePerSec: homeCoreIncomeDelta(ctx),
     });
   }
-  // The probe quotes a ladder of new-server sizes; only sizes the CURRENT
-  // bankroll covers may compete. The winner executes in this same pass, so an
-  // aspirational quote would not merely lose — it would win the ranking and
-  // then block the whole infrastructure lane until the money materialized.
+  // The probe quotes the whole one-step cloud frontier. The pure planner
+  // filters every kind against the current bankroll before choosing the one
+  // executable alternative to publish to the central money arbiter.
   for (const quote of fleet.infrastructureOptions ?? []) {
-    if (quote.kind === "buyServer" && quote.cost > money) continue;
     options.push({ ...quote, incomePerSec: marginalIncome(quote.addedRam), horizonSec: installLifetimeSec });
   }
-  return stepInfrastructure(options, nodeHorizonSec);
+  return stepInfrastructure(options, nodeHorizonSec, money);
 }
 
 function infrastructureMethods(kind: InfrastructureOption["kind"]): readonly string[] {
@@ -339,10 +344,16 @@ async function executeInfrastructure(ctx: DriverContext, decision: ScoredInfrast
       merge(ctx.state, "fleet", { infrastructurePlan: { ...publishedPlan, lastResult: lastInfrastructureResult } });
     }
     if (ok) {
+      const fleet = ctx.state.topics.fleet;
+      const advanced = decision.kind === "buyServer" || decision.kind === "upgradeServer"
+        ? advanceInfrastructureFrontier(fleet?.infrastructureOptions ?? [], fleet?.purchased, decision)
+        : undefined;
       merge(ctx.state, "fleet", {
         ...(decision.kind === "homeRam" ? { homeRamUpgradeCost: Infinity } : {}),
         ...(decision.kind === "homeCore" ? { homeCoreUpgradeCost: Infinity } : {}),
-        ...(decision.kind === "buyServer" || decision.kind === "upgradeServer" ? { infrastructureOptions: [] } : {}),
+        ...(advanced
+          ? { infrastructureOptions: advanced.options, ...(advanced.purchased ? { purchased: advanced.purchased } : {}) }
+          : {}),
       });
     }
   } finally {
@@ -594,6 +605,7 @@ function runPump(
     expRateEma,
   );
   const completions = drainCompletions(driver);
+  const reinvestmentReturnPerDollarSec = bestReinvestmentReturnPerDollarSec(game);
 
   const started = Date.now();
   // pooling: farm batch ops ride pooled serve workers (worker.ts serve mode),
@@ -604,6 +616,7 @@ function runPump(
     ...(fleetReserveGb > 0 ? { fleetReserveGb } : {}),
     pooling: true,
     ...(installSec !== undefined ? { horizonMs: installSec * 1_000 } : {}),
+    ...(reinvestmentReturnPerDollarSec > 0 ? { reinvestmentReturnPerDollarSec } : {}),
   });
   const elapsed = Date.now() - started;
   if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
@@ -703,6 +716,7 @@ export const hacking: FeatureDriver = {
             moneyAvailable: game.topics.player?.money ?? 0,
             moneyGranted: ctx.grants.money,
             incomePerSecPerGb: game.topics.farm?.moneyPerSecPerGb ?? 0,
+            reinvestmentReturnPerDollarSec: infrastructure.reinvestmentReturnPerDollarSec,
             ...(infrastructure.buy ? { buy: {
               kind: infrastructure.buy.kind,
               cost: infrastructure.buy.cost,

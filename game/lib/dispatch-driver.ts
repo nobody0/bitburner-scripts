@@ -148,11 +148,20 @@ export function pump(
    *  directly. Named options rather than a positional number tail, because
    *  three adjacent defaulted numbers in three different units transpose
    *  silently. */
-  options: { homeReserveGb?: number; fleetReserveGb?: number; horizonMs?: number; pooling?: boolean } = {},
+  options: {
+    homeReserveGb?: number;
+    fleetReserveGb?: number;
+    horizonMs?: number;
+    pooling?: boolean;
+    reinvestmentReturnPerDollarSec?: number;
+  } = {},
 ): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"] } {
   const result = planFarm(view, state.memory, completions, {
     homeReserveGb: options.homeReserveGb ?? HOME_RESERVE_GB,
     ...(options.fleetReserveGb ? { fleetReserveGb: options.fleetReserveGb } : {}),
+    ...(options.reinvestmentReturnPerDollarSec !== undefined
+      ? { reinvestmentReturnPerDollarSec: options.reinvestmentReturnPerDollarSec }
+      : {}),
     ...(options.horizonMs !== undefined ? { horizonMs: options.horizonMs } : {}),
     ...(options.pooling ? { pooling: true } : {}),
   });

@@ -12,6 +12,8 @@ export interface FarmRollup {
   /** Current target's expected $/sec/GB, used to price added fleet RAM. */
   moneyPerSecPerGb?: number;
   prepTarget?: string;
+  /** Current demand-driven reservation for the executable prep wave. */
+  prepBudgetGb?: number;
   segOrder?: string[];
   /** Farm scheduling mode (hwgw | hgw | shotgun). */
   mode?: string;
@@ -92,6 +94,7 @@ export interface FleetRollup {
     moneyAvailable: number;
     moneyGranted: number;
     incomePerSecPerGb: number;
+    reinvestmentReturnPerDollarSec?: number;
     buy?: { kind: string; cost: number; host?: string; targetRam?: number };
     /** True candidate count; `ranked` is a bounded display/telemetry digest. */
     rankedTotal: number;

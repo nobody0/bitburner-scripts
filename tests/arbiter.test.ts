@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { MONEY_SPAN, REP_SPAN } from "../shared/strategy/income.ts";
-import { scoreHomeRam, stepInfrastructure } from "../shared/strategy/infrastructure.ts";
+import { advanceInfrastructureFrontier, scoreHomeRam, stepInfrastructure } from "../shared/strategy/infrastructure.ts";
 import {
   grantFor,
   grantedAmount,
@@ -382,5 +382,35 @@ describe("cross-feature investments", () => {
       { kind: "upgradeServer", host: "pserv", cost: 440_000, addedRam: 8, targetRam: 16, incomePerSec: 80 },
     ], 10_000);
     expect(decision.buy).toMatchObject({ kind: "upgradeServer", host: "pserv", targetRam: 16 });
+  });
+
+  test("an unaffordable large upgrade cannot hide a profitable affordable step", () => {
+    const decision = stepInfrastructure([
+      { kind: "upgradeServer", host: "large", cost: 3_520_000, addedRam: 64, targetRam: 128, incomePerSec: 1_280 },
+      { kind: "upgradeServer", host: "small", cost: 440_000, addedRam: 8, targetRam: 16, incomePerSec: 80 },
+    ], 10_000, 500_000);
+    expect(decision.buy).toMatchObject({ host: "small", cost: 440_000 });
+    expect(decision.ranked).toHaveLength(1);
+    // The executable purchase and the value of money are separate facts: an
+    // unaffordable high-return quote still tells preparation what early cash
+    // could buy as soon as enough of it has accumulated.
+    expect(decision.reinvestmentReturnPerDollarSec).toBeCloseTo(1_280 / 3_520_000, 12);
+  });
+
+  test("a confirmed upgrade invalidates only that host's quote", () => {
+    const buy = { kind: "buyServer" as const, cost: 440_000, addedRam: 8, targetRam: 8 };
+    const a = { kind: "upgradeServer" as const, host: "a", cost: 440_000, addedRam: 8, targetRam: 16 };
+    const b = { kind: "upgradeServer" as const, host: "b", cost: 440_000, addedRam: 8, targetRam: 16 };
+    const advanced = advanceInfrastructureFrontier([buy, a, b], { count: 2, totalRam: 16, limit: 3 }, a);
+    expect(advanced.options).toEqual([buy, b]);
+    expect(advanced.purchased).toMatchObject({ count: 2, totalRam: 24 });
+  });
+
+  test("a confirmed buy waits for observation before buying another new host", () => {
+    const buy = { kind: "buyServer" as const, cost: 440_000, addedRam: 8, targetRam: 8 };
+    const upgrade = { kind: "upgradeServer" as const, host: "a", cost: 440_000, addedRam: 8, targetRam: 16 };
+    const room = advanceInfrastructureFrontier([buy, upgrade], { count: 1, totalRam: 8, limit: 3 }, buy);
+    expect(room.options).toEqual([upgrade]);
+    expect(room.purchased).toMatchObject({ count: 2, totalRam: 16 });
   });
 });

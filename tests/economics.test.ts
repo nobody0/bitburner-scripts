@@ -1,5 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { depthCapGb, evaluatePrep, farmIncomeRate, prepTimeDiscount, type FarmRateModel } from "../shared/strategy/economics.ts";
+import {
+  depthCapGb,
+  evaluatePrep,
+  farmIncomeRate,
+  incomePresentValue,
+  prepTimeDiscount,
+  type FarmRateModel,
+} from "../shared/strategy/economics.ts";
+import { allocateSegments, retainPrepReservation } from "../shared/strategy/evaluator.ts";
 import type { PrepPlan } from "../shared/strategy/targeting.ts";
 
 /** Prep opportunity-cost economics: the "3 hours of prep is 3 hours of lost
@@ -40,7 +48,65 @@ describe("farmIncomeRate", () => {
   });
 });
 
+describe("dynamic RAM allocation", () => {
+  test("prep gets exact executable demand and farming gets every remaining GB", () => {
+    expect(allocateSegments(100, 37)).toEqual([
+      { kind: "prep", gb: 37 },
+      { kind: "farm", gb: 63 },
+      { kind: "share", gb: 0 },
+    ]);
+    expect(allocateSegments(100, 0)[0]).toEqual({ kind: "farm", gb: 100 });
+    expect(allocateSegments(100, 150).slice(0, 2)).toEqual([
+      { kind: "prep", gb: 100 },
+      { kind: "farm", gb: 0 },
+    ]);
+  });
+
+  test("an atomic grow/weaken wave cannot lose its reservation at the transient grow landing", () => {
+    expect(retainPrepReservation(1.75, 350, true)).toBe(350);
+    expect(retainPrepReservation(1.75, 350, false)).toBe(1.75);
+  });
+});
+
+describe("incomePresentValue", () => {
+  test("is linear without reinvestment and values equal earlier income more with it", () => {
+    expect(incomePresentValue(10, 20, 120, 0)).toBe(1_000);
+    expect(incomePresentValue(10, 0, 100, 0.01)).toBeGreaterThan(
+      incomePresentValue(10, 100, 200, 0.01),
+    );
+  });
+});
+
 describe("evaluatePrep", () => {
+  test("exact demand replaces fixed shares and reinvestment prices money-now", () => {
+    const current = model({ score: 1, ramPerBatch: 1, weakenTimeS: 800 });
+    const candidate = model({ score: 1.08, ramPerBatch: 1, weakenTimeS: 800 });
+    const p = plan({ ramSec: 5_000, weakenTimeS: 10 });
+    const linear = evaluatePrep({
+      current,
+      candidate,
+      plan: p,
+      fleetGb: 100,
+      horizonMs: 1_000_000,
+      prepGb: 50,
+    })!;
+    expect(linear.prepGb).toBe(50);
+    expect(linear.prepShare).toBe(0.5);
+    expect(linear.prepSeconds).toBe(100);
+    expect(linear.net).toBeGreaterThan(0);
+
+    const compounded = evaluatePrep({
+      current,
+      candidate,
+      plan: p,
+      fleetGb: 100,
+      horizonMs: 1_000_000,
+      prepGb: 50,
+      reinvestmentReturnPerDollarSec: 0.01,
+    })!;
+    expect(compounded.net).toBeLessThan(0);
+  });
+
   test("nothing farming: net is the legacy idle rule, rate x (T - prepTime)", () => {
     // No current income means prep costs nothing — the value is exactly what
     // the candidate earns in the horizon left after its prep.

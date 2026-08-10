@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { announcedIncome, bestIncomePerSec } from "../game/lib/income.ts";
+import {
+  announcedIncome,
+  bestIncomePerSec,
+  bestReinvestmentReturnPerDollarSec,
+} from "../game/lib/income.ts";
 import { MS_PER_TICK } from "../shared/strategy/stock/market.ts";
 import type { GameState } from "../game/lib/state.ts";
 
@@ -56,5 +60,53 @@ describe("income announcements", () => {
     // gang 400/cycle = 2000/sec beats the farm's 1000.
     expect(bestIncomePerSec(s)).toBe(2_000);
     expect(announcedIncome(s).map((a) => a.by).sort()).toEqual(["career", "gang", "hacking"]);
+  });
+});
+
+describe("reinvestment return", () => {
+  test("uses the best money return across granted and denied claims", () => {
+    const s = state({
+      progression: {
+        arbitration: {
+          grants: [
+            { by: "hacknet", id: "upgrade", resource: "money", returnPerDollarSec: 1 / 600 },
+            { by: "hacking", id: "action", resource: "ram", returnPerDollarSec: 1 },
+          ],
+          denied: [
+            { by: "stock", id: "position", resource: "money", returnPerDollarSec: 1 / 300 },
+          ],
+          remaining: { money: 0, ram: 0 },
+        },
+      },
+    });
+    expect(bestReinvestmentReturnPerDollarSec(s)).toBeCloseTo(1 / 300, 12);
+  });
+
+  test("includes the productive infrastructure frontier that is not yet affordable", () => {
+    const s = state({
+      fleet: { infrastructurePlan: { reinvestmentReturnPerDollarSec: 1 / 120 } },
+      progression: {
+        arbitration: {
+          grants: [{ by: "hacknet", id: "upgrade", resource: "money", returnPerDollarSec: 1 / 300 }],
+          denied: [],
+          remaining: { money: 0, ram: 0 },
+        },
+      },
+    });
+    expect(bestReinvestmentReturnPerDollarSec(s)).toBeCloseTo(1 / 120, 12);
+  });
+
+  test("ignores absent, non-positive and non-finite returns", () => {
+    const s = state({
+      fleet: { infrastructurePlan: { reinvestmentReturnPerDollarSec: Number.NaN } },
+      progression: {
+        arbitration: {
+          grants: [{ by: "hacknet", id: "upgrade", resource: "money", returnPerDollarSec: -1 }],
+          denied: [{ by: "stock", id: "position", resource: "money", returnPerDollarSec: Infinity }],
+          remaining: { money: 0, ram: 0 },
+        },
+      },
+    });
+    expect(bestReinvestmentReturnPerDollarSec(s)).toBe(0);
   });
 });
