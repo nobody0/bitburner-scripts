@@ -190,6 +190,18 @@ export interface TargetBand {
   contenders: string[];
 }
 
+/** The contender set for a hacking skill (the last band caps out upward).
+ * Lives HERE, not in the generated table file: logic in a DO-NOT-EDIT file
+ * either gets silently reverted by the next regeneration or silently diverges
+ * from the generator's template — the staleness pin only covers the data. */
+export function contendersAt(bands: readonly TargetBand[], skill: number): readonly string[] {
+  for (const band of bands) {
+    if (skill >= band.from && skill <= band.to) return band.contenders;
+  }
+  const last = bands[bands.length - 1];
+  return last && skill > last.to ? last.contenders : [];
+}
+
 export interface TargetBandOptions {
   /** World-generation multipliers (default BN1: all 1). */
   mults?: ServerGenMults;

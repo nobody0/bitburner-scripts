@@ -1,4 +1,4 @@
-﻿import type { NS } from "@ns";
+import type { NS } from "@ns";
 import { bitNodeMultipliers, effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { makeHackContext } from "../../../shared/formulas.ts";

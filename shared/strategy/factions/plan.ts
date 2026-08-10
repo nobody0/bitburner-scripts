@@ -19,6 +19,10 @@ export interface FactionObjective {
   /** The one package being pursued now. The compatible faction set is not an
    * actionable intent; this is what other features should prepare. */
   intent?: FactionIntent;
+  /** Intent absent ONLY because the planning horizon filtered every raw
+   * candidate — a transient forecast state, not a concluded frontier. The
+   * install verdict must not treat it as "nothing left to push for". */
+  horizonStarved?: boolean;
   /** Best alternative package at the same decision point. Its marginal rate
    * is the opportunity cost that stops us pushing `intent` indefinitely. */
   runnerUp?: FactionIntent;

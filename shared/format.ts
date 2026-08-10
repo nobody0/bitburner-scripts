@@ -33,3 +33,15 @@ export function formatNumber(n: number, fractionalDigits = 0): string {
 export function formatMoney(n: number, fractionalDigits = 0): string {
   return `$${formatNumber(n, fractionalDigits)}`;
 }
+
+/** Round to `digits` significant figures. For REPORTS (digests, why-strings),
+ * never decisions: full precision makes every digest whose signature embeds a
+ * drifting value differ on each pass, and the change-filtered store then
+ * writes a record per tick for the whole run. One shared primitive because
+ * two private copies (the arbitration digest's and the horizon's) had already
+ * grown different edge-case guards. */
+export function roundSigFigs(value: number, digits: number): number {
+  if (!Number.isFinite(value) || value === 0) return value;
+  const scale = 10 ** (Math.floor(Math.log10(Math.abs(value))) - (digits - 1));
+  return Math.round(value / scale) * scale;
+}

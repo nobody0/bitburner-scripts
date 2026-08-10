@@ -153,7 +153,7 @@ function incomeRate(value: number | [number, number] | undefined): number {
  * `position.value` is already marked at bid/ask, so the spread is priced in; what
  * remains is one $100k commission per position on the way out. Netted, never
  * negative — a book worth less than its exit costs is not a source of funds. */
-function liquidatableValue(ctx: DriverContext): number {
+export function liquidatableValue(ctx: Pick<DriverContext, "state" | "caps">): number {
   const stock = ctx.state.topics.stock;
   if (!stock || ctx.caps.unlocked.stock === "no") return 0;
   const positions = (stock.positions ?? []).filter(
@@ -466,7 +466,12 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
       // money the arbiter allocated elsewhere. Priced from the probed offer,
       // falling back to the plan's own escalated estimate.
       const offer = (ctx.state.topics.factions?.offers ?? []).find((entry) => entry.name === action.augmentation);
-      const fundNeeded = offer?.price ?? 0;
+      const catalogAug = view.catalog.get(action.augmentation);
+      const estimated = catalogAug ? augCost(catalogAug, view.priceContext).moneyCost : 0;
+      // Max of the probed offer and the locally escalated estimate: an offer
+      // from a never-probed faction used to fall back to 0, silently waiving
+      // the funding gate entirely.
+      const fundNeeded = Math.max(offer?.price ?? 0, estimated);
       if (fundNeeded > 0 && moneyGrantFor(ctx, "aug-fund") < fundNeeded) {
         record(false, `waiting for the ${formatMoney(fundNeeded)} augmentation fund grant`);
         return;

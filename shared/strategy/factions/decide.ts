@@ -211,15 +211,27 @@ export function stepFactions(
   // the GRANTED budget, a grant only exists once something claimed it, and a claim
   // read off the already-funded decision could never bootstrap.
   let decision = out.decision;
-  const intended = nextPurchase(view, purchaseOrder(view, decision.objective?.augmentations ?? []), Infinity);
+  const endgameDrain = decision.recommendInstall !== undefined || decision.drainCeiling !== undefined;
   if (!decision.nextBuy) {
-    if (intended) decision = { ...decision, nextBuy: { name: intended.name, price: intended.price } };
+    // Guarded: purchaseOrder runs the exponential ordering DP (up to ~40 ms
+    // at 16 items), and during the drain — when chainWake runs this at
+    // controller-pass cadence — the drain always supplies nextBuy itself.
+    const intended = nextPurchase(view, purchaseOrder(view, decision.objective?.augmentations ?? []), Infinity);
+    // During the drain, an empty drain intent means the sweep found nothing
+    // the frozen pile can cover. Falling back to the OBJECTIVE's head priced
+    // with Infinity would publish a nextBuy the pile can never fund, and the
+    // driver's priority-90 divisible reserve for it absorbs the entire money
+    // pool with no timeout — starving every lower band until raw income
+    // reaches an unbounded price.
+    const fundable =
+      intended !== undefined &&
+      (!endgameDrain || intended.price <= view.moneyAvailable + Math.max(0, view.pendingProceeds));
+    if (intended && fundable) decision = { ...decision, nextBuy: { name: intended.name, price: intended.price } };
   }
 
   // End-loaded buying can reach its first purchase with most of the bankroll
   // still in stocks. Publish the bootstrap separately so progression may ask
   // stock to liquidate without treating an empty queue as installable.
-  const endgameDrain = decision.recommendInstall !== undefined || decision.drainCeiling !== undefined;
   const nextBuy = decision.nextBuy;
   if (
     endgameDrain &&
@@ -293,6 +305,7 @@ function decideFactions(
       : "no faction package fits the planning horizon",
     ...(selection.intent ? { intent: selection.intent } : {}),
     ...(selection.runnerUp ? { runnerUp: selection.runnerUp } : {}),
+    ...(selection.horizonStarved ? { horizonStarved: true } : {}),
   };
 
   // Keep the promised breakpoint stable while it is in flight. In
@@ -531,7 +544,7 @@ function decideFactions(
     // cash on hand) — or when the remaining node cannot repay it. One-shot
     // augmentations keep nextPurchase's own patience rules (hold only while
     // liquidation proceeds with a settlement date cover the gap).
-    const sweepAll = recommend ? finalSweepWanted(view) : [];
+    const sweepAll = recommend ? finalSweepWanted(view, ceiling ?? Infinity) : [];
     const drainBudget = ceiling !== undefined ? Math.min(ceiling, view.moneyAvailable) : 0;
     const nfgAug = view.catalog.get(NEUROFLUX);
     const nfgAffordable = nfgAug !== undefined && augCost(nfgAug, view.priceContext).moneyCost <= drainBudget;
@@ -866,7 +879,7 @@ function nextPurchase(
  * of this list, so executing one purchase per tick reproduces the planned order.
  *
  * NeuroFlux comes last, as the sink for whatever the batch leaves behind. */
-function finalSweepWanted(view: FactionsView): string[] {
+function finalSweepWanted(view: FactionsView, budgetCap = Infinity): string[] {
   const joined = new Set(view.factions.filter((standing) => standing.joined).map((standing) => standing.name));
   const byValue = [...view.catalog.values()]
     .filter(
@@ -891,11 +904,15 @@ function finalSweepWanted(view: FactionsView): string[] {
   // The whole bankroll, not the granted slice, and not cash alone: this decides
   // which SET is worth planning, and at this boundary the market book is about to
   // become cash while the cash itself is about to be deleted by the install.
+  // The drain passes its frozen ceiling as the cap: planning with the
+  // income-over-horizon slack there names items the pile can never cover, and
+  // the driver's priority-90 reserve for an uncoverable nextBuy starves every
+  // lower band with no timeout.
   const plan = selectAffordableBatch({
     candidates,
     owned: view.owned,
     ctx: view.priceContext,
-    money: plannedBudget(view),
+    money: Math.min(plannedBudget(view), budgetCap),
   });
 
   const order = plan.order.map((candidate) => candidate.name);

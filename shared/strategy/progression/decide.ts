@@ -1,5 +1,6 @@
 import { formatScientific } from "../../format.ts";
 import { addRepToFavor } from "../factions/rep.ts";
+import { INSTALL_OVERHEAD_SEC } from "./eta.ts";
 
 /** Progression: install timing, reset cadence and BitNode ordering.
  *
@@ -134,8 +135,10 @@ export const PUSH_MARGIN = 1.25;
  * machinery (the final sweep and the stock liquidation both key off it). */
 export const VERDICT_DWELL_MS = 90_000;
 /** Flat time cost a reset spends before the activated queue earns anything
- * (kill/reboot/re-sweep). Matches the route model's install overhead. */
-export const INSTALL_VERDICT_OVERHEAD_SEC = 300;
+ * (kill/reboot/re-sweep). Not a second opinion: it IS the route model's
+ * install overhead, imported so a recalibration there moves the cadence
+ * threshold sqrt(2·O·pushRate) with it. */
+export const INSTALL_VERDICT_OVERHEAD_SEC = INSTALL_OVERHEAD_SEC;
 
 export interface InstallVerdict {
   verdict: "push" | "install" | "no-data";
@@ -161,7 +164,12 @@ export interface InstallVerdict {
  * marker) are excluded from the accrued side — they mark necessity, not
  * rate — and the route-mandatory install path is routeRequiresInstall's. */
 export function installVerdict(view: {
-  nodeRemainingSec?: number;
+  /** A route ETA exists at all. Deliberately a boolean, not the seconds: the
+   * renewal rule is INDEPENDENT of remaining node time (see above), so only
+   * the ETA's absence matters here — the magnitude is consumed by
+   * stepProgression's INSTALL_MIN_PAYBACK_SEC rule. A numeric parameter whose
+   * value was dead invited someone to double-count that rule. */
+  routeEtaKnown?: boolean;
   resetValueMult?: number;
   pushMarginalRate?: number;
   /** The frontier has published a plan and it names NO push target — the
@@ -170,7 +178,7 @@ export function installVerdict(view: {
    * concluding "install" there latches before any work begins. */
   frontierIdle?: boolean;
 }): InstallVerdict {
-  if (view.nodeRemainingSec === undefined) {
+  if (view.routeEtaKnown !== true) {
     return { verdict: "no-data", why: "no route ETA; the legacy cash gate decides" };
   }
   const accrued = Math.max(0, view.resetValueMult ?? 0);

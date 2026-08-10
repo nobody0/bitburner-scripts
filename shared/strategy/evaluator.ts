@@ -64,14 +64,12 @@ export interface FleetCapacity {
 
 export interface TargetEntry {
   statics: TargetStatics;
+  /** Undefined when ineligible OR pruned this generation (the upper bound
+   * could not reach the incumbent's rate — bounds.ts); either way the entry
+   * takes no part in ranking. `memory.prunedSolves` counts the skips. */
   solution?: CycleSolution;
   /** ctx generation `solution` was computed under. */
   generation: number;
-  /** Solve skipped this generation because the score upper bound cannot reach
-   * the incumbent farm score (bounds.ts). Distinct from ineligible: a pruned
-   * target IS farmable, it just provably cannot win any decision this
-   * generation. */
-  pruned?: boolean;
 }
 
 export interface EvaluatorMemory {
@@ -236,15 +234,24 @@ export function stepEvaluator(
   }
 
   // One solve choke point, shared by the slice and the gate. The prune is
-  // PROVABLY decision-free: a farm switch needs score > incumbent·1.1 and a
-  // prep pick needs positive net (score strictly above the incumbent's), so a
-  // candidate whose upper bound (bounds.ts — ≥ its score under every cap and
-  // batch shape, stock value included) cannot reach the incumbent score cannot
-  // be chosen by any path, and its exhaustive solve is skipped. Guards, each
+  // PROVABLY decision-free against both consumers of `ranked`:
+  //  - the farm switch compares SCORES (needs > incumbent·1.1), and a pruned
+  //    candidate has score ≤ UB ≤ threshold ≤ incumbent score;
+  //  - the prep pick compares RATES (economics.ts: rate = score·min(fleetGb,
+  //    depthCapGb), so a LOWER-score candidate with a deeper pipeline can
+  //    beat a depth-capped incumbent — which is why the threshold is the
+  //    incumbent's EFFECTIVE per-GB rate, farmIncomeRate/fleetGb, not its raw
+  //    score. Then candidateRate ≤ UB·fleetGb ≤ threshold·fleetGb =
+  //    incumbentRate, so the net can never go positive. Thresholding on raw
+  //    score instead would re-create the n00dles lock-in: a huge fleet farming
+  //    a tiny fast target prunes exactly the rich slow upgrade whose RATE
+  //    would have won the prep pick.
+  // The upper bound (bounds.ts) is ≥ the candidate's score under every cap
+  // and batch shape, stock value included. Remaining guards, each
   // load-bearing:
   //  - threshold only from an incumbent solved at the CURRENT generation (a
   //    stale score could overstate the fleet's worth and over-prune);
-  //  - no pruning when the incumbent earns nothing (currentScore ≤ 0): the
+  //  - no pruning when the incumbent earns nothing (threshold ≤ 0): the
   //    cold-start and BN8 fallbacks rank by prep-aware value, where a
   //    low-score fast-prep target can legitimately win;
   //  - the incumbent itself is never pruned (its solution feeds the
@@ -257,17 +264,15 @@ export function stepEvaluator(
   const solveEntry = (entry: TargetEntry): void => {
     if (entry.generation === memory.generation) return;
     entry.generation = memory.generation;
-    entry.pruned = false;
     if (!isEligible(ctx, entry.statics)) {
       entry.solution = undefined;
       return;
     }
     const manipulation = manipulationFor(entry.statics.hostname);
-    if (pruneEnabled && entry !== incumbentEntry && incumbentEntry?.generation === memory.generation) {
-      const threshold = incumbentEntry.solution?.score ?? 0;
+    if (pruneEnabled && entry !== incumbentEntry && incumbentEntry?.generation === memory.generation && fleetGb > 0) {
+      const threshold = farmIncomeRate(incumbentEntry.solution, fleetGb) / fleetGb;
       if (threshold > 0 && scoreUpperBound(ctx, entry.statics, manipulation?.valuePerOp ?? 0) * (1 + 1e-9) <= threshold) {
         entry.solution = undefined;
-        entry.pruned = true;
         memory.prunedSolves++;
         return;
       }
@@ -312,13 +317,22 @@ export function stepEvaluator(
   const current = currentHost ? memory.entries.get(currentHost) : undefined;
   const currentScore = current?.solution?.score ?? 0;
 
+  // Memoized per gate: prepOf is consulted by the bestPrepped find, the
+  // cold-start value loop and the prep pick — identical inputs within one
+  // gate (view and statics are fixed for the call), so one solve each.
+  const prepPlans = new Map<string, PrepPlan | undefined>();
   const prepOf = (entry: TargetEntry): PrepPlan | undefined => {
-    const server = byHost.get(entry.statics.hostname);
-    if (!server) return undefined;
-    return solvePrep(ctx, entry.statics, {
-      hackDifficulty: server.hackDifficulty,
-      moneyAvailable: server.moneyAvailable,
-    });
+    const hostname = entry.statics.hostname;
+    if (prepPlans.has(hostname)) return prepPlans.get(hostname);
+    const server = byHost.get(hostname);
+    const plan = server
+      ? solvePrep(ctx, entry.statics, {
+          hackDifficulty: server.hackDifficulty,
+          moneyAvailable: server.moneyAvailable,
+        })
+      : undefined;
+    prepPlans.set(hostname, plan);
+    return plan;
   };
 
   // Horizon bounds how far prep time is amortized (and caps skill staleness).
@@ -350,7 +364,7 @@ export function stepEvaluator(
     const nowSec = weakenTimeSeconds(ctx, entry.statics.baseDifficulty, entry.statics.requiredHackingSkill);
     const futureSec = weakenTimeSeconds(futureCtx, entry.statics.baseDifficulty, entry.statics.requiredHackingSkill);
     if (!(nowSec > 0)) return 1;
-    return prepTimeDiscount({ prepSeconds, futureOpTimeScale: futureSec / nowSec });
+    return prepTimeDiscount(futureSec / nowSec);
   };
 
   // Farm pick: the best PREPPED candidate — `ranked` is sorted, so the first
@@ -369,7 +383,12 @@ export function stepEvaluator(
       memory.farmSince = now;
     }
   }
-  if (!bestPrepped) {
+  if (!bestPrepped && (!farmEntry || currentScore <= 0)) {
+    // Only entered when the result can matter: with an EARNING incumbent both
+    // consumers below are unreachable (`!farmEntry` and `currentScore <= 0`),
+    // and the momentary not-prepped dip after every hack landing used to run
+    // this whole per-candidate solve loop for nothing.
+    //
     // Nothing prepped anywhere: farm the best target anyway (the dispatcher
     // preps it, then fires hacks). "Best" here MUST be prep-aware, not raw
     // score: the pipeline-aware score can rank a 50M-money server above a

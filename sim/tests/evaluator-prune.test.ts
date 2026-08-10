@@ -158,6 +158,96 @@ function runTimeline(scenario: Scenario, prune: boolean): {
   return { decisions, memory, gateMs };
 }
 
+describe("depth-capped incumbent: the prep pick is rate-based, not score-based", () => {
+  // The regression three independent review passes converged on: with a fleet
+  // far beyond the incumbent's pipeline depth cap, a candidate whose per-GB
+  // SCORE is below the incumbent's can still win the prep pick on RATE
+  // (economics.ts: rate = score·min(fleetGb, depthCap)). A prune thresholded
+  // on raw score removes exactly that candidate; the fix thresholds on the
+  // incumbent's effective per-GB rate. This scenario is built so the old
+  // threshold WOULD have pruned the winner (preconditions asserted, so the
+  // test fails loudly if tuning drifts instead of silently covering nothing).
+  test("a lower-score deeper-pipeline upgrade survives the prune and wins prep", async () => {
+    const { makeHackContext } = await import("../../shared/formulas.ts");
+    const { solveCycle } = await import("../../shared/strategy/targeting.ts");
+    const { scoreUpperBound } = await import("../../shared/strategy/bounds.ts");
+    const { farmIncomeRate } = await import("../../shared/strategy/economics.ts");
+
+    const fleetGb = 65_536;
+    const neutralMults = { hacking: 1, hacking_exp: 1, hacking_money: 1, hacking_grow: 1, hacking_speed: 1, hacking_chance: 1 };
+    const skill = 1_000;
+    const smallfast = { hostname: "smallfast", minDifficulty: 1, moneyMax: 5e7, requiredHackingSkill: 1, serverGrowth: 100, baseDifficulty: 3 };
+    const bigslow = { hostname: "bigslow", minDifficulty: 40, moneyMax: 8e9, requiredHackingSkill: 500, serverGrowth: 40, baseDifficulty: 120 };
+    // A third target the prune CAN legitimately drop — poor AND hard, so its
+    // bound sits below even the rate threshold (which is ~fleet/depthCap
+    // times smaller than the incumbent's raw score) — proving pruning still
+    // fires under the corrected threshold.
+    const chaff = { hostname: "chaff", minDifficulty: 90, moneyMax: 1e5, requiredHackingSkill: 900, serverGrowth: 5, baseDifficulty: 100 };
+
+    const ctx = makeHackContext({ skill, intelligence: 0, mults: neutralMults }, {});
+    const curSolution = solveCycle(ctx, smallfast)!;
+    const candSolution = solveCycle(ctx, bigslow)!;
+    // Preconditions that make this a regression test at all:
+    expect(candSolution.score).toBeLessThan(curSolution.score); // score says keep farming smallfast...
+    expect(scoreUpperBound(ctx, bigslow)).toBeLessThan(curSolution.score); // ...and the OLD threshold would prune bigslow...
+    expect(farmIncomeRate(candSolution, fleetGb)).toBeGreaterThan(farmIncomeRate(curSolution, fleetGb) * 1.5); // ...but its RATE wins.
+
+    const serverOf = (statics: typeof smallfast, prepped: boolean): ServerView => ({
+      hostname: statics.hostname,
+      hasAdminRights: true,
+      purchasedByPlayer: false,
+      moneyAvailable: prepped ? statics.moneyMax : statics.moneyMax * 0.3,
+      moneyMax: statics.moneyMax,
+      hackDifficulty: prepped ? statics.minDifficulty : statics.baseDifficulty,
+      minDifficulty: statics.minDifficulty,
+      baseDifficulty: statics.baseDifficulty,
+      requiredHackingSkill: statics.requiredHackingSkill,
+      serverGrowth: statics.serverGrowth,
+      numOpenPortsRequired: 0,
+      maxRam: 64,
+      usedRam: 0,
+      cpuCores: 1,
+    });
+    const viewAt = (time: number, skillNow: number): WorldView => ({
+      time,
+      player: { money: 1e9, hackingSkill: skillNow, hackingExp: 1e9, intelligence: 0, mults: neutralMults },
+      servers: [serverOf(smallfast, true), serverOf(bigslow, false), serverOf(chaff, true)],
+      prices: { upgradeHomeRam: Infinity, cloudServer: {}, cloudServerLimit: 0 },
+    });
+    // No hostBlocksGb: the plain E/R score keeps the score-vs-rate gap clean.
+    const capacity: FleetCapacity = { fleetGb, largestBlockGb: fleetGb / 2 };
+
+    const run = (prune: boolean): { memory: EvaluatorMemory; preps: (string | undefined)[] } => {
+      const memory = initEvaluator();
+      const preps: (string | undefined)[] = [];
+      for (let step = 0; step < 4; step++) {
+        // Goal far enough away that the goal horizon does not undercut the
+        // candidate's ~48 min prep (a short horizon rejects it in BOTH runs,
+        // which would cover nothing). The >2% skill jumps at steps 2 and 3
+        // bump the context generation AFTER the incumbent exists — the first
+        // gate has no incumbent, so pruning can only fire on a re-score. Two
+        // jumps because on a bump pass the round-robin slice runs before the
+        // gate and legitimately solves its one target unpruned (the incumbent
+        // is still stale then); the second bump lands while the slice cursor
+        // is elsewhere, so the gate is what reaches chaff.
+        const skillNow = step < 2 ? skill : skill * (step === 2 ? 1.03 : 1.061);
+        const { directive } = stepEvaluator(viewAt(step * 6_000, skillNow), memory, capacity, 1e15, Infinity, { prune });
+        preps.push(directive.prep?.host);
+      }
+      return { memory, preps };
+    };
+    const pruned = run(true);
+    const full = run(false);
+    expect(pruned.preps).toEqual(full.preps);
+    // The rate-winning upgrade is chosen despite its lower score...
+    expect(pruned.preps[pruned.preps.length - 1]).toBe("bigslow");
+    expect(pruned.memory.entries.get("bigslow")?.solution).toBeDefined();
+    // ...while the prune still fires on the genuinely hopeless target.
+    expect(pruned.memory.entries.get("chaff")?.solution).toBeUndefined();
+    expect(pruned.memory.prunedSolves).toBeGreaterThan(0);
+  });
+});
+
 describe("upper-bound pruning is decision-free", () => {
   for (const scenario of SCENARIOS) {
     test(`scenario 0x${scenario.seed.toString(16)}: identical decisions with and without pruning`, () => {

@@ -2,6 +2,7 @@ import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { NEUROFLUX, nextPurchasableAugmentation, scoreAugMults, weightsForRoute } from "../../../shared/strategy/factions/augs.ts";
+import { liquidatableValue } from "./factions.ts";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
@@ -1590,7 +1591,11 @@ function progressionRefresh(ctx: NeedContext): void {
     ));
   };
   const realizable = new Set<string>();
-  const sweepBudget = player.money;
+  // The sweep's budget is cash PLUS the liquidatable stock book — the same
+  // frozen ceiling the drain itself uses (cash + pendingProceeds). Cash alone
+  // read near-zero on stock-funded nodes (BN8 keeps the bankroll invested by
+  // design), so realizable stayed empty and the verdict pushed forever.
+  const sweepBudget = player.money + liquidatableValue(ctx);
   const unownedByFaction = new Map<string, number>();
   // Joined factions only: the sweep can only buy from a faction we are IN,
   // and after a prestige the offers list can briefly describe factions the
@@ -1598,11 +1603,31 @@ function progressionRefresh(ctx: NeedContext): void {
   // cycle with nothing joined and deadlocked it (installRequested stops the
   // very faction work that would have made something realizable).
   const joinedSet = new Set(factions?.joined ?? []);
+  const ownedOrQueued = new Set<string>(pending);
+  for (const offer of factions?.offers ?? []) if (offer.owned) ownedOrQueued.add(offer.name);
+  const affordable: string[] = [];
   for (const offer of factions?.offers ?? []) {
     if (offer.owned || offer.name === NEUROFLUX || !joinedSet.has(offer.faction)) continue;
     unownedByFaction.set(offer.faction, (unownedByFaction.get(offer.faction) ?? 0) + 1);
     if (!offer.affordableRep || offer.price > sweepBudget) continue;
-    realizable.add(offer.name);
+    affordable.push(offer.name);
+  }
+  // Prereq closure: every real purchase path skips a prereq-unmet aug
+  // (augs.ts nextPurchasableAugmentation), so an offer only counts as
+  // realizable when its prerequisites are owned, queued, or themselves
+  // realizable this sweep — otherwise a rep-locked prereq chain manufactures
+  // install pressure for value the sweep can never convert, the exact
+  // deadlock shape the joined-factions filter above was added for.
+  for (let moved = true; moved; ) {
+    moved = false;
+    for (const name of affordable) {
+      if (realizable.has(name)) continue;
+      const prereqs = AUGMENTATIONS[name]?.prereqs ?? [];
+      if (prereqs.every((prereq) => ownedOrQueued.has(prereq) || realizable.has(prereq))) {
+        realizable.add(name);
+        moved = true;
+      }
+    }
   }
   for (const name of pending) realizable.delete(name);
   // Banked-but-unrealized favor, priced with packageValue's OWN favor terms
@@ -1627,18 +1652,20 @@ function progressionRefresh(ctx: NeedContext): void {
   // side without the count term could never clear the threshold on cheap
   // augs however many of them an install would activate.
   const resetValueMult =
-    pending.length + realizable.size
-    + pending.reduce((sum, name) => sum + scoreMults(name), 0)
-    + [...realizable].reduce((sum, name) => sum + scoreMults(name), 0)
-    + bankedFavorValue;
+    [...pending, ...realizable].reduce((sum, name) => sum + 1 + scoreMults(name), 0) + bankedFavorValue;
   const intent = factions?.plan?.objective?.intent;
   const rawVerdict = installVerdict({
-    ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
+    routeEtaKnown: selectedEta !== undefined,
     resetValueMult,
     ...(intent?.marginalRate !== undefined ? { pushMarginalRate: intent.marginalRate } : {}),
     // A published factions plan naming no intent is a concluded frontier; a
     // missing plan is a frontier that has not run yet (see installVerdict).
-    frontierIdle: factions?.plan !== undefined && intent === undefined,
+    // A HORIZON-STARVED objective is neither: raw candidates exist but the
+    // node forecast currently prices them all out — a transient state that
+    // recalibrates, and reading it as "concluded" armed a premature install
+    // (irreversible once the sweep starts buying) at package boundaries.
+    frontierIdle:
+      factions?.plan !== undefined && intent === undefined && factions.plan.objective?.horizonStarved !== true,
   });
   // Symmetric dwell: a raw flip must hold for VERDICT_DWELL_MS in EITHER
   // direction. An early "install" verdict is often boot noise (the frontier
@@ -1696,7 +1723,23 @@ function progressionRefresh(ctx: NeedContext): void {
     ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
     routeRequiresInstall,
     resetValueMult,
-    resetRealizable: realizable.size > 0 || bankedFavorValue > 0.01,
+    // Banked favor may only OPEN the gate when the sweep can actually convert
+    // something — any joined offer with rep met (NeuroFlux included), or a
+    // donation path (favor past the donate wall on a faction with unowned
+    // augs). Rep-locked value must not arm an install whose installRequested
+    // then halts the very rep work that would unlock it: with nothing
+    // convertible the queue stays empty and the "nothing queued yet" blocker
+    // holds the reset forever, with faction work frozen.
+    resetRealizable:
+      realizable.size > 0
+      || (bankedFavorValue > 0.01
+        && ((factions?.offers ?? []).some((offer) => !offer.owned && joinedSet.has(offer.faction) && offer.affordableRep)
+          || (factions?.standings ?? []).some(
+            (standing) =>
+              joinedSet.has(standing.name)
+              && standing.favor >= favorDonateAt
+              && (unownedByFaction.get(standing.name) ?? 0) > 0,
+          ))),
     ...(intent?.marginalRate !== undefined ? { pushMarginalRate: intent.marginalRate } : {}),
     ...(intent?.etaSec !== undefined ? { pushEtaSec: intent.etaSec } : {}),
     ...(marginalInstall !== undefined ? { marginalInstall } : {}),

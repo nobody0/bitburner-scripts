@@ -31,6 +31,12 @@ export interface PackageSelection {
   /** Complete, non-dominated frontier for review/tests/UI. */
   frontiers: Map<string, FactionPackage[]>;
   foreclosed: { name: string; bannedBy: string }[];
+  /** No intent, but only because the planning horizon filtered every raw
+   * candidate out — a TRANSIENT state (the node forecast recalibrates), not
+   * "nothing left worth pushing for". The install verdict must not read a
+   * horizon-starved frontier as concluded: doing so armed premature installs
+   * at cycle start whenever the forecast dipped for one 90s dwell. */
+  horizonStarved?: boolean;
 }
 
 const ROUTE_MANDATORY_VALUE = 100;
@@ -169,6 +175,9 @@ export function factionPackageFrontier(
   standing: FactionStanding,
   blockers: readonly Blocker[],
   view: FactionsView,
+  /** Incremented for every raw candidate the horizon filter drops — lets the
+   * selection distinguish "nothing exists" from "nothing fits the horizon". */
+  stats?: { horizonDropped: number },
 ): FactionPackage[] {
   if (!cycleCompatible(standing, view.factions)) return [];
   if (!standing.joined && !standing.invited && !isReachable(blockers)) return [];
@@ -215,7 +224,10 @@ export function factionPackageFrontier(
     const moneySec = useDonation ? donateMoneySec : workMoneySec;
     const totalCost = purchaseCost + donationCost;
     const etaSec = Math.max(1, Math.min(workEta, donateEta));
-    if (etaSec > view.horizonSec) continue;
+    if (etaSec > view.horizonSec) {
+      if (stats) stats.horizonDropped++;
+      continue;
+    }
 
     raw.push({
       faction: standing.name,
@@ -348,8 +360,9 @@ export function selectFactionPackage(
 ): PackageSelection {
   const frontiers = new Map<string, FactionPackage[]>();
   const entries: { faction: string; pkg: FactionPackage; index: number }[] = [];
+  const stats = { horizonDropped: 0 };
   for (const standing of view.factions) {
-    const frontier = factionPackageFrontier(standing, blockers.get(standing.name) ?? [], view);
+    const frontier = factionPackageFrontier(standing, blockers.get(standing.name) ?? [], view, stats);
     if (frontier.length === 0) continue;
     frontiers.set(standing.name, frontier);
     const entry = bestEntry(frontier);
@@ -357,7 +370,7 @@ export function selectFactionPackage(
   }
   entries.sort((a, b) => b.pkg.rate - a.pkg.rate || b.pkg.value - a.pkg.value || (a.faction < b.faction ? -1 : 1));
   const winner = entries[0];
-  if (!winner) return { frontiers, foreclosed: [] };
+  if (!winner) return { frontiers, foreclosed: [], ...(stats.horizonDropped > 0 ? { horizonStarved: true } : {}) };
 
   let intent = winner.pkg;
   let intentIndex = winner.index;

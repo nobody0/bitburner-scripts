@@ -238,13 +238,7 @@ function contributionOf(field: string, multiplier: number, weights: ObjectiveWei
  * An augmentation whose multipliers upstream randomises scores 0 rather than
  * being guessed at — see AUGMENTATION_TABLE.multsUnknown. */
 export function scoreAug(aug: AugInfo, weights: ObjectiveWeights): number {
-  let score = AUG_BONUS[aug.name] ?? 0;
-  if (aug.multsUnknown) return score;
-  for (const [field, value] of Object.entries(aug.mults)) {
-    if (value <= 0) continue;
-    score += contributionOf(field, value, weights);
-  }
-  return score;
+  return (AUG_BONUS[aug.name] ?? 0) + scoreAugMults(aug, weights);
 }
 
 /** Multiplier-only score: the log-mult contributions WITHOUT the AUG_BONUS

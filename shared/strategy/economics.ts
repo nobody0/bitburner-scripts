@@ -40,21 +40,14 @@ export function farmIncomeRate(model: FarmRateModel | undefined, farmGb: number)
  *
  * Prep time is quoted at today's skill, but weaken/grow times shrink as the
  * player levels DURING the prep — on a small early fleet that error prices
- * every upgrade out of reach forever. Estimate the skill after `prepSeconds`
- * at the measured exp rate and average the op-time ratio over the window
- * (trapezoid: the prep starts at today's speed and ends at the future one).
- *
- * `opTimeScaleAt` maps a skill to the relative op time (1 = today); callers
- * derive it from the same formulas the solver uses so the discount can never
- * disagree with the clock it discounts. Returns a multiplier in (0, 1]. */
-export function prepTimeDiscount(args: {
-  prepSeconds: number;
-  /** Relative op time at the projected future skill (weakenTime(future) /
-   * weakenTime(now) for the candidate). 1 = no growth measured. */
-  futureOpTimeScale: number;
-}): number {
-  const scale = Math.min(1, Math.max(0, args.futureOpTimeScale));
-  if (!Number.isFinite(args.prepSeconds) || args.prepSeconds <= 0) return 1;
+ * every upgrade out of reach forever. The caller projects the skill at the
+ * prep's end and passes the relative op time there (weakenTime(future) /
+ * weakenTime(now), 1 = no growth measured); the discount averages start and
+ * end speed (trapezoid). Deliberately takes ONLY that ratio: an earlier
+ * signature also took prepSeconds and ignored its value, which read as if a
+ * longer prep discounted differently. Returns a multiplier in (0, 1]. */
+export function prepTimeDiscount(futureOpTimeScale: number): number {
+  const scale = Math.min(1, Math.max(0, futureOpTimeScale));
   return (1 + scale) / 2;
 }
 

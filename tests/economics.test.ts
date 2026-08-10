@@ -74,7 +74,7 @@ describe("evaluatePrep", () => {
     const p = plan({ ramSec: 120_000, weakenTimeS: 1_000 });
     const blocked = evaluatePrep({ current, candidate, plan: p, fleetGb: 100, horizonMs: 1_800_000 })!;
     expect(blocked.net).toBeLessThan(0);
-    const scale = prepTimeDiscount({ prepSeconds: 0.7 * 3600, futureOpTimeScale: 0.4 });
+    const scale = prepTimeDiscount(0.4);
     expect(scale).toBeCloseTo(0.7, 10);
     const discounted = evaluatePrep({
       current,
@@ -90,15 +90,13 @@ describe("evaluatePrep", () => {
 
   test("prepTimeDiscount is bounded and inert without growth", () => {
     // No growth measured (future ops as slow as today's) -> no discount.
-    expect(prepTimeDiscount({ prepSeconds: 1_000, futureOpTimeScale: 1 })).toBe(1);
+    expect(prepTimeDiscount(1)).toBe(1);
     // Faster growth -> deeper discount, floored at half (ops cannot finish
     // before they start; the trapezoid never drops below 0.5).
-    const mild = prepTimeDiscount({ prepSeconds: 1_000, futureOpTimeScale: 0.8 });
-    const steep = prepTimeDiscount({ prepSeconds: 1_000, futureOpTimeScale: 0.2 });
+    const mild = prepTimeDiscount(0.8);
+    const steep = prepTimeDiscount(0.2);
     expect(mild).toBeGreaterThan(steep);
     expect(steep).toBeGreaterThanOrEqual(0.5);
-    // A degenerate quote is left alone.
-    expect(prepTimeDiscount({ prepSeconds: 0, futureOpTimeScale: 0.2 })).toBe(1);
   });
 
   test("a depth-capped farm preps for free: surplus RAM has no opportunity cost", () => {

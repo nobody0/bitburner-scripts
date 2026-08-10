@@ -80,7 +80,9 @@ const hackingCloud: DodgedProbe = {
       // even-exponent maximum (2^20) was otherwise never quoted.
       const maxRam = fleet.purchased.maxRamPerServer;
       const rungs = new Set<number>();
-      for (let targetRam = Math.min(8, maxRam); targetRam <= maxRam; targetRam *= 4) rungs.add(targetRam);
+      // Ladder base floored at 1: with maxRam <= 0 (a degenerate probe value)
+      // a 0 start would loop forever (0 <= 0, 0*4 = 0) inside the dodge stub.
+      for (let targetRam = Math.max(1, Math.min(8, maxRam)); targetRam <= maxRam; targetRam *= 4) rungs.add(targetRam);
       if (maxRam >= 2) rungs.add(maxRam);
       for (const targetRam of [...rungs].sort((a, b) => a - b)) {
         const cost = stubNs["cloud"]["getServerCost"](targetRam);

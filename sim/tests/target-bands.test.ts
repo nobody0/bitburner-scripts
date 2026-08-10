@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { makeHackContext } from "../../shared/formulas.ts";
-import { computeTargetBands, staticsFromRolls } from "../../shared/strategy/bounds.ts";
-import { contendersAt, TARGET_BANDS } from "../../shared/strategy/target-bands.ts";
+import { computeTargetBands, contendersAt, staticsFromRolls } from "../../shared/strategy/bounds.ts";
+import { TARGET_BANDS } from "../../shared/strategy/target-bands.ts";
 import { solveCycle, type TargetStatics } from "../../shared/strategy/targeting.ts";
 import { SERVER_RANGES, type Range } from "../../shared/features/servers.ts";
 import { mulberry32 } from "../core/rng.ts";
@@ -40,7 +40,7 @@ describe("target band table", () => {
     const neutral = { hacking_chance: 1, hacking_money: 1, hacking_speed: 1, hacking_exp: 1, hacking_grow: 1 };
     for (const skill of [5, 25, 60, 150, 400, 900, 1_500]) {
       const ctx = makeHackContext({ skill, intelligence: 0, mults: neutral }, {});
-      const contenders = new Set(contendersAt(skill));
+      const contenders = new Set(contendersAt(TARGET_BANDS, skill));
       expect(contenders.size).toBeGreaterThan(0);
       for (let world = 0; world < 40; world++) {
         let best: { host: string; score: number } | undefined;
@@ -68,11 +68,11 @@ describe("target band table", () => {
   test("the table tells the known early-game story", () => {
     // Fixed-value servers make the low bands exact: n00dles opens the game,
     // joesguns is the classic first upgrade once its skill 10 gate passes.
-    expect(contendersAt(1)).toContain("n00dles");
-    expect(contendersAt(1)).not.toContain("joesguns");
-    expect(contendersAt(50)).toContain("joesguns");
+    expect(contendersAt(TARGET_BANDS, 1)).toContain("n00dles");
+    expect(contendersAt(TARGET_BANDS, 1)).not.toContain("joesguns");
+    expect(contendersAt(TARGET_BANDS, 50)).toContain("joesguns");
     // The megacorps can only matter once their skill ranges can roll eligible.
-    expect(contendersAt(500)).not.toContain("ecorp");
-    expect(contendersAt(1_100)).toContain("ecorp");
+    expect(contendersAt(TARGET_BANDS, 500)).not.toContain("ecorp");
+    expect(contendersAt(TARGET_BANDS, 1_100)).toContain("ecorp");
   });
 });

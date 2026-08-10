@@ -86,14 +86,20 @@ asserting `score ≤ UB` with **exact** `<=`, plus the `growThreads`
 post-conditions and formula monotonicities the interval arithmetic rests on.
 
 The evaluator prunes with it: a candidate whose bound cannot reach the
-incumbent farm score is skipped without solving — a farm switch needs
-score > incumbent·1.1 and a prep pick needs positive net (score strictly above
-the incumbent), so the skip is decision-free by construction. Guards: the
-threshold only comes from an incumbent solved at the *current* generation, the
-incumbent itself is never pruned, and when the incumbent earns nothing
-(cold start, BN8's zero-gain targets) pruning stands down entirely — those
-fallbacks rank by prep-aware value, where a low-score fast-prep target can
-legitimately win. `sim/tests/evaluator-prune.test.ts` walks randomized rolled
+incumbent's **effective per-GB rate** (`farmIncomeRate/fleetGb`, ≤ its raw
+score) is skipped without solving. The threshold is the rate, not the score,
+because the two consumers of the ranking differ: the farm switch compares
+scores (needs > incumbent·1.1), but the prep pick compares *rates* —
+`score·min(fleetGb, depthCapGb)` — so on a fleet beyond the incumbent's depth
+cap a LOWER-score candidate with a deeper pipeline can legitimately win the
+prep pick; thresholding on raw score would prune exactly that upgrade and
+re-create the n00dles lock-in (caught in review by three independent passes;
+pinned by the depth-capped-incumbent regression in the invariance suite).
+Guards: the threshold only comes from an incumbent solved at the *current*
+generation, the incumbent itself is never pruned, and when the incumbent earns
+nothing (cold start, BN8's zero-gain targets) pruning stands down entirely —
+those fallbacks rank by prep-aware value, where a low-score fast-prep target
+can legitimately win. `sim/tests/evaluator-prune.test.ts` walks randomized rolled
 timelines (skill/fleet jumps, roots appearing, prepped states flapping, stock
 positions opening/closing, a BN8 scenario) twice — prune on vs off — and
 asserts byte-identical decisions; measured ~2–3× on evaluator time with

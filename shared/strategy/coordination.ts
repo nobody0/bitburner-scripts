@@ -1,4 +1,5 @@
 import type { ArbitrationDigest, NeedDigest } from "../telemetry/topics/progression.ts";
+import { roundSigFigs } from "../format.ts";
 import { resolveClaims, type ArbiterResult, type Claim, type SlotState } from "./arbiter.ts";
 import { needProgress, isSatisfied, postNeeds, type Need, type NeedBoard } from "./needs.ts";
 
@@ -97,9 +98,7 @@ export function needDigest(need: Need): NeedDigest {
  * change-filtered store then writes ~5 records per second for the whole run.
  * Three digits is what any reader of the board actually consumes. */
 function sig3(value: number): number {
-  if (!Number.isFinite(value) || value === 0) return value;
-  const scale = 10 ** (Math.floor(Math.log10(Math.abs(value))) - 2);
-  return Math.round(value / scale) * scale;
+  return roundSigFigs(value, 3);
 }
 
 /** Held time bucketed to 10s — "held 4m" is the reading; per-pass increments

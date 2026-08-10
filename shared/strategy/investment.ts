@@ -1,3 +1,5 @@
+import { roundSigFigs } from "../format.ts";
+
 /** A common economic unit for purchases made by otherwise independent
  * features. `incomePerSec / cost` is return on one invested dollar per
  * second; its reciprocal is the payback period. */
@@ -31,7 +33,6 @@ export function paysBackWithin(investment: Investment, horizonSec: number): bool
  * signature embeds a horizon differ each second as the forecast ticked down —
  * one change-filtered store record per second for the whole run. */
 export function coarseHorizonSec(sec: number): number {
-  if (!Number.isFinite(sec) || sec <= 0) return sec;
-  const scale = 10 ** (Math.floor(Math.log10(sec)) - 1);
-  return Math.round(sec / scale) * scale;
+  if (sec <= 0) return sec; // a non-positive horizon is reported raw, not rounded
+  return roundSigFigs(sec, 2);
 }

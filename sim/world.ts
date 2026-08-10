@@ -332,15 +332,21 @@ export class SimWorld {
   }
 
   /** Measured hacking exp/sec for the evaluator's prep discount — the same
-   * signal the game driver's EMA provides. Sampled on each view build. */
+   * signal the game driver's EMA provides. Sampled on each view build.
+   * Virtual clock, like every other timestamp in this class: Date.now() is
+   * only virtual inside an installed realm (game-run.ts), and un-realmed
+   * callers (run.ts, unit tests) were mixing real wall-clock dt with
+   * virtual-speed exp deltas — the rate either never sampled or came out
+   * inflated by the compression factor, machine-dependent either way.
+   * Sentinel is -1 because clock.now() legitimately starts at 0. */
   private expRateEma = 0;
-  private expRateLastAt = 0;
+  private expRateLastAt = -1;
   private expRateLastExp = 0;
 
   playerView(): PlayerView {
-    const now = Date.now();
+    const now = this.clock.now();
     const dtSec = (now - this.expRateLastAt) / 1_000;
-    if (this.expRateLastAt === 0) {
+    if (this.expRateLastAt < 0) {
       this.expRateLastAt = now;
       this.expRateLastExp = this.person.exp.hacking;
     } else if (dtSec >= 1) {

@@ -1,5 +1,6 @@
 import type { Person, Server } from "@ns";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
+import { staticsFromRolls } from "../../shared/strategy/bounds.ts";
 import {
   calculateHackingChance,
   calculateHackingExpGain,
@@ -218,17 +219,25 @@ export interface ServerSpec {
 }
 
 export function serverFromSpec(spec: ServerSpec, base: SimServer): SimServer {
-  const realDifficulty = spec.hackDifficulty * currentNodeMults.ServerStartingSecurity;
+  // The constructor derivations (25x money, the difficulty cap, the /3 min
+  // clamp) live in ONE transcription — shared/strategy/bounds.ts — so a
+  // vendor bump cannot desynchronize the sim's world from the prune bounds
+  // and the band table. Only the live starting money stays local.
+  const statics = staticsFromRolls(
+    spec.hostname,
+    { money: spec.moneyAvailable, sec: spec.hackDifficulty, skill: spec.requiredHackingSkill, growth: spec.serverGrowth },
+    { ServerMaxMoney: currentNodeMults.ServerMaxMoney, ServerStartingSecurity: currentNodeMults.ServerStartingSecurity },
+  );
   base.hostname = spec.hostname;
   base.organizationName = spec.organizationName ?? "";
   base.maxRam = spec.maxRam;
-  base.requiredHackingSkill = spec.requiredHackingSkill;
+  base.requiredHackingSkill = statics.requiredHackingSkill;
   base.moneyAvailable = spec.moneyAvailable * currentNodeMults.ServerStartingMoney;
-  base.moneyMax = 25 * spec.moneyAvailable * currentNodeMults.ServerMaxMoney;
-  base.hackDifficulty = Math.min(realDifficulty, 100);
-  base.baseDifficulty = base.hackDifficulty;
-  base.minDifficulty = Math.min(Math.max(1, Math.round(realDifficulty / 3)), 100);
-  base.serverGrowth = spec.serverGrowth;
+  base.moneyMax = statics.moneyMax;
+  base.hackDifficulty = statics.baseDifficulty;
+  base.baseDifficulty = statics.baseDifficulty;
+  base.minDifficulty = statics.minDifficulty;
+  base.serverGrowth = statics.serverGrowth;
   base.numOpenPortsRequired = spec.numOpenPortsRequired;
   return base;
 }

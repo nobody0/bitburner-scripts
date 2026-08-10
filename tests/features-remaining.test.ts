@@ -721,18 +721,18 @@ describe("progression", () => {
   test("a missing push rate installs only when the frontier itself is idle", () => {
     // No rate + no frontier conclusion is a booting cycle, not an exhausted
     // one — concluding "install" there latches before any work begins.
-    expect(installVerdict({ nodeRemainingSec: 10_000 }).verdict).toBe("no-data");
-    expect(installVerdict({ nodeRemainingSec: 10_000, frontierIdle: true }).verdict).toBe("install");
-    expect(installVerdict({ nodeRemainingSec: 10_000, resetValueMult: 0.5, pushMarginalRate: 0, frontierIdle: true }).verdict).toBe("install");
-    expect(installVerdict({ nodeRemainingSec: 10_000, resetValueMult: 0.5, pushMarginalRate: 0 }).verdict).toBe("no-data");
+    expect(installVerdict({ routeEtaKnown: true }).verdict).toBe("no-data");
+    expect(installVerdict({ routeEtaKnown: true, frontierIdle: true }).verdict).toBe("install");
+    expect(installVerdict({ routeEtaKnown: true, resetValueMult: 0.5, pushMarginalRate: 0, frontierIdle: true }).verdict).toBe("install");
+    expect(installVerdict({ routeEtaKnown: true, resetValueMult: 0.5, pushMarginalRate: 0 }).verdict).toBe("no-data");
   });
 
   test("accrued value must clear sqrt(2·O·p) with the margin", () => {
     const p = 1e-4;
     const threshold = Math.sqrt(2 * INSTALL_VERDICT_OVERHEAD_SEC * p) * PUSH_MARGIN;
-    const below = installVerdict({ nodeRemainingSec: 10_000, resetValueMult: threshold * 0.9, pushMarginalRate: p });
+    const below = installVerdict({ routeEtaKnown: true, resetValueMult: threshold * 0.9, pushMarginalRate: p });
     expect(below.verdict).toBe("push");
-    const above = installVerdict({ nodeRemainingSec: 10_000, resetValueMult: threshold * 1.1, pushMarginalRate: p });
+    const above = installVerdict({ routeEtaKnown: true, resetValueMult: threshold * 1.1, pushMarginalRate: p });
     expect(above.verdict).toBe("install");
     expect(above.threshold).toBeCloseTo(threshold, 10);
   });
@@ -740,10 +740,11 @@ describe("progression", () => {
   test("a long node does NOT suppress the cadence — it wants frequent installs", () => {
     // The old rule amortized the accrued value over the remaining node, so a
     // distant ending forbade every optional install. The renewal form is
-    // independent of remaining time; only INSTALL_MIN_PAYBACK_SEC (a
-    // stepProgression gate) protects the too-close-to-the-end case.
-    const week = 7 * 24 * 3600;
-    const verdict = installVerdict({ nodeRemainingSec: week, resetValueMult: 0.5, pushMarginalRate: 1e-4 });
+    // independent of remaining time — now structurally: the verdict only
+    // takes routeEtaKnown, so a magnitude cannot creep back in; only
+    // INSTALL_MIN_PAYBACK_SEC (a stepProgression gate) protects the
+    // too-close-to-the-end case.
+    const verdict = installVerdict({ routeEtaKnown: true, resetValueMult: 0.5, pushMarginalRate: 1e-4 });
     expect(verdict.verdict).toBe("install");
   });
 
