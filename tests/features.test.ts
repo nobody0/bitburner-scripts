@@ -20,6 +20,7 @@ import { purchasableAugmentation, sleeveView } from "../game/lib/features/remain
 import { NEUROFLUX } from "../shared/strategy/factions/augs.ts";
 import {
   ALL_PROBES,
+  DIRECT_PROBES,
   DODGED_PROBES,
   GATE_PROBE,
   isStepped,
@@ -208,7 +209,7 @@ async function runAllProbes(): Promise<{
 }> {
   const emissions = new Map<string, { key: string; data: unknown }[]>();
   const threw: string[] = [];
-  for (const probe of [...LOCAL_PROBES, ...DODGED_PROBES]) {
+  for (const probe of [...LOCAL_PROBES, ...DIRECT_PROBES, ...DODGED_PROBES]) {
     try {
       let emitted: { key: string; data: unknown }[];
       // The Go probe intentionally validates the game's finite board sizes;
@@ -218,6 +219,8 @@ async function runAllProbes(): Promise<{
         : universal();
       if (probe.kind === "local") {
         emitted = probe.run(probeContext);
+      } else if (probe.kind === "direct") {
+        emitted = probe.run(stubNs, probeContext);
       } else if (isStepped(probe)) {
         // A stepped probe is exercised the way the runner drives it: every
         // step against the shared accumulator, then finish(). That also
@@ -237,7 +240,7 @@ async function runAllProbes(): Promise<{
 }
 
 describe("probe table", () => {
-  const allProbes = [...LOCAL_PROBES, ...DODGED_PROBES];
+  const allProbes = [...LOCAL_PROBES, ...DIRECT_PROBES, ...DODGED_PROBES];
 
   test("probe ids are unique", () => {
     expect(new Set(allProbes.map((p) => p.id)).size).toBe(allProbes.length);
@@ -248,7 +251,7 @@ describe("probe table", () => {
     // falls back to a guessed price, and the probe may never run. Both halves
     // of a dotted name are checked — the namespace must be a real property of
     // the NS interface, and the leaf must be a declared method somewhere.
-    const names = [...DODGED_PROBES.flatMap(probeMethods), ...GATE_PROBE.methods];
+    const names = [...DIRECT_PROBES.flatMap((probe) => probe.methods), ...DODGED_PROBES.flatMap(probeMethods), ...GATE_PROBE.methods];
     const missing: string[] = [];
     for (const name of names) {
       const segments = name.split(".");

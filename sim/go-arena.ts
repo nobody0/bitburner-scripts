@@ -57,6 +57,9 @@ export interface GoArenaGameResult {
   won: boolean;
   completed: boolean;
   turns: number;
+  /** Virtual engine time consumed by upstream AI waits (black planning runs
+   * synchronously in the arena and is reported separately in planningMs). */
+  durationMs: number;
   score: { X: number; O: number };
   planningMs: number[];
   trace?: GoArenaTurnTrace[];
@@ -209,6 +212,7 @@ export async function playGoArenaGame(
   let turns = 0;
   let dispatchPlaytime = initialState?.dispatchPlaytime
     ?? Math.floor(seed / GO_ENGINE_CYCLE_MS) * GO_ENGINE_CYCLE_MS;
+  const startedPlaytime = dispatchPlaytime;
   const planningMs: number[] = [];
   const trace: GoArenaTurnTrace[] = [];
   const maxTurns = board.size * board.size * 4;
@@ -327,6 +331,7 @@ export async function playGoArenaGame(
     won: score.X >= score.O,
     completed: consecutivePasses >= 2,
     turns,
+    durationMs: dispatchPlaytime - startedPlaytime,
     score,
     planningMs,
     ...(includeTrace ? { trace } : {}),

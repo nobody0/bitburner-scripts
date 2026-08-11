@@ -85,9 +85,21 @@ export function noRates(): RouteRates {
  * loop needs to know which formula produced the error. */
 export interface EtaPart {
   what: string;
+  /** Machine-readable resource behind the diagnostic label. Consumers such
+   * as the Go reward selector must not infer strategy from UI prose. */
+  resource: ProgressResource;
   sec: number;
   measured: boolean;
 }
+
+export type ProgressResource =
+  | "augmentations"
+  | "money"
+  | "hacking"
+  | "reputation"
+  | "combat"
+  | "install"
+  | "other";
 
 export interface RouteEta {
   id: RouteId;
@@ -97,11 +109,17 @@ export interface RouteEta {
   parts: EtaPart[];
 }
 
-function part(what: string, gap: number, ratePerSec: number, fallbackRatePerSec: number): EtaPart {
-  if (gap <= 0) return { what, sec: 0, measured: true };
+function part(
+  what: string,
+  resource: ProgressResource,
+  gap: number,
+  ratePerSec: number,
+  fallbackRatePerSec: number,
+): EtaPart {
+  if (gap <= 0) return { what, resource, sec: 0, measured: true };
   const measured = ratePerSec > 0;
   const rate = measured ? ratePerSec : fallbackRatePerSec;
-  return { what, sec: gap / rate, measured };
+  return { what, resource, sec: gap / rate, measured };
 }
 
 function total(parts: EtaPart[]): number {
@@ -115,15 +133,16 @@ function redPillTail(view: EndgameView, wdSkill: number | undefined, rates: Rout
   const skill = wdSkill ?? 3000;
   const rate = rates.hackingSkillPerSec > 0 ? rates.hackingSkillPerSec : 1 / FALLBACK_SEC_PER_HACK_LEVEL;
   if (!view.redPillInstalled) {
-    parts.push({ what: "install", sec: INSTALL_OVERHEAD_SEC, measured: false });
+    parts.push({ what: "install", resource: "install", sec: INSTALL_OVERHEAD_SEC, measured: false });
     // The whole climb from 1, discounted for the freshly installed set.
     parts.push({
       what: "regrow",
+      resource: "hacking",
       sec: (skill / rate) * REGROW_DISCOUNT,
       measured: rates.hackingSkillPerSec > 0,
     });
   } else if (view.hackingSkill < skill) {
-    parts.push(part("regrow", skill - view.hackingSkill, rates.hackingSkillPerSec, 1 / FALLBACK_SEC_PER_HACK_LEVEL));
+    parts.push(part("regrow", "hacking", skill - view.hackingSkill, rates.hackingSkillPerSec, 1 / FALLBACK_SEC_PER_HACK_LEVEL));
   }
   return parts;
 }
@@ -145,28 +164,29 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
           // Augs, money and skill accrue in PARALLEL while the run plays, so
           // the estimate takes the slowest of the three, not their sum.
           const gate = [
-            part("augmentations", augsNeeded - view.augCount, rates.augsPerSec, 1 / FALLBACK_SEC_PER_AUG),
-            part("money", DAEDALUS_MONEY - view.money, rates.moneyPerSec, FALLBACK_MONEY_PER_SEC),
+            part("augmentations", "augmentations", augsNeeded - view.augCount, rates.augsPerSec, 1 / FALLBACK_SEC_PER_AUG),
+            part("money", "money", DAEDALUS_MONEY - view.money, rates.moneyPerSec, FALLBACK_MONEY_PER_SEC),
             skillPart(view, rates),
           ];
           const slowest = gate.reduce((a, b) => (b.sec > a.sec ? b : a));
           parts.push({ ...slowest, what: `invite gate (${slowest.what})` });
           // Reputation is sequential: it only starts once Daedalus invites.
           parts.push(
-            part("daedalus reputation", RED_PILL_REP - view.daedalusRep, rates.daedalusRepPerSec, FALLBACK_DAEDALUS_REP_PER_SEC),
+            part("daedalus reputation", "reputation", RED_PILL_REP - view.daedalusRep, rates.daedalusRepPerSec, FALLBACK_DAEDALUS_REP_PER_SEC),
           );
         }
         parts.push(...redPillTail(view, wdSkill, rates));
       } else if (route.id === "labyrinth") {
-        if (!view.ownsRedPill) parts.push({ what: "labyrinth walk", sec: LABYRINTH_WALK_SEC, measured: false });
+        if (!view.ownsRedPill) parts.push({ what: "labyrinth walk", resource: "other", sec: LABYRINTH_WALK_SEC, measured: false });
         parts.push(...redPillTail(view, wdSkill, rates));
       } else {
         // Black ops earn rank as they complete, so the rank climb and the op
         // sequence overlap: the estimate is the slower of the two.
         const remainingOps = Math.max(0, BLACK_OP_COUNT - (view.blackOpsComplete ?? 0));
-        const ops = part("black operations", remainingOps, rates.blackOpsPerSec, 1 / FALLBACK_SEC_PER_BLACK_OP);
+        const ops = part("black operations", "combat", remainingOps, rates.blackOpsPerSec, 1 / FALLBACK_SEC_PER_BLACK_OP);
         const rank = part(
           "bladeburner rank",
+          "combat",
           BLACK_OP_FINAL_RANK - (view.bladeburnerRank ?? 0),
           rates.bladeburnerRankPerSec,
           FALLBACK_RANK_PER_SEC,
@@ -190,9 +210,10 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
 /** Daedalus accepts hacking 2500 OR all four combat skills at 1500 — whichever
  * climb is faster is the one the estimate prices. */
 function skillPart(view: EndgameView, rates: RouteRates): EtaPart {
-  const hack = part("hacking skill", DAEDALUS_HACKING - view.hackingSkill, rates.hackingSkillPerSec, 1 / FALLBACK_SEC_PER_HACK_LEVEL);
+  const hack = part("hacking skill", "hacking", DAEDALUS_HACKING - view.hackingSkill, rates.hackingSkillPerSec, 1 / FALLBACK_SEC_PER_HACK_LEVEL);
   const combat = part(
     "combat skills",
+    "combat",
     DAEDALUS_COMBAT - view.lowestCombatSkill,
     rates.combatSkillPerSec,
     1 / FALLBACK_SEC_PER_COMBAT_LEVEL,

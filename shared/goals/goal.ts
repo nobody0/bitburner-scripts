@@ -53,6 +53,9 @@ export interface GoalContext {
    *  acquisition-oriented; positive faction augmentation gates differ and
    *  count installed entries only. */
   augmentations: Set<string>;
+  /** Installed augmentation names from the progression/reset-info topic.
+   * Unlike `augmentations`, this deliberately excludes queued purchases. */
+  installedAugmentations: Set<string>;
   /** Destructive augmentation installs observed in this run. */
   installs: number;
 }

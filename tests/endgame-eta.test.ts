@@ -80,7 +80,7 @@ describe("route ETAs", () => {
     const v = view({ ownsRedPill: true, redPillInstalled: true, hackingSkill: 100 });
     const daedalus = etasFor(v, { ...noRates(), hackingSkillPerSec: 1 }).find((eta) => eta.id === "daedalus")!;
     // BN1 world daemon is 3000: 2900 levels at 1/sec.
-    expect(daedalus.parts).toEqual([{ what: "regrow", sec: 2_900, measured: true }]);
+    expect(daedalus.parts).toEqual([{ what: "regrow", resource: "hacking", sec: 2_900, measured: true }]);
   });
 
   test("the Daedalus invite gate is priced as the SLOWEST parallel track", () => {
@@ -169,7 +169,7 @@ describe("route choice", () => {
 describe("anchored uncapped forecasts", () => {
   test("a multi-day estimate stays uncapped and counts down", () => {
     const week = estimatedForecast(1_000, "week", [
-      { what: "long route", sec: 7 * 86_400, measured: true, mode: "sequential" },
+      { what: "long route", resource: "other", sec: 7 * 86_400, measured: true, mode: "sequential" },
     ]);
     expect(week.remainingSec).toBe(7 * 86_400);
     expect(forecastAt(week, 3_601_000)).toMatchObject({ state: "stale", remainingSec: 7 * 86_400 - 3_600 });
@@ -177,7 +177,7 @@ describe("anchored uncapped forecasts", () => {
 
   test("re-estimates every ten minutes or when the structural basis changes", () => {
     const forecast = estimatedForecast(1_000, "same", [
-      { what: "work", sec: 100, measured: true, mode: "sequential" },
+      { what: "work", resource: "other", sec: 100, measured: true, mode: "sequential" },
     ]);
     expect(shouldReforecast(forecast, 1_000 + FORECAST_RECALIBRATION_MS - 1, "same")).toBe(false);
     expect(shouldReforecast(forecast, 1_000 + FORECAST_RECALIBRATION_MS, "same")).toBe(true);
@@ -199,7 +199,7 @@ describe("anchored uncapped forecasts", () => {
   test("unknown and stale stay explicit", () => {
     expect(usableForecastSec(unknownForecast(0, "route", "no route"))).toBeUndefined();
     const forecast = estimatedForecast(0, "route", [
-      { what: "work", sec: 100, measured: true, mode: "sequential" },
+      { what: "work", resource: "other", sec: 100, measured: true, mode: "sequential" },
     ]);
     const stale = forecastAt(forecast, FORECAST_STALE_MS + 1);
     expect(stale.state).toBe("stale");

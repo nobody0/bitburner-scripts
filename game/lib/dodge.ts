@@ -31,8 +31,9 @@ const DODGE_TIMEOUT_MS = 10_000;
  * copying: `exec` returns 0 for a transient condition as readily as a
  * permanent one — the target host can be momentarily full because a worker has
  * not been reaped yet. Failing immediately turns a RAM blip into a lost probe
- * and a 30 s wait for the next sweep. A `sleep(0)` between attempts yields to
- * the game's scheduler, which is exactly long enough for a reap to land. */
+ * and a 30 s wait for the next sweep. An `asleep(0)` between attempts yields
+ * to the game's scheduler without registering a cancellable Netscript delay;
+ * unlike `sleep`, `asleep` is explicitly concurrency-exempt. */
 const EXEC_RETRIES = 10;
 /** Default dynamic budget for the dodged calls themselves — fits scan +
  * getServer + stock getters. (The predecessor scripts default to 6.6 GB and
@@ -113,9 +114,14 @@ export async function dodge<T>(
   budgetGb = DODGE_BUDGET_GB,
   options: DodgeOptions = {},
 ): Promise<T> {
-  if (g.dodge_running) {
-    await g.dodge_running.catch(() => {});
-    if (g.dodge_running !== undefined) throw new Error("dodge error after queueing");
+  // Resolution wakes promise waiters before the owner's finally block clears
+  // the rendezvous slots. Yield until that exact owner has completed cleanup;
+  // a detached long-running feature (Go) can otherwise make the next ordinary
+  // probe crash the controller with "dodge error after queueing".
+  while (g.dodge_running) {
+    const owner = g.dodge_running;
+    await owner.catch(() => {});
+    while (g.dodge_running === owner) await Promise.resolve();
   }
 
   const host = options.host ?? "home";
@@ -144,7 +150,7 @@ export async function dodge<T>(
     for (let attempt = 0; attempt < EXEC_RETRIES && pid === 0; attempt++) {
       pid = ns.exec(stubScript, host, { ramOverride: STUB_BASE_GB + budgetGb });
       // Yield to the game's scheduler so a pending reap can free the RAM.
-      if (pid === 0) await ns.sleep(0);
+      if (pid === 0) await ns.asleep(0);
     }
     if (pid === 0) {
       const error = new DodgeExecError(

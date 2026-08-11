@@ -563,13 +563,23 @@ function orderedChildren(board: GoBoard, colour: Stone, history: ReadonlySet<str
 function immediateDecision(view: GoView, positionValue: number): GoDecision | undefined {
   const preferredOpponent = view.nextGame?.opponent ?? view.opponent;
   const boardSize = view.nextGame?.boardSize ?? 5;
-  if (view.status === "gameOver" || view.currentPlayer === "None") {
+  // The game boots into an untouched 7x7 Netburners board. No move means no
+  // score, streak, or favor has been invested, so replace a pristine board
+  // when the bottleneck model wants a different game rather than spending
+  // minutes finishing an irrelevant default. Once either side has moved, the
+  // normal finish-what-we-started rule applies.
+  const pristineRetarget = view.nextGame !== undefined
+    && view.previousBoards.length === 0
+    && (view.opponent !== preferredOpponent || view.board.size !== boardSize);
+  if (view.status === "gameOver" || view.currentPlayer === "None" || pristineRetarget) {
     return {
       action: {
         type: "newGame",
         opponent: preferredOpponent,
         boardSize,
-        why: view.nextGame?.why ?? "completed subnet; start the highest-value reward",
+        why: pristineRetarget
+          ? "untouched subnet has no invested reward; start the highest-value game"
+          : view.nextGame?.why ?? "completed subnet; start the highest-value reward",
       },
       ranked: [],
       why: `new ${boardSize}x${boardSize} game against ${preferredOpponent}`,

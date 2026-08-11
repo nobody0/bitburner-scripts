@@ -3,6 +3,7 @@ import type { Clock } from "../clock.ts";
 import type { SimServer } from "../core/effects.ts";
 import type { Engine } from "../engine.ts";
 import type { HacknetSystem } from "../features/hacknet.ts";
+import type { GoSystem } from "../features/go-system.ts";
 import type { StockMarketSystem } from "../features/stock.ts";
 import { getBitNodeMultipliers as vendoredBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { StockMarketConstants as STOCK_CONSTANTS } from "../vendor/bitburner/src/StockMarket/data/Constants.ts";
@@ -52,6 +53,9 @@ export interface SimNsHost {
   /** null means a save supplied an unknown live board; undefined means the
    * exact fresh-game state used by synthetic/unit worlds. */
   goState?: SimGoState | null;
+  /** Full Go lifecycle used by game-driver simulations. Unit harnesses may
+   * omit it and retain the narrow goState getter fixture above. */
+  go?: GoSystem;
   processes: ProcessTable;
   /** host -> filenames present on it. */
   files: Map<string, Set<string>>;
@@ -121,10 +125,16 @@ function concurrentCall(host: SimNsHost, process: SimProcess, path: string): voi
   if (process.killed) throw new ScriptDeath(process.pid);
   if (!process.runningFn || path === "asleep") return;
   const running = process.runningFn;
-  host.processes.kill(process.pid);
-  throw new Error(
+  const error = new Error(
     `Concurrent calls to Netscript functions are not allowed! Currently running: ${running}; tried to run: ${path}`,
   );
+  // This is the point at which Bitburner terminates the worker. Recording it
+  // here matters because application code can catch the immediate Error; the
+  // following Netscript call then only observes ScriptDeath, which is normal
+  // cancellation and is intentionally omitted by launch().
+  host.crashes.push({ pid: process.pid, filename: process.filename, error: String(error) });
+  host.processes.kill(process.pid);
+  throw error;
 }
 
 function unknownNode(path: string, host: SimNsHost, process: SimProcess): unknown {
@@ -606,9 +616,28 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     },
     upgradeServer: (hostname: string, ram: number) => world.execute({ type: "upgradeServer", host: hostname, ram }),
   }, "cloud", host, process);
+  const goAnalysis = host.go
+    ? namespace({
+        getStats: () => host.go!.getStats(),
+        getControlledEmptyNodes: () => host.go!.getControlledEmptyNodes(),
+      }, "go.analysis", host, process)
+    : namespace({}, "go.analysis", host, process);
   impl["go"] = namespace(
-    {
-      getGameState: () => {
+    host.go
+      ? {
+          getGameState: () => host.go!.getGameState(),
+          getBoardState: () => host.go!.getBoardState(),
+          getMoveHistory: () => host.go!.getMoveHistory(),
+          getCurrentPlayer: () => host.go!.getCurrentPlayer(),
+          getOpponent: () => host.go!.getOpponent(),
+          resetBoardState: (opponent: string, boardSize: number) => host.go!.resetBoardState(opponent, boardSize),
+          makeMove: (x: number, y: number) => host.go!.makeMove(x, y),
+          passTurn: () => host.go!.passTurn(),
+          opponentNextTurn: () => host.go!.opponentNextTurn(),
+          analysis: goAnalysis,
+        }
+      : {
+        getGameState: () => {
         // Exact fresh-game state: GoObject.currentGame starts as an empty 7x7
         // Netburners board. This getter is universally reachable, so the
         // capability probe must succeed. Deeper Go calls still fall through
@@ -628,8 +657,9 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
           komi: 1.5,
           bonusCycles: 0,
         });
+        },
+        analysis: goAnalysis,
       },
-    },
     "go",
     host,
     process,

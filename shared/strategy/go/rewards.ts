@@ -7,6 +7,10 @@ import type {
 } from "./decide.ts";
 import { addRepToFavor } from "../factions/rep.ts";
 
+/** Two games cover the every-second-win favor cadence. Longer policy horizons
+ * performed worse on held-out BN1 seeds. */
+export const GO_PLANNING_GAMES_MAX = 2;
+
 /** `bonusPower` and `komi` are v3.0.1 game data; the remaining fields are
  * simulator-fitted policy estimates as noted below.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/Constants.ts */
@@ -15,18 +19,18 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   komi: number;
   priorWinProbability: number;
   scoreFraction: number;
-  turnSecondsPerNode: number;
+  aiSecondsPerPlayableNode: number;
 }>> = {
   // Win/score priors are fitted by sim/tests/go-selection.test.ts against
   // upstream obstacles and faction AI. Runtime records never tune the policy:
   // they are outcomes, not an excuse to learn around an incomplete predictor.
-  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 1, scoreFraction: 0.844, turnSecondsPerNode: 2.9 },
-  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 0.922, scoreFraction: 0.784, turnSecondsPerNode: 3.3 },
-  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.977, scoreFraction: 0.765, turnSecondsPerNode: 4 },
-  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 0.703, scoreFraction: 0.643, turnSecondsPerNode: 3.2 },
-  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 0.836, scoreFraction: 0.67, turnSecondsPerNode: 3.2 },
-  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.684, scoreFraction: 0.696, turnSecondsPerNode: 3.4 },
-  "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.02, scoreFraction: 0.1, turnSecondsPerNode: 4 },
+  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 1, scoreFraction: 0.844, aiSecondsPerPlayableNode: 0.1976 },
+  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 0.922, scoreFraction: 0.784, aiSecondsPerPlayableNode: 0.2940 },
+  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.977, scoreFraction: 0.765, aiSecondsPerPlayableNode: 0.3697 },
+  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 0.703, scoreFraction: 0.643, aiSecondsPerPlayableNode: 0.4309 },
+  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 0.836, scoreFraction: 0.67, aiSecondsPerPlayableNode: 0.3681 },
+  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.684, scoreFraction: 0.696, aiSecondsPerPlayableNode: 0.4051 },
+  "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.02, scoreFraction: 0.1, aiSecondsPerPlayableNode: 4 },
 };
 
 export interface GoEtaDemand {
@@ -48,7 +52,7 @@ export interface GoRewardView {
   goPower: number;
   hasSourceFile14: boolean;
   favorRepCap: number;
-  installRemainingSec?: number;
+  installRemainingSec: number;
 }
 
 export interface GoGameCandidate {
@@ -73,13 +77,16 @@ export interface GoGameCandidate {
   favorBefore: number;
   favorAfter: number;
   favorRemainingWorkSec: number;
-  /** Expected persistent favor points gained, including event probability. */
+  /** Expected persistent favor points gained by this game. A two-win route is
+   * represented in the bounded continuation fields instead. */
   expectedFavorGain: number;
+  /** Faction-work seconds this game's possible favor event is expected to
+   * save after the game settles. */
   favorSecSaved: number;
   totalSecSaved: number;
   utilityPerSec: number;
   /** Finite-horizon continuation used for selection, assuming we keep playing
-   * this opponent until the install horizon or an eight-game exact tree. */
+   * this opponent until the install horizon or the bounded exact tree. */
   planningGames: number;
   horizonNodePower: number;
   horizonTransientSecSaved: number;
@@ -167,10 +174,10 @@ function expectedPerformance(
   const playable = size * size * (size === 19 ? 0.55 : 0.92);
   const profile = GO_REWARD_RULES[opponent];
   const expectedBlackScore = playable * clamp01(profile.scoreFraction + (probability - profile.priorWinProbability) * 0.25);
-  // One controller action resolves both the black and white move. The 5 s Go
-  // cadence therefore prices roughly half the playable points, plus reset/end
-  // overhead. Full-controller simulation and live game summaries tune this.
-  const expectedGameSec = Math.max(20, playable * profile.turnSecondsPerNode + 10);
+  // The arena measures exact upstream AI waits. A successful turn chains in a
+  // microtask after that response; there is no controller-cadence tax between
+  // black moves (only an observed seed-boundary crossing may pay 10 ms).
+  const expectedGameSec = playable * profile.aiSecondsPerPlayableNode;
   return { size, expectedBlackScore, expectedGameSec };
 }
 
@@ -178,10 +185,12 @@ function isFactionOpponent(opponent: GoRewardOpponent): opponent is GoFactionOpp
   return opponent !== "????????????";
 }
 
-function favorProbability(streak: number, winProbability: number): number {
-  // Odd positive streak -> this win pays. Every other streak needs two wins;
-  // this gives preservation a continuation value without an arbitrary bump.
-  return streak > 0 && streak % 2 === 1 ? winProbability : winProbability * winProbability;
+function immediateFavorProbability(streak: number, winProbability: number): number {
+  // Favor is awarded only after completing an even positive win streak. From
+  // an odd streak this game can pay; from every other state it cannot. The
+  // exact continuation tree below prices the two-win route without pretending
+  // its reward arrives one game early.
+  return streak > 0 && streak % 2 === 1 ? winProbability : 0;
 }
 
 interface HorizonState {
@@ -190,6 +199,8 @@ interface HorizonState {
   power: number;
   favor: number;
   rep: number;
+  /** Remaining faction reputation work in seconds at the initial favor rate. */
+  favorWork: number;
 }
 
 function goHorizon(
@@ -207,16 +218,22 @@ function goHorizon(
   transientSecSaved: number;
   favorSecSaved: number;
 } {
-  const horizonSec = Math.max(performance.expectedGameSec, view.installRemainingSec ?? performance.expectedGameSec * 2);
-  const games = Math.max(1, Math.min(8, Math.floor(horizonSec / performance.expectedGameSec)));
+  const horizonSec = Math.max(performance.expectedGameSec, view.installRemainingSec);
+  const games = Math.max(
+    1,
+    Math.min(GO_PLANNING_GAMES_MAX, Math.floor(horizonSec / performance.expectedGameSec)),
+  );
   const initialPower = inferGoNodePower(stat?.bonusPercent ?? 0, opponent, view.goPower, view.hasSourceFile14);
+  const faction = isFactionOpponent(opponent) ? view.factionFavor[opponent] : undefined;
   let states: HorizonState[] = [{
     probability: 1,
     streak: stat?.winStreak ?? 0,
     power: initialPower,
     favor: initialFavor,
     rep: stat?.rep ?? 0,
+    favorWork: Math.max(0, faction?.remainingWorkSec ?? 0),
   }];
+  const initialFavorRate = 1 + initialFavor / 100;
   for (let game = 0; game < games; game++) {
     const next: HorizonState[] = [];
     for (const state of states) {
@@ -228,12 +245,20 @@ function goHorizon(
           * goStreakMultiplier(streak.current, streak.previous);
         let favor = state.favor;
         let rep = state.rep;
+        // Go and faction work run concurrently. Work completed before the game
+        // settles uses the old favor; only the remaining farm benefits from a
+        // favor reward earned at the end of this game.
+        const favorRate = 1 + favor / 100;
+        const favorWork = Math.max(
+          0,
+          state.favorWork - performance.expectedGameSec * favorRate / initialFavorRate,
+        );
         if (won && favorEligible && streak.current > 0 && streak.current % 2 === 0 && rep < view.favorRepCap) {
           const reward = goFavorReward(favor, rep, view.favorRepCap);
           favor = reward.favorAfter;
           rep += reward.repGranted;
         }
-        next.push({ probability: branchProbability, streak: streak.current, power, favor, rep });
+        next.push({ probability: branchProbability, streak: streak.current, power, favor, rep, favorWork });
       }
     }
     states = next;
@@ -247,11 +272,12 @@ function goHorizon(
   const transientSecSaved = demand
     ? runway * clamp01(demand.share) * Math.max(0, 1 - multiplierBefore / expectedMultiplier)
     : 0;
-  const faction = isFactionOpponent(opponent) ? view.factionFavor[opponent] : undefined;
-  const expectedFavorRate = states.reduce((sum, state) => sum + state.probability * (1 + state.favor / 100), 0);
-  const favorSecSaved = favorEligible && faction
-    ? Math.max(0, faction.remainingWorkSec) * Math.max(0, 1 - (1 + initialFavor / 100) / expectedFavorRate)
-    : 0;
+  const baselineFavorWork = Math.max(0, (faction?.remainingWorkSec ?? 0) - games * performance.expectedGameSec);
+  const expectedFavorWork = states.reduce((sum, state) => {
+    const relativeRate = (1 + state.favor / 100) / initialFavorRate;
+    return sum + state.probability * state.favorWork / relativeRate;
+  }, 0);
+  const favorSecSaved = favorEligible ? Math.max(0, baselineFavorWork - expectedFavorWork) : 0;
   return {
     games,
     nodePower: Math.max(0, expectedPower - initialPower),
@@ -308,9 +334,7 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
       const afterLoss = goEffectMultiplier(currentPower + powerIfLoss, opponent, view.goPower, view.hasSourceFile14);
       const multiplierAfter = winProbability * afterWin + (1 - winProbability) * afterLoss;
       const demand = view.demands[opponent];
-      const runway = view.installRemainingSec === undefined
-        ? 0
-        : Math.min(Math.max(0, demand?.seconds ?? 0), Math.max(0, view.installRemainingSec));
+      const runway = Math.min(Math.max(0, demand?.seconds ?? 0), view.installRemainingSec);
       const transientSecSaved = demand
         ? runway * clamp01(demand.share) * Math.max(0, 1 - multiplierBefore / multiplierAfter)
         : 0;
@@ -319,7 +343,7 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
         && view.joinedFactions.has(opponent)
         && faction !== undefined
         && (stat?.rep ?? 0) < view.favorRepCap;
-      const favorEventProbability = favorEligible ? favorProbability(currentStreak, winProbability) : 0;
+      const favorEventProbability = favorEligible ? immediateFavorProbability(currentStreak, winProbability) : 0;
       const favorReward = favorEligible
         ? goFavorReward(faction.favor, stat?.rep ?? 0, view.favorRepCap)
         : { repGranted: 0, favorAfter: faction?.favor ?? 0, favorGain: 0 };
@@ -327,7 +351,9 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
       const rateBefore = 1 + (faction?.favor ?? 0) / 100;
       const rateAfter = 1 + favorReward.favorAfter / 100;
       const favorSecSaved = favorEligible
-        ? favorEventProbability * Math.max(0, faction.remainingWorkSec) * Math.max(0, 1 - rateBefore / rateAfter)
+        ? favorEventProbability
+          * Math.max(0, faction.remainingWorkSec - performance.expectedGameSec)
+          * Math.max(0, 1 - rateBefore / rateAfter)
         : 0;
       const totalSecSaved = transientSecSaved + favorSecSaved;
       const horizon = goHorizon(

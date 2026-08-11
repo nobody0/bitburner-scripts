@@ -20,7 +20,7 @@ const RED_PILL = "The Red Pill";
  *   redpill             owns The Red Pill
  *   installs:2          two destructive augmentation installs
  *   wd / wd:14          hacking >= that node's w0r1d_d43m0n requirement
- *   bn / bn:6           the whole node: daedalus, then redpill, then wd
+ *   bn / bn:6           the whole node: acquire Red Pill, install, then wd
  * Repeat --goal to combine; they compose with allOf.
  *
  * The two faction forms are what a feature-isolation run asks for: "unlock
@@ -171,13 +171,17 @@ export function parseGoal(spec: string): Goal {
       };
     }
     case "bn": {
-      // The whole node, in the order the constraints bind. The skill goal is
-      // deliberately LAST and separate from `daedalus`: owning The Red Pill
-      // requires an install, which resets hacking to 1, so "reach 2500" and
-      // "reach the w0r1d_d43m0n level" are two different climbs with a reset
-      // between them. Collapsing them would hide a whole regrow phase.
+      // The Daedalus gate is a phase, not a terminal-state invariant: the
+      // install that activates The Red Pill resets cash and skills. Red Pill
+      // ownership proves that an acquisition route completed (Daedalus or the
+      // BN15/SF15 labyrinth); only the post-install daemon skill must coexist.
       const node = rest.length > 0 ? parseAmount(rest[0], spec) : 1;
-      return allOf(parseGoal(`daedalus:${node}`), parseGoal("redpill"), parseGoal(`wd:${node}`));
+      const daemon = parseGoal(`wd:${node}`);
+      return {
+        id: spec,
+        describe: () => `installed ${RED_PILL}, then ${daemon.describe()}`,
+        done: (ctx) => ctx.installedAugmentations.has(RED_PILL) && daemon.done(ctx),
+      };
     }
     default:
       throw new Error(

@@ -624,15 +624,15 @@ describe("panel view state", () => {
             state: "estimated", estimatedAt: now, nextRecalibrationAt: now + 600_000,
             expectedAt: now + 660_000, remainingSec: 660, confidence: "mixed", basis: "package",
             components: [
-              { what: "faction unlock and reputation", sec: 600, measured: true, mode: "parallel", critical: true },
-              { what: "package money", sec: 300, measured: true, mode: "parallel", critical: false },
-              { what: "final purchase and donation sweep", sec: 60, measured: false, mode: "sequential", critical: true },
+              { what: "faction unlock and reputation", resource: "reputation", sec: 600, measured: true, mode: "parallel", critical: true },
+              { what: "package money", resource: "money", sec: 300, measured: true, mode: "parallel", critical: false },
+              { what: "final purchase and donation sweep", resource: "install", sec: 60, measured: false, mode: "sequential", critical: true },
             ],
           },
           node: {
             state: "estimated", estimatedAt: now, nextRecalibrationAt: now + 600_000,
             expectedAt: now + 172_800_000, remainingSec: 172_800, confidence: "measured", basis: "route",
-            components: [{ what: "hacking level", sec: 172_800, measured: true, mode: "sequential", critical: true }],
+            components: [{ what: "hacking level", resource: "hacking", sec: 172_800, measured: true, mode: "sequential", critical: true }],
           },
         },
       },
@@ -674,12 +674,12 @@ describe("panel view state", () => {
           {
             id: "daedalus", available: true, complete: false, blocker: "2.5m Daedalus rep",
             etaSec: 7_200,
-            parts: [{ what: "daedalus reputation", sec: 7_000, measured: true }, { what: "install overhead", sec: 200, measured: false }],
+            parts: [{ what: "daedalus reputation", resource: "reputation", sec: 7_000, measured: true }, { what: "install overhead", resource: "install", sec: 200, measured: false }],
           },
           {
             id: "bladeburner", available: false, complete: false, blocker: "join Bladeburner",
             etaSec: 90_000,
-            parts: [{ what: "bladeburner rank", sec: 90_000, measured: false }],
+            parts: [{ what: "bladeburner rank", resource: "combat", sec: 90_000, measured: false }],
           },
         ],
         installDecision: {

@@ -43,6 +43,31 @@ export interface SimProfile {
 
 export const FACTION_DONATION_TARGET = "Synaptic Enhancement Implant";
 
+/** One valid upstream roll for the randomized UCM augmentation. */
+const UCM_FIXTURE_ROLL = {
+  company_rep: 1.25,
+  faction_rep: 1.15,
+  work_money: 1.7,
+} as const;
+
+function augmentationMultiplierSnapshot(
+  names: readonly string[],
+  randomEffects: Readonly<Record<string, number>> = {},
+): Record<string, number> {
+  const result: Record<string, number> = {};
+  for (const name of names) {
+    const aug = AUGMENTATION_TABLE[name];
+    if (!aug || aug.multsUnknown) continue;
+    for (const [field, value] of Object.entries(aug.mults)) {
+      result[field] = (result[field] ?? 1) * value;
+    }
+  }
+  for (const [field, value] of Object.entries(randomEffects)) {
+    result[field] = (result[field] ?? 1) * value;
+  }
+  return result;
+}
+
 const CYBERSEC_DONATION_WORLD: NonNullable<SimProfile["world"]> = {
   network: [
     {
@@ -126,12 +151,115 @@ const BN5_STOCK_WORLD: NonNullable<SimProfile["world"]> = {
   homeFiles: ["BruteSSH.exe", "FTPCrack.exe"],
 };
 
+/** Reachable mid-BN1 state with SF4/SF14 and one real queued reset. UCM is
+ * installed with the explicit roll above so the simulator never invents it. */
+const BN1_PROGRESSION_WORLD: NonNullable<SimProfile["world"]> = {
+  network: [
+    {
+      hostname: "faction-farm",
+      hackDifficulty: 1,
+      moneyAvailable: 1e12,
+      requiredHackingSkill: 1,
+      serverGrowth: 100,
+      numOpenPortsRequired: 0,
+      maxRam: 512,
+    },
+  ],
+  person: {
+    skills: { hacking: 100 },
+    exp: { hacking: calculateExp(100) },
+    mults: augmentationMultiplierSnapshot(["Unstable Circadian Modulator"], UCM_FIXTURE_ROLL),
+  },
+  playerState: {
+    factions: ["CyberSec", "Sector-12", "Tian Di Hui"],
+    augmentations: [{ name: "Unstable Circadian Modulator", level: 1 }],
+    queuedAugmentations: [{ name: "Synaptic Enhancement Implant", level: 1 }],
+    sourceFiles: { "4": 3, "14": 3 },
+  },
+  factions: {
+    CyberSec: { rep: 100_000, favor: 149 },
+    "Sector-12": { rep: 60_000, favor: 0 },
+    "Tian Di Hui": { rep: 50_000, favor: 0 },
+  },
+};
+
+/** Late-BN1 fixture retaining the final package, Daedalus, Red Pill install,
+ * and post-install world-daemon regrow phases. */
+const BN1_LATE_INSTALLED = [
+  ...Object.values(AUGMENTATION_TABLE)
+    .filter((aug) => !aug.isSpecial && (aug.mults.hacking ?? 1) > 1)
+    .map((aug) => aug.name),
+  // Gen V requires Gen IV, which has no hacking multiplier itself.
+  "Cranial Signal Processors - Gen IV",
+  // Avoid querying an unknown randomized UCM roll.
+  "Unstable Circadian Modulator",
+] as const;
+
+const BN1_FULL_WORLD: NonNullable<SimProfile["world"]> = {
+  network: [
+    {
+      hostname: "late-farm",
+      hackDifficulty: 100,
+      moneyAvailable: 1e15,
+      requiredHackingSkill: 1,
+      serverGrowth: 100,
+      numOpenPortsRequired: 0,
+      maxRam: 32_768,
+    },
+  ],
+  person: {
+    skills: { hacking: 1_500 },
+    exp: {
+      hacking: calculateExp(
+        1_500,
+        augmentationMultiplierSnapshot(BN1_LATE_INSTALLED, UCM_FIXTURE_ROLL).hacking,
+      ),
+    },
+    mults: augmentationMultiplierSnapshot(BN1_LATE_INSTALLED, UCM_FIXTURE_ROLL),
+  },
+  playerState: {
+    factions: ["BitRunners"],
+    augmentations: BN1_LATE_INSTALLED.map((name) => ({ name, level: 1 })),
+    queuedAugmentations: ["DataJack", "ADR-V2 Pheromone Gene", "Neuroreceptor Management Implant"]
+      .map((name) => ({ name, level: 1 })),
+    sourceFiles: { "4": 3, "14": 3 },
+  },
+  factions: { BitRunners: { rep: 2_000_000, favor: 0 } },
+};
+
 export const PROFILES: readonly SimProfile[] = [
   {
     id: "bn1-speedrun",
     description: "Synthetic early-game fixture: how fast does the small deterministic BN1 network reach $1b?",
     goals: ["earn:1e9"],
     horizon: "8h",
+    seeds: [1, 2, 3],
+  },
+  {
+    id: "bn1-progression",
+    description:
+      "Mid-BN1 route across three installs: reach 13 augmentations while Go follows the changing reputation and income bottlenecks.",
+    bitnode: 1,
+    features: only("hacking", "factions", "progression", "go"),
+    // Prevent low-value resets from satisfying the install count alone.
+    goals: ["augs:13", "installs:3"],
+    homeRam: 256,
+    startingMoney: 1.5e9,
+    world: BN1_PROGRESSION_WORLD,
+    horizon: "3h",
+    seeds: [1, 2, 3],
+  },
+  {
+    id: "bn1-full",
+    description:
+      "Full final BN1 route: install the last ordinary package, unlock and grind Daedalus, install The Red Pill, then regrow for w0r1d_d43m0n.",
+    bitnode: 1,
+    features: only("hacking", "factions", "progression", "go"),
+    goals: ["bn:1", "installs:2"],
+    homeRam: 512,
+    startingMoney: 1e11,
+    world: BN1_FULL_WORLD,
+    horizon: "2h",
     seeds: [1, 2, 3],
   },
   {

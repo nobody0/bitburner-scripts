@@ -7,6 +7,7 @@ import { StockMarketSystem } from "../features/stock.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { FactionSystem } from "../features/factions.ts";
 import { makeSingularity } from "../ns/singularity.ts";
+import { GoSystem } from "../features/go-system.ts";
 
 function harness(programs: string[] = [], withStock = false, bitnode = 1): { ns: NS; host: SimNsHost; world: SimWorld } {
   const world = new SimWorld({
@@ -40,6 +41,8 @@ function harness(programs: string[] = [], withStock = false, bitnode = 1): { ns:
     output: [],
     crashes: [],
   };
+  const factions = new FactionSystem(world, world.player);
+  host.go = new GoSystem(world, factions, 1);
   const process = processes.start({
     filename: "main.js",
     host: "home",
@@ -113,6 +116,21 @@ describe("Netscript contract fidelity", () => {
       komi: 1.5,
       bonusCycles: 0,
     });
+  });
+
+  test("the Go Netscript surface advances the vendored opponent in virtual time", async () => {
+    const { ns, host } = harness();
+    let settled = false;
+    const pending = ns.go.makeMove(0, 0).finally(() => { settled = true; });
+    expect(await host.clock.runAsync(() => settled, 60_000)).toBe("goal");
+    const response = await pending;
+    expect(["move", "pass", "gameOver"]).toContain(response.type);
+    expect(ns.go.getMoveHistory().length).toBeGreaterThan(0);
+
+    expect(ns.go.resetBoardState("Illuminati", 5)).toHaveLength(5);
+    expect(ns.go.getOpponent()).toBe("Illuminati");
+    expect(ns.go.analysis.getStats().Netburners?.losses).toBe(1);
+    expect(ns.go.analysis.getControlledEmptyNodes()).toHaveLength(5);
   });
 
   test("script totals report live per-process rates and since-install hacking separately", () => {

@@ -533,6 +533,22 @@ describe("go", () => {
     expect(decision.action).toMatchObject({ type: "newGame", opponent: "Daedalus", boardSize: 5 });
   });
 
+  test("an untouched default board is retargeted, but an invested game is finished", () => {
+    const view = {
+      board: board(Array.from({ length: 7 }, () => ".......")),
+      currentPlayer: "Black" as const,
+      status: "inProgress" as const,
+      opponent: "Netburners" as const,
+      nextGame: { opponent: "Illuminati" as const, boardSize: 5 as const, why: "largest ETA reduction" },
+    };
+    expect(stepGo({ ...view, previousBoards: [] }).action).toMatchObject({
+      type: "newGame",
+      opponent: "Illuminati",
+      boardSize: 5,
+    });
+    expect(stepGo({ ...view, previousBoards: [view.board.rows] }).action.type).toBe("move");
+  });
+
   test("opponent choice follows feature needs and rewards a pending favor win", () => {
     const ranked = rankGoGames({
       opponents: ["Daedalus", "The Black Hand"],

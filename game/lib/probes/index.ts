@@ -4,6 +4,7 @@ import type { Capabilities } from "../../../shared/features/unlock.ts";
 import type { StateKey, StateMap } from "../../../shared/telemetry/state-map.ts";
 import type { GameState, Topics } from "../state.ts";
 import { DODGED_PROBES } from "./dodged.ts";
+import { DIRECT_PROBES } from "./direct.ts";
 import { LOCAL_PROBES } from "./local.ts";
 
 /** Feature probes: the read half of the feature axis. One probe collects the
@@ -89,6 +90,14 @@ export interface LocalProbe extends ProbeBase {
   run(ctx: ProbeContext): Emission[];
 }
 
+/** Synchronous NS reads whose declared methods all cost exactly 0 GB. The
+ * runner verifies that invariant against the live API before invoking them. */
+export interface DirectProbe extends ProbeBase {
+  kind: "direct";
+  methods: string[];
+  run(ns: NS, ctx: ProbeContext): Emission[];
+}
+
 /** A dodged probe that reads everything in one stub launch. */
 export interface SingleStepProbe extends ProbeBase {
   kind: "dodged";
@@ -151,7 +160,7 @@ export function probeMethods(probe: DodgedProbe): string[] {
   return isStepped(probe) ? probe.steps.flatMap((step) => step.methods) : probe.methods;
 }
 
-export type Probe = LocalProbe | DodgedProbe;
+export type Probe = LocalProbe | DirectProbe | DodgedProbe;
 
 /** The fastest cadence anything in the table asks for.
  *
@@ -166,8 +175,8 @@ export function probeCadenceMs(probes: readonly Probe[]): number {
 }
 
 export { GATE_PROBE, type GateResult } from "./gates.ts";
-export { LOCAL_PROBES, DODGED_PROBES };
+export { LOCAL_PROBES, DIRECT_PROBES, DODGED_PROBES };
 
 /** Every scheduled probe, both tiers. The one list `probeCadenceMs` is derived
  *  from, so the controller's acquisition interval cannot drift from the table. */
-export const ALL_PROBES: readonly Probe[] = [...LOCAL_PROBES, ...DODGED_PROBES];
+export const ALL_PROBES: readonly Probe[] = [...LOCAL_PROBES, ...DIRECT_PROBES, ...DODGED_PROBES];

@@ -25,6 +25,7 @@ import {
   type GoView,
 } from "../../../shared/strategy/go/decide.ts";
 import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand } from "../../../shared/strategy/go/rewards.ts";
+import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
@@ -41,6 +42,7 @@ import {
 import {
   forecastAt,
   IMMINENT_INSTALL_SEC,
+  installHorizonSec,
   installForecast,
   nodeForecast,
   shouldReforecast,
@@ -66,7 +68,7 @@ import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
 import { merge, set, type GameState } from "../state.ts";
 import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions, resetSleeveCompletions } from "../sleeve-completion.ts";
 import type { WorkTaskLike } from "../work-completion.ts";
-import { actionRamClaim, featureDodge } from "./dodge.ts";
+import { actionRamClaim, featureDodge, featureGoDodge } from "./dodge.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
 /** Drivers for the features whose game-side work is a thin execution layer
@@ -81,6 +83,7 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
 /** Every driver here reports its own peak dodge step so the home reserve can
  * cover it (shared/ram/reserve.ts). */
 const STEP_GB = { gang: 6, corp: 24, bladeburner: 10, sleeves: 12, go: 4, stanek: 6, dnet: 8, progression: 8 };
+const GO_MAX_FLEET_SHARE = 0.01;
 const BLADES_SIMULACRUM = "The Blade's Simulacrum";
 
 type Result = { action: string; ok: boolean; detail: string; at: number } | undefined;
@@ -108,9 +111,12 @@ async function act<T>(
   methods: readonly string[],
   body: (stubNs: NS) => T | Promise<T>,
   describe: (value: T) => { ok: boolean; detail: string },
+  lane: "ordinary" | "go" = "ordinary",
 ): Promise<T | undefined> {
   try {
-    const outcome = await featureDodge(ctx, id as Claim["by"], actionClaimId(action), methods, body);
+    const outcome = lane === "go"
+      ? await featureGoDodge(ctx, goActionClaimId(action), methods, body)
+      : await featureDodge(ctx, id as Claim["by"], actionClaimId(action), methods, body);
     if (!outcome.ok) {
       record(id, action, false, outcome.reason);
       return;
@@ -126,6 +132,13 @@ async function act<T>(
 }
 
 function actionClaimId(action: string): string { return `action:${action}`; }
+
+/** Move, pass and resume share one turn-sized RAM grant. */
+function goActionClaimId(action: string): string {
+  return action === "move" || action === "pass" || action === "resume"
+    ? "action:turn"
+    : actionClaimId(action);
+}
 
 function maybeActionClaim(
   by: Claim["by"],
@@ -651,95 +664,11 @@ function goGameCandidateDigest(candidate: ReturnType<typeof rankGoGames>[number]
   };
 }
 
-function addGoDemand(
-  demands: Partial<Record<ReturnType<typeof goRewardOpponent>, GoEtaDemand>>,
-  opponent: ReturnType<typeof goRewardOpponent>,
-  seconds: number,
-  share: number,
-  why: string,
-): void {
-  if (!(seconds > 0) || !(share > 0)) return;
-  const previous = demands[opponent];
-  const effective = seconds * Math.min(1, share) + (previous?.seconds ?? 0) * (previous?.share ?? 0);
-  demands[opponent] = {
-    seconds: effective,
-    share: 1,
-    why: previous ? `${previous.why}; ${why}` : why,
-  };
-}
-
-function goRewardOpponent(value: "hacknet" | "crime" | "money" | "combat" | "reputation" | "speed" | "level") {
-  return ({
-    hacknet: "Netburners",
-    crime: "Slum Snakes",
-    money: "The Black Hand",
-    combat: "Tetrads",
-    reputation: "Daedalus",
-    speed: "Illuminati",
-    level: "????????????",
-  } as const)[value];
-}
-
-/** Convert the same ETA decomposition shown in the UI into seconds that each
- * Go multiplier can remove. No generic feature weights are involved. */
-function goDemands(ctx: DriverContext): Partial<Record<ReturnType<typeof goRewardOpponent>, GoEtaDemand>> {
-  const demands: Partial<Record<ReturnType<typeof goRewardOpponent>, GoEtaDemand>> = {};
-  const installSec = usableForecastSec(ctx.horizons.install);
-  const nodeSec = usableForecastSec(ctx.horizons.node);
-  const runway = installSec ?? nodeSec ?? 0;
-  const sources = ctx.state.topics.progression?.moneySources?.sinceInstall;
-  const positiveTotal = sources ? Math.max(0, sources.total) : 0;
-  const hackingShare = positiveTotal > 0 ? Math.max(0, sources!.hacking) / positiveTotal : 0.5;
-  const hacknetShare = positiveTotal > 0 ? Math.max(0, sources!.hacknet) / positiveTotal : 0;
-
-  // Hacking is the background engine for both money and experience. Its value
-  // compounds across the remaining install runway, which makes it naturally
-  // strongest early and naturally fade as the install approaches.
-  addGoDemand(demands, goRewardOpponent("speed"), runway, 0.5 + hackingShare * 0.5, "hacking throughput over the install runway");
-  addGoDemand(demands, goRewardOpponent("money"), runway, hackingShare, "measured hacking share of install income");
-  addGoDemand(demands, goRewardOpponent("hacknet"), runway, hacknetShare, "measured Hacknet share of install income");
-
-  if (ctx.horizons.install.state === "estimated") {
-    for (const part of ctx.horizons.install.components) {
-      if (part.what.includes("reputation") || part.what.includes("faction unlock")) {
-        addGoDemand(demands, goRewardOpponent("reputation"), part.sec, 1, `install component: ${part.what}`);
-      }
-      if (part.what.includes("money")) {
-        addGoDemand(demands, goRewardOpponent("money"), part.sec, hackingShare, `install component: ${part.what}`);
-        addGoDemand(demands, goRewardOpponent("hacknet"), part.sec, hacknetShare, `install component: ${part.what}`);
-      }
-    }
-  }
-  if (ctx.horizons.node.state === "estimated") {
-    for (const part of ctx.horizons.node.components) {
-      if (part.what.includes("hacking") || part.what.includes("regrow")) {
-        addGoDemand(demands, goRewardOpponent("speed"), part.sec, 1, `node route component: ${part.what}`);
-        addGoDemand(demands, goRewardOpponent("level"), part.sec, 1, `node route component: ${part.what}`);
-      } else if (part.what.includes("reputation")) {
-        addGoDemand(demands, goRewardOpponent("reputation"), part.sec, 1, `node route component: ${part.what}`);
-      } else if (part.what.includes("combat") || part.what.includes("black operations") || part.what.includes("rank")) {
-        addGoDemand(demands, goRewardOpponent("combat"), part.sec, 1, `node route component: ${part.what}`);
-      }
-    }
-  }
-  for (const need of ctx.board.open) {
-    const seconds = runway * Math.min(1, Math.max(0.1, need.weight / 10));
-    if (need.kind === "karma" || need.kind === "kills") addGoDemand(demands, goRewardOpponent("crime"), seconds, 1, need.why);
-    else if (need.kind === "combatSkills" || need.kind === "bladeburnerRank") addGoDemand(demands, goRewardOpponent("combat"), seconds, 1, need.why);
-    else if (need.kind === "companyRep") addGoDemand(demands, goRewardOpponent("reputation"), seconds, 1, need.why);
-    else if (need.kind === "hacknetRam" || need.kind === "hacknetCores" || need.kind === "hacknetLevels") {
-      addGoDemand(demands, goRewardOpponent("hacknet"), seconds, 1, need.why);
-    } else if (need.kind === "backdoor" || need.kind === "skill" && need.subject === "hacking") {
-      addGoDemand(demands, goRewardOpponent("speed"), seconds, 1, need.why);
-      addGoDemand(demands, goRewardOpponent("level"), seconds, 1, need.why);
-    }
-  }
-  return demands;
-}
-
 function goFactionFavor(ctx: DriverContext): Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>> {
   const result: Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>> = {};
   const joined = new Set(ctx.state.topics.factions?.joined ?? []);
+  // Only the committed intent is actionable; alternatives are not concurrent
+  // faction farms.
   const intent = ctx.state.topics.factions?.plan?.objective?.intent;
   const standings = new Map((ctx.state.topics.factions?.standings ?? []).map((standing) => [standing.name, standing]));
   for (const opponent of GO_OPPONENTS) {
@@ -783,10 +712,11 @@ function normalizeGoResponse(response: RawGoResponse): GoResponse {
   return { type: response.type, x: null, y: null };
 }
 
-/** `makeMove`, `passTurn`, and `opponentNextTurn` all resolve only when the
- * opponent has finished. Once one does, wake Go on the next controller pass
- * rather than imposing the ordinary five-second review cadence. */
+/** Successful turns chain immediately; five seconds is the failure retry. */
 let goContinuationReady = false;
+let goCompletionReady = false;
+let goTurnRunning = false;
+let goGeneration = 0;
 
 function sameGoPosition(plan: GoPlan | undefined, topic: NonNullable<GameState["topics"]["go"]>): boolean {
   if (!plan || plan.input.status !== topic.status || plan.input.currentPlayer !== topic.currentPlayer) return false;
@@ -797,34 +727,86 @@ function sameGoPosition(plan: GoPlan | undefined, topic: NonNullable<GameState["
 /** Claims are collected before tick() computes the next plan. Derive lifecycle
  * transitions from the current public board so a freshly completed promise can
  * act immediately even though the stored plan describes the preceding turn. */
-function goClaimAction(state: GameState): GoAction["type"] | undefined {
+function goClaimAction(state: GameState): GoAction["type"] | "hydrate" | undefined {
   const topic = state.topics.go;
-  if (!topic?.board || !topic.status || !topic.currentPlayer) return undefined;
+  if (!topic?.status || !topic.currentPlayer) return undefined;
+  if (!topic.board || !topic.previousBoards) return "hydrate";
   if (topic.status === "gameOver" || topic.currentPlayer === "None") return "newGame";
   if (topic.currentPlayer !== "Black") return "resume";
   if (sameGoPosition(topic.plan, topic)) {
     const planned = topic.plan!.action.type;
-    if (planned === "move" || planned === "pass") return planned;
+    if (planned === "move" || planned === "pass" || planned === "newGame") return planned;
   }
   return topic.board.some((column) => column.includes(".")) ? "move" : "pass";
+}
+
+/** Finish active games, but start Go only when its fixed RAM cost is small
+ * relative to the fleet. GoPower and SF14 scale the admission threshold. */
+function goActionAdmitted(state: GameState, caps: DriverContext["caps"]): boolean {
+  const topic = state.topics.go;
+  if ((topic?.previousBoards?.length ?? 0) > 0 && topic?.status !== "gameOver") return true;
+  const pie = state.topics.farm?.ramPie;
+  if (!pie) return false;
+  const usableGb = pie.farm + pie.prep + pie.share + pie.free + pie.reserve;
+  const nodeMults = effectiveBitNodeMultipliers(
+    caps.bitNode,
+    sfLevel(caps.sourceFiles, 12),
+    state.topics.progression?.multipliers,
+  );
+  const rewardScale = (nodeMults?.GoPower ?? 1) * (sfLevel(caps.sourceFiles, 14) > 0 ? 2 : 1);
+  return usableGb > 0 && STEP_GB.go / usableGb <= GO_MAX_FLEET_SHARE * rewardScale;
 }
 
 const go: FeatureDriver = {
   id: "go",
   everyMs: 5_000,
-  wake: () => goContinuationReady,
+  wake: () => goContinuationReady || goCompletionReady,
   requires: "go",
   async tick(ctx: DriverContext) {
+    if (goTurnRunning) return;
+    // A completed game/new-game transition needs a fresh central claim. A
+    // failed turn uses this pass only to release the stale claim, then retains
+    // the five-second retry backoff.
+    if (goCompletionReady) {
+      goCompletionReady = false;
+      if (!goContinuationReady) return;
+    }
     // Consume the edge. A successful action below raises it again when the
     // authoritative game promise resolves. Failure falls back to the normal
     // cadence, except for a one-pass stale-claim transition corrected below.
     goContinuationReady = false;
     const topic = ctx.state.topics.go;
     if (
-      !topic?.board || !topic.boardSize || !topic.previousBoards || !topic.status || !topic.currentPlayer ||
-      !topic.opponent || !topic.stats || !isGoRewardOpponent(topic.opponent)
+      !topic?.status || !topic.currentPlayer || !topic.opponent || !topic.stats || !isGoRewardOpponent(topic.opponent)
     ) return;
+    if (!goActionAdmitted(ctx.state, ctx.caps)) return;
     const claimedAction = goClaimAction(ctx.state);
+    if (!topic.board || !topic.boardSize || !topic.previousBoards) {
+      const hydrated = await act(
+        ctx,
+        "go",
+        "hydrate",
+        goMethods("hydrate"),
+        (stubNs: NS) => ({
+          board: stubNs["go"]["getBoardState"](),
+          history: stubNs["go"]["getMoveHistory"](),
+        }),
+        (value) => ({ ok: value.board.length > 0, detail: `read ${value.board.length}x${value.board.length} Go board` }),
+      );
+      if (hydrated) {
+        const boardSize = observedGoBoardSize(hydrated.board);
+        const controlled = goTerritory({ rows: hydrated.board, size: boardSize });
+        merge(ctx.state, "go", {
+          board: hydrated.board,
+          boardSize,
+          previousBoards: hydrated.history,
+          moveCount: hydrated.history.length,
+          territory: { black: controlled.X, white: controlled.O },
+        });
+        goContinuationReady = true;
+      }
+      return;
+    }
     const joined = new Set(ctx.state.topics.factions?.joined ?? []);
     const stats = topic.stats;
     const allowWorldDaemon = Boolean(ctx.state.topics.progression?.ownedAugs?.["The Red Pill"]);
@@ -833,7 +815,7 @@ const go: FeatureDriver = {
       sfLevel(ctx.caps.sourceFiles, 12),
       ctx.state.topics.progression?.multipliers,
     );
-    const installRemainingSec = usableForecastSec(ctx.horizons.install);
+    const installRemainingSec = installHorizonSec(ctx.horizons);
     const rewardOpponents: readonly GoRewardOpponent[] = allowWorldDaemon
       ? ["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati", "????????????"]
       : ["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati"];
@@ -842,13 +824,17 @@ const go: FeatureDriver = {
       stats,
       joinedFactions: joined,
       factionFavor: goFactionFavor(ctx),
-      demands: goDemands(ctx),
+      demands: goDemands({
+        horizons: ctx.horizons,
+        sinceInstall: ctx.state.topics.progression?.moneySources?.sinceInstall,
+        openNeeds: ctx.board.open,
+        canEarnFactionRep: ctx.caps.unlocked.factions === "yes",
+        canRunBladeburner: ctx.caps.unlocked.bladeburner === "yes",
+      }),
       goPower: nodeMults?.GoPower ?? 1,
       hasSourceFile14: sfLevel(ctx.caps.sourceFiles, 14) > 0,
       favorRepCap: goFavorRepCap(sfLevel(ctx.caps.sourceFiles, 14)),
-      ...(installRemainingSec !== undefined
-        ? { installRemainingSec }
-        : {}),
+      installRemainingSec,
     } as const;
     const candidates = rankGoGames(rewardView);
     const preferred = candidates[0];
@@ -906,7 +892,7 @@ const go: FeatureDriver = {
           goPower: rewardView.goPower,
           hasSourceFile14: rewardView.hasSourceFile14,
           favorRepCap: rewardView.favorRepCap,
-          ...(installRemainingSec !== undefined ? { installRemainingSec } : {}),
+          installRemainingSec,
           joinedFactions: [...joined].sort(),
           demands: Object.fromEntries(
             Object.entries(rewardView.demands).map(([opponent, demand]) => [opponent, goDemandDigest(demand)]),
@@ -920,6 +906,8 @@ const go: FeatureDriver = {
 
     let action = decision.action;
     if (action.type === "newGame") {
+      // Do not spend RAM when no modeled reward can shorten the route.
+      if (!(preferred.utilityPerSec > 0)) return;
       const newGameAction = action;
       const actionStartedAt = Date.now();
       const reset = await act(
@@ -975,208 +963,230 @@ const go: FeatureDriver = {
       return;
     }
 
-    const actionStartedAt = Date.now();
-    const rawOutcome = await act(
-      ctx,
-      "go",
-      action.type,
-      goMethods(action.type),
-      async (stubNs: NS): Promise<GoActionOutcome> => {
-        let dispatchPlayer: ReturnType<NS["getPlayer"]> | undefined;
-        let dispatchedAction = action.type === "move" || action.type === "pass" ? action : undefined;
-        let dispatchedDecision: GoDecision | undefined;
-        let dispatchPrediction: NonNullable<GoPlan["prediction"]> | undefined;
-        let boundaryRetries = 0;
-        if (dispatchedAction && exactForecast && !prepared.immediate) {
-          const preparedAction = dispatchedAction;
-          const finalizeForSlot = (player: ReturnType<NS["getPlayer"]>) => {
-            const sampledAt = Date.now();
-            const seeds = (topic.bonusCycles ?? 0) > 0
-              ? [player.totalPlaytime, player.totalPlaytime + GO_ENGINE_CYCLE_MS]
-              : [alignedAiSeed(player.totalPlaytime, topic.bonusCycles)];
-            const finalizationStartedAt = Date.now();
-            let exactDecision = finalizeGoDecision({
-              ...prepared,
-              view: { ...view, alignedDispatchPlaytime: player.totalPlaytime },
-            }, seeds);
-            const decisionAt = Date.now();
-            const exactAction = exactDecision.action;
-            const chosenAction = exactAction.type === preparedAction.type
-              && (exactAction.type === "move" || exactAction.type === "pass")
-              ? exactAction
-              : preparedAction;
-            if (chosenAction === preparedAction && exactAction !== preparedAction) {
-              exactDecision = {
-                ...exactDecision,
-                action: preparedAction,
-                why: `${exactDecision.why}; keep the prepared action type for immediate dispatch`,
+    const generation = goGeneration;
+    goTurnRunning = true;
+    let turnCompleted = false;
+    let continueImmediately = false;
+    const runTurn = async (): Promise<void> => {
+      const actionStartedAt = Date.now();
+      const rawOutcome = await act(
+        ctx,
+        "go",
+        action.type,
+        goMethods(action.type),
+        async (stubNs: NS): Promise<GoActionOutcome> => {
+          let dispatchPlayer: ReturnType<NS["getPlayer"]> | undefined;
+          let dispatchedAction = action.type === "move" || action.type === "pass" ? action : undefined;
+          let dispatchedDecision: GoDecision | undefined;
+          let dispatchPrediction: NonNullable<GoPlan["prediction"]> | undefined;
+          let boundaryRetries = 0;
+          if (dispatchedAction && exactForecast && !prepared.immediate) {
+            const preparedAction = dispatchedAction;
+            const finalizeForSlot = (player: ReturnType<NS["getPlayer"]>) => {
+              const sampledAt = Date.now();
+              const seeds = (topic.bonusCycles ?? 0) > 0
+                ? [player.totalPlaytime, player.totalPlaytime + GO_ENGINE_CYCLE_MS]
+                : [alignedAiSeed(player.totalPlaytime, topic.bonusCycles)];
+              const finalizationStartedAt = Date.now();
+              let exactDecision = finalizeGoDecision({
+                ...prepared,
+                view: { ...view, alignedDispatchPlaytime: player.totalPlaytime },
+              }, seeds);
+              const decisionAt = Date.now();
+              const exactAction = exactDecision.action;
+              const chosenAction = exactAction.type === preparedAction.type
+                && (exactAction.type === "move" || exactAction.type === "pass")
+                ? exactAction
+                : preparedAction;
+              if (chosenAction === preparedAction && exactAction !== preparedAction) {
+                exactDecision = {
+                  ...exactDecision,
+                  action: preparedAction,
+                  why: `${exactDecision.why}; keep the prepared action type for immediate dispatch`,
+                };
+              }
+              return {
+                action: chosenAction,
+                decision: exactDecision,
+                prediction: {
+                  model: GO_OPPONENT_MODEL,
+                  sampledTotalPlaytime: player.totalPlaytime,
+                  sampledAt,
+                  decisionAt,
+                  preparationMs,
+                  finalizationMs: decisionAt - finalizationStartedAt,
+                  totalPlanningMs: decisionAt - planStartedAt,
+                  engineCycleMs: GO_ENGINE_CYCLE_MS,
+                  aiWaitMs: goAiWaitMs(topic.bonusCycles),
+                  seedCandidates: seeds,
+                  dispatchPlaytime: player.totalPlaytime,
+                  boundaryRetries,
+                } satisfies NonNullable<GoPlan["prediction"]>,
               };
-            }
-            return {
-              action: chosenAction,
-              decision: exactDecision,
-              prediction: {
-                model: GO_OPPONENT_MODEL,
-                sampledTotalPlaytime: player.totalPlaytime,
-                sampledAt,
-                decisionAt,
-                preparationMs,
-                finalizationMs: decisionAt - finalizationStartedAt,
-                totalPlanningMs: decisionAt - planStartedAt,
-                engineCycleMs: GO_ENGINE_CYCLE_MS,
-                aiWaitMs: goAiWaitMs(topic.bonusCycles),
-                seedCandidates: seeds,
-                dispatchPlaytime: player.totalPlaytime,
-                boundaryRetries,
-              } satisfies NonNullable<GoPlan["prediction"]>,
             };
-          };
-          // Finalize against the tick we can dispatch in now. A second public
-          // read proves that the sub-millisecond exact step stayed in that
-          // slot. Only an observed rollover pays a short retry; there is no
-          // fixed 200/600 ms seed reservation.
-          for (let attempt = 0; attempt < 3; attempt++) {
-            dispatchPlayer = stubNs["getPlayer"]();
-            const finalized = finalizeForSlot(dispatchPlayer);
-            const verified = stubNs["getPlayer"]();
-            if (verified.totalPlaytime === dispatchPlayer.totalPlaytime) {
+            // Re-read after planning; only an observed seed rollover may wait.
+            for (let attempt = 0; attempt < 2; attempt++) {
+              dispatchPlayer = stubNs["getPlayer"]();
+              const finalized = finalizeForSlot(dispatchPlayer);
+              const verified = stubNs["getPlayer"]();
+              if (verified.totalPlaytime === dispatchPlayer.totalPlaytime) {
+                dispatchedAction = finalized.action;
+                dispatchedDecision = finalized.decision;
+                dispatchPrediction = finalized.prediction;
+                break;
+              }
+              boundaryRetries++;
+              // Never stack delays when a throttled browser crosses twice.
+              if (attempt === 0) await stubNs["sleep"](10);
+            }
+            // A second rollover dispatches from one fresh read immediately.
+            if (!dispatchPrediction) {
+              dispatchPlayer = stubNs["getPlayer"]();
+              const finalized = finalizeForSlot(dispatchPlayer);
               dispatchedAction = finalized.action;
               dispatchedDecision = finalized.decision;
               dispatchPrediction = finalized.prediction;
-              break;
             }
-            boundaryRetries++;
-            await stubNs["sleep"](10);
           }
-          // Three consecutive rollovers require a heavily throttled browser.
-          // Throughput still wins: dispatch immediately from one fresh read
-          // instead of waiting for a distant guaranteed tick.
-          if (!dispatchPrediction) {
-            dispatchPlayer = stubNs["getPlayer"]();
-            const finalized = finalizeForSlot(dispatchPlayer);
-            dispatchedAction = finalized.action;
-            dispatchedDecision = finalized.decision;
-            dispatchPrediction = finalized.prediction;
+          let response: RawGoResponse;
+          if (dispatchedAction?.type === "move") {
+            response = await stubNs["go"]["makeMove"](dispatchedAction.x, dispatchedAction.y);
+          } else if (action.type === "resume") {
+            // makeMove/passTurn already await this same promise. This branch only
+            // reattaches after a restart interrupted an in-flight white turn.
+            response = await stubNs["go"]["opponentNextTurn"](false, false);
+          } else if (dispatchedAction?.type === "pass") {
+            response = await stubNs["go"]["passTurn"]();
+          } else {
+            throw new Error(`invalid Go turn action ${action.type}`);
           }
-        }
-        let response: RawGoResponse;
-        if (dispatchedAction?.type === "move") {
-          response = await stubNs["go"]["makeMove"](dispatchedAction.x, dispatchedAction.y);
-        } else if (action.type === "resume") {
-          // makeMove/passTurn already await this same promise. This branch only
-          // reattaches after a restart interrupted an in-flight white turn.
-          response = await stubNs["go"]["opponentNextTurn"](false, false);
-        } else if (dispatchedAction?.type === "pass") {
-          response = await stubNs["go"]["passTurn"]();
-        } else {
-          throw new Error(`invalid Go turn action ${action.type}`);
-        }
-        return {
-          response,
-          alignment: dispatchPlayer ? boundaryRetries ? "boundary-replan" : "same-slot" : "none",
-          ...(dispatchPlayer ? { dispatchPlaytime: dispatchPlayer.totalPlaytime, player: dispatchPlayer } : {}),
-          ...(dispatchedAction ? { action: dispatchedAction } : {}),
-          ...(dispatchedDecision ? { decision: dispatchedDecision } : {}),
-          ...(dispatchPrediction ? { prediction: dispatchPrediction } : {}),
-        } satisfies GoActionOutcome;
-      },
-      (value) => ({
-        ok: value.response !== undefined,
-        detail: `${value.action?.type ?? action.type}; opponent ${value.response?.type}`,
-      }),
-    );
-    const result = requireResult("go");
-    if (rawOutcome?.action && rawOutcome.decision) {
-      action = rawOutcome.action;
-      decision = rawOutcome.decision;
-      plan.action = goActionDigest(decision.action);
-      plan.ranked = decision.ranked.map(goMoveDigest);
-      plan.planning = { finalistCount: decision.finalists, positionValue: decision.positionValue };
-      if (rawOutcome.prediction) plan.prediction = rawOutcome.prediction;
-    }
-    if (rawOutcome?.player) {
-      set(ctx.state, "player", rawOutcome.player);
-      ctx.state.playerObservedAt = Date.now();
-    }
-    if (!rawOutcome?.response) {
+          return {
+            response,
+            alignment: dispatchPlayer ? boundaryRetries ? "boundary-replan" : "same-slot" : "none",
+            ...(dispatchPlayer ? { dispatchPlaytime: dispatchPlayer.totalPlaytime, player: dispatchPlayer } : {}),
+            ...(dispatchedAction ? { action: dispatchedAction } : {}),
+            ...(dispatchedDecision ? { decision: dispatchedDecision } : {}),
+            ...(dispatchPrediction ? { prediction: dispatchPrediction } : {}),
+          } satisfies GoActionOutcome;
+        },
+        (value) => ({
+          ok: value.response !== undefined,
+          detail: `${value.action?.type ?? action.type}; opponent ${value.response?.type}`,
+        }),
+        "go",
+      );
+      if (generation !== goGeneration) return;
+      const result = requireResult("go");
+      if (rawOutcome?.action && rawOutcome.decision) {
+        action = rawOutcome.action;
+        decision = rawOutcome.decision;
+        plan.action = goActionDigest(decision.action);
+        plan.ranked = decision.ranked.map(goMoveDigest);
+        plan.planning = { finalistCount: decision.finalists, positionValue: decision.positionValue };
+        if (rawOutcome.prediction) plan.prediction = rawOutcome.prediction;
+      }
+      if (rawOutcome?.player) {
+        set(ctx.state, "player", rawOutcome.player);
+        ctx.state.playerObservedAt = Date.now();
+      }
+      if (!rawOutcome?.response) {
+        merge(ctx.state, "go", {
+          plan,
+          lastTurn: {
+            at: result.at,
+            durationMs: Date.now() - actionStartedAt,
+            action: goActionDigest(action),
+            timing: {
+              alignment: rawOutcome?.alignment ?? "none",
+              ...(rawOutcome?.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
+              ...(plan.prediction ? { seed: plan.prediction.seedCandidates[0] } : {}),
+            },
+            ok: result.ok,
+            detail: result.detail,
+          },
+        });
+        if (claimedAction !== action.type) goContinuationReady = true;
+        return;
+      }
+      const response = normalizeGoResponse(rawOutcome.response);
+
+      // makeMove/passTurn returns the AI's actual public response. Advance the
+      // held board immediately so the driver never replays a stale move while
+      // waiting for the next 30 s probe sweep. No hidden AI state is inferred.
+      let board = view.board;
+      const previousBoards = [...view.previousBoards];
+      if (action.type === "move") {
+        const ours = playMove(board, action.x, action.y, "X", new Set(previousBoards.map((prior) => prior.join(""))));
+        if (!ours) throw new Error(`Go rules drift: accepted move ${action.x},${action.y} was locally illegal`);
+        previousBoards.unshift(board.rows);
+        board = ours.board;
+      }
+      if (response.type === "move") {
+        const theirs = playMove(board, response.x, response.y, "O", new Set(previousBoards.map((prior) => prior.join(""))));
+        if (!theirs) throw new Error(`Go rules drift: accepted AI move ${response.x},${response.y} was locally illegal`);
+        previousBoards.unshift(board.rows);
+        board = theirs.board;
+      }
+      const selected = action.type === "move"
+        ? decision.ranked.find((candidate) => candidate.x === (action as Extract<GoAction, { type: "move" }>).x
+          && candidate.y === (action as Extract<GoAction, { type: "move" }>).y)
+        : undefined;
+      const predicted = selected?.predictedReplies ?? [];
+      const predictionTotal = predicted.reduce((sum, candidate) => sum + candidate.count, 0);
+      const matching = predicted.reduce((sum, candidate) => {
+        const matches = response.type === "move"
+          ? candidate.x === response.x && candidate.y === response.y
+          : candidate.x === null && candidate.y === null;
+        return sum + (matches ? candidate.count : 0);
+      }, 0);
+      const controlled = goTerritory(board);
+      const score = topic.komi === undefined ? undefined : scoreBoard(board, topic.komi);
       merge(ctx.state, "go", {
+        board: board.rows,
+        previousBoards,
+        moveCount: previousBoards.length,
+        territory: { black: controlled.X, white: controlled.O },
+        ...(score ? { blackScore: score.X, whiteScore: score.O } : {}),
+        currentPlayer: response.type === "gameOver" ? "None" : "Black",
+        status: response.type === "gameOver" ? "gameOver" : "inProgress",
         plan,
         lastTurn: {
           at: result.at,
           durationMs: Date.now() - actionStartedAt,
           action: goActionDigest(action),
+          opponentResponse: response,
           timing: {
-            alignment: rawOutcome?.alignment ?? "none",
-            ...(rawOutcome?.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
+            alignment: rawOutcome.alignment,
+            ...(rawOutcome.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
             ...(plan.prediction ? { seed: plan.prediction.seedCandidates[0] } : {}),
           },
+          ...(predictionTotal > 0 ? { predictionSupport: { matching, total: predictionTotal } } : {}),
           ok: result.ok,
           detail: result.detail,
         },
       });
-      if (claimedAction !== action.type) goContinuationReady = true;
-      return;
-    }
-    const response = normalizeGoResponse(rawOutcome.response);
-
-    // makeMove/passTurn returns the AI's actual public response. Advance the
-    // held board immediately so the driver never replays a stale move while
-    // waiting for the next 30 s probe sweep. No hidden AI state is inferred.
-    let board = view.board;
-    const previousBoards = [...view.previousBoards];
-    if (action.type === "move") {
-      const ours = playMove(board, action.x, action.y, "X", new Set(previousBoards.map((prior) => prior.join(""))));
-      if (!ours) throw new Error(`Go rules drift: accepted move ${action.x},${action.y} was locally illegal`);
-      previousBoards.unshift(board.rows);
-      board = ours.board;
-    }
-    if (response.type === "move") {
-      const theirs = playMove(board, response.x, response.y, "O", new Set(previousBoards.map((prior) => prior.join(""))));
-      if (!theirs) throw new Error(`Go rules drift: accepted AI move ${response.x},${response.y} was locally illegal`);
-      previousBoards.unshift(board.rows);
-      board = theirs.board;
-    }
-    const responsePlayer = ctx.ns.getPlayer();
-    set(ctx.state, "player", responsePlayer);
-    ctx.state.playerObservedAt = Date.now();
-    const selected = action.type === "move"
-      ? decision.ranked.find((candidate) => candidate.x === action.x && candidate.y === action.y)
-      : undefined;
-    const predicted = selected?.predictedReplies ?? [];
-    const predictionTotal = predicted.reduce((sum, candidate) => sum + candidate.count, 0);
-    const matching = predicted.reduce((sum, candidate) => {
-      const matches = response.type === "move"
-        ? candidate.x === response.x && candidate.y === response.y
-        : candidate.x === null && candidate.y === null;
-      return sum + (matches ? candidate.count : 0);
-    }, 0);
-    const controlled = goTerritory(board);
-    const score = topic.komi === undefined ? undefined : scoreBoard(board, topic.komi);
-    merge(ctx.state, "go", {
-      board: board.rows,
-      previousBoards,
-      moveCount: previousBoards.length,
-      territory: { black: controlled.X, white: controlled.O },
-      ...(score ? { blackScore: score.X, whiteScore: score.O } : {}),
-      currentPlayer: response.type === "gameOver" ? "None" : "Black",
-      status: response.type === "gameOver" ? "gameOver" : "inProgress",
-      plan,
-      lastTurn: {
-        at: result.at,
-        durationMs: Date.now() - actionStartedAt,
-        action: goActionDigest(action),
-        opponentResponse: response,
-        timing: {
-          alignment: rawOutcome.alignment,
-          ...(rawOutcome.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
-          ...(plan.prediction ? { seed: plan.prediction.seedCandidates[0] } : {}),
-        },
-        ...(predictionTotal > 0 ? { predictionSupport: { matching, total: predictionTotal } } : {}),
-        ok: result.ok,
-        detail: result.detail,
-      },
+      turnCompleted = true;
+      continueImmediately = response.type !== "gameOver";
+      goContinuationReady = false;
+    };
+    void runTurn().catch((error: unknown) => {
+      if (!isScriptDeath(error)) record("go", action.type, false, String(error));
+    }).finally(() => {
+      if (generation !== goGeneration) return;
+      goTurnRunning = false;
+      if (continueImmediately) {
+        // The opponent and worker cleanup are complete; dispatch the next turn
+        // without waiting for the controller cadence.
+        void Promise.resolve().then(() => go.tick(ctx)).catch((error: unknown) => {
+          if (!isScriptDeath(error)) record("go", "continue", false, String(error));
+        });
+        return;
+      }
+      goCompletionReady = true;
+      // A finished game should select/start the next one on the next central
+      // pass. Failure releases the claim now but retries on ordinary cadence.
+      goContinuationReady = turnCompleted;
     });
-    goContinuationReady = true;
   },
 };
 
@@ -1630,7 +1640,7 @@ function progressionRefresh(ctx: NeedContext): void {
     complete: eta.complete,
     blocker: blockerOf.get(eta.id) ?? "",
     etaSec: Math.round(eta.etaSec),
-    parts: eta.parts.map((entry) => ({ what: entry.what, sec: Math.round(entry.sec), measured: entry.measured })),
+    parts: eta.parts.map((entry) => ({ what: entry.what, resource: entry.resource, sec: Math.round(entry.sec), measured: entry.measured })),
   }));
   const selectedEta = choice ? etas.find((eta) => eta.id === choice.route) : undefined;
   const routeRequiresInstall = Boolean(
@@ -2103,12 +2113,19 @@ export const sleevesModule: FeatureModule = {
 export const goModule: FeatureModule = {
   driver: go,
   reset: (state) => {
+    goGeneration++;
+    goTurnRunning = false;
+    goCompletionReady = false;
     goContinuationReady = false;
     delete state.topics.go;
   },
   claims: (ctx) => {
+    if (goTurnRunning || (goCompletionReady && !goContinuationReady)) return [];
+    if (!goActionAdmitted(ctx.state, ctx.caps)) return [];
     const action = goClaimAction(ctx.state);
-    return maybeActionClaim("go", ctx, action, goMethods(action));
+    const methods = goMethods(action);
+    if (!action || methods.length === 0) return [];
+    return [actionRamClaim(ctx, "go", goActionClaimId(action), methods, `go ${action}`)];
   },
   peakStepGb: STEP_GB.go,
 };
@@ -2166,6 +2183,7 @@ function sleeveMethods(action: string | undefined): readonly string[] {
 }
 
 function goMethods(action: string | undefined): readonly string[] {
+  if (action === "hydrate") return ["go.getBoardState", "go.getMoveHistory"];
   if (action === "move") return ["getPlayer", "sleep", "go.makeMove"];
   if (action === "pass") return ["getPlayer", "sleep", "go.passTurn"];
   if (action === "resume") return ["go.opponentNextTurn"];

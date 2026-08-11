@@ -14,15 +14,14 @@ import type { SimServer } from "../core/effects.ts";
  *    awaiting its op, so a kill still reports the completion and releases the
  *    dispatcher's reservation. */
 
-/** Bitburner's cancellation marker. game/start.ts and game/lib/dodge.ts both
- * sniff for a `pid` property to tell a kill apart from a real crash. */
-export class ScriptDeath {
+/** Bitburner's cancellation marker: a named Error with the killed pid. */
+export class ScriptDeath extends Error {
   readonly pid: number;
-  readonly message: string;
 
   constructor(pid: number) {
+    super(`script ${pid} was killed`);
+    this.name = "ScriptDeath";
     this.pid = pid;
-    this.message = `script ${pid} was killed`;
   }
 }
 

@@ -71,6 +71,44 @@ describe("ram costs", () => {
 });
 
 describe("running game/ in the synthetic world", () => {
+  test("the real controller completes Go games and realizes their BN1 effects", async () => {
+    let games = 0;
+    let maxBonus = 0;
+    const selected = new Set<string>();
+    const result = await runGame({
+      goal: parseGoals(["earn:1e30"]),
+      seed: 1,
+      horizonMs: 10 * 60_000,
+      homeRam: 1_024,
+      label: "go-integration",
+      features: only("hacking", "progression", "go"),
+      onRecord: (line) => {
+        const record = JSON.parse(line) as {
+          kind: string;
+          key?: string;
+          name?: string;
+          data?: {
+            stats?: { bonusPercent: number }[];
+            plan?: { selection?: { preferred?: { opponent?: string } } };
+          };
+        };
+        if (record.kind === "event" && record.name === "go.game") games++;
+        if (record.kind !== "state" || record.key !== "go") return;
+        for (const stat of record.data?.stats ?? []) maxBonus = Math.max(maxBonus, stat.bonusPercent);
+        const opponent = record.data?.plan?.selection?.preferred?.opponent;
+        if (opponent) selected.add(opponent);
+      },
+    });
+
+    expect(result.stoppedBecause).toBe("horizon");
+    expect(result.validity).toBe("valid");
+    expect(result.crashes).toEqual([]);
+    expect(games).toBeGreaterThanOrEqual(2);
+    expect(maxBonus).toBeGreaterThan(0);
+    expect(selected.size).toBeGreaterThanOrEqual(1);
+    expect(Object.keys(result.unmodeled).filter((gap) => gap.toLowerCase().includes("go"))).toEqual([]);
+  }, 10_000);
+
   test("the real controller reaches a money goal", async () => {
     const result = await runGame({
       goal: parseGoals(["earn:1e6"]),
@@ -93,7 +131,10 @@ describe("running game/ in the synthetic world", () => {
 
   test("the run is deterministic for a fixed seed", async () => {
     const run = () =>
-      runGame({ goal: parseGoals(["earn:1e6"]), seed: 7, horizonMs: 60 * 60_000, homeRam: 16, label: "det" });
+      runGame({
+        goal: parseGoals(["earn:1e6"]), seed: 7, horizonMs: 60 * 60_000, homeRam: 16, label: "det",
+        features: only("hacking", "progression"),
+      });
     const [a, b] = [await run(), await run()];
     expect(a.timeToGoalMs).toBe(b.timeToGoalMs);
     expect(a.records).toBe(b.records);
@@ -107,6 +148,7 @@ describe("running game/ in the synthetic world", () => {
       seed: 1,
       horizonMs: 60 * 60_000,
       homeRam: 16,
+      features: only("hacking", "progression"),
       onRecord: (line) => {
         const record = JSON.parse(line) as { kind: string; key?: string; name?: string; data?: unknown };
         if (record.kind === "state" && record.key === "farm") farm = record.data as typeof farm;
@@ -133,6 +175,7 @@ describe("running game/ in the synthetic world", () => {
       seed: 1,
       horizonMs: 60 * 60_000,
       homeRam: 16,
+      features: only("hacking", "progression"),
       onRecord: (line) => {
         const record = JSON.parse(line) as {
           kind: string;
@@ -159,9 +202,9 @@ describe("running game/ in the synthetic world", () => {
   test("the capability gate detects the BitNode and derives unlocks", async () => {
     let caps: { bitNode?: number; unlocked?: Record<string, string> } | undefined;
     await runGame({
-      goal: parseGoals(["earn:1e6"]),
+      goal: parseGoals(["earn:1e30"]),
       seed: 1,
-      horizonMs: 60 * 60_000,
+      horizonMs: 30_000,
       homeRam: 16,
       onRecord: (line) => {
         const record = JSON.parse(line) as { kind: string; key?: string; data?: unknown };
@@ -188,6 +231,7 @@ describe("running game/ in the synthetic world", () => {
       horizonMs: 60 * 60_000,
       homeRam: 16,
       gates: { inGang: true, hasWseAccount: true },
+      features: only("hacking", "progression", "gang", "stock"),
       onRecord: (line) => {
         const record = JSON.parse(line) as { kind: string; key?: string; data?: unknown };
         if (record.kind === "state" && record.key === "capabilities") caps = record.data as typeof caps;
@@ -205,6 +249,7 @@ describe("running game/ in the synthetic world", () => {
       horizonMs: 60 * 60_000,
       homeRam: 16,
       label: "gaps",
+      features: { go: "off" },
     });
 
     // Probes for features we do not simulate hit the wall and say so...
@@ -260,6 +305,7 @@ describe("running game/ in the synthetic world", () => {
       seed: 1,
       horizonMs: 60 * 60_000,
       homeRam: 8,
+      features: only("hacking", "progression"),
       onRecord: (line) => {
         const record = JSON.parse(line) as {
           kind: string;

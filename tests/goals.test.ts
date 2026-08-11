@@ -40,6 +40,23 @@ describe("evaluate.reduceRecord", () => {
     expect(ctx.servers.get("home")!.hasAdminRights).toBe(true);
     expect(ctx.servers.get("n00dles")!.moneyAvailable).toBe(70000);
   });
+
+  test("tracks installed augmentations separately from queued ownership", () => {
+    const ctx = initialContext();
+    reduceRecord(ctx, record({
+      kind: "state",
+      key: "factions",
+      data: { ownedAugs: ["BitWire", "The Red Pill"] },
+    }));
+    reduceRecord(ctx, record({
+      kind: "state",
+      key: "progression",
+      data: { ownedAugs: { BitWire: 1 } },
+    }));
+
+    expect(ctx.augmentations).toEqual(new Set(["BitWire", "The Red Pill"]));
+    expect(ctx.installedAugmentations).toEqual(new Set(["BitWire"]));
+  });
 });
 
 describe("goals", () => {

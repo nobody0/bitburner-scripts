@@ -170,5 +170,5 @@ export interface RouteEtaDigest {
   etaSec: number;
   /** `measured: false` marks a fallback constant rather than an observed
    *  rate — the calibration loop treats the two kinds of error differently. */
-  parts: { what: string; sec: number; measured: boolean }[];
+  parts: { what: string; resource: string; sec: number; measured: boolean }[];
 }

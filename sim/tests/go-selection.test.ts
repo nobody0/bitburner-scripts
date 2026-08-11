@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { GO_REWARD_RULES, rankGoGames } from "../../shared/strategy/go/rewards.ts";
+import { GO_REWARD_RULES, goFavorReward, rankGoGames } from "../../shared/strategy/go/rewards.ts";
 import { GO_ARENA_OPPONENTS, goArenaSeeds, playGoArenaGame } from "../go-arena.ts";
 import { GoOpponent } from "../vendor/bitburner/src/Go/Enums.ts";
 
@@ -23,15 +23,19 @@ describe("Go reward strategy tuning", () => {
         const seeds = goArenaSeeds(opponent.ours === "Illuminati" ? 512 : 128, 123_456);
         let wins = 0;
         let blackScore = 0;
+        let durationMs = 0;
         for (const seed of seeds) {
           const game = await playGoArenaGame(GO_ARENA_OPPONENTS[opponentIndex]!, seed);
           expect(game.completed).toBe(true);
           wins += Number(game.won);
           blackScore += game.score.X;
+          durationMs += game.durationMs;
         }
         const rules = GO_REWARD_RULES[opponent.ours];
         expect(Math.abs(wins / seeds.length - rules.priorWinProbability), opponent.ours).toBeLessThan(0.005);
         expect(Math.abs(blackScore / seeds.length / 23 - rules.scoreFraction), opponent.ours).toBeLessThan(0.005);
+        expect(Math.abs(durationMs / seeds.length / 1_000 / 23 - rules.aiSecondsPerPlayableNode), opponent.ours)
+          .toBeLessThan(0.0001);
       }
     } finally {
       Math.random = originalRandom;
@@ -90,6 +94,69 @@ describe("Go reward strategy tuning", () => {
     }
   });
 
+  test("every opponent wins its bottleneck across ordinary and BN14-strength Go rules", () => {
+    const opponents = [...normalOpponents.map((opponent) => opponent.ours), "????????????"] as const;
+    for (const target of opponents) {
+      for (const goPower of [0.25, 1, 4]) {
+        for (const hasSourceFile14 of [false, true]) {
+          const ranked = rankGoGames({
+            opponents,
+            stats: [],
+            joinedFactions: new Set<string>(),
+            factionFavor: {},
+            demands: { [target]: { seconds: 10_000, share: 1, why: "exclusive bottleneck" } },
+            goPower,
+            hasSourceFile14,
+            favorRepCap: hasSourceFile14 ? 400_000 : 100_000,
+            installRemainingSec: 10_000,
+          });
+          expect(ranked[0]?.opponent, `${target}; GoPower ${goPower}; SF14 ${hasSourceFile14}`).toBe(target);
+        }
+      }
+    }
+  });
+
+  test("every joined faction opponent gets faction-specific value from a pending favor win", () => {
+    for (const target of normalOpponents.map((opponent) => opponent.ours)) {
+      const ranked = rankGoGames({
+        opponents: normalOpponents.map((opponent) => opponent.ours),
+        stats: [{ opponent: target, wins: 1, losses: 0, winStreak: 1, rep: 0, bonusPercent: 0 }],
+        joinedFactions: new Set([target]),
+        factionFavor: { [target]: { favor: 0, remainingWorkSec: 10_000 } },
+        demands: {},
+        goPower: 1,
+        hasSourceFile14: false,
+        favorRepCap: 100_000,
+        installRemainingSec: 10_000,
+      });
+      expect(ranked[0]?.opponent, target).toBe(target);
+      expect(ranked[0]?.favorSecSaved, target).toBeGreaterThan(0);
+    }
+  });
+
+  test("faction-specific favor can beat a saturated global reputation bonus", () => {
+    const common = {
+      opponents: normalOpponents.map((opponent) => opponent.ours),
+      stats: [
+        { opponent: "Tetrads" as const, wins: 1, losses: 0, winStreak: 1, rep: 0, bonusPercent: 0 },
+        { opponent: "Daedalus" as const, wins: 100, losses: 0, winStreak: 2, rep: 100_000, bonusPercent: 10 },
+      ],
+      joinedFactions: new Set(["Tetrads"]),
+      demands: { Daedalus: { seconds: 10_000, share: 1, why: "global faction reputation" } },
+      goPower: 1,
+      hasSourceFile14: false,
+      favorRepCap: 100_000,
+      installRemainingSec: 10_000,
+    } as const;
+    const withoutFactionWork = rankGoGames({ ...common, factionFavor: {} });
+    const withFactionWork = rankGoGames({
+      ...common,
+      factionFavor: { Tetrads: { favor: 0, remainingWorkSec: 10_000 } },
+    });
+    expect(withoutFactionWork[0]?.opponent).toBe("Daedalus");
+    expect(withFactionWork[0]?.opponent).toBe("Tetrads");
+  });
+
   test("live wins and losses never train around the clean-room predictor", () => {
     const common = {
       opponents: ["Daedalus"] as const,
@@ -113,15 +180,16 @@ describe("Go reward strategy tuning", () => {
       .toEqual(losing.map(({ boardSize, winProbability }) => ({ boardSize, winProbability })));
   });
 
-  test("joined-faction favor has persistent value, exact streak odds, and an enforced cap", () => {
+  test("joined-faction favor has immediate value only when the next win pays", () => {
     const base = {
       opponents: ["Daedalus"] as const,
       joinedFactions: new Set(["Daedalus"]),
-      factionFavor: { Daedalus: { favor: 25, remainingWorkSec: 0 } },
+      factionFavor: { Daedalus: { favor: 25, remainingWorkSec: 10_000 } },
       demands: {},
       goPower: 1,
       hasSourceFile14: false,
       favorRepCap: 100_000,
+      installRemainingSec: 10_000,
     };
     const odd = rankGoGames({
       ...base,
@@ -129,12 +197,15 @@ describe("Go reward strategy tuning", () => {
     })[0]!;
     expect(odd.favorEventProbability).toBeCloseTo(odd.winProbability, 12);
     expect(odd.expectedFavorGain).toBeGreaterThan(0);
+    expect(odd.favorSecSaved).toBeGreaterThan(0);
 
     const even = rankGoGames({
       ...base,
       stats: [{ opponent: "Daedalus", wins: 2, losses: 0, winStreak: 2, rep: 0, bonusPercent: 0 }],
     })[0]!;
-    expect(even.favorEventProbability).toBeCloseTo(even.winProbability ** 2, 12);
+    expect(even.favorEventProbability).toBe(0);
+    expect(even.favorSecSaved).toBe(0);
+    expect(even.horizonFavorSecSaved).toBeGreaterThan(0);
 
     const capped = rankGoGames({
       ...base,
@@ -142,5 +213,44 @@ describe("Go reward strategy tuning", () => {
     })[0]!;
     expect(capped.expectedFavorGain).toBe(0);
     expect(capped.favorSecSaved).toBe(0);
+  });
+
+  test("two-win favor continuation is delayed and probability weighted exactly", () => {
+    const remainingWorkSec = 10_000;
+    const candidate = rankGoGames({
+      opponents: ["Slum Snakes"],
+      stats: [{ opponent: "Slum Snakes", wins: 0, losses: 0, winStreak: 0, rep: 0, bonusPercent: 0 }],
+      joinedFactions: new Set(["Slum Snakes"]),
+      factionFavor: { "Slum Snakes": { favor: 0, remainingWorkSec } },
+      demands: {},
+      goPower: 1,
+      hasSourceFile14: false,
+      favorRepCap: 100_000,
+      installRemainingSec: remainingWorkSec,
+    })[0]!;
+    const favorAfter = goFavorReward(0, 0, 100_000).favorAfter;
+    const workAfterTwoGames = Math.max(0, remainingWorkSec - 2 * candidate.expectedGameSec);
+    const expected = candidate.winProbability ** 2
+      * workAfterTwoGames
+      * (1 - 1 / (1 + favorAfter / 100));
+    expect(candidate.favorEventProbability).toBe(0);
+    expect(candidate.favorSecSaved).toBe(0);
+    expect(candidate.horizonFavorSecSaved).toBeCloseTo(expected, 9);
+    expect(candidate.utilityPerSec).toBeCloseTo(expected / (2 * candidate.expectedGameSec), 9);
+  });
+
+  test("no bottleneck and no active favor work has zero route utility", () => {
+    const ranked = rankGoGames({
+      opponents: normalOpponents.map((opponent) => opponent.ours),
+      stats: [],
+      joinedFactions: new Set<string>(),
+      factionFavor: {},
+      demands: {},
+      goPower: 4,
+      hasSourceFile14: true,
+      favorRepCap: 400_000,
+      installRemainingSec: 10_000,
+    });
+    expect(ranked.every((candidate) => candidate.utilityPerSec === 0)).toBe(true);
   });
 });

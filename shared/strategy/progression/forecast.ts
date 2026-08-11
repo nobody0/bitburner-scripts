@@ -1,5 +1,5 @@
 import type { FactionIntent } from "../factions/plan.ts";
-import type { RouteEta } from "./eta.ts";
+import type { ProgressResource, RouteEta } from "./eta.ts";
 
 /** Forecasts are anchored rather than rewritten on every controller pass. The
  * countdown is derived from expectedAt; a new estimate is made every ten
@@ -20,6 +20,8 @@ export type ForecastConfidence = "measured" | "mixed" | "fallback";
 
 export interface ForecastComponent {
   what: string;
+  /** Stable semantic identity; `what` is free-form diagnostic text. */
+  resource: ProgressResource;
   sec: number;
   measured: boolean;
   /** Parallel components overlap; sequential components are added after the
@@ -118,17 +120,12 @@ export function usableForecastSec(forecast: TimeForecast): number | undefined {
   return forecast.state === "estimated" ? forecast.remainingSec : undefined;
 }
 
-/** The planning horizon for INSTALL-lifetime purchases (cloud servers,
- * hacknet, stock positions — everything prestigeAugmentation wipes).
- *
- * Never exceeds the NODE's own horizon, on EITHER path: the two forecasts
- * are computed independently, so a usable 2-hour install estimate can
- * coexist with a route that ends the node in 20 minutes — and an install
- * can never outlive its node. */
 /** Below this many forecast seconds to the install, investment spending is
  * braked (the `progression:imminent-install` reserve). */
 export const IMMINENT_INSTALL_SEC = 300;
 
+/** Planning horizon for state erased by augmentation installation, capped by
+ * the node horizon and a conservative fallback when no install ETA exists. */
 export function installHorizonSec(horizons: PlanningHorizons): number {
   const node = usableForecastSec(horizons.node) ?? DEFAULT_PLANNING_HORIZON_SEC;
   const install = usableForecastSec(horizons.install);
@@ -152,6 +149,7 @@ export function nodeForecast(now: number, route: RouteEta | undefined, basis: st
     basis,
     route.parts.map((part) => ({
       what: part.what,
+      resource: part.resource,
       sec: part.sec,
       measured: part.measured,
       mode: "sequential" as const,
@@ -181,6 +179,7 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
     if (view.queuedCount > 0 && view.phase === "ending") {
       return estimatedForecast(now, basis, [{
         what: "final purchase and donation sweep",
+        resource: "install",
         sec: view.finalSweepReady ? 0 : INSTALL_FINAL_SWEEP_SEC,
         measured: false,
         mode: "sequential",
@@ -191,10 +190,11 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
 
   const workSec = Math.max(0, intent.unlockSec + intent.repSec);
   return estimatedForecast(now, basis, [
-    { what: "faction unlock and reputation", sec: workSec, measured: view.workMeasured, mode: "parallel" },
-    { what: "package money", sec: Math.max(0, intent.moneySec), measured: view.moneyMeasured, mode: "parallel" },
+    { what: "faction unlock and reputation", resource: "reputation", sec: workSec, measured: view.workMeasured, mode: "parallel" },
+    { what: "package money", resource: "money", sec: Math.max(0, intent.moneySec), measured: view.moneyMeasured, mode: "parallel" },
     {
       what: "final purchase and donation sweep",
+      resource: "install",
       sec: INSTALL_FINAL_SWEEP_SEC,
       measured: false,
       mode: "sequential",

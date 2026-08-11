@@ -1,6 +1,7 @@
 import type { NS, Server } from "@ns";
-import { resyncHeap, WORKER_BASE_SCRIPT, workerScript } from "./dispatch-driver.ts";
-import { dodge, dodgeStubScript } from "./dodge.ts";
+import { resyncHeap, WORKER_BASE_SCRIPT } from "./dispatch-driver.ts";
+import { dodge } from "./dodge.ts";
+import { fleetPayloadScripts } from "./fleet-payload.ts";
 import { hackingState } from "./features/hacking.ts";
 import {
   canRoot,
@@ -66,9 +67,13 @@ export async function sweepFleet(
     TELEMETRY: if (__TELEMETRY__) tel!.event("net.rooted", { hosts: rooted, openers });
   }
 
-  // 3) Deploy the fleet payload — puppet worker AND dodge stub — so any rooted
+  // 3) Deploy the fleet payload — puppet worker and both dodge lanes — so any rooted
   //    host can serve a dodge (dodged: scp stays out of our RAM bill).
-  const deployed = await dodge(ns, (stubNs) => deployFleet(stubNs, [workerScript(), dodgeStubScript()], servers), 1);
+  const deployed = await dodge(
+    ns,
+    (stubNs) => deployFleet(stubNs, fleetPayloadScripts(), servers),
+    1,
+  );
   for (const host of deployed) driver.deployed.add(host);
 
   // 3a) Safety net: retire old architectures and kill unreachable workers.

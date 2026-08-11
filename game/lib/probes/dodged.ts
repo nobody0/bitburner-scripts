@@ -7,7 +7,6 @@ import {
   CONTRACT_QUEUE_LIMIT,
   CONTRACT_TELEMETRY_LIMIT,
 } from "../../../shared/strategy/side/contracts.ts";
-import { GO_REWARD_OPPONENTS, type GoObservedBoardSize } from "../../../shared/strategy/go/decide.ts";
 import { rotate } from "../../../shared/strategy/stanek/pack.ts";
 import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
 import type { ContractDigest } from "../../../shared/telemetry/topics/side.ts";
@@ -1310,107 +1309,6 @@ const sleevesCore: DodgedProbe = {
   },
 };
 
-// --- go --------------------------------------------------------------------
-
-function goBoardSize(board: string[]): GoObservedBoardSize {
-  const size = board.length;
-  if ((size !== 5 && size !== 7 && size !== 9 && size !== 13 && size !== 19) || board.some((column) => column.length !== size)) {
-    throw new Error(`unexpected Go board dimensions ${size}x${board[0]?.length ?? 0}`);
-  }
-  return size;
-}
-
-const goCore: DodgedProbe = {
-  id: "go.core",
-  kind: "dodged",
-  feature: "go",
-  requires: "go",
-  everyMs: SEC_2,
-  merge: true,
-  methods: ["go.getGameState", "go.getOpponent", "go.analysis.getStats"],
-  run(stubNs: NS) {
-    const state = stubNs["go"]["getGameState"]();
-    const rawStats = stubNs["go"]["analysis"]["getStats"]();
-    const stats = GO_REWARD_OPPONENTS.flatMap((opponent) => {
-      const s = rawStats[opponent];
-      return s
-        ? [{
-            opponent,
-            wins: s.wins,
-            losses: s.losses,
-            winStreak: s.winStreak,
-            highestWinStreak: s.highestWinStreak,
-            rep: s.rep,
-            bonusPercent: s.bonusPercent,
-            bonusDescription: s.bonusDescription,
-          }]
-        : [];
-    });
-    return [
-      emitPartial("go", {
-        status: state.currentPlayer === "None" ? "gameOver" : state.currentPlayer === "White" ? "waitingOnAI" : "inProgress",
-        currentPlayer: state.currentPlayer,
-        opponent: stubNs["go"]["getOpponent"](),
-        whiteScore: state.whiteScore,
-        blackScore: state.blackScore,
-        komi: state.komi,
-        bonusCycles: state.bonusCycles,
-        stats,
-      }),
-    ];
-  },
-};
-
-const goBoard: DodgedProbe = {
-  id: "go.board",
-  kind: "dodged",
-  feature: "go",
-  requires: "go",
-  everyMs: SEC_2,
-  merge: true,
-  methods: ["go.getBoardState", "go.getMoveHistory"],
-  run(stubNs: NS) {
-    const board = stubNs["go"]["getBoardState"]();
-    const history = stubNs["go"]["getMoveHistory"]();
-    return [
-      emitPartial("go", {
-        board,
-        boardSize: goBoardSize(board),
-        moveCount: history.length,
-        previousBoards: history,
-      }),
-    ];
-  },
-};
-
-/** Territory is useful telemetry but costs 16 GB. It must not be bundled with
- * the 4 GB board read that the player needs every turn. */
-const goTerritory: DodgedProbe = {
-  id: "go.territory",
-  kind: "dodged",
-  feature: "go",
-  requires: "go",
-  everyMs: SEC_30,
-  merge: true,
-  methods: ["go.analysis.getControlledEmptyNodes"],
-  run(stubNs: NS) {
-    const controlled = stubNs["go"]["analysis"]["getControlledEmptyNodes"]();
-    let black = 0;
-    let white = 0;
-    for (const row of controlled) {
-      for (const cell of row) {
-        if (cell === "X") black++;
-        else if (cell === "O") white++;
-      }
-    }
-    return [
-      emitPartial("go", {
-        territory: { black, white },
-      }),
-    ];
-  },
-};
-
 // --- stanek ----------------------------------------------------------------
 
 const stanekCore: DodgedProbe = {
@@ -1630,9 +1528,6 @@ export const DODGED_PROBES: readonly DodgedProbe[] = [
   bladeActions,
   bladeCities,
   sleevesCore,
-  goCore,
-  goBoard,
-  goTerritory,
   stanekCore,
   dnetCore,
   sideContracts,

@@ -14,6 +14,11 @@
       "versioned": true
     },
     {
+      "source": "game/lib/go-dodge-stub.ts",
+      "target": "lib/go-dodge-stub.js",
+      "versioned": true
+    },
+    {
       "source": "game/worker/worker.ts",
       "target": "worker/worker.js",
       "versioned": true

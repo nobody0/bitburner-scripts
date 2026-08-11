@@ -4,10 +4,12 @@ import { dodge } from "./dodge.ts";
 import type { DodgeLease } from "./ram.ts";
 import {
   DODGED_PROBES,
+  DIRECT_PROBES,
   GATE_PROBE,
   isStepped,
   LOCAL_PROBES,
   type DodgedProbe,
+  type DirectProbe,
   type Emission,
   type ProbeAcc,
   type ProbeContext,
@@ -204,7 +206,7 @@ export async function runProbes(
   const budget = dodgeBudget(hosts);
 
   const ctx: ProbeContext = { player, servers, caps: caps(state), state };
-  const applicable = (probe: DodgedProbe | (typeof LOCAL_PROBES)[number]): boolean => {
+  const applicable = (probe: DodgedProbe | DirectProbe | (typeof LOCAL_PROBES)[number]): boolean => {
     // A probe never runs while its OWN feature reads "no". Mirrors the same
     // rule in selectDue: `requires` is a dependency, this is the feature
     // itself, and without it an isolation profile would still spend its dodge
@@ -221,6 +223,23 @@ export async function runProbes(
     runner.lastRunAt.set(probe.id, now);
     try {
       publish(state, probe.run(ctx), probe.merge ?? false);
+      clearProbeFailure(state, probe.id);
+    } catch (error) {
+      recordProbeFailure(state, probe.id, error);
+    }
+  }
+
+  // Verified-free synchronous reads. If an API update gives any declared
+  // method a RAM price, refuse the direct call and report the drift instead of
+  // overrunning start.js's allocation.
+  for (const probe of DIRECT_PROBES) {
+    if (!due(runner, probe.id, probe.everyMs, now) || !applicable(probe)) continue;
+    runner.lastRunAt.set(probe.id, now);
+    try {
+      const priced = probe.methods.map((method) => [method, methodCost(ns, method)] as const);
+      const costly = priced.find(([, cost]) => cost !== 0);
+      if (costly) throw new Error(`direct probe method ${costly[0]} costs ${costly[1]}GB`);
+      publish(state, probe.run(ns, ctx), probe.merge ?? false);
       clearProbeFailure(state, probe.id);
     } catch (error) {
       recordProbeFailure(state, probe.id, error);

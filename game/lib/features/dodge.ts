@@ -2,6 +2,7 @@ import type { NS } from "@ns";
 import type { FeatureId } from "../../../shared/features/ids.ts";
 import { grantFor, PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { dodge, DodgeExecError, priceCalls } from "../dodge.ts";
+import { goDodge } from "../go-dodge.ts";
 import { recordProbeSkip } from "../state.ts";
 import type { ClaimContext, DriverContext } from "./index.ts";
 
@@ -49,6 +50,39 @@ export async function featureDodge<T>(
     // the fleet reserve can open room. Body throws keep propagating.
     if (error instanceof DodgeExecError) {
       recordProbeSkip(ctx.state, `action:${by}:${claimId}`, budgetGb, 0);
+      return { ok: false, reason: String(error) };
+    }
+    throw error;
+  } finally {
+    lease.release();
+  }
+}
+
+/** Go variant of featureDodge. Its worker has a separate rendezvous lane, so
+ * waiting for the opponent does not block unrelated probes or actions. */
+export async function featureGoDodge<T>(
+  ctx: DriverContext,
+  claimId: string,
+  methods: readonly string[],
+  body: (stubNs: NS) => T | Promise<T>,
+): Promise<FeatureDodgeResult<T>> {
+  const budgetGb = priceCalls(ctx.ns, methods);
+  const grant = grantFor(ctx.grants.result, "go", claimId);
+  if (!grant || grant.resource !== "ram" || grant.amount < budgetGb) {
+    const detail = grant ? `granted ${grant.resource}:${grant.amount}` : "no grant";
+    return { ok: false, reason: `RAM claim go:${claimId} was not granted ${budgetGb.toFixed(1)}GB (${detail})` };
+  }
+  const lease = ctx.acquireDodge(budgetGb);
+  if (!lease) {
+    recordProbeSkip(ctx.state, `action:go:${claimId}`, budgetGb, 0);
+    return { ok: false, reason: `no host can serve a ${budgetGb.toFixed(1)}GB Go worker` };
+  }
+  delete ctx.state.probeSkips[`action:go:${claimId}`];
+  try {
+    return { ok: true, value: await goDodge(ctx.ns, body, budgetGb, lease.host) };
+  } catch (error) {
+    if (error instanceof DodgeExecError) {
+      recordProbeSkip(ctx.state, `action:go:${claimId}`, budgetGb, 0);
       return { ok: false, reason: String(error) };
     }
     throw error;

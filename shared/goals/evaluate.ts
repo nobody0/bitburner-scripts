@@ -16,6 +16,7 @@ export function initialContext(): GoalContext {
     stockPortfolioValue: 0,
     factions: new Map(),
     augmentations: new Set(),
+    installedAugmentations: new Set(),
     installs: 0,
   };
 }
@@ -60,6 +61,10 @@ interface PlayerData {
   numPeopleKilled?: number;
 }
 
+interface ProgressionData {
+  ownedAugs?: Record<string, number>;
+}
+
 interface ServerData {
   hostname?: string;
   hasAdminRights?: boolean;
@@ -91,6 +96,15 @@ export function reduceRecord(ctx: GoalContext, record: LogRecord): GoalContext {
       }
     } else if (record.key === "factions") {
       applyFactions(ctx, record.data as FactionsData);
+    } else if (record.key === "progression") {
+      const data = record.data as ProgressionData;
+      if (data.ownedAugs) {
+        ctx.installedAugmentations = new Set(
+          Object.entries(data.ownedAugs)
+            .filter(([, level]) => level > 0)
+            .map(([name]) => name),
+        );
+      }
     } else if (record.key === "farm") {
       // Dispatcher rollup: cumulative totals are authoritative (they replace
       // per-op hack.done accumulation, which only exists in verbose runs).

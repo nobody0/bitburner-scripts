@@ -14,6 +14,7 @@ import { CrimeSystem } from "./features/crime.ts";
 import { FactionSystem } from "./features/factions.ts";
 import { GraftingSystem } from "./features/grafting.ts";
 import { HacknetSystem } from "./features/hacknet.ts";
+import { GoSystem } from "./features/go-system.ts";
 import { StockMarketSystem } from "./features/stock.ts";
 import { satisfiesAll, type SatisfyContext } from "./features/requirements.ts";
 import { DEFAULT_NETWORK } from "./network.ts";
@@ -41,6 +42,7 @@ import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/Augmenta
 
 const WORKER_SCRIPT = versionedScript("worker/worker.js", "sim");
 const DODGE_STUB = versionedScript("lib/dodge-stub.js", "sim");
+const GO_DODGE_STUB = versionedScript("lib/go-dodge-stub.js", "sim");
 const START_SCRIPT = "start.js";
 
 export interface GameRunOptions {
@@ -130,6 +132,10 @@ const REALM_SLOTS = [
   "dodge_cb",
   "dodge_reject",
   "dodge_running",
+  "go_dodge_func",
+  "go_dodge_cb",
+  "go_dodge_reject",
+  "go_dodge_running",
 ] as const;
 
 function clearRealm(): void {
@@ -139,12 +145,16 @@ function clearRealm(): void {
 function buildResetInfo(
   bitnode: number,
   sourceFileLevel: number,
+  sourceFiles: Readonly<Record<string, number>>,
   installedAugs: ReadonlyMap<string, number>,
   nowMs: number,
   save?: SaveSeed,
 ): ResetInfo {
+  // ResetInfo is what the real controller trusts for capability gates. Read
+  // the constructed player, not only an imported save: synthetic profiles can
+  // legitimately model a player revisiting BN1 with SF4/SF14 already earned.
   const ownedSF = new Map<number, number>(
-    Object.entries(save?.sourceFiles ?? {}).map(([sf, level]) => [Number(sf), level]),
+    Object.entries(sourceFiles).map(([sf, level]) => [Number(sf), level]),
   );
   if (ownedSF.size === 0 && sourceFileLevel > 0) ownedSF.set(bitnode, sourceFileLevel);
   const savedOptions = save?.bitNodeOptions;
@@ -223,12 +233,13 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // retrofitting a second timebase under models written against the first
   // would mean redoing all of them.
   const factions = new FactionSystem(world, world.player, options.factions ?? save?.factions);
+  const go = save ? undefined : new GoSystem(world, factions, seed);
   const terminal = { host: "home" };
   const hasTor = { value: false };
   const initialHomeFiles = new Set(
     save
-      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
-      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
+      ? [START_SCRIPT, DODGE_STUB, GO_DODGE_STUB, WORKER_SCRIPT, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
+      : [START_SCRIPT, DODGE_STUB, GO_DODGE_STUB, WORKER_SCRIPT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
   );
   // Netburners' requirements are hacknet totals, so they have to be real
   // rather than the zeros a stub would report.
@@ -375,6 +386,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     clock,
     nowMs: virtualTime.nowMs,
     goState: save ? null : undefined,
+    ...(go ? { go } : {}),
     processes: new ProcessTable(world.servers, clock),
     files: new Map(
       save
@@ -390,7 +402,14 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     scripts: new Map<string, ScriptMain>(),
     network,
     ramCtx: ramCostContext(bitnode, world.player.sourceFiles),
-    reset: buildResetInfo(bitnode, sourceFileLevel, world.player.augmentations, virtualTime.nowMs(), save),
+    reset: buildResetInfo(
+      bitnode,
+      sourceFileLevel,
+      world.player.sourceFiles,
+      world.player.augmentations,
+      virtualTime.nowMs(),
+      save,
+    ),
     output: [],
     crashes: [],
     engine,
@@ -438,11 +457,12 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
 
   // Imported AFTER the flags are on globalThis, and dynamically so module
   // evaluation cannot outrun them.
-  const [{ main: startMain }, { resetAllFeatures }, { initState }, dodgeStub, worker] = await Promise.all([
+  const [{ main: startMain }, { resetAllFeatures }, { initState }, dodgeStub, goDodgeStub, worker] = await Promise.all([
     import("../game/start.ts"),
     import("../game/lib/features/index.ts"),
     import("../game/lib/state.ts"),
     import("../game/lib/dodge-stub.ts"),
+    import("../game/lib/go-dodge-stub.ts"),
     import("../game/worker/worker.ts"),
   ]);
 
@@ -463,6 +483,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     hacknet.prestige();
     stock.prestige();
     grafting.prestige();
+    go?.prestigeAugmentation();
     hasTor.value = false;
 
     const homeFiles = new Set(
@@ -536,6 +557,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   }
 
   host.scripts.set(DODGE_STUB, dodgeStub.main as ScriptMain);
+  host.scripts.set(GO_DODGE_STUB, goDodgeStub.main as ScriptMain);
   host.scripts.set(WORKER_SCRIPT, worker.main as ScriptMain);
   host.scripts.set(START_SCRIPT, ((ns: NS) => startMain(ns, options.features)) as ScriptMain);
 
