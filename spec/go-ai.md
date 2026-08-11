@@ -13,6 +13,8 @@ bun run go:book:train -- --opponent Daedalus --games 1024
 bun run go:teacher -- --games 8 --max-empty 6 --nodes 20000
 bun run go:arena -- --games 64 --opponent Illuminati --board-size 7 --analysis-width 5
 bun run go:arena -- --games 4 --opponent secret --trace
+bun run go:arena -- --games 64 --opponent secret --forecast-width 0
+bun run go:book:train -- --opponent secret --games 1024
 ```
 
 The default seed corpus walks engine ticks with a stride coprime to the
@@ -21,8 +23,9 @@ millisecond step: that samples only a narrow set of RNG phases. `--seed` selects
 a disjoint starting phase; `--seed-step` exists only for reproducing older
 linear corpora.
 
-Each JSON summary reports wins, score difference, a Wilson 95% lower bound,
-decision latency percentiles, and replayable losing seeds. `--trace` adds every
+Each JSON summary reports wins, score difference, mean black score and game
+duration, a Wilson 95% lower bound, decision latency percentiles, and
+replayable losing seeds. `--trace` adds every
 input board, history, dispatch playtime, chosen move, predicted response and
 actual upstream response. `--all-ties` repeats games across the full set of
 representative values for the one intentionally unseeded defense tie.
@@ -132,34 +135,89 @@ inherited/manual boards much less fragile. The deterministic size table is:
 | 7x7 | 3.5 ms | 20 | 3 |
 | 9x9 | 5 ms | 30 | 2 |
 | 13x13 | 8 ms | 60 | 1 |
-| 19x19 | 10 ms | all 361 | 0 |
+| 19x19 | 20 ms | 120 | 2 |
 
 There is still no wall-clock cutoff. On 7x7 the scaled policy won 40/128 on the
 primary corpus and 34/128 (26.6%) on a disjoint corpus, with 3.28 ms p95. A
 32-game 9x9 sample won 9/32 (28.1%) at 4.72 ms p95. These rates remain below
-5x5, but materially improve the old roughly 3-9% larger-board policy. The
-19x19 Secret lane cannot afford exact opponent reconstruction; exhaustive
-static ranking is cheap enough and won 2/4 in a disjoint smoke corpus at
-2.33 ms p95. That sample is deliberately too small to use as a reward prior.
+5x5, but materially improve the old roughly 3-9% larger-board policy.
+
+The 19x19 Secret lane is the one exception to the original 10 ms largest-board
+target. Two static finalists receive the exact next daemon response, followed
+by two bounded black continuations and a final board evaluation. It never
+predicts a second daemon move: subsequent AI sleeps perturb the next seed, so
+the next decision is replanned from the observed board and clock. A typed-array
+component scan and bounded continuation prefilter keep this one-reply search at
+19.69 ms p95 in an isolated 16-game run.
+
+On a 64-game identical-seed A/B, this lane won 44/64 (68.8%) versus 28/64
+(43.8%) with exact forecasting disabled: +25.0 percentage points, clearing the
+20-point requirement for relaxing the 19x19 budget from 10 to 20 ms. The
+concurrent A/B itself measured 20.14 ms p95, but only the isolated latency run
+is used for budget acceptance.
+
+The daemon teacher also has opponent-specific candidate generators for small
+sacrifices and moves that force a defense. They are counterfactual candidates,
+not unconditional production rules. On the corrected 16-game corpus, globally
+reserving the second finalist for either bait family produced 6/16 and 12/16,
+versus 11/16 for the ordinary two finalists; that is neither stable nor a
+robust held-out gain. The first abstract-board correction admitted by the
+training filter also regressed its disjoint control and was pruned. The daemon
+book therefore remains empty until a concrete candidate improves held-out
+wins; the generation and replay pipeline is retained for larger teacher
+corpora.
+
+The same bounded-root experiment was repeated per ordinary enemy. Wider roots
+or continuations which helped only the 256-game training phase were rejected on
+the disjoint 1,024-game corpus. Black Hand keeps one additional exact finalist
+(+7 wins); Tetrads keeps that extra finalist and a 12-move cheap continuation
+(+21 wins). Netburners, Slum Snakes, Daedalus, and Illuminati retain their
+previous work bounds because their apparent training gains reversed held out.
+The existing policy books remain enabled: disabling them was non-improving for
+every faction after the corrected chain ordering.
+
+Current upstream-arena results are below. Ordinary rows use the same 1,024-seed
+corpus; the daemon win rate uses 64 games, while its latency is the isolated
+16-game acceptance run rather than the concurrent win-rate A/B.
+
+| Opponent | Wins | Win rate | Mean game | Planning p50 | Planning p95 | Change |
+|---|---:|---:|---:|---:|---:|---:|
+| Netburners | 1,020/1,024 | 99.6% | 4.42 s | 0.36 ms | 1.27 ms | unchanged |
+| Slum Snakes | 977/1,024 | 95.4% | 6.54 s | 0.44 ms | 1.58 ms | unchanged |
+| The Black Hand | 944/1,024 | 92.2% | 8.44 s | 0.56 ms | 1.95 ms | +7 wins |
+| Tetrads | 789/1,024 | 77.1% | 9.54 s | 0.53 ms | 1.45 ms | +21 wins |
+| Daedalus | 858/1,024 | 83.8% | 8.10 s | 0.61 ms | 1.58 ms | unchanged |
+| Illuminati | 713/1,024 | 69.6% | 9.33 s | 0.70 ms | 1.56 ms | unchanged |
+| w0r1d_d43m0n | 44/64 | 68.8% | 127.12 s | 6.74 ms | 19.69 ms | +16/64 vs no forecast |
 
 The stronger predictor weights, chain priors, continuation widths and compact
 books are deliberate per-opponent policy parameters tuned only through the
 arena. When white passes, black uses exact area score and komi and immediately
 accepts a current win instead of needlessly reopening the board.
 
+Descriptive arena measurements and route-selection estimates are separate.
+Using one corrected 128-seed phase as selection probabilities worsened the
+fixed BN1 JIT profile from 3,964.0 s to 4,355.3 s by diverting games into Slum
+Snakes and Tetrads. Using all final 1,024-game measurements directly improved
+that to 3,993.3 s, but still lost to the independently validated 3,964.0 s
+route. Production therefore publishes and stores the current arena rates while
+retaining the validated route calibration. The final profile remains 3,964.0 s
+versus 5,165.7 s without Go, preserving the 23.3% improvement. Neither table
+reads or adapts to live game W/L records.
+
 The secret opponent is a separate 19x19 lane. Its upstream constructor always
 replaces a supplied position with the fresh BitVerse board, so the oracle must
 reconstruct midgames under Illuminati and then restore the secret identity.
-The large-board policy exhaustively ranks static moves but remains tactically
-shallow; arena results must not be combined with ordinary 5x5 win rates.
+Its policy compares two exact one-reply lines but remains deliberately shallow;
+arena results must not be combined with ordinary 5x5 win rates.
 
 ## Acceptance
 
 - Every game completes or reports its explicit turn cap.
 - Every observed immediate white response is contained in the clean-room
   predicted set.
-- The hot-path target scales from approximately 2 ms p95 on 5x5 toward 10 ms
-  on the largest board; the arena publishes p99/p99.9/max rather than hiding
+- The hot-path target scales from approximately 2 ms p95 on 5x5 to 20 ms on
+  the secret 19x19 board; the arena publishes p99/p99.9/max rather than hiding
   cold-start or scheduler outliers.
 - Win rates and reward priors come from the upstream arena's stratified corpus.
 - A reported 100% means zero losses on the named finite corpus, accompanied by

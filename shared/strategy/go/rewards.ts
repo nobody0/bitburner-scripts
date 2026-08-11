@@ -24,13 +24,34 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   // Win/score priors are fitted by sim/tests/go-selection.test.ts against
   // upstream obstacles and faction AI. Runtime records never tune the policy:
   // they are outcomes, not an excuse to learn around an incomplete predictor.
-  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 1, scoreFraction: 0.844, aiSecondsPerPlayableNode: 0.1976 },
-  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 0.922, scoreFraction: 0.784, aiSecondsPerPlayableNode: 0.2940 },
-  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.977, scoreFraction: 0.765, aiSecondsPerPlayableNode: 0.3697 },
-  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 0.703, scoreFraction: 0.643, aiSecondsPerPlayableNode: 0.4309 },
-  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 0.836, scoreFraction: 0.67, aiSecondsPerPlayableNode: 0.3681 },
-  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.684, scoreFraction: 0.696, aiSecondsPerPlayableNode: 0.4051 },
-  "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.02, scoreFraction: 0.1, aiSecondsPerPlayableNode: 4 },
+  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 0.996, scoreFraction: 0.819, aiSecondsPerPlayableNode: 0.1923 },
+  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 0.954, scoreFraction: 0.798, aiSecondsPerPlayableNode: 0.2845 },
+  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.922, scoreFraction: 0.719, aiSecondsPerPlayableNode: 0.3671 },
+  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 0.771, scoreFraction: 0.659, aiSecondsPerPlayableNode: 0.4147 },
+  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 0.838, scoreFraction: 0.676, aiSecondsPerPlayableNode: 0.3521 },
+  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.696, scoreFraction: 0.695, aiSecondsPerPlayableNode: 0.4055 },
+  // 64-game exact-reply arena: 44/64 wins, 146.92 points and 127.12 s per
+  // game. These are simulator priors; live W/L never tunes the policy.
+  "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.688, scoreFraction: 0.55, aiSecondsPerPlayableNode: 0.4761 },
+};
+
+/** End-to-end route estimates are deliberately separate from the descriptive
+ * arena measurements above. Refitting selection to one 128-seed phase changed
+ * a fixed BN1 route from 3,964.0 s to 4,355.3 s; even the final 1,024-game
+ * measurements produced 3,993.3 s. These simulator-derived estimates retain
+ * the independently validated route; live W/L influences neither table. */
+const GO_SELECTION_PROFILE: Readonly<Record<GoRewardOpponent, {
+  priorWinProbability: number;
+  scoreFraction: number;
+  aiSecondsPerPlayableNode: number;
+}>> = {
+  Netburners: { priorWinProbability: 1, scoreFraction: 0.844, aiSecondsPerPlayableNode: 0.1976 },
+  "Slum Snakes": { priorWinProbability: 0.922, scoreFraction: 0.784, aiSecondsPerPlayableNode: 0.2940 },
+  "The Black Hand": { priorWinProbability: 0.977, scoreFraction: 0.765, aiSecondsPerPlayableNode: 0.3697 },
+  Tetrads: { priorWinProbability: 0.703, scoreFraction: 0.643, aiSecondsPerPlayableNode: 0.4309 },
+  Daedalus: { priorWinProbability: 0.836, scoreFraction: 0.67, aiSecondsPerPlayableNode: 0.3681 },
+  Illuminati: { priorWinProbability: 0.684, scoreFraction: 0.696, aiSecondsPerPlayableNode: 0.4051 },
+  "????????????": { priorWinProbability: 0.688, scoreFraction: 0.55, aiSecondsPerPlayableNode: 0.4761 },
 };
 
 export interface GoEtaDemand {
@@ -158,7 +179,7 @@ function clamp01(value: number): number {
 }
 
 function simulatedWinProbability(opponent: GoRewardOpponent, size: number): number {
-  const prior = GO_REWARD_RULES[opponent].priorWinProbability;
+  const prior = GO_SELECTION_PROFILE[opponent].priorWinProbability;
   // Fixed komi becomes less important as area grows. These deltas are offline
   // simulator policy, never adapted from the live save's W/L record.
   const sizeShift = size <= 5 ? 0 : size <= 7 ? 0.04 : size <= 9 ? 0.07 : 0.1;
@@ -171,8 +192,10 @@ function expectedPerformance(
   probability: number,
 ): { size: GoObservedBoardSize; expectedBlackScore: number; expectedGameSec: number } {
   const size: GoObservedBoardSize = opponent === "????????????" ? 19 : requestedSize;
-  const playable = size * size * (size === 19 ? 0.55 : 0.92);
-  const profile = GO_REWARD_RULES[opponent];
+  // The fixed BitVerse board has exactly 267 playable intersections; the
+  // requested size is ignored for this opponent.
+  const playable = size === 19 ? 267 : size * size * 0.92;
+  const profile = GO_SELECTION_PROFILE[opponent];
   const expectedBlackScore = playable * clamp01(profile.scoreFraction + (probability - profile.priorWinProbability) * 0.25);
   // The arena measures exact upstream AI waits. A successful turn chains in a
   // microtask after that response; there is no controller-cadence tax between

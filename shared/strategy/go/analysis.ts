@@ -39,57 +39,71 @@ export function cardinal(board: GoBoard, x: number, y: number): GoPoint[] {
     .map(([nx, ny]) => ({ x: nx, y: ny }));
 }
 
-function connected(board: GoBoard, start: GoPoint, color: Exclude<Cell, "#">): GoPoint[] {
-  const result: GoPoint[] = [];
-  const seen = new Uint8Array(board.size * board.size);
-  const stack = [start.x * board.size + start.y];
-  while (stack.length) {
-    const index = stack.pop()!;
-    if (seen[index]) continue;
-    const x = Math.floor(index / board.size);
-    const y = index % board.size;
-    if (cellAt(board, x, y) !== color) continue;
-    seen[index] = 1;
-    result.push({ x, y });
-    // Push in reverse so traversal itself follows north/east/south/west. Chain
-    // members are sorted below because getAllChains exposes scan order.
-    const next = cardinal(board, x, y);
-    for (let i = next.length - 1; i >= 0; i--) {
-      const point = next[i]!;
-      const nextIndex = point.x * board.size + point.y;
-      if (!seen[nextIndex]) stack.push(nextIndex);
-    }
-  }
-  return result.sort((a, b) => a.x - b.x || a.y - b.y);
-}
-
 export function analyzeBoard(board: GoBoard): GoAnalysis {
+  const size = board.size;
+  const area = size * size;
   const chains: GoChain[] = [];
   const chainAt = new Map<string, GoChain>();
-  const assigned = new Uint8Array(board.size * board.size);
-  for (let x = 0; x < board.size; x++) {
-    for (let y = 0; y < board.size; y++) {
+  const assigned = new Uint8Array(area);
+  const libertyMark = new Uint16Array(area);
+  const stack = new Int16Array(area);
+  const encoded: number[] = [];
+  let mark = 0;
+  for (let x = 0; x < size; x++) {
+    for (let y = 0; y < size; y++) {
       const color = cellAt(board, x, y);
       const id = key(x, y);
-      const index = x * board.size + y;
+      const index = x * size + y;
       if (color === "#" || assigned[index]) continue;
-      const points = connected(board, { x, y }, color);
-      const pointIds = new Set(points.map((point) => key(point.x, point.y)));
-      for (const point of points) assigned[point.x * board.size + point.y] = 1;
-      const liberties: GoPoint[] = [];
-      const seenLiberties = new Set<string>();
-      for (const point of points) {
-        for (const neighbor of cardinal(board, point.x, point.y)) {
-          const neighborKey = key(neighbor.x, neighbor.y);
-          if (cellAt(board, neighbor.x, neighbor.y) !== "." || seenLiberties.has(neighborKey)) {
-            continue;
+
+      encoded.length = 0;
+      let top = 0;
+      stack[top++] = index;
+      assigned[index] = 1;
+      encoded.push(index);
+      while (top) {
+        const point = stack[--top]!;
+        const px = Math.floor(point / size);
+        const py = point % size;
+        // Upstream discovers north/east/south/west and traverses the resulting
+        // stack in reverse. getAllChains later exposes points in x/y scan
+        // order, but the discovery order remains observable in each chain's
+        // shared liberty list and therefore in seeded growth-move selection.
+        for (let direction = 0; direction < 4; direction++) {
+          const nx = px + (direction === 1 ? 1 : direction === 3 ? -1 : 0);
+          const ny = py + (direction === 0 ? 1 : direction === 2 ? -1 : 0);
+          if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+          const next = nx * size + ny;
+          if (!assigned[next] && board.rows[nx]![ny] === color) {
+            assigned[next] = 1;
+            encoded.push(next);
+            stack[top++] = next;
           }
-          // `assigned` is not sufficient for an empty chain currently being
-          // analyzed; coordinate membership is the actual upstream check.
-          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/boardAnalysis.ts
-          if (pointIds.has(neighborKey)) continue;
-          seenLiberties.add(neighborKey);
-          liberties.push(neighbor);
+        }
+      }
+      const points = [...encoded].sort((a, b) => a - b)
+        .map((point) => ({ x: Math.floor(point / size), y: point % size }));
+      const liberties: GoPoint[] = [];
+      // Empty chains cannot have an adjacent empty point outside their own
+      // connected component. Stone-chain liberties retain upstream's
+      // discovery-point order, then north/east/south/west.
+      if (color !== ".") {
+        mark++;
+        for (const encodedPoint of encoded) {
+          const point = { x: Math.floor(encodedPoint / size), y: encodedPoint % size };
+          const coordinates = [
+            [point.x, point.y + 1],
+            [point.x + 1, point.y],
+            [point.x, point.y - 1],
+            [point.x - 1, point.y],
+          ] as const;
+          for (const [nx, ny] of coordinates) {
+            if (nx < 0 || ny < 0 || nx >= size || ny >= size || board.rows[nx]![ny] !== ".") continue;
+            const next = nx * size + ny;
+            if (libertyMark[next] === mark) continue;
+            libertyMark[next] = mark;
+            liberties.push({ x: nx, y: ny });
+          }
         }
       }
       const chain: GoChain = { id, color, points, liberties };
@@ -152,48 +166,97 @@ function replace(board: GoBoard, x: number, y: number, color: Cell): GoBoard {
   return { rows, size: board.size };
 }
 
-function localGroup(board: GoBoard, x: number, y: number, color: Stone): { points: GoPoint[]; liberties: number } {
-  const points: GoPoint[] = [];
-  const seen = new Set<string>();
-  const liberties = new Set<string>();
-  const stack: GoPoint[] = [{ x, y }];
-  while (stack.length) {
-    const point = stack.pop()!;
-    const id = key(point.x, point.y);
-    if (seen.has(id) || cellAt(board, point.x, point.y) !== color) continue;
-    seen.add(id);
+interface LocalGroupWorkspace {
+  seen: Uint8Array;
+  libertySeen: Uint8Array;
+  checked: Uint8Array;
+  stack: Int16Array;
+  points: number[];
+}
+
+function localGroupWorkspace(size: number): LocalGroupWorkspace {
+  const area = size * size;
+  return {
+    seen: new Uint8Array(area),
+    libertySeen: new Uint8Array(area),
+    checked: new Uint8Array(area),
+    stack: new Int16Array(area),
+    points: [],
+  };
+}
+
+function localGroup(
+  board: GoBoard,
+  x: number,
+  y: number,
+  color: Stone,
+  workspace: LocalGroupWorkspace,
+): { points: number[]; liberties: number } {
+  const size = board.size;
+  const { seen, libertySeen, stack, points } = workspace;
+  seen.fill(0);
+  libertySeen.fill(0);
+  points.length = 0;
+  let liberties = 0;
+  let top = 0;
+  const start = x * size + y;
+  stack[top++] = start;
+  seen[start] = 1;
+  while (top) {
+    const point = stack[--top]!;
     points.push(point);
-    for (const neighbor of cardinal(board, point.x, point.y)) {
-      const cell = cellAt(board, neighbor.x, neighbor.y);
-      if (cell === ".") liberties.add(key(neighbor.x, neighbor.y));
-      else if (cell === color && !seen.has(key(neighbor.x, neighbor.y))) stack.push(neighbor);
+    const px = Math.floor(point / size);
+    const py = point % size;
+    for (let direction = 0; direction < 4; direction++) {
+      const nx = px + (direction === 0 ? 1 : direction === 1 ? -1 : 0);
+      const ny = py + (direction === 2 ? 1 : direction === 3 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const next = nx * size + ny;
+      const cell = board.rows[nx]![ny];
+      if (cell === color && !seen[next]) {
+        seen[next] = 1;
+        stack[top++] = next;
+      } else if (cell === "." && !libertySeen[next]) {
+        libertySeen[next] = 1;
+        liberties++;
+      }
     }
   }
-  return { points, liberties: liberties.size };
+  return { points, liberties };
 }
 
 /** Upstream evaluateMoveResult semantics: enemy captures win over suicide.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/boardAnalysis.ts */
-export function evaluateMove(board: GoBoard, x: number, y: number, player: Stone): GoBoard {
+export function evaluateMove(
+  board: GoBoard,
+  x: number,
+  y: number,
+  player: Stone,
+  workspace = localGroupWorkspace(board.size),
+): GoBoard {
   if (cellAt(board, x, y) === "#") return board;
   let result = replace(board, x, y, player);
   const enemy: Stone = player === "X" ? "O" : "X";
-  const checked = new Set<string>();
+  const checked = workspace.checked;
+  checked.fill(0);
   let capturedEnemy = false;
   for (const neighbor of cardinal(result, x, y)) {
-    if (cellAt(result, neighbor.x, neighbor.y) !== enemy || checked.has(key(neighbor.x, neighbor.y))) continue;
-    const chain = localGroup(result, neighbor.x, neighbor.y, enemy);
-    for (const point of chain.points) checked.add(key(point.x, point.y));
+    const neighborIndex = neighbor.x * board.size + neighbor.y;
+    if (cellAt(result, neighbor.x, neighbor.y) !== enemy || checked[neighborIndex]) continue;
+    const chain = localGroup(result, neighbor.x, neighbor.y, enemy, workspace);
+    for (const point of chain.points) checked[point] = 1;
     if (chain.liberties !== 0) continue;
     capturedEnemy = true;
-    for (const point of chain.points) result = replace(result, point.x, point.y, ".");
+    for (const point of chain.points) result = replace(result, Math.floor(point / board.size), point % board.size, ".");
   }
   // Upstream removes captured enemy chains instead of treating a capturing
   // move as suicide. Only inspect the newly placed friendly chain when no
   // enemy was removed.
   if (!capturedEnemy) {
-    const own = localGroup(result, x, y, player);
-    if (own.liberties === 0) for (const point of own.points) result = replace(result, point.x, point.y, ".");
+    const own = localGroup(result, x, y, player, workspace);
+    if (own.liberties === 0) for (const point of own.points) {
+      result = replace(result, Math.floor(point / board.size), point % board.size, ".");
+    }
   }
   return result;
 }
@@ -201,10 +264,11 @@ export function evaluateMove(board: GoBoard, x: number, y: number, player: Stone
 export function legalPoints(board: GoBoard, player: Stone, history: readonly string[][] = []): GoPoint[] {
   const prior = new Set(history.map((position) => position.join("")));
   const result: GoPoint[] = [];
+  const workspace = localGroupWorkspace(board.size);
   for (let x = 0; x < board.size; x++) {
     for (let y = 0; y < board.size; y++) {
       if (cellAt(board, x, y) !== ".") continue;
-      const next = evaluateMove(board, x, y, player);
+      const next = evaluateMove(board, x, y, player, workspace);
       if (cellAt(next, x, y) !== player || prior.has(next.rows.join(""))) continue;
       result.push({ x, y });
     }

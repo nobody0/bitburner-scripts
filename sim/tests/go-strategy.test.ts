@@ -54,10 +54,20 @@ function referenceEvaluate(board: GoBoard, us: Stone, cohesionWeight: number): n
 describe("Go strategy simulation", () => {
   test("planning widths scale deterministically from the 5x5 to 19x19 budget", () => {
     const sizes = [5, 7, 9, 13, 19] as const;
-    const views = sizes.map((size) => ({ board: { size, rows: [] }, opponent: "Illuminati" as const }));
-    expect(views.map(goAnalysisWidth)).toEqual([5, 20, 30, 60, 361]);
-    expect(views.map(goForecastWidth)).toEqual([5, 3, 2, 1, 0]);
-    expect(sizes.map(goPlanningBudgetMs)).toEqual([2, 3.5, 5, 8, 10]);
+    const views = sizes.map((size) => ({
+      board: { size, rows: size === 19 ? Array.from({ length: 19 }, () => "X".repeat(19)) : [] },
+      opponent: "Illuminati" as const,
+    }));
+    expect(views.map(goAnalysisWidth)).toEqual([5, 20, 30, 60, 120]);
+    expect(views.map(goForecastWidth)).toEqual([5, 3, 2, 1, 2]);
+    expect(sizes.map(goPlanningBudgetMs)).toEqual([2, 3.5, 5, 8, 20]);
+  });
+
+  test("19x19 exact forecasting compares two candidates throughout the game", () => {
+    const rows = Array.from({ length: 19 }, () => ".".repeat(19));
+    expect(goForecastWidth({ board: { size: 19, rows }, opponent: "????????????" })).toBe(2);
+    const tactical = rows.map((column, x) => x < 14 ? "X".repeat(19) : column);
+    expect(goForecastWidth({ board: { size: 19, rows: tactical }, opponent: "????????????" })).toBe(2);
   });
 
   test("5x5 work is concentrated on the opponents that benefit from it", () => {
@@ -71,7 +81,7 @@ describe("Go strategy simulation", () => {
     ] as const;
     const views = opponents.map((opponent) => ({ board: { size: 5 as const, rows: [] }, opponent }));
     expect(views.map(goAnalysisWidth)).toEqual([4, 4, 4, 4, 5, 5]);
-    expect(views.map(goForecastWidth)).toEqual([4, 3, 3, 3, 5, 5]);
+    expect(views.map(goForecastWidth)).toEqual([4, 3, 4, 4, 5, 5]);
   });
 
   test("the Illuminati policy book reaches midgame boards and has no fallback guess", () => {
@@ -110,6 +120,8 @@ describe("Go strategy simulation", () => {
     ] as const;
     expect(opponents.map((opponent) => GO_POLICY_BOOK_CAPACITY[opponent])).toEqual([4, 8, 12, 24, 64, 164]);
     expect(opponents.map(goPolicyEntryCount)).toEqual([4, 8, 12, 24, 64, 164]);
+    expect(GO_POLICY_BOOK_CAPACITY["????????????"]).toBe(64);
+    expect(goPolicyEntryCount("????????????")).toBe(0);
   });
 
   test("the allocation-free evaluator preserves the reference score", () => {
@@ -180,4 +192,5 @@ describe("Go strategy simulation", () => {
     }, 1_000, 0, 20);
     expect(solution).toEqual({ action: { type: "pass" }, value: 1_425, nodes: 1 });
   });
+
 });

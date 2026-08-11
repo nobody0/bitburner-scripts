@@ -13,7 +13,7 @@ import {
   type WeightedOpponentReply,
 } from "./opponent.ts";
 import { alignedAiSeed, consumeGoWaits, GO_ENGINE_CYCLE_MS } from "./rng.ts";
-import { goPolicyMove, type GoPolicyBookOpponent } from "./policy-book.ts";
+import { goPolicyMove } from "./policy-book.ts";
 import { goDifficultyMultiplier, goStreakMultiplier, nextGoStreak } from "./rewards.ts";
 
 export type Cell = "." | "X" | "O" | "#";
@@ -116,6 +116,8 @@ export interface GoView {
   deepAdaptiveGap?: number;
   /** Simulator A/B control for the offline-distilled early/midgame policy. */
   policyBook?: boolean;
+  /** Simulator/teacher control for opponent-specific bait candidate injection. */
+  baitType?: "sacrifice" | "threat";
   /** Fresh engine tick on which the controller will dispatch this move. When
    * present, the sole seed is exact and a distinct second-turn seed can be
    * derived for every predicted response branch. */
@@ -150,6 +152,7 @@ interface PreparedMove {
   y: number;
   played: PlayedMove;
   tacticalScore: number;
+  candidateKind?: "sacrifice-bait" | "defense-bait";
   opponent?: PreparedOpponentPosition;
 }
 
@@ -492,7 +495,7 @@ export function goPlanningBudgetMs(boardSize: GoObservedBoardSize): number {
   if (boardSize === 7) return 3.5;
   if (boardSize === 9) return 5;
   if (boardSize === 13) return 8;
-  return 10;
+  return 20;
 }
 
 /** Deterministic work bounds fitted to the size-scaled planning budget. */
@@ -504,14 +507,14 @@ export function goAnalysisWidth(view: Pick<GoView, "board" | "opponent" | "analy
   if (view.board.size === 7) return 20;
   if (view.board.size === 9) return 30;
   if (view.board.size === 13) return 60;
-  return view.board.size ** 2;
+  return 120;
 }
 
 export function goForecastWidth(
   view: Pick<GoView, "board" | "opponent" | "forecastWidth">,
 ): number {
   if (view.forecastWidth !== undefined) return Math.max(0, Math.floor(view.forecastWidth));
-  if (view.board.size === 19) return 0;
+  if (view.board.size === 19) return 2;
   if (view.board.size === 13) return 1;
   if (view.board.size === 9) return 2;
   if (view.board.size === 7) return 3;
@@ -519,11 +522,15 @@ export function goForecastWidth(
   if (view.opponent === "Illuminati") return 5;
   if (view.opponent === "Daedalus") return 5;
   if (view.opponent === "Netburners") return 4;
+  if (view.opponent === "The Black Hand" || view.opponent === "Tetrads") return 4;
   return 3;
 }
 
-export function usesExactGoForecast(view: Pick<GoView, "board" | "opponent" | "forecastWidth">): boolean {
-  return goForecastWidth(view) > 0;
+export function usesExactGoForecast(view: Pick<GoView, "board" | "opponent" | "forecastWidth" | "policyBook">): boolean {
+  return goForecastWidth(view) > 0
+    || view.opponent === "????????????"
+      && (view.policyBook ?? true)
+      && goPolicyMove(view.opponent, view.board.rows) !== undefined;
 }
 
 function orderedChildren(board: GoBoard, colour: Stone, history: ReadonlySet<string>, us: Stone) {
@@ -630,6 +637,10 @@ export function prepareGoDecision(
   const forecastHistory = [view.board.rows, ...(view.previousBoards ?? [])];
   const finalistWidth = goAnalysisWidth(view);
   const forecastWidth = goForecastWidth(view);
+  const policyAction = (view.policyBook ?? true)
+    && (view.board.size === 5 || view.opponent === "????????????" && view.board.size === 19)
+    ? goPolicyMove(view.opponent, view.board.rows)
+    : undefined;
   const ordered = orderedChildren(view.board, us, history, us);
   // A 5x5 board has at most 25 legal points, so its complete static evaluation
   // is cheap and prevents the local contact ordering from deleting a vital
@@ -644,13 +655,49 @@ export function prepareGoDecision(
       tacticalScore: evaluate(played.board, us, cohesion),
     }))
     .sort((a, b) => b.tacticalScore - a.tacticalScore || b.played.captures - a.played.captures || a.x - b.x || a.y - b.y);
-  const baseMoves = scoredMoves.slice(0, finalistWidth);
+  let candidateMoves = scoredMoves;
+  if (view.baitType) {
+    const bait = scoredMoves.find((move) => {
+      if (move.played.captures > 0) return false;
+      if (view.baitType === "sacrifice") {
+        const placed = fastGroup(move.played.board, move.x, move.y);
+        return placed.stones.length <= 2 && placed.liberties === 1;
+      }
+      const checked = new Uint8Array(view.board.size * view.board.size);
+      for (const [nx, ny] of neighbors(move.x, move.y)) {
+        if (at(move.played.board, nx, ny) !== "O") continue;
+        const index = nx * view.board.size + ny;
+        if (checked[index]) continue;
+        const enemy = fastGroup(move.played.board, nx, ny);
+        for (const point of enemy.stones) checked[point] = 1;
+        if (enemy.liberties === 1) return true;
+      }
+      return false;
+    });
+    if (bait && bait !== scoredMoves[0]) {
+      const tagged = {
+        ...bait,
+        candidateKind: view.baitType === "sacrifice" ? "sacrifice-bait" as const : "defense-bait" as const,
+      };
+      candidateMoves = [scoredMoves[0]!, tagged, ...scoredMoves.slice(1).filter((move) => move !== bait)];
+    }
+  }
+  let baseMoves = candidateMoves.slice(0, finalistWidth);
+  if (policyAction) {
+    const policyIndex = baseMoves.findIndex((move) => move.x === policyAction[0] && move.y === policyAction[1]);
+    if (policyIndex > 0) {
+      baseMoves = [baseMoves[policyIndex]!, ...baseMoves.slice(0, policyIndex), ...baseMoves.slice(policyIndex + 1)];
+    }
+  }
+  const effectiveForecastWidth = forecastWidth || Number(
+    view.opponent === "????????????" && policyAction !== undefined,
+  );
   // Prepare the opponent's option space for every finalist. Forecasting only
   // the first candidate made prediction explanatory rather than selective:
   // the sole forecasted move was then sorted ahead of every alternative.
   const moves = baseMoves.map((move, index) => ({
     ...move,
-    ...(prepareForecast && index < forecastWidth
+    ...(prepareForecast && index < effectiveForecastWidth
       ? { opponent: prepareOpponentPosition(move.played.board, view.opponent, forecastHistory) }
       : {}),
   }));
@@ -721,6 +768,9 @@ export function solveGoEndgame(
   bonusCycles = 0,
   nodeLimit = 2_048,
 ): GoEndgameSolution | undefined {
+  // The second daemon seed depends on random sleep timing. Only the immediate
+  // reply is reliable; daemon labels come from complete upstream rollouts in
+  // go-book-train rather than this multi-turn clean-room solver.
   if (view.opponent === "????????????") return undefined;
   const budget = { used: 0, limit: Math.max(1, Math.floor(nodeLimit)) };
   const memo = new Map<string, GoEndgameResult>();
@@ -836,11 +886,58 @@ function continuationValue(
   komi: number,
   scoreLeadBonus: number,
 ): number {
-  const replies = orderedChildren(board, "X", history, "X").slice(0, width);
+  const replies = board.size === 19
+    ? boundedLargeBoardContinuations(board, history, width)
+    : orderedChildren(board, "X", history, "X").slice(0, width);
   const value = (position: GoBoard) => evaluate(position, "X", cohesion, komi, scoreLeadBonus);
   let best = value(board);
   for (const reply of replies) best = Math.max(best, value(reply.played.board));
   return best;
+}
+
+/** The exact opponent reply leaves roughly two hundred legal black points on
+ * the BitVerse board. Generating all resulting boards merely to retain four is
+ * the dominant 19x19 tail cost. Prefilter by the same local order used by the
+ * full search, while retaining contact moves which may capture; only this
+ * bounded set pays full capture, suicide, superko, and evaluation work. */
+function boundedLargeBoardContinuations(
+  board: GoBoard,
+  history: ReadonlySet<string>,
+  width: number,
+): { move: [number, number]; played: PlayedMove; order: number }[] {
+  const centre = (board.size - 1) / 2;
+  const candidates: { move: [number, number]; order: number; contact: boolean }[] = [];
+  for (let x = 0; x < board.size; x++) for (let y = 0; y < board.size; y++) {
+    if (at(board, x, y) !== ".") continue;
+    const centrality = board.size - Math.abs(x - centre) - Math.abs(y - centre);
+    let adjacent = 0;
+    let contact = false;
+    for (const [nx, ny] of neighbors(x, y)) {
+      const cell = at(board, nx, ny);
+      if (cell === "X") adjacent += 3;
+      else if (cell === "O") {
+        adjacent += 2;
+        contact = true;
+      } else if (cell === ".") adjacent++;
+    }
+    candidates.push({ move: [x, y], order: adjacent * 10 + centrality * 0.02, contact });
+  }
+  candidates.sort((a, b) => b.order - a.order || a.move[0] - b.move[0] || a.move[1] - b.move[1]);
+  const selected = new Map<number, typeof candidates[number]>();
+  for (const candidate of candidates.slice(0, Math.max(16, width * 4))) {
+    selected.set(candidate.move[0] * board.size + candidate.move[1], candidate);
+  }
+  let contacts = 0;
+  for (const candidate of candidates) {
+    if (!candidate.contact) continue;
+    selected.set(candidate.move[0] * board.size + candidate.move[1], candidate);
+    if (++contacts >= 16) break;
+  }
+  return [...selected.values()].flatMap((candidate) => {
+    const played = playMove(board, candidate.move[0], candidate.move[1], "X", history);
+    return played ? [{ ...candidate, played, order: played.captures * 1_000 + candidate.order }] : [];
+  }).sort((a, b) => b.order - a.order || a.move[0] - b.move[0] || a.move[1] - b.move[1])
+    .slice(0, width);
 }
 
 function deepContinuationValue(
@@ -920,9 +1017,10 @@ export function finalizeGoDecision(
   const cohesion = view.cohesionWeight ?? opponentCohesion(view.opponent, view.board.size);
   const defaultContinuationWidth = view.board.size === 5
     ? view.opponent === "Illuminati" ? 14
-      : view.opponent === "Netburners" || view.opponent === "Tetrads" ? 8
+      : view.opponent === "Tetrads" ? 12
+      : view.opponent === "Netburners" ? 8
       : 4
-    : 4;
+    : view.board.size === 19 ? 2 : 4;
   const continuationWidth = Math.max(1, Math.floor(view.continuationWidth ?? defaultContinuationWidth));
   // On the tiny high-komi board, crossing from 7.5 points behind to a real
   // lead is strategically discontinuous: preserving a win matters more than
@@ -1040,21 +1138,24 @@ export function finalizeGoDecision(
       ...(forecastCertainty ? { forecastCertainty } : {}),
       ...(predictedReplies ? { predictedReplies } : {}),
       captures: played.captures,
-      why: `fixed-budget tactical shortlist${prediction}`,
+      why: `${candidate.candidateKind ?? "fixed-budget tactical shortlist"}${prediction}`,
     } satisfies GoMove;
   }).sort((a, b) => Number(Boolean(b.predictedReplies)) - Number(Boolean(a.predictedReplies))
     || b.score - a.score || b.captures - a.captures || a.x - b.x || a.y - b.y);
 
-  const bookAction = view.opponent !== "????????????"
-    && view.board.size === 5
+  const bookAction = (view.board.size === 5 || view.opponent === "????????????" && view.board.size === 19)
     && (view.policyBook ?? true)
-    ? goPolicyMove(view.opponent as GoPolicyBookOpponent, view.board.rows)
+    ? goPolicyMove(view.opponent, view.board.rows)
     : undefined;
   if (bookAction) {
     // Board-only keys deliberately omit private state and history. Applying a
     // stored action only when it remains in the freshly legal, exactly
     // forecasted shortlist makes every miss or superko disagreement safe.
-    const bookIndex = ranked.findIndex((move) => move.x === bookAction[0] && move.y === bookAction[1]);
+    const bookIndex = ranked.findIndex((move) =>
+      move.x === bookAction[0]
+      && move.y === bookAction[1]
+      && (view.opponent !== "????????????" || move.predictedReplies !== undefined)
+    );
     if (bookIndex >= 0) {
       const bookMove = ranked[bookIndex]!;
       const bookRanked = [bookMove, ...ranked.slice(0, bookIndex), ...ranked.slice(bookIndex + 1)];

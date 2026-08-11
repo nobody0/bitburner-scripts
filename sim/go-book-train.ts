@@ -17,12 +17,13 @@ import {
   playGoArenaPosition,
   type GoArenaInitialState,
 } from "./go-arena.ts";
-import type { GoBoard } from "../shared/strategy/go/decide.ts";
+import { playMove, type GoBoard } from "../shared/strategy/go/decide.ts";
 import {
   GO_POLICY_BOOK_CAPACITY,
   type GoPolicyBookOpponent,
 } from "../shared/strategy/go/policy-book.ts";
 import type { GoArenaOpponent } from "./go-arena.ts";
+import { secretPolicyKey } from "../shared/strategy/go/secret-book.ts";
 
 interface Occurrence {
   seed: number;
@@ -51,6 +52,10 @@ interface BookEntry extends CandidateStats {
   winRate: number;
   meanMarginDelta: number;
   impact: number;
+}
+
+function policyKey(opponent: GoArenaOpponent, rows: readonly string[]): string {
+  return opponent.name === "????????????" ? secretPolicyKey(rows) : rows.join("");
 }
 
 interface ActivatedEntry {
@@ -84,6 +89,7 @@ function candidateDecision(
   board: GoBoard,
   occurrence: Occurrence,
   opponent: GoArenaOpponent,
+  baitType?: "sacrifice" | "threat",
 ) {
   return decideGoArenaBlack(
     board,
@@ -102,8 +108,19 @@ function candidateDecision(
     undefined,
     undefined,
     undefined,
+    baitType,
     false,
   );
+}
+
+/** Candidate families follow the opponent's actual priority tree. Reckless
+ * capture-first factions get sacrificial probes; defense-first and smart
+ * factions get threats which may force their reply. The teacher still has to
+ * prove each concrete move by replay before it can enter a book. */
+function opponentBaits(opponent: GoArenaOpponent): readonly ("sacrifice" | "threat")[] {
+  if (opponent.name === "Netburners") return [];
+  if (opponent.name === "Slum Snakes") return ["threat"];
+  return ["sacrifice", "threat"];
 }
 
 async function main(): Promise<void> {
@@ -113,9 +130,13 @@ async function main(): Promise<void> {
   const phaseSamples = Math.max(1, Math.floor(numberFlag("--phase-samples", 3)));
   const minVisits = Math.max(1, Math.floor(numberFlag("--min-visits", 3)));
   const minPolicyVisits = Math.max(1, Math.floor(numberFlag("--min-policy-visits", 1)));
+  const minApplicable = Math.max(1, Math.floor(numberFlag("--min-applicable", Math.min(2, phaseSamples))));
   const opponentQuery = stringFlag("--opponent", "Illuminati").toLowerCase();
-  const opponent = GO_ARENA_OPPONENTS.find(({ name }) => name.toLowerCase().includes(opponentQuery));
-  if (!opponent || opponent.name === "????????????") {
+  const opponent = GO_ARENA_OPPONENTS.find(({ name }) => {
+    if ((opponentQuery === "secret" || opponentQuery === "world-daemon") && name === "????????????") return true;
+    return name.toLowerCase().includes(opponentQuery);
+  });
+  if (!opponent) {
     throw new Error(`unknown or unsupported policy-book opponent ${opponentQuery}`);
   }
   const bookOpponent = opponent.name as GoPolicyBookOpponent;
@@ -125,6 +146,8 @@ async function main(): Promise<void> {
   )));
   const minMarginDelta = Math.max(0, numberFlag("--min-margin-delta", 5));
   const excludeFinal = Math.max(0, Math.floor(numberFlag("--exclude-final", 2)));
+  const maxDepth = Math.max(0, Math.floor(numberFlag("--max-depth", Number.MAX_SAFE_INTEGER)));
+  const maxStates = Math.max(1, Math.floor(numberFlag("--max-states", Number.MAX_SAFE_INTEGER)));
   const outputIndex = Bun.argv.indexOf("--out");
   const output = outputIndex >= 0 ? Bun.argv[outputIndex + 1] : undefined;
   const observations = new Map<string, Occurrence[]>();
@@ -134,11 +157,11 @@ async function main(): Promise<void> {
     const game = await playGoArenaGame(opponent, seed, 0.5, true);
     const trace = game.trace ?? [];
     const limit = Math.max(0, trace.length - excludeFinal);
-    for (let depth = 0; depth < limit; depth++) {
+    for (let depth = 0; depth < limit && depth <= maxDepth; depth++) {
       const turn = trace[depth]!;
       if (turn.black.type !== "move") continue;
       const board: GoBoard = { size: turn.board.length, rows: [...turn.board] };
-      const key = board.rows.join("");
+      const key = policyKey(opponent, board.rows);
       const occurrences = observations.get(key) ?? [];
       occurrences.push({
         seed,
@@ -174,14 +197,26 @@ async function main(): Promise<void> {
   const entries: BookEntry[] = [];
   let evaluatedStates = 0;
   let rollouts = 0;
-  for (const [boardKey, allOccurrences] of observations) {
-    if (allOccurrences.length < minVisits) continue;
+  const eligibleObservations = [...observations.entries()]
+    .filter(([, occurrences]) => occurrences.length >= minVisits)
+    .sort((a, b) =>
+      b[1].filter(({ won }) => !won).length - a[1].filter(({ won }) => !won).length
+      || b[1].length - a[1].length
+      || a[0].localeCompare(b[0]),
+    )
+    .slice(0, maxStates);
+  for (const [boardKey, allOccurrences] of eligibleObservations) {
     evaluatedStates++;
     const occurrences = sampled(allOccurrences, phaseSamples);
     const representative = occurrences[0]!;
-    const decision = candidateDecision(representative.state.board, representative, opponent);
+    const decisions = [candidateDecision(representative.state.board, representative, opponent)];
+    for (const bait of opponentBaits(opponent)) {
+      decisions.push(candidateDecision(representative.state.board, representative, opponent, bait));
+    }
     const candidates = new Map<string, readonly [number, number]>();
-    for (const move of decision.ranked.slice(0, width)) candidates.set(`${move.x},${move.y}`, [move.x, move.y]);
+    for (const decision of decisions) for (const move of decision.ranked.slice(0, width)) {
+      candidates.set(`${move.x},${move.y}`, [move.x, move.y]);
+    }
     // A seed-sensitive deployed action can fall outside the representative's
     // first few candidates. Retain every action actually observed at this
     // public position so the teacher can compare it fairly.
@@ -201,6 +236,14 @@ async function main(): Promise<void> {
         marginDelta: 0,
       };
       for (const occurrence of occurrences) {
+        const legal = playMove(
+          occurrence.state.board,
+          x,
+          y,
+          "X",
+          new Set(occurrence.state.previousBoards.map((position) => position.join(""))),
+        );
+        if (!legal) continue;
         const game = await playGoArenaPosition(opponent, occurrence.seed, 0.5, occurrence.state, [x, y]);
         rollouts++;
         candidate.samples++;
@@ -220,6 +263,7 @@ async function main(): Promise<void> {
       || a.x - b.x
       || a.y - b.y,
     )[0]!;
+    if (best.samples < minApplicable) continue;
     const winCorrection = best.conversions >= 1
       && best.regressions === 0
       && best.wins / best.samples >= 2 / 3;
@@ -227,7 +271,7 @@ async function main(): Promise<void> {
       && best.wins === best.samples
       && best.marginDelta / best.samples >= minMarginDelta;
     if (!winCorrection && !scoreCorrection) continue;
-    const visits = allOccurrences.length;
+    const visits = best.samples / occurrences.length * allOccurrences.length;
     entries.push({
       board: boardKey,
       ...best,
@@ -274,9 +318,12 @@ async function main(): Promise<void> {
     phaseSamples,
     minVisits,
     minPolicyVisits,
+    minApplicable,
     minMarginDelta,
     maxEntries,
     excludeFinal,
+    maxDepth,
+    maxStates,
     observedStates: observations.size,
     evaluatedStates,
     rollouts,

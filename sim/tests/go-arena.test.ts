@@ -52,6 +52,17 @@ describe("upstream-backed Go arena", () => {
     if (move) expect(playMove(first!.board, move[0], move[1], "O", new Set([initial.rows.join("")]))).toBeDefined();
   });
 
+  test("the 19x19 daemon lane predicts each immediate upstream reply", async () => {
+    const game = await playGoArenaGame(GO_ARENA_OPPONENTS[6]!, 1_000, 0.5, true);
+    expect(game.completed).toBe(true);
+    for (const turn of game.trace ?? []) {
+      if (turn.black.type === "pass") continue;
+      const actual = turn.white.type === "move" ? `${turn.white.x},${turn.white.y}` : "pass";
+      const predicted = turn.predicted.map((reply) => reply.x === null ? "pass" : `${reply.x},${reply.y}`);
+      expect(predicted, `19x19 turn ${turn.turn} at ${turn.dispatchPlaytime}`).toContain(actual);
+    }
+  }, 15_000);
+
   test("a public midgame snapshot replays the original continuation exactly", async () => {
     const opponent = GO_ARENA_OPPONENTS[5]!;
     const original = await playGoArenaGame(opponent, 123_456, 0.5, true);

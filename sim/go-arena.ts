@@ -97,6 +97,8 @@ export interface GoArenaSummary {
   winRate: number;
   wilsonLower95: number;
   pointDifference: number;
+  meanBlackScore: number;
+  meanDurationMs: number;
   decisions: number;
   latencyMs: { p50: number; p95: number; p99: number; p999: number; max: number };
   losingSeeds: { seed: number; tieRoll: number; margin: number }[];
@@ -150,6 +152,7 @@ export function decideGoArenaBlack(
   deepForecastWidth?: number,
   deepRootWidth?: number,
   deepAdaptiveGap?: number,
+  baitType?: "sacrifice" | "threat",
   policyBook?: boolean,
 ): GoDecision {
   const view = {
@@ -171,6 +174,7 @@ export function decideGoArenaBlack(
     ...(deepForecastWidth !== undefined ? { deepForecastWidth } : {}),
     ...(deepRootWidth !== undefined ? { deepRootWidth } : {}),
     ...(deepAdaptiveGap !== undefined ? { deepAdaptiveGap } : {}),
+    ...(baitType !== undefined ? { baitType } : {}),
     ...(policyBook !== undefined ? { policyBook } : {}),
   };
   const exactForecast = usesExactGoForecast(view);
@@ -195,6 +199,7 @@ export async function playGoArenaGame(
   deepForecastWidth?: number,
   deepRootWidth?: number,
   deepAdaptiveGap?: number,
+  baitType?: "sacrifice" | "threat",
   policyBook?: boolean,
   forcedOpening?: readonly [number, number],
   initialBoard?: GoBoard,
@@ -249,6 +254,7 @@ export async function playGoArenaGame(
           deepForecastWidth,
           deepRootWidth,
           deepAdaptiveGap,
+          baitType,
           policyBook,
         );
       const elapsed = performance.now() - started;
@@ -362,6 +368,7 @@ export function playGoArenaPosition(
     undefined,
     undefined,
     undefined,
+    undefined,
     true,
     forcedAction,
     undefined,
@@ -381,6 +388,8 @@ export function summarizeGoArena(opponent: GoRewardOpponent, games: readonly GoA
     winRate: games.length ? wins / games.length : 0,
     wilsonLower95: wilsonLower95(wins, games.length),
     pointDifference: games.reduce((sum, game) => sum + game.score.X - game.score.O, 0),
+    meanBlackScore: games.length ? games.reduce((sum, game) => sum + game.score.X, 0) / games.length : 0,
+    meanDurationMs: games.length ? games.reduce((sum, game) => sum + game.durationMs, 0) / games.length : 0,
     decisions: times.length,
     latencyMs: {
       p50: percentile(times, 0.5),
@@ -398,6 +407,18 @@ export function summarizeGoArena(opponent: GoRewardOpponent, games: readonly GoA
 function numberFlag(name: string, fallback: number): number {
   const index = Bun.argv.indexOf(name);
   return index >= 0 ? Number(Bun.argv[index + 1] ?? fallback) : fallback;
+}
+
+function coordinateFlag(name: string): readonly [number, number] | undefined {
+  const index = Bun.argv.indexOf(name);
+  if (index < 0) return undefined;
+  const [rawX, rawY] = (Bun.argv[index + 1] ?? "").split(",");
+  const x = Number(rawX);
+  const y = Number(rawY);
+  if (!Number.isInteger(x) || !Number.isInteger(y)) {
+    throw new Error(`${name} must be an x,y coordinate`);
+  }
+  return [x, y];
 }
 
 async function main(): Promise<void> {
@@ -434,6 +455,13 @@ async function main(): Promise<void> {
   const policyBook = Bun.argv.includes("--disable-policy-book") || Bun.argv.includes("--disable-opening-book")
     ? false
     : undefined;
+  const forcedOpening = coordinateFlag("--opening");
+  const baitIndex = Bun.argv.indexOf("--bait");
+  const rawBait = baitIndex >= 0 ? Bun.argv[baitIndex + 1] : undefined;
+  if (rawBait !== undefined && rawBait !== "sacrifice" && rawBait !== "threat") {
+    throw new Error("--bait must be sacrifice or threat");
+  }
+  const baitType = rawBait as "sacrifice" | "threat" | undefined;
   const selected = GO_ARENA_OPPONENTS.filter((opponent) => {
     const index = Bun.argv.indexOf("--opponent");
     if (index < 0) return true;
@@ -465,7 +493,9 @@ async function main(): Promise<void> {
           deepForecastWidth,
           deepRootWidth,
           deepAdaptiveGap,
+          baitType,
           policyBook,
+          forcedOpening,
         );
         games.push(game);
         if (includeTrace) console.log(JSON.stringify({ type: "game", ...game }));
