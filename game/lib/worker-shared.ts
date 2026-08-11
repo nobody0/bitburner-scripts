@@ -59,6 +59,17 @@ export interface WorkerGlobals {
   dispatch_done?: WorkerDone[];
   /** Poked by a finishing worker so the controller can wake early. */
   dispatch_wake?: () => void;
+  /** A wake which fired while the controller was between `armWake` calls.
+   * Latching it is essential: losing a weaken completion loses the only
+   * guaranteed minimum-security observation window. */
+  dispatch_wake_pending?: boolean;
+  /** One earliest-deadline timer for pending JIT work. */
+  dispatch_jit_timer?: ReturnType<typeof setTimeout>;
+  dispatch_jit_at?: number;
+  /** Realm-wide trailing-edge debounce for weaken completions. Spread weakens
+   * can finish a few milliseconds apart; the final callback is the one that
+   * proves every fragment has restored minimum security. */
+  dispatch_weaken_timer?: ReturnType<typeof setTimeout>;
 }
 
 export type WorkerGlobalThis = typeof globalThis & WorkerGlobals;

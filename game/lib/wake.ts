@@ -22,10 +22,24 @@ import type { WorkerGlobalThis } from "./worker-shared.ts";
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L398-L431 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L250-L265
  */
 
+/** Signal a controller wake without losing it when the controller is inside
+ * another feature tick and has not armed its promise yet. */
+export function signalWake(globals: WorkerGlobalThis): void {
+  const resolve = globals.dispatch_wake;
+  if (resolve) resolve();
+  else globals.dispatch_wake_pending = true;
+}
+
 /** Install a fresh resolver into `dispatch_wake`. Resolving disarms it, so N
- * completions landing in one engine tick coalesce into a single wake. */
+ * completions landing in one engine tick coalesce into a single wake. A wake
+ * which arrived between arms is consumed immediately. */
 export function armWake(globals: WorkerGlobalThis): Promise<void> {
   return new Promise<void>((resolve) => {
+    if (globals.dispatch_wake_pending) {
+      globals.dispatch_wake_pending = false;
+      resolve();
+      return;
+    }
     globals.dispatch_wake = () => {
       globals.dispatch_wake = undefined;
       resolve();

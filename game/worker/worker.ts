@@ -1,5 +1,7 @@
 import type { NS } from "@ns";
 import { workerGlobals, type WorkerJob } from "../lib/worker-shared.ts";
+import { signalWake } from "../lib/wake.ts";
+import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/jit.ts";
 
 /** Puppet worker: one script file for all modes, launched with
  * `{ threads, temporary: true, ramOverride: perThreadCost }` so its RAM bill
@@ -24,6 +26,19 @@ import { workerGlobals, type WorkerJob } from "../lib/worker-shared.ts";
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L143-L159 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91 */
 
 const IDLE_MS = 5_000;
+
+function wakeDispatcher(kind: "hack" | "grow" | "weaken"): void {
+  const g = workerGlobals();
+  if (kind !== "weaken") {
+    signalWake(g);
+    return;
+  }
+  if (g.dispatch_weaken_timer !== undefined) clearTimeout(g.dispatch_weaken_timer);
+  g.dispatch_weaken_timer = setTimeout(() => {
+    g.dispatch_weaken_timer = undefined;
+    signalWake(g);
+  }, MINIMUM_WORKER_PRECISION_MS);
+}
 
 export async function main(ns: NS): Promise<void> {
   const id = Number(ns.args[0]);
@@ -61,7 +76,7 @@ export async function main(ns: NS): Promise<void> {
     ns.atExit(() => {
       g.worker_info?.delete(id);
       g.dispatch_done?.push({ opId: id, kind: info.kind, target: info.target, threads: info.threads, result });
-      g.dispatch_wake?.();
+      wakeDispatcher(info.kind);
     }, `op${id}`);
     result = await run(info.target, options(info));
     return;
@@ -78,7 +93,7 @@ export async function main(ns: NS): Promise<void> {
       g.dispatch_done?.push({ opId: current.opId, kind: info.kind, target: current.target, threads: info.threads });
     }
     g.dispatch_done?.push({ opId: id, kind: "workerExit", target: "", threads: info.threads });
-    g.dispatch_wake?.();
+    wakeDispatcher(info.kind);
   }, `worker${id}`);
 
   for (;;) {
@@ -109,6 +124,6 @@ export async function main(ns: NS): Promise<void> {
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91
     if (!g.worker_info?.has(id)) return;
     g.dispatch_done?.push({ opId: job.opId, kind: info.kind, target: job.target, threads: info.threads, result });
-    g.dispatch_wake?.();
+    wakeDispatcher(info.kind);
   }
 }

@@ -7,6 +7,68 @@ export interface JitRole {
   gb: number;
   /** Conservative call-to-landing time, including launch guards. */
   holdMs: number;
+  /** Hack and grow are one Netscript call and therefore need one contiguous
+   * host for every concurrent slot. Weaken deliberately omits this: its
+   * additive effect may be spread over slabs. */
+  atomic?: boolean;
+}
+
+/** Measured worker handoff uncertainty. A process which lands at t cannot be
+ * budgeted for another invocation at exactly t: promise continuation, exec
+ * and timer jitter consume a few milliseconds even when the math is exact. */
+export const MINIMUM_WORKER_PRECISION_MS = 5;
+
+export interface JitTopology {
+  /** Placeable GB per host. Standing reservations are already subtracted. */
+  hostBlocksGb: readonly number[];
+  /** Smallest divisible worker block (weaken in the current worker set). */
+  divisibleBlockGb: number;
+}
+
+export interface JitCycleShape {
+  kind: "hwgw" | "hgw";
+  hackGb: number;
+  weaken1Gb: number;
+  growGb: number;
+  weaken2Gb: number;
+}
+
+/** One construction path for both executable dispatch and economic pricing. */
+export function cycleJitRoles(
+  cycle: JitCycleShape,
+  durationMs: (kind: JitRole["kind"]) => number,
+  safetyMs: number,
+): JitRole[] {
+  const role = (
+    roleName: JitRole["role"],
+    kind: JitRole["kind"],
+    gb: number,
+    atomic = false,
+  ): JitRole => ({
+    role: roleName,
+    kind,
+    gb,
+    holdMs: durationMs(kind) + safetyMs,
+    ...(atomic ? { atomic: true } : {}),
+  });
+  return [
+    role("h", "hack", cycle.hackGb, true),
+    ...(cycle.kind === "hwgw" ? [role("w1", "weaken", cycle.weaken1Gb)] : []),
+    role("g", "grow", cycle.growGb, true),
+    role("w2", "weaken", cycle.weaken2Gb),
+  ].filter((entry) => entry.gb > 0);
+}
+
+export function cycleWorstDifficulty(
+  kind: JitCycleShape["kind"],
+  minDifficulty: number,
+  hackThreads: number,
+  growThreads: number,
+): number {
+  const hackFortify = 0.002 * hackThreads;
+  const growFortify = 0.004 * growThreads;
+  const excess = kind === "hgw" ? hackFortify + growFortify : Math.max(hackFortify, growFortify);
+  return Math.min(100, minDifficulty + excess);
 }
 
 export interface JitSchedule {
@@ -95,6 +157,67 @@ export function jitCapacity(roles: readonly JitRole[], intervalMs: number): JitS
   };
 }
 
+/** Check the role envelope against real host topology.
+ *
+ * Total GB is insufficient when the few hosts large enough for atomic H/G
+ * calls are already occupied by other concurrent H/G slots. Pack each atomic
+ * call separately (largest first, best fit), then make sure the residual slabs
+ * can hold the divisible weaken envelope. Trying the two role-group orders as
+ * well as global size order avoids the common two-size greedy pathology while
+ * keeping this cheap enough for every evaluator generation. */
+export function jitTopologyFits(
+  roles: readonly JitRole[],
+  schedule: JitSchedule,
+  topology: JitTopology,
+): boolean {
+  const hosts = topology.hostBlocksGb.filter((gb) => gb > 0);
+  if (hosts.length === 0) return schedule.totalGb <= 1e-9;
+  const atomicRoles = roles.filter((role) => role.atomic && role.gb > 0);
+  const divisibleGb = roles
+    .filter((role) => !role.atomic)
+    .reduce((sum, role) => sum + schedule.quotaGb[role.role], 0);
+  const slotsFor = (role: JitRole): number => Math.ceil(role.holdMs / schedule.intervalMs);
+  const slots = atomicRoles.flatMap((role) => Array.from({ length: slotsFor(role) }, () => role.gb));
+  if (slots.length === 0) {
+    const block = Math.max(1e-9, topology.divisibleBlockGb);
+    return hosts.reduce((sum, gb) => sum + Math.floor((gb + 1e-9) / block) * block, 0) + 1e-9 >= divisibleGb;
+  }
+
+  const pack = (ordered: readonly number[]): boolean => {
+    const free = [...hosts];
+    for (const gb of ordered) {
+      let best = -1;
+      let bestRemainder = Infinity;
+      for (let i = 0; i < free.length; i++) {
+        const remainder = free[i]! - gb;
+        if (remainder >= -1e-9 && remainder < bestRemainder) {
+          best = i;
+          bestRemainder = remainder;
+        }
+      }
+      if (best < 0) return false;
+      free[best] = Math.max(0, bestRemainder);
+    }
+    const block = Math.max(1e-9, topology.divisibleBlockGb);
+    const divisibleCapacity = free.reduce(
+      (sum, gb) => sum + Math.floor((gb + 1e-9) / block) * block,
+      0,
+    );
+    return divisibleCapacity + 1e-9 >= divisibleGb;
+  };
+
+  const descending = [...slots].sort((a, b) => b - a);
+  if (pack(descending)) return true;
+  for (const first of atomicRoles) {
+    const grouped = atomicRoles
+      .flatMap((role) => Array.from({ length: slotsFor(role) }, () => ({ role, gb: role.gb })))
+      .sort((a, b) => Number(b.role === first) - Number(a.role === first) || b.gb - a.gb)
+      .map((entry) => entry.gb);
+    if (pack(grouped)) return true;
+  }
+  return false;
+}
+
 /** Choose the fastest safe cadence, restricted to whole landing intervals so
  * every batch retains the same H/W/G/W slot grid. Undefined means even one
  * reusable slot per role does not fit; the dispatcher then uses its simpler
@@ -103,13 +226,17 @@ export function chooseJitSchedule(
   roles: readonly JitRole[],
   capacityGb: number,
   minimumIntervalMs: number,
+  topology?: JitTopology,
 ): JitSchedule | undefined {
   if (capacityGb <= 0 || minimumIntervalMs <= 0) return undefined;
   const longest = Math.max(minimumIntervalMs, ...roles.map((role) => role.holdMs));
   const factors = Math.ceil(longest / minimumIntervalMs) + 1;
   for (let factor = 1; factor <= factors; factor++) {
     const schedule = jitCapacity(roles, factor * minimumIntervalMs);
-    if (schedule.totalGb <= capacityGb + 1e-9) return schedule;
+    if (
+      schedule.totalGb <= capacityGb + 1e-9 &&
+      (!topology || jitTopologyFits(roles, schedule, topology))
+    ) return schedule;
   }
   return undefined;
 }

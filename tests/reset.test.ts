@@ -33,9 +33,17 @@ describe("prestige invalidation", () => {
   test("hacking drops the dispatcher wake rendezvous with the dead worker fleet", () => {
     const globals = workerGlobals();
     globals.dispatch_wake = () => undefined;
+    globals.dispatch_wake_pending = true;
+    globals.dispatch_weaken_timer = setTimeout(() => undefined, 60_000);
+    globals.dispatch_jit_timer = setTimeout(() => undefined, 60_000);
+    globals.dispatch_jit_at = Date.now() + 60_000;
 
     resetHackingState();
 
     expect(globals.dispatch_wake).toBeUndefined();
+    expect(globals.dispatch_wake_pending).toBe(false);
+    expect(globals.dispatch_weaken_timer).toBeUndefined();
+    expect(globals.dispatch_jit_timer).toBeUndefined();
+    expect(globals.dispatch_jit_at).toBeUndefined();
   });
 });

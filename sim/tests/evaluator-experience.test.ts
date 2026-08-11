@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { initEvaluator, stepEvaluator, type FleetCapacity } from "../../shared/strategy/evaluator.ts";
+import {
+  initEvaluator,
+  projectedRuntimeSecondsPerExp,
+  stepEvaluator,
+  type FleetCapacity,
+} from "../../shared/strategy/evaluator.ts";
 import type { ServerView, WorldView } from "../../shared/world.ts";
 
 const mults = {
@@ -94,5 +99,13 @@ describe("zero-income hacking fallback", () => {
 
     expect(directive.farm?.host).toBe("easy");
     expect(directive.farm?.solution.stockIncomePerBatch).toBeGreaterThan(0);
+  });
+});
+
+describe("experience runtime utility", () => {
+  test("values faster future income over both live horizons and finite sim goals", () => {
+    expect(projectedRuntimeSecondsPerExp(100, 125, 1_000, 3_600)).toBeCloseTo(0.72, 12);
+    expect(projectedRuntimeSecondsPerExp(100, 125, 1_000, 3_600, 10_000)).toBeCloseTo(0.02, 12);
+    expect(projectedRuntimeSecondsPerExp(100, 100, 1_000, 3_600)).toBe(0);
   });
 });

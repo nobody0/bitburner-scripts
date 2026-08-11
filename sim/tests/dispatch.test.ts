@@ -7,8 +7,7 @@ import {
 } from "../../shared/strategy/dispatch.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
 import { PREPPED_MONEY_FRACTION, PREPPED_SEC_TOLERANCE, solvePrep } from "../../shared/strategy/targeting.ts";
-import { coreEffect } from "../../shared/ram/heap.ts";
-import type { Action, CompletionEvent } from "../../shared/world.ts";
+import type { Action, CompletionEvent, HgwAction } from "../../shared/world.ts";
 import { DEFAULT_NETWORK } from "../network.ts";
 import { SimWorld } from "../world.ts";
 
@@ -19,20 +18,21 @@ interface Harness {
   world: SimWorld;
   memory: FarmMemory;
   run(untilMs: number): void;
-  launches: { action: Action; at: number }[];
+  launches: { action: Action; at: number; landing?: number }[];
   completions: { kind: string; at: number; batched: boolean }[];
   samples: { host: string; sec: number; minSec: number; money: number; maxMoney: number }[];
 }
 
-function harness(options: { seed?: number; homeRam?: number; plan?: DispatchOptions } = {}): Harness {
+function harness(options: { seed?: number; homeRam?: number; plan?: DispatchOptions; setup?: (world: SimWorld) => void } = {}): Harness {
   const world = new SimWorld({
     seed: options.seed ?? 1,
     network: DEFAULT_NETWORK,
     homeRam: options.homeRam ?? 64,
     startingMoney: 1_000,
   });
+  options.setup?.(world);
   let memory = initFarm();
-  const launches: { action: Action; at: number }[] = [];
+  const launches: { action: Action; at: number; landing?: number }[] = [];
   const completions: { kind: string; at: number; batched: boolean }[] = [];
   const samples: Harness["samples"] = [];
   const batchedOps = new Set<number>();
@@ -56,9 +56,15 @@ function harness(options: { seed?: number; homeRam?: number; plan?: DispatchOpti
     const failed: number[] = [];
     let executed = 0;
     for (const action of result.actions) {
+      const at = world.clock.now();
+      const landing = (
+        action.type === "hack" || action.type === "grow" || action.type === "weaken"
+      )
+        ? at + world.hgwDurationMs(action.type, world.servers.get(action.target)!) + (action.additionalMsec ?? 0)
+        : undefined;
       if (world.execute(action)) {
         executed++;
-        launches.push({ action, at: world.clock.now() });
+        launches.push({ action, at, ...(landing !== undefined ? { landing } : {}) });
         if (
           "additionalMsec" in action &&
           action.additionalMsec !== undefined &&
@@ -134,6 +140,33 @@ describe("HWGW dispatcher", () => {
     expect(Math.max(...launched.map((action) => action.additionalMsec ?? 0))).toBeLessThanOrEqual(4 * SPACER_MS);
   });
 
+  test("a farm-ready tolerance state can bootstrap into the steady-state JIT envelope", () => {
+    const h = harness({
+      homeRam: 1_024,
+      setup: (world) => {
+        world.person.skills.hacking = 500;
+        for (const server of world.servers.values()) {
+          if (server.hostname === "home") continue;
+          server.hasAdminRights = true;
+          // Both corrections are deliberately larger than the solved
+          // minimum-security roles, but remain inside `isPrepped`.
+          server.hackDifficulty = server.minDifficulty + 0.25;
+          server.moneyAvailable = server.moneyMax * 0.95;
+        }
+      },
+    });
+    h.run(300_000);
+
+    const farm = h.memory.dispatch.evaluator.directive.farm?.host;
+    const farmLaunches = h.launches.filter((entry) =>
+      (entry.action.type === "hack" || entry.action.type === "grow" || entry.action.type === "weaken") &&
+      entry.action.target === farm &&
+      entry.action.phase !== "prep"
+    );
+    expect(farmLaunches.some((entry) => entry.action.type === "hack")).toBe(true);
+    expect(h.memory.dispatch.stats.hacks).toBeGreaterThan(0);
+  });
+
   test("a mode-shape switch discards the old pending JIT suffix", () => {
     const world = new SimWorld({ seed: 2, network: DEFAULT_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
     world.person.skills.hacking = 500;
@@ -155,7 +188,18 @@ describe("HWGW dispatcher", () => {
   });
 
   test("batches land in H -> W1 -> G -> W2 order, one spacer apart", () => {
-    const h = harness({ homeRam: 256 });
+    const h = harness({
+      homeRam: 256,
+      setup: (world) => {
+        world.person.skills.hacking = 500;
+        for (const server of world.servers.values()) {
+          if (server.hostname === "home") continue;
+          server.hasAdminRights = true;
+          server.hackDifficulty = server.minDifficulty;
+          server.moneyAvailable = server.moneyMax;
+        }
+      },
+    });
     h.run(900_000);
 
     // Landings are observed from the world, not recomputed from our own
@@ -304,7 +348,7 @@ describe("prep waves", () => {
     return { world, plan, memory: () => memory };
   }
 
-  test("the grow phase pipelines atomic grows with weaken cover between them", () => {
+  test("the grow phase launches W2 before atomic grows reach their JIT deadlines", () => {
     // A modest deficit (85% money) keeps the whole wave inside the per-pass
     // op cap, so the LAUNCHED thread ratio reflects the plan's G:W2 ratio
     // instead of cap truncation.
@@ -330,12 +374,12 @@ describe("prep waves", () => {
     // At min security the wave is G + W2 TOGETHER: both kinds present, in
     // roughly the 0.004·G/weakenEffect cover ratio (well under 20%).
     expect(waveOps.some((a) => a.type === "hack")).toBe(false);
-    expect(growThreads).toBeGreaterThan(0);
+    // Covers are resident first; grow descriptors remain outside RAM until
+    // their native invocation windows open.
+    expect(growThreads).toBe(0);
     expect(weakenThreads).toBeGreaterThan(0);
-    expect(weakenThreads).toBeLessThan(growThreads * 0.2);
-    expect(actions.find((action) => action.type === "grow")?.additionalMsec ?? 0).toBe(0);
+    expect(launch.memory.dispatch.prepPending.length).toBeGreaterThan(0);
 
-    const target = world.servers.get(farmHost!)!;
     const byLanding = new Map<number, typeof waveOps>();
     for (const action of waveOps) {
       const landing = action.landing;
@@ -344,23 +388,56 @@ describe("prep waves", () => {
       byLanding.set(landing, group);
     }
     const landings = [...byLanding.entries()].sort((a, b) => a[0] - b[0]);
-    expect(landings.length % 2).toBe(0);
-    for (let i = 0; i < landings.length; i += 2) {
-      const growLanding = landings[i]![1];
-      const weakenLanding = landings[i + 1]![1];
-      // Each money step is ONE grow call. Its covering weaken(s) land before
-      // the next grow, so every grow observes minimum security.
-      expect(growLanding).toHaveLength(1);
-      expect(growLanding[0]!.type).toBe("grow");
-      expect(weakenLanding.every((action) => action.type === "weaken")).toBe(true);
-      const growSecurity = growLanding[0]!.threads * 0.004;
-      const weakenSecurity = weakenLanding.reduce(
-        (sum, action) => sum + action.threads * 0.05 * coreEffect(
-          world.servers.get(action.source)?.cpuCores ?? 1,
-        ),
-        0,
-      );
-      expect(weakenSecurity).toBeGreaterThanOrEqual(growSecurity);
+    expect(landings.every(([, group]) => group.every((action) => action.type === "weaken"))).toBe(true);
+  });
+
+  test("pending prep grows actually launch with bounded padding", () => {
+    const h = harness({
+      seed: 3,
+      homeRam: 256,
+      setup: (world) => {
+        world.person.skills.hacking = 500;
+        for (const server of world.servers.values()) {
+          if (server.hostname === "home") continue;
+          server.hasAdminRights = true;
+          server.hackDifficulty = server.minDifficulty;
+          server.moneyAvailable = server.moneyMax * 0.85;
+        }
+      },
+    });
+    h.run(180_000);
+    const prep = h.launches.filter(
+      (entry): entry is { action: HgwAction; at: number; landing: number } =>
+        (entry.action.type === "grow" || entry.action.type === "weaken") &&
+        entry.action.phase === "prep" &&
+        entry.landing !== undefined,
+    );
+    const grows = prep.filter((entry) => entry.action.type === "grow");
+    const weakens = prep.filter((entry) => entry.action.type === "weaken");
+    expect(grows.length).toBeGreaterThan(0);
+    expect(weakens.length).toBeGreaterThan(0);
+    expect(Math.min(...weakens.map((entry) => entry.at))).toBeLessThanOrEqual(Math.min(...grows.map((entry) => entry.at)));
+    expect(Math.max(...grows.map((entry) => entry.action.additionalMsec ?? 0))).toBeLessThanOrEqual(
+      JIT_LAUNCH_GUARD_MS + SPACER_MS,
+    );
+    for (const target of new Set(grows.map((entry) => entry.action.target))) {
+      const targetGrows = grows
+        .filter((entry) => entry.action.target === target)
+        .sort((a, b) => a.landing! - b.landing!);
+      const targetWeakens = weakens.filter((entry) => entry.action.target === target);
+      for (let i = 0; i < targetGrows.length; i++) {
+        const grow = targetGrows[i]!;
+        const cover = targetWeakens.find((weaken) => Math.abs(weaken.landing! - grow.landing! - PREP_ORDER_MS) < 1e-6);
+        expect(cover).toBeDefined();
+        // W2's slower native call is resident before its grow is invoked.
+        expect(cover!.at).toBeLessThanOrEqual(grow.at);
+        if (i > 0) {
+          // Pair N cannot grow until pair N-1's W2 restored minimum security.
+          expect(targetWeakens.some((weaken) =>
+            Math.abs(weaken.landing! - grow.landing! + PREP_ORDER_MS) < 1e-6
+          )).toBe(true);
+        }
+      }
     }
   });
 
@@ -383,10 +460,12 @@ describe("prep waves", () => {
     const weakens = prepOps.filter((action) => action.type === "weaken");
     expect(weakens.length).toBeGreaterThan(1);
     expect(new Set(weakens.map((action) => action.source)).size).toBeGreaterThan(1);
-    expect(new Set(weakens.map((action) => action.additionalMsec ?? 0))).toEqual(new Set([0]));
+    expect(new Set(weakens.map((action) => "additionalMsec" in action ? action.additionalMsec ?? 0 : 0))).toEqual(
+      new Set([JIT_LAUNCH_GUARD_MS]),
+    );
   });
 
-  test("a complete W1 overlaps in flight and lands immediately before G and W2", () => {
+  test("W1 launches first, then W2, while grow waits outside RAM", () => {
     const { world, plan } = prepWorld(0.85);
     for (const server of world.servers.values()) {
       if (server.hostname === "home") continue;
@@ -394,23 +473,15 @@ describe("prep waves", () => {
     }
     const launch = plan();
     const farmHost = launch.directive.farm!.host;
-    const target = world.servers.get(farmHost)!;
     const prepOps = launch.actions.filter(
       (action): action is Extract<Action, { type: "hack" | "grow" | "weaken" }> =>
         (action.type === "grow" || action.type === "weaken" || action.type === "hack") &&
         action.target === farmHost &&
         action.phase === "prep",
     );
-    const landings = prepOps
-      .map((action) => ({
-        kind: action.type,
-        at: world.hgwDurationMs(action.type, target) + (action.additionalMsec ?? 0),
-      }))
-      .sort((a, b) => a.at - b.at);
-    const instants = [...new Map(landings.map((landing) => [landing.at, landing.kind])).entries()];
-    expect(instants.slice(0, 3).map(([, kind]) => kind)).toEqual(["weaken", "grow", "weaken"]);
-    expect(instants[1]![0] - instants[0]![0]).toBe(PREP_ORDER_MS);
-    expect(instants[2]![0] - instants[1]![0]).toBe(PREP_ORDER_MS);
+    expect(prepOps.length).toBeGreaterThan(0);
+    expect(prepOps.every((action) => action.type === "weaken")).toBe(true);
+    expect(launch.memory.dispatch.prepPending.length).toBeGreaterThan(0);
   });
 
   test("transient batch landings cannot start prep before the restoring op", () => {
@@ -491,7 +562,19 @@ describe("prep waves", () => {
 
 describe("shotgun mode", () => {
   test("every op of a wave lands the same tick, in launch order H, G, W — and the bands hold", () => {
-    const h = harness({ homeRam: 512, plan: { modeOverride: "shotgun" } });
+    const h = harness({
+      homeRam: 512,
+      plan: { modeOverride: "shotgun" },
+      setup: (world) => {
+        world.person.skills.hacking = 500;
+        for (const server of world.servers.values()) {
+          if (server.hostname === "home") continue;
+          server.hasAdminRights = true;
+          server.hackDifficulty = server.minDifficulty;
+          server.moneyAvailable = server.moneyMax;
+        }
+      },
+    });
     h.run(900_000);
     expect(h.memory.dispatch.mode).toBe("shotgun");
 

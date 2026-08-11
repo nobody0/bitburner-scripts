@@ -47,6 +47,8 @@ export interface FarmRollup {
     paddingGbMs: number;
     nativeGbMsByKind: { hack: number; grow: number; weaken: number };
     paddingGbMsByKind: { hack: number; grow: number; weaken: number };
+    nativeGbMsBySegment: { farm: number; prep: number; share: number };
+    paddingGbMsBySegment: { farm: number; prep: number; share: number };
   };
   pumpMaxMs?: number;
   /** Cumulative early pumps triggered by worker completions (the

@@ -18,6 +18,10 @@ function cleanupRealm(): void {
   delete g.worker_wake;
   delete g.dispatch_done;
   delete g.dispatch_wake;
+  delete g.dispatch_wake_pending;
+  delete g.dispatch_jit_timer;
+  delete g.dispatch_jit_at;
+  delete g.dispatch_weaken_timer;
 }
 
 interface MockOp {
@@ -54,6 +58,8 @@ describe("serve-mode worker", () => {
     vt = installVirtualTime(clock);
     cleanupRealm();
     const g = workerGlobals();
+    let dispatchWakes = 0;
+    g.dispatch_wake = () => dispatchWakes++;
     g.worker_info!.set(WORKER_ID, { kind: "weaken", target: "alpha", threads: 5, mode: "serve" });
     g.worker_jobs!.set(WORKER_ID, [{ opId: 1, target: "alpha" }]);
     const done: WorkerDone[] = g.dispatch_done!;
@@ -73,6 +79,9 @@ describe("serve-mode worker", () => {
     await drainMicrotasks();
     expect(done).toHaveLength(1);
     expect(done[0]).toMatchObject({ opId: 1, kind: "weaken", target: "alpha", threads: 5, result: 0.25 });
+    expect(dispatchWakes).toBe(0);
+    await clock.runAsync(() => dispatchWakes === 1, 10);
+    expect(dispatchWakes).toBe(1);
 
     // Idle now. A job posted through the mailbox + wake resumes the loop.
     g.worker_jobs!.get(WORKER_ID)!.push({ opId: 2, target: "beta", additionalMsec: 40 });

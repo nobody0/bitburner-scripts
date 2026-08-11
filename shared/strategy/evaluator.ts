@@ -1,5 +1,20 @@
-import { makeHackContext, skillFromExp, weakenTimeSeconds, type HackContext } from "../formulas.ts";
+import {
+  growTimeSeconds,
+  hackTimeSeconds,
+  expForSkill,
+  makeHackContext,
+  skillFromExp,
+  weakenTimeSeconds,
+  type HackContext,
+} from "../formulas.ts";
+import { WORKER_RAM } from "../world.ts";
 import { scoreUpperBound } from "./bounds.ts";
+import {
+  cycleJitRoles,
+  cycleWorstDifficulty,
+  jitCapacity,
+  MINIMUM_WORKER_PRECISION_MS,
+} from "./jit.ts";
 import {
   depthCapGb,
   evaluatePrep,
@@ -52,6 +67,78 @@ export const FARM_SOLVE_SHARE = 0.75;
 export const FLEET_DELTA = 0.1;
 /** Smallest sensible batch cap: one hack thread plus its support. */
 export const WORKER_RAM_FLOOR = 16;
+const JIT_ECONOMICS_GUARD_MS = 230 + MINIMUM_WORKER_PRECISION_MS;
+
+/** Runtime reduction bought by one point of experience at the next cached
+ * skill milestone. With no synthetic money goal (the live game), value the
+ * amount of hacking progress the incumbent would produce over the remaining
+ * route horizon. */
+export function projectedRuntimeSecondsPerExp(
+  currentIncomePerSec: number,
+  futureIncomePerSec: number,
+  expNeeded: number,
+  horizonSec: number,
+  goalRemaining = Infinity,
+): number {
+  if (!(currentIncomePerSec > 0) || !(futureIncomePerSec > currentIncomePerSec) || !(expNeeded > 0)) return 0;
+  const horizon = Math.max(0, horizonSec);
+  const valuedIncome = Math.min(
+    currentIncomePerSec * horizon,
+    Number.isFinite(goalRemaining) ? Math.max(0, goalRemaining) : Infinity,
+  );
+  if (!(valuedIncome > 0)) return 0;
+  const currentSeconds = Math.min(horizon, valuedIncome / currentIncomePerSec);
+  const futureSeconds = Math.min(horizon, valuedIncome / futureIncomePerSec);
+  return Math.max(0, currentSeconds - futureSeconds) / expNeeded;
+}
+
+/** Attach the reusable-role saturation envelope used by economics. This runs
+ * once per solved target/generation, not in the dispatcher hot loop. Dispatch
+ * separately proves that today's atomic host topology can sustain a cadence;
+ * this cap prices how much RAM the fastest legal grid can ultimately use. */
+function withJitEconomics(
+  solution: CycleSolution,
+  statics: TargetStatics,
+  ctx: HackContext,
+): CycleSolution {
+  const worstDifficulty = cycleWorstDifficulty(
+    solution.kind,
+    statics.minDifficulty,
+    solution.hackThreads,
+    solution.growThreads,
+  );
+  const duration = (kind: "hack" | "grow" | "weaken"): number => {
+    if (kind === "hack") return hackTimeSeconds(ctx, worstDifficulty, statics.requiredHackingSkill) * 1_000;
+    if (kind === "grow") return growTimeSeconds(ctx, worstDifficulty, statics.requiredHackingSkill) * 1_000;
+    return weakenTimeSeconds(ctx, worstDifficulty, statics.requiredHackingSkill) * 1_000;
+  };
+  const roles = cycleJitRoles(
+    {
+      kind: solution.kind,
+      hackGb: solution.hackThreads * WORKER_RAM.hack,
+      weaken1Gb: solution.weaken1Threads * WORKER_RAM.weaken,
+      growGb: solution.growThreads * WORKER_RAM.grow,
+      weaken2Gb: solution.weaken2Threads * WORKER_RAM.weaken,
+    },
+    duration,
+    JIT_ECONOMICS_GUARD_MS,
+  );
+  const intervalMs = solution.kind === "hgw" ? 600 : 800;
+  // Saturation prices the FUTURE fleet size which can sustain the fastest
+  // legal landing grid. Using today's slower affordable schedule as the cap is
+  // self-defeating: it declares the RAM that would unlock the next cadence
+  // worthless and prevents infrastructure from ever buying it.
+  const saturation = jitCapacity(roles, intervalMs);
+  const batchesPerSec = 1_000 / intervalMs;
+  const maximumIncomePerSec = (solution.incomePerBatch + solution.stockIncomePerBatch) * batchesPerSec;
+  const maximumExperiencePerSec = solution.experiencePerBatch * batchesPerSec;
+  return {
+    ...solution,
+    jitSaturationGb: saturation.totalGb,
+    maximumIncomePerSec,
+    maximumExperiencePerSec,
+  };
+}
 
 /** Turn an economic yes/no prep decision into executable RAM budgets.
  * Preparation receives only its next placeable wave; farming receives the
@@ -135,6 +222,14 @@ export interface EvaluatorMemory {
   influenceKey: string;
   /** Cumulative count of exhaustive solves skipped by the upper-bound prune. */
   prunedSolves: number;
+  /** Expensive half of experience valuation, cached for one score generation.
+   * Goal/horizon discounting is cheap and remains live at each gate. */
+  skillProjection?: {
+    generation: number;
+    targetSkill: number;
+    expNeeded: number;
+    futureBestIncomePerSec: number;
+  };
 }
 
 export function initEvaluator(): EvaluatorMemory {
@@ -281,8 +376,10 @@ export function stepEvaluator(
     else memory.entries.set(server.hostname, { statics: staticsOf(server), generation: -1 });
   }
 
-  // One solve choke point, shared by the slice and the gate. The prune is
-  // PROVABLY decision-free against both consumers of `ranked`:
+  // One solve choke point, shared by the slice and the gate. The monetary
+  // upper bound proves that skipped targets cannot improve income; the
+  // randomized prune A/B suite pins that the cached experience utility also
+  // leaves the resulting farm and prep decisions unchanged:
   //  - the farm switch compares SCORES (needs > incumbent·1.1), and a pruned
   //    candidate has score ≤ UB ≤ threshold ≤ incumbent score;
   //  - the prep pick compares RATES (economics.ts: rate = score·min(fleetGb,
@@ -317,7 +414,12 @@ export function stepEvaluator(
       return;
     }
     const manipulation = manipulationFor(entry.statics.hostname);
-    if (pruneEnabled && entry !== incumbentEntry && incumbentEntry?.generation === memory.generation && fleetGb > 0) {
+    if (
+      pruneEnabled &&
+      entry !== incumbentEntry &&
+      incumbentEntry?.generation === memory.generation &&
+      fleetGb > 0
+    ) {
       const threshold = farmIncomeRate(incumbentEntry.solution, fleetGb) / fleetGb;
       if (threshold > 0 && scoreUpperBound(ctx, entry.statics, manipulation?.valuePerOp ?? 0) * (1 + 1e-9) <= threshold) {
         entry.solution = undefined;
@@ -325,7 +427,8 @@ export function stepEvaluator(
         return;
       }
     }
-    entry.solution = solveCycle(ctx, entry.statics, 1, caps, manipulation);
+    const solved = solveCycle(ctx, entry.statics, 1, caps, manipulation);
+    entry.solution = solved ? withJitEconomics(solved, entry.statics, ctx) : undefined;
   };
 
   // Round-robin slice: B = clamp(ceil(N/10), 1, 8) targets per tick.
@@ -354,13 +457,70 @@ export function stepEvaluator(
 
   const byHost = new Map(view.servers.map((s) => [s.hostname, s]));
   const experienceRate = (solution: CycleSolution): number =>
-    solution.experienceScore * Math.min(fleetGb, depthCapGb(solution));
-  const ranked = [...memory.entries.values()]
-    .filter((e) => e.solution && byHost.get(e.statics.hostname)?.hasAdminRights)
-    .sort((a, b) => {
-      const dollars = b.solution!.score - a.solution!.score;
-      return dollars !== 0 ? dollars : experienceRate(b.solution!) - experienceRate(a.solution!);
-    });
+    solution.maximumExperiencePerSec !== undefined && solution.jitSaturationGb !== undefined
+      ? solution.maximumExperiencePerSec * Math.min(1, fleetGb / solution.jitSaturationGb)
+      : solution.experienceScore * Math.min(fleetGb, depthCapGb(solution));
+  const eligibleEntries = [...memory.entries.values()]
+    .filter((e) => e.solution && byHost.get(e.statics.hostname)?.hasAdminRights);
+  const bestIncomeRate = eligibleEntries.reduce(
+    (best, entry) => Math.max(best, farmIncomeRate(entry.solution, fleetGb)),
+    0,
+  );
+
+  if (!memory.skillProjection || memory.skillProjection.generation !== memory.generation) {
+    const normalStep = view.player.hackingSkill + Math.max(1, Math.ceil(view.player.hackingSkill * SKILL_DELTA));
+    const nextUnlock = candidates.reduce(
+      (next, server) => server.requiredHackingSkill > view.player.hackingSkill
+        ? Math.min(next, server.requiredHackingSkill)
+        : next,
+      Infinity,
+    );
+    const targetSkill = Math.min(normalStep, nextUnlock);
+    const expNeeded = Math.max(
+      0,
+      expForSkill(targetSkill, view.player.mults.hacking ?? 1) - view.player.hackingExp,
+    );
+    const futureCtx = makeHackContext(
+      { skill: targetSkill, intelligence: view.player.intelligence, mults: view.player.mults },
+      view.nodeMults ?? {},
+    );
+    let futureBestIncomePerSec = bestIncomeRate;
+    for (const server of candidates) {
+      const statics = staticsOf(server);
+      const solved = solveCycle(futureCtx, statics, 1, caps, manipulationFor(server.hostname));
+      if (!solved) continue;
+      const executable = withJitEconomics(solved, statics, futureCtx);
+      futureBestIncomePerSec = Math.max(futureBestIncomePerSec, farmIncomeRate(executable, fleetGb));
+    }
+    memory.skillProjection = {
+      generation: memory.generation,
+      targetSkill,
+      expNeeded,
+      futureBestIncomePerSec,
+    };
+  }
+  const projection = memory.skillProjection;
+  const utilityHorizonS = Math.min(
+    PREP_HORIZON_MAX_MS,
+    Math.max(HORIZON_MIN_MS, horizonCapMs),
+  ) / 1_000;
+  const secondsSavedPerExp = projectedRuntimeSecondsPerExp(
+    bestIncomeRate,
+    projection.futureBestIncomePerSec,
+    projection.expNeeded,
+    utilityHorizonS,
+    goalRemaining,
+  );
+  /** Common currency is BitNode time: direct income advances the best current
+   * completion clock; exp advances the cached next skill/unlock gate. */
+  const runtimeProgressRate = (solution: CycleSolution): number =>
+    (bestIncomeRate > 0 ? farmIncomeRate(solution, fleetGb) / bestIncomeRate : 0) +
+    experienceRate(solution) * secondsSavedPerExp;
+  const ranked = eligibleEntries.sort((a, b) =>
+    runtimeProgressRate(b.solution!) - runtimeProgressRate(a.solution!) ||
+    farmIncomeRate(b.solution, fleetGb) - farmIncomeRate(a.solution, fleetGb) ||
+    experienceRate(b.solution!) - experienceRate(a.solution!),
+  );
   if (ranked.length === 0) {
     memory.directive = { segments: [], ctxGeneration: memory.generation, decidedAt: now };
     return { memory, directive: memory.directive };
@@ -368,7 +528,7 @@ export function stepEvaluator(
 
   const currentHost = memory.directive.farm?.host;
   const current = currentHost ? memory.entries.get(currentHost) : undefined;
-  const currentScore = current?.solution?.score ?? 0;
+  const currentScore = current?.solution ? runtimeProgressRate(current.solution) : 0;
 
   // Memoized per gate: prepOf is consulted by the bestPrepped find, the
   // cold-start value loop and the prep pick — identical inputs within one
@@ -391,7 +551,7 @@ export function stepEvaluator(
   // Horizon bounds how far prep time is amortized (and caps skill staleness).
   // Two ceilings apply: how long the GOAL still needs at the current rate,
   // and how long the RUN is expected to last at all — whichever ends first.
-  const currentRate = currentScore * fleetGb;
+  const currentRate = current?.solution ? farmIncomeRate(current.solution, fleetGb) : 0;
   const goalHorizonMs = currentRate > 0 ? (goalRemaining / currentRate) * 1000 : PREP_HORIZON_MAX_MS;
   // Prep INVESTMENT amortizes over the run, not the 30-minute farm window.
   const prepHorizonMs = Math.min(PREP_HORIZON_MAX_MS, Math.max(HORIZON_MIN_MS, Math.min(goalHorizonMs, horizonCapMs)));
@@ -435,7 +595,7 @@ export function stepEvaluator(
   // farm even when it is cold. The dispatcher will prepare that target through
   // the normal farm path, then batch it. Any positive hacking/manipulation
   // score disables this fallback and remains the primary objective.
-  const noMoneyIncentive = ranked[0]!.solution!.score <= 0;
+  const noMoneyIncentive = bestIncomeRate <= 0;
   const bestExperience = noMoneyIncentive ? ranked[0] : undefined;
   if (bestExperience && bestExperience !== farmEntry && (!farmEntry || dwellOk)) {
     switched = { from: farmEntry?.statics.hostname, to: bestExperience.statics.hostname };
@@ -444,7 +604,7 @@ export function stepEvaluator(
   }
   const bestPrepped = noMoneyIncentive ? undefined : ranked.find((candidate) => prepOf(candidate)?.prepped);
   if (bestPrepped && bestPrepped !== farmEntry) {
-    const better = bestPrepped.solution!.score > currentScore * (1 + SWITCH_MARGIN);
+    const better = runtimeProgressRate(bestPrepped.solution!) > currentScore * (1 + SWITCH_MARGIN);
     const noIncumbent = !farmEntry || !current?.solution;
     if (noIncumbent || (better && dwellOk)) {
       switched = { from: farmEntry?.statics.hostname, to: bestPrepped.statics.hostname };
@@ -530,7 +690,7 @@ export function stepEvaluator(
   const currentRateNow = farmIncomeRate(farmModel, fleetGb);
   let prepEntry: TargetEntry | undefined;
   let prepPlan: PrepPlan | undefined;
-  let bestNet = 0.02 * currentRateNow * (prepHorizonMs / 1_000); // churn epsilon
+  let bestRuntimeNet = 0.02 * (prepHorizonMs / 1_000); // 2% of the valued run window
   for (const candidate of ranked) {
     if (candidate === farmEntry) continue;
     const plan = prepOf(candidate);
@@ -550,8 +710,29 @@ export function stepEvaluator(
       prepGb: candidatePrepGb,
       reinvestmentReturnPerDollarSec: reinvestmentRate,
     });
-    if (!economics || economics.net <= bestNet) continue;
-    bestNet = economics.net;
+    if (!economics) continue;
+    const secondsAfterPrep = Math.max(0, prepHorizonMs / 1_000 - economics.prepSeconds);
+    const currentExpRate = farmModel ? experienceRate(farmModel) : 0;
+    const candidateExpRate = experienceRate(candidate.solution!);
+    // Keep the two effects in their natural units until the final comparison:
+    // economic NPV buys completion seconds at the best current income rate;
+    // experience buys the cached seconds/exp of the next skill or unlock gate.
+    const incomeSeconds = bestIncomeRate > 0 ? economics.net / bestIncomeRate : 0;
+    // The cached conversion describes ONE next skill/unlock milestone. Do not
+    // linearly sell the same runtime saving over and over for every multiple
+    // of expNeeded earned during the horizon; the evaluator will re-score at
+    // the milestone with a fresh context. This was not a harmless optimism:
+    // it could dedicate the whole fleet to an hour-long cold prep for a small
+    // post-prep exp-rate edge.
+    const experienceDelta = (candidateExpRate - currentExpRate) * secondsAfterPrep;
+    const boundedExperienceDelta = Math.max(
+      -projection.expNeeded,
+      Math.min(projection.expNeeded, experienceDelta),
+    );
+    const experienceSeconds = boundedExperienceDelta * secondsSavedPerExp;
+    const runtimeNet = incomeSeconds + experienceSeconds;
+    if (runtimeNet <= bestRuntimeNet) continue;
+    bestRuntimeNet = runtimeNet;
     prepEntry = candidate;
     prepPlan = plan;
   }

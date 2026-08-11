@@ -31,6 +31,22 @@ describe("JIT pipeline capacity", () => {
   test("rejects a fleet that cannot hold one slot for every role", () => {
     expect(chooseJitSchedule(roles, 39, 1_000)).toBeUndefined();
   });
+
+  test("slows down when atomic hack and grow slots compete for the same hosts", () => {
+    const competing: JitRole[] = [
+      { role: "h", kind: "hack", gb: 40, holdMs: 2_000, atomic: true },
+      { role: "g", kind: "grow", gb: 40, holdMs: 2_000, atomic: true },
+      { role: "w2", kind: "weaken", gb: 10, holdMs: 1_000 },
+    ];
+    // 170 GB is enough in aggregate at 1s, and each role independently sees
+    // enough slots. But three hosts can hold only three simultaneous 40 GB
+    // atomic calls, not Hx2 + Gx2. At 2s only H+G are needed and it fits.
+    const schedule = chooseJitSchedule(competing, 170, 1_000, {
+      hostBlocksGb: [60, 60, 50],
+      divisibleBlockGb: 1.75,
+    });
+    expect(schedule?.intervalMs).toBe(2_000);
+  });
 });
 
 describe("latest safe JIT start", () => {

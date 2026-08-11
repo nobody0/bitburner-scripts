@@ -66,6 +66,14 @@ describe("dynamic RAM allocation", () => {
     expect(retainPrepReservation(1.75, 350, true)).toBe(350);
     expect(retainPrepReservation(1.75, 350, false)).toBe(1.75);
   });
+
+  test("prefers the executable JIT role envelope and cadence when available", () => {
+    const m = model({ jitSaturationGb: 60, maximumIncomePerSec: 120 });
+    expect(depthCapGb(m)).toBe(60);
+    expect(farmIncomeRate(m, 30)).toBe(60);
+    expect(farmIncomeRate(m, 60)).toBe(120);
+    expect(farmIncomeRate(m, 1_000)).toBe(120);
+  });
 });
 
 describe("incomePresentValue", () => {

@@ -34,6 +34,10 @@ export interface LedgerOp {
   kind: "hack" | "grow" | "weaken";
   /** REAL threads (fortify scales with these). */
   threads: number;
+  /** Conservative real-thread ceiling when placement is still pending. Grow
+   * may move from a high-core host to a one-core host before JIT launch; its
+   * money effect remains core-adjusted, but its security cost can increase. */
+  fortifyThreads?: number;
   /** Core-adjusted one-core-equivalent threads (grow/weaken strength). */
   effectThreads: number;
   /** ms, same clock as `view.time`. */
@@ -70,12 +74,12 @@ export function predictAtLanding(
       const percent = hackPercent(ctx, sec, statics.requiredHackingSkill);
       const steal = Math.min(1, op.threads * percent);
       money = Math.max(0, money * (1 - steal));
-      sec = Math.min(maxSec, sec + 0.002 * op.threads);
+      sec = Math.min(maxSec, sec + 0.002 * (op.fortifyThreads ?? op.threads));
     } else if (op.kind === "grow") {
       const k = growthLogPerThread(ctx, sec, statics.serverGrowth, 1);
       const grown = (money + op.threads) * (k === -Infinity ? 1 : Math.exp(k * op.effectThreads));
       money = Math.min(statics.moneyMax, grown);
-      sec = Math.min(maxSec, sec + 0.004 * op.threads);
+      sec = Math.min(maxSec, sec + 0.004 * (op.fortifyThreads ?? op.threads));
     } else {
       sec = Math.max(statics.minDifficulty, sec - weakenEffect(ctx, 1, 1) * op.effectThreads);
     }

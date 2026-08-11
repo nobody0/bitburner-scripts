@@ -148,7 +148,8 @@ describe("running game/ in the synthetic world", () => {
 
     // Ops landed, so their atExit poked dispatch_wake — the controller must
     // have run early pumps, not just the 200 ms tick. The throttle (25 ms,
-    // ≤4/frame) means wakePumps < landings, but it must be non-zero: zero
+    // ≤4/frame for ordinary completions; queued weakens bypass it) still
+    // coalesces many landings, but it must be non-zero: zero
     // means the wake resolver was never armed (the pre-wake bug, where
     // spec/targeting.md documented a mechanism that did not exist).
     expect(landed).toBeGreaterThan(0);

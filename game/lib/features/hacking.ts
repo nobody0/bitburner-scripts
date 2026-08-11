@@ -20,6 +20,7 @@ import { gameGlobal } from "../globals.ts";
 import { bestReinvestmentReturnPerDollarSec } from "../income.ts";
 import { buildView, drainCompletions, initDriver, pump, type DriverState } from "../dispatch-driver.ts";
 import { merge, recordProbeFailure, set, type GameState } from "../state.ts";
+import { signalWake } from "../wake.ts";
 import { workerGlobals } from "../worker-shared.ts";
 import { isScriptDeath } from "../errors.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
@@ -64,6 +65,12 @@ export function resetHackingState(): void {
   globals.worker_wake!.clear();
   globals.dispatch_done!.length = 0;
   globals.dispatch_wake = undefined;
+  globals.dispatch_wake_pending = false;
+  if (globals.dispatch_weaken_timer !== undefined) clearTimeout(globals.dispatch_weaken_timer);
+  globals.dispatch_weaken_timer = undefined;
+  if (globals.dispatch_jit_timer !== undefined) clearTimeout(globals.dispatch_jit_timer);
+  globals.dispatch_jit_timer = undefined;
+  globals.dispatch_jit_at = undefined;
   state = initDriver();
   pumpMaxMs = 0;
   lastRollup = 0;
@@ -100,6 +107,27 @@ const WAKE_MAX_PER_FRAME = 4;
 let lastPumpAt = 0;
 let wakesThisFrame = 0;
 let wakePumps = 0;
+
+/** Arm the planner's earliest native-invocation deadline on a realm timer.
+ * The ordinary heartbeat remains the fallback, while this wake avoids paying
+ * another feature's variable frame time as worker padding. */
+function scheduleJitWake(at: number | undefined): void {
+  const globals = workerGlobals();
+  if (at === undefined) {
+    if (globals.dispatch_jit_timer !== undefined) clearTimeout(globals.dispatch_jit_timer);
+    globals.dispatch_jit_timer = undefined;
+    globals.dispatch_jit_at = undefined;
+    return;
+  }
+  if (globals.dispatch_jit_timer !== undefined && (globals.dispatch_jit_at ?? Infinity) <= at + 1) return;
+  if (globals.dispatch_jit_timer !== undefined) clearTimeout(globals.dispatch_jit_timer);
+  globals.dispatch_jit_at = at;
+  globals.dispatch_jit_timer = setTimeout(() => {
+    globals.dispatch_jit_timer = undefined;
+    globals.dispatch_jit_at = undefined;
+    signalWake(globals);
+  }, Math.max(0, at - Date.now()));
+}
 
 export function takePumpMaxMs(): number {
   const value = pumpMaxMs;
@@ -177,6 +205,8 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
       paddingGbMs: stats.paddingRamMs,
       nativeGbMsByKind: stats.nativeRamMsByKind,
       paddingGbMsByKind: stats.paddingRamMsByKind,
+      nativeGbMsBySegment: stats.nativeRamMsBySegment,
+      paddingGbMsBySegment: stats.paddingRamMsBySegment,
     },
     pumpMaxMs: takePumpMaxMs(),
     wakePumps,
@@ -624,6 +654,7 @@ function runPump(
     ...(installSec !== undefined ? { horizonMs: installSec * 1_000 } : {}),
     ...(reinvestmentReturnPerDollarSec > 0 ? { reinvestmentReturnPerDollarSec } : {}),
   });
+  scheduleJitWake(result.nextWakeMs === undefined ? undefined : view.time + result.nextWakeMs);
   const elapsed = Date.now() - started;
   if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
   lastPumpAt = Date.now();
@@ -653,8 +684,13 @@ export function pumpOnWake(
   installSec: number | undefined,
 ): void {
   const now = Date.now();
-  if (now - lastPumpAt < WAKE_MIN_MS) return;
-  if (wakesThisFrame >= WAKE_MAX_PER_FRAME) return;
+  // Ordinary completions are throughput hints and may be coalesced. A queued
+  // weaken is different: after a spread weaken's trailing debounce, this is
+  // the only guaranteed observation point at minimum security. Never discard
+  // that launch window merely because another op woke us a few ms earlier.
+  const weakenWindow = hackingState().globals.dispatch_done?.some((done) => done.kind === "weaken") ?? false;
+  if (!weakenWindow && now - lastPumpAt < WAKE_MIN_MS) return;
+  if (!weakenWindow && wakesThisFrame >= WAKE_MAX_PER_FRAME) return;
   wakesThisFrame++;
   wakePumps++;
   runPump(ns, game, caps, homeReserveGb, fleetReserveGb, installSec);

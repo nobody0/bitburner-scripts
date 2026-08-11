@@ -155,7 +155,7 @@ export function pump(
     pooling?: boolean;
     reinvestmentReturnPerDollarSec?: number;
   } = {},
-): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"] } {
+): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"]; nextWakeMs?: number } {
   const result = planFarm(view, state.memory, completions, {
     homeReserveGb: options.homeReserveGb ?? HOME_RESERVE_GB,
     ...(options.fleetReserveGb ? { fleetReserveGb: options.fleetReserveGb } : {}),
@@ -164,6 +164,7 @@ export function pump(
       : {}),
     ...(options.horizonMs !== undefined ? { horizonMs: options.horizonMs } : {}),
     ...(options.pooling ? { pooling: true } : {}),
+    sourceHosts: state.deployed,
   });
   state.memory = result.memory;
 
@@ -176,7 +177,16 @@ export function pump(
     else failed.push(action.opId);
   }
   if (failed.length > 0) reportFailed(state.memory, failed);
-  return { launched, failed: failed.length, directive: result.directive };
+  const nextWakeMs = result.actions.reduce(
+    (earliest, action) => action.type === "sleep" ? Math.min(earliest, action.ms) : earliest,
+    Infinity,
+  );
+  return {
+    launched,
+    failed: failed.length,
+    directive: result.directive,
+    ...(Number.isFinite(nextWakeMs) ? { nextWakeMs } : {}),
+  };
 }
 
 function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, plannedAt: number): boolean {
@@ -263,10 +273,36 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
 export function resyncHeap(state: DriverState, servers: Record<string, Server>): string[] {
   const drifted: string[] = [];
   for (const server of Object.values(servers)) {
-    if (!state.memory.dispatch.heap.host(server.hostname)) continue;
-    // Our workers are temporary and tracked; anything else on the host is
-    // foreign usage the heap must respect.
-    const drift = state.memory.dispatch.heap.resync(server.hostname, server.ramUsed);
+    const heapHost = state.memory.dispatch.heap.host(server.hostname);
+    if (!heapHost) continue;
+
+    // A worker's process releases real RAM before the controller can drain its
+    // atExit completion. A fleet scan in that interval therefore observes less
+    // RAM than the heap still (correctly) owns; replacing the heap with that
+    // observation and then draining the completion subtracts the same worker
+    // twice. JIT makes this ordinary because many landings can queue during a
+    // sweep. Separate our accounted reservations from observed live workers:
+    // keep every reservation until dispatch consumes its completion, while
+    // still reconciling genuinely foreign RAM whenever no exit is pending.
+    let accountedGb = 0;
+    let liveGb = 0;
+    for (const [opId, tracked] of state.memory.dispatch.tracked) {
+      if (tracked.hostname !== server.hostname || tracked.workerId !== undefined) continue;
+      accountedGb += tracked.gb;
+      if (state.globals.worker_info?.has(opId)) liveGb += tracked.gb;
+    }
+    for (const worker of state.memory.dispatch.pool.workers.values()) {
+      if (worker.hostname !== server.hostname) continue;
+      accountedGb += worker.gb;
+      if (state.globals.worker_info?.has(worker.workerId)) liveGb += worker.gb;
+    }
+    const priorForeignGb = Math.max(0, heapHost.used - accountedGb);
+    const observedForeignGb = Math.max(0, server.ramUsed - liveGb);
+    const pendingExit = accountedGb > liveGb + 0.01;
+    const reconciledUsed = accountedGb + (pendingExit
+      ? Math.max(priorForeignGb, observedForeignGb)
+      : observedForeignGb);
+    const drift = state.memory.dispatch.heap.resync(server.hostname, reconciledUsed);
     if (Math.abs(drift) > 0.05) drifted.push(server.hostname);
   }
   return drifted;

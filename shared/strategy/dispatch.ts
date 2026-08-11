@@ -1,4 +1,6 @@
 import {
+  growthLogPerThread,
+  growThreads,
   growTimeSeconds,
   hackExpGain,
   hackTimeSeconds,
@@ -35,8 +37,11 @@ import {
 } from "./worker-pool.ts";
 import {
   chooseJitSchedule,
+  cycleJitRoles,
+  cycleWorstDifficulty,
   jitCapacity,
   latestJitStart,
+  MINIMUM_WORKER_PRECISION_MS,
   type JitRole,
   type JitSchedule,
 } from "./jit.ts";
@@ -136,6 +141,22 @@ interface PendingJitBatch {
   ops: PendingJitOp[];
 }
 
+/** Prep weaken cover is launched first and owns the landing slot. The atomic
+ * grow waits outside RAM until this deadline. */
+interface PendingPrepGrow {
+  target: string;
+  segment: SegmentKind;
+  kind: "grow";
+  threads: number;
+  /** One-core placement ceiling. W2 covers this, so moving an atomic grow off
+   * the provisional high-core host cannot leave residual security. */
+  maxThreads: number;
+  effectThreads: number;
+  startAt: number;
+  landing: number;
+  stock: boolean;
+}
+
 export interface DispatchStats {
   launched: { hack: number; grow: number; weaken: number };
   landed: { hack: number; grow: number; weaken: number };
@@ -158,6 +179,8 @@ export interface DispatchStats {
   paddingRamMs: number;
   nativeRamMsByKind: { hack: number; grow: number; weaken: number };
   paddingRamMsByKind: { hack: number; grow: number; weaken: number };
+  nativeRamMsBySegment: Record<SegmentKind, number>;
+  paddingRamMsBySegment: Record<SegmentKind, number>;
 }
 
 export interface DispatchMemory {
@@ -174,6 +197,9 @@ export interface DispatchMemory {
   /** Batches whose slow support has been planned but whose shorter operations
    * have not reached their just-in-time launch windows yet. */
   jitPending: PendingJitBatch[];
+  /** Atomic prep grows waiting for their invocation windows. Their covering
+   * W2 calls are already resident, so W2 always starts before G. */
+  prepPending: PendingPrepGrow[];
   /** Farm scheduling mode (shared/strategy/mode.ts) with its flap guard. */
   mode: FarmMode;
   modeSince: number;
@@ -227,6 +253,11 @@ export interface DispatchOptions {
   pooling?: boolean;
   /** A/B valve for staged steady-state launches. Defaults on. */
   jit?: boolean;
+  /** Sources on which the worker bundle is known to exist. The live driver
+   * passes its deployment ledger; the planner simulator omits this because
+   * its actions execute directly. A newly bought/rooted host is not usable RAM
+   * until deployment completes. */
+  sourceHosts?: ReadonlySet<string>;
 }
 
 export function initDispatch(): DispatchMemory {
@@ -241,6 +272,7 @@ export function initDispatch(): DispatchMemory {
     nextServerIndex: 0,
     lastAnchor: -Infinity,
     jitPending: [],
+    prepPending: [],
     mode: "hwgw",
     modeSince: -Infinity,
     modeWhy: "initial",
@@ -259,6 +291,8 @@ export function initDispatch(): DispatchMemory {
       paddingRamMs: 0,
       nativeRamMsByKind: { hack: 0, grow: 0, weaken: 0 },
       paddingRamMsByKind: { hack: 0, grow: 0, weaken: 0 },
+      nativeRamMsBySegment: { farm: 0, prep: 0, share: 0 },
+      paddingRamMsBySegment: { farm: 0, prep: 0, share: 0 },
     },
   };
 }
@@ -272,6 +306,7 @@ function syncTopology(
   view: WorldView,
   homeReserveGb: number,
   fleetReserveGb = 0,
+  sourceHosts?: ReadonlySet<string>,
 ): FleetCapacity {
   // Our own in-flight ops are transient — their RAM frees within one batch
   // cycle, so they must NOT shrink what the solver may plan with. Foreign
@@ -306,6 +341,7 @@ function syncTopology(
     let smallestFitRam = Infinity;
     for (const server of view.servers) {
       if (!server.hasAdminRights || server.hostname === "home" || server.maxRam < 2) continue;
+      if (sourceHosts && !sourceHosts.has(server.hostname)) continue;
       if (server.maxRam > largestRam || (server.maxRam === largestRam && server.hostname < (largest ?? "￿"))) {
         largest = server.hostname;
         largestRam = server.maxRam;
@@ -326,6 +362,20 @@ function syncTopology(
   const freeNowBlocksGb: number[] = [];
   for (const server of view.servers) {
     if (!server.hasAdminRights || server.maxRam < 2) continue;
+    if (sourceHosts && !sourceHosts.has(server.hostname)) {
+      // Keep an existing heap host quarantined too. Merely skipping the fresh
+      // capacity sum leaves its old bucket allocatable after a cloud upgrade
+      // replaced the machine (and therefore erased its scripts).
+      const existing = memory.heap.host(server.hostname);
+      memory.heap.upsert(
+        server.hostname,
+        server.maxRam,
+        existing?.used ?? server.usedRam,
+        server.cpuCores,
+        server.maxRam,
+      );
+      continue;
+    }
     const reserved =
       server.hostname === "home"
         ? homeReserveGb
@@ -409,6 +459,9 @@ export function releaseFailed(memory: DispatchMemory, opIds: Iterable<number>): 
     const tracked = memory.tracked.get(opId);
     if (!tracked) continue;
     if (tracked.jitRole !== undefined) jitFailed = true;
+    if (tracked.wave) {
+      memory.prepPending = memory.prepPending.filter((op) => op.target !== tracked.target);
+    }
     if (tracked.workerId !== undefined) releaseWorker(memory, tracked.workerId);
     release(memory, opId);
   }
@@ -433,6 +486,7 @@ export function dispatch(
   const homeReserveGb = options.homeReserveGb ?? 0;
 
   const byHost = new Map(view.servers.map((s) => [s.hostname, s]));
+  const weakenWakeTargets = new Set<string>();
   for (const completion of completions) {
     if (completion.kind === "sleep") continue;
     if (completion.kind === "workerExit") {
@@ -462,12 +516,19 @@ export function dispatch(
     }
     if (completion.opId !== undefined) {
       const tracked = memory.tracked.get(completion.opId);
+      // A successful weaken completion is the scheduler's only guaranteed
+      // observation point at minimum security once a pipeline is busy. Force
+      // pending deadlines for this target to be folded on this exact pump,
+      // even when their conservative worst-security bound has not opened.
+      if (tracked?.kind === "weaken" && completion.result !== undefined) {
+        weakenWakeTargets.add(tracked.target);
+      }
       if (tracked?.workerId !== undefined) noteJobDone(memory.pool, tracked.workerId, view.time);
       release(memory, completion.opId);
     }
   }
 
-  const capacity = syncTopology(memory, view, homeReserveGb, options.fleetReserveGb ?? 0);
+  const capacity = syncTopology(memory, view, homeReserveGb, options.fleetReserveGb ?? 0, options.sourceHosts);
   const stepped = stepEvaluator(
     view,
     memory.evaluator,
@@ -482,6 +543,8 @@ export function dispatch(
   );
   memory.evaluator = stepped.memory;
   const directive = stepped.directive;
+  const activeTargets = new Set([directive.farm?.host, directive.prep?.host].filter((host): host is string => Boolean(host)));
+  memory.prepPending = memory.prepPending.filter((op) => activeTargets.has(op.target));
 
   // An unlaunched JIT batch contains only support work at this point: hack is
   // always the last native call to start. On a retarget, dropping those plans
@@ -554,6 +617,10 @@ export function dispatch(
         }
       }
       if (Number.isFinite(landingDeadline)) {
+        const nextPrepStart = memory.prepPending
+          .filter((op) => op.target === directive.prep!.host)
+          .reduce((earliest, op) => Math.min(earliest, op.startAt), Infinity);
+        if (Number.isFinite(nextPrepStart)) landingDeadline = Math.min(landingDeadline, nextPrepStart);
         const prepSegment = directive.segments.find((candidate) => candidate.kind === "prep");
         const unusedPrepGb = Math.max(0, (prepSegment?.gb ?? 0) - memory.segmentGb.prep);
         const alreadyBorrowedGb = Math.max(0, memory.segmentGb.farm - segmentCap);
@@ -564,7 +631,7 @@ export function dispatch(
         }
       }
     }
-    const budget = segmentCap - memory.segmentGb[segment.kind];
+    let budget = segmentCap - memory.segmentGb[segment.kind];
     if (budget <= 0) continue;
 
     if (segment.kind === "farm" && directive.farm) {
@@ -648,25 +715,36 @@ export function dispatch(
           shotgun,
           options.jit !== false,
           borrow,
+          capacity.hostBlocksGb,
+          weakenWakeTargets.has(server.hostname),
         );
       } else {
+        launchDuePrep(memory, actions, server, now, launchCtx, segmentCap, weakenWakeTargets.has(server.hostname));
+        budget = segmentCap - memory.segmentGb[segment.kind];
+        if (budget <= 0) continue;
         launchPrepWave(memory, actions, view, server, budget, "farm");
       }
     } else if (segment.kind === "prep" && directive.prep) {
       const server = byHost.get(directive.prep.host);
       if (!server || isPrepped(server)) continue;
+      launchDuePrep(memory, actions, server, now, launchCtx, segmentCap, weakenWakeTargets.has(server.hostname));
+      budget = segmentCap - memory.segmentGb[segment.kind];
+      if (budget <= 0) continue;
       launchPrepWave(memory, actions, view, server, budget, "prep");
     }
   }
 
 
-  // The standalone planner simulator replans on action completions, whereas
-  // the real controller also has a 200 ms heartbeat. Give the former the same
-  // clock edge while a JIT operation is waiting for its launch window. The
-  // game driver intentionally ignores sleep actions because its heartbeat is
-  // already running.
-  if (memory.jitPending.length > 0) {
-    const nextStart = Math.min(...memory.jitPending.flatMap((batch) => batch.ops.map((op) => op.startAt)));
+  // Publish the earliest pending invocation deadline as a pure sleep action.
+  // The standalone planner executes it directly; the game driver turns it
+  // into a cancellable realm-timer wake alongside its 200 ms heartbeat. Both
+  // paths therefore exercise the same schedule without injecting a clock into
+  // strategy code.
+  if (memory.jitPending.length > 0 || memory.prepPending.length > 0) {
+    const nextStart = Math.min(
+      ...memory.jitPending.flatMap((batch) => batch.ops.map((op) => op.startAt)),
+      ...memory.prepPending.map((op) => op.startAt),
+    );
     actions.push({ type: "sleep", ms: nextStart > now ? nextStart - now : SPACER_MS });
   }
 
@@ -735,6 +813,7 @@ function opDurationMs(
 
 function accountRamWork(
   memory: DispatchMemory,
+  segment: SegmentKind,
   kind: "hack" | "grow" | "weaken",
   gb: number,
   nativeMs: number,
@@ -746,6 +825,8 @@ function accountRamWork(
   memory.stats.paddingRamMs += paddingRamMs;
   memory.stats.nativeRamMsByKind[kind] += nativeRamMs;
   memory.stats.paddingRamMsByKind[kind] += paddingRamMs;
+  memory.stats.nativeRamMsBySegment[segment] += nativeRamMs;
+  memory.stats.paddingRamMsBySegment[segment] += paddingRamMs;
 }
 
 /** Highest security an invocation can observe in a correctly interleaved
@@ -762,12 +843,17 @@ function jitWorstDifficultyFor(
   growThreads: number,
   server: ServerView,
 ): number {
-  const hackFortify = 0.002 * hackThreads;
-  const growFortify = 0.004 * growThreads;
-  const excess = kind === "hgw"
-    ? hackFortify + growFortify
-    : Math.max(hackFortify, growFortify);
-  return Math.min(100, server.minDifficulty + excess);
+  // The steady-state peak starts at min security, but `isPrepped` admits a
+  // small residual. That LIVE difficulty is part of the first batch's timing:
+  // using only the lower steady-state peak can make W1 look as though it need
+  // not start yet. If the next controller frame is delayed, the real longer
+  // weaken then misses its landing and the target can never enter steady
+  // state. This conservative bound makes bootstrap W1 launch immediately;
+  // later deadlines are still tightened by `latestJitStart` at weaken wakes.
+  return Math.max(
+    server.hackDifficulty,
+    cycleWorstDifficulty(kind, server.minDifficulty, hackThreads, growThreads),
+  );
 }
 
 function jitRoles(
@@ -777,17 +863,17 @@ function jitRoles(
 ): JitRole[] {
   const difficulty = jitWorstDifficulty(solution, server);
   const required = server.requiredHackingSkill;
-  const hold = (kind: "hack" | "grow" | "weaken") =>
-    opDurationMs(kind, ctx, difficulty, required) + 2 * JIT_LAUNCH_GUARD_MS;
-  const roles: JitRole[] = [
-    { role: "h", kind: "hack", gb: solution.hackThreads * WORKER_RAM.hack, holdMs: hold("hack") },
-    ...(solution.kind === "hwgw"
-      ? [{ role: "w1" as const, kind: "weaken" as const, gb: solution.weaken1Threads * WORKER_RAM.weaken, holdMs: hold("weaken") }]
-      : []),
-    { role: "g", kind: "grow", gb: solution.growThreads * WORKER_RAM.grow, holdMs: hold("grow") },
-    { role: "w2", kind: "weaken", gb: solution.weaken2Threads * WORKER_RAM.weaken, holdMs: hold("weaken") },
-  ];
-  return roles.filter((role) => role.gb > 0);
+  return cycleJitRoles(
+    {
+      kind: solution.kind,
+      hackGb: solution.hackThreads * WORKER_RAM.hack,
+      weaken1Gb: solution.weaken1Threads * WORKER_RAM.weaken,
+      growGb: solution.growThreads * WORKER_RAM.grow,
+      weaken2Gb: solution.weaken2Threads * WORKER_RAM.weaken,
+    },
+    (kind) => opDurationMs(kind, ctx, difficulty, required),
+    JIT_LAUNCH_GUARD_MS + MINIMUM_WORKER_PRECISION_MS,
+  );
 }
 
 function jitLedger(memory: DispatchMemory, host: string): LedgerOp[] {
@@ -816,6 +902,17 @@ function jitLedger(memory: DispatchMemory, host: string): LedgerOp[] {
       });
     }
   }
+  for (const op of memory.prepPending) {
+    if (op.target !== host) continue;
+    ops.push({
+      kind: "grow",
+      threads: op.threads,
+      fortifyThreads: op.maxThreads,
+      effectThreads: op.effectThreads,
+      landing: op.landing,
+      opId: pendingId--,
+    });
+  }
   return ops;
 }
 
@@ -824,7 +921,7 @@ function jitLedger(memory: DispatchMemory, host: string): LedgerOp[] {
  * security boundary only when crossing that boundary would make the desired
  * landing unreachable. */
 function jitStartAt(
-  op: PendingJitOp,
+  op: Pick<PendingJitOp, "kind" | "landing">,
   ledger: readonly LedgerOp[],
   server: ServerView,
   now: number,
@@ -843,12 +940,94 @@ function jitStartAt(
       deltaDifficulty: event.kind === "hack"
         ? 0.002 * event.threads
         : event.kind === "grow"
-          ? 0.004 * event.threads
+          ? 0.004 * (event.fortifyThreads ?? event.threads)
           : -weakenPerThread * event.effectThreads,
     })),
     durationMs: (difficulty) => opDurationMs(op.kind, ctx, difficulty, required),
     launchGuardMs: JIT_LAUNCH_GUARD_MS,
   });
+}
+
+/** Launch prep grows at the closest safe invocation window. Their W2 cover
+ * was launched when the wave was planned, so this function can never emit G
+ * before W2. A weaken-completion pump forces a fresh fold: this is the mature
+ * JIT rendezvous rule which avoids sampling a busy target between effects. */
+function launchDuePrep(
+  memory: DispatchMemory,
+  actions: Action[],
+  server: ServerView,
+  now: number,
+  ctx: HackContext,
+  segmentCapGb: number,
+  weakenWake = false,
+): void {
+  const ops = memory.prepPending.filter((op) => op.target === server.hostname);
+  if (ops.length === 0) return;
+  const ledger = jitLedger(memory, server.hostname);
+  for (const op of ops) {
+    if (weakenWake || op.startAt <= now) op.startAt = jitStartAt(op, ledger, server, now, ctx);
+  }
+  ops.sort((a, b) => a.startAt - b.startAt || a.landing - b.landing);
+
+  let emitted = 0;
+  for (const op of ops) {
+    if (emitted >= MAX_PREP_SLABS_PER_PASS || op.startAt > now) break;
+    const liveDuration = opDurationMs("grow", ctx, server.hackDifficulty, server.requiredHackingSkill);
+    const padding = op.landing - now - liveDuration;
+    if (padding < WORKER_STARTUP_GUARD_MS - 1e-9) {
+      memory.prepPending.splice(memory.prepPending.indexOf(op), 1);
+      memory.stats.batchesSkipped++;
+      continue;
+    }
+    // Re-place the atomic effect at launch time. Holding its provisional host
+    // would turn the reservation itself into the idle RAM JIT removes. The
+    // ACTUAL reservation is the segment-cap authority: charging the one-core
+    // security-cover ceiling here would reject a valid grow that re-lands on
+    // the high-core host deliberately kept free for it.
+    const fallback = memory.heap.allocate(allocFor("grow", op.effectThreads));
+    if (!fallback.ok) {
+      memory.stats.allocFails++;
+      break;
+    }
+    const reservation = fallback.reservation;
+    if (memory.segmentGb[op.segment] + reservation.gb > segmentCapGb + 1e-9) {
+      reservation.release();
+      break;
+    }
+    const block = reservation.blocks[0]!;
+    const opId = memory.nextOpId++;
+    const gb = block.threads * WORKER_RAM.grow;
+    const effectThreads = block.threads * coreEffect(block.cores);
+    actions.push({
+      type: "grow",
+      target: server.hostname,
+      source: block.hostname,
+      threads: block.threads,
+      opId,
+      phase: "prep",
+      ...(padding > 0 ? { additionalMsec: padding } : {}),
+      ...(op.stock ? { stock: true } : {}),
+    });
+    memory.tracked.set(opId, {
+      hostname: block.hostname,
+      target: server.hostname,
+      kind: "grow",
+      segment: op.segment,
+      gb,
+      wave: true,
+      landing: op.landing,
+      effectThreads,
+    });
+    memory.inFlight.grow++;
+    memory.segmentGb[op.segment] += gb;
+    memory.prepInFlight.set(server.hostname, (memory.prepInFlight.get(server.hostname) ?? 0) + 1);
+    memory.stats.launched.grow++;
+    memory.stats.execs++;
+    if (op.stock) memory.stats.stockOps++;
+    accountRamWork(memory, op.segment, "grow", gb, liveDuration, padding);
+    memory.prepPending.splice(memory.prepPending.indexOf(op), 1);
+    emitted++;
+  }
 }
 
 /** Enforce the dependency order inside one JIT batch. A shorter op can have an
@@ -876,6 +1055,7 @@ function launchDueJit(
   ctx: HackContext,
   schedule: JitSchedule,
   segmentCapGb: number,
+  weakenWake = false,
 ): boolean {
   const required = server.requiredHackingSkill;
   const ledger = jitLedger(memory, server.hostname);
@@ -886,7 +1066,7 @@ function launchDueJit(
     // insert a new fortify before it. Re-folding every future op against the
     // whole ledger on every 200 ms tick is quadratic at deep pipelines.
     for (const op of batch.ops) {
-      if (op.startAt <= now) op.startAt = jitStartAt(op, ledger, server, now, ctx);
+      if (weakenWake || op.startAt <= now) op.startAt = jitStartAt(op, ledger, server, now, ctx);
     }
     orderJitStarts(batch.ops);
   }
@@ -922,8 +1102,17 @@ function launchDueJit(
       }
 
       const requestedGb = op.threads * WORKER_RAM[op.kind];
+      // `isPrepped` intentionally admits a small residual security/money
+      // tolerance. The first batch then has a larger W1 and/or G than the
+      // minimum-security steady-state role used to derive `schedule`. Let one
+      // such bootstrap op own its role exclusively: it is still bounded by
+      // the real segment and allocator below, while later steady-state ops
+      // wait for it to clear. Applying the steady-state quota literally here
+      // deadlocks a perfectly usable target forever (no RAM is allocated, so
+      // nothing can change the state that made the role larger).
+      const roleCapGb = Math.max(schedule.quotaGb[op.role], requestedGb);
       if (
-        heldByRole[op.role] + requestedGb > schedule.quotaGb[op.role] + 1e-9 ||
+        heldByRole[op.role] + requestedGb > roleCapGb + 1e-9 ||
         memory.segmentGb.farm + requestedGb > segmentCapGb + 1e-9
       ) {
         // Later operations and batches were sized against this effect. Never
@@ -937,7 +1126,7 @@ function launchDueJit(
       }
       const reservation = allocation.reservation;
       if (
-        heldByRole[op.role] + reservation.gb > schedule.quotaGb[op.role] + 1e-9 ||
+        heldByRole[op.role] + reservation.gb > roleCapGb + 1e-9 ||
         memory.segmentGb.farm + reservation.gb > segmentCapGb + 1e-9
       ) {
         reservation.release();
@@ -972,7 +1161,7 @@ function launchDueJit(
         memory.stats.launched[op.kind]++;
         memory.stats.execs++;
         if (op.stock) memory.stats.stockOps++;
-        accountRamWork(memory, op.kind, gb, liveDuration, padding);
+        accountRamWork(memory, "farm", op.kind, gb, liveDuration, padding);
       }
       heldByRole[op.role] += reservation.gb;
       memory.segmentGb.farm += reservation.gb;
@@ -1077,6 +1266,8 @@ function launchBatches(
   /** Extra prep RAM this pass may borrow. Every op of a batch using it must
    * land before the current prep wave, so the next wave can reclaim it. */
   borrow?: { gb: number; landingDeadline: number },
+  hostBlocksGb?: readonly number[],
+  weakenWake = false,
 ): void {
   const host = server.hostname;
   const difficulty = server.hackDifficulty;
@@ -1095,15 +1286,23 @@ function launchBatches(
   // batch-atomic implementation below.
   if (jit && memory.mode !== "shotgun" && !shotgun && borrow === undefined) {
     const roles = jitRoles(solution, server, ctx);
-    const schedule = chooseJitSchedule(roles, segmentCapGb, intervalMs);
+    const schedule = chooseJitSchedule(
+      roles,
+      segmentCapGb,
+      intervalMs,
+      hostBlocksGb ? { hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken } : undefined,
+    );
     const worstWeakenMs = opDurationMs("weaken", ctx, jitWorstDifficulty(solution, server), required);
     if (schedule && schedule.intervalMs < worstWeakenMs) {
-      const saturation = jitCapacity(roles, intervalMs);
-      memory.depthCapGb = saturation.totalGb;
+      // Saturation is the minimum-interval role envelope, not the envelope of
+      // the slower cadence today's fleet can afford. Infrastructure purchases
+      // may unlock each faster step, so treating the present cadence as an
+      // absolute cap creates a self-fulfilling RAM-growth stall.
+      memory.depthCapGb = solution.jitSaturationGb ?? jitCapacity(roles, intervalMs).totalGb;
       memory.depthCapHost = host;
-      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb)) return;
+      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, weakenWake)) return;
       planJitBatches(memory, solution, server, now, ctx, schedule, influence);
-      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb);
+      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, weakenWake);
       return;
     }
     // Pending batches have not launched their hack yet. If the farm segment
@@ -1255,7 +1454,7 @@ function launchBatches(
       memory.stats.launched[op.kind]++;
       if (op.stock) memory.stats.stockOps++;
       if (!worker || worker.spawn) memory.stats.execs++;
-      accountRamWork(memory, op.kind, gb, op.duration, op.landing - now - op.duration);
+      accountRamWork(memory, "farm", op.kind, gb, op.duration, op.landing - now - op.duration);
     };
 
     if (!pooling) {
@@ -1365,6 +1564,7 @@ function launchPrepWave(
   for (const tracked of memory.tracked.values()) {
     if (tracked.target === server.hostname && tracked.segment === "farm" && !tracked.wave) return;
   }
+  if (memory.prepPending.some((op) => op.target === server.hostname)) return;
   if ((memory.prepInFlight.get(server.hostname) ?? 0) > 0) return;
 
   const ctx = memory.evaluator.ctx;
@@ -1437,6 +1637,7 @@ function launchPrepWave(
       if (kind === "grow" && growInfluences) memory.stats.stockOps++;
       accountRamWork(
         memory,
+        segment,
         kind,
         block.threads * WORKER_RAM[kind],
         nativeLanding[kind] - view.time,
@@ -1450,7 +1651,12 @@ function launchPrepWave(
     }
     return effectThreads;
   };
-  const launchKind = (kind: "weaken" | "grow", wantedThreads: number, opCap: number): number => {
+  const launchKind = (
+    kind: "weaken" | "grow",
+    wantedThreads: number,
+    opCap: number,
+    landing = nativeLanding[kind],
+  ): number => {
     if (wantedThreads < 1 || ops >= opCap) return 0;
     const affordable = Math.floor(budgetRemainingGb / WORKER_RAM[kind]);
     const threads = Math.min(wantedThreads, affordable, memory.heap.capacity(WORKER_RAM[kind]));
@@ -1465,41 +1671,44 @@ function launchPrepWave(
       memory.stats.allocFails++;
       return 0;
     }
-    return emitReservation(kind, allocation.reservation, opCap);
+    return emitReservation(kind, allocation.reservation, opCap, landing);
   };
 
-  // W1, G and W2 may share one in-flight wave; padding, not launch time,
-  // makes security land first. If the complete W1 cannot be reserved, launch
-  // only the partial weaken and defer every grow rather than grow at high
-  // security. Launching the W2 threads as extra
+  // W1, G and W2 may share one in-flight wave, but only the weakens are eager:
+  // launch W1 first, establish W2, and leave G outside RAM until its JIT
+  // deadline. If complete W1 cannot be reserved, launch only the partial
+  // weaken and defer every grow. Launching the W2 threads as extra
   // grows — the old behaviour — over-grew the target and left the grow's
   // security for the NEXT wave's W1 to clean up: self-correcting, but a whole
   // extra weaken-time of prep latency and wasted grow RAM. The cover is sized
   // to the grow that ACTUALLY launched (op cap and budget truncate the plan),
   // with one op slot held back so the grow cannot starve its weaken cover.
   if (plan.weaken1Threads > 0) {
-    const weakened = launchKind("weaken", plan.weaken1Threads, MAX_PREP_OPS_PER_PASS);
+    const w1Landing = nativeLanding.weaken + JIT_LAUNCH_GUARD_MS;
+    const weakened = launchKind("weaken", plan.weaken1Threads, MAX_PREP_OPS_PER_PASS, w1Landing);
     if (weakened + 1e-9 < plan.weaken1Threads) return;
   }
 
   interface GrowWaveReservation {
     grow: Reservation;
     weaken: Reservation;
+    realGrowThreads: number;
+    maxGrowThreads: number;
     effectGrowThreads: number;
   }
-  let firstGrowLanding: number;
-  if (plan.weaken1Threads > 0) {
-    firstGrowLanding = nativeLanding.weaken + PREP_ORDER_MS;
-  } else {
-    // Already at minimum security: the first grow needs no leading weaken and
-    // should land at its native deadline. Its W2 may land later; only the NEXT
-    // grow has to wait until that cover has restored minimum security.
-    firstGrowLanding = nativeLanding.grow;
-  }
-  const firstWeakenLanding = Math.max(nativeLanding.weaken, firstGrowLanding + PREP_ORDER_MS);
+  // W2 is the slow role and therefore establishes the wave. Give its worker a
+  // real startup margin, then place G immediately before it. Later pairs keep
+  // the proven G -> W2 -> G -> W2 landing grid; latestJitStart decides whether
+  // each grow invokes before the first fortify or at a later weaken rendezvous.
+  const w1Landing = plan.weaken1Threads > 0
+    ? nativeLanding.weaken + JIT_LAUNCH_GUARD_MS
+    : undefined;
+  const firstWeakenLanding = w1Landing === undefined
+    ? nativeLanding.weaken + JIT_LAUNCH_GUARD_MS
+    : w1Landing + 2 * PREP_ORDER_MS;
   const pairLandings = (index: number): { grow: number; weaken: number } => ({
-    grow: index === 0 ? firstGrowLanding : firstWeakenLanding + (2 * index - 1) * PREP_ORDER_MS,
-    weaken: index === 0 ? firstWeakenLanding : firstWeakenLanding + 2 * index * PREP_ORDER_MS,
+    grow: firstWeakenLanding + 2 * index * PREP_ORDER_MS - PREP_ORDER_MS,
+    weaken: firstWeakenLanding + 2 * index * PREP_ORDER_MS,
   });
   const reserveGrowWave = (
     effectThreads: number,
@@ -1518,7 +1727,8 @@ function launchPrepWave(
     const growBlock = grow.blocks[0];
     const realGrowThreads = growBlock?.threads ?? 0;
     const effectGrowThreads = realGrowThreads * coreEffect(growBlock?.cores ?? 1);
-    const coverEffectThreads = Math.ceil((0.004 * realGrowThreads) / weakenEffect(ctx, 1, 1));
+    const maxGrowThreads = Math.ceil(effectGrowThreads - 1e-12);
+    const coverEffectThreads = Math.ceil((0.004 * maxGrowThreads) / weakenEffect(ctx, 1, 1));
     const weakenResult = memory.heap.allocate({
       blockSize: WORKER_RAM.weaken,
       threads: coverEffectThreads,
@@ -1535,21 +1745,26 @@ function launchPrepWave(
       grow.release();
       return undefined;
     }
-    return { grow, weaken, effectGrowThreads };
+    return { grow, weaken, realGrowThreads, maxGrowThreads, effectGrowThreads };
   };
 
   const pairs: GrowWaveReservation[] = [];
-  let remainingEffectThreads = plan.growThreads;
+  const growK = growthLogPerThread(ctx, server.minDifficulty, server.serverGrowth, 1);
+  let predictedMoney = server.moneyAvailable;
   let reservedGb = 0;
   let reservedOps = 0;
-  while (remainingEffectThreads >= 1 && reservedOps + 2 <= MAX_PREP_OPS_PER_PASS) {
+  while (predictedMoney < server.moneyMax && reservedOps + 2 <= MAX_PREP_OPS_PER_PASS) {
+    const wantedGrow = growK === -Infinity
+      ? 0
+      : growThreads(growK, server.moneyMax, predictedMoney, server.moneyMax);
+    if (!Number.isFinite(wantedGrow) || wantedGrow < 1) break;
     // Find the largest safe atomic pair on the remaining heap. Feasibility is
     // monotone for a fixed remaining topology: a smaller grow needs no more
     // contiguous RAM and no more weaken cover. Trial reservations are
     // released exactly before the next probe.
     let low = 1;
     let high = Math.min(
-      Math.ceil(remainingEffectThreads),
+      Math.ceil(wantedGrow),
       memory.heap.contiguousCapacity(WORKER_RAM.grow, true),
     );
     let best = 0;
@@ -1571,19 +1786,35 @@ function launchPrepWave(
     pairs.push(pair);
     reservedGb += pair.grow.gb + pair.weaken.gb;
     reservedOps += pair.grow.blocks.length + pair.weaken.blocks.length;
-    remainingEffectThreads -= pair.effectGrowThreads;
+    // Grow has an additive `+ realThreads` term as well as its multiplier.
+    // Re-solving from predicted money makes these genuinely separate atomic
+    // calls; subtracting effect threads would incorrectly model one split call.
+    predictedMoney = Math.min(
+      server.moneyMax,
+      (predictedMoney + pair.realGrowThreads) * Math.exp(growK * pair.effectGrowThreads),
+    );
   }
   if (pairs.length === 0) return;
 
-  // Each grow is one call, but the fleet can carry several pairs at once.
-  // Alternate their landings so pair i's weaken has restored min security
-  // before pair i+1 grows. This is the distributed/slab-friendly equivalent
-  // of one huge atomic grow and avoids the 8 GB-home utilization cliff.
+  // Launch every cover first. Grow reservations above were feasibility probes,
+  // not resident work: release each one and retain only its JIT descriptor.
+  // This is the distributed/slab-friendly equivalent of one huge grow while
+  // preserving the rule that every actual grow is one atomic Netscript call.
   for (let i = 0; i < pairs.length; i++) {
     const pair = pairs[i]!;
     const { grow: growLanding, weaken: weakenLanding } = pairLandings(i);
-    // Cover first in launch order; landing order is still G -> W2.
+    pair.grow.release();
     emitReservation("weaken", pair.weaken, MAX_PREP_OPS_PER_PASS, weakenLanding);
-    emitReservation("grow", pair.grow, MAX_PREP_OPS_PER_PASS, growLanding);
+    memory.prepPending.push({
+      target: server.hostname,
+      segment,
+      kind: "grow",
+      threads: pair.realGrowThreads,
+      maxThreads: pair.maxGrowThreads,
+      effectThreads: pair.effectGrowThreads,
+      startAt: growLanding - (nativeLanding.grow - view.time) - JIT_LAUNCH_GUARD_MS,
+      landing: growLanding,
+      stock: growInfluences,
+    });
   }
 }

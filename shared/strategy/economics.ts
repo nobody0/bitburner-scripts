@@ -22,17 +22,26 @@ export interface FarmRateModel {
   score: number;
   ramPerBatch: number;
   weakenTimeS: number;
+  /** Executable reusable-role envelope. Optional only for older fixtures and
+   * topology-unaware callers. */
+  jitSaturationGb?: number;
+  /** Maximum cadence of the fastest legal reusable-role envelope. */
+  maximumIncomePerSec?: number;
 }
 
 /** GB beyond which more farm RAM earns nothing: the pipeline holds at most
  * one batch per interval for one weakenTime. */
 export function depthCapGb(model: FarmRateModel): number {
+  if (model.jitSaturationGb !== undefined && model.jitSaturationGb > 0) return model.jitSaturationGb;
   return Math.max(1, Math.floor(model.weakenTimeS / BATCH_INTERVAL_S)) * model.ramPerBatch;
 }
 
 /** Farm income in $/sec from `farmGb` of fleet, saturating at the depth cap. */
 export function farmIncomeRate(model: FarmRateModel | undefined, farmGb: number): number {
   if (!model || farmGb <= 0) return 0;
+  if (model.maximumIncomePerSec !== undefined && model.jitSaturationGb !== undefined) {
+    return model.maximumIncomePerSec * Math.min(1, farmGb / model.jitSaturationGb);
+  }
   return model.score * Math.min(farmGb, depthCapGb(model));
 }
 

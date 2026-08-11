@@ -101,13 +101,18 @@ export interface CycleSolution {
   stockIncomePerBatch: number;
   /** Expected hacking experience per batch. Hacks award full experience on
    * success and one quarter on failure; grow/weaken always award the full
-   * per-thread amount. This remains a separate objective: dollars (including
-   * manipulation) always rank first, and experience only breaks a genuinely
-   * zero/equal-dollar choice. */
+   * per-thread amount. It remains in natural exp units here; the evaluator
+   * converts projected skill milestones into BitNode-runtime reduction. */
   experiencePerBatch: number;
   /** Expected hacking experience per GB-second, with the same pipeline cap
    * adjustment as `score` when fleet topology is available. */
   experienceScore: number;
+  /** Reusable JIT role envelope at the fastest legal landing cadence. The
+   * economics layer prefers these limits over the legacy whole-batch/weaken-
+   * depth approximation; dispatch separately checks today's host topology. */
+  jitSaturationGb?: number;
+  maximumIncomePerSec?: number;
+  maximumExperiencePerSec?: number;
 }
 
 export interface PrepPlan {
