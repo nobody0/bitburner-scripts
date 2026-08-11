@@ -4,6 +4,7 @@ import type { SimServer } from "../core/effects.ts";
 import type { Engine } from "../engine.ts";
 import type { HacknetSystem } from "../features/hacknet.ts";
 import type { StockMarketSystem } from "../features/stock.ts";
+import { getBitNodeMultipliers as vendoredBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { StockMarketConstants as STOCK_CONSTANTS } from "../vendor/bitburner/src/StockMarket/data/Constants.ts";
 import { CodingContractName } from "../vendor/bitburner/src/CodingContract/Enums.ts";
 import { unmodeled } from "../realm/unmodeled.ts";
@@ -383,6 +384,20 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     // --- world reads ----------------------------------------------------
     getPlayer: (): Player => world.playerRecord(),
     getResetInfo: (): ResetInfo => host.reset,
+    getBitNodeMultipliers: (n?: number, lvl?: number) => {
+      const currentNode = host.reset.currentNode ?? world.bitnode;
+      const sf5 = host.reset.ownedSF?.get(5) ?? world.player.sourceFiles["5"] ?? 0;
+      if (currentNode !== 5 && sf5 <= 0) {
+        throw new Error("getBitNodeMultipliers: requires BitNode 5 or Source-File 5");
+      }
+      const node = n ?? currentNode;
+      const level = lvl ?? (
+        node === 12
+          ? (host.reset.ownedSF?.get(12) ?? world.player.sourceFiles["12"] ?? 0) + (currentNode === 12 ? 1 : 0)
+          : 1
+      );
+      return { ...vendoredBitNodeMultipliers(node, level) };
+    },
     getMoneySources: () => structuredClone(world.moneySources),
     getTotalScriptIncome: (): [number, number] => {
       let current = 0;

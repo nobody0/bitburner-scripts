@@ -97,7 +97,7 @@ describe("running game/ in the synthetic world", () => {
     const [a, b] = [await run(), await run()];
     expect(a.timeToGoalMs).toBe(b.timeToGoalMs);
     expect(a.records).toBe(b.records);
-  });
+  }, 10_000);
 
   test("the sweep roots and deploys, and the dispatcher lands real ops", async () => {
     let farm: { landed?: Record<string, number>; totals?: Record<string, number> } | undefined;

@@ -612,6 +612,13 @@ describe("the unlock ladder", () => {
     const { decision } = run(view({ hasWseAccount: false, totalMoney: 1e12 }), 1, () => true);
     expect(decision.plan.blocker).toContain("WSE");
     expect(decision.plan.unlock?.action.type).toBe("buyWse");
+    expect(decision.plan.unlock?.investmentCost).toBe(5.2e9);
+    expect(decision.plan.unlock?.paybackSec).toBe(
+      decision.plan.unlock!.investmentCost / decision.plan.unlock!.gainPerSec,
+    );
+    expect(decision.plan.unlock?.netOverHorizon).toBe(
+      decision.plan.unlock!.gainPerSec * 86_400 - decision.plan.unlock!.investmentCost,
+    );
     expect(decision.plan.unlock?.why).toContain("both are priced together");
   });
 

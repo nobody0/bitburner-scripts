@@ -18,7 +18,7 @@ import {
   type StockView,
 } from "../../../shared/strategy/stock/decide.ts";
 import { resetHistory } from "../../../shared/strategy/stock/history.ts";
-import type { StockManipulation, StockPlan as StockPlanDigest } from "../../../shared/telemetry/topics/stock.ts";
+import type { StockManipulation, StockPlan as StockPlanDigest, StockState } from "../../../shared/telemetry/topics/stock.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge } from "../state.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
@@ -54,17 +54,18 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
 /** Worst single dodge step this feature needs, priced from the ns costs rather
  * than guessed (`GetStock` 2 GB, `BuySellStock` 2.5 GB):
  *
- *  - the ACTION batch, at 12 GB: `getPosition` 2 (read inside the trade, so a
+ *  - the ACTION batch, at 12.1 GB: `getPosition` 2 (read inside the trade, so a
  *    buy is idempotent) + `sellStock` 2.5 + `sellShort` 2.5 + one of
  *    `buyStock`/`buyShort` 2.5 + one unlock purchase 2.5. Only one entry side and
- *    one unlock can appear in a plan, which is what bounds it here;
- *  - `stock.tick`, at 10 GB: `getSymbols` + `getAskPrice` + `getBidPrice` +
- *    `getPosition` + `getMaxShares`;
+ *    one unlock can appear in a plan, which is what bounds it here, plus the
+ *    0.1 GB cash read that keeps wealth coherent;
+ *  - `stock.tick`, at 10.1 GB: `getSymbols` + `getAskPrice` + `getBidPrice` +
+ *    `getPosition` + `getMaxShares` + the same cash read;
  *  - `stock.forecast`, at 7 GB, and `stock.account` at 0.2 GB.
  *
  * The old declaration was 8 GB, which under-priced the 11.5 GB forecast probe of
  * the time — a home reserve too small for the step it was reserving for. */
-const PEAK_STEP_GB = 12;
+const PEAK_STEP_GB = 12.1;
 
 let memory: StockMemory = initStockMemory();
 let lastPlan: StockPlan | undefined;
@@ -258,17 +259,27 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
   const outcome = await featureDodge(ctx, "stock", claimId, methods, (stubNs: NS) => {
     const out: string[] = [];
     const touched = new Set<string>();
+    const access: Partial<Pick<StockState, "hasWseAccount" | "hasTixApiAccess" | "has4SDataApi">> = {};
     for (const action of actions) {
       switch (action.type) {
-        case "buyWse":
-          out.push(stubNs["stock"]["purchaseWseAccount"]() ? "bought WSE account" : "WSE refused");
+        case "buyWse": {
+          const bought = stubNs["stock"]["purchaseWseAccount"]();
+          if (bought) access.hasWseAccount = true;
+          out.push(bought ? "bought WSE account" : "WSE refused");
           break;
-        case "buyTix":
-          out.push(stubNs["stock"]["purchaseTixApi"]() ? "bought TIX API" : "TIX refused");
+        }
+        case "buyTix": {
+          const bought = stubNs["stock"]["purchaseTixApi"]();
+          if (bought) access.hasTixApiAccess = true;
+          out.push(bought ? "bought TIX API" : "TIX refused");
           break;
-        case "buy4SApi":
-          out.push(stubNs["stock"]["purchase4SMarketDataTixApi"]() ? "bought 4S API" : "4S API refused");
+        }
+        case "buy4SApi": {
+          const bought = stubNs["stock"]["purchase4SMarketDataTixApi"]();
+          if (bought) access.has4SDataApi = true;
+          out.push(bought ? "bought 4S API" : "4S API refused");
           break;
+        }
         case "buy": {
           touched.add(action.sym);
           const [long, , short] = stubNs["stock"]["getPosition"](action.sym as never);
@@ -306,7 +317,9 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
     }
     return {
       detail: out,
+      access,
       holdings: Object.fromEntries([...touched].map((sym) => [sym, stubNs["stock"]["getPosition"](sym as never)])),
+      cash: stubNs["getServerMoneyAvailable"]("home"),
     };
   });
   if (!outcome.ok) {
@@ -328,13 +341,16 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
       costBasis: shares * avgPx + sharesShort * avgPxShort,
     };
   });
-  if (Object.keys(holdings).length > 0) {
-    merge(ctx.state, "stock", {
+  const portfolioValue = positions.reduce((sum, position) => sum + position.value, 0);
+  merge(ctx.state, "stock", {
+    ...outcome.value.access,
+    wealth: outcome.value.cash + portfolioValue,
+    ...(Object.keys(holdings).length > 0 ? {
       positions,
-      portfolioValue: positions.reduce((sum, position) => sum + position.value, 0),
+      portfolioValue,
       portfolioCost: positions.reduce((sum, position) => sum + position.costBasis, 0),
-    });
-  }
+    } : {}),
+  });
   lastResult = { action: actions[0]!.type, ok: true, detail: outcome.value.detail.join("; "), at };
 }
 
@@ -350,8 +366,6 @@ const driver: FeatureDriver = {
 
     const actions = fundedActions(decision.plan, stockGrants(decision.plan, ctx));
     merge(ctx.state, "stock", {
-      // Cash and liquidation value from the same pre-trade snapshot.
-      wealth: view.totalMoney + view.portfolioValue,
       market: {
         tick: decision.plan.observedTicks,
         ...(decision.plan.ticksUntilCycle !== undefined ? { ticksUntilCycle: decision.plan.ticksUntilCycle } : {}),
@@ -420,6 +434,7 @@ function planDigest(plan: StockPlan, actions: readonly StockAction[], liquidate:
           unlock: {
             type: plan.unlock.action.type,
             cost: plan.unlock.cost,
+            investmentCost: plan.unlock.investmentCost,
             gainPerSec: plan.unlock.gainPerSec,
             paybackSec: plan.unlock.paybackSec,
             netOverHorizon: plan.unlock.netOverHorizon,
@@ -475,7 +490,7 @@ function claims(ctx: ClaimContext): Claim[] {
       // smaller version of this purchase.
       divisible: false,
       ratePerSec: plan.unlock.gainPerSec,
-      returnPerDollarSec: plan.unlock.gainPerSec / Math.max(1, plan.unlock.cost),
+      returnPerDollarSec: plan.unlock.gainPerSec / Math.max(1, plan.unlock.investmentCost),
       why: plan.unlock.why,
     });
   }
@@ -511,6 +526,7 @@ function stockClaimId(actions: readonly StockAction[]): string {
 
 function stockMethods(actions: readonly StockAction[]): readonly string[] {
   const methods = new Set<string>();
+  if (actions.length > 0) methods.add("getServerMoneyAvailable");
   for (const action of actions) {
     switch (action.type) {
       case "buyWse":
@@ -545,4 +561,10 @@ export const stockModule: FeatureModule = {
   },
   claims,
   peakStepGb: PEAK_STEP_GB,
+  // Outside BN8, the base reserve already fits account observation and either
+  // half of WSE/TIX acquisition. The 12.1 GB market/trade reserve has value
+  // only after TIX exists. BN8 keeps it from the first pass because TIX is a
+  // node starting condition that may not have reached the topic yet.
+  reserveStepGb: (state, caps) =>
+    caps.bitNode === 8 || state.topics.stock?.hasTixApiAccess === true ? PEAK_STEP_GB : 0,
 };

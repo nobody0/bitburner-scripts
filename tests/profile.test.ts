@@ -81,6 +81,28 @@ describe("simulation profiles", () => {
     expect(() => findProfile("nope")).toThrow(/unknown profile/);
   });
 
+  test("the BN5 stock treatment changes only the feature under test", () => {
+    const control = findProfile("bn5-hacking");
+    const treatment = findProfile("bn5-hacking-stock");
+
+    expect(treatment.bitnode).toBe(control.bitnode);
+    expect(treatment.goals).toEqual(control.goals);
+    expect(treatment.horizon).toBe(control.horizon);
+    expect(treatment.seeds).toEqual(control.seeds);
+    expect(treatment.startingMoney).toBe(control.startingMoney);
+    expect(treatment.homeRam).toBe(control.homeRam);
+    expect(treatment.world).toBe(control.world);
+
+    expect(control.features?.stock).toBe("off");
+    expect(treatment.features?.stock).toBeUndefined();
+    for (const feature of Object.keys(control.features ?? {})) {
+      if (feature !== "stock") {
+        expect(treatment.features?.[feature as keyof NonNullable<typeof treatment.features>])
+          .toBe(control.features?.[feature as keyof NonNullable<typeof control.features>]);
+      }
+    }
+  });
+
 });
 
 describe("faction goals", () => {

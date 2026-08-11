@@ -630,6 +630,19 @@ describe("feature modules", () => {
       expect(gb, `${id} declares a non-positive peak step`).toBeGreaterThan(0);
     }
   });
+
+  test("stock reserves its expensive steps only when the market can use them", () => {
+    const state = freshState();
+    const bn1 = deriveCapabilities({ bitNode: 1, sourceFiles: {} });
+    expect(featureRamDemand(state, bn1).stock).toBe(0);
+
+    state.topics.stock = { hasTixApiAccess: true } as GameState["topics"]["stock"];
+    expect(featureRamDemand(state, bn1).stock).toBe(12.1);
+
+    delete state.topics.stock;
+    const bn8 = deriveCapabilities({ bitNode: 8, sourceFiles: {} });
+    expect(featureRamDemand(state, bn8).stock).toBe(12.1);
+  });
 });
 
 describe("feature drivers", () => {

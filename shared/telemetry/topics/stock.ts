@@ -118,7 +118,14 @@ export interface StockPlan {
     holdTicks: number;
     breakEvenTicks: number;
   };
-  unlock?: { type: string; cost: number; gainPerSec: number; paybackSec: number; netOverHorizon: number };
+  unlock?: {
+    type: string;
+    cost: number;
+    investmentCost: number;
+    gainPerSec: number;
+    paybackSec: number;
+    netOverHorizon: number;
+  };
   /** Nothing held, nothing pending, nothing wanted. `progression` reads THIS as
    *  its install barrier rather than scanning `positions`: a snapshot says nothing
    *  about intent, and a position about to be opened or an exit not yet executed

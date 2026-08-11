@@ -101,6 +101,31 @@ const CYBERSEC_CADENCE_WORLD: NonNullable<SimProfile["world"]> = {
   },
 };
 
+/** Cross-node stock fixture. This is a reachable mid-run BN5 state rather than
+ * free market access: the controller must decide whether WSE + TIX are worth
+ * their real $5.2b cost. Every omega-net field is a vendored upstream value
+ * (the midpoint where upstream declares a range), and the paired profiles
+ * differ only by whether the stock feature is enabled. */
+const BN5_STOCK_WORLD: NonNullable<SimProfile["world"]> = {
+  network: [
+    {
+      hostname: "omega-net",
+      organizationName: "Omega Software",
+      hackDifficulty: 30,
+      moneyAvailable: 65_000_000,
+      requiredHackingSkill: 200,
+      serverGrowth: 35,
+      numOpenPortsRequired: 2,
+      maxRam: 32,
+    },
+  ],
+  person: {
+    skills: { hacking: 300 },
+    exp: { hacking: calculateExp(300) },
+  },
+  homeFiles: ["BruteSSH.exe", "FTPCrack.exe"],
+};
+
 export const PROFILES: readonly SimProfile[] = [
   {
     id: "bn1-speedrun",
@@ -130,6 +155,32 @@ export const PROFILES: readonly SimProfile[] = [
     goals: ["earn:1e6"],
     horizon: "1h",
     seeds: [1, 2, 3, 4, 5],
+  },
+  {
+    id: "bn5-hacking",
+    description:
+      "BN5 control: hacking alone grows a $12b mid-run bankroll to $20b on the vendored omega-net midpoint.",
+    bitnode: 5,
+    features: only("hacking", "progression"),
+    goals: ["wealth:20e9"],
+    horizon: "12h",
+    seeds: [1, 2, 3],
+    startingMoney: 12e9,
+    homeRam: 512,
+    world: BN5_STOCK_WORLD,
+  },
+  {
+    id: "bn5-hacking-stock",
+    description:
+      "BN5 treatment: the identical hacking run may buy and trade stocks through the shared money arbiter.",
+    bitnode: 5,
+    features: only("hacking", "stock", "progression"),
+    goals: ["wealth:20e9"],
+    horizon: "12h",
+    seeds: [1, 2, 3],
+    startingMoney: 12e9,
+    homeRam: 512,
+    world: BN5_STOCK_WORLD,
   },
   {
     id: "factions-join",

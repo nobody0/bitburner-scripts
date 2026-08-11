@@ -799,7 +799,14 @@ const stockTick: DodgedProbe = {
   everyMs: SEC_4,
   merge: true,
   when: (_caps, topics) => topics.stock?.hasTixApiAccess === true,
-  methods: ["stock.getSymbols", "stock.getAskPrice", "stock.getBidPrice", "stock.getPosition", "stock.getMaxShares"],
+  methods: [
+    "stock.getSymbols",
+    "stock.getAskPrice",
+    "stock.getBidPrice",
+    "stock.getPosition",
+    "stock.getMaxShares",
+    "getServerMoneyAvailable",
+  ],
   run(stubNs: NS) {
     const positions = [];
     let portfolioValue = 0;
@@ -828,7 +835,8 @@ const stockTick: DodgedProbe = {
         costBasis,
       });
     }
-    return [emitPartial("stock", { positions, portfolioValue, portfolioCost })];
+    const cash = stubNs["getServerMoneyAvailable"]("home");
+    return [emitPartial("stock", { positions, portfolioValue, portfolioCost, wealth: cash + portfolioValue })];
   },
 };
 

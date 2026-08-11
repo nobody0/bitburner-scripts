@@ -243,7 +243,12 @@ export interface PositionTarget {
 
 export interface UnlockPurchase {
   action: StockAction;
+  /** Cash this action spends now. */
   cost: number;
+  /** Full capital required to realize the quoted gain. For WSE this includes
+   * the still-unbought TIX API; advertising the pair's gain against WSE's
+   * $200m action cost would overstate its ROI by 26x in the shared arbiter. */
+  investmentCost: number;
   /** $/sec the unlock is expected to add. */
   gainPerSec: number;
   paybackSec: number;
@@ -772,7 +777,7 @@ function propose(
   cost: number,
   gainPerSec: number,
   horizonSec: number,
-  cashNeeded: number,
+  investmentCost: number,
   view: StockView,
   rationale: string,
 ): UnlockPurchase | undefined {
@@ -780,20 +785,21 @@ function propose(
   // Spending the whole bankroll on the unlock leaves nothing to trade with,
   // which makes the purchase worthless the instant it completes. Twice the cash
   // needed is the minimum that leaves a working position behind.
-  if (view.totalMoney < cashNeeded * 2) return undefined;
-  const netOverHorizon = gainPerSec * horizonSec - cost;
+  if (view.totalMoney < investmentCost * 2) return undefined;
+  const netOverHorizon = gainPerSec * horizonSec - investmentCost;
   if (!(netOverHorizon > 0)) return undefined;
-  const paybackSec = cost / gainPerSec;
+  const paybackSec = investmentCost / gainPerSec;
   if (paybackSec > horizonSec) return undefined;
   return {
     action,
     cost,
+    investmentCost,
     gainPerSec,
     paybackSec,
     netOverHorizon,
     why:
       `${rationale}; ${formatMoney(gainPerSec)}/sec pays back ` +
-      `${formatMoney(cost)} in ${Math.round(paybackSec)}s of ${Math.round(horizonSec)}s left`,
+      `${formatMoney(investmentCost)} in ${Math.round(paybackSec)}s of ${Math.round(horizonSec)}s left`,
   };
 }
 

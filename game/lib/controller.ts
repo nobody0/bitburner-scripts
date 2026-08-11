@@ -495,7 +495,7 @@ function computeReserve(
   const home = state.topics.servers?.["home"];
   const result = homeReserveGb({
     enabled: FEATURE_IDS.filter((id) => active.unlocked[id] === "yes"),
-    demand: featureRamDemand(),
+    demand: featureRamDemand(state, active),
     homeMaxRam: home?.maxRam ?? 8,
   });
   const previous = state.topics.progression?.homeReserve;

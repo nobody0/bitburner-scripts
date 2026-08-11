@@ -8,9 +8,10 @@ import { mulberry32 } from "../core/rng.ts";
 import { FactionSystem } from "../features/factions.ts";
 import { makeSingularity } from "../ns/singularity.ts";
 
-function harness(programs: string[] = [], withStock = false): { ns: NS; host: SimNsHost; world: SimWorld } {
+function harness(programs: string[] = [], withStock = false, bitnode = 1): { ns: NS; host: SimNsHost; world: SimWorld } {
   const world = new SimWorld({
     seed: 1,
+    bitnode,
     network: [{
       hostname: "n00dles",
       hackDifficulty: 1,
@@ -34,8 +35,8 @@ function harness(programs: string[] = [], withStock = false): { ns: NS; host: Si
     contents: new Map(),
     scripts: new Map(),
     network: new Map([["home", ["n00dles"]], ["n00dles", ["home"]]]),
-    ramCtx: {},
-    reset: {} as ResetInfo,
+    ramCtx: { bitNode: bitnode },
+    reset: { currentNode: bitnode, ownedSF: new Map() } as ResetInfo,
     output: [],
     crashes: [],
   };
@@ -205,6 +206,15 @@ describe("Netscript contract fidelity", () => {
   test("the 4S script API purchase requires TIX access", () => {
     const { ns } = harness([], true);
     expect(() => ns.stock.purchase4SMarketDataTixApi()).toThrow("no TIX API access");
+  });
+
+  test("BitNode multipliers are available in BN5 and gated elsewhere", () => {
+    const locked = harness().ns;
+    expect(() => locked.getBitNodeMultipliers()).toThrow("requires BitNode 5 or Source-File 5");
+
+    const bn5 = harness([], false, 5).ns.getBitNodeMultipliers();
+    expect(bn5.ScriptHackMoney).toBe(0.15);
+    expect(bn5.FourSigmaMarketDataApiCost).toBe(1);
   });
 
   test("a fresh stock market has an authoritatively empty order book", () => {

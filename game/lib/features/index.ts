@@ -158,6 +158,9 @@ export interface FeatureModule {
    *  next to the driver so it cannot drift from the probe, and folded into the
    *  home reserve by shared/ram/reserve.ts. */
   peakStepGb?: number;
+  /** Optional state-aware demand below the declared peak. This is pure and may
+   * only reduce RAM for a phase where the expensive step cannot run yet. */
+  reserveStepGb?(state: GameState, caps: Capabilities): number;
 }
 
 export const FEATURE_MODULES: Readonly<Record<FeatureId, FeatureModule>> = {
@@ -191,11 +194,18 @@ export function resetAllFeatures(state: GameState, kind: PrestigeKind): void {
   for (const id of FEATURE_IDS) FEATURE_MODULES[id].reset?.(state, kind);
 }
 
-/** Peak dodge step per enabled feature, for shared/ram/reserve.ts. */
-export function featureRamDemand(): Partial<Record<FeatureId, number>> {
+/** Current dodge step per enabled feature, for shared/ram/reserve.ts. Without
+ * state, return every declared peak for static validation and reporting. */
+export function featureRamDemand(
+  state?: GameState,
+  caps?: Capabilities,
+): Partial<Record<FeatureId, number>> {
   const demand: Partial<Record<FeatureId, number>> = {};
   for (const id of FEATURE_IDS) {
-    const peak = FEATURE_MODULES[id].peakStepGb;
+    const module = FEATURE_MODULES[id];
+    const peak = state && caps && module.reserveStepGb
+      ? module.reserveStepGb(state, caps)
+      : module.peakStepGb;
     if (peak !== undefined) demand[id] = peak;
   }
   return demand;
