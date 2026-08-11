@@ -13,6 +13,7 @@ import {
   isGoRewardOpponent,
   playMove,
   prepareGoDecision,
+  usesExactGoForecast,
   finalizeGoDecision,
   scoreBoard,
   territory as goTerritory,
@@ -23,7 +24,7 @@ import {
   type GoRewardOpponent,
   type GoView,
 } from "../../../shared/strategy/go/decide.ts";
-import { goFavorRepCap, rankGoGames, type GoEtaDemand } from "../../../shared/strategy/go/rewards.ts";
+import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand } from "../../../shared/strategy/go/rewards.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
@@ -858,9 +859,14 @@ const go: FeatureDriver = {
       opponent: topic.opponent,
       status: topic.status,
       previousBoards: topic.previousBoards,
-      ...(topic.komi !== undefined ? { komi: topic.komi } : {}),
+      // resetBoardState returns the new board before the core probe refreshes
+      // its metadata. Komi is immutable opponent data, so use the pinned
+      // public constant during that one-pass gap and keep live/arena choices
+      // identical even when the policy book has no exact board entry.
+      komi: topic.komi ?? GO_REWARD_RULES[topic.opponent].komi,
       ...(topic.bonusCycles !== undefined ? { bonusCycles: topic.bonusCycles } : {}),
       currentWinStreak: stats.find((entry) => entry.opponent === topic.opponent)?.winStreak ?? 0,
+      consecutivePasses: topic.lastTurn?.opponentResponse?.type === "pass" ? 1 : 0,
       nextGame: {
         opponent: preferred.opponent,
         boardSize: preferred.boardSize,
@@ -872,7 +878,7 @@ const go: FeatureDriver = {
     // inside the dodge immediately before the Go call, so planning never
     // reserves a future tick or sleeps merely to make a seed reachable.
     const planStartedAt = Date.now();
-    const exactForecast = view.board.size === 5;
+    const exactForecast = usesExactGoForecast(view);
     const prepared = prepareGoDecision(view, exactForecast);
     const preparationMs = Date.now() - planStartedAt;
     decision = prepared.immediate ?? finalizeGoDecision(prepared);
@@ -889,7 +895,7 @@ const go: FeatureDriver = {
         opponent: view.opponent,
         ...(topic.blackScore !== undefined ? { blackScore: topic.blackScore } : {}),
         ...(topic.whiteScore !== undefined ? { whiteScore: topic.whiteScore } : {}),
-        ...(topic.komi !== undefined ? { komi: topic.komi } : {}),
+        komi: view.komi,
         ...(topic.bonusCycles !== undefined ? { bonusCycles: topic.bonusCycles } : {}),
       },
       planning: { finalistCount: decision.finalists, positionValue: decision.positionValue },

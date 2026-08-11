@@ -35,7 +35,14 @@ export function oracleInitialBoard(size: 5 | 7 | 9 | 13, opponent: GoOpponent, s
 
 export function oracleWhitePolicy(opponent: GoOpponent, seedAtTurn: (turn: number) => number): AsyncGoPolicy {
   return async ({ board, history, turn, consecutivePasses }) => {
-    const state = getNewBoardStateFromSimpleBoard(board.rows, undefined, opponent, GoColor.black);
+    // Passing w0r1d_d43m0n to getNewBoardStateFromSimpleBoard discards the
+    // supplied position: upstream intentionally replaces it with a fresh
+    // BitVerse board. Reconstruct secret-opponent midgames with the equivalent
+    // smart AI first, then restore the actual opponent identity below.
+    const reconstructionOpponent = opponent === GoOpponent.w0r1d_d43m0n
+      ? GoOpponent.Illuminati
+      : opponent;
+    const state = getNewBoardStateFromSimpleBoard(board.rows, undefined, reconstructionOpponent, GoColor.black);
     state.previousBoards = history.map((position) => position.join(""));
     state.passCount = consecutivePasses;
     state.ai = opponent;

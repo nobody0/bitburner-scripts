@@ -104,6 +104,7 @@ describe("Go live seed observation", () => {
       dispatchPlaytime: 10_000,
       seed: 10_200,
     });
+    expect(state.topics.go?.plan?.input.komi).toBe(1.5);
   });
 
   test("claims the current lifecycle action before a prior plan exists", () => {

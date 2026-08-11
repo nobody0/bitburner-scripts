@@ -475,26 +475,28 @@ describe("go", () => {
       plan(20_200 + index * 200);
       return performance.now() - started;
     }).sort((a, b) => a - b);
-    // The measured local median is about 2 ms. Leave headroom for loaded CI
+    // The measured local median is about 1 ms. Leave headroom for loaded CI
     // while still catching an accidental return to per-legal-move expansion.
-    expect(samples[15]!).toBeLessThan(5);
+    expect(samples[15]!).toBeLessThan(3);
   });
 
-  test("an inherited 13x13 board stays under budget without the 5x5 exact forecast", () => {
+  test("an inherited 13x13 board uses its scaled exact-forecast budget", () => {
     const view = {
       board: board(Array.from({ length: 13 }, () => ".".repeat(13))),
       currentPlayer: "Black",
       opponent: "Daedalus",
       status: "inProgress",
       previousBoards: [],
+      alignedDispatchPlaytime: 10_000,
     } as const;
-    for (let index = 0; index < 5; index++) finalizeGoDecision(prepareGoDecision(view, false));
-    const samples = Array.from({ length: 31 }, () => {
+    const plan = (seed: number) => finalizeGoDecision(prepareGoDecision(view, true), [seed]);
+    for (let index = 0; index < 3; index++) plan(10_200 + index * 200);
+    const samples = Array.from({ length: 15 }, (_, index) => {
       const started = performance.now();
-      finalizeGoDecision(prepareGoDecision(view, false));
+      plan(20_200 + index * 200);
       return performance.now() - started;
     }).sort((a, b) => a - b);
-    expect(samples[15]!).toBeLessThan(5);
+    expect(samples[7]!).toBeLessThan(10);
   });
 
   test("a full board passes rather than crashing", () => {

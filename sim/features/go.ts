@@ -41,7 +41,7 @@ export const greedyPolicy: GoPolicy = ({ board, colour, history }) => {
 export function productionPolicy(
   prediction?: { opponent: GoRewardOpponent; seedAtTurn(turn: number): number; forecastWeight?: number },
 ): GoPolicy {
-  return ({ board, colour, history, turn, komi }) => {
+  return ({ board, colour, history, turn, komi, consecutivePasses }) => {
     if (colour === "O") {
       // Color swap preserves rules and makes the black-only production planner
       // usable as a white policy without teaching game/ about the simulator.
@@ -60,6 +60,7 @@ export function productionPolicy(
       status: "inProgress",
       previousBoards: [...history],
       komi,
+      consecutivePasses,
       ...(prediction ? { aiSeedCandidates: [prediction.seedAtTurn(turn)] } : {}),
       ...(prediction?.forecastWeight !== undefined ? { forecastWeight: prediction.forecastWeight } : {}),
     });

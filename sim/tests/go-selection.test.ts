@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { GO_REWARD_RULES, rankGoGames } from "../../shared/strategy/go/rewards.ts";
-import { productionPolicy, simulateGoGameAsync } from "../features/go.ts";
-import { oracleInitialBoard, oracleWhitePolicy } from "../features/go-oracle.ts";
+import { GO_ARENA_OPPONENTS, goArenaSeeds, playGoArenaGame } from "../go-arena.ts";
 import { GoOpponent } from "../vendor/bitburner/src/Go/Enums.ts";
 
 const normalOpponents = [
@@ -15,32 +14,24 @@ const normalOpponents = [
 
 describe("Go reward strategy tuning", () => {
   test("win/score priors stay aligned with upstream obstacle and faction-AI tournaments", async () => {
-    const seeds = Array.from({ length: 24 }, (_, index) => 1_000 + index * 4_000);
     const originalRandom = Math.random;
     Math.random = () => 0.5;
     try {
-      for (const opponent of normalOpponents) {
-      let wins = 0;
-      let blackScore = 0;
-      for (const seed of seeds) {
-        const seedAtTurn = (turn: number) => seed + Math.floor(turn / 2) * 401;
-        const game = await simulateGoGameAsync(
-          productionPolicy({ opponent: opponent.ours, seedAtTurn }),
-          oracleWhitePolicy(opponent.oracle, seedAtTurn),
-          {
-            size: 5,
-            komi: opponent.komi,
-            maxTurns: 100,
-            initialBoard: oracleInitialBoard(5, opponent.oracle, seed),
-          },
-        );
-        expect(game.completed).toBe(true);
-        wins += Number(game.winner === "X");
-        blackScore += game.score.X;
-      }
-      const rules = GO_REWARD_RULES[opponent.ours];
-        expect(Math.abs(wins / seeds.length - rules.priorWinProbability), opponent.ours).toBeLessThan(0.03);
-        expect(Math.abs(blackScore / seeds.length / 23 - rules.scoreFraction), opponent.ours).toBeLessThan(0.015);
+      for (const [opponentIndex, opponent] of normalOpponents.entries()) {
+        // Keep Illuminati's fitted prior on a corpus disjoint from the seeds
+        // used to distill its policy book.
+        const seeds = goArenaSeeds(opponent.ours === "Illuminati" ? 512 : 128, 123_456);
+        let wins = 0;
+        let blackScore = 0;
+        for (const seed of seeds) {
+          const game = await playGoArenaGame(GO_ARENA_OPPONENTS[opponentIndex]!, seed);
+          expect(game.completed).toBe(true);
+          wins += Number(game.won);
+          blackScore += game.score.X;
+        }
+        const rules = GO_REWARD_RULES[opponent.ours];
+        expect(Math.abs(wins / seeds.length - rules.priorWinProbability), opponent.ours).toBeLessThan(0.005);
+        expect(Math.abs(blackScore / seeds.length / 23 - rules.scoreFraction), opponent.ours).toBeLessThan(0.005);
       }
     } finally {
       Math.random = originalRandom;

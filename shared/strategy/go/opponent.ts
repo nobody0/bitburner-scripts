@@ -272,7 +272,10 @@ function prepareOptionSpace(
   passCount: number,
 ): PreparedOptionSpace {
   const analysis = analyzeBoard(board);
-  const available = disputedTerritory(board, player, history, smart);
+  // Legality is one of the most expensive option-space passes. Reuse it for
+  // both territory filtering and the final fallback validity check.
+  const legalMoves = legalPoints(board, player, history);
+  const available = disputedTerritory(board, player, history, smart, analysis, legalMoves);
   const contested = disputedMoves(analysis, available);
   const endGame = contested.length === 0 && passCount > 0;
   const expansions = memo(() => expansionMoves(board, analysis, available));
@@ -289,7 +292,7 @@ function prepareOptionSpace(
   return {
     board,
     available,
-    legal: new Set(legalPoints(board, player, history).map(pointKey)),
+    legal: new Set(legalMoves.map(pointKey)),
     expansions,
     growthMoves,
     defenses,

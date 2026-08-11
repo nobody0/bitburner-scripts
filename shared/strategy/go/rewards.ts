@@ -20,12 +20,12 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   // Win/score priors are fitted by sim/tests/go-selection.test.ts against
   // upstream obstacles and faction AI. Runtime records never tune the policy:
   // they are outcomes, not an excuse to learn around an incomplete predictor.
-  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 0.96, scoreFraction: 0.84, turnSecondsPerNode: 2.9 },
-  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 0.83, scoreFraction: 0.79, turnSecondsPerNode: 3.3 },
-  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.88, scoreFraction: 0.83, turnSecondsPerNode: 4 },
-  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 0.38, scoreFraction: 0.45, turnSecondsPerNode: 3.2 },
-  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 0.58, scoreFraction: 0.55, turnSecondsPerNode: 3.2 },
-  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.04, scoreFraction: 0.14, turnSecondsPerNode: 3.4 },
+  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 1, scoreFraction: 0.844, turnSecondsPerNode: 2.9 },
+  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 0.922, scoreFraction: 0.784, turnSecondsPerNode: 3.3 },
+  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.977, scoreFraction: 0.765, turnSecondsPerNode: 4 },
+  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 0.703, scoreFraction: 0.643, turnSecondsPerNode: 3.2 },
+  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 0.836, scoreFraction: 0.67, turnSecondsPerNode: 3.2 },
+  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.684, scoreFraction: 0.696, turnSecondsPerNode: 3.4 },
   "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.02, scoreFraction: 0.1, turnSecondsPerNode: 4 },
 };
 

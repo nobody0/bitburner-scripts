@@ -41,18 +41,24 @@ export function cardinal(board: GoBoard, x: number, y: number): GoPoint[] {
 
 function connected(board: GoBoard, start: GoPoint, color: Exclude<Cell, "#">): GoPoint[] {
   const result: GoPoint[] = [];
-  const seen = new Set<string>();
-  const stack = [start];
+  const seen = new Uint8Array(board.size * board.size);
+  const stack = [start.x * board.size + start.y];
   while (stack.length) {
-    const point = stack.pop()!;
-    const id = key(point.x, point.y);
-    if (seen.has(id) || cellAt(board, point.x, point.y) !== color) continue;
-    seen.add(id);
-    result.push(point);
+    const index = stack.pop()!;
+    if (seen[index]) continue;
+    const x = Math.floor(index / board.size);
+    const y = index % board.size;
+    if (cellAt(board, x, y) !== color) continue;
+    seen[index] = 1;
+    result.push({ x, y });
     // Push in reverse so traversal itself follows north/east/south/west. Chain
     // members are sorted below because getAllChains exposes scan order.
-    const next = cardinal(board, point.x, point.y);
-    for (let i = next.length - 1; i >= 0; i--) stack.push(next[i]!);
+    const next = cardinal(board, x, y);
+    for (let i = next.length - 1; i >= 0; i--) {
+      const point = next[i]!;
+      const nextIndex = point.x * board.size + point.y;
+      if (!seen[nextIndex]) stack.push(nextIndex);
+    }
   }
   return result.sort((a, b) => a.x - b.x || a.y - b.y);
 }
@@ -60,14 +66,16 @@ function connected(board: GoBoard, start: GoPoint, color: Exclude<Cell, "#">): G
 export function analyzeBoard(board: GoBoard): GoAnalysis {
   const chains: GoChain[] = [];
   const chainAt = new Map<string, GoChain>();
-  const assigned = new Set<string>();
+  const assigned = new Uint8Array(board.size * board.size);
   for (let x = 0; x < board.size; x++) {
     for (let y = 0; y < board.size; y++) {
       const color = cellAt(board, x, y);
       const id = key(x, y);
-      if (color === "#" || assigned.has(id)) continue;
+      const index = x * board.size + y;
+      if (color === "#" || assigned[index]) continue;
       const points = connected(board, { x, y }, color);
-      for (const point of points) assigned.add(key(point.x, point.y));
+      const pointIds = new Set(points.map((point) => key(point.x, point.y)));
+      for (const point of points) assigned[point.x * board.size + point.y] = 1;
       const liberties: GoPoint[] = [];
       const seenLiberties = new Set<string>();
       for (const point of points) {
@@ -79,7 +87,7 @@ export function analyzeBoard(board: GoBoard): GoAnalysis {
           // `assigned` is not sufficient for an empty chain currently being
           // analyzed; coordinate membership is the actual upstream check.
           // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/boardAnalysis.ts
-          if (points.some((member) => member.x === neighbor.x && member.y === neighbor.y)) continue;
+          if (pointIds.has(neighborKey)) continue;
           seenLiberties.add(neighborKey);
           liberties.push(neighbor);
         }
@@ -144,18 +152,49 @@ function replace(board: GoBoard, x: number, y: number, color: Cell): GoBoard {
   return { rows, size: board.size };
 }
 
+function localGroup(board: GoBoard, x: number, y: number, color: Stone): { points: GoPoint[]; liberties: number } {
+  const points: GoPoint[] = [];
+  const seen = new Set<string>();
+  const liberties = new Set<string>();
+  const stack: GoPoint[] = [{ x, y }];
+  while (stack.length) {
+    const point = stack.pop()!;
+    const id = key(point.x, point.y);
+    if (seen.has(id) || cellAt(board, point.x, point.y) !== color) continue;
+    seen.add(id);
+    points.push(point);
+    for (const neighbor of cardinal(board, point.x, point.y)) {
+      const cell = cellAt(board, neighbor.x, neighbor.y);
+      if (cell === ".") liberties.add(key(neighbor.x, neighbor.y));
+      else if (cell === color && !seen.has(key(neighbor.x, neighbor.y))) stack.push(neighbor);
+    }
+  }
+  return { points, liberties: liberties.size };
+}
+
 /** Upstream evaluateMoveResult semantics: enemy captures win over suicide.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/boardAnalysis.ts */
 export function evaluateMove(board: GoBoard, x: number, y: number, player: Stone): GoBoard {
   if (cellAt(board, x, y) === "#") return board;
   let result = replace(board, x, y, player);
-  let analysis = analyzeBoard(result);
   const enemy: Stone = player === "X" ? "O" : "X";
-  const enemyCaptures = analysis.chains.filter((chain) => chain.color === enemy && chain.liberties.length === 0);
-  const captures = enemyCaptures.length
-    ? enemyCaptures
-    : analysis.chains.filter((chain) => chain.color === player && chain.liberties.length === 0);
-  for (const chain of captures) for (const point of chain.points) result = replace(result, point.x, point.y, ".");
+  const checked = new Set<string>();
+  let capturedEnemy = false;
+  for (const neighbor of cardinal(result, x, y)) {
+    if (cellAt(result, neighbor.x, neighbor.y) !== enemy || checked.has(key(neighbor.x, neighbor.y))) continue;
+    const chain = localGroup(result, neighbor.x, neighbor.y, enemy);
+    for (const point of chain.points) checked.add(key(point.x, point.y));
+    if (chain.liberties !== 0) continue;
+    capturedEnemy = true;
+    for (const point of chain.points) result = replace(result, point.x, point.y, ".");
+  }
+  // Upstream removes captured enemy chains instead of treating a capturing
+  // move as suicide. Only inspect the newly placed friendly chain when no
+  // enemy was removed.
+  if (!capturedEnemy) {
+    const own = localGroup(result, x, y, player);
+    if (own.liberties === 0) for (const point of own.points) result = replace(result, point.x, point.y, ".");
+  }
   return result;
 }
 
@@ -248,9 +287,11 @@ export function disputedTerritory(
   player: Stone,
   history: readonly string[][],
   excludeFriendlyEyes: boolean,
+  preparedAnalysis?: GoAnalysis,
+  preparedLegal?: readonly GoPoint[],
 ): GoPoint[] {
-  const analysis = analyzeBoard(board);
-  let valid = legalPoints(board, player, history);
+  const analysis = preparedAnalysis ?? analyzeBoard(board);
+  let valid = preparedLegal ? [...preparedLegal] : legalPoints(board, player, history);
   if (excludeFriendlyEyes) {
     const friendly = new Set(allEyes(analysis, player)
       .filter((eyes) => eyes.length >= 2)
@@ -278,7 +319,12 @@ export function disputedMoves(analysis: GoAnalysis, available: readonly GoPoint[
   return available.filter((point) => {
     const chain = analysis.chainAt.get(key(point.x, point.y));
     if (!chain || chain.points.length > maxChainSize) return false;
-    const neighbors = neighboringChains(analysis, chain.points);
+    // Upstream passes its size-filtered chain list into
+    // getAllNeighboringChains, so large neighboring stone chains are absent as
+    // well as large candidate empty chains. This is observable once open
+    // expansion points are exhausted.
+    const neighbors = neighboringChains(analysis, chain.points)
+      .filter((neighbor) => neighbor.points.length <= maxChainSize);
     return neighbors.some((neighbor) => neighbor.color === "O") && neighbors.some((neighbor) => neighbor.color === "X");
   });
 }

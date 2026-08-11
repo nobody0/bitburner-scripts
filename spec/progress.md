@@ -404,7 +404,7 @@ Every feature now has a real driver module; `inert()` is gone from
 | 6 | corp | Sequence divisions, cities, products, investment | Staged script with per-stage precondition and expected effect. **Optimality boundary stated openly** — near-optimal *within the modelled stage graph*, not globally. |
 | 7 | bladeburner | Climb rank fastest **without dying** | Every decision uses the **pessimistic** end of the `[min,max]` chance interval; Black Ops refused below 95%. Stamina floor and chaos ceiling. |
 | 8 | sleeves | Allocate N sleeves across the task menu | Exact per-sleeve argmax (sleeves do not interfere). Shock scales output down linearly, so recovery dominates. |
-| 9 | go | Wins, territory, streaks | Depth-bounded negamax with liberty-aware evaluation; **exhaustive at 5x5**. |
+| 9 | go | Wins, territory, streaks | Upstream-oracle arena; exact seeded faction reply over an opponent-tuned fixed shortlist, with a deterministic ~2 ms hot-path budget. See `spec/go-ai.md`. |
 | 10 | stanek | Pack the grid, then charge | **Exhaustive packing is PROVABLY optimal** — the strongest evidence in the roster. Correctly leaves out a large fragment to fit two smaller ones. |
 | 11 | dnet | Traverse under a stasis-link budget | Exact max-reachable search; links spent where they unlock the most. |
 | 12 | side | Solve every coding contract | **All 30 v3.0.1 contract types implemented** with exact registry coverage and known-answer tests. Discovery is ls-only; staged batches peak at `attempt` RAM, and a first rejection is logged and quarantined rather than retried. Infiltration stays manual. |
