@@ -8,7 +8,7 @@ import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../sha
 import type { Need } from "../../shared/strategy/needs.ts";
 import { forecastAt, unknownForecast, usableForecastSec } from "../../shared/strategy/progression/forecast.ts";
 import { FEATURE_IDS } from "../../shared/features/ids.ts";
-import { homeReserveGb } from "../../shared/ram/reserve.ts";
+import { fleetDodgeReserveGb, homeReserveGb } from "../../shared/ram/reserve.ts";
 import { priceCalls } from "./dodge.ts";
 import { isScriptDeath } from "./errors.ts";
 import { ContributionCache } from "./features/contributions.ts";
@@ -251,7 +251,11 @@ export async function runController(
     const active = caps(state);
     const hosts = placement(state);
     const budgetGb = dodgeBudget(hosts);
-    const { reserveGb, fleetReserveGb: reserveShortfallGb } = computeReserve(state, active);
+    const {
+      reserveGb,
+      fleetReserveGb: reserveShortfallGb,
+      contiguousFleetReserveGb,
+    } = computeReserve(state, active);
     // A live starvation re-records its skip on every retry; an entry that has
     // stopped refreshing is a need that went away without a successful retry
     // (dodge.ts only deletes on grant+lease). Age those out here, or one dead
@@ -262,7 +266,17 @@ export async function runController(
     if (reserveShortfallGb > 0 && Object.keys(state.probeSkips).length > 0) {
       fleetReserveHoldUntil = Date.now() + FLEET_RESERVE_HOLD_MS;
     }
-    const fleetReserveGb = reserveShortfallGb > 0 && Date.now() < fleetReserveHoldUntil ? reserveShortfallGb : 0;
+    // BN8 starts with the market API and hacked cash is worthless. Reserve the
+    // spill host from the first pass so fallback prep/experience work cannot
+    // occupy it for a full weaken cycle before the market sampler first runs.
+    // Other nodes retain the demand-driven hold and its zero steady-state cost.
+    const stockPrimary = active.bitNode === 8;
+    const fleetReserveGb = reserveShortfallGb > 0 && (stockPrimary || Date.now() < fleetReserveHoldUntil)
+      // The standing BN8 reserve must fit the executable stub, not just its
+      // dynamic calls. Otherwise an XP worker can consume the apparent slack
+      // and make the market action miss its tick.
+      ? (stockPrimary ? contiguousFleetReserveGb : reserveShortfallGb)
+      : 0;
     const dueModules = selectDueModules(state.featureLastRun, active, now);
 
     // A locked/disabled feature cannot leave a stale need, reservation or slot
@@ -474,7 +488,10 @@ function placement(state: GameState): HostRam[] {
  * to cover the biggest of them or that feature's probe is unaffordable forever
  * (see shared/ram/reserve.ts). A reserve that had to be capped is written to
  * the store as a blocker — the feature is not silently starved. */
-function computeReserve(state: GameState, active: Capabilities): { reserveGb: number; fleetReserveGb: number } {
+function computeReserve(
+  state: GameState,
+  active: Capabilities,
+): { reserveGb: number; fleetReserveGb: number; contiguousFleetReserveGb: number } {
   const home = state.topics.servers?.["home"];
   const result = homeReserveGb({
     enabled: FEATURE_IDS.filter((id) => active.unlocked[id] === "yes"),
@@ -496,7 +513,11 @@ function computeReserve(state: GameState, active: Capabilities): { reserveGb: nu
   // outgrew a small home still has a launch site. This is what keeps the
   // 10 GB market sampler alive on an 8 GB home once the farm fills the fleet.
   const fleetReserveGb = result.capped ? Math.max(0, result.wantedGb - result.reserveGb) : 0;
-  return { reserveGb: result.reserveGb, fleetReserveGb };
+  return {
+    reserveGb: result.reserveGb,
+    fleetReserveGb,
+    contiguousFleetReserveGb: fleetDodgeReserveGb(result),
+  };
 }
 
 /** Write the coordination digest into the store, but only when it changed.

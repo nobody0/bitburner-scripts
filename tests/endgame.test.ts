@@ -123,6 +123,7 @@ describe("BitNode goal presets", () => {
       player: { money: 100e9, hackingSkill: 3000, hackingExp: 0, karma: 0, numPeopleKilled: 0 },
       servers: new Map(),
       totals: { moneyEarned: 0, hacks: 0 },
+      stockPortfolioValue: 0,
       factions: new Map(),
       augmentations: new Set(Array.from({ length: 30 }, (_, i) => `aug${i}`)),
       installs: 0,

@@ -13,6 +13,7 @@ export function initialContext(): GoalContext {
     player: { money: 0, hackingSkill: 1, hackingExp: 0, karma: 0, numPeopleKilled: 0 },
     servers: new Map(),
     totals: { moneyEarned: 0, hacks: 0 },
+    stockPortfolioValue: 0,
     factions: new Map(),
     augmentations: new Set(),
     installs: 0,
@@ -96,6 +97,10 @@ export function reduceRecord(ctx: GoalContext, record: LogRecord): GoalContext {
       const data = record.data as { totals?: { moneyEarned?: number; hacks?: number } };
       if (typeof data.totals?.moneyEarned === "number") ctx.totals.moneyEarned = data.totals.moneyEarned;
       if (typeof data.totals?.hacks === "number") ctx.totals.hacks = data.totals.hacks;
+    } else if (record.key === "stock") {
+      const data = record.data as { portfolioValue?: number; wealth?: number };
+      if (typeof data.portfolioValue === "number") ctx.stockPortfolioValue = data.portfolioValue;
+      if (typeof data.wealth === "number") ctx.stockWealth = data.wealth;
     }
     return ctx;
   }

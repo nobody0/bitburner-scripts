@@ -10,6 +10,7 @@ const RED_PILL = "The Red Pill";
 /** String forms for the CLI (bun run sim -- --goal ...):
  *   earn:1e9            money earned from hacking >= 1e9
  *   money:1e9           player money on hand >= 1e9
+ *   wealth:1e9          cash + stock liquidation value >= 1e9
  *   ram:home:512        server maxRam >= 512 (host defaults to home: ram:512)
  *   skill:100           hacking skill >= 100
  *   only:hack,grow,weaken  restrict allowed action types (sleep always allowed)
@@ -34,6 +35,17 @@ export function parseGoal(spec: string): Goal {
       return goalFrom(spec, { totals: { moneyEarned: { gte: parseAmount(rest[0], spec) } } });
     case "money":
       return goalFrom(spec, { player: { money: { gte: parseAmount(rest[0], spec) } } });
+    case "wealth": {
+      const target = parseAmount(rest[0], spec);
+      const current = (ctx: Parameters<Goal["done"]>[0]) =>
+        ctx.stockWealth ?? ctx.player.money + ctx.stockPortfolioValue;
+      return {
+        id: spec,
+        describe: () => `cash plus stock liquidation value >= ${target}`,
+        remainingMoney: (ctx) => Math.max(0, target - current(ctx)),
+        done: (ctx) => current(ctx) >= target,
+      };
+    }
     case "skill":
       return goalFrom(spec, { player: { hackingSkill: { gte: parseAmount(rest[0], spec) } } });
     case "ram": {
@@ -170,7 +182,7 @@ export function parseGoal(spec: string): Goal {
     default:
       throw new Error(
         `unknown goal spec: ${spec} ` +
-          `(want earn:|money:|skill:|ram:|only:|faction:|rep:|karma:|augs:|aug:|favor:|installs:|daedalus:|redpill|wd:|bn:)`,
+          `(want earn:|money:|wealth:|skill:|ram:|only:|faction:|rep:|karma:|augs:|aug:|favor:|installs:|daedalus:|redpill|wd:|bn:)`,
       );
   }
 }

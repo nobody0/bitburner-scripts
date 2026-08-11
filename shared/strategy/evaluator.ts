@@ -1,6 +1,7 @@
 import { makeHackContext, skillFromExp, weakenTimeSeconds, type HackContext } from "../formulas.ts";
 import { scoreUpperBound } from "./bounds.ts";
 import {
+  depthCapGb,
   evaluatePrep,
   farmIncomeRate,
   incomePresentValue,
@@ -352,9 +353,14 @@ export function stepEvaluator(
   for (const entry of memory.entries.values()) solveEntry(entry);
 
   const byHost = new Map(view.servers.map((s) => [s.hostname, s]));
+  const experienceRate = (solution: CycleSolution): number =>
+    solution.experienceScore * Math.min(fleetGb, depthCapGb(solution));
   const ranked = [...memory.entries.values()]
     .filter((e) => e.solution && byHost.get(e.statics.hostname)?.hasAdminRights)
-    .sort((a, b) => b.solution!.score - a.solution!.score);
+    .sort((a, b) => {
+      const dollars = b.solution!.score - a.solution!.score;
+      return dollars !== 0 ? dollars : experienceRate(b.solution!) - experienceRate(a.solution!);
+    });
   if (ranked.length === 0) {
     memory.directive = { segments: [], ctxGeneration: memory.generation, decidedAt: now };
     return { memory, directive: memory.directive };
@@ -424,7 +430,19 @@ export function stepEvaluator(
   let farmEntry: TargetEntry | undefined = current?.solution ? current : undefined;
   let switched: { from?: string; to: string } | undefined;
   const dwellOk = now - memory.farmSince >= DWELL_MS;
-  const bestPrepped = ranked.find((candidate) => prepOf(candidate)?.prepped);
+  // In BN8 without a held, favorable stock position every dollar score is
+  // exactly zero. Do useful work anyway: select the best expected hacking-exp
+  // farm even when it is cold. The dispatcher will prepare that target through
+  // the normal farm path, then batch it. Any positive hacking/manipulation
+  // score disables this fallback and remains the primary objective.
+  const noMoneyIncentive = ranked[0]!.solution!.score <= 0;
+  const bestExperience = noMoneyIncentive ? ranked[0] : undefined;
+  if (bestExperience && bestExperience !== farmEntry && (!farmEntry || dwellOk)) {
+    switched = { from: farmEntry?.statics.hostname, to: bestExperience.statics.hostname };
+    farmEntry = bestExperience;
+    memory.farmSince = now;
+  }
+  const bestPrepped = noMoneyIncentive ? undefined : ranked.find((candidate) => prepOf(candidate)?.prepped);
   if (bestPrepped && bestPrepped !== farmEntry) {
     const better = bestPrepped.solution!.score > currentScore * (1 + SWITCH_MARGIN);
     const noIncumbent = !farmEntry || !current?.solution;
@@ -434,7 +452,7 @@ export function stepEvaluator(
       memory.farmSince = now;
     }
   }
-  if (!bestPrepped && (!farmEntry || currentScore <= 0)) {
+  if (!noMoneyIncentive && !bestPrepped && (!farmEntry || currentScore <= 0)) {
     // Only entered when the result can matter: with an EARNING incumbent both
     // consumers below are unreachable (`!farmEntry` and `currentScore <= 0`),
     // and the momentary not-prepped dip after every hack landing used to run
@@ -539,7 +557,7 @@ export function stepEvaluator(
   }
 
   const previousPrepHost = memory.directive.prep?.host;
-  if (previousPrepHost) {
+  if (previousPrepHost && !noMoneyIncentive) {
     const previous = memory.entries.get(previousPrepHost);
     const plan = previous ? prepOf(previous) : undefined;
     if (previous && plan && !plan.prepped) {

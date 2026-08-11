@@ -13,7 +13,11 @@ export const SIM_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> 
   factions: "full",
   career: "partial",
   hacknet: "full",
-  stock: "partial",
+  // Full for the shipped controller lifecycle: fresh market generation,
+  // prices/cycles, positions, unlocks, prestige, and hack/grow influence.
+  // User-created limit/stop orders remain outside that lifecycle and still
+  // fail loudly when a save contains them or a script tries to place one.
+  stock: "full",
   gang: "unmodeled",
   corp: "unmodeled",
   bladeburner: "unmodeled",

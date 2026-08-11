@@ -233,7 +233,7 @@ export const PROFILES: readonly SimProfile[] = [
       "switched off entirely? Answers 'does the trading model make money on its own', with no farm to confound it.",
     bitnode: 8,
     features: only("stock", "progression"),
-    goals: ["earn:1e9"],
+    goals: ["wealth:1e9"],
     horizon: "6h",
     seeds: [1, 2, 3],
     // BN8's starting money (Prestige.ts: BitNode8StartingMoney). Below roughly
@@ -243,14 +243,38 @@ export const PROFILES: readonly SimProfile[] = [
   {
     id: "stock-manipulation",
     description:
-      "The market WITH the farm, in BN8 where hacked money is worth zero: does driving grow/hack at the held " +
-      "symbol beat trading alone? The A/B against `stock-only` is the whole value of the hacking tie-in.",
+      "Early BN8 market + farm on an 8 GB home: does driving grow/hack at the held symbol beat trading alone? " +
+      "The A/B against `stock-only` is the whole value of the hacking tie-in.",
     bitnode: 8,
     features: only("stock", "hacking", "progression"),
-    goals: ["earn:1e9"],
+    goals: ["wealth:1e9"],
     horizon: "6h",
     seeds: [1, 2, 3],
     startingMoney: 250e6,
+  },
+  {
+    id: "stock-manipulation-mid",
+    description:
+      "Mid-scale BN8 stock manipulation on a 128 GB home, keeping the same market seed and target network.",
+    bitnode: 8,
+    features: only("stock", "hacking", "progression"),
+    goals: ["wealth:1e9"],
+    horizon: "6h",
+    seeds: [1, 2, 3],
+    startingMoney: 250e6,
+    homeRam: 128,
+  },
+  {
+    id: "stock-manipulation-large",
+    description:
+      "Large-fleet BN8 stock manipulation on a 2 TB home, for throughput and saturation regressions.",
+    bitnode: 8,
+    features: only("stock", "hacking", "progression"),
+    goals: ["wealth:1e9"],
+    horizon: "6h",
+    seeds: [1, 2, 3],
+    startingMoney: 250e6,
+    homeRam: 2_048,
   },
 ] as const;
 

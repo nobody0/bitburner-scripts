@@ -2,6 +2,7 @@ import {
   growthLogPerThread,
   growThreads,
   hackChance,
+  hackExpGain,
   hackPercent,
   hackTimeSeconds,
   weakenEffect,
@@ -98,6 +99,15 @@ export interface CycleSolution {
    *  and a target that is worth farming ONLY for its price impact should be
    *  visibly so. */
   stockIncomePerBatch: number;
+  /** Expected hacking experience per batch. Hacks award full experience on
+   * success and one quarter on failure; grow/weaken always award the full
+   * per-thread amount. This remains a separate objective: dollars (including
+   * manipulation) always rank first, and experience only breaks a genuinely
+   * zero/equal-dollar choice. */
+  experiencePerBatch: number;
+  /** Expected hacking experience per GB-second, with the same pipeline cap
+   * adjustment as `score` when fleet topology is available. */
+  experienceScore: number;
 }
 
 export interface PrepPlan {
@@ -138,6 +148,7 @@ export function isEligible(ctx: HackContext, statics: TargetStatics): boolean {
 
 interface CycleEval {
   score: number;
+  experienceScore: number;
   hackThreads: number;
   growThreadCount: number;
   weaken1: number;
@@ -145,6 +156,7 @@ interface CycleEval {
   steal: number;
   income: number;
   stockIncome: number;
+  experience: number;
   ram: number;
 }
 
@@ -208,7 +220,7 @@ export function solveCycle(
   kind: CycleKind = "hwgw",
 ): CycleSolution | undefined {
   if (!isEligible(ctx, statics)) return undefined;
-  const { minDifficulty, moneyMax, requiredHackingSkill, serverGrowth } = statics;
+  const { minDifficulty, moneyMax, requiredHackingSkill, serverGrowth, baseDifficulty } = statics;
   const percent = hackPercent(ctx, minDifficulty, requiredHackingSkill);
   const chance = hackChance(ctx, minDifficulty, requiredHackingSkill);
   if (chance <= 0) return undefined;
@@ -258,6 +270,10 @@ export function solveCycle(
     // grow moves a zero fraction (no long influence either). Fixes the
     // long-side overvaluation spec/targeting.md used to acknowledge.
     const stockIncome = manipulation ? chance * steal * manipulation.valuePerOp : 0;
+    const experiencePerThread = hackExpGain(ctx, baseDifficulty);
+    const expectedHackThreads = hackThreads * (0.25 + 0.75 * chance);
+    const experience = experiencePerThread *
+      (expectedHackThreads + growThreadCount + weaken1 + weaken2);
     // RAM-seconds: op RAM held for its own duration (1x/3.2x/4x hack time).
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacking.ts#L59-L94
     const ramSec =
@@ -271,6 +287,7 @@ export function solveCycle(
     const ram = hackGb + WORKER_RAM.grow * growThreadCount + WORKER_RAM.weaken * (weaken1 + weaken2);
     if (ram > caps.batchGb) return undefined;
     let score = (income + stockIncome) / ramSec;
+    let experienceScore = experience / ramSec;
     if (caps.farmGb !== undefined && Number.isFinite(caps.farmGb) && caps.farmGb > 0 && caps.hostBlocksGb) {
       // Pipeline-aware score. The dispatcher execs all four ops at launch, so
       // each holds its RAM until it lands ~weakenTime later; a contiguous hack
@@ -291,9 +308,11 @@ export function solveCycle(
       if (slots < 1) return undefined;
       const period = Math.max(ramSec / caps.farmGb, weakenTimeS / slots, intervalS);
       score = (income + stockIncome) / (period * caps.farmGb);
+      experienceScore = experience / (period * caps.farmGb);
     }
     return {
       score,
+      experienceScore,
       hackThreads,
       growThreadCount,
       weaken1,
@@ -301,6 +320,7 @@ export function solveCycle(
       steal,
       income,
       stockIncome,
+      experience,
       ram,
     };
   };
@@ -309,7 +329,9 @@ export function solveCycle(
     candidate !== undefined &&
     (incumbent === undefined ||
       candidate.score > incumbent.score ||
-      (candidate.score === incumbent.score && candidate.hackThreads < incumbent.hackThreads));
+      (candidate.score === incumbent.score &&
+        (candidate.experienceScore > incumbent.experienceScore ||
+          (candidate.experienceScore === incumbent.experienceScore && candidate.hackThreads < incumbent.hackThreads))));
 
   const finish = (best: CycleEval, exact: boolean): CycleSolution => ({
     kind,
@@ -327,6 +349,8 @@ export function solveCycle(
     ramPerBatch: best.ram,
     incomePerBatch: best.income,
     stockIncomePerBatch: best.stockIncome,
+    experiencePerBatch: best.experience,
+    experienceScore: best.experienceScore,
   });
 
   if (maxThreads <= EXACT_THREAD_LIMIT) {
@@ -387,7 +411,7 @@ export function solveCycle(
     const eval2 = evalSteal(1 - Math.exp(-mid2));
     if (eval1) promising.add(eval1.hackThreads);
     if (eval2) promising.add(eval2.hackThreads);
-    if ((eval1?.score ?? -1) >= (eval2?.score ?? -1)) hi = mid2;
+    if (better(eval1, eval2)) hi = mid2;
     else lo = mid1;
     const mid = evalSteal(1 - Math.exp(-(lo + hi) / 2));
     if (mid) promising.add(mid.hackThreads);

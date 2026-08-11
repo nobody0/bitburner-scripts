@@ -1,14 +1,12 @@
 /** Signal recovery from price history — what the market tells you for free.
  *
- * The market's tick loop leaks more than it means to, and two of those leaks are
- * worth real money:
+ * Two public observations are useful:
  *
- * **The volatility roll is shared.** `const v = Math.random()` is drawn ONCE per
- * tick, outside the per-symbol loop, and every symbol moves by `v * mv / 100`.
- * So in a single tick the magnitudes of all 33 symbols are perfectly correlated
- * and differ only by their own `mv`. Divide one symbol's observed step by its
- * known `mv` range and you have `v`; divide every other symbol's step by that
- * `v` and you have its `mv` — measured, not guessed, WITHOUT 4S.
+ * **The volatility roll is shared.** Upstream generates volatility on a known
+ * discrete grid. A basket tick exposes `shared roll * symbol volatility`, so
+ * intersecting every symbol's published grid can uniquely recover that roll
+ * and all live volatilities. Ambiguous or inconsistent observations fall back
+ * to a range-midpoint/EWMA estimate. Public 4S values override either one.
  *
  * **The sign is a Bernoulli draw on the forecast.** A tick goes up with
  * probability `chc = (50 +/- otlkMag) / 100`, which is exactly what
@@ -17,13 +15,13 @@
  * quantity being estimated is piecewise-constant: it holds steady for up to 75
  * ticks and then may invert, so recency has to win over sample size.
  *
- * **The cycle is periodic.** `ticksUntilCycle` is seeded once at `1..75` and
- * reset to exactly 75 afterwards, so after ONE observed cycle every future
- * regime change is known to the tick. A cycle flips bull/bear for ~45% of
- * symbols at once, and flipping bull/bear moves the absolute forecast from
- * `50 + otlkMag` to `50 - otlkMag` — a jump straight across 0.5. Counting
- * symbols that crossed 0.5 in one tick is therefore a near-exact detector, and
- * ~15 of 33 crossing at once cannot happen any other way.
+ * **The cycle is periodic when 4S exposes its boundary.** `ticksUntilCycle` is
+ * seeded once at `1..75` and reset to exactly 75 afterwards, so after one
+ * observed 4S boundary every future regime change is known to the tick. A cycle
+ * flips bull/bear for ~45% of symbols and moves each affected exact forecast
+ * across 0.5; ~15 simultaneous crossings cannot happen through ordinary drift.
+ * Without 4S the boundary remains unknown rather than being inferred from a
+ * noisy sign estimate, and the solver uses the expected remaining phase.
  *
  * Pure and clock-free: the caller supplies the samples and the tick counter is
  * derived from the samples themselves, so this is directly unit-testable and
@@ -31,20 +29,23 @@
  * oversampling — the price probe runs faster than the 6 s tick precisely so it
  * cannot MISS one, which means it will often see the same tick twice. */
 
-/** Pinned source for the shared volatility draw, forecast probability, and
+/** Pinned source for the volatility draw, forecast probability, and
  * periodic cycle mechanics described above:
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarket.ts
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/Stock.ts */
-import { midpoint, STOCK_METADATA } from "../../features/stocks.ts";
+import {
+  midpoint,
+  STOCK_VOLATILITY_STEP,
+  volatilityRange,
+} from "../../features/stocks.ts";
 import { TICKS_PER_CYCLE } from "./market.ts";
 
 /** EWMA weight for the forecast estimate. 0.08 gives a ~12-tick memory: fast
  *  enough to notice a cycle flip within a fraction of the 75-tick regime, slow
  *  enough that a run of four heads is not mistaken for an edge. */
 export const FORECAST_ALPHA = 0.08;
-/** EWMA weight for the measured volatility. Slower: `mv` NEVER changes within a
- *  BitNode, so the only reason to weight recency at all is to shake off the
- *  bootstrap estimate. */
+/** EWMA weight for volatility once the shared tick roll makes a live
+ * measurement available. The upstream midpoint is only the bootstrap. */
 export const VOLATILITY_ALPHA = 0.05;
 /** Strength of the Beta(k,k) prior at 0.5. A forecast estimate is shrunk toward
  *  the coin flip by `n / (n + k)`, so it takes real evidence to claim an edge —
@@ -67,7 +68,7 @@ export interface SymbolHistory {
   samples: number;
   /** EWMA of the up-tick indicator — the raw forecast estimate before shrinkage. */
   upRate: number;
-  /** EWMA of the measured `mv / 100`, i.e. `getVolatility()`'s units. */
+  /** Online mean estimate of `mv / 100`, i.e. `getVolatility()`'s units. */
   volatility?: number;
   /** Forecast at the previous tick (4S only), for the 0.5-crossing detector. */
   lastForecast?: number;
@@ -87,7 +88,7 @@ export interface MarketHistory {
   cyclesSeen: number;
   /** Symbols that crossed 0.5 at the last observed tick, for reporting. */
   lastFlipCount: number;
-  /** The recovered common volatility roll of the last observed tick. */
+  /** Common roll recovered from the vendored grid or public 4S volatility. */
   lastV?: number;
   symbols: Record<string, SymbolHistory>;
 }
@@ -158,7 +159,8 @@ export function observeMarket(history: MarketHistory, samples: readonly PriceSam
   }
 
   history.tick++;
-  const v = recoverCommonRoll(history, moved);
+  const recovered = recoverCommonRoll(history, moved);
+  const v = recovered?.v;
   history.lastV = v;
 
   let flips = 0;
@@ -177,8 +179,15 @@ export function observeMarket(history: MarketHistory, samples: readonly PriceSam
       entry.volatility = sample.volatility;
     } else if (v !== undefined && v > 0) {
       const measured = Math.expm1(step) / v;
-      entry.volatility =
-        entry.volatility === undefined ? measured : entry.volatility + VOLATILITY_ALPHA * (measured - entry.volatility);
+      // A unique solution of the vendored discrete grids is the actual static
+      // roll, not a noisy sample, so install it directly. If the corpus does
+      // not fit (for example a mechanic changed volatility), retain the EWMA
+      // fallback over live observations.
+      entry.volatility = recovered?.corpusExact
+        ? measured
+        : entry.volatility === undefined
+          ? measured
+          : entry.volatility + VOLATILITY_ALPHA * (measured - entry.volatility);
     }
 
     if (sample.forecast !== undefined) {
@@ -203,19 +212,24 @@ export function observeMarket(history: MarketHistory, samples: readonly PriceSam
 }
 
 /** Invert `step = ln(1 + v * mv/100)` across the basket to recover the tick's
- * shared roll.
- *
- * The median rather than the mean: a symbol whose price hit its soft cap had its
- * direction forced, and a symbol whose measured `mv` is still the metadata
- * midpoint carries up to ~12% of error. One robust statistic over 30-odd
- * estimates beats any single symbol. */
+ * shared roll. Prefer a unique corpus solution; otherwise take the median of
+ * estimates from public 4S values or prior live volatility estimates. */
+interface RollRecovery {
+  v: number;
+  /** Exactly one common roll fits every vendored volatility grid. */
+  corpusExact: boolean;
+}
+
 function recoverCommonRoll(
   history: MarketHistory,
   moved: readonly { sample: PriceSample; step: number }[],
-): number | undefined {
+): RollRecovery | undefined {
+  const corpus = recoverCorpusRoll(moved);
+  if (corpus !== undefined) return { v: corpus, corpusExact: true };
+
   const estimates: number[] = [];
   for (const { sample, step } of moved) {
-    const known = history.symbols[sample.sym]?.volatility ?? metadataVolatility(sample.sym);
+    const known = sample.volatility ?? history.symbols[sample.sym]?.volatility ?? metadataVolatility(sample.sym);
     if (!(known > 0)) continue;
     const estimate = Math.expm1(step) / known;
     if (estimate > 0 && estimate <= 1.5) estimates.push(estimate);
@@ -226,12 +240,60 @@ function recoverCommonRoll(
   const median = estimates.length % 2 === 1 ? estimates[mid]! : (estimates[mid - 1]! + estimates[mid]!) / 2;
   // v is a U(0,1) draw; an estimate outside that says the inputs are wrong, and
   // clamping is better than propagating a volatility measurement built on it.
-  return Math.min(1, median);
+  return { v: Math.min(1, median), corpusExact: false };
+}
+
+/** Solve the shared tick roll against the discrete volatility corpus.
+ *
+ * For every moved symbol, public prices reveal `amplitude = v * volatility`.
+ * The hidden `v` is common to the whole basket, while each volatility must be
+ * one of the integer-grid values in the pinned upstream range. Enumerating the
+ * narrowest symbol's grid and intersecting all 33 constraints usually leaves
+ * exactly one `v`, which in turn reveals every symbol's volatility after one
+ * tick. Ambiguous or inconsistent baskets return undefined and use the live
+ * midpoint/EWMA estimator above. */
+function recoverCorpusRoll(moved: readonly { sample: PriceSample; step: number }[]): number | undefined {
+  const constrained = moved.flatMap(({ sample, step }) => {
+    const range = volatilityRange(sample.sym);
+    const amplitude = Math.expm1(step);
+    return range && amplitude > 0 ? [{ sym: sample.sym, amplitude, range }] : [];
+  });
+  if (constrained.length < 2) return undefined;
+
+  const count = (range: readonly [number, number]): number =>
+    Math.max(0, Math.round((range[1] - range[0]) / STOCK_VOLATILITY_STEP));
+  const reference = constrained.reduce((best, candidate) =>
+    count(candidate.range) < count(best.range) ? candidate : best);
+  const solutions: number[] = [];
+  const tolerance = 1e-8;
+
+  for (let i = 0; i <= count(reference.range); i++) {
+    const referenceVolatility = reference.range[0] + i * STOCK_VOLATILITY_STEP;
+    const v = reference.amplitude / referenceVolatility;
+    if (!(v > 0) || v > 1 + tolerance) continue;
+
+    let fits = true;
+    for (const candidate of constrained) {
+      const implied = candidate.amplitude / v;
+      const index = Math.round((implied - candidate.range[0]) / STOCK_VOLATILITY_STEP);
+      if (index < 0 || index > count(candidate.range)) {
+        fits = false;
+        break;
+      }
+      const gridValue = candidate.range[0] + index * STOCK_VOLATILITY_STEP;
+      if (Math.abs(implied - gridValue) > tolerance * Math.max(STOCK_VOLATILITY_STEP, gridValue)) {
+        fits = false;
+        break;
+      }
+    }
+    if (fits) solutions.push(Math.min(1, v));
+  }
+  return solutions.length === 1 ? solutions[0] : undefined;
 }
 
 function metadataVolatility(sym: string): number {
-  const meta = STOCK_METADATA[sym];
-  return meta ? midpoint(meta.mv) / 100 : 0;
+  const range = volatilityRange(sym);
+  return range ? midpoint(range) : 0;
 }
 
 /** The forecast we are willing to act on, and how much of it is evidence.

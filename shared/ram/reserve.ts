@@ -1,6 +1,7 @@
 import type { FeatureId } from "../features/ids.ts";
 import { formatNumber } from "../format.ts";
 import { HOME_RESERVE_GB } from "./heap.ts";
+import { STUB_BASE_GB } from "./placement.ts";
 
 /** How much home RAM to keep out of the dispatcher's hands.
  *
@@ -53,6 +54,16 @@ export interface ReserveResult {
   /** What the reserve would have been without the ceiling. */
   wantedGb: number;
   why: string;
+}
+
+/** Contiguous fleet block required when home cannot hold the winning feature
+ * step. Home's partial reserve cannot be combined with another host, so reserve
+ * the entire dynamic step plus the executable stub—not merely the arithmetic
+ * shortfall. */
+export function fleetDodgeReserveGb(result: ReserveResult): number {
+  if (!result.capped) return 0;
+  const dynamicStepGb = Math.max(0, result.wantedGb - HOME_RESERVE_GB);
+  return dynamicStepGb + STUB_BASE_GB;
 }
 
 export function homeReserveGb(input: ReserveInput): ReserveResult {

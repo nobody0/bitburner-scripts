@@ -5,7 +5,8 @@
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/data/servers.ts
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/Stock.ts
  *
- * Two things live here, and both are static game data no ns getter provides:
+ * Two static upstream datasets live here. They are fair strategy inputs: they
+ * describe published generation ranges, not hidden values rolled for this run.
  *
  *  1. **The generation ranges.** Like `SERVER_RANGES`, most fields are declared
  *     upstream as `{min, max}` and rolled ONCE at world generation
@@ -19,7 +20,8 @@
  *     stock up by `server.organizationName`
  *     (`StockMarket/PlayerInfluencing.ts`), so the organization is the join key
  *     between a farm target and a tradeable symbol. Computed here rather than
- *     through `ns.stock.getOrganization` (2 GB) because it cannot change.
+ *     through the public `ns.stock.getOrganization` API in production; this
+ *     table remains the simulator's pinned reference as well.
  *     Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/PlayerInfluencing.ts
  *
  * Two facts about that mapping the strategy has to respect:
@@ -103,6 +105,12 @@ export const STOCK_METADATA: Readonly<Record<string, StockMetadata>> = {
 
 export const STOCK_SYMBOLS: readonly string[] = Object.keys(STOCK_METADATA);
 
+/** Resolution of a generated `ns.stock.getVolatility()` value. Upstream rolls
+ * an integer `mv`, divides it by the metadata divisor (100) to get a percent,
+ * then the API divides that percent by 100 once more. Thus every unmodified
+ * market volatility lies on this public, vendored grid. */
+export const STOCK_VOLATILITY_STEP = 1 / 100 / 100;
+
 /** hostname -> symbol. Two Fulcrum hosts collapse onto FLCM. */
 export const SYMBOL_BY_HOST: Readonly<Record<string, string>> = Object.fromEntries(
   Object.entries(STOCK_METADATA).flatMap(([symbol, meta]) => meta.hosts.map((host) => [host, symbol])),
@@ -122,8 +130,14 @@ export function midpoint(range: Range): number {
 /** `ns.stock.getVolatility()`'s units (a per-tick fraction) from the metadata's
  *  percent, so callers never have to remember the /100. */
 export function volatilityEstimate(symbol: string): number {
+  const range = volatilityRange(symbol);
+  return range ? midpoint(range) : 0;
+}
+
+/** `ns.stock.getVolatility()` range for a symbol, including API units. */
+export function volatilityRange(symbol: string): Range | undefined {
   const meta = STOCK_METADATA[symbol];
-  return meta ? midpoint(meta.mv) / 100 : 0;
+  return meta ? [meta.mv[0] / 100, meta.mv[1] / 100] : undefined;
 }
 
 /** Worst-case round-trip spread cost as a FRACTION of notional, from the

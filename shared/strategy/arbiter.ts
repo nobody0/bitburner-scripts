@@ -202,13 +202,6 @@ export const PRIORITY = {
    *  ordinary upgrades post at income:investment; only milestone-clearing
    *  ones escalate to the hacknet:*-need bands. */
   "hacknet:upgrade": 25,
-  "stock:position": 20,
-  /** A position in a node where hacked money arrives at ZERO value — BN8's
-   *  `ScriptHackMoneyGain: 0`. There the market is not one income source among
-   *  several, it is the only one, so a hacknet upgrade or a home-RAM investment
-   *  must not outbid it. Still below `factions:aug-fund`: even in BN8 the money
-   *  exists to become permanent multipliers. */
-  "stock:sole-income": 55,
   /** Port openers and TOR that unblock requested rooting/backdoors. They must
    *  remain fundable through the imminent-install reserve: until the backdoor
    *  clears, the faction sweep that forecast is waiting on cannot finish.

@@ -3,14 +3,13 @@ import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
-import { manipulationLeverage, secondsForTicks, TICKS_PER_CYCLE } from "../../../shared/strategy/stock/market.ts";
+import { secondsForTicks, TICKS_PER_CYCLE } from "../../../shared/strategy/stock/market.ts";
 import {
   fundedActions,
   initStockMemory,
   manipulationByHost,
   POSITION_CLAIM_ID,
   stepStock,
-  symbolForHost,
   unlockClaimId,
   type StockAction,
   type StockGrants,
@@ -35,14 +34,16 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * always-playable feature and the ladder is the driver's own job.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts#L163-L168
  *
- * Cadence is 4 s and that is load-bearing, not a preference: the market updates
- * every 6 s (4 s while burning stored cycles) and the whole no-4S signal —
- * measured volatility, estimated forecast, and the cycle clock — comes from
- * observing every tick exactly once. A poller slower than the tick cannot count
- * up-ticks and cannot see the cycle. It must also be no slower than the price
+ * Market probes run every 4 s and that is load-bearing: the market updates
+ * every 6 s (4 s while burning stored cycles), while measured volatility and
+ * the no-4S forecast estimate come from observing every tick exactly once. A
+ * poller slower than the tick cannot count up-ticks reliably. It must also be
+ * no slower than the price
  * probe, which declares the same 4 s, or a tick the probe captured would be
- * overwritten before we folded it into the history. `observeMarket` is idempotent
- * when nothing moved, so sampling the same tick twice costs nothing.
+ * overwritten before we folded it into the history. The pure driver runs at
+ * controller cadence so plan -> claim -> grant and retryable actions do not
+ * each wait another market sample. `observeMarket` is idempotent when nothing
+ * moved, so those extra evaluations add neither samples nor Netscript calls.
  *
  * The plan/fund split is the other structural rule. `stepStock` sizes a position
  * at full ambition with NO knowledge of the money grant, the claim is posted from
@@ -91,7 +92,19 @@ export function resetStockState(): void {
  *
  * The same three conditions the target evaluator uses (`isCandidate` plus a skill
  * check), because a host that fails any of them cannot carry an influencing op. */
-function farmableHosts(ctx: DriverContext): string[] {
+function symbolByHost(ctx: DriverContext): Record<string, string> {
+  const servers = ctx.state.topics.servers ?? {};
+  const organizations = ctx.state.topics.stock?.organizations ?? {};
+  const byOrganization = new Map(Object.entries(organizations).map(([sym, organization]) => [organization, sym]));
+  const out: Record<string, string> = {};
+  for (const server of Object.values(servers)) {
+    const sym = byOrganization.get(server.organizationName);
+    if (sym) out[server.hostname] = sym;
+  }
+  return out;
+}
+
+function farmableHosts(ctx: DriverContext, mapping: Readonly<Record<string, string>>): string[] {
   const servers = ctx.state.topics.servers;
   const skill = ctx.state.topics.player?.skills.hacking ?? 0;
   if (!servers) return [];
@@ -100,7 +113,7 @@ function farmableHosts(ctx: DriverContext): string[] {
     if (!server.hasAdminRights || server.purchasedByPlayer) continue;
     if ((server.moneyMax ?? 0) <= 0) continue;
     if ((server.requiredHackingSkill ?? Infinity) > skill) continue;
-    if (symbolForHost(server.hostname) === undefined) continue;
+    if (mapping[server.hostname] === undefined) continue;
     out.push(server.hostname);
   }
   return out;
@@ -192,6 +205,7 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     progression?.multipliers,
   );
 
+  const mapping = symbolByHost(ctx);
   return {
     symbols: (topic.positions ?? []).map((position) => ({
       sym: position.sym,
@@ -213,8 +227,8 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     // the ranking, which blocked every long ranked below it.
     canShort: ctx.caps.bitNode === 8 || (ctx.caps.sourceFiles["8"] ?? 0) >= 2,
     fourSigmaDisabled: ctx.caps.restrictions.disable4SData === true,
-    farmableHosts: farmableHosts(ctx),
-    ...(ctx.state.topics.farm?.target ? { farmTarget: ctx.state.topics.farm.target } : {}),
+    farmableHosts: farmableHosts(ctx, mapping),
+    symbolByHost: mapping,
     ...(nodeMults ? { nodeMults } : {}),
     moneyGranted: ctx.grants.money,
     totalMoney: ctx.state.topics.player?.money ?? 0,
@@ -326,7 +340,7 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
 
 const driver: FeatureDriver = {
   id: "stock",
-  everyMs: 4_000,
+  everyMs: 500,
   async tick(ctx: DriverContext) {
     const view = buildView(ctx);
     if (!view) return;
@@ -336,6 +350,8 @@ const driver: FeatureDriver = {
 
     const actions = fundedActions(decision.plan, stockGrants(decision.plan, ctx));
     merge(ctx.state, "stock", {
+      // Cash and liquidation value from the same pre-trade snapshot.
+      wealth: view.totalMoney + view.portfolioValue,
       market: {
         tick: decision.plan.observedTicks,
         ...(decision.plan.ticksUntilCycle !== undefined ? { ticksUntilCycle: decision.plan.ticksUntilCycle } : {}),
@@ -465,22 +481,15 @@ function claims(ctx: ClaimContext): Claim[] {
   }
 
   if (plan.entry) {
-    const leverage = manipulationLeverage(effectiveBitNodeMultipliers(
-      ctx.caps.bitNode,
-      sfLevel(ctx.caps.sourceFiles, 12),
-      ctx.state.topics.progression?.multipliers,
-    ));
     out.push({
       by: "stock",
       id: POSITION_CLAIM_ID,
       resource: "money",
       amount: plan.entry.cost,
-      // In a node where hacked money arrives at zero value (BN8's
-      // ScriptHackMoneyGain: 0) the market is not one income source among
-      // several, it is the ONLY one, and a hacknet upgrade must not outbid it.
-      // The augmentation fund still wins — in BN8 as everywhere else, the money
-      // exists to become permanent multipliers.
-      priority: Number.isFinite(leverage) ? PRIORITY["stock:position"] : PRIORITY["stock:sole-income"],
+      // Stocks, market unlocks and every other income investment share one
+      // band. The arbiter compares their marginal return; BN8 needs no priority
+      // override because competing income returns are naturally near zero.
+      priority: PRIORITY["income:investment"],
       mode: "spend",
       // Divisible: a position is continuous, and fundedActions re-checks that
       // the reduced size still clears its round trip before buying it.

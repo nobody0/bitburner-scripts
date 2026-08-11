@@ -96,7 +96,8 @@ refuses invalid runs unless `--allow-invalid` is supplied for diagnostics.
   rendezvous lives on `globalThis`. `sim/run.ts` fans multi-seed runs out to one
   child process per seed.
 - Controller-facing models currently cover hacking, factions, crimes,
-  grafting, Hacknet and stocks. Career, progression and stocks are partial;
+  grafting, Hacknet and the stock lifecycle used by the shipped controller.
+  Career and progression are partial; user-created stock order mutation/fills,
   gang, corporation, Bladeburner, sleeves, Stanek and Darknet remain
   unmodeled. Go and coding-contract rules have oracle tests but their Netscript
   lifecycles are not wired, so they report a gap instead of returning synthetic

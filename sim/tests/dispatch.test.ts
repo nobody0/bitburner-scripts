@@ -793,6 +793,7 @@ describe("stock manipulation reaches the ops", () => {
 
   test("with no intent, nothing is flagged and no stock income is claimed", () => {
     const none = withInfluence({ side: "long", valuePerOp: 5_000, bitnode: 8, intent: false });
+    expect(none.host).not.toBe("");
     expect(none.flagged).toEqual({});
     expect(none.stockIncome).toBe(0);
   });

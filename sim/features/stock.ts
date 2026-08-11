@@ -233,6 +233,24 @@ export class StockMarketSystem {
     this.#world.emit({ kind: "event", name: "stock.trade", data: { symbol, kind, shares, money } });
   }
 
+  /** Cash obtainable by closing the live book at current public quotes. Uses
+   * the same vendored transaction helper as an actual sale, including the
+   * final commission and short cost basis, but has no side effects. */
+  liquidationValue(): number {
+    let total = 0;
+    for (const symbol of this.symbols()) {
+      const stock = this.stock(symbol);
+      if (!stock) continue;
+      if (stock.playerShares > 0) {
+        total += getSellTransactionGain(stock, stock.playerShares, PositionType.Long) ?? 0;
+      }
+      if (stock.playerShortShares > 0) {
+        total += getSellTransactionGain(stock, stock.playerShortShares, PositionType.Short) ?? 0;
+      }
+    }
+    return total;
+  }
+
   // --- unlocks --------------------------------------------------------------
 
   costs(): { wse: number; tix: number; fourSigmaData: number; fourSigmaApi: number } {

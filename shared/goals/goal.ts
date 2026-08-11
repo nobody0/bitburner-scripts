@@ -36,6 +36,14 @@ export interface GoalContext {
   player: GoalPlayer;
   servers: Map<string, GoalServer>;
   totals: { moneyEarned: number; hacks: number };
+  /** Liquidation value of the stock book from the latest authoritative stock
+   * topic. Kept separate from cash so ordinary `money:` goals still mean money
+   * on hand, while `wealth:` can measure a trading policy without forcing a
+   * gratuitous sale merely to trip the benchmark. */
+  stockPortfolioValue: number;
+  /** Coherent cash + liquidation value published by the stock feature. Once
+   * present, wealth goals ignore independently timed player/position records. */
+  stockWealth?: number;
   /** Faction membership and standing, for feature-isolation goals. Membership
    *  is free (Player.factions); rep needs the singularity API, so it stays 0
    *  without BN4/SF4 and a rep goal is simply unreachable there. */

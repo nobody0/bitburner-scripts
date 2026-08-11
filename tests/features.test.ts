@@ -665,17 +665,17 @@ describe("feature drivers", () => {
   test("only hacking and stock run faster than the 5 s floor, each for a reason", () => {
     // Batch ops land on 200ms slots, so a slower hacking cadence would miss them.
     //
-    // `stock` is the one other exception, at 4 s, and it is not a preference: the
-    // market updates every 6 s (4 s while burning stored cycles), and the entire
-    // no-4S signal — measured volatility, the estimated forecast, and the 75-tick
-    // cycle clock — is recovered by observing every tick exactly once. A poller
-    // slower than the tick sees a fraction of them and can recover none of it.
-    // It must also be no slower than the price probe, or a tick the probe captured
-    // would be overwritten before the driver folded it into the history.
+    // `stock` is the one other exception. Its probes stay at 4 s because the
+    // market updates every 6 s (4 s while burning stored cycles), while its pure
+    // no-4S signal — measured volatility and the estimated forecast — is
+    // recovered by observing every tick exactly once. A poller slower than the
+    // tick sees only a fraction of the Bernoulli direction samples.
+    // The driver itself retries at controller cadence so a plan/claim/action
+    // handshake cannot lose a whole market tick to one RAM-grant miss.
     const hacking = FEATURE_DRIVERS.find((d) => d.id === "hacking")!;
     expect(hacking.everyMs).toBe(200);
     const stock = FEATURE_DRIVERS.find((d) => d.id === "stock")!;
-    expect(stock.everyMs).toBe(4_000);
+    expect(stock.everyMs).toBe(500);
     expect(stock.everyMs).toBeLessThan(MS_PER_TICK);
     // A normal Stanek charge takes 1 s (200 ms while consuming stored cycles).
     // The controller awaits feature drivers serially, so it must remain a

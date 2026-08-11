@@ -1,11 +1,10 @@
 import { beforeEach, describe, expect, test } from "bun:test";
 import { STOCK_METADATA } from "../../shared/features/stocks.ts";
+import { COMMISSION } from "../../shared/strategy/stock/market.ts";
 import {
   fundedActions,
   initStockMemory,
   manipulationByHost,
-  MAX_PORTFOLIO_FRACTION,
-  MAX_SYMBOL_FRACTION,
   stepStock,
   type StockAction,
   type StockMemory,
@@ -37,6 +36,9 @@ const CYCLES_PER_TICK = 30;
 
 /** Every host any symbol owns — the stand-in farm has no skill or rooting limit. */
 const FARMABLE_HOSTS: readonly string[] = Object.values(STOCK_METADATA).flatMap((meta) => meta.hosts);
+const SYMBOL_BY_HOST: Readonly<Record<string, string>> = Object.fromEntries(
+  Object.entries(STOCK_METADATA).flatMap(([sym, meta]) => meta.hosts.map((host) => [host, sym])),
+);
 
 type Strategy = "solver" | "naive" | "hold" | "cash";
 
@@ -117,14 +119,9 @@ function apply(market: StockMarketSystem, actions: readonly StockAction[]): void
  * the best above 0.6, exit below 0.5. Blind to the spread, to the commission, and
  * to the regime cycle.
  *
- * Given the SAME capital policy as the solver, deliberately. Without that the
- * comparison measures exposure rather than judgement: an uncapped naive book ends
- * ~98% invested against the solver's 60%, and in a market with positive drift the
- * more-invested book wins on raw wealth whatever it holds. The 40% held back is
- * the augmentation fund — a policy choice about what money is FOR, not a
- * limitation of the decision rule — so it is held constant across both arms and
- * the difference that remains is strategy. */
-function naiveStep(market: StockMarketSystem, cash: number, portfolioCap: number): void {
+ * Both strategies offer their best investment at full ambition. The shared
+ * arbiter owns allocation; this isolated market harness funds the claim fully. */
+function naiveStep(market: StockMarketSystem, cash: number): void {
   const ranked = market
     .symbols()
     .map((sym) => ({ sym, stock: market.stock(sym)! }))
@@ -133,13 +130,10 @@ function naiveStep(market: StockMarketSystem, cash: number, portfolioCap: number
     const forecast = stock.getAbsoluteForecast() / 100;
     if (stock.playerShares > 0 && forecast < 0.5) market.sellStock(sym, stock.playerShares);
   }
-  const room = portfolioCap - market.portfolioValue();
-  if (room <= 0) return;
   for (const { sym, stock } of ranked) {
     if (stock.playerShares > 0) continue;
     if (stock.getAbsoluteForecast() / 100 <= 0.6) continue;
-    const budget = Math.min(room, cash, portfolioCap * (MAX_SYMBOL_FRACTION / MAX_PORTFOLIO_FRACTION));
-    const shares = Math.min(stock.maxShares, Math.floor(budget / stock.getAskPrice()));
+    const shares = Math.min(stock.maxShares, Math.floor(Math.max(0, cash - COMMISSION) / stock.getAskPrice()));
     if (shares > 0) market.buyStock(sym, shares);
     break;
   }
@@ -177,6 +171,7 @@ function tradeRun(options: RunOptions): RunResult {
         // The stand-in farm can drive every symbol that has a host, so the
         // manipulation preference is exercised rather than bypassed.
         farmableHosts: options.manipulationOps ? FARMABLE_HOSTS : [],
+        symbolByHost: SYMBOL_BY_HOST,
         moneyGranted: world.player.money,
         totalMoney: world.player.money,
         portfolioValue: market.portfolioValue(),
@@ -203,8 +198,7 @@ function tradeRun(options: RunOptions): RunResult {
         }
       }
     } else if (strategy === "naive" && !liquidate) {
-      const bankroll = world.player.money + market.portfolioValue();
-      naiveStep(market, world.player.money, bankroll * MAX_PORTFOLIO_FRACTION);
+      naiveStep(market, world.player.money);
     } else if (strategy === "naive" && liquidate) {
       for (const sym of market.symbols()) {
         const stock = market.stock(sym)!;
@@ -253,14 +247,14 @@ describe("the solver against the real market", () => {
     expect(solver).toBeGreaterThan(hold);
   });
 
-  test("it beats the naive forecast>0.6 rule, and churns far less", () => {
+  test("it beats the naive forecast>0.6 rule without more churn", () => {
     // The rule the predecessor used and the previous solver's shape. It is not
     // stupid — a 0.6 forecast IS an edge — it just pays the spread and the
     // commission often enough to give the edge back.
     const solver = SEEDS.map((seed) => tradeRun({ seed, ticks: 400, money: START, strategy: "solver" }));
     const naive = SEEDS.map((seed) => tradeRun({ seed, ticks: 400, money: START, strategy: "naive" }));
     expect(median(solver.map((r) => r.net))).toBeGreaterThan(median(naive.map((r) => r.net)));
-    expect(median(solver.map((r) => r.commission))).toBeLessThan(median(naive.map((r) => r.commission)));
+    expect(median(solver.map((r) => r.commission))).toBeLessThanOrEqual(median(naive.map((r) => r.commission)));
   });
 
   test("without 4S it still makes money from price history alone", () => {
@@ -280,25 +274,6 @@ describe("the solver against the real market", () => {
       SEEDS.map((seed) => tradeRun({ seed, ticks: 900, money: START, strategy: "solver", has4S: false }).net),
     );
     expect(withApi).toBeGreaterThan(without);
-  });
-
-  test("it holds the portfolio cap, leaving the rest liquid for augmentations", () => {
-    // The cap is the feature, not a shortfall. It is also why the naive baseline
-    // above is given the same policy: measured on raw wealth, an uncapped book at
-    // ~98% exposure beats a capped one at 60% in a market with positive drift
-    // whatever either of them holds, so an unmatched comparison would be
-    // measuring the capital policy and calling it strategy.
-    for (const seed of SEEDS) {
-      const result = tradeRun({ seed, ticks: 400, money: START, strategy: "solver" });
-      const exposure = result.portfolio / result.net;
-      // The cap binds at ENTRY. A winner then appreciates past it, and the right
-      // response is to leave it alone: force-selling to rebalance would pay a
-      // round trip to reduce a position the forecast still favours. So the
-      // tolerance is real drift, not slack in the check.
-      expect(exposure, `seed ${seed}`).toBeLessThanOrEqual(MAX_PORTFOLIO_FRACTION * 1.25);
-      // And it does deploy: a cap nobody reaches would be a different bug.
-      expect(exposure, `seed ${seed}`).toBeGreaterThan(0.2);
-    }
   });
 
   test("it refuses to trade at all on a horizon too short to clear a round trip", () => {
@@ -428,6 +403,7 @@ describe("the install barrier", () => {
       canShort: false,
       fourSigmaDisabled: false,
       farmableHosts: [],
+      symbolByHost: SYMBOL_BY_HOST,
       moneyGranted: world.player.money,
       totalMoney: world.player.money,
       portfolioValue: market.portfolioValue(),

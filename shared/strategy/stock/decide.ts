@@ -24,8 +24,8 @@ import { formatMoney } from "../../format.ts";
  *    the answer is to hold cash.
  *
  * The signal model lives in ./market.ts (how prices move) and ./history.ts (how
- * to recover a forecast and the cycle clock from prices alone). This file spends
- * money.
+ * to recover volatility and estimate forecast from prices, plus the cycle clock
+ * after 4S exposes a boundary). This file spends money.
  *
  * Pure: no clock, no randomness, no ns. `stepStock` returns a PLAN, sized at
  * full ambition and independent of what the arbiter granted; {@link fundedActions}
@@ -39,7 +39,7 @@ import { formatMoney } from "../../format.ts";
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/StockMarket.ts
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarket.ts */
-import { STOCK_METADATA, midpoint, symbolForHost, worstSpreadFraction } from "../../features/stocks.ts";
+import { midpoint, STOCK_METADATA, worstSpreadFraction } from "../../features/stocks.ts";
 import {
   breakEvenTicks,
   COMMISSION,
@@ -69,36 +69,15 @@ import {
 
 // --- tuning -----------------------------------------------------------------
 
-/** Most of the BANKROLL (cash plus mark-to-market) the market may hold at once.
- *  The rest is the augmentation fund's, and unlike an augmentation a position can
- *  evaporate.
- *
- *  A fraction of the bankroll and not of the cash: measured against cash alone
- *  the cap tightens as it is used — every dollar deployed shrinks the very number
- *  the limit is computed from — so the portfolio would converge on about half its
- *  intended size. */
-export const MAX_PORTFOLIO_FRACTION = 0.6;
-/** Most of the bankroll in ONE symbol.
- *
- *  Deliberately large, because CONCENTRATION is correct here and diversification
- *  is not. Spreading across symbols cuts variance — the direction is drawn per
- *  symbol even though the magnitude roll is shared — but it also dilutes capital
- *  into weaker edges, and the objective is money at the end of a run spanning
- *  hundreds of regime cycles, where variance averages out and expected return
- *  does not. Measured against the alternative: an equal-weight 6-symbol book lost
- *  to a concentrated one by ~20% over 400 ticks
- *  (sim/tests/stock-strategy.test.ts).
- *
- *  What actually limits per-symbol size is not this number but
- *  {@link selfInfluenceCost}: past a few `shareTxForMovement` the position starts
- *  eating the forecast it was opened on, so the marginal share is worth less than
- *  the last. This is the backstop against a single symbol being the whole book. */
-export const MAX_SYMBOL_FRACTION = 0.34;
+/** Stock does not reserve a fixed share of cash. It prices the best available
+ * position at full ambition and lets the shared money arbiter compare that
+ * marginal return with every other investment. Public `maxShares`, available
+ * cash, transaction costs and the profitability gates below are the limits. */
 /** Forecast distance from 0.5 required to OPEN a position. 0.6 for a long,
  *  matching the threshold the predecessor scripts settled on
  *  (`bitburner-2023/src/main.ts:761`) — a wide band is what stops the estimator's
  *  noise from paying the spread. */
-export const ENTER_BAND = 0.1;
+export const ENTER_BAND = 0.09;
 /** Forecast distance required to KEEP one. Narrower than ENTER_BAND on purpose:
  *  the gap is the hysteresis that stops a symbol oscillating around 0.5 from
  *  churning two commissions and two spread crossings per tick. */
@@ -111,24 +90,6 @@ export const MIN_HOLD_TICKS = 10;
 /** Safety margin on the achievable hold: a position must clear its round trip
  *  with this much room to spare, not exactly at the buzzer. */
 export const BREAK_EVEN_MARGIN = 1.5;
-/** Concurrent positions. Above this the per-symbol size falls below what can
- *  clear a $200k round trip on a mid-cap. */
-export const MAX_POSITIONS = 6;
-/** How much edge to give up for a symbol the farm can actually push.
- *
- * The manipulation loop only closes if BOTH halves choose each other: `hacking`
- * prices the price impact into its target score, and `stock` prefers symbols
- * whose organization owns a server the farm can drive. Without this second half
- * the solver picks a megacorp on pure edge, the farm cannot reach it, and the
- * whole tie-in idles — which is exactly what the first end-to-end BN8 run did.
- *
- * Deliberately a PREFERENCE among near-equal candidates rather than a bonus added
- * to the expected profit. Turning "the farm could push this" into a dollar figure
- * would mean inventing an ops-per-second rate that only `hacking` knows, and a
- * fabricated number in the ranking is worse than an explicit policy: a manipulable
- * symbol wins whenever it is within this fraction of the best return on capital,
- * and loses when it is not. */
-export const MANIPULATION_PREFERENCE = 0.25;
 /** Forecast deviation to assume when pricing an unlock that cannot be evaluated
  *  from live data yet (no TIX API means no `getSymbols`, so the market is
  *  entirely invisible). Deliberately meek — 0.55 is a quarter of what a good 4S
@@ -164,14 +125,12 @@ export interface StockView {
   /** `bitNodeOptions.disable4SData`: the forecast cannot be bought at all. */
   fourSigmaDisabled: boolean;
   /** Hostnames the farm can currently drive: rooted, worth money, and within
-   *  reach of the player's hacking skill. The other half of the manipulation
-   *  loop — see MANIPULATION_PREFERENCE. Empty means no symbol is pushable, which
-   *  is the honest early-game answer and leaves the ranking on pure edge. */
+   *  reach of the player's hacking skill. Empty means a held position cannot
+   *  be manipulated yet. */
   farmableHosts: readonly string[];
-  /** The host the farm is dispatching against RIGHT NOW (its published
-   *  target). The speculative manipulation intent prefers its symbol: the
-   *  push starts immediately instead of waiting for a re-target. */
-  farmTarget?: string;
+  /** Hostname -> symbol, derived in the game from public
+   * `stock.getOrganization` plus each server's public organization name. */
+  symbolByHost: Readonly<Record<string, string>>;
 
   /** `FourSigmaMarketData*Cost` scale the unlock; `ScriptHackMoney*` scale what
    *  manipulation is worth against hacking. See market.ts#StockNodeMults. */
@@ -181,10 +140,7 @@ export interface StockView {
   moneyGranted: number;
   /** Liquid cash. */
   totalMoney: number;
-  /** Mark-to-market value of what is already held. Together with `totalMoney`
-   *  this is the BANKROLL the portfolio caps are fractions of — see
-   *  MAX_PORTFOLIO_FRACTION for why measuring them against cash alone
-   *  under-deploys. */
+  /** Mark-to-market value of what is already held. */
   portfolioValue: number;
 
   /** Seconds until the next augmentation install is expected — the life of a
@@ -221,6 +177,11 @@ export interface StockMemory {
 
 export function initStockMemory(): StockMemory {
   return { history: initHistory(), intent: {} };
+}
+
+/** Full liquid cash offered to the shared investment arbiter. */
+export function positionBudget(view: Pick<StockView, "totalMoney">): number {
+  return Math.max(0, view.totalMoney);
 }
 
 // --- plan -------------------------------------------------------------------
@@ -368,9 +329,9 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
     return blocked(memory, unlockLadder(view, costs), "no TIX API — prices are visible but positions are not");
   }
 
-  // Fold the sample into the history FIRST: the forecast estimator, the measured
-  // volatility and the cycle clock all come out of it, and without 4S it is the
-  // only signal there is.
+  // Fold the sample into history first: the forecast estimator and measured
+  // volatility come from prices, while 4S samples can additionally establish
+  // the periodic cycle clock.
   observeMarket(memory.history, view.symbols.map(toSample));
   const cycleTicks = ticksUntilCycle(memory.history);
   const observedTicks = memory.history.tick;
@@ -402,35 +363,29 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   const tail = (survival / (1 - survival)) * TICKS_PER_CYCLE;
   const holdTicks = Math.max(0, Math.min(horizonTicks, guaranteedTicks + tail));
 
-  const bankroll = view.totalMoney + view.portfolioValue;
   const farmable = new Set(view.farmableHosts);
   const ranked: RankedSymbol[] = [];
   const perSymbol = new Map<string, { view: StockSymbolView; ranked: RankedSymbol }>();
-  const symbolBudget = Math.min(view.totalMoney, bankroll * MAX_SYMBOL_FRACTION);
+  const cashBudget = positionBudget(view);
 
   for (const symbol of view.symbols) {
     const signal = estimateSignal(memory.history, symbol.sym, symbol.forecast);
     const side = favouredSide(signal.forecast);
-    const entry = rankSymbol({ symbol, signal, side, holdTicks, symbolBudget, farmable });
+    const entry = rankSymbol({ symbol, signal, side, holdTicks, cashBudget, farmable, symbolByHost: view.symbolByHost });
     ranked.push(entry);
     perSymbol.set(symbol.sym, { view: symbol, ranked: entry });
   }
   // Ranked by RETURN ON CAPITAL, not by absolute profit.
   //
-  // The portfolio cap binds — half the bankroll stays liquid for augmentations —
-  // so capital is the scarce input and the right objective is profit per dollar
-  // deployed. Ranking by absolute profit instead lets a symbol that can absorb a
-  // lot of money at a thin edge outrank a smaller one at a fat edge, and then
-  // consume the room the better position wanted. Absolute profit is the
-  // tie-break, and the symbol name the final one, so the order is total.
+  // Capital is allocated by the arbiter, so rank the claim by return on each
+  // dollar requested. Absolute profit is the tie-break, and the symbol name the
+  // final one, so the order is total.
   ranked.sort(
     (a, b) =>
       returnOnCapital(b) - returnOnCapital(a) ||
       b.expectedProfit - a.expectedProfit ||
       (a.sym < b.sym ? -1 : 1),
   );
-  promoteManipulable(ranked);
-
   const exits = planExits(view, memory, perSymbol, guaranteedTicks);
   const held = view.symbols.filter((s) => s.shares > 0 || s.sharesShort > 0);
   const exiting = new Set(exits.map((action) => (action as { sym: string }).sym));
@@ -454,12 +409,6 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
     };
   }
 
-  const portfolioRoom = Math.min(
-    view.totalMoney,
-    Math.max(0, bankroll * MAX_PORTFOLIO_FRACTION - view.portfolioValue),
-  );
-  const openPositions = held.filter((s) => !exiting.has(s.sym)).length;
-
   const entry = planEntry({
     view,
     memory,
@@ -468,16 +417,14 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
     holdTicks,
     guaranteedTicks,
     exiting,
-    portfolioRoom,
-    symbolBudget,
-    openPositions,
+    cashBudget,
   });
   if (entry) {
     memory.intent[entry.sym] = { side: entry.side, sinceTick: memory.history.tick };
   }
 
   const unlock = unlockLadder(view, costs, ranked, holdTicks);
-  const manipulation = planManipulation({ view, memory, perSymbol, holdTicks, entry, exiting });
+  const manipulation = planManipulation({ view, perSymbol, holdTicks, exiting });
 
   const actions = exits.length + (entry ? 1 : 0) + (unlock ? 1 : 0);
   const best = ranked[0];
@@ -505,27 +452,6 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
  *  deployed, which is worth nothing however good the forecast. */
 function returnOnCapital(entry: RankedSymbol): number {
   return entry.notional > 0 ? entry.expectedProfit / entry.notional : -Infinity;
-}
-
-/** Move the best PUSHABLE candidate to the front, if it is close enough behind.
- *
- * The other half of the manipulation loop. `hacking` prices price impact into its
- * target score, but that only ever fires for a symbol `stock` already holds — so
- * if `stock` always picks whichever megacorp has the best edge and the farm cannot
- * reach its host, the tie-in never engages at all. A symbol within
- * {@link MANIPULATION_PREFERENCE} of the leader's return on capital is preferred,
- * because the farm can add drift to it and cannot add any to the leader.
- *
- * In place, and only ever ONE promotion: the ranking's own order still decides
- * everything else, so this can bias the choice but not reorder the book. */
-function promoteManipulable(ranked: RankedSymbol[]): void {
-  const leader = ranked[0];
-  if (!leader || leader.manipulable) return;
-  const bar = returnOnCapital(leader) * (1 - MANIPULATION_PREFERENCE);
-  if (!(bar > 0)) return;
-  const index = ranked.findIndex((entry) => entry.manipulable && returnOnCapital(entry) >= bar);
-  if (index <= 0) return;
-  ranked.unshift(...ranked.splice(index, 1));
 }
 
 function toSample(symbol: StockSymbolView): PriceSample {
@@ -566,14 +492,15 @@ function rankSymbol(params: {
   signal: { forecast: number; volatility: number; exact: boolean; samples: number };
   side: PositionSide;
   holdTicks: number;
-  symbolBudget: number;
+  cashBudget: number;
   farmable: ReadonlySet<string>;
+  symbolByHost: Readonly<Record<string, string>>;
 }): RankedSymbol {
-  const { symbol, signal, side, holdTicks, symbolBudget, farmable } = params;
+  const { symbol, signal, side, holdTicks, cashBudget, farmable, symbolByHost } = params;
   const price = side === "short" ? symbol.bid : symbol.ask;
   const held = symbol.shares + symbol.sharesShort;
   const room = Math.max(0, symbol.maxShares - held);
-  const affordable = price > 0 ? Math.floor(Math.max(0, symbolBudget - COMMISSION) / price) : 0;
+  const affordable = price > 0 ? Math.floor(Math.max(0, cashBudget - COMMISSION) / price) : 0;
   const shares = Math.min(room, affordable);
   const meta = STOCK_METADATA[symbol.sym];
   const shareTx = meta ? midpoint(meta.shareTxForMovement) : Infinity;
@@ -606,7 +533,7 @@ function rankSymbol(params: {
     volatility: signal.volatility,
     exact: signal.exact,
     drift,
-    manipulable: (STOCK_METADATA[symbol.sym]?.hosts ?? []).some((host) => farmable.has(host)),
+    manipulable: Object.entries(symbolByHost).some(([host, sym]) => sym === symbol.sym && farmable.has(host)),
     breakEvenTicks: be,
     expectedProfit: profit,
     notional: shares * price,
@@ -678,15 +605,10 @@ function planEntry(params: {
   holdTicks: number;
   guaranteedTicks: number;
   exiting: Set<string>;
-  portfolioRoom: number;
-  symbolBudget: number;
-  openPositions: number;
+  cashBudget: number;
 }): PositionTarget | undefined {
-  const { view, ranked, perSymbol, holdTicks, guaranteedTicks, exiting, portfolioRoom, symbolBudget, openPositions } = params;
-  if (guaranteedTicks <= 0 || portfolioRoom <= COMMISSION) return undefined;
-  if (openPositions >= MAX_POSITIONS) return undefined;
-
-  const budget = Math.min(portfolioRoom, symbolBudget);
+  const { view, ranked, perSymbol, holdTicks, guaranteedTicks, exiting, cashBudget } = params;
+  if (guaranteedTicks <= 0 || cashBudget <= COMMISSION) return undefined;
 
   // Walk the ranking rather than taking only the head: the top candidate may be
   // a short we cannot open, already held, or too small to clear its spread, and
@@ -703,13 +625,17 @@ function planEntry(params: {
     if (held > 0) continue;
     // Never both sides of one symbol — they cancel, and both pay commission.
     if (symbol.shares > 0 || symbol.sharesShort > 0) continue;
+    // Manipulation is additive: merely having a reachable farm target must not
+    // make the base trader reject a position it would otherwise take. The
+    // overlay is enabled only after the position exists and only in its
+    // favorable direction (planManipulation below).
     if (Math.abs(candidate.forecast - 0.5) < ENTER_BAND) continue;
     if (!candidate.exact && !isConfident(candidate)) continue;
 
     const price = candidate.side === "short" ? symbol.bid : symbol.ask;
     if (!(price > 0)) continue;
     const room = Math.max(0, symbol.maxShares - symbol.shares - symbol.sharesShort);
-    const shares = Math.min(room, Math.floor(Math.max(0, budget - COMMISSION) / price));
+    const shares = Math.min(room, Math.floor(Math.max(0, cashBudget - COMMISSION) / price));
     if (shares <= 0) continue;
 
     const meta = STOCK_METADATA[candidate.sym];
@@ -871,15 +797,10 @@ function propose(
   };
 }
 
-/** Trading rate estimate with the market entirely invisible.
- *
- * Without the TIX API there is no `getSymbols`, so there are no prices, no
- * forecasts and nothing to measure. What IS known is the metadata: the
- * volatility ranges and the spread ranges of all 33 symbols. Assume the median
- * symbol, a meek {@link BLIND_FORECAST} edge, and the worst-case spread, and ask
- * whether even that clears the cost. */
+/** Conservative trading-rate estimate while the market is entirely invisible.
+ * Uses known upstream generation ranges, never a live hidden value. */
 function blindRatePerSec(view: StockView): number {
-  const bankroll = (view.totalMoney + view.portfolioValue) * MAX_PORTFOLIO_FRACTION;
+  const bankroll = view.totalMoney + view.portfolioValue;
   if (!(bankroll > 0)) return 0;
   const volatilities = Object.keys(STOCK_METADATA)
     .map((sym) => midpoint(STOCK_METADATA[sym]!.mv) / 100)
@@ -887,16 +808,12 @@ function blindRatePerSec(view: StockView): number {
   const median = volatilities[volatilities.length >> 1] ?? 0;
   const drift = (2 * BLIND_FORECAST - 1) * meanLogStep(median);
   if (!(drift > 0)) return 0;
-  // One full cycle of holding, then a round trip. The spread is charged once per
-  // hold, so a longer assumed hold would flatter the estimate; one cycle is the
-  // longest hold the regime actually supports.
   const spread = Object.keys(STOCK_METADATA)
     .map((sym) => worstSpreadFraction(sym))
     .sort((a, b) => a - b)[Math.floor(Object.keys(STOCK_METADATA).length / 2)] ?? 0;
   const gross = bankroll * Math.expm1(drift * TICKS_PER_CYCLE);
   const net = gross - bankroll * spread - 2 * COMMISSION;
-  if (!(net > 0)) return 0;
-  return net / secondsForTicks(TICKS_PER_CYCLE);
+  return net > 0 ? net / secondsForTicks(TICKS_PER_CYCLE) : 0;
 }
 
 /** What the exact forecast adds over the estimated one, in $/sec.
@@ -908,18 +825,18 @@ function blindRatePerSec(view: StockView): number {
  * is un-shrunk to recover the forecast it is a shrunken view OF. */
 function fourSigmaGainPerSec(view: StockView, ranked: readonly RankedSymbol[], holdTicks: number): number {
   if (holdTicks <= 0) return 0;
-  const budget = Math.min(view.totalMoney, (view.totalMoney + view.portfolioValue) * MAX_SYMBOL_FRACTION);
-  if (!(budget > COMMISSION)) return 0;
+  let remaining = Math.max(0, view.totalMoney);
+  if (!(remaining > COMMISSION)) return 0;
   let estimated = 0;
   let exact = 0;
-  let counted = 0;
   for (const candidate of ranked) {
-    if (counted >= MAX_POSITIONS) break;
+    if (remaining <= COMMISSION) break;
     const symbol = view.symbols.find((s) => s.sym === candidate.sym);
     if (!symbol) continue;
     const price = candidate.side === "short" ? symbol.bid : symbol.ask;
     if (!(price > 0)) continue;
-    const shares = Math.min(symbol.maxShares, Math.floor((budget - COMMISSION) / price));
+    const room = Math.max(0, symbol.maxShares - symbol.shares - symbol.sharesShort);
+    const shares = Math.min(room, Math.floor((remaining - COMMISSION) / price));
     if (shares <= 0) continue;
     const common = { shares, ask: symbol.ask, bid: symbol.bid, volatility: candidate.volatility, side: candidate.side, ticks: holdTicks };
     estimated += Math.max(0, expectedProfit({ ...common, forecast: candidate.forecast }));
@@ -928,7 +845,7 @@ function fourSigmaGainPerSec(view: StockView, ranked: readonly RankedSymbol[], h
     // it is the conservative inverse (it assumes n = k, the halfway point).
     const unshrunk = 0.5 + (candidate.forecast - 0.5) * 2;
     exact += Math.max(0, expectedProfit({ ...common, forecast: Math.min(1, Math.max(0, unshrunk)) }));
-    counted++;
+    remaining -= shares * price + COMMISSION;
   }
   const delta = exact - estimated;
   if (!(delta > 0)) return 0;
@@ -948,13 +865,11 @@ function fourSigmaGainPerSec(view: StockView, ranked: readonly RankedSymbol[], h
  * inversion is the whole reason this has to be priced rather than assumed. */
 function planManipulation(params: {
   view: StockView;
-  memory: StockMemory;
   perSymbol: Map<string, { view: StockSymbolView; ranked: RankedSymbol }>;
   holdTicks: number;
-  entry?: PositionTarget;
   exiting: Set<string>;
 }): ManipulationIntent[] {
-  const { view, perSymbol, holdTicks, entry, exiting } = params;
+  const { view, perSymbol, holdTicks, exiting } = params;
   if (holdTicks <= 0) return [];
   const out: ManipulationIntent[] = [];
 
@@ -968,11 +883,18 @@ function planManipulation(params: {
   const consider = (sym: string, side: PositionSide, notional: number): void => {
     const entryView = perSymbol.get(sym);
     if (!entryView || notional <= 0) return;
-    const meta = STOCK_METADATA[sym];
-    if (!meta || meta.hosts.length === 0) return; // WDS has no server at all.
+    const hosts = Object.entries(view.symbolByHost)
+      .filter(([, mapped]) => mapped === sym)
+      .map(([host]) => host);
+    if (hosts.length === 0) return;
     const forecast = entryView.ranked.forecast;
     const volatility = entryView.ranked.volatility;
-    for (const hostname of meta.hosts) {
+    // Manipulation is positive feedback, not a substitute for an edge. Once
+    // the public signal no longer favours the held side, stop feeding it: a
+    // small farm can otherwise mask a regime reversal just long enough to
+    // delay the exit while being far too weak to overcome the new drift.
+    if (side === "long" ? forecast <= 0.5 : forecast >= 0.5) return;
+    for (const hostname of hosts) {
       if (!farmable.has(hostname)) continue;
       // stealFraction 1 is the per-op UNIT: `hacking` scales by the steal
       // fraction its own solved batch achieves, which it knows and we do not.
@@ -1006,49 +928,6 @@ function planManipulation(params: {
     if (symbol.shares > 0) consider(symbol.sym, "long", symbol.shares * symbol.bid);
     else if (symbol.sharesShort > 0) consider(symbol.sym, "short", symbol.sharesShort * symbol.ask);
   }
-  // The position we are about to open counts too: the manipulation and the
-  // position should start together, not a tick apart.
-  if (entry && !view.symbols.some((s) => s.sym === entry.sym && (s.shares > 0 || s.sharesShort > 0))) {
-    consider(entry.sym, entry.side, entry.cost - COMMISSION);
-  }
-
-  // SPECULATIVE intent — the chicken-and-egg breaker. The pushable symbols
-  // are the flattest on the board (that is what makes them pushable), so they
-  // never cross the entry band on their own, no position is ever held, and
-  // without a position no intent was published — the farm never pushed
-  // anything (measured: FNS/SGC/JGN held 3.6% of a 6h run, stockOps 0).
-  // Publishing an intent BEFORE the position lets the farm manufacture the
-  // edge: its ops (prep grows especially — each moves a large fraction of
-  // moneyMax, so nearly every one nudges) push the forecast, the estimator
-  // MEASURES the rising up-rate, the entry gate opens on real data, and the
-  // position buys the edge the farm created. Costs nothing — the ops fly
-  // anyway; the flag is free. One symbol only, so the push is concentrated:
-  // the farm's current target if it carries a symbol, else the first
-  // farmable one. Sized at the position we WOULD deploy.
-  if (out.length === 0 && farmable.size > 0) {
-    const pick = (): { sym: string; view: StockSymbolView; ranked: RankedSymbol } | undefined => {
-      const targetSym = view.farmTarget ? symbolForHost(view.farmTarget) : undefined;
-      const candidates = [...perSymbol.entries()].filter(([sym]) =>
-        (STOCK_METADATA[sym]?.hosts ?? []).some((host) => farmable.has(host)),
-      );
-      if (candidates.length === 0) return undefined;
-      const target = targetSym ? candidates.find(([sym]) => sym === targetSym) : undefined;
-      const [sym, entryView] = target ?? candidates[0]!;
-      return { sym, view: entryView.view, ranked: entryView.ranked };
-    };
-    const speculative = pick();
-    if (speculative) {
-      const notional = Math.min(view.totalMoney, view.totalMoney * MAX_SYMBOL_FRACTION);
-      // Push in the direction the symbol already leans, so the manufactured
-      // edge and the natural drift add instead of fighting — unless shorting
-      // is locked (no BN8/SF8.2): the entry gate can never open a short
-      // then, and a standing down-push would manufacture an edge nobody can
-      // buy while keeping the long side below the entry band all run.
-      const side: PositionSide =
-        speculative.ranked.forecast >= 0.5 || !view.canShort ? "long" : "short";
-      consider(speculative.sym, side, notional);
-    }
-  }
   out.sort((a, b) => b.valuePerOp - a.valuePerOp || (a.hostname < b.hostname ? -1 : 1));
   return out;
 }
@@ -1063,10 +942,6 @@ export function manipulationByHost(intents: readonly ManipulationIntent[]): Reco
   }
   return byHost;
 }
-
-/** The symbol a host's hacked money moves, or undefined. Re-exported so callers
- *  need only one stock import. */
-export { symbolForHost };
 
 // --- funding ----------------------------------------------------------------
 

@@ -8,6 +8,7 @@ import {
   midpoint,
   STOCK_METADATA,
   STOCK_SYMBOLS,
+  SYMBOL_BY_HOST,
   volatilityEstimate,
   worstSpreadFraction,
 } from "../shared/features/stocks.ts";
@@ -40,8 +41,6 @@ import {
   fundedActions,
   initStockMemory,
   manipulationByHost,
-  MAX_PORTFOLIO_FRACTION,
-  MAX_SYMBOL_FRACTION,
   MIN_HOLD_TICKS,
   stepStock,
   type StockGrants,
@@ -86,6 +85,7 @@ function view(over: Partial<StockView> = {}): StockView {
     canShort: true,
     fourSigmaDisabled: false,
     farmableHosts: [],
+    symbolByHost: SYMBOL_BY_HOST,
     moneyGranted: 1e10,
     totalMoney: 1e10,
     portfolioValue: 0,
@@ -251,9 +251,14 @@ describe("BitNode effect on the market", () => {
 
 describe("price history", () => {
   /** A tick where every symbol moves by v * mv/100, sharing one `v`. */
-  function tick(prices: Map<string, number>, v: number, up: (sym: string) => boolean): PriceSample[] {
+  function tick(
+    prices: Map<string, number>,
+    v: number,
+    up: (sym: string) => boolean,
+    volatility = (sym: string) => midpoint(STOCK_METADATA[sym]!.mv) / 100,
+  ): PriceSample[] {
     return [...prices.entries()].map(([sym, price]) => {
-      const av = (v * midpoint(STOCK_METADATA[sym]!.mv)) / 100;
+      const av = v * volatility(sym);
       const next = up(sym) ? price * (1 + av) : price / (1 + av);
       prices.set(sym, next);
       const spread = midpoint(STOCK_METADATA[sym]!.spreadPerc) / 100;
@@ -271,17 +276,31 @@ describe("price history", () => {
     expect(history.tick).toBe(1);
   });
 
-  test("the shared volatility roll is recoverable, and with it every symbol's mv", () => {
-    // This is the leak that makes a forecast possible without 4S: `v` is ONE
-    // draw for all 33 symbols, so one symbol's step calibrates every other's.
+  test("upstream ranges bootstrap the shared roll, then live prices refine volatility", () => {
     const prices = new Map(STOCK_SYMBOLS.map((sym) => [sym, midpoint(STOCK_METADATA[sym]!.initPrice)]));
     const history = initHistory();
     observeMarket(history, tick(prices, 0.5, () => true));
     for (let i = 0; i < 40; i++) observeMarket(history, tick(prices, 0.6, (sym) => sym !== "JGN"));
     expect(history.lastV).toBeCloseTo(0.6, 1);
-    // Measured volatility converges on the true mv/100 without any 4S call.
     expect(history.symbols["ECP"]!.volatility).toBeCloseTo(volatilityEstimate("ECP"), 3);
     expect(history.symbols["NTLK"]!.volatility).toBeCloseTo(volatilityEstimate("NTLK"), 3);
+  });
+
+  test("one basket tick solves extreme discrete volatility rolls from the vendored corpus", () => {
+    const prices = new Map(STOCK_SYMBOLS.map((sym) => [sym, midpoint(STOCK_METADATA[sym]!.initPrice)]));
+    const actual = new Map(STOCK_SYMBOLS.map((sym, index) => {
+      const range = STOCK_METADATA[sym]!.mv;
+      return [sym, range[index % 2] / 100] as const;
+    }));
+    const history = initHistory();
+    const quotes = tick(prices, 0, () => true, (sym) => actual.get(sym)!);
+    observeMarket(history, quotes);
+    observeMarket(history, tick(prices, 0.731, (sym) => sym !== "NTLK", (sym) => actual.get(sym)!));
+
+    expect(history.lastV).toBeCloseTo(0.731, 10);
+    for (const sym of STOCK_SYMBOLS) {
+      expect(history.symbols[sym]!.volatility, sym).toBeCloseTo(actual.get(sym)!, 10);
+    }
   });
 
   test("the up-tick frequency estimates the forecast, shrunk until there is evidence", () => {
@@ -514,11 +533,29 @@ describe("stepStock", () => {
     expect(manipulationByHost(unreachable.manipulation)["ecorp"]).toBeUndefined();
   });
 
-  test("it prefers a symbol the farm can push, when the edge is close", () => {
-    // The other half of the manipulation loop. `hacking` only prices price impact
-    // for a symbol we already hold, so a solver that always took the best edge
-    // would keep choosing hosts the farm cannot reach and the tie-in would never
-    // engage — which is exactly what the first end-to-end BN8 run did.
+  test("it never manipulates speculatively or against a held position's signal", () => {
+    const open = symbol({ forecast: 0.7, volatility: 0.0045 });
+    const flat = stepStock(view({ symbols: [open], farmableHosts: ["ecorp"] }), initStockMemory());
+    expect(flat.plan.manipulation).toHaveLength(0);
+
+    const held = symbol({ shares: 1_000_000, avgPx: 19_000, forecast: 0.3, volatility: 0.0045 });
+    const memory = initStockMemory();
+    memory.intent["ECP"] = { side: "long", sinceTick: 0 };
+    memory.history.tick = 5;
+    const adverse = stepStock(view({ symbols: [held], farmableHosts: ["ecorp"] }), memory);
+    expect(adverse.plan.manipulation).toHaveLength(0);
+  });
+
+  test("manipulation availability never raises the base entry threshold", () => {
+    const candidate = symbol({ sym: "JGN", forecast: 0.595, volatility: 0.03, ask: 1_000, bid: 990 });
+    const withoutFarm = run(view({ symbols: [candidate], farmableHosts: [] }), MIN_HOLD_TICKS + 2, () => true);
+    const withFarm = run(view({ symbols: [candidate], farmableHosts: ["joesguns"] }), MIN_HOLD_TICKS + 2, () => true);
+
+    expect(withoutFarm.decision.plan.entry).toMatchObject({ sym: "JGN", side: "long" });
+    expect(withFarm.decision.plan.entry).toEqual(withoutFarm.decision.plan.entry);
+  });
+
+  test("it reports manipulability without changing the economic ranking", () => {
     const unreachable = symbol({ sym: "MGCP", ask: 30_000, bid: 29_940, forecast: 0.70, volatility: 0.0045 });
     const pushable = symbol({ sym: "FNS", ask: 3_000, bid: 2_964, forecast: 0.68, volatility: 0.0075 });
     const withFarm = run(
@@ -529,14 +566,13 @@ describe("stepStock", () => {
     expect(withFarm.decision.plan.ranked[0]!.sym).toBe("FNS");
     expect(withFarm.decision.plan.ranked[0]!.manipulable).toBe(true);
 
-    // With no farm at all the preference does not apply, and pure edge decides.
     const noFarm = run(view({ symbols: [unreachable, pushable], farmableHosts: [] }), MIN_HOLD_TICKS + 2, () => true);
+    expect(noFarm.decision.plan.ranked.map((entry) => entry.sym))
+      .toEqual(withFarm.decision.plan.ranked.map((entry) => entry.sym));
     expect(noFarm.decision.plan.ranked.every((entry) => !entry.manipulable)).toBe(true);
   });
 
-  test("but it does NOT give up a large edge for manipulability", () => {
-    // The preference is a tie-break, not an override: a pushable symbol has to be
-    // within MANIPULATION_PREFERENCE of the leader's return on capital.
+  test("it does not give up a large edge for manipulability", () => {
     const strong = symbol({ sym: "MGCP", ask: 30_000, bid: 29_940, forecast: 0.9, volatility: 0.0045 });
     const weak = symbol({ sym: "FNS", ask: 3_000, bid: 2_910, forecast: 0.52, volatility: 0.0075 });
     const { decision } = run(
@@ -556,18 +592,15 @@ describe("stepStock", () => {
     expect(plan.manipulation).toHaveLength(0);
   });
 
-  test("it caps the portfolio and one symbol's share of it", () => {
+  test("it offers the best investment at full cash ambition to the arbiter", () => {
     const rich = view({
       totalMoney: 1e12,
       symbols: [symbol({ forecast: 0.7, volatility: 0.0045, maxShares: 1e12 })],
     });
     const { decision } = run(rich, MIN_HOLD_TICKS + 2, () => true);
     const entry = decision.plan.entry!;
-    // Both caps are fractions of the BANKROLL (cash + mark-to-market), which is
-    // just the cash here since nothing is held yet.
-    const bankroll = rich.totalMoney + rich.portfolioValue;
-    expect(entry.cost).toBeLessThanOrEqual(bankroll * MAX_PORTFOLIO_FRACTION + COMMISSION);
-    expect(entry.cost).toBeLessThanOrEqual(bankroll * MAX_SYMBOL_FRACTION + COMMISSION);
+    expect(entry.cost).toBeLessThanOrEqual(rich.totalMoney);
+    expect(entry.cost).toBeGreaterThan(rich.totalMoney * 0.99);
   });
 });
 

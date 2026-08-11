@@ -33,6 +33,13 @@ Q2 audit proved the two are not constant-factor conversions (hack is 1.70 GB,
 grow/weaken 1.75 GB), but they are monotonic in the same duration-weighted
 non-hack/hack ratio and therefore induce the same ordering.
 
+The solver also reports expected hacking experience per batch and per
+GB-second. Hack threads contribute `0.25 + 0.75*chance` times their full
+experience (failure awards one quarter); grow and weaken threads contribute
+fully. Dollars, including stock manipulation, remain the primary objective.
+Experience only breaks an equal-dollar choice, most importantly BN8's exact
+zero-dollar fallback.
+
 Search first derives a finite hack-thread ceiling from the 95% steal cap, the
 contiguous hack-block cap, and total batch RAM. Domains of at most **1,024**
 threads evaluate every integer candidate and return `exact: true`. Larger
@@ -98,8 +105,8 @@ pinned by the depth-capped-incumbent regression in the invariance suite).
 Guards: the threshold only comes from an incumbent solved at the *current*
 generation, the incumbent itself is never pruned, and when the incumbent earns
 nothing (cold start, BN8's zero-gain targets) pruning stands down entirely —
-those fallbacks rank by prep-aware value, where a low-score fast-prep target
-can legitimately win. `sim/tests/evaluator-prune.test.ts` walks randomized rolled
+the BN8 fallback ranks by expected experience rate and can deliberately select
+a cold target for the farm path to prepare. `sim/tests/evaluator-prune.test.ts` walks randomized rolled
 timelines (skill/fleet jumps, roots appearing, prepped states flapping, stock
 positions opening/closing, a BN8 scenario) twice — prune on vs off — and
 asserts byte-identical decisions; measured ~2–3× on evaluator time with
@@ -155,8 +162,11 @@ ranked by `score·max(0, T − prepTime)` rather than raw score, because the
 pipeline-aware score can rank a rich server above a small one whose prep the
 early fleet can actually finish.
 
-A farm switch requires **all** of: candidate prepped (sec ≤ min+1, money ≥ 90 %
-max), +10 % hysteresis on same-generation scores, 60 s dwell.
+A money-driven farm switch requires **all** of: candidate prepped (sec ≤ min+1,
+money ≥ 90 % max), +10 % hysteresis on same-generation scores, 60 s dwell. When
+every dollar score is zero, the evaluator instead chooses the best expected
+experience-rate target after the dwell even if it is cold; the farm dispatcher
+prepares it before batching.
 **Segment order** is fixed `[farm, prep, share]`. The old ≥25 % reorder rule
 (and an economics-driven 60 % prep share) was A/B-tested and LOST — the model
 prefers a big share because the farm's loss is share-invariant when RAM-bound,
@@ -353,9 +363,9 @@ op — against **tens of millions** of hacked money per batch. So:
   same intent, `bitnode: 8`.
 
 That asymmetry is why the two multipliers had to be separated rather than folded
-together, and why `stock` also biases its own choice toward symbols whose host the
-farm can reach (`MANIPULATION_PREFERENCE`) — the loop only closes if both halves
-choose each other.
+together. Stock selection remains purely economic; once a naturally selected
+position has a reachable server, its live manipulation intent makes the farm
+follow that exposure.
 
 ## Telemetry
 

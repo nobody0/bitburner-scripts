@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { growThreads, growthLogPerThread, makeHackContext, type HackContext } from "../../shared/formulas.ts";
+import { growThreads, growthLogPerThread, hackExpGain, makeHackContext, type HackContext } from "../../shared/formulas.ts";
 import { prepTimeSeconds, prepWaveRamGb, solveCycle, solvePrep, type TargetStatics } from "../../shared/strategy/targeting.ts";
 import { applyGrow, applyHack, applyWeaken, serverFromSpec, type SimServer } from "../core/effects.ts";
 import { mockPerson, mockServer } from "../core/mocks.ts";
@@ -142,6 +142,23 @@ describe("solveCycle hgw", () => {
 });
 
 describe("solveCycle", () => {
+  test("zero-dollar batches optimize and report their expected experience", () => {
+    const person = mockPerson();
+    person.skills.hacking = 300;
+    const ctx = makeHackContext(
+      { skill: 300, intelligence: 0, mults: person.mults },
+      { ScriptHackMoneyGain: 0 },
+    );
+    const solution = solveCycle(ctx, JOESGUNS)!;
+    const expectedHackThreads = solution.hackThreads * (0.25 + 0.75 * solution.chance);
+    const expected = hackExpGain(ctx, JOESGUNS.baseDifficulty) *
+      (expectedHackThreads + solution.growThreads + solution.weaken1Threads + solution.weaken2Threads);
+
+    expect(solution.score).toBe(0);
+    expect(solution.experiencePerBatch).toBeCloseTo(expected, 10);
+    expect(solution.experienceScore).toBeGreaterThan(0);
+  });
+
   test("one solved batch round-trips exactly through the game effects", () => {
     const skill = 300;
     const { ctx, person, server } = makeScenario(skill);

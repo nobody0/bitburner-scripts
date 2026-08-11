@@ -20,6 +20,7 @@ describe("evaluate.reduceRecord", () => {
     expect(ctx.player.hackingSkill).toBe(3);
     expect(ctx.servers.get("home")!.maxRam).toBe(32);
     expect(ctx.totals).toEqual({ moneyEarned: 100, hacks: 1 });
+    expect(ctx.stockPortfolioValue).toBe(0);
     expect(ctx.time).toBe(40);
   });
 
@@ -56,6 +57,12 @@ describe("goals", () => {
 
   test("parseGoal handles all preset kinds", () => {
     expect(parseGoal("earn:1e6").id).toBe("earn:1e6");
+    const wealth = parseGoal("wealth:100");
+    const wealthCtx = initialContext();
+    wealthCtx.player.money = 40;
+    wealthCtx.stockPortfolioValue = 60;
+    expect(wealth.done(wealthCtx)).toBe(true);
+    expect(wealth.remainingMoney!(wealthCtx)).toBe(0);
     expect(parseGoal("ram:512").describe()).toContain("home");
     expect(parseGoal("ram:pserv-0:128").describe()).toContain("pserv-0");
     const only = parseGoal("only:hack,weaken");
@@ -63,6 +70,26 @@ describe("goals", () => {
     expect(only.allows!({ type: "sleep", ms: 1 })).toBe(true);
     expect(only.allows!({ type: "buyServer", ram: 64, name: "p" })).toBe(false);
     expect(() => parseGoal("bogus:1")).toThrow("unknown goal spec");
+  });
+
+  test("stock topics feed wealth at liquidation value without changing cash", () => {
+    const ctx = initialContext();
+    reduceRecord(ctx, record({ kind: "state", key: "getPlayer", data: { money: 25 } }));
+    reduceRecord(ctx, record({ kind: "state", key: "stock", data: { portfolioValue: 80 } }));
+    expect(parseGoal("wealth:100").done(ctx)).toBe(true);
+    expect(parseGoal("money:100").done(ctx)).toBe(false);
+  });
+
+  test("wealth uses the stock feature's coherent snapshot around trades", () => {
+    const ctx = initialContext();
+    reduceRecord(ctx, record({ kind: "state", key: "player", data: { money: 950 } }, 1));
+    reduceRecord(ctx, record({ kind: "state", key: "stock", data: { portfolioValue: 100, wealth: 900 } }, 2));
+
+    // 950 + 100 is an impossible mixed-time view (cash from before the buy,
+    // holdings from after it). The feature's atomic snapshot is authoritative.
+    const wealth = parseGoal("wealth:1000");
+    expect(wealth.done(ctx)).toBe(false);
+    expect(wealth.remainingMoney!(ctx)).toBe(100);
   });
 
   test("allOf combines done, allows, and setup", () => {

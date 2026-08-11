@@ -236,7 +236,7 @@ describe("arbiter shape", () => {
     // The aug fund outranks the upgrades that would otherwise always win by
     // being cheaper and always ready.
     expect(PRIORITY["factions:aug-fund"]).toBeGreaterThan(PRIORITY["hacknet:upgrade"]);
-    expect(PRIORITY["factions:aug-fund"]).toBeGreaterThan(PRIORITY["stock:position"]);
+    expect(PRIORITY["factions:aug-fund"]).toBeGreaterThan(PRIORITY["income:investment"]);
   });
 
   test("a blocking need can actually PREEMPT faction work, not merely outbid it", () => {

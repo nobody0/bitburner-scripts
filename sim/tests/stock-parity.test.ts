@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { midpoint, STOCK_METADATA, STOCK_SYMBOLS } from "../../shared/features/stocks.ts";
+import { midpoint, STOCK_METADATA, STOCK_SYMBOLS, STOCK_VOLATILITY_STEP } from "../../shared/features/stocks.ts";
 import {
   COMMISSION,
   CYCLE_FLIP_CHANCE,
@@ -179,6 +179,13 @@ describe("volatility units", () => {
       const [min, max] = range(upstream.mv);
       expect(ours).toBeGreaterThanOrEqual(min / 100);
       expect(ours).toBeLessThanOrEqual(max / 100);
+    }
+  });
+
+  test("the discrete API grid follows the upstream integer roll and divisor", () => {
+    for (const upstream of InitStockMetadata) {
+      if (typeof upstream.mv === "number") continue;
+      expect(1 / (upstream.mv.divisor ?? 1) / 100).toBe(STOCK_VOLATILITY_STEP);
     }
   });
 });

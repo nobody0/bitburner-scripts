@@ -206,4 +206,12 @@ describe("Netscript contract fidelity", () => {
     const { ns } = harness([], true);
     expect(() => ns.stock.purchase4SMarketDataTixApi()).toThrow("no TIX API access");
   });
+
+  test("a fresh stock market has an authoritatively empty order book", () => {
+    const { ns, host } = harness([], true);
+    expect(() => ns.stock.getOrders()).toThrow("no TIX API access");
+    host.stock!.hasWseAccount = true;
+    host.stock!.hasTixApiAccess = true;
+    expect(ns.stock.getOrders()).toEqual({});
+  });
 });

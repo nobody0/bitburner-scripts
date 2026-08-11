@@ -246,11 +246,9 @@ function syncTopology(
   // contiguous call, so carving the reserve out of the biggest host shrinks
   // `largestBlockGb` for every solve (measured on bn1-speedrun: fleet
   // utilization fell ~90% → ~72% with the reserve parked on the top host).
-  // Same best-fit policy as dodgeHost. The largest host is a fallback ONLY
-  // while the reserve itself still fits on it (the dodge is placeable, just
-  // without the churn margin): a reserve larger than the host it lands on
-  // zeroes that host's farm income without making the starved dodge
-  // placeable, which is pure loss.
+  // Same best-fit policy as dodgeHost. The largest host is a fallback only
+  // while the reserve itself still fits on it: consuming an undersized host
+  // would reduce farm capacity without making the starved dodge executable.
   let reserveHost: string | undefined;
   if (fleetReserveGb > 0) {
     const fitsGb = fleetReserveGb + 4; // stub base + a couple of threads of churn
@@ -281,7 +279,11 @@ function syncTopology(
   for (const server of view.servers) {
     if (!server.hasAdminRights || server.maxRam < 2) continue;
     const reserved =
-      server.hostname === "home" ? homeReserveGb : server.hostname === reserveHost ? fleetReserveGb : 0;
+      server.hostname === "home"
+        ? homeReserveGb
+        : server.hostname === reserveHost
+          ? fleetReserveGb
+          : 0;
     const existing = memory.heap.host(server.hostname);
     // The heap owns `used` (reservation ledger); topology comes from the view.
     memory.heap.upsert(

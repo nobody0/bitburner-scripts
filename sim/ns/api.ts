@@ -536,10 +536,15 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
           requireTix("purchase4SMarketDataTixApi");
           return stock.purchase4SMarketDataTixApi();
         },
-        // Not modelled: `processOrders` in the vendored price engine is a no-op,
-        // so an order book would silently never fill. Reporting it is the honest
-        // answer, and nothing in shared/strategy places one.
-        getOrders: () => unmodeled("ns", "stock.getOrders", "limit/stop orders have no simulation model"),
+        // Reading an EMPTY order book is fully modelled. Fresh worlds have no
+        // orders, our strategy never places one, and save seeding separately
+        // marks a non-empty saved book invalid before the controller starts.
+        // Returning `{}` here is therefore observed state, not a fabricated
+        // fill engine. Mutating the book remains deliberately unmodelled.
+        getOrders: () => {
+          requireTix("getOrders");
+          return {};
+        },
         placeOrder: () => unmodeled("ns", "stock.placeOrder", "limit/stop orders have no simulation model"),
         cancelOrder: () => unmodeled("ns", "stock.cancelOrder", "limit/stop orders have no simulation model"),
       },

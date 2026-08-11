@@ -98,6 +98,16 @@ export interface GameRunResult {
   output: string[];
   validity: RunValidity;
   scenario: ScenarioClass;
+  /** Terminal stock economics. Wealth includes cash plus what closing every
+   * position at the current quotes would return after commission. */
+  stock: {
+    cash: number;
+    liquidationValue: number;
+    wealth: number;
+    realizedProfit: number;
+    commissionPaid: number;
+    tradesMade: number;
+  };
 }
 
 /** Realm slots game/ owns. Cleared before and after a run so a process that
@@ -644,6 +654,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   const reached = stoppedBecause === "goal";
   const gaps = unmodeledCounts();
   const validity: RunValidity = Object.keys(gaps).length > 0 || host.crashes.length > 0 ? "invalid-for-goal" : "valid";
+  const liquidationValue = stock.liquidationValue();
   const result: GameRunResult = {
     seed,
     reached,
@@ -656,6 +667,14 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     output: host.output,
     validity,
     scenario: scenarioClass(save !== undefined),
+    stock: {
+      cash: world.player.money,
+      liquidationValue,
+      wealth: world.player.money + liquidationValue,
+      realizedProfit: stock.realizedProfit,
+      commissionPaid: stock.commissionPaid,
+      tradesMade: stock.tradesMade,
+    },
   };
   world.emit({ kind: "event", name: "sim.result", data: { goal: goal.id, ...result } });
   clearRealm();

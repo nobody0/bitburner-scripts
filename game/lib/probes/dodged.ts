@@ -832,6 +832,26 @@ const stockTick: DodgedProbe = {
   },
 };
 
+/** Public symbol/organization mapping. It is immutable for a market, so pay
+ * the RAM cost once instead of shipping a private symbol/host table. */
+const stockOrganizations: DodgedProbe = {
+  id: "stock.organizations",
+  kind: "dodged",
+  feature: "stock",
+  everyMs: MIN_10,
+  merge: true,
+  when: (_caps, topics) =>
+    topics.stock?.hasTixApiAccess === true && topics.stock.organizations === undefined,
+  methods: ["stock.getSymbols", "stock.getOrganization"],
+  run(stubNs: NS) {
+    const organizations: Record<string, string> = {};
+    for (const sym of stubNs["stock"]["getSymbols"]()) {
+      organizations[String(sym)] = String(stubNs["stock"]["getOrganization"](sym));
+    }
+    return [emitPartial("stock", { organizations })];
+  },
+};
+
 /** The 4S signal. Gated on `has4SDataApi` rather than try/catch: the flag is
  *  already probed for 0.05 GB, so launching a 7 GB stub to discover it throws is
  *  pure waste. Same 4 s cadence as the prices, because the forecast is half of
@@ -1591,6 +1611,7 @@ export const DODGED_PROBES: readonly DodgedProbe[] = [
   hackingInfrastructure,
   stockAccount,
   stockTick,
+  stockOrganizations,
   stockForecast,
   stockOrders,
   gangCore,

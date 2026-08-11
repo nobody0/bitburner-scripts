@@ -7,9 +7,18 @@ import {
   STUB_BASE_GB,
   type HostRam,
 } from "../shared/ram/placement.ts";
-import { homeReserveGb, MAX_RESERVE_FRACTION } from "../shared/ram/reserve.ts";
+import { fleetDodgeReserveGb, homeReserveGb, MAX_RESERVE_FRACTION } from "../shared/ram/reserve.ts";
 
 describe("homeReserveGb", () => {
+  test("a capped dodge spills its full contiguous executable footprint", () => {
+    const tiny = homeReserveGb({ enabled: ["stock"], demand: { stock: 12 }, homeMaxRam: 8 });
+    const largerButStillCapped = homeReserveGb({ enabled: ["stock"], demand: { stock: 12 }, homeMaxRam: 16 });
+    expect(tiny.capped).toBe(true);
+    expect(largerButStillCapped.capped).toBe(true);
+    expect(fleetDodgeReserveGb(tiny)).toBe(13.6);
+    expect(fleetDodgeReserveGb(largerButStillCapped)).toBe(13.6);
+  });
+
   test("is just the base when no enabled feature declares a step", () => {
     const result = homeReserveGb({ enabled: ["hacking"], demand: {}, homeMaxRam: 64 });
     expect(result.reserveGb).toBe(HOME_RESERVE_GB);
