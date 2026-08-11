@@ -1016,7 +1016,10 @@ function launchPrepWave(
   if (plan.weaken1Threads > 0) {
     firstGrowLanding = nativeLanding.weaken + PREP_ORDER_MS;
   } else {
-    firstGrowLanding = Math.max(nativeLanding.grow, nativeLanding.weaken - PREP_ORDER_MS);
+    // Already at minimum security: the first grow needs no leading weaken and
+    // should land at its native deadline. Its W2 may land later; only the NEXT
+    // grow has to wait until that cover has restored minimum security.
+    firstGrowLanding = nativeLanding.grow;
   }
   const firstWeakenLanding = Math.max(nativeLanding.weaken, firstGrowLanding + PREP_ORDER_MS);
   const pairLandings = (index: number): { grow: number; weaken: number } => ({

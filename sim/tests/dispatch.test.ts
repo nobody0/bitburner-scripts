@@ -279,6 +279,7 @@ describe("prep waves", () => {
     expect(growThreads).toBeGreaterThan(0);
     expect(weakenThreads).toBeGreaterThan(0);
     expect(weakenThreads).toBeLessThan(growThreads * 0.2);
+    expect(actions.find((action) => action.type === "grow")?.additionalMsec ?? 0).toBe(0);
 
     const target = world.servers.get(farmHost!)!;
     const byLanding = new Map<number, typeof waveOps>();
