@@ -29,6 +29,7 @@ const RAM_COSTS: Record<string, number> = {
   "ns.killall": 0.5,
   "ns.getServerMaxRam": 0.05,
   "ns.getServerUsedRam": 0.05,
+  "ns.disableLog": 0,
   "ns.hack": 0.1,
   "ns.grow": 0.15,
   "ns.weaken": 0.15,
@@ -134,10 +135,10 @@ describe("in-game static RAM budget", () => {
     const artifacts = await buildScripts(config, { telemetry: true });
     const worker = artifacts.find((a) => a.filename === "worker/worker.js")!;
     // The worker is billed per launch via ramOverride (1.7 / 1.75), not by its
-    // own static cost — but only because it references nothing beyond the
-    // three ops. Anything else here would exceed the declared override at
-    // runtime and the game would kill the worker mid-batch.
+    // own static cost — but only because it references nothing with a RAM
+    // charge beyond the three ops. disableLog is a zero-RAM hot-path guard;
+    // anything else would exceed the declared override and kill the worker.
     const { members } = staticRam(worker.content);
-    expect(members).toEqual(["ns.grow", "ns.hack", "ns.weaken"]);
+    expect(members).toEqual(["ns.disableLog", "ns.grow", "ns.hack", "ns.weaken"]);
   });
 });

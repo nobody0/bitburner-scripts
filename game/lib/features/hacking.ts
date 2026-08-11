@@ -5,6 +5,9 @@ import { sfLevel } from "../../../shared/features/unlock.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import {
   advanceInfrastructureFrontier,
+  capInfrastructureByObservedFleet,
+  deferPrerequisitePurchase,
+  infrastructureBeforeMoneyNeeds,
   scoreHomeRam,
   stepInfrastructure,
   type InfrastructureDecision,
@@ -26,13 +29,13 @@ import { isScriptDeath } from "../errors.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
-/** The hacking driver: one HWGW dispatcher pass per tick.
+/** The hacking driver: one HWGW dispatcher pass per heartbeat or worker wake.
  *
  * All decisions live in shared/strategy; this only moves data. It runs at
- * TICK_MS — one HWGW spacer — because batch ops land on 200 ms slots and a
- * slower cadence would simply miss them. Every other feature is slower by
- * orders of magnitude, which is the whole reason the frame schedules by
- * cadence rather than running everything every pass. */
+ * TICK_MS as a fallback, while cancellable JIT deadline and completion wakes
+ * service landing windows without waiting for another heartbeat. Every other feature is
+ * slower by orders of magnitude, which is the whole reason the frame schedules
+ * by cadence rather than running everything every pass. */
 
 /** Module-level, not realm-level: the ledger is per-controller-instance by
  * design. A build handoff gives the incoming controller a fresh ledger while
@@ -126,7 +129,7 @@ function scheduleJitWake(at: number | undefined): void {
     globals.dispatch_jit_timer = undefined;
     globals.dispatch_jit_at = undefined;
     signalWake(globals);
-  }, Math.max(0, at - Date.now()));
+  }, Math.max(0, at - performance.now()));
 }
 
 export function takePumpMaxMs(): number {
@@ -165,6 +168,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   // dispatcher — this is display/telemetry, 30 s staleness is fine.
   const targetServer = target ? game.topics.servers?.[target] : undefined;
   const heap = driver.memory.dispatch.heap;
+  const poolWorkers = [...driver.memory.dispatch.pool.workers.values()];
   const segmentGb = driver.memory.dispatch.segmentGb;
   const prepBudgetGb = driver.memory.dispatch.evaluator.directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
 
@@ -196,6 +200,9 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     },
     allocFails: stats.allocFails,
     execs: stats.execs,
+    ...(poolWorkers.length > 0
+      ? { pool: { workers: poolWorkers.length, busy: poolWorkers.filter((worker) => worker.busy).length } }
+      : {}),
     ...(stats.stockOps > 0 ? { stockOps: stats.stockOps } : {}),
     ...(driver.memory.dispatch.depthCapGb !== undefined ? { depthCapGb: driver.memory.dispatch.depthCapGb } : {}),
     execFails: driver.execFails,
@@ -261,7 +268,7 @@ function homeCoreIncomeDelta(ctx: Pick<ClaimContext, "state">): number {
   return Math.max(0, after - before) * usable;
 }
 
-function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): InfrastructureDecision {
+function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons" | "board">): InfrastructureDecision {
   // Two lifetimes, two horizons. Home RAM and cores survive augmentation
   // installs, so they amortize over the whole node. Purchased cloud servers
   // are destroyed by prestigeAugmentation, so they only have until the next
@@ -318,7 +325,10 @@ function infrastructureDecision(ctx: Pick<ClaimContext, "state" | "horizons">): 
   for (const quote of fleet.infrastructureOptions ?? []) {
     options.push({ ...quote, incomePerSec: marginalIncome(quote.addedRam), horizonSec: installLifetimeSec });
   }
-  return stepInfrastructure(options, nodeHorizonSec, money);
+  const currentIncome = Math.max(0, fleet.scriptIncome?.[0] ?? 0);
+  const conservative = capInfrastructureByObservedFleet(options, currentIncome, fleetGb);
+  const goalCompatible = infrastructureBeforeMoneyNeeds(conservative, money, currentIncome, ctx.board.byKind.money);
+  return stepInfrastructure(goalCompatible, nodeHorizonSec, money);
 }
 
 function infrastructureMethods(kind: InfrastructureOption["kind"]): readonly string[] {
@@ -523,6 +533,11 @@ function nextBackdoorAction(ctx: Pick<ClaimContext, "board" | "state">): Backdoo
     // compounding investment hours before the backdoor is actionable.
     if (!server.hasAdminRights) {
       if ((server.numOpenPortsRequired ?? 0) === 0) continue;
+      // Do not turn a wanted future backdoor into a higher-priority savings
+      // target while another subsystem is waiting on cash right now. Ready
+      // backdoors remain free to execute, and a genuinely blocking opener is
+      // still allowed through.
+      if (deferPrerequisitePurchase(need.urgency, ctx.board.open)) continue;
       const program = programForPortNeed(ctx.state, server.numOpenPortsRequired ?? 0);
       const dear = (program?.purchaseCost ?? 0) > OPENER_ANTICIPATION_COST_CAP;
       if (dear && (server.requiredHackingSkill ?? Infinity) > player.skills.hacking * OPENER_SKILL_ANTICIPATION) {
@@ -643,7 +658,7 @@ function runPump(
   const completions = drainCompletions(driver);
   const reinvestmentReturnPerDollarSec = bestReinvestmentReturnPerDollarSec(game);
 
-  const started = Date.now();
+  const started = performance.now();
   // pooling: farm batch ops ride pooled serve workers (worker.ts serve mode),
   // collapsing exec churn — the browser-side cost of a fresh WorkerScript per
   // op — to near zero at depth.
@@ -655,9 +670,9 @@ function runPump(
     ...(reinvestmentReturnPerDollarSec > 0 ? { reinvestmentReturnPerDollarSec } : {}),
   });
   scheduleJitWake(result.nextWakeMs === undefined ? undefined : view.time + result.nextWakeMs);
-  const elapsed = Date.now() - started;
+  const elapsed = performance.now() - started;
   if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
-  lastPumpAt = Date.now();
+  lastPumpAt = performance.now();
 
   const target = result.directive.farm?.host ?? "";
   const current = gameGlobal.farmTarget ?? "";
@@ -683,7 +698,7 @@ export function pumpOnWake(
   fleetReserveGb: number,
   installSec: number | undefined,
 ): void {
-  const now = Date.now();
+  const now = performance.now();
   // Ordinary completions are throughput hints and may be coalesced. A queued
   // weaken is different: after a spread weaken's trailing debounce, this is
   // the only guaranteed observation point at minimum security. Never discard
@@ -836,8 +851,14 @@ export const hackingModule: FeatureModule = {
             resource: "money",
             amount: program.purchaseCost + 200_000,
             priority: PRIORITY["hacking:blocking-prerequisite"],
-            mode: "spend",
-            divisible: false,
+            // This is a savings target as well as an eventual atomic spend.
+            // While the full TOR + program price is not yet available, reserve
+            // every dollar the higher-priority prerequisite wins. Otherwise an
+            // indivisible denial leaves the pool untouched and the cheaper
+            // infrastructure claim behind it repeatedly drains the bankroll
+            // before BruteSSH can ever become affordable.
+            mode: "reserve",
+            divisible: true,
             why: `buy TOR and ${program.name} to reach a requested backdoor`,
           },
         );

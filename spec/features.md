@@ -216,9 +216,10 @@ properties matter.
   `yes`, the controller deletes its `featureLastRun` entry so it ticks on the
   next pass instead of serving out a cadence it was never eligible for.
 
-`hacking` is the only driver at 200 ms — batch ops land on HWGW spacer slots,
-so a slower cadence would miss them. Everything else is slower by orders of
-magnitude, which is the reason the frame schedules by cadence at all rather
+`hacking` is the only driver with a 200 ms fallback heartbeat; JIT deadline and
+completion wakes service exact HWGW landing windows without waiting another tick.
+Everything else is slower by orders of magnitude, which is the reason the
+frame schedules by cadence at all rather
 than running every driver every pass.
 
 All fourteen are implemented; there is no `inert()` helper any more. Four have

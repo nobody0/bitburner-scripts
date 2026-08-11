@@ -1242,11 +1242,13 @@ await extractDataTable({
     FactionName: enums.FactionName,
     LiteratureName: literatureEnums.LiteratureName,
   },
-  // Only the fields that are ROLLED, normalised to [min, max] pairs so a
-  // consumer never has to care which form upstream happened to use. A fixed
-  // number is a degenerate range, which is exactly how it behaves.
+  // Preserve both the normalized range and whether upstream actually rolls
+  // it. A fixed number and {min: n, max: n} have the same value but consume a
+  // different Math.random call; that distinction is load-bearing for a
+  // reproducible full-network seed.
   shape: `(() => {
     const range = (v) => v === undefined ? undefined : (typeof v === "number" ? [v, v] : [v.min, v.max]);
+    const rolled = (v) => typeof v === "object";
     return Object.fromEntries(serverMetadata.map((s) => [s.hostname, {
       host: s.hostname,
       org: s.organizationName,
@@ -1255,6 +1257,15 @@ await extractDataTable({
       sec: range(s.hackDifficulty),
       growth: range(s.serverGrowth),
       ramExp: range(s.maxRamExponent),
+      layer: range(s.networkLayer),
+      randomized: Object.fromEntries([
+        ["money", s.moneyAvailable],
+        ["skill", s.requiredHackingSkill],
+        ["sec", s.hackDifficulty],
+        ["growth", s.serverGrowth],
+        ["ramExp", s.maxRamExponent],
+        ["layer", s.networkLayer],
+      ].filter(([, value]) => rolled(value)).map(([field]) => [field, true])),
       ports: s.numOpenPortsRequired,
     }]));
   })()`,
@@ -1298,6 +1309,10 @@ await extractDataTable({
     `  sec?: Range;`,
     `  growth?: Range;`,
     `  ramExp?: Range;`,
+    `  layer?: Range;`,
+    `  /** Fields represented as an upstream min/max object. Only these consume`,
+    `   *  a random roll; fixed numbers do not, even when normalized ranges match. */`,
+    `  randomized: Partial<Record<"money" | "skill" | "sec" | "growth" | "ramExp" | "layer", true>>;`,
     `  ports: number;`,
     `}`,
   ],

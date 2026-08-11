@@ -3,7 +3,7 @@ import {
   canSolve,
   CONTRACT_BATCH_SIZE,
   CONTRACT_QUEUE_LIMIT,
-  CONTRACT_TELEMETRY_LIMIT,
+  CONTRACT_REPORT_LIMIT,
   CONTRACT_SOLVER_VERSION,
   solve,
   SOLVERS,
@@ -240,7 +240,7 @@ const side: FeatureDriver = {
       `${solved} solved, ${failures.length} quarantined from a batch of ${batch.length}${rewardDetail}`,
     );
     merge(ctx.state, "side", {
-      contracts: remaining.slice(0, CONTRACT_TELEMETRY_LIMIT),
+      contracts: remaining.slice(0, CONTRACT_REPORT_LIMIT),
       contractTotal: Math.max(0, (topic.contractTotal ?? topic.contracts.length) - solved),
       solvableTotal: Math.max(0, solvableTotal - solved - failures.length),
       failures: allFailures

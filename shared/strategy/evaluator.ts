@@ -12,7 +12,10 @@ import { scoreUpperBound } from "./bounds.ts";
 import {
   cycleJitRoles,
   cycleWorstDifficulty,
+  HGW_MIN_INTERVAL_MS,
+  HWGW_MIN_INTERVAL_MS,
   jitCapacity,
+  JIT_LAUNCH_GUARD_MS,
   MINIMUM_WORKER_PRECISION_MS,
 } from "./jit.ts";
 import {
@@ -67,7 +70,7 @@ export const FARM_SOLVE_SHARE = 0.75;
 export const FLEET_DELTA = 0.1;
 /** Smallest sensible batch cap: one hack thread plus its support. */
 export const WORKER_RAM_FLOOR = 16;
-const JIT_ECONOMICS_GUARD_MS = 230 + MINIMUM_WORKER_PRECISION_MS;
+const JIT_ECONOMICS_GUARD_MS = JIT_LAUNCH_GUARD_MS + MINIMUM_WORKER_PRECISION_MS;
 
 /** Runtime reduction bought by one point of experience at the next cached
  * skill milestone. With no synthetic money goal (the live game), value the
@@ -123,7 +126,7 @@ function withJitEconomics(
     duration,
     JIT_ECONOMICS_GUARD_MS,
   );
-  const intervalMs = solution.kind === "hgw" ? 600 : 800;
+  const intervalMs = solution.kind === "hgw" ? HGW_MIN_INTERVAL_MS : HWGW_MIN_INTERVAL_MS;
   // Saturation prices the FUTURE fleet size which can sustain the fastest
   // legal landing grid. Using today's slower affordable schedule as the cap is
   // self-defeating: it declares the RAM that would unlock the next cadence

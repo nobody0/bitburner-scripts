@@ -17,7 +17,7 @@ import { HacknetSystem } from "./features/hacknet.ts";
 import { GoSystem } from "./features/go-system.ts";
 import { StockMarketSystem } from "./features/stock.ts";
 import { satisfiesAll, type SatisfyContext } from "./features/requirements.ts";
-import { DEFAULT_NETWORK } from "./network.ts";
+import { DEFAULT_NETWORK, isSeededVanillaNetwork } from "./network.ts";
 import { makeSingularity } from "./ns/singularity.ts";
 import { launch, makeSimNs, type ScriptMain, type SimNsHost } from "./ns/api.ts";
 import { ProcessTable } from "./ns/process.ts";
@@ -55,6 +55,10 @@ export interface GameRunOptions {
   homeCores?: number;
   startingMoney?: number;
   network?: ServerSpec[];
+  /** Explicit foreign-server graph. When absent, small synthetic fixtures use
+   * the historical home-centred star. Saves always carry their own topology. */
+  topology?: Record<string, readonly string[]>;
+  augmentationStats?: Record<string, Record<string, number>>;
   person?: SimOptions["person"];
   playerState?: SimPlayerOptions;
   factions?: Record<string, { rep: number; favor: number }>;
@@ -77,7 +81,13 @@ export interface GameRunOptions {
   runId?: string;
   label?: string;
   verbose?: boolean;
+  /** Exercise the telemetry-free build path. Acquisition and decisions remain
+   * identical; SimWorld's authoritative records still drive goals/validity. */
+  telemetry?: boolean;
   onRecord?: (line: string) => void;
+  /** Optional artifact filter. Every record still reaches the goal reducer;
+   * this only controls which already-observed records are serialized. */
+  recordFilter?: (record: LogRecord) => boolean;
 }
 
 /** Singularity RAM is governed only by active SF4 (or BN4 inside getRamCost),
@@ -184,15 +194,19 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   const { goal, seed, horizonMs, save } = options;
   const bitnode = options.bitnode ?? save?.bitnode ?? 1;
   const sourceFileLevel = options.sourceFileLevel ?? save?.sourceFileLevel ?? 0;
+  const scenario = scenarioClass(
+    save !== undefined,
+    isSeededVanillaNetwork(options.network, options.topology),
+  );
 
   clearRealm();
   resetUnmodeled();
 
-  // Compile-time flags become runtime globals. Telemetry stays ON: the sink is
-  // real, only its transport is swapped, so the run exercises the same publish
-  // path the game does — and never opens a socket.
+  // Compile-time flags become runtime globals. Normal runs exercise the real
+  // publish path; --perf exercises the pinned telemetry-free behavior while
+  // simulator-owned records still feed goals and fidelity checks.
   const realm = globalThis as Record<string, unknown>;
-  realm["__TELEMETRY__"] = true;
+  realm["__TELEMETRY__"] = options.telemetry ?? true;
   realm["__BUILD_ID__"] = "sim";
 
   const clock = new Clock();
@@ -217,11 +231,12 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     ...(playerState ? { playerState } : {}),
     runId: options.runId ?? `${options.label ?? "game"}-seed${seed}`,
     verbose: options.verbose ?? false,
+    retainRecords: false,
     ...(save || options.gates ? { gates: { ...save?.gates, ...options.gates } } : {}),
     onRecord: (record: LogRecord) => {
       recordCount++;
       reduceRecord(ctx, record);
-      options.onRecord?.(JSON.stringify(record));
+      if (options.recordFilter?.(record) !== false) options.onRecord?.(JSON.stringify(record));
     },
   });
 
@@ -367,11 +382,13 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   });
   engine.start();
 
-  // A save carries its own topology. Otherwise: a star, which is what the six
-  // servers in DEFAULT_NETWORK really are — all one hop from home.
+  // A save carries its own topology; a full vanilla fixture supplies its
+  // generated graph. Small focused fixtures default to a home-centred star.
   const network = new Map<string, string[]>();
   if (save) {
     for (const [hostname, neighbours] of Object.entries(save.topology)) network.set(hostname, neighbours);
+  } else if (options.topology) {
+    for (const [hostname, neighbours] of Object.entries(options.topology)) network.set(hostname, [...neighbours]);
   } else {
     const others = [...world.servers.keys()].filter((h) => h !== "home");
     network.set("home", others);
@@ -432,6 +449,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       homeFiles: () => host.files.get("home")!,
       hasTor: () => hasTor.value,
       setTor: (value) => void (hasTor.value = value),
+      augmentationStats: options.augmentationStats,
       assertPrestigeSupported: () => world.assertPrestigeSupported(),
       onPrestige: (cbScript, newlyInstalled) => host.onPrestige?.(cbScript, newlyInstalled),
     }),
@@ -507,6 +525,14 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       if (!world.servers.has(hostname)) continue;
       host.network.set(hostname, neighbours.filter((neighbour) => world.servers.has(neighbour)));
     }
+    if (world.player.hasAugmentation("The Red Pill")) {
+      const cave = host.network.get("The-Cave");
+      const daemon = host.network.get("w0r1d_d43m0n");
+      if (cave && daemon) {
+        if (!cave.includes("w0r1d_d43m0n")) cave.push("w0r1d_d43m0n");
+        if (!daemon.includes("The-Cave")) daemon.push("The-Cave");
+      }
+    }
     host.reset = {
       ...host.reset,
       lastAugReset: virtualTime.nowMs(),
@@ -566,7 +592,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     goal: goal.id,
     horizonMs,
     seed,
-    scenario: scenarioClass(save !== undefined),
+    scenario,
     bitnode,
     sourceFileLevel,
     features: options.features ?? {},
@@ -585,6 +611,8 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
         homeCores: options.homeCores,
         startingMoney: options.startingMoney,
         network: options.network,
+        topology: options.topology,
+        augmentationStats: options.augmentationStats,
         person: options.person,
         playerState: options.playerState,
         factions: options.factions,
@@ -642,7 +670,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       label: options.label,
       seed,
       driver: "game",
-      scenario: scenarioClass(save !== undefined),
+      scenario,
       scenarioFingerprint: scenarioId,
       coverage: SIM_FEATURE_COVERAGE,
       bitnode,
@@ -670,7 +698,11 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     launch(host, controller);
     stoppedBecause = await clock.runAsync(() => goal.done(ctx), horizonMs);
   } finally {
-    host.processes.killAll();
+    // Terminal harness teardown is not an in-world kill: no continuation is
+    // observable after the virtual realm is dismantled. Do not reject pending
+    // Netscript delays and let Bun mistake normal teardown for an unhandled
+    // ScriptDeath after a valid result has already been emitted.
+    host.processes.killAll(false);
     engine.stop();
     virtualTime.restore();
     globalThis.WebSocket = originalWebSocket;
@@ -692,7 +724,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     crashes: host.crashes,
     output: host.output,
     validity,
-    scenario: scenarioClass(save !== undefined),
+    scenario,
     stock: {
       cash: world.player.money,
       liquidationValue,

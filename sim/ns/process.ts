@@ -159,11 +159,13 @@ export class ProcessTable {
     for (const process of this.#processes.values()) process.onlineRunningTimeSeconds += seconds;
   }
 
-  /** prestigeWorkerScripts: kill every process on every host. */
-  killAll(): number {
+  /** prestigeWorkerScripts: kill every process on every host. The harness's
+   * terminal teardown may pass false because no script continuation will be
+   * observed after the virtual realm is dismantled. */
+  killAll(cancelled = true): number {
     let killed = 0;
     for (const process of [...this.#processes.values()]) {
-      this.#stop(process, true);
+      this.#stop(process, cancelled);
       killed++;
     }
     return killed;

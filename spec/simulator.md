@@ -89,6 +89,20 @@ a versioned fingerprint of the complete experimental input. `sim:compare`
 refuses different fingerprints, drivers, scenarios, goals or gap sets, and
 refuses invalid runs unless `--allow-invalid` is supplied for diagnostics.
 
+Long controller benchmarks can use `--compact`. Goal reduction and validity
+still consume every record, but the JSONL retains only experimental identity,
+route changes, install milestones, fidelity events and the terminal result.
+Full-game runs also stream records instead of retaining a duplicate in-memory
+history. Neither changes controller behaviour; they only bound host-side I/O
+and heap use for multi-install BitNode runs.
+
+`--perf` additionally exercises the game's telemetry-free build path. The
+controller still acquires and stores exactly the same state (pinned by
+`tests/build-perf.test.ts`); simulator-owned player, server, install and
+progression records keep goals and validity observable without paying for the
+game's WebSocket payload construction. Use `--compact --perf` for BN-time
+benchmarks, and the normal telemetry path when inspecting detailed decisions.
+
 ## Known gaps
 
 - **One run per process.** `currentNodeMults` is module state in the vendored
@@ -102,10 +116,12 @@ refuses invalid runs unless `--allow-invalid` is supplied for diagnostics.
   unmodeled. Go and coding-contract rules have oracle tests but their Netscript
   lifecycles are not wired, so they report a gap instead of returning synthetic
   gameplay state.
-- The default network is an eight-server deterministic early-game fixture, not
-  Bitburner's generated whole-node network. Save-seeded runs use the real saved
-  topology and live server state. The scenario class prevents accidental
-  comparisons between the two.
+- Unprofiled runs use the small deterministic early-game fixture. `bn1-full`
+  instead generates the complete vanilla v3.0.1 foreign-server population and
+  topology from a fixed dedicated seed; `bn1-jit-stress` and
+  `jit-process-pressure` are explicitly synthetic late-game laboratories.
+  Save-seeded runs use the real saved topology and live state. Scenario classes
+  prevent accidental comparison of these inputs.
 - Save seeding restores supported current work and the stock market's prices,
   forecasts, positions and cycle state. Unsupported work kinds and nonempty
   stock order books invalidate the run rather than being silently discarded.
@@ -116,8 +132,9 @@ refuses invalid runs unless `--allow-invalid` is supplied for diagnostics.
 - `bitburner-src/src/Exploits/loops.ts` uses `performance.now()` to *detect*
   time compression; a real game under this clock would grant the
   TimeCompression exploit. Exploits are not modelled.
-- Port openers are not modelled in the default fixture network (all 0-port
-  servers). A save-seeded run carries its real `openPortCount`.
+- Port opener purchase/use and real port requirements are modelled. The small
+  fixture only includes the early faction gates; `bn1-full` carries the vanilla
+  requirement of every generated server, while saves retain live open ports.
 - Intelligence is 0 in the default fixture, matching a fresh character.
 
 ## Run-length pathologies (found and FIXED by profiling factions-join)

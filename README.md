@@ -130,6 +130,7 @@ dodged ns call sites and cost the same 3.6 GB.
 ```
 bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h            # HWGW engine (default)
 bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h --baseline # naive planner
+bun run sim -- --profile bn1-full --horizon 72h --compact --perf      # full fixed-seed BN1, bounded benchmark
 bun run sim:compare runs/<baseline>.jsonl runs/<candidate>.jsonl
 ```
 

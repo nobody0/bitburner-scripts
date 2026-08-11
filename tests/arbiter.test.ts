@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { MONEY_SPAN, REP_SPAN } from "../shared/strategy/income.ts";
-import { advanceInfrastructureFrontier, scoreHomeRam, stepInfrastructure } from "../shared/strategy/infrastructure.ts";
+import {
+  advanceInfrastructureFrontier,
+  capInfrastructureByObservedFleet,
+  deferPrerequisitePurchase,
+  infrastructureBeforeMoneyNeeds,
+  scoreHomeRam,
+  stepInfrastructure,
+} from "../shared/strategy/infrastructure.ts";
 import {
   grantFor,
   grantedAmount,
@@ -359,6 +366,50 @@ describe("the imminent-install band sits where the endgame needs it", () => {
 });
 
 describe("cross-feature investments", () => {
+  test("cash-goal crossover caps ideal marginal RAM by observed fleet throughput", () => {
+    const [capped] = capInfrastructureByObservedFleet([{
+      kind: "buyServer",
+      cost: 440_000,
+      addedRam: 8,
+      incomePerSec: 6_300,
+    }], 5_400, 580);
+    expect(capped?.incomePerSec).toBeCloseTo(5_400 / 580 * 8, 10);
+  });
+
+  test("a wanted paid prerequisite waits behind a blocking cash milestone", () => {
+    const cash = {
+      by: "factions" as const,
+      kind: "money" as const,
+      target: 15_000_000,
+      have: 4_000_000,
+      weight: 1,
+      urgency: "blocking" as const,
+      why: "join Sector-12",
+    };
+    expect(deferPrerequisitePurchase("wanted", [cash])).toBe(true);
+    expect(deferPrerequisitePurchase("nice", [cash])).toBe(true);
+    expect(deferPrerequisitePurchase("blocking", [cash])).toBe(false);
+    expect(deferPrerequisitePurchase("wanted", [{ ...cash, urgency: "wanted" }])).toBe(false);
+  });
+
+  test("infrastructure must shorten a blocking money threshold and preserve it at the crossing", () => {
+    const sector12 = {
+      by: "factions" as const,
+      kind: "money" as const,
+      target: 15_000_000,
+      have: 15_000_000,
+      weight: 1,
+      urgency: "blocking" as const,
+      why: "Sector-12 invitation",
+    };
+    const fast = { kind: "buyServer" as const, cost: 1_000_000, addedRam: 8, incomePerSec: 2_000 };
+    const slow = { kind: "homeRam" as const, cost: 1_000_000, addedRam: 8, incomePerSec: 1 };
+    expect(infrastructureBeforeMoneyNeeds([fast, slow], 5_000_000, 1_000, [sector12])).toEqual([fast]);
+    expect(infrastructureBeforeMoneyNeeds([fast], 15_000_000, 1_000, [sector12])).toEqual([]);
+    expect(infrastructureBeforeMoneyNeeds([fast], 20_000_000, 1_000, [{ ...sector12, urgency: "wanted" }])).toEqual([fast]);
+    expect(infrastructureBeforeMoneyNeeds([fast], 20_000_000, 1_000, [])).toEqual([fast]);
+  });
+
   test("home RAM is rejected when its payoff is beyond the run horizon", () => {
     const short = scoreHomeRam({ currentRam: 64, upgradeCost: 1_000_000, incomePerSecPerGb: 1, horizonSec: 1_000 });
     expect(short.worthBuying).toBe(false);

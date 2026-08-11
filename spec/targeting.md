@@ -10,7 +10,7 @@ measured in sim transfers directly.
 
 | Loop | Trigger | Budget | Measured |
 |---|---|---|---|
-| Dispatcher pass | every 200 ms tick (one spacer) | ≤10 ms | 0.01–0.03 ms |
+| Dispatcher pass | every 200 ms heartbeat plus exact deadline/completion wakes | ≤10 ms | 0.01–0.03 ms |
 | Evaluator slice | ≥2 s, `clamp(ceil(N/10),1,8)` targets | ≤2 ms | 0.1–0.9 ms / 8 targets |
 | Decision gate | ≥5 s, or invalidation | ≤200 ms | 3–21 ms / 100 targets |
 | Sweep | 30 s, dodged | — | scan + root + deploy + heap resync |

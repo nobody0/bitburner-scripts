@@ -17,6 +17,16 @@ export interface JitRole {
  * budgeted for another invocation at exactly t: promise continuation, exec
  * and timer jitter consume a few milliseconds even when the math is exact. */
 export const MINIMUM_WORKER_PRECISION_MS = 5;
+/** Conservative landing separation: forty measured handoff quanta. This is
+ * intentionally wider than the zero-overhead 4:1 weaken:hack ratio suggests;
+ * promise continuation, exec and browser-timer jitter consume real time. */
+export const MINIMUM_LANDING_GAP_MS = 40 * MINIMUM_WORKER_PRECISION_MS;
+/** Measured allowance for dispatch plus a warm worker-module start. */
+export const WORKER_STARTUP_GUARD_MS = 30;
+/** A deadline wake replaces the old full-heartbeat allowance. */
+export const JIT_LAUNCH_GUARD_MS = WORKER_STARTUP_GUARD_MS + MINIMUM_LANDING_GAP_MS;
+export const HWGW_MIN_INTERVAL_MS = 4 * MINIMUM_LANDING_GAP_MS;
+export const HGW_MIN_INTERVAL_MS = 3 * MINIMUM_LANDING_GAP_MS;
 
 export interface JitTopology {
   /** Placeable GB per host. Standing reservations are already subtracted. */
@@ -231,12 +241,24 @@ export function chooseJitSchedule(
   if (capacityGb <= 0 || minimumIntervalMs <= 0) return undefined;
   const longest = Math.max(minimumIntervalMs, ...roles.map((role) => role.holdMs));
   const factors = Math.ceil(longest / minimumIntervalMs) + 1;
-  for (let factor = 1; factor <= factors; factor++) {
+  const fits = (factor: number): JitSchedule | undefined => {
     const schedule = jitCapacity(roles, factor * minimumIntervalMs);
     if (
       schedule.totalGb <= capacityGb + 1e-9 &&
       (!topology || jitTopologyFits(roles, schedule, topology))
     ) return schedule;
+    return undefined;
+  };
+  // Capacity is monotone as cadence slows: every role retains the same or
+  // fewer integer slots, and topology only has fewer blocks to place. Binary
+  // search keeps long weaken schedules cheap even when they last minutes.
+  if (!fits(factors)) return undefined;
+  let low = 1;
+  let high = factors;
+  while (low < high) {
+    const mid = Math.floor((low + high) / 2);
+    if (fits(mid)) high = mid;
+    else low = mid + 1;
   }
-  return undefined;
+  return fits(low);
 }

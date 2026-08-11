@@ -46,7 +46,9 @@ export async function main(ns: NS, featureOverrides?: FeatureOverrides): Promise
   // analyser recognises this syntax before launch. Dynamic RAM is independently
   // pinned below by tests against the controller's direct ns call surface.
   ns.ramOverride(3.6);
-
+  // HGW is deliberately high-frequency. Avoid constructing and retaining a
+  // Netscript log entry for every scheduler getter and exec call.
+  ns.disableLog("ALL");
   const mode = parseStartMode(ns.args, __BUILD_ID__);
   const epoch = (gameGlobal.controllerEpoch ?? 0) + 1;
   gameGlobal.controllerEpoch = epoch;

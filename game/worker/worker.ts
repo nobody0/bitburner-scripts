@@ -41,6 +41,9 @@ function wakeDispatcher(kind: "hack" | "grow" | "weaken"): void {
 }
 
 export async function main(ns: NS): Promise<void> {
+  // A worker can execute thousands of HGW calls over its life; telemetry, not
+  // Netscript's per-call log, is the automation's observable record.
+  ns.disableLog("ALL");
   const id = Number(ns.args[0]);
   const g = workerGlobals();
   const info = g.worker_info?.get(id);
@@ -57,7 +60,7 @@ export async function main(ns: NS): Promise<void> {
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L342-L362
     const additionalMsec = job.delayUntil === undefined
       ? job.additionalMsec
-      : Math.max(0, job.delayUntil - Date.now());
+      : Math.max(0, job.delayUntil - performance.now());
     return additionalMsec || job.stock
       ? {
           ...(additionalMsec ? { additionalMsec } : {}),

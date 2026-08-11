@@ -22,7 +22,7 @@ export const CONTRACT_SOLVER_VERSION = 1;
  * cannot silently disagree. */
 export const CONTRACT_BATCH_SIZE = 20;
 export const CONTRACT_QUEUE_LIMIT = 100;
-export const CONTRACT_TELEMETRY_LIMIT = CONTRACT_BATCH_SIZE;
+export const CONTRACT_REPORT_LIMIT = CONTRACT_BATCH_SIZE;
 
 /** Largest sum of any contiguous subarray. */
 function maxSubarraySum(data: unknown): number {

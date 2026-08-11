@@ -192,6 +192,19 @@ describe("Netscript contract fidelity", () => {
     expect(await pending).toBeInstanceOf(ScriptDeath);
   });
 
+  test("terminal harness teardown cancels timers without fabricating an observable script kill", async () => {
+    const { ns, host } = harness();
+    let settled = false;
+    void ns.sleep(1_000).then(
+      () => { settled = true; },
+      () => { settled = true; },
+    );
+    expect(host.processes.killAll(false)).toBe(1);
+    await Promise.resolve();
+    expect(host.processes.size).toBe(0);
+    expect(settled).toBe(false);
+  });
+
   test("killing installBackdoor cancels its timer and world mutation", async () => {
     const { ns, host, world } = harness();
     const target = world.servers.get("n00dles")!;

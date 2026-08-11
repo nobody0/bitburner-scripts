@@ -42,16 +42,17 @@ export function drainCompletions(state: DriverState): CompletionEvent[] {
           opId: entry.opId,
           target: entry.target,
           threads: entry.threads,
-          result:
-            entry.kind === "hack"
-              // ns.hack returns money gained, not a success bit. Positive is
-              // definitive success; $0 is ambiguous in BN8 and is treated as
-              // failure for conservative exp/success telemetry.
-              // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L561-L635
-              ? { success: (entry.result ?? 0) > 0, moneyGained: entry.result ?? 0 }
-              : entry.kind === "weaken"
-                ? { securityReduced: entry.result ?? 0 }
-                : { growth: entry.result ?? 0 },
+          // Undefined is the worker protocol's failure marker (kill, reset or
+          // exception). Preserve it so a failed weaken cannot masquerade as a
+          // proven min-security landing window.
+          ...(entry.result === undefined
+            ? {}
+            : { result:
+                entry.kind === "hack"
+                  ? { success: entry.result > 0, moneyGained: entry.result }
+                  : entry.kind === "weaken"
+                    ? { securityReduced: entry.result }
+                    : { growth: entry.result } }),
         },
   );
   done.length = 0;
@@ -107,7 +108,9 @@ export function buildView(
     });
   }
   return {
-    time: Date.now(),
+    // Scheduler deadlines need a monotonic, sub-millisecond clock. Date.now()
+    // remains the timestamp domain for diagnostics and persisted game state.
+    time: performance.now(),
     player: {
       money: player.money,
       hackingSkill: player.skills.hacking,

@@ -41,6 +41,12 @@ export interface PackageSelection {
 }
 
 const ROUTE_MANDATORY_VALUE = 100;
+/** Until it is installed, CashRoot is persistent bootstrap infrastructure:
+ * the kit restores $1m and BruteSSH after every augmentation reset. A
+ * currently owned BruteSSH is deliberately irrelevant because ordinary
+ * programs disappear at that reset â€” it is precisely the next cold start
+ * that this augmentation prevents. */
+const CASHROOT_BOOTSTRAP_VALUE = 1_000;
 
 function cycleCompatible(standing: FactionStanding, standings: readonly FactionStanding[]): boolean {
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L35-L51
@@ -59,6 +65,10 @@ function routeAwareScore(aug: AugInfo, view: FactionsView): number {
   if (aug.name === "The Red Pill" && view.route && view.route !== "daedalus") return 0;
   let value = Math.max(0, scoreAug(aug, view.weights));
   if (aug.name === "The Red Pill" && view.route === "daedalus") value += ROUTE_MANDATORY_VALUE;
+  if (
+    aug.name === "CashRoot Starter Kit"
+    && !view.owned.has(aug.name)
+  ) value += CASHROOT_BOOTSTRAP_VALUE;
   return value;
 }
 

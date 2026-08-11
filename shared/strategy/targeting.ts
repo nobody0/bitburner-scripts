@@ -9,6 +9,7 @@ import {
   type HackContext,
 } from "../formulas.ts";
 import { WORKER_RAM } from "../world.ts";
+import { HGW_MIN_INTERVAL_MS, HWGW_MIN_INTERVAL_MS } from "./jit.ts";
 
 /** Per-target strategy solve — the inner half of "find the optimal target".
  * Pure math on shared/formulas.ts. Small domains are exhaustively searched;
@@ -173,11 +174,11 @@ export const MAX_STEAL = 0.95;
 export const EXACT_THREAD_LIMIT = 1_024;
 
 /** One batch per pipeline lane per interval, in seconds. The dispatcher's
- * INTERVAL_MS is derived from this (4 spacers of 200 ms), so the solver's
+ * INTERVAL_MS is derived from the same precision constants, so the solver's
  * launch-rate floor and the dispatcher's anchor spacing cannot drift apart. */
-export const BATCH_INTERVAL_S = 0.8;
+export const BATCH_INTERVAL_S = HWGW_MIN_INTERVAL_MS / 1_000;
 /** HGW batches have three landings, so their interval is 3 spacers. */
-export const HGW_INTERVAL_S = 0.6;
+export const HGW_INTERVAL_S = HGW_MIN_INTERVAL_MS / 1_000;
 
 /** RAM feasibility caps. A batch that cannot be placed is worthless however
  * well it scores, so the search only considers placeable thread counts:

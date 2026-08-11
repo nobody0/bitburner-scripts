@@ -19,6 +19,10 @@ export interface VendoredServer {
   sec?: Range;
   growth?: Range;
   ramExp?: Range;
+  layer?: Range;
+  /** Fields represented as an upstream min/max object. Only these consume
+   *  a random roll; fixed numbers do not, even when normalized ranges match. */
+  randomized: Partial<Record<"money" | "skill" | "sec" | "growth" | "ramExp" | "layer", true>>;
   ports: number;
 }
 
@@ -42,6 +46,14 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       99,
       99
     ],
+    "layer": [
+      15,
+      15
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true
+    },
     "ports": 5
   },
   "megacorp": {
@@ -63,6 +75,14 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       99,
       99
     ],
+    "layer": [
+      15,
+      15
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true
+    },
     "ports": 5
   },
   "b-and-a": {
@@ -84,6 +104,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       60,
       80
     ],
+    "layer": [
+      14,
+      14
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "blade": {
@@ -109,6 +139,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       5,
       9
     ],
+    "layer": [
+      14,
+      14
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "nwo": {
@@ -130,6 +171,15 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       65,
       95
     ],
+    "layer": [
+      14,
+      14
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "growth": true
+    },
     "ports": 5
   },
   "clarkinc": {
@@ -151,6 +201,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       45,
       75
     ],
+    "layer": [
+      14,
+      14
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "omnitek": {
@@ -176,6 +236,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       7,
       9
     ],
+    "layer": [
+      13,
+      13
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "4sigma": {
@@ -197,6 +268,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       75,
       99
     ],
+    "layer": [
+      13,
+      13
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "kuai-gong": {
@@ -218,6 +299,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       90,
       99
     ],
+    "layer": [
+      13,
+      13
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "fulcrumtech": {
@@ -243,6 +334,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       7,
       11
     ],
+    "layer": [
+      12,
+      12
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "fulcrumassets": {
@@ -264,6 +366,13 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       1,
       1
     ],
+    "layer": [
+      15,
+      15
+    ],
+    "randomized": {
+      "skill": true
+    },
     "ports": 5
   },
   "stormtech": {
@@ -285,6 +394,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       68,
       92
     ],
+    "layer": [
+      12,
+      12
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "defcomm": {
@@ -306,6 +425,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       47,
       73
     ],
+    "layer": [
+      9,
+      9
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "infocomm": {
@@ -327,6 +456,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       35,
       75
     ],
+    "layer": [
+      10,
+      10
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "helios": {
@@ -352,6 +491,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       5,
       8
     ],
+    "layer": [
+      12,
+      12
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "vitalife": {
@@ -377,6 +527,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      12,
+      12
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "icarus": {
@@ -398,6 +559,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       85,
       95
     ],
+    "layer": [
+      9,
+      9
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "univ-energy": {
@@ -423,6 +594,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      9,
+      9
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 4
   },
   "titan-labs": {
@@ -448,6 +630,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      11,
+      11
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "microdyne": {
@@ -473,6 +666,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       6
     ],
+    "layer": [
+      11,
+      11
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "taiyang-digital": {
@@ -494,6 +698,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       70,
       80
     ],
+    "layer": [
+      10,
+      10
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "galactic-cyber": {
@@ -515,6 +729,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       70,
       90
     ],
+    "layer": [
+      7,
+      7
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "aerocorp": {
@@ -536,6 +760,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       55,
       65
     ],
+    "layer": [
+      7,
+      7
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "omnia": {
@@ -561,6 +795,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       6
     ],
+    "layer": [
+      8,
+      8
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "zb-def": {
@@ -582,6 +827,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       65,
       75
     ],
+    "layer": [
+      10,
+      10
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 4
   },
   "applied-energetics": {
@@ -603,6 +858,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       70,
       75
     ],
+    "layer": [
+      11,
+      11
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 4
   },
   "solaris": {
@@ -628,6 +893,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      9,
+      9
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "deltaone": {
@@ -649,6 +925,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       50,
       70
     ],
+    "layer": [
+      8,
+      8
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "global-pharm": {
@@ -674,6 +960,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       3,
       6
     ],
+    "layer": [
+      7,
+      7
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 4
   },
   "nova-med": {
@@ -695,6 +992,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       65,
       85
     ],
+    "layer": [
+      10,
+      10
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 4
   },
   "zeus-med": {
@@ -716,6 +1023,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       70,
       80
     ],
+    "layer": [
+      9,
+      9
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 5
   },
   "unitalife": {
@@ -741,6 +1058,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       6
     ],
+    "layer": [
+      8,
+      8
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 4
   },
   "lexo-corp": {
@@ -766,6 +1094,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      6,
+      6
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 4
   },
   "rho-construction": {
@@ -791,6 +1130,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       6
     ],
+    "layer": [
+      6,
+      6
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 3
   },
   "alpha-ent": {
@@ -816,6 +1166,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      6,
+      6
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 4
   },
   "aevum-police": {
@@ -841,6 +1202,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       6
     ],
+    "layer": [
+      6,
+      6
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 4
   },
   "rothman-uni": {
@@ -866,6 +1238,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      5,
+      5
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 3
   },
   "zb-institute": {
@@ -891,6 +1274,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      5,
+      5
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "summit-uni": {
@@ -916,6 +1310,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       6
     ],
+    "layer": [
+      5,
+      5
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 3
   },
   "syscore": {
@@ -937,6 +1342,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       60,
       70
     ],
+    "layer": [
+      5,
+      5
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 4
   },
   "catalyst": {
@@ -962,6 +1377,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      5,
+      5
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 3
   },
   "the-hub": {
@@ -987,6 +1413,17 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       3,
       6
     ],
+    "layer": [
+      4,
+      4
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 2
   },
   "computek": {
@@ -1008,6 +1445,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       45,
       65
     ],
+    "layer": [
+      4,
+      4
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 3
   },
   "netlink": {
@@ -1033,6 +1480,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      4,
+      4
+    ],
+    "randomized": {
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 3
   },
   "johnson-ortho": {
@@ -1054,6 +1511,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       35,
       65
     ],
+    "layer": [
+      4,
+      4
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 2
   },
   "n00dles": {
@@ -1079,6 +1546,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       2,
       2
     ],
+    "layer": [
+      1,
+      1
+    ],
+    "randomized": {},
     "ports": 0
   },
   "foodnstuff": {
@@ -1104,6 +1576,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       4
     ],
+    "layer": [
+      1,
+      1
+    ],
+    "randomized": {},
     "ports": 0
   },
   "sigma-cosmetics": {
@@ -1129,6 +1606,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       4
     ],
+    "layer": [
+      1,
+      1
+    ],
+    "randomized": {},
     "ports": 0
   },
   "joesguns": {
@@ -1154,6 +1636,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       4
     ],
+    "layer": [
+      1,
+      1
+    ],
+    "randomized": {},
     "ports": 0
   },
   "zer0": {
@@ -1179,6 +1666,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       5,
       5
     ],
+    "layer": [
+      2,
+      2
+    ],
+    "randomized": {},
     "ports": 1
   },
   "nectar-net": {
@@ -1204,6 +1696,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       4
     ],
+    "layer": [
+      2,
+      2
+    ],
+    "randomized": {},
     "ports": 0
   },
   "neo-net": {
@@ -1229,6 +1726,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       5,
       5
     ],
+    "layer": [
+      3,
+      3
+    ],
+    "randomized": {},
     "ports": 1
   },
   "silver-helix": {
@@ -1254,6 +1756,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       6,
       6
     ],
+    "layer": [
+      3,
+      3
+    ],
+    "randomized": {},
     "ports": 2
   },
   "hong-fang-tea": {
@@ -1279,6 +1786,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       4
     ],
+    "layer": [
+      1,
+      1
+    ],
+    "randomized": {},
     "ports": 0
   },
   "harakiri-sushi": {
@@ -1304,6 +1816,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       4
     ],
+    "layer": [
+      1,
+      1
+    ],
+    "randomized": {},
     "ports": 0
   },
   "phantasy": {
@@ -1329,6 +1846,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       5,
       5
     ],
+    "layer": [
+      3,
+      3
+    ],
+    "randomized": {},
     "ports": 2
   },
   "max-hardware": {
@@ -1354,6 +1876,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       5,
       5
     ],
+    "layer": [
+      2,
+      2
+    ],
+    "randomized": {},
     "ports": 1
   },
   "omega-net": {
@@ -1379,6 +1906,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       5,
       5
     ],
+    "layer": [
+      3,
+      3
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 2
   },
   "crush-fitness": {
@@ -1400,6 +1937,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       27,
       33
     ],
+    "layer": [
+      4,
+      4
+    ],
+    "randomized": {
+      "money": true,
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 2
   },
   "iron-gym": {
@@ -1425,6 +1972,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       5,
       5
     ],
+    "layer": [
+      1,
+      1
+    ],
+    "randomized": {},
     "ports": 1
   },
   "millenium-fitness": {
@@ -1450,6 +2002,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       8
     ],
+    "layer": [
+      6,
+      6
+    ],
+    "randomized": {
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 3
   },
   "powerhouse-fitness": {
@@ -1475,6 +2037,16 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       6
     ],
+    "layer": [
+      14,
+      14
+    ],
+    "randomized": {
+      "skill": true,
+      "sec": true,
+      "growth": true,
+      "ramExp": true
+    },
     "ports": 5
   },
   "snap-fitness": {
@@ -1496,6 +2068,15 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       40,
       60
     ],
+    "layer": [
+      7,
+      7
+    ],
+    "randomized": {
+      "skill": true,
+      "sec": true,
+      "growth": true
+    },
     "ports": 4
   },
   "run4theh111z": {
@@ -1521,6 +2102,14 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       5,
       9
     ],
+    "layer": [
+      11,
+      11
+    ],
+    "randomized": {
+      "skill": true,
+      "ramExp": true
+    },
     "ports": 4
   },
   "I.I.I.I": {
@@ -1546,6 +2135,14 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       8
     ],
+    "layer": [
+      5,
+      5
+    ],
+    "randomized": {
+      "skill": true,
+      "ramExp": true
+    },
     "ports": 3
   },
   "avmnite-02h": {
@@ -1571,6 +2168,14 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       7
     ],
+    "layer": [
+      4,
+      4
+    ],
+    "randomized": {
+      "skill": true,
+      "ramExp": true
+    },
     "ports": 2
   },
   ".": {
@@ -1596,6 +2201,13 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       4,
       4
     ],
+    "layer": [
+      13,
+      13
+    ],
+    "randomized": {
+      "skill": true
+    },
     "ports": 4
   },
   "CSEC": {
@@ -1621,6 +2233,13 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       3,
       3
     ],
+    "layer": [
+      2,
+      2
+    ],
+    "randomized": {
+      "skill": true
+    },
     "ports": 1
   },
   "The-Cave": {
@@ -1642,6 +2261,11 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       0,
       0
     ],
+    "layer": [
+      15,
+      15
+    ],
+    "randomized": {},
     "ports": 5
   },
   "w0r1d_d43m0n": {
@@ -1663,6 +2287,7 @@ export const SERVER_METADATA: Record<string, VendoredServer> = {
       0,
       0
     ],
+    "randomized": {},
     "ports": 5
   }
 };

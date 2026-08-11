@@ -37,6 +37,7 @@ function mockNs(pending: MockOp[]): { ns: unknown; exitCbs: (() => void)[] } {
     });
   const ns = {
     args: [WORKER_ID],
+    disableLog: () => undefined,
     atExit: (cb: () => void) => exitCbs.push(cb),
     hack: op,
     grow: op,
@@ -139,7 +140,7 @@ describe("serve-mode worker", () => {
     vt = installVirtualTime(clock);
     cleanupRealm();
     const g = workerGlobals();
-    const deadline = Date.now() + 200;
+    const deadline = performance.now() + 200;
     // Model planning/exec/module startup consuming 75 ms before main() runs.
     clock.in(75, () => {});
     clock.run();

@@ -216,6 +216,11 @@ export interface ServerSpec {
   serverGrowth: number;
   numOpenPortsRequired: number;
   maxRam: number;
+  cpuCores?: number;
+  /** Explicit live save-state overrides. The roll fields above still derive
+   * base/min/max exactly as the upstream constructor does. */
+  currentDifficulty?: number;
+  currentMoney?: number;
   simKind?: SimServer["simKind"];
 }
 
@@ -226,20 +231,31 @@ export function serverFromSpec(spec: ServerSpec, base: SimServer): SimServer {
   // and the band table. Only the live starting money stays local.
   const statics = staticsFromRolls(
     spec.hostname,
-    { money: spec.moneyAvailable, sec: spec.hackDifficulty, skill: spec.requiredHackingSkill, growth: spec.serverGrowth },
+    {
+      money: spec.moneyAvailable,
+      sec: spec.hackDifficulty,
+      skill: spec.hostname === "w0r1d_d43m0n"
+        ? spec.requiredHackingSkill * currentNodeMults.WorldDaemonDifficulty
+        : spec.requiredHackingSkill,
+      growth: spec.serverGrowth,
+    },
     { ServerMaxMoney: currentNodeMults.ServerMaxMoney, ServerStartingSecurity: currentNodeMults.ServerStartingSecurity },
   );
   base.hostname = spec.hostname;
   base.simKind = spec.simKind ?? "Server";
   base.organizationName = spec.organizationName ?? "";
   base.maxRam = spec.maxRam;
+  base.cpuCores = spec.cpuCores ?? 1;
   base.requiredHackingSkill = statics.requiredHackingSkill;
-  base.moneyAvailable = spec.moneyAvailable * currentNodeMults.ServerStartingMoney;
+  base.moneyAvailable = spec.currentMoney
+    ?? spec.moneyAvailable * currentNodeMults.ServerStartingMoney;
   base.moneyMax = statics.moneyMax;
-  base.hackDifficulty = statics.baseDifficulty;
+  base.hackDifficulty = spec.currentDifficulty ?? statics.baseDifficulty;
   base.baseDifficulty = statics.baseDifficulty;
   base.minDifficulty = statics.minDifficulty;
   base.serverGrowth = statics.serverGrowth;
   base.numOpenPortsRequired = spec.numOpenPortsRequired;
+  capDifficulty(base);
+  base.moneyAvailable = Math.max(0, Math.min(base.moneyMax, base.moneyAvailable));
   return base;
 }

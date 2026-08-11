@@ -50,6 +50,9 @@ export interface SingularityDeps {
   homeFiles(): Set<string>;
   hasTor(): boolean;
   setTor(value: boolean): void;
+  /** Explicit world-generation rolls for augmentations whose multipliers are
+   * randomized at load time. Absent values remain unmodeled. */
+  augmentationStats?: Readonly<Record<string, Readonly<Record<string, number>>>>;
   assertPrestigeSupported?(): void;
   onPrestige?: (cbScript: string | undefined, newlyInstalled: ReadonlyMap<string, number>) => void;
 }
@@ -302,6 +305,8 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       // the empty placeholder would be a fabricated value; this is the one
       // place the simulator must refuse rather than guess.
       if (aug?.multsUnknown) {
+        const rolled = deps.augmentationStats?.[name];
+        if (rolled) return { ...rolled };
         unmodeled("ns", "singularity.getAugmentationStats", `${name} randomises its multipliers at load time`);
       }
       return { ...(aug?.mults ?? {}) };

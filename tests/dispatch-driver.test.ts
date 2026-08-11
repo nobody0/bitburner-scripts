@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { Server } from "@ns";
-import { initDriver, resyncHeap, type DriverState } from "../game/lib/dispatch-driver.ts";
+import { drainCompletions, initDriver, resyncHeap, type DriverState } from "../game/lib/dispatch-driver.ts";
 import type { WorkerGlobalThis } from "../game/lib/worker-shared.ts";
 import { reportFailed } from "../shared/strategy/farm-planner.ts";
 
@@ -21,6 +21,20 @@ function server(ramUsed: number): Server {
 }
 
 describe("dispatcher heap reconciliation", () => {
+  test("preserves a worker failure instead of fabricating a zero-result weaken", () => {
+    const state = driver();
+    state.globals.dispatch_done!.push({
+      opId: 7,
+      kind: "weaken",
+      target: "n00dles",
+      threads: 2,
+      result: undefined,
+    });
+    expect(drainCompletions(state)).toEqual([
+      { opId: 7, kind: "weaken", target: "n00dles", threads: 2 },
+    ]);
+  });
+
   test("does not subtract a worker twice while its completion is queued", () => {
     const state = driver();
     const memory = state.memory.dispatch;

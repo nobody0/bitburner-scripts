@@ -870,6 +870,54 @@ describe("faction breakpoint package planner", () => {
     expect(daedalus.intent?.faction).toBe("Daedalus");
   });
 
+  test("treats CashRoot as persistent bootstrap infrastructure until the augmentation is installed", () => {
+    const factions = [packageStanding("Sector-12"), packageStanding("CyberSec")];
+    const catalog = new Map([
+      ["CashRoot Starter Kit", aug("CashRoot Starter Kit", {
+        factions: ["Sector-12"],
+        baseCost: 12_500_000,
+        baseRepRequirement: 12_500,
+      })],
+      ["quick", aug("quick", {
+        factions: ["CyberSec"],
+        baseCost: 1,
+        baseRepRequirement: 100,
+        mults: { hacking: 1.5 },
+      })],
+    ]);
+    const blockers = new Map(factions.map((faction) => [faction.name, []]));
+    const bootstrap = selectFactionPackage(
+      factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      blockers,
+    );
+    expect(bootstrap.intent?.augmentations).toContain("CashRoot Starter Kit");
+
+    const established = selectFactionPackage(
+      factionsView({
+        factions,
+        catalog,
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+        requirementView: { ...view(), files: new Set(["BruteSSH.exe"]) },
+      }),
+      blockers,
+    );
+    expect(established.intent?.augmentations).toContain("CashRoot Starter Kit");
+
+    const installed = selectFactionPackage(
+      factionsView({
+        factions,
+        catalog,
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+        owned: new Set(["CashRoot Starter Kit"]),
+        requirementView: { ...view(), files: new Set(["BruteSSH.exe"]) },
+      }),
+      blockers,
+    );
+    expect(installed.intent?.faction).toBe("CyberSec");
+  });
+
   test("enemy membership blocks only this install cycle", () => {
     const west = packageStanding("Sector-12", { enemies: ["Chongqing"] });
     const east = packageStanding("Chongqing", { joined: false, enemies: ["Sector-12"] });

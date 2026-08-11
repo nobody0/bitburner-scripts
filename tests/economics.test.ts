@@ -8,7 +8,7 @@ import {
   type FarmRateModel,
 } from "../shared/strategy/economics.ts";
 import { allocateSegments, retainPrepReservation } from "../shared/strategy/evaluator.ts";
-import type { PrepPlan } from "../shared/strategy/targeting.ts";
+import { BATCH_INTERVAL_S, type PrepPlan } from "../shared/strategy/targeting.ts";
 
 /** Prep opportunity-cost economics: the "3 hours of prep is 3 hours of lost
  * income" model, with the depth-cap carve-out that makes surplus-RAM prep
@@ -33,18 +33,20 @@ function plan(overrides: Partial<PrepPlan> = {}): PrepPlan {
 
 describe("farmIncomeRate", () => {
   test("scales with RAM until the depth cap, then saturates", () => {
-    const m = model({ score: 2, ramPerBatch: 10, weakenTimeS: 8 }); // cap = 10 batches * 10 GB
-    expect(depthCapGb(m)).toBe(100);
+    const m = model({ score: 2, ramPerBatch: 10, weakenTimeS: 8 });
+    const cap = Math.floor(8 / BATCH_INTERVAL_S) * 10;
+    expect(depthCapGb(m)).toBe(cap);
     expect(farmIncomeRate(m, 50)).toBe(100);
-    expect(farmIncomeRate(m, 100)).toBe(200);
-    expect(farmIncomeRate(m, 10_000)).toBe(200); // surplus earns nothing
+    expect(farmIncomeRate(m, cap)).toBe(2 * cap);
+    expect(farmIncomeRate(m, 10_000)).toBe(2 * cap); // surplus earns nothing
     expect(farmIncomeRate(undefined, 100)).toBe(0);
   });
 
   test("uses the dispatcher's floored depth for partial intervals", () => {
     const m = model({ ramPerBatch: 10, weakenTimeS: 2.1 });
-    expect(depthCapGb(m)).toBe(20);
-    expect(farmIncomeRate(m, 1_000)).toBe(20);
+    const cap = Math.floor(2.1 / BATCH_INTERVAL_S) * 10;
+    expect(depthCapGb(m)).toBe(cap);
+    expect(farmIncomeRate(m, 1_000)).toBe(cap);
   });
 });
 
@@ -174,11 +176,11 @@ describe("evaluatePrep", () => {
   });
 
   test("a depth-capped farm preps for free: surplus RAM has no opportunity cost", () => {
-    // Farm saturates at 100 GB of a 1000 GB fleet: even the 0.6 share leaves
-    // (1-0.6)*1000 = 400 GB >= cap, so lost = 0 and any better candidate pays.
-    const current = model({ score: 1, ramPerBatch: 10, weakenTimeS: 80 }); // cap 1000 GB? no: 100 batches*10
-    expect(depthCapGb(current)).toBe(1_000);
-    const capped = model({ score: 1, ramPerBatch: 10, weakenTimeS: 8 }); // cap 100 GB
+    // Even the 0.6 prep share leaves (1-0.6)*1000 = 400 GB, above the
+    // incumbent's cadence-derived cap, so lost = 0 and any better candidate pays.
+    const current = model({ score: 1, ramPerBatch: 10, weakenTimeS: 80 });
+    expect(depthCapGb(current)).toBe(Math.floor(80 / BATCH_INTERVAL_S) * 10);
+    const capped = model({ score: 1, ramPerBatch: 10, weakenTimeS: 8 });
     const candidate = model({ score: 1.5, ramPerBatch: 10, weakenTimeS: 8 });
     const p = plan({ ramSec: 60_000, weakenTimeS: 100 });
     const result = evaluatePrep({ current: capped, candidate, plan: p, fleetGb: 1_000, horizonMs: 1_800_000 })!;

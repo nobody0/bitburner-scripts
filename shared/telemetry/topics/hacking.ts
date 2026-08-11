@@ -31,6 +31,9 @@ export interface FarmRollup {
   /** Fresh processes started (one-shots + pool spawns). Pooling keeps this
    * flat while `launched` climbs — the browser-RAM churn figure. */
   execs?: number;
+  /** Resident serve-mode processes. Jobs can outnumber these over time; that
+   * gap is the process-churn reduction pooling exists to create. */
+  pool?: { workers: number; busy: number };
   /** Ops launched with a `{stock:true}` influence flag — the observable link
    * between manipulation intent and nudges actually rolled. */
   stockOps?: number;

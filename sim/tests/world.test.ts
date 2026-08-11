@@ -7,6 +7,21 @@ function makeWorld(seed = 1): SimWorld {
 }
 
 describe("SimWorld", () => {
+  test("stream-only worlds do not retain duplicate record history", () => {
+    let streamed = 0;
+    const world = new SimWorld({
+      seed: 1,
+      network: DEFAULT_NETWORK,
+      retainRecords: false,
+      onRecord: () => streamed++,
+    });
+    expect(streamed).toBeGreaterThan(0);
+    expect(world.records).toEqual([]);
+    world.emit({ kind: "event", name: "proof" });
+    expect(streamed).toBeGreaterThan(1);
+    expect(world.records).toEqual([]);
+  });
+
   test("hgw reserves RAM, applies at completion, frees RAM", () => {
     const world = makeWorld();
     expect(world.execute({ type: "nuke", target: "n00dles" })).toBe(true);

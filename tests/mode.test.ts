@@ -51,4 +51,31 @@ describe("decideMode", () => {
     }
     expect(switches).toBeLessThanOrEqual(3); // one per dwell window over 60s
   });
+
+  test("follows the late-game HWGW -> HGW -> shotgun sequence", () => {
+    const hwgw = decideMode({ ...base, now: MODE_DWELL_MS, lastModeSince: 0 });
+    expect(hwgw.mode).toBe("hwgw");
+
+    const hgw = decideMode({
+      ...base,
+      liveOps: HGW_LIVE_OPS_PRESSURE + 1,
+      lastMode: hwgw.mode,
+      lastModeSince: 0,
+      now: MODE_DWELL_MS,
+    });
+    expect(hgw.mode).toBe("hgw");
+
+    // Correctness wins immediately over the performance dwell: once native
+    // hack time is below the reliable timer window, same-deadline FIFO is the
+    // only supported ordering mechanism.
+    const shotgun = decideMode({
+      ...base,
+      hackMs: SHOTGUN_HACK_MS - 1,
+      liveOps: HGW_LIVE_OPS_PRESSURE + 1,
+      lastMode: hgw.mode,
+      lastModeSince: MODE_DWELL_MS,
+      now: MODE_DWELL_MS + 1,
+    });
+    expect(shotgun.mode).toBe("shotgun");
+  });
 });

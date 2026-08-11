@@ -99,11 +99,17 @@ export function reduceRecord(ctx: GoalContext, record: LogRecord): GoalContext {
     } else if (record.key === "progression") {
       const data = record.data as ProgressionData;
       if (data.ownedAugs) {
-        ctx.installedAugmentations = new Set(
+        const installed = new Set(
           Object.entries(data.ownedAugs)
             .filter(([, level]) => level > 0)
             .map(([name]) => name),
         );
+        ctx.installedAugmentations = installed;
+        // Installed augmentations are necessarily owned too. The simulator's
+        // authoritative progression mirror is the only augmentation source in
+        // a telemetry-free run, so keep the inclusive goal set in sync rather
+        // than making `augs:`/`redpill:` silently unreachable under --perf.
+        for (const name of installed) ctx.augmentations.add(name);
       }
     } else if (record.key === "farm") {
       // Dispatcher rollup: cumulative totals are authoritative (they replace

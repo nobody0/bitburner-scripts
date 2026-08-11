@@ -5,7 +5,7 @@ import { sfLevel } from "../../../shared/features/unlock.ts";
 import {
   canSolve,
   CONTRACT_QUEUE_LIMIT,
-  CONTRACT_TELEMETRY_LIMIT,
+  CONTRACT_REPORT_LIMIT,
 } from "../../../shared/strategy/side/contracts.ts";
 import { rotate } from "../../../shared/strategy/stanek/pack.ts";
 import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
@@ -1484,7 +1484,7 @@ const sideContracts: DodgedProbe = {
       .map(({ data: _data, answer: _answer, ...summary }) => summary);
     return [
       emit("side", {
-        contracts: queue.slice(0, CONTRACT_TELEMETRY_LIMIT),
+        contracts: queue.slice(0, CONTRACT_REPORT_LIMIT),
         contractTotal,
         // Types are intentionally unknown until the bounded driver inspection.
         // This is therefore the unquarantined candidate count; unsupported

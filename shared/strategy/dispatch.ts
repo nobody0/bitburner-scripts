@@ -39,9 +39,14 @@ import {
   chooseJitSchedule,
   cycleJitRoles,
   cycleWorstDifficulty,
+  HGW_MIN_INTERVAL_MS,
+  HWGW_MIN_INTERVAL_MS,
   jitCapacity,
+  JIT_LAUNCH_GUARD_MS as TIMING_JIT_LAUNCH_GUARD_MS,
   latestJitStart,
+  MINIMUM_LANDING_GAP_MS,
   MINIMUM_WORKER_PRECISION_MS,
+  WORKER_STARTUP_GUARD_MS as TIMING_WORKER_STARTUP_GUARD_MS,
   type JitRole,
   type JitSchedule,
 } from "./jit.ts";
@@ -60,16 +65,14 @@ import {
  * borrowed prep RAM retain the simpler batch-atomic eager path.
  * Source (additionalMsec is added to each duration at invocation): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L537-L561 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L266-L286 */
 
-export const SPACER_MS = 200;
-/** Measured allowance for ns.exec plus cached-module worker startup. */
-export const WORKER_STARTUP_GUARD_MS = 30;
-/** One heartbeat plus worker startup. Landing slots remain a full spacer
- * apart; this only decides how early the controller must dispatch. */
-export const JIT_LAUNCH_GUARD_MS = SPACER_MS + WORKER_STARTUP_GUARD_MS;
+export const SPACER_MS = MINIMUM_LANDING_GAP_MS;
+/** Public aliases retained for dispatcher tests and diagnostics. */
+export const WORKER_STARTUP_GUARD_MS = TIMING_WORKER_STARTUP_GUARD_MS;
+export const JIT_LAUNCH_GUARD_MS = TIMING_JIT_LAUNCH_GUARD_MS;
 /** Distinct prep effects use the same proven timer guard as farm effects. This
  * is landing precision, not a minimum time for staying on a target. */
 export const PREP_ORDER_MS = SPACER_MS;
-export const INTERVAL_MS = 4 * SPACER_MS; // == targeting's BATCH_INTERVAL_S · 1000
+export const INTERVAL_MS = HWGW_MIN_INTERVAL_MS; // == targeting's BATCH_INTERVAL_S · 1000
 /** Cap launches per pass so one scheduler call stays inside the tick budget. */
 export const MAX_BATCHES_PER_PASS = 8;
 /** Shotgun emits a whole wave per pass — every batch lands the same engine
@@ -191,6 +194,11 @@ export interface DispatchMemory {
   segmentGb: Record<SegmentKind, number>;
   /** host -> op count in flight, so prep fires in non-overlapping waves. */
   prepInFlight: Map<string, number>;
+  /** Logical distributed weaken landings which have lost at least one
+   * fragment. Retained across pumps until the final fragment settles, so a
+   * later successful fragment cannot turn a partial weaken into a false
+   * min-security observation. */
+  failedWeakenGroups: Set<string>;
   nextOpId: number;
   nextServerIndex: number;
   lastAnchor: number;
@@ -268,6 +276,7 @@ export function initDispatch(): DispatchMemory {
     inFlight: { hack: 0, grow: 0, weaken: 0 },
     segmentGb: { farm: 0, prep: 0, share: 0 },
     prepInFlight: new Map(),
+    failedWeakenGroups: new Set(),
     nextOpId: 1,
     nextServerIndex: 0,
     lastAnchor: -Infinity,
@@ -487,6 +496,9 @@ export function dispatch(
 
   const byHost = new Map(view.servers.map((s) => [s.hostname, s]));
   const weakenWakeTargets = new Set<string>();
+  const successfulWeakenGroups = new Set<string>();
+  const touchedWeakenGroups = new Set<string>();
+  const weakenGroup = (target: string, landing: number): string => `${target}\u0000${landing}`;
   for (const completion of completions) {
     if (completion.kind === "sleep") continue;
     if (completion.kind === "workerExit") {
@@ -516,16 +528,34 @@ export function dispatch(
     }
     if (completion.opId !== undefined) {
       const tracked = memory.tracked.get(completion.opId);
-      // A successful weaken completion is the scheduler's only guaranteed
-      // observation point at minimum security once a pipeline is busy. Force
-      // pending deadlines for this target to be folded on this exact pump,
-      // even when their conservative worst-security bound has not opened.
-      if (tracked?.kind === "weaken" && completion.result !== undefined) {
-        weakenWakeTargets.add(tracked.target);
+      if (tracked?.kind === "weaken" && tracked.landing !== undefined) {
+        const group = weakenGroup(tracked.target, tracked.landing);
+        touchedWeakenGroups.add(group);
+        if (completion.result === undefined) memory.failedWeakenGroups.add(group);
+        else successfulWeakenGroups.add(group);
       }
       if (tracked?.workerId !== undefined) noteJobDone(memory.pool, tracked.workerId, view.time);
       release(memory, completion.opId);
     }
+  }
+
+  // A spread weaken is one logical effect emitted as several worker calls.
+  // Only its LAST successful fragment proves the target is at the security
+  // boundary. The worker-side debounce merely coalesces wakeups; this ledger
+  // check is the correctness barrier and also rejects a group with any failed
+  // fragment in this completion drain.
+  for (const group of touchedWeakenGroups) {
+    const separator = group.indexOf("\u0000");
+    const target = group.slice(0, separator);
+    const landing = Number(group.slice(separator + 1));
+    const pendingFragment = [...memory.tracked.values()].some(
+      (tracked) => tracked.kind === "weaken" && tracked.target === target && tracked.landing === landing,
+    );
+    if (pendingFragment) continue;
+    if (successfulWeakenGroups.has(group) && !memory.failedWeakenGroups.has(group)) {
+      weakenWakeTargets.add(target);
+    }
+    memory.failedWeakenGroups.delete(group);
   }
 
   const capacity = syncTopology(memory, view, homeReserveGb, options.fleetReserveGb ?? 0, options.sourceHosts);
@@ -682,7 +712,7 @@ export function dispatch(
         // keeps depth low — the whole early game — a pooled worker would idle
         // out before reuse, degenerating to spawn-per-op plus an idle timeout
         // of stranded RAM (measured: +11 % time-to-goal on a 16 GB start).
-        const interval = solution.kind === "hgw" ? 3 * SPACER_MS : INTERVAL_MS;
+        const interval = solution.kind === "hgw" ? HGW_MIN_INTERVAL_MS : INTERVAL_MS;
         memory.depthCapGb = Math.max(1, Math.floor(weakenMs / interval)) * solution.ramPerBatch;
         memory.depthCapHost = directive.farm.host;
         const depth = Math.max(
@@ -1055,6 +1085,7 @@ function launchDueJit(
   ctx: HackContext,
   schedule: JitSchedule,
   segmentCapGb: number,
+  pooling: boolean,
   weakenWake = false,
 ): boolean {
   const required = server.requiredHackingSkill;
@@ -1072,7 +1103,14 @@ function launchDueJit(
   }
   const heldByRole: Record<JitRole["role"], number> = { h: 0, w1: 0, g: 0, w2: 0 };
   for (const tracked of memory.tracked.values()) {
-    if (tracked.segment === "farm" && tracked.jitRole) heldByRole[tracked.jitRole] += tracked.gb;
+    // A pooled job does not own RAM; its resident worker is counted exactly
+    // once below, whether the worker is busy or idle.
+    if (tracked.segment === "farm" && tracked.jitRole && tracked.workerId === undefined) {
+      heldByRole[tracked.jitRole] += tracked.gb;
+    }
+  }
+  for (const worker of memory.pool.workers.values()) {
+    if (worker.role) heldByRole[worker.role] += worker.gb;
   }
 
   let emitted = 0;
@@ -1102,6 +1140,10 @@ function launchDueJit(
       }
 
       const requestedGb = op.threads * WORKER_RAM[op.kind];
+      const poolPlan = pooling
+        ? planTake(memory.pool, op.kind, op.threads, new Set(), op.role)
+        : { take: [], missThreads: op.threads };
+      const missRequestedGb = poolPlan.missThreads * WORKER_RAM[op.kind];
       // `isPrepped` intentionally admits a small residual security/money
       // tolerance. The first batch then has a larger W1 and/or G than the
       // minimum-security steady-state role used to derive `schedule`. Let one
@@ -1112,42 +1154,50 @@ function launchDueJit(
       // nothing can change the state that made the role larger).
       const roleCapGb = Math.max(schedule.quotaGb[op.role], requestedGb);
       if (
-        heldByRole[op.role] + requestedGb > roleCapGb + 1e-9 ||
-        memory.segmentGb.farm + requestedGb > segmentCapGb + 1e-9
+        heldByRole[op.role] + missRequestedGb > roleCapGb + 1e-9 ||
+        memory.segmentGb.farm + missRequestedGb > segmentCapGb + 1e-9
       ) {
         // Later operations and batches were sized against this effect. Never
         // expose a dependent hack while a required support launch is blocked.
         return true;
       }
-      const allocation = memory.heap.allocate(allocFor(op.kind, op.threads));
-      if (!allocation.ok) {
-        memory.stats.allocFails++;
-        return true;
+      let reservation: Reservation | undefined;
+      if (poolPlan.missThreads >= 1) {
+        const allocation = memory.heap.allocate(allocFor(op.kind, poolPlan.missThreads));
+        if (!allocation.ok) {
+          memory.stats.allocFails++;
+          return true;
+        }
+        reservation = allocation.reservation;
       }
-      const reservation = allocation.reservation;
       if (
-        heldByRole[op.role] + reservation.gb > roleCapGb + 1e-9 ||
-        memory.segmentGb.farm + reservation.gb > segmentCapGb + 1e-9
+        heldByRole[op.role] + (reservation?.gb ?? 0) > roleCapGb + 1e-9 ||
+        memory.segmentGb.farm + (reservation?.gb ?? 0) > segmentCapGb + 1e-9
       ) {
-        reservation.release();
+        reservation?.release();
         return true;
       }
 
-      for (const block of reservation.blocks) {
+      const track = (
+        hostname: string,
+        threads: number,
+        effectThreads: number,
+        gb: number,
+        worker?: { id: number; spawn: boolean },
+      ): void => {
         const opId = memory.nextOpId++;
-        const gb = block.threads * WORKER_RAM[op.kind];
-        const effectThreads = op.kind === "hack" ? block.threads : block.threads * coreEffect(block.cores);
         actions.push({
           type: op.kind,
           target: server.hostname,
-          source: block.hostname,
-          threads: block.threads,
+          source: hostname,
+          threads,
           opId,
           ...(padding > 0 ? { additionalMsec: padding } : {}),
           ...(op.stock ? { stock: true } : {}),
+          ...(worker ? { worker } : {}),
         });
         memory.tracked.set(opId, {
-          hostname: block.hostname,
+          hostname,
           target: server.hostname,
           kind: op.kind,
           segment: "farm",
@@ -1156,17 +1206,45 @@ function launchDueJit(
           landing: op.landing,
           effectThreads,
           jitRole: op.role,
+          ...(worker ? { workerId: worker.id, spawned: worker.spawn } : {}),
         });
         memory.inFlight[op.kind]++;
         memory.stats.launched[op.kind]++;
-        memory.stats.execs++;
+        if (!worker || worker.spawn) memory.stats.execs++;
         if (op.stock) memory.stats.stockOps++;
         accountRamWork(memory, "farm", op.kind, gb, liveDuration, padding);
+      };
+
+      for (const worker of poolPlan.take) {
+        noteJobStart(memory.pool, worker.workerId);
+        track(worker.hostname, worker.threads, worker.effectThreads, worker.gb, {
+          id: worker.workerId,
+          spawn: false,
+        });
       }
-      heldByRole[op.role] += reservation.gb;
-      memory.segmentGb.farm += reservation.gb;
+      for (const block of reservation?.blocks ?? []) {
+        const workerId = memory.nextOpId++;
+        const gb = block.threads * WORKER_RAM[op.kind];
+        const effectThreads = op.kind === "hack" ? block.threads : block.threads * coreEffect(block.cores);
+        noteSpawn(
+          memory.pool,
+          {
+            workerId,
+            hostname: block.hostname,
+            kind: op.kind,
+            role: op.role,
+            threads: block.threads,
+            effectThreads,
+            gb,
+          },
+          now,
+        );
+        track(block.hostname, block.threads, effectThreads, gb, { id: workerId, spawn: true });
+      }
+      heldByRole[op.role] += reservation?.gb ?? 0;
+      memory.segmentGb.farm += reservation?.gb ?? 0;
       batch.ops.splice(batch.ops.indexOf(op), 1);
-      emitted += reservation.blocks.length;
+      emitted += poolPlan.take.length + (reservation?.blocks.length ?? 0);
     }
   }
   memory.jitPending = memory.jitPending.filter((batch) => batch.ops.length > 0);
@@ -1276,7 +1354,7 @@ function launchBatches(
   const growMs = growTimeSeconds(ctx, difficulty, required) * 1_000;
   const weakenMs = weakenTimeSeconds(ctx, difficulty, required) * 1_000;
   // HGW batches have three landings, so their interval is one spacer shorter.
-  const intervalMs = solution.kind === "hgw" ? 3 * SPACER_MS : INTERVAL_MS;
+  const intervalMs = solution.kind === "hgw" ? HGW_MIN_INTERVAL_MS : INTERVAL_MS;
 
   // Proper steady-state JIT. The integer role envelope is a real capacity
   // guarantee (not average-RAM wishful accounting): if it fits, weakens launch
@@ -1300,9 +1378,9 @@ function launchBatches(
       // absolute cap creates a self-fulfilling RAM-growth stall.
       memory.depthCapGb = solution.jitSaturationGb ?? jitCapacity(roles, intervalMs).totalGb;
       memory.depthCapHost = host;
-      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, weakenWake)) return;
+      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, weakenWake)) return;
       planJitBatches(memory, solution, server, now, ctx, schedule, influence);
-      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, weakenWake);
+      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, weakenWake);
       return;
     }
     // Pending batches have not launched their hack yet. If the farm segment

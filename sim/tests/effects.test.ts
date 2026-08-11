@@ -39,6 +39,25 @@ describe("serverFromSpec (BN1 derivations)", () => {
     expect(server.baseDifficulty).toBe(1);
     expect(server.minDifficulty).toBe(1); // round(1/3)=0 -> clamped to 1
   });
+
+  test("accepts explicit prepared save-state without changing constructor statics", () => {
+    const server = serverFromSpec({
+      hostname: "prepared",
+      hackDifficulty: 90,
+      currentDifficulty: 30,
+      moneyAvailable: 1e12,
+      currentMoney: 25e12,
+      requiredHackingSkill: 900,
+      serverGrowth: 100,
+      numOpenPortsRequired: 0,
+      maxRam: 0,
+    }, mockServer() as SimServer);
+    expect(server.baseDifficulty).toBe(90);
+    expect(server.minDifficulty).toBe(30);
+    expect(server.hackDifficulty).toBe(30);
+    expect(server.moneyMax).toBe(25e12);
+    expect(server.moneyAvailable).toBe(25e12);
+  });
 });
 
 describe("applyHack", () => {

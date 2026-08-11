@@ -1,7 +1,7 @@
 import type { FeatureId } from "../shared/features/ids.ts";
 
 export type RunValidity = "valid" | "partial" | "invalid-for-goal";
-export type ScenarioClass = "save-snapshot" | "synthetic-early-game";
+export type ScenarioClass = "save-snapshot" | "seeded-vanilla" | "synthetic-early-game";
 export type FeatureCoverage = "full" | "partial" | "oracle-only" | "unmodeled";
 
 /** Static implementation coverage, carried in every run rather than hidden in
@@ -28,6 +28,6 @@ export const SIM_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> 
   side: "oracle-only",
 };
 
-export function scenarioClass(hasSave: boolean): ScenarioClass {
-  return hasSave ? "save-snapshot" : "synthetic-early-game";
+export function scenarioClass(hasSave: boolean, seededVanilla = false): ScenarioClass {
+  return hasSave ? "save-snapshot" : seededVanilla ? "seeded-vanilla" : "synthetic-early-game";
 }

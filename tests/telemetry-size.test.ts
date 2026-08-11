@@ -4,7 +4,7 @@ import { DODGED_PROBES, isStepped, type SingleStepProbe } from "../game/lib/prob
 import type { GameState } from "../game/lib/state.ts";
 import {
   CONTRACT_QUEUE_LIMIT,
-  CONTRACT_TELEMETRY_LIMIT,
+  CONTRACT_REPORT_LIMIT,
   SOLVERS,
 } from "../shared/strategy/side/contracts.ts";
 import type { SideState } from "../shared/telemetry/topics/side.ts";
@@ -157,7 +157,7 @@ describe("telemetry record size", () => {
     expect(data.unsolvableTotal).toBe(0);
     expect(data.registryComplete).toBe(true);
     // ...and the record carries a bounded window plus counts, not the list.
-    expect(data.contracts).toHaveLength(CONTRACT_TELEMETRY_LIMIT);
+    expect(data.contracts).toHaveLength(CONTRACT_REPORT_LIMIT);
     expect(state.contractQueue).toHaveLength(CONTRACT_QUEUE_LIMIT);
     expect(singleStep("side.contracts").methods).toEqual(["ls", "codingcontract.getContractTypes"]);
     expect(JSON.stringify(data).length).toBeLessThan(MAX_SIDE_RECORD_BYTES);

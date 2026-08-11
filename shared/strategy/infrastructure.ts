@@ -1,5 +1,69 @@
 import { formatMoney, formatNumber } from "../format.ts";
 import { coarseHorizonSec, scoreInvestment, type ScoredInvestment } from "./investment.ts";
+import type { Need } from "./needs.ts";
+
+/** A lower-urgency prerequisite may be useful later, but it must not drain the
+ * bankroll while another subsystem is blocked on a concrete cash threshold.
+ * Ready/free actions do not use this rule; callers apply it only to purchases. */
+export function deferPrerequisitePurchase(
+  urgency: Need["urgency"],
+  openNeeds: readonly Need[],
+): boolean {
+  return urgency !== "blocking"
+    && openNeeds.some((need) => need.kind === "money" && need.urgency === "blocking");
+}
+
+/** Cap optimistic marginal quotes by throughput the installed fleet has
+ * actually demonstrated. The evaluator's ideal $/s/GB is useful for ordinary
+ * long-horizon ranking, but during an unsettled bootstrap it can price one new
+ * server as if the whole target pipeline were already prepared. Cash-goal
+ * crossover decisions need the conservative observed rate instead. */
+export function capInfrastructureByObservedFleet(
+  options: readonly InfrastructureOption[],
+  observedIncomePerSec: number,
+  installedRam: number,
+): InfrastructureOption[] {
+  const observedPerGb = Math.max(0, observedIncomePerSec) / Math.max(1, installedRam);
+  return options.map((option) => ({
+    ...option,
+    incomePerSec: Math.min(
+      Math.max(0, option.incomePerSec),
+      observedPerGb * Math.max(0, option.addedRam),
+    ),
+  }));
+}
+
+/** Keep only investments that make a blocking cash threshold arrive sooner.
+ * This is the exact one-purchase crossover, not a savings heuristic:
+ *
+ *   without = (target - money) / currentIncome
+ *   with    = (target - money + cost) / (currentIncome + addedIncome)
+ *
+ * Once the balance reaches the threshold, preserve it until the requester
+ * withdraws the need; invitation checks and controller ticks are asynchronous. */
+export function infrastructureBeforeMoneyNeeds(
+  options: readonly InfrastructureOption[],
+  money: number,
+  currentIncomePerSec: number,
+  needs: readonly Need[],
+): InfrastructureOption[] {
+  const target = needs.reduce(
+    (highest, need) => need.kind === "money" && need.urgency === "blocking"
+      ? Math.max(highest, need.target)
+      : highest,
+    0,
+  );
+  if (!(target > 0)) return [...options];
+  if (money >= target) return [];
+  const remaining = target - money;
+  const income = Math.max(0, currentIncomePerSec);
+  const withoutSec = income > 0 ? remaining / income : Infinity;
+  return options.filter((option) => {
+    const withIncome = income + Math.max(0, option.incomePerSec);
+    if (!(withIncome > 0)) return false;
+    return (remaining + option.cost) / withIncome < withoutSec;
+  });
+}
 
 export interface HomeRamView {
   currentRam: number;

@@ -57,6 +57,10 @@ export interface SimOptions {
   runId?: string;
   /** Installed before construction emits the initial world snapshot. */
   onRecord?: (record: LogRecord) => void;
+  /** Keep an in-memory copy of every emitted record. Direct unit harnesses use
+   * this for assertions; streamed full-game runs disable it to avoid retaining
+   * the same multi-gigabyte history that their JSONL sink already owns. */
+  retainRecords?: boolean;
   /** Emit per-op events + per-completion mirrors (debugging). Default off:
    * completions mark servers dirty and a 1Hz virtual rollup flushes dirty
    * mirrors + the cumulative "farm" state topic — keeps JSONLs sane. */
@@ -139,6 +143,7 @@ export class SimWorld {
   #run: string;
   #inFlight = 0;
   #verbose: boolean;
+  #retainRecords: boolean;
   #dirty = new Set<SimServer>();
   #lastRollup = -1;
   #prestigeServers = new Map<string, SimServer>();
@@ -152,6 +157,7 @@ export class SimWorld {
     this.crimeRng = mulberry32(opts.seed + 0x9e3779b9);
     this.#run = opts.runId ?? `seed${opts.seed}`;
     this.onRecord = opts.onRecord;
+    this.#retainRecords = opts.retainRecords ?? true;
     this.bitnode = opts.bitnode ?? 1;
     this.#prestigeSupported = !opts.liveServers || opts.liveServers.length === 0;
     this.person = mockPerson();
@@ -206,6 +212,7 @@ export class SimWorld {
 
     this.emit({ kind: "event", name: "sim.started", data: { seed: opts.seed, bitnode: opts.bitnode ?? 1 } });
     this.mirrorPlayer();
+    this.mirrorProgression();
     for (const server of this.servers.values()) this.mirrorServer(server);
     this.#rollup();
   }
@@ -292,6 +299,10 @@ export class SimWorld {
     this.recalculateSkills();
     this.person.hp.current = this.person.hp.max;
     this.emit({ kind: "event", name: "sim.prestige", data: { newlyInstalled: [...newlyInstalled] } });
+    // Simulator-owned authoritative state for goal evaluation. A --perf run
+    // deliberately receives no game telemetry, but install/BN goals must not
+    // become blind merely because serialization is disabled.
+    this.mirrorProgression();
     this.mirrorPlayer();
   }
 
@@ -303,7 +314,7 @@ export class SimWorld {
       run: this.#run,
       src: "sim",
     } as LogRecord;
-    this.records.push(record);
+    if (this.#retainRecords) this.records.push(record);
     this.onRecord?.(record);
   }
 
@@ -326,6 +337,16 @@ export class SimWorld {
         karma: this.player.karma,
         numPeopleKilled: this.player.numPeopleKilled,
       },
+    });
+  }
+
+  /** Simulator-owned progression snapshot. Unlike game telemetry, this is
+   * always emitted so goal evaluation is identical in normal and --perf runs. */
+  mirrorProgression(): void {
+    this.emit({
+      kind: "state",
+      key: "progression",
+      data: { ownedAugs: Object.fromEntries(this.player.augmentations) },
     });
   }
 

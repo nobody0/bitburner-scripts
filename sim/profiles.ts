@@ -2,6 +2,7 @@ import { only, type FeatureOverrides } from "../shared/features/profile.ts";
 import type { GameRunOptions } from "./game-run.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 import { calculateExp } from "./vendor/bitburner/src/PersonObjects/formulas/skill.ts";
+import { VANILLA_NETWORK } from "./network.ts";
 
 /** Named simulation runs.
  *
@@ -38,7 +39,7 @@ export interface SimProfile {
   /** Focused synthetic initial conditions. Kept separate from the common CLI
    * fields so profiles can pose a precise cross-feature experiment without
    * teaching the simulator a magic scenario name. */
-  world?: Pick<GameRunOptions, "network" | "person" | "playerState" | "factions" | "companies" | "bladeburnerRank" | "homeFiles">;
+  world?: Pick<GameRunOptions, "network" | "topology" | "augmentationStats" | "person" | "playerState" | "factions" | "companies" | "bladeburnerRank" | "homeFiles">;
 }
 
 export const FACTION_DONATION_TARGET = "Synaptic Enhancement Implant";
@@ -183,8 +184,9 @@ const BN1_PROGRESSION_WORLD: NonNullable<SimProfile["world"]> = {
   },
 };
 
-/** Late-BN1 fixture retaining the final package, Daedalus, Red Pill install,
- * and post-install world-daemon regrow phases. */
+/** Late-BN1 stress fixture retaining the final package, Daedalus, Red Pill
+ * install, and post-install world-daemon regrow phases. This is deliberately
+ * separate from bn1-full, whose contract is a cold 8 GB bootstrap. */
 const BN1_LATE_INSTALLED = [
   ...Object.values(AUGMENTATION_TABLE)
     .filter((aug) => !aug.isSpecial && (aug.mults.hacking ?? 1) > 1)
@@ -195,18 +197,9 @@ const BN1_LATE_INSTALLED = [
   "Unstable Circadian Modulator",
 ] as const;
 
-const BN1_FULL_WORLD: NonNullable<SimProfile["world"]> = {
-  network: [
-    {
-      hostname: "late-farm",
-      hackDifficulty: 100,
-      moneyAvailable: 1e15,
-      requiredHackingSkill: 1,
-      serverGrowth: 100,
-      numOpenPortsRequired: 0,
-      maxRam: 32_768,
-    },
-  ],
+const BN1_JIT_STRESS_WORLD: NonNullable<SimProfile["world"]> = {
+  ...VANILLA_NETWORK,
+  augmentationStats: { "Unstable Circadian Modulator": UCM_FIXTURE_ROLL },
   person: {
     skills: { hacking: 1_500 },
     exp: {
@@ -224,7 +217,46 @@ const BN1_FULL_WORLD: NonNullable<SimProfile["world"]> = {
       .map((name) => ({ name, level: 1 })),
     sourceFiles: { "4": 3, "14": 3 },
   },
-  factions: { BitRunners: { rep: 2_000_000, favor: 0 } },
+  factions: {
+    BitRunners: { rep: 2_000_000, favor: 0 },
+    Daedalus: { rep: 0, favor: 0 },
+  },
+};
+
+/** Synthetic process-pressure laboratory. Unlike bn1-full this deliberately
+ * isolates one deep pipeline: high minimum security creates a long weaken
+ * horizon, while the enormous home removes game RAM as the limiting factor.
+ * That makes live worker count â€” the quantity which motivates HGW and pooled
+ * workers â€” observable without pretending this is a normal BN1 bootstrap. */
+const JIT_PROCESS_PRESSURE_WORLD: NonNullable<SimProfile["world"]> = {
+  network: [{
+    hostname: "jit-pressure",
+    organizationName: "JIT process-pressure laboratory",
+    hackDifficulty: 90,
+    moneyAvailable: 1e12,
+    requiredHackingSkill: 900,
+    serverGrowth: 100,
+    numOpenPortsRequired: 0,
+    maxRam: 0,
+    // The constructor roll derives minDifficulty=30 and moneyMax=$25t. This
+    // is a prepared late-game snapshot of that same server, not a different
+    // formula or a sim-only controller branch.
+    currentDifficulty: 30,
+    currentMoney: 25e12,
+  }],
+  person: {
+    skills: { hacking: 1_000 },
+    exp: { hacking: calculateExp(1_000) },
+  },
+};
+
+/** Full BN1 benchmark: only cross-node capabilities are present. Everything
+ * else—money, skill, programs, augmentations, reputation, fleet and home
+ * upgrades—must be bootstrapped by the real controller. */
+const BN1_FULL_WORLD: NonNullable<SimProfile["world"]> = {
+  ...VANILLA_NETWORK,
+  augmentationStats: { "Unstable Circadian Modulator": UCM_FIXTURE_ROLL },
+  playerState: { sourceFiles: { "4": 3, "14": 3 } },
 };
 
 export const PROFILES: readonly SimProfile[] = [
@@ -252,15 +284,39 @@ export const PROFILES: readonly SimProfile[] = [
   {
     id: "bn1-full",
     description:
-      "Full final BN1 route: install the last ordinary package, unlock and grind Daedalus, install The Red Pill, then regrow for w0r1d_d43m0n.",
+      "Full BN1 cold start on the fixed vanilla network: bootstrap from 8 GB through strategy-chosen installs, Red Pill, and w0r1d_d43m0n.",
     bitnode: 1,
     features: only("hacking", "factions", "progression", "go"),
     goals: ["bn:1", "installs:2"],
-    homeRam: 512,
-    startingMoney: 1e11,
+    homeRam: 8,
     world: BN1_FULL_WORLD,
+    horizon: "24h",
+    seeds: [1, 2, 3],
+  },
+  {
+    id: "bn1-jit-stress",
+    description:
+      "Late BN1 endgame/regrow fixture on vanilla targets; validates Red Pill and JIT lifecycle, not process-pressure mode thresholds.",
+    bitnode: 1,
+    features: only("hacking", "factions", "progression", "go"),
+    goals: ["bn:1", "installs:2"],
+    homeRam: 32_768,
+    startingMoney: 1e11,
+    world: BN1_JIT_STRESS_WORLD,
     horizon: "2h",
     seeds: [1, 2, 3],
+  },
+  {
+    id: "jit-process-pressure",
+    description:
+      "Synthetic late-game JIT laboratory: game RAM is abundant and a long high-security pipeline stresses live worker count, HGW, and pooling.",
+    bitnode: 1,
+    features: only("hacking", "progression"),
+    goals: ["earn:1e12"],
+    homeRam: 134_217_728,
+    world: JIT_PROCESS_PRESSURE_WORLD,
+    horizon: "12m",
+    seeds: [1],
   },
   {
     id: "hacking-only",

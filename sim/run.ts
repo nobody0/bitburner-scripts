@@ -281,6 +281,8 @@ if (import.meta.main) {
   let homeRam: number | undefined;
   let startingMoney: number | undefined;
   let verbose = false;
+  let compact = false;
+  let perf = false;
   let farm = true;
   let driver: "game" | "planner" = "game";
   let profileId: string | undefined;
@@ -302,6 +304,8 @@ if (import.meta.main) {
     else if (arg === "--homeRam") homeRam = Number(next());
     else if (arg === "--money") startingMoney = Number(next());
     else if (arg === "--verbose") verbose = true;
+    else if (arg === "--compact") compact = true;
+    else if (arg === "--perf") perf = true;
     else if (arg === "--farm") farm = true;
     else if (arg === "--baseline") farm = false;
     else if (arg === "--profile") profileId = next();
@@ -414,6 +418,17 @@ if (import.meta.main) {
         ...(features ? { features } : {}),
         ...(homeRam !== undefined ? { homeRam } : profile?.homeRam !== undefined ? { homeRam: profile.homeRam } : {}),
         ...(runMoney !== undefined ? { startingMoney: runMoney } : {}),
+        ...(perf ? { telemetry: false } : {}),
+        ...(compact ? {
+          // Preserve identity, validity, milestones and terminal result while
+          // dropping enormous periodic state payloads. Goal evaluation still
+          // consumes every record inside runGame before this artifact filter.
+          recordFilter: (record) => record.kind === "event" && (
+            record.name.startsWith("sim.") ||
+            record.name === "endgame.route" ||
+            record.name.startsWith("install")
+          ),
+        } : {}),
         onRecord: (line) => void sink.write(line + "\n"),
       });
       result = outcome;

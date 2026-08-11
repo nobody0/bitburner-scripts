@@ -43,7 +43,10 @@ describe("Go reward strategy tuning", () => {
     } finally {
       Math.random = originalRandom;
     }
-  }, 40_000);
+  // This is a deterministic 1,152-game oracle tournament. Its assertions are
+  // the correctness gate; allow slower CI/Windows hosts to finish the fixed
+  // corpus without treating wall-clock throughput as a strategy regression.
+  }, 90_000);
 
   test("long runway chooses growth while an imminent install values joined-faction favor", () => {
     const common = {

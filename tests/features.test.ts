@@ -679,7 +679,8 @@ describe("feature drivers", () => {
   });
 
   test("only hacking and stock run faster than the 5 s floor, each for a reason", () => {
-    // Batch ops land on 200ms slots, so a slower hacking cadence would miss them.
+    // Hacking keeps a 200ms fallback heartbeat and also wakes at the finer JIT
+    // deadlines; slower feature cadences would miss those scheduling windows.
     //
     // `stock` is the one other exception. Its probes stay at 4 s because the
     // market updates every 6 s (4 s while burning stored cycles), while its pure

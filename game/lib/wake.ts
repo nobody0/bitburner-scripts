@@ -2,10 +2,10 @@ import type { WorkerGlobalThis } from "./worker-shared.ts";
 
 /** The weaken-landing wake: the second scheduling window.
  *
- * Batch ops land on 200 ms slots, but the instant a weaken LANDS is the only
+ * JIT effects land on 200 ms slots, but the instant a weaken LANDS is the only
  * moment the target's security is provably at minimum — and the instant any op
  * lands is when its heap reservation can be freed. Waiting out the remainder
- * of the tick wastes up to one full spacer of both. A finishing worker pokes
+ * of the heartbeat wastes up to one landing slot of both. A finishing worker pokes
  * `dispatch_wake` from its atExit (game/worker/worker.ts); arming a resolver
  * here turns that poke into a promise the controller can race against its tick
  * sleep.

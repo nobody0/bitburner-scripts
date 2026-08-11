@@ -1,4 +1,131 @@
 import type { ServerSpec } from "./core/effects.ts";
+import { mulberry32 } from "./core/rng.ts";
+import {
+  SERVER_METADATA,
+  type Range,
+  type VendoredServer,
+} from "./vendor/bitburner/src/Server/data/ServerMetadata.ts";
+
+export interface GeneratedNetwork {
+  network: ServerSpec[];
+  topology: Record<string, string[]>;
+}
+
+/** Dedicated world-generation seed for the full BN1 benchmark. Gameplay
+ * seeds deliberately do not change the target population: seed-to-seed A/B
+ * variance then measures the strategy, not a different set of servers. */
+export const VANILLA_NETWORK_SEED = 0xb17b_0301;
+
+function randomInt(rng: () => number, [min, max]: Range): number {
+  return Math.floor(rng() * (max - min + 1) + min);
+}
+
+function rolledValue(
+  rng: () => number,
+  metadata: VendoredServer,
+  field: keyof VendoredServer["randomized"],
+  range: Range | undefined,
+  fallback: number,
+): number {
+  if (!range) return fallback;
+  return metadata.randomized[field] ? randomInt(rng, range) : range[0];
+}
+
+function truthyMetadataValue(
+  rng: () => number,
+  metadata: VendoredServer,
+  field: keyof VendoredServer["randomized"],
+  range: Range | undefined,
+  fallback: number,
+): number {
+  if (!range) return fallback;
+  if (metadata.randomized[field]) return randomInt(rng, range);
+  return range[0] ? range[0] : fallback;
+}
+
+/** Build the standard v3.0.1 foreign-server population using the same roll
+ * order and layer-parent algorithm as ServerHelpers.initForeignServers().
+ * IP values are irrelevant to Netscript here, but their random draws are
+ * consumed because upstream creates an IP before rolling each server's stats. */
+export function generateVanillaNetwork(seed: number): GeneratedNetwork {
+  const rng = mulberry32(seed);
+  const ips = new Set<string>();
+  const network: ServerSpec[] = [];
+  const layers: string[][] = Array.from({ length: 15 }, () => []);
+
+  for (const metadata of Object.values(SERVER_METADATA)) {
+    let ip: string;
+    do {
+      const encoded = rng().toString(16) + "000000000";
+      ip = (encoded.match(/..?/g) ?? []).slice(1, 5).map((part) => parseInt(part, 16)).join(".");
+    } while (ips.has(ip));
+    ips.add(ip);
+
+    const ramExponent = rolledValue(rng, metadata, "ramExp", metadata.ramExp, -Infinity);
+    const hackDifficulty = truthyMetadataValue(rng, metadata, "sec", metadata.sec, 1);
+    const moneyAvailable = rolledValue(rng, metadata, "money", metadata.money, 0);
+    const requiredHackingSkill = rolledValue(rng, metadata, "skill", metadata.skill, 1);
+    const serverGrowth = truthyMetadataValue(rng, metadata, "growth", metadata.growth, 1);
+    const server: ServerSpec = {
+      hostname: metadata.host,
+      organizationName: metadata.org,
+      hackDifficulty,
+      moneyAvailable,
+      requiredHackingSkill,
+      serverGrowth,
+      numOpenPortsRequired: metadata.ports,
+      maxRam: Math.pow(2, ramExponent),
+    };
+    const layer = rolledValue(rng, metadata, "layer", metadata.layer, 0);
+    server.cpuCores = layer > 0
+      ? Math.floor(rng() * (layer - Math.ceil(layer / 2) + 1) + Math.ceil(layer / 2))
+      : 1;
+    network.push(server);
+    const topologyLayer = rolledValue(rng, metadata, "layer", metadata.layer, 0);
+    if (topologyLayer > 0) layers[topologyLayer - 1]!.push(server.hostname);
+  }
+
+  const topology: Record<string, string[]> = Object.fromEntries([
+    ["home", []],
+    ...network.map((server) => [server.hostname, []]),
+  ]);
+  const connect = (a: string, b: string): void => {
+    topology[a]!.push(b);
+    topology[b]!.push(a);
+  };
+  for (const host of layers[0]!) connect(host, "home");
+  for (let layer = 1; layer < layers.length; layer++) {
+    const parents = layers[layer - 1]!;
+    for (const host of layers[layer]!) connect(host, parents[Math.floor(rng() * parents.length)]!);
+  }
+  return { network, topology };
+}
+
+export const VANILLA_NETWORK = generateVanillaNetwork(VANILLA_NETWORK_SEED);
+
+/** Structural classifier for run metadata. It intentionally requires both the
+ * complete host population and exact fixed topology; a synthetic fixture that
+ * merely reuses one vanilla hostname must never be labeled vanilla. */
+export function isSeededVanillaNetwork(
+  network: readonly ServerSpec[] | undefined,
+  topology: Readonly<Record<string, readonly string[]>> | undefined,
+): boolean {
+  if (!network || !topology || network.length !== VANILLA_NETWORK.network.length) return false;
+  const actualHosts = network.map((server) => server.hostname).sort();
+  const expectedHosts = VANILLA_NETWORK.network.map((server) => server.hostname).sort();
+  if (actualHosts.some((host, index) => host !== expectedHosts[index])) return false;
+  const actualTopologyHosts = Object.keys(topology).sort();
+  const expectedTopologyHosts = Object.keys(VANILLA_NETWORK.topology).sort();
+  if (
+    actualTopologyHosts.length !== expectedTopologyHosts.length
+    || actualTopologyHosts.some((host, index) => host !== expectedTopologyHosts[index])
+  ) return false;
+  return expectedTopologyHosts.every((host) => {
+    const actual = [...(topology[host] ?? [])].sort();
+    const expected = [...(VANILLA_NETWORK.topology[host] ?? [])].sort();
+    return actual.length === expected.length && actual.every((neighbour, index) => neighbour === expected[index]);
+  });
+}
 
 /** Early-game target set for the v1 simulator. Base values copied verbatim
  * from bitburner-src v3.0.1 src/Server/data/servers.ts (maxRam = 2^maxRamExponent);
