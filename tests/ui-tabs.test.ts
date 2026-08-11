@@ -27,6 +27,27 @@ describe("tab rendering", () => {
     renderAll(emptyState());
   });
 
+  test("Hacking server table shows and explains host CPU cores", () => {
+    const state = emptyState();
+    state.servers.set("iron-gym", {
+      hostname: "iron-gym",
+      cpuCores: 8,
+      maxRam: 32,
+      ramUsed: 0,
+      moneyMax: 1,
+      moneyAvailable: 1,
+      numOpenPortsRequired: 1,
+    } as StateMap["servers"][string]);
+
+    const html = TABS.hacking.render(state);
+    expect(html).toContain('data-sort-key="ports"');
+    expect(html).not.toContain('data-sort-key="roll"');
+    expect(html).toContain("1.4375x grow/weaken effect");
+    expect(html).toContain("1 required for NUKE; 0 port-opening programs available globally");
+    expect(html).toContain(">1</span>");
+    expect(html).toContain("0/32 · 8c</span>");
+  });
+
   test("every feature's populated panel renders", () => {
     // One synthetic record per topic, so no panel's data branch is untested
     // just because the local save cannot reach that feature.

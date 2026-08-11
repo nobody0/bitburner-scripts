@@ -28,6 +28,8 @@ import type { Tab } from "./index.ts";
 interface Row {
   server: Server;
   root: RootState;
+  /** Global number of port-opening programs currently available. */
+  portOpeners: number;
   /** Fraction of max money currently on the host. */
   moneyFrac: number;
   atMaxMoney: boolean;
@@ -38,6 +40,8 @@ interface Row {
   moneyRoll?: number;
   skillRoll?: number;
   secRoll?: number;
+  moneyRange?: readonly [number, number];
+  securityRange?: readonly [number, number];
 }
 
 const ROOT_DOT: Record<RootState, { status: "good" | "ready" | "bad"; label: string }> = {
@@ -66,6 +70,7 @@ function buildRows(state: ProjectedState): Row[] {
     return {
       server,
       root: rootState(server, skill, openers),
+      portOpeners: openers,
       moneyFrac: max > 0 ? money / max : 0,
       atMaxMoney: max > 0 && money >= max * 0.999,
       // 100 is the game's hard cap, so the bar spans min..100 and empty means
@@ -73,29 +78,18 @@ function buildRows(state: ProjectedState): Row[] {
       secFrac: Math.max(0, Math.min(1, (current - min) / Math.max(1, 100 - min))),
       atMinSec: current <= min + 0.01,
       ...(rolled !== undefined ? { moneyRoll: rollPercentile(rolled, ranges?.money) } : {}),
+      ...(ranges?.money
+        ? { moneyRange: [ranges.money[0] * 25 * maxMoneyMult, ranges.money[1] * 25 * maxMoneyMult] as const }
+        : {}),
       ...(server.requiredHackingSkill !== undefined
         ? { skillRoll: rollPercentile(server.requiredHackingSkill, ranges?.skill) }
         : {}),
       ...(rolledSec !== undefined ? { secRoll: rollPercentile(rolledSec, ranges?.sec) } : {}),
+      ...(ranges?.sec
+        ? { securityRange: [Math.min(100, ranges.sec[0] * startSecMult), Math.min(100, ranges.sec[1] * startSecMult)] as const }
+        : {}),
     };
   });
-}
-
-/** A percentile as a short, sortable label. Deliberately terse: it is a
- * curiosity column, not a decision column, and it must not push the meters
- * off the right edge. */
-function rollCell(row: Row): string {
-  const p = row.moneyRoll;
-  const ranges = serverRanges(row.server.hostname);
-  if (p === undefined || !ranges?.money) return `<span class="muted">fixed</span>`;
-  const [min, max] = ranges.money;
-  const cls = p >= 0.66 ? "good" : p <= 0.33 ? "bad" : "";
-  return (
-    `<span class="${cls}" title="${esc(
-      `this save rolled ${fmtMoney(min + p * (max - min))} of the ${fmtMoney(min)}–${fmtMoney(max)} the generator allows` +
-        `\nmoneyMax = 25 x roll x ServerMaxMoney`,
-    )}">p${(p * 100).toFixed(0)}</span>`
-  );
 }
 
 const COLUMNS: Column<Row>[] = [
@@ -119,9 +113,23 @@ const COLUMNS: Column<Row>[] = [
       // Colour matches the dot's reasoning: the number is the reason we cannot
       // take the host, so it should read as the blocker.
       const cls = r.root === "rooted" ? "muted" : r.root === "ready" ? "" : "bad";
-      const roll =
-        r.skillRoll !== undefined ? ` <span class="muted">p${(r.skillRoll * 100).toFixed(0)}</span>` : "";
-      return `<span class="${cls}">${fmtNum(need)}</span>${roll}`;
+      const range = serverRanges(r.server.hostname)?.skill;
+      const detail = range
+        ? range[0] === range[1]
+          ? `fixed at ${fmtNum(range[0])}`
+          : `generated range ${fmtNum(range[0])}–${fmtNum(range[1])}${r.skillRoll !== undefined ? `; this save is p${(r.skillRoll * 100).toFixed(0)}` : ""}`
+        : `requires hacking skill ${fmtNum(need)}`;
+      return `<span class="${cls}" title="${esc(detail)}">${fmtNum(need)}</span>`;
+    },
+  },
+  {
+    id: "ports",
+    label: "ports req.",
+    sort: (r) => r.server.numOpenPortsRequired ?? 0,
+    cell: (r) => {
+      const required = r.server.numOpenPortsRequired ?? 0;
+      const cls = r.portOpeners >= required ? "muted" : "bad";
+      return `<span class="${cls}" title="${esc(`${required} required for NUKE; ${r.portOpeners} port-opening programs available globally`)}">${required}</span>`;
     },
   },
   {
@@ -131,11 +139,15 @@ const COLUMNS: Column<Row>[] = [
     cell: (r) => {
       const max = r.server.moneyMax ?? 0;
       if (max <= 0) return `<span class="muted">none</span>`;
+      const roll = r.moneyRoll !== undefined ? `; this save is p${(r.moneyRoll * 100).toFixed(0)}` : "";
+      const potential = r.moneyRange
+        ? `\ngenerated maximum-money range ${fmtMoney(r.moneyRange[0])}–${fmtMoney(r.moneyRange[1])}${roll}`
+        : "";
       return meter(
         r.moneyFrac,
         `${fmtMoney(r.server.moneyAvailable)} / ${fmtMoney(max)}`,
         r.atMaxMoney,
-        `${fmtPct(r.moneyFrac)} of maximum`,
+        `${fmtPct(r.moneyFrac)} of maximum${potential}`,
       );
     },
   },
@@ -149,30 +161,30 @@ const COLUMNS: Column<Row>[] = [
       if (min === undefined || current === undefined) return `<span class="muted">–</span>`;
       // The bar EMPTIES as security falls, so "prepped" reads as an empty bar
       // that has gone green — the same visual as a full money bar.
-      const roll =
-        r.secRoll !== undefined ? `\nbase security rolled at p${(r.secRoll * 100).toFixed(0)} of its range` : "";
+      const roll = r.secRoll !== undefined ? `; this save is p${(r.secRoll * 100).toFixed(0)}` : "";
+      const potential = r.securityRange
+        ? `\ngenerated starting-security range ${r.securityRange[0].toFixed(1)}–${r.securityRange[1].toFixed(1)}${roll}`
+        : "";
       return meter(
         1 - r.secFrac,
         `${current.toFixed(1)} / ${min.toFixed(1)}`,
         r.atMinSec,
-        `current ${current.toFixed(2)}, minimum ${min.toFixed(2)}, cap 100${roll}`,
+        `current ${current.toFixed(2)}, minimum ${min.toFixed(2)}, cap 100${potential}`,
       );
     },
   },
   {
-    id: "roll",
-    label: "roll",
-    sort: (r) => r.moneyRoll ?? -1,
-    cell: rollCell,
-  },
-  {
     id: "ram",
-    label: "ram",
+    label: "ram · cores",
     sort: (r) => r.server.maxRam ?? 0,
-    cell: (r) =>
-      (r.server.maxRam ?? 0) > 0
+    cell: (r) => {
+      const cores = r.server.cpuCores ?? 1;
+      const bonus = 1 + (Math.max(1, cores) - 1) / 16;
+      const ram = (r.server.maxRam ?? 0) > 0
         ? `${fmtNum(r.server.ramUsed ?? 0)}/${fmtNum(r.server.maxRam)}`
-        : `<span class="muted">–</span>`,
+        : "–";
+      return `<span title="${esc(`${bonus.toFixed(4)}x grow/weaken effect when scripts run on this host`)}">${ram} · ${fmtNum(cores)}c</span>`;
+    },
   },
 ];
 
@@ -375,8 +387,7 @@ export const hackingTab: Tab = {
       }) +
       note(
         "● rooted · ● rootable now · ● needs more skill or port openers. " +
-          "roll is where this save landed in the range the generator rolls each server from — " +
-          "money, security and required skill are all randomised per save, so two BN12s do not share a network.",
+          "Hover skill, money and security for this save's generated ranges; hover RAM/cores for the core effect.",
       );
 
     return (
