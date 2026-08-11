@@ -3,19 +3,20 @@ import {
   HGW_LIVE_OPS_PRESSURE,
   HGW_LIVE_OPS_RELEASE,
   MODE_DWELL_MS,
+  SHOTGUN_HACK_MS,
   decideMode,
 } from "../shared/strategy/mode.ts";
 
 /** The farm-mode policy: hwgw by default, hgw under process pressure with
- * hysteresis, shotgun when weakenTime can no longer hold the interleave. */
+ * hysteresis, shotgun below the reliable native hack-time window. */
 
-const base = { weakenMs: 120_000, liveOps: 100, lastMode: "hwgw" as const, lastModeSince: 0, now: 100_000 };
+const base = { hackMs: 30_000, liveOps: 100, lastMode: "hwgw" as const, lastModeSince: 0, now: 100_000 };
 
 describe("decideMode", () => {
-  test("shotgun when weakenTime fits fewer than the minimum interleaved batches", () => {
-    // 0.8s interval: 1.5s of weakenTime holds one batch — below SHOTGUN_MIN_DEPTH.
-    expect(decideMode({ ...base, weakenMs: 1_500 }).mode).toBe("shotgun");
-    expect(decideMode({ ...base, weakenMs: 1_700 }).mode).toBe("hwgw");
+  test("shotgun only below the native hack-time safety boundary", () => {
+    expect(decideMode({ ...base, hackMs: SHOTGUN_HACK_MS - 0.001 }).mode).toBe("shotgun");
+    expect(decideMode({ ...base, hackMs: SHOTGUN_HACK_MS }).mode).toBe("hwgw");
+    expect(decideMode({ ...base, hackMs: 50, lastModeSince: base.now - 1 }).mode).toBe("shotgun");
   });
 
   test("hgw under live-op pressure, with hysteresis on the way back", () => {

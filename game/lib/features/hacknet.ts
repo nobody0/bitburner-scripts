@@ -114,7 +114,7 @@ function hashGoals(ctx: HacknetViewContext): HashGoalCandidate[] {
       requiredHackingSkill: target.requiredHackingSkill ?? Infinity,
       serverGrowth: target.serverGrowth ?? 0,
       baseDifficulty: target.baseDifficulty ?? 1,
-    }, { batchGb: fleetGb, hackBlockGb: largest }, fleetGb, installHorizonSec(ctx.horizons));
+    }, { batchGb: fleetGb, hackBlockGb: largest, growBlockGb: largest }, fleetGb, installHorizonSec(ctx.horizons));
     goals.push(
       { name: HASH_UPGRADE.maxMoney, target: targetName, priority: 30, valueDollars: values.maxMoney, why: `increase ${targetName}'s farm value over the remaining horizon` },
       { name: HASH_UPGRADE.minSecurity, target: targetName, priority: 30, valueDollars: values.minSecurity, why: `reduce ${targetName}'s minimum security over the remaining horizon` },

@@ -243,9 +243,9 @@ export function stepEvaluator(
   const caps: RamCaps = {
     batchGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SOLVE_SHARE),
     hackBlockGb: Math.max(WORKER_RAM_FLOOR, capacity.largestBlockGb),
-    // The farm segment is the launch-rate denominator; hostBlocksGb lets the
-    // solver count hack SLOTS, so a block only one host can hold is priced at
-    // the depth-1 pipeline it actually buys (the 32 GB-home stall).
+    growBlockGb: Math.max(WORKER_RAM_FLOOR, capacity.largestBlockGb),
+    // The farm segment is the launch-rate denominator; hostBlocksGb bounds
+    // how quickly atomic hack/grow slots can recycle under JIT.
     ...(capacity.hostBlocksGb ? { hostBlocksGb: capacity.hostBlocksGb } : {}),
     farmGb: Math.max(WORKER_RAM_FLOOR, fleetGb * FARM_SOLVE_SHARE),
   };

@@ -40,6 +40,14 @@ export interface FarmRollup {
   depthCapGb?: number;
   execFails?: number;
   batchesSkipped?: number;
+  ramWork?: {
+    /** Cumulative scheduled work; padding is deliberately separate because
+     * every GB·ms held by additionalMsec is idle, not native HGW work. */
+    nativeGbMs: number;
+    paddingGbMs: number;
+    nativeGbMsByKind: { hack: number; grow: number; weaken: number };
+    paddingGbMsByKind: { hack: number; grow: number; weaken: number };
+  };
   pumpMaxMs?: number;
   /** Cumulative early pumps triggered by worker completions (the
    * weaken-landing wake) rather than the 200 ms tick. */

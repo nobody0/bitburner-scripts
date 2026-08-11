@@ -172,6 +172,12 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     ...(driver.memory.dispatch.depthCapGb !== undefined ? { depthCapGb: driver.memory.dispatch.depthCapGb } : {}),
     execFails: driver.execFails,
     batchesSkipped: stats.batchesSkipped,
+    ramWork: {
+      nativeGbMs: stats.nativeRamMs,
+      paddingGbMs: stats.paddingRamMs,
+      nativeGbMsByKind: stats.nativeRamMsByKind,
+      paddingGbMsByKind: stats.paddingRamMsByKind,
+    },
     pumpMaxMs: takePumpMaxMs(),
     wakePumps,
     totals: { moneyEarned: stats.moneyEarned, hacks: stats.hacks },
@@ -219,7 +225,7 @@ function homeCoreIncomeDelta(ctx: Pick<ClaimContext, "state">): number {
     serverGrowth: target.serverGrowth ?? 0,
     baseDifficulty: target.baseDifficulty ?? 1,
   };
-  const caps = { batchGb: usable, hackBlockGb: usable };
+  const caps = { batchGb: usable, hackBlockGb: usable, growBlockGb: usable };
   const before = solveCycle(hackCtx, statics, home.cores, caps)?.score ?? 0;
   const after = solveCycle(hackCtx, statics, home.cores + 1, caps)?.score ?? 0;
   return Math.max(0, after - before) * usable;

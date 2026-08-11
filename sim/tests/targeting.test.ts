@@ -49,11 +49,11 @@ function resetPerson(person: ReturnType<typeof mockPerson>, skill: number): void
 }
 
 describe("pipeline-aware solve", () => {
-  test("a hack block that collapses the pipeline to one slot loses to multi-slot blocks", () => {
+  test("JIT prices a contiguous slot for hack time rather than weaken time", () => {
     // Generous batch RAM so the total-RAM cap does not bind: the plain solve
-    // sizes the hack toward the whole 26 GB block (one slot -> one batch per
-    // weakenTime). With the pipeline inputs that candidate's launch rate is
-    // priced in and a smaller multi-slot block must win.
+    // sizes the hack toward the whole 26 GB block. Under eager launch one slot
+    // meant one batch per weakenTime and forced a smaller block. Under JIT the
+    // slot is reusable after hackTime, so that forced shrink is incorrect.
     const { ctx } = makeScenario(300);
     const plain = solveCycle(ctx, JOESGUNS, 1, { batchGb: 200, hackBlockGb: 26 })!;
     const aware = solveCycle(ctx, JOESGUNS, 1, {
@@ -68,8 +68,11 @@ describe("pipeline-aware solve", () => {
     const slots = (gb: number) => [26, 8, 8, 8, 4].reduce((sum, host) => sum + Math.floor(host / gb), 0);
     // The plain solve takes (nearly) the whole big host: at most one slot.
     expect(slots(hackGb(plain.hackThreads))).toBe(1);
-    // The aware solve keeps at least two slots' worth of launch rate.
-    expect(slots(hackGb(aware.hackThreads))).toBeGreaterThanOrEqual(2);
+    // The aware solve may keep that one-slot shape because it cycles about four
+    // times while the slow weaken support remains in flight.
+    expect(aware.hackThreads).toBe(plain.hackThreads);
+    expect(slots(hackGb(aware.hackThreads))).toBe(1);
+    expect(aware.score).toBeLessThanOrEqual(plain.score + 1e-12);
     // And when RAM is the binding constraint the two scores agree exactly —
     // the pipeline term degenerates to income/ramSec on small fleets.
     const smallPlain = solveCycle(ctx, JOESGUNS, 1, { batchGb: 24, hackBlockGb: 8 })!;

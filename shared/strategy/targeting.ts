@@ -176,17 +176,15 @@ export const HGW_INTERVAL_S = 0.6;
 
 /** RAM feasibility caps. A batch that cannot be placed is worthless however
  * well it scores, so the search only considers placeable thread counts:
- * `batchGb` bounds the whole batch, `hackBlockGb` bounds the hack op alone —
- * hack must land as ONE call (splitting it compounds the steal fraction and
- * would desync the grow sizing), so it is limited by the largest single host. */
+ * `batchGb` bounds the whole batch; hack and grow block caps enforce the two
+ * atomic operations. Splitting either changes the result of later calls. */
 export interface RamCaps {
   batchGb: number;
   hackBlockGb: number;
-  /** FREE GB per host, descending (a bounded prefix is fine). When present
-   * together with `farmGb`, the score becomes pipeline-aware: a hack block so
-   * large that only one host can hold one caps the LAUNCH RATE — however well
-   * the batch scores per RAM-second — because every op holds its RAM from
-   * launch until it lands ~weakenTime later. */
+  /** Largest atomic grow block. Omit only for topology-unaware analysis. */
+  growBlockGb?: number;
+  /** FREE GB per host, descending (a bounded prefix is fine). With farmGb,
+   * bounds how quickly atomic hack/grow blocks can recycle under JIT. */
   hostBlocksGb?: number[];
   /** GB the farm segment actually gets; the launch-rate denominator. */
   farmGb?: number;
@@ -284,29 +282,36 @@ export function solveCycle(
     if (ramSec <= 0) return undefined;
     const hackGb = WORKER_RAM.hack * hackThreads;
     if (hackGb > caps.hackBlockGb) return undefined;
-    const ram = hackGb + WORKER_RAM.grow * growThreadCount + WORKER_RAM.weaken * (weaken1 + weaken2);
+    const growGb = WORKER_RAM.grow * growThreadCount;
+    if (growGb > (caps.growBlockGb ?? Infinity)) return undefined;
+    const ram = hackGb + growGb + WORKER_RAM.weaken * (weaken1 + weaken2);
     if (ram > caps.batchGb) return undefined;
     let score = (income + stockIncome) / ramSec;
     let experienceScore = experience / ramSec;
     if (caps.farmGb !== undefined && Number.isFinite(caps.farmGb) && caps.farmGb > 0 && caps.hostBlocksGb) {
-      // Pipeline-aware score. The dispatcher execs all four ops at launch, so
-      // each holds its RAM until it lands ~weakenTime later; a contiguous hack
-      // slot therefore serves at most one batch per weakenTime. With S slots
-      // the launch period cannot beat weakenTime/S no matter how much total
-      // RAM is free — the regime behind the 32 GB-home stall, where a hack
-      // block sized to the whole home had exactly one slot and the pipeline
-      // collapsed to depth 1. The period also floors at the batch interval
-      // and at the RAM-bound rate; when RAM binds, the score degenerates to
-      // exactly income/ramSec, so small fleets are unaffected.
-      const weakenTimeS = 4 * hackTimeS;
-      const slotsNeeded = Math.max(1, Math.ceil(weakenTimeS / intervalS));
-      let slots = 0;
+      // Pipeline-aware JIT score. A contiguous slot is occupied only for its
+      // native call: hackTime for H and growTime for G. Total RAM-seconds price
+      // simultaneous H/G/W competition; these bounds add the unavoidable
+      // contiguous-host limits without cloning fleet states. The period also
+      // floors at the landing interval and RAM-bound rate; when RAM binds the
+      // score degenerates to income/ramSec.
+      const growTimeS = 3.2 * hackTimeS;
+      const hackSlotsNeeded = Math.max(1, Math.ceil(hackTimeS / intervalS));
+      const growSlotsNeeded = Math.max(1, Math.ceil(growTimeS / intervalS));
+      let hackSlots = 0;
+      let growSlots = caps.growBlockGb === undefined ? Infinity : 0;
       for (const hostGb of caps.hostBlocksGb) {
-        slots += Math.floor(hostGb / hackGb);
-        if (slots >= slotsNeeded) break; // beyond full depth, slots are free
+        hackSlots += Math.floor(hostGb / hackGb);
+        if (caps.growBlockGb !== undefined) growSlots += Math.floor(hostGb / growGb);
+        if (hackSlots >= hackSlotsNeeded && growSlots >= growSlotsNeeded) break;
       }
-      if (slots < 1) return undefined;
-      const period = Math.max(ramSec / caps.farmGb, weakenTimeS / slots, intervalS);
+      if (hackSlots < 1 || growSlots < 1) return undefined;
+      const period = Math.max(
+        ramSec / caps.farmGb,
+        hackTimeS / hackSlots,
+        caps.growBlockGb === undefined ? 0 : growTimeS / growSlots,
+        intervalS,
+      );
       score = (income + stockIncome) / (period * caps.farmGb);
       experienceScore = experience / (period * caps.farmGb);
     }
