@@ -184,7 +184,11 @@ export function cycleProgressEtaWithPrior(
   const sec = priorEstimate.sec * Math.pow(boundedCurrentSec / Math.max(1e-9, priorEstimate.sec), maturity);
   return {
     sec: Math.max(last.t, sec),
-    measured: true,
+    // The blend is only as measured as the prior it is anchored to: when the
+    // prior has no usable points for this resource its estimate is the raw
+    // fallback constant, and flagging that measured would let curvePart
+    // subtract elapsed cycle time from a number that never included it.
+    measured: priorEstimate.measured,
     ...(currentEstimate.exponent !== undefined ? { exponent: currentEstimate.exponent } : {}),
   };
 }

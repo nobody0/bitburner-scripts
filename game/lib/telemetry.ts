@@ -7,6 +7,7 @@ import {
   type WireMessage,
 } from "../../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
+import type { ArtifactIdentity } from "../../shared/run-identity.ts";
 
 /** In-game telemetry client. Streams LogRecords to the ui/ process over a bare
  * `new WebSocket()` (browser global — 0 GB ns RAM).
@@ -37,7 +38,7 @@ export interface Telemetry {
   dispose(): void;
 }
 
-export function initTelemetry(ns: NS, script: string): Telemetry {
+export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity): Telemetry {
   const run = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
   const buffer: LogRecord[] = [];
@@ -59,7 +60,7 @@ export function initTelemetry(ns: NS, script: string): Telemetry {
     ws = new WebSocket(`ws://127.0.0.1:${TELEMETRY_PORT}/ingest`);
     ws.onopen = () => {
       backoff = BACKOFF_MIN_MS;
-      send({ v: WIRE_VERSION, hello: { run, src: "game", script, startedAt } });
+      send({ v: WIRE_VERSION, hello: { run, src: "game", script, startedAt, identity } });
       flush();
     };
     ws.onclose = () => {

@@ -117,4 +117,20 @@ describe("experience runtime utility", () => {
     expect(skillGateRuntimeSecondsPerExp(currentExp, 1, 1, 14_400)).toBe(0);
     expect(skillGateRuntimeSecondsPerExp(currentExp, 1, 2_500, 7_200)).toBeCloseTo(value / 2, 12);
   });
+
+  test("the route skill-gate term stays commensurate with the income ratio", () => {
+    // The fleet's own best exp rate is the normaliser, so the term a target
+    // contributes (`expRate * secondsPerExp`) can never exceed 1 — the income
+    // ratio's own maximum — however close the gate is.
+    for (const targetSkill of [200, 500, 1_500, 2_500]) {
+      for (const bestExpPerSec of [1, 50, 5_000]) {
+        const perExp = skillGateRuntimeSecondsPerExp(1_000, 1, targetSkill, 14_400, bestExpPerSec);
+        expect(bestExpPerSec * perExp).toBeLessThanOrEqual(1 + 1e-12);
+      }
+    }
+    // Beyond the horizon the bound is inactive: the unbounded form is already
+    // the right answer there, so nothing about the far-gate case changes.
+    const far = skillGateRuntimeSecondsPerExp(1_000, 1, 2_500, 14_400, 1e-6);
+    expect(far).toBeCloseTo(skillGateRuntimeSecondsPerExp(1_000, 1, 2_500, 14_400), 12);
+  });
 });

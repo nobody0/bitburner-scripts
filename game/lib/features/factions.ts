@@ -779,7 +779,13 @@ const driver: FeatureDriver = {
 
     const { decision, memory: next } = stepFactions(view, memory);
     memory = next;
-    waitingForWorkSlot = decision.action.type === "idle" && decision.action.reason === "slot";
+    // "Waiting" covers wanting the slot as well as being blocked on it: when a
+    // higher band preempts live faction work or a graft, our last decision was
+    // workForFaction/graft, not idle-for-slot. Without this the freeing
+    // completion is ignored and the player stands idle for a full cadence.
+    waitingForWorkSlot = decision.action.type === "idle"
+      ? decision.action.reason === "slot"
+      : decision.action.type === "workForFaction" || decision.action.type === "graft";
 
     // While the final-sweep drain is pending — an install is recommended and
     // the next buy is affordable with cash on hand — keep waking at tick

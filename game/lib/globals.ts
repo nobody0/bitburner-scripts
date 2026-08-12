@@ -1,4 +1,5 @@
 import type { GameState } from "./state.ts";
+import type { ArtifactIdentity } from "../../shared/run-identity.ts";
 
 /** Typed cross-script cache on globalThis (same JS realm trick the dodger
  * uses). Everything the controller knows about the world lives in one store
@@ -18,6 +19,9 @@ export interface GameGlobals {
   /** Active farm target, retained across handoffs so a build push does not
    * look like a target switch. */
   farmTarget?: string;
+  /** Current install identity. Survives deployment handoffs in the page realm;
+   * prestige kills the process and the next cold start resolves fresh epochs. */
+  artifactIdentity?: ArtifactIdentity;
 }
 
 export const gameGlobal = globalThis as typeof globalThis & GameGlobals;

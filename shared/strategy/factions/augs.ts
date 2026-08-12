@@ -464,6 +464,20 @@ export function totalCost(order: readonly PurchaseCandidate[], ctx: PriceContext
  * this; the limit exists so a late-game objective cannot stall the loop. */
 export const EXACT_ORDER_LIMIT = 16;
 
+/** Joint (subset x NeuroFlux level) state budget for the exact solve.
+ *
+ * The one-shot limit alone bounds only ONE dimension: 16 candidates against
+ * the 64-level drain cap is 2^16 x 65 = 4.3M states and ~42 MB of typed
+ * arrays, seconds per controller pass at the moment the run is most
+ * time-critical. 2^20 keeps the joint sweep inside the millisecond budget the
+ * limit above was chosen for; past it the greedy NeuroFlux order takes over. */
+export const EXACT_JOINT_STATE_LIMIT = 1 << 20;
+
+/** Whether the joint one-shot/NeuroFlux DP fits both budgets. */
+function exactJointFits(size: number, levels: number): boolean {
+  return size <= EXACT_ORDER_LIMIT && (1 << size) * (levels + 1) <= EXACT_JOINT_STATE_LIMIT;
+}
+
 /** Order a purchase set for minimum total cost, respecting prerequisites.
  *
  * WITHOUT prerequisites the answer is just most-expensive-first: the
@@ -514,7 +528,7 @@ export function orderPurchasesWithNeuroflux(
 ): PurchaseCandidate[] {
   const levels = Math.max(0, Math.floor(neurofluxCount));
   if (levels === 0) return orderPurchases(candidates, ctx);
-  if (candidates.length <= EXACT_ORDER_LIMIT) return neurofluxOrdersByLevel(candidates, neuroflux, levels, ctx)[levels]!;
+  if (exactJointFits(candidates.length, levels)) return neurofluxOrdersByLevel(candidates, neuroflux, levels, ctx)[levels]!;
   return greedyNeurofluxOrder(candidates, neuroflux, levels, ctx);
 }
 
@@ -533,7 +547,7 @@ export function orderPurchasesWithNeurofluxByLevel(
   ctx: PriceContext,
 ): PurchaseCandidate[][] {
   const levels = Math.max(0, Math.floor(maxLevels));
-  if (candidates.length <= EXACT_ORDER_LIMIT && levels > 0) {
+  if (levels > 0 && exactJointFits(candidates.length, levels)) {
     return neurofluxOrdersByLevel(candidates, neuroflux, levels, ctx);
   }
   return Array.from({ length: levels + 1 }, (_unused, count) =>

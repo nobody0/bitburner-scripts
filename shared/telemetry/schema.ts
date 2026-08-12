@@ -1,3 +1,5 @@
+import type { ArtifactIdentity } from "../run-identity.ts";
+
 /** Telemetry wire schema shared by the game logger, the simulator, and the UI
  * process. One JSONL line per LogRecord on disk; JSON text frames on the wire. */
 
@@ -39,12 +41,15 @@ export interface DebugRecord extends RecordBase {
 export type LogRecord = StateRecord | EventRecord | DebugRecord;
 
 export interface HelloBody {
+  /** Emitter/process identity. Records retain this value for sequence gaps. */
   run: string;
   src: Source;
   script: string;
   startedAt: number;
   /** Optional label / git rev for A/B bookkeeping. */
   label?: string;
+  /** Install artifact identity. Absent on legacy clients. */
+  identity?: ArtifactIdentity;
 }
 
 export type WireMessage =

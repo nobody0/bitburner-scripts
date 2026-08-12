@@ -131,7 +131,7 @@ dodged ns call sites and cost the same 3.6 GB.
 bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h            # HWGW engine (default)
 bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h --baseline # naive planner
 bun run sim -- --profile bn1-full --horizon 72h --compact --perf      # full fixed-seed BN1, bounded benchmark
-bun run sim:compare runs/<baseline>.jsonl runs/<candidate>.jsonl
+bun run sim:compare runs/<baseline>.session.json runs/<candidate>.session.json
 ```
 
 The sim and live game emit the same telemetry schema and state keys, so the UI
@@ -158,8 +158,8 @@ import type { NS } from "@ns";
 - `bun run sync` — one-shot build and push, then exit.
 - `bun run build` / `build:perf` — compile the allowlist to `build/`.
 - `bun run ui` — telemetry hub + viewer on port 12526, including manual sync.
-- `bun run sim -- --goal …` — run the simulator; JSONL lands in `runs/`.
-- `bun run sim:compare a.jsonl b.jsonl` — A/B time-to-goal.
+- `bun run sim -- --goal …` — run the simulator; per-install JSONLs and a session manifest land in `runs/`.
+- `bun run sim:compare a.jsonl b.jsonl` — A/B time-to-goal; either input may also be a `.session.json` manifest for all chained installs.
 - `bun run go:arena -- --games 24` — upstream-oracle IPvGO tournament and latency report.
 - `bun run go:teacher -- --games 8` — slow exact Illuminati endgame audit for offline policy labels.
 - `bun run go:book:train -- --opponent Daedalus --games 1024 --phase-samples 3` — distill recurring, high-impact faction early/midgame actions offline.

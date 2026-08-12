@@ -13,6 +13,7 @@ import { DEFAULT_NETWORK } from "./network.ts";
 import { SimWorld, type SimOptions } from "./world.ts";
 import { SIM_FEATURE_COVERAGE, type RunValidity, type ScenarioClass } from "./fidelity.ts";
 import { scenarioFingerprint } from "./scenario.ts";
+import { SimArtifactSession } from "./artifacts.ts";
 
 export interface RunOptions {
   goal: Goal;
@@ -371,13 +372,15 @@ if (import.meta.main) {
   }
 
   const times: number[] = [];
+  const saveBitNode = save ? (await import("../tools/save-io.ts")).findSave(save).bitNode : undefined;
   for (const seed of runSeeds) {
-    const stamp = Date.now();
-    const name = [stamp, "sim", runLabel ?? goal.id.replaceAll(/[^\w.-]/g, "_"), save, `seed${seed}`]
-      .filter(Boolean)
-      .join("-");
-    const file = path.join(outDir, `${name}.jsonl`);
-    const sink = Bun.file(file).writer();
+    const artifacts = new SimArtifactSession({
+      outDir,
+      label: runLabel ?? goal.id,
+      seed,
+      bitNode: saveBitNode ?? (driver === "game" ? runBitnode : bitnode),
+      ...(save ? { seededFrom: save } : {}),
+    });
 
     let result: {
       reached: boolean;
@@ -395,7 +398,7 @@ if (import.meta.main) {
         label: runLabel ?? gitRev,
         farm,
         world: { bitnode, homeRam, startingMoney, verbose },
-        onRecord: (line) => void sink.write(line + "\n"),
+        onRecord: (line) => artifacts.write(line),
       });
     } else {
       const { runGame } = await import("./game-run.ts");
@@ -429,7 +432,7 @@ if (import.meta.main) {
             record.name.startsWith("install")
           ),
         } : {}),
-        onRecord: (line) => void sink.write(line + "\n"),
+        onRecord: (line) => artifacts.write(line),
       });
       result = outcome;
       const gaps = Object.entries(outcome.unmodeled);
@@ -441,11 +444,11 @@ if (import.meta.main) {
       }
     }
 
-    void sink.end();
+    await artifacts.close();
     times.push(result.timeToGoalMs);
     console.log(
       `seed ${seed}: [${result.validity}] ${result.reached ? `reached in ${formatDuration(result.timeToGoalMs)}` : `NOT reached (${result.stoppedBecause})`}  ` +
-        `records=${result.records}  -> ${file}`,
+        `records=${result.records}  -> ${artifacts.files.join(", ")}  session=${artifacts.manifestFile}`,
     );
     if (result.validity === "invalid-for-goal") process.exitCode = 2;
   }

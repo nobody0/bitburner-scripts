@@ -977,6 +977,10 @@ describe("progression", () => {
     });
     expect(distinctOffer).toBeCloseTo(oneSeller * 2, 12);
 
+    // A faction's improved favor rate accelerates EVERY residual augmentation
+    // it still offers, which is how packageValues prices the push side
+    // (`future * rateGain`). Crediting the accrued side once per faction
+    // instead put the two sides of the install verdict on different scales.
     const nestedAtOneFaction = bankedFavorActivationValue({
       standings: [{ name: "CyberSec", rep: 100_000, favor: 0 }],
       offers: [
@@ -985,7 +989,7 @@ describe("progression", () => {
       ],
       favorToDonate: 150,
     });
-    expect(nestedAtOneFaction).toBeCloseTo(oneSeller, 12);
+    expect(nestedAtOneFaction).toBeCloseTo(oneSeller * 2, 12);
 
     const reroutedSharedOffer = bankedFavorActivationValue({
       standings: [

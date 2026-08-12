@@ -181,6 +181,7 @@ export interface GameRunResult {
  * registry into the next. */
 const REALM_SLOTS = [
   "controllerEpoch",
+  "artifactIdentity",
   "state",
   "farmTarget",
   "worker_info",

@@ -5,6 +5,8 @@ import { note } from "./lib/dom.ts";
 import { NO_SORT, setView, toggleSort } from "./lib/viewstate.ts";
 import { appendRecords, emptyState, project, type ProjectedState } from "./project.ts";
 import { TABS, type TabId } from "./tabs/index.ts";
+import { BITNODES } from "../../shared/features/bitnode.ts";
+import type { RunCatalogEntry } from "../../shared/run-catalog.ts";
 
 /** Viewer shell: one live socket, one loaded run, one active tab.
  *
@@ -20,6 +22,7 @@ interface RunSummaryLike {
   hello?: { src: "game" | "sim"; script: string };
   state?: LogRecord[];
   tail?: LogRecord[];
+  metadata?: RunCatalogEntry;
 }
 
 /** The loaded run.
@@ -37,7 +40,7 @@ const run = {
 };
 let cutoff = Infinity;
 let liveRuns: RunSummaryLike[] = [];
-let storedRuns: { file: string; size: number; pinned?: boolean }[] = [];
+let storedRuns: RunCatalogEntry[] = [];
 let compactOverBytes = 8_000_000;
 let active: TabId = "overview";
 let state: ProjectedState = emptyState();
@@ -238,14 +241,55 @@ $("view").addEventListener("input", (ev) => {
 function refreshPicker(): void {
   const pick = $<HTMLSelectElement>("runpick");
   const current = pick.value;
-  pick.innerHTML = [
-    ...liveRuns.map(
-      (r) => `<option value="live:${esc(r.id)}">● live — ${esc(r.hello?.src)}/${esc(r.hello?.script)} (${esc(r.id)})</option>`,
-    ),
-    ...storedRuns.map(
-      (f) => `<option value="file:${esc(f.file)}">${f.pinned ? "📌 " : ""}${esc(f.file)}</option>`,
-    ),
-  ].join("");
+  const liveInstallIds = new Set(liveRuns.map((entry) => entry.metadata?.identity?.install.id).filter(Boolean));
+  const choices = [
+    ...liveRuns.map((summary) => ({
+      key: `live:${summary.id}`,
+      metadata: summary.metadata,
+      fallback: `live — ${summary.hello?.src}/${summary.hello?.script} (${summary.id})`,
+      live: true,
+    })),
+    ...storedRuns
+      .filter((entry) => !entry.identity || !liveInstallIds.has(entry.identity.install.id))
+      .map((metadata) => ({ key: `file:${metadata.file}`, metadata, fallback: metadata.file, live: false })),
+  ];
+  const grouped = new Map<string, typeof choices>();
+  for (const choice of choices) {
+    const key = choice.metadata?.identity?.lineage.id ?? "legacy";
+    const bucket = grouped.get(key) ?? [];
+    bucket.push(choice);
+    grouped.set(key, bucket);
+  }
+  const groups = [...grouped.entries()].sort(([, a], [, b]) =>
+    Math.max(...b.map((x) => x.metadata?.updatedAt ?? 0)) - Math.max(...a.map((x) => x.metadata?.updatedAt ?? 0))
+  );
+  pick.innerHTML = groups.map(([lineageId, entries]) => {
+    entries.sort((a, b) =>
+      (a.metadata?.identity?.bitNode?.startedAt ?? 0) - (b.metadata?.identity?.bitNode?.startedAt ?? 0) ||
+      (a.metadata?.identity?.install.startedAt ?? 0) - (b.metadata?.identity?.install.startedAt ?? 0)
+    );
+    const lineage = entries[0]?.metadata?.identity?.lineage;
+    const label = lineage?.label ?? (lineageId === "legacy" ? "Legacy / ungrouped" : lineageId);
+    const nodeOrdinals = new Map<string, number>();
+    return `<optgroup label="${esc(label)}">${entries.map((entry) => {
+      const metadata = entry.metadata;
+      if (!metadata?.identity) return `<option value="${esc(entry.key)}">${esc(entry.fallback)}</option>`;
+      const node = metadata.identity.bitNode;
+      const nodeInfo = node ? BITNODES.find((known) => known.n === node.bitNode) : undefined;
+      const nodeKey = node?.id ?? "none";
+      const ordinal = nodeOrdinals.get(nodeKey) ?? 0;
+      nodeOrdinals.set(nodeKey, ordinal + 1);
+      const install = (metadata.identity.install.index ?? ordinal) + 1;
+      const date = new Date(metadata.createdAt).toLocaleDateString(undefined, { day: "2-digit", month: "short" });
+      const duration = fmtTime(metadata.durationMs ?? (
+        metadata.firstT === null || metadata.lastT === null ? 0 : metadata.lastT - metadata.firstT
+      ));
+      const onlyOneSimInstall = metadata.identity.lineage.kind === "sim" && entries.length === 1;
+      const bn = node && !onlyOneSimInstall ? `BN${node.bitNode}${nodeInfo ? ` ${nodeInfo.name}` : ""} › ` : "";
+      const flags = `${entry.live ? "● " : ""}${metadata.pinned ? "📌 " : ""}`;
+      return `<option value="${esc(entry.key)}">${esc(`${flags}${bn}Install ${install} · ${date} · ${duration}`)}</option>`;
+    }).join("")}</optgroup>`;
+  }).join("");
   if ([...pick.options].some((o) => o.value === current)) pick.value = current;
   // Only an unpinned stored run can be pinned.
   const selected = pick.value;
@@ -330,10 +374,13 @@ function attachLive(summary: RunSummaryLike): void {
   // A live run keeps no history: the snapshot is folded once, and every later
   // batch is folded as it arrives.
   run.records = null;
-  const seen = new Set<number>();
+  const seen = new Set<string>();
   const initial = [...(summary.state ?? []), ...(summary.tail ?? [])]
-    .sort((a, b) => a.seq - b.seq)
-    .filter((r) => (seen.has(r.seq) ? false : (seen.add(r.seq), true)));
+    .sort((a, b) => a.t - b.t || a.run.localeCompare(b.run) || a.seq - b.seq)
+    .filter((r) => {
+      const key = `${r.run}\0${r.seq}`;
+      return seen.has(key) ? false : (seen.add(key), true);
+    });
   run.t0 = initial[0]?.t ?? null;
   cutoff = Infinity;
   $("scrubrow").style.display = "none";
@@ -369,7 +416,7 @@ $("scrub").addEventListener("input", () => {
 interface HubMessage {
   type: string;
   runs?: RunSummaryLike[];
-  stored?: { file: string; size: number; pinned?: boolean }[];
+  stored?: RunCatalogEntry[];
   run?: RunSummaryLike & { id: string };
   records?: LogRecord[];
   busy?: boolean;
@@ -406,9 +453,11 @@ function connect(): void {
         render();
       }
     } else if (msg.type === "run-started" && msg.run) {
-      liveRuns.push({ ...msg.run, state: [], tail: [] });
+      const existing = liveRuns.findIndex((entry) => entry.id === msg.run!.id);
+      if (existing < 0) liveRuns.push({ ...msg.run, state: [], tail: [] });
+      else liveRuns[existing] = { ...liveRuns[existing], ...msg.run };
       refreshPicker();
-      if (liveRuns.length === 1) {
+      if (existing < 0 && liveRuns.length === 1) {
         $<HTMLSelectElement>("runpick").value = `live:${msg.run.id}`;
         attachLive(liveRuns[0]!);
       }

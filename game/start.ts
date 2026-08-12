@@ -5,6 +5,7 @@ import { errorDetails, isScriptDeath } from "./lib/errors.ts";
 import { gameGlobal } from "./lib/globals.ts";
 import { makeSink, type TelemetrySink } from "./lib/telemetry-sink.ts";
 import { initTelemetry, type Telemetry } from "./lib/telemetry.ts";
+import { resolveRunIdentity } from "./lib/run-identity.ts";
 
 export type StartMode = "cold" | "handoff";
 
@@ -52,6 +53,7 @@ export async function main(ns: NS, featureOverrides?: FeatureOverrides): Promise
   const mode = parseStartMode(ns.args, __BUILD_ID__);
   const epoch = (gameGlobal.controllerEpoch ?? 0) + 1;
   gameGlobal.controllerEpoch = epoch;
+  const identity = await resolveRunIdentity(ns, mode === "handoff");
 
   // The telemetry sink is the ONLY thing this flag decides. Acquisition, the
   // game-state store and every feature driver are compiled into both builds:
@@ -60,7 +62,7 @@ export async function main(ns: NS, featureOverrides?: FeatureOverrides): Promise
   let sink: TelemetrySink | undefined;
   try {
     TELEMETRY: if (__TELEMETRY__) {
-      tel = initTelemetry(ns, "start.js");
+      tel = initTelemetry(ns, "start.js", identity);
       sink = makeSink(tel);
     }
     await runController(ns, tel, sink, mode, epoch, featureOverrides);

@@ -2,6 +2,8 @@ import type { EventRecord, LogRecord } from "../shared/telemetry/schema.ts";
 import { formatDuration } from "./run.ts";
 import type { RunValidity, ScenarioClass } from "./fidelity.ts";
 import { assertComparable } from "./compare-policy.ts";
+import path from "node:path";
+import type { SimSessionManifest } from "./artifacts.ts";
 
 /** A/B compare stored sim runs:
  *   bun run sim:compare runs/a.jsonl runs/b.jsonl [more...]
@@ -23,7 +25,11 @@ interface RunInfo {
 }
 
 async function readRun(file: string): Promise<RunInfo> {
-  const text = await Bun.file(file).text();
+  let inputs = [file];
+  if (file.endsWith(".session.json")) {
+    const manifest = JSON.parse(await Bun.file(file).text()) as SimSessionManifest;
+    inputs = manifest.artifacts.map((artifact) => path.join(path.dirname(file), artifact));
+  }
   let meta: { goal?: string; label?: string; seed?: number; driver?: string; scenario?: string; scenarioFingerprint?: string } = {};
   let result: {
     goal?: string;
@@ -33,13 +39,16 @@ async function readRun(file: string): Promise<RunInfo> {
     scenario?: ScenarioClass;
     unmodeled?: Record<string, number>;
   } | undefined;
-  for (const line of text.split("\n")) {
-    if (!line) continue;
-    const record = JSON.parse(line) as LogRecord;
-    if (record.kind !== "event") continue;
-    const event = record as EventRecord;
-    if (event.name === "sim.meta") meta = event.data as typeof meta;
-    if (event.name === "sim.result") result = event.data as typeof result;
+  for (const input of inputs) {
+    const text = await Bun.file(input).text();
+    for (const line of text.split("\n")) {
+      if (!line) continue;
+      const record = JSON.parse(line) as LogRecord;
+      if (record.kind !== "event") continue;
+      const event = record as EventRecord;
+      if (event.name === "sim.meta") meta = event.data as typeof meta;
+      if (event.name === "sim.result") result = event.data as typeof result;
+    }
   }
   if (!result) throw new Error(`${file}: no sim.result event (incomplete run?)`);
   return {

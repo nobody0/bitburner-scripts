@@ -98,16 +98,31 @@ export function projectedRuntimeSecondsPerExp(
 /** Direct completion-clock value of hacking experience when another feature
  * has posted a concrete skill gate (Daedalus, w0r1d_d43m0n, a backdoor).
  * This is separate from future-income utility above: reaching the requested
- * skill can itself unblock the route even if it never improves $/sec. */
+ * skill can itself unblock the route even if it never improves $/sec.
+ *
+ * `horizon / gap` alone DIVERGES as the gate is approached: at a 4-hour
+ * horizon and a 1e5-exp gap it already prices exp fourteen times the whole
+ * normalised income term, so the farm abandons money for the entire approach
+ * and the route's OTHER gate (Daedalus wants $100b as well as the skill)
+ * stops progressing. The bound is the same one the income sibling above
+ * applies: an exp point can only remove route clock that the route was
+ * actually going to spend. The gate closes after `gap / rate` seconds, so one
+ * point brings it forward by `1 / rate` — never more, however small the gap
+ * gets — and the whole saving is still capped at the valued horizon. Passing
+ * the fleet's BEST exp rate makes the resulting term `expRate / bestExpRate`
+ * at most, exactly the shape and scale of the income ratio it is added to. */
 export function skillGateRuntimeSecondsPerExp(
   currentExp: number,
   hackingMult: number,
   targetSkill: number,
   horizonSec: number,
+  bestExpPerSec = 0,
 ): number {
   const gap = Math.max(0, expForSkill(Math.max(1, targetSkill), Math.max(1e-9, hackingMult)) - currentExp);
   if (!(gap > 0)) return 0;
-  return Math.max(0, horizonSec) / gap;
+  const horizon = Math.max(0, horizonSec);
+  const savableSeconds = bestExpPerSec > 0 ? Math.min(horizon, gap / bestExpPerSec) : horizon;
+  return savableSeconds / gap;
 }
 
 /** Attach the reusable-role saturation envelope used by economics. This runs
@@ -486,6 +501,11 @@ export function stepEvaluator(
     (best, entry) => Math.max(best, farmIncomeRate(entry.solution, fleetGb)),
     0,
   );
+  // Normaliser for the route skill-gate term, mirroring `bestIncomeRate`.
+  const bestExpRate = eligibleEntries.reduce(
+    (best, entry) => entry.solution ? Math.max(best, experienceRate(entry.solution)) : best,
+    0,
+  );
 
   if (!memory.skillProjection || memory.skillProjection.generation !== memory.generation) {
     const normalStep = view.player.hackingSkill + Math.max(1, Math.ceil(view.player.hackingSkill * SKILL_DELTA));
@@ -537,6 +557,7 @@ export function stepEvaluator(
         view.player.mults.hacking ?? 1,
         opts.hackingSkillGoal,
         utilityHorizonS,
+        bestExpRate,
       )
     : 0;
   /** Common currency is BitNode time: direct income advances the best current

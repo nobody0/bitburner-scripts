@@ -2,19 +2,18 @@ import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import {
-  basePriceMultiplier,
-  closePrereqs,
-  countSlotWeight,
   isSoA,
   NEUROFLUX,
   nextPurchasableAugmentation,
-  scoreAug,
   scoreAugMults,
-  selectAffordableBatch,
   weightsForRoute,
-  type AugInfo,
-  type PurchaseCandidate,
 } from "../../../shared/strategy/factions/augs.ts";
+import {
+  countClosureAffordable,
+  countSlotValueFor,
+  fundedActivationBatch,
+  routeCountVerdict,
+} from "../../../shared/strategy/progression/activation.ts";
 import { liquidatableValue } from "./factions.ts";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
@@ -43,10 +42,9 @@ import { sfLevel } from "../../../shared/features/unlock.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
-import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, earlyCountBatchAllowed, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installVerdict, routeCountInstallValue, stepProgression } from "../../../shared/strategy/progression/decide.ts";
+import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
 import {
   DAEDALUS_COMBAT,
-  DAEDALUS_FINAL_BATCH_FRACTION,
   GANG_FACTIONS,
   GANG_KARMA,
   RED_PILL,
@@ -1978,49 +1976,11 @@ function progressionRefresh(ctx: NeedContext): void {
   // the same value-order / payment-order split as the transaction boundary.
   // Purchases remain entirely end-loaded; this is only the honest value of
   // what the current bankroll could convert if progression ended the cycle.
-  const activationCatalog = new Map<string, AugInfo>();
-  for (const name of realizable) {
-    const aug = AUGMENTATIONS[name];
-    if (!aug || name === NEUROFLUX) continue;
-    activationCatalog.set(name, {
-      name,
-      baseCost: aug.cost,
-      baseRepRequirement: aug.rep,
-      factions: [...aug.factions],
-      prereqs: [...(aug.prereqs ?? [])],
-      mults: { ...(aug.mults ?? {}) },
-      ...(aug.multsUnknown ? { multsUnknown: true } : {}),
-    });
-  }
-  const countSlotsRemaining = choice?.route === "daedalus" && view.bitNode !== undefined
-    ? Math.max(0, (daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0) ?? 0) - view.augCount)
-    : 0;
-  const liveCountTarget = choice?.route === "daedalus" && view.bitNode !== undefined
-    ? daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0) ?? Infinity
-    : Infinity;
-  const liveCountValue = countSlotWeight(liveCountTarget, countSlotsRemaining);
-  const activationValueOrder = [...activationCatalog.values()]
-    .sort((a, b) => {
-      const aValue = Math.max(1e-9, scoreAug(a, verdictWeights) + liveCountValue);
-      const bValue = Math.max(1e-9, scoreAug(b, verdictWeights) + liveCountValue);
-      return a.baseCost / aValue - b.baseCost / bValue
-        || scoreAug(b, verdictWeights) - scoreAug(a, verdictWeights)
-        || (a.name < b.name ? -1 : 1);
-    })
-    .map((aug) => aug.name);
+  const daedalusRequired = choice?.route === "daedalus" && view.bitNode !== undefined
+    ? daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0)
+    : undefined;
   const activationOwned = new Set([...ownedOrQueued, ...pending]);
-  const activationCandidates: PurchaseCandidate[] = closePrereqs(
-    activationValueOrder,
-    activationCatalog,
-    activationOwned,
-  ).flatMap((name) => {
-    const aug = activationCatalog.get(name);
-    if (!aug) return [];
-    const faction = (factions?.offers ?? []).find(
-      (offer) => offer.name === name && joinedSet.has(offer.faction) && offer.affordableRep,
-    )?.faction;
-    return faction ? [{ name, aug, faction }] : [];
-  });
+  const activationOffers = factions?.offers ?? [];
   const activationPriceContext = {
     queuedNonSoA: pending.filter((name) => !isSoA(name)).length,
     ownedSoA: Object.keys(installed).filter(isSoA).length,
@@ -2033,81 +1993,32 @@ function progressionRefresh(ctx: NeedContext): void {
     )?.AugmentationMoneyCost ?? 1,
     augRepCost: 1,
   };
-  const fundedActivation = selectAffordableBatch({
-    candidates: activationCandidates,
+  const fundedActivation = fundedActivationBatch({
+    realizable,
+    offers: activationOffers,
+    joined: joinedSet,
     owned: activationOwned,
+    weights: verdictWeights,
+    countSlotValue: countSlotValueFor(daedalusRequired ?? Infinity, view.augCount),
     ctx: activationPriceContext,
     money: sweepBudget,
-  }).order;
+  });
 
-  // In Daedalus's final batch, an empty queue is expected because purchases
-  // are end-loaded. Promote the reset from "optional" to route-required once
-  // the current pile can buy enough REP-MET unique augmentations to satisfy
-  // the installed-count gate. This is what lets the hold-at-2/3 policy finish
-  // rather than deadlocking before the sweep that creates its queue.
-  if (choice?.route === "daedalus" && view.bitNode !== undefined) {
-    const required = daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0);
-    if (required !== undefined && view.augCount < required) {
-      const installedNames = new Set(Object.keys(view.installedAugs ?? {}));
-      const queuedCountable = new Set(
-        pending.filter((name) => name !== NEUROFLUX || !installedNames.has(NEUROFLUX)),
-      );
-      const stillNeeded = Math.max(0, required - view.augCount - queuedCountable.size);
-      const candidates = new Map([...realizable]
-        .filter((name) => name !== NEUROFLUX || !installedNames.has(NEUROFLUX))
-        .map((name) => {
-          const offers = (factions?.offers ?? []).filter((offer) => offer.name === name);
-          const cheapestOffer = offers.reduce<typeof offers[number] | undefined>(
-            (best, offer) => !best || offer.price < best.price ? offer : best,
-            undefined,
-          );
-          return cheapestOffer ? { name, price: cheapestOffer.price, soa: cheapestOffer.soa === true } : undefined;
-        })
-        .filter((entry): entry is { name: string; price: number; soa: boolean } => entry !== undefined)
-        .map((entry) => [entry.name, entry] as const));
-      const queueMult = basePriceMultiplier(view.sourceFiles["11"] ?? 0);
-      const costOf = (names: ReadonlySet<string>): number => {
-        const entries = [...names].map((name) => candidates.get(name)).filter((entry) => entry !== undefined);
-        const normal = entries.filter((entry) => !entry.soa).sort((a, b) => b.price - a.price);
-        return entries.filter((entry) => entry.soa).reduce((sum, entry) => sum + entry.price, 0)
-          + normal.reduce((sum, entry, index) => sum + entry.price * queueMult ** index, 0);
-      };
-      const closure = (name: string, selected: ReadonlySet<string>): Set<string> | undefined => {
-        const adding = new Set<string>();
-        const visiting = new Set<string>();
-        const visit = (candidate: string): boolean => {
-          if (ownedOrQueued.has(candidate) || selected.has(candidate) || adding.has(candidate)) return true;
-          if (visiting.has(candidate) || !candidates.has(candidate)) return false;
-          visiting.add(candidate);
-          for (const prereq of AUGMENTATIONS[candidate]?.prereqs ?? []) if (!visit(prereq)) return false;
-          visiting.delete(candidate);
-          adding.add(candidate);
-          return true;
-        };
-        return visit(name) ? adding : undefined;
-      };
-      const selected = new Set<string>();
-      while (selected.size < stillNeeded) {
-        let best: Set<string> | undefined;
-        let bestCost = Infinity;
-        for (const name of candidates.keys()) {
-          if (selected.has(name)) continue;
-          const adding = closure(name, selected);
-          if (!adding) continue;
-          const trial = new Set([...selected, ...adding]);
-          const cost = costOf(trial);
-          if (cost < bestCost) {
-            bestCost = cost;
-            best = adding;
-          }
-        }
-        if (!best) break;
-        for (const name of best) selected.add(name);
-      }
-      if (selected.size >= stillNeeded && costOf(selected) <= sweepBudget) {
-        routeRequiresInstall = true;
-      }
-    }
+  if (daedalusRequired !== undefined && view.augCount < daedalusRequired) {
+    const installedNames = new Set(Object.keys(view.installedAugs ?? {}));
+    const queuedCountable = new Set(
+      pending.filter((name) => name !== NEUROFLUX || !installedNames.has(NEUROFLUX)),
+    );
+    routeRequiresInstall = routeRequiresInstall || countClosureAffordable({
+      realizable,
+      offers: activationOffers,
+      joined: joinedSet,
+      owned: ownedOrQueued,
+      wanted: Math.max(0, daedalusRequired - view.augCount - queuedCountable.size),
+      neurofluxCountable: !installedNames.has(NEUROFLUX),
+      ctx: activationPriceContext,
+      money: sweepBudget,
+    });
   }
   // Banked-but-unrealized favor, priced with packageValue's OWN favor terms
   // (futureRateGain + crossesDonation) at current rep. The frontier's favor
@@ -2136,26 +2047,19 @@ function progressionRefresh(ctx: NeedContext): void {
   );
   let routeCountValue = 0;
   let countCadenceReady = true;
-  if (choice?.route === "daedalus" && view.bitNode !== undefined) {
-    const required = daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0);
-    if (required !== undefined) {
-      const installedNames = new Set(Object.keys(view.installedAugs ?? {}));
-      const affordableDistinct = new Set(
+  if (daedalusRequired !== undefined) {
+    const installedNames = new Set(Object.keys(view.installedAugs ?? {}));
+    const verdict = routeCountVerdict({
+      required: daedalusRequired,
+      installed: view.augCount,
+      affordableDistinct: new Set(
         [...pending, ...fundedActivation.map((candidate) => candidate.name)]
           .filter((name) => !installedNames.has(name)),
-      ).size;
-      const beforeConsolidation = view.augCount < Math.ceil(required * DAEDALUS_FINAL_BATCH_FRACTION);
-      const batchAllowed = beforeConsolidation
-        ? earlyCountBatchAllowed(required, view.augCount, affordableDistinct)
-        : selectedStatus?.optionalInstall.allowed === true;
-      countCadenceReady = view.augCount >= required || batchAllowed;
-      routeCountValue = routeCountInstallValue({
-        required,
-        installed: view.augCount,
-        affordableDistinct,
-        batchAllowed,
-      });
-    }
+      ).size,
+      consolidationAllowed: selectedStatus?.optionalInstall.allowed === true,
+    });
+    countCadenceReady = verdict.ready;
+    routeCountValue = verdict.value;
   }
   const resetValueMult = resetMultiplierValue + bankedFavorValue + routeCountValue;
   const intent = factions?.plan?.objective?.intent;
@@ -2799,23 +2703,28 @@ export const progressionModule: FeatureModule = {
         `complete the BitNode and enter BN${plan.completion.nextBitNode}`,
       )];
     }
+    // A pending route action is additive: it does NOT excuse the bankroll
+    // reservations below. An unfunded createGang/joinBladeburner can stay
+    // pending for many arbitration passes, and leaving the install brakes off
+    // for that window lets investments spend cash the armed reset would wipe.
+    const routeClaims: Claim[] = [];
     if (plan?.routeAction?.type === "createGang") {
-      return [actionRamClaim(
+      routeClaims.push(actionRamClaim(
         ctx,
         "progression",
         "action:create-gang",
         ["gang.createGang"],
         `create the ${plan.routeAction.faction} gang selected by the BN2 route`,
-      )];
+      ));
     }
     if (plan?.routeAction?.type === "joinBladeburner") {
-      return [actionRamClaim(
+      routeClaims.push(actionRamClaim(
         ctx,
         "progression",
         "action:join-bladeburner",
         ["bladeburner.joinBladeburnerDivision"],
         "join the Bladeburner division selected by the endgame route",
-      )];
+      ));
     }
     if (!plan?.installReady) {
       // The IMMINENT-install brake: when the install forecast says the reset
@@ -2825,7 +2734,7 @@ export const progressionModule: FeatureModule = {
       // the full freeze.
       const installSec = usableForecastSec(ctx.horizons.install);
       if (installSec !== undefined && installSec < IMMINENT_INSTALL_SEC) {
-        return [{
+        routeClaims.push({
           by: "progression",
           id: "imminent-install",
           resource: "money",
@@ -2834,11 +2743,11 @@ export const progressionModule: FeatureModule = {
           mode: "reserve",
           divisible: true,
           why: `install expected in ${Math.round(installSec)}s; investment ROI windows are closed`,
-        }];
+        });
       }
-      return [];
+      return routeClaims;
     }
-    const claims: Claim[] = [{
+    const claims: Claim[] = [...routeClaims, {
       by: "progression",
       id: "install-freeze",
       resource: "money",

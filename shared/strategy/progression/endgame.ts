@@ -251,7 +251,10 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
 
   // Shared tail of all three Red Pill routes. Owning the pill is not enough: the
   // link is created on install, and the install resets the skill.
-  const redPillTail = (): { complete: boolean; blocker: string; stage: string; needs: RouteNeed[]; mandatoryInstall?: MandatoryInstall } => {
+  // `optionalInstall` is part of the tail's own policy: the post-Red-Pill
+  // regrow is erased by any further reset, and that is true on whichever route
+  // produced the pill. Owning it here keeps the three call sites from drifting.
+  const redPillTail = (): { complete: boolean; blocker: string; stage: string; needs: RouteNeed[]; mandatoryInstall?: MandatoryInstall; optionalInstall?: OptionalInstallPolicy } => {
     if (!view.ownsRedPill) return { complete: false, blocker: `acquire ${RED_PILL}`, stage: "red-pill", needs: [] };
     if (!view.redPillInstalled) {
       return {
@@ -268,10 +271,17 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
         blocker: `hacking ${view.hackingSkill} of ${wdSkill ?? "?"} after the install`,
         stage: "world-daemon-regrow",
         needs: wdSkill === undefined ? [] : [{ kind: "skill", subject: "hacking", target: wdSkill, have: view.hackingSkill, why: "root the world daemon after the Red Pill install" }],
+        optionalInstall: { allowed: false, why: "another reset would erase the post-Red-Pill hacking regrow" },
       };
     }
     if (!view.worldDaemonRooted) {
-      return { complete: false, blocker: "root w0r1d_d43m0n", stage: "world-daemon-root", needs: [] };
+      return {
+        complete: false,
+        blocker: "root w0r1d_d43m0n",
+        stage: "world-daemon-root",
+        needs: [],
+        optionalInstall: { allowed: false, why: "another reset would erase the post-Red-Pill hacking regrow" },
+      };
     }
     return { complete: true, blocker: "", stage: "complete", needs: [] };
   };
@@ -382,9 +392,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       stage,
       needs,
       ...(mandatoryInstall ? { mandatoryInstall } : {}),
-      optionalInstall: stage.startsWith("world-daemon-")
-        ? { allowed: false, why: "another reset would erase the post-Red-Pill hacking regrow" }
-        : optionalInstall,
+      optionalInstall: (stage === tail.stage ? tail.optionalInstall : undefined) ?? optionalInstall,
     });
   }
 
@@ -438,14 +446,10 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       stage,
       needs,
       ...(mandatoryInstall ? { mandatoryInstall } : {}),
-      optionalInstall: stage.startsWith("world-daemon-")
-        ? {
-            allowed: false,
-            why: "another reset would erase the post-Red-Pill hacking regrow",
-          }
-        : stage === "gang-reputation"
+      optionalInstall: (stage === tail.stage ? tail.optionalInstall : undefined)
+        ?? (stage === "gang-reputation"
           ? { allowed: true, why: "the gang survives; cadence prices lost faction rep against favor and installed multipliers" }
-          : { allowed: true, why: "no route progress would be erased" },
+          : { allowed: true, why: "no route progress would be erased" }),
     });
   }
 
@@ -482,11 +486,9 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       stage: view.ownsRedPill ? tail.stage : queuedReward ? "labyrinth-install" : `labyrinth-${stageIndex + 1}`,
       needs: view.ownsRedPill ? tail.needs : needs,
       ...(mandatoryInstall ? { mandatoryInstall } : {}),
-      optionalInstall: {
+      optionalInstall: (view.ownsRedPill ? tail.optionalInstall : undefined) ?? {
         allowed: false,
-        why: view.ownsRedPill && tail.stage.startsWith("world-daemon-")
-          ? "another reset would erase the post-Red-Pill hacking regrow"
-          : "labyrinth progress advances only through its route-mandatory reward installs",
+        why: "labyrinth progress advances only through its route-mandatory reward installs",
       },
     });
   }

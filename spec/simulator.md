@@ -96,6 +96,12 @@ Full-game runs also stream records instead of retaining a duplicate in-memory
 history. Neither changes controller behaviour; they only bound host-side I/O
 and heap use for multi-install BitNode runs.
 
+Every simulator seed is a fresh lineage, even when two runs start from the same
+registered snapshot. `sim.prestige` closes the current install JSONL; the next
+record opens its successor. A `.session.json` manifest lists those artifacts in
+order, and `sim:compare` accepts either a manifest or a legacy single JSONL.
+The snapshot id is retained as `seededFrom` metadata, not reused as identity.
+
 `--perf` additionally exercises the game's telemetry-free build path. The
 controller still acquires and stores exactly the same state (pinned by
 `tests/build-perf.test.ts`); simulator-owned player, server, install and

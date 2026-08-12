@@ -129,8 +129,8 @@ the shared dollar at a particular pass.
 WebSocket to the ui/ hub at `ws://127.0.0.1:12526/ingest`; the in-game side is
 a bare `new WebSocket()` — a browser global, 0 GB ns RAM. JSON text frames:
 one `hello` on connect, then batched `{v, records: LogRecord[]}` flushed every
-500 ms or at 100 buffered records. On disk: one JSONL file per run under
-`runs/`, one LogRecord per line.
+500 ms or at 100 buffered records. On disk: one JSONL file per install artifact
+under `runs/`, one LogRecord per line.
 
 Client behavior (`game/lib/telemetry.ts`): bounded ring buffer (5000; drops
 oldest debug first, reports `telemetry.dropped`), reconnect with 1s→30s
@@ -179,10 +179,32 @@ bracket notation on its own stub ns, so the whole probe table costs 0 GB.
 buys no socket, no serialization, no ring buffer and a smaller bundle, and
 changes nothing about what the script does.
 
+## Run identity and artifacts
+
+Emitter `run` ids still identify one process and its monotonic `seq` space, but
+JSONL persistence is keyed by the install identity in the hello message. A
+deployment handoff therefore starts a new emitter without fragmenting the
+install replay.
+
+The hierarchy is `lineage -> BitNode visit -> install`. A real lineage UUID is
+stored in `data/run-lineage.txt` on `home`, whose text files survive both kinds
+of prestige. `getResetInfo().lastNodeReset` distinguishes BitNode visits,
+including revisiting the same numbered node; `lastAugReset` distinguishes the
+installs within one visit. The identity read is unconditional acquisition, so a
+`--perf` build plays identically while still sending nothing.
+
+Each JSONL has a `.meta.json` sidecar containing the hierarchy, emitter ids,
+record count, first/last record timestamps, real creation/update dates, and pin
+state. Duration is `lastT - firstT`, which works for live wall time and simulator
+virtual time alike. Files without sidecars remain loadable under
+`Legacy / ungrouped`; they are never guessed into a real save lineage.
+
 ## Hub
 
 `ui/server.ts` (Bun.serve, port 12526): ws `/ingest` for emitters, ws `/live`
 for browser viewers (snapshot then fan-out), HTTP `/` viewer shell, `/app.js`
 (the viewer bundle, built on demand from `ui/app/`), `/runs` +
 `/runs/:file` for stored JSONL replays. `ui/store.ts` handles persistence,
-tail ring, and state reduction per run.
+metadata, the tail ring, and state reduction per install artifact. The picker
+groups artifacts by lineage and labels leaves with the in-game BitNode name,
+install ordinal, short date, and duration.

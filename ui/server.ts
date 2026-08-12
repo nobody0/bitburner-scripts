@@ -1,8 +1,21 @@
-import { mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { TELEMETRY_PORT, type WireMessage } from "../shared/telemetry/schema.ts";
 import { RunStore } from "./store.ts";
+import type { ArtifactMetadata, RunCatalogEntry } from "../shared/run-catalog.ts";
 
 /** Telemetry hub: one Bun.serve hosting
  *  - ws /ingest — game scripts and sim runs push WireMessages in
@@ -34,24 +47,148 @@ const viewers = new Set<Bun.ServerWebSocket<SocketData>>();
 let simBusy = false;
 let syncBusy = false;
 
-function listIn(dir: string, prefix: string): { file: string; size: number; pinned: boolean }[] {
+function metadataFor(dir: string, name: string, prefix: string): RunCatalogEntry {
+  const file = prefix + name;
+  const full = path.join(dir, name);
+  const size = Bun.file(full).size;
+  try {
+    const metadata = JSON.parse(readFileSync(`${full}.meta.json`, "utf8")) as ArtifactMetadata;
+    return {
+      ...metadata,
+      file,
+      size,
+      pinned: prefix !== "",
+      live: false,
+      durationMs: metadata.firstT === null || metadata.lastT === null ? 0 : Math.max(0, metadata.lastT - metadata.firstT),
+    };
+  } catch {
+    const match = /^(\d+)-(game|sim)-/.exec(name);
+    const createdAt = match ? Number(match[1]) : statSync(full).birthtimeMs;
+    const src = match?.[2] === "game" ? "game" : "sim";
+    return {
+      version: 1,
+      file,
+      hello: { run: file, src, script: src === "game" ? "start.js" : "sim", startedAt: createdAt },
+      emitters: [file],
+      records: 0,
+      firstT: null,
+      lastT: null,
+      createdAt,
+      updatedAt: statSync(full).mtimeMs,
+      live: false,
+      pinned: prefix !== "",
+      size,
+      legacy: true,
+      durationMs: 0,
+    };
+  }
+}
+
+function listIn(dir: string, prefix: string): RunCatalogEntry[] {
   let names: string[] = [];
   try {
     names = readdirSync(dir).filter((n) => n.endsWith(".jsonl"));
   } catch {
     return [];
   }
-  return names.map((name) => ({
-    file: prefix + name,
-    size: Bun.file(path.join(dir, name)).size,
-    pinned: prefix !== "",
-  }));
+  return names.map((name) => metadataFor(dir, name, prefix));
 }
 
-function listRunFiles(): { file: string; size: number; pinned: boolean }[] {
+function listRunFiles(): RunCatalogEntry[] {
   return [...listIn(PINNED_DIR, "pinned/"), ...listIn(RUNS_DIR, "")].sort((a, b) =>
     path.basename(b.file).localeCompare(path.basename(a.file)),
   );
+}
+
+interface LegacyEdgeRecord {
+  t: number;
+  run?: string;
+  src?: "game" | "sim";
+}
+
+/** Read a bounded edge of a legacy log. Historical directories can contain
+ * tens of gigabytes, so startup must not rescan entire JSONL files merely to
+ * discover their duration. A partial oversized row is ignored safely. */
+function legacyEdge(full: string, size: number, fromEnd: boolean): LegacyEdgeRecord | undefined {
+  const bytes = Math.min(size, 256_000);
+  if (bytes <= 0) return;
+  const buffer = Buffer.allocUnsafe(bytes);
+  const fd = openSync(full, "r");
+  try {
+    readSync(fd, buffer, 0, bytes, fromEnd ? size - bytes : 0);
+  } finally {
+    closeSync(fd);
+  }
+  const lines = buffer.toString("utf8").split("\n");
+  if (fromEnd) lines.reverse();
+  for (const line of lines) {
+    try {
+      const value = JSON.parse(line) as Partial<LegacyEdgeRecord>;
+      if (typeof value.t !== "number" || !Number.isFinite(value.t)) continue;
+      return {
+        t: value.t,
+        ...(typeof value.run === "string" ? { run: value.run } : {}),
+        ...(value.src === "game" || value.src === "sim" ? { src: value.src } : {}),
+      };
+    } catch {
+      // The first line of a tail window, or last line of a live file, can be partial.
+    }
+  }
+  return;
+}
+
+/** Give pre-lineage JSONL files enough catalog data to remain useful. The
+ * generated sidecar makes every later list operation constant-time. Legacy
+ * files stay ungrouped because ancestry cannot be reconstructed safely. */
+function backfillLegacyMetadataIn(dir: string, prefix: string): void {
+  let names: string[];
+  try {
+    names = readdirSync(dir).filter((name) => name.endsWith(".jsonl"));
+  } catch {
+    return;
+  }
+
+  for (const name of names) {
+    const full = path.join(dir, name);
+    const sidecar = `${full}.meta.json`;
+    const stats = statSync(full);
+    if (existsSync(sidecar)) continue;
+    const first = legacyEdge(full, stats.size, false);
+    const last = legacyEdge(full, stats.size, true);
+    const firstT = first?.t ?? null;
+    const lastT = last?.t ?? firstT;
+    const emitter = first?.run ?? last?.run ?? prefix + name;
+    const source = first?.src ?? last?.src ?? (name.includes("-game-") ? "game" : "sim");
+    const match = /^(\d+)-(?:game|sim)-/.exec(name);
+    const createdAt = match ? Number(match[1]) : stats.birthtimeMs;
+    const metadata: ArtifactMetadata = {
+      version: 1,
+      file: prefix + name,
+      hello: {
+        run: emitter,
+        src: source,
+        script: source === "game" ? "start.js" : "sim",
+        startedAt: createdAt,
+      },
+      emitters: [emitter],
+      records: 0,
+      firstT,
+      lastT,
+      createdAt,
+      updatedAt: stats.mtimeMs,
+      live: false,
+      pinned: prefix !== "",
+      size: stats.size,
+      legacy: true,
+    };
+    writeFileSync(sidecar, JSON.stringify(metadata, null, 2) + "\n");
+    console.log(`indexed legacy run: ${prefix}${name}`);
+  }
+}
+
+function backfillLegacyMetadata(): void {
+  backfillLegacyMetadataIn(RUNS_DIR, "");
+  backfillLegacyMetadataIn(PINNED_DIR, "pinned/");
 }
 
 /** Resolve a client-supplied run name to a path inside runs/, pinned or not.
@@ -70,6 +207,7 @@ function sweep(): void {
     try {
       if (statSync(full).mtimeMs < cutoff) {
         unlinkSync(full);
+        try { unlinkSync(`${full}.meta.json`); } catch { /* legacy file */ }
         console.log(`swept ${file}`);
       }
     } catch {
@@ -141,14 +279,15 @@ async function compactRun(file: string): Promise<Response> {
     records,
     t0,
     lastT,
-    // Ordered by seq so the viewer folds them exactly as it folds a live run.
-    entries: [...state.values(), ...tail].sort((a, b) => a.seq - b.seq),
+    // Emitters restart across handoffs, so seq is only meaningful within run.
+    entries: [...state.values(), ...tail].sort((a, b) => a.t - b.t || a.run.localeCompare(b.run) || a.seq - b.seq),
   });
 }
 
 interface LogRecordish {
   seq: number;
   t: number;
+  run: string;
   kind: string;
   key?: string;
 }
@@ -230,7 +369,9 @@ function pinRun(name: string): Response {
   const from = path.join(RUNS_DIR, path.basename(name));
   if (Bun.file(from).size === 0) return Response.json({ error: "no such run" }, { status: 404 });
   mkdirSync(PINNED_DIR, { recursive: true });
-  renameSync(from, path.join(PINNED_DIR, path.basename(name)));
+  const to = path.join(PINNED_DIR, path.basename(name));
+  renameSync(from, to);
+  try { renameSync(`${from}.meta.json`, `${to}.meta.json`); } catch { /* legacy file */ }
   broadcast({ type: "runs-changed", stored: listRunFiles() });
   return Response.json({ pinned: `pinned/${path.basename(name)}` });
 }
@@ -330,6 +471,9 @@ function launchSync(): Response {
  * a second hub alongside a live one (a scratch instance, or a test). */
 const PORT = Number(process.env["UI_PORT"] ?? TELEMETRY_PORT);
 
+mkdirSync(RUNS_DIR, { recursive: true });
+backfillLegacyMetadata();
+
 const server = Bun.serve<SocketData, never>({
   port: PORT,
   fetch(req, srv) {
@@ -390,14 +534,18 @@ const server = Bun.serve<SocketData, never>({
         return;
       }
       if ("hello" in message) {
-        const existing = runs.get(message.hello.run);
+        const artifactId = message.hello.identity?.install.id ?? message.hello.run;
+        const existing = runs.get(artifactId);
         if (existing) {
-          existing.reattach();
+          existing.attach(message.hello);
           ws.data.store = existing;
           console.log(`run reattached: ${existing.id}`);
         } else {
-          ws.data.store = new RunStore(RUNS_DIR, message.hello);
-          runs.set(message.hello.run, ws.data.store);
+          const resume = message.hello.identity
+            ? listRunFiles().find((entry) => !entry.pinned && entry.identity?.install.id === artifactId)
+            : undefined;
+          ws.data.store = new RunStore(RUNS_DIR, message.hello, resume);
+          runs.set(artifactId, ws.data.store);
           console.log(`run started: ${message.hello.src}/${message.hello.script} (${message.hello.run})`);
         }
         broadcast({ type: "run-started", run: ws.data.store.summary() });
@@ -405,8 +553,8 @@ const server = Bun.serve<SocketData, never>({
       }
       const store = ws.data.store ?? (message.records[0] && runs.get(message.records[0].run));
       if (!store) return;
-      store.append(message.records);
-      broadcast({ type: "records", run: store.id, records: message.records });
+      const accepted = store.append(message.records);
+      if (accepted.length > 0) broadcast({ type: "records", run: store.id, records: accepted });
     },
     close(ws) {
       if (ws.data.role === "live") {
@@ -415,9 +563,11 @@ const server = Bun.serve<SocketData, never>({
       }
       const store = ws.data.store;
       if (store) {
-        store.close();
-        console.log(`run ended: ${store.id} (${store.recordCount} records -> ${store.file})`);
-        broadcast({ type: "run-ended", run: store.summary(), stored: listRunFiles() });
+        const closing = store.detach();
+        if (closing) void closing.then(() => {
+          console.log(`run ended: ${store.id} (${store.recordCount} records -> ${store.file})`);
+          broadcast({ type: "run-ended", run: store.summary(), stored: listRunFiles() });
+        }).catch((error) => console.error(`failed to close run ${store.id}:`, error));
       }
     },
   },

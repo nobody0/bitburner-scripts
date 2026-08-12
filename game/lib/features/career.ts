@@ -566,6 +566,13 @@ function claims(ctx: ClaimContext): Claim[] {
   const candidatePriority = candidate && candidateView
     ? priorityForDecision(candidate, candidateView, ctx.state)
     : priorityForBand(candidate?.workPriority ?? "income", ctx.state);
+  // The scored value above is a bid for the WORK SLOT against route reputation
+  // — the only resource that tradeoff is denominated in. Career's money claims
+  // stay on the plain band: an income-fallback course scored into the blocking
+  // band would otherwise reserve tuition above `factions:aug-fund`, and an
+  // in-flight course whose marginal share has decayed would price its own
+  // standing reserve down to near zero.
+  const moneyPriority = priorityForBand(candidate?.workPriority ?? "income", ctx.state);
 
   const actionType = schedule.due ? candidate?.action.type : undefined;
   const methods = careerMethods(actionType);
@@ -583,7 +590,7 @@ function claims(ctx: ClaimContext): Claim[] {
       id: "travel-fund",
       resource: "money",
       amount: TRAVEL_COST,
-      priority: candidatePriority,
+      priority: moneyPriority,
       mode: "spend",
       divisible: false,
       why: `travel costs ${formatMoney(TRAVEL_COST)}`,
@@ -599,7 +606,7 @@ function claims(ctx: ClaimContext): Claim[] {
         id: "training-fund",
         resource: "money",
         amount: costPerSec * TRAINING_FUND_WINDOW_SEC,
-        priority: candidatePriority,
+        priority: moneyPriority,
         mode: "reserve",
         divisible: false,
         why: "fund the next training window",
@@ -615,7 +622,7 @@ function claims(ctx: ClaimContext): Claim[] {
       id: "training-fund",
       resource: "money",
       amount: trainingCostPerSec * TRAINING_FUND_WINDOW_SEC,
-      priority: candidatePriority,
+      priority: moneyPriority,
       mode: "reserve",
       divisible: false,
       why: "an active course drains continuously; keep its window funded",

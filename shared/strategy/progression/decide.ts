@@ -432,23 +432,22 @@ export function bankedFavorActivationValue(input: {
     return { faction: standing.name, value: rateGain + crossesDonation };
   }).sort((a, b) => b.value - a.value || a.faction.localeCompare(b.faction));
 
-  const ownerByAugmentation = new Map<string, string>();
-  const assign = (faction: string, visited: Set<string>): boolean => {
-    for (const augmentation of [...(offersByFaction.get(faction) ?? [])].sort()) {
-      if (visited.has(augmentation)) continue;
-      visited.add(augmentation);
-      const owner = ownerByAugmentation.get(augmentation);
-      if (owner === undefined || assign(owner, visited)) {
-        ownerByAugmentation.set(augmentation, faction);
-        return true;
-      }
-    }
-    return false;
-  };
-
+  // Each faction is credited by how many residual augmentations its favor rate
+  // could still accelerate — the same `future * rateGain` shape packageValues
+  // prices the push side with, so the install verdict compares like with like.
+  // Shared offers go to the highest-valued seller only, so one augmentation is
+  // never counted twice; factions are already sorted by value, which makes the
+  // greedy walk the best such partition.
+  const claimed = new Set<string>();
   let value = 0;
   for (const faction of factions) {
-    if (assign(faction.faction, new Set())) value += faction.value;
+    let residual = 0;
+    for (const augmentation of [...(offersByFaction.get(faction.faction) ?? [])].sort()) {
+      if (claimed.has(augmentation)) continue;
+      claimed.add(augmentation);
+      residual += 1;
+    }
+    value += residual * faction.value;
   }
   return value;
 }
