@@ -113,7 +113,7 @@ export async function runController(
     // Self-update: a newer build was pushed -> hand off to a fresh instance.
     const pushedBuild = ns.read("build-id.txt").trim();
     if (pushedBuild !== "" && pushedBuild !== __BUILD_ID__) {
-      const pid = ns.exec("start.js", "home", 1, "handoff", pushedBuild);
+      const pid = ns.exec("start.js", "home", { threads: 1, temporary: true }, "handoff", pushedBuild);
       if (pid !== 0) {
         TELEMETRY: if (__TELEMETRY__) {
           tel!.event("start.respawn", { from: __BUILD_ID__, to: pushedBuild });

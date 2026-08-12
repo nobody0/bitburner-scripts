@@ -7,6 +7,7 @@ import type { DodgeGlobalThis } from "./dodge-shared.ts";
  * this file free of value imports and ns references so the base stays 1.6GB. */
 
 export async function main(ns: NS): Promise<void> {
+  ns.disableLog("ALL");
   const g = globalThis as DodgeGlobalThis;
   const reject = g.dodge_reject;
   // Missing rendezvous happens after a game restart; die quietly.

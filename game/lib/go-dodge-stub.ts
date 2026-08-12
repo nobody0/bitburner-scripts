@@ -3,6 +3,7 @@ import type { GoDodgeGlobalThis } from "./go-dodge-shared.ts";
 
 /** Go worker entrypoint, isolated from the general dodge lane. */
 export async function main(ns: NS): Promise<void> {
+  ns.disableLog("ALL");
   const g = globalThis as GoDodgeGlobalThis;
   const reject = g.go_dodge_reject;
   if (!reject) return;

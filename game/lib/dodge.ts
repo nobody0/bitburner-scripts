@@ -148,7 +148,7 @@ export async function dodge<T>(
     const stubScript = dodgeStubScript();
     let pid = 0;
     for (let attempt = 0; attempt < EXEC_RETRIES && pid === 0; attempt++) {
-      pid = ns.exec(stubScript, host, { ramOverride: STUB_BASE_GB + budgetGb });
+      pid = ns.exec(stubScript, host, { ramOverride: STUB_BASE_GB + budgetGb, temporary: true });
       // Yield to the game's scheduler so a pending reap can free the RAM.
       if (pid === 0) await ns.asleep(0);
     }
