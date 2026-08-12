@@ -513,9 +513,24 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
     const economic = slotClaim({ rep: 100, route: "daedalus", installWanted: true })!;
     expect(economic.priority).toBe(PRIORITY["factions:route-work"]);
 
-    const claim = slotClaim({ rep: 100, route: "daedalus", installWanted: true, routeInstallRequired: true })!;
+    // The band is for the window BEFORE the transaction opens: the route
+    // mandates this install and the reputation for its package is still being
+    // earned. That is the only state in which the claim buys anything.
+    const claim = slotClaim({ rep: 100, route: "daedalus", routeInstallRequired: true })!;
     expect(claim.priority).toBe(PRIORITY["factions:install-work"]);
     expect(claim.priority).toBeGreaterThan(PRIORITY["career:blocking-need"] + PREEMPT_MARGIN);
+  });
+
+  test("the pre-install drain releases the slot instead of parking it at the top band", () => {
+    // Once progression ALSO wants the install, `stepFactions` refuses to start
+    // work at all (both its exceptions are gated on `routeInstallRequired !==
+    // true`) and runs the frozen purchase drain, which needs money and RAM
+    // rather than player time. Holding the slot there — above even
+    // `career:blocking-need` — would lock career out of the karma an install
+    // does not wipe, for a feature with nothing to do with the slot.
+    expect(
+      slotClaim({ rep: 100, route: "daedalus", installWanted: true, routeInstallRequired: true }),
+    ).toBeUndefined();
   });
 
   test("nothing left to work toward DOES release the slot", () => {

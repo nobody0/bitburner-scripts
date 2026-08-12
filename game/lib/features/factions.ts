@@ -983,8 +983,19 @@ function claims(ctx: ClaimContext): Claim[] {
   const routePackage =
     (plan.context?.route === "daedalus" || plan.context?.route === "gang")
     && plan.objective?.intent?.purpose === "augmentations";
-  const installPackage = routePackage
-    && ctx.state.topics.progression?.plan?.routeInstallRequired === true;
+  // The route-mandatory band is for the window BEFORE the transaction opens:
+  // route mechanics require this install and the route-weighted package is the
+  // remaining pre-reset WORK. Once progression also wants the install,
+  // `stepFactions` has stopped working entirely — its two exceptions (an active
+  // package in flight, the 1% opportunistic push) are both gated on
+  // `routeInstallRequired !== true` — and the decision is the frozen purchase
+  // drain, which needs money and RAM, not player time. Claiming the slot there,
+  // at the highest band in the table, parks player time on a feature that will
+  // not use it and locks career out of the karma that is the one thing an
+  // install does NOT wipe.
+  const routeInstallRequired = ctx.state.topics.progression?.plan?.routeInstallRequired === true;
+  const installDrain = routeInstallRequired && ctx.state.topics.progression?.plan?.installWanted === true;
+  const installPackage = routePackage && routeInstallRequired && !installDrain;
   // Player time and the dodge that STARTS that work are one atomic action.
   // Giving the time half route priority while leaving the RAM half tied with
   // ordinary probes lets another feature win RAM forever: factions owns the
@@ -1143,7 +1154,10 @@ function claims(ctx: ClaimContext): Claim[] {
   // decision needs the slot, the slot needs the claim, and the claim was
   // waiting for the decision. The feature would sit at "another feature holds
   // Player.currentWork" forever with nobody actually holding it.
-  if (wanted) {
+  // ...and during that drain the slot is released outright, for the same reason
+  // "nothing left to work toward" releases it: a feature that will not work must
+  // not hold the one resource only one feature can hold.
+  if (wanted && !(installDrain && working === undefined)) {
     out.push({
       by: "factions",
       // Stable per faction: re-issuing the SAME id is what holds the slot
