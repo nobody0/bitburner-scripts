@@ -78,6 +78,7 @@ describe("faction and hacking strategy simulation", () => {
     let installed = 0;
     let prestiged = 0;
     let verdictInstalls = 0;
+    let traveled = 0;
 
     const result = await runGame({
       goal: parseGoals([...profile.goals]),
@@ -97,6 +98,7 @@ describe("faction and hacking strategy simulation", () => {
         };
         if (record.name === "aug.installed") installed++;
         if (record.name === "sim.prestige") prestiged++;
+        if (record.name === "travel") traveled++;
         if (record.key === "progression" && record.data?.plan?.installDecision?.verdict === "install") verdictInstalls++;
       },
     });
@@ -105,6 +107,7 @@ describe("faction and hacking strategy simulation", () => {
     expect(result.crashes).toEqual([]);
     expect(installed).toBe(2);
     expect(prestiged).toBe(2);
+    expect(traveled).toBeGreaterThan(0);
     // The SECOND install must come from the marginal cadence verdict, not the
     // legacy cash gate: cycle 2 has no pre-queued augmentations, so only the
     // realizable-sweep signal and the renewal threshold can conclude it.
@@ -114,7 +117,7 @@ describe("faction and hacking strategy simulation", () => {
     expect(result.output.filter((line) => line.includes("start.js online")).length).toBeGreaterThanOrEqual(2);
   }, 120_000);
 
-  test("hacking funds an exact donation breakpoint and the unlocked augmentation", async () => {
+  test("hacking funds an exact donation breakpoint without purchasing before the install boundary", async () => {
     const profile = findProfile("factions-donation");
     if (!profile.bitnode || !profile.homeRam || !profile.startingMoney || !profile.features) {
       throw new Error("factions-donation profile is missing its required world setup");
@@ -168,8 +171,11 @@ describe("faction and hacking strategy simulation", () => {
 
     expect(result.reached).toBe(true);
     expect(result.crashes).toEqual([]);
-    expect(purchased).toBe(true);
-    expect(purchaseResult).toBe(true);
+    // Unlocking reputation is planning progress, not a purchase boundary.
+    // Paying now would activate nothing and prematurely consume a 1.9x queue
+    // slot; the eventual install sweep chooses the full set and payment order.
+    expect(purchased).toBe(false);
+    expect(purchaseResult).toBe(false);
     expect(donationCount).toBe(1);
     // BN4 applies FactionWorkRepGain 0.75 to donations. The absolute amount is
     // deliberately not pinned: reputation keeps accruing while the arbiter

@@ -83,6 +83,7 @@ export function resetHackingState(): void {
   lastPumpAt = 0;
   wakesThisFrame = 0;
   wakePumps = 0;
+  routeHackingSkillGoal = undefined;
   switched = undefined;
   backdoorAttempted.clear();
   backdoorInFlight = false;
@@ -110,6 +111,10 @@ const WAKE_MAX_PER_FRAME = 4;
 let lastPumpAt = 0;
 let wakesThisFrame = 0;
 let wakePumps = 0;
+/** Latest open hacking-skill outcome from the needs board. Wake-driven pumps
+ * run outside a feature context, so they reuse the last scheduled tick's
+ * pure-board decision. */
+let routeHackingSkillGoal: number | undefined;
 
 /** Arm the planner's earliest native-invocation deadline on a realm timer.
  * The ordinary heartbeat remains the fallback, while this wake avoids paying
@@ -668,6 +673,7 @@ function runPump(
     pooling: true,
     ...(installSec !== undefined ? { horizonMs: installSec * 1_000 } : {}),
     ...(reinvestmentReturnPerDollarSec > 0 ? { reinvestmentReturnPerDollarSec } : {}),
+    ...(routeHackingSkillGoal !== undefined ? { hackingSkillGoal: routeHackingSkillGoal } : {}),
   });
   scheduleJitWake(result.nextWakeMs === undefined ? undefined : view.time + result.nextWakeMs);
   const elapsed = performance.now() - started;
@@ -717,6 +723,12 @@ export const hacking: FeatureDriver = {
   async tick(ctx: DriverContext) {
     const { ns, state: game, homeReserveGb } = ctx;
     wakesThisFrame = 0;
+    routeHackingSkillGoal = ctx.board.open
+      .filter((need) => need.kind === "skill" && need.subject === "hacking")
+      .reduce<number | undefined>(
+        (highest, need) => highest === undefined ? need.target : Math.max(highest, need.target),
+        undefined,
+      );
 
     // The reserve is computed per pass, not constant: it grows to cover the
     // largest dodge step any unlocked feature declares, so an expensive

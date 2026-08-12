@@ -1,8 +1,9 @@
 import type { NS, PlayerRequirement } from "@ns";
-import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
+import { effectiveBitNodeMultipliers, worldDaemonSkill } from "../../../shared/features/bitnode.ts";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
+import { FEATURE_IDS } from "../../../shared/features/ids.ts";
 import { grantFor, PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import {
   NEUROFLUX,
@@ -75,12 +76,17 @@ let chainWake = false;
  * 200ms pass of that window, for every crime completion, forever (measured:
  * the factions-join profile spent most of its CPU in stepFactions at 5 Hz). */
 let seenCompletion: unknown;
+/** A faction package is ready to work but lost Player.currentWork to a
+ * completable task. Wake exactly at that task's completion so ordinary
+ * faction priority can compete before career starts the next unit. */
+let waitingForWorkSlot = false;
 
 export function resetFactionsState(): void {
   memory = initFactionMemory();
   lastResult = undefined;
   chainWake = false;
   seenCompletion = undefined;
+  waitingForWorkSlot = false;
 }
 
 /** The grant won by ONE of this feature's money claims — never the sum.
@@ -129,6 +135,14 @@ function requirementView(state: GameState): RequirementView {
     city: String(player?.city ?? "Sector-12"),
     location: String(player?.location ?? "home"),
     backdoored,
+    backdoorAccess: Object.fromEntries(
+      Object.entries(servers).map(([hostname, server]) => [hostname, {
+        requiredHackingSkill: server.requiredHackingSkill ?? 0,
+        numOpenPortsRequired: server.numOpenPortsRequired ?? 0,
+        openPortCount: server.openPortCount ?? 0,
+      }]),
+    ),
+    portOpeners: state.topics.fleet?.portOpeners ?? 0,
     files,
     hacknetRam: hacknet?.nodes?.reduce((sum, node) => sum + node.ram, 0) ?? 0,
     hacknetCores: hacknet?.nodes?.reduce((sum, node) => sum + node.cores, 0) ?? 0,
@@ -277,6 +291,11 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     state.topics.progression?.multipliers,
   ) ?? {};
   const career = state.topics.career;
+  const selectedRouteEta = state.topics.progression?.plan?.routes?.find((route) => route.id === ctx.route);
+  const routeAugmentationFocus = ctx.route === "daedalus"
+    && selectedRouteEta?.parts.some((part) => part.resource === "combat")
+      ? "combat" as const
+      : "hacking" as const;
 
   const installed = state.topics.progression?.ownedAugs ?? {};
   const occurrences = new Map<string, number>();
@@ -312,6 +331,7 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
       mults: { faction_rep: mults["faction_rep"] ?? 1 },
     } as FactionsView["person"],
     requirementView: requirementView(state),
+    availableOwners: new Set(FEATURE_IDS.filter((id) => caps.unlocked[id] !== "no")),
     repContext: {
       factionWorkRepGain: nodeMults["FactionWorkRepGain"] ?? 1,
       factionPassiveRepGain: nodeMults["FactionPassiveRepGain"] ?? 1,
@@ -326,17 +346,36 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     queued: queuedAugs,
     graftable: topic.graftable ?? [],
     entropy: player.entropy ?? 0,
-    weights: weightsForRoute(ctx.route),
+    weights: weightsForRoute(ctx.route, routeAugmentationFocus, {
+      hackingTarget: worldDaemonSkill(ctx.caps.bitNode, sfLevel(ctx.caps.sourceFiles, 12)),
+      combatTarget: 1_500,
+      multipliers: mults,
+    }),
     ...(ctx.route ? { route: ctx.route } : {}),
     // Factions creates the package that will eventually trigger the install,
     // so it plans against the node horizon rather than circularly depending
     // on the not-yet-known install horizon. Unknown means no arbitrary cutoff.
     horizonSec: usableForecastSec(ctx.horizons.node) ?? Infinity,
-    targetAugCount: daedalusAugsRequired(ctx.caps.bitNode, sfLevel(ctx.caps.sourceFiles, 12)) ?? Infinity,
+    installCycleSec: Math.max(
+      0,
+      (now - (state.topics.progression?.lastAugReset ?? now)) / 1_000,
+    ),
+    // Only a route KNOWN not to be Daedalus lifts the count goal. Before
+    // progression has published one — the whole early window, until an endgame
+    // view and measured rates exist — `Infinity` would zero `countSlotWeight`,
+    // disable the repeat-NeuroFlux suppression and skip the route-count
+    // closure, so early cycles buy cheap multipliers instead of accumulating
+    // the distinct installs the invitation gate counts.
+    targetAugCount: ctx.route === undefined || ctx.route === "daedalus"
+      ? daedalusAugsRequired(ctx.caps.bitNode, sfLevel(ctx.caps.sourceFiles, 12)) ?? Infinity
+      : Infinity,
     favorToDonate: topic.favorToDonate ?? 150,
     // Progression owns the install cadence: when its published plan wants the
     // reset, this feature concludes (stops working, runs the final sweep).
     ...(ctx.state.topics.progression?.plan?.installWanted === true ? { installRequested: true } : {}),
+    ...(ctx.state.topics.progression?.plan?.routeInstallRequired === true
+      ? { routeInstallRequired: true }
+      : {}),
     // PER-CLAIM, not the feature sum: `ctx.grants.money` adds aug-fund +
     // donation + graft + travel together, so a partial aug-fund grant plus a
     // $200k travel grant could fund a purchase the arbiter never allocated
@@ -497,6 +536,13 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
       // the funding gate entirely.
       const fundNeeded = Math.max(offer?.price ?? 0, estimated);
       if (fundNeeded > 0 && moneyGrantFor(ctx, "aug-fund") < fundNeeded) {
+        // Claims are collected from the previously published plan. After one
+        // successful purchase raises the 1.9x queue exponent, the next tick
+        // can therefore decide a dearer action than this pass funded. Publish
+        // that new price (below) and wake immediately so the next arbitration
+        // funds it; otherwise every escalation burns the full 30-second
+        // faction cadence despite the end-loaded transaction being ready.
+        chainWake = true;
         record(false, `waiting for the ${formatMoney(fundNeeded)} augmentation fund grant`);
         return;
       }
@@ -589,7 +635,7 @@ function objectiveDigest(objective: NonNullable<FactionDecision["objective"]>): 
   };
 }
 
-function planDigest(decision: FactionDecision, view: FactionsView): FactionPlan {
+function planDigest(decision: FactionDecision, view: FactionsView, bankedAugmentations: readonly string[]): FactionPlan {
   return {
     context: {
       evaluatedAt: view.time,
@@ -609,6 +655,7 @@ function planDigest(decision: FactionDecision, view: FactionsView): FactionPlan 
         neurofluxLevel: view.priceContext.neurofluxLevel,
       },
     },
+    bankedAugmentations: [...bankedAugmentations],
     ...(decision.objective ? { objective: objectiveDigest(decision.objective) } : {}),
     action: {
       type: decision.action.type,
@@ -709,7 +756,14 @@ const driver: FeatureDriver = {
   wake: () => {
     if (chainWake) return true;
     const notice = peekWorkCompletion();
-    return notice !== undefined && notice !== seenCompletion;
+    // Career consumes the shared notice too. A completed crime/course/program
+    // can change a faction gate, but those gates are safely refreshed on this
+    // driver's ordinary 30-second cadence. Only our own faction-work tick must
+    // immediately advance a reputation breakpoint; waking the full frontier
+    // solver on every short crime dominated long benchmark wall time.
+    return notice !== undefined
+      && notice !== seenCompletion
+      && (notice.type === "FACTION" || waitingForWorkSlot);
   },
   requires: "factions",
   async tick(ctx: DriverContext) {
@@ -725,6 +779,7 @@ const driver: FeatureDriver = {
 
     const { decision, memory: next } = stepFactions(view, memory);
     memory = next;
+    waitingForWorkSlot = decision.action.type === "idle" && decision.action.reason === "slot";
 
     // While the final-sweep drain is pending — an install is recommended and
     // the next buy is affordable with cash on hand — keep waking at tick
@@ -740,7 +795,7 @@ const driver: FeatureDriver = {
     if ((decision.recommendInstall && !decision.nextBuy) || decision.liquidationNeeded) signalInstallCheck();
 
     annotateOffers(ctx.state, view);
-    merge(ctx.state, "factions", { plan: planDigest(decision, view), gates: gatesFrom(view) });
+    merge(ctx.state, "factions", { plan: planDigest(decision, view, memory.bankedAugmentations), gates: gatesFrom(view) });
 
     try {
       await execute(ctx.ns, ctx, decision.action, view);
@@ -748,13 +803,13 @@ const driver: FeatureDriver = {
       // next 30-second faction decision made result telemetry lag one action
       // behind and could lose the final successful purchase when a goal/reset
       // ended the run immediately afterward.
-      merge(ctx.state, "factions", { plan: planDigest(decision, view) });
+      merge(ctx.state, "factions", { plan: planDigest(decision, view, memory.bankedAugmentations) });
     } catch (error) {
       // ScriptDeath is a kill, not a feature bug — rethrow so the controller
       // can shut down cleanly rather than looping on a corpse.
       if (isScriptDeath(error)) throw error;
       lastResult = { action: decision.action.type, ok: false, detail: String(error), at: now };
-      merge(ctx.state, "factions", { plan: planDigest(decision, view) });
+      merge(ctx.state, "factions", { plan: planDigest(decision, view, memory.bankedAugmentations) });
     }
   },
 };
@@ -774,8 +829,8 @@ function needs(ctx: NeedContext): Need[] {
   // of five is merely wanted.
   //
   // The distinction is load-bearing, not cosmetic: `career` claims the work
-  // slot at `career:blocking-need` (75) whenever ANY blocking need exists,
-  // which outranks `factions:work` (60). Marking every far-off requirement as
+  // slot at `career:blocking-need` whenever any blocking need exists, which
+  // outranks `factions:work`. Marking every far-off requirement as
   // blocking therefore made factions starve ITSELF — career held the slot
   // permanently chasing Daedalus's hacking 2500, and factions could never work
   // for the reputation it was asking for.
@@ -925,10 +980,32 @@ function claims(ctx: ClaimContext): Claim[] {
   // execution observes a slot grant with no matching dodge grant.
   const working = plan.action.type === "workForFaction" ? plan.action.faction : undefined;
   const wanted = working ?? nextWorkFaction(ctx.state);
+  const routePackage =
+    (plan.context?.route === "daedalus" || plan.context?.route === "gang")
+    && plan.objective?.intent?.purpose === "augmentations";
+  const installPackage = routePackage
+    && ctx.state.topics.progression?.plan?.routeInstallRequired === true;
+  // Player time and the dodge that STARTS that work are one atomic action.
+  // Giving the time half route priority while leaving the RAM half tied with
+  // ordinary probes lets another feature win RAM forever: factions owns the
+  // slot, but cannot switch to the faction it planned. Keep both resources at
+  // the same policy band for a route-critical package.
+  const workRamPriority = installPackage
+    ? PRIORITY["factions:install-work"]
+    : routePackage
+    ? PRIORITY["factions:route-work"]
+    : PRIORITY["probe:detail"];
 
   const methods = factionMethods(plan.action.type);
   if (methods.length > 0) {
-    out.push(actionRamClaim(ctx, "factions", factionClaimId(plan.action.type), methods, `factions ${plan.action.type}`));
+    out.push(actionRamClaim(
+      ctx,
+      "factions",
+      factionClaimId(plan.action.type),
+      methods,
+      `factions ${plan.action.type}`,
+      plan.action.type === "workForFaction" ? workRamPriority : PRIORITY["probe:detail"],
+    ));
   }
   const legacyReason = (plan.action as typeof plan.action & { reason?: string }).reason;
   if (plan.action.type === "idle" && (plan.action.awaitingWorkSlot || legacyReason === "slot") && wanted) {
@@ -938,6 +1015,7 @@ function claims(ctx: ClaimContext): Claim[] {
       factionClaimId("workForFaction"),
       factionMethods("workForFaction"),
       `start faction work at ${wanted} if the work slot is granted`,
+      workRamPriority,
     ));
   }
 
@@ -1079,10 +1157,16 @@ function claims(ctx: ClaimContext): Claim[] {
       // and takes the full `REP_SPAN`; it pays no salary, so its money fraction is
       // zero. That arithmetic reproduces the constant this used to be, which is the
       // point: the number stops being a magic 60 and becomes a consequence.
-      priority: slotPriority({ repFraction: 1 }),
+      priority: installPackage
+        ? PRIORITY["factions:install-work"]
+        : routePackage
+        ? PRIORITY["factions:route-work"]
+        : slotPriority({ repFraction: 1 }),
       mode: "spend",
       ratePerSec: plan.until?.etaSec ? 1 / plan.until.etaSec : 0,
-      why: working ? `${wanted} reputation work` : `reputation still needed at ${wanted}`,
+      why: working
+        ? `${wanted} reputation work${routePackage ? " for the selected completion route" : ""}`
+        : `reputation still needed at ${wanted}${routePackage ? " for the selected completion route" : ""}`,
     });
   }
 

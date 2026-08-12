@@ -9,7 +9,8 @@ import {
   type CrimePerson,
   type CrimeStats,
 } from "../shared/strategy/career/crimes.ts";
-import { CAREER_KINDS, needValues, stepCareer, type CareerView } from "../shared/strategy/career/decide.ts";
+import { expForSkill } from "../shared/formulas.ts";
+import { CAREER_KINDS, needValues, skillRepTradeoff, stepCareer, type CareerView } from "../shared/strategy/career/decide.ts";
 import { PORT_OPENER_PROGRAMS, programCreateTimeMs, preferProgramCreation } from "../shared/strategy/career/programs.ts";
 import { postNeeds, type Need } from "../shared/strategy/needs.ts";
 
@@ -302,6 +303,34 @@ describe("career as the needs-board consumer", () => {
       ]),
     );
     expect(decision.action.subject).toBe("Algorithms");
+  });
+
+  test("skill gates score raw experience remaining, not levels as if they were linear", () => {
+    const currentExp = expForSkill(50, 1);
+    const decision = stepCareer(
+      view({
+        courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 0, location: "Rothman University" }],
+        exp: { hacking: currentExp },
+        skillMultipliers: { hacking: 1 },
+      }),
+      postNeeds([need({ kind: "skill", subject: "hacking", target: 100, have: 50, weight: 2 })]),
+    );
+    const contribution = decision.ranked[0]!.contributions[0]!;
+    expect(contribution.score).toBeCloseTo(8 / (expForSkill(100, 1) - currentExp) * 2, 12);
+  });
+
+  test("Algorithms only gets credit for route time the background hacking fleet cannot cover during rep work", () => {
+    const hiddenByRep = skillRepTradeoff(10_000, 10, 10, 1_000);
+    expect(hiddenByRep.backgroundExpDuringRep).toBe(10_000);
+    expect(hiddenByRep.trainingWorkSec).toBe(0);
+    expect(hiddenByRep.timeSavedSec).toBe(0);
+    expect(hiddenByRep.relativeTimeSaved).toBe(0);
+
+    const stillUseful = skillRepTradeoff(20_000, 10, 10, 1_000);
+    expect(stillUseful.trainingWorkSec).toBe(500);
+    expect(stillUseful.etaWithoutTrainingSec).toBe(2_000);
+    expect(stillUseful.etaWithTrainingSec).toBe(1_500);
+    expect(stillUseful.relativeTimeSaved).toBe(0.25);
   });
 });
 

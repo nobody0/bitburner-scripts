@@ -49,6 +49,7 @@ import {
   WORKER_STARTUP_GUARD_MS as TIMING_WORKER_STARTUP_GUARD_MS,
   type JitRole,
   type JitSchedule,
+  type JitSecurityEvent,
 } from "./jit.ts";
 
 /** HWGW batch dispatcher — pure. Plans slow support first, then emits each
@@ -246,6 +247,9 @@ export interface DispatchOptions {
   horizonMs?: number;
   /** Best observed marginal income/sec per invested dollar. */
   reinvestmentReturnPerDollarSec?: number;
+  /** Route-owned hacking skill gate. The evaluator prices XP as direct
+   * completion progress until this level is reached. */
+  hackingSkillGoal?: number;
   /** Emit buyServer/upgradeHomeRam actions. In the live game the shared
    *  investment arbiter owns home/cloud/Hacknet spending, so the driver leaves
    *  this off; the sim's farm mode runs no feature drivers or arbiter, so the
@@ -569,6 +573,7 @@ export function dispatch(
       ...(options.reinvestmentReturnPerDollarSec !== undefined
         ? { reinvestmentReturnPerDollarSec: options.reinvestmentReturnPerDollarSec }
         : {}),
+      ...(options.hackingSkillGoal !== undefined ? { hackingSkillGoal: options.hackingSkillGoal } : {}),
     },
   );
   memory.evaluator = stepped.memory;
@@ -746,7 +751,6 @@ export function dispatch(
           options.jit !== false,
           borrow,
           capacity.hostBlocksGb,
-          weakenWakeTargets.has(server.hostname),
         );
       } else {
         launchDuePrep(memory, actions, server, now, launchCtx, segmentCap, weakenWakeTargets.has(server.hostname));
@@ -952,30 +956,35 @@ function jitLedger(memory: DispatchMemory, host: string): LedgerOp[] {
  * landing unreachable. */
 function jitStartAt(
   op: Pick<PendingJitOp, "kind" | "landing">,
-  ledger: readonly LedgerOp[],
+  events: readonly JitSecurityEvent[],
   server: ServerView,
   now: number,
   ctx: HackContext,
 ): number {
   const required = server.requiredHackingSkill;
-  const weakenPerThread = weakenEffect(ctx, 1, 1);
   return latestJitStart({
     now,
     landing: op.landing,
     currentDifficulty: server.hackDifficulty,
     minDifficulty: server.minDifficulty,
-    events: ledger.map((event) => ({
-      at: event.landing,
-      order: event.opId,
-      deltaDifficulty: event.kind === "hack"
-        ? 0.002 * event.threads
-        : event.kind === "grow"
-          ? 0.004 * (event.fortifyThreads ?? event.threads)
-          : -weakenPerThread * event.effectThreads,
-    })),
+    events,
+    eventsSorted: true,
     durationMs: (difficulty) => opDurationMs(op.kind, ctx, difficulty, required),
     launchGuardMs: JIT_LAUNCH_GUARD_MS,
   });
+}
+
+function jitSecurityEvents(ledger: readonly LedgerOp[], ctx: HackContext): JitSecurityEvent[] {
+  const weakenPerThread = weakenEffect(ctx, 1, 1);
+  return ledger.map((event) => ({
+    at: event.landing,
+    order: event.opId,
+    deltaDifficulty: event.kind === "hack"
+      ? 0.002 * event.threads
+      : event.kind === "grow"
+        ? 0.004 * (event.fortifyThreads ?? event.threads)
+        : -weakenPerThread * event.effectThreads,
+  })).sort((a, b) => a.at - b.at || a.order - b.order);
 }
 
 /** Launch prep grows at the closest safe invocation window. Their W2 cover
@@ -994,8 +1003,9 @@ function launchDuePrep(
   const ops = memory.prepPending.filter((op) => op.target === server.hostname);
   if (ops.length === 0) return;
   const ledger = jitLedger(memory, server.hostname);
+  const securityEvents = jitSecurityEvents(ledger, ctx);
   for (const op of ops) {
-    if (weakenWake || op.startAt <= now) op.startAt = jitStartAt(op, ledger, server, now, ctx);
+    if (weakenWake || op.startAt <= now) op.startAt = jitStartAt(op, securityEvents, server, now, ctx);
   }
   ops.sort((a, b) => a.startAt - b.startAt || a.landing - b.landing);
 
@@ -1086,10 +1096,10 @@ function launchDueJit(
   schedule: JitSchedule,
   segmentCapGb: number,
   pooling: boolean,
-  weakenWake = false,
 ): boolean {
   const required = server.requiredHackingSkill;
   const ledger = jitLedger(memory, server.hostname);
+  const securityEvents = jitSecurityEvents(ledger, ctx);
   for (const batch of memory.jitPending) {
     if (batch.target !== server.hostname) continue;
     // The initial worst-security deadline is a lower bound. Refine only when
@@ -1097,7 +1107,12 @@ function launchDueJit(
     // insert a new fortify before it. Re-folding every future op against the
     // whole ledger on every 200 ms tick is quadratic at deep pipelines.
     for (const op of batch.ops) {
-      if (weakenWake || op.startAt <= now) op.startAt = jitStartAt(op, ledger, server, now, ctx);
+      // A weaken wake changes the ledger, but future ops were seeded from the
+      // conservative worst-security deadline and remain safe. Re-fold only
+      // when that bound opens. Re-folding the entire deep pipeline at every
+      // weaken landing is O(pending × ledger) and dominated long simulations
+      // without changing which not-yet-due operation could launch.
+      if (op.startAt <= now) op.startAt = jitStartAt(op, securityEvents, server, now, ctx);
     }
     orderJitStarts(batch.ops);
   }
@@ -1266,6 +1281,11 @@ function planJitBatches(
   const maxDepth = Math.max(1, 1 + Math.ceil(worstWeakenMs / schedule.intervalMs));
   const statics = staticsOf(server);
   const worstDifficulty = jitWorstDifficulty(solution, server);
+  // Fold the existing pipeline once. Each pass may append eight batches; a
+  // fresh walk of every tracked and pending operation for every append made
+  // planning quadratic at the deep pipelines unlocked by late-game RAM.
+  const planningLedger = jitLedger(memory, server.hostname);
+  let planningOpId = -planningLedger.length - 1;
   const pending = (
     role: JitRole["role"],
     kind: PendingJitOp["kind"],
@@ -1288,7 +1308,7 @@ function planJitBatches(
       ctx,
       statics,
       { hackDifficulty: server.hackDifficulty, moneyAvailable: server.moneyAvailable },
-      jitLedger(memory, server.hostname),
+      planningLedger,
       anchor,
     );
     const sized = sizeBatchAtLanding(ctx, statics, predicted, solution);
@@ -1318,7 +1338,17 @@ function planJitBatches(
       op.startAt = op.landing - opDurationMs(op.kind, ctx, batchWorstDifficulty, required) - JIT_LAUNCH_GUARD_MS;
     }
     orderJitStarts(ops);
-    memory.jitPending.push({ target: server.hostname, ops: ops.filter((op) => op.threads >= 1) });
+    const retained = ops.filter((op) => op.threads >= 1);
+    memory.jitPending.push({ target: server.hostname, ops: retained });
+    for (const op of retained) {
+      planningLedger.push({
+        kind: op.kind,
+        threads: op.threads,
+        effectThreads: op.threads,
+        landing: op.landing,
+        opId: planningOpId--,
+      });
+    }
     memory.lastAnchor = anchor;
   }
 }
@@ -1345,7 +1375,6 @@ function launchBatches(
    * land before the current prep wave, so the next wave can reclaim it. */
   borrow?: { gb: number; landingDeadline: number },
   hostBlocksGb?: readonly number[],
-  weakenWake = false,
 ): void {
   const host = server.hostname;
   const difficulty = server.hackDifficulty;
@@ -1378,9 +1407,9 @@ function launchBatches(
       // absolute cap creates a self-fulfilling RAM-growth stall.
       memory.depthCapGb = solution.jitSaturationGb ?? jitCapacity(roles, intervalMs).totalGb;
       memory.depthCapHost = host;
-      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, weakenWake)) return;
+      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling)) return;
       planJitBatches(memory, solution, server, now, ctx, schedule, influence);
-      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, weakenWake);
+      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling);
       return;
     }
     // Pending batches have not launched their hack yet. If the farm segment

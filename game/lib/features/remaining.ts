@@ -1,7 +1,20 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
-import { NEUROFLUX, nextPurchasableAugmentation, scoreAugMults, weightsForRoute } from "../../../shared/strategy/factions/augs.ts";
+import {
+  basePriceMultiplier,
+  closePrereqs,
+  countSlotWeight,
+  isSoA,
+  NEUROFLUX,
+  nextPurchasableAugmentation,
+  scoreAug,
+  scoreAugMults,
+  selectAffordableBatch,
+  weightsForRoute,
+  type AugInfo,
+  type PurchaseCandidate,
+} from "../../../shared/strategy/factions/augs.ts";
 import { liquidatableValue } from "./factions.ts";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
@@ -30,15 +43,31 @@ import { sfLevel } from "../../../shared/features/unlock.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
-import { installVerdict, stepProgression, VERDICT_DWELL_MS } from "../../../shared/strategy/progression/decide.ts";
-import { RED_PILL, stepEndgame, type EndgameView, type RouteId } from "../../../shared/strategy/progression/endgame.ts";
+import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, earlyCountBatchAllowed, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installVerdict, routeCountInstallValue, stepProgression } from "../../../shared/strategy/progression/decide.ts";
+import {
+  DAEDALUS_COMBAT,
+  DAEDALUS_FINAL_BATCH_FRACTION,
+  GANG_FACTIONS,
+  GANG_KARMA,
+  RED_PILL,
+  daedalusAugsRequired,
+  stepEndgame,
+  type EndgameView,
+  type RouteId,
+} from "../../../shared/strategy/progression/endgame.ts";
 import {
   chooseRoute,
-  noRates,
   routeEtas,
   type RouteChoice,
   type RouteRates,
 } from "../../../shared/strategy/progression/eta.ts";
+import {
+  augmentationAcquisitionRate,
+  cycleProgressExponent,
+  retainCycleCurve,
+  type AugmentationCycle,
+  type CyclePoint,
+} from "../../../shared/strategy/progression/regrowth.ts";
 import {
   forecastAt,
   IMMINENT_INSTALL_SEC,
@@ -61,7 +90,7 @@ import type {
 } from "../../../shared/telemetry/topics/go.ts";
 import { packFragments } from "../../../shared/strategy/stanek/pack.ts";
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
-import { addRepToFavor, workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
+import { workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
 import { stepSleeves, type SleevesView, type SleeveTask } from "../../../shared/strategy/sleeves/decide.ts";
 import { isScriptDeath } from "../errors.ts";
 import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
@@ -83,6 +112,13 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
 /** Every driver here reports its own peak dodge step so the home reserve can
  * cover it (shared/ram/reserve.ts). */
 const STEP_GB = { gang: 6, corp: 24, bladeburner: 10, sleeves: 12, go: 4, stanek: 6, dnet: 8, progression: 8 };
+/** `singularity.destroyW0r1dD43m0n` is progression's peak dodge, and it is four
+ * times the feature's ordinary step. Held as a STATIC peak it would tax the
+ * home reserve — and a contiguous fleet block — from the first pass of every
+ * run, starving the early farm of the income needed to buy that RAM, for a call
+ * that fires once at the end of a node and only with SF4. `reserveStepGb` holds
+ * it only while the completion action is actually armed. */
+const PROGRESSION_COMPLETE_GB = 32;
 const GO_MAX_FLEET_SHARE = 0.01;
 const BLADES_SIMULACRUM = "The Blade's Simulacrum";
 
@@ -194,7 +230,12 @@ const gang: FeatureDriver = {
       respectForNextRecruit: topic.respectForNextRecruit,
       canRecruit: topic.canRecruit,
       clashChances: topic.clashChances ?? {},
-      weights: { respect: 1, money: 1e-6 },
+      // Gang respect is the direct input to gang-faction reputation. When BN2
+      // selected this route, make that terminal objective dominate equipment
+      // money; on other routes retain the balanced standing policy.
+      weights: ctx.route === "gang"
+        ? { respect: 10, money: 1e-8 }
+        : { respect: 1, money: 1e-6 },
     });
 
     merge(ctx.state, "gang", {
@@ -757,6 +798,16 @@ function goActionAdmitted(state: GameState, caps: DriverContext["caps"]): boolea
   return usableGb > 0 && STEP_GB.go / usableGb <= GO_MAX_FLEET_SHARE * rewardScale;
 }
 
+/** A Go candidate reports route-seconds saved per second spent playing. Its
+ * opportunity cost is the fraction of productive fleet RAM occupied by the
+ * fixed Go dodge. This is deliberately a marginal test: active games finish,
+ * but an asymptotically positive bonus does not justify playing forever after
+ * its next increment is smaller than the hacking throughput it displaces. */
+export function goGamePaysForRam(utilityPerSec: number, usableGb: number): boolean {
+  if (!(utilityPerSec > 0) || !(usableGb > 0)) return false;
+  return utilityPerSec > STEP_GB.go / usableGb;
+}
+
 const go: FeatureDriver = {
   id: "go",
   everyMs: 5_000,
@@ -906,8 +957,12 @@ const go: FeatureDriver = {
 
     let action = decision.action;
     if (action.type === "newGame") {
-      // Do not spend RAM when no modeled reward can shorten the route.
-      if (!(preferred.utilityPerSec > 0)) return;
+      // Positive but vanishing Go power is not free: the dodge occupies RAM
+      // the income engine could use. Compare both in the same route-seconds
+      // per elapsed-second unit and stop once the marginal game loses.
+      const pie = ctx.state.topics.farm?.ramPie;
+      const usableGb = pie ? pie.farm + pie.prep + pie.share + pie.free + pie.reserve : 0;
+      if (!goGamePaysForRam(preferred.utilityPerSec, usableGb)) return;
       const newGameAction = action;
       const actionStartedAt = Date.now();
       const reset = await act(
@@ -1371,6 +1426,7 @@ interface ProgressionMemory {
     combat: RateTracker;
     augs: RateTracker;
     daedalusRep: RateTracker;
+    gangRep: RateTracker;
     blackOps: RateTracker;
     rank: RateTracker;
   };
@@ -1385,6 +1441,17 @@ interface ProgressionMemory {
   verdictCandidate?: "push" | "install";
   verdictCandidateSince?: number;
   effectiveVerdict?: "push" | "install";
+  nodeCompletionArmedAt?: number;
+  cyclePoints: CyclePoint[];
+  previousCyclePoints?: CyclePoint[];
+  cycleResetAt?: number;
+  cycleStartAugCount?: number;
+  /** Whether this controller observed the cycle from a clean prestige
+   * boundary. A startup save can already contain queued augs and banked rep;
+   * its next immediate reset is a censored partial cycle, not evidence that a
+   * fresh install can reproduce that acquisition rate. */
+  cycleObservedFromBoundary?: boolean;
+  augmentationCycles: AugmentationCycle[];
 }
 
 function freshProgressionMemory(): ProgressionMemory {
@@ -1395,9 +1462,12 @@ function freshProgressionMemory(): ProgressionMemory {
       combat: new RateTracker(),
       augs: new RateTracker(),
       daedalusRep: new RateTracker(),
+      gangRep: new RateTracker(),
       blackOps: new RateTracker(),
       rank: new RateTracker(),
     },
+    cyclePoints: [],
+    augmentationCycles: [],
   };
 }
 
@@ -1440,7 +1510,34 @@ function endgameView(ctx: NeedContext): EndgameView | undefined {
 
   const installed = prog?.ownedAugs ?? {};
   const ownedAll = factions?.ownedAugs ?? Object.keys(installed);
+  const installedOccurrences = new Set(Object.keys(installed));
+  const seenInstalled = new Set<string>();
+  const queuedAugs: string[] = [];
+  for (const name of ownedAll) {
+    if (installedOccurrences.has(name) && !seenInstalled.has(name)) seenInstalled.add(name);
+    else queuedAugs.push(name);
+  }
+  // End-loaded packages are acquired in the strategic sense (their
+  // reputation work is complete) but intentionally not purchased yet. Count
+  // those commitments only in the projected queue used by route cadence; do
+  // not add them to `ownedAll`, because no multiplier or Red Pill ownership
+  // exists before the transaction.
+  for (const name of factions?.plan?.bankedAugmentations ?? []) {
+    if (!installedOccurrences.has(name) && !queuedAugs.includes(name)) queuedAugs.push(name);
+  }
   const skills = player.skills;
+  const gang = ctx.state.topics.gang;
+  const gangFactionRep = gang
+    ? factions?.standings?.find((standing) => standing.name === gang.faction)?.rep ?? 0
+    : undefined;
+  const gangCreateFaction = (factions?.joined ?? []).find((name) =>
+    (GANG_FACTIONS as readonly string[]).includes(name));
+  const bladeburnerAvailable = ctx.caps.restrictions.disableBladeburner !== true && (
+    ctx.caps.bitNode === 6
+    || ctx.caps.bitNode === 7
+    || (ctx.caps.sourceFiles["6"] ?? 0) > 0
+    || (ctx.caps.sourceFiles["7"] ?? 0) > 0
+  );
 
   // Preferred source: the core probe's derived count (30 s cadence, 0 GB
   // extra). Fallback: count the detail probe's action table once it lands.
@@ -1456,13 +1553,29 @@ function endgameView(ctx: NeedContext): EndgameView | undefined {
     bitNode: ctx.caps.bitNode,
     sourceFiles: ctx.caps.sourceFiles ?? {},
     augCount: prog?.augCount ?? Object.keys(installed).length,
+    installedAugs: installed,
+    queuedAugs,
     ownsRedPill: ownedAll.includes(RED_PILL),
     redPillInstalled: RED_PILL in installed,
+    worldDaemonRooted: ctx.state.topics.servers?.["w0r1d_d43m0n"]?.hasAdminRights === true,
     money: player.money,
     hackingSkill: skills.hacking,
     lowestCombatSkill: Math.min(skills.strength, skills.defense, skills.dexterity, skills.agility),
     daedalusRep: factions?.standings?.find((standing) => standing.name === "Daedalus")?.rep ?? 0,
+    gangAvailable: ctx.caps.bitNode === 2 && ctx.caps.restrictions.disableGang !== true,
+    inGang: gang !== undefined,
+    ...(gang ? { gangFaction: gang.faction } : {}),
+    ...(gangFactionRep !== undefined ? { gangFactionRep } : {}),
+    karma: player.karma ?? 0,
+    ...(gangCreateFaction ? { gangCreateFaction } : {}),
+    bladeburnerAvailable,
+    darknetAvailable: ctx.caps.unlocked.dnet === "yes",
+    // The current dnet driver can observe and plan traversal but deliberately
+    // refuses host-local authentication/stasis actions until dispatch can
+    // lease the intended darknet host. Do not select an ETA we cannot execute.
+    labyrinthAutomationAvailable: false,
     inBladeburner: ctx.caps.unlocked.bladeburner === "yes",
+    charismaSkill: skills.charisma,
     ...(blackOpsComplete !== undefined ? { blackOpsComplete } : {}),
     ...(blade?.rank !== undefined ? { bladeburnerRank: blade.rank } : {}),
   };
@@ -1471,7 +1584,58 @@ function endgameView(ctx: NeedContext): EndgameView | undefined {
 function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
   const t = ctx.now;
   const trackers = progressionMemory.trackers;
-  const earned = ctx.state.topics.progression?.moneySources?.sinceInstall?.total;
+  const progression = ctx.state.topics.progression;
+  const earned = progression?.moneySources?.sinceInstall?.total;
+  const resetAt = progression?.lastAugReset;
+  if (resetAt !== undefined && progressionMemory.cycleResetAt !== resetAt) {
+    const previousResetAt = progressionMemory.cycleResetAt;
+    const previousAugCount = progressionMemory.cycleStartAugCount;
+    if (
+      previousResetAt !== undefined
+      && previousAugCount !== undefined
+      && progressionMemory.cycleObservedFromBoundary === true
+    ) {
+      const completed: AugmentationCycle = {
+        sec: Math.max(0, (resetAt - previousResetAt) / 1_000),
+        augmentations: Math.max(0, view.augCount - previousAugCount),
+      };
+      if (completed.sec > 0 && completed.augmentations > 0) {
+        progressionMemory.augmentationCycles.push(completed);
+        if (progressionMemory.augmentationCycles.length > 6) progressionMemory.augmentationCycles.shift();
+      }
+    }
+    if (progressionMemory.cyclePoints.length >= 2) {
+      progressionMemory.previousCyclePoints = progressionMemory.cyclePoints;
+    }
+    progressionMemory.cyclePoints = [];
+    progressionMemory.cycleResetAt = resetAt;
+    progressionMemory.cycleStartAugCount = view.augCount;
+    progressionMemory.cycleObservedFromBoundary = (view.queuedAugs?.length ?? 0) === 0;
+    // Aug count does not decrease on prestige, so RateTracker's generic
+    // decrease detector cannot discover the boundary. Without this explicit
+    // clear, the install jump is divided by post-install idle time and remains
+    // a fabricated acquisition rate for another 30 minutes.
+    trackers.augs.clear();
+  }
+  if (resetAt !== undefined && earned !== undefined) {
+    const sec = Math.max(0, (t - resetAt) / 1_000);
+    const last = progressionMemory.cyclePoints.at(-1);
+    if (!last || sec - last.sec >= 60) {
+      progressionMemory.cyclePoints.push({
+        sec,
+        money: Math.max(0, earned),
+        hacking: view.hackingSkill,
+        combat: view.lowestCombatSkill,
+      });
+      // Preserve the cold bootstrap instead of turning this into a sliding
+      // window. Fresh-install ETA needs the first minutes where skill, RAM and
+      // rooted hosts unlock one another; dropping those points after two
+      // hours made every long cycle look like its late plateau and forecasts
+      // grew *longer* as real progress accumulated. At the fixed bound retain
+      // two dense hours at each end and discard only the oldest middle point.
+      retainCycleCurve(progressionMemory.cyclePoints);
+    }
+  }
   if (earned !== undefined) trackers.moneyEarned.sample(t, earned);
   trackers.hacking.sample(t, view.hackingSkill);
   trackers.combat.sample(t, view.lowestCombatSkill);
@@ -1484,6 +1648,7 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
     ctx.state.topics.progression?.augCount !== undefined || ctx.state.topics.factions?.ownedAugs !== undefined;
   if (augsKnown) trackers.augs.sample(t, view.augCount);
   if (ctx.state.topics.factions?.standings !== undefined) trackers.daedalusRep.sample(t, view.daedalusRep);
+  if (view.gangFactionRep !== undefined) trackers.gangRep.sample(t, view.gangFactionRep);
   if (view.blackOpsComplete !== undefined) trackers.blackOps.sample(t, view.blackOpsComplete);
   if (view.bladeburnerRank !== undefined) trackers.rank.sample(t, view.bladeburnerRank);
   // The rank tracker needs two samples 30s apart before it reports anything,
@@ -1502,15 +1667,46 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
     || (blade?.plan?.lastResult?.ok === true && t - blade.plan.lastResult.at < 300_000);
   const plannedRank = bladeExecuting ? blade?.plan?.ranked?.[0]?.rankPerSec : undefined;
   const sampledRank = trackers.rank.perSec();
+  const curvePoints = progressionMemory.cyclePoints;
+  const priorCyclePoints = progressionMemory.previousCyclePoints;
+  const committedNames = new Set([
+    ...(ctx.state.topics.factions?.plan?.bankedAugmentations ?? []),
+    ...(view.queuedAugs ?? []),
+  ]);
+  const augMeta = ctx.state.topics.factions?.augMeta ?? {};
+  const committedMultiplier = (field: string): number => {
+    let result = 1;
+    for (const name of committedNames) {
+      const value = augMeta[name]?.mults?.[field];
+      if (value !== undefined && value > 0) result *= value;
+    }
+    return result;
+  };
   return {
-    ...noRates(),
     moneyPerSec: trackers.moneyEarned.perSec(),
     hackingSkillPerSec: trackers.hacking.perSec(),
     combatSkillPerSec: trackers.combat.perSec(),
-    augsPerSec: trackers.augs.perSec(),
+    augsPerSec: augmentationAcquisitionRate(progressionMemory.augmentationCycles) || trackers.augs.perSec(),
     daedalusRepPerSec: trackers.daedalusRep.perSec(),
+    gangRepPerSec: trackers.gangRep.perSec(),
     blackOpsPerSec: trackers.blackOps.perSec(),
     bladeburnerRankPerSec: sampledRank > 0 ? sampledRank : plannedRank ?? 0,
+    postInstallHackingSkillMult: committedMultiplier("hacking"),
+    postInstallCombatSkillMult: Math.min(
+      committedMultiplier("strength"),
+      committedMultiplier("defense"),
+      committedMultiplier("dexterity"),
+      committedMultiplier("agility"),
+    ),
+    ...(curvePoints.length >= 2 || (priorCyclePoints?.length ?? 0) >= 2
+      ? {
+          cycle: {
+            points: curvePoints,
+            elapsedSec: Math.max(0, (t - (resetAt ?? t)) / 1_000),
+            ...(priorCyclePoints && priorCyclePoints.length >= 2 ? { priorPoints: priorCyclePoints } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -1576,9 +1772,6 @@ function previousChoice(ctx: NeedContext): RouteChoice | undefined {
   };
 }
 
-/** The refresh half: decide how this BitNode ends and when, from the enriched
- * store, and publish it for every feature to read this same pass. Runs before
- * any needs/claims/tick — see FeatureModule.refresh. */
 /** An augmentation that could still be PURCHASED right now, if there is one.
  *
  * The half of the install barrier that is not about stocks. Cash does not survive
@@ -1599,18 +1792,15 @@ export function purchasableAugmentation(ctx: NeedContext): string | undefined {
   // already declined to spend it (see FactionPlan.drainCeiling).
   const plan = factions.plan;
   const ceiling = plan?.drainCeiling ?? Infinity;
-  // NeuroFlux's probed offer goes stale the moment the drain buys a level —
-  // its price and reputation requirement escalate per QUEUED level, which the
-  // probe only sees on its next pass. The drain's own locally-escalated intent
-  // (plan.nextBuy) is the accurate judgement, so while a drain is running the
-  // barrier defers to it for NeuroFlux and stays independent for everything
-  // else. Deferring can only RELEASE the barrier earlier, never block on
-  // something factions declines to buy.
+  // Once the transaction starts, the drain's exact ordered batch is the sole
+  // authority. Testing isolated live offers here ignores the price escalation
+  // already paid by the queue and can resurrect an item the frozen package
+  // deliberately dropped, deadlocking the install behind a purchase factions
+  // will never make. The probed NeuroFlux offer can also be one pass stale.
   const draining = plan?.drainCeiling !== undefined;
-  const drainWantsNfg = plan?.nextBuy?.name === NEUROFLUX;
-  const offers = draining && !drainWantsNfg ? factions.offers.filter((offer) => offer.name !== NEUROFLUX) : factions.offers;
+  if (draining) return plan.nextBuy?.name;
   return nextPurchasableAugmentation({
-    offers,
+    offers: factions.offers,
     joined: new Set(factions.joined ?? []),
     owned,
     prereqs: (name) => factions.augMeta?.[name]?.prereqs ?? [],
@@ -1618,6 +1808,8 @@ export function purchasableAugmentation(ctx: NeedContext): string | undefined {
   })?.name;
 }
 
+/** Decide how this BitNode ends and when, then publish it before this pass's
+ * needs, claims, and feature ticks consume the result. */
 function progressionRefresh(ctx: NeedContext): void {
   const player = ctx.state.topics.player;
   if (!player) return;
@@ -1634,21 +1826,27 @@ function progressionRefresh(ctx: NeedContext): void {
   progressionMemory.choice = choice;
 
   const blockerOf = new Map(endgame.routes.map((route) => [route.id, route.blocker]));
+  const statusOf = new Map(endgame.routes.map((route) => [route.id, route]));
   const routesDigest: RouteEtaDigest[] = etas.map((eta) => ({
     id: eta.id,
     available: eta.available,
+    ...(eta.actionable !== undefined ? { actionable: eta.actionable } : {}),
     complete: eta.complete,
     blocker: blockerOf.get(eta.id) ?? "",
     etaSec: Math.round(eta.etaSec),
     parts: eta.parts.map((entry) => ({ what: entry.what, resource: entry.resource, sec: Math.round(entry.sec), measured: entry.measured })),
+    ...(eta.stage ? { stage: eta.stage } : {}),
+    ...(eta.needs ? { needs: eta.needs } : {}),
+    ...(eta.nextMandatoryInstall
+      ? { nextMandatoryInstall: { ...eta.nextMandatoryInstall, sec: Math.round(eta.nextMandatoryInstall.sec) } }
+      : {}),
+    ...(statusOf.get(eta.id)?.optionalInstall
+      ? { optionalInstall: statusOf.get(eta.id)!.optionalInstall }
+      : {}),
   }));
   const selectedEta = choice ? etas.find((eta) => eta.id === choice.route) : undefined;
-  const routeRequiresInstall = Boolean(
-    choice
-    && (choice.route === "daedalus" || choice.route === "labyrinth")
-    && view.ownsRedPill
-    && !view.redPillInstalled
-  );
+  const selectedStatus = choice ? endgame.routes.find((route) => route.id === choice.route) : undefined;
+  let routeRequiresInstall = selectedStatus?.mandatoryInstall?.ready === true;
   const nodeBasis = JSON.stringify({
     route: choice?.route,
     complete: selectedEta?.complete,
@@ -1712,7 +1910,15 @@ function progressionRefresh(ctx: NeedContext): void {
   // whose reputation is met and price is within the bankroll. Purchases are
   // end-loaded, so mid-cycle the queue is empty by design; without the
   // realizable set the reset side reads zero and the verdict pushes forever.
-  const verdictWeights = weightsForRoute(choice?.route);
+  const routeAugmentationFocus = choice?.route === "daedalus"
+    && selectedEta?.parts.some((part) => part.resource === "combat")
+      ? "combat" as const
+      : "hacking" as const;
+  const verdictWeights = weightsForRoute(choice?.route, routeAugmentationFocus, {
+    hackingTarget: endgame.worldDaemonSkill,
+    combatTarget: DAEDALUS_COMBAT,
+    multipliers: (player.mults ?? {}) as unknown as Record<string, number>,
+  });
   // Clamped at zero per augmentation: cost-reduction multipliers sit BELOW 1,
   // so a beneficial aug can carry a negative log-score — the accrued signal
   // measures what an install would activate, and that is never negative.
@@ -1730,7 +1936,6 @@ function progressionRefresh(ctx: NeedContext): void {
   // read near-zero on stock-funded nodes (BN8 keeps the bankroll invested by
   // design), so realizable stayed empty and the verdict pushed forever.
   const sweepBudget = player.money + liquidatableValue(ctx);
-  const unownedByFaction = new Map<string, number>();
   // Joined factions only: the sweep can only buy from a faction we are IN,
   // and after a prestige the offers list can briefly describe factions the
   // reset just removed — counting those manufactured install pressure in a
@@ -1741,8 +1946,7 @@ function progressionRefresh(ctx: NeedContext): void {
   for (const offer of factions?.offers ?? []) if (offer.owned) ownedOrQueued.add(offer.name);
   const affordable: string[] = [];
   for (const offer of factions?.offers ?? []) {
-    if (offer.owned || offer.name === NEUROFLUX || !joinedSet.has(offer.faction)) continue;
-    unownedByFaction.set(offer.faction, (unownedByFaction.get(offer.faction) ?? 0) + 1);
+    if (offer.owned || !joinedSet.has(offer.faction)) continue;
     if (!offer.affordableRep || offer.price > sweepBudget) continue;
     affordable.push(offer.name);
   }
@@ -1764,34 +1968,232 @@ function progressionRefresh(ctx: NeedContext): void {
     }
   }
   for (const name of pending) realizable.delete(name);
+
+  // "Every item fits this bankroll on its own" is not a funded reset set:
+  // the second and later purchases pay the 1.9x queue escalation. Cadence used
+  // to sum every individually affordable offer here, then the frozen sweep
+  // could buy only a strict subset. That fabricated reset value and armed an
+  // early install (measured in the full BN1 harness: eight candidates valued,
+  // five actually bought). Select the jointly affordable one-shot set using
+  // the same value-order / payment-order split as the transaction boundary.
+  // Purchases remain entirely end-loaded; this is only the honest value of
+  // what the current bankroll could convert if progression ended the cycle.
+  const activationCatalog = new Map<string, AugInfo>();
+  for (const name of realizable) {
+    const aug = AUGMENTATIONS[name];
+    if (!aug || name === NEUROFLUX) continue;
+    activationCatalog.set(name, {
+      name,
+      baseCost: aug.cost,
+      baseRepRequirement: aug.rep,
+      factions: [...aug.factions],
+      prereqs: [...(aug.prereqs ?? [])],
+      mults: { ...(aug.mults ?? {}) },
+      ...(aug.multsUnknown ? { multsUnknown: true } : {}),
+    });
+  }
+  const countSlotsRemaining = choice?.route === "daedalus" && view.bitNode !== undefined
+    ? Math.max(0, (daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0) ?? 0) - view.augCount)
+    : 0;
+  const liveCountTarget = choice?.route === "daedalus" && view.bitNode !== undefined
+    ? daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0) ?? Infinity
+    : Infinity;
+  const liveCountValue = countSlotWeight(liveCountTarget, countSlotsRemaining);
+  const activationValueOrder = [...activationCatalog.values()]
+    .sort((a, b) => {
+      const aValue = Math.max(1e-9, scoreAug(a, verdictWeights) + liveCountValue);
+      const bValue = Math.max(1e-9, scoreAug(b, verdictWeights) + liveCountValue);
+      return a.baseCost / aValue - b.baseCost / bValue
+        || scoreAug(b, verdictWeights) - scoreAug(a, verdictWeights)
+        || (a.name < b.name ? -1 : 1);
+    })
+    .map((aug) => aug.name);
+  const activationOwned = new Set([...ownedOrQueued, ...pending]);
+  const activationCandidates: PurchaseCandidate[] = closePrereqs(
+    activationValueOrder,
+    activationCatalog,
+    activationOwned,
+  ).flatMap((name) => {
+    const aug = activationCatalog.get(name);
+    if (!aug) return [];
+    const faction = (factions?.offers ?? []).find(
+      (offer) => offer.name === name && joinedSet.has(offer.faction) && offer.affordableRep,
+    )?.faction;
+    return faction ? [{ name, aug, faction }] : [];
+  });
+  const activationPriceContext = {
+    queuedNonSoA: pending.filter((name) => !isSoA(name)).length,
+    ownedSoA: Object.keys(installed).filter(isSoA).length,
+    neurofluxLevel: (installed[NEUROFLUX] ?? 0) + pending.filter((name) => name === NEUROFLUX).length,
+    sf11Level: view.sourceFiles["11"] ?? 0,
+    augMoneyCost: effectiveBitNodeMultipliers(
+      view.bitNode,
+      view.sf12Level ?? view.sourceFiles["12"] ?? 0,
+      prog?.multipliers,
+    )?.AugmentationMoneyCost ?? 1,
+    augRepCost: 1,
+  };
+  const fundedActivation = selectAffordableBatch({
+    candidates: activationCandidates,
+    owned: activationOwned,
+    ctx: activationPriceContext,
+    money: sweepBudget,
+  }).order;
+
+  // In Daedalus's final batch, an empty queue is expected because purchases
+  // are end-loaded. Promote the reset from "optional" to route-required once
+  // the current pile can buy enough REP-MET unique augmentations to satisfy
+  // the installed-count gate. This is what lets the hold-at-2/3 policy finish
+  // rather than deadlocking before the sweep that creates its queue.
+  if (choice?.route === "daedalus" && view.bitNode !== undefined) {
+    const required = daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0);
+    if (required !== undefined && view.augCount < required) {
+      const installedNames = new Set(Object.keys(view.installedAugs ?? {}));
+      const queuedCountable = new Set(
+        pending.filter((name) => name !== NEUROFLUX || !installedNames.has(NEUROFLUX)),
+      );
+      const stillNeeded = Math.max(0, required - view.augCount - queuedCountable.size);
+      const candidates = new Map([...realizable]
+        .filter((name) => name !== NEUROFLUX || !installedNames.has(NEUROFLUX))
+        .map((name) => {
+          const offers = (factions?.offers ?? []).filter((offer) => offer.name === name);
+          const cheapestOffer = offers.reduce<typeof offers[number] | undefined>(
+            (best, offer) => !best || offer.price < best.price ? offer : best,
+            undefined,
+          );
+          return cheapestOffer ? { name, price: cheapestOffer.price, soa: cheapestOffer.soa === true } : undefined;
+        })
+        .filter((entry): entry is { name: string; price: number; soa: boolean } => entry !== undefined)
+        .map((entry) => [entry.name, entry] as const));
+      const queueMult = basePriceMultiplier(view.sourceFiles["11"] ?? 0);
+      const costOf = (names: ReadonlySet<string>): number => {
+        const entries = [...names].map((name) => candidates.get(name)).filter((entry) => entry !== undefined);
+        const normal = entries.filter((entry) => !entry.soa).sort((a, b) => b.price - a.price);
+        return entries.filter((entry) => entry.soa).reduce((sum, entry) => sum + entry.price, 0)
+          + normal.reduce((sum, entry, index) => sum + entry.price * queueMult ** index, 0);
+      };
+      const closure = (name: string, selected: ReadonlySet<string>): Set<string> | undefined => {
+        const adding = new Set<string>();
+        const visiting = new Set<string>();
+        const visit = (candidate: string): boolean => {
+          if (ownedOrQueued.has(candidate) || selected.has(candidate) || adding.has(candidate)) return true;
+          if (visiting.has(candidate) || !candidates.has(candidate)) return false;
+          visiting.add(candidate);
+          for (const prereq of AUGMENTATIONS[candidate]?.prereqs ?? []) if (!visit(prereq)) return false;
+          visiting.delete(candidate);
+          adding.add(candidate);
+          return true;
+        };
+        return visit(name) ? adding : undefined;
+      };
+      const selected = new Set<string>();
+      while (selected.size < stillNeeded) {
+        let best: Set<string> | undefined;
+        let bestCost = Infinity;
+        for (const name of candidates.keys()) {
+          if (selected.has(name)) continue;
+          const adding = closure(name, selected);
+          if (!adding) continue;
+          const trial = new Set([...selected, ...adding]);
+          const cost = costOf(trial);
+          if (cost < bestCost) {
+            bestCost = cost;
+            best = adding;
+          }
+        }
+        if (!best) break;
+        for (const name of best) selected.add(name);
+      }
+      if (selected.size >= stillNeeded && costOf(selected) <= sweepBudget) {
+        routeRequiresInstall = true;
+      }
+    }
+  }
   // Banked-but-unrealized favor, priced with packageValue's OWN favor terms
   // (futureRateGain + crossesDonation) at current rep. The frontier's favor
   // packages accrue value that only an install banks — without this term the
   // push stream counts that value as income while the reset side never sees
   // it, and a favor-purpose objective can never conclude.
   const favorDonateAt = factions?.favorToDonate ?? 150;
-  let bankedFavorValue = 0;
-  for (const standing of factions?.standings ?? []) {
-    if (!joinedSet.has(standing.name)) continue;
-    const future = unownedByFaction.get(standing.name) ?? 0;
-    if (future === 0) continue;
-    const favorAfter = addRepToFavor(standing.favor, standing.rep);
-    const rateGain = future * Math.max(0, (1 + favorAfter / 100) / (1 + standing.favor / 100) - 1);
-    const crosses = standing.favor < favorDonateAt && favorAfter >= favorDonateAt ? future * 0.5 : 0;
-    bankedFavorValue += rateGain + crosses;
-  }
+  const bankedFavorValue = bankedFavorActivationValue({
+    standings: (factions?.standings ?? []).filter((standing) => joinedSet.has(standing.name)),
+    offers: factions?.offers ?? [],
+    favorToDonate: favorDonateAt,
+  });
   // Unit-consistent with packageValue (count + quality + favor terms): the
   // push rate is denominated in package value, where every augmentation
   // carries a flat +1 count on top of its multiplier quality — an accrued
   // side without the count term could never clear the threshold on cheap
   // augs however many of them an install would activate.
-  const resetValueMult =
-    [...pending, ...realizable].reduce((sum, name) => sum + 1 + scoreMults(name), 0) + bankedFavorValue;
+  // Count slots pay at the Daedalus gate rather than accelerating the next
+  // cycle, but a sufficiently large partial tranche has persistent route
+  // value: it avoids forcing every remaining slot through one exponential
+  // 1.9^N transaction. The node-relative consolidation policy remains the
+  // guard against tiny late resets; below it count contributes zero here.
+  const resetMultiplierValue = [...pending, ...fundedActivation.map((candidate) => candidate.name)].reduce(
+    (sum, name) => sum + scoreMults(name),
+    0,
+  );
+  let routeCountValue = 0;
+  let countCadenceReady = true;
+  if (choice?.route === "daedalus" && view.bitNode !== undefined) {
+    const required = daedalusAugsRequired(view.bitNode, view.sf12Level ?? view.sourceFiles["12"] ?? 0);
+    if (required !== undefined) {
+      const installedNames = new Set(Object.keys(view.installedAugs ?? {}));
+      const affordableDistinct = new Set(
+        [...pending, ...fundedActivation.map((candidate) => candidate.name)]
+          .filter((name) => !installedNames.has(name)),
+      ).size;
+      const beforeConsolidation = view.augCount < Math.ceil(required * DAEDALUS_FINAL_BATCH_FRACTION);
+      const batchAllowed = beforeConsolidation
+        ? earlyCountBatchAllowed(required, view.augCount, affordableDistinct)
+        : selectedStatus?.optionalInstall.allowed === true;
+      countCadenceReady = view.augCount >= required || batchAllowed;
+      routeCountValue = routeCountInstallValue({
+        required,
+        installed: view.augCount,
+        affordableDistinct,
+        batchAllowed,
+      });
+    }
+  }
+  const resetValueMult = resetMultiplierValue + bankedFavorValue + routeCountValue;
   const intent = factions?.plan?.objective?.intent;
+  // The package selector also values permanent Daedalus count slots. They
+  // advance the route, but do not accelerate the next cycle, so cadence uses
+  // its separately measured reset-activated stream. A nearly-complete package
+  // can report eta=1 while purchases are deliberately end-loaded; treating
+  // activationValue/1s as a production rate makes the renewal threshold blow
+  // up exactly when a cycle is done. installCadencePushRate bounds that forward
+  // estimate by value actually accrued over this cycle, so a completed package
+  // remains a sample rather than masquerading as an exhausted frontier.
+  const runSec = prog?.lastAugReset ? Math.max(0, (ctx.now - prog.lastAugReset) / 1000) : 0;
+  const cadencePushRate = installCadencePushRate({
+    runSec,
+    resetValueMult,
+    ...(intent?.activationValue !== undefined ? { intentActivationValue: intent.activationValue } : {}),
+    ...(intent?.etaSec !== undefined ? { intentEtaSec: intent.etaSec } : {}),
+    ...(intent?.marginalActivationRate !== undefined
+      ? { intentMarginalActivationRate: intent.marginalActivationRate }
+      : {}),
+  });
+  // Convert the measured nonlinear money bootstrap into an equivalent delay.
+  // For cumulative y=a*t^p, the tangent at the current point reaches y=0 at
+  // t*(1-1/p): that is the startup delay a steady-state stream would have to
+  // pay to reproduce the observed curve. Linear production (p<=1) loses only
+  // the physical install interruption; an accelerating cold start pays more,
+  // without charging unrelated faction work and purchases as if they had to
+  // be repeated. The exponent is the same bounded fit used by route ETA.
+  const bootstrapExponent = cycleProgressExponent(progressionMemory.cyclePoints, "money");
+  const measuredBootstrapDelay = bootstrapExponent !== undefined && bootstrapExponent > 1
+    ? runSec * (1 - 1 / bootstrapExponent)
+    : 0;
+  const resetOverheadSec = Math.max(INSTALL_VERDICT_OVERHEAD_SEC, measuredBootstrapDelay);
   const rawVerdict = installVerdict({
     routeEtaKnown: selectedEta !== undefined,
     resetValueMult,
-    ...(intent?.marginalRate !== undefined ? { pushMarginalRate: intent.marginalRate } : {}),
+    resetOverheadSec,
+    ...(cadencePushRate !== undefined ? { pushMarginalRate: cadencePushRate } : {}),
     // A published factions plan naming no intent is a concluded frontier; a
     // missing plan is a frontier that has not run yet (see installVerdict).
     // A HORIZON-STARVED objective is neither: raw candidates exist but the
@@ -1799,31 +2201,43 @@ function progressionRefresh(ctx: NeedContext): void {
     // recalibrates, and reading it as "concluded" armed a premature install
     // (irreversible once the sweep starts buying) at package boundaries.
     frontierIdle:
-      factions?.plan !== undefined && intent === undefined && factions.plan.objective?.horizonStarved !== true,
+      factions?.plan !== undefined
+      && intent === undefined
+      && factions.plan.objective?.horizonStarved !== true,
   });
-  // Symmetric dwell: a raw flip must hold for VERDICT_DWELL_MS in EITHER
-  // direction. An early "install" verdict is often boot noise (the frontier
-  // publishes a near-zero rate before its first real package), so a
-  // permanent latch on the verdict alone locked entire cycles; the only
-  // point of no return is the sweep actually reaching ready/armed, at which
-  // point un-flipping would thrash factions and stock mid-conversion.
+  // Install is irreversible: it must dwell before opening the transaction,
+  // while contrary push evidence cancels immediately. The only true latch is
+  // the point where the final sweep has become ready/armed.
   const pastPointOfNoReturn =
-    prog?.plan?.installReady === true || progressionMemory.installArmedAt !== undefined;
+    pending.length > 0
+    || factions?.plan?.drainCeiling !== undefined
+    || prog?.plan?.installReady === true
+    || progressionMemory.installArmedAt !== undefined;
   let marginalInstall: boolean | undefined;
   if (pastPointOfNoReturn) {
     marginalInstall = true;
   } else if (rawVerdict.verdict === "no-data") {
     marginalInstall = undefined;
   } else {
-    if (progressionMemory.verdictCandidate !== rawVerdict.verdict) {
-      progressionMemory.verdictCandidate = rawVerdict.verdict;
-      progressionMemory.verdictCandidateSince = ctx.now;
-    }
-    const held = ctx.now - (progressionMemory.verdictCandidateSince ?? ctx.now) >= VERDICT_DWELL_MS;
-    if (held || progressionMemory.effectiveVerdict === undefined) {
-      progressionMemory.effectiveVerdict = rawVerdict.verdict;
-    }
-    marginalInstall = progressionMemory.effectiveVerdict === "install";
+    const dwelled = dwellInstallVerdict(rawVerdict.verdict, {
+      ...(progressionMemory.verdictCandidate !== undefined ? { candidate: progressionMemory.verdictCandidate } : {}),
+      ...(progressionMemory.verdictCandidateSince !== undefined ? { candidateSince: progressionMemory.verdictCandidateSince } : {}),
+      ...(progressionMemory.effectiveVerdict !== undefined ? { effective: progressionMemory.effectiveVerdict } : {}),
+    }, ctx.now);
+    progressionMemory.verdictCandidate = dwelled.state.candidate;
+    progressionMemory.verdictCandidateSince = dwelled.state.candidateSince;
+    progressionMemory.effectiveVerdict = dwelled.state.effective;
+    marginalInstall = dwelled.install;
+  }
+  // On the finite Daedalus count route, a small multiplier package can clear
+  // the generic renewal threshold while still being a terrible reset: it pays
+  // another full cold bootstrap but barely advances the installed-count gate.
+  // Do not even OPEN the end-loaded transaction until the currently funded
+  // distinct set covers a target-relative early tranche. This is cadence
+  // permission only; route-mandatory Red Pill/count-closure installs bypass it
+  // through routeRequiresInstall and an already-started queue remains latched.
+  if (marginalInstall === true && !routeRequiresInstall && !pastPointOfNoReturn && !countCadenceReady) {
+    marginalInstall = false;
   }
 
   const decision = stepProgression({
@@ -1853,9 +2267,10 @@ function progressionRefresh(ctx: NeedContext): void {
     homeRam: ctx.state.topics.servers?.["home"]?.maxRam ?? 8,
     // No probe prices the home upgrade yet; Infinity keeps the budget advisory.
     homeRamUpgradeCost: Infinity,
-    runSec: prog?.lastAugReset ? Math.max(0, (ctx.now - prog.lastAugReset) / 1000) : 0,
+    runSec,
     ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
     routeRequiresInstall,
+    optionalInstallAllowed: selectedStatus?.optionalInstall.allowed ?? true,
     resetValueMult,
     // Banked favor may only OPEN the gate when the sweep can actually convert
     // something — any joined offer with rep met (NeuroFlux included), or a
@@ -1872,9 +2287,11 @@ function progressionRefresh(ctx: NeedContext): void {
             (standing) =>
               joinedSet.has(standing.name)
               && standing.favor >= favorDonateAt
-              && (unownedByFaction.get(standing.name) ?? 0) > 0,
+              && (factions?.offers ?? []).some(
+                (offer) => !offer.owned && offer.faction === standing.name,
+              ),
           ))),
-    ...(intent?.marginalRate !== undefined ? { pushMarginalRate: intent.marginalRate } : {}),
+    ...(cadencePushRate !== undefined ? { pushMarginalRate: cadencePushRate } : {}),
     ...(intent?.etaSec !== undefined ? { pushEtaSec: intent.etaSec } : {}),
     ...(marginalInstall !== undefined ? { marginalInstall } : {}),
   });
@@ -1895,6 +2312,12 @@ function progressionRefresh(ctx: NeedContext): void {
     progressionMemory.installQueueKey = undefined;
   }
   const armedAt = progressionMemory.installArmedAt;
+  const cadenceRemainingSec =
+    rawVerdict.pushRate !== undefined
+    && rawVerdict.pushRate > 0
+    && rawVerdict.threshold !== undefined
+      ? Math.max(0, (rawVerdict.threshold - resetValueMult) / rawVerdict.pushRate)
+      : undefined;
 
   const installBasis = JSON.stringify({
     phase: decision.phase,
@@ -1902,6 +2325,8 @@ function progressionRefresh(ctx: NeedContext): void {
     liquidate: decision.liquidationWanted,
     ready: decision.installReady,
     blockers: decision.installBlockers.map((blocker) => blocker.kind),
+    optionalAllowed: selectedStatus?.optionalInstall.allowed,
+    mandatory: selectedEta?.nextMandatoryInstall,
     queue: pending,
     intent: factions?.plan?.objective?.intent
       ? {
@@ -1914,17 +2339,47 @@ function progressionRefresh(ctx: NeedContext): void {
   });
   const previousInstallForecast = readablePlan(ctx.state)?.forecasts.install;
   const nextInstallForecast = shouldReforecast(previousInstallForecast, ctx.now, installBasis)
-    ? installForecast(ctx.now, {
+      ? installForecast(ctx.now, {
         installNow: decision.installReady && armedAt !== undefined,
+        installWanted: decision.installWanted,
         queuedCount: pending.length,
         phase: decision.phase,
         ...(factions?.plan?.objective?.intent ? { intent: factions.plan.objective.intent } : {}),
         workMeasured: factions?.plan?.until?.kind === "rep",
         moneyMeasured: (factions?.plan?.context?.incomePerSec ?? 0) > 0,
         finalSweepReady: decision.installReady,
+        ...(decision.installWanted
+          && factions?.plan?.recommendInstall === undefined
+          && factions?.plan?.objective?.intent?.etaSec !== undefined
+            ? { committedPackageSec: factions.plan.objective.intent.etaSec }
+            : {}),
+        ...(cadenceRemainingSec !== undefined ? { cadenceSec: cadenceRemainingSec } : {}),
+        optionalInstallAllowed: selectedStatus?.optionalInstall.allowed ?? true,
+        ...(selectedEta?.nextMandatoryInstall ? { mandatory: selectedEta.nextMandatoryInstall } : {}),
       }, installBasis)
     : forecastAt(previousInstallForecast!, ctx.now);
   const forecasts: PlanningHorizons = { node: nextNodeForecast, install: nextInstallForecast };
+  const nextBitNode = selectedEta?.complete && view.bitNode !== undefined
+    ? chooseNextBitNode(view.bitNode, view.sourceFiles)
+    : undefined;
+  const canAutomateNodeCompletion =
+    view.bitNode === 4 || (view.sourceFiles["4"] ?? 0) > 0;
+  const routeAction =
+    choice?.route === "bladeburner"
+    && selectedStatus?.stage === "bladeburner-join"
+    && view.lowestCombatSkill >= 100
+      ? { type: "joinBladeburner" as const, why: "the selected Bladeburner route has cleared the division's combat gate" }
+      : choice?.route === "gang"
+        && selectedStatus?.stage === "gang-create"
+        && (view.karma ?? 0) <= GANG_KARMA
+        && view.gangCreateFaction
+        ? {
+            type: "createGang" as const,
+            faction: view.gangCreateFaction,
+            why: `the selected BN2 gang route has cleared karma and membership gates for ${view.gangCreateFaction}`,
+          }
+        : undefined;
+  if (!selectedEta?.complete) progressionMemory.nodeCompletionArmedAt = undefined;
   merge(ctx.state, "progression", {
     plan: {
       phase: decision.phase,
@@ -1955,7 +2410,26 @@ function progressionRefresh(ctx: NeedContext): void {
           }
         : {}),
       routes: routesDigest,
+      routeInstallRequired: routeRequiresInstall,
       forecasts,
+      ...(routeAction ? { routeAction } : {}),
+      ...(nextBitNode
+        ? {
+            completion: {
+              ready: true,
+              automatic: canAutomateNodeCompletion,
+              nextBitNode: nextBitNode.bitNode,
+              targetLevel: nextBitNode.targetLevel,
+              why: canAutomateNodeCompletion
+                ? nextBitNode.why
+                : `${nextBitNode.why}; manual completion required until BN4/SF4 unlocks Singularity`,
+              ...(progressionMemory.nodeCompletionArmedAt !== undefined
+                ? { armedAt: progressionMemory.nodeCompletionArmedAt }
+                : {}),
+              execute: canAutomateNodeCompletion && progressionMemory.nodeCompletionArmedAt !== undefined,
+            },
+          }
+        : {}),
     },
   });
 }
@@ -1966,9 +2440,62 @@ const progression: FeatureDriver = {
   // Armed installs carry themselves pass-to-pass; the install signal covers
   // the FIRST evaluation after factions' drain concludes, which otherwise
   // waits out the 60-second cadence (game/lib/install-signal.ts).
-  wake: () => progressionMemory.installArmedAt !== undefined || takeInstallSignal(),
+  wake: () =>
+    progressionMemory.installArmedAt !== undefined
+    || progressionMemory.nodeCompletionArmedAt !== undefined
+    || takeInstallSignal(),
   async tick(ctx: DriverContext) {
     const plan = readablePlan(ctx.state);
+    if (plan?.completion?.ready && plan.completion.automatic) {
+      if (progressionMemory.nodeCompletionArmedAt === undefined) {
+        progressionMemory.nodeCompletionArmedAt = Date.now();
+        merge(ctx.state, "progression", {
+          plan: {
+            ...plan,
+            completion: {
+              ...plan.completion,
+              armedAt: progressionMemory.nodeCompletionArmedAt,
+              execute: false,
+            },
+          },
+        });
+        return;
+      }
+      if (!plan.completion.execute || plan.completion.armedAt !== progressionMemory.nodeCompletionArmedAt) return;
+      const outcome = await featureDodge(
+        ctx,
+        "progression",
+        "action:complete-bitnode",
+        ["singularity.destroyW0r1dD43m0n"],
+        (stubNs) => {
+          stubNs["singularity"]["destroyW0r1dD43m0n"](plan.completion!.nextBitNode, "/start.js");
+          return true;
+        },
+      );
+      if (!outcome.ok) progressionMemory.nodeCompletionArmedAt = undefined;
+      return;
+    }
+    if (plan?.routeAction?.type === "joinBladeburner") {
+      await featureDodge(
+        ctx,
+        "progression",
+        "action:join-bladeburner",
+        ["bladeburner.joinBladeburnerDivision"],
+        (stubNs) => stubNs["bladeburner"]["joinBladeburnerDivision"](),
+      );
+      return;
+    }
+    if (plan?.routeAction?.type === "createGang") {
+      const faction = plan.routeAction.faction;
+      await featureDodge(
+        ctx,
+        "progression",
+        "action:create-gang",
+        ["gang.createGang"],
+        (stubNs) => stubNs["gang"]["createGang"](faction as never),
+      );
+      return;
+    }
     if (!plan?.installReady) {
       progressionMemory.installArmedAt = undefined;
       progressionMemory.installQueueKey = undefined;
@@ -2205,11 +2732,33 @@ function dnetMethods(_action: string | undefined): readonly string[] {
 
 export const progressionModule: FeatureModule = {
   driver: progression,
-  reset: (state: GameState) => {
+  reset: (state: GameState, kind) => {
     reset();
     // Rates and the route choice describe the node that just ended; the next
     // one re-measures and re-decides from scratch.
+    const completedCycle = progressionMemory.cyclePoints.length >= 2
+      ? progressionMemory.cyclePoints
+      : progressionMemory.previousCyclePoints;
+    const augmentationCycles = [...progressionMemory.augmentationCycles];
+    if (kind === "augmentation") {
+      const next = state.topics.progression;
+      const previousResetAt = progressionMemory.cycleResetAt;
+      const previousAugCount = progressionMemory.cycleStartAugCount;
+      if (next && previousResetAt !== undefined && previousAugCount !== undefined) {
+        const completed: AugmentationCycle = {
+          sec: Math.max(0, (next.lastAugReset - previousResetAt) / 1_000),
+          augmentations: Math.max(0, next.augCount - previousAugCount),
+        };
+        if (completed.sec > 0 && completed.augmentations > 0) augmentationCycles.push(completed);
+      }
+    }
     progressionMemory = freshProgressionMemory();
+    if (kind === "augmentation" && completedCycle) {
+      progressionMemory.previousCyclePoints = completedCycle;
+    }
+    if (kind === "augmentation") {
+      progressionMemory.augmentationCycles = augmentationCycles.slice(-6);
+    }
     routeChange = undefined;
     lastRouteEmit = undefined;
     resetInstallSignal();
@@ -2224,16 +2773,56 @@ export const progressionModule: FeatureModule = {
     }
   },
   refresh: progressionRefresh,
+  needs: (ctx) => {
+    const plan = readablePlan(ctx.state);
+    const route = plan?.route === undefined ? undefined : plan.routes?.find((candidate) => candidate.id === plan.route);
+    if (!route?.needs) return [];
+    return route.needs.map((need): Need => ({
+      by: "progression",
+      kind: need.kind,
+      ...(need.subject !== undefined ? { subject: need.subject } : {}),
+      target: need.target,
+      have: need.have,
+      weight: 5,
+      urgency: "blocking",
+      why: `${route.id}/${route.stage ?? "route"}: ${need.why}`,
+    }));
+  },
   claims: (ctx) => {
     const plan = readablePlan(ctx.state);
+    if (plan?.completion?.execute) {
+      return [actionRamClaim(
+        ctx,
+        "progression",
+        "action:complete-bitnode",
+        ["singularity.destroyW0r1dD43m0n"],
+        `complete the BitNode and enter BN${plan.completion.nextBitNode}`,
+      )];
+    }
+    if (plan?.routeAction?.type === "createGang") {
+      return [actionRamClaim(
+        ctx,
+        "progression",
+        "action:create-gang",
+        ["gang.createGang"],
+        `create the ${plan.routeAction.faction} gang selected by the BN2 route`,
+      )];
+    }
+    if (plan?.routeAction?.type === "joinBladeburner") {
+      return [actionRamClaim(
+        ctx,
+        "progression",
+        "action:join-bladeburner",
+        ["bladeburner.joinBladeburnerDivision"],
+        "join the Bladeburner division selected by the endgame route",
+      )];
+    }
     if (!plan?.installReady) {
       // The IMMINENT-install brake: when the install forecast says the reset
       // is minutes away, everything with an install lifetime stops buying —
-      // its ROI window is about to close. Priority 50 sits above ordinary
-      // investments (25) and below blocking prerequisites (65), donations
-      // (70), the aug fund (90), and blocking needs (95), so anything needed
-      // to reach the reset remains fundable while pservs, hacknet and positions
-      // stop. `installReady` then takes over with the full freeze at 110.
+      // its ROI window is about to close. The reserve outranks ordinary
+      // investments but not reset prerequisites; `installReady` later applies
+      // the full freeze.
       const installSec = usableForecastSec(ctx.horizons.install);
       if (installSec !== undefined && installSec < IMMINENT_INSTALL_SEC) {
         return [{
@@ -2270,5 +2859,7 @@ export const progressionModule: FeatureModule = {
     }
     return claims;
   },
-  peakStepGb: STEP_GB.progression,
+  peakStepGb: PROGRESSION_COMPLETE_GB,
+  reserveStepGb: (state) =>
+    readablePlan(state)?.completion?.execute === true ? PROGRESSION_COMPLETE_GB : STEP_GB.progression,
 };

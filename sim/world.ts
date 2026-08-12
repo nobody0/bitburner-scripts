@@ -241,7 +241,7 @@ export class SimWorld {
 
   /** Player/server half of prestigeAugmentation. Factions, stock, Hacknet and
    * process lifecycle are owned by their systems and the host orchestrator. */
-  prestigeAugmentation(newlyInstalled: ReadonlyMap<string, number>): void {
+  prestigeAugmentation(newlyInstalled: ReadonlyMap<string, number>, plan?: unknown): void {
     this.assertPrestigeSupported();
     this.resetInstallMoneySources();
 
@@ -298,7 +298,11 @@ export class SimWorld {
     this.#dirty.clear();
     this.recalculateSkills();
     this.person.hp.current = this.person.hp.max;
-    this.emit({ kind: "event", name: "sim.prestige", data: { newlyInstalled: [...newlyInstalled] } });
+    this.emit({
+      kind: "event",
+      name: "sim.prestige",
+      data: { newlyInstalled: [...newlyInstalled], ...(plan !== undefined ? { plan } : {}) },
+    });
     // Simulator-owned authoritative state for goal evaluation. A --perf run
     // deliberately receives no game telemetry, but install/BN goals must not
     // become blind merely because serialization is disabled.

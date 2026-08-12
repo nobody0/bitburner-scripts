@@ -98,13 +98,14 @@ export function actionRamClaim(
   claimId: string,
   methods: readonly string[],
   why: string,
+  priority: number = PRIORITY["probe:detail"],
 ): Claim {
   return {
     by,
     id: claimId,
     resource: "ram",
     amount: ctx.ramPrice(methods),
-    priority: PRIORITY["probe:detail"],
+    priority,
     mode: "spend",
     why,
   };

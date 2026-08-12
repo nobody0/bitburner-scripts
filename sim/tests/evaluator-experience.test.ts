@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   initEvaluator,
   projectedRuntimeSecondsPerExp,
+  skillGateRuntimeSecondsPerExp,
   stepEvaluator,
   type FleetCapacity,
 } from "../../shared/strategy/evaluator.ts";
@@ -107,5 +108,13 @@ describe("experience runtime utility", () => {
     expect(projectedRuntimeSecondsPerExp(100, 125, 1_000, 3_600)).toBeCloseTo(0.72, 12);
     expect(projectedRuntimeSecondsPerExp(100, 125, 1_000, 3_600, 10_000)).toBeCloseTo(0.02, 12);
     expect(projectedRuntimeSecondsPerExp(100, 100, 1_000, 3_600)).toBe(0);
+  });
+
+  test("values experience that directly closes a posted route skill gate", () => {
+    const currentExp = 1_000;
+    const value = skillGateRuntimeSecondsPerExp(currentExp, 1, 2_500, 14_400);
+    expect(value).toBeGreaterThan(0);
+    expect(skillGateRuntimeSecondsPerExp(currentExp, 1, 1, 14_400)).toBe(0);
+    expect(skillGateRuntimeSecondsPerExp(currentExp, 1, 2_500, 7_200)).toBeCloseTo(value / 2, 12);
   });
 });

@@ -477,7 +477,21 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   // Partially-implemented namespaces: the gate batch reads exactly these, and
   // every other member of each reports itself.
   impl["gang"] = namespace({ inGang: () => world.gates.inGang }, "gang", host, process);
-  impl["bladeburner"] = namespace({ inBladeburner: () => world.gates.inBladeburner }, "bladeburner", host, process);
+  impl["bladeburner"] = namespace({
+    inBladeburner: () => world.gates.inBladeburner,
+    joinBladeburnerDivision: (): boolean => {
+      const access = world.bitnode === 6
+        || world.bitnode === 7
+        || (world.player.sourceFiles["6"] ?? 0) > 0
+        || (world.player.sourceFiles["7"] ?? 0) > 0;
+      const skills = world.person.skills;
+      const combatReady = Math.min(skills.strength, skills.defense, skills.dexterity, skills.agility) >= 100;
+      if (!access || !combatReady) return false;
+      world.gates.inBladeburner = true;
+      world.emit({ kind: "event", name: "bladeburner.joined", data: {} });
+      return true;
+    },
+  }, "bladeburner", host, process);
   impl["corporation"] = namespace({ hasCorporation: () => world.gates.hasCorporation }, "corporation", host, process);
   // The market, when a run wires one. Every getter reads the vendored `Stock`
   // objects directly, so a price, a spread or a forecast the strategy sees is

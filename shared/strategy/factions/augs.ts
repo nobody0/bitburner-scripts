@@ -52,11 +52,10 @@ export interface PurchasableOffer {
  * drain decides through `nextPurchase` over the augmentation catalogue and the
  * GRANTED budget; this reads the probed offers and cash on hand. Two predicates
  * that must not disagree permanently, because a barrier blocking on something
- * factions declines to buy is a deadlock. They converge rather than match exactly:
- * the drain re-plans every tick against the cash that is actually left, so an
- * augmentation the batch passed over this pass is reconsidered as soon as the items
- * ahead of it have been bought and the budget has shrunk to fit it. Any change here
- * has to preserve that, not just the field list.
+ * factions declines to buy is a deadlock. They converge rather than match
+ * exactly: the drain freezes a funded order, then removes each completed
+ * purchase from that order. Any change here has to preserve that convergence,
+ * not just the field list.
  *
  * `offers` spans every faction the NODE defines, joined or not. Owned
  * non-repeatables are filtered while repeatable NeuroFlux remains, so
@@ -190,11 +189,20 @@ export function augCost(
  * independently, which is reassuring. */
 export type ObjectiveWeights = Record<string, number>;
 
+export interface RouteWeightContext {
+  /** Route skill levels that installed augmentations must make reachable. */
+  hackingTarget?: number;
+  combatTarget?: number;
+  /** Already-active stat multipliers. The marginal value of another direct
+   * multiplier falls as this base grows (notably across SF12 stress levels). */
+  multipliers?: Readonly<Record<string, number>>;
+}
+
 /** Named special cases, in log space. These are effects the multiplier fields
  * do not express at all, so without them the planner cannot see why anyone
  * would buy The Red Pill. */
 export const AUG_BONUS: Record<string, number> = {
-  // Ends the BitNode. Nothing else in the game does that.
+  // Route marker for the faction paths that require The Red Pill.
   "The Red Pill": 9,
   // A one-off $1m and a free port opener on a fresh run.
   "CashRoot Starter Kit": 0.05,
@@ -209,6 +217,16 @@ export const AUG_BONUS: Record<string, number> = {
  * predecessor scripts apply `sqrt` to the multiplier; in log space that is
  * exactly a factor of 0.5 on the contribution, which is how it lands here. */
 const EXP_DISCOUNT = 0.5;
+
+/** Route value of one distinct slot in a finite installed-augmentation gate.
+ * Early slots are nearly the whole objective; near closure, multiplier quality
+ * must break ties between the scarce remaining candidates. The floor keeps a
+ * mechanically required slot material without letting cheap filler dominate
+ * a high-impact augmentation. Infinite/no-count routes receive no flat bonus. */
+export function countSlotWeight(target: number, remaining: number): number {
+  if (!Number.isFinite(target) || target <= 0 || remaining <= 0) return 0;
+  return Math.max(1 / 5, Math.min(1, remaining / target));
+}
 
 /** Fields multiplied by CONSTANTS.EntropyEffect for each completed graft in
  * v3.0.1's `calculateEntropy`.
@@ -273,12 +291,12 @@ export function defaultWeights(): ObjectiveWeights {
   return {
     hacking: 1,
     hacking_exp: 1,
-    hacking_chance: 0.6,
+    hacking_chance: 0.5,
     hacking_speed: 1,
-    hacking_money: 1,
-    hacking_grow: 0.4,
-    faction_rep: 0.8,
-    company_rep: 0.3,
+    hacking_money: 0.5,
+    hacking_grow: 0.5,
+    faction_rep: 2,
+    company_rep: 2,
     crime_money: 0.2,
     crime_success: 0.2,
     charisma: 0.1,
@@ -300,7 +318,12 @@ export function defaultWeights(): ObjectiveWeights {
  * The count objective remains route-independent; this only breaks ties toward
  * augmentations that accelerate the chosen finish. */
 export function weightsForRoute(
-  route: "daedalus" | "labyrinth" | "bladeburner" | undefined,
+  route: "daedalus" | "gang" | "labyrinth" | "bladeburner" | undefined,
+  /** Critical alternative selected by the measured route ETA. Daedalus can
+   * invite through hacking OR combat; feeding the selected branch back into
+   * augmentation scoring keeps the feature plan aligned with the forecast. */
+  focus?: "hacking" | "combat",
+  context?: RouteWeightContext,
 ): ObjectiveWeights {
   const weights = defaultWeights();
   if (route === "bladeburner") {
@@ -312,14 +335,59 @@ export function weightsForRoute(
     weights.defense = 0.5;
     weights.dexterity = 0.5;
     weights.agility = 0.5;
-  } else if (route === "daedalus") {
+  } else if (route === "daedalus" || route === "gang") {
     weights.hacking = 1.2;
     weights.hacking_exp = 1.2;
-    weights.faction_rep = 1.2;
+    weights.faction_rep = 2.5;
+    if (context?.hackingTarget !== undefined) {
+      // skill = m * (32 ln(exp + 534.6) - 200). Around a high target,
+      // -d ln(requiredExp) / d ln(m) = target / (32m): direct skill
+      // multipliers are exponentially more valuable than an ordinary output
+      // multiplier. This is the local time-to-gate sensitivity, not a BN1
+      // bonus, and naturally declines when SF12 or prior augs make m large.
+      const active = Math.max(1e-9, context.multipliers?.["hacking"] ?? 1);
+      weights.hacking = Math.max(weights.hacking, context.hackingTarget / (32 * active));
+    }
+    if (route === "daedalus" && focus === "combat") {
+      // Combat only clears the invitation; hacking is still mandatory after
+      // The Red Pill install. Raise the four balanced combat dimensions
+      // without erasing the terminal hacking objective.
+      weights.strength = 0.5;
+      weights.defense = 0.5;
+      weights.dexterity = 0.5;
+      weights.agility = 0.5;
+      weights.strength_exp = 0.5;
+      weights.defense_exp = 0.5;
+      weights.dexterity_exp = 0.5;
+      weights.agility_exp = 0.5;
+      if (context?.combatTarget !== undefined) {
+        // Gym work trains the four required stats sequentially. Attribute an
+        // equal quarter of the gate-time sensitivity to each dimension; augs
+        // covering several stats then receive the corresponding combined
+        // value, while one-stat augs cannot masquerade as clearing the gate.
+        for (const skill of ["strength", "defense", "dexterity", "agility"] as const) {
+          const active = Math.max(1e-9, context.multipliers?.[skill] ?? 1);
+          weights[skill] = Math.max(weights[skill] ?? 0, context.combatTarget / (128 * active));
+        }
+      }
+    }
   } else if (route === "labyrinth") {
     weights.hacking = 1.1;
     weights.hacking_speed = 1.1;
     weights.dnet_money = 0.8;
+  }
+  // Sensitivities are relative preferences, not a new value currency. The
+  // renewal cadence compares accrued value with a value/sec frontier and the
+  // count heuristic contributes in these same units; multiplying the whole
+  // objective made tiny packages trigger premature resets. Preserve the
+  // route's original positive-weight budget while redistributing it toward
+  // the nonlinear critical skill.
+  if (context?.hackingTarget !== undefined || context?.combatTarget !== undefined) {
+    const baseline = weightsForRoute(route, focus);
+    const total = (source: ObjectiveWeights) => Object.values(source)
+      .reduce((sum, weight) => sum + Math.max(0, weight), 0);
+    const scale = total(weights) > 0 ? total(baseline) / total(weights) : 1;
+    for (const field of Object.keys(weights)) weights[field] = weights[field]! * scale;
   }
   return weights;
 }
@@ -427,6 +495,172 @@ export function orderPurchases(
     : improveOrder(greedyOrder(candidates), candidates, ctx);
 }
 
+/** Minimum-cost order for a fixed one-shot set plus a fixed number of
+ * NeuroFlux levels. NeuroFlux is a chain (level n must precede n+1), while
+ * ordinary prerequisites form a DAG. Keeping the NFG counter beside the
+ * one-shot subset is enough to solve both exactly: price depends only on the
+ * number of non-SoA purchases already placed and the current NFG level.
+ *
+ * This exists separately from {@link orderPurchases} because duplicate NFG
+ * names are real purchases, whereas ordinary candidate identity is its name.
+ * Above the exact one-shot limit a deterministic ready-most-expensive
+ * heuristic preserves the same semantics without threatening the planner's
+ * tick budget. */
+export function orderPurchasesWithNeuroflux(
+  candidates: readonly PurchaseCandidate[],
+  neuroflux: PurchaseCandidate,
+  neurofluxCount: number,
+  ctx: PriceContext,
+): PurchaseCandidate[] {
+  const levels = Math.max(0, Math.floor(neurofluxCount));
+  if (levels === 0) return orderPurchases(candidates, ctx);
+  if (candidates.length <= EXACT_ORDER_LIMIT) return neurofluxOrdersByLevel(candidates, neuroflux, levels, ctx)[levels]!;
+  return greedyNeurofluxOrder(candidates, neuroflux, levels, ctx);
+}
+
+/** Optimal orders for EVERY NeuroFlux level count from 0 to `maxLevels`.
+ *
+ * One solve answers them all: the DP state already carries the level counter,
+ * so the terminal state at each `nfg` IS the optimum for exactly that many
+ * levels. The drain's affordability search wants the largest fundable count,
+ * and calling the exponential solver once per candidate level re-derived every
+ * cheaper answer from scratch — tens of 2^n * levels sweeps per controller
+ * pass, at the one moment the run is most time-critical. */
+export function orderPurchasesWithNeurofluxByLevel(
+  candidates: readonly PurchaseCandidate[],
+  neuroflux: PurchaseCandidate,
+  maxLevels: number,
+  ctx: PriceContext,
+): PurchaseCandidate[][] {
+  const levels = Math.max(0, Math.floor(maxLevels));
+  if (candidates.length <= EXACT_ORDER_LIMIT && levels > 0) {
+    return neurofluxOrdersByLevel(candidates, neuroflux, levels, ctx);
+  }
+  return Array.from({ length: levels + 1 }, (_unused, count) =>
+    orderPurchasesWithNeuroflux(candidates, neuroflux, count, ctx));
+}
+
+/** Ready-most-expensive heuristic used above the exact one-shot limit. */
+function greedyNeurofluxOrder(
+  candidates: readonly PurchaseCandidate[],
+  neuroflux: PurchaseCandidate,
+  levels: number,
+  ctx: PriceContext,
+): PurchaseCandidate[] {
+  const remaining = new Map(candidates.map((candidate) => [candidate.name, candidate]));
+  const inSet = new Set(remaining.keys());
+  const placed = new Set<string>();
+  const order: PurchaseCandidate[] = [];
+  let nfgPlaced = 0;
+  while (remaining.size > 0 || nfgPlaced < levels) {
+    const ready = [...remaining.values()].filter((candidate) =>
+      candidate.aug.prereqs.every((prereq) => !inSet.has(prereq) || placed.has(prereq)),
+    );
+    let best = nfgPlaced < levels ? neuroflux : undefined;
+    let bestCost = best
+      ? augCost(best.aug, { ...ctx, neurofluxLevel: ctx.neurofluxLevel + nfgPlaced }, order.filter((item) => !isSoA(item.name)).length).moneyCost
+      : -Infinity;
+    for (const candidate of ready) {
+      const cost = augCost(candidate.aug, ctx, order.filter((item) => !isSoA(item.name)).length).moneyCost;
+      if (cost > bestCost || (cost === bestCost && best && candidate.name < best.name)) {
+        best = candidate;
+        bestCost = cost;
+      }
+    }
+    if (!best) break;
+    order.push(best);
+    if (best.name === NEUROFLUX) nfgPlaced++;
+    else {
+      placed.add(best.name);
+      remaining.delete(best.name);
+    }
+  }
+  return order;
+}
+
+/** The exact solve, shared by both entry points. Returns one order per level
+ * count in `0..levels`. */
+function neurofluxOrdersByLevel(
+  candidates: readonly PurchaseCandidate[],
+  neuroflux: PurchaseCandidate,
+  levels: number,
+  ctx: PriceContext,
+): PurchaseCandidate[][] {
+  const size = candidates.length;
+  const masks = 1 << size;
+  const stride = levels + 1;
+  const states = masks * stride;
+  const index = new Map(candidates.map((candidate, i) => [candidate.name, i]));
+  const needs = candidates.map((candidate) => {
+    let mask = 0;
+    for (const prereq of candidate.aug.prereqs) {
+      const at = index.get(prereq);
+      if (at !== undefined) mask |= 1 << at;
+    }
+    return mask;
+  });
+  const nonSoAMask = candidates.reduce(
+    (mask, candidate, i) => isSoA(candidate.name) ? mask : mask | (1 << i),
+    0,
+  );
+  const popcount = new Uint8Array(masks);
+  for (let mask = 1; mask < masks; mask++) popcount[mask] = popcount[mask >> 1]! + (mask & 1);
+
+  const best = new Float64Array(states).fill(Infinity);
+  const from = new Int16Array(states).fill(-2);
+  best[0] = 0;
+  for (let mask = 0; mask < masks; mask++) {
+    for (let nfg = 0; nfg <= levels; nfg++) {
+      const at = mask * stride + nfg;
+      const sofar = best[at]!;
+      if (!Number.isFinite(sofar)) continue;
+      const queuedOffset = popcount[mask & nonSoAMask]! + nfg;
+      if (nfg < levels) {
+        const next = at + 1;
+        const cost = augCost(
+          neuroflux.aug,
+          { ...ctx, neurofluxLevel: ctx.neurofluxLevel + nfg },
+          queuedOffset,
+        ).moneyCost;
+        if (sofar + cost < best[next]!) {
+          best[next] = sofar + cost;
+          from[next] = -1;
+        }
+      }
+      for (let i = 0; i < size; i++) {
+        if ((mask & (1 << i)) !== 0 || (needs[i]! & mask) !== needs[i]!) continue;
+        const next = (mask | (1 << i)) * stride + nfg;
+        const cost = augCost(candidates[i]!.aug, ctx, queuedOffset).moneyCost;
+        if (sofar + cost < best[next]!) {
+          best[next] = sofar + cost;
+          from[next] = i;
+        }
+      }
+    }
+  }
+
+  // Each terminal state (every one-shot bought, `count` levels placed) is the
+  // optimum for exactly that count, so one solve reconstructs them all.
+  return Array.from({ length: levels + 1 }, (_unused, count) => {
+    const order: PurchaseCandidate[] = [];
+    let mask = masks - 1;
+    let nfg = count;
+    while (mask !== 0 || nfg !== 0) {
+      const action = from[mask * stride + nfg]!;
+      if (action === -1) {
+        order.push(neuroflux);
+        nfg--;
+      } else if (action >= 0) {
+        order.push(candidates[action]!);
+        mask &= ~(1 << action);
+      } else {
+        return [...orderPurchases(candidates, ctx), ...Array.from({ length: count }, () => neuroflux)];
+      }
+    }
+    return order.reverse();
+  });
+}
+
 /** Cost of placing `index` when exactly the items in `mask` are already
  * bought. Depends only on the SET, which is what makes the DP valid. */
 function costAt(
@@ -514,13 +748,10 @@ function exactOrder(candidates: readonly PurchaseCandidate[], ctx: PriceContext)
  * should not veto every cheaper augmentation behind it. Its dependants go with it,
  * since an augmentation whose prerequisite was dropped cannot be bought at all.
  *
- * NeuroFlux is deliberately not a candidate here. It is the residual sink — bought
- * repeatedly with whatever survives the batch, so its count is not known until the
- * money runs out, and its levels form a forced ascending-price chain that cannot
- * be reordered. The drain re-plans each tick and buys NeuroFlux once the one-offs
- * are done. That is a simplification: at high levels NeuroFlux is dear enough that
- * it would ideally interleave into the batch rather than follow it, which costs at
- * most part of one level's escalation. */
+ * NeuroFlux is deliberately not a candidate here because its repeatable levels
+ * need an additional state dimension. The final sweep chooses a funded level
+ * count separately, then {@link orderPurchasesWithNeuroflux} jointly orders
+ * those levels with the accepted one-shot set. */
 export function selectAffordableBatch(input: {
   candidates: readonly PurchaseCandidate[];
   owned: ReadonlySet<string>;

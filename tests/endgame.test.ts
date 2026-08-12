@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { bitNodeMultipliers, effectiveBitNodeMultipliers } from "../shared/features/bitnode.ts";
 import {
   BLACK_OP_COUNT,
+  LABYRINTH_AUGMENTATIONS,
+  RED_PILL,
   daedalusAugsRequired,
   labyrinthOffersRedPill,
   stepEndgame,
@@ -44,6 +46,40 @@ describe("endgame routes", () => {
     expect(d.best!.blocker).toContain("install");
   });
 
+  test("a banked Red Pill makes its end-loaded transaction route-mandatory", () => {
+    const daedalus = stepEndgame(view({
+      augCount: 30,
+      money: 100e9,
+      hackingSkill: 3000,
+      daedalusRep: 2_500_000,
+      queuedAugs: [RED_PILL],
+      ownsRedPill: false,
+    })).routes.find((route) => route.id === "daedalus")!;
+
+    expect(daedalus).toMatchObject({
+      stage: "red-pill-install",
+      mandatoryInstall: { augmentation: RED_PILL, ready: true },
+    });
+    expect(daedalus.complete).toBe(false);
+  });
+
+  test("the BN2 gang route also treats its banked Red Pill as mandatory", () => {
+    const gang = stepEndgame(view({
+      bitNode: 2,
+      gangAvailable: true,
+      inGang: true,
+      gangFaction: "Slum Snakes",
+      gangFactionRep: 2_500_000,
+      queuedAugs: [RED_PILL],
+      ownsRedPill: false,
+    })).routes.find((route) => route.id === "gang")!;
+
+    expect(gang).toMatchObject({
+      stage: "red-pill-install",
+      mandatoryInstall: { augmentation: RED_PILL, ready: true },
+    });
+  });
+
   test("the install resets the skill, so the regrow is a distinct phase", () => {
     // Exactly the trap: pill owned AND installed, but hacking is back at 1.
     const d = stepEndgame(
@@ -60,6 +96,18 @@ describe("endgame routes", () => {
     );
     expect(d.awaitingRegrow).toBe(false);
     expect(d.routes.find((r) => r.id === "daedalus")!.complete).toBe(true);
+  });
+
+  test("the Red Pill route also waits for admin rights on the world daemon", () => {
+    const d = stepEndgame(view({
+      ownsRedPill: true,
+      redPillInstalled: true,
+      hackingSkill: 3_000,
+      worldDaemonRooted: false,
+    }));
+    const daedalus = d.routes.find((route) => route.id === "daedalus")!;
+    expect(daedalus).toMatchObject({ complete: false, stage: "world-daemon-root" });
+    expect(daedalus.blocker).toContain("root");
   });
 
   test("Daedalus accepts the combat branch, not only hacking", () => {
@@ -91,8 +139,127 @@ describe("endgame routes", () => {
     ).toContain("BN8");
   });
 
+  test("all four mechanical routes are represented, with impossible routes exited early", () => {
+    const bn1 = stepEndgame(view({ bitNode: 1 }));
+    expect(bn1.routes.map((route) => route.id)).toEqual(["daedalus", "gang", "labyrinth", "bladeburner"]);
+    expect(bn1.routes.find((route) => route.id === "gang")!.available).toBe(false);
+
+    const bn2 = stepEndgame(view({ bitNode: 2, gangAvailable: true, inGang: true, gangFaction: "Slum Snakes" }));
+    expect(bn2.routes.find((route) => route.id === "gang")).toMatchObject({
+      available: true,
+      stage: "gang-reputation",
+      optionalInstall: { allowed: true },
+    });
+
+    const bn15 = stepEndgame(view({ bitNode: 15, darknetAvailable: true }));
+    expect(bn15.routes.find((route) => route.id === "daedalus")!.available).toBe(false);
+    expect(bn15.routes.find((route) => route.id === "labyrinth")!.available).toBe(true);
+  });
+
+  test("DarkscapeNavigator access makes the labyrinth real without SF15", () => {
+    const labyrinth = stepEndgame(view({ bitNode: 1, darknetAvailable: true })).routes.find(
+      (route) => route.id === "labyrinth",
+    )!;
+    expect(labyrinth.available).toBe(true);
+  });
+
+  test("labyrinth rewards must be installed in sequence before The Red Pill", () => {
+    const first = stepEndgame(view({ darknetAvailable: true })).routes.find((route) => route.id === "labyrinth")!;
+    expect(first.blocker).toContain(LABYRINTH_AUGMENTATIONS[0]);
+    expect(first.optionalInstall.allowed).toBe(false);
+
+    const queued = stepEndgame(view({
+      darknetAvailable: true,
+      queuedAugs: [LABYRINTH_AUGMENTATIONS[0]],
+    })).routes.find((route) => route.id === "labyrinth")!;
+    expect(queued.mandatoryInstall).toMatchObject({ augmentation: LABYRINTH_AUGMENTATIONS[0], ready: true });
+
+    const allRewards = Object.fromEntries(LABYRINTH_AUGMENTATIONS.map((name) => [name, 1]));
+    const pill = stepEndgame(view({ darknetAvailable: true, installedAugs: allRewards })).routes.find(
+      (route) => route.id === "labyrinth",
+    )!;
+    expect(pill.blocker).toContain(RED_PILL);
+  });
+
+  test("Daedalus's final batch is node-relative and suppresses another partial install", () => {
+    const route = stepEndgame(view({ bitNode: 6, augCount: 24 })).routes.find((candidate) => candidate.id === "daedalus")!;
+    expect(daedalusAugsRequired(6)).toBe(35);
+    expect(route.optionalInstall.allowed).toBe(false);
+    expect(route.optionalInstall.why).toContain("at least 6 of the remaining 11");
+
+    const before = stepEndgame(view({ bitNode: 1, augCount: 9 })).routes.find(
+      (candidate) => candidate.id === "daedalus",
+    )!;
+    expect(before.optionalInstall.allowed).toBe(true);
+    const weakMiddleBatch = stepEndgame(view({
+      bitNode: 1,
+      augCount: 14,
+      queuedAugs: ["banked-a", "banked-b"],
+    })).routes.find((candidate) => candidate.id === "daedalus")!;
+    expect(weakMiddleBatch.optionalInstall.allowed).toBe(false);
+    expect(weakMiddleBatch.optionalInstall.why).toContain("at least 8 of the remaining 16");
+
+    const substantialMiddleBatch = stepEndgame(view({
+      bitNode: 1,
+      augCount: 14,
+      queuedAugs: Array.from({ length: 8 }, (_, index) => `middle-${index}`),
+    })).routes.find((candidate) => candidate.id === "daedalus")!;
+    expect(substantialMiddleBatch.optionalInstall.allowed).toBe(true);
+
+    const weakLateBatch = stepEndgame(view({
+      bitNode: 1,
+      augCount: 20,
+      queuedAugs: ["late-a", "late-b", "late-c"],
+    })).routes.find((candidate) => candidate.id === "daedalus")!;
+    expect(weakLateBatch.optionalInstall.allowed).toBe(false);
+    expect(weakLateBatch.optionalInstall.why).toContain("at least 5 of the remaining 10");
+
+    const substantialLateBatch = stepEndgame(view({
+      bitNode: 1,
+      augCount: 16,
+      queuedAugs: Array.from({ length: 9 }, (_, index) => `substantial-${index}`),
+    })).routes.find((candidate) => candidate.id === "daedalus")!;
+    // A substantial middle batch remains valid even when it lands inside the
+    // closing quarter. The NEXT cycle starts there and must close completely;
+    // this distinguishes 16 -> 25 from the bad 20 -> 23 tiny reset.
+    expect(substantialLateBatch.optionalInstall.allowed).toBe(true);
+
+    const gateClosingBatch = stepEndgame(view({
+      bitNode: 1,
+      augCount: 16,
+      queuedAugs: Array.from({ length: 14 }, (_, index) => `closing-${index}`),
+    })).routes.find((candidate) => candidate.id === "daedalus")!;
+    expect(gateClosingBatch.optionalInstall.allowed).toBe(true);
+
+    const incompleteClosingBatch = stepEndgame(view({
+      bitNode: 1,
+      augCount: 26,
+      queuedAugs: ["closing-a", "closing-b"],
+    })).routes.find((candidate) => candidate.id === "daedalus")!;
+    expect(incompleteClosingBatch.optionalInstall.allowed).toBe(false);
+    expect(incompleteClosingBatch.optionalInstall.why).toContain("at least 4 of the remaining 4");
+
+    const completeClosingBatch = stepEndgame(view({
+      bitNode: 1,
+      augCount: 26,
+      queuedAugs: ["closing-a", "closing-b", "closing-c", "closing-d"],
+    })).routes.find((candidate) => candidate.id === "daedalus")!;
+    expect(completeClosingBatch.optionalInstall.allowed).toBe(true);
+  });
+
+  test("faction-reputation routes let the cadence trade current rep for favor", () => {
+    const daedalus = stepEndgame(view({
+      augCount: 30,
+      money: 100e9,
+      hackingSkill: 2_500,
+      daedalusRep: 1_000_000,
+    })).routes.find((route) => route.id === "daedalus")!;
+    expect(daedalus).toMatchObject({ stage: "red-pill-reputation", optionalInstall: { allowed: true } });
+    expect(daedalus.optionalInstall.why).toContain("favor");
+  });
+
   test("a finished labyrinth run is not credited to Daedalus", () => {
-    // Both Red Pill routes share a tail, so `complete` is true for both once
+    // All Red Pill routes share a tail, so `complete` is true once
     // the pill is in. The explanation must not invent an acquisition history.
     const d = stepEndgame(
       view({

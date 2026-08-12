@@ -3,6 +3,7 @@ import type { AugInfo, ObjectiveWeights, PriceContext } from "./augs.ts";
 import type { RepContext, RepPerson, WorkType } from "./rep.ts";
 import type { RequirementView } from "./requirements.ts";
 import type { RouteId } from "../progression/endgame.ts";
+import type { FeatureId } from "../../features/ids.ts";
 
 /** The flat snapshot `stepFactions` decides from.
  *
@@ -34,6 +35,9 @@ export interface FactionsView {
 
   person: RepPerson & { skills: Record<string, number> };
   requirementView: RequirementView;
+  /** Requirement owners that can still act in this run. Absent preserves the
+   * ordinary all-features assumption used by pure callers. */
+  availableOwners?: ReadonlySet<FeatureId>;
   repContext: RepContext;
   priceContext: PriceContext;
 
@@ -56,6 +60,9 @@ export interface FactionsView {
   route?: RouteId;
   /** Remaining time in which a package can pay off. */
   horizonSec: number;
+  /** Elapsed seconds since the current augmentation prestige. Incremental
+   * post-plan work is capped as a fraction of this measured cycle length. */
+  installCycleSec?: number;
   /** The permanent augmentation-count target. Infinity means "take as many as
    * the horizon permits" rather than inventing a count target. */
   targetAugCount: number;
@@ -67,6 +74,8 @@ export interface FactionsView {
    * (published installWanted). This feature must conclude: stop pushing the
    * objective and run the final sweep with the reputation already banked. */
   installRequested?: boolean;
+  /** The selected high-level route itself requires this reset now. */
+  routeInstallRequired?: boolean;
   /** Money the arbiter granted the AUGMENTATION FUND this tick — the per-claim
    * amount, never the feature's summed grants (a travel grant must not top up
    * a purchase). */

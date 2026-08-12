@@ -399,6 +399,11 @@
       "sha256": "dc70147f7dfb5c5bc6acf9edc840c2debbcd73f78106dab80cff1d18cb64a1da"
     },
     {
+      "path": "src/Company/data/JobTracks.ts+src/Company/data/CompanyPositionsMetadata.ts+src/Company/data/CompaniesMetadata.ts#COMPANY_TABLE",
+      "output": "src/Company/CompanyTable.ts",
+      "sha256": "fd5cf3d6495e335796e5283ac19680f39db8d7813f46d080a4cd5efc4dd512c2"
+    },
+    {
       "path": "src/Faction/FactionJoinCondition.ts+src/Faction/FactionInfo.tsx#FACTION_TABLE",
       "output": "src/Faction/FactionTable.ts",
       "sha256": "4e70c86f6c6453e585b8703e6341061736012cb4412bdebf64054768c074f1b4"

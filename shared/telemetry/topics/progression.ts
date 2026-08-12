@@ -3,6 +3,7 @@ import type { FeatureId } from "../../features/ids.ts";
 import type { DenyReason, ResourceId } from "../../strategy/arbiter.ts";
 import type { NeedKind, NeedUrgency } from "../../strategy/needs.ts";
 import type { PlanningHorizons } from "../../strategy/progression/forecast.ts";
+import type { OptionalInstallPolicy, RouteId, RouteNeed } from "../../strategy/progression/endgame.ts";
 
 /** Progression feature — the meta layer. Problem: pick the destroy order and
  * the augmentation/reset cadence that minimises total wall-clock to a target
@@ -119,6 +120,10 @@ export interface ProgressionPlan {
   installBlockers: { kind: "factions" | "stock" | "graft" | "augmentations" }[];
   /** Every reset-sensitive subsystem has acknowledged readiness. */
   installReady: boolean;
+  /** Route mechanics require the current final sweep/reset. This is broader
+   * than a queued route reward: Daedalus also needs the count-finishing batch
+   * installed before its invitation can exist. */
+  routeInstallRequired?: boolean;
   /** First safe pass has been published; execution occurs on the next pass. */
   installArmedAt?: number;
   /** Exact queue the armed transaction revalidates before executing. */
@@ -146,11 +151,28 @@ export interface ProgressionPlan {
     remainingSec?: number;
     latched: boolean;
   };
+  /** Terminal action once the selected route is mechanically complete. The
+   * source-file policy is explicit so a reset log can explain why that next
+   * node was chosen. */
+  completion?: {
+    ready: boolean;
+    automatic: boolean;
+    nextBitNode: number;
+    targetLevel: number;
+    why: string;
+    armedAt?: number;
+    execute: boolean;
+  };
+  /** Immediate, reversible route bootstrap owned by progression because it is
+   * selected by the high-level route rather than by a feature-local optimum. */
+  routeAction?:
+    | { type: "joinBladeburner"; why: string }
+    | { type: "createGang"; faction: string; why: string };
   /** The chosen way to finish this BitNode, with the estimate it was chosen
    *  on. Everything below is the decision record the calibration loop reads
    *  back out of runs/*.jsonl: which route, guessed for how long, decided
    *  when — matched at the node reset against what actually happened. */
-  route?: "daedalus" | "labyrinth" | "bladeburner";
+  route?: RouteId;
   /** When the current route was chosen (survives refreshes that keep it). */
   decidedAt?: number;
   /** Every route's estimate with its per-part breakdown, so a wrong total can
@@ -162,8 +184,11 @@ export interface ProgressionPlan {
 }
 
 export interface RouteEtaDigest {
-  id: "daedalus" | "labyrinth" | "bladeburner";
+  id: RouteId;
   available: boolean;
+  /** False means game mechanics permit it, but this controller cannot safely
+   * execute it yet; it remains visible but is excluded from route choice. */
+  actionable?: boolean;
   complete: boolean;
   /** The single next thing this route is waiting on (from stepEndgame). */
   blocker: string;
@@ -171,4 +196,8 @@ export interface RouteEtaDigest {
   /** `measured: false` marks a fallback constant rather than an observed
    *  rate — the calibration loop treats the two kinds of error differently. */
   parts: { what: string; resource: string; sec: number; measured: boolean }[];
+  stage?: string;
+  needs?: RouteNeed[];
+  nextMandatoryInstall?: { sec: number; measured: boolean; why: string };
+  optionalInstall?: OptionalInstallPolicy;
 }

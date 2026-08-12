@@ -66,6 +66,24 @@ export function fleetDodgeReserveGb(result: ReserveResult): number {
   return dynamicStepGb + STUB_BASE_GB;
 }
 
+/** Contiguous heap reservation required to execute one action whose claim is
+ * the dynamic Netscript API cost. The executable itself is RAM too, and a
+ * small placement margin prevents a nominally exact block losing to ledger
+ * rounding/churn before `ns.exec` runs. */
+export function executableDodgeReserveGb(dynamicGb: number, safetyGb = 0.5): number {
+  return Math.max(0, dynamicGb) + STUB_BASE_GB + Math.max(0, safetyGb);
+}
+
+/** Executable footprint of the largest operation currently starved for RAM. */
+export function starvationDodgeReserveGb(
+  probeCosts: readonly number[],
+  deniedActionGb: number,
+  safetyGb = 0.5,
+): number {
+  const dynamicGb = Math.max(0, deniedActionGb, ...probeCosts.map((cost) => Math.max(0, cost)));
+  return dynamicGb > 0 ? executableDodgeReserveGb(dynamicGb, safetyGb) : 0;
+}
+
 export function homeReserveGb(input: ReserveInput): ReserveResult {
   const base = input.base ?? HOME_RESERVE_GB;
   const enabled = new Set(input.enabled);

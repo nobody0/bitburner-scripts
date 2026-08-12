@@ -3,6 +3,7 @@ import {
   NEUROFLUX,
   augCost,
   closePrereqs,
+  countSlotWeight,
   estimatedCost,
   scoreAug,
   type AugInfo,
@@ -41,13 +42,19 @@ export interface PackageSelection {
 }
 
 const ROUTE_MANDATORY_VALUE = 100;
-/** Until it is installed, CashRoot is persistent bootstrap infrastructure:
- * the kit restores $1m and BruteSSH after every augmentation reset. A
- * currently owned BruteSSH is deliberately irrelevant because ordinary
- * programs disappear at that reset â€” it is precisely the next cold start
- * that this augmentation prevents. */
-const CASHROOT_BOOTSTRAP_VALUE = 1_000;
-
+/** CashRoot persists across installs and replaces the first $1m plus BruteSSH
+ * bootstrap, but remains comparable to an augmentation slot. */
+const CASHROOT_BOOTSTRAP_VALUE = 0.5;
+/** Favor is a smooth rate multiplier except at the donation crossing. Sampling
+ * every integer up to a horizon-derived maximum made one strategy pass grow
+ * from milliseconds to seconds when a noisy long-node ETA appeared. Keep the
+ * discontinuity exact and approximate the smooth curve with a fixed budget. */
+export const MAX_FAVOR_BREAKPOINTS = 8;
+// One WorldView is immutable for one strategy pass. Faction frontiers revisit
+// the same augmentation hundreds of times (breakpoints, residual runners and
+// ordering ties), so scoring its static multiplier vector each time only burns
+// the controller's planning budget without changing a decision.
+const ROUTE_SCORE_CACHE = new WeakMap<FactionsView, Map<string, number>>();
 function cycleCompatible(standing: FactionStanding, standings: readonly FactionStanding[]): boolean {
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L35-L51
   if (standing.joined) return true;
@@ -59,16 +66,20 @@ function cycleCompatible(standing: FactionStanding, standings: readonly FactionS
 }
 
 function routeAwareScore(aug: AugInfo, view: FactionsView): number {
-  // The Red Pill's terminal bonus belongs only to the Daedalus acquisition
-  // route. It is still allowed to count as an ordinary augmentation elsewhere,
-  // but must not drag a labyrinth/Bladeburner run through Daedalus.
-  if (aug.name === "The Red Pill" && view.route && view.route !== "daedalus") return 0;
+  let cache = ROUTE_SCORE_CACHE.get(view);
+  if (!cache) {
+    cache = new Map();
+    ROUTE_SCORE_CACHE.set(view, cache);
+  }
+  const cached = cache.get(aug.name);
+  if (cached !== undefined) return cached;
+  // The Red Pill's terminal bonus belongs to a faction acquisition route. It
+  // must not drag a labyrinth/Bladeburner run through an unrelated faction.
+  if (aug.name === "The Red Pill" && view.route && view.route !== "daedalus" && view.route !== "gang") return 0;
   let value = Math.max(0, scoreAug(aug, view.weights));
-  if (aug.name === "The Red Pill" && view.route === "daedalus") value += ROUTE_MANDATORY_VALUE;
-  if (
-    aug.name === "CashRoot Starter Kit"
-    && !view.owned.has(aug.name)
-  ) value += CASHROOT_BOOTSTRAP_VALUE;
+  if (aug.name === "The Red Pill" && (view.route === "daedalus" || view.route === "gang")) value += ROUTE_MANDATORY_VALUE;
+  if (aug.name === "CashRoot Starter Kit" && !view.owned.has(aug.name)) value += CASHROOT_BOOTSTRAP_VALUE;
+  cache.set(aug.name, value);
   return value;
 }
 
@@ -98,7 +109,15 @@ function usableAt(
 }
 
 function candidateCost(faction: string, augs: readonly AugInfo[], view: FactionsView): number {
-  const order = closePrereqs(augs.map((aug) => aug.name), view.catalog, view.owned);
+  // `closePrereqs` normally removes owned augmentations. NeuroFlux is the
+  // exception: the next level remains purchasable after the name is owned,
+  // and its 1.14^level + queue-scaled price is the whole cost of this
+  // repeatable breakpoint. Treating it as already satisfied made every later
+  // NFG package cost $0 with a 1-second ETA, an infinite-looking marginal
+  // frontier that could veto installs forever.
+  const closureOwned = new Set(view.owned);
+  if (augs.some((aug) => aug.name === NEUROFLUX)) closureOwned.delete(NEUROFLUX);
+  const order = closePrereqs(augs.map((aug) => aug.name), view.catalog, closureOwned);
   const candidates: PurchaseCandidate[] = order.flatMap((name) => {
     const aug = view.catalog.get(name);
     return aug ? [{ name, aug, faction }] : [];
@@ -122,15 +141,42 @@ function remainingGoal(view: FactionsView): number {
   return Math.max(0, view.targetAugCount - view.owned.size);
 }
 
-function packageValue(
+/** Favor only pays after an install. Once the selected route's final-batch
+ * policy forbids another partial reset, favor earned now cannot accelerate
+ * acquisition of the remaining count package; it activates at the same reset
+ * that finishes the gate. This mirrors progression's route-relative half-gate
+ * without introducing a BitNode-specific constant. */
+function favorCanActivateBeforeGoal(view: FactionsView): boolean {
+  return !Number.isFinite(view.targetAugCount)
+    || view.requirementView.augCount < Math.ceil(view.targetAugCount / 2);
+}
+
+function packageValues(
   augs: readonly AugInfo[],
   allOffered: readonly AugInfo[],
   standing: FactionStanding,
   favorAfterInstall: number,
   view: FactionsView,
   countGoal = remainingGoal(view),
-): number {
-  const count = Math.min(augs.length, countGoal);
+): { total: number; activation: number } {
+  // Repeatable NFG levels are multiplier value, not one fresh permanent
+  // augmentation apiece. The first level can fill one Daedalus count slot;
+  // later levels cannot because the game stores installed NFG as one entry.
+  const countable = augs.filter(
+    (aug) => aug.name !== NEUROFLUX || (Number.isFinite(view.targetAugCount) && !view.owned.has(NEUROFLUX)),
+  ).length;
+  // Count is ROUTE progress, not one universal value unit per object. Early
+  // in a finite gate it competes at nearly one unit per unique slot; as the
+  // gate fills, scarce closing slots should favor multiplier quality. The
+  // route's batch policy independently guarantees closure, so selection need
+  // not fill the last slots with the cheapest low-value objects. A 1/5 floor
+  // keeps count material beside a normal log-multiplier score. Count stays out
+  // of activationValue/install cadence. Routes with no finite gate get no flat
+  // count bonus at all—the augmentation's real effects are its value there.
+  const countWeight = countSlotWeight(view.targetAugCount, countGoal);
+  const count = Number.isFinite(countGoal) && countGoal > 0
+    ? Math.min(countable, countGoal) * countWeight
+    : 0;
   const quality = augs.reduce((sum, aug) => sum + routeAwareScore(aug, view), 0);
 
   // Favor matters only through future work it can accelerate. Weight the rate
@@ -142,10 +188,15 @@ function packageValue(
   const future = allOffered.filter((aug) => !acquired.has(aug.name)).length;
   const beforeRate = 1 + standing.favor / 100;
   const afterRate = 1 + favorAfterInstall / 100;
-  const futureRateGain = future * Math.max(0, afterRate / beforeRate - 1);
-  const crossesDonation =
-    standing.favor < view.favorToDonate && favorAfterInstall >= view.favorToDonate ? future * 0.5 : 0;
-  return count + quality + futureRateGain + crossesDonation;
+  const favorUseful = favorCanActivateBeforeGoal(view);
+  const futureRateGain = favorUseful ? future * Math.max(0, afterRate / beforeRate - 1) : 0;
+  const crossesDonation = favorUseful
+    && standing.favor < view.favorToDonate
+    && favorAfterInstall >= view.favorToDonate
+      ? future * 0.5
+      : 0;
+  const activation = quality + futureRateGain + crossesDonation;
+  return { total: count + activation, activation };
 }
 
 function targetCandidates(standing: FactionStanding, offered: readonly AugInfo[], view: FactionsView): Map<number, "augmentations" | "favor"> {
@@ -166,23 +217,51 @@ function targetCandidates(standing: FactionStanding, offered: readonly AugInfo[]
   // remaining augmentation ladder and what work/donation can reach inside the
   // current horizon. This lets a dominant faction earn favor beyond donation
   // unlock, but makes the exponential rep curve penalise every extra point.
-  const currentAfterInstall = addRepToFavor(standing.favor, standing.rep);
-  const work = bestWorkType(standing.offers, view.person, standing.favor, view.repContext, true);
-  const workReach = standing.rep + (work?.repPerSec ?? 0) * view.horizonSec;
-  const donationReach = standing.favor >= view.favorToDonate
-    ? standing.rep + repFromDonation(
-        settlingMoney(view),
-        view.person.mults.faction_rep,
-        view.repContext.factionWorkRepGain,
-      )
-    : standing.rep;
-  const reachableRep = Math.min(highestAugRep, Math.max(workReach, donationReach));
-  const reachableFavor = addRepToFavor(standing.favor, reachableRep);
-  const lastFavor = Math.max(Math.ceil(currentAfterInstall), Math.floor(reachableFavor));
-  for (let favor = Math.floor(currentAfterInstall) + 1; favor <= lastFavor; favor++) {
-    const rep = Math.max(0, favorToRep(favor) - favorToRep(standing.favor));
-    if (!Number.isFinite(rep) || rep <= standing.rep) continue;
-    if (!targets.has(rep)) targets.set(rep, "favor");
+  // Favor is a NEXT-cycle accelerator. Before joining a faction it is too
+  // speculative to justify the unlock path by itself: doing so can select a
+  // zero-augmentation package at a deep faction and starve the permanent
+  // augmentations needed by the current route. Unlock an unjoined faction for
+  // an actual augmentation first; after membership, favor competes normally.
+  if ((standing.joined || standing.invited) && favorCanActivateBeforeGoal(view)) {
+    const currentAfterInstall = addRepToFavor(standing.favor, standing.rep);
+    const work = bestWorkType(standing.offers, view.person, standing.favor, view.repContext, true);
+    const workReach = standing.rep + (work?.repPerSec ?? 0) * view.horizonSec;
+    const donationReach = standing.favor >= view.favorToDonate
+      ? standing.rep + repFromDonation(
+          settlingMoney(view),
+          view.person.mults.faction_rep,
+          view.repContext.factionWorkRepGain,
+        )
+      : standing.rep;
+    const reachableRep = Math.min(highestAugRep, Math.max(workReach, donationReach));
+    const reachableFavor = addRepToFavor(standing.favor, reachableRep);
+    const firstFavor = Math.floor(currentAfterInstall) + 1;
+    const lastFavor = Math.max(Math.ceil(currentAfterInstall), Math.floor(reachableFavor));
+    const span = Math.max(0, lastFavor - firstFavor + 1);
+    const sampledFavors = new Set<number>();
+    if (span <= MAX_FAVOR_BREAKPOINTS) {
+      for (let favor = firstFavor; favor <= lastFavor; favor++) sampledFavors.add(favor);
+    } else {
+      // The NEAREST breakpoint is the cheapest and soonest one, and therefore
+      // the only favor target a package can realistically bank before the
+      // install. Sampling from `firstFavor + span/N` upward drops it entirely,
+      // leaving the selection to choose between a favor goal an order of
+      // magnitude further away and no favor at all. Seed it, then spread the
+      // remaining budget over the rest of the reachable span.
+      sampledFavors.add(firstFavor);
+      for (let sample = 1; sample < MAX_FAVOR_BREAKPOINTS; sample++) {
+        sampledFavors.add(Math.round(firstFavor + (lastFavor - firstFavor) * sample / (MAX_FAVOR_BREAKPOINTS - 1)));
+      }
+    }
+    // Donation is the one discontinuity in the otherwise smooth favor curve.
+    if (standing.favor < view.favorToDonate && view.favorToDonate >= firstFavor && view.favorToDonate <= lastFavor) {
+      sampledFavors.add(view.favorToDonate);
+    }
+    for (const favor of [...sampledFavors].sort((a, b) => a - b)) {
+      const rep = Math.max(0, favorToRep(favor) - favorToRep(standing.favor));
+      if (!Number.isFinite(rep) || rep <= standing.rep) continue;
+      if (!targets.has(rep)) targets.set(rep, "favor");
+    }
   }
   return targets;
 }
@@ -198,12 +277,27 @@ export function factionPackageFrontier(
   if (!cycleCompatible(standing, view.factions)) return [];
   if (!standing.joined && !standing.invited && !isReachable(blockers)) return [];
 
-  // NeuroFlux is deliberately not an unlock objective: nearly every faction
-  // offers it, so counting it here makes every otherwise-empty faction appear
-  // valuable. It belongs in the final repeatable purchase sweep.
+  // NFG is a real one-level breakpoint for factions we have already joined:
+  // it may be worth earning its escalating reputation before the final sweep.
+  // It must not justify unlocking an otherwise-useless faction merely because
+  // nearly every ordinary faction sells it. The next refresh naturally offers
+  // the next level with the updated 1.14 rep/money costs.
+  //
+  // One exception is load-bearing for finite count routes. Once NFG is
+  // installed it can never fill another distinct slot, so while the projected
+  // (owned + end-loaded bank) count is still short it must not consume the
+  // player work frontier ahead of distinct augmentations. It remains in the
+  // final sweep as a residual cash sink and returns as a work objective once
+  // the count gate is complete (or on a route with no finite count gate).
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/Augmentations.ts#L1159-L1209
-  const offered = [...view.catalog.values()].filter(
-    (aug) => aug.name !== NEUROFLUX && !view.owned.has(aug.name) && aug.factions.includes(standing.name),
+  const suppressRepeatNfgForCount = Number.isFinite(view.targetAugCount)
+    && remainingGoal(view) > 0
+    && view.owned.has(NEUROFLUX);
+  const offered = [...view.catalog.values()].filter((aug) =>
+    aug.factions.includes(standing.name)
+    && (aug.name === NEUROFLUX
+      ? standing.joined && !suppressRepeatNfgForCount
+      : !view.owned.has(aug.name))
   );
   if (offered.length === 0) return [];
 
@@ -217,7 +311,8 @@ export function factionPackageFrontier(
   for (const [repTarget, purpose] of targets) {
     const augs = usableAt(repTarget, offered, view.owned, view);
     const favorAfterInstall = addRepToFavor(standing.favor, Math.max(standing.rep, repTarget));
-    const value = packageValue(augs, offered, standing, favorAfterInstall, view);
+    const values = packageValues(augs, offered, standing, favorAfterInstall, view);
+    const value = values.total;
     if (value <= 0) continue;
 
     const repGap = Math.max(0, repTarget - standing.rep);
@@ -241,7 +336,23 @@ export function factionPackageFrontier(
     const moneySec = useDonation ? donateMoneySec : workMoneySec;
     const totalCost = purchaseCost + donationCost;
     const etaSec = Math.max(1, Math.min(workEta, donateEta));
-    if (etaSec > view.horizonSec) {
+    // The node horizon is itself estimated from the selected route's terminal
+    // package. Never let small disagreement between that estimator and this
+    // package estimator erase the route objective: doing so creates a circular
+    // veto where The Red Pill falls just outside its own horizon, factions
+    // switches to optional NFG/favor work, and repeated economic installs move
+    // the horizon again without ever advancing the node. Optional packages
+    // still have to repay inside the horizon.
+    const routeMandatory =
+      (view.route === "daedalus" || view.route === "gang")
+      && augs.some((aug) => aug.name === "The Red Pill")
+      && !view.owned.has("The Red Pill")
+      // Before the faction is available, its invite blockers (especially
+      // Daedalus's augmentation-count gate) are the route objective. Ignoring
+      // the horizon at that point would select Red Pill too early and starve
+      // the ordinary packages that satisfy those blockers.
+      && (standing.joined || standing.invited);
+    if (etaSec > view.horizonSec && !routeMandatory) {
       if (stats) stats.horizonDropped++;
       continue;
     }
@@ -251,8 +362,10 @@ export function factionPackageFrontier(
       repTarget,
       augmentations: augs.map((aug) => aug.name),
       value,
+      activationValue: values.activation,
       etaSec,
       marginalRate: 0,
+      marginalActivationRate: 0,
       favorAfterInstall,
       purpose,
       unlockSec: joinSec,
@@ -274,8 +387,13 @@ export function factionPackageFrontier(
     if (pkg.value <= bestValue + 1e-12) continue;
     const previous = frontier.at(-1);
     const marginalValue = pkg.value - (previous?.value ?? 0);
+    const marginalActivationValue = Math.max(
+      0,
+      (pkg.activationValue ?? 0) - (previous?.activationValue ?? 0),
+    );
     const marginalSec = Math.max(1, pkg.etaSec - (previous?.etaSec ?? 0));
     pkg.marginalRate = marginalValue / marginalSec;
+    pkg.marginalActivationRate = marginalActivationValue / marginalSec;
     pkg.why = previous
       ? `${pkg.augmentations.length} augmentation(s) by ${formatNumber(pkg.repTarget)} rep; marginal ${formatScientific(pkg.marginalRate)} value/sec`
       : `${pkg.augmentations.length} augmentation(s) in ${Math.round(pkg.etaSec)}s; ${formatScientific(pkg.rate)} value/sec`;
@@ -317,7 +435,7 @@ function residualPackage(
     .filter((name) => !acquired.has(name))
     .map((name) => view.catalog.get(name))
     .filter((aug): aug is AugInfo => Boolean(aug));
-  const value = packageValue(
+  const values = packageValues(
     residualAugs,
     residualOffered,
     standing,
@@ -333,12 +451,14 @@ function residualPackage(
   return {
     ...pkg,
     augmentations: residualAugs.map((aug) => aug.name),
-    value,
+    value: values.total,
+    activationValue: values.activation,
     etaSec,
     purchaseCost,
     totalCost,
     moneySec,
-    rate: value / etaSec,
+    rate: values.total / etaSec,
+    marginalActivationRate: values.activation / etaSec,
   };
 }
 
@@ -347,13 +467,20 @@ function bestRunner(
   intent: FactionPackage,
   frontiers: ReadonlyMap<string, readonly FactionPackage[]>,
   view: FactionsView,
+  residualCache: Map<string, FactionPackage>,
 ): FactionPackage | undefined {
   const acquired = new Set(intent.augmentations);
+  const acquiredKey = [...acquired].sort().join("\0");
   let best: FactionPackage | undefined;
   for (const [faction, frontier] of frontiers) {
     if (faction === winnerFaction) continue;
     for (const candidate of frontier) {
-      const residual = residualPackage(candidate, acquired, view);
+      const cacheKey = `${faction}\0${candidate.repTarget}\0${acquiredKey}`;
+      let residual = residualCache.get(cacheKey);
+      if (!residual) {
+        residual = residualPackage(candidate, acquired, view);
+        residualCache.set(cacheKey, residual);
+      }
       if (residual.value <= 0) continue;
       if (
         !best ||
@@ -386,39 +513,72 @@ export function selectFactionPackage(
     if (entry) entries.push({ faction: standing.name, ...entry });
   }
   entries.sort((a, b) => b.pkg.rate - a.pkg.rate || b.pkg.value - a.pkg.value || (a.faction < b.faction ? -1 : 1));
-  const winner = entries[0];
+  const terminalPill =
+    (view.route === "daedalus" || view.route === "gang")
+    && !view.owned.has("The Red Pill")
+      ? [...frontiers.entries()]
+          .flatMap(([faction, frontier]) => frontier.map((pkg, index) => ({ faction, pkg, index })))
+          .filter((entry) => {
+            const standing = view.factions.find((candidate) => candidate.name === entry.faction);
+            return (standing?.joined === true || standing?.invited === true)
+              && entry.pkg.augmentations.includes("The Red Pill");
+          })
+          .sort((a, b) => a.pkg.etaSec - b.pkg.etaSec || a.pkg.totalCost - b.pkg.totalCost || (a.faction < b.faction ? -1 : 1))[0]
+      : undefined;
+  // Once the selected faction-acquisition route has a reachable Red Pill
+  // package, it is a route constraint rather than another value/sec bidder.
+  // Optional NFG levels remain real frontier candidates and residual-sweep
+  // purchases, but they may not indefinitely outrank the augmentation that
+  // ends the node merely because the next level is immediately affordable.
+  const winner = terminalPill ?? entries[0];
   if (!winner) return { frontiers, foreclosed: [], ...(stats.horizonDropped > 0 ? { horizonStarved: true } : {}) };
 
   let intent = winner.pkg;
   let intentIndex = winner.index;
   const frontier = frontiers.get(winner.faction)!;
+  const residualCache = new Map<string, FactionPackage>();
+  // Runner opportunity cost is a stopping threshold, not a new global search
+  // at every point on the winner's own concave envelope. Recomputing every
+  // competing residual frontier for each extension made one faction decision
+  // hundreds of milliseconds. The final runner is recomputed once against
+  // the chosen set so shared augmentations are still removed exactly.
+  const entryRunner = terminalPill
+    ? undefined
+    : bestRunner(winner.faction, intent, frontiers, view, residualCache);
   // The raw frontier need not be concave: a small favor breakpoint can sit
   // between two augmentation breakpoints. Comparing only adjacent entries
   // would stop at that weak favor point and never see the valuable augment
   // behind it. Repeatedly take the best secant from the current package; this
   // is the upper concave envelope and is the actual marginal opportunity cost.
-  while (intentIndex + 1 < frontier.length) {
-    const runner = bestRunner(winner.faction, intent, frontiers, view);
-    const runnerRate = runner?.rate ?? 0;
-    let bestExtension: { pkg: FactionPackage; index: number; rate: number } | undefined;
+  while (!terminalPill && intentIndex + 1 < frontier.length) {
+    const runnerRate = entryRunner?.rate ?? 0;
+    let bestExtension: { pkg: FactionPackage; index: number; rate: number; activationRate: number } | undefined;
     for (let index = intentIndex + 1; index < frontier.length; index++) {
       const pkg = frontier[index]!;
-      const rate = (pkg.value - intent.value) / Math.max(1, pkg.etaSec - intent.etaSec);
+      const extensionSec = Math.max(1, pkg.etaSec - intent.etaSec);
+      const rate = (pkg.value - intent.value) / extensionSec;
+      const activationRate = Math.max(0, (pkg.activationValue ?? 0) - (intent.activationValue ?? 0)) / extensionSec;
       if (!bestExtension || rate > bestExtension.rate || (rate === bestExtension.rate && index > bestExtension.index)) {
-        bestExtension = { pkg, index, rate };
+        bestExtension = { pkg, index, rate, activationRate };
       }
     }
     if (!bestExtension || bestExtension.rate + 1e-12 < runnerRate) break;
-    intent = { ...bestExtension.pkg, marginalRate: bestExtension.rate };
+    intent = {
+      ...bestExtension.pkg,
+      marginalRate: bestExtension.rate,
+      marginalActivationRate: bestExtension.activationRate,
+    };
     intentIndex = bestExtension.index;
   }
-  const runner = bestRunner(winner.faction, intent, frontiers, view);
+  const runner = bestRunner(winner.faction, intent, frontiers, view, residualCache);
   const runnerRate = runner?.rate ?? 0;
   intent = {
     ...intent,
-    why: runner
-      ? `${intent.why}; stop before the next extension falls below ${runner.faction} at ${formatScientific(runnerRate)} value/sec`
-      : `${intent.why}; no competing faction package fits the horizon`,
+    why: terminalPill
+      ? `${intent.why}; The Red Pill is mandatory for the selected ${view.route} route`
+      : runner
+        ? `${intent.why}; stop before the next extension falls below ${runner.faction} at ${formatScientific(runnerRate)} value/sec`
+        : `${intent.why}; no competing faction package fits the horizon`,
   };
 
   const winnerStanding = view.factions.find((standing) => standing.name === winner.faction)!;

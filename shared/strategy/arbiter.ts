@@ -130,10 +130,8 @@ export const PREEMPT_MARGIN = 10;
 export const PRIORITY = {
   /** Freeze every remaining dollar after the final augmentation sweep. */
   "progression:install-freeze": 110,
-  /** The reset is FORECAST minutes away: ordinary reset-lifetime investments
-   *  at band 25 stop being funded, while prerequisites needed to clear the
-   *  forecast (65) and endgame conversion (donate 70, aug-fund 90, blocking
-   *  needs 95) still outbid this. */
+  /** The reset is forecast minutes away: ordinary reset-lifetime investments
+   * stop being funded, while reset prerequisites still outbid this. */
   "progression:imminent-install": 50,
   /** Money set aside to buy a planned augmentation set. */
   "factions:aug-fund": 90,
@@ -147,6 +145,19 @@ export const PRIORITY = {
    *  graft claim, which occupies the same slot to install an augmentation rather than
    *  to earn a rate, and as the named point the ordering tests compare against. */
   "factions:work": 60,
+  /** Reputation work on the selected faction-acquisition route. It must beat
+   * ordinary career income (whose scored ceiling is 80), otherwise the
+   * faction package ETA assumes continuous work while the arbiter gives that
+   * work only occasional boundary ticks. Genuine career blockers still win:
+   * they are what unlock the faction this work needs. */
+  "factions:route-work": 91,
+  /** Route mechanics require the current install and the route-weighted
+   * augmentation package is the remaining pre-reset work. This is deliberately
+   * NOT used for an ordinary economic install recommendation: doing so forced
+   * tiny two-augmentation resets. The mandatory band clears both blocking
+   * career and its pre-emption margin; ordinary route work competes with skill
+   * training through the measured marginal-XP model. */
+  "factions:install-work": 121,
   /** Career satisfying a BLOCKING need from the board (karma, stats).
    *
    *  Deliberately more than PREEMPT_MARGIN above BOTH rates the slot can be scored
@@ -159,8 +170,14 @@ export const PRIORITY = {
    *  the gate on something far more valuable than either rate — the karma, stats or
    *  backdoor that UNLOCKS a faction, without which no amount of reputation or
    *  income moves the run forward. At 75 it sat below a best-in-game earner's 80, so
-   *  crime could outrank the very unlock it was funding. */
-  "career:blocking-need": 95,
+   *  crime could outrank the very unlock it was funding.
+   *
+   *  Strictly BELOW `progression:install-freeze`. An exact tie there would not be
+   *  a tie in practice: `compareClaims` falls through to the feature id, so
+   *  "career" would sort ahead of "progression" on every pass and its training
+   *  and travel funds would be allocated out of the very bankroll the post-sweep
+   *  freeze exists to protect. */
+  "career:blocking-need": 109,
   /** Career's request queue. Blocking work may interrupt ordinary faction
    * reputation; wanted/nice work may not. The gaps exceed PREEMPT_MARGIN so a
    * priority change has the same result regardless of which side is incumbent. */

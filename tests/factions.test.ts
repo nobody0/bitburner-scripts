@@ -5,12 +5,14 @@ import {
   basePriceMultiplier,
   canAfford,
   closePrereqs,
+  countSlotWeight,
   entropyCost,
   estimatedCost,
   EXACT_ORDER_LIMIT,
   MULTIPLE_AUG_MULTIPLIER,
   NEUROFLUX,
   orderPurchases,
+  orderPurchasesWithNeuroflux,
   scoreAug,
   selectAffordableBatch,
   totalCost,
@@ -22,6 +24,7 @@ import {
   combinedEtaSec,
   evaluate,
   evaluateAll,
+  estimateBlockerSec,
   isReachable,
   negate,
   type Blocker,
@@ -359,6 +362,20 @@ describe("purchase ordering — brute-force oracle", () => {
     return { name, aug: aug(name, { baseCost, prereqs }), faction: "CyberSec" };
   }
 
+  test("interleaves a funded NeuroFlux level at its minimum-cost position", () => {
+    const ctx = priceCtx();
+    const set = [candidate("dear", 100), candidate("cheap", 1)];
+    const nfg = candidate(NEUROFLUX, 50);
+    const order = orderPurchasesWithNeuroflux(set, nfg, 1, ctx);
+    expect(order.map((item) => item.name)).toEqual(["dear", NEUROFLUX, "cheap"]);
+
+    let best = Infinity;
+    for (const permutation of permutations([...set, nfg])) {
+      best = Math.min(best, totalCost(permutation, ctx));
+    }
+    expect(totalCost(order, ctx)).toBeCloseTo(best, 12);
+  });
+
   test("matches the exhaustive optimum over all permutations (no prerequisites)", () => {
     const rng = mulberry32(7);
     const ctx = priceCtx();
@@ -607,6 +624,13 @@ describe("affordability", () => {
 });
 
 describe("augmentation scoring", () => {
+  test("finite route-count pressure declines toward closure but never vanishes", () => {
+    expect(countSlotWeight(30, 29)).toBeCloseTo(29 / 30, 12);
+    expect(countSlotWeight(30, 17)).toBeCloseTo(17 / 30, 12);
+    expect(countSlotWeight(30, 1)).toBe(1 / 5);
+    expect(countSlotWeight(Infinity, 10)).toBe(0);
+  });
+
   test("multiplicative bonuses become an additive set problem in log space", () => {
     const weights = { hacking: 1 };
     const a = aug("A", { mults: { hacking: 1.2 } });
@@ -633,7 +657,7 @@ describe("augmentation scoring", () => {
 
 // --- never attempt work a faction does not offer ------------------------------
 
-import { stepFactions } from "../shared/strategy/factions/decide.ts";
+import { blockersFor, stepFactions } from "../shared/strategy/factions/decide.ts";
 import { factionPackageFrontier, selectFactionPackage } from "../shared/strategy/factions/packages.ts";
 import { initFactionMemory } from "../shared/strategy/factions/plan.ts";
 import type { FactionStanding, FactionsView } from "../shared/strategy/factions/state.ts";
@@ -814,12 +838,296 @@ describe("faction breakpoint package planner", () => {
         catalog,
         horizonSec: 100_000,
         moneyAvailable: 1e15,
+        // The old continuation guard saw that its last A order was still
+        // running and idled, even though completing A promoted B. This is the
+        // exact stale-work state observed in the full BitNode simulation.
+        currentWork: { kind: "faction", faction: "A", workType: "hacking", focused: true },
       }),
       first.memory,
     );
     expect(advanced.decision.objective?.intent?.faction).toBe("B");
     expect(advanced.decision.action).toMatchObject({ type: "workForFaction", faction: "B" });
     expect(advanced.decision.recommendInstall).toBeUndefined();
+  });
+
+  test("does not select an end-loaded completed package again while it remains unowned", () => {
+    const faction = packageStanding("A");
+    const catalog = new Map([
+      ["A-fast", aug("A-fast", { factions: ["A"], baseCost: 1, baseRepRequirement: 100 })],
+    ]);
+    const first = stepFactions(
+      factionsView({ factions: [faction], catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      initFactionMemory(),
+    );
+    expect(first.decision.objective?.intent?.augmentations).toEqual(["A-fast"]);
+
+    const completed = stepFactions(
+      factionsView({
+        factions: [{ ...faction, rep: 100 }],
+        catalog,
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+      }),
+      first.memory,
+    );
+
+    expect(completed.memory.bankedAugmentations).toEqual(["A-fast"]);
+    expect(completed.decision.objective?.intent).toBeUndefined();
+    expect(completed.decision.action).toMatchObject({ type: "idle" });
+    // Completing work is not itself permission to start the purchase
+    // transaction; progression still owns the cadence decision.
+    expect(completed.decision.recommendInstall).toBeUndefined();
+  });
+
+  test("moves to a compatible fresh package when a completed package's recorded runner is enemy-blocked", () => {
+    const a = packageStanding("A", { joined: false, invited: true, enemies: ["B"] });
+    const b = packageStanding("B", { joined: false, invited: true, enemies: ["A"] });
+    const c = packageStanding("C");
+    const catalog = new Map([
+      ["A-aug", aug("A-aug", { factions: ["A"], baseCost: 1, baseRepRequirement: 100 })],
+      ["B-aug", aug("B-aug", { factions: ["B"], baseCost: 1, baseRepRequirement: 200 })],
+      ["C-aug", aug("C-aug", { factions: ["C"], baseCost: 1, baseRepRequirement: 1_000 })],
+    ]);
+    const first = stepFactions(
+      factionsView({ factions: [a, b, c], catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      initFactionMemory(),
+    );
+    expect(first.decision.objective?.intent?.faction).toBe("A");
+    expect(first.decision.objective?.runnerUp?.faction).toBe("B");
+
+    const completed = stepFactions(
+      factionsView({
+        factions: [{ ...a, joined: true, invited: false, rep: 100 }, b, c],
+        catalog,
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+      }),
+      first.memory,
+    );
+    expect(completed.memory.bankedAugmentations).toEqual(["A-aug"]);
+    expect(completed.decision.objective?.intent?.faction).toBe("C");
+    expect(completed.decision.action).toMatchObject({ type: "workForFaction", faction: "C" });
+  });
+
+  test("does not close an end-loaded transaction before its banked base package is funded", () => {
+    const faction = packageStanding("A", { rep: 100 });
+    const wanted = aug("A-base", {
+      factions: ["A"],
+      baseCost: 1_000,
+      baseRepRequirement: 100,
+      mults: { hacking: 1.1 },
+    });
+    const memory = {
+      ...initFactionMemory(),
+      objective: {
+        factions: ["A"],
+        augmentations: [wanted.name],
+        value: 1,
+        foreclosed: [],
+        why: "base package",
+        intent: {
+          faction: "A", repTarget: 100, augmentations: [wanted.name], value: 1,
+          activationValue: 0.1, etaSec: 1, marginalRate: 1,
+          marginalActivationRate: 0.1, favorAfterInstall: 0,
+          purpose: "augmentations" as const, unlockSec: 0, repSec: 0,
+          moneySec: 1, totalCost: 1_000, purchaseCost: 1_000,
+          donationCost: 0, rate: 1, why: "base package",
+        },
+      },
+    };
+    const short = stepFactions(factionsView({
+      factions: [faction],
+      catalog: new Map([[wanted.name, wanted]]),
+      installRequested: true,
+      moneyAvailable: 999,
+    }), memory);
+    expect(short.memory.bankedAugmentations).toEqual([wanted.name]);
+    expect(short.decision.recommendInstall).toBeUndefined();
+    expect(short.decision.action.type).not.toBe("purchaseAugmentation");
+
+    const funded = stepFactions(factionsView({
+      factions: [faction],
+      catalog: new Map([[wanted.name, wanted]]),
+      installRequested: true,
+      moneyAvailable: 1_000,
+      moneyGranted: 1_000,
+    }), short.memory);
+    expect(funded.decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: wanted.name });
+    expect(funded.decision.drainCeiling).toBe(1_000);
+  });
+
+  test("an unaffordable optional bank cannot hold a funded Red Pill reset hostage", () => {
+    const faction = packageStanding("Daedalus", { rep: 2_500_000 });
+    const pill = aug("The Red Pill", {
+      factions: ["Daedalus"],
+      baseCost: 100,
+      baseRepRequirement: 2_500_000,
+    });
+    const optional = aug("Optional luxury", {
+      factions: ["Daedalus"],
+      baseCost: 1e12,
+      baseRepRequirement: 100,
+      mults: { hacking: 10 },
+    });
+    const memory = {
+      ...initFactionMemory(),
+      bankedAugmentations: [pill.name, optional.name],
+    };
+
+    const closing = stepFactions(factionsView({
+      factions: [faction],
+      catalog: new Map([[pill.name, pill], [optional.name, optional]]),
+      route: "daedalus",
+      installRequested: true,
+      moneyAvailable: 100,
+      moneyGranted: 100,
+    }), memory);
+
+    expect(closing.decision.action).toMatchObject({
+      type: "purchaseAugmentation",
+      augmentation: "The Red Pill",
+    });
+    expect(closing.memory.drainOrder).toEqual(["The Red Pill"]);
+    expect(closing.decision.drainCeiling).toBe(100);
+  });
+
+  test("does not abandon an unfinished base package when its work target is transiently unavailable", () => {
+    const faction = packageStanding("A");
+    const wanted = aug("A-base", {
+      factions: ["A"], baseCost: 1, baseRepRequirement: 100, mults: { hacking: 1.1 },
+    });
+    const catalog = new Map([[wanted.name, wanted]]);
+    const first = stepFactions(
+      factionsView({ factions: [faction], catalog, moneyAvailable: 1e15 }),
+      initFactionMemory(),
+    );
+    expect(first.decision.objective?.intent?.repTarget).toBe(100);
+
+    // A stale/temporarily absent work-type probe means no executable target
+    // this tick. It does not mean the committed 100-rep package is complete.
+    const unavailable = stepFactions(factionsView({
+      factions: [{ ...faction, offers: { hacking: false, field: false, security: false } }],
+      catalog,
+      installRequested: true,
+      moneyAvailable: 1e15,
+    }), first.memory);
+    expect(unavailable.decision.action).toMatchObject({ type: "idle" });
+    expect(unavailable.decision.recommendInstall).toBeUndefined();
+    expect(unavailable.decision.drainCeiling).toBeUndefined();
+  });
+
+  test("an actionable joined package replaces a speculative unjoined latch immediately", () => {
+    const locked = packageStanding("Locked", {
+      joined: false,
+      invited: false,
+      requirements: [{ type: "city", city: "Aevum" }],
+    });
+    const available = packageStanding("Available", { joined: true });
+    const catalog = new Map([
+      ["locked-aug", aug("locked-aug", { factions: ["Locked"], baseCost: 1, baseRepRequirement: 100, mults: { hacking: 1.1 } })],
+      ["available-aug", aug("available-aug", { factions: ["Available"], baseCost: 1, baseRepRequirement: 100, mults: { hacking: 10 } })],
+    ]);
+    const first = stepFactions(
+      factionsView({ factions: [locked], catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      initFactionMemory(),
+    );
+    expect(first.decision.objective?.intent?.faction).toBe("Locked");
+
+    const replanned = stepFactions(
+      factionsView({ factions: [locked, available], catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      first.memory,
+    );
+    expect(replanned.decision.objective?.intent?.faction).toBe("Available");
+    expect(replanned.decision.action).toMatchObject({ type: "workForFaction", faction: "Available" });
+  });
+
+  test("only pushes a post-plan augmentation inside one percent of the elapsed install", () => {
+    const factions = [packageStanding("A"), packageStanding("B")];
+    const catalog = new Map([
+      ["A-fast", aug("A-fast", { factions: ["A"], baseCost: 1, baseRepRequirement: 100 })],
+      ["A-deep", aug("A-deep", { factions: ["A"], baseCost: 1, baseRepRequirement: 1_000 })],
+      ["B-next", aug("B-next", { factions: ["B"], baseCost: 1, baseRepRequirement: 200 })],
+    ]);
+    const first = stepFactions(
+      factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      initFactionMemory(),
+    );
+    const committed = stepFactions(
+      factionsView({
+        factions,
+        catalog,
+        horizonSec: 100_000,
+        installCycleSec: 1,
+        installRequested: true,
+        moneyAvailable: 1e15,
+      }),
+      first.memory,
+    );
+    expect(committed.decision.action).toMatchObject({ type: "workForFaction", faction: "A" });
+    expect(committed.decision.recommendInstall).toBeUndefined();
+
+    const held = stepFactions(
+      factionsView({
+        factions: [{ ...factions[0]!, rep: 100 }, factions[1]!],
+        catalog,
+        horizonSec: 100_000,
+        installCycleSec: 1,
+        installRequested: true,
+        moneyAvailable: 1e15,
+      }),
+      first.memory,
+    );
+    expect(held.decision.objective?.intent?.faction).toBe("B");
+    expect(held.decision.action.type).not.toBe("workForFaction");
+    expect(held.decision.action.type).toBe("purchaseAugmentation");
+    expect(held.decision.drainCeiling).toBeDefined();
+    expect(held.memory.drainCeiling).toBe(held.decision.drainCeiling);
+    expect(held.memory.drainOrder?.length).toBeGreaterThan(0);
+
+    const draining = stepFactions(
+      factionsView({
+        factions: [{ ...factions[0]!, rep: 100 }, factions[1]!],
+        catalog,
+        horizonSec: 100_000,
+        installCycleSec: 100_000,
+        installRequested: true,
+        moneyAvailable: 1e15,
+      }),
+      held.memory,
+    );
+    expect(draining.decision.action.type).not.toBe("workForFaction");
+    expect(draining.decision.drainCeiling).toBe(held.decision.drainCeiling);
+    expect(draining.memory.drainOrder).toEqual(held.memory.drainOrder);
+
+    const cadenceReconsidered = stepFactions(
+      factionsView({
+        factions: [{ ...factions[0]!, rep: 100 }, factions[1]!],
+        catalog,
+        horizonSec: 100_000,
+        installCycleSec: 100_000,
+        installRequested: false,
+        moneyAvailable: 1e15,
+      }),
+      held.memory,
+    );
+    expect(cadenceReconsidered.decision.action.type).not.toBe("workForFaction");
+    expect(cadenceReconsidered.decision.action).toMatchObject({ type: "purchaseAugmentation", faction: "A" });
+    expect(cadenceReconsidered.decision.drainCeiling).toBe(held.decision.drainCeiling);
+    expect(cadenceReconsidered.memory.drainOrder).toEqual(held.memory.drainOrder);
+
+    const cheapExtra = stepFactions(
+      factionsView({
+        factions: [{ ...factions[0]!, rep: 100 }, factions[1]!],
+        catalog,
+        horizonSec: 100_000,
+        installCycleSec: 100_000,
+        installRequested: true,
+        moneyAvailable: 1e15,
+      }),
+      first.memory,
+    );
+    expect(cheapExtra.decision.action).toMatchObject({ type: "workForFaction", faction: "B" });
+    expect(cheapExtra.decision.recommendInstall).toBeUndefined();
   });
 
   test("pushes the best faction farther when switching is much worse", () => {
@@ -851,11 +1159,12 @@ describe("faction breakpoint package planner", () => {
     expect(selection.runnerUp).toBeUndefined();
   });
 
-  test("gives The Red Pill terminal value only on the Daedalus route", () => {
+  test("gives The Red Pill terminal value only on faction-acquisition routes", () => {
     const factions = [packageStanding("Daedalus"), packageStanding("CyberSec")];
     const catalog = new Map([
       ["The Red Pill", aug("The Red Pill", { factions: ["Daedalus"], baseCost: 0, baseRepRequirement: 1_000 })],
       ["quick", aug("quick", { factions: ["CyberSec"], baseCost: 0, baseRepRequirement: 100 })],
+      [NEUROFLUX, aug(NEUROFLUX, { factions: ["CyberSec"], baseCost: 1, baseRepRequirement: 0, mults: { hacking: 2 } })],
     ]);
     const blockers = new Map(factions.map((faction) => [faction.name, []]));
     const labyrinth = selectFactionPackage(
@@ -863,14 +1172,244 @@ describe("faction breakpoint package planner", () => {
       blockers,
     );
     const daedalus = selectFactionPackage(
-      factionsView({ factions, catalog, route: "daedalus", horizonSec: 100_000, moneyAvailable: 1e15 }),
+      factionsView({ factions, catalog, route: "daedalus", horizonSec: 100_000, moneyAvailable: 1e15, owned: new Set([NEUROFLUX]) }),
+      blockers,
+    );
+    const gang = selectFactionPackage(
+      factionsView({ factions, catalog, route: "gang", horizonSec: 100_000, moneyAvailable: 1e15, owned: new Set([NEUROFLUX]) }),
       blockers,
     );
     expect(labyrinth.intent?.faction).toBe("CyberSec");
     expect(daedalus.intent?.faction).toBe("Daedalus");
+    expect(gang.intent?.faction).toBe("Daedalus");
   });
 
-  test("treats CashRoot as persistent bootstrap infrastructure until the augmentation is installed", () => {
+  test("does not select a faction whose requirement owner is unavailable", () => {
+    const blocked: FactionStanding = standing("The Dark Army", { hacking: true, field: false, security: false });
+    blocked.joined = false;
+    blocked.requirements = [{ type: "city", city: "Chongqing" } as PlayerRequirement];
+    const selection = stepFactions(
+      factionsView({
+        factions: [blocked],
+        catalog: new Map([["A", aug("A", { factions: [blocked.name], mults: { hacking: 2 } })]]),
+        availableOwners: new Set(["hacking", "factions", "progression"]),
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+      }),
+      initFactionMemory(),
+    );
+    expect(selection.decision.objective?.intent).toBeUndefined();
+    expect(selection.decision.action.type).toBe("idle");
+  });
+
+  test("backdoor ranking includes observed skill and port gates", () => {
+    const csec = evaluate(
+      { type: "backdoorInstalled", server: "CSEC" },
+      view({
+        skills: { hacking: 200 },
+        portOpeners: 1,
+        backdoorAccess: {
+          CSEC: { requiredHackingSkill: 1, numOpenPortsRequired: 1, openPortCount: 0 },
+        },
+      }),
+    )[0]!;
+    const run4 = evaluate(
+      { type: "backdoorInstalled", server: "run4theh111z" },
+      view({
+        skills: { hacking: 200 },
+        portOpeners: 1,
+        backdoorAccess: {
+          run4theh111z: { requiredHackingSkill: 505, numOpenPortsRequired: 5, openPortCount: 0 },
+        },
+      }),
+    )[0]!;
+    expect(estimateBlockerSec(csec, 0)).toBe(300);
+    expect(estimateBlockerSec(run4, 0)).toBe(11_850);
+  });
+
+  test("does not horizon-filter the terminal package out of its own route", () => {
+    const daedalus = packageStanding("Daedalus");
+    const catalog = new Map([
+      ["The Red Pill", aug("The Red Pill", {
+        factions: ["Daedalus"],
+        baseCost: 0,
+        baseRepRequirement: 2_500_000,
+      })],
+    ]);
+    const selection = selectFactionPackage(
+      factionsView({
+        factions: [daedalus],
+        catalog,
+        route: "daedalus",
+        // Deliberately much shorter than the package ETA. This represents
+        // estimator disagreement, not a reason to abandon the chosen route.
+        horizonSec: 1,
+        moneyAvailable: 1e15,
+      }),
+      new Map([["Daedalus", []]]),
+    );
+    expect(selection.intent?.augmentations).toContain("The Red Pill");
+    expect(selection.horizonStarved).toBeUndefined();
+  });
+
+  test("builds Daedalus invite prerequisites before making Red Pill mandatory", () => {
+    const daedalus = packageStanding("Daedalus", {
+      joined: false,
+      invited: false,
+      requirements: [{ type: "numAugmentations", numAugmentations: 30 }],
+    });
+    const cybersec = packageStanding("CyberSec");
+    const catalog = new Map([
+      ["The Red Pill", aug("The Red Pill", {
+        factions: ["Daedalus"],
+        baseCost: 0,
+        baseRepRequirement: 2_500_000,
+      })],
+      ["Count builder", aug("Count builder", {
+        factions: ["CyberSec"],
+        baseCost: 0,
+        baseRepRequirement: 100,
+        mults: { hacking: 1.1 },
+      })],
+    ]);
+    const selection = selectFactionPackage(
+      factionsView({
+        factions: [daedalus, cybersec],
+        catalog,
+        route: "daedalus",
+        horizonSec: 1_000,
+        moneyAvailable: 1e15,
+        requirementView: view({ augCount: 10 }),
+      }),
+      new Map([
+        ["Daedalus", blockersFor(daedalus, factionsView({ requirementView: view({ augCount: 10 }) }))],
+        ["CyberSec", []],
+      ]),
+    );
+    expect(selection.intent?.faction).toBe("CyberSec");
+    expect(selection.intent?.augmentations).toContain("Count builder");
+  });
+
+  test("preempts an optional latched package when the selected route's Red Pill becomes actionable", () => {
+    const cybersec = packageStanding("CyberSec");
+    const daedalus = packageStanding("Daedalus", {
+      joined: false,
+      invited: false,
+      requirements: [{ type: "numAugmentations", numAugmentations: 30 }],
+    });
+    const catalog = new Map([
+      ["optional", aug("optional", { factions: ["CyberSec"], baseCost: 0, baseRepRequirement: 100_000 })],
+      ["The Red Pill", aug("The Red Pill", {
+        factions: ["Daedalus"], baseCost: 0, baseRepRequirement: 2_500_000,
+      })],
+    ]);
+    const first = stepFactions(
+      factionsView({
+        factions: [cybersec, daedalus], catalog, route: "daedalus",
+        horizonSec: 100_000, moneyAvailable: 1e15,
+        requirementView: view({ augCount: 10 }),
+      }),
+      initFactionMemory(),
+    );
+    expect(first.decision.objective?.intent?.faction).toBe("CyberSec");
+
+    const actionable = stepFactions(
+      factionsView({
+        factions: [cybersec, { ...daedalus, joined: true }], catalog, route: "daedalus",
+        horizonSec: 100_000, moneyAvailable: 1e15,
+        requirementView: view({ augCount: 30 }),
+      }),
+      first.memory,
+    );
+    expect(actionable.decision.objective?.intent?.faction).toBe("Daedalus");
+    expect(actionable.decision.objective?.intent?.augmentations).toContain("The Red Pill");
+    expect(actionable.decision.action).toMatchObject({ type: "workForFaction", faction: "Daedalus" });
+  });
+
+  test("refreshes a latched package's estimates after its faction is joined", () => {
+    const locked = packageStanding("Daedalus", {
+      joined: false,
+      invited: false,
+      requirements: [{ type: "money", money: 100_000 }],
+    });
+    const catalog = new Map([
+      ["The Red Pill", aug("The Red Pill", {
+        factions: ["Daedalus"],
+        baseCost: 0,
+        baseRepRequirement: 2_500_000,
+      })],
+    ]);
+    const first = stepFactions(
+      factionsView({
+        factions: [locked],
+        catalog,
+        route: "daedalus",
+        horizonSec: Infinity,
+        moneyAvailable: 0,
+        requirementView: view({ money: 0 }),
+      }),
+      initFactionMemory(),
+    );
+    expect(first.decision.objective?.intent?.unlockSec).toBeGreaterThan(0);
+
+    const joined = stepFactions(
+      factionsView({
+        time: 30_000,
+        factions: [{ ...locked, joined: true }],
+        catalog,
+        route: "daedalus",
+        horizonSec: Infinity,
+        moneyAvailable: 0,
+        requirementView: view({ money: 0 }),
+      }),
+      first.memory,
+    );
+    expect(joined.decision.objective?.intent?.repTarget).toBe(2_500_000);
+    expect(joined.decision.objective?.intent?.unlockSec).toBe(0);
+    expect(joined.decision.objective?.intent?.etaSec).toBeLessThan(
+      first.decision.objective!.intent!.etaSec,
+    );
+  });
+
+  test("repeat NeuroFlux yields the work frontier to missing distinct count slots", () => {
+    const joined = packageStanding("A", { joined: true, rep: 0 });
+    const unjoined = packageStanding("B", { joined: false, invited: true, rep: 0 });
+    const neuroflux = aug(NEUROFLUX, {
+      factions: ["A", "B"],
+      baseCost: 750_000,
+      baseRepRequirement: 500,
+      mults: { hacking: 1.01, faction_rep: 1.01 },
+    });
+    const world = factionsView({
+      factions: [joined, unjoined],
+      catalog: new Map([[NEUROFLUX, neuroflux]]),
+      owned: new Set([NEUROFLUX]),
+      targetAugCount: 30,
+      horizonSec: 100_000,
+      moneyAvailable: 1e15,
+    });
+    const selection = selectFactionPackage(world, new Map([["A", []], ["B", []]]));
+    expect(selection.intent).toBeUndefined();
+
+    // Once the finite gate is complete, another NFG level is ordinary
+    // multiplier value again. Routes without a count gate behave the same.
+    const completed = selectFactionPackage({
+      ...world,
+      targetAugCount: 1,
+    }, new Map([["A", []], ["B", []]]));
+    expect(completed.intent?.faction).toBe("A");
+    expect(completed.intent?.augmentations).toEqual([NEUROFLUX]);
+    expect(completed.intent!.value).toBeGreaterThan(0);
+    expect(completed.intent!.purchaseCost).toBeGreaterThan(0);
+
+    const openEnded = selectFactionPackage({
+      ...world,
+      targetAugCount: Infinity,
+    }, new Map([["A", []], ["B", []]]));
+    expect(openEnded.intent?.augmentations).toEqual([NEUROFLUX]);
+  });
+
+  test("values CashRoot as bootstrap infrastructure without overriding a faster multiplier package", () => {
     const factions = [packageStanding("Sector-12"), packageStanding("CyberSec")];
     const catalog = new Map([
       ["CashRoot Starter Kit", aug("CashRoot Starter Kit", {
@@ -890,7 +1429,26 @@ describe("faction breakpoint package planner", () => {
       factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
       blockers,
     );
-    expect(bootstrap.intent?.augmentations).toContain("CashRoot Starter Kit");
+    expect(bootstrap.intent?.faction).toBe("CyberSec");
+    const cashRoot = bootstrap.frontiers.get("Sector-12")?.find((pkg) =>
+      pkg.augmentations.includes("CashRoot Starter Kit"));
+    // The finite Daedalus gate makes this one real slot plus bootstrap value.
+    expect(cashRoot?.value).toBeGreaterThan(1.5);
+    const noCount = selectFactionPackage(
+      factionsView({
+        factions,
+        catalog,
+        route: "bladeburner",
+        targetAugCount: Infinity,
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+      }),
+      blockers,
+    );
+    const noCountCashRoot = noCount.frontiers.get("Sector-12")?.find((pkg) =>
+      pkg.augmentations.includes("CashRoot Starter Kit"));
+    expect(noCountCashRoot?.value).toBeGreaterThan(0.5);
+    expect(noCountCashRoot?.value).toBeLessThan(1);
 
     const established = selectFactionPackage(
       factionsView({
@@ -902,7 +1460,7 @@ describe("faction breakpoint package planner", () => {
       }),
       blockers,
     );
-    expect(established.intent?.augmentations).toContain("CashRoot Starter Kit");
+    expect(established.intent?.faction).toBe("CyberSec");
 
     const installed = selectFactionPackage(
       factionsView({
@@ -916,6 +1474,29 @@ describe("faction breakpoint package planner", () => {
       blockers,
     );
     expect(installed.intent?.faction).toBe("CyberSec");
+  });
+
+  test("uses strong count pressure early and multiplier quality for the closing slots", () => {
+    const factions = [packageStanding("cheap"), packageStanding("quality")];
+    const catalog = new Map([
+      ["cheap-slot", aug("cheap-slot", { factions: ["cheap"], baseCost: 0, baseRepRequirement: 100 })],
+      ["quality-slot", aug("quality-slot", {
+        factions: ["quality"], baseCost: 0, baseRepRequirement: 150, mults: { hacking: 1.3 },
+      })],
+    ]);
+    const blockers = new Map(factions.map((faction) => [faction.name, []]));
+    const early = selectFactionPackage(
+      factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      blockers,
+    );
+    expect(early.intent?.faction).toBe("cheap");
+
+    const installed = new Set(Array.from({ length: 26 }, (_, index) => `installed-${index}`));
+    const closing = selectFactionPackage(
+      factionsView({ factions, catalog, owned: installed, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      blockers,
+    );
+    expect(closing.intent?.faction).toBe("quality");
   });
 
   test("enemy membership blocks only this install cycle", () => {
@@ -1042,6 +1623,19 @@ describe("faction breakpoint package planner", () => {
     expect(factionPackageFrontier(faction, [], finished)).toEqual([]);
   });
 
+  test("bounds smooth favor sampling when a noisy horizon is enormous", () => {
+    const faction = packageStanding("A", { rep: 0, favor: 0 });
+    const future = aug("Distant", { factions: ["A"], baseCost: 0, baseRepRequirement: 1e15 });
+    const frontier = factionPackageFrontier(
+      faction,
+      [],
+      factionsView({ factions: [faction], catalog: new Map([[future.name, future]]), horizonSec: 1e15 }),
+    );
+    // One augmentation breakpoint, at most eight smooth samples, plus the exact
+    // donation discontinuity (which can coincide with a sample).
+    expect(frontier.length).toBeLessThanOrEqual(10);
+  });
+
   test("can push favor beyond donation unlock when the faction still dominates", () => {
     const faction = packageStanding("A", { favor: 5 });
     const future = aug("Future", { factions: ["A"], baseCost: 0, baseRepRequirement: 1e9 });
@@ -1140,9 +1734,9 @@ describe("the last-chance drain", () => {
 
   test("publishes what it would buy even when nothing has been granted yet", () => {
     const decision = drained();
-    expect(decision.recommendInstall).toBeDefined();
+    expect(decision.drainCeiling).toBeDefined();
     // Unfunded, so it cannot act — but it says what the money is for.
-    expect(decision.action.type).toBe("idle");
+    expect(decision.action.type).toBe("purchaseAugmentation");
     expect(decision.nextBuy).toMatchObject({ name: NEUROFLUX });
     expect(decision.nextBuy!.price).toBeGreaterThan(0);
   });
@@ -1153,12 +1747,234 @@ describe("the last-chance drain", () => {
     expect(decision.nextBuy!.price).toBeCloseTo(expected, 6);
   });
 
+  test("drops favor-only work once the route is locked into its final count batch", () => {
+    const faction = {
+      ...standing("A", { hacking: true, field: false, security: false }),
+      rep: 100,
+      favor: 10,
+    };
+    const owned = aug("already unlocked", {
+      factions: ["A"], baseCost: 0, baseRepRequirement: 100, mults: { hacking: 1.1 },
+    });
+    const future = aug("future", {
+      factions: ["A"], baseCost: 0, baseRepRequirement: 200, mults: { hacking: 1.1 },
+    });
+    const world = factionsView({
+      factions: [faction],
+      catalog: new Map([[owned.name, owned], [future.name, future]]),
+      owned: new Set([owned.name]),
+      targetAugCount: 30,
+      requirementView: { ...view(), augCount: 15 },
+      horizonSec: 10_000,
+    });
+    const frontier = factionPackageFrontier(faction, [], world);
+    expect(frontier.every((pkg) => pkg.purpose === "augmentations")).toBe(true);
+  });
+
+  test("does not unlock an unjoined faction for favor alone", () => {
+    const faction: FactionStanding = {
+      ...standing("Deep", { hacking: true, field: false, security: false }),
+      joined: false,
+      invited: false,
+    };
+    const future = aug("Future", { factions: ["Deep"], baseCost: 1e12, baseRepRequirement: 1e9 });
+    const frontier = factionPackageFrontier(
+      faction,
+      [{
+        kind: "backdoor",
+        subject: "deep-server",
+        target: 1,
+        have: 0,
+        progress: 0,
+        owner: "hacking",
+        reachable: true,
+        why: "deep unlock",
+      }],
+      factionsView({
+        factions: [faction],
+        catalog: new Map([[future.name, future]]),
+        horizonSec: 10_000,
+        moneyAvailable: 0,
+      }),
+    );
+    expect(frontier.every((pkg) => pkg.augmentations.length > 0)).toBe(true);
+  });
+
+  test("a route-mandatory install still drains an affordable NeuroFlux at a short horizon", () => {
+    const decision = drained({ horizonSec: 1, routeInstallRequired: true, targetAugCount: Infinity });
+    expect(decision.nextBuy).toMatchObject({ name: NEUROFLUX });
+  });
+
+  test("a Daedalus count-finishing sweep chooses count before multiplier value", () => {
+    const cheap = aug("cheap count", { baseCost: 1e6, baseRepRequirement: 0, factions: ["CyberSec"] });
+    const valuable = aug("valuable but dear", {
+      baseCost: 100e6,
+      baseRepRequirement: 0,
+      factions: ["CyberSec"],
+      mults: { hacking: 10 },
+    });
+    const decision = drained({
+      catalog: new Map([["cheap count", cheap], ["valuable but dear", valuable], ["Owned Thing", owned]]),
+      routeInstallRequired: true,
+      targetAugCount: 2,
+      moneyGranted: 100e6,
+      moneyAvailable: 100e6,
+    });
+    expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: "cheap count" });
+  });
+
+  test("a funded cheap closure is not displaced by a smaller valuable set", () => {
+    const cheapA = aug("cheap A", { baseCost: 1e6, baseRepRequirement: 0, factions: ["CyberSec"] });
+    const cheapB = aug("cheap B", { baseCost: 1e6, baseRepRequirement: 0, factions: ["CyberSec"] });
+    const valuable = aug("valuable singleton", {
+      baseCost: 2e6,
+      baseRepRequirement: 0,
+      factions: ["CyberSec"],
+      mults: { hacking: 100 },
+    });
+    const result = stepFactions(factionsView({
+      factions: [standing("CyberSec", { hacking: true, field: true, security: true })],
+      catalog: new Map([
+        [cheapA.name, cheapA],
+        [cheapB.name, cheapB],
+        [valuable.name, valuable],
+        ["Owned Thing", owned],
+      ]),
+      owned: new Set(["Owned Thing"]),
+      queued: new Set(),
+      routeInstallRequired: true,
+      installRequested: true,
+      targetAugCount: 3,
+      moneyGranted: 3e6,
+      moneyAvailable: 3e6,
+    }), {
+      ...initFactionMemory(),
+      bankedAugmentations: [cheapA.name, cheapB.name],
+    });
+    const decision = result.decision;
+    expect(new Set(result.memory.drainOrder)).toEqual(new Set([cheapA.name, cheapB.name]));
+    expect(decision.action).toMatchObject({ type: "purchaseAugmentation" });
+  });
+
+  test("a mandatory funded count closure preempts an unfinished optional package", () => {
+    const cheapA = aug("banked A", { baseCost: 1e6, baseRepRequirement: 0, factions: ["CyberSec"] });
+    const cheapB = aug("banked B", { baseCost: 1e6, baseRepRequirement: 0, factions: ["CyberSec"] });
+    const deep = aug("deep optional", {
+      baseCost: 1e6,
+      baseRepRequirement: 100_000,
+      factions: ["CyberSec"],
+      mults: { hacking: 10 },
+    });
+    const standingView = standing("CyberSec", { hacking: true, field: true, security: true });
+    const catalog = new Map([
+      [cheapA.name, cheapA],
+      [cheapB.name, cheapB],
+      [deep.name, deep],
+      ["Owned Thing", owned],
+    ]);
+    const first = stepFactions(factionsView({
+      factions: [standingView],
+      catalog,
+      owned: new Set(["Owned Thing", cheapA.name, cheapB.name]),
+      moneyAvailable: 3e6,
+    }), initFactionMemory());
+    expect(first.decision.action).toMatchObject({ type: "workForFaction" });
+
+    const closing = stepFactions(factionsView({
+      time: 30_000,
+      factions: [standingView],
+      catalog,
+      owned: new Set(["Owned Thing"]),
+      targetAugCount: 3,
+      routeInstallRequired: true,
+      installRequested: true,
+      moneyAvailable: 3e6,
+      moneyGranted: 3e6,
+    }), {
+      ...first.memory,
+      bankedAugmentations: [cheapA.name, cheapB.name],
+    });
+    expect(closing.decision.action).toMatchObject({ type: "purchaseAugmentation" });
+    expect(new Set(closing.memory.drainOrder)).toEqual(new Set([cheapA.name, cheapB.name]));
+  });
+
+  test("a projected count package waits when the affordable frozen set is one slot short", () => {
+    const cheap = aug("cheap count", { baseCost: 1e6, baseRepRequirement: 0, factions: ["CyberSec"] });
+    const unaffordable = aug("banked but unfunded", {
+      baseCost: 1e12,
+      baseRepRequirement: 0,
+      factions: ["CyberSec"],
+    });
+    const result = stepFactions(factionsView({
+      factions: [standing("CyberSec", { hacking: true, field: true, security: true })],
+      catalog: new Map([[cheap.name, cheap], [unaffordable.name, unaffordable], ["Owned Thing", owned]]),
+      owned: new Set(["Owned Thing"]),
+      queued: new Set(),
+      targetAugCount: 3,
+      routeInstallRequired: true,
+      installRequested: true,
+      moneyAvailable: 1e6,
+      moneyGranted: 1e6,
+    }), {
+      ...initFactionMemory(),
+      bankedAugmentations: [cheap.name, unaffordable.name],
+    });
+
+    expect(result.decision.recommendInstall).toBeUndefined();
+    expect(result.decision.drainCeiling).toBeUndefined();
+    expect(result.decision.action.type).not.toBe("purchaseAugmentation");
+  });
+
   test("keeps publishing while the purchase is in flight, so the claim cannot blink out", () => {
     // If `drain` only appeared on the idle tick, the claim would vanish the moment
     // a purchase was decided, un-funding the very action it authorised.
     const decision = drained({ moneyGranted: 1e9 });
     expect(decision.action).toMatchObject({ type: "purchaseAugmentation", augmentation: NEUROFLUX });
     expect(decision.nextBuy).toMatchObject({ name: NEUROFLUX });
+  });
+
+  test("consumes each frozen NeuroFlux occurrence only after its level appears", () => {
+    const base = factionsView({
+      factions: [standing("CyberSec", { hacking: true, field: true, security: true })],
+      catalog: new Map([[NEUROFLUX, nfg], ["Owned Thing", owned]]),
+      owned: new Set(["Owned Thing"]),
+      queued: new Set(["Owned Thing"]),
+      moneyAvailable: 1e9,
+      moneyGranted: 1e9,
+    });
+    const first = stepFactions(base, initFactionMemory());
+    expect(first.memory.drainOrder?.filter((name) => name === NEUROFLUX).length).toBeGreaterThan(1);
+    expect(first.memory.drainStartNeurofluxLevel).toBe(0);
+
+    const confirmed = stepFactions({
+      ...base,
+      queued: new Set(["Owned Thing", NEUROFLUX]),
+      priceContext: priceCtx({ queuedNonSoA: 1, neurofluxLevel: 1 }),
+      moneyAvailable: 1e9 - first.decision.nextBuy!.price,
+    }, first.memory);
+    expect(confirmed.memory.drainOrder).toEqual(first.memory.drainOrder);
+    expect(confirmed.decision.nextBuy).toMatchObject({ name: NEUROFLUX });
+    expect(confirmed.decision.nextBuy!.price).toBeGreaterThan(first.decision.nextBuy!.price);
+  });
+
+  test("does not resurrect a purchase that outgrew the frozen drain ceiling", () => {
+    const base = factionsView({
+      factions: [standing("CyberSec", { hacking: true, field: true, security: true })],
+      catalog: new Map([[NEUROFLUX, nfg], ["Owned Thing", owned]]),
+      owned: new Set(["Owned Thing"]),
+      queued: new Set(["Owned Thing"]),
+      moneyAvailable: 1e6,
+      moneyGranted: 0,
+    });
+    const first = stepFactions(base, initFactionMemory());
+    expect(first.decision.drainCeiling).toBe(1e6);
+    const escalated = stepFactions({
+      ...base,
+      moneyAvailable: 1e9,
+      priceContext: { ...base.priceContext, neurofluxLevel: 30 },
+    }, first.memory);
+    expect(escalated.decision.drainCeiling).toBe(1e6);
+    expect(escalated.decision.nextBuy).toBeUndefined();
   });
 
   test("nothing is published when the run is not ending", () => {
@@ -1274,7 +2090,7 @@ describe("patience — waiting for the bankroll before committing the order", ()
   test("an empty queue requests liquidation before the first purchase", () => {
     // A separate liquidation signal breaks the empty-queue cycle without
     // buying a cheaper item first and escalating the intended expensive one.
-    const bootstrap = step({ queued: new Set(), pendingProceeds: 6e8, proceedsSettling: false });
+    const bootstrap = step({ queued: new Set(), pendingProceeds: 6e8, proceedsSettling: false, installRequested: true });
     expect(bootstrap.action).toMatchObject({ type: "idle", reason: "waiting" });
     expect(bootstrap.liquidationNeeded).toMatchObject({ augmentation: "dear", pendingProceeds: 6e8 });
     // ...and with one item queued the hold engages, on the very same numbers.

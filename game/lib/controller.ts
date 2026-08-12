@@ -8,7 +8,7 @@ import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../sha
 import type { Need } from "../../shared/strategy/needs.ts";
 import { forecastAt, unknownForecast, usableForecastSec } from "../../shared/strategy/progression/forecast.ts";
 import { FEATURE_IDS } from "../../shared/features/ids.ts";
-import { fleetDodgeReserveGb, homeReserveGb } from "../../shared/ram/reserve.ts";
+import { fleetDodgeReserveGb, homeReserveGb, starvationDodgeReserveGb } from "../../shared/ram/reserve.ts";
 import { priceCalls } from "./dodge.ts";
 import { isScriptDeath } from "./errors.ts";
 import { ContributionCache } from "./features/contributions.ts";
@@ -20,7 +20,7 @@ import { driverEnabled, featureModule, featureRamDemand, grantsFor, resetAllFeat
 import type { ClaimContext, NeedContext } from "./features/index.ts";
 import { sweepFleet } from "./fleet.ts";
 import { gameGlobal } from "./globals.ts";
-import { dodgeBudget, initProbeRunner, runGateProbe, runProbes } from "./probe-runner.ts";
+import { dodgeBudget, initProbeRunner, runGateProbe, runProbes, SAFETY_GB } from "./probe-runner.ts";
 import { ALL_PROBES, probeCadenceMs } from "./probes/index.ts";
 import { acquireDodge, dodgeHosts } from "./ram.ts";
 import { caps, initState, merge, set, type GameState } from "./state.ts";
@@ -45,7 +45,7 @@ const PLAYER_EVERY_TICKS = 10; // 2s
  *  it used to be by accident. */
 const SWEEP_EVERY_TICKS = 150; // 30s
 /** How long the demand-driven fleet reserve stays engaged after the last
- * probe-starvation report, so it cannot flap at probe cadence. */
+ * dodge-starvation report, so it cannot flap at probe/action cadence. */
 const FLEET_RESERVE_HOLD_MS = 600_000;
 /** Acquisition cadence, DERIVED from the probe table rather than chosen here.
  *
@@ -96,6 +96,7 @@ export async function runController(
   // insurance most runs never needed; a starving profile (BN8's market
   // sampler) latches it within one sweep.
   let fleetReserveHoldUntil = 0;
+  let fleetReserveDemandGb = 0;
   // Standing needs, by poster. Replaced wholesale when that feature next
   // runs, so a satisfied need disappears the moment its poster stops asking.
   const contributions = new ContributionCache();
@@ -263,9 +264,39 @@ export async function runController(
     for (const [id, skip] of Object.entries(state.probeSkips)) {
       if (skip.at !== undefined && Date.now() - skip.at > FLEET_RESERVE_HOLD_MS) delete state.probeSkips[id];
     }
-    if (reserveShortfallGb > 0 && Object.keys(state.probeSkips).length > 0) {
+    // Feature ACTIONS use the same dodge launcher as probes. A denied RAM
+    // claim is therefore just as strong a starvation signal as a skipped
+    // probe: unless the farm releases a contiguous fleet block, the action
+    // can remain impossible forever (for example, a feature cannot replace a
+    // repeating low-value crime on an 8 GB home). The previous arbitration
+    // is already in the unconditional state store, so this changes telemetry
+    // and --perf builds identically and opens the reserve on the next pass.
+    const deniedActionGb = state.topics.progression?.arbitration?.denied.reduce(
+      (largest, denial) => denial.resource === "ram" && denial.wanted > denial.available
+        ? Math.max(largest, denial.wanted)
+        : largest,
+      0,
+    ) ?? 0;
+    const starvedReserveGb = starvationDodgeReserveGb(
+      Object.values(state.probeSkips).map((skip) => skip.cost),
+      deniedActionGb,
+      SAFETY_GB,
+    );
+    if (
+      reserveShortfallGb > 0
+      && starvedReserveGb > 0
+    ) {
       fleetReserveHoldUntil = Date.now() + FLEET_RESERVE_HOLD_MS;
+      // Arbiter RAM claims and probe skips carry the DYNAMIC API price. A
+      // runnable dodge needs one CONTIGUOUS block containing that price plus
+      // the executable stub and the placement safety margin. Reserving only
+      // the claim amount lets dispatch legally occupy the missing 2.1 GB; the
+      // arbiter then keeps denying the same action forever even though a
+      // "reserve" is visible. Keep the demand exact to the starved action,
+      // rather than substituting the feature's potentially much larger peak.
+      fleetReserveDemandGb = Math.max(fleetReserveDemandGb, starvedReserveGb);
     }
+    if (Date.now() >= fleetReserveHoldUntil) fleetReserveDemandGb = 0;
     // BN8 starts with the market API and hacked cash is worthless. Reserve the
     // spill host from the first pass so fallback prep/experience work cannot
     // occupy it for a full weaken cycle before the market sampler first runs.
@@ -275,7 +306,7 @@ export async function runController(
       // The standing BN8 reserve must fit the executable stub, not just its
       // dynamic calls. Otherwise an XP worker can consume the apparent slack
       // and make the market action miss its tick.
-      ? (stockPrimary ? contiguousFleetReserveGb : reserveShortfallGb)
+      ? (stockPrimary ? contiguousFleetReserveGb : fleetReserveDemandGb)
       : 0;
     const dueModules = selectDueModules(state.featureLastRun, active, now);
 

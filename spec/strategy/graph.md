@@ -254,16 +254,17 @@ All four feed `progression`'s aug count, which Daedalus gates on (30 in BN1, 20
 in BN15, 35 in BN6/7, up to 40 in deep BN12). The gang route changes the
 problem's *shape* — it removes the work slot from the augmentation path.
 
-### Ending a node — three routes, not one
+### Ending a node — four routes, not one
 
 `ns.singularity.destroyW0r1dD43m0n` accepts two entirely different proofs
-(`NetscriptFunctions/Singularity.ts:1170`), and the Red Pill has two sources,
-so there are three real routes. `shared/strategy/progression/endgame.ts` models
-all three:
+(`NetscriptFunctions/Singularity.ts:1170`), and The Red Pill has three sources,
+so there are four real routes. `shared/strategy/progression/endgame.ts` models
+all four:
 
 | Route | Requires | Available |
 |---|---|---|
-| **Daedalus** | 30 augs (node-dependent), $100b, hacking 2500 **or** combat 1500, then 2.5m rep → Red Pill → install → regrow to the world-daemon skill | everywhere |
+| **Daedalus** | 30 augs (node-dependent), $100b, hacking 2500 **or** combat 1500, then 2.5m rep → Red Pill → install → regrow to the world-daemon skill | every node except BN15 |
+| **BN2 gang** | create an eligible gang, then 2.5m gang-faction rep → Red Pill → install → regrow | BN2 only |
 | **Labyrinth** | dark web access, then walk the lab sequence → Red Pill → install → regrow | every node except **BN8**, with BN15 or SF15 |
 | **Bladeburner** | all **20** black operations; the last needs rank **400 000** | anywhere we hold Bladeburner |
 
@@ -271,7 +272,7 @@ Two things that a Red-Pill-shaped planner gets wrong:
 
 - **The Bladeburner route needs no Red Pill and no hacking level at all.** It is
   not a variation on the others; it shares none of their prerequisites.
-- **Both Red Pill routes share a tail that is easy to under-count.** The
+- **All three Red Pill routes share a tail that is easy to under-count.** The
   `The-Cave ↔ w0r1d_d43m0n` link is created *during the install*, and the
   install resets hacking to 1. So the world-daemon climb happens **after** the
   install carrying the pill — never before. Collapsing "reach 2500 for
@@ -300,7 +301,7 @@ The ns check is also weaker than the terminal's: it wants
 | BN12 | Every edge scaled by `1.02^±lvl`. One-dimensional difficulty — our best A/B substrate |
 | BN13 | Hardest hacking (0.25 × 0.1), every alternative nerfed. `stanek` at 2× is the only edge up |
 | BN14 | Faction *and* company rep to 0.2×; `go` favor replaces them. `HackingSpeedMultiplier: 0.3` retimes every batch |
-| BN15 | Mildest hacking nerf of the late nodes; Daedalus at 20 augs; charisma buffed; the Red Pill is in the labyrinth |
+| BN15 | Mildest hacking nerf of the late nodes; Daedalus does not sell The Red Pill; charisma is buffed and the pill is in the labyrinth |
 
 Two structural warnings:
 

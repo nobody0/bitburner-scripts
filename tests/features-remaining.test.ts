@@ -20,11 +20,18 @@ import { rankGoGames } from "../shared/strategy/go/rewards.ts";
 import { postNeeds } from "../shared/strategy/needs.ts";
 import {
   BASELINE_ORDER,
+  DEFAULT_BITNODE_TARGETS,
+  bankedFavorActivationValue,
+  earlyCountBatchAllowed,
+  chooseNextBitNode,
+  dwellInstallVerdict,
   INSTALL_VERDICT_OVERHEAD_SEC,
   PUSH_MARGIN,
   bestOrdering,
   favorCrossings,
+  installCadencePushRate,
   installVerdict,
+  routeCountInstallValue,
   orderingCost,
   phaseOf,
   stepProgression,
@@ -820,7 +827,9 @@ describe("progression", () => {
     expect(installVerdict({ routeEtaKnown: true }).verdict).toBe("no-data");
     expect(installVerdict({ routeEtaKnown: true, frontierIdle: true }).verdict).toBe("install");
     expect(installVerdict({ routeEtaKnown: true, resetValueMult: 0.5, pushMarginalRate: 0, frontierIdle: true }).verdict).toBe("install");
-    expect(installVerdict({ routeEtaKnown: true, resetValueMult: 0.5, pushMarginalRate: 0 }).verdict).toBe("no-data");
+    // Undefined means the frontier has not spoken; explicit zero means it has
+    // measured no further reset-activated acceleration.
+    expect(installVerdict({ routeEtaKnown: true, resetValueMult: 0.5, pushMarginalRate: 0 }).verdict).toBe("install");
   });
 
   test("accrued value must clear sqrt(2·O·p) with the margin", () => {
@@ -859,6 +868,34 @@ describe("progression", () => {
     expect(scoreAugMults(redPill, weightsForRoute("daedalus"))).toBe(0);
   });
 
+  test("Daedalus augmentation weights follow the ETA-selected invitation branch", () => {
+    const hacking = weightsForRoute("daedalus", "hacking");
+    const combat = weightsForRoute("daedalus", "combat");
+    expect(combat.strength).toBeGreaterThan(hacking.strength!);
+    expect(combat.agility_exp).toBeGreaterThan(hacking.agility_exp!);
+    // Combat clears the invitation, but the installed Red Pill still leaves a
+    // hacking-only world-daemon tail, so hacking value must remain intact.
+    expect(combat.hacking).toBe(hacking.hacking);
+    expect(combat.hacking_exp).toBe(hacking.hacking_exp);
+  });
+
+  test("direct skill multiplier value follows the nonlinear route target and SF12 base", () => {
+    const baseline = weightsForRoute("daedalus", "hacking");
+    const weak = weightsForRoute("daedalus", "hacking", {
+      hackingTarget: 3_000,
+      multipliers: { hacking: 1.5 },
+    });
+    const strong = weightsForRoute("daedalus", "hacking", {
+      hackingTarget: 3_000,
+      multipliers: { hacking: 15 },
+    });
+    expect(weak.hacking).toBeGreaterThan(strong.hacking);
+    expect(strong.hacking).toBeGreaterThan(baseline.hacking);
+    const total = (weights: Record<string, number>) => Object.values(weights).reduce((sum, weight) => sum + weight, 0);
+    expect(total(weak)).toBeCloseTo(total(baseline), 12);
+    expect(total(strong)).toBeCloseTo(total(baseline), 12);
+  });
+
   test("a realizable sweep set opens the install gate despite the empty queue", () => {
     // Purchases are end-loaded: mid-cycle the queue is empty BY DESIGN, and
     // the sweep that fills it is triggered by installWanted itself. The
@@ -889,6 +926,161 @@ describe("progression", () => {
     expect(required.installWanted).toBe(true);
     expect(required.installReady).toBe(false);
     expect(required.installBlockers.map((blocker) => blocker.kind)).toEqual(["stock"]);
+  });
+
+  test("a banked route package opens its mandatory end-loaded sweep before purchase", () => {
+    const required = stepProgression(view({
+      queued: [],
+      resetRealizable: true,
+      routeRequiresInstall: true,
+      nodeRemainingSec: 1,
+      factionsReadyToInstall: false,
+    }));
+
+    expect(required.installWanted).toBe(true);
+    expect(required.installReady).toBe(false);
+    expect(required.installBlockers.map((blocker) => blocker.kind)).toEqual([
+      "factions",
+      "augmentations",
+    ]);
+  });
+
+  test("banked favor values a shared future augmentation only once", () => {
+    const oneSeller = bankedFavorActivationValue({
+      standings: [{ name: "CyberSec", rep: 100_000, favor: 0 }],
+      offers: [{ name: "Shared", faction: "CyberSec", owned: false }],
+      favorToDonate: 150,
+    });
+    const duplicatedOffer = bankedFavorActivationValue({
+      standings: [
+        { name: "CyberSec", rep: 100_000, favor: 0 },
+        { name: "NiteSec", rep: 100_000, favor: 0 },
+      ],
+      offers: [
+        { name: "Shared", faction: "CyberSec", owned: false },
+        { name: "Shared", faction: "NiteSec", owned: false },
+      ],
+      favorToDonate: 150,
+    });
+    expect(duplicatedOffer).toBeCloseTo(oneSeller, 12);
+
+    const distinctOffer = bankedFavorActivationValue({
+      standings: [
+        { name: "CyberSec", rep: 100_000, favor: 0 },
+        { name: "NiteSec", rep: 100_000, favor: 0 },
+      ],
+      offers: [
+        { name: "A", faction: "CyberSec", owned: false },
+        { name: "B", faction: "NiteSec", owned: false },
+      ],
+      favorToDonate: 150,
+    });
+    expect(distinctOffer).toBeCloseTo(oneSeller * 2, 12);
+
+    const nestedAtOneFaction = bankedFavorActivationValue({
+      standings: [{ name: "CyberSec", rep: 100_000, favor: 0 }],
+      offers: [
+        { name: "Low breakpoint", faction: "CyberSec", owned: false },
+        { name: "High breakpoint", faction: "CyberSec", owned: false },
+      ],
+      favorToDonate: 150,
+    });
+    expect(nestedAtOneFaction).toBeCloseTo(oneSeller, 12);
+
+    const reroutedSharedOffer = bankedFavorActivationValue({
+      standings: [
+        { name: "CyberSec", rep: 100_000, favor: 0 },
+        { name: "NiteSec", rep: 100_000, favor: 0 },
+      ],
+      offers: [
+        { name: "Shared", faction: "CyberSec", owned: false },
+        { name: "CyberSec only", faction: "CyberSec", owned: false },
+        { name: "Shared", faction: "NiteSec", owned: false },
+      ],
+      favorToDonate: 150,
+    });
+    expect(reroutedSharedOffer).toBeCloseTo(oneSeller * 2, 12);
+  });
+
+  test("install evidence must dwell, while contrary push evidence cancels immediately", () => {
+    const first = dwellInstallVerdict("install", {}, 1_000, 90_000);
+    expect(first.install).toBe(false);
+    const held = dwellInstallVerdict("install", first.state, 91_000, 90_000);
+    expect(held.install).toBe(true);
+    const cancelled = dwellInstallVerdict("push", held.state, 91_001, 90_000);
+    expect(cancelled.install).toBe(false);
+    const restarted = dwellInstallVerdict("install", cancelled.state, 91_002, 90_000);
+    expect(restarted.install).toBe(false);
+  });
+
+  test("a completed package's one-second ETA cannot explode cadence throughput", () => {
+    const rate = installCadencePushRate({
+      runSec: 3_600,
+      resetValueMult: 1,
+      intentActivationValue: 0.2,
+      intentEtaSec: 1,
+      intentMarginalActivationRate: 0.2,
+    });
+    expect(rate).toBeCloseTo(1 / 3_600, 12);
+    expect(rate).toBeLessThan(0.001);
+  });
+
+  test("a zero speed slope keeps count-only route progress on the observed cadence", () => {
+    const rate = installCadencePushRate({
+      runSec: 5_400,
+      resetValueMult: 0.7,
+      intentActivationValue: 0.3,
+      intentEtaSec: 1_500,
+      intentMarginalActivationRate: 0,
+    });
+    expect(rate).toBeCloseTo(0.7 / 5_400, 12);
+    expect(installVerdict({
+      routeEtaKnown: true,
+      resetValueMult: 0.7,
+      resetOverheadSec: 5_400,
+      pushMarginalRate: rate,
+    }).verdict).toBe("push");
+  });
+
+  test("route progress that resets do not preserve vetoes only optional installs", () => {
+    const held = stepProgression(view({
+      queued: ["a"],
+      marginalInstall: true,
+      resetRealizable: true,
+      optionalInstallAllowed: false,
+    }));
+    expect(held.installWanted).toBe(false);
+
+    const mandatory = stepProgression(view({
+      queued: ["The Red Pill"],
+      routeRequiresInstall: true,
+      optionalInstallAllowed: false,
+    }));
+    expect(mandatory.installWanted).toBe(true);
+  });
+
+  test("a consolidation-sized count tranche has route value without reopening tiny resets", () => {
+    expect(earlyCountBatchAllowed(30, 1, 2)).toBe(false);
+    expect(earlyCountBatchAllowed(30, 1, 10)).toBe(true);
+    expect(earlyCountBatchAllowed(30, 6, 8)).toBe(true);
+    expect(routeCountInstallValue({
+      required: 30,
+      installed: 13,
+      affordableDistinct: 8,
+      batchAllowed: false,
+    })).toBe(0);
+    expect(routeCountInstallValue({
+      required: 30,
+      installed: 13,
+      affordableDistinct: 9,
+      batchAllowed: true,
+    })).toBeCloseTo(9 * 17 / 30, 12);
+    expect(routeCountInstallValue({
+      required: 30,
+      installed: 29,
+      affordableDistinct: 20,
+      batchAllowed: true,
+    })).toBeCloseTo(1 / 5, 12);
   });
 
   test("empty-queue liquidation is requested without making an install possible", () => {
@@ -996,6 +1188,15 @@ describe("progression", () => {
       const levels = BASELINE_ORDER.filter(([n]) => n === node).map(([, level]) => level);
       expect(levels[1]).toBeGreaterThan(levels[0]!);
     }
+  });
+
+  test("next-BitNode selection credits the node being completed and covers all nodes", () => {
+    expect(chooseNextBitNode(4, {})).toMatchObject({ bitNode: 4, targetLevel: 3 });
+    expect(chooseNextBitNode(4, { "4": 2 })).toMatchObject({ bitNode: 1, targetLevel: 3 });
+    expect(new Set(DEFAULT_BITNODE_TARGETS.map(([node]) => node))).toEqual(new Set(Array.from({ length: 15 }, (_, i) => i + 1)));
+
+    const allThree = Object.fromEntries(Array.from({ length: 15 }, (_, i) => [String(i + 1), 3]));
+    expect(chooseNextBitNode(1, allThree)).toMatchObject({ bitNode: 12, targetLevel: 4 });
   });
 });
 

@@ -88,7 +88,14 @@ const CYBERSEC_DONATION_WORLD: NonNullable<SimProfile["world"]> = {
   playerState: {
     factions: ["CyberSec"],
     augmentations: Object.values(AUGMENTATION_TABLE)
-      .filter((aug) => aug.name !== FACTION_DONATION_TARGET && aug.name !== "NeuroFlux Governor")
+      // This fixture tests an ordinary economic install. An installed Red
+      // Pill would put the real planner in its no-extra-resets daemon-regrow
+      // phase, where refusing this synthetic reset is the correct behavior.
+      .filter((aug) =>
+        aug.name !== FACTION_DONATION_TARGET
+        && aug.name !== "NeuroFlux Governor"
+        && aug.name !== "The Red Pill"
+      )
       .map((aug) => ({ name: aug.name, level: 1 })),
   },
   factions: { CyberSec: { rep: 0, favor: 150 } },
@@ -116,6 +123,14 @@ const CYBERSEC_INSTALL_WORLD: NonNullable<SimProfile["world"]> = {
  * banked rep as soon as the accrued value clears the cadence threshold. */
 const CYBERSEC_CADENCE_WORLD: NonNullable<SimProfile["world"]> = {
   ...CYBERSEC_INSTALL_WORLD,
+  // This is a cadence/transaction fixture, not a reputation-throughput
+  // benchmark. Keep its second cross-prestige package short enough that the
+  // test does not encode the old policy of forcing a tiny install at Tian Di
+  // Hui instead of continuing into a worthwhile runner.
+  person: {
+    ...CYBERSEC_INSTALL_WORLD.person,
+    mults: { faction_rep: 10 },
+  },
   playerState: {
     ...CYBERSEC_INSTALL_WORLD.playerState,
     augmentations: [],
@@ -155,7 +170,9 @@ const BN5_STOCK_WORLD: NonNullable<SimProfile["world"]> = {
 /** Reachable mid-BN1 state with SF4/SF14 and one real queued reset. UCM is
  * installed with the explicit roll above so the simulator never invents it. */
 const BN1_PROGRESSION_WORLD: NonNullable<SimProfile["world"]> = {
+  ...VANILLA_NETWORK,
   network: [
+    ...VANILLA_NETWORK.network,
     {
       hostname: "faction-farm",
       hackDifficulty: 1,
@@ -166,6 +183,11 @@ const BN1_PROGRESSION_WORLD: NonNullable<SimProfile["world"]> = {
       maxRam: 512,
     },
   ],
+  topology: {
+    ...VANILLA_NETWORK.topology,
+    home: [...(VANILLA_NETWORK.topology.home ?? []), "faction-farm"],
+    "faction-farm": ["home"],
+  },
   person: {
     skills: { hacking: 100 },
     exp: { hacking: calculateExp(100) },
@@ -259,6 +281,25 @@ const BN1_FULL_WORLD: NonNullable<SimProfile["world"]> = {
   playerState: { sourceFiles: { "4": 3, "14": 3 } },
 };
 
+/** Same cold BN1 benchmark with the exact persistent benefit granted by
+ * SF12.30: one installed NeuroFlux object at level 30 and its multiplier
+ * applied thirty times. This is a calibration accelerator, not a planner
+ * shortcut; all money, skills, reputation, programs and infrastructure still
+ * start from prestige state and the real controller sees ordinary APIs. */
+const SF12_CALIBRATION_LEVEL = 30;
+const BN1_FULL_SF12_30_WORLD: NonNullable<SimProfile["world"]> = {
+  ...BN1_FULL_WORLD,
+  person: {
+    mults: augmentationMultiplierSnapshot(
+      Array.from({ length: SF12_CALIBRATION_LEVEL }, () => "NeuroFlux Governor"),
+    ),
+  },
+  playerState: {
+    sourceFiles: { "4": 3, "12": SF12_CALIBRATION_LEVEL, "14": 3 },
+    augmentations: [{ name: "NeuroFlux Governor", level: SF12_CALIBRATION_LEVEL }],
+  },
+};
+
 export const PROFILES: readonly SimProfile[] = [
   {
     id: "bn1-speedrun",
@@ -286,12 +327,33 @@ export const PROFILES: readonly SimProfile[] = [
     description:
       "Full BN1 cold start on the fixed vanilla network: bootstrap from 8 GB through strategy-chosen installs, Red Pill, and w0r1d_d43m0n.",
     bitnode: 1,
-    features: only("hacking", "factions", "progression", "go"),
+    // Full-route benchmark: career must be live because city, karma, kills and
+    // combat gates are genuine competing faction paths. Disabling it makes
+    // the optimiser solve a smaller game and invalidates route timing.
+    // Full mechanically playable BN1 surface for this save. `only` does not
+    // force any capability on; it merely excludes the currently unmodelled
+    // node-specific systems. Hacknet, the market and side income are universal
+    // systems and must compete with hacking/career in a full-node benchmark.
+    // `side` stays excluded until coding-contract generation is modeled; the
+    // simulator correctly reports that oracle-only subsystem as unmodeled.
+    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock"),
     goals: ["bn:1", "installs:2"],
     homeRam: 8,
     world: BN1_FULL_WORLD,
     horizon: "24h",
     seeds: [1, 2, 3],
+  },
+  {
+    id: "bn1-full-sf12-30",
+    description:
+      "Full BN1 calibration run with the exact free NeuroFlux level and multipliers granted by SF12.30.",
+    bitnode: 1,
+    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock"),
+    goals: ["bn:1", "installs:2"],
+    homeRam: 8,
+    world: BN1_FULL_SF12_30_WORLD,
+    horizon: "24h",
+    seeds: [1],
   },
   {
     id: "bn1-jit-stress",
@@ -303,7 +365,7 @@ export const PROFILES: readonly SimProfile[] = [
     homeRam: 32_768,
     startingMoney: 1e11,
     world: BN1_JIT_STRESS_WORLD,
-    horizon: "2h",
+    horizon: "2.5h",
     seeds: [1, 2, 3],
   },
   {
@@ -389,10 +451,13 @@ export const PROFILES: readonly SimProfile[] = [
   {
     id: "factions-donation",
     description:
-      "Hacking must close CyberSec's exact donation-plus-purchase cash gap; measures time to one augmentation breakpoint.",
+      "Hacking must close CyberSec's exact donation cash gap; the unlocked augmentation stays banked until an end-loaded install sweep.",
     bitnode: 4,
     features: only("hacking", "factions", "progression"),
-    goals: [`aug:${FACTION_DONATION_TARGET}`],
+    // Above the augmentation's 2,000-rep breakpoint so the run records the
+    // donation that crosses it rather than stopping on the preceding work
+    // sample; still no purchase is needed or permitted before an install.
+    goals: ["rep:CyberSec:3000"],
     homeRam: 256,
     startingMoney: 1.5e9,
     world: CYBERSEC_DONATION_WORLD,
@@ -417,7 +482,11 @@ export const PROFILES: readonly SimProfile[] = [
     description:
       "Two consecutive install resets on the banked-rep fixture: prestige soundness and the install-vs-push cadence at speed.",
     bitnode: 4,
-    features: only("hacking", "factions", "progression"),
+    // The second-cycle packages include city factions. Career owns travel and
+    // therefore has to participate; otherwise the faction planner correctly
+    // rejects those packages as impossible and this is no longer a cadence
+    // experiment.
+    features: only("hacking", "factions", "career", "progression"),
     goals: ["installs:2"],
     homeRam: 256,
     startingMoney: 1.5e9,

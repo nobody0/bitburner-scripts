@@ -65,7 +65,7 @@ describe("route ETAs", () => {
     expect(blade.etaSec).toBe(0);
   });
 
-  test("owning the pill collapses both Red Pill routes to the shared tail", () => {
+  test("owning the pill collapses the Red Pill routes to the shared tail", () => {
     const v = view({ ownsRedPill: true, sourceFiles: { "15": 1 } });
     const etas = etasFor(v);
     const daedalus = etas.find((eta) => eta.id === "daedalus")!;
@@ -92,6 +92,39 @@ describe("route ETAs", () => {
     expect(gate.sec).toBeCloseTo(DAEDALUS_MONEY / 1e6, 5);
   });
 
+  test("the Daedalus invite publishes money and its measured faster skill branch in parallel", () => {
+    const v = view({ augCount: 30, hackingSkill: 10, lowestCombatSkill: 10, money: 0 });
+    const hacking = etasFor(v, {
+      ...noRates(),
+      moneyPerSec: 1e6,
+      hackingSkillPerSec: 10,
+      combatSkillPerSec: 0.01,
+    }).find((eta) => eta.id === "daedalus")!;
+    expect(hacking.needs).toEqual([
+      expect.objectContaining({ kind: "money", target: DAEDALUS_MONEY }),
+      expect.objectContaining({ kind: "skill", subject: "hacking", target: 2_500 }),
+    ]);
+
+    const combat = etasFor(v, {
+      ...noRates(),
+      moneyPerSec: 1e6,
+      hackingSkillPerSec: 0.01,
+      combatSkillPerSec: 10,
+    }).find((eta) => eta.id === "daedalus")!;
+    expect(combat.needs).toEqual([
+      expect.objectContaining({ kind: "money", target: DAEDALUS_MONEY }),
+      expect.objectContaining({ kind: "combatSkills", target: 1_500 }),
+    ]);
+  });
+
+  test("the pending count install does not request invitation work that prestige will erase", () => {
+    const daedalus = etasFor(view({ augCount: 29, money: 0, hackingSkill: 1, lowestCombatSkill: 1 }))
+      .find((eta) => eta.id === "daedalus")!;
+    expect(daedalus.needs).toEqual([
+      expect.objectContaining({ kind: "augCount", target: 30 }),
+    ]);
+  });
+
   test("black ops overlap with the rank climb — slower of the two, not the sum", () => {
     const v = view({ inBladeburner: true, blackOpsComplete: 10, bladeburnerRank: 399_999 });
     const blade = etasFor(v, { ...noRates(), bladeburnerRankPerSec: 1 }).find((eta) => eta.id === "bladeburner")!;
@@ -103,7 +136,67 @@ describe("route ETAs", () => {
     const v = view({ sourceFiles: { "15": 1 } });
     const labyrinth = etasFor(v).find((eta) => eta.id === "labyrinth")!;
     expect(labyrinth.available).toBe(true);
-    expect(labyrinth.parts[0]).toMatchObject({ what: "labyrinth walk", sec: LABYRINTH_WALK_SEC, measured: false });
+    expect(labyrinth.parts[0]).toMatchObject({ what: "labyrinth stage 1", sec: LABYRINTH_WALK_SEC, measured: false });
+  });
+
+  test("Daedalus prices queued unique augs as acquired but still requires their install", () => {
+    const queued = Array.from({ length: 10 }, (_, index) => `queued-${index}`);
+    const v = view({ augCount: 20, queuedAugs: queued });
+    const daedalus = etasFor(v).find((eta) => eta.id === "daedalus")!;
+    expect(daedalus.parts.find((part) => part.what === "final augmentation package")!.sec).toBe(0);
+    expect(daedalus.parts.some((part) => part.what === "install Daedalus count package")).toBe(true);
+    expect(daedalus.nextMandatoryInstall).toMatchObject({ sec: 0 });
+  });
+
+  test("a banked direct skill multiplier reduces only the post-install gate", () => {
+    const v = view({ augCount: 29, queuedAugs: ["closing-slot"] });
+    const ordinary = etasFor(v, { ...noRates(), moneyPerSec: 1e12, hackingSkillPerSec: 1 })
+      .find((eta) => eta.id === "daedalus")!;
+    const boosted = etasFor(v, {
+      ...noRates(),
+      moneyPerSec: 1e12,
+      hackingSkillPerSec: 1,
+      postInstallHackingSkillMult: 2,
+    }).find((eta) => eta.id === "daedalus")!;
+    const ordinaryGate = ordinary.parts.find((part) => part.what.startsWith("post-install invite gate"))!;
+    const boostedGate = boosted.parts.find((part) => part.what.startsWith("post-install invite gate"))!;
+    expect(boostedGate.resource).toBe("hacking");
+    expect(boostedGate.sec).toBeLessThan(ordinaryGate.sec);
+  });
+
+  test("queued NeuroFlux counts once toward Daedalus only when not already installed", () => {
+    const fresh = view({ augCount: 29, queuedAugs: ["NeuroFlux Governor", "NeuroFlux Governor"] });
+    const freshEta = etasFor(fresh).find((eta) => eta.id === "daedalus")!;
+    expect(freshEta.parts.find((part) => part.what === "final augmentation package")!.sec).toBe(0);
+
+    const stacked = view({
+      augCount: 29,
+      installedAugs: { "NeuroFlux Governor": 10 },
+      queuedAugs: ["NeuroFlux Governor", "NeuroFlux Governor"],
+    });
+    const stackedEta = etasFor(stacked).find((eta) => eta.id === "daedalus")!;
+    expect(stackedEta.parts.find((part) => part.what === "final augmentation package")!.sec).toBeGreaterThan(0);
+  });
+
+  test("labyrinth ETA includes every remaining mandatory reward install", () => {
+    const v = view({ bitNode: 15, darknetAvailable: true });
+    const labyrinth = etasFor(v).find((eta) => eta.id === "labyrinth")!;
+    expect(labyrinth.parts.filter((part) => part.resource === "install")).toHaveLength(5);
+    expect(labyrinth.nextMandatoryInstall).toMatchObject({ sec: LABYRINTH_WALK_SEC });
+  });
+
+  test("route evaluation for all BitNodes remains comfortably below the 10ms budget", () => {
+    const started = performance.now();
+    let evaluated = 0;
+    for (let repeat = 0; repeat < 100; repeat++) {
+      for (let bitNode = 1; bitNode <= 15; bitNode++) {
+        const v = view({ bitNode, darknetAvailable: true, bladeburnerAvailable: true });
+        etasFor(v);
+        evaluated++;
+      }
+    }
+    const perPlanMs = (performance.now() - started) / evaluated;
+    expect(perPlanMs).toBeLessThan(10);
   });
 });
 
@@ -122,6 +215,13 @@ describe("route choice", () => {
   test("no available route yields no choice", () => {
     const unavailable = etas(1, 1).map((eta) => ({ ...eta, available: false }));
     expect(chooseRoute(undefined, unavailable, 0)).toEqual({ choice: undefined, switched: false });
+  });
+
+  test("a mechanically available but unexecutable route cannot lock the run", () => {
+    const routes = etas(1_000, 1).map((eta) =>
+      eta.id === "labyrinth" ? { ...eta, actionable: false } : eta,
+    );
+    expect(chooseRoute(undefined, routes, 0).choice?.route).toBe("daedalus");
   });
 
   test("a complete route wins immediately, margin and dwell notwithstanding", () => {
@@ -175,7 +275,7 @@ describe("anchored uncapped forecasts", () => {
     expect(forecastAt(week, 3_601_000)).toMatchObject({ state: "stale", remainingSec: 7 * 86_400 - 3_600 });
   });
 
-  test("re-estimates every ten minutes or when the structural basis changes", () => {
+  test("re-estimates every minute or when the structural basis changes", () => {
     const forecast = estimatedForecast(1_000, "same", [
       { what: "work", resource: "other", sec: 100, measured: true, mode: "sequential" },
     ]);
@@ -188,9 +288,9 @@ describe("anchored uncapped forecasts", () => {
   });
 
   test("a complete route publishes NO node forecast", () => {
-    // The act that ends the node is deliberately unwired (a human clicks), so
-    // "done" can persist indefinitely. Publishing a 0-second estimate for it
-    // would freeze every horizon-gated purchase in the meantime.
+    // Completion is a separately armed transaction (or manual without SF4).
+    // Publishing a 0-second economic horizon would freeze every horizon-gated
+    // purchase while that handoff is pending.
     const done = nodeForecast(0, { id: "daedalus", available: true, complete: true, etaSec: 0, parts: [] }, "basis");
     expect(done.state).toBe("unknown");
     expect(usableForecastSec(done)).toBeUndefined();
@@ -230,6 +330,66 @@ describe("anchored uncapped forecasts", () => {
         { critical: true, measured: false },
       ],
     });
+
+    const cadenceHeld = installForecast(0, {
+      installNow: false,
+      queuedCount: 0,
+      phase: "start",
+      workMeasured: true,
+      moneyMeasured: true,
+      finalSweepReady: false,
+      cadenceSec: 900,
+      intent: {
+        faction: "CyberSec", repTarget: 100, augmentations: ["a"], value: 1, etaSec: 100, rate: 1,
+        marginalRate: 1, unlockSec: 0, repSec: 100, moneySec: 0, favorAfterInstall: 0,
+        totalCost: 1, purchaseCost: 1, donationCost: 0, purpose: "augmentations",
+      },
+    }, "cadence");
+    expect(cadenceHeld).toMatchObject({ state: "estimated", remainingSec: 960 });
+
+    const committed = installForecast(0, {
+      installNow: false,
+      installWanted: true,
+      queuedCount: 0,
+      phase: "finishUp",
+      workMeasured: true,
+      moneyMeasured: true,
+      finalSweepReady: false,
+      committedPackageSec: 293,
+    }, "committed");
+    expect(committed).toMatchObject({
+      state: "estimated",
+      remainingSec: 353,
+      components: [
+        { what: "finish committed augmentation package", measured: true },
+        { what: "committed install blockers and final sweep", measured: false },
+      ],
+    });
+  });
+
+  test("an unsafe route stage exposes only its mandatory install horizon", () => {
+    const held = installForecast(0, {
+      installNow: false,
+      queuedCount: 2,
+      phase: "finishUp",
+      workMeasured: true,
+      moneyMeasured: true,
+      finalSweepReady: false,
+      optionalInstallAllowed: false,
+      mandatory: { sec: 900, measured: true, why: "finish the route batch" },
+    }, "held");
+    expect(held).toMatchObject({ state: "estimated", remainingSec: 960 });
+
+    const noMandatory = installForecast(0, {
+      installNow: false,
+      queuedCount: 2,
+      phase: "finishUp",
+      workMeasured: true,
+      moneyMeasured: true,
+      finalSweepReady: false,
+      optionalInstallAllowed: false,
+    }, "held");
+    expect(noMandatory.state).toBe("unknown");
   });
 });
 

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { goDemands } from "../shared/strategy/go/demand.ts";
+import { goGamePaysForRam } from "../game/lib/features/remaining.ts";
 import { estimatedForecast, unknownForecast } from "../shared/strategy/progression/forecast.ts";
 import type { Need, NeedKind } from "../shared/strategy/needs.ts";
 
@@ -19,6 +20,13 @@ function need(kind: NeedKind, subject?: string): Need {
 const unknownNode = unknownForecast(0, "node", "test");
 
 describe("Go target demands", () => {
+  test("a new game must repay the productive RAM it displaces", () => {
+    // Four GB on a 400 GB fleet costs roughly 1% of throughput.
+    expect(goGamePaysForRam(0.02, 400)).toBe(true);
+    expect(goGamePaysForRam(0.00185, 400)).toBe(false);
+    expect(goGamePaysForRam(0, 400)).toBe(false);
+  });
+
   test("uses typed critical-path resources and ignores noncritical parallel work", () => {
     const install = estimatedForecast(0, "install", [
       { what: "renamed primary work", resource: "reputation", sec: 600, measured: true, mode: "parallel" },
@@ -71,6 +79,23 @@ describe("Go target demands", () => {
     });
     expect(demands["The Black Hand"]?.seconds).toBeGreaterThan(0);
     expect(demands.Illuminati?.seconds).toBeGreaterThan(0);
+  });
+
+  test("maps an augmentation-package route component to its live producers", () => {
+    const node = estimatedForecast(0, "node", [
+      { what: "final augmentation package", resource: "augmentations", sec: 1_000, measured: false, mode: "sequential" },
+      { what: "install count package", resource: "install", sec: 300, measured: false, mode: "sequential" },
+    ]);
+    const demands = goDemands({
+      horizons: { install: unknownForecast(0, "install", "test"), node },
+      sinceInstall: { total: 100, hacking: 100, hacknet: 0 },
+      openNeeds: [],
+      canEarnFactionRep: true,
+      canRunBladeburner: false,
+    });
+    expect(demands["The Black Hand"]?.seconds).toBe(1_000);
+    expect(demands.Illuminati?.seconds).toBe(1_000);
+    expect(demands.Daedalus?.seconds).toBe(500);
   });
 
   test("attributes a money bottleneck only to producers with known reward elasticity", () => {

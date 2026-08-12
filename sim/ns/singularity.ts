@@ -4,6 +4,9 @@ import type { SimPlayer } from "../core/player.ts";
 import type { CrimeSystem } from "../features/crime.ts";
 import type { FactionSystem } from "../features/factions.ts";
 import type { GraftingSystem } from "../features/grafting.ts";
+import type { EducationSystem } from "../features/education.ts";
+import type { ProgramSystem } from "../features/programs.ts";
+import type { CompanySystem } from "../features/companies.ts";
 import { satisfiesAll, type SatisfyContext } from "../features/requirements.ts";
 import { unmodeled } from "../realm/unmodeled.ts";
 import type { SimWorld } from "../world.ts";
@@ -13,7 +16,7 @@ import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipl
 import { FactionName } from "../vendor/bitburner/src/Faction/Enums.ts";
 import { CityName, LocationName } from "../vendor/bitburner/src/Locations/Enums.ts";
 import { CompanyName } from "../vendor/bitburner/src/Company/Enums.ts";
-import { JobName } from "../vendor/bitburner/src/Work/Enums.ts";
+import { JobField, JobName } from "../vendor/bitburner/src/Work/Enums.ts";
 import { AugmentationName } from "../vendor/bitburner/src/Augmentation/Enums.ts";
 import { calculateHackingTime } from "../vendor/bitburner/src/Hacking.ts";
 import { getUpgradeHomeRamCost } from "../core/effects.ts";
@@ -43,6 +46,9 @@ export interface SingularityDeps {
   network: Map<string, string[]>;
   crimes: CrimeSystem;
   grafting?: GraftingSystem;
+  education?: EducationSystem;
+  programs?: ProgramSystem;
+  companies?: CompanySystem;
   satisfyContext(): SatisfyContext;
   /** Poke the engine's invitation counter, as the real call does. */
   pokeInvitationCounter(): void;
@@ -252,14 +258,78 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       return player.stopWork();
     },
 
+    universityCourse: (universityName: string, courseName: string, focus = true): boolean =>
+      deps.education?.universityCourse(universityName, courseName, focus)
+        ?? unmodeled("subsystem", "education", "class work was invoked without an education system"),
+
+    gymWorkout: (gymName: string, stat: string, focus = true): boolean =>
+      deps.education?.gymWorkout(gymName, stat, focus)
+        ?? unmodeled("subsystem", "education", "gym work was invoked without an education system"),
+
+    // --- companies ----------------------------------------------------
+    getCompanyPositions: (companyName: string): string[] => {
+      const companies = deps.companies
+        ?? unmodeled("subsystem", "companies", "company positions were requested without a company system");
+      return companies.positions(companyName);
+    },
+
+    getCompanyPositionInfo: (companyName: string, positionName: string): Record<string, unknown> => {
+      const companies = deps.companies
+        ?? unmodeled("subsystem", "companies", "company position info was requested without a company system");
+      return companies.positionInfo(companyName, positionName);
+    },
+
+    workForCompany: (companyName: string, focus = true): boolean => {
+      const companies = deps.companies
+        ?? unmodeled("subsystem", "companies", "company work was started without a company system");
+      return companies.startWork(companyName, focus);
+    },
+
+    applyToCompany: (companyName: string, field: string): string | null => {
+      const companies = deps.companies
+        ?? unmodeled("subsystem", "companies", "a company application was made without a company system");
+      return companies.apply(companyName, field);
+    },
+
+    quitJob: (companyName: string): void => {
+      const companies = deps.companies
+        ?? unmodeled("subsystem", "companies", "a company job was quit without a company system");
+      companies.quit(companyName);
+    },
+
+    getCompanyRep: (companyName: string): number => {
+      const companies = deps.companies
+        ?? unmodeled("subsystem", "companies", "company reputation was requested without a company system");
+      return companies.rep(companyName);
+    },
+
+    getCompanyFavor: (companyName: string): number => {
+      const companies = deps.companies
+        ?? unmodeled("subsystem", "companies", "company favor was requested without a company system");
+      return companies.favor(companyName);
+    },
+
+    createProgram: (name: string, focus = true): boolean =>
+      deps.programs?.start(name, focus)
+        ?? unmodeled("subsystem", "programs", "program creation was invoked without a program system"),
+
     getCurrentWork: (): unknown => {
       const work = player.currentWork;
       if (!work) return null;
       return {
-        type: work.kind === "faction" ? "FACTION" : work.kind === "graft" ? "GRAFTING" : work.kind.toUpperCase(),
-        factionName: work.subject,
+        type: work.kind === "faction"
+          ? "FACTION"
+          : work.kind === "graft"
+            ? "GRAFTING"
+            : work.kind === "createProgram"
+              ? "CREATE_PROGRAM"
+              : work.kind.toUpperCase(),
+        factionName: work.kind === "faction" ? work.subject : undefined,
+        companyName: work.kind === "company" ? work.subject : undefined,
         crimeType: work.kind === "crime" ? work.subject : undefined,
         factionWorkType: work.workType,
+        classType: work.kind === "class" ? work.subject : undefined,
+        programName: work.kind === "createProgram" ? work.subject : undefined,
         cyclesWorked: work.cyclesWorked,
         nextCompletion: work.nextCompletion,
       };
@@ -337,6 +407,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       // Reputation banks into favor HERE and nowhere else — the reason a
       // donation-gated faction is a reset decision rather than a wait.
       factions.prestigeAugmentation();
+      deps.companies?.prestigeAugmentation();
       for (const [name, level] of player.queuedAugmentations) {
         player.augmentations.set(name, (player.augmentations.get(name) ?? 0) + level);
       }
@@ -459,6 +530,7 @@ function makeEnums(): Record<string, unknown> {
     LocationName,
     CompanyName,
     JobName,
+    JobField,
     AugmentationName,
     // Present so a probe reading it does not fall through to unmodeled().
     FactionWorkType: Object.freeze({ hacking: "hacking", field: "field", security: "security" }),

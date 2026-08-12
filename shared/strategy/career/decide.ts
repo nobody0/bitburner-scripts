@@ -1,4 +1,5 @@
 import { formatMoney, formatScientific } from "../../format.ts";
+import { expForSkill } from "../../formulas.ts";
 import type { Need, NeedBoard, NeedKind, NeedUrgency } from "../needs.ts";
 import { needKey, needProgress, URGENCY_ORDER } from "../needs.ts";
 import { careerWorkMode } from "./schedule.ts";
@@ -72,6 +73,12 @@ export interface CareerView {
   karma: number;
   numPeopleKilled: number;
   skills: Record<string, number>;
+  /** Current raw experience and effective direct skill multipliers. Needed to
+   * translate a level gate through the game's nonlinear exp curve. */
+  exp?: Record<string, number>;
+  skillMultipliers?: Record<string, number>;
+  /** Experience that continues while player work is spent elsewhere. */
+  externalSkillExpPerSec?: Record<string, number>;
   city: string;
   jobs?: Record<string, string>;
   companies?: { name: string; rep: number; repPerSec?: number; moneyPerSec?: number }[];
@@ -131,6 +138,7 @@ interface NeedValue {
   subject?: string;
   weight: number;
   remaining: number;
+  target: number;
   urgency: NeedUrgency;
 }
 
@@ -144,6 +152,7 @@ export function needValues(board: NeedBoard): Map<string, NeedValue> {
     if (existing) {
       existing.weight += need.weight;
       existing.remaining = Math.min(existing.remaining, remaining);
+      existing.target = Math.min(existing.target, need.target);
       if (URGENCY_ORDER[need.urgency] > URGENCY_ORDER[existing.urgency]) existing.urgency = need.urgency;
       continue;
     }
@@ -152,10 +161,112 @@ export function needValues(board: NeedBoard): Map<string, NeedValue> {
       ...(need.subject !== undefined ? { subject: need.subject } : {}),
       weight: need.weight,
       remaining: Math.max(1e-9, remaining),
+      target: need.target,
       urgency: need.urgency,
     });
   }
   return out;
+}
+
+/** Fraction of hacking progress that disappears when Algorithms gives up the
+ * player-work slot. The fleet's background XP is common to both choices. */
+export function marginalTrainingShare(trainingExpPerSec: number, externalExpPerSec: number): number {
+  const training = Math.max(0, trainingExpPerSec);
+  const external = Math.max(0, externalExpPerSec);
+  return training + external > 0 ? training / (training + external) : 0;
+}
+
+/** Compare spending the player-work slot on a skill course with spending it on
+ * a reputation gate. Hacking XP from the fleet continues in BOTH cases. The
+ * reputation work is therefore also useful time for the skill gate: only the
+ * raw XP left after that interval can justify taking the slot for Algorithms.
+ *
+ * `relativeTimeSaved` is deliberately wall-clock, not an XP share. For
+ * example, if normal hacking finishes the level gate while faction work runs,
+ * Algorithms saves zero seconds even when its displayed XP/sec is large. */
+interface SkillRepTradeoff {
+  remainingExp: number;
+  backgroundExpDuringRep: number;
+  trainingWorkSec: number;
+  etaWithoutTrainingSec: number;
+  etaWithTrainingSec: number;
+  timeSavedSec: number;
+  relativeTimeSaved: number;
+}
+
+export function skillRepTradeoff(
+  remainingExp: number,
+  backgroundExpPerSec: number,
+  trainingExpPerSec: number,
+  repWorkSec: number,
+): SkillRepTradeoff {
+  const remaining = Math.max(0, remainingExp);
+  const background = Math.max(0, backgroundExpPerSec);
+  const training = Math.max(0, trainingExpPerSec);
+  const rep = Math.max(0, repWorkSec);
+  const backgroundExpDuringRep = background * rep;
+  const residual = Math.max(0, remaining - backgroundExpDuringRep);
+  const combined = background + training;
+  const trainingWorkSec = residual <= 0 ? 0 : combined > 0 ? residual / combined : Infinity;
+  const etaWithTrainingSec = rep + trainingWorkSec;
+  const backgroundOnlySec = remaining <= 0 ? 0 : background > 0 ? remaining / background : Infinity;
+  const etaWithoutTrainingSec = Math.max(rep, backgroundOnlySec);
+  const timeSavedSec = Number.isFinite(etaWithoutTrainingSec)
+    ? Math.max(0, etaWithoutTrainingSec - etaWithTrainingSec)
+    : Number.isFinite(etaWithTrainingSec) ? Infinity : 0;
+  const relativeTimeSaved = etaWithoutTrainingSec === 0
+    ? 0
+    : Number.isFinite(etaWithoutTrainingSec)
+      ? Math.min(1, timeSavedSec / etaWithoutTrainingSec)
+      : Number.isFinite(etaWithTrainingSec) ? 1 : 0;
+  return {
+    remainingExp: remaining,
+    backgroundExpDuringRep,
+    trainingWorkSec,
+    etaWithoutTrainingSec,
+    etaWithTrainingSec,
+    timeSavedSec,
+    relativeTimeSaved,
+  };
+}
+
+function skillNeedContribution(
+  value: NeedValue,
+  skill: string,
+  expPerSec: number,
+  view: CareerView,
+): number {
+  const currentExp = view.exp?.[skill];
+  const mult = view.skillMultipliers?.[skill];
+  if (currentExp === undefined || mult === undefined || !(mult > 0)) {
+    return (expPerSec / value.remaining) * value.weight;
+  }
+  const remainingExp = Math.max(1e-9, expForSkill(value.target, mult) - currentExp);
+  return (expPerSec / remainingExp) * value.weight;
+}
+
+function addContribution(
+  contributions: ScoredAction["contributions"],
+  kind: NeedKind,
+  perSec: number,
+  subject: string | undefined,
+  view: CareerView,
+  values: ReturnType<typeof needValues>,
+): number {
+  if (perSec <= 0) return 0;
+  const value = values.get(needKey({ kind, subject }));
+  if (!value) return 0;
+  const score = kind === "skill" && subject
+    ? skillNeedContribution(value, subject, perSec, view)
+    : (perSec / value.remaining) * value.weight;
+  contributions.push({
+    kind,
+    ...(subject !== undefined ? { subject } : {}),
+    perSec,
+    weight: value.weight,
+    score,
+  });
+  return score;
 }
 
 function scoreCrime(
@@ -167,13 +278,7 @@ function scoreCrime(
   let score = 0;
 
   const add = (kind: NeedKind, perSec: number, subject?: string): void => {
-    if (perSec <= 0) return;
-    const value = values.get(needKey({ kind, subject }));
-    if (!value) return;
-    // Fraction of the remaining gap closed per second, times its worth.
-    const contribution = (perSec / value.remaining) * value.weight;
-    score += contribution;
-    contributions.push({ kind, ...(subject !== undefined ? { subject } : {}), perSec, weight: value.weight, score: contribution });
+    score += addContribution(contributions, kind, perSec, subject, view, values);
   };
 
   add("karma", karmaPerSec(crime, view.person, view.crimeContext));
@@ -217,12 +322,7 @@ function scoreCourse(
   const contributions: ScoredAction["contributions"] = [];
   let score = 0;
   const add = (kind: NeedKind, perSec: number, subject?: string): void => {
-    if (perSec <= 0) return;
-    const value = values.get(needKey({ kind, subject }));
-    if (!value) return;
-    const contribution = (perSec / value.remaining) * value.weight;
-    score += contribution;
-    contributions.push({ kind, ...(subject !== undefined ? { subject } : {}), perSec, weight: value.weight, score: contribution });
+    score += addContribution(contributions, kind, perSec, subject, view, values);
   };
   add("skill", course.expPerSec, course.skill);
   if (course.skill === "charisma") add("charisma", course.expPerSec);
@@ -416,14 +516,23 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     .sort((a, b) => b.score - a.score)[0];
   const bestCareerIncome = Math.max(0, ...ranked.map((entry) => entry.moneyPerSec));
   const trainByDefault = !anyNeed && trainingCourse !== undefined && (view.externalIncomePerSec ?? 0) >= bestCareerIncome;
-  const key = anyNeed
-    ? (entry: ScoredAction) => URGENCY_ORDER[entry.priority === "income" ? "nice" : entry.priority] * 1e12 + entry.score
-    : trainByDefault
-      ? (entry: ScoredAction) => entry === trainingCourse ? 1 : 0
-      : (entry: ScoredAction) => entry.moneyPerSec;
   ranked.sort((a, b) => {
-    const diff = key(b) - key(a);
-    if (diff !== 0) return diff;
+    // Compare dimensions lexicographically. Packing urgency and score into a
+    // single `urgency * 1e12 + score` number erased ordinary scores (~1e-5)
+    // below IEEE-754 precision, so same-band crimes tied and alphabetical
+    // order repeatedly selected Assassination over a 10x better earner.
+    if (anyNeed) {
+      const urgencyA = URGENCY_ORDER[a.priority === "income" ? "nice" : a.priority];
+      const urgencyB = URGENCY_ORDER[b.priority === "income" ? "nice" : b.priority];
+      if (urgencyA !== urgencyB) return urgencyB - urgencyA;
+      if (a.score !== b.score) return b.score - a.score;
+    } else if (trainByDefault) {
+      const preferredA = a === trainingCourse ? 1 : 0;
+      const preferredB = b === trainingCourse ? 1 : 0;
+      if (preferredA !== preferredB) return preferredB - preferredA;
+    } else if (a.moneyPerSec !== b.moneyPerSec) {
+      return b.moneyPerSec - a.moneyPerSec;
+    }
     // Deterministic: never depend on the order the crime table arrived in.
     return a.action.subject! < b.action.subject! ? -1 : 1;
   });

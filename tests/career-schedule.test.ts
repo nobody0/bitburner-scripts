@@ -5,7 +5,7 @@ import {
   peekWorkCompletion,
   resetWorkCompletion,
 } from "../game/lib/work-completion.ts";
-import { careerModule, resetCareerState } from "../game/lib/features/career.ts";
+import { careerModule, priorityForDecision, resetCareerState } from "../game/lib/features/career.ts";
 import { factionsModule } from "../game/lib/features/factions.ts";
 import type { ClaimContext } from "../game/lib/features/index.ts";
 import type { GameState } from "../game/lib/state.ts";
@@ -90,7 +90,11 @@ describe("career review scheduling", () => {
     await Promise.resolve();
     expect(peekWorkCompletion()).toMatchObject({ type: "CRIME", detail: "Homicide" });
     expect(careerModule.driver.wake?.()).toBe(true);
-    expect(factionsModule.driver.wake?.()).toBe(true);
+    // A generic crime completion is intentionally not enough to wake the
+    // expensive faction frontier. Factions wakes for its own work or when its
+    // last decision was waiting for this slot; the ordinary cadence covers
+    // unrelated gate drift.
+    expect(factionsModule.driver.wake?.()).toBe(false);
     expect(consumeWorkCompletion()).toBeDefined();
     expect(peekWorkCompletion()).toBeUndefined();
   });
@@ -331,6 +335,95 @@ describe("the slot lock is bounded by the progress it protects", () => {
   });
 });
 
+describe("Algorithms versus route reputation", () => {
+  function routeState(repSec: number): GameState {
+    return {
+      topics: {
+        progression: { plan: { route: "daedalus" } },
+        factions: {
+          plan: {
+            objective: {
+              intent: { purpose: "augmentations", repSec },
+            },
+          },
+        },
+      },
+    } as unknown as GameState;
+  }
+
+  function algorithms(externalExpPerSec: number): { decision: ReturnType<typeof stepCareer>; careerView: CareerView } {
+    const careerView = view({
+      crimes: [],
+      courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 10, costPerSec: 0, location: "Rothman University" }],
+      exp: { hacking: 0 },
+      skillMultipliers: { hacking: 1 },
+      externalSkillExpPerSec: { hacking: externalExpPerSec },
+    });
+    const board = postNeeds([{
+      by: "progression",
+      kind: "skill",
+      subject: "hacking",
+      target: 100,
+      have: 1,
+      weight: 5,
+      urgency: "blocking",
+      why: "Daedalus invite",
+    }]);
+    return { decision: stepCareer(careerView, board), careerView };
+  }
+
+  test("background XP that closes the skill gate during faction work removes the Algorithms bid", () => {
+    const { decision, careerView } = algorithms(1_000_000);
+    expect(priorityForDecision(decision, careerView, routeState(1_000))).toBe(0);
+  });
+
+  test("without background XP Algorithms retains its blocking priority", () => {
+    const { decision, careerView } = algorithms(0);
+    const priority = priorityForDecision(decision, careerView, routeState(1_000));
+    expect(priority).toBe(PRIORITY["career:blocking-need"]);
+    expect(priority).toBeGreaterThan(PRIORITY["factions:route-work"] + PREEMPT_MARGIN);
+  });
+
+  test("pre-gate Algorithms bootstrap decays as the hacking fleet replaces its XP", () => {
+    const careerView = view({
+      crimes: [],
+      courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 10, costPerSec: 0, location: "Rothman University" }],
+      externalIncomePerSec: 1,
+      externalSkillExpPerSec: { hacking: 0 },
+    });
+    const decision = stepCareer(careerView, postNeeds([]));
+    expect(decision).toMatchObject({ action: { subject: "Algorithms" }, incomeFallback: true });
+    expect(priorityForDecision(decision, careerView, routeState(1_000)))
+      .toBe(PRIORITY["career:blocking-need"]);
+
+    const farmDominates = { ...careerView, externalSkillExpPerSec: { hacking: 90 } };
+    expect(priorityForDecision(decision, farmDominates, routeState(1_000)))
+      .toBeCloseTo(PRIORITY["career:blocking-need"] * 0.1, 12);
+  });
+
+  test("an optional Algorithms need keeps its declared priority", () => {
+    const careerView = view({
+      crimes: [],
+      courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 10, costPerSec: 0, location: "Rothman University" }],
+      externalSkillExpPerSec: { hacking: 0 },
+    });
+    const decision = stepCareer(careerView, postNeeds([{
+      by: "progression",
+      kind: "skill",
+      subject: "hacking",
+      target: 100,
+      have: 1,
+      weight: 1,
+      urgency: "wanted",
+      why: "optional acceleration",
+    }]));
+
+    expect(decision).toMatchObject({ incomeFallback: false, workPriority: "wanted" });
+    expect(priorityForDecision(decision, careerView, routeState(1_000)))
+      .toBe(PRIORITY["career:wanted-request"]);
+  });
+});
+
 describe("factions holds the slot across a breakpoint hand-off", () => {
   // THE BUG, measured on a live BN12 run: reaching the objective's reputation
   // breakpoint closed the only gap `nextWorkFaction` looks at, so factions posted no
@@ -345,6 +438,9 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
     repTarget?: number;
     offers?: { faction: string; repReq: number; owned?: boolean }[];
     joined?: string[];
+    route?: "daedalus" | "gang";
+    installWanted?: boolean;
+    routeInstallRequired?: boolean;
   } = {}) {
     const rep = over.rep ?? 7_400;
     const state = {
@@ -355,14 +451,25 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
           standings: [{ name: "The Covenant", rep, favor: 13, joined: true }],
           offers: over.offers ?? [{ faction: "The Covenant", repReq: 50_000, owned: false }],
           plan: {
+            context: { route: over.route },
             action: { type: "idle", why: "breakpoint met" },
             objective: {
               factions: ["The Covenant"],
               augmentations: [],
-              intent: { faction: "The Covenant", repTarget: over.repTarget ?? 7_340 },
+              intent: {
+                faction: "The Covenant",
+                repTarget: over.repTarget ?? 7_340,
+                purpose: "augmentations",
+              },
             },
           },
         },
+        ...(over.installWanted || over.routeInstallRequired
+          ? { progression: { plan: {
+              ...(over.installWanted ? { installWanted: true } : {}),
+              ...(over.routeInstallRequired ? { routeInstallRequired: true } : {}),
+            } } }
+          : {}),
       },
       dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
       probeFailures: {}, probeSkips: {}, featureLastRun: {},
@@ -393,6 +500,22 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
 
   test("still claims while the breakpoint is UNMET, as before", () => {
     expect(slotClaim({ rep: 100 })!.id).toBe("work:The Covenant");
+  });
+
+  test("a selected faction-acquisition route outranks ordinary income after a task boundary", () => {
+    const claim = slotClaim({ rep: 100, route: "daedalus" })!;
+    expect(claim.priority).toBe(PRIORITY["factions:route-work"]);
+    expect(claim.priority).toBeGreaterThan(80 + PREEMPT_MARGIN);
+    expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(claim.priority + PREEMPT_MARGIN);
+  });
+
+  test("only a mechanically mandatory route install gets hard preemption", () => {
+    const economic = slotClaim({ rep: 100, route: "daedalus", installWanted: true })!;
+    expect(economic.priority).toBe(PRIORITY["factions:route-work"]);
+
+    const claim = slotClaim({ rep: 100, route: "daedalus", installWanted: true, routeInstallRequired: true })!;
+    expect(claim.priority).toBe(PRIORITY["factions:install-work"]);
+    expect(claim.priority).toBeGreaterThan(PRIORITY["career:blocking-need"] + PREEMPT_MARGIN);
   });
 
   test("nothing left to work toward DOES release the slot", () => {

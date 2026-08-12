@@ -408,7 +408,7 @@ Every feature now has a real driver module; `inert()` is gone from
 | 10 | stanek | Pack the grid, then charge | **Exhaustive packing is PROVABLY optimal** — the strongest evidence in the roster. Correctly leaves out a large fragment to fit two smaller ones. |
 | 11 | dnet | Traverse under a stasis-link budget | Exact max-reachable search; links spent where they unlock the most. |
 | 12 | side | Solve every coding contract | **All 30 v3.0.1 contract types implemented** with exact registry coverage and known-answer tests. Discovery is ls-only; staged batches peak at `attempt` RAM, and a first rejection is logged and quarantined rather than retried. Infiltration stays manual. |
-| 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); exhaustive node ordering for a small set, measured against the predecessor's real 15-node ordering. |
+| 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); explicit milestone order for live selection, with a small-set ordering oracle retained for offline comparisons. |
 
 ### The hacking audit
 
@@ -499,8 +499,8 @@ right. Four distinct bugs, in a chain:
    extend the hold forever, which is as broken as releasing it too early.
 3. **Factions starved itself.** It posted every objective blocker as
    `urgency: "blocking"`, including Daedalus's hacking 2500. `career` claims
-   the slot at `career:blocking-need` (75) whenever any blocking need exists,
-   which outranks `factions:work` (60) — so career held the slot permanently
+   the slot at `career:blocking-need` whenever any blocking need exists, which
+   outranks `factions:work` — so career held the slot permanently
    chasing a requirement hours away, and factions could never work for the
    reputation it was itself asking for. Urgency is now `blocking` only when the
    blocker is the LAST one for that faction (clearing it unlocks a join now).
@@ -541,9 +541,8 @@ What landed, in dependency order:
   slowest not the sum, the shared Red Pill install+regrow tail) and
   `chooseRoute` with a 25 % switch margin and 10-minute dwell. Every part is
   `{what, sec, measured}` so a wrong total is attributable to the specific
-  sub-heuristic. `BitNodeEntry.hours` re-documented as a heuristic — it was
-  framed as "measured hours, once known", which is the wrong model: the
-  estimate must be computable NOW, always, and tuned from the log later.
+  sub-heuristic. Estimates are computable from current evidence and tuned from
+  logged prediction-versus-outcome data later.
 - **The refresh/act split** (`FeatureModule.refresh`) — evaluation runs for
   every due module before any needs/claims/tick, with `progression` ordered
   LAST so its route decision reads the pass's refreshed state; drivers then
@@ -747,7 +746,7 @@ exactly 0, it is the entire score. Both directions are pinned in
 
 - Replaced the scalar, capped planning window with the typed
   `PlanningHorizons` contract. The install and BitNode forecasts are uncapped,
-  anchored, recalculated every ten minutes or on structural milestones, and
+  anchored, recalculated every minute or on structural milestones, and
   preserve unknown/stale states plus critical-path component evidence.
 - The progression panel now shows both countdowns, expected wall-clock times,
   confidence/recalibration age and parallel/sequential component tables.
@@ -945,6 +944,63 @@ A sim regression test (sim/tests/factions-strategy.test.ts) pins two
 consecutive installs prestiging cleanly with the second driven by the
 marginal verdict.
 
+### SF12.30 full-BN calibration (August 2026)
+
+The full BN1 harness includes career/city/karma/combat, companies, Hacknet,
+stock and Go, with every augmentation purchase end-loaded into one frozen,
+dependency-safe transaction. A post-plan push is accepted only when its
+remaining work is at most 1% of elapsed time in the current install.
+
+Pinned seed-1 observations used during tuning:
+
+| policy/checkpoint | observed state |
+|---|---|
+| count-first closing baseline | installs at 1.210h (8), 2.938h (6), 7.248h (15); count 30 |
+| route-selected combat valuation | same first two installs; closing 15-aug install at **5.948h** |
+| nonlinear skill value, normalized cadence | one 12-aug install at **1.719h**; at 4h count 13 + 7 banked; at 6h count 13 + 12 banked |
+| start-relative consolidation + funded closure | installs at **1.719h (12)**, **3.713h (10)** and **5.974h (7 distinct + 1 residual NFG)**; installed count reaches exactly 30, with no late partial reset |
+| late Red-Pill fixture | predicted 2.339h from the 2h checkpoint, observed **2.314h** (about 1.2% error) |
+
+The end-loaded handshake regression now completes that late fixture at
+**2.3136h**. Its second/final transaction lands at 2.2869h with 15 distinct
+entries (including The Red Pill and NFG) and six funded NFG purchases total;
+the zero-price Red Pill is correctly paid last. The final live route sample at
+2.2017h predicted 402 seconds remaining and the observed remainder was about
+403 seconds. An unaffordable optional bank no longer blocks the terminal set:
+the mandatory closure opens the transaction, the affordable subset and its
+order freeze once, and install permission still waits for real ownership.
+
+The `bn1-progression` startup fixture also exposed censored rate leakage: its
+preloaded queue reset in four seconds and was being extrapolated forever as a
+fresh-cycle augmentation rate. Startup-partial cycles below one minute are now
+discarded and the augmentation-rate window clears on prestige; the post-reset
+20-slot estimate changed from a falsely measured 8 seconds to an explicit
+unmeasured 36,000-second prior.
+
+The skill-value correction follows the exact game curve
+`skill = mult * (32 ln(exp + 534.6) - 200)`: direct stat multipliers receive
+local time-to-target sensitivity `target/(32*activeMult)`, then all weights
+are normalized back to the fixed route-value budget so the units cannot cause
+tiny premature installs. Known banked direct multipliers scale only the
+post-install forecast; they never appear in live skills before prestige.
+
+NFG mechanics were rechecked against pinned v3.0.1: repeated levels merge into
+one `Player.augmentations` entry, while Daedalus checks that array's length.
+Thus NFG contributes at most one distinct invite slot (SF12.30 starts at count
+1), although additional funded levels remain valuable acceleration and are
+jointly interleaved by the exact purchase-order solver.
+
+Count consolidation is evaluated from the installed count at cycle start. A
+substantial 13→23 tranche is allowed because it banks over half the remaining
+gate; the following cycle starts inside the closing quarter and must reach 30.
+At a mandatory boundary the transaction first freezes a funded, reputation-ready
+distinct closure and only then spends residual cash on optional quality/NFG.
+This also preempts an unfinished optional package: in the SF12.30 run the
+seven-slot bank closed at 5.974h instead of continuing another projected 6.75h
+of BitRunners work. Package ranking and final-set ranking now share the same
+node-relative count-slot weight rather than using declining pressure in one
+layer and a flat +1 in the other.
+
 | profile | old rule | new rule |
 |---|---|---|
 | install-cadence | 1 install, then push-forever (0/3 seeds) | **reached ×3: 2 installs in 70.2m** — boot noise self-corrects at 20m via the dwell, value accrues while the Tian Di Hui package is worked, its landing clears the ~2.9 threshold and the verdict concludes the cycle |
@@ -996,10 +1052,9 @@ the *strategy* level without full end-to-end execution:
     what `factions` actually buys (`nextPurchase`, over the catalogue and the
     granted budget) are **two predicates, not one**, because a barrier blocking on
     something `factions` declines to buy is a deadlock by construction. They
-    converge rather than match: the drain re-plans every tick against the cash
-    genuinely left, so an augmentation this pass's batch passed over is reconsidered
-    once the items ahead of it are bought and the budget has shrunk to fit it. That
-    convergence is the invariant to preserve, not field-by-field equality.
+    converge rather than match: the drain freezes a funded order and removes
+    purchases from it as they complete. That convergence is the invariant to
+    preserve, not field-by-field equality.
 
     That deadlock was real, and the barrier is what exposed it: the driver's
     `aug-fund` claim was derived from `plan.objective`, which is complete by the
@@ -1016,11 +1071,24 @@ the *strategy* level without full end-to-end execution:
   but `dnet` has no simulation model to drive it. The vendored price engine calls
   through an adapter, so the day darknet lands the mechanic connects with no
   further change.
-- **`ctx.route` has no consumer yet.** The chosen route reaches every driver's
-  context, but no feature biases its priorities by it so far (bladeburner
-  when it IS the route, combat stats for the Daedalus combat branch). The
-  horizon half is consumed; the route half is plumbing awaiting its first
-  customer.
+- **Route bias is heuristic, not an exact downstream schedule.** Factions now
+  values augmentations against the selected route and the ETA-selected
+  Daedalus hacking/combat alternative; career and Go consume the route's
+  published needs. Corp, sleeves and Stanek still use their own local value
+  models rather than translating every route component into weights.
+- **Player-work XP is marginal, not exclusive.** Algorithms converts a level
+  gate to raw remaining experience with the nonlinear skill curve, then counts
+  normal hacking XP as background progress under both choices. During a
+  competing route-reputation interval, only the wall-clock Algorithms still
+  removes receives priority. Before the explicit skill gate, the same priority
+  decays as `courseXP / (courseXP + fleetXP)`, preserving the cold bootstrap
+  without starving reputation after the hacking fleet takes over.
+- **SF12.30 cadence checkpoint (seed 1).** The marginal-XP change exposed a
+  favor/count interaction that reset at 1.63 h with only four new augmentations.
+  Favor is now counted once per faction curve and early count value requires a
+  funded third of the remaining node-relative gate. The corrected run had no
+  install at 2 h with seven augs banked, then installed twelve at 2.59 h
+  (`runs/1786550754662-sim-sf12-30-count-cadence-release-seed1.jsonl`).
 - **The labyrinth walk is a pure guess** (`LABYRINTH_WALK_SEC`): the darknet
   labyrinth mechanic is unmodelled, so the route's estimate carries an
   explicit unmeasured constant until a walk is implemented and measured.

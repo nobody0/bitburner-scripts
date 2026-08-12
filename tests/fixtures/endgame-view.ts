@@ -15,6 +15,7 @@ export function freshEndgameView(over: Partial<EndgameView> = {}): EndgameView {
     augCount: 0,
     ownsRedPill: false,
     redPillInstalled: false,
+    worldDaemonRooted: true,
     money: 0,
     hackingSkill: 1,
     lowestCombatSkill: 1,

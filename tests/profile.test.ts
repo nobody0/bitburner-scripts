@@ -81,6 +81,30 @@ describe("simulation profiles", () => {
     expect(() => findProfile("nope")).toThrow(/unknown profile/);
   });
 
+  test("full BN1 and cross-city cadence runs include the career gate owner", () => {
+    const full = findProfile("bn1-full");
+    expect(full.features?.career).toBeUndefined();
+    expect(full.features?.hacknet).toBeUndefined();
+    expect(full.features?.stock).toBeUndefined();
+    expect(full.features?.side).toBe("off");
+    expect(findProfile("install-cadence").features?.career).toBeUndefined();
+  });
+
+  test("SF12.30 calibration changes only persistent SF12 state", () => {
+    const clean = findProfile("bn1-full");
+    const boosted = findProfile("bn1-full-sf12-30");
+    expect(boosted.bitnode).toBe(clean.bitnode);
+    expect(boosted.features).toEqual(clean.features);
+    expect(boosted.goals).toEqual(clean.goals);
+    expect(boosted.homeRam).toBe(clean.homeRam);
+    expect(boosted.world?.network).toBe(clean.world?.network);
+    expect(boosted.world?.playerState?.sourceFiles?.["12"]).toBe(30);
+    expect(boosted.world?.playerState?.augmentations).toEqual([
+      { name: "NeuroFlux Governor", level: 30 },
+    ]);
+    expect(boosted.world?.person?.mults?.hacking).toBeGreaterThan(1);
+  });
+
   test("the BN5 stock treatment changes only the feature under test", () => {
     const control = findProfile("bn5-hacking");
     const treatment = findProfile("bn5-hacking-stock");

@@ -39,6 +39,11 @@ export interface FactionIntent {
   rate: number;
   /** Value/time of the last extension included in this package. */
   marginalRate: number;
+  /** Reset-activated value excludes permanent route counters and one-off
+   * ranking bonuses. This is the like-for-like stream used by install cadence. */
+  activationValue?: number;
+  /** Marginal activationValue/time for the last package extension. */
+  marginalActivationRate?: number;
   /** ETA decomposition. Unlock/player work is sequential; money production
    * overlaps it, so `etaSec` is not the sum of all three. */
   unlockSec: number;
@@ -138,6 +143,11 @@ export interface FactionDecision {
 export interface FactionMemory {
   /** The committed objective, so it does not thrash between equal options. */
   objective?: FactionObjective;
+  /** One-shot augmentations whose reputation breakpoint was completed during
+   * this install cycle. They remain physically unowned until the end-loaded
+   * transaction, but package selection treats them as committed so their
+   * zero-second frontier cannot win again and strand the work loop idle. */
+  bankedAugmentations: string[];
   /** Measured rep/sec per faction (EWMA). Reality beats the formula when a
    *  share bonus or an unnoticed unfocus disagrees with it. */
   measuredRepPerSec: Record<string, number>;
@@ -169,10 +179,20 @@ export interface FactionMemory {
    * better in the next run. Cleared on any decision that is not a recommending
    * drain. */
   drainCeiling?: number;
+  /** Frozen payment order for the end-loaded transaction. Replanning
+   * this set after its first purchase would apply the new 1.9x queue depth to
+   * a different set than the one whose affordability was proved. Repeated
+   * NeuroFlux names are finite, pre-funded levels interleaved at their
+   * price-minimising positions. */
+  drainOrder?: string[];
+  /** NFG level when drainOrder was frozen, used to consume repeated NFG
+   * entries only after the game confirms each purchase. */
+  drainStartNeurofluxLevel?: number;
 }
 
 export function initFactionMemory(): FactionMemory {
   return {
+    bankedAugmentations: [],
     measuredRepPerSec: {},
     lastRep: {},
     lastRepAt: 0,

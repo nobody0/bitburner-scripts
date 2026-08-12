@@ -891,6 +891,102 @@ const bladeburnerConstants = await import(`../${OUT_DIR}/src/Bladeburner/data/Co
 const gameConstants = await import(`../${OUT_DIR}/src/Constants.ts`);
 const bitNodeMults = await import(`../${OUT_DIR}/src/BitNode/BitNodeMultipliers.ts`);
 
+// Company careers are a progression mechanic, not merely telemetry: applying
+// chooses the highest qualified position on a field's track, and company work
+// supplies the reputation required by megacorp faction invitations. Extract
+// both tables together so the simulator never invents job requirements,
+// salaries, experience, performance weights, or company-specific offsets.
+await extractDataTable({
+  sources: [
+    {
+      path: "src/Company/data/JobTracks.ts",
+      from: "export const JobTracks: Record<JobField, readonly JobName[]> = {",
+      to: "export const businessConsultJobs = JobTracks[JobField.businessConsultant];",
+    },
+    {
+      path: "src/Company/data/CompanyPositionsMetadata.ts",
+      from: "export function getCompanyPositionMetadata(): Record<JobName, CompanyPositionCtorParams> {",
+      to: "}",
+    },
+    {
+      path: "src/Company/data/CompaniesMetadata.ts",
+      from: "export function getCompaniesMetadata(): Record<CompanyName, CompanyCtorParams> {",
+      to: "}",
+    },
+  ],
+  scope: {
+    JobName: workEnums.JobName,
+    JobField: workEnums.JobField,
+    CompanyName: companyEnums.CompanyName,
+    FactionName: enums.FactionName,
+  },
+  shape: `(() => {
+    const positions = getCompanyPositionMetadata();
+    const companies = getCompaniesMetadata();
+    const number = (value) => value ?? 0;
+    return {
+      jobTracks: Object.fromEntries(Object.entries(JobTracks).map(([field, names]) => [field, [...names]])),
+      positions: Object.fromEntries(Object.entries(positions).map(([name, p]) => [name, {
+        name,
+        field: p.field,
+        nextPosition: p.nextPosition,
+        isStartingJob: !!p.isStartingJob,
+        isPartTime: !!p.isPartTime,
+        baseSalary: p.baseSalary,
+        repMultiplier: p.repMultiplier,
+        requiredSkills: {
+          hacking: number(p.reqdHacking), strength: number(p.reqdStrength), defense: number(p.reqdDefense),
+          dexterity: number(p.reqdDexterity), agility: number(p.reqdAgility), charisma: number(p.reqdCharisma),
+        },
+        requiredReputation: number(p.reqdReputation),
+        effectiveness: {
+          hacking: number(p.hackingEffectiveness), strength: number(p.strengthEffectiveness), defense: number(p.defenseEffectiveness),
+          dexterity: number(p.dexterityEffectiveness), agility: number(p.agilityEffectiveness), charisma: number(p.charismaEffectiveness),
+        },
+        expGain: {
+          hacking: number(p.hackingExpGain), strength: number(p.strengthExpGain), defense: number(p.defenseExpGain),
+          dexterity: number(p.dexterityExpGain), agility: number(p.agilityExpGain), charisma: number(p.charismaExpGain),
+        },
+      }])),
+      companies: Object.fromEntries(Object.entries(companies).map(([name, c]) => [name, {
+        name,
+        positions: [...c.companyPositions],
+        expMultiplier: c.expMultiplier,
+        salaryMultiplier: c.salaryMultiplier,
+        jobStatReqOffset: c.jobStatReqOffset,
+        ...(c.relatedFaction !== undefined ? { relatedFaction: c.relatedFaction } : {}),
+      }])),
+    };
+  })()`,
+  verify(table) {
+    const data = table as { jobTracks: Record<string, string[]>; positions: Record<string, { effectiveness: Record<string, number> }>; companies: Record<string, { positions: string[] }> };
+    if (Object.keys(data.positions).length !== Object.keys(workEnums.JobName).length) throw new Error("company position extraction lost a JobName");
+    if (Object.keys(data.companies).length !== Object.keys(companyEnums.CompanyName).length) throw new Error("company extraction lost a CompanyName");
+    if (data.jobTracks["Software"]?.[0] !== "Software Engineering Intern") throw new Error("software entry position drifted");
+    if (!data.companies["ECorp"]?.positions.includes("Chief Technology Officer")) throw new Error("ECorp software track drifted");
+    for (const [name, position] of Object.entries(data.positions)) {
+      const total = Object.values(position.effectiveness).reduce((sum, value) => sum + value, 0);
+      if (Math.round(total) !== 100) throw new Error(`${name} effectiveness sums to ${total}`);
+    }
+  },
+  outRelPath: "src/Company/CompanyTable.ts",
+  prologue: [
+    `export interface VendoredCompanyPosition {`,
+    `  name: string; field: string; nextPosition: string | null; isStartingJob: boolean; isPartTime: boolean;`,
+    `  baseSalary: number; repMultiplier: number; requiredSkills: Record<string, number>; requiredReputation: number;`,
+    `  effectiveness: Record<string, number>; expGain: Record<string, number>;`,
+    `}`,
+    `export interface VendoredCompany {`,
+    `  name: string; positions: string[]; expMultiplier: number; salaryMultiplier: number; jobStatReqOffset: number; relatedFaction?: string;`,
+    `}`,
+    `export interface VendoredCompanyTable {`,
+    `  jobTracks: Record<string, string[]>; positions: Record<string, VendoredCompanyPosition>; companies: Record<string, VendoredCompany>;`,
+    `}`,
+  ],
+  exportName: "COMPANY_TABLE",
+  exportType: "VendoredCompanyTable",
+});
+
 await extractDataTable({
   sources: [
     {

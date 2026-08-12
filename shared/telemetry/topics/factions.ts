@@ -1,6 +1,7 @@
 import type { PlayerRequirement } from "@ns";
 import type { FactionIntent, FactionObjective } from "../../strategy/factions/plan.ts";
 import type { FeatureId } from "../../features/ids.ts";
+import type { RouteId } from "../../strategy/progression/endgame.ts";
 
 /** Factions feature — reputation and augmentations (grafting included: it is
  * an augmentation acquisition path, not a separate problem). Problem: reach a
@@ -80,7 +81,7 @@ export interface FactionDecisionContext {
   /** Time at which the planner evaluated this snapshot. */
   evaluatedAt: number;
   horizonSec: number;
-  route?: "daedalus" | "labyrinth" | "bladeburner";
+  route?: RouteId;
   targetAugCount?: number;
   /** Owned augmentations as reported by the game, including queued purchases. */
   ownedAugCount: number;
@@ -125,6 +126,11 @@ export type FactionObjectiveDigest = Omit<FactionObjective, "why" | "intent" | "
 /** The decision digest: what we are doing and what would change it. */
 export interface FactionPlan {
   context: FactionDecisionContext;
+  /** Reputation-complete one-shot augmentations committed this install cycle.
+   * They are deliberately not purchased yet, but progression needs their
+   * projected installed count to avoid crossing into a route's final-batch
+   * region with a partial reset. */
+  bankedAugmentations?: string[];
   objective?: FactionObjectiveDigest;
   action: {
     type: string;

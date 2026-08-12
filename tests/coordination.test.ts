@@ -222,6 +222,28 @@ describe("standing feature contributions", () => {
       id: "action:workForFaction",
       resource: "ram",
       amount: 3.5,
+      priority: PRIORITY["probe:detail"],
+    }));
+
+    state.topics.factions!.plan!.context.route = "daedalus";
+    state.topics.factions!.plan!.objective!.intent = {
+      faction: "Slum Snakes",
+      repTarget: 100,
+      purpose: "augmentations",
+    } as never;
+    const routeClaims = factionsModule.claims!({
+      state,
+      now: 0,
+      caps: {} as ClaimContext["caps"],
+      budgetGb: 8,
+      board: emptyBoard(),
+      horizons: {} as ClaimContext["horizons"],
+      ramPrice: () => 3.5,
+    });
+    expect(routeClaims).toContainEqual(expect.objectContaining({
+      id: "action:workForFaction",
+      resource: "ram",
+      priority: PRIORITY["factions:route-work"],
     }));
   });
 

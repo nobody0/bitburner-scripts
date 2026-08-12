@@ -7,9 +7,24 @@ import {
   STUB_BASE_GB,
   type HostRam,
 } from "../shared/ram/placement.ts";
-import { fleetDodgeReserveGb, homeReserveGb, MAX_RESERVE_FRACTION } from "../shared/ram/reserve.ts";
+import {
+  executableDodgeReserveGb,
+  fleetDodgeReserveGb,
+  homeReserveGb,
+  MAX_RESERVE_FRACTION,
+  starvationDodgeReserveGb,
+} from "../shared/ram/reserve.ts";
 
 describe("homeReserveGb", () => {
+  test("an action-starvation reserve includes the stub and placement margin", () => {
+    expect(executableDodgeReserveGb(3.5)).toBe(5.6);
+  });
+
+  test("starvation reserve follows the largest skipped operation, not the feature peak", () => {
+    expect(starvationDodgeReserveGb([3.5, 8], 6)).toBe(10.1);
+    expect(starvationDodgeReserveGb([], 3.5)).toBe(5.6);
+    expect(starvationDodgeReserveGb([], 0)).toBe(0);
+  });
   test("a capped dodge spills its full contiguous executable footprint", () => {
     const tiny = homeReserveGb({ enabled: ["stock"], demand: { stock: 12 }, homeMaxRam: 8 });
     const largerButStillCapped = homeReserveGb({ enabled: ["stock"], demand: { stock: 12 }, homeMaxRam: 16 });

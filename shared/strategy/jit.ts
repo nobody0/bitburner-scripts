@@ -101,6 +101,9 @@ export interface LatestJitStartInput {
   currentDifficulty: number;
   minDifficulty: number;
   events: readonly JitSecurityEvent[];
+  /** Caller has already ordered events by (at, order). Hot dispatch paths
+   * share one immutable ledger across many pending operations. */
+  eventsSorted?: boolean;
   durationMs: (difficulty: number) => number;
   /** Time reserved for dispatch + worker startup before an invocation deadline. */
   launchGuardMs: number;
@@ -120,15 +123,22 @@ export interface LatestJitStartInput {
  * assuming that a future security change will not happen. */
 export function latestJitStart(input: LatestJitStartInput): number {
   const { now, landing, minDifficulty, durationMs, launchGuardMs } = input;
-  const events = input.events
-    .filter((event) => event.at > now && event.at < landing)
-    .sort((a, b) => a.at - b.at || a.order - b.order);
+  const events = input.eventsSorted
+    ? input.events
+    : input.events
+        .filter((event) => event.at > now && event.at < landing)
+        .sort((a, b) => a.at - b.at || a.order - b.order);
   let difficulty = Math.max(minDifficulty, Math.min(100, input.currentDifficulty));
   let intervalStart = now;
   let best = -Infinity;
 
   for (let i = 0; i < events.length;) {
+    if (events[i]!.at <= now) {
+      i++;
+      continue;
+    }
     const boundary = events[i]!.at;
+    if (boundary >= landing) break;
     const nativeDeadline = landing - durationMs(difficulty) - launchGuardMs;
     const candidate = Math.min(nativeDeadline, boundary - launchGuardMs);
     if (candidate >= intervalStart) best = Math.max(best, candidate);

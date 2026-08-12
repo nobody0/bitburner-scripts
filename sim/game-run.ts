@@ -11,6 +11,9 @@ import type { ServerSpec } from "./core/effects.ts";
 import { mulberry32 } from "./core/rng.ts";
 import { Engine, initialCounters } from "./engine.ts";
 import { CrimeSystem } from "./features/crime.ts";
+import { EducationSystem } from "./features/education.ts";
+import { CompanySystem } from "./features/companies.ts";
+import { ProgramSystem } from "./features/programs.ts";
 import { FactionSystem } from "./features/factions.ts";
 import { GraftingSystem } from "./features/grafting.ts";
 import { HacknetSystem } from "./features/hacknet.ts";
@@ -27,6 +30,8 @@ import { SimWorld, type GateFlags, type SimOptions } from "./world.ts";
 import { scenarioFingerprint } from "./scenario.ts";
 import { SIM_FEATURE_COVERAGE, scenarioClass, type RunValidity, type ScenarioClass } from "./fidelity.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
+import type { GameState } from "../game/lib/state.ts";
+import { gameGlobal } from "../game/lib/globals.ts";
 
 /** Run the REAL game/ controller against the synthetic world.
  *
@@ -119,6 +124,55 @@ export interface GameRunResult {
     realizedProfit: number;
     commissionPaid: number;
     tradesMade: number;
+  };
+  /** Small terminal strategy digest retained by --compact/--perf benchmarks.
+   * It is read from the real controller's store after the run; no extra game
+   * getter or simulation-only decision input is introduced. */
+  strategy: {
+    route?: string;
+    nodeRemainingSec?: number;
+    installRemainingSec?: number;
+    augCount?: number;
+    queuedAugmentations: number;
+    installs: number;
+    goGames: number;
+    goPreferredUtilityPerSec?: number;
+    goPreferredOpponent?: string;
+    installVerdict?: string;
+    installResetValueMult?: number;
+    installThreshold?: number;
+    pushMarginalRate?: number;
+    factionObjective?: string;
+    factionObjectiveAugs: string[];
+    factionObjectiveEtaSec?: number;
+    factionObjectiveActivationValue?: number;
+    factionObjectiveMarginalActivationRate?: number;
+    factionObjectiveRepTarget?: number;
+    factionObjectivePurpose?: string;
+    factionAction?: string;
+    factionRecommendInstall?: boolean;
+    factionNextBuy?: string;
+    factionNextBuyPrice?: number;
+    factionLastResult?: string;
+    factionJoined: string[];
+    factionBankedAugmentations: string[];
+    factionDrainCeiling?: number;
+    progressionInstallWanted?: boolean;
+    progressionInstallReady?: boolean;
+    progressionInstallBlockers: string[];
+    factionArbitration: string[];
+    routeParts: { what: string; sec: number; measured: boolean }[];
+    factionObjectiveRep?: number;
+    factionObjectiveFavor?: number;
+    factionContextRoute?: string;
+    /** Simulator truth beside the controller's last observed probe, retained
+     * to diagnose stale-currentWork planning without feeding either value
+     * back into the game controller. */
+    actualCurrentWork?: string;
+    observedCurrentWork?: string;
+    /** Simulator truth for terminal diagnosis only; never enters WorldView. */
+    actualSkills: Record<string, number>;
+    actualMoney: number;
   };
 }
 
@@ -248,6 +302,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // retrofitting a second timebase under models written against the first
   // would mean redoing all of them.
   const factions = new FactionSystem(world, world.player, options.factions ?? save?.factions);
+  const companies = new CompanySystem(world, world.player, options.companies ?? save?.companies);
   const go = save ? undefined : new GoSystem(world, factions, seed);
   const terminal = { host: "home" };
   const hasTor = { value: false };
@@ -269,7 +324,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     person: world.person,
     servers: world.servers,
     factionRep: (name) => factions.get(name)?.rep ?? 0,
-    companyRep: (name) => options.companies?.[name] ?? save?.companies[name] ?? 0,
+    companyRep: (name) => companies.rep(name),
     bitNode: bitnode,
     // Not modelled yet; these feed requirements only, and reporting 0 is the
     // truth for a run with no hacknet rather than a fabricated value.
@@ -292,10 +347,11 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // actually completes. This lets program-granting augmentations update the
   // same home file set observed by ns.ls.
   const grafting = new GraftingSystem(world, world.player, () => host.files.get("home")!);
+  const programs = new ProgramSystem(world, world.player, () => host.files.get("home")!);
   const savedWork = save?.currentWork;
   if (savedWork) {
     const focused = save?.playerState.focus ?? true;
-    if (savedWork.kind === "faction" || savedWork.kind === "crime" || savedWork.kind === "graft") {
+    if (savedWork.kind === "faction" || savedWork.kind === "company" || savedWork.kind === "crime" || savedWork.kind === "graft") {
       world.player.startWork({
         kind: savedWork.kind,
         subject: savedWork.subject,
@@ -338,6 +394,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   world.stockSystem = stock;
   const hashMode = (bitnode === 9 || (save?.sourceFiles["9"] ?? 0) > 0) && save?.bitNodeOptions.disableHacknetServer !== true;
   const hacknet = new HacknetSystem(world, world.player, hashMode, save?.hacknet);
+  const education = new EducationSystem(world, world.player, (name) => hacknet.hashLevels[name] ?? 0);
 
   const engine: Engine = new Engine(clock, {
     updateOnlineScriptTimes: (cycles) => host.processes.updateOnlineTimes(cycles),
@@ -345,8 +402,11 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     // immediately unless it owns `currentWork`.
     processWork: (cycles) => {
       factions.processWork(cycles);
+      companies.processWork(cycles);
       crimes.processWork(cycles);
+      education.processWork(cycles);
       grafting.processWork(cycles);
+      programs.processWork(cycles);
     },
     checkFactionInvitations: () => factions.checkInvitations((reqs) => satisfiesAll(reqs, satisfyContext())),
     // The one counter that compensates for a fat catch-up tick, and the one
@@ -441,6 +501,9 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       terminal,
       network,
       crimes,
+      education,
+      programs,
+      companies,
       grafting,
       satisfyContext,
       // The real call resets the counter to force an immediate re-check
@@ -497,10 +560,39 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // stale-state bugs in the install callback path.
   host.onPrestige = (cbScript, newlyInstalled): void => {
     host.processes.killAll();
-    world.prestigeAugmentation(newlyInstalled);
+    // The install destroys the cycle state immediately. Preserve the real
+    // controller's final, already-held decision beside the simulated prestige
+    // so cadence tuning can explain each batch instead of inferring it from
+    // the terminal state of the following cycle. This is observation only:
+    // no getter or simulator value is fed back into game/ strategy.
+    const topics = gameGlobal.state?.topics;
+    const progressionPlan = topics?.progression?.plan;
+    const factionPlan = topics?.factions?.plan;
+    world.prestigeAugmentation(newlyInstalled, {
+      money: world.player.money,
+      progression: progressionPlan
+        ? {
+            phase: progressionPlan.phase,
+            installWanted: progressionPlan.installWanted,
+            routeInstallRequired: progressionPlan.routeInstallRequired === true,
+            favorCrossings: progressionPlan.favorCrossings,
+            decision: progressionPlan.installDecision,
+          }
+        : undefined,
+      factions: factionPlan
+        ? {
+            objective: factionPlan.objective?.intent,
+            runnerUp: factionPlan.objective?.runnerUp,
+            action: factionPlan.action,
+            recommendInstall: factionPlan.recommendInstall,
+            drainCeiling: factionPlan.drainCeiling,
+          }
+        : undefined,
+    });
     hacknet.prestige();
     stock.prestige();
     grafting.prestige();
+    programs.prestige();
     go?.prestigeAugmentation();
     hasTor.value = false;
 
@@ -713,6 +805,13 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   const gaps = unmodeledCounts();
   const validity: RunValidity = Object.keys(gaps).length > 0 || host.crashes.length > 0 ? "invalid-for-goal" : "valid";
   const liquidationValue = stock.liquidationValue();
+  const terminalState = (realm["state"] as GameState | undefined)?.topics;
+  const progressionPlan = terminalState?.progression?.plan;
+  const preferredGo = terminalState?.go?.plan?.selection.preferred;
+  const factionIntent = terminalState?.factions?.plan?.objective?.intent;
+  const factionStanding = terminalState?.factions?.standings?.find(
+    (standing) => standing.name === factionIntent?.faction,
+  );
   const result: GameRunResult = {
     seed,
     reached,
@@ -732,6 +831,100 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       realizedProfit: stock.realizedProfit,
       commissionPaid: stock.commissionPaid,
       tradesMade: stock.tradesMade,
+    },
+    strategy: {
+      ...(progressionPlan?.route ? { route: progressionPlan.route } : {}),
+      ...(progressionPlan?.forecasts.node.state === "estimated"
+        ? { nodeRemainingSec: progressionPlan.forecasts.node.remainingSec }
+        : {}),
+      ...(progressionPlan?.forecasts.install.state === "estimated"
+        ? { installRemainingSec: progressionPlan.forecasts.install.remainingSec }
+        : {}),
+      ...(terminalState?.progression?.augCount !== undefined
+        ? { augCount: terminalState.progression.augCount }
+        : {}),
+      queuedAugmentations: world.player.queuedAugmentations.size,
+      installs: ctx.installs,
+      goGames: go ? [...go.stats.values()].reduce((sum, entry) => sum + entry.wins + entry.losses, 0) : 0,
+      ...(preferredGo?.utilityPerSec !== undefined
+        ? { goPreferredUtilityPerSec: preferredGo.utilityPerSec, goPreferredOpponent: preferredGo.opponent }
+        : {}),
+      ...(progressionPlan?.installDecision?.effective
+        ? { installVerdict: progressionPlan.installDecision.effective }
+        : {}),
+      ...(progressionPlan?.installDecision?.resetValueMult !== undefined
+        ? { installResetValueMult: progressionPlan.installDecision.resetValueMult }
+        : {}),
+      ...(progressionPlan?.installDecision?.threshold !== undefined
+        ? { installThreshold: progressionPlan.installDecision.threshold }
+        : {}),
+      ...(progressionPlan?.installDecision?.pushRate !== undefined
+        ? { pushMarginalRate: progressionPlan.installDecision.pushRate }
+        : {}),
+      ...(factionIntent?.faction
+        ? { factionObjective: factionIntent.faction }
+        : {}),
+      factionObjectiveAugs: terminalState?.factions?.plan?.objective?.augmentations ?? [],
+      ...(factionIntent?.etaSec !== undefined ? { factionObjectiveEtaSec: factionIntent.etaSec } : {}),
+      ...(factionIntent?.activationValue !== undefined
+        ? { factionObjectiveActivationValue: factionIntent.activationValue }
+        : {}),
+      ...(factionIntent?.marginalActivationRate !== undefined
+        ? { factionObjectiveMarginalActivationRate: factionIntent.marginalActivationRate }
+        : {}),
+      ...(factionIntent?.repTarget !== undefined ? { factionObjectiveRepTarget: factionIntent.repTarget } : {}),
+      ...(factionIntent?.purpose !== undefined ? { factionObjectivePurpose: factionIntent.purpose } : {}),
+      ...(terminalState?.factions?.plan?.action.type
+        ? { factionAction: terminalState.factions.plan.action.type }
+        : {}),
+      ...(terminalState?.factions?.plan
+        ? { factionRecommendInstall: terminalState.factions.plan.recommendInstall !== undefined }
+        : {}),
+      ...(terminalState?.factions?.plan?.nextBuy?.name
+        ? {
+            factionNextBuy: terminalState.factions.plan.nextBuy.name,
+            factionNextBuyPrice: terminalState.factions.plan.nextBuy.price,
+          }
+        : {}),
+      ...(terminalState?.factions?.plan?.lastResult
+        ? { factionLastResult: `${terminalState.factions.plan.lastResult.action}:${terminalState.factions.plan.lastResult.ok}:${terminalState.factions.plan.lastResult.detail}` }
+        : {}),
+      factionJoined: terminalState?.factions?.joined ?? [],
+      factionBankedAugmentations: terminalState?.factions?.plan?.bankedAugmentations ?? [],
+      ...(terminalState?.factions?.plan?.drainCeiling !== undefined
+        ? { factionDrainCeiling: terminalState.factions.plan.drainCeiling }
+        : {}),
+      ...(progressionPlan
+        ? {
+            progressionInstallWanted: progressionPlan.installWanted,
+            progressionInstallReady: progressionPlan.installReady,
+          }
+        : {}),
+      progressionInstallBlockers: progressionPlan?.installBlockers.map((blocker) => blocker.kind) ?? [],
+      factionArbitration: [
+        ...(terminalState?.progression?.arbitration?.grants ?? [])
+          .filter((grant) => grant.by === "factions")
+          .map((grant) => `grant:${grant.id}:${grant.amount}:p${grant.priority ?? "?"}`),
+        ...(terminalState?.progression?.arbitration?.denied ?? [])
+          .filter((denial) => denial.by === "factions")
+          .map((denial) => `deny:${denial.id}:${denial.reason}:${denial.available}/${denial.wanted}:p${denial.priority ?? "?"}`),
+      ],
+      routeParts: progressionPlan?.routes?.find((route) => route.id === progressionPlan.route)?.parts.map(
+        (part) => ({ what: part.what, sec: part.sec, measured: part.measured }),
+      ) ?? [],
+      ...(factionStanding?.rep !== undefined ? { factionObjectiveRep: factionStanding.rep } : {}),
+      ...(factionStanding?.favor !== undefined ? { factionObjectiveFavor: factionStanding.favor } : {}),
+      ...(terminalState?.factions?.plan?.context.route !== undefined
+        ? { factionContextRoute: terminalState.factions.plan.context.route }
+        : {}),
+      ...(world.player.currentWork
+        ? { actualCurrentWork: `${world.player.currentWork.kind}:${world.player.currentWork.subject}:${world.player.currentWork.workType ?? ""}` }
+        : {}),
+      ...(terminalState?.career?.currentWork
+        ? { observedCurrentWork: `${terminalState.career.currentWork.type}:${terminalState.career.currentWork.detail ?? ""}:${terminalState.career.currentWork.workType ?? ""}` }
+        : {}),
+      actualSkills: { ...world.person.skills },
+      actualMoney: world.player.money,
     },
   };
   world.emit({ kind: "event", name: "sim.result", data: { goal: goal.id, ...result } });

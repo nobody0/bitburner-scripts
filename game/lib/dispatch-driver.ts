@@ -157,6 +157,7 @@ export function pump(
     horizonMs?: number;
     pooling?: boolean;
     reinvestmentReturnPerDollarSec?: number;
+    hackingSkillGoal?: number;
   } = {},
 ): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"]; nextWakeMs?: number } {
   const result = planFarm(view, state.memory, completions, {
@@ -165,6 +166,7 @@ export function pump(
     ...(options.reinvestmentReturnPerDollarSec !== undefined
       ? { reinvestmentReturnPerDollarSec: options.reinvestmentReturnPerDollarSec }
       : {}),
+    ...(options.hackingSkillGoal !== undefined ? { hackingSkillGoal: options.hackingSkillGoal } : {}),
     ...(options.horizonMs !== undefined ? { horizonMs: options.horizonMs } : {}),
     ...(options.pooling ? { pooling: true } : {}),
     sourceHosts: state.deployed,

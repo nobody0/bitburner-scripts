@@ -4,22 +4,19 @@
  * Bitburner v3.0.1 formats its exponential branch with an
  * `Intl.NumberFormat` configured for scientific (or optional engineering)
  * notation and three fractional digits. This dependency-free copy fixes the
- * locale to English for stable telemetry; game bundles cannot import the
- * upstream UI module.
+ * locale to English and preserves the game's lowercase exponent marker for
+ * stable telemetry; game bundles cannot import the upstream UI module.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/ui/formatNumber.ts#L29-L56
  */
-const scientificFormatter = new Intl.NumberFormat(["en"], {
-  minimumFractionDigits: 3,
-  maximumFractionDigits: 3,
-  notation: "scientific",
-});
-
-/** Bitburner's scientific display, including its lowercase exponent marker.
- * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/ui/formatNumber.ts#L29-L56 */
 export function formatScientific(n: number): string {
   if (Number.isNaN(n)) return "NaN";
   if (Math.abs(n) === Infinity) return n < 0 ? "-∞" : "∞";
-  return scientificFormatter.format(n).toLocaleLowerCase();
+  // For this fixed English/scientific/three-decimal configuration,
+  // toExponential is byte-identical after removing the optional positive
+  // exponent sign. Intl formatting dominated long simulator profiles because
+  // strategy why-strings are rebuilt frequently; this preserves the public
+  // format without locale parsing and case conversion on every call.
+  return n.toExponential(3).replace("e+", "e");
 }
 
 /**

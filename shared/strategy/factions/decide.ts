@@ -3,12 +3,16 @@ import {
   augCost,
   canAfford,
   closePrereqs,
+  countSlotWeight,
   entropyCost,
+  estimatedCost,
   isSoA,
   NEUROFLUX,
   orderPurchases,
+  orderPurchasesWithNeurofluxByLevel,
   scoreAug,
   selectAffordableBatch,
+  totalCost,
   type PurchaseCandidate,
 } from "./augs.ts";
 import {
@@ -36,6 +40,11 @@ import {
 import { evaluateAll, type Blocker } from "./requirements.ts";
 import { settlingMoney, type FactionStanding, type FactionsView } from "./state.ts";
 
+/** Once the planned package is banked, opportunistic work may extend this
+ * cycle by at most one percent. Purchases themselves remain end-loaded and do
+ * not consume this budget. */
+export const EXTRA_AUG_PUSH_FRACTION = 0.01;
+
 /** The faction decision.
  *
  * Pure: same view + same memory => same decision, always. It reads no clock
@@ -46,12 +55,11 @@ import { settlingMoney, type FactionStanding, type FactionsView } from "./state.
  *   purchaseAugmentation -> joinFaction -> travelTo -> donate -> graft
  *   -> workForFaction -> stopWork -> idle
  *
- * Purchases come first because reputation is a bank that survives to install
- * while money is fungible: converting rep into augmentations the moment it is
- * possible can never be worse, and delaying risks the run ending with unspent
- * reputation. Joins come next because an invitation can be REVOKED by joining
- * an enemy. Travel is last among the cheap actions and heavily guarded — see
- * below.
+ * Purchase is first only after the final transaction has been closed. Before
+ * that boundary it is deliberately absent: queued augmentations provide no
+ * benefit, and each one makes every later purchase 1.9x dearer. Joins come
+ * next because an invitation can be REVOKED by joining an enemy. Travel is
+ * last among the cheap actions and heavily guarded — see below.
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L35-L51
  *
  * `installAugmentations` is deliberately never selected. spec/features.md
@@ -68,9 +76,20 @@ import { settlingMoney, type FactionStanding, type FactionsView } from "./state.
  * the game still shows it running, its `until` is unmet, and nothing
  * invalidated the plan, the only correct answer is "keep going".
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22 */
-function shouldContinue(view: FactionsView, memory: FactionMemory, invalidation: InvalidationKey[]): boolean {
+function shouldContinue(
+  view: FactionsView,
+  memory: FactionMemory,
+  invalidation: InvalidationKey[],
+  target: { faction: string; workType: WorkType },
+): boolean {
   const last = memory.lastAction;
   if (!last || last.type !== "workForFaction") return false;
+  // A completed breakpoint can promote another faction without changing any
+  // coarse invalidation key: reputation deliberately is not one because it
+  // changes every tick. Continuing is correct only when the promoted target
+  // is still the work we started. Otherwise the guard strands the new package
+  // in the plan while the player keeps earning obsolete reputation forever.
+  if (target.faction !== last.faction || target.workType !== last.workType) return false;
   const work = view.currentWork;
   if (!work || work.kind !== "faction" || work.faction !== last.faction) return false;
   if (work.workType !== last.workType) return false;
@@ -125,7 +144,15 @@ export function blockersFor(standing: FactionStanding, view: FactionsView): Bloc
       },
     ];
   }
-  return evaluateAll(standing.requirements, view.requirementView);
+  const evaluated = evaluateAll(standing.requirements, view.requirementView);
+  if (!view.availableOwners) return evaluated;
+  return evaluated.map((entry) => view.availableOwners!.has(entry.owner)
+    ? entry
+    : {
+        ...entry,
+        reachable: false,
+        why: `${entry.why}; ${entry.owner} is unavailable in this run`,
+      });
 }
 
 /** Measured reputation rate, EWMA over observed deltas. Reality beats the
@@ -204,34 +231,42 @@ function purchaseOrder(view: FactionsView, names: readonly string[]): string[] {
   return orderPurchases(candidates, view.priceContext).map((candidate) => candidate.name);
 }
 
+/** Dependency-safe cost of the reputation breakpoints already banked this
+ * cycle. End-loading must not confuse "rep complete" with "base plan
+ * complete" while its real purchase set is still short of cash. */
+function bankedPackageCost(view: FactionsView, names: ReadonlySet<string>): number {
+  const candidates: PurchaseCandidate[] = [];
+  for (const name of closePrereqs([...names], view.catalog, view.owned)) {
+    const aug = view.catalog.get(name);
+    if (!aug) return Infinity;
+    const repCost = augCost(aug, view.priceContext).repCost;
+    const seller = view.factions.find(
+      (standing) => standing.joined && standing.rep >= repCost && aug.factions.includes(standing.name),
+    );
+    if (!seller) return Infinity;
+    candidates.push({ name, aug, faction: seller.name });
+  }
+  return totalCost(orderPurchases(candidates, view.priceContext), view.priceContext);
+}
+
 export function stepFactions(
   view: FactionsView,
   memoryIn: FactionMemory,
 ): { decision: FactionDecision; memory: FactionMemory } {
   const out = decideFactions(view, memoryIn);
-  // `nextBuy` is the money the driver has to claim. The drain fills it in itself
-  // (a different candidate set); otherwise it is the head of the objective's
-  // purchase order. Priced with unlimited money on purpose: `nextPurchase` tests
-  // the GRANTED budget, a grant only exists once something claimed it, and a claim
-  // read off the already-funded decision could never bootstrap.
+  // `nextBuy` is the money the driver has to claim, and during the endgame drain
+  // the drain is its SOLE author: it prices the frozen order against the frozen
+  // pile and deliberately withholds an intent the pile cannot cover.
+  //
+  // There is no objective-derived fallback here. The only names the objective
+  // could contribute beyond the frozen order are the ones `selectAffordableBatch`
+  // already dropped for cost, and publishing one of those is a deadlock: the
+  // driver hands `nextBuy.name` to progression as `purchasableAugmentation`,
+  // which raises the `augmentations` install blocker, while the drain — latched
+  // out of all faction work — will never buy a name outside `drainOrder`. The
+  // run then sits on a frozen bankroll with `installReady` permanently false.
   let decision = out.decision;
   const endgameDrain = decision.recommendInstall !== undefined || decision.drainCeiling !== undefined;
-  if (!decision.nextBuy) {
-    // Guarded: purchaseOrder runs the exponential ordering DP (up to ~40 ms
-    // at 16 items), and during the drain — when chainWake runs this at
-    // controller-pass cadence — the drain always supplies nextBuy itself.
-    const intended = nextPurchase(view, purchaseOrder(view, decision.objective?.augmentations ?? []), Infinity);
-    // During the drain, an empty drain intent means the sweep found nothing
-    // the frozen pile can cover. Falling back to the OBJECTIVE's head priced
-    // with Infinity would publish a nextBuy the pile can never fund, and the
-    // driver's priority-90 divisible reserve for it absorbs the entire money
-    // pool with no timeout — starving every lower band until raw income
-    // reaches an unbounded price.
-    const fundable =
-      intended !== undefined &&
-      (!endgameDrain || intended.price <= view.moneyAvailable + Math.max(0, view.pendingProceeds));
-    if (intended && fundable) decision = { ...decision, nextBuy: { name: intended.name, price: intended.price } };
-  }
 
   // End-loaded buying can reach its first purchase with most of the bankroll
   // still in stocks. Publish the bootstrap separately so progression may ask
@@ -296,9 +331,49 @@ function decideFactions(
 
   const blockers = new Map(view.factions.map((standing) => [standing.name, blockersFor(standing, view)]));
 
+  // End-loading deliberately leaves a completed package physically unowned.
+  // Without a separate planning commitment, its now-zero work ETA wins the
+  // frontier on every refresh: the objective remains complete, factions sits
+  // idle, and progression continues to say push forever. Bank completed
+  // one-shot names for SELECTION only. The real view is retained below for
+  // purchases, affordability and ownership, so no benefit is fabricated
+  // before the install transaction actually runs.
+  const bankedAugmentations = new Set(memory.bankedAugmentations);
+  const rememberedIntent = memory.objective?.intent;
+  const rememberedStanding = rememberedIntent
+    ? view.factions.find((standing) => standing.name === rememberedIntent.faction)
+    : undefined;
+  if (rememberedIntent && rememberedStanding && rememberedStanding.rep >= rememberedIntent.repTarget) {
+    for (const name of rememberedIntent.augmentations) {
+      if (name !== NEUROFLUX && !view.owned.has(name)) bankedAugmentations.add(name);
+    }
+  }
+  const planningOwned = new Set([...view.owned, ...bankedAugmentations]);
+  const planningView: FactionsView = planningOwned.size === view.owned.size
+    ? view
+    : { ...view, owned: planningOwned };
+  // A bank is a pool of reputation-complete opportunities, not a promise to
+  // buy every item in it.  In particular, once a faction-acquisition route has
+  // banked The Red Pill, an optional wish list must not hold the terminal reset
+  // hostage.  Require the route-critical dependency closure to fit, then let
+  // the final-sweep solver freeze the best affordable subset of the rest.
+  // Ordinary (non-terminal) packages retain the stronger all-banked-items gate:
+  // cadence selected those as the base package, so silently dropping one would
+  // make its renewal calculation describe different work from what we buy.
+  const terminalBanked = (view.route === "daedalus" || view.route === "gang")
+    && bankedAugmentations.has("The Red Pill");
+  const terminalRequired = terminalBanked
+    ? closePrereqs(["The Red Pill"], view.catalog, view.owned)
+    : [];
+  const fundedBase = terminalRequired.length > 0
+    ? new Set(terminalRequired)
+    : bankedAugmentations;
+  const bankedFunded = bankedPackageCost(view, fundedBase)
+    <= view.moneyAvailable + Math.max(0, view.pendingProceeds);
+
   // --- objective ------------------------------------------------------------
-  const selection = selectFactionPackage(view, blockers);
-  const objectiveAugs = closePrereqs(selection.intent?.augmentations ?? [], view.catalog, view.owned);
+  const selection = selectFactionPackage(planningView, blockers);
+  const objectiveAugs = closePrereqs(selection.intent?.augmentations ?? [], view.catalog, planningOwned);
   const fresh: FactionObjective = {
     factions: selection.intent ? [selection.intent.faction] : [],
     augmentations: objectiveAugs,
@@ -333,6 +408,25 @@ function decideFactions(
   const previousComplete = Boolean(
     previousIntent && previousStanding && previousStanding.rep >= previousIntent.repTarget,
   );
+  // Stability latches the promised BREAKPOINT, not the estimates captured on
+  // the tick that selected it. Invite blockers, measured work rates, income,
+  // favor and the current rep gap all change while a package is in flight. A
+  // stale pre-join intent can otherwise retain a years-long unlockSec after
+  // the faction has been joined; progression then sees an almost-zero push
+  // rate and repeatedly installs optional NFG instead of finishing the route.
+  const refreshedPreviousIntent = previousIntent
+    ? selection.frontiers.get(previousIntent.faction)?.find(
+        (candidate) => Math.abs(candidate.repTarget - previousIntent.repTarget) <= 1e-9,
+      )
+    : undefined;
+  const refreshedPrevious = previous && refreshedPreviousIntent
+    ? {
+        ...previous,
+        augmentations: closePrereqs(refreshedPreviousIntent.augmentations, view.catalog, view.owned),
+        value: refreshedPreviousIntent.value,
+        intent: refreshedPreviousIntent,
+      }
+    : previous;
   const runnerBlockedThisCycle = Boolean(
     previousRunner &&
     view.factions.some(
@@ -359,7 +453,54 @@ function decideFactions(
           intent: previousRunner,
         }
       : undefined;
-  let keepPrevious = Boolean(previousIntent && previousStanding && (!previousComplete || runnerBlockedThisCycle));
+  // A completed, still-unpurchased package is not itself a reason to stop selection. If its
+  // recorded runner is enemy-blocked this cycle, `fresh` already contains the
+  // best compatible package after excluding every banked augmentation. Keep
+  // the completed objective here and an end-loaded augmentation remains
+  // physically unowned, so the feature can sit idle on it forever while a
+  // route-level batch policy correctly refuses the too-small reset.
+  // Progression still closes the cycle when no compatible fresh package is
+  // worth pursuing; an empty fresh frontier is the explicit conclude signal.
+  // Once a queue entry exists the transaction is irreversible, however, and
+  // the pre-join stopping point must remain closed rather than reopening work
+  // under an already-inflated price ladder.
+  let keepPrevious = Boolean(
+    previousIntent
+    && previousStanding
+    && (!previousComplete || (runnerBlockedThisCycle && view.queued.size > 0)),
+  );
+  // Membership is a structural improvement in certainty. A speculative
+  // package whose faction is still locked must not hold the latch after a
+  // joined/invited package becomes the fresh winner: its ETA is executable
+  // now, while the old ETA still depends on another feature's coarse blocker
+  // model. Measured failure before this rule: each newly joined early faction
+  // sat unused behind a five-minute stall window for an unjoined combat/city
+  // faction, consuming most of an install cycle without earning reputation.
+  const freshStanding = fresh.intent
+    ? view.factions.find((standing) => standing.name === fresh.intent!.faction)
+    : undefined;
+  if (
+    keepPrevious
+    && previousStanding
+    && !previousStanding.joined
+    && !previousStanding.invited
+    && (freshStanding?.joined === true || freshStanding?.invited === true)
+  ) {
+    keepPrevious = false;
+  }
+  // Once the selected faction-acquisition route exposes its terminal
+  // augmentation, it is no longer an ordinary value/sec bidder. Do not let a
+  // previously latched optional package delay the route-ending reputation
+  // grind merely because that package is still making progress. This remains
+  // route-generic: routeAware selection is what decides whether The Red Pill
+  // is terminal, and routes that do not use it never produce this fresh intent.
+  if (
+    keepPrevious
+    && fresh.intent?.augmentations.includes("The Red Pill")
+    && !previousIntent?.augmentations.includes("The Red Pill")
+  ) {
+    keepPrevious = false;
+  }
   // Stall escape for the latch: zero reputation progress for INTENT_STALL_MS
   // while the frontier prefers a DIFFERENT package means the latched intent
   // is not merely slow, it is unservable — measured: an employment-gated
@@ -382,7 +523,7 @@ function decideFactions(
       keepPrevious = false;
     }
   }
-  const objective = keepPrevious ? previous! : promotedRunner ?? fresh;
+  const objective = keepPrevious ? refreshedPrevious! : promotedRunner ?? fresh;
   if (!keepPrevious) {
     intentKey = objective.intent?.faction;
     intentRepSeen = undefined;
@@ -405,15 +546,28 @@ function decideFactions(
   // The drain ceiling survives ONLY through consecutive recommending-drain
   // decisions (set again below); any other decision clears it, so an aborted
   // drain can never leak a stale, lower snapshot into the next one.
-  const { drainCeiling: _staleCeiling, intentKey: _ik, intentRepSeen: _irs, intentProgressAt: _ipa, ...carried } = memory;
+  const {
+    drainCeiling: _staleCeiling,
+    drainOrder: _staleOrder,
+    drainStartNeurofluxLevel: _staleDrainNfg,
+    intentKey: _ik,
+    intentRepSeen: _irs,
+    intentProgressAt: _ipa,
+    ...carried
+  } = memory;
   const next = {
     ...carried,
+    bankedAugmentations: [...bankedAugmentations].sort(),
     objective,
     lastInvalidation: invalidation,
     ...(intentKey !== undefined ? { intentKey } : {}),
     ...(intentRepSeen !== undefined ? { intentRepSeen } : {}),
     ...(intentProgressAt !== undefined ? { intentProgressAt } : {}),
   };
+  // Irreversible transaction boundary: after the first final-sweep purchase
+  // was authorized, only finish that sweep and install. No graft, join,
+  // travel, or renewed work may reopen the package under escalated prices.
+  const drainLatched = memory.drainCeiling !== undefined;
 
   if (view.currentWork?.kind === "grafting") {
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/GraftingWork.tsx#L26-L98
@@ -439,7 +593,7 @@ function decideFactions(
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L109-L141
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38
 
-  const graft = nextGraft(view, objective.augmentations);
+  const graft = view.installRequested || drainLatched ? undefined : nextGraft(view, objective.augmentations);
   if (graft) {
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Grafting.ts#L17-L103
     const action: FactionAction = view.requirementView.city === "New Tokyo"
@@ -455,7 +609,7 @@ function decideFactions(
   const invitation = view.factions.find(
     (standing) => standing.invited && !standing.joined && objective.factions.includes(standing.name),
   );
-  if (invitation) {
+  if (invitation && !drainLatched) {
     const lost = objective.foreclosed.filter((entry) => entry.bannedBy === invitation.name);
     const action: FactionAction = {
       type: "joinFaction",
@@ -482,6 +636,8 @@ function decideFactions(
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L35-L51
   const freeInvite = view.factions.find(
     (standing) =>
+      !view.installRequested &&
+      !drainLatched &&
       standing.invited &&
       !standing.joined &&
       standing.enemies.length === 0 &&
@@ -503,10 +659,9 @@ function decideFactions(
   // ONLY when it is the last remaining requirement for a faction. Travelling
   // invalidates other city-bound requirements, so issuing it speculatively
   // produces a loop: travel for A, which breaks B, travel back for B, which
-  // breaks A. The predecessor scripts hit exactly this and added the same
-  // guard (src/_lib/factions.ts:256-262).
+  // breaks A.
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts#L196-L214
-  const travel = soleTravelBlocker(allBlockers);
+  const travel = view.installRequested || drainLatched ? undefined : soleTravelBlocker(allBlockers);
   if (travel) {
     const action: FactionAction = {
       type: "travelTo",
@@ -527,10 +682,66 @@ function decideFactions(
   // finished its sweep" while factions keeps pushing a multi-hour objective
   // it was never told to abandon (measured: 0 installs in 30 minutes on the
   // cadence fixture while progression wanted one from minute 2).
-  const target = view.installRequested ? undefined : pickWorkFaction(view, next, objective, alternatives);
+  const extraPushBudgetSec = Math.max(0, view.installCycleSec ?? 0) * EXTRA_AUG_PUSH_FRACTION;
+  const activePackageInFlight = Boolean(
+    view.installRequested
+    && view.routeInstallRequired !== true
+    && memory.drainCeiling === undefined
+    && objective.intent
+    && objective.intent.purpose === "augmentations"
+    && previousIntent
+    && objective.intent.faction === previousIntent.faction
+    && objective.intent.repTarget === previousIntent.repTarget
+    && !previousComplete,
+  );
+  const opportunisticPush = Boolean(
+    view.installRequested
+    && view.routeInstallRequired !== true
+    && memory.drainCeiling === undefined
+    && !activePackageInFlight
+    && objective.intent
+    && objective.intent.purpose === "augmentations"
+    && objective.intent.augmentations.some((name) => !view.owned.has(name))
+    && objective.intent.etaSec <= extraPushBudgetSec,
+  );
+  // Cadence may arm while a committed package is still in flight. Finish that
+  // package: the 1% rule applies only AFTER its breakpoint, to a promoted
+  // runner/new extra package. Treating the active package itself as the extra
+  // abandoned nearly-complete augmentations and made the published install
+  // ETA cease to describe the work we would actually perform.
+  // Starting the first purchase closes the package. Progression can revise its
+  // marginal-value verdict after the queue changes, but that must not reopen
+  // faction work: doing so buys the base package, then earns another package
+  // under inflated prices, exactly the ordering loss end-loading avoids.
+  const target = !drainLatched && (!view.installRequested || activePackageInFlight || opportunisticPush)
+    ? pickWorkFaction(view, next, objective, alternatives)
+    : undefined;
   if (!target) {
     const why = allBlockers.length > 0 ? "every objective faction is blocked" : "nothing left to work toward";
-    const recommend = shouldRecommendInstall(view, objective);
+    // Completing one faction breakpoint does not decide the install. Keep the
+    // bankroll unqueued while progression's renewal model still says push;
+    // otherwise every package boundary starts paying the 1.9x ladder early.
+    // An existing queue is already irreversible (including external/manual
+    // purchases), and a route-mandatory reset may close immediately.
+    const mayCloseTransaction = (view.installRequested && !activePackageInFlight && bankedFunded)
+      || view.routeInstallRequired === true
+      || view.queued.size > 0
+      || drainLatched;
+    const recommendation = (view.installRequested && !activePackageInFlight && bankedFunded && bankedAugmentations.size > 0
+        ? {
+            why: terminalRequired.length > 0
+              ? "the end-loaded route-critical package is reputation-complete and funded; freeze the best affordable sweep"
+              : "the end-loaded base package is reputation-complete and fully funded",
+            augmentations: [...bankedAugmentations],
+          }
+        : undefined)
+      ?? (mayCloseTransaction ? shouldRecommendInstall(view, objective) : undefined)
+      ?? (drainLatched
+      ? {
+          why: "the end-loaded purchase transaction has started; finish its frozen spend-down and install",
+          augmentations: [...view.queued],
+        }
+      : undefined);
     // Last-chance drain. This is intentionally broader than the objective:
     // once progression is about to reset, every augmentation we can still buy
     // beats carrying the cash into the reset — WITHIN the BitNode. The metric
@@ -539,8 +750,9 @@ function decideFactions(
     // REMAINING node. With minutes left it can never repay the drain and
     // install overhead, so NFG drops out of the sweep; an unknown horizon
     // (Infinity) keeps the full drain. Keep the same priority order, falling
-    // downward when a better item is not currently affordable; NeuroFlux is
-    // repeatable and comes last.
+    // downward when a better item is not currently affordable. NeuroFlux is
+    // repeatable; the frozen-set solver interleaves its funded levels with
+    // one-shots at the cheapest dependency-safe positions.
     // The drain spends the pile that exists when it STARTS — cash on hand PLUS
     // the stock book's liquidation value, because the book only converts once
     // the endgame begins and its proceeds are exactly the money this drain
@@ -549,34 +761,95 @@ function decideFactions(
     // and the install waits on a race.
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/Augmentations.ts#L1159-L1209
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38
-    const ceiling = recommend ? memory.drainCeiling ?? view.moneyAvailable + view.pendingProceeds : undefined;
-    const ceilingDigest = ceiling !== undefined ? { drainCeiling: ceiling } : {};
+    const proposedCeiling = recommendation
+      ? memory.drainCeiling ?? view.moneyAvailable + view.pendingProceeds
+      : undefined;
     // The spend-down bound applies to the NEUROFLUX LADDER ONLY: it is the
     // repeatable item whose price escalation can race income forever. It
     // drops out of the sweep when the next level exceeds min(frozen ceiling,
     // cash on hand) — or when the remaining node cannot repay it. One-shot
     // augmentations keep nextPurchase's own patience rules (hold only while
     // liquidation proceeds with a settlement date cover the gap).
-    const sweepAll = recommend ? finalSweepWanted(view, ceiling ?? Infinity) : [];
-    const drainBudget = ceiling !== undefined ? Math.min(ceiling, view.moneyAvailable) : 0;
-    const nfgAug = view.catalog.get(NEUROFLUX);
-    const nfgAffordable = nfgAug !== undefined && augCost(nfgAug, view.priceContext).moneyCost <= drainBudget;
-    const wanted =
-      view.horizonSec > NFG_MIN_PAYBACK_SEC && nfgAffordable
+    const proposedSweep = recommendation
+      ? finalSweepWanted(view, proposedCeiling ?? Infinity, terminalRequired)
+      : [];
+    const startNfgLevel = memory.drainStartNeurofluxLevel ?? view.priceContext.neurofluxLevel;
+    let consumedNfg = Math.max(0, view.priceContext.neurofluxLevel - startNfgLevel);
+    const frozenRemaining = memory.drainOrder?.filter((name) => {
+      if (name !== NEUROFLUX || consumedNfg === 0) return true;
+      consumedNfg--;
+      return false;
+    });
+    const sweepAll = frozenRemaining ?? proposedSweep;
+    const drainBudget = proposedCeiling !== undefined ? Math.min(proposedCeiling, view.moneyAvailable) : 0;
+    // The payback filter is part of SET selection. Once the first purchase
+    // freezes a proven order, changing horizon estimates may not remove an NFG
+    // from the middle and expose later items to a different 1.9x queue depth.
+    const wanted = memory.drainOrder !== undefined
+      || view.routeInstallRequired === true
+      || view.horizonSec > NFG_MIN_PAYBACK_SEC
         ? sweepAll
         : sweepAll.filter((name) => name !== NEUROFLUX);
+    // Merely completing a reputation breakpoint is not a transaction. If the
+    // frozen pile selects no purchase and the queue is still empty, release
+    // the tentative boundary so income and the next package can continue.
+    // Once even one purchase exists, the 1.9x escalation is irreversible and
+    // the latch must survive until install.
+    // A route may project reputation-banked names into its count queue before
+    // they are purchased. That is useful for deciding when the closing batch
+    // is ready, but it is not proof the frozen bankroll can buy every required
+    // slot under 1.9x escalation. Do not start the irreversible transaction
+    // unless the actual affordable set closes the finite gate. Repeated NFG
+    // naturally contributes only once through Set semantics.
+    const projectedDistinctCount = new Set([
+      ...view.owned,
+      ...view.queued,
+      ...wanted,
+    ]).size;
+    const fundedRouteCount = view.routeInstallRequired !== true
+      || !Number.isFinite(view.targetAugCount)
+      || view.owned.size >= view.targetAugCount
+      || projectedDistinctCount >= view.targetAugCount;
+    const recommend = recommendation !== undefined
+      && fundedRouteCount
+      && (wanted.length > 0 || view.queued.size > 0)
+      ? recommendation
+      : undefined;
+    const ceiling = recommend ? proposedCeiling : undefined;
+    const drainOrder = recommend ? memory.drainOrder ?? wanted : undefined;
+    const drainStartNeurofluxLevel = recommend ? startNfgLevel : undefined;
+    const ceilingDigest = ceiling !== undefined ? { drainCeiling: ceiling } : {};
+    const drainMemory = {
+      ...next,
+      ...(ceiling !== undefined ? { drainCeiling: ceiling } : {}),
+      ...(drainOrder !== undefined ? { drainOrder } : {}),
+      ...(drainStartNeurofluxLevel !== undefined ? { drainStartNeurofluxLevel } : {}),
+    };
     // What the drain would buy if money were no object. Published on the decision
     // so the driver can claim exactly that much: `nextPurchase` above tests the
     // GRANTED budget, and a grant only exists once something claimed it. Derived
     // from the plan rather than the funded action, it survives the whole drain —
     // including the ticks where a purchase is in flight — so the claim does not
     // blink out between buys.
-    const drainIntent = recommend ? nextPurchase(view, wanted, Infinity) : undefined;
+    // Publish only an intent the frozen drain pile can really fund. Infinity
+    // is appropriate before the boundary (it bootstraps a claim), but here it
+    // resurrects a candidate selectAffordableBatch deliberately dropped and
+    // leaves progression waiting on an impossible purchase forever.
+    const drainIntent = recommend ? nextPurchase(view, wanted, ceiling ?? Infinity) : undefined;
     const nextBuyDigest = drainIntent ? { nextBuy: { name: drainIntent.name, price: drainIntent.price } } : {};
-    const sweep = recommend ? nextSweepAction(view, wanted) : undefined;
+    // Decide from the frozen cash pile, then let the driver enforce the
+    // current-pass arbiter grant. Deciding from moneyGranted is circular: the
+    // claim comes from the published decision, so a purchase can remain idle
+    // even while the arbiter is granting both its exact fund and RAM.
+    const sweep = recommend
+      ? nextSweepAction({ ...view, moneyGranted: drainBudget }, wanted)
+      : undefined;
     if (sweep) {
       return {
-        memory: { ...next, lastAction: sweep, ...(ceiling !== undefined ? { drainCeiling: ceiling } : {}) },
+        memory: {
+          ...drainMemory,
+          lastAction: sweep,
+        },
         decision: { objective, action: sweep, alternatives, blockers: allBlockers, needOwners, invalidation, ...nextBuyDigest, ...ceilingDigest },
       };
     }
@@ -586,7 +859,10 @@ function decideFactions(
       why,
     };
     return {
-      memory: { ...next, lastAction: action, ...(ceiling !== undefined ? { drainCeiling: ceiling } : {}) },
+      memory: {
+        ...drainMemory,
+        lastAction: action,
+      },
       decision: {
         objective,
         action,
@@ -649,10 +925,9 @@ function decideFactions(
     };
   }
 
-  // The continuation guard. Must come after the cheap actions (a purchase we
-  // can afford now should not wait for work to finish) but before we would
-  // re-issue the same work order.
-  if (shouldContinue(view, memory, invalidation)) {
+  // The continuation guard comes after cheap actions but before reissuing the
+  // same work order.
+  if (shouldContinue(view, memory, invalidation, target)) {
     const action: FactionAction = { type: "idle", reason: "continue", why: "faction work already running" };
     return {
       memory: { ...next, lastAction: memory.lastAction },
@@ -894,13 +1169,22 @@ function nextPurchase(
  * {@link selectAffordableBatch}. Ordering is not cosmetic: buying a $1m
  * augmentation before a $500m one pays the 1.9x queue escalation on the $500m
  * instead of on the $1m, and the batch that was affordable as a plan stops being
- * affordable as a sequence. The drain re-plans every tick and always buys the head
- * of this list, so executing one purchase per tick reproduces the planned order.
+ * affordable as a sequence. The drain freezes this list before its first
+ * purchase and buys one head per tick, reproducing the planned order.
  *
- * NeuroFlux comes last, as the sink for whatever the batch leaves behind.
+ * NeuroFlux is selected as a residual sink, then jointly reordered with the
+ * accepted one-shot set; it is not forced to the expensive end of the ladder.
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38 */
-function finalSweepWanted(view: FactionsView, budgetCap = Infinity): string[] {
+function finalSweepWanted(
+  view: FactionsView,
+  budgetCap = Infinity,
+  requiredNames: readonly string[] = [],
+): string[] {
   const joined = new Set(view.factions.filter((standing) => standing.joined).map((standing) => standing.name));
+  const countSlotsRemaining = Number.isFinite(view.targetAugCount)
+    ? Math.max(0, view.targetAugCount - view.owned.size)
+    : 0;
+  const countValue = countSlotWeight(view.targetAugCount, countSlotsRemaining);
   const byValue = [...view.catalog.values()]
     .filter(
       (aug) =>
@@ -909,14 +1193,107 @@ function finalSweepWanted(view: FactionsView, budgetCap = Infinity): string[] {
         aug.factions.some((faction) => joined.has(faction)),
     )
     .sort(
-      (a, b) =>
-        scoreAug(b, view.weights) - scoreAug(a, view.weights) ||
-        (a.name < b.name ? -1 : 1),
+      (a, b) => {
+        const aValue = Math.max(1e-9, scoreAug(a, view.weights) + countValue);
+        const bValue = Math.max(1e-9, scoreAug(b, view.weights) + countValue);
+        // Before a route's installed-augmentation gate is full, every unique
+        // one-shot also advances that gate by one. Select the affordable SET
+        // by route-value per base dollar; the exact payment solver below still
+        // buys the chosen set dearest-first to minimise 1.9x escalation.
+        const efficiency = a.baseCost / aValue - b.baseCost / bValue;
+        return efficiency || scoreAug(b, view.weights) - scoreAug(a, view.weights) || (a.name < b.name ? -1 : 1);
+      },
     )
     .map((aug) => aug.name);
 
+  const budget = Math.min(plannedBudget(view), budgetCap);
+
+  // A route-mandatory finite count transaction has a lexicographic objective:
+  // prove the cheapest reputation-ready distinct closure first, then spend the
+  // residual bankroll on multiplier quality. A single combined value ordering
+  // can otherwise accept six attractive expensive items and reject the cheap
+  // seventh slot, leaving a mechanically completable node waiting for more
+  // money. This greedy marginal-closure solve is bounded by the small joined
+  // augmentation catalog and uses the same queue-aware cost estimate as the
+  // final selector. Prerequisites count as useful distinct slots themselves.
+  const countClosure: string[] = [];
+  if (view.routeInstallRequired === true && countSlotsRemaining > 0) {
+    const sellerOf = new Map<string, string>();
+    for (const aug of view.catalog.values()) {
+      if (aug.name === NEUROFLUX || view.owned.has(aug.name)) continue;
+      const repCost = augCost(aug, view.priceContext).repCost;
+      const seller = view.factions.find(
+        (standing) => standing.joined && standing.rep >= repCost && aug.factions.includes(standing.name),
+      );
+      if (seller) sellerOf.set(aug.name, seller.name);
+    }
+    const selected = new Set<string>();
+    const closure = (name: string): Set<string> | undefined => {
+      const adding = new Set<string>();
+      const visiting = new Set<string>();
+      const visit = (candidate: string): boolean => {
+        if (view.owned.has(candidate) || selected.has(candidate) || adding.has(candidate)) return true;
+        if (visiting.has(candidate) || !sellerOf.has(candidate)) return false;
+        visiting.add(candidate);
+        const aug = view.catalog.get(candidate)!;
+        for (const prereq of aug.prereqs) if (!visit(prereq)) return false;
+        visiting.delete(candidate);
+        adding.add(candidate);
+        return true;
+      };
+      return visit(name) ? adding : undefined;
+    };
+    while (selected.size < countSlotsRemaining) {
+      let best: Set<string> | undefined;
+      let bestCost = Infinity;
+      let bestQuality = -Infinity;
+      for (const name of sellerOf.keys()) {
+        if (selected.has(name)) continue;
+        const adding = closure(name);
+        if (!adding) continue;
+        const trial = new Set([...selected, ...adding]);
+        const trialCandidates: PurchaseCandidate[] = [...trial].map((candidate) => ({
+          name: candidate,
+          aug: view.catalog.get(candidate)!,
+          faction: sellerOf.get(candidate)!,
+        }));
+        const cost = estimatedCost(trialCandidates, view.priceContext);
+        const quality = [...adding].reduce((sum, candidate) => sum + scoreAug(view.catalog.get(candidate)!, view.weights), 0);
+        if (cost < bestCost || (cost === bestCost && quality > bestQuality)) {
+          best = adding;
+          bestCost = cost;
+          bestQuality = quality;
+        }
+      }
+      if (!best) break;
+      for (const name of best) selected.add(name);
+    }
+    const selectedCandidates: PurchaseCandidate[] = [...selected].map((name) => ({
+      name,
+      aug: view.catalog.get(name)!,
+      faction: sellerOf.get(name)!,
+    }));
+    if (selected.size >= countSlotsRemaining && estimatedCost(selectedCandidates, view.priceContext) <= budget) {
+      countClosure.push(...closePrereqs([...selected], view.catalog, view.owned));
+    }
+  }
+
+  // Required route items lead the VALUE order. selectAffordableBatch accepts
+  // greedily in this order and only the returned set is later cost-reordered,
+  // so this guarantees an affordable terminal closure cannot be displaced by
+  // an attractive optional item. De-duplicate after closing both lists because
+  // an optional augmentation may share a prerequisite with the required one.
+  const required = closePrereqs(requiredNames, view.catalog, view.owned);
+  const candidateNames = [
+    ...required,
+    ...countClosure,
+    ...closePrereqs(byValue, view.catalog, new Set([...view.owned, ...required, ...countClosure])),
+  ];
+  const seen = new Set<string>();
   const candidates: PurchaseCandidate[] = [];
-  for (const name of closePrereqs(byValue, view.catalog, view.owned)) {
+  for (const name of candidateNames) {
+    if (seen.has(name)) continue;
+    seen.add(name);
     const aug = view.catalog.get(name);
     const faction = aug?.factions.find((candidate) => joined.has(candidate));
     if (aug && faction) candidates.push({ name, aug, faction });
@@ -932,13 +1309,68 @@ function finalSweepWanted(view: FactionsView, budgetCap = Infinity): string[] {
     candidates,
     owned: view.owned,
     ctx: view.priceContext,
-    money: Math.min(plannedBudget(view), budgetCap),
+    money: budget,
   });
 
-  const order = plan.order.map((candidate) => candidate.name);
+  let order = plan.order;
   const neuroflux = view.catalog.get(NEUROFLUX);
-  if (neuroflux?.factions.some((faction) => joined.has(faction))) order.push(NEUROFLUX);
-  return order;
+  if (neuroflux) {
+    const sellers = view.factions.filter(
+      (standing) => standing.joined && neuroflux.factions.includes(standing.name),
+    );
+    const source = sellers[0]?.name;
+    if (source) {
+      const nfgCandidate: PurchaseCandidate = { name: NEUROFLUX, aug: neuroflux, faction: source };
+      let bestOrder = order;
+      // Prices grow by at least 1.9x per level, so this terminates in a handful
+      // of iterations in real data. The cap is only a corruption guard.
+      //
+      // Bound the search first, with the NeuroFlux ladder priced ALONE at a
+      // zero queue offset: the one-shots can only make each level dearer, so
+      // this is a true upper bound on the levels any budget can reach. Then one
+      // joint solve yields the order for every count within it — the DP state
+      // already carries the level counter, so re-entering it per level made
+      // this decision (which chainWake runs at controller-pass cadence during
+      // the drain) re-derive every cheaper answer from scratch.
+      let ladderCost = 0;
+      let maxLevels = 0;
+      while (maxLevels < 64) {
+        ladderCost += augCost(
+          neuroflux,
+          { ...view.priceContext, neurofluxLevel: view.priceContext.neurofluxLevel + maxLevels },
+        ).moneyCost;
+        if (ladderCost > budget) break;
+        maxLevels++;
+      }
+      const trials = orderPurchasesWithNeurofluxByLevel(plan.order, nfgCandidate, maxLevels, view.priceContext);
+      for (let count = 1; count <= maxLevels; count++) {
+        const repCost = augCost(
+          neuroflux,
+          { ...view.priceContext, neurofluxLevel: view.priceContext.neurofluxLevel + count - 1 },
+        ).repCost;
+        let donationCost = Infinity;
+        for (const standing of sellers) {
+          if (standing.rep >= repCost) donationCost = 0;
+          else if (standing.favor >= view.favorToDonate) {
+            donationCost = Math.min(
+              donationCost,
+              donationForRep(
+                repCost - standing.rep,
+                view.person.mults.faction_rep,
+                view.repContext.factionWorkRepGain,
+              ),
+            );
+          }
+        }
+        if (!Number.isFinite(donationCost)) break;
+        const trial = trials[count]!;
+        if (totalCost(trial, view.priceContext) + donationCost > budget) break;
+        bestOrder = trial;
+      }
+      order = bestOrder;
+    }
+  }
+  return order.map((candidate) => candidate.name);
 }
 
 function nextSweepAction(view: FactionsView, wanted: readonly string[]): FactionAction | undefined {
@@ -1071,6 +1503,16 @@ function shouldRecommendInstall(
   }
   // An install needs SOMETHING to convert: already queued, or buyable now.
   const queued = [...view.queued].filter((name) => view.catalog.has(name));
+  // NFG may be the frontier's next ROI-positive breakpoint, but a repeatable
+  // level alone does not get to declare the cycle over. Progression compares
+  // its multiplier value with the reset cost and then re-enters here with
+  // installRequested; an existing queue also makes it a strict residual sink.
+  if (
+    !view.installRequested
+    && queued.length === 0
+    && outstanding.length > 0
+    && outstanding.every((name) => name === NEUROFLUX)
+  ) return undefined;
   if (queued.length === 0 && outstanding.length === 0) return undefined;
   return {
     why: view.installRequested

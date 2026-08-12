@@ -1,4 +1,5 @@
 import { formatScientific } from "../../format.ts";
+import { countSlotWeight } from "../factions/augs.ts";
 import { addRepToFavor } from "../factions/rep.ts";
 import { INSTALL_OVERHEAD_SEC } from "./eta.ts";
 
@@ -19,6 +20,31 @@ import { INSTALL_OVERHEAD_SEC } from "./eta.ts";
  * by an install-timing rule, not a copied implementation. */
 
 export type RunPhase = "start" | "finishUp" | "ending";
+
+/** Require early count-only installs to bank a target-relative tranche. */
+export function earlyCountBatchAllowed(required: number, installed: number, fundedDistinct: number): boolean {
+  if (!(required > 0) || installed >= required) return false;
+  return Math.max(0, Math.floor(fundedDistinct))
+    >= Math.ceil((required - Math.max(0, installed)) / 3);
+}
+
+/** Persistent value of installing a sufficiently large partial tranche toward
+ * a finite route count gate. Count slots do not accelerate the next cycle, but
+ * omitting them entirely makes cadence wait for one enormous 1.9^N purchase
+ * ladder. The route's consolidation policy supplies `batchAllowed`, so this
+ * never re-opens tiny late resets. Units match faction package count value. */
+export function routeCountInstallValue(input: {
+  required: number;
+  installed: number;
+  affordableDistinct: number;
+  batchAllowed: boolean;
+}): number {
+  if (!input.batchAllowed || input.required <= 0 || input.installed >= input.required) return 0;
+  const remaining = input.required - input.installed;
+  const progress = Math.min(remaining, Math.max(0, Math.floor(input.affordableDistinct)));
+  const countWeight = countSlotWeight(input.required, remaining);
+  return progress * countWeight;
+}
 
 export interface ProgressionView {
   /** Augmentations owned this run (installed or queued). */
@@ -70,6 +96,10 @@ export interface ProgressionView {
   /** The selected route cannot complete without installing its already-owned
    * route augmentation (currently The Red Pill). */
   routeRequiresInstall: boolean;
+  /** The selected route stage can survive an economic (non-mandatory) reset.
+   * False for progress such as gang/Daedalus reputation, labyrinth traversal,
+   * and the final world-daemon skill regrow. */
+  optionalInstallAllowed?: boolean;
   /** Σ multiplier-only log-value of the QUEUED augmentations (scoreAugMults —
    * no flat bonuses). What the reset would ACTIVATE. */
   resetValueMult?: number;
@@ -129,6 +159,11 @@ export const INSTALL_MIN_PAYBACK_SEC = 600;
 /** The accrued value must clear the renewal threshold by this margin before
  * the verdict flips to "install" — the push rate re-measures constantly and
  * an install is irreversible. */
+// The renewal equation assumes a stationary value stream and an exact replay
+// cost. Real prestige cycles are neither: the early bootstrap is convex and
+// package value arrives at discrete reputation breakpoints. Keep a modest
+// safety margin around the measured crossing; dwell handles transient flips.
+// This is route-independent and is not a minimum augmentation count.
 export const PUSH_MARGIN = 1.25;
 /** A raw verdict flip must hold this long before it takes effect: rates
  * re-measure constantly and an unhysteresed rule would thrash the endgame
@@ -172,6 +207,8 @@ export function installVerdict(view: {
   routeEtaKnown?: boolean;
   resetValueMult?: number;
   pushMarginalRate?: number;
+  /** Empirical time to replay the reset-sensitive frontier after prestige. */
+  resetOverheadSec?: number;
   /** The frontier has published a plan and it names NO push target — the
    * honest "nothing left to push for". A missing rate WITHOUT this flag just
    * means the frontier has not run yet (cycle start, feature booting), and
@@ -183,13 +220,24 @@ export function installVerdict(view: {
   }
   const accrued = Math.max(0, view.resetValueMult ?? 0);
   const pushRate = view.pushMarginalRate;
-  if (pushRate === undefined || pushRate <= 0) {
+  if (pushRate === undefined) {
     if (view.frontierIdle === true) {
       return { verdict: "install", why: "nothing left worth pushing for" };
     }
     return { verdict: "no-data", why: "the frontier has not published a push target yet" };
   }
-  const threshold = Math.sqrt(2 * INSTALL_VERDICT_OVERHEAD_SEC * pushRate) * PUSH_MARGIN;
+  if (pushRate <= 0) {
+    return {
+      verdict: "install",
+      pushRate: 0,
+      threshold: 0,
+      why: accrued > 0
+        ? "the next package adds route progress but no reset-activated acceleration; bank the accrued multiplier value"
+        : "the next package adds no reset-activated acceleration",
+    };
+  }
+  const overhead = Math.max(INSTALL_VERDICT_OVERHEAD_SEC, view.resetOverheadSec ?? 0);
+  const threshold = Math.sqrt(2 * overhead * pushRate) * PUSH_MARGIN;
   if (accrued > threshold) {
     return {
       verdict: "install",
@@ -250,7 +298,14 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   // delays the finish. Unknown route ETA keeps installs allowed.
   const nodeAllowsOptionalInstall =
     view.nodeRemainingSec === undefined || view.nodeRemainingSec > INSTALL_MIN_PAYBACK_SEC;
-  const routeInstallWanted = view.routeRequiresInstall && view.queued.length > 0;
+  // A route-critical package may still be only reputation-banked here:
+  // purchases are deliberately end-loaded, and factions opens that
+  // transaction only after installWanted becomes true.  A realizable banked
+  // set therefore counts as "something to activate" for a mandatory install
+  // just as it does for optional cadence.  installReady remains blocked on an
+  // empty queue until the sweep has actually converted it.
+  const somethingToActivate = view.queued.length > 0 || view.resetRealizable === true;
+  const routeInstallWanted = view.routeRequiresInstall && somethingToActivate;
   // The marginal-value rule is the PRIMARY driver when a route ETA exists;
   // the legacy cash-ratio phase gate covers the no-data case. The favor
   // crossing stays as an independent fast-path — a step change (donations
@@ -259,8 +314,8 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   // End-loaded purchasing keeps the queue empty until the sweep runs, and the
   // sweep is triggered BY installWanted — so a realizable sweep set must open
   // this gate as well or cycles after the first can never conclude.
-  const somethingToActivate = view.queued.length > 0 || view.resetRealizable === true;
   const optionalInstallWanted =
+    view.optionalInstallAllowed !== false &&
     nodeAllowsOptionalInstall &&
     somethingToActivate &&
     (endingArm || (crossings.length > 0 && view.factionsReadyToInstall));
@@ -327,6 +382,175 @@ export const BASELINE_ORDER: [number, number][] = [
   [4, 3], [1, 3], [5, 1], [2, 3], [5, 3], [12, 3], [8, 3], [10, 3],
   [9, 3], [13, 3], [7, 1], [6, 3], [7, 3], [11, 3], [3, 3],
 ];
+
+/** Default account progression after the predecessor baseline. The first
+ * entries preserve its staged prerequisites; BN14/15 are appended so the
+ * policy covers every finite Source-File rather than silently stopping at 13.
+ * This is policy data, separate from the mechanism below and replaceable by a
+ * future measured ordering without touching node-completion execution. */
+export const DEFAULT_BITNODE_TARGETS: readonly [number, number][] = [
+  ...BASELINE_ORDER,
+  [14, 3],
+  [15, 3],
+];
+
+export interface NextBitNodeDecision {
+  bitNode: number;
+  targetLevel: number;
+  why: string;
+}
+
+/** Reset-activated value of reputation that will become favor at install.
+ *
+ * Each faction and unique augmentation contributes at most once. Shared offers
+ * are matched to sellers so one arbitrary seller choice cannot hide another
+ * faction's useful favor gain. Repeatable levels are re-evaluated after reset.
+ */
+export function bankedFavorActivationValue(input: {
+  standings: readonly { name: string; rep: number; favor: number }[];
+  offers: readonly { name: string; faction: string; owned: boolean }[];
+  favorToDonate: number;
+}): number {
+  const joined = new Set(input.standings.map((standing) => standing.name));
+  const offersByFaction = new Map<string, Set<string>>();
+  for (const offer of input.offers) {
+    if (offer.owned) continue;
+    if (!joined.has(offer.faction)) continue;
+    const offers = offersByFaction.get(offer.faction) ?? new Set<string>();
+    offers.add(offer.name);
+    offersByFaction.set(offer.faction, offers);
+  }
+
+  const factions = input.standings.filter((standing) => offersByFaction.has(standing.name)).map((standing) => {
+    const favorAfter = addRepToFavor(standing.favor, standing.rep);
+    const beforeRate = 1 + standing.favor / 100;
+    const afterRate = 1 + favorAfter / 100;
+    const rateGain = Math.max(0, afterRate / beforeRate - 1);
+    const crossesDonation = standing.favor < input.favorToDonate && favorAfter >= input.favorToDonate
+      ? 0.5
+      : 0;
+    return { faction: standing.name, value: rateGain + crossesDonation };
+  }).sort((a, b) => b.value - a.value || a.faction.localeCompare(b.faction));
+
+  const ownerByAugmentation = new Map<string, string>();
+  const assign = (faction: string, visited: Set<string>): boolean => {
+    for (const augmentation of [...(offersByFaction.get(faction) ?? [])].sort()) {
+      if (visited.has(augmentation)) continue;
+      visited.add(augmentation);
+      const owner = ownerByAugmentation.get(augmentation);
+      if (owner === undefined || assign(owner, visited)) {
+        ownerByAugmentation.set(augmentation, faction);
+        return true;
+      }
+    }
+    return false;
+  };
+
+  let value = 0;
+  for (const faction of factions) {
+    if (assign(faction.faction, new Set())) value += faction.value;
+  }
+  return value;
+}
+
+export interface InstallVerdictDwell {
+  candidate?: "push" | "install";
+  candidateSince?: number;
+  effective?: "push" | "install";
+}
+
+/** Conservative hysteresis for an irreversible reset. A push observation can
+ * always cancel safely and therefore applies immediately. Install must remain
+ * the raw answer for the full dwell; boot noise never gets a free first flip. */
+export function dwellInstallVerdict(
+  raw: InstallVerdict["verdict"],
+  previous: InstallVerdictDwell,
+  now: number,
+  dwellMs = VERDICT_DWELL_MS,
+): { state: InstallVerdictDwell; install: boolean | undefined } {
+  if (raw === "no-data") return { state: previous, install: undefined };
+  if (raw === "push") {
+    return {
+      state: { candidate: "push", candidateSince: now, effective: "push" },
+      install: false,
+    };
+  }
+  const candidateSince = previous.candidate === "install" && previous.candidateSince !== undefined
+    ? previous.candidateSince
+    : now;
+  const held = now - candidateSince >= Math.max(0, dwellMs);
+  return {
+    state: {
+      candidate: "install",
+      candidateSince,
+      effective: held ? "install" : "push",
+    },
+    install: held,
+  };
+}
+
+/** Bound a forward-looking package slope with the value stream observed over
+ * the current prestige cycle. Package ETA is a remaining-time estimate and
+ * legitimately tends to one second at completion; it must not be interpreted
+ * as a sustainable activationValue/second rate by reset cadence. */
+export function installCadencePushRate(view: {
+  runSec: number;
+  resetValueMult: number;
+  intentActivationValue?: number;
+  intentEtaSec?: number;
+  intentMarginalActivationRate?: number;
+}): number | undefined {
+  const runSec = Math.max(0, view.runSec);
+  const observed = runSec > 0 ? Math.max(0, view.resetValueMult) / runSec : 0;
+  const intentAverage = view.intentActivationValue !== undefined
+    ? Math.max(0, view.intentActivationValue) / Math.max(1, runSec, view.intentEtaSec ?? 0)
+    : undefined;
+  if (view.intentMarginalActivationRate !== undefined) {
+    const forward = Math.max(0, view.intentMarginalActivationRate);
+    // A zero marginal SPEED value is not an exhausted route frontier. A
+    // package may still contribute a distinct Daedalus count slot, which is
+    // intentionally excluded from activationValue because it does not make
+    // the next bootstrap faster. Use the measured cycle-average multiplier
+    // stream as the cadence prior in that case: this keeps pursuing route
+    // progress without pretending the count itself is acceleration.
+    if (forward === 0) {
+      const prior = Math.max(observed, intentAverage ?? 0);
+      return prior > 0 ? prior : undefined;
+    }
+    const bounded = Math.min(forward, Math.max(observed, intentAverage ?? 0));
+    return bounded > 0 ? bounded : undefined;
+  }
+  return observed > 0 ? observed : undefined;
+}
+
+/** Choose the next node after crediting the Source-File the current destroy
+ * will award. Duplicate staged entries (SF5.1 before SF5.3, SF7.1 before
+ * SF7.3) are intentional. Once every finite target is met, BN12 remains the
+ * repeatable scaling destination. */
+export function chooseNextBitNode(
+  currentBitNode: number,
+  sourceFiles: Readonly<Record<string, number>>,
+  targets: readonly [number, number][] = DEFAULT_BITNODE_TARGETS,
+): NextBitNodeDecision {
+  const projected = { ...sourceFiles };
+  projected[String(currentBitNode)] = (projected[String(currentBitNode)] ?? 0) + 1;
+  for (const [bitNode, targetLevel] of targets) {
+    const level = projected[String(bitNode)] ?? 0;
+    if (level < targetLevel) {
+      return {
+        bitNode,
+        targetLevel,
+        why: `SF${bitNode}.${level + 1} is the next unmet milestone toward level ${targetLevel}`,
+      };
+    }
+  }
+  const nextLevel = (projected["12"] ?? 0) + 1;
+  return {
+    bitNode: 12,
+    targetLevel: nextLevel,
+    why: `all finite Source-File targets are met; continue repeatable SF12 at level ${nextLevel}`,
+  };
+}
 
 /** Total hours for an ordering, given measured per-node times and the
  * dependency discount a prerequisite source file provides. */

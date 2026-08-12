@@ -2,9 +2,11 @@ import type { FactionIntent } from "../factions/plan.ts";
 import type { ProgressResource, RouteEta } from "./eta.ts";
 
 /** Forecasts are anchored rather than rewritten on every controller pass. The
- * countdown is derived from expectedAt; a new estimate is made every ten
- * minutes or immediately when its structural basis changes. */
-export const FORECAST_RECALIBRATION_MS = 10 * 60_000;
+ * countdown is derived from expectedAt; a new estimate is made on the
+ * progression planner's one-minute observation cadence or immediately when
+ * its structural basis changes. Fresh-install rates change by orders of
+ * magnitude in ten minutes, so a longer anchor is not a usable ROI horizon. */
+export const FORECAST_RECALIBRATION_MS = 60_000;
 export const FORECAST_STALE_MS = 3 * FORECAST_RECALIBRATION_MS;
 export const INSTALL_FINAL_SWEEP_SEC = 60;
 
@@ -143,7 +145,7 @@ export function nodeForecast(now: number, route: RouteEta | undefined, basis: st
   // that ends the node is deliberately unwired (a human clicks), so that state
   // can persist indefinitely — and a 0 s horizon would freeze every feature's
   // spending while it does.
-  if (route.complete) return unknownForecast(now, basis, "route complete — ending the node is a manual act");
+  if (route.complete) return unknownForecast(now, basis, "route complete — terminal execution is armed separately");
   return estimatedForecast(
     now,
     basis,
@@ -159,12 +161,25 @@ export function nodeForecast(now: number, route: RouteEta | undefined, basis: st
 
 export interface InstallForecastView {
   installNow: boolean;
+  /** Cadence has committed to reset and feature blockers are being drained. */
+  installWanted?: boolean;
   queuedCount: number;
   phase: "start" | "finishUp" | "ending";
   intent?: Omit<FactionIntent, "why">;
   workMeasured: boolean;
   moneyMeasured: boolean;
   finalSweepReady: boolean;
+  /** Work the faction planner has already committed to finishing despite the
+   * cadence request. This includes both the base package that happened to be
+   * in flight and an accepted <=1% post-plan push. */
+  committedPackageSec?: number;
+  /** Remaining time for reset-activated value to reach the renewal cadence
+   * threshold. A package breakpoint is not automatically an install. */
+  cadenceSec?: number;
+  /** Whether the selected route can survive an economic reset right now. */
+  optionalInstallAllowed?: boolean;
+  /** Earliest reset imposed by the selected route. */
+  mandatory?: { sec: number; measured: boolean; why: string };
 }
 
 /** Estimate the current committed install cycle. The faction intent already
@@ -174,7 +189,52 @@ export interface InstallForecastView {
 export function installForecast(now: number, view: InstallForecastView, basis: string): TimeForecast {
   if (view.installNow) return estimatedForecast(now, basis, []);
 
+  if (view.installWanted) {
+    return estimatedForecast(now, basis, [
+      ...(view.committedPackageSec !== undefined && view.committedPackageSec > 0
+        ? [{
+            what: "finish committed augmentation package",
+            resource: "reputation" as const,
+            sec: view.committedPackageSec,
+            measured: view.workMeasured,
+            mode: "sequential" as const,
+          }]
+        : []),
+      {
+        what: "committed install blockers and final sweep",
+        resource: "install",
+        sec: view.finalSweepReady ? 0 : INSTALL_FINAL_SWEEP_SEC,
+        measured: false,
+        mode: "sequential",
+      },
+    ]);
+  }
+
+  const mandatoryComponents = view.mandatory
+    ? [
+        {
+          what: view.mandatory.why,
+          resource: "install" as const,
+          sec: Math.max(0, view.mandatory.sec),
+          measured: view.mandatory.measured,
+          mode: "parallel" as const,
+        },
+        {
+          what: "mandatory install final sweep",
+          resource: "install" as const,
+          sec: INSTALL_FINAL_SWEEP_SEC,
+          measured: false,
+          mode: "sequential" as const,
+        },
+      ]
+    : undefined;
+
   const intent = view.intent;
+  if (view.optionalInstallAllowed === false) {
+    return mandatoryComponents
+      ? estimatedForecast(now, basis, mandatoryComponents)
+      : unknownForecast(now, basis, "the selected route stage forbids an optional install");
+  }
   if (!intent) {
     if (view.queuedCount > 0 && view.phase === "ending") {
       return estimatedForecast(now, basis, [{
@@ -185,13 +245,24 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
         mode: "sequential",
       }]);
     }
-    return unknownForecast(now, basis, "no committed augmentation package yet");
+    return mandatoryComponents
+      ? estimatedForecast(now, basis, mandatoryComponents)
+      : unknownForecast(now, basis, "no committed augmentation package yet");
   }
 
   const workSec = Math.max(0, intent.unlockSec + intent.repSec);
-  return estimatedForecast(now, basis, [
+  const economicComponents = [
     { what: "faction unlock and reputation", resource: "reputation", sec: workSec, measured: view.workMeasured, mode: "parallel" },
     { what: "package money", resource: "money", sec: Math.max(0, intent.moneySec), measured: view.moneyMeasured, mode: "parallel" },
+    ...(view.cadenceSec !== undefined
+      ? [{
+          what: "install cadence value crossing",
+          resource: "augmentations" as const,
+          sec: Math.max(0, view.cadenceSec),
+          measured: true,
+          mode: "parallel" as const,
+        }]
+      : []),
     {
       what: "final purchase and donation sweep",
       resource: "install",
@@ -199,5 +270,8 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
       measured: false,
       mode: "sequential",
     },
-  ]);
+  ] as const;
+  const economicSec = Math.max(workSec, Math.max(0, intent.moneySec), Math.max(0, view.cadenceSec ?? 0)) + INSTALL_FINAL_SWEEP_SEC;
+  const mandatorySec = view.mandatory ? Math.max(0, view.mandatory.sec) + INSTALL_FINAL_SWEEP_SEC : Infinity;
+  return estimatedForecast(now, basis, mandatoryComponents && mandatorySec < economicSec ? mandatoryComponents : economicComponents);
 }

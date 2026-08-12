@@ -2,37 +2,41 @@
 
 How the controller decides *which way to finish the current node*, how long it
 guesses that will take, and how that guess steers every other feature. The
-route model itself (what the three routes are, what each requires) lives in
+route model itself (what the four routes are, what each requires) lives in
 `shared/strategy/progression/endgame.ts`; this document covers the decision
 built on top of it.
 
 ## The decision
 
-Three routes reach `enterBitNode`, sharing almost no prerequisites:
+Four routes reach `enterBitNode`, sharing almost no prerequisites. Three
+acquire The Red Pill; Bladeburner is the independent no-pill proof:
 
 | Route | Ends the node by | Modelled in |
 |---|---|---|
 | `daedalus` | 30 augs (node-dependent) → $100b → skill gate → 2.5m rep → Red Pill → install → regrow | `endgame.ts` |
+| `gang` | in BN2, create a gang → 2.5m gang-faction rep → Red Pill → install → regrow | `endgame.ts` |
 | `labyrinth` | walk the darknet labyrinth (BN15 or SF15; not BN8) → Red Pill → install → regrow | `endgame.ts` |
 | `bladeburner` | all 20 black operations — no pill, no hacking requirement | `endgame.ts` |
 
 Once per progression cadence (60 s) the `progression` module's **refresh**:
 
 1. builds an `EndgameView` from the store — every input is already acquired
-   by an existing probe (`getResetInfo`, faction standings, the aug catalog,
-   the bladeburner action table, `getPlayer`); the refresh composes, it never
-   calls ns;
+   by an existing probe (`getResetInfo`, player/karma, faction and gang state,
+   the augmentation catalog, and the Bladeburner action table); the refresh
+   composes, it never calls ns;
 2. runs `stepEndgame` for availability, completeness and blockers;
 3. estimates each route's remaining time (`eta.ts`, below);
-4. picks the fastest available route with hysteresis (`chooseRoute`);
+4. picks the fastest available, executable route with hysteresis
+   (`chooseRoute`); mechanically available but currently unautomatable routes
+   remain visible in telemetry and cannot win the comparison;
 5. publishes the route record plus independent forecasts for the next
    augmentation installation and BitNode completion on `progression.plan`.
 
 Forecasts are anchored at `expectedAt`, not rewritten as a fresh duration on
 every controller pass. Their displayed remaining time counts down from that
-anchor. The model is recomputed every ten minutes, or immediately when a
+anchor. The model is recomputed every minute, or immediately when a
 structural milestone changes (route, blocker, package, install phase, queue or
-readiness). After thirty minutes without a successful recalculation it becomes
+readiness). After three minutes without a successful recalculation it becomes
 explicitly `stale`; absent evidence is `unknown`. Neither state is converted to
 a scalar default, and there is no floor or ceiling.
 
@@ -70,12 +74,14 @@ Red Pill out of a stale aug list). A complete route wins immediately.
 - **Parallel work is priced as the slowest track, not the sum** — Daedalus's
   augs/money/skill gate accrues while the run plays; black ops overlap the
   rank climb.
-- **The Red Pill tail is shared** — install overhead plus the post-install
+- **The Red Pill tail is shared by all three acquisition routes** — install
+  overhead plus the post-install
   regrow (the install resets hacking to 1; the `The-Cave → w0r1d_d43m0n` link
   only exists after it), discounted because the freshly installed set speeds
   the second climb.
-- **The labyrinth walk is an explicit guess** (`LABYRINTH_WALK_SEC`) — the
-  mechanic is unmodelled, and the part is marked `measured: false` so the
+- **The labyrinth is multi-install** — six reward installs plus The Red Pill
+  outside BN15, four reward installs plus The Red Pill in BN15. The walk time
+  is an explicit guess (`LABYRINTH_WALK_SEC`) and marked `measured: false`, so the
   calibration loop can see exactly which figure was invented.
 
 Every part carries `{what, sec, measured}`. `measured: false` means a
@@ -104,8 +110,10 @@ From these, offline:
    Linked to calibration but independent of it: making augs cheaper changes
    the game; fixing the aug-rate estimate changes the guess.
 
-`BitNodeEntry.hours` in `decide.ts` (cross-node ordering) is the same kind of
-number: a heuristic estimate to be tuned from the log, never a known constant.
+Live next-node selection follows `DEFAULT_BITNODE_TARGETS`. The small-set
+`orderingCost`/`bestOrdering` helpers in `decide.ts` are comparison tools, not
+the runtime policy; any future measured reordering should update the explicit
+target list rather than silently changing completion execution.
 
 ## How features consume the decision
 
@@ -118,18 +126,75 @@ number: a heuristic estimate to be tuned from the log, never a known constant.
   and stock API access can repay across installations, so a multi-day estimate
   remains multi-day.
 - **`route`** — a bias, never a gate: a driver may weight priorities by it
-  (bladeburner when it *is* the route; combat stats for the Daedalus combat
-  branch) but must not refuse to play because of it. Nothing consumes it yet;
-  the field exists so the first consumer is a local change.
+  (Bladeburner combat/rank, BN2 gang reputation, Daedalus augmentation count,
+  or labyrinth charisma) but must not refuse unrelated useful work because of
+  it. Career, factions, gang, Bladeburner and Go consume the published needs,
+  route weights or horizons today.
 
 Unknown or stale forecasts do not silently become a made-up hour. Each
 consumer chooses an explicit conservative behavior. Estimated forecasts carry
 parallel/sequential components, critical-path flags and measured-versus-model
 provenance; the UI and telemetry retain that same typed evidence.
 
-## Deliberately not wired
+Player-work competition uses the same overlap rule. Algorithms is not credited
+with all hacking progress merely because it owns the work slot: the hacking
+fleet's measured XP continues while either Algorithms or faction work runs.
+Career converts the live level gate to raw remaining XP through the nonlinear
+skill curve, subtracts the XP the fleet will earn during the competing route
+reputation interval, and prices only the wall-clock time Algorithms can still
+remove. If background hacking closes the gate during that reputation work, the
+course has zero route priority; if no background XP exists, it retains its full
+blocking priority. Once the competing route package is complete the discount
+disappears, so this is an observed-rate allocation heuristic rather than an
+always-faction special case.
 
-The armed two-pass augmentation transaction is wired and simulator-tested.
-Walking the labyrinth and calling `destroyW0r1dD43m0n` still end the BitNode
-and remain outside this controller until their irreversible paths are proven
-end to end.
+## Installs and terminal execution
+
+The install forecast is the current planning horizon: optional economic resets
+use the renewal/payback verdict, while route-mandatory resets bypass it. The
+Daedalus consolidation starts after one third of the live node count. A cycle
+that starts before the closing quarter must cover at least half its remaining
+distinct slots; a cycle that starts inside the closing quarter must finish the
+count gate. This distinguishes a substantial 13→23 tranche from a wasteful
+20→23 reset. The final sweep gives each count slot a node-relative value that
+declines toward closure, jointly orders funded NeuroFlux levels with one-shots,
+and installs only after factions, stock, grafting and the queue agree.
+
+Before that consolidation region, route-count value enters cadence only when
+the funded distinct batch covers at least one third of the remaining finite
+gate. This does not hardcode BN1's 30-augmentation requirement and does not
+forbid a mechanically required reset; it prevents a handful of attractive
+multipliers from paying a whole cold bootstrap while barely advancing the
+selected route. Favor activation is valued once per faction-wide reputation
+curve, after assigning shared augmentations to their best seller. Augmentations
+at one faction are nested reputation breakpoints, so counting the same favor
+rate improvement once for every offer would manufacture reset value.
+
+Purchases are strictly end-loaded. Reputation-complete augmentations form a
+candidate bank, not a promise to buy the entire bank: when the boundary opens,
+the solver freezes the best dependency-safe subset covered by cash plus bounded
+liquidation proceeds, forces any route-critical augmentation into that subset,
+then executes the minimum-cost legal order under the 1.9× queue escalation.
+An unaffordable optional wish list therefore cannot hold a funded Red Pill
+hostage. The banked Red Pill opens a route-mandatory transaction even while the
+real queue is empty; `installReady` remains false until the sweep has actually
+purchased it. Optional post-plan reputation work is capped at 1% of elapsed
+time in the current install; merely buying another already-affordable item at
+the frozen boundary consumes none of that work budget.
+
+Completed-cycle augmentation rates also reject startup-partial cycles shorter
+than one minute and clear their sliding count window on prestige. A save or
+harness that starts with a queue and preloaded reputation has only observed the
+button press, not a reproducible fresh-install acquisition curve.
+
+The armed two-pass augmentation transaction and two-pass
+`destroyW0r1dD43m0n` call are wired. Automatic node completion requires BN4 or
+SF4; otherwise the plan publishes the selected next node for manual action.
+The destroy action waits for both the post-install hacking level and admin
+rights on `w0r1d_d43m0n`.
+
+Labyrinth mechanics and ETA are modelled, including every mandatory reward
+install, but its host-local authentication/stasis executor is not. Therefore
+the live view marks it `actionable: false`: it is reported but cannot lock the
+run onto an unexecutable route. If The Red Pill is acquired manually, its
+shared install/regrow/destroy tail becomes actionable automatically.

@@ -58,6 +58,17 @@ export interface RequirementView {
   city: string;
   location: string;
   backdoored: ReadonlySet<string>;
+  /** Observed access gates for servers named by backdoor requirements. These
+   * are ranking inputs only: the actual requirement remains satisfied solely
+   * by `backdoored`. Keeping the estimate here prevents every server from
+   * looking like the same 300-second task while preserving pure strategy. */
+  backdoorAccess?: Readonly<Record<string, {
+    requiredHackingSkill: number;
+    numOpenPortsRequired: number;
+    openPortCount: number;
+  }>>;
+  /** Port-opening programs observed by the fleet sweep. */
+  portOpeners?: number;
   files: ReadonlySet<string>;
   hacknetRam: number;
   hacknetCores: number;
@@ -93,6 +104,9 @@ export interface Blocker {
    *  revocable kinds, since those are the only ones De Morgan can act on. */
   negated?: boolean;
   why: string;
+  /** Optional observation-aware ranking estimate. It never substitutes for
+   * the requirement predicate and is not presented as a route forecast. */
+  etaSec?: number;
 }
 
 /** Which feature can deliver each outcome. Changing an entry here re-routes a
@@ -265,10 +279,22 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
         ? []
         : [blocker("location", 1, 0, `needs to be at ${requirement.location}`, { subject: requirement.location })];
 
-    case "backdoorInstalled":
-      return view.backdoored.has(requirement.server)
-        ? []
-        : [blocker("backdoor", 1, 0, `needs a backdoor on ${requirement.server}`, { subject: requirement.server })];
+    case "backdoorInstalled": {
+      if (view.backdoored.has(requirement.server)) return [];
+      const access = view.backdoorAccess?.[requirement.server];
+      if (!access) {
+        return [blocker("backdoor", 1, 0, `needs a backdoor on ${requirement.server}`, { subject: requirement.server })];
+      }
+      const skillGap = Math.max(0, access.requiredHackingSkill - (view.skills.hacking ?? 0));
+      const usableOpeners = Math.max(access.openPortCount, view.portOpeners ?? 0);
+      const portGap = Math.max(0, access.numOpenPortsRequired - usableOpeners);
+      return [blocker("backdoor", 1, 0, `needs a backdoor on ${requirement.server}`, {
+        subject: requirement.server,
+        // Coarse ranking economics: skill and program acquisition precede the
+        // fixed terminal/backdoor action. The live hacking planner owns both.
+        etaSec: 300 + skillGap * NOMINAL_SEC_PER_UNIT.skill + portGap * NOMINAL_SEC_PER_UNIT.file,
+      })];
+    }
 
     case "hacknetRAM":
       return view.hacknetRam >= requirement.hacknetRAM
@@ -545,6 +571,7 @@ const NOMINAL_SEC_PER_UNIT: Record<BlockerKind, number> = {
  * the planner genuinely measures, so money uses it. */
 export function estimateBlockerSec(blocker: Blocker, incomePerSec: number): number {
   if (!blocker.reachable) return Infinity;
+  if (blocker.etaSec !== undefined) return Math.max(0, blocker.etaSec);
   const remaining = Math.abs(blocker.target - blocker.have);
   if (remaining === 0) return 0;
   if (blocker.kind === "money") return remaining / Math.max(1, incomePerSec);

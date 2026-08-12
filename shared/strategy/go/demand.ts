@@ -98,6 +98,17 @@ export function goDemands(view: GoDemandView): Partial<Record<GoRewardOpponent, 
       if (part.resource === "install") break;
       if (part.resource === "money") {
         addMoneyDemand(part.sec, `node route component: ${part.what}`);
+      } else if (part.resource === "augmentations") {
+        // Aug acquisition is not a producer of its own. Before the count
+        // package install it is paid for by the live income engine and often
+        // by faction reputation, both of which Go can accelerate. Omitting
+        // this mapping made a fresh Daedalus plan publish only `augCount`, so
+        // every Go candidate appeared to save exactly zero seconds and play
+        // stopped for the entire early node.
+        addMoneyDemand(part.sec, `node route component: ${part.what}; augmentation funding`);
+        if (view.canEarnFactionRep) {
+          addDemand(demands, opponentFor("reputation"), part.sec, 0.5, `node route component: ${part.what}; augmentation reputation`);
+        }
       } else if (part.resource === "hacking") {
         addDemand(demands, opponentFor("speed"), part.sec, 1, `node route component: ${part.what}`);
         addDemand(demands, opponentFor("level"), part.sec, 1, `node route component: ${part.what}`);

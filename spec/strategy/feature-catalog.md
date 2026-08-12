@@ -71,8 +71,9 @@ the others' ceiling.
   all skills, **kills**, faction membership. It does **not** reset karma, favor,
   home RAM or programs.
 - BitNode reset additionally zeroes karma and every feature's state.
-- The Red Pill has **two** sources: Daedalus, and the darknet labyrinth in every
-  node except BN8. Do not hard-code the Daedalus path.
+- The Red Pill has **three** sources: Daedalus (except BN15), a gang faction in
+  BN2, and the darknet labyrinth in every node except BN8. Bladeburner is the
+  fourth completion route and needs no pill. Do not hard-code the Daedalus path.
 
 ---
 

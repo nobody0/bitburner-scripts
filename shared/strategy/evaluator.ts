@@ -95,6 +95,21 @@ export function projectedRuntimeSecondsPerExp(
   return Math.max(0, currentSeconds - futureSeconds) / expNeeded;
 }
 
+/** Direct completion-clock value of hacking experience when another feature
+ * has posted a concrete skill gate (Daedalus, w0r1d_d43m0n, a backdoor).
+ * This is separate from future-income utility above: reaching the requested
+ * skill can itself unblock the route even if it never improves $/sec. */
+export function skillGateRuntimeSecondsPerExp(
+  currentExp: number,
+  hackingMult: number,
+  targetSkill: number,
+  horizonSec: number,
+): number {
+  const gap = Math.max(0, expForSkill(Math.max(1, targetSkill), Math.max(1e-9, hackingMult)) - currentExp);
+  if (!(gap > 0)) return 0;
+  return Math.max(0, horizonSec) / gap;
+}
+
 /** Attach the reusable-role saturation envelope used by economics. This runs
  * once per solved target/generation, not in the dispatcher hot loop. Dispatch
  * separately proves that today's atomic host topology can sustain a cadence;
@@ -318,6 +333,8 @@ export function stepEvaluator(
   opts?: {
     prune?: boolean;
     reinvestmentReturnPerDollarSec?: number;
+    /** Open route-owned hacking skill gate, if any. */
+    hackingSkillGoal?: number;
   },
 ): { memory: EvaluatorMemory; directive: TargetDirective; switched?: { from?: string; to: string } } {
   const now = view.time;
@@ -514,11 +531,19 @@ export function stepEvaluator(
     utilityHorizonS,
     goalRemaining,
   );
+  const routeSecondsPerExp = opts?.hackingSkillGoal !== undefined
+    ? skillGateRuntimeSecondsPerExp(
+        view.player.hackingExp,
+        view.player.mults.hacking ?? 1,
+        opts.hackingSkillGoal,
+        utilityHorizonS,
+      )
+    : 0;
   /** Common currency is BitNode time: direct income advances the best current
    * completion clock; exp advances the cached next skill/unlock gate. */
   const runtimeProgressRate = (solution: CycleSolution): number =>
     (bestIncomeRate > 0 ? farmIncomeRate(solution, fleetGb) / bestIncomeRate : 0) +
-    experienceRate(solution) * secondsSavedPerExp;
+    experienceRate(solution) * (secondsSavedPerExp + routeSecondsPerExp);
   const ranked = eligibleEntries.sort((a, b) =>
     runtimeProgressRate(b.solution!) - runtimeProgressRate(a.solution!) ||
     farmIncomeRate(b.solution, fleetGb) - farmIncomeRate(a.solution, fleetGb) ||
