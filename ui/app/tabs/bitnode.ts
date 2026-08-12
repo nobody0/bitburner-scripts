@@ -306,6 +306,11 @@ export const bitnodeTab: Tab = {
     const route = p.plan ? card("Endgame route", routeCard(p.plan, now)) : "";
     const summary = tiles([
       { label: "current BitNode", value: current ? `BN${p.bitNode} ${current.name}` : `BN${p.bitNode}` },
+      {
+        label: "planned next BitNode",
+        value: p.plan?.completion ? `BN${p.plan.completion.nextBitNode}` : "–",
+        sub: p.plan?.completion?.execute ? "ready to complete" : "central speedrun plan",
+      },
       { label: "source files", value: String(completed.length), sub: `${BITNODES.length} nodes exist` },
       { label: "augmentations installed", value: String(p.augCount) },
       { label: "since aug reset", value: p.lastAugReset ? fmtTime(Date.now() - p.lastAugReset) : "–" },

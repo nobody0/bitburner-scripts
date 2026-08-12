@@ -1,6 +1,7 @@
 import { formatScientific } from "../../format.ts";
 import { countSlotWeight } from "../factions/augs.ts";
 import { addRepToFavor } from "../factions/rep.ts";
+import { BITNODE_SPEEDRUN_PLAN } from "./bitnode-order.ts";
 import { INSTALL_OVERHEAD_SEC } from "./eta.ts";
 
 /** Progression: install timing, reset cadence and BitNode ordering.
@@ -370,18 +371,23 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   };
 }
 
-// --- BitNode ordering -------------------------------------------------------
+// --- BitNode ordering analysis ---------------------------------------------
 
-/** The predecessor scripts' explicit ordering, with their stated rationale:
- * "build hack power to get hacknet, use hacknet to get Stanek, then do all the
- * Bladeburners" (src/main.ts:1483-1511).
- *
- * This is the BASELINE to beat — a real, rationalised human ordering, which is
- * a far more honest bar than a strawman. */
+/** Runtime and analytical ordering share one source. Commenting a milestone
+ * out of bitnode-order.ts removes it from both the live selector and any
+ * comparison against the active plan. */
+export { BITNODE_SPEEDRUN_PLAN as ACTIVE_SPEEDRUN_ORDER } from "./bitnode-order.ts";
+
+/** The predecessor scripts' explicit ordering, retained as the analytical
+ * baseline against which candidate orders are measured. */
 export const BASELINE_ORDER: [number, number][] = [
   [4, 3], [1, 3], [5, 1], [2, 3], [5, 3], [12, 3], [8, 3], [10, 3],
   [9, 3], [13, 3], [7, 1], [6, 3], [7, 3], [11, 3], [3, 3],
 ];
+
+/** Tuple form consumed by the existing selector. */
+export const ACTIVE_BITNODE_TARGETS: readonly [number, number][] =
+  BITNODE_SPEEDRUN_PLAN.map(({ node, level }) => [node, level]);
 
 /** Default account progression after the predecessor baseline. The first
  * entries preserve its staged prerequisites; BN14/15 are appended so the
@@ -529,7 +535,7 @@ export function installCadencePushRate(view: {
 export function chooseNextBitNode(
   currentBitNode: number,
   sourceFiles: Readonly<Record<string, number>>,
-  targets: readonly [number, number][] = DEFAULT_BITNODE_TARGETS,
+  targets: readonly [number, number][] = ACTIVE_BITNODE_TARGETS,
 ): NextBitNodeDecision {
   const projected = { ...sourceFiles };
   projected[String(currentBitNode)] = (projected[String(currentBitNode)] ?? 0) + 1;
