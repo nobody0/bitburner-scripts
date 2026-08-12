@@ -1,5 +1,5 @@
 import type { NS } from "@ns";
-import { GO_REWARD_OPPONENTS } from "../../../shared/strategy/go/decide.ts";
+import { GO_REWARD_OPPONENTS } from "../../../shared/strategy/go/rules.ts";
 import { emitPartial, type DirectProbe } from "./index.ts";
 
 /** Zero-RAM synchronous probes; the runner verifies every declared method. */

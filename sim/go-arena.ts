@@ -3,17 +3,23 @@
  * White is always the independently vendored v3.0.1 AI. The arena advances
  * Player.totalPlaytime from the waits actually requested by that oracle, so
  * black forecasts the same 200 ms seed slots used by the live controller.
+ * Black is the production neural engine. TypeScript inference requires
+ * WebGPU; run this arena through `bun run go:gpu -- --arena` in Chromium.
  */
 import {
-  prepareGoDecision,
-  finalizeGoDecision,
   playMove,
   scoreBoard,
-  usesExactGoForecast,
   type GoBoard,
   type GoDecision,
   type GoRewardOpponent,
-} from "../shared/strategy/go/decide.ts";
+} from "../shared/strategy/go/rules.ts";
+import {
+  decideGoNeural,
+  GoNeuralEngine,
+  type GoValueBackendFactory,
+  yieldGoPlanner,
+} from "../shared/strategy/go/neural/engine.ts";
+import { createRequiredWebGpuGoValueBackend } from "../shared/strategy/go/neural/webgpu.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
 import { oracleInitialBoard } from "./features/go-oracle.ts";
 import { GoColor, GoOpponent, GoPlayType } from "./vendor/bitburner/src/Go/Enums.ts";
@@ -72,15 +78,14 @@ export interface GoArenaTurnTrace {
   previousBoards: string[][];
   consecutivePasses: number;
   black: { type: "move"; x: number; y: number } | { type: "pass" };
-  policyBook: boolean;
   predicted: { x: number | null; y: number | null; count: number }[];
   white: { type: "move"; x: number; y: number } | { type: "pass" };
   planningMs: number;
 }
 
-/** Public position snapshot used by the offline teacher for counterfactual
- * continuation rollouts. No hidden oracle state is carried across: the arena
- * reconstructs the upstream opponent from these same public fields. */
+/** Public position snapshot used for counterfactual continuation rollouts. No
+ * hidden oracle state is carried across: the arena reconstructs the upstream
+ * opponent from these same public fields. */
 export interface GoArenaInitialState {
   board: GoBoard;
   previousBoards: readonly string[][];
@@ -102,6 +107,17 @@ export interface GoArenaSummary {
   decisions: number;
   latencyMs: { p50: number; p95: number; p99: number; p999: number; max: number };
   losingSeeds: { seed: number; tieRoll: number; margin: number }[];
+}
+
+export interface GoArenaOptions {
+  /** Simulator A/B override for the oversized-board candidate cap. */
+  candidateLimit?: number;
+  forcedOpening?: readonly [number, number];
+  initialBoard?: GoBoard;
+  initialState?: GoArenaInitialState;
+  /** Planner-only tests may disable browser task yielding; production and the
+   * Chromium arena keep it enabled to enforce the main-thread slice budget. */
+  cooperativePlanning?: boolean;
 }
 
 function percentile(sorted: readonly number[], fraction: number): number {
@@ -135,53 +151,35 @@ function oracleState(
   return state;
 }
 
-export function decideGoArenaBlack(
+let arenaEngine = new GoNeuralEngine((weights) => createRequiredWebGpuGoValueBackend(weights));
+
+/** Swap the value backend under the arena for planner-only tests. Production
+ * and browser arenas use the required WebGPU factory above. */
+export function configureGoArenaEngine(factory: GoValueBackendFactory): void {
+  void arenaEngine.dispose();
+  arenaEngine = new GoNeuralEngine(factory);
+}
+
+function decideGoArenaBlack(
   board: GoBoard,
   history: readonly string[][],
   opponent: GoRewardOpponent,
   komi: number,
   dispatchPlaytime: number,
   consecutivePasses: number,
-  forecastWeight?: number,
-  analysisWidth?: number,
-  forecastWidth?: number,
-  cohesionWeight?: number,
-  scoreLeadBonus?: number,
-  continuationWidth?: number,
-  deepForecastThreshold?: number,
-  deepForecastWidth?: number,
-  deepRootWidth?: number,
-  deepAdaptiveGap?: number,
-  baitType?: "sacrifice" | "threat",
-  policyBook?: boolean,
-): GoDecision {
-  const view = {
+  candidateLimit?: number,
+  cooperativePlanning = true,
+): Promise<GoDecision> {
+  return decideGoNeural({
     board,
-    currentPlayer: "Black" as const,
+    currentPlayer: "Black",
     opponent,
-    status: "inProgress" as const,
+    status: "inProgress",
     previousBoards: history,
     komi,
-    alignedDispatchPlaytime: dispatchPlaytime,
     consecutivePasses,
-    ...(forecastWeight !== undefined ? { forecastWeight } : {}),
-    ...(analysisWidth !== undefined ? { analysisWidth } : {}),
-    ...(forecastWidth !== undefined ? { forecastWidth } : {}),
-    ...(cohesionWeight !== undefined ? { cohesionWeight } : {}),
-    ...(scoreLeadBonus !== undefined ? { scoreLeadBonus } : {}),
-    ...(continuationWidth !== undefined ? { continuationWidth } : {}),
-    ...(deepForecastThreshold !== undefined ? { deepForecastThreshold } : {}),
-    ...(deepForecastWidth !== undefined ? { deepForecastWidth } : {}),
-    ...(deepRootWidth !== undefined ? { deepRootWidth } : {}),
-    ...(deepAdaptiveGap !== undefined ? { deepAdaptiveGap } : {}),
-    ...(baitType !== undefined ? { baitType } : {}),
-    ...(policyBook !== undefined ? { policyBook } : {}),
-  };
-  const exactForecast = usesExactGoForecast(view);
-  const prepared = prepareGoDecision(view, exactForecast);
-  return exactForecast
-    ? finalizeGoDecision(prepared, [alignedAiSeed(dispatchPlaytime, 0)])
-    : finalizeGoDecision(prepared);
+    ...(candidateLimit !== undefined ? { candidateLimit } : {}),
+  }, [alignedAiSeed(dispatchPlaytime, 0)], arenaEngine, cooperativePlanning ? { pause: yieldGoPlanner } : {});
 }
 
 export async function playGoArenaGame(
@@ -189,22 +187,9 @@ export async function playGoArenaGame(
   seed: number,
   tieRoll = 0.5,
   includeTrace = false,
-  forecastWeight?: number,
-  analysisWidth?: number,
-  forecastWidth?: number,
-  cohesionWeight?: number,
-  scoreLeadBonus?: number,
-  continuationWidth?: number,
-  deepForecastThreshold?: number,
-  deepForecastWidth?: number,
-  deepRootWidth?: number,
-  deepAdaptiveGap?: number,
-  baitType?: "sacrifice" | "threat",
-  policyBook?: boolean,
-  forcedOpening?: readonly [number, number],
-  initialBoard?: GoBoard,
-  initialState?: GoArenaInitialState,
+  options: GoArenaOptions = {},
 ): Promise<GoArenaGameResult> {
+  const { initialState, initialBoard, forcedOpening } = options;
   let board = initialState
     ? { size: initialState.board.size, rows: [...initialState.board.rows] }
     : initialBoard
@@ -231,31 +216,21 @@ export async function playGoArenaGame(
       const inputConsecutivePasses = consecutivePasses;
       const decision: GoDecision = turns === 0 && forcedOpening
         ? {
-          action: { type: "move", x: forcedOpening[0], y: forcedOpening[1], why: "offline teacher action" },
+          action: { type: "move", x: forcedOpening[0], y: forcedOpening[1], why: "forced opening" },
           ranked: [],
-          why: "offline teacher action",
+          why: "forced opening",
           finalists: 0,
-          positionValue: 0,
+          positionValue: 0.5,
         }
-        : decideGoArenaBlack(
+        : await decideGoArenaBlack(
           board,
           history,
           definition.name,
           definition.komi,
           dispatchPlaytime,
           consecutivePasses,
-          forecastWeight,
-          analysisWidth,
-          forecastWidth,
-          cohesionWeight,
-          scoreLeadBonus,
-          continuationWidth,
-          deepForecastThreshold,
-          deepForecastWidth,
-          deepRootWidth,
-          deepAdaptiveGap,
-          baitType,
-          policyBook,
+          options.candidateLimit,
+          options.cooperativePlanning,
         );
       const elapsed = performance.now() - started;
       planningMs.push(elapsed);
@@ -314,8 +289,7 @@ export async function playGoArenaGame(
           previousBoards: inputHistory,
           consecutivePasses: inputConsecutivePasses,
           black,
-          policyBook: decision.why.startsWith("offline teacher policy"),
-          predicted: decision.ranked[0]?.predictedReplies ?? [],
+          predicted: decision.forecast ?? [],
           white: white.type === GoPlayType.move
             ? { type: "move", x: white.x, y: white.y }
             : { type: "pass" },
@@ -344,8 +318,8 @@ export async function playGoArenaGame(
   };
 }
 
-/** Counterfactual teacher entrypoint: force exactly the first black action,
- * then return to the deployed policy for the rest of the continuation. */
+/** Counterfactual entrypoint: force exactly the first black action, then
+ * return to the deployed policy for the rest of the continuation. */
 export function playGoArenaPosition(
   definition: GoArenaOpponent,
   seed: number,
@@ -353,27 +327,10 @@ export function playGoArenaPosition(
   initialState: GoArenaInitialState,
   forcedAction: readonly [number, number],
 ): Promise<GoArenaGameResult> {
-  return playGoArenaGame(
-    definition,
-    seed,
-    tieRoll,
-    false,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    undefined,
-    true,
-    forcedAction,
-    undefined,
+  return playGoArenaGame(definition, seed, tieRoll, false, {
     initialState,
-  );
+    forcedOpening: forcedAction,
+  });
 }
 
 export function summarizeGoArena(opponent: GoRewardOpponent, games: readonly GoArenaGameResult[]): GoArenaSummary {
@@ -430,38 +387,9 @@ async function main(): Promise<void> {
     : goArenaSeeds(count, start);
   const requested = Bun.argv.includes("--all-ties") ? [0, 0.25, 0.5, 0.75, 0.999999] : [0.5];
   const includeTrace = Bun.argv.includes("--trace");
-  const forecastWeightIndex = Bun.argv.indexOf("--forecast-weight");
-  const forecastWeight = forecastWeightIndex >= 0 ? Number(Bun.argv[forecastWeightIndex + 1]) : undefined;
-  const analysisWidthIndex = Bun.argv.indexOf("--analysis-width");
-  const analysisWidth = analysisWidthIndex >= 0 ? Number(Bun.argv[analysisWidthIndex + 1]) : undefined;
-  const forecastWidthIndex = Bun.argv.indexOf("--forecast-width");
-  const forecastWidth = forecastWidthIndex >= 0 ? Number(Bun.argv[forecastWidthIndex + 1]) : undefined;
-  const cohesionWeightIndex = Bun.argv.indexOf("--cohesion-weight");
-  const cohesionWeight = cohesionWeightIndex >= 0 ? Number(Bun.argv[cohesionWeightIndex + 1]) : undefined;
-  const scoreLeadBonusIndex = Bun.argv.indexOf("--score-lead-bonus");
-  const scoreLeadBonus = scoreLeadBonusIndex >= 0 ? Number(Bun.argv[scoreLeadBonusIndex + 1]) : undefined;
-  const continuationWidthIndex = Bun.argv.indexOf("--continuation-width");
-  const continuationWidth = continuationWidthIndex >= 0 ? Number(Bun.argv[continuationWidthIndex + 1]) : undefined;
-  const deepForecastThresholdIndex = Bun.argv.indexOf("--deep-forecast-threshold");
-  const deepForecastThreshold = deepForecastThresholdIndex >= 0
-    ? Number(Bun.argv[deepForecastThresholdIndex + 1])
-    : undefined;
-  const deepForecastWidthIndex = Bun.argv.indexOf("--deep-forecast-width");
-  const deepForecastWidth = deepForecastWidthIndex >= 0 ? Number(Bun.argv[deepForecastWidthIndex + 1]) : undefined;
-  const deepRootWidthIndex = Bun.argv.indexOf("--deep-root-width");
-  const deepRootWidth = deepRootWidthIndex >= 0 ? Number(Bun.argv[deepRootWidthIndex + 1]) : undefined;
-  const deepAdaptiveGapIndex = Bun.argv.indexOf("--deep-adaptive-gap");
-  const deepAdaptiveGap = deepAdaptiveGapIndex >= 0 ? Number(Bun.argv[deepAdaptiveGapIndex + 1]) : undefined;
-  const policyBook = Bun.argv.includes("--disable-policy-book") || Bun.argv.includes("--disable-opening-book")
-    ? false
-    : undefined;
+  const candidateLimitIndex = Bun.argv.indexOf("--candidate-limit");
+  const candidateLimit = candidateLimitIndex >= 0 ? Number(Bun.argv[candidateLimitIndex + 1]) : undefined;
   const forcedOpening = coordinateFlag("--opening");
-  const baitIndex = Bun.argv.indexOf("--bait");
-  const rawBait = baitIndex >= 0 ? Bun.argv[baitIndex + 1] : undefined;
-  if (rawBait !== undefined && rawBait !== "sacrifice" && rawBait !== "threat") {
-    throw new Error("--bait must be sacrifice or threat");
-  }
-  const baitType = rawBait as "sacrifice" | "threat" | undefined;
   const selected = GO_ARENA_OPPONENTS.filter((opponent) => {
     const index = Bun.argv.indexOf("--opponent");
     if (index < 0) return true;
@@ -478,25 +406,10 @@ async function main(): Promise<void> {
     const games: GoArenaGameResult[] = [];
     for (const seed of seeds) {
       for (const tieRoll of requested) {
-        const game = await playGoArenaGame(
-          opponent,
-          seed,
-          tieRoll,
-          includeTrace,
-          forecastWeight,
-          analysisWidth,
-          forecastWidth,
-          cohesionWeight,
-          scoreLeadBonus,
-          continuationWidth,
-          deepForecastThreshold,
-          deepForecastWidth,
-          deepRootWidth,
-          deepAdaptiveGap,
-          baitType,
-          policyBook,
-          forcedOpening,
-        );
+        const game = await playGoArenaGame(opponent, seed, tieRoll, includeTrace, {
+          ...(candidateLimit !== undefined ? { candidateLimit } : {}),
+          ...(forcedOpening ? { forcedOpening } : {}),
+        });
         games.push(game);
         if (includeTrace) console.log(JSON.stringify({ type: "game", ...game }));
       }
@@ -505,4 +418,5 @@ async function main(): Promise<void> {
   }
 }
 
-if (import.meta.main) await main();
+// No top-level await: the WebGPU harness bundles this module into an iife.
+if (import.meta.main) void main();

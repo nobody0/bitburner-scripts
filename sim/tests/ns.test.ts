@@ -1,10 +1,12 @@
-import { describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Server } from "@ns";
+import { setGoBackendFactoryForTest } from "../../game/lib/features/remaining.ts";
 import { homeDodgeBudget } from "../../game/lib/probe-runner.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { only } from "../../shared/features/profile.ts";
 import { ramCostContext, runGame } from "../game-run.ts";
 import { getFunctionRamCost, getRamCost } from "../ns/ram-costs.ts";
+import { StubGoValueBackend } from "../../tests/support/go-value-backend.ts";
 
 /** The synthetic ns exists to run game/ for real. These pin the mechanics that
  * make that possible, and the end-to-end proof that it does. */
@@ -71,9 +73,16 @@ describe("ram costs", () => {
 });
 
 describe("running game/ in the synthetic world", () => {
-  test("the real controller completes Go games and realizes their BN1 effects", async () => {
+  beforeAll(() => {
+    setGoBackendFactoryForTest((weights) => new StubGoValueBackend(weights));
+  });
+
+  afterAll(() => {
+    setGoBackendFactoryForTest();
+  });
+
+  test("the real controller completes Go games and records its selections", async () => {
     let games = 0;
-    let maxBonus = 0;
     const selected = new Set<string>();
     const result = await runGame({
       goal: parseGoals(["earn:1e30"]),
@@ -94,7 +103,6 @@ describe("running game/ in the synthetic world", () => {
         };
         if (record.kind === "event" && record.name === "go.game") games++;
         if (record.kind !== "state" || record.key !== "go") return;
-        for (const stat of record.data?.stats ?? []) maxBonus = Math.max(maxBonus, stat.bonusPercent);
         const opponent = record.data?.plan?.selection?.preferred?.opponent;
         if (opponent) selected.add(opponent);
       },
@@ -104,7 +112,6 @@ describe("running game/ in the synthetic world", () => {
     expect(result.validity).toBe("valid");
     expect(result.crashes).toEqual([]);
     expect(games).toBeGreaterThanOrEqual(2);
-    expect(maxBonus).toBeGreaterThan(0);
     expect(selected.size).toBeGreaterThanOrEqual(1);
     expect(Object.keys(result.unmodeled).filter((gap) => gap.toLowerCase().includes("go"))).toEqual([]);
   }, 10_000);

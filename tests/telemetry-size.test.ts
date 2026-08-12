@@ -55,9 +55,8 @@ describe("telemetry record size", () => {
     const ranked = Array.from({ length: 8 }, (_, i) => ({
       x: i % 5,
       y: Math.floor(i / 5),
-      score: 10 - i,
-      tacticalScore: 9 - i,
-      forecastScore: 11 - i,
+      score: (10 - i) / 10,
+      powerPerRound: 11 - i,
       captures: i,
       predictedReplies: Array.from({ length: 6 }, (_, seed) => ({ x: seed % 5, y: i % 5, count: 1 })),
     }));

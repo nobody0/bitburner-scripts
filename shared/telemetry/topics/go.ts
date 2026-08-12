@@ -11,7 +11,7 @@ import type {
   GoObservedBoardSize,
   GoRewardOpponent,
   GoStatus,
-} from "../../strategy/go/decide.ts";
+} from "../../strategy/go/rules.ts";
 import type { GoEtaDemand, GoGameCandidate } from "../../strategy/go/rewards.ts";
 import type { GO_OPPONENT_MODEL } from "../../strategy/go/opponent.ts";
 
@@ -82,6 +82,18 @@ export interface GoPlan {
   planning: { finalistCount: number; positionValue: number };
   prediction?: {
     model: typeof GO_OPPONENT_MODEL;
+    /** Value-network execution path actually used for this decision. */
+    backend?: "webgpu";
+    /** Weight profile that rated the candidates. */
+    modelProfile?: "small5" | "daemon19";
+    /** Set when the board is smaller than the profile's feature extent, i.e.
+     * an inherited 7x7-13x13 game rated by padded World Daemon weights. Those
+     * weights never saw such a position in training. */
+    paddedToExtent?: number;
+    /** Milliseconds of engine-cycle headroom the dispatch expected. */
+    rolloverMarginMs?: number;
+    /** True when the turn deliberately waited for the next engine cycle. */
+    waitedForRollover?: boolean;
     sampledTotalPlaytime: number;
     sampledAt: number;
     decisionAt: number;
@@ -93,7 +105,7 @@ export interface GoPlan {
     seedCandidates: number[];
     /** Public engine tick read immediately before the Go call. */
     dispatchPlaytime: number;
-    /** Number of 10 ms retries after finalization crossed a tick boundary. */
+    /** Number of warm replans after finalization crossed a tick boundary. */
     boundaryRetries: number;
   };
   /** Full opponent/board comparison in the same ETA units used to decide. */

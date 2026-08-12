@@ -1,0 +1,15 @@
+/build/
+/runs/
+/.deps/
+/.venv-gpu/
+__pycache__/
+*.py[cod]
+/katago/models/
+/katago/results/
+*.model
+!small5-champion.model
+!daemon19-champion.model
+*.tsv
+*.log
+*.worker-*
+/progress*

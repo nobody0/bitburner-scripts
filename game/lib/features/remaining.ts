@@ -22,11 +22,9 @@ import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
 import { stepGang } from "../../../shared/strategy/gang/decide.ts";
 import {
   GO_OPPONENTS,
+  GO_REWARD_OPPONENTS,
   isGoRewardOpponent,
   playMove,
-  prepareGoDecision,
-  usesExactGoForecast,
-  finalizeGoDecision,
   scoreBoard,
   territory as goTerritory,
   type GoAction,
@@ -35,7 +33,24 @@ import {
   type GoFactionOpponent,
   type GoRewardOpponent,
   type GoView,
-} from "../../../shared/strategy/go/decide.ts";
+} from "../../../shared/strategy/go/rules.ts";
+import {
+  finalizeNeuralGoDecision,
+  goModelProfile,
+  GoNeuralEngine,
+  prepareNeuralGoDecision,
+  yieldGoPlanner,
+  type GoValueBackendFactory,
+  type GoModelProfile,
+} from "../../../shared/strategy/go/neural/engine.ts";
+import { createRequiredWebGpuGoValueBackend } from "../../../shared/strategy/go/neural/webgpu.ts";
+import {
+  goChooseSeedTarget,
+  goDispatchDelayMs,
+  goPhaseAgrees,
+  type GoSeedTarget,
+  type GoTickPhase,
+} from "../../../shared/strategy/go/tick.ts";
 import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand } from "../../../shared/strategy/go/rewards.ts";
 import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
@@ -167,9 +182,11 @@ async function act<T>(
 
 function actionClaimId(action: string): string { return `action:${action}`; }
 
-/** Move, pass and resume share one turn-sized RAM grant. */
+/** Move, pass, resume and the tick-anchoring probe share one turn-sized RAM
+ * grant: anchoring always runs immediately before the turn it aligns, and its
+ * own dodge is far smaller than the grant already reserved for that turn. */
 function goActionClaimId(action: string): string {
-  return action === "move" || action === "pass" || action === "resume"
+  return action === "move" || action === "pass" || action === "resume" || action === "align"
     ? "action:turn"
     : actionClaimId(action);
 }
@@ -757,6 +774,62 @@ let goCompletionReady = false;
 let goTurnRunning = false;
 let goGeneration = 0;
 
+/** Model weights live on the required WebGPU backend for the whole controller
+ * lifetime; prestige resets dispose it and lazily rebuild it. */
+const requiredGoBackendFactory: GoValueBackendFactory = (weights) =>
+  createRequiredWebGpuGoValueBackend(weights);
+let goBackendFactory = requiredGoBackendFactory;
+const makeGoEngine = (): GoNeuralEngine => new GoNeuralEngine(goBackendFactory);
+let goEngine = makeGoEngine();
+
+/** Replace the backend only for Bun controller tests that do not evaluate the
+ * model. Production always uses the required WebGPU factory above. */
+export function setGoBackendFactoryForTest(factory?: GoValueBackendFactory): void {
+  if (typeof Bun === "undefined") throw new Error("Go backend test injection is only available under Bun");
+  void goEngine.dispose();
+  goBackendFactory = factory ?? requiredGoBackendFactory;
+  goEngine = makeGoEngine();
+}
+
+/** Preparation shares the main thread with latency-sensitive dispatchers.
+ * MessageChannel yields a fresh task without setTimeout's nested 4 ms clamp. */
+const goPause = yieldGoPlanner;
+
+/** Wall-clock anchor for the 200 ms engine cycle, established by observing a
+ * totalPlaytime transition. Held across turns: one observation keeps the phase
+ * known for as long as the browser advances time normally. */
+let goTickPhase: GoTickPhase | undefined;
+
+/** Sampling period for the anchoring poll. Two milliseconds bounds the phase
+ * error well inside the 20 ms guard band without busy-waiting. */
+export const GO_ANCHOR_POLL_MS = 2;
+
+/** A game that is paused or hard-throttled never rolls over, and retrying a
+ * full-cycle poll every turn would waste a dodge each time. */
+const GO_ANCHOR_RETRY_MS = 30_000;
+let goAnchorFailedAt = 0;
+
+/** Observe one engine-cycle rollover.
+ *
+ * This is deliberately its own dodge: it may wait most of a 200 ms cycle, and
+ * the turn dodge that follows must reserve `go.makeMove` at 4 GB. Polling here
+ * costs only `getPlayer` (0.5 GB) plus the stub base, so the large grant is
+ * never held while merely waiting for the clock. Netscript prices RAM per
+ * distinct function used rather than per call, so the poll loop itself is
+ * free. */
+async function observeGoTickPhase(stubNs: NS): Promise<GoTickPhase | undefined> {
+  const initial = stubNs["getPlayer"]().totalPlaytime;
+  const attempts = Math.ceil(GO_ENGINE_CYCLE_MS / GO_ANCHOR_POLL_MS) + 2;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    await stubNs["sleep"](GO_ANCHOR_POLL_MS);
+    const playtime = stubNs["getPlayer"]().totalPlaytime;
+    if (playtime !== initial) return { wallAt: Date.now(), playtime };
+  }
+  // A paused or heavily throttled game never rolls over; report failure and
+  // let the caller fall back to dispatching against the current tick.
+  return undefined;
+}
+
 function sameGoPosition(plan: GoPlan | undefined, topic: NonNullable<GameState["topics"]["go"]>): boolean {
   if (!plan || plan.input.status !== topic.status || plan.input.currentPlayer !== topic.currentPlayer) return false;
   return plan.input.board.length === topic.board?.length
@@ -865,9 +938,7 @@ const go: FeatureDriver = {
       ctx.state.topics.progression?.multipliers,
     );
     const installRemainingSec = installHorizonSec(ctx.horizons);
-    const rewardOpponents: readonly GoRewardOpponent[] = allowWorldDaemon
-      ? ["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati", "????????????"]
-      : ["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati"];
+    const rewardOpponents: readonly GoRewardOpponent[] = allowWorldDaemon ? GO_REWARD_OPPONENTS : GO_OPPONENTS;
     const rewardView = {
       opponents: rewardOpponents,
       stats,
@@ -896,11 +967,9 @@ const go: FeatureDriver = {
       previousBoards: topic.previousBoards,
       // resetBoardState returns the new board before the core probe refreshes
       // its metadata. Komi is immutable opponent data, so use the pinned
-      // public constant during that one-pass gap and keep live/arena choices
-      // identical even when the policy book has no exact board entry.
+      // public constant during that one-pass gap and keep live and arena
+      // scoring identical.
       komi: topic.komi ?? GO_REWARD_RULES[topic.opponent].komi,
-      ...(topic.bonusCycles !== undefined ? { bonusCycles: topic.bonusCycles } : {}),
-      currentWinStreak: stats.find((entry) => entry.opponent === topic.opponent)?.winStreak ?? 0,
       consecutivePasses: topic.lastTurn?.opponentResponse?.type === "pass" ? 1 : 0,
       nextGame: {
         opponent: preferred.opponent,
@@ -908,15 +977,57 @@ const go: FeatureDriver = {
         why: `${preferred.totalSecSaved.toFixed(1)}s immediate and ${(preferred.horizonTransientSecSaved + preferred.horizonFavorSecSaved).toFixed(1)}s over ${preferred.planningGames} games`,
       },
     };
+    // Re-anchor the engine-cycle phase before planning when it is unknown or
+    // has drifted. This runs in its own small-RAM dodge and only when needed;
+    // once anchored, the wall clock carries the phase across turns.
+    const playerPlaytime = ctx.state.topics.player?.totalPlaytime;
+    if (
+      playerPlaytime !== undefined
+      && goTickPhase
+      && !goPhaseAgrees(goTickPhase, playerPlaytime, ctx.state.playerObservedAt ?? Date.now())
+    ) {
+      goTickPhase = undefined;
+    }
+    if (
+      !goTickPhase
+      && (claimedAction === "move" || claimedAction === "pass")
+      && Date.now() - goAnchorFailedAt > GO_ANCHOR_RETRY_MS
+    ) {
+      const anchored = await act(
+        ctx,
+        "go",
+        "align",
+        goMethods("align"),
+        (stubNs: NS) => observeGoTickPhase(stubNs),
+        (value) => ({
+          ok: value !== undefined,
+          detail: value ? `anchored engine tick ${value.playtime}` : "no engine tick observed",
+        }),
+        "go",
+      );
+      if (anchored) goTickPhase = anchored;
+      else goAnchorFailedAt = Date.now();
+    }
+
     let decision: GoDecision;
-    // Board analysis is seed-independent. The exact seed-dependent half runs
-    // inside the dodge immediately before the Go call, so planning never
-    // reserves a future tick or sleeps merely to make a seed reachable.
+    // Candidate enumeration and reply option spaces are seed-independent. The
+    // exact seed-dependent half runs inside the dodge immediately before the
+    // Go call. Preparation never waits for a chosen seed; only dispatch inside
+    // the rollover guard may target the next tick and wait its short remainder.
+    // This decision is provisional: it uses the last observed playtime only to
+    // fix the action type for RAM pricing and publish a plan digest.
     const planStartedAt = Date.now();
-    const exactForecast = usesExactGoForecast(view);
-    const prepared = prepareGoDecision(view, exactForecast);
+    const prepared = await prepareNeuralGoDecision(view, { pause: goPause });
     const preparationMs = Date.now() - planStartedAt;
-    decision = prepared.immediate ?? finalizeGoDecision(prepared);
+    const provisionalSeed = alignedAiSeed(
+      ctx.state.topics.player?.totalPlaytime ?? 0,
+      topic.bonusCycles ?? 0,
+    );
+    // The provisional pass warms every candidate's memoized reply analyses in
+    // cooperative slices, so the dispatch-time finalize inside the dodge runs
+    // in about a millisecond even on the BitVerse board.
+    decision = prepared.immediate
+      ?? await finalizeNeuralGoDecision(prepared, [provisionalSeed], goEngine, { pause: goPause });
     const decisionAt = Date.now();
     const plan: GoPlan = {
       action: goActionDigest(decision.action),
@@ -1033,18 +1144,26 @@ const go: FeatureDriver = {
           let dispatchedDecision: GoDecision | undefined;
           let dispatchPrediction: NonNullable<GoPlan["prediction"]> | undefined;
           let boundaryRetries = 0;
-          if (dispatchedAction && exactForecast && !prepared.immediate) {
+          if (dispatchedAction && !prepared.immediate) {
             const preparedAction = dispatchedAction;
-            const finalizeForSlot = (player: ReturnType<NS["getPlayer"]>) => {
+            const finalizeForSlot = async (
+              player: ReturnType<NS["getPlayer"]>,
+              target?: GoSeedTarget,
+            ) => {
               const sampledAt = Date.now();
+              // The AI seeds from the tick it is dispatched in, so forecast
+              // for the tick this turn will actually land in rather than the
+              // one that happens to be current while planning.
+              const dispatchPlaytime = target?.targetPlaytime ?? player.totalPlaytime;
               const seeds = (topic.bonusCycles ?? 0) > 0
-                ? [player.totalPlaytime, player.totalPlaytime + GO_ENGINE_CYCLE_MS]
-                : [alignedAiSeed(player.totalPlaytime, topic.bonusCycles)];
+                ? [dispatchPlaytime, dispatchPlaytime + GO_ENGINE_CYCLE_MS]
+                : [alignedAiSeed(dispatchPlaytime, topic.bonusCycles)];
               const finalizationStartedAt = Date.now();
-              let exactDecision = finalizeGoDecision({
-                ...prepared,
-                view: { ...view, alignedDispatchPlaytime: player.totalPlaytime },
-              }, seeds);
+              // Cooperative slices here too: a fresh seed can still force a
+              // few unwarmed reply branches on the BitVerse board. A seed
+              // rollover during a pause is caught by the verify/replan loop,
+              // and the replan runs warm.
+              let exactDecision = await finalizeNeuralGoDecision(prepared, seeds, goEngine, { pause: goPause });
               const decisionAt = Date.now();
               const exactAction = exactDecision.action;
               const chosenAction = exactAction.type === preparedAction.type
@@ -1058,11 +1177,20 @@ const go: FeatureDriver = {
                   why: `${exactDecision.why}; keep the prepared action type for immediate dispatch`,
                 };
               }
+              const modelProfile = goModelProfile(view.board.size);
+              const backend = await goEngine.backendFor(view.board.size);
               return {
                 action: chosenAction,
                 decision: exactDecision,
                 prediction: {
                   model: GO_OPPONENT_MODEL,
+                  backend: "webgpu",
+                  modelProfile,
+                  // Every board above 5x5 is rated by the 19x19 daemon weights
+                  // on a padded board. That is deliberate migration handling
+                  // for inherited games, but it is out of distribution and
+                  // must be visible when such a game plays badly.
+                  ...(backend.extent !== view.board.size ? { paddedToExtent: backend.extent } : {}),
                   sampledTotalPlaytime: player.totalPlaytime,
                   sampledAt,
                   decisionAt,
@@ -1072,33 +1200,54 @@ const go: FeatureDriver = {
                   engineCycleMs: GO_ENGINE_CYCLE_MS,
                   aiWaitMs: goAiWaitMs(topic.bonusCycles),
                   seedCandidates: seeds,
-                  dispatchPlaytime: player.totalPlaytime,
+                  dispatchPlaytime,
+                  ...(target ? { rolloverMarginMs: target.marginMs, waitedForRollover: target.waitsForRollover } : {}),
                   boundaryRetries,
                 } satisfies NonNullable<GoPlan["prediction"]>,
               };
             };
-            // Re-read after planning; only an observed seed rollover may wait.
-            for (let attempt = 0; attempt < 2; attempt++) {
-              dispatchPlayer = stubNs["getPlayer"]();
-              const finalized = finalizeForSlot(dispatchPlayer);
-              const verified = stubNs["getPlayer"]();
-              if (verified.totalPlaytime === dispatchPlayer.totalPlaytime) {
-                dispatchedAction = finalized.action;
-                dispatchedDecision = finalized.decision;
-                dispatchPrediction = finalized.prediction;
-                break;
-              }
-              boundaryRetries++;
-              // Never stack delays when a throttled browser crosses twice.
-              if (attempt === 0) await stubNs["sleep"](10);
+
+            dispatchPlayer = stubNs["getPlayer"]();
+            const observedAt = Date.now();
+            // Anchor the 200 ms phase. Without it the tick value alone cannot
+            // say where inside a cycle we are, so a drifted or missing anchor
+            // is re-established in its own cheap dodge before planning; here
+            // we only use it.
+            if (goTickPhase && !goPhaseAgrees(goTickPhase, dispatchPlayer.totalPlaytime, observedAt)) {
+              goTickPhase = undefined;
             }
-            // A second rollover dispatches from one fresh read immediately.
-            if (!dispatchPrediction) {
-              dispatchPlayer = stubNs["getPlayer"]();
-              const finalized = finalizeForSlot(dispatchPlayer);
-              dispatchedAction = finalized.action;
-              dispatchedDecision = finalized.decision;
-              dispatchPrediction = finalized.prediction;
+            const target = goTickPhase
+              ? goChooseSeedTarget(goTickPhase, dispatchPlayer.totalPlaytime, observedAt)
+              : undefined;
+
+            const finalized = await finalizeForSlot(dispatchPlayer, target);
+            dispatchedAction = finalized.action;
+            dispatchedDecision = finalized.decision;
+            dispatchPrediction = finalized.prediction;
+
+            if (target?.waitsForRollover) {
+              // The move was computed for the next cycle while the current one
+              // drained, so this wait is whatever is left of a <20 ms window.
+              const delay = goDispatchDelayMs(target, Date.now());
+              if (delay > 0) await stubNs["sleep"](delay);
+            }
+
+            // One verification read. A tick that still disagrees means the
+            // browser advanced time unpredictably; replan once against what is
+            // now current, which is cheap because the option spaces are warm.
+            const verified = stubNs["getPlayer"]();
+            const expected = target?.targetPlaytime ?? dispatchPlayer.totalPlaytime;
+            if (verified.totalPlaytime !== expected) {
+              boundaryRetries++;
+              // The two reads bracket a rollover a few milliseconds apart, so
+              // this doubles as a free anchor: no poll is needed to learn a
+              // phase the turn just walked into.
+              goTickPhase = { wallAt: Date.now(), playtime: verified.totalPlaytime };
+              dispatchPlayer = verified;
+              const replanned = await finalizeForSlot(verified);
+              dispatchedAction = replanned.action;
+              dispatchedDecision = replanned.decision;
+              dispatchPrediction = replanned.prediction;
             }
           }
           let response: RawGoResponse;
@@ -1180,11 +1329,7 @@ const go: FeatureDriver = {
         previousBoards.unshift(board.rows);
         board = theirs.board;
       }
-      const selected = action.type === "move"
-        ? decision.ranked.find((candidate) => candidate.x === (action as Extract<GoAction, { type: "move" }>).x
-          && candidate.y === (action as Extract<GoAction, { type: "move" }>).y)
-        : undefined;
-      const predicted = selected?.predictedReplies ?? [];
+      const predicted = decision.forecast ?? [];
       const predictionTotal = predicted.reduce((sum, candidate) => sum + candidate.count, 0);
       const matching = predicted.reduce((sum, candidate) => {
         const matches = response.type === "move"
@@ -2548,6 +2693,12 @@ export const goModule: FeatureModule = {
     goTurnRunning = false;
     goCompletionReady = false;
     goContinuationReady = false;
+    // Release GPU buffers across a prestige; the next game lazily rebuilds
+    // the required backend against the successor Electron device.
+    void goEngine.dispose();
+    goTickPhase = undefined;
+    goAnchorFailedAt = 0;
+    goEngine = makeGoEngine();
     delete state.topics.go;
   },
   claims: (ctx) => {
@@ -2615,6 +2766,10 @@ function sleeveMethods(action: string | undefined): readonly string[] {
 
 function goMethods(action: string | undefined): readonly string[] {
   if (action === "hydrate") return ["go.getBoardState", "go.getMoveHistory"];
+  // Seed anchoring is split out precisely because it is cheap: 0.5 GB of
+  // getPlayer instead of the 4 GB go.makeMove grant, which must not be held
+  // while waiting for an engine tick.
+  if (action === "align") return ["getPlayer", "sleep"];
   if (action === "move") return ["getPlayer", "sleep", "go.makeMove"];
   if (action === "pass") return ["getPlayer", "sleep", "go.passTurn"];
   if (action === "resume") return ["go.opponentNextTurn"];

@@ -1,0 +1,28 @@
+{
+  "objective": ["wins", "gamePowerPerRound"],
+  "policyVisits": 2,
+  "replyVisitsPerCandidate": 2,
+  "candidates": 4,
+  "small5": {
+    "gamesPerOpponent": 32,
+    "seedStart": 31337000,
+    "tieRolls": [0.5],
+    "results": [
+      { "opponent": "Netburners", "predictive": { "wins": 32, "losses": 0, "gamePowerPerRound": 0.9517133956386293 }, "plain": { "wins": 32, "losses": 0, "gamePowerPerRound": 0.8157894736842105 }, "handcrafted": { "wins": 32, "losses": 0, "gamePowerPerRound": 0.9625407166123778 } },
+      { "opponent": "Slum Snakes", "predictive": { "wins": 32, "losses": 0, "gamePowerPerRound": 1.944078947368421 }, "plain": { "wins": 30, "losses": 2, "gamePowerPerRound": 1.6572890025575449 }, "handcrafted": { "wins": 32, "losses": 0, "gamePowerPerRound": 1.9262820512820513 } },
+      { "opponent": "The Black Hand", "predictive": { "wins": 32, "losses": 0, "gamePowerPerRound": 1.5485564304461943 }, "plain": { "wins": 30, "losses": 2, "gamePowerPerRound": 1.4752941176470589 }, "handcrafted": { "wins": 28, "losses": 4, "gamePowerPerRound": 1.5154929577464789 } },
+      { "opponent": "Tetrads", "predictive": { "wins": 32, "losses": 0, "gamePowerPerRound": 2.5075301204819276 }, "plain": { "wins": 30, "losses": 2, "gamePowerPerRound": 2.206496519721578 }, "handcrafted": { "wins": 25, "losses": 7, "gamePowerPerRound": 2.299698795180723 } },
+      { "opponent": "Daedalus", "predictive": { "wins": 32, "losses": 0, "gamePowerPerRound": 2.5761904761904764 }, "plain": { "wins": 30, "losses": 2, "gamePowerPerRound": 2.113013698630137 }, "handcrafted": { "wins": 29, "losses": 3, "gamePowerPerRound": 2.1077586206896552 } },
+      { "opponent": "Illuminati", "predictive": { "wins": 23, "losses": 9, "gamePowerPerRound": 7.980535279805353 }, "plain": { "wins": 21, "losses": 11, "gamePowerPerRound": 10.985074626865671 }, "handcrafted": { "wins": 21, "losses": 11, "gamePowerPerRound": 11.37190082644628 } }
+    ],
+    "totals": { "predictiveWins": 183, "plainWins": 173, "handcraftedWins": 167, "games": 192 }
+  },
+  "daemon19": {
+    "games": 8,
+    "seedStart": 31337000,
+    "tieRolls": [0.5],
+    "predictive": { "wins": 8, "losses": 0, "gamePowerPerRound": 3.4589426321709786, "medianLatencyMs": 225.1018330000079 },
+    "plain": { "wins": 8, "losses": 0, "gamePowerPerRound": 3.6609620721554115, "medianLatencyMs": 30.963999999999942 },
+    "verdict": "retain plain KataGo"
+  }
+}

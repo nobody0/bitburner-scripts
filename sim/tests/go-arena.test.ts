@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { legalMoves, playMove } from "../../shared/strategy/go/decide.ts";
+import { legalMoves, playMove } from "../../shared/strategy/go/rules.ts";
 import { oracleInitialBoard, oracleWhitePolicy } from "../features/go-oracle.ts";
 import {
   GO_ARENA_OPPONENTS,
@@ -9,8 +9,10 @@ import {
 } from "../go-arena.ts";
 import { GoOpponent } from "../vendor/bitburner/src/Go/Enums.ts";
 
+const hasWebGpu = Boolean((globalThis as { navigator?: { gpu?: unknown } }).navigator?.gpu);
+
 describe("upstream-backed Go arena", () => {
-  test("realistic seed timing keeps every forecasted immediate reply honest", async () => {
+  test.skipIf(!hasWebGpu)("realistic seed timing keeps every forecasted immediate reply honest", async () => {
     const game = await playGoArenaGame(GO_ARENA_OPPONENTS[0]!, 1_000, 0.5, true);
     expect(game.completed).toBe(true);
     expect(game.trace?.length).toBeGreaterThan(0);
@@ -21,7 +23,7 @@ describe("upstream-backed Go arena", () => {
     }
   });
 
-  test("the scaled 7x7 exact lane stays aligned with the upstream Illuminati", async () => {
+  test.skipIf(!hasWebGpu)("the scaled 7x7 exact lane stays aligned with the upstream Illuminati", async () => {
     const game = await playGoArenaGame({
       ...GO_ARENA_OPPONENTS[5]!,
       requestedSize: 7,
@@ -52,18 +54,22 @@ describe("upstream-backed Go arena", () => {
     if (move) expect(playMove(first!.board, move[0], move[1], "O", new Set([initial.rows.join("")]))).toBeDefined();
   });
 
-  test("the 19x19 daemon lane predicts each immediate upstream reply", async () => {
+  test.skipIf(!hasWebGpu)("the 19x19 daemon lane predicts each immediate upstream reply", async () => {
     const game = await playGoArenaGame(GO_ARENA_OPPONENTS[6]!, 1_000, 0.5, true);
     expect(game.completed).toBe(true);
+    expect(game.size).toBe(19);
+    expect(game.planningMs.length).toBeGreaterThan(0);
     for (const turn of game.trace ?? []) {
       if (turn.black.type === "pass") continue;
       const actual = turn.white.type === "move" ? `${turn.white.x},${turn.white.y}` : "pass";
       const predicted = turn.predicted.map((reply) => reply.x === null ? "pass" : `${reply.x},${reply.y}`);
       expect(predicted, `19x19 turn ${turn.turn} at ${turn.dispatchPlaytime}`).toContain(actual);
     }
-  }, 15_000);
+    // Inference is the deployed WebGPU backend; Bun skips this and the
+    // Chromium arena runs it through `bun run go:gpu -- --arena`.
+  }, 120_000);
 
-  test("a public midgame snapshot replays the original continuation exactly", async () => {
+  test.skipIf(!hasWebGpu)("a public midgame snapshot replays the original continuation exactly", async () => {
     const opponent = GO_ARENA_OPPONENTS[5]!;
     const original = await playGoArenaGame(opponent, 123_456, 0.5, true);
     const turn = original.trace?.[3];
@@ -79,7 +85,7 @@ describe("upstream-backed Go arena", () => {
     expect(replay.score).toEqual(original.score);
   });
 
-  test("summary reports confidence, tail latency, and replayable losses", async () => {
+  test.skipIf(!hasWebGpu)("summary reports confidence, tail latency, and replayable losses", async () => {
     const opponent = GO_ARENA_OPPONENTS[5]!;
     const games = await Promise.all([1_000, 5_000].map((seed) => playGoArenaGame(opponent, seed)));
     const summary = summarizeGoArena(opponent.name, games);

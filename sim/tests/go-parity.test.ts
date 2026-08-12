@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { group, playMove, scoreBoard, type GoBoard, type Stone } from "../../shared/strategy/go/decide.ts";
+import { group, playMove, scoreBoard, type GoBoard, type Stone } from "../../shared/strategy/go/rules.ts";
 import { predictOpponentReplies } from "../../shared/strategy/go/opponent.ts";
 import { GO_ENGINE_CYCLE_MS, goAiWaitMs, nextGoTurnTiming, whrng } from "../../shared/strategy/go/rng.ts";
 import {

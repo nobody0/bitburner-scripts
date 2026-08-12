@@ -10,12 +10,12 @@ import { CORP_STAGES, stepCorp, type CorpView } from "../shared/strategy/corp/st
 import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet/decide.ts";
 import { ASCEND_THRESHOLD, CLASH_CONFIDENCE, stepGang } from "../shared/strategy/gang/decide.ts";
 import {
-  evaluate,
-  prepareGoDecision,
-  finalizeGoDecision,
-  stepGo,
-  terminalGoRewardValue,
-} from "../shared/strategy/go/decide.ts";
+  decideGoNeural,
+  finalizeNeuralGoDecision,
+  GoNeuralEngine,
+  prepareNeuralGoDecision,
+} from "../shared/strategy/go/neural/engine.ts";
+import { StubGoValueBackend } from "./support/go-value-backend.ts";
 import { rankGoGames } from "../shared/strategy/go/rewards.ts";
 import { postNeeds } from "../shared/strategy/needs.ts";
 import {
@@ -428,119 +428,108 @@ describe("stanek packing", () => {
 
 describe("go", () => {
   const board = (rows: string[]) => ({ rows, size: rows[0]!.length });
+  const engine = new GoNeuralEngine((weights) => new StubGoValueBackend(weights));
 
-  test("evaluation prefers our stones and penalises atari", () => {
-    const safe = board(["XX.", "...", "..."]);
-    const atari = board(["XO.", "...", "..."]);
-    expect(evaluate(safe, "X")).toBeGreaterThan(evaluate(atari, "X"));
-  });
-
-  test("terminal evaluation treats a score tie as the game's black win", () => {
-    const empty = board([".....", ".....", ".....", ".....", "....."]);
-    expect(terminalGoRewardValue(empty, {
-      board: empty,
-      currentPlayer: "None",
-      opponent: "Netburners",
-      status: "gameOver",
-      previousBoards: [],
-      komi: 0,
-      currentWinStreak: 0,
-    })).toBe(1_000);
-  });
-
-  test("an aligned plan predicts the immediate reply from the exact dispatch seed", () => {
+  test("an aligned plan predicts the immediate reply from the exact dispatch seed", async () => {
     const view = {
       board: board([".....", ".....", ".....", ".....", "....."]),
       currentPlayer: "Black",
       opponent: "Daedalus",
       status: "inProgress",
       previousBoards: [],
-      alignedDispatchPlaytime: 10_000,
-      bonusCycles: 0,
       komi: 5.5,
     } as const;
-    const decision = finalizeGoDecision(prepareGoDecision(view), [10_200]);
+    const decision = await decideGoNeural(view, [10_200], engine);
     const best = decision.ranked[0]!;
     expect(best.predictedReplies?.length).toBeGreaterThan(0);
     expect(best.forecastCertainty).toBe("exact");
+    expect(best.score).toBeGreaterThan(0);
+    expect(best.score).toBeLessThanOrEqual(1);
   });
 
-  test("the ordinary exact-seed 5x5 plan stays near the 2 ms hot-path budget", () => {
+  test("the dispatch-time seed finalization reuses prepared option spaces", async () => {
     const view = {
       board: board([".....", ".....", ".....", ".....", "....."]),
       currentPlayer: "Black",
       opponent: "Daedalus",
       status: "inProgress",
       previousBoards: [],
-      alignedDispatchPlaytime: 10_000,
-      bonusCycles: 0,
+      komi: 5.5,
     } as const;
-    const plan = (seed: number) => finalizeGoDecision(prepareGoDecision(view, true), [seed]);
-    for (let index = 0; index < 5; index++) plan(10_200 + index * 200);
-    const samples = Array.from({ length: 31 }, (_, index) => {
+    const prepared = await prepareNeuralGoDecision(view);
+    for (let index = 0; index < 5; index++) {
+      await finalizeNeuralGoDecision(prepared, [10_200 + index * 200], engine);
+    }
+    const samples: number[] = [];
+    for (let index = 0; index < 31; index++) {
       const started = performance.now();
-      plan(20_200 + index * 200);
-      return performance.now() - started;
-    }).sort((a, b) => a - b);
-    // The measured local median is about 1 ms. Leave headroom for loaded CI
-    // while still catching an accidental return to per-legal-move expansion.
-    expect(samples[15]!).toBeLessThan(3);
+      await finalizeNeuralGoDecision(prepared, [20_200 + index * 200], engine);
+      samples.push(performance.now() - started);
+    }
+    samples.sort((a, b) => a - b);
+    // The test double isolates reply preparation from model execution. The
+    // deployed shader has a separate Chromium performance gate.
+    expect(samples[15]!).toBeLessThan(8);
   });
 
-  test("an inherited 13x13 board uses its scaled exact-forecast budget", () => {
+  test("a complete 5x5 decision stays inside the turn latency budget", async () => {
     const view = {
-      board: board(Array.from({ length: 13 }, () => ".".repeat(13))),
+      board: board(["X.O..", ".XO..", "..X..", ".O...", "....."]),
       currentPlayer: "Black",
       opponent: "Daedalus",
       status: "inProgress",
       previousBoards: [],
-      alignedDispatchPlaytime: 10_000,
+      komi: 5.5,
     } as const;
-    const plan = (seed: number) => finalizeGoDecision(prepareGoDecision(view, true), [seed]);
-    for (let index = 0; index < 3; index++) plan(10_200 + index * 200);
-    const samples = Array.from({ length: 15 }, (_, index) => {
+    for (let index = 0; index < 5; index++) await decideGoNeural(view, [10_200 + index * 200], engine);
+    const samples: number[] = [];
+    for (let index = 0; index < 21; index++) {
       const started = performance.now();
-      plan(20_200 + index * 200);
-      return performance.now() - started;
-    }).sort((a, b) => a - b);
-    expect(samples[7]!).toBeLessThan(10);
+      await decideGoNeural(view, [20_200 + index * 200], engine);
+      samples.push(performance.now() - started);
+    }
+    samples.sort((a, b) => a - b);
+    // Preparation dominates (one reply option space per candidate) and is
+    // sliced cooperatively in production; the full turn budget is 50 ms.
+    expect(samples[10]!).toBeLessThan(40);
   });
 
-  test("a full board passes rather than crashing", () => {
-    const decision = stepGo({
+  test("a full board passes rather than crashing", async () => {
+    const decision = await decideGoNeural({
       board: board(["XX", "XX"]),
       currentPlayer: "Black",
       opponent: "Netburners",
       status: "inProgress",
       previousBoards: [],
-    });
+    }, [10_200], engine);
     expect(decision.action.type).toBe("pass");
+    expect(decision.forecast?.length).toBeGreaterThan(0);
   });
 
-  test("a white turn resumes the public opponent promise after interruption", () => {
-    const decision = stepGo({
+  test("a white turn resumes the public opponent promise after interruption", async () => {
+    const decision = await decideGoNeural({
       board: board([".....", ".....", ".....", ".....", "....."]),
       currentPlayer: "White",
       opponent: "Netburners",
       status: "waitingOnAI",
       previousBoards: [],
-    });
+    }, [0], engine);
     expect(decision.action.type).toBe("resume");
   });
 
-  test("a completed game starts the most valuable 5x5 subnet", () => {
-    const decision = stepGo({
+  test("a completed game starts the most valuable 5x5 subnet", async () => {
+    const decision = await decideGoNeural({
       board: board([".....", ".....", ".....", ".....", "....."]),
       currentPlayer: "None",
       status: "gameOver",
       opponent: "Netburners",
       previousBoards: [],
       nextGame: { opponent: "Daedalus", boardSize: 5, why: "largest ETA reduction" },
-    });
+    }, [0], engine);
     expect(decision.action).toMatchObject({ type: "newGame", opponent: "Daedalus", boardSize: 5 });
   });
 
-  test("an untouched default board is retargeted, but an invested game is finished", () => {
+  test("an untouched default board is retargeted, but an invested game is finished", async () => {
     const view = {
       board: board(Array.from({ length: 7 }, () => ".......")),
       currentPlayer: "Black" as const,
@@ -548,12 +537,14 @@ describe("go", () => {
       opponent: "Netburners" as const,
       nextGame: { opponent: "Illuminati" as const, boardSize: 5 as const, why: "largest ETA reduction" },
     };
-    expect(stepGo({ ...view, previousBoards: [] }).action).toMatchObject({
+    const retargeted = await decideGoNeural({ ...view, previousBoards: [] }, [10_200], engine);
+    expect(retargeted.action).toMatchObject({
       type: "newGame",
       opponent: "Illuminati",
       boardSize: 5,
     });
-    expect(stepGo({ ...view, previousBoards: [view.board.rows] }).action.type).toBe("move");
+    const invested = await decideGoNeural({ ...view, previousBoards: [view.board.rows] }, [10_200], engine);
+    expect(invested.action.type).toBe("move");
   });
 
   test("opponent choice follows feature needs and rewards a pending favor win", () => {
@@ -1159,7 +1150,7 @@ describe("progression", () => {
     expect(done.installReady).toBe(true);
   });
 
-  test("BitNode ordering is exact for a small set and beats the baseline order", () => {
+  test("BitNode ordering is exact for a small set", () => {
     const nodes: [number, number][] = [[4, 3], [1, 3], [5, 1], [2, 3]];
     const hours = { 1: 10, 2: 20, 4: 5, 5: 30 };
     const wants = { 2: [4], 5: [1], 1: [] as number[], 4: [] as number[] };
@@ -1168,6 +1159,9 @@ describe("progression", () => {
     // The optimum is never worse than the baseline's ordering of the same set.
     const baselineSubset = BASELINE_ORDER.filter(([node]) => nodes.some(([n]) => n === node));
     expect(best.hours).toBeLessThanOrEqual(orderingCost(baselineSubset, hours, 0.5, wants) + 1e-9);
+    expect(best.hours).toBe(40);
+    expect(best.order.findIndex(([node]) => node === 4)).toBeLessThan(best.order.findIndex(([node]) => node === 2));
+    expect(best.order.findIndex(([node]) => node === 1)).toBeLessThan(best.order.findIndex(([node]) => node === 5));
   });
 
   test("above the exact limit it falls back and says so", () => {

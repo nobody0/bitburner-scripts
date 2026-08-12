@@ -80,13 +80,13 @@ describe("tab rendering", () => {
         territory: { black: 2, white: 1 },
         stats: [{ opponent: "Netburners", wins: 3, losses: 1, winStreak: 2, highestWinStreak: 2, rep: 100, bonusPercent: 5, bonusDescription: "hacking speed" }],
         plan: {
-          action: { type: "move", x: 1, y: 1, why: "best blended line" },
+          action: { type: "move", x: 1, y: 1, why: "neural value 0.840 win" },
           ranked: [{
-            x: 1, y: 1, score: 4.2, tacticalScore: 3.5, forecastScore: 5.5, captures: 1,
+            x: 1, y: 1, score: 0.84, powerPerRound: 5.5, captures: 1,
             predictedReplies: [{ x: 2, y: 2, count: 5 }, { x: null, y: null, count: 1 }],
-            why: "fixed-budget tactical shortlist; forecast 2,2 in 5/6 seeds",
+            why: "neural value; forecast 2,2 with 5.00/6 support",
           }],
-          why: "fixed-budget tactical shortlist of 4 moves",
+          why: "neural value over 4 candidates",
           input: {
             at: 1_000, board: ["X....", ".....", ".....", ".....", "....."], previousBoards: [],
             status: "inProgress", currentPlayer: "Black", opponent: "Netburners", blackScore: 1, whiteScore: 1.5, komi: 1.5,
@@ -134,7 +134,7 @@ describe("tab rendering", () => {
         lastTurn: {
           at: 1_100,
           durationMs: 205,
-          action: { type: "move", x: 1, y: 1, why: "best blended line" },
+          action: { type: "move", x: 1, y: 1, why: "neural value 0.840 win" },
           opponentResponse: { type: "move", x: 2, y: 2 },
           predictionSupport: { matching: 5, total: 6 },
           ok: true,
@@ -268,7 +268,7 @@ describe("tab rendering", () => {
       plan: {
         action: { type: "move", x: 1, y: 1 },
         ranked: [{
-          x: 1, y: 1, score: 4.2, tacticalScore: 3.5, forecastScore: 5.5, captures: 1,
+          x: 1, y: 1, score: 0.84, powerPerRound: 5.5, captures: 1,
           predictedReplies: [{ x: 2, y: 2, count: 5 }, { x: null, y: null, count: 1 }],
         }],
         input: { at: 1_000, board: [".....", ".....", ".....", ".....", "....."], previousBoards: [], status: "inProgress", currentPlayer: "Black", opponent: "Netburners" },

@@ -192,8 +192,8 @@ function decisionMarkup(g: GoState): string {
     : result ? `${result.durationMs.toFixed(0)} ms` : "waiting";
   return (
     tiles([
-      { label: "selected", value: action, sub: selectedMove ? `score ${fmtNum(selectedMove.score, 2)} · ${selectedMove.captures} capture(s)` : undefined },
-      { label: "planner", value: `${plan.planning.finalistCount} finalists`, sub: `position ${fmtNum(plan.planning.positionValue, 2)}; history ${plan.input.previousBoards.length}` },
+      { label: "selected", value: action, sub: selectedMove ? `win ${fmtPct(selectedMove.score)} · ${selectedMove.captures} capture(s)` : undefined },
+      { label: "planner", value: `${plan.planning.finalistCount} finalists`, sub: `position win ${fmtPct(plan.planning.positionValue)}; history ${plan.input.previousBoards.length}` },
       { label: "actual reply", value: response, sub: timingDetail },
       { label: "forecast support", value: support, sub: seedDetail },
     ]) +
@@ -205,18 +205,17 @@ function decisionMarkup(g: GoState): string {
 function rankingMarkup(g: GoState): string {
   const ranked = g.plan?.ranked ?? [];
   return table(
-    ["#", "move", "blended", "tactical", "forecast", "certainty", "take", "predicted reply"],
+    ["#", "move", "win", "power/round", "certainty", "take", "predicted reply"],
     ranked.map((move, index) => [
       String(index + 1),
       esc(coordinate(move.x, move.y)),
-      fmtNum(move.score, 2),
-      fmtNum(move.tacticalScore, 2),
-      move.forecastScore === undefined ? "-" : fmtNum(move.forecastScore, 2),
+      fmtPct(move.score),
+      fmtNum(move.powerPerRound, 2),
       move.forecastCertainty ?? "-",
       String(move.captures),
       esc(predictions(move)),
     ]),
-    { empty: "no legal candidates for this decision", wrap: [7] },
+    { empty: "no legal candidates for this decision", wrap: [6] },
   );
 }
 

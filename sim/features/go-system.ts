@@ -21,7 +21,7 @@ import {
   goFavorReward,
   goStreakMultiplier,
 } from "../../shared/strategy/go/rewards.ts";
-import type { GoRewardOpponent } from "../../shared/strategy/go/decide.ts";
+import type { GoRewardOpponent } from "../../shared/strategy/go/rules.ts";
 
 type RewardOpponent = Exclude<GoOpponent, GoOpponent.none>;
 

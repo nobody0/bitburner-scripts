@@ -404,11 +404,11 @@ Every feature now has a real driver module; `inert()` is gone from
 | 6 | corp | Sequence divisions, cities, products, investment | Staged script with per-stage precondition and expected effect. **Optimality boundary stated openly** — near-optimal *within the modelled stage graph*, not globally. |
 | 7 | bladeburner | Climb rank fastest **without dying** | Every decision uses the **pessimistic** end of the `[min,max]` chance interval; Black Ops refused below 95%. Stamina floor and chaos ceiling. |
 | 8 | sleeves | Allocate N sleeves across the task menu | Exact per-sleeve argmax (sleeves do not interfere). Shock scales output down linearly, so recovery dominates. |
-| 9 | go | Wins, territory, streaks | Upstream-oracle arena; exact seeded faction reply over an opponent-tuned fixed shortlist, with a deterministic ~2 ms hot-path budget. See `spec/go-ai.md`. |
+| 9 | go | Wins, territory, streaks | Upstream-oracle arena; trained value network over legal candidates and their seeded faction replies, executed as a WebGPU compute shader. See `spec/go-ai.md`. |
 | 10 | stanek | Pack the grid, then charge | **Exhaustive packing is PROVABLY optimal** — the strongest evidence in the roster. Correctly leaves out a large fragment to fit two smaller ones. |
 | 11 | dnet | Traverse under a stasis-link budget | Exact max-reachable search; links spent where they unlock the most. |
 | 12 | side | Solve every coding contract | **All 30 v3.0.1 contract types implemented** with exact registry coverage and known-answer tests. Discovery is ls-only; staged batches peak at `attempt` RAM, and a first rejection is logged and quarantined rather than retried. Infiltration stays manual. |
-| 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); explicit milestone order for live selection, with a small-set ordering oracle retained for offline comparisons. |
+| 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); directly tested live milestone selector, with a small-set ordering oracle retained for offline comparisons. |
 
 ### The hacking audit
 
@@ -751,14 +751,17 @@ exactly 0, it is the entire score. Both directions are pinned in
 - The progression panel now shows both countdowns, expected wall-clock times,
   confidence/recalibration age and parallel/sequential component tables.
   Telemetry retains the same typed objects for later calibration.
-- Implemented rules-correct Go play with a fixed-budget tactical shortlist and a handcrafted
-  faction-reply forecast driven by the public `totalPlaytime` WHRNG seed. The
-  production bundle imports no game source. Simulator parity tests import the
-  pinned v3.0.1 board/RNG/effect implementations and detect drift.
+- Implemented rules-correct Go play with a trained value network (`go-ai/`) over
+  legal candidates and their handcrafted faction-reply forecasts, driven by the
+  public `totalPlaytime` WHRNG seed. TypeScript inference runs only as a WebGPU
+  compute shader; missing or lost WebGPU fails explicitly. The production bundle
+  imports no game source. Simulator parity tests import the pinned v3.0.1 board/RNG/effect
+  implementations and detect drift.
 - Replaced fixed opponent selection with ETA valuation across every opponent
   on the throughput-optimal 5x5 board. Node-power, difficulty, streak/comeback effects,
   nonlinear rep-to-favor conversion and the SF14 cap are exact transcriptions;
-  win/score priors and shortlist ordering are fitted by upstream-AI tournaments.
+  win/score priors are fitted by upstream-AI tournaments and must be refitted
+  whenever a new model is promoted.
   Game-duration coefficients remain heuristic planning inputs.
 - Go telemetry records the public decision input, seed uncertainty, predicted
   replies, observed support and all reward candidates. The UI exposes the

@@ -1,0 +1,284 @@
+diff --git a/cpp/command/analysis.cpp b/cpp/command/analysis.cpp
+index ef629b8..be68e33 100644
+--- a/cpp/command/analysis.cpp
++++ b/cpp/command/analysis.cpp
+@@ -219,6 +219,7 @@ int MainCmds::analysis(const vector<string>& args) {
+     "turnNumbers",
+     "boardXSize",
+     "boardYSize",
++    "blockedPoints",
+     "initialStones",
+     "moves",
+     "initialPlayer",
+@@ -785,6 +786,11 @@ int MainCmds::analysis(const vector<string>& args) {
+       };
+ 
+       vector<Move> placements;
++      vector<Loc> blockedPoints;
++      if(input.find("blockedPoints") != input.end()) {
++        if(!parseBoardLocs(input, "blockedPoints", blockedPoints, false))
++          continue;
++      }
+       if(input.find("initialStones") != input.end()) {
+         if(!parseBoardMoves(input, "initialStones", placements, false))
+           continue;
+@@ -1104,9 +1110,25 @@ int MainCmds::analysis(const vector<string>& args) {
+ 
+ 
+       Board board(boardXSize,boardYSize);
++      bool invalidBlockedPoint = false;
++      for(Loc loc: blockedPoints) {
++        if(!board.setWall(loc)) {
++          reportErrorForId(rbase.id, "blockedPoints", "Blocked points must be distinct intersections");
++          invalidBlockedPoint = true;
++          break;
++        }
++      }
++      if(invalidBlockedPoint)
++        continue;
+       for(int i = 0; i<placements.size(); i++) {
+-        board.setStone(placements[i].loc,placements[i].pla);
++        if(!board.setStone(placements[i].loc,placements[i].pla)) {
++          reportErrorForId(rbase.id, "initialStones", "Initial stone overlaps a blocked point");
++          invalidBlockedPoint = true;
++          break;
++        }
+       }
++      if(invalidBlockedPoint)
++        continue;
+ 
+       if(initialPlayer == C_EMPTY) {
+         if(moveHistory.size() > 0)
+diff --git a/cpp/game/board.cpp b/cpp/game/board.cpp
+index 5ad4686..805fd20 100644
+--- a/cpp/game/board.cpp
++++ b/cpp/game/board.cpp
+@@ -243,12 +243,30 @@ void Board::setSimpleKoLoc(Loc loc) {
+ 
+ 
+ double Board::sqrtBoardArea() const {
+-    if (x_size == y_size) {
+-        return x_size;
+-    }
+-    else {
+-        return sqrt(x_size * y_size);
++  return sqrt(numPlayableLocs());
++}
++
++int Board::numPlayableLocs() const {
++  int count = 0;
++  for(int y = 0; y < y_size; y++) {
++    for(int x = 0; x < x_size; x++) {
++      Loc loc = Location::getLoc(x,y,x_size);
++      if(colors[loc] != C_WALL)
++        count += 1;
+     }
++  }
++  return count;
++}
++
++bool Board::setWall(Loc loc) {
++  if(loc < 0 || loc >= MAX_ARR_SIZE || colors[loc] != C_EMPTY)
++    return false;
++  colors[loc] = C_WALL;
++  // Empty and wall deliberately share the normal positional hash upstream.
++  // Mix in the independently seeded secondary hash so persistent analysis
++  // caches cannot alias two different IPvGO obstacle masks.
++  pos_hash ^= ZOBRIST_BOARD_HASH2[loc][C_WALL];
++  return true;
+ }
+ 
+ //Gets the number of stones of the chain at loc. Precondition: location must be black or white.
+@@ -2324,6 +2342,12 @@ void Board::checkConsistency() const {
+         //   throw StringError(errLabel + "Empty list doesn't contain empty location");
+         emptyCount += 1;
+       }
++      else if(colors[loc] == C_WALL) {
++        // IPvGO may have internal walls. Their independently seeded secondary
++        // hash distinguishes obstacle layouts without changing upstream's
++        // border-wall hashing convention.
++        tmp_pos_hash ^= ZOBRIST_BOARD_HASH2[loc][C_WALL];
++      }
+       else
+         throw StringError(errLabel + "Non-(black,white,empty) value within board legal area");
+     }
+diff --git a/cpp/game/board.h b/cpp/game/board.h
+index 4fdb2a2..b99cab3 100644
+--- a/cpp/game/board.h
++++ b/cpp/game/board.h
+@@ -208,6 +208,15 @@ struct Board
+   //Count the number of stones on the board
+   int numStonesOnBoard() const;
+   int numPlaStonesOnBoard(Player pla) const;
++  // Number of playable intersections. Unlike x_size*y_size this excludes
++  // internal C_WALL points used by the IPvGO analysis adapter.
++  int numPlayableLocs() const;
++
++  // Turn an empty intersection into an internal wall. KataGo already uses
++  // C_WALL for the rectangular border; exposing this operation lets the
++  // analysis command represent IPvGO's offline nodes without pretending they
++  // are stones. Must be called before adding stones or constructing history.
++  bool setWall(Loc loc);
+ 
+   //Get a hash that combines the position of the board with simple ko prohibition and a player to move.
+   Hash128 getSitHashWithSimpleKo(Player pla) const;
+diff --git a/cpp/neuralnet/nninputs.cpp b/cpp/neuralnet/nninputs.cpp
+index 5fad7ec..ce1c931 100644
+--- a/cpp/neuralnet/nninputs.cpp
++++ b/cpp/neuralnet/nninputs.cpp
+@@ -1004,11 +1004,11 @@ void NNInputs::fillRowV3(
+     for(int x = 0; x<xSize; x++) {
+       int pos = NNPos::xyToPos(x,y,nnXLen);
+       Loc loc = Location::getLoc(x,y,xSize);
++      Color stone = board.colors[loc];
+ 
+       //Feature 0 - on board
+-      setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+-
+-      Color stone = board.colors[loc];
++      if(stone != C_WALL)
++        setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+ 
+       //Features 1,2 - pla,opp stone
+       //Features 3,4,5 - 1,2,3 libs
+@@ -1209,7 +1209,7 @@ void NNInputs::fillRowV3(
+ 
+   //Komi and any score adjustments
+   float selfKomi = hist.currentSelfKomi(nextPlayer,nnInputParams.drawEquivalentWinsForWhite);
+-  float bArea = (float)(xSize * ySize);
++  float bArea = (float)board.numPlayableLocs();
+   //Bound komi just in case
+   if(selfKomi > bArea+1.0f)
+     selfKomi = bArea+1.0f;
+@@ -1281,7 +1281,7 @@ void NNInputs::fillRowV3(
+   //more games except in case of odd-dame seki.
+ 
+   if(hist.rules.scoringRule == Rules::SCORING_AREA || hist.encorePhase >= 2) {
+-    bool boardAreaIsEven = (xSize*ySize) % 2 == 0;
++    bool boardAreaIsEven = board.numPlayableLocs() % 2 == 0;
+ 
+     //What is the parity of the komi values that can produce jigos?
+     bool drawableKomisAreEven = boardAreaIsEven;
+@@ -1354,11 +1354,11 @@ void NNInputs::fillRowV4(
+     for(int x = 0; x<xSize; x++) {
+       int pos = NNPos::xyToPos(x,y,nnXLen);
+       Loc loc = Location::getLoc(x,y,xSize);
++      Color stone = board.colors[loc];
+ 
+       //Feature 0 - on board
+-      setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+-
+-      Color stone = board.colors[loc];
++      if(stone != C_WALL)
++        setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+ 
+       //Features 1,2 - pla,opp stone
+       //Features 3,4,5 - 1,2,3 libs
+@@ -1548,7 +1548,7 @@ void NNInputs::fillRowV4(
+ 
+   //Komi and any score adjustments
+   float selfKomi = hist.currentSelfKomi(nextPlayer,nnInputParams.drawEquivalentWinsForWhite);
+-  float bArea = (float)(xSize * ySize);
++  float bArea = (float)board.numPlayableLocs();
+   //Bound komi just in case
+   if(selfKomi > bArea+1.0f)
+     selfKomi = bArea+1.0f;
+@@ -1620,7 +1620,7 @@ void NNInputs::fillRowV4(
+   //more games except in case of odd-dame seki.
+ 
+   if(hist.rules.scoringRule == Rules::SCORING_AREA || hist.encorePhase >= 2) {
+-    bool boardAreaIsEven = (xSize*ySize) % 2 == 0;
++    bool boardAreaIsEven = board.numPlayableLocs() % 2 == 0;
+ 
+     //What is the parity of the komi values that can produce jigos?
+     bool drawableKomisAreEven = boardAreaIsEven;
+@@ -1694,11 +1694,11 @@ void NNInputs::fillRowV5(
+     for(int x = 0; x<xSize; x++) {
+       int pos = NNPos::xyToPos(x,y,nnXLen);
+       Loc loc = Location::getLoc(x,y,xSize);
++      Color stone = board.colors[loc];
+ 
+       //Feature 0 - on board
+-      setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+-
+-      Color stone = board.colors[loc];
++      if(stone != C_WALL)
++        setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+ 
+       //Features 1,2 - pla,opp stone
+       if(stone == pla)
+@@ -1819,7 +1819,7 @@ void NNInputs::fillRowV5(
+ 
+   //Komi and any score adjustments
+   float selfKomi = hist.currentSelfKomi(nextPlayer,nnInputParams.drawEquivalentWinsForWhite);
+-  float bArea = (float)(xSize * ySize);
++  float bArea = (float)board.numPlayableLocs();
+   //Bound komi just in case
+   if(selfKomi > bArea+1.0f)
+     selfKomi = bArea+1.0f;
+@@ -1896,11 +1896,11 @@ void NNInputs::fillRowV6(
+     for(int x = 0; x<xSize; x++) {
+       int pos = NNPos::xyToPos(x,y,nnXLen);
+       Loc loc = Location::getLoc(x,y,xSize);
++      Color stone = board.colors[loc];
+ 
+       //Feature 0 - on board
+-      setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+-
+-      Color stone = board.colors[loc];
++      if(stone != C_WALL)
++        setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+ 
+       //Features 1,2 - pla,opp stone
+       //Features 3,4,5 - 1,2,3 libs
+@@ -2178,7 +2178,7 @@ void NNInputs::fillRowV6(
+ 
+   //Komi and any score adjustments
+   float selfKomi = hist.currentSelfKomi(nextPlayer,nnInputParams.drawEquivalentWinsForWhite);
+-  float bArea = (float)(xSize * ySize);
++  float bArea = (float)board.numPlayableLocs();
+   //Bound komi just in case
+   if(selfKomi > bArea+1.0f)
+     selfKomi = bArea+1.0f;
+@@ -2260,7 +2260,7 @@ void NNInputs::fillRowV6(
+   //more games except in case of odd-dame seki.
+ 
+   if(hist.rules.scoringRule == Rules::SCORING_AREA || hist.encorePhase >= 2) {
+-    bool boardAreaIsEven = (xSize*ySize) % 2 == 0;
++    bool boardAreaIsEven = board.numPlayableLocs() % 2 == 0;
+ 
+     //What is the parity of the komi values that can produce jigos?
+     bool drawableKomisAreEven = boardAreaIsEven;
+@@ -2333,11 +2333,11 @@ void NNInputs::fillRowV7(
+     for(int x = 0; x<xSize; x++) {
+       int pos = NNPos::xyToPos(x,y,nnXLen);
+       Loc loc = Location::getLoc(x,y,xSize);
++      Color stone = board.colors[loc];
+ 
+       //Feature 0 - on board
+-      setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+-
+-      Color stone = board.colors[loc];
++      if(stone != C_WALL)
++        setRowBin(rowBin,pos,0, 1.0f, posStride, featureStride);
+ 
+       //Features 1,2 - pla,opp stone
+       //Features 3,4,5 - 1,2,3 libs
+@@ -2616,7 +2616,7 @@ void NNInputs::fillRowV7(
+ 
+   //Komi and any score adjustments
+   float selfKomi = hist.currentSelfKomi(nextPlayer,nnInputParams.drawEquivalentWinsForWhite);
+-  float bArea = (float)(xSize * ySize);
++  float bArea = (float)board.numPlayableLocs();
+   //Bound komi just in case
+   if(selfKomi > bArea+NNPos::KOMI_CLIP_RADIUS)
+     selfKomi = bArea+NNPos::KOMI_CLIP_RADIUS;
+@@ -2710,7 +2710,7 @@ void NNInputs::fillRowV7(
+   //more games except in case of odd-dame seki.
+ 
+   if(hist.rules.scoringRule == Rules::SCORING_AREA || hist.encorePhase >= 2) {
+-    bool boardAreaIsEven = (xSize*ySize) % 2 == 0;
++    bool boardAreaIsEven = board.numPlayableLocs() % 2 == 0;
+ 
+     //What is the parity of the komi values that can produce jigos?
+     bool drawableKomisAreEven = boardAreaIsEven;

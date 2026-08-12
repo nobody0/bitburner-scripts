@@ -1,0 +1,128 @@
+[
+  {
+    "profile": "small5",
+    "size": 5,
+    "opponentIndex": 0,
+    "board": "..............O..O..XO..O",
+    "winProbability": 0.6413948382840537,
+    "terminalPower": 5.226922926404653,
+    "remainingRounds": 25.267715265409024
+  },
+  {
+    "profile": "small5",
+    "size": 5,
+    "opponentIndex": 1,
+    "board": "....X.O.O.XO...X.OX.....O",
+    "winProbability": 0.533161909364715,
+    "terminalPower": 6.12916496823143,
+    "remainingRounds": 18.887302648051982
+  },
+  {
+    "profile": "small5",
+    "size": 5,
+    "opponentIndex": 2,
+    "board": ".XX..O.....X.#...OO..#OX#",
+    "winProbability": 0.2359872609920958,
+    "terminalPower": 3.8336712398542887,
+    "remainingRounds": 13.352759632889617
+  },
+  {
+    "profile": "small5",
+    "size": 5,
+    "opponentIndex": 3,
+    "board": ".X...XO.O.X..OXX.O..XX.X.",
+    "winProbability": 0.06073197720970261,
+    "terminalPower": 1.3940958331123292,
+    "remainingRounds": 6.569476377624261
+  },
+  {
+    "profile": "small5",
+    "size": 5,
+    "opponentIndex": 4,
+    "board": ".X.XX..O.X##.OO#XO.O...X.",
+    "winProbability": 0.06752515855711655,
+    "terminalPower": 2.093235664760454,
+    "remainingRounds": 7.158445913611433
+  },
+  {
+    "profile": "small5",
+    "size": 5,
+    "opponentIndex": 5,
+    "board": ".OXX..XOOX.X.O..OOOO.XOO.",
+    "winProbability": 0.007381425071646793,
+    "terminalPower": 1.0489269047521685,
+    "remainingRounds": 4.119280916202026
+  },
+  {
+    "profile": "small5",
+    "size": 5,
+    "opponentIndex": 3,
+    "board": ".........................",
+    "winProbability": 0.7445985345492698,
+    "terminalPower": 15.485080364102854,
+    "remainingRounds": 20.973560914559144
+  },
+  {
+    "profile": "small5",
+    "size": 5,
+    "opponentIndex": 5,
+    "board": "XXXXXXXXXOOOOO.OOOOX#..OX",
+    "winProbability": 0.005740377733232886,
+    "terminalPower": 2.074354395957159,
+    "remainingRounds": 3.566215445445093
+  },
+  {
+    "profile": "daemon19",
+    "size": 19,
+    "opponentIndex": 0,
+    "board": ".X..X.OXO.X..O.X.OX..#X.X.X..O.X.XX#O..O.O...XX..X.......OO.X.O.O.X.#X...#.#XOOOO#.OO..OXX.OO.O....#O.#O...XXO.X.O..OXXX.#..O..OX.O.X.OX.....#XO..X..OX.OOO..OOX.OO.O.OX.X##.O.....OX..#O.XOOX.XXXX.X.O.XO.X.X.#XO..XXX.....OXOXO.....XO.....OO.OOX.X.X.O.##.OOOO.X.#..O.XX#OX..OOX.XOO.#XXOX.O.....XOO.X...O.OOX#XXX.O.O.O..O..O..X.X.XO....XOO.....XXX.OX..XO.X.OX.OO.X",
+    "winProbability": 0.00001582298111600694,
+    "terminalPower": 0.1799177721626262,
+    "remainingRounds": 0.21105122026636666
+  },
+  {
+    "profile": "daemon19",
+    "size": 19,
+    "opponentIndex": 0,
+    "board": ".OO....X...O.O...O.OOX..OX.O..OO...OO....O.XXX..XO.O...X...X.OO....XO.OOOX.X.OOOX..X...X..X.......OO.O...OXO.XX..O...XOO....XX..OX....O.OX.XX...X...X..XX..OO.OX..X...X.O....X..OX..X.O.............XO.OX....XXOX..XX..O.O...O.X.O..X.XO.X.O.....O...X..XOX.O....X.X...X..XX..XX.XX....XXO.......O.O.XX.X.OXO..OO.XXO....XXOOX.XX.X..OOXOO.O..OO.XX...OXOX.OXXO.X..O..O.X",
+    "winProbability": 0.0036859170657879657,
+    "terminalPower": 0.3274038903121555,
+    "remainingRounds": 0.4467547285380848
+  },
+  {
+    "profile": "daemon19",
+    "size": 19,
+    "opponentIndex": 0,
+    "board": ".OX.##OXO.XX#XX.X#.O..O.#.OX#..O#O.OXO#.#XX..X.OO.XO.O#.OO..#.O..X.OXO....X.XXOX..X.X.#.OO...#..XXOOX.O.O....X.#.X.O#O..OXO..#O#.O.X..OO..OO...X#O..#..O.O.XX.OXX.....X............OX..OXO..#X...X..XXO.X..XOOO.X.X.XX..OX...O.O..O.#..OX#....XO.X.#O..O...........X.O.XXXO..#..X.....X..#.....XX.O.XX.XX..X.#.O..XO.XX..XX.X.XO.OX...X.OXO..OXOO.OX...O..OX..O#O....#OXO",
+    "winProbability": 0.0010360552783087256,
+    "terminalPower": 0.5729980789769007,
+    "remainingRounds": 0.7934850282240961
+  },
+  {
+    "profile": "daemon19",
+    "size": 19,
+    "opponentIndex": 0,
+    "board": ".O..XO.......XO.O.XX.XX.....OXO.O.OO.XO.XX.OOXOX.XOX.XO.O.X.XOOXO.O..X..X.OX..O...XO..X..XO..OX.O.XOO...O.....XX...XXOXXOOX.O.O....OO....XOO..O...OO.OO......OOX...XXOX.....X.OX.O..X....OOXX..O..O.O...XXO..OO.OO.OX.......XOX....O...OO..X.OOX.XOO..OX..XXX.OXO.XO.O..O.O.XX.X....OX....OXO.OXOO.X.X..XO.X.OX.......O.OX....O.O.O.....O..O..X.XX.O.OOOO.X.O.OOO.O.XX..O",
+    "winProbability": 0.0000015567820170577515,
+    "terminalPower": 0.1355456337088344,
+    "remainingRounds": 0.17010394621096797
+  },
+  {
+    "profile": "daemon19",
+    "size": 7,
+    "opponentIndex": 0,
+    "board": "XO.#.X......OXX.X#.OX.XOXO.#.X.X..X.X#X..O.OX....",
+    "winProbability": 0.9999998661933222,
+    "terminalPower": 1180.1865784903853,
+    "remainingRounds": 297.5696836722107
+  },
+  {
+    "profile": "daemon19",
+    "size": 13,
+    "opponentIndex": 0,
+    "board": "X.O.O.X.O.XOO.O.X..X.X.OO..O..OO.O...O.X.XO...OOXX.O.X.....O..O.O....XX.OO...O.OXXO..X..OX.X...O.XO.OOX.O.OO..XO...X....XXOO.XO.......O.X..X.X.O.....X..XO..O....XO...O..",
+    "winProbability": 0.9988052749833428,
+    "terminalPower": 151.2788688002444,
+    "remainingRounds": 41.7919802715625
+  }
+]

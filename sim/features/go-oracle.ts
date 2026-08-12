@@ -1,6 +1,6 @@
 /** Upstream-backed Go opponent and board adapters. This module is confined to
  * sim/: production imports neither vendored source nor hidden game state. */
-import type { GoBoard } from "../../shared/strategy/go/decide.ts";
+import type { GoBoard } from "../../shared/strategy/go/rules.ts";
 import type { AsyncGoPolicy } from "./go.ts";
 import { GoColor, GoOpponent, GoPlayType } from "../vendor/bitburner/src/Go/Enums.ts";
 import { getMove } from "../vendor/bitburner/src/Go/boardAnalysis/goAI.ts";

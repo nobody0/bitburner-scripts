@@ -1,4 +1,4 @@
-import type { GoBoard, Stone } from "./decide.ts";
+import type { GoBoard, Stone } from "./rules.ts";
 import { analyzeBoard, cellAt, effectiveLiberties, pointKey, type GoPoint } from "./analysis.ts";
 
 /** Independently transcribed IPvGO 3x3 tactical vocabulary.
@@ -34,7 +34,7 @@ const vertical = (pattern: readonly string[]): string[] => [pattern[2]!, pattern
 // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/patternMatching.ts
 const horizontal = (pattern: readonly string[]): string[] => pattern.map((row) => [...row].reverse().join());
 
-export function expandedGoPatterns(): string[][] {
+function expandedGoPatterns(): string[][] {
   const r1 = BASE_PATTERNS.map(rotate);
   const r2 = r1.map(rotate);
   const r3 = r2.map(rotate);
@@ -63,6 +63,19 @@ function matches(token: string, cell: ReturnType<typeof patternCell>, player: St
   return token === "?";
 }
 
+function matchesAnyPattern(board: GoBoard, x: number, y: number, player: Stone): boolean {
+  return PATTERNS.some((pattern) => {
+    let index = 0;
+    for (let dx = -1; dx <= 1; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const token = pattern[index++]!;
+        if (!matches(token, patternCell(board, x + dx, y + dy), player)) return false;
+      }
+    }
+    return true;
+  });
+}
+
 export function patternMoves(
   board: GoBoard,
   player: Stone,
@@ -77,18 +90,37 @@ export function patternMoves(
       if (!allowed.has(`${x},${y}`)) continue;
       // Match is player-relative. Avoid rebuilding the transformed board by
       // applying the same token relation directly here.
-      const matched = PATTERNS.some((pattern) => {
-        let index = 0;
-        for (let dx = -1; dx <= 1; dx++) {
-          for (let dy = -1; dy <= 1; dy++) {
-            const token = pattern[index++]!;
-            if (!matches(token, patternCell(board, x + dx, y + dy), player)) return false;
-          }
-        }
-        return true;
-      });
+      const matched = matchesAnyPattern(board, x, y, player);
       if (matched && (!smart || effectiveLiberties(analysis, x, y, player).length > 1)) moves.push({ x, y });
     }
+  }
+  return moves;
+}
+
+
+/** Cooperative pattern scan for the production planner. Pattern matching is
+ * pure but a 19x19 board times the transformed vocabulary is too large for one
+ * browser task. */
+export async function patternMovesCooperative(
+  board: GoBoard,
+  player: Stone,
+  available: readonly GoPoint[],
+  smart: boolean,
+  checkpoint: () => Promise<void> | undefined,
+): Promise<GoPoint[]> {
+  const allowed = new Set(available.map(pointKey));
+  const analysis = analyzeBoard(board);
+  const moves: GoPoint[] = [];
+  for (let x = 0; x < board.size; x++) {
+    for (let y = 0; y < board.size; y++) {
+      if (!allowed.has(`${x},${y}`)) continue;
+      if (matchesAnyPattern(board, x, y, player)
+        && (!smart || effectiveLiberties(analysis, x, y, player).length > 1)) {
+        moves.push({ x, y });
+      }
+    }
+    const pause = checkpoint();
+    if (pause) await pause;
   }
   return moves;
 }

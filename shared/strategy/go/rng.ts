@@ -28,7 +28,7 @@ export function goAiWaitMs(bonusCycles = 0): number {
   return bonusCycles > 0 ? 40 : 200;
 }
 
-export interface GoWaitResult {
+interface GoWaitResult {
   wallMs: number;
   bonusCycles: number;
 }
@@ -36,7 +36,7 @@ export interface GoWaitResult {
 /** Apply the game's waitCycle rule exactly: a positive stored-cycle balance
  * buys a 40 ms wait and is decremented by two (and may therefore reach -1).
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts */
-export function consumeGoWaits(bonusCycles: number, count: number): GoWaitResult {
+function consumeGoWaits(bonusCycles: number, count: number): GoWaitResult {
   let remaining = bonusCycles;
   let wallMs = 0;
   for (let index = 0; index < Math.max(0, Math.floor(count)); index++) {

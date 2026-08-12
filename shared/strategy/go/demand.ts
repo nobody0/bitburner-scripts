@@ -1,6 +1,6 @@
 import type { Need } from "../needs.ts";
 import { installHorizonSec, type PlanningHorizons } from "../progression/forecast.ts";
-import type { GoRewardOpponent } from "./decide.ts";
+import type { GoRewardOpponent } from "./rules.ts";
 import type { GoEtaDemand } from "./rewards.ts";
 
 export interface GoDemandView {

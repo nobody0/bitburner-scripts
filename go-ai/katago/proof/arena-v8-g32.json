@@ -1,0 +1,55 @@
+{
+  "generatedAt": "2026-08-12T12:03:32.634Z",
+  "kataGo": {
+    "version": "v1.16.3",
+    "commit": "802946dbb15ab7b52f6fa18e777ec8f8f65bfaff"
+  },
+  "gamesPerOpponent": 32,
+  "seedStart": 31337000,
+  "visits": 8,
+  "tieRolls": [0.5],
+  "results": [
+    {
+      "opponent": "Netburners",
+      "boardSize": 5,
+      "katago": { "wins": 32, "losses": 0, "completed": 32, "wilsonLower95": 0.8928208017449293, "pointDifference": 561, "meanBlackScore": 20.34375 },
+      "handcrafted": { "wins": 32, "losses": 0, "completed": 32, "wilsonLower95": 0.8928208017449293, "pointDifference": 450, "meanBlackScore": 18.46875 }
+    },
+    {
+      "opponent": "Slum Snakes",
+      "boardSize": 5,
+      "katago": { "wins": 30, "losses": 2, "completed": 32, "wilsonLower95": 0.7985287685584541, "pointDifference": 488, "meanBlackScore": 20.25 },
+      "handcrafted": { "wins": 32, "losses": 0, "completed": 32, "wilsonLower95": 0.8928208017449293, "pointDifference": 402, "meanBlackScore": 18.78125 }
+    },
+    {
+      "opponent": "The Black Hand",
+      "boardSize": 5,
+      "katago": { "wins": 30, "losses": 2, "completed": 32, "wilsonLower95": 0.7985287685584541, "pointDifference": 450, "meanBlackScore": 19.59375 },
+      "handcrafted": { "wins": 28, "losses": 4, "completed": 32, "wilsonLower95": 0.7193169451834978, "pointDifference": 284, "meanBlackScore": 16.8125 }
+    },
+    {
+      "opponent": "Tetrads",
+      "boardSize": 5,
+      "katago": { "wins": 30, "losses": 2, "completed": 32, "wilsonLower95": 0.7985287685584541, "pointDifference": 400, "meanBlackScore": 19.8125 },
+      "handcrafted": { "wins": 25, "losses": 7, "completed": 32, "wilsonLower95": 0.6124500635075646, "pointDifference": 167, "meanBlackScore": 15.90625 }
+    },
+    {
+      "opponent": "Daedalus",
+      "boardSize": 5,
+      "katago": { "wins": 30, "losses": 2, "completed": 32, "wilsonLower95": 0.7985287685584541, "pointDifference": 366, "meanBlackScore": 19.28125 },
+      "handcrafted": { "wins": 29, "losses": 3, "completed": 32, "wilsonLower95": 0.7578184527161214, "pointDifference": 139, "meanBlackScore": 15.28125 }
+    },
+    {
+      "opponent": "Illuminati",
+      "boardSize": 5,
+      "katago": { "wins": 21, "losses": 11, "completed": 32, "wilsonLower95": 0.4831108797896222, "pointDifference": 171, "meanBlackScore": 17.25 },
+      "handcrafted": { "wins": 21, "losses": 11, "completed": 32, "wilsonLower95": 0.4831108797896222, "pointDifference": 107, "meanBlackScore": 16.125 }
+    },
+    {
+      "opponent": "????????????",
+      "boardSize": 19,
+      "katago": { "wins": 32, "losses": 0, "completed": 32, "wilsonLower95": 0.8928208017449293, "pointDifference": 4004, "meanBlackScore": 200.28125 },
+      "handcrafted": { "wins": 16, "losses": 16, "completed": 32, "wilsonLower95": 0.3363088286932748, "pointDifference": 38, "meanBlackScore": 138.625 }
+    }
+  ]
+}

@@ -160,9 +160,10 @@ import type { NS } from "@ns";
 - `bun run ui` — telemetry hub + viewer on port 12526, including manual sync.
 - `bun run sim -- --goal …` — run the simulator; per-install JSONLs and a session manifest land in `runs/`.
 - `bun run sim:compare a.jsonl b.jsonl` — A/B time-to-goal; either input may also be a `.session.json` manifest for all chained installs.
-- `bun run go:arena -- --games 24` — upstream-oracle IPvGO tournament and latency report.
-- `bun run go:teacher -- --games 8` — slow exact Illuminati endgame audit for offline policy labels.
-- `bun run go:book:train -- --opponent Daedalus --games 1024 --phase-samples 3` — distill recurring, high-impact faction early/midgame actions offline.
+- `bun run go:arena` — upstream-oracle IPvGO WebGPU smoke tournament and latency report (12 games per ordinary opponent, 2 World Daemon games).
+- `bun run go:gpu` — run the deployed WGSL shader in headless Chrome against native golden vectors and the production latency budgets.
+- `bun run go:promote <small5|daemon19> <candidate.model>` — fixed-corpus promotion gate; `--apply` installs the champion and refreshes the artifact and golden fixture.
+- `bun run go:export` / `go:golden` — regenerate the deployed weight artifact and its golden fixture from promoted checkpoints.
 - `bun run vendor` — re-extract the game formula core from the pinned tag.
 - `bun run typecheck` / `typecheck:vendor` / `bun test` — checks; run before commit.
 - `bun run types` — refresh type definitions from the running game.

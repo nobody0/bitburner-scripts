@@ -373,11 +373,6 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
 
 // --- BitNode ordering analysis ---------------------------------------------
 
-/** Runtime and analytical ordering share one source. Commenting a milestone
- * out of bitnode-order.ts removes it from both the live selector and any
- * comparison against the active plan. */
-export { BITNODE_SPEEDRUN_PLAN as ACTIVE_SPEEDRUN_ORDER } from "./bitnode-order.ts";
-
 /** The predecessor scripts' explicit ordering, retained as the analytical
  * baseline against which candidate orders are measured. */
 export const BASELINE_ORDER: [number, number][] = [
