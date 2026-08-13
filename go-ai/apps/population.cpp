@@ -411,7 +411,7 @@ int main(int argc, char** argv) {
   try {
     const auto started = std::chrono::steady_clock::now();
     if (argc < 15) throw std::invalid_argument(
-      "usage: go_cpp_population GAMES SEED SIMULATIONS OUT_DIR OPPONENT SIZE CHECKPOINT_EVERY THREADS PROFILE INIT_MODEL OUTCOME_RATES POLICY_RATES BRANCH_WIDTH ROOT_WIDTH [TREE_DEPTH] [ROLLOUT_DEPTH] [teacher|duel|trio] [KATAGO_BINARY] [KATAGO_MODEL] [KATAGO_CONFIG] [KATAGO_VISITS] [KATAGO_POLICY_VISITS] [KATAGO_CANDIDATES] [RETENTION_MODEL] [full|heads] [KATAGO_PROCESSES]"
+      "usage: go_cpp_population GAMES SEED SIMULATIONS OUT_DIR OPPONENT SIZE CHECKPOINT_EVERY THREADS PROFILE INIT_MODEL OUTCOME_RATES POLICY_RATES BRANCH_WIDTH ROOT_WIDTH [TREE_DEPTH] [ROLLOUT_DEPTH] [teacher|duel|trio|kata] [KATAGO_BINARY] [KATAGO_MODEL] [KATAGO_CONFIG] [KATAGO_VISITS] [KATAGO_POLICY_VISITS] [KATAGO_CANDIDATES] [RETENTION_MODEL] [full|heads] [KATAGO_PROCESSES]"
     );
     const int games = std::stoi(argv[1]);
     const std::uint64_t corpus_seed = std::stoull(argv[2]);
@@ -445,8 +445,9 @@ int main(int argc, char** argv) {
     if (profile != "small5" && profile != "daemon19") {
       throw std::invalid_argument("PROFILE must be small5 or daemon19");
     }
-    if (trajectory_mode != "teacher" && trajectory_mode != "duel" && trajectory_mode != "trio") {
-      throw std::invalid_argument("trajectory mode must be teacher, duel or trio");
+    if (trajectory_mode != "teacher" && trajectory_mode != "duel"
+      && trajectory_mode != "trio" && trajectory_mode != "kata") {
+      throw std::invalid_argument("trajectory mode must be teacher, duel, trio or kata");
     }
     if (profile == "small5" && (size != 5 || (!balanced_opponents && opponent == Opponent::world_daemon))) {
       throw std::invalid_argument("small5 population requires '-' or an ordinary 5x5 opponent");
@@ -482,7 +483,7 @@ int main(int argc, char** argv) {
     std::optional<KataAdvisorConfig> kata_settings;
     const std::size_t kata_processes = argc >= 27 ? std::stoull(argv[26]) : 1;
     if (kata_processes == 0) throw std::invalid_argument("KATAGO_PROCESSES must be positive");
-    if (trajectory_mode == "trio") {
+    if (trajectory_mode == "trio" || trajectory_mode == "kata") {
 #ifdef __APPLE__
       const std::string default_backend = "opencl";
 #else
@@ -612,31 +613,39 @@ int main(int argc, char** argv) {
               const std::size_t index = next_game.fetch_add(1, std::memory_order_relaxed);
               if (index >= count) return;
               const auto& game = scheduled[static_cast<std::size_t>(completed) + index];
-              auto teacher = generate_episode(game.seed, game.opponent, game.size, config);
-              if (trajectory_mode == "duel" || trajectory_mode == "trio") {
-                auto challenger = generate_episode(
-                  game.seed, game.opponent, game.size, config, &retention);
-                if (better_episode(challenger, teacher)) {
-                  challenger.challenger_selected = true;
-                  append_outcomes(challenger, teacher);
-                  episodes[index] = std::move(challenger);
-                } else {
-                  append_outcomes(teacher, challenger);
-                  episodes[index] = std::move(teacher);
-                }
-              } else {
-                episodes[index] = std::move(teacher);
-              }
-              if (trajectory_mode == "trio") {
+              if (trajectory_mode == "kata") {
                 auto advised = generate_kata_episode(
                   game.seed, game.opponent, game.size, feature_extent,
                   *kata_advisers[worker % kata_advisers.size()]);
-                if (better_episode(advised, episodes[index])) {
-                  advised.adviser_selected = true;
-                  append_outcomes(advised, episodes[index]);
-                  episodes[index] = std::move(advised);
+                advised.adviser_selected = true;
+                episodes[index] = std::move(advised);
+              } else {
+                auto teacher = generate_episode(game.seed, game.opponent, game.size, config);
+                if (trajectory_mode == "duel" || trajectory_mode == "trio") {
+                  auto challenger = generate_episode(
+                    game.seed, game.opponent, game.size, config, &retention);
+                  if (better_episode(challenger, teacher)) {
+                    challenger.challenger_selected = true;
+                    append_outcomes(challenger, teacher);
+                    episodes[index] = std::move(challenger);
+                  } else {
+                    append_outcomes(teacher, challenger);
+                    episodes[index] = std::move(teacher);
+                  }
                 } else {
-                  append_outcomes(episodes[index], advised);
+                  episodes[index] = std::move(teacher);
+                }
+                if (trajectory_mode == "trio") {
+                  auto advised = generate_kata_episode(
+                    game.seed, game.opponent, game.size, feature_extent,
+                    *kata_advisers[worker % kata_advisers.size()]);
+                  if (better_episode(advised, episodes[index])) {
+                    advised.adviser_selected = true;
+                    append_outcomes(advised, episodes[index]);
+                    episodes[index] = std::move(advised);
+                  } else {
+                    append_outcomes(episodes[index], advised);
+                  }
                 }
               }
             }

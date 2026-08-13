@@ -14,11 +14,12 @@ import {
   type GoRewardOpponent,
 } from "../shared/strategy/go/rules.ts";
 import {
-  decideGoNeural,
+  finalizeNeuralGoDecision,
   GoNeuralEngine,
+  prepareNeuralGoDecision,
   type GoValueBackendFactory,
-  yieldGoPlanner,
 } from "../shared/strategy/go/neural/engine.ts";
+import { predictPreparedOpponentReplies } from "../shared/strategy/go/opponent.ts";
 import { createRequiredWebGpuGoValueBackend } from "../shared/strategy/go/neural/webgpu.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
 import { oracleInitialBoard } from "./features/go-oracle.ts";
@@ -68,6 +69,7 @@ export interface GoArenaGameResult {
   durationMs: number;
   score: { X: number; O: number };
   planningMs: number[];
+  planningPhases: { preparationMs: number[]; predictionMs: number[]; gpuAndSelectionMs: number[] };
   trace?: GoArenaTurnTrace[];
 }
 
@@ -115,9 +117,6 @@ export interface GoArenaOptions {
   forcedOpening?: readonly [number, number];
   initialBoard?: GoBoard;
   initialState?: GoArenaInitialState;
-  /** Planner-only tests may disable browser task yielding; production and the
-   * Chromium arena keep it enabled to enforce the main-thread slice budget. */
-  cooperativePlanning?: boolean;
 }
 
 function percentile(sorted: readonly number[], fraction: number): number {
@@ -160,7 +159,7 @@ export function configureGoArenaEngine(factory: GoValueBackendFactory): void {
   arenaEngine = new GoNeuralEngine(factory);
 }
 
-function decideGoArenaBlack(
+async function decideGoArenaBlack(
   board: GoBoard,
   history: readonly string[][],
   opponent: GoRewardOpponent,
@@ -168,9 +167,9 @@ function decideGoArenaBlack(
   dispatchPlaytime: number,
   consecutivePasses: number,
   candidateLimit?: number,
-  cooperativePlanning = true,
-): Promise<GoDecision> {
-  return decideGoNeural({
+): Promise<{ decision: GoDecision; preparationMs: number; predictionMs: number; gpuAndSelectionMs: number }> {
+  const started = performance.now();
+  const view = {
     board,
     currentPlayer: "Black",
     opponent,
@@ -179,7 +178,22 @@ function decideGoArenaBlack(
     komi,
     consecutivePasses,
     ...(candidateLimit !== undefined ? { candidateLimit } : {}),
-  }, [alignedAiSeed(dispatchPlaytime, 0)], arenaEngine, cooperativePlanning ? { pause: yieldGoPlanner } : {});
+  } as const;
+  const prepared = prepareNeuralGoDecision(view);
+  const preparedAt = performance.now();
+  const seed = alignedAiSeed(dispatchPlaytime, 0);
+  for (const candidate of prepared.candidates) {
+    if (!candidate.terminal) predictPreparedOpponentReplies(candidate.opponent!, seed);
+  }
+  const predictedAt = performance.now();
+  const decision = await finalizeNeuralGoDecision(prepared, [seed], arenaEngine);
+  const finalizedAt = performance.now();
+  return {
+    decision,
+    preparationMs: preparedAt - started,
+    predictionMs: predictedAt - preparedAt,
+    gpuAndSelectionMs: finalizedAt - predictedAt,
+  };
 }
 
 export async function playGoArenaGame(
@@ -204,6 +218,7 @@ export async function playGoArenaGame(
     ?? Math.floor(seed / GO_ENGINE_CYCLE_MS) * GO_ENGINE_CYCLE_MS;
   const startedPlaytime = dispatchPlaytime;
   const planningMs: number[] = [];
+  const planningPhases = { preparationMs: [] as number[], predictionMs: [] as number[], gpuAndSelectionMs: [] as number[] };
   const trace: GoArenaTurnTrace[] = [];
   const maxTurns = board.size * board.size * 4;
   const originalRandom = Math.random;
@@ -214,15 +229,17 @@ export async function playGoArenaGame(
       const inputHistory = history.map((position) => [...position]);
       const inputDispatchPlaytime = dispatchPlaytime;
       const inputConsecutivePasses = consecutivePasses;
-      const decision: GoDecision = turns === 0 && forcedOpening
-        ? {
+      let decision: GoDecision;
+      if (turns === 0 && forcedOpening) {
+        decision = {
           action: { type: "move", x: forcedOpening[0], y: forcedOpening[1], why: "forced opening" },
           ranked: [],
           why: "forced opening",
           finalists: 0,
           positionValue: 0.5,
-        }
-        : await decideGoArenaBlack(
+        };
+      } else {
+        const planned = await decideGoArenaBlack(
           board,
           history,
           definition.name,
@@ -230,8 +247,12 @@ export async function playGoArenaGame(
           dispatchPlaytime,
           consecutivePasses,
           options.candidateLimit,
-          options.cooperativePlanning,
         );
+        decision = planned.decision;
+        planningPhases.preparationMs.push(planned.preparationMs);
+        planningPhases.predictionMs.push(planned.predictionMs);
+        planningPhases.gpuAndSelectionMs.push(planned.gpuAndSelectionMs);
+      }
       const elapsed = performance.now() - started;
       planningMs.push(elapsed);
       if (decision.action.type === "move") {
@@ -314,6 +335,7 @@ export async function playGoArenaGame(
     durationMs: dispatchPlaytime - startedPlaytime,
     score,
     planningMs,
+    planningPhases,
     ...(includeTrace ? { trace } : {}),
   };
 }

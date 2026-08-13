@@ -6,8 +6,9 @@ It predates BN14, BN15, and the Darknet victory route.
 
 This is a reference measurement, not the live allowlist. The runtime order is
 `BITNODE_SPEEDRUN_PLAN` in
-`shared/strategy/progression/bitnode-order.ts`; milestones can stay commented
-out there while their feature controllers are not ready.
+`shared/strategy/progression/bitnode-order.ts`, which lists only the milestones
+whose feature controllers are ready. The full intended route lives in this
+document; add an entry there as each controller lands.
 
 It is also **not claimed to be the optimal route**. It is a coherent measured
 starting point that the new planner must first reproduce and then beat. Order
@@ -111,10 +112,10 @@ taken early:
 This placement is a hypothesis to benchmark, not a settled optimum. In
 particular, early BN14 must be compared against the previous late/split option
 using identical post-SF2.3 checkpoints, and the portable labyrinth route still
-needs timings. `BITNODE_SPEEDRUN_PLAN` preserves the intended positions
-in-place, but BN14 and BN15 remain commented out until their controllers are
-ready. If every uncommented milestone is complete, the live selector still
-falls back to repeatable BN12.
+needs timings. `BITNODE_SPEEDRUN_PLAN` carries only the milestones that are
+live today, so the route above — including BN14 and BN15 — is restored from
+here as each controller becomes ready. If every listed milestone is complete,
+the live selector still falls back to repeatable BN12.
 
 ## Historical order and times
 

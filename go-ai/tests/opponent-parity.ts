@@ -106,7 +106,7 @@ const scenarios = [
   { opponent: daemon, seed: goArenaSeeds(1, 117_000)[0]! },
 ];
 for (const { opponent, seed } of scenarios) {
-  const game = await playGoArenaGame(opponent, seed, 0.5, true, { cooperativePlanning: false });
+  const game = await playGoArenaGame(opponent, seed, 0.5, true);
   for (const turn of game.trace ?? []) {
     let board: GoBoard = { size: turn.board.length, rows: [...turn.board] };
     const history = [...turn.previousBoards];

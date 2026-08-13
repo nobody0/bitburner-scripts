@@ -26,6 +26,7 @@ import {
   GoNeuralEngine,
   prepareNeuralGoDecision,
 } from "../../shared/strategy/go/neural/engine.ts";
+import { predictPreparedOpponentReplies } from "../../shared/strategy/go/opponent.ts";
 
 interface FixtureCase {
   profile: "small5" | "daemon19";
@@ -100,26 +101,23 @@ function summarize(samples: number[]): { p50: number; p95: number; max: number }
   };
 }
 
-const yieldMainThread = (() => {
-  const channel = new MessageChannel();
-  const waiters: Array<() => void> = [];
-  channel.port1.onmessage = () => waiters.shift()?.();
-  return () => new Promise<void>((resolve) => {
-    waiters.push(resolve);
-    channel.port2.postMessage(0);
-  });
-})();
-
 async function main(): Promise<unknown> {
   const failures: string[] = [];
-  const weights = {
-    small5: loadGoValueWeights(SMALL5_GO_MODEL),
-    daemon19: loadGoValueWeights(DAEMON19_GO_MODEL),
-  };
-  const gpu = {
-    small5: await createRequiredWebGpuGoValueBackend(weights.small5),
-    daemon19: await createRequiredWebGpuGoValueBackend(weights.daemon19),
-  };
+  const coldStart: Record<string, { decodeMs: number; backendCreateMs: number }> = {};
+  const smallDecodeAt = performance.now();
+  const smallWeights = loadGoValueWeights(SMALL5_GO_MODEL);
+  coldStart.small5 = { decodeMs: performance.now() - smallDecodeAt, backendCreateMs: 0 };
+  const smallBackendAt = performance.now();
+  const smallGpu = await createRequiredWebGpuGoValueBackend(smallWeights);
+  coldStart.small5.backendCreateMs = performance.now() - smallBackendAt;
+  const daemonDecodeAt = performance.now();
+  const daemonWeights = loadGoValueWeights(DAEMON19_GO_MODEL);
+  coldStart.daemon19 = { decodeMs: performance.now() - daemonDecodeAt, backendCreateMs: 0 };
+  const daemonBackendAt = performance.now();
+  const daemonGpu = await createRequiredWebGpuGoValueBackend(daemonWeights);
+  coldStart.daemon19.backendCreateMs = performance.now() - daemonBackendAt;
+  const weights = { small5: smallWeights, daemon19: daemonWeights };
+  const gpu = { small5: smallGpu, daemon19: daemonGpu };
 
   // 1. C++ golden vectors through the real shader: all profiles, all heads,
   // all three outputs.
@@ -219,90 +217,64 @@ async function main(): Promise<unknown> {
     };
   }
 
-  // 5. The TypeScript rules/reply planner has a separate main-thread gate.
-  // It uses the production 19x19 cap and the same GPU backend, while the hook
-  // records only uninterrupted JS slices (GPU wait time is outside them).
+  // 5. Benchmark the unsliced production planner by phase. Opponent prediction
+  // is invoked explicitly before finalization so its exact cost is visible;
+  // finalization then reuses the same memoized option spaces and includes the
+  // real GPU dispatch, decoding, and ranking.
   const daemonFixture = (fixture as FixtureCase[]).find((golden) => golden.size === 19)!;
   const daemonBoard = boardFromHash(19, daemonFixture.board);
-  const plannerSlices = {
-    candidatePreparation: [] as number[],
-    replyPreparation: [] as number[],
-  };
-  const plannerWorst: Partial<Record<keyof typeof plannerSlices, { elapsedMs: number; detail?: string }>> = {};
-  const plannerDetails = new Map<string, { slices: number; mainThreadMs: number; maxMs: number }>();
   const plannerEngine = new GoNeuralEngine(() => gpu.daemon19);
-  const plannerOptions = {
-    pause: yieldMainThread,
-    sliceMs: 0.1,
-    onSlice: (phase: keyof typeof plannerSlices, elapsedMs: number, detail?: string) => {
-      plannerSlices[phase].push(elapsedMs);
-      if (elapsedMs > (plannerWorst[phase]?.elapsedMs ?? -1)) plannerWorst[phase] = { elapsedMs, detail };
-      const key = `${phase}:${detail ?? "finish"}`;
-      const current = plannerDetails.get(key) ?? { slices: 0, mainThreadMs: 0, maxMs: 0 };
-      current.slices++;
-      current.mainThreadMs += elapsedMs;
-      current.maxMs = Math.max(current.maxMs, elapsedMs);
-      plannerDetails.set(key, current);
-    },
-  };
-  const planningStarted = performance.now();
-  const prepared = await prepareNeuralGoDecision({
-    board: daemonBoard,
-    currentPlayer: "Black",
-    status: "inProgress",
-    opponent: "????????????",
-    previousBoards: [],
-    komi: 9.5,
-  }, plannerOptions);
-  const preparedAt = performance.now();
-  await finalizeNeuralGoDecision(prepared, [1_200], plannerEngine, plannerOptions);
-  const finalizedAt = performance.now();
-  const boardToMoveSamples = [finalizedAt - planningStarted];
-  for (let round = 1; round < 20; round++) {
+  const candidatePreparationSamples: number[] = [];
+  const opponentPredictionSamples: number[] = [];
+  const gpuAndSelectionSamples: number[] = [];
+  const boardToMoveSamples: number[] = [];
+  for (let round = 0; round < 30; round++) {
     const started = performance.now();
-    const repeatPrepared = await prepareNeuralGoDecision({
+    const prepared = prepareNeuralGoDecision({
       board: daemonBoard,
       currentPlayer: "Black",
       status: "inProgress",
       opponent: "????????????",
       previousBoards: [],
       komi: 9.5,
-    }, { pause: yieldMainThread, sliceMs: 0.1 });
-    await finalizeNeuralGoDecision(repeatPrepared, [1_200 + round * 200], plannerEngine, {
-      pause: yieldMainThread,
-      sliceMs: 0.1,
     });
+    const preparedAt = performance.now();
+    const seed = 1_200 + round * 200;
+    for (const candidate of prepared.candidates) {
+      if (!candidate.terminal) predictPreparedOpponentReplies(candidate.opponent!, seed);
+    }
+    const predictedAt = performance.now();
+    await finalizeNeuralGoDecision(prepared, [seed], plannerEngine);
+    const finalizedAt = performance.now();
+    candidatePreparationSamples.push(preparedAt - started);
+    opponentPredictionSamples.push(predictedAt - preparedAt);
+    gpuAndSelectionSamples.push(finalizedAt - predictedAt);
     boardToMoveSamples.push(performance.now() - started);
   }
   const planning = {
-    candidatePreparation: summarize(plannerSlices.candidatePreparation),
-    replyPreparation: summarize(plannerSlices.replyPreparation),
-    wallMs: {
-      candidatePreparation: +(preparedAt - planningStarted).toFixed(2),
-      replyPreparation: +(finalizedAt - preparedAt).toFixed(2),
-      total: +(finalizedAt - planningStarted).toFixed(2),
-    },
+    candidatePreparation: summarize(candidatePreparationSamples),
+    opponentPrediction: summarize(opponentPredictionSamples),
+    gpuAndSelection: summarize(gpuAndSelectionSamples),
     boardToMove: summarize(boardToMoveSamples),
-    worstDetail: plannerWorst,
-    details: Object.fromEntries([...plannerDetails].map(([key, value]) => [key, {
-      slices: value.slices,
-      mainThreadMs: +value.mainThreadMs.toFixed(2),
-      maxMs: +value.maxMs.toFixed(2),
-    }])),
   };
 
   const daemonLatency = latency["daemon19x400"]!;
   if (daemonLatency.mainThread.max >= 2) {
-    failures.push(`daemon19x400 main-thread slice ${daemonLatency.mainThread.max}ms exceeded 2ms`);
+    failures.push(`daemon19x400 main-thread work ${daemonLatency.mainThread.max}ms exceeded 2ms`);
   }
   if (daemonLatency.requestToParsed.max >= 30) {
     failures.push(`daemon19x400 request-to-result ${daemonLatency.requestToParsed.max}ms exceeded 30ms`);
   }
-  if (planning.candidatePreparation.max >= 2) {
-    failures.push(`candidate preparation slice ${planning.candidatePreparation.max}ms exceeded 2ms`);
+  if (planning.opponentPrediction.p95 >= 15) {
+    failures.push(`opponent prediction p95 ${planning.opponentPrediction.p95}ms exceeded 15ms`);
   }
-  if (planning.replyPreparation.max >= 2) {
-    failures.push(`reply preparation slice ${planning.replyPreparation.max}ms exceeded 2ms`);
+  if (planning.boardToMove.p95 >= 50) {
+    failures.push(`19x19 board-to-move p95 ${planning.boardToMove.p95}ms exceeded 50ms`);
+  }
+  for (const [profile, timing] of Object.entries(coldStart)) {
+    timing.decodeMs = +timing.decodeMs.toFixed(2);
+    timing.backendCreateMs = +timing.backendCreateMs.toFixed(2);
+    if (timing.decodeMs >= 10) failures.push(`${profile} artifact decode ${timing.decodeMs}ms exceeded 10ms`);
   }
 
   gpu.small5.dispose();
@@ -316,6 +288,7 @@ async function main(): Promise<unknown> {
       remainingRoundsRelative: +goldenDeviation.remainingRounds.toExponential(2),
     },
     latency,
+    coldStart,
     planning,
     failures,
   };

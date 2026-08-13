@@ -47,8 +47,10 @@ The 19x19 board is the only size that caps its candidate set (96 by default,
 shader rates 400 boards in well under a millisecond.
 
 Weights are versioned artifacts, not code. `shared/strategy/go/neural/models/`
-holds generated float32 modules exported from promoted checkpoints; changing
-them never touches engine or shader source.
+holds generated storage modules exported from promoted checkpoints: row-wise
+int8 plus float16 biases for `small5`, and float16 for the more sensitive
+`daemon19`. Both decode once to the shader's unchanged float32 layout; changing
+weights or storage never touches engine or shader source.
 
 ## Execution
 
@@ -107,9 +109,13 @@ into the policy or the priors.
   predicted set (`go_cpp_opponent_parity` enforces this across full games,
   against both the C++ and TypeScript forecasts).
 - The deployed shader reproduces the trainer's own predictions on the committed
-  golden vectors and completes upstream-backed arena games through WebGPU.
-- Main-thread blocking stays within the ~2 ms budget; planning is sliced
-  cooperatively and only the warm dispatch-time finalize is seed-critical.
+  golden vectors for the decoded runtime weights and completes upstream-backed
+  arena games through WebGPU.
+- Generated artifacts pin source and payload SHA-256 digests, stay below their
+  encoded-size budget, and reproduce exactly under `go:export --check`.
+- WebGPU submission and output parsing stay within the 2 ms main-thread budget.
+  Opponent prediction is benchmarked as one optimized synchronous operation;
+  provisional prediction keeps dispatch-time finalization warm and seed-critical.
 - Win rates and reward priors come from the upstream arena's stratified corpus.
 - A reported 100% means zero losses on the named finite corpus, accompanied by
   its Wilson lower bound. It is not presented as a proof over all games.

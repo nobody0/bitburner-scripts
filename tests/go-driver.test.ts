@@ -203,6 +203,76 @@ describe("Go live seed observation", () => {
     expect(state.topics.go?.lastTurn?.timing?.alignment).toBe("boundary-replan");
   });
 
+  test("a reset discards an in-flight planning result before dispatch", async () => {
+    let releaseBatch!: () => void;
+    const batchReleased = new Promise<void>((resolve) => {
+      releaseBatch = resolve;
+    });
+    let markBatchStarted!: () => void;
+    const batchStarted = new Promise<void>((resolve) => {
+      markBatchStarted = resolve;
+    });
+    setGoBackendFactoryForTest((weights) => ({
+      extent: weights.extent,
+      async evaluateBatch(batch) {
+        markBatchStarted();
+        await batchReleased;
+        return new Float32Array(batch.count * 3);
+      },
+      dispose() {},
+    }));
+    const state = goState();
+    goModule.reset?.({ ...goState(), topics: {} } as GameState, "bitnode");
+    let makeMoves = 0;
+    let playtimeRead = 0;
+    const dodgedNs = {
+      getPlayer: () => ({ totalPlaytime: playtimeRead++ ? 10_000 : 9_800, money: 0 }),
+      sleep: async () => {},
+      go: {
+        makeMove: async () => {
+          makeMoves++;
+          return { type: "gameOver", x: null, y: null };
+        },
+      },
+    } as unknown as NS;
+    const ns = {
+      getFunctionRamCost: () => 1,
+      exec: () => {
+        const globals = globalThis as typeof globalThis & GoDodgeGlobals;
+        queueMicrotask(async () => {
+          try {
+            globals.go_dodge_cb?.(await globals.go_dodge_func!(dodgedNs));
+          } catch (error) {
+            globals.go_dodge_reject?.(error);
+          }
+        });
+        return 1;
+      },
+    } as unknown as NS;
+    const result = resolveClaims({
+      now: 0,
+      pools: { money: 0, ram: 10 },
+      claims: [{ by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50, mode: "spend", why: "test" }],
+    });
+    const tick = goModule.driver.tick({
+      ns,
+      state,
+      caps: { bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} },
+      board: emptyBoard(),
+      grants: { money: 0, ram: 10, slot: false, result },
+      horizons: { node: unknown, install: unknown },
+      acquireDodge: () => ({ host: "home", release: () => {} }),
+    } as unknown as DriverContext);
+
+    await batchStarted;
+    goModule.reset?.(state, "bitnode");
+    releaseBatch();
+    await tick;
+
+    expect(makeMoves).toBe(0);
+    expect(state.topics.go?.lastTurn).toBeUndefined();
+  });
+
   test("a 40 ms bonus wait keeps only the two engine phases it can reach", async () => {
     const state = goState();
     state.topics.go!.bonusCycles = 2;

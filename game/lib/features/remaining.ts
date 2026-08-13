@@ -39,7 +39,6 @@ import {
   goModelProfile,
   GoNeuralEngine,
   prepareNeuralGoDecision,
-  yieldGoPlanner,
   type GoValueBackendFactory,
   type GoModelProfile,
 } from "../../../shared/strategy/go/neural/engine.ts";
@@ -772,6 +771,12 @@ function normalizeGoResponse(response: RawGoResponse): GoResponse {
 let goContinuationReady = false;
 let goCompletionReady = false;
 let goTurnRunning = false;
+/** Planning is asynchronous (including the GPU batch), so the
+ * turn-running flag alone no longer covers the whole tick: a controller-cadence
+ * pass can arrive while the detached continuation is still preparing. Two
+ * concurrent planners would interleave into the engine's single packing buffer
+ * and dispatch two turns for one position. */
+let goPlanning = false;
 let goGeneration = 0;
 
 /** Model weights live on the required WebGPU backend for the whole controller
@@ -790,10 +795,6 @@ export function setGoBackendFactoryForTest(factory?: GoValueBackendFactory): voi
   goBackendFactory = factory ?? requiredGoBackendFactory;
   goEngine = makeGoEngine();
 }
-
-/** Preparation shares the main thread with latency-sensitive dispatchers.
- * MessageChannel yields a fresh task without setTimeout's nested 4 ms clamp. */
-const goPause = yieldGoPlanner;
 
 /** Wall-clock anchor for the 200 ms engine cycle, established by observing a
  * totalPlaytime transition. Held across turns: one observation keeps the phase
@@ -885,6 +886,20 @@ const go: FeatureDriver = {
   wake: () => goContinuationReady || goCompletionReady,
   requires: "go",
   async tick(ctx: DriverContext) {
+    // Hold one guard across the whole asynchronous body, including planning.
+    if (goTurnRunning || goPlanning) return;
+    const generation = goGeneration;
+    goPlanning = true;
+    try {
+      await goTick(ctx, generation);
+    } finally {
+      goPlanning = false;
+    }
+  },
+};
+
+async function goTick(ctx: DriverContext, generation: number): Promise<void> {
+    if (generation !== goGeneration) return;
     if (goTurnRunning) return;
     // A completed game/new-game transition needs a fresh central claim. A
     // failed turn uses this pass only to release the stale claim, then retains
@@ -915,6 +930,7 @@ const go: FeatureDriver = {
         }),
         (value) => ({ ok: value.board.length > 0, detail: `read ${value.board.length}x${value.board.length} Go board` }),
       );
+      if (generation !== goGeneration) return;
       if (hydrated) {
         const boardSize = observedGoBoardSize(hydrated.board);
         const controlled = goTerritory({ rows: hydrated.board, size: boardSize });
@@ -1005,6 +1021,7 @@ const go: FeatureDriver = {
         }),
         "go",
       );
+      if (generation !== goGeneration) return;
       if (anchored) goTickPhase = anchored;
       else goAnchorFailedAt = Date.now();
     }
@@ -1017,17 +1034,17 @@ const go: FeatureDriver = {
     // This decision is provisional: it uses the last observed playtime only to
     // fix the action type for RAM pricing and publish a plan digest.
     const planStartedAt = Date.now();
-    const prepared = await prepareNeuralGoDecision(view, { pause: goPause });
+    const prepared = prepareNeuralGoDecision(view);
     const preparationMs = Date.now() - planStartedAt;
     const provisionalSeed = alignedAiSeed(
       ctx.state.topics.player?.totalPlaytime ?? 0,
       topic.bonusCycles ?? 0,
     );
-    // The provisional pass warms every candidate's memoized reply analyses in
-    // cooperative slices, so the dispatch-time finalize inside the dodge runs
-    // in about a millisecond even on the BitVerse board.
+    // The provisional pass warms every candidate's memoized reply analyses so
+    // dispatch-time finalization inside the dodge only resolves a seed delta.
     decision = prepared.immediate
-      ?? await finalizeNeuralGoDecision(prepared, [provisionalSeed], goEngine, { pause: goPause });
+      ?? await finalizeNeuralGoDecision(prepared, [provisionalSeed], goEngine);
+    if (generation !== goGeneration) return;
     const decisionAt = Date.now();
     const plan: GoPlan = {
       action: goActionDigest(decision.action),
@@ -1087,6 +1104,7 @@ const go: FeatureDriver = {
             : `could not start a game against ${newGameAction.opponent}`,
         }),
       );
+      if (generation !== goGeneration) return;
       const result = requireResult("go");
       const lastTurn: GoTurnResult = {
         at: result.at,
@@ -1127,7 +1145,6 @@ const go: FeatureDriver = {
       return;
     }
 
-    const generation = goGeneration;
     goTurnRunning = true;
     let turnCompleted = false;
     let continueImmediately = false;
@@ -1159,11 +1176,9 @@ const go: FeatureDriver = {
                 ? [dispatchPlaytime, dispatchPlaytime + GO_ENGINE_CYCLE_MS]
                 : [alignedAiSeed(dispatchPlaytime, topic.bonusCycles)];
               const finalizationStartedAt = Date.now();
-              // Cooperative slices here too: a fresh seed can still force a
-              // few unwarmed reply branches on the BitVerse board. A seed
-              // rollover during a pause is caught by the verify/replan loop,
-              // and the replan runs warm.
-              let exactDecision = await finalizeNeuralGoDecision(prepared, seeds, goEngine, { pause: goPause });
+              // A fresh seed can force a few reply branches that the
+              // provisional seed did not warm; repeated branches stay memoized.
+              let exactDecision = await finalizeNeuralGoDecision(prepared, seeds, goEngine);
               const decisionAt = Date.now();
               const exactAction = exactDecision.action;
               const chosenAction = exactAction.type === preparedAction.type
@@ -1385,8 +1400,7 @@ const go: FeatureDriver = {
       // pass. Failure releases the claim now but retries on ordinary cadence.
       goContinuationReady = turnCompleted;
     });
-  },
-};
+}
 
 // --- stanek -----------------------------------------------------------------
 
@@ -2691,6 +2705,9 @@ export const goModule: FeatureModule = {
   reset: (state) => {
     goGeneration++;
     goTurnRunning = false;
+    // goPlanning is deliberately not cleared here: its owner always clears it
+    // in a finally, and clearing it early would let a fresh tick plan
+    // concurrently with the reset one.
     goCompletionReady = false;
     goContinuationReady = false;
     // Release GPU buffers across a prestige; the next game lazily rebuilds

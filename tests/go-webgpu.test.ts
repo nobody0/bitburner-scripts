@@ -20,9 +20,11 @@ describe("go WGSL shader", () => {
         requestToParsed: { p50: number; p95: number; max: number };
         mainThread: { p50: number; p95: number; max: number };
       }>;
+      coldStart: Record<string, { decodeMs: number; backendCreateMs: number }>;
       planning: {
         candidatePreparation: { p50: number; p95: number; max: number };
-        replyPreparation: { p50: number; p95: number; max: number };
+        opponentPrediction: { p50: number; p95: number; max: number };
+        gpuAndSelection: { p50: number; p95: number; max: number };
         boardToMove: { p50: number; p95: number; max: number };
       };
     };
@@ -33,7 +35,9 @@ describe("go WGSL shader", () => {
     const daemon = result.latency["daemon19x400"]!;
     expect(daemon.mainThread.max).toBeLessThan(2);
     expect(daemon.requestToParsed.max).toBeLessThan(30);
-    expect(result.planning.candidatePreparation.max).toBeLessThan(2);
-    expect(result.planning.replyPreparation.max).toBeLessThan(2);
+    expect(result.coldStart.small5!.decodeMs).toBeLessThan(10);
+    expect(result.coldStart.daemon19!.decodeMs).toBeLessThan(10);
+    expect(result.planning.opponentPrediction.p95).toBeLessThan(15);
+    expect(result.planning.boardToMove.p95).toBeLessThan(50);
   }, 240_000);
 });

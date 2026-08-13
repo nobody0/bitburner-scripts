@@ -46,6 +46,11 @@ async function bundleEntry(
     target: "es2022",
     sourcemap: "external",
     logLevel: "warning",
+    // Whitespace-only minification shrinks the large embedded strategy data
+    // without rewriting property access or identifier bindings. Syntax
+    // minification remains forbidden because it can turn bracketed dodged ns
+    // calls into dotted calls and change the game's static RAM accounting.
+    minifyWhitespace: true,
     define: {
       __TELEMETRY__: options.telemetry ? "true" : "false",
       __BUILD_ID__: JSON.stringify(buildId),

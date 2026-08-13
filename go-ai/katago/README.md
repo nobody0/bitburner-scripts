@@ -137,3 +137,11 @@ round labels; the best route alone supplies policy rankings. Missing
 dependencies fail before generation; a worker/query error
 fails the checkpoint rather than silently changing the requested adviser set.
 Existing `teacher` and `duel` modes do not start or depend on KataGo.
+
+`go_cpp_population ... kata` is the high-throughput pretraining variant. It
+plays only the exact native-environment Kata-advised route and trains from its
+complete terminal outcome and ranking labels. It omits the two additional
+handcrafted and frozen-champion trajectories that `trio` generates. Use it to
+produce research candidates when Kata wins essentially every route comparison,
+then pass finalists through a fresh `trio` CPU handoff and the unchanged
+fixed-corpus promotion gates. It is not itself a promotion proof.

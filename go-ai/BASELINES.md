@@ -8,8 +8,8 @@ Power per total round.
 
 | Profile | Artifact | Neural input | SHA-256 |
 |---|---|---|---|
-| six ordinary enemies on 5x5 | `small5-champion.model` | resulting board plus enemy identity | `314149e442998b2c7e098e4a3366b9a371c13a235c6651e74ec5f8a4b3457010` |
-| World Daemon on 19x19 | `daemon19-champion.model` | resulting board; no enemy input | `a3dc8836e2a5720c341bbbb6518343cddef08fb33db39b406b70713ef3033d4c` |
+| six ordinary enemies on 5x5 | `small5-champion.model` | resulting board plus enemy identity | `f7ba0ae8733d2634e330fb381664b952aaf5ba949b7690b4220d0758fcc0b9fa` |
+| World Daemon on 19x19 | `daemon19-champion.model` | resulting board; no enemy input | `cccab618a6c8c04acf869f92daf40ba7f120975bbe91251c97b17565ee4f628e` |
 
 Both are v7 spatial board-value networks with three outputs per applicable
 enemy: win probability, expected loss-penalized terminal Power, and expected
@@ -197,8 +197,110 @@ frozen-champion population actor were unchanged. It completed in 415.54 seconds
 | 1208203035 (`go:promote --apply`) | 3,991/4,800 | 3,882/4,800 | 1.73430 | 1.76339 |
 
 The promoted checkpoint is `locked-small5-1208203030/gpu-lr-5e-06.model`;
-its SHA-256 is the current small5 artifact hash above. The final gate win rate
+its SHA-256 is the preceding generation's hash. The final gate win rate
 is 83.15%; training remains win-focused rather than shifting to Power/round.
+
+### 2026-08-12 low-rate 16k continuation promotion
+
+The same locked pipeline continued for 16,384 games from seed `1208203060`,
+using 12 CPU cores, Metal/MPS, uniform replay, one update per game, and rates
+`0.0000005,0.000001,0.0000025,0.000005`. It completed in 429.67 seconds
+(38.13 games/second). The conservative `0.000001` path passed all full gates:
+
+| Corpus seed | Candidate wins | Incoming wins | Candidate Power/round | Incoming Power/round |
+|---:|---:|---:|---:|---:|
+| 1208203062 | 4,003/4,800 | 4,000/4,800 | 1.76381 | 1.76295 |
+| 1208203063 (independent confirmation) | 4,040/4,800 | 4,017/4,800 | 1.76546 | 1.76039 |
+| 1208203064 (`go:promote --apply`) | 3,998/4,800 | 3,992/4,800 | 1.76376 | 1.76257 |
+
+The promoted checkpoint is `locked-small5-1208203060/gpu-lr-1e-06.model`;
+its SHA-256 is the preceding generation's hash. The gain is small but
+strictly lexicographic and independently repeated; the profile is still only
+83.29% on the final corpus, so win-first training remains active.
+
+### 2026-08-13 32k locked-pipeline promotion
+
+The locked equal-head pipeline continued for 32,768 balanced games from seed
+`1208203100`, using 12 CPU workers, Metal/MPS, uniform replay, one update per
+game, 256 environments, and rates
+`0.0000005,0.000001,0.0000025,0.000005`. It completed in 810.87 seconds
+(40.41 games/second). A win-only ablation immediately before this run failed
+its full proof, so all three value targets remained equally weighted. The
+`0.0000025` candidate passed both independent proofs and the apply gate:
+
+| Corpus seed | Candidate wins | Incoming wins | Candidate Power/round | Incoming Power/round |
+|---:|---:|---:|---:|---:|
+| 1208203102 | 4,065/4,800 | 3,997/4,800 | 1.77287 | 1.74614 |
+| 1208203103 (independent confirmation) | 4,019/4,800 | 4,000/4,800 | 1.73991 | 1.77015 |
+| 1208203104 (`go:promote --apply`) | 4,062/4,800 | 4,013/4,800 | 1.74349 | 1.74702 |
+
+The promoted checkpoint is
+`locked-small5-equal-1208203100/gpu-lr-2_5e-06.model`; its SHA-256 is the
+preceding generation's hash. The final gate reached 84.63%, so the
+profile remains win-first rather than shifting to Power/round optimization.
+
+### 2026-08-13 low-rate 32k continuation promotion
+
+The same locked pipeline continued for 32,768 balanced games from seed
+`1208203112`, using all 12 CPU workers and Metal/MPS. The rate range moved down
+to `0.00000025,0.0000005,0.000001,0.0000025`; uniform replay, equal weighting
+of all three value targets, one update per game, 256 environments, and frozen
+champion retention were unchanged. It completed in 811.81 seconds (40.36
+games/second). The `0.0000025` path passed every full gate and increased both
+win count and Power/round on all three corpora:
+
+| Corpus seed | Candidate wins | Incoming wins | Candidate Power/round | Incoming Power/round |
+|---:|---:|---:|---:|---:|
+| 1208203114 | 4,092/4,800 | 4,024/4,800 | 1.76223 | 1.72935 |
+| 1208203115 (independent confirmation) | 4,075/4,800 | 3,997/4,800 | 1.76970 | 1.73879 |
+| 1208203116 (`go:promote --apply`) | 4,060/4,800 | 4,032/4,800 | 1.76444 | 1.72447 |
+
+The promoted checkpoint is
+`locked-small5-equal-1208203112/gpu-lr-2_5e-06.model`; its SHA-256 is the
+preceding generation's hash. The final-gate win rate is 84.58%, so the
+profile remains win-first.
+
+### 2026-08-13 conservative-rate 32k promotion
+
+The locked pipeline continued for another 32,768 balanced games from seed
+`1208203126`, narrowing rates to
+`0.0000001,0.00000025,0.0000005,0.000001`. It used 12 CPU workers, Metal/MPS,
+uniform replay, equal three-head loss, one update per game, 256 environments,
+and frozen champion retention. It completed in 811.55 seconds (40.38
+games/second). The `0.0000005` candidate passed both full proofs and the apply
+gate; the second proof's two-win margin still outranks its lower Power/round
+under the fixed lexicographic rule:
+
+| Corpus seed | Candidate wins | Incoming wins | Candidate Power/round | Incoming Power/round |
+|---:|---:|---:|---:|---:|
+| 1208203128 | 4,123/4,800 | 4,107/4,800 | 1.78758 | 1.77341 |
+| 1208203129 (independent confirmation) | 4,053/4,800 | 4,051/4,800 | 1.73972 | 1.75026 |
+| 1208203130 (`go:promote --apply`) | 4,091/4,800 | 4,070/4,800 | 1.77928 | 1.76104 |
+
+The promoted checkpoint is
+`locked-small5-equal-1208203126/gpu-lr-5e-07.model`; its SHA-256 is the current
+preceding generation's hash. The final-gate win rate is 85.23%, so win-first
+training remains active.
+
+### 2026-08-13 repeated conservative-rate promotion
+
+A fresh 32,768-game continuation from seed `1208203136` repeated the locked
+12-worker Metal/MPS pipeline and conservative rates
+`0.0000001,0.00000025,0.0000005,0.000001`. Uniform replay, equal three-head
+loss, one update per game, 256 environments, and frozen champion retention
+were unchanged. It completed in 814.10 seconds (40.25 games/second). The
+`0.0000005` path improved both lexicographic metrics on all three full gates:
+
+| Corpus seed | Candidate wins | Incoming wins | Candidate Power/round | Incoming Power/round |
+|---:|---:|---:|---:|---:|
+| 1208203138 | 4,148/4,800 | 4,141/4,800 | 1.80995 | 1.80289 |
+| 1208203139 (independent confirmation) | 4,105/4,800 | 4,080/4,800 | 1.79277 | 1.77855 |
+| 1208203140 (`go:promote --apply`) | 4,107/4,800 | 4,070/4,800 | 1.78898 | 1.75472 |
+
+The promoted checkpoint is
+`locked-small5-equal-1208203136/gpu-lr-5e-07.model`; its SHA-256 is the current
+small5 artifact hash above. The final-gate win rate is 85.56%, so win-first
+training remains active.
 
 ## World Daemon
 
@@ -237,6 +339,78 @@ The finalist passed both 128-game fixed-corpus gates and was promoted:
 | 2026081222 (independent confirmation) | 21/128 | 6/128 | 1.10590 | 0.97047 |
 
 The promoted artifact is the rate pair outcome `0.000001`, policy `0.0001`.
+
+### 2026-08-13 wide-shortlist KataGo promotion
+
+A 384-game `trio` population on seed `1208203106` used all 12 CPU workers and
+two Metal/OpenCL KataGo adviser processes. Increasing the plain KataGo
+shortlist from 4 to 32 supplied ranking supervision over a substantially
+larger fraction of the roughly 400 legal deployment choices without reducing
+measured trajectory throughput. The frozen incoming champion remained the
+retention adviser. Outcome rates were `0,0.0000001`; policy rates were
+`0.000001,0.0000025,0.000005,0.00001`. The selected checkpoint used outcome
+rate `0` and policy rate `0.000005`.
+
+| Corpus seed | Candidate wins | Incoming wins | Candidate Power/round | Incoming Power/round |
+|---:|---:|---:|---:|---:|
+| 1208203108 | 17/128 | 6/128 | 1.05594 | 0.96374 |
+| 1208203109 (independent confirmation) | 16/128 | 11/128 | 1.08389 | 1.00640 |
+| 1208203110 (`go:promote --apply`) | 23/128 | 15/128 | 1.14074 | 1.04310 |
+
+The promoted checkpoint is
+`locked-daemon19-kata32-1208203106/o0-p5e-06.model`; its SHA-256 is the current
+daemon19 artifact hash above. The 17.97% final-gate win rate remains far from
+saturation, so daemon19 training remains win-first.
+
+### 2026-08-13 Kata-focused pretraining result
+
+The later 32-candidate `trio` populations showed that KataGo supplied the
+selected route in nearly every World Daemon opening, while the trainer still
+paid for complete handcrafted and frozen-champion trajectories. A new `kata`
+research mode retains the exact native board, Bitburner opponent, seed phases,
+superko, terminal labels, and Kata rankings, but generates only the advised
+trajectory. A 24-game benchmark on seed `1208203146` reached 0.37955 games/s,
+versus about 0.204 games/s for the corresponding full `trio` regime. The
+384-game pretraining block on seed `1208203148` reached 0.43296 games/s and
+selected `o0-p2.5e-06.model` on unseen seed `1208203149`: 5/24 wins and
+1.15824 Power/round, versus 3/24 and 1.08021 for the champion.
+
+The candidate then entered the required exact CPU `trio` handoff: 120 games
+from seed `1208203150`, retaining the official champion and testing the raw
+candidate plus seven low-rate refinements. Kata supplied 119/120 selected
+routes, and throughput was 0.23711 games/s. On unseen screen seed `1208203151`
+the champion scored 3/24 and 1.05358 Power/round; the unchanged candidate scored
+1/24 and 0.95665, and no refinement exceeded 2/24. All were rejected, so the
+promoted daemon19 artifact remains unchanged. The result locks `kata` mode in
+as the faster research pretraining stage, never as a substitute for the CPU
+handoff or independent promotion gates.
+
+## Runtime storage gate
+
+The deployment experiment was isolated under `go-ai/experiments/` and removed
+after selecting the formats. Randomized board-value sweeps found no top-choice
+changes in 160 candidate groups per profile for either float16 or row-wise
+int8, but complete-game evaluation exposed a profile-specific sensitivity that
+pointwise error did not:
+
+| Profile and corpus | Float32 wins | Candidate storage wins | Decision |
+|---|---:|---:|---|
+| small5, seed 10992001, 2,400 mixed games | 2,055 | 2,057 int8 | row-wise int8 + float16 biases |
+| daemon19, seed 7193001, 16 games | 4 | 0 int8 | reject int8 |
+| daemon19, seed 7193001, 16 games | 4 | 4 float16 | float16 |
+
+The accepted daemon float16 artifact also improved the exact-win-tie
+Power/round from 1.20804 to 1.21537 on that corpus. The generated payloads are
+29,812 raw bytes for small5 and 52,678 for daemon19, or 109,992 base64
+characters together. They expand once to the existing float32 WebGPU layout;
+the measured warm 400-board shader p95 remained below 1 ms. With
+whitespace-only bundle minification, `start.js` fell from 1,151,718 to 773,692
+bytes. The experiment left no retained checkpoints or scripts.
+
+`go:promote --apply` now repeats the complete-game comparison between a newly
+promoted checkpoint and its decoded runtime artifact. A storage representation
+that loses games cannot be installed, even when its pointwise golden-vector
+errors look small.
 
 ## Clean handoff
 

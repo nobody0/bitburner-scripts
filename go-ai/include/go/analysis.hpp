@@ -20,6 +20,8 @@ struct Analysis {
   std::vector<Chain> chains;
   // x * size + y -> index in chains, or -1 for offline nodes.
   std::vector<int> chain_at;
+  mutable std::vector<std::vector<int>> neighbor_cache;
+  mutable std::vector<unsigned char> neighbor_ready;
 };
 
 struct EyeCandidate {

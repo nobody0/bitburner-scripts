@@ -374,7 +374,7 @@ export class WebGpuGoValueBackend implements GoValueBackend {
 }
 
 export interface WebGpuInferenceTiming {
-  /** Longest synchronous main-thread slice used to submit or parse this request. */
+  /** Total synchronous main-thread work used to submit and parse this request. */
   mainThreadMs: number;
   /** Wall time from evaluateBatch() invocation through copied, parsed output. */
   requestToParsedMs: number;

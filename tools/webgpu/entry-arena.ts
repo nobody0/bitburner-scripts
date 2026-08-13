@@ -42,6 +42,11 @@ async function main(): Promise<unknown> {
       }
 
       const summary = summarizeGoArena(opponent.name, gpuGames);
+      const phase = (name: keyof GoArenaGameResult["planningPhases"]) => {
+        const values = gpuGames.flatMap((game) => game.planningPhases[name]).sort((a, b) => a - b);
+        const at = (fraction: number) => values[Math.min(values.length - 1, Math.floor(values.length * fraction))] ?? 0;
+        return { p50: +at(0.5).toFixed(2), p95: +at(0.95).toFixed(2), max: +(values.at(-1) ?? 0).toFixed(2) };
+      };
       summaries.push({
         opponent: summary.opponent,
         games: summary.games,
@@ -51,6 +56,11 @@ async function main(): Promise<unknown> {
           p50: +summary.latencyMs.p50.toFixed(2),
           p95: +summary.latencyMs.p95.toFixed(2),
           max: +summary.latencyMs.max.toFixed(2),
+        },
+        planningPhases: {
+          preparation: phase("preparationMs"),
+          prediction: phase("predictionMs"),
+          gpuAndSelection: phase("gpuAndSelectionMs"),
         },
       });
     }

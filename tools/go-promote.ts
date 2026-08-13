@@ -11,10 +11,13 @@
  *   bun run go:promote daemon19 <candidate.model> --games 128 --seed 7193001
  *   bun run go:promote small5 <candidate.model> --apply
  *
- * `--apply` replaces the champion, re-exports the runtime artifact, and
- * regenerates the C++ golden fixture, so the deployed weights, the artifact,
- * and the test oracle can never drift apart.
+ * `--apply` stages the champion, re-exports the runtime artifact, regenerates
+ * the C++ golden fixture, runs the real shader, and compares the decoded
+ * runtime weights on the same complete-game corpus. Any failure restores the
+ * prior champion, artifact, and fixture.
  */
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
@@ -70,16 +73,20 @@ if (gate.exitCode !== 0) throw new Error(gate.stderr.toString() || "evaluator fa
 const output = gate.stdout.toString();
 console.log(output.trimEnd());
 
-const rows: Row[] = output.trim().split("\n").slice(1).map((line) => {
-  const [model, gameCount, wins, winRate, powerPerRound] = line.split("\t");
-  return {
-    model: model!,
-    games: Number(gameCount),
-    wins: Number(wins),
-    winRate: Number(winRate),
-    powerPerRound: Number(powerPerRound),
-  };
-});
+function parseRows(report: string): Row[] {
+  return report.trim().split("\n").slice(1).filter((line) => !line.startsWith("  ")).map((line) => {
+    const [model, gameCount, wins, winRate, powerPerRound] = line.split("\t");
+    return {
+      model: model!,
+      games: Number(gameCount),
+      wins: Number(wins),
+      winRate: Number(winRate),
+      powerPerRound: Number(powerPerRound),
+    };
+  });
+}
+
+const rows = parseRows(output);
 const championRow = rows.find((row) => row.model === champion);
 const candidateRow = rows.find((row) => row.model === candidate);
 if (!championRow || !candidateRow) throw new Error("evaluator did not report both models");
@@ -99,19 +106,56 @@ if (!improved) {
 if (!Bun.argv.includes("--apply")) {
   console.log("\nre-run with --apply to install this candidate and refresh the deployment artifacts");
 } else {
-  await Bun.write(champion, Bun.file(candidate));
-  console.log(`\ninstalled ${candidate} as ${champion}`);
-  for (const step of [
-    [join(ROOT, "tools", "go-export-model.ts"), champion, profile],
-    [join(ROOT, "tools", "go-golden-fixture.ts")],
-  ]) {
+  const artifact = join(ROOT, "shared", "strategy", "go", "neural", "models", `${profile}.ts`);
+  const fixture = join(ROOT, "tests", "fixtures", "go-value.json");
+  const originals = {
+    champion: await Bun.file(champion).text(),
+    artifact: await Bun.file(artifact).text(),
+    fixture: await Bun.file(fixture).text(),
+  };
+  const scratch = mkdtempSync(join(tmpdir(), `go-promote-${profile}-`));
+  const runtimeModel = join(scratch, `${profile}-runtime.model`);
+  const runStep = (step: string[]) => {
     const run = Bun.spawnSync(["bun", "run", ...step], { stdout: "inherit", stderr: "inherit" });
     if (run.exitCode !== 0) throw new Error(`post-promotion step failed: ${step.join(" ")}`);
+  };
+  try {
+    await Bun.write(champion, Bun.file(candidate));
+    console.log(`\nstaged ${candidate} as ${champion}`);
+    runStep([join(ROOT, "tools", "go-export-model.ts"), champion, profile]);
+    runStep([join(ROOT, "tools", "go-golden-fixture.ts")]);
+    runStep([join(ROOT, "tools", "go-export-model.ts"), "--check"]);
+    runStep([join(ROOT, "tools", "go-webgpu-test.ts")]);
+    runStep([join(ROOT, "tools", "go-write-runtime-model.ts"), profile, runtimeModel]);
+
+    const runtimeCommand = profile === "small5"
+      ? [join(RELEASE, "go_cpp_evaluate_mixed"), String(games), String(seed), champion, runtimeModel, "--small5"]
+      : [join(RELEASE, "go_cpp_evaluate"), String(games), String(seed), "????????????", "19", champion, runtimeModel];
+    const runtimeGate = Bun.spawnSync(runtimeCommand, { stdout: "pipe", stderr: "pipe" });
+    if (runtimeGate.exitCode !== 0) throw new Error(runtimeGate.stderr.toString() || "runtime evaluator failed");
+    const runtimeOutput = runtimeGate.stdout.toString();
+    console.log("\nruntime storage gate:");
+    console.log(runtimeOutput.trimEnd());
+    const runtimeRows = parseRows(runtimeOutput);
+    const fullPrecision = runtimeRows.find((row) => row.model === champion);
+    const deployed = runtimeRows.find((row) => row.model === runtimeModel);
+    if (!fullPrecision || !deployed) throw new Error("runtime evaluator did not report both models");
+    if (deployed.wins < fullPrecision.wins) {
+      throw new Error(`runtime storage loses ${fullPrecision.wins - deployed.wins} games versus its promoted checkpoint`);
+    }
+    console.log(`\ninstalled ${profile}: runtime storage retained ${deployed.wins}/${deployed.games} wins`);
+  } catch (error) {
+    await Bun.write(champion, originals.champion);
+    await Bun.write(artifact, originals.artifact);
+    await Bun.write(fixture, originals.fixture);
+    console.error("\npromotion failed; restored the previous champion, artifact, and golden fixture");
+    throw error;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
   console.log(
-    "\nartifact and golden fixture refreshed. Next:\n"
-    + "  bun test tests/go-neural.test.ts        # TS reference vs C++ golden vectors\n"
-    + "  bun run go:gpu                          # WGSL shader vs the same vectors\n"
+    "\nartifact, golden fixture, and WebGPU gate verified. Next:\n"
+    + "  bun run typecheck && bun test           # repository gates\n"
     + "  bun run go:arena --games 128            # refresh winrate/latency priors\n"
     + "  then refit GO_REWARD_RULES in shared/strategy/go/rewards.ts",
   );

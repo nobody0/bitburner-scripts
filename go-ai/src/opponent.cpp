@@ -79,6 +79,70 @@ const Chain* chain_at(const Analysis& analysis, Point point) {
   return index < 0 ? nullptr : &analysis.chains[static_cast<std::size_t>(index)];
 }
 
+std::vector<Point> legal_moves_from_analysis(
+  const Position& position,
+  Stone player,
+  const Analysis& analysis
+) {
+  const int size = position.board.size;
+  const char own = static_cast<char>(player);
+  const char enemy = static_cast<char>(player == Stone::black ? Stone::white : Stone::black);
+  const std::string current = position.previous_hashes.empty() ? std::string{} : board_hash(position.board);
+  const std::unordered_set<std::string> history(
+    position.previous_hashes.begin(), position.previous_hashes.end());
+  std::vector<Point> result;
+  for (int x = 0; x < size; ++x) for (int y = 0; y < size; ++y) {
+    if (at(position.board, x, y) != '.') continue;
+    bool survives = false;
+    bool captures = false;
+    for (int direction = 0; direction < 4; ++direction) {
+      const int nx = x + (direction == 1 ? 1 : direction == 3 ? -1 : 0);
+      const int ny = y + (direction == 0 ? 1 : direction == 2 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const char cell = at(position.board, nx, ny);
+      if (cell == '.') {
+        survives = true;
+        continue;
+      }
+      const Chain* chain = chain_at(analysis, {nx, ny});
+      if (!chain) continue;
+      if (cell == own && chain->liberties.size() > 1) survives = true;
+      else if (cell == enemy && chain->liberties.size() == 1) captures = true;
+    }
+    if (!survives && !captures) continue;
+    const Point point{x, y};
+    if (captures) {
+      if (play_move(position.board, point, player, history)) result.push_back(point);
+      continue;
+    }
+    bool repeated = false;
+    const std::size_t changed = static_cast<std::size_t>(x * size + y);
+    if (position.previous_hashes.size() > 4) {
+      std::string next = current;
+      next[changed] = own;
+      repeated = history.contains(next);
+      if (!repeated) result.push_back(point);
+      continue;
+    }
+    for (const auto& previous : position.previous_hashes) {
+      if (previous.size() != current.size() || previous[changed] != own) continue;
+      bool equal = true;
+      for (std::size_t index = 0; index < current.size(); ++index) {
+        if (index != changed && previous[index] != current[index]) {
+          equal = false;
+          break;
+        }
+      }
+      if (equal) {
+        repeated = true;
+        break;
+      }
+    }
+    if (!repeated) result.push_back(point);
+  }
+  return result;
+}
+
 std::vector<MoveOption> expansion_moves(
   const Board& board,
   const Analysis& analysis,
@@ -102,13 +166,14 @@ std::vector<MoveOption> liberty_growth_moves(
   Stone player,
   const std::vector<Point>& available
 ) {
-  std::unordered_set<int> allowed;
-  for (const auto point : available) allowed.insert(key(analysis.board, point));
+  std::vector<unsigned char> allowed(
+    static_cast<std::size_t>(analysis.board.size * analysis.board.size));
+  for (const auto point : available) allowed[static_cast<std::size_t>(key(analysis.board, point))] = 1;
   std::vector<MoveOption> result;
   for (const auto& chain : analysis.chains) {
     if (chain.color != static_cast<char>(player)) continue;
     for (const auto point : chain.liberties) {
-      if (!allowed.contains(key(analysis.board, point))) continue;
+      if (allowed[static_cast<std::size_t>(key(analysis.board, point))] == 0) continue;
       const Chain* weakest = weakest_neighbor_chain(analysis, point.x, point.y, player);
       const int old_count = weakest ? static_cast<int>(weakest->liberties.size()) : 99;
       const int new_count = static_cast<int>(effective_liberties(analysis, point.x, point.y, player).size());
@@ -149,36 +214,41 @@ std::optional<MoveOption> surround_move(
   bool smart
 ) {
   const Stone enemy = player == Stone::black ? Stone::white : Stone::black;
-  std::unordered_set<int> allowed;
-  for (const auto point : available) allowed.insert(key(analysis.board, point));
-  std::vector<Point> liberties;
+  std::vector<unsigned char> allowed(
+    static_cast<std::size_t>(analysis.board.size * analysis.board.size));
+  for (const auto point : available) allowed[static_cast<std::size_t>(key(analysis.board, point))] = 1;
+  std::optional<MoveOption> first_atari;
+  std::optional<MoveOption> first_surround;
   for (const auto& chain : analysis.chains) if (chain.color == static_cast<char>(enemy)) {
-    for (const auto liberty : chain.liberties) if (allowed.contains(key(analysis.board, liberty))) liberties.push_back(liberty);
-  }
-  std::vector<MoveOption> capture;
-  std::vector<MoveOption> atari;
-  std::vector<MoveOption> surround;
-  for (const auto point : liberties) {
-    const int effective = static_cast<int>(effective_liberties(analysis, point.x, point.y, player).size());
-    const Chain* weakest = weakest_neighbor_chain(analysis, point.x, point.y, enemy);
-    const int old_count = weakest ? static_cast<int>(weakest->liberties.size()) : 99;
-    const int weakest_length = weakest ? static_cast<int>(weakest->points.size()) : 99;
-    std::unordered_set<int> liberty_groups;
-    if (weakest) for (const auto liberty : weakest->liberties) {
-      const Chain* group = chain_at(analysis, liberty);
-      liberty_groups.insert(group ? group->id : -1);
+    for (const auto point : chain.liberties) {
+      if (allowed[static_cast<std::size_t>(key(analysis.board, point))] == 0) continue;
+      const int effective = static_cast<int>(effective_liberties(analysis, point.x, point.y, player).size());
+      const Chain* weakest = weakest_neighbor_chain(analysis, point.x, point.y, enemy);
+      const int old_count = weakest ? static_cast<int>(weakest->liberties.size()) : 99;
+      if (effective <= 2 && old_count > 2) continue;
+      MoveOption move{.point = point, .old_liberties = old_count, .new_liberties = old_count - 1};
+      if (old_count <= 1) return move;
+      if (old_count == 2) {
+        bool one_liberty_group = weakest != nullptr && !weakest->liberties.empty();
+        int first_group = std::numeric_limits<int>::min();
+        if (weakest) for (const auto liberty : weakest->liberties) {
+          const Chain* group = chain_at(analysis, liberty);
+          const int id = group ? group->id : -1;
+          if (first_group == std::numeric_limits<int>::min()) first_group = id;
+          else if (id != first_group) {
+            one_liberty_group = false;
+            break;
+          }
+        }
+        if (effective >= 2 || (one_liberty_group && static_cast<int>(weakest->points.size()) > 3) || !smart) {
+          if (!first_atari) first_atari = move;
+        }
+      } else if (effective >= 2 && !first_surround) {
+        first_surround = move;
+      }
     }
-    if (effective <= 2 && old_count > 2) continue;
-    MoveOption move{.point = point, .old_liberties = old_count, .new_liberties = old_count - 1};
-    if (old_count <= 1) capture.push_back(move);
-    else if (old_count == 2 && (effective >= 2 || (liberty_groups.size() == 1 && weakest_length > 3) || !smart)) {
-      atari.push_back(move);
-    } else if (effective >= 2) surround.push_back(move);
   }
-  if (!capture.empty()) return capture.front();
-  if (!atari.empty()) return atari.front();
-  if (!surround.empty()) return surround.front();
-  return std::nullopt;
+  return first_atari ? first_atari : first_surround;
 }
 
 std::vector<MoveOption> eye_creation_moves(
@@ -186,7 +256,8 @@ std::vector<MoveOption> eye_creation_moves(
   const Analysis& analysis,
   Stone player,
   const std::vector<Point>& available,
-  int max_liberties = 99
+  int max_liberties = 99,
+  bool stop_at_first_life = false
 ) {
   const auto current_by_chain = eyes_by_chain(analysis, player);
   int current_living = 0;
@@ -196,15 +267,15 @@ std::vector<MoveOption> eye_creation_moves(
     if (!current_by_chain[index].empty()) ++current_eye_count;
     if (current_by_chain[index].size() >= 2) { ++current_living; living.insert(static_cast<int>(index)); }
   }
-  std::unordered_set<int> allowed;
-  for (const auto point : available) allowed.insert(key(board, point));
+  std::vector<unsigned char> allowed(static_cast<std::size_t>(board.size * board.size));
+  for (const auto point : available) allowed[static_cast<std::size_t>(key(board, point))] = 1;
   std::vector<Point> candidates;
   for (std::size_t index = 0; index < analysis.chains.size(); ++index) {
     const Chain& chain = analysis.chains[index];
     if (chain.color != static_cast<char>(player) || chain.points.size() <= 1
       || static_cast<int>(chain.liberties.size()) > max_liberties || living.contains(static_cast<int>(index))) continue;
     for (const auto point : chain.liberties) {
-      if (!allowed.contains(key(board, point))) continue;
+      if (allowed[static_cast<std::size_t>(key(board, point))] == 0) continue;
       const auto neighborhood = cardinal(board, point.x, point.y);
       const int friendly_or_edge = 4 - static_cast<int>(neighborhood.size())
         + static_cast<int>(std::count_if(neighborhood.begin(), neighborhood.end(), [&](Point neighbor) {
@@ -217,16 +288,24 @@ std::vector<MoveOption> eye_creation_moves(
     }
   }
   std::vector<MoveOption> result;
+  std::unordered_map<int, std::pair<int, int>> outcomes;
   for (const auto point : candidates) {
-    const auto new_eyes = all_eyes(analyze_board(evaluate_move(board, point, player)), player);
-    const int new_living = static_cast<int>(std::count_if(new_eyes.begin(), new_eyes.end(), [](const auto& eyes) {
-      return eyes.size() >= 2;
-    }));
-    const int new_eye_count = static_cast<int>(std::count_if(new_eyes.begin(), new_eyes.end(), [](const auto& eyes) {
-      return !eyes.empty();
-    }));
+    const int encoded_point = key(board, point);
+    auto found = outcomes.find(encoded_point);
+    if (found == outcomes.end()) {
+      const auto new_eyes = all_eyes(analyze_board(evaluate_move(board, point, player)), player);
+      const int new_living = static_cast<int>(std::count_if(new_eyes.begin(), new_eyes.end(), [](const auto& eyes) {
+        return eyes.size() >= 2;
+      }));
+      const int new_eye_count = static_cast<int>(std::count_if(new_eyes.begin(), new_eyes.end(), [](const auto& eyes) {
+        return !eyes.empty();
+      }));
+      found = outcomes.emplace(encoded_point, std::pair{new_living, new_eye_count}).first;
+    }
+    const auto [new_living, new_eye_count] = found->second;
     if (new_living > current_living || (new_eye_count > current_eye_count && new_living == current_living)) {
       result.push_back({.point = point, .creates_life = new_living > current_living});
+      if (stop_at_first_life && new_living > current_living) break;
     }
   }
   std::stable_sort(result.begin(), result.end(), [](const MoveOption& left, const MoveOption& right) {
@@ -274,7 +353,7 @@ std::optional<MoveOption> corner_move(const Board& board) {
 
 OptionSpace prepare_option_space(const Position& position, bool smart) {
   OptionSpace space{.position = position, .analysis = analyze_board(position.board)};
-  space.legal = legal_moves(position, Stone::white);
+  space.legal = legal_moves_from_analysis(position, Stone::white, space.analysis);
   for (const auto point : space.legal) space.legal_set.insert(key(position.board, point));
   space.available = disputed_territory(position, Stone::white, smart, space.analysis, space.legal);
   const auto contested = disputed_moves(space.analysis, space.available);
@@ -285,7 +364,7 @@ OptionSpace prepare_option_space(const Position& position, bool smart) {
   space.defenses = defend_candidates(space.growth_moves);
   space.surround = surround_move(space.analysis, Stone::white, space.available, smart);
   if (!space.end_game) {
-    space.eyes = eye_creation_moves(position.board, space.analysis, Stone::white, space.available);
+    space.eyes = eye_creation_moves(position.board, space.analysis, Stone::white, space.available, 99, true);
     space.eye_block = eye_block_move(position.board, space.analysis, Stone::white, space.available);
     space.patterns = pattern_moves(position.board, Stone::white, space.available, smart);
   }

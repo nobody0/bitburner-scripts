@@ -7,6 +7,7 @@
 #include "go/rules.hpp"
 
 #include <cstdlib>
+#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -91,6 +92,34 @@ void reply(int argc, char** argv) {
   }
 }
 
+void reply_bench(int argc, char** argv) {
+  if (argc != 8) throw std::invalid_argument("reply-bench SIZE OPPONENT SEED PASS_COUNT ITERATIONS BOARD");
+  const int size = std::stoi(argv[2]);
+  const int iterations = std::stoi(argv[6]);
+  const Position position{
+    .board = board_from_hash(size, argv[7]),
+    .consecutive_passes = std::stoi(argv[5]),
+  };
+  std::size_t checksum = 0;
+  const auto started = std::chrono::steady_clock::now();
+  for (int iteration = 0; iteration < iterations; ++iteration) {
+    const auto forecast = predict_opponent_replies(
+      position,
+      parse_opponent(argv[3]),
+      std::stod(argv[4]) + iteration * 200.0);
+    checksum += forecast.replies.size();
+    for (const auto& reply : forecast.replies) {
+      checksum += static_cast<std::size_t>(reply.move.pass ? 1 : 2 + reply.move.point.x * size + reply.move.point.y);
+    }
+  }
+  const double elapsed_ms = std::chrono::duration<double, std::milli>(
+    std::chrono::steady_clock::now() - started).count();
+  std::cout << std::setprecision(10) << "iterations\t" << iterations
+    << "\ttotal_ms\t" << elapsed_ms
+    << "\tper_prediction_ms\t" << elapsed_ms / iterations
+    << "\tchecksum\t" << checksum << '\n';
+}
+
 // Golden vectors for the deployed TypeScript/WebGPU inference ports: raw
 // decoded predictions for result boards, bypassing reply prediction entirely.
 void value(int argc, char** argv) {
@@ -129,6 +158,7 @@ int main(int argc, char** argv) {
     const std::string command = argv[1];
     if (command == "analyze") analyze(argc, argv);
     else if (command == "whrng") random_values(argc, argv);
+    else if (command == "reply-bench") reply_bench(argc, argv);
     else if (command == "reward") reward(argc, argv);
     else if (command == "reply") reply(argc, argv);
     else if (command == "value") value(argc, argv);

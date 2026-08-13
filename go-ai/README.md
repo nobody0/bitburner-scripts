@@ -177,9 +177,12 @@ existing run.
 The trajectory argument selects generation. `teacher` is pure search
 distillation. `duel` plays the frozen champion alongside the teacher from the
 same opening and paired environment stream. `trio` adds a KataGo episode and
-trains only from the best of all three complete routes. All routes use the same
-native opening, reply phases, rules, terminal reward, and win-first then
-Power/round comparison. Smoke audits selected champion routes in 12/100
+uses the best of all three complete routes for ranking while retaining all
+three native terminal outcomes. `kata` is a research-only high-throughput
+pretraining mode that generates just the exact native Kata-advised trajectory;
+its finalists still require a fresh `trio` handoff and the unchanged promotion
+gates. All routes use the same native opening, reply phases, rules, terminal
+reward, and win-first then Power/round comparison. Smoke audits selected champion routes in 12/100
 balanced 5x5 openings and 1/12 World Daemon openings; the integrated Kata
 smokes selected its route on six balanced 5x5 openings and one 19x19 daemon
 opening.
@@ -284,15 +287,23 @@ the champion and immediately re-runs steps 2 and 3, so weights, artifact, and
 test oracle cannot drift apart. Always gate on a fresh corpus seed.
 
 **2. Export — narrow to a deployable artifact.**
-`bun run go:export` converts the promoted checkpoints to float32, reorders the
-tensors for inference, and writes generated modules under
-`shared/strategy/go/neural/models/` (~150 KB each versus ~600 KB checkpoints).
+`bun run go:export` reorders the promoted checkpoints for inference and writes
+generated modules under `shared/strategy/go/neural/models/`. The 5x5 profile
+uses row-wise symmetric int8 weights with float16 biases; the more
+quantization-sensitive World Daemon profile uses float16 throughout. Together
+they occupy about 111 KB of TypeScript source instead of 296 KB as base64
+float32 or roughly 1.2 MB as training checkpoints. Both formats expand once to
+the shader's float32 layout when their profile is first used, so compression
+adds no arithmetic to a turn. `bun run go:export --check` fails when a generated
+artifact, its source digest, or its payload digest is stale.
 
 **3. Golden vectors — pin the ports to this trainer.**
 `bun run go:golden` (needs `go_cpp_oracle`) regenerates
-`tests/fixtures/go-value.json` from `go_cpp_oracle value`: exact predictions
+`tests/fixtures/go-value.json` from `go_cpp_oracle value` after materializing
+the decoded runtime weights as a temporary native checkpoint: exact predictions
 for 14 boards spanning every 5x5 enemy head, offline-heavy positions, and
-sub-extent padding.
+sub-extent padding. Thus the shader stays pinned to native inference without
+pretending intentional storage quantization is a port error.
 
 **4. Inference — one TypeScript backend.**
 `shared/strategy/go/neural/` keeps the exact rules and the clean-room reply
@@ -306,7 +317,7 @@ evaluation, and generation of the committed golden vectors.
 `bun run go:gpu` runs the real WGSL in headless Chrome (Dawn, the same WebGPU
 family as Bitburner's Electron) against the step-3 vectors: every case, every
 head, and all three outputs, plus batch-versus-single equality, buffer
-capacity growth past 512 boards, and dispatch latency. `tests/go-webgpu.test.ts`
+capacity growth past 512 boards, cold decode time, and dispatch latency. `tests/go-webgpu.test.ts`
 runs the same gate inside `bun test`; missing Chrome or WebGPU is a failure,
 not a skip. `bun run go:gpu -- --arena` additionally plays complete oracle games
 through the same WebGPU backend.

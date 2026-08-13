@@ -490,7 +490,7 @@ describe("go", () => {
     }
     samples.sort((a, b) => a - b);
     // Preparation dominates (one reply option space per candidate) and is
-    // sliced cooperatively in production; the full turn budget is 50 ms.
+    // optimized as one synchronous prediction in production; the full turn budget is 50 ms.
     expect(samples[10]!).toBeLessThan(40);
   });
 

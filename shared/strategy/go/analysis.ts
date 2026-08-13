@@ -18,6 +18,13 @@ export interface GoAnalysis {
   /** Extent-major chain lookup; numeric indexing avoids allocating coordinate
    * strings in the planner's hottest repeated analysis path. */
   chainAt: Array<GoChain | undefined>;
+  /** Reused by effective-liberty queries; each analysis is confined to one
+   * synchronous prediction, so a monotonically increasing mark is sufficient. */
+  libertyScratch: { seen: Uint32Array; mark: number };
+  /** Immutable topology caches shared by territory and eye-option passes. */
+  neighborCache: Array<GoChain[] | undefined>;
+  potentialEyeCache: Array<GoEyeCandidate[] | undefined>;
+  eyesCache: Array<Map<number, GoChain[]> | undefined>;
 }
 
 export interface GoEyeCandidate {
@@ -88,8 +95,8 @@ export function analyzeBoard(board: GoBoard): GoAnalysis {
           }
         }
       }
-      const points = [...encoded].sort((a, b) => a - b)
-        .map((point) => ({ x: Math.floor(point / size), y: point % size }));
+      const ordered = [...encoded].sort((a, b) => a - b);
+      const points = ordered.map((point) => ({ x: Math.floor(point / size), y: point % size }));
       const liberties: GoPoint[] = [];
       // Empty chains cannot have an adjacent empty point outside their own
       // connected component. Stone-chain liberties retain upstream's
@@ -115,14 +122,46 @@ export function analyzeBoard(board: GoBoard): GoAnalysis {
       for (const point of points) chainAt[point.x * size + point.y] = chain;
     }
   }
-  return { board, chains, chainAt };
+  return {
+    board,
+    chains,
+    chainAt,
+    libertyScratch: { seen: new Uint32Array(area), mark: 0 },
+    neighborCache: new Array(chains.length),
+    potentialEyeCache: new Array(2),
+    eyesCache: new Array(2),
+  };
+}
+
+function neighboringChain(analysis: GoAnalysis, source: GoChain): GoChain[] {
+  const cached = analysis.neighborCache[source.id];
+  if (cached) return cached;
+  const size = analysis.board.size;
+  const found = new Uint8Array(analysis.chains.length);
+  found[source.id] = 1;
+  const result: GoChain[] = [];
+  for (const point of source.points) {
+    for (let direction = 0; direction < 4; direction++) {
+      const nx = point.x + (direction === 1 ? 1 : direction === 3 ? -1 : 0);
+      const ny = point.y + (direction === 0 ? 1 : direction === 2 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const chain = analysis.chainAt[nx * size + ny];
+      // getAllNeighboringChains ignores empty cells even when they belong to
+      // a different disconnected empty chain.
+      if (!chain || chain.color === "." || found[chain.id]) continue;
+      found[chain.id] = 1;
+      result.push(chain);
+    }
+  }
+  analysis.neighborCache[source.id] = result;
+  return result;
 }
 
 export function neighboringChains(analysis: GoAnalysis, points: readonly GoPoint[]): GoChain[] {
   const size = analysis.board.size;
   const own = new Uint8Array(size * size);
   for (const point of points) own[point.x * size + point.y] = 1;
-  const found = new Set<number>();
+  const found = new Uint8Array(analysis.chains.length);
   const result: GoChain[] = [];
   for (const point of points) {
     for (let direction = 0; direction < 4; direction++) {
@@ -132,8 +171,8 @@ export function neighboringChains(analysis: GoAnalysis, points: readonly GoPoint
       const index = nx * size + ny;
       if (own[index] || analysis.board.rows[nx]![ny] === ".") continue;
       const chain = analysis.chainAt[index];
-      if (!chain || found.has(chain.id)) continue;
-      found.add(chain.id);
+      if (!chain || found[chain.id]) continue;
+      found[chain.id] = 1;
       result.push(chain);
     }
   }
@@ -141,31 +180,50 @@ export function neighboringChains(analysis: GoAnalysis, points: readonly GoPoint
 }
 
 export function effectiveLiberties(analysis: GoAnalysis, x: number, y: number, player: Stone): GoPoint[] {
-  const neighbors = cardinal(analysis.board, x, y)
-    .filter((point) => {
-      const color = cellAt(analysis.board, point.x, point.y);
-      return color === "." || color === player;
-    });
-  const direct = neighbors.filter((point) => cellAt(analysis.board, point.x, point.y) === ".");
-  const allied = neighbors
-    .filter((point) => cellAt(analysis.board, point.x, point.y) === player)
-    .flatMap((point) => analysis.chainAt[point.x * analysis.board.size + point.y]?.liberties ?? []);
-  const seen = new Set<string>();
-  return [...direct, ...allied].filter((point) => {
-    const id = key(point.x, point.y);
-    if ((point.x === x && point.y === y) || seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  });
+  const size = analysis.board.size;
+  const scratch = analysis.libertyScratch;
+  const mark = ++scratch.mark;
+  const seen = scratch.seen;
+  const result: GoPoint[] = [];
+  const allied: GoChain[] = [];
+  // Preserve upstream's direct-liberties-first ordering, followed by each
+  // adjacent allied chain in north/east/south/west order.
+  for (let direction = 0; direction < 4; direction++) {
+    const nx = x + (direction === 1 ? 1 : direction === 3 ? -1 : 0);
+    const ny = y + (direction === 0 ? 1 : direction === 2 ? -1 : 0);
+    if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+    const color = analysis.board.rows[nx]![ny];
+    if (color === ".") {
+      const index = nx * size + ny;
+      if (index !== x * size + y && seen[index] !== mark) {
+        seen[index] = mark;
+        result.push({ x: nx, y: ny });
+      }
+    } else if (color === player) {
+      const chain = analysis.chainAt[nx * size + ny];
+      if (chain) allied.push(chain);
+    }
+  }
+  for (const chain of allied) for (const point of chain.liberties) {
+    const index = point.x * size + point.y;
+    if (index === x * size + y || seen[index] === mark) continue;
+    seen[index] = mark;
+    result.push(point);
+  }
+  return result;
 }
 
 export function weakestNeighborChain(analysis: GoAnalysis, x: number, y: number, player: Stone): GoChain | undefined {
-  const friendly = cardinal(analysis.board, x, y)
-    .filter((point) => cellAt(analysis.board, point.x, point.y) === player)
-    .map((point) => analysis.chainAt[point.x * analysis.board.size + point.y])
-    .filter((chain): chain is GoChain => Boolean(chain));
-  const minimum = friendly.reduce((value, chain) => Math.min(value, chain.liberties.length), friendly[0]?.liberties.length ?? 99);
-  return friendly.find((chain) => chain.liberties.length === minimum);
+  const size = analysis.board.size;
+  let weakest: GoChain | undefined;
+  for (let direction = 0; direction < 4; direction++) {
+    const nx = x + (direction === 1 ? 1 : direction === 3 ? -1 : 0);
+    const ny = y + (direction === 0 ? 1 : direction === 2 ? -1 : 0);
+    if (nx < 0 || ny < 0 || nx >= size || ny >= size || analysis.board.rows[nx]![ny] !== player) continue;
+    const chain = analysis.chainAt[nx * size + ny];
+    if (chain && (!weakest || chain.liberties.length < weakest.liberties.length)) weakest = chain;
+  }
+  return weakest;
 }
 
 function replace(board: GoBoard, x: number, y: number, color: Cell): GoBoard {
@@ -242,8 +300,61 @@ export function evaluateMove(
   y: number,
   player: Stone,
   workspace = localGroupWorkspace(board.size),
+  preparedAnalysis?: GoAnalysis,
 ): GoBoard {
   if (cellAt(board, x, y) === "#") return board;
+  if (cellAt(board, x, y) === "." && preparedAnalysis) {
+    const size = board.size;
+    const enemy: Stone = player === "X" ? "O" : "X";
+    const adjacentEnemy = new Uint8Array(preparedAnalysis.chains.length);
+    const adjacentAllies = new Uint8Array(preparedAnalysis.chains.length);
+    let captures = false;
+    let survives = false;
+    for (let direction = 0; direction < 4; direction++) {
+      const nx = x + (direction === 1 ? 1 : direction === 3 ? -1 : 0);
+      const ny = y + (direction === 0 ? 1 : direction === 2 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const color = board.rows[nx]![ny];
+      if (color === ".") {
+        survives = true;
+        continue;
+      }
+      const chain = preparedAnalysis.chainAt[nx * size + ny];
+      if (!chain) continue;
+      if (color === enemy) {
+        if (chain.liberties.length === 1) {
+          adjacentEnemy[chain.id] = 1;
+          captures = true;
+        }
+      } else if (color === player) {
+        adjacentAllies[chain.id] = 1;
+        if (chain.liberties.length > 1) survives = true;
+      }
+    }
+    const rows = [...board.rows];
+    const edited = new Array<string[] | undefined>(size);
+    const set = (px: number, py: number, color: Cell): void => {
+      const column = edited[px] ??= [...rows[px]!];
+      column[py] = color;
+    };
+    set(x, y, player);
+    if (captures) {
+      for (const chain of preparedAnalysis.chains) {
+        if (!adjacentEnemy[chain.id]) continue;
+        for (const point of chain.points) set(point.x, point.y, ".");
+      }
+    } else if (!survives) {
+      set(x, y, ".");
+      for (const chain of preparedAnalysis.chains) {
+        if (!adjacentAllies[chain.id]) continue;
+        for (const point of chain.points) set(point.x, point.y, ".");
+      }
+    }
+    for (let column = 0; column < size; column++) {
+      if (edited[column]) rows[column] = edited[column]!.join("");
+    }
+    return { rows, size };
+  }
   let result = replace(board, x, y, player);
   const enemy: Stone = player === "X" ? "O" : "X";
   const checked = workspace.checked;
@@ -270,34 +381,36 @@ export function evaluateMove(
   return result;
 }
 
-/** Evaluate legality from the already-built chain graph. Most moves cannot
- * capture, so their result is one string replacement instead of rebuilding
- * several flood-filled groups. Captures retain the full rules path. */
-function legalResultFromAnalysis(
+/** Evaluate legality from the already-built chain graph. The numeric result
+ * distinguishes ordinary moves from captures so callers only materialize a
+ * result board when a non-empty superko history actually needs its hash. */
+function legalMoveKindFromAnalysis(
   board: GoBoard,
   analysis: GoAnalysis,
   x: number,
   y: number,
   player: Stone,
-  workspace: LocalGroupWorkspace,
-): GoBoard | undefined {
-  if (cellAt(board, x, y) !== ".") return;
+): 0 | 1 | 2 {
+  if (cellAt(board, x, y) !== ".") return 0;
   const enemy: Stone = player === "X" ? "O" : "X";
   let survives = false;
   let captures = false;
-  for (const neighbor of cardinal(board, x, y)) {
-    const color = cellAt(board, neighbor.x, neighbor.y);
+  for (let direction = 0; direction < 4; direction++) {
+    const nx = x + (direction === 1 ? 1 : direction === 3 ? -1 : 0);
+    const ny = y + (direction === 0 ? 1 : direction === 2 ? -1 : 0);
+    if (nx < 0 || ny < 0 || nx >= board.size || ny >= board.size) continue;
+    const color = board.rows[nx]![ny];
     if (color === ".") {
       survives = true;
       continue;
     }
-    const chain = analysis.chainAt[neighbor.x * board.size + neighbor.y];
+    const chain = analysis.chainAt[nx * board.size + ny];
     if (!chain) continue;
     if (color === player && chain.liberties.length > 1) survives = true;
     else if (color === enemy && chain.liberties.length === 1) captures = true;
   }
-  if (!survives && !captures) return;
-  return captures ? evaluateMove(board, x, y, player, workspace) : replace(board, x, y, player);
+  if (!survives && !captures) return 0;
+  return captures ? 2 : 1;
 }
 
 export function legalPoints(
@@ -305,43 +418,51 @@ export function legalPoints(
   player: Stone,
   history: readonly string[][] = [],
   preparedAnalysis?: GoAnalysis,
+  preparedHistory?: ReadonlySet<string>,
 ): GoPoint[] {
-  const prior = new Set(history.map((position) => position.join("")));
+  const prior = preparedHistory ? undefined : history.map((position) => position.join(""));
+  const priorSet = preparedHistory ?? (prior!.length > 4 ? new Set(prior) : undefined);
+  const hasHistory = preparedHistory ? preparedHistory.size > 0 : prior!.length > 0;
+  const current = hasHistory ? board.rows.join("") : "";
   const result: GoPoint[] = [];
   const workspace = localGroupWorkspace(board.size);
   const analysis = preparedAnalysis ?? analyzeBoard(board);
   for (let x = 0; x < board.size; x++) {
     for (let y = 0; y < board.size; y++) {
-      const next = legalResultFromAnalysis(board, analysis, x, y, player, workspace);
-      if (!next || prior.has(next.rows.join(""))) continue;
+      const kind = legalMoveKindFromAnalysis(board, analysis, x, y, player);
+      if (!kind) continue;
+      if (hasHistory) {
+        if (kind === 2) {
+          const next = evaluateMove(board, x, y, player, workspace, analysis).rows.join("");
+          if ((priorSet ? priorSet.has(next) : prior!.includes(next))) continue;
+        } else {
+          const changed = x * board.size + y;
+          if (priorSet) {
+            const next = current.slice(0, changed) + player + current.slice(changed + 1);
+            if (priorSet.has(next)) continue;
+            result.push({ x, y });
+            continue;
+          }
+          let repeated = false;
+          for (const previous of prior!) {
+            if (previous[changed] !== player || previous.length !== current.length) continue;
+            let equal = true;
+            for (let index = 0; index < current.length; index++) {
+              if (index !== changed && previous[index] !== current[index]) {
+                equal = false;
+                break;
+              }
+            }
+            if (equal) {
+              repeated = true;
+              break;
+            }
+          }
+          if (repeated) continue;
+        }
+      }
       result.push({ x, y });
     }
-  }
-  return result;
-}
-
-/** Cooperative equivalent used by the production neural planner. A 19x19
- * legality sweep is several milliseconds as one task even though each row is
- * cheap, so give the caller a chance to yield between rows. */
-export async function legalPointsCooperative(
-  board: GoBoard,
-  player: Stone,
-  history: readonly string[][] = [],
-  checkpoint: () => Promise<void> | undefined,
-  preparedAnalysis?: GoAnalysis,
-): Promise<GoPoint[]> {
-  const prior = new Set(history.map((position) => position.join("")));
-  const result: GoPoint[] = [];
-  const workspace = localGroupWorkspace(board.size);
-  const analysis = preparedAnalysis ?? analyzeBoard(board);
-  for (let x = 0; x < board.size; x++) {
-    for (let y = 0; y < board.size; y++) {
-      const next = legalResultFromAnalysis(board, analysis, x, y, player, workspace);
-      if (!next || prior.has(next.rows.join(""))) continue;
-      result.push({ x, y });
-    }
-    const pause = checkpoint();
-    if (pause) await pause;
   }
   return result;
 }
@@ -362,11 +483,77 @@ function spread(chain: GoChain): { north: number; east: number; south: number; w
   return { north, east, south, west };
 }
 
+/** Upstream tests whether one neighboring chain fully surrounds an empty
+ * region by copying the board, erasing every other neighboring chain,
+ * rebuilding every chain, and then counting the original stone chains beside
+ * the expanded empty region. A flood fill over exactly those erased cells is
+ * behaviorally identical and avoids the repeated whole-board rebuild. */
+function fullyEncircles(
+  analysis: GoAnalysis,
+  candidate: GoChain,
+  neighbors: readonly GoChain[],
+  keptIndex: number,
+): boolean {
+  const size = analysis.board.size;
+  const area = size * size;
+  const removed = new Uint8Array(area);
+  for (let index = 0; index < neighbors.length; index++) {
+    if (index === keptIndex) continue;
+    for (const point of neighbors[index]!.points) removed[point.x * size + point.y] = 1;
+  }
+  const expanded = new Uint8Array(area);
+  const stack = new Int16Array(area);
+  let top = 0;
+  const first = candidate.points[0]!;
+  const start = first.x * size + first.y;
+  expanded[start] = 1;
+  stack[top++] = start;
+  while (top) {
+    const encoded = stack[--top]!;
+    const x = Math.floor(encoded / size);
+    const y = encoded % size;
+    for (let direction = 0; direction < 4; direction++) {
+      const nx = x + (direction === 1 ? 1 : direction === 3 ? -1 : 0);
+      const ny = y + (direction === 0 ? 1 : direction === 2 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const next = nx * size + ny;
+      if (expanded[next]) continue;
+      if (analysis.board.rows[nx]![ny] !== "." && !removed[next]) continue;
+      expanded[next] = 1;
+      stack[top++] = next;
+    }
+  }
+  const found = new Uint8Array(analysis.chains.length);
+  let count = 0;
+  for (let encoded = 0; encoded < area; encoded++) {
+    if (!expanded[encoded]) continue;
+    const x = Math.floor(encoded / size);
+    const y = encoded % size;
+    for (let direction = 0; direction < 4; direction++) {
+      const nx = x + (direction === 1 ? 1 : direction === 3 ? -1 : 0);
+      const ny = y + (direction === 0 ? 1 : direction === 2 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const next = nx * size + ny;
+      if (expanded[next]) continue;
+      const chain = analysis.chainAt[next];
+      if (!chain || chain.color === "." || found[chain.id]) continue;
+      found[chain.id] = 1;
+      if (++count > 1) return false;
+    }
+  }
+  return count === 1;
+}
+
 function potentialEyes(
   analysis: GoAnalysis,
   player: Stone,
   requestedMaxSize?: number,
 ): GoEyeCandidate[] {
+  const playerIndex = player === "X" ? 0 : 1;
+  if (requestedMaxSize === undefined) {
+    const cached = analysis.potentialEyeCache[playerIndex];
+    if (cached) return cached;
+  }
   let nodeCount = 0;
   for (const column of analysis.board.rows) {
     for (let index = 0; index < column.length; index++) {
@@ -374,42 +561,43 @@ function potentialEyes(
     }
   }
   const maxSize = requestedMaxSize ?? Math.min(nodeCount * 0.4, 11);
-  return analysis.chains
-    .filter((chain) => chain.color === "." && chain.points.length <= maxSize)
-    .flatMap((chain) => {
-      const neighbors = neighboringChains(analysis, chain.points);
-      const hasWhite = neighbors.some((neighbor) => neighbor.color === "O");
-      const hasBlack = neighbors.some((neighbor) => neighbor.color === "X");
-      return (player === "O" ? hasWhite && !hasBlack : hasBlack && !hasWhite) ? [{ chain, neighbors }] : [];
-    });
+  const result: GoEyeCandidate[] = [];
+  for (const chain of analysis.chains) {
+    if (chain.color !== "." || chain.points.length > maxSize) continue;
+    const neighbors = neighboringChain(analysis, chain);
+    let hasWhite = false;
+    let hasBlack = false;
+    for (const neighbor of neighbors) {
+      if (neighbor.color === "O") hasWhite = true;
+      else if (neighbor.color === "X") hasBlack = true;
+    }
+    if (player === "O" ? hasWhite && !hasBlack : hasBlack && !hasWhite) result.push({ chain, neighbors });
+  }
+  if (requestedMaxSize === undefined) analysis.potentialEyeCache[playerIndex] = result;
+  return result;
 }
 
 /** True eyes keyed by the surrounding stone chain, preserving insertion order. */
 export function eyesByChain(analysis: GoAnalysis, player: Stone): Map<number, GoChain[]> {
+  const playerIndex = player === "X" ? 0 : 1;
+  const cached = analysis.eyesCache[playerIndex];
+  if (cached) return cached;
   const result = new Map<number, GoChain[]>();
   const boardMax = analysis.board.size - 1;
   for (const candidate of potentialEyes(analysis, player)) {
     if (candidate.neighbors.length === 0) continue;
+    const candidateSpread = candidate.neighbors.length === 1 ? undefined : spread(candidate.chain);
     const encircling = candidate.neighbors.length === 1
       ? candidate.neighbors
       : candidate.neighbors.filter((neighbor, index) => {
-          const candidateSpread = spread(candidate.chain);
           const neighborSpread = spread(neighbor);
           if (
-            !(neighborSpread.north > candidateSpread.north || candidateSpread.north === boardMax && neighborSpread.north === boardMax)
-            || !(neighborSpread.east > candidateSpread.east || candidateSpread.east === boardMax && neighborSpread.east === boardMax)
-            || !(neighborSpread.south < candidateSpread.south || candidateSpread.south === 0 && neighborSpread.south === 0)
-            || !(neighborSpread.west < candidateSpread.west || candidateSpread.west === 0 && neighborSpread.west === 0)
+            !(neighborSpread.north > candidateSpread!.north || candidateSpread!.north === boardMax && neighborSpread.north === boardMax)
+            || !(neighborSpread.east > candidateSpread!.east || candidateSpread!.east === boardMax && neighborSpread.east === boardMax)
+            || !(neighborSpread.south < candidateSpread!.south || candidateSpread!.south === 0 && neighborSpread.south === 0)
+            || !(neighborSpread.west < candidateSpread!.west || candidateSpread!.west === 0 && neighborSpread.west === 0)
           ) return false;
-          let evaluation = analysis.board;
-          for (let other = 0; other < candidate.neighbors.length; other++) {
-            if (other === index) continue;
-            for (const point of candidate.neighbors[other]!.points) evaluation = replace(evaluation, point.x, point.y, ".");
-          }
-          const evaluated = analyzeBoard(evaluation);
-          const first = candidate.chain.points[0]!;
-          const expanded = evaluated.chainAt[first.x * evaluated.board.size + first.y];
-          return expanded ? neighboringChains(analysis, expanded.points).length === 1 : false;
+          return fullyEncircles(analysis, candidate.chain, candidate.neighbors, index);
         });
     for (const neighbor of encircling) {
       const eyes = result.get(neighbor.id) ?? [];
@@ -417,76 +605,12 @@ export function eyesByChain(analysis: GoAnalysis, player: Stone): Map<number, Go
       result.set(neighbor.id, eyes);
     }
   }
+  analysis.eyesCache[playerIndex] = result;
   return result;
 }
 
 export function allEyes(analysis: GoAnalysis, player: Stone): GoChain[][] {
   return [...eyesByChain(analysis, player).values()];
-}
-
-export async function eyesByChainCooperative(
-  analysis: GoAnalysis,
-  player: Stone,
-  checkpoint: () => Promise<void> | undefined,
-): Promise<Map<number, GoChain[]>> {
-  const result = new Map<number, GoChain[]>();
-  const boardMax = analysis.board.size - 1;
-  const candidates = potentialEyes(analysis, player);
-  let pause = checkpoint();
-  if (pause) await pause;
-  for (const candidate of candidates) {
-    if (candidate.neighbors.length !== 0) {
-      const encircling: GoChain[] = [];
-      if (candidate.neighbors.length === 1) {
-        encircling.push(candidate.neighbors[0]!);
-      } else {
-        const candidateSpread = spread(candidate.chain);
-        for (let index = 0; index < candidate.neighbors.length; index++) {
-          const neighbor = candidate.neighbors[index]!;
-          const neighborSpread = spread(neighbor);
-          if (
-            neighborSpread.north > candidateSpread.north || candidateSpread.north === boardMax && neighborSpread.north === boardMax
-          ) {
-            if (neighborSpread.east > candidateSpread.east || candidateSpread.east === boardMax && neighborSpread.east === boardMax) {
-              if (neighborSpread.south < candidateSpread.south || candidateSpread.south === 0 && neighborSpread.south === 0) {
-                if (neighborSpread.west < candidateSpread.west || candidateSpread.west === 0 && neighborSpread.west === 0) {
-                  let evaluation = analysis.board;
-                  for (let other = 0; other < candidate.neighbors.length; other++) {
-                    if (other === index) continue;
-                    for (const point of candidate.neighbors[other]!.points) {
-                      evaluation = replace(evaluation, point.x, point.y, ".");
-                    }
-                  }
-                  const evaluated = analyzeBoard(evaluation);
-                  const first = candidate.chain.points[0]!;
-                  const expanded = evaluated.chainAt[first.x * evaluated.board.size + first.y];
-                  if (expanded && neighboringChains(analysis, expanded.points).length === 1) encircling.push(neighbor);
-                }
-              }
-            }
-          }
-          pause = checkpoint();
-          if (pause) await pause;
-        }
-      }
-      for (const neighbor of encircling) {
-        const eyes = result.get(neighbor.id) ?? [];
-        eyes.push(candidate.chain);
-        result.set(neighbor.id, eyes);
-      }
-    }
-    pause = checkpoint();
-    if (pause) await pause;
-  }
-  return result;
-}
-
-export async function allEyesCooperative(
-  analysis: GoAnalysis,
-  player: Stone,
-  checkpoint: () => Promise<void> | undefined,
-): Promise<GoChain[][]> {
-  return [...(await eyesByChainCooperative(analysis, player, checkpoint)).values()];
 }
 
 export function disputedTerritory(
@@ -498,28 +622,36 @@ export function disputedTerritory(
   preparedLegal?: readonly GoPoint[],
 ): GoPoint[] {
   const analysis = preparedAnalysis ?? analyzeBoard(board);
+  const size = board.size;
   let valid = preparedLegal ? [...preparedLegal] : legalPoints(board, player, history);
   if (excludeFriendlyEyes) {
-    const friendly = new Set(allEyes(analysis, player)
-      .filter((eyes) => eyes.length >= 2)
-      .flatMap((eyes) => eyes.flatMap((eye) => eye.points))
-      .map((point) => key(point.x, point.y)));
-    valid = valid.filter((point) => !friendly.has(key(point.x, point.y)));
+    const friendly = new Uint8Array(size * size);
+    for (const eyes of allEyes(analysis, player)) {
+      if (eyes.length < 2) continue;
+      for (const eye of eyes) for (const point of eye.points) friendly[point.x * size + point.y] = 1;
+    }
+    valid = valid.filter((point) => !friendly[point.x * size + point.y]);
   }
   const opponent: Stone = player === "X" ? "O" : "X";
   const enemySpaces = potentialEyes(analysis, opponent);
-  const inside = new Set(enemySpaces.flatMap((space) => space.chain.points).map((point) => key(point.x, point.y)));
-  const playable = new Set<string>();
+  const inside = new Uint8Array(size * size);
+  for (const space of enemySpaces) for (const point of space.chain.points) inside[point.x * size + point.y] = 1;
+  const playable = new Uint8Array(size * size);
   for (const space of enemySpaces) {
+    const spacePoints = new Uint8Array(size * size);
+    for (const point of space.chain.points) spacePoints[point.x * size + point.y] = 1;
     for (const border of space.neighbors) {
       if (border.liberties.length > 4) continue;
-      if (!neighboringChains(analysis, border.points).some((chain) => chain.color === player)) continue;
-      const libertiesInside = border.liberties.filter((point) => space.chain.points.some((insidePoint) => insidePoint.x === point.x && insidePoint.y === point.y));
+      if (!neighboringChain(analysis, border).some((chain) => chain.color === player)) continue;
+      const libertiesInside = border.liberties.filter((point) => spacePoints[point.x * size + point.y]);
       if (libertiesInside.length !== border.liberties.length) continue;
-      for (const point of libertiesInside) playable.add(key(point.x, point.y));
+      for (const point of libertiesInside) playable[point.x * size + point.y] = 1;
     }
   }
-  return valid.filter((point) => !inside.has(key(point.x, point.y)) || playable.has(key(point.x, point.y)));
+  return valid.filter((point) => {
+    const index = point.x * size + point.y;
+    return !inside[index] || Boolean(playable[index]);
+  });
 }
 
 export function disputedMoves(analysis: GoAnalysis, available: readonly GoPoint[], maxChainSize = 99): GoPoint[] {
@@ -533,45 +665,13 @@ export function disputedMoves(analysis: GoAnalysis, available: readonly GoPoint[
     // getAllNeighboringChains, so large neighboring stone chains are absent as
     // well as large candidate empty chains. This is observable once open
     // expansion points are exhausted.
-    const neighbors = neighboringChains(analysis, chain.points)
+    const neighbors = neighboringChain(analysis, chain)
       .filter((neighbor) => neighbor.points.length <= maxChainSize);
     const disputed = neighbors.some((neighbor) => neighbor.color === "O")
       && neighbors.some((neighbor) => neighbor.color === "X");
     disputedByChain.set(chain.id, disputed);
     return disputed;
   });
-}
-
-/** Cooperative equivalent of disputedMoves. Large empty chains make the
- * neighboring-chain walk expensive enough that the full filter cannot share
- * one browser task with the game UI. */
-export async function disputedMovesCooperative(
-  analysis: GoAnalysis,
-  available: readonly GoPoint[],
-  maxChainSize: number,
-  checkpoint: () => Promise<void> | undefined,
-): Promise<GoPoint[]> {
-  const result: GoPoint[] = [];
-  const disputedByChain = new Map<number, boolean>();
-  for (const point of available) {
-    const chain = analysis.chainAt[point.x * analysis.board.size + point.y];
-    if (chain && chain.points.length <= maxChainSize) {
-      let disputed = disputedByChain.get(chain.id);
-      if (disputed === undefined) {
-        const neighbors = neighboringChains(analysis, chain.points)
-          .filter((neighbor) => neighbor.points.length <= maxChainSize);
-        disputed = neighbors.some((neighbor) => neighbor.color === "O")
-          && neighbors.some((neighbor) => neighbor.color === "X");
-        disputedByChain.set(chain.id, disputed);
-      }
-      if (disputed) {
-        result.push(point);
-      }
-    }
-    const pause = checkpoint();
-    if (pause) await pause;
-  }
-  return result;
 }
 
 export function pointKey(point: GoPoint): string {

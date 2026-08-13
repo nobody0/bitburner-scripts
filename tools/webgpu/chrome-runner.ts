@@ -168,6 +168,19 @@ export async function runInHeadlessChrome(entryPath: string, timeoutMs = 300_000
     const sessionId = attached["sessionId"] as string;
     cdp = browser;
     await browser.send("Runtime.enable", {}, sessionId);
+    // Target.createTarget resolves before the document has parsed the inline
+    // bundle. Evaluating too early would resolve `undefined` against the
+    // initial empty document and report a harness-shaped result with no data,
+    // so wait for the entry to publish its promise first.
+    const readyBy = Date.now() + 30_000;
+    while (Date.now() < readyBy) {
+      const probe = await browser.send("Runtime.evaluate", {
+        expression: "typeof globalThis.__goWebGpuResult",
+        returnByValue: true,
+      }, sessionId);
+      if ((probe["result"] as { value?: unknown } | undefined)?.value === "object") break;
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const evaluated = await Promise.race([
       browser.send("Runtime.evaluate", {

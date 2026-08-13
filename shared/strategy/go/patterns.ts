@@ -96,31 +96,3 @@ export function patternMoves(
   }
   return moves;
 }
-
-
-/** Cooperative pattern scan for the production planner. Pattern matching is
- * pure but a 19x19 board times the transformed vocabulary is too large for one
- * browser task. */
-export async function patternMovesCooperative(
-  board: GoBoard,
-  player: Stone,
-  available: readonly GoPoint[],
-  smart: boolean,
-  checkpoint: () => Promise<void> | undefined,
-): Promise<GoPoint[]> {
-  const allowed = new Set(available.map(pointKey));
-  const analysis = analyzeBoard(board);
-  const moves: GoPoint[] = [];
-  for (let x = 0; x < board.size; x++) {
-    for (let y = 0; y < board.size; y++) {
-      if (!allowed.has(`${x},${y}`)) continue;
-      if (matchesAnyPattern(board, x, y, player)
-        && (!smart || effectiveLiberties(analysis, x, y, player).length > 1)) {
-        moves.push({ x, y });
-      }
-    }
-    const pause = checkpoint();
-    if (pause) await pause;
-  }
-  return moves;
-}

@@ -21,6 +21,11 @@ const config: BitburnerConfig = {
   entries: [{ source: "game/start.ts", target: "start.js" }],
 };
 
+/** Model artifacts are deliberately part of the controller bundle. Keep
+ * enough headroom for normal strategy growth while preventing a checkpoint
+ * export from silently returning start.js to its former >1 MB size. */
+const MAX_START_SOURCE_BYTES = 850_000;
+
 afterAll(async () => {
   await rm(config.buildDir, { recursive: true, force: true });
 });
@@ -39,6 +44,7 @@ describe("compile-time telemetry elimination", () => {
     expect(main!.content).toContain("start.boot");
     expect(main!.content).toContain("start.crash");
     expect(main!.content).toContain(buildId!.content);
+    expect(main!.content.length).toBeLessThanOrEqual(MAX_START_SOURCE_BYTES);
   });
 
   test("--perf build eliminates telemetry entirely, payloads included", async () => {

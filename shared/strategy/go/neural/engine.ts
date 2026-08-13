@@ -9,13 +9,13 @@
  * mirroring go-ai's choose_with_network().
  *
  * The two-phase split matches the production driver: preparation is
- * seed-independent and may be spread across event-loop turns; finalization
- * applies one or two concrete WHRNG seeds and is dominated by the async
- * backend batch, so the main thread is never blocked for long.
+ * seed-independent; finalization applies one or two concrete WHRNG seeds and
+ * the optimized synchronous opponent predictor before the async GPU batch.
  */
 import {
+  createOpponentPredictionCache,
   predictPreparedOpponentReplies,
-  prepareOpponentPositionCooperative,
+  prepareOpponentPosition,
   type PreparedOpponentPosition,
 } from "../opponent.ts";
 import {
@@ -192,82 +192,16 @@ interface OrderedCandidate {
   order: number;
 }
 
-const nowMs = (): number => (globalThis.performance ?? Date).now();
-
-let cooperativePost: ((resolve: () => void) => void) | undefined;
-
-/** Yield to a fresh browser task without the nested setTimeout clamp. */
-export function yieldGoPlanner(): Promise<void> {
-  if (!cooperativePost) {
-    const Channel = (globalThis as unknown as {
-      MessageChannel?: new () => {
-        port1: { onmessage: (() => void) | null; unref?: () => void };
-        port2: { postMessage(value: number): void; unref?: () => void };
-      };
-    }).MessageChannel;
-    if (!Channel) return new Promise((resolve) => setTimeout(resolve));
-    const channel = new Channel();
-    const waiters: Array<() => void> = [];
-    channel.port1.unref?.();
-    channel.port2.unref?.();
-    channel.port1.onmessage = () => waiters.shift()?.();
-    cooperativePost = (resolve) => {
-      waiters.push(resolve);
-      channel.port2.postMessage(0);
-    };
-  }
-  return new Promise<void>((resolve) => cooperativePost!(resolve));
-}
-
-export interface GoNeuralPrepareOptions {
-  /** Cooperative yield between candidates once a slice budget is spent, so
-   * large-board preparation never blocks the shared main thread. */
-  pause?: () => Promise<void>;
-  sliceMs?: number;
-  /** Test/profiling hook for every uninterrupted planner slice. */
-  onSlice?: (
-    phase: "candidatePreparation" | "replyPreparation",
-    elapsedMs: number,
-    detail?: string,
-  ) => void;
-}
-
-function sliceCheckpoint(
-  options: GoNeuralPrepareOptions,
-  phase: "candidatePreparation" | "replyPreparation",
-): { checkpoint: (detail?: string) => Promise<void> | undefined; finish: () => void } {
-  // Keep substantial headroom below the 2 ms long-task budget. Chromium can
-  // spend a few tenths of a millisecond in bookkeeping between checkpoints,
-  // so a 0.1 ms work quantum remains bounded even under modest contention.
-  const sliceMs = options.sliceMs ?? 0.1;
-  let started = nowMs();
-  return {
-    checkpoint: (detail) => {
-      const elapsed = nowMs() - started;
-      if (!options.pause || elapsed < sliceMs) return;
-      options.onSlice?.(phase, elapsed, detail);
-      return options.pause().then(() => {
-        started = nowMs();
-      });
-    },
-    finish: () => options.onSlice?.(phase, nowMs() - started),
-  };
-}
-
 /** Seed-independent half: enumerate candidates and prepare each candidate's
  * faction option space. This is the expensive part of a turn and is fully
  * reusable across the one or two seeds finalization considers. */
-export async function prepareNeuralGoDecision(
-  view: GoView,
-  options: GoNeuralPrepareOptions = {},
-): Promise<GoNeuralPrepared> {
+export function prepareNeuralGoDecision(view: GoView): GoNeuralPrepared {
   const historyHashes = new Set((view.previousBoards ?? []).map((position) => position.join("")));
   const elapsedRounds = Math.floor((view.previousBoards?.length ?? 0) / 2);
   const immediate = immediateDecision(view);
   if (immediate) return { view, candidates: [], historyHashes, elapsedRounds, immediate };
 
   const board = view.board;
-  let slices = sliceCheckpoint(options, "candidatePreparation");
   const centre = (board.size - 1) / 2;
   const ordered: OrderedCandidate[] = [];
   for (let x = 0; x < board.size; x++) {
@@ -286,8 +220,6 @@ export async function prepareNeuralGoDecision(
       const centrality = board.size - Math.abs(x - centre) - Math.abs(y - centre);
       ordered.push({ x, y, played, order: played.captures * 1_000 + adjacent * 10 + centrality * 0.02 });
     }
-    const pause = slices.checkpoint();
-    if (pause) await pause;
   }
   const limit = goNeuralCandidateLimit(view);
   let selected = ordered;
@@ -300,6 +232,12 @@ export async function prepareNeuralGoDecision(
 
   const passCount = view.consecutivePasses ?? 0;
   const forecastHistory = [view.board.rows, ...(view.previousBoards ?? [])];
+  // Every black candidate presents white with the same prior positions. Keep
+  // one immutable superko index instead of rejoining and rehashing the entire
+  // late-game history once per candidate.
+  const forecastHistoryHashes = new Set(historyHashes);
+  forecastHistoryHashes.add(boardHash(view.board));
+  const opponentPredictionCache = createOpponentPredictionCache();
   const candidates: GoNeuralPreparedCandidate[] = [];
   for (const candidate of selected) {
     candidates.push({
@@ -307,16 +245,15 @@ export async function prepareNeuralGoDecision(
       board: candidate.played.board,
       captures: candidate.played.captures,
       terminal: false,
-      opponent: await prepareOpponentPositionCooperative(
+      opponent: prepareOpponentPosition(
         candidate.played.board,
         view.opponent,
         forecastHistory,
         0,
-        slices.checkpoint,
+        forecastHistoryHashes,
+        opponentPredictionCache,
       ),
     });
-    const pause = slices.checkpoint();
-    if (pause) await pause;
   }
   const passTerminal = passCount + 1 >= 2;
   candidates.push({
@@ -326,15 +263,15 @@ export async function prepareNeuralGoDecision(
     terminal: passTerminal,
     ...(passTerminal
       ? {}
-      : { opponent: await prepareOpponentPositionCooperative(
+      : { opponent: prepareOpponentPosition(
         view.board,
         view.opponent,
         view.previousBoards ?? [],
         passCount + 1,
-        slices.checkpoint,
+        historyHashes,
+        opponentPredictionCache,
       ) }),
   });
-  slices.finish();
   return { view, candidates, historyHashes, elapsedRounds };
 }
 
@@ -358,16 +295,13 @@ function exactTerminalPrediction(view: GoView, board: GoBoard): GoValuePredictio
  * given seeds, evaluates every distinct result board in one backend batch,
  * and selects exactly like the trainer's outer loop.
  *
- * The first finalization of a prepared decision forces each option space's
- * memoized analyses, so callers off the dispatch hot path should pass `pause`
- * to keep those slices cooperative; repeat finalizations (the exact
- * dispatch-time seed, a boundary replan) then run warm in about a
- * millisecond. */
+ * The first finalization of a prepared decision forces only the option-space
+ * branches reached by the concrete seeds. Repeat finalizations (the exact
+ * dispatch-time seed or a boundary replan) reuse those memoized analyses. */
 export async function finalizeNeuralGoDecision(
   prepared: GoNeuralPrepared,
   seeds: readonly number[],
   engine: GoNeuralEngine,
-  options: GoNeuralPrepareOptions = {},
 ): Promise<GoDecision> {
   if (prepared.immediate) return prepared.immediate;
   const { view, candidates, elapsedRounds } = prepared;
@@ -395,7 +329,6 @@ export async function finalizeNeuralGoDecision(
   const moveHistory = new Set(prepared.historyHashes);
   moveHistory.add(boardHash(view.board));
   let unseededDefenseTie = false;
-  let slices = sliceCheckpoint(options, "replyPreparation");
   const outcomes: CandidateOutcome[][] = [];
   for (const candidate of candidates) {
     if (candidate.terminal) {
@@ -419,25 +352,17 @@ export async function finalizeNeuralGoDecision(
       }
     }
     outcomes.push(perCandidate);
-    const pause = slices.checkpoint();
-    if (pause) await pause;
   }
 
   const words = goBoardWords(backend.extent);
   const packed = engine.packedScratch(profile, words * batchBoards.length);
   for (let index = 0; index < batchBoards.length; index++) {
     packGoBoard(batchBoards[index]!, backend.extent, packed, index * words);
-    const pause = slices.checkpoint();
-    if (pause) await pause;
   }
-  slices.finish();
   const raw = await backend.evaluateBatch({ packed, count: batchBoards.length, opponentIndex });
-  slices = sliceCheckpoint(options, "replyPreparation");
   const predictions: GoValuePrediction[] = [];
   for (let index = 0; index < batchBoards.length; index++) {
     predictions.push(decodeGoValue(raw, index));
-    const pause = slices.checkpoint();
-    if (pause) await pause;
   }
   const positionValue = predictions[0]!.winProbability;
 
@@ -469,8 +394,6 @@ export async function finalizeNeuralGoDecision(
         return { x: x!, y: y!, count };
       });
     scored.push({ candidate, winProbability, powerPerRound, predictedReplies });
-    const pause = slices.checkpoint();
-    if (pause) await pause;
   }
 
   // Strict improvement over scan order (pass last) reproduces the trainer's
@@ -481,8 +404,6 @@ export async function finalizeNeuralGoDecision(
       || (entry.winProbability === best.winProbability && entry.powerPerRound > best.powerPerRound)) {
       best = entry;
     }
-    const pause = slices.checkpoint();
-    if (pause) await pause;
   }
 
   const ranked: GoMove[] = [];
@@ -504,11 +425,8 @@ export async function finalizeNeuralGoDecision(
         why: `neural value${modalText}`,
       });
     }
-    const pause = slices.checkpoint();
-    if (pause) await pause;
   }
   ranked.sort((a, b) => b.score - a.score || b.powerPerRound - a.powerPerRound || b.captures - a.captures || a.x - b.x || a.y - b.y);
-  slices.finish();
 
   const summary = `neural value over ${candidates.length} candidates`;
   if (best.candidate.action.type === "pass") {
@@ -547,8 +465,7 @@ export async function decideGoNeural(
   view: GoView,
   seeds: readonly number[],
   engine: GoNeuralEngine,
-  options: GoNeuralPrepareOptions = {},
 ): Promise<GoDecision> {
-  const prepared = await prepareNeuralGoDecision(view, options);
-  return finalizeNeuralGoDecision(prepared, seeds, engine, options);
+  const prepared = prepareNeuralGoDecision(view);
+  return finalizeNeuralGoDecision(prepared, seeds, engine);
 }

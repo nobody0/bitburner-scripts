@@ -10,25 +10,22 @@
 import type { GoBoard, GoRewardOpponent, Stone } from "./rules.ts";
 import {
   allEyes,
-  allEyesCooperative,
   analyzeBoard,
   cardinal,
   cellAt,
   disputedMoves,
-  disputedMovesCooperative,
   disputedTerritory,
   effectiveLiberties,
   evaluateMove,
   eyesByChain,
-  eyesByChainCooperative,
   legalPoints,
-  legalPointsCooperative,
   pointKey,
   weakestNeighborChain,
   type GoAnalysis,
+  type GoChain,
   type GoPoint,
 } from "./analysis.ts";
-import { patternMoves, patternMovesCooperative } from "./patterns.ts";
+import { patternMoves } from "./patterns.ts";
 import { whrng } from "./rng.ts";
 
 interface MoveOption {
@@ -94,8 +91,8 @@ interface PreparedOptionSpace {
   patterns(): readonly GoPoint[];
   jump(): readonly MoveOption[];
   corner(): MoveOption | undefined;
-  contested: boolean;
-  endGame: boolean;
+  contested(): boolean;
+  endGame(): boolean;
 }
 
 export interface PreparedOpponentPosition {
@@ -104,20 +101,18 @@ export interface PreparedOpponentPosition {
   reckless?: PreparedOptionSpace;
 }
 
+export interface OpponentPredictionCache {
+  eyeOutcomes: Map<string, EyeOutcome>;
+}
+
+export function createOpponentPredictionCache(): OpponentPredictionCache {
+  return { eyeOutcomes: new Map() };
+}
+
 /** Recorded with telemetry so upstream drift can be separated from seed misses. */
 export const GO_OPPONENT_MODEL = "clean-room-v3.0.1" as const;
 
 const pick = <T>(values: readonly T[], roll: number): T | undefined => values[Math.floor(roll * values.length)];
-
-function uniquePoints(points: readonly GoPoint[]): GoPoint[] {
-  const seen = new Set<string>();
-  return points.filter((point) => {
-    const key = pointKey(point);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
 
 function memo<T>(compute: () => T): () => T {
   let ready = false;
@@ -145,20 +140,24 @@ function libertyGrowthMoves(
   player: Stone,
   available: readonly GoPoint[],
 ): MoveOption[] {
-  const allowed = new Set(available.map(pointKey));
-  return analysis.chains
-    .filter((chain) => chain.color === player)
-    .flatMap((chain) => chain.liberties)
-    .filter((point) => allowed.has(pointKey(point)))
-    .map((point) => {
+  const size = analysis.board.size;
+  const allowed = new Uint8Array(size * size);
+  for (const point of available) allowed[point.x * size + point.y] = 1;
+  const result: MoveOption[] = [];
+  for (const chain of analysis.chains) {
+    if (chain.color !== player) continue;
+    for (const point of chain.liberties) {
+      if (!allowed[point.x * size + point.y]) continue;
       const weakest = weakestNeighborChain(analysis, point.x, point.y, player);
-      return {
+      const move = {
         point,
         oldLibertyCount: weakest?.liberties.length ?? 99,
         newLibertyCount: effectiveLiberties(analysis, point.x, point.y, player).length,
       };
-    })
-    .filter((move) => move.newLibertyCount > 1 && move.newLibertyCount >= move.oldLibertyCount);
+      if (move.newLibertyCount > 1 && move.newLibertyCount >= move.oldLibertyCount) result.push(move);
+    }
+  }
+  return result;
 }
 
 function maximumGrowth(moves: readonly MoveOption[], roll: number): MoveOption | undefined {
@@ -180,29 +179,107 @@ function surroundMove(
   smart: boolean,
 ): MoveOption | undefined {
   const enemy: Stone = player === "X" ? "O" : "X";
-  const allowed = new Set(available.map(pointKey));
-  const liberties = analysis.chains
-    .filter((chain) => chain.color === enemy)
-    .flatMap((chain) => chain.liberties)
-    .filter((point) => allowed.has(pointKey(point)));
-  const capture: MoveOption[] = [];
-  const atari: MoveOption[] = [];
-  const surround: MoveOption[] = [];
-  for (const point of liberties) {
-    const newLibertyCount = effectiveLiberties(analysis, point.x, point.y, player).length;
-    const weakest = weakestNeighborChain(analysis, point.x, point.y, enemy);
-    const oldLibertyCount = weakest?.liberties.length ?? 99;
-    const weakestLength = weakest?.points.length ?? 99;
-    const libertyGroups = new Set((weakest?.liberties ?? [])
-      .map((liberty) => analysis.chainAt[liberty.x * analysis.board.size + liberty.y]?.id ?? -1));
-    if (newLibertyCount <= 2 && oldLibertyCount > 2) continue;
-    const move = { point, oldLibertyCount, newLibertyCount: oldLibertyCount - 1 };
-    if (oldLibertyCount <= 1) capture.push(move);
-    else if (oldLibertyCount === 2 && (newLibertyCount >= 2 || libertyGroups.size === 1 && weakestLength > 3 || !smart)) {
-      atari.push(move);
-    } else if (newLibertyCount >= 2) surround.push(move);
+  const size = analysis.board.size;
+  const allowed = new Uint8Array(size * size);
+  for (const point of available) allowed[point.x * size + point.y] = 1;
+  let firstAtari: MoveOption | undefined;
+  let firstSurround: MoveOption | undefined;
+  // Preserve chain/liberty scan order and category priority without building
+  // three temporary arrays. The first capture is globally final.
+  for (const chain of analysis.chains) {
+    if (chain.color !== enemy) continue;
+    for (const point of chain.liberties) {
+      if (!allowed[point.x * size + point.y]) continue;
+      const newLibertyCount = effectiveLiberties(analysis, point.x, point.y, player).length;
+      const weakest = weakestNeighborChain(analysis, point.x, point.y, enemy);
+      const oldLibertyCount = weakest?.liberties.length ?? 99;
+      if (newLibertyCount <= 2 && oldLibertyCount > 2) continue;
+      const move = { point, oldLibertyCount, newLibertyCount: oldLibertyCount - 1 };
+      if (oldLibertyCount <= 1) return move;
+      if (oldLibertyCount === 2) {
+        let oneLibertyGroup = false;
+        if (weakest) {
+          let firstGroup: number | undefined;
+          oneLibertyGroup = true;
+          for (const liberty of weakest.liberties) {
+            const group = analysis.chainAt[liberty.x * size + liberty.y]?.id ?? -1;
+            if (firstGroup === undefined) firstGroup = group;
+            else if (group !== firstGroup) {
+              oneLibertyGroup = false;
+              break;
+            }
+          }
+        }
+        if (newLibertyCount >= 2 || oneLibertyGroup && (weakest?.points.length ?? 99) > 3 || !smart) {
+          firstAtari ??= move;
+        }
+      } else if (newLibertyCount >= 2) {
+        firstSurround ??= move;
+      }
+    }
   }
-  return [...capture, ...atari, ...surround][0];
+  return firstAtari ?? firstSurround;
+}
+
+interface EyeOutcome {
+  newLiving: number;
+  newEyeCount: number;
+}
+
+function eyeOutcome(newEyes: readonly GoChain[][]): EyeOutcome {
+  let newLiving = 0;
+  let newEyeCount = 0;
+  for (const eyes of newEyes) {
+    if (eyes.length) newEyeCount++;
+    if (eyes.length >= 2) newLiving++;
+  }
+  return { newLiving, newEyeCount };
+}
+
+/** Upstream flattens every qualifying chain's liberty list without
+ * deduplicating, and the multiplicity is observable: getEyeBlockingMove only
+ * blocks when EXACTLY one life-creating move exists, so a liberty shared by
+ * two friendly chains suppresses the block. Keep the duplicates; the callers
+ * memoize the expensive per-point analysis instead.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts */
+function eyeCandidates(
+  board: GoBoard,
+  analysis: GoAnalysis,
+  player: Stone,
+  allowed: Uint8Array,
+  livingIds: ReadonlySet<number>,
+  maxLiberties: number,
+): GoPoint[] {
+  const result: GoPoint[] = [];
+  const size = board.size;
+  for (const chain of analysis.chains) {
+    if (chain.color !== player || chain.points.length <= 1
+      || chain.liberties.length > maxLiberties || livingIds.has(chain.id)) continue;
+    for (const point of chain.liberties) {
+      if (!allowed[point.x * size + point.y]) continue;
+      let friendlyOrEdge = 0;
+      let hasEmpty = false;
+      for (let direction = 0; direction < 4; direction++) {
+        const nx = point.x + (direction === 1 ? 1 : direction === 3 ? -1 : 0);
+        const ny = point.y + (direction === 0 ? 1 : direction === 2 ? -1 : 0);
+        if (nx < 0 || ny < 0 || nx >= size || ny >= size) {
+          friendlyOrEdge++;
+          continue;
+        }
+        const color = board.rows[nx]![ny];
+        // `cardinal()` omits both edges and offline nodes before upstream's
+        // four-slot count, so both contribute to this missing-neighbor term.
+        if (color === "#") {
+          friendlyOrEdge++;
+          continue;
+        }
+        if (color === player) friendlyOrEdge++;
+        if (color === ".") hasEmpty = true;
+      }
+      if (friendlyOrEdge >= 2 && hasEmpty) result.push(point);
+    }
+  }
+  return result;
 }
 
 function eyeCreationMoves(
@@ -211,82 +288,37 @@ function eyeCreationMoves(
   player: Stone,
   available: readonly GoPoint[],
   maxLiberties = 99,
+  stopAtFirstLife = false,
+  sharedCache?: OpponentPredictionCache,
 ): MoveOption[] {
   const currentByChain = eyesByChain(analysis, player);
   const currentEyes = [...currentByChain.values()];
   const livingIds = new Set([...currentByChain].filter(([, eyes]) => eyes.length >= 2).map(([id]) => id));
   const currentLiving = livingIds.size;
   const currentEyeCount = currentEyes.filter((eyes) => eyes.length).length;
-  const allowed = new Set(available.map(pointKey));
-  const candidates = uniquePoints(analysis.chains
-    .filter((chain) => chain.color === player && chain.points.length > 1)
-    .filter((chain) => chain.liberties.length <= maxLiberties && !livingIds.has(chain.id))
-    .flatMap((chain) => chain.liberties)
-    .filter((point) => allowed.has(pointKey(point)))
-    .filter((point) => {
-      const neighborhood = cardinal(board, point.x, point.y);
-      // Missing cardinal points count as friendly/off-board in the upstream
-      // four-slot neighborhood, while offline nodes are present and hostile.
-      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts
-      const friendlyOrEdge = 4 - neighborhood.length
-        + neighborhood.filter((neighbor) => cellAt(board, neighbor.x, neighbor.y) === player).length;
-      return friendlyOrEdge >= 2
-        && neighborhood.some((neighbor) => cellAt(board, neighbor.x, neighbor.y) === ".");
-    }));
-  return candidates.reduce<MoveOption[]>((result, point) => {
-    const next = analyzeBoard(evaluateMove(board, point.x, point.y, player));
-    const newEyes = allEyes(next, player);
-    const newLiving = newEyes.filter((eyes) => eyes.length >= 2).length;
-    const newEyeCount = newEyes.filter((eyes) => eyes.length).length;
-    if (newLiving > currentLiving || newEyeCount > currentEyeCount && newLiving === currentLiving) {
-      result.push({ point, createsLife: newLiving > currentLiving });
-    }
-    return result;
-  }, []).sort((a, b) => Number(b.createsLife) - Number(a.createsLife));
-}
-
-async function eyeCreationMovesCooperative(
-  board: GoBoard,
-  analysis: GoAnalysis,
-  player: Stone,
-  available: readonly GoPoint[],
-  maxLiberties: number,
-  checkpoint: (detail?: string) => Promise<void> | undefined,
-  stopAtFirstLife = false,
-): Promise<MoveOption[]> {
-  const currentByChain = await eyesByChainCooperative(analysis, player, () => checkpoint("eye-baseline"));
-  const currentEyes = [...currentByChain.values()];
-  const livingIds = new Set([...currentByChain].filter(([, eyes]) => eyes.length >= 2).map(([id]) => id));
-  const currentLiving = livingIds.size;
-  const currentEyeCount = currentEyes.filter((eyes) => eyes.length).length;
-  const allowed = new Set(available.map(pointKey));
-  const candidates = uniquePoints(analysis.chains
-    .filter((chain) => chain.color === player && chain.points.length > 1)
-    .filter((chain) => chain.liberties.length <= maxLiberties && !livingIds.has(chain.id))
-    .flatMap((chain) => chain.liberties)
-    .filter((point) => allowed.has(pointKey(point)))
-    .filter((point) => {
-      const neighborhood = cardinal(board, point.x, point.y);
-      const friendlyOrEdge = 4 - neighborhood.length
-        + neighborhood.filter((neighbor) => cellAt(board, neighbor.x, neighbor.y) === player).length;
-      return friendlyOrEdge >= 2
-        && neighborhood.some((neighbor) => cellAt(board, neighbor.x, neighbor.y) === ".");
-    }));
+  const allowed = new Uint8Array(board.size * board.size);
+  for (const point of available) allowed[point.x * board.size + point.y] = 1;
+  const candidates = eyeCandidates(board, analysis, player, allowed, livingIds, maxLiberties);
+  const cache = new Map<number, EyeOutcome>();
   const result: MoveOption[] = [];
   for (const point of candidates) {
-    const next = analyzeBoard(evaluateMove(board, point.x, point.y, player));
-    const newEyes = await allEyesCooperative(next, player, () => checkpoint("eye-analysis"));
-    const newLiving = newEyes.filter((eyes) => eyes.length >= 2).length;
-    const newEyeCount = newEyes.filter((eyes) => eyes.length).length;
+    const key = point.x * board.size + point.y;
+    let outcome = cache.get(key);
+    if (!outcome) {
+      const evaluated = evaluateMove(board, point.x, point.y, player, undefined, analysis);
+      const sharedKey = sharedCache ? `${player}${evaluated.rows.join("")}` : undefined;
+      outcome = sharedKey ? sharedCache!.eyeOutcomes.get(sharedKey) : undefined;
+      if (!outcome) {
+        outcome = eyeOutcome(allEyes(analyzeBoard(evaluated), player));
+        if (sharedKey) sharedCache!.eyeOutcomes.set(sharedKey, outcome);
+      }
+      cache.set(key, outcome);
+    }
+    const { newLiving, newEyeCount } = outcome;
     if (newLiving > currentLiving || newEyeCount > currentEyeCount && newLiving === currentLiving) {
       result.push({ point, createsLife: newLiving > currentLiving });
-      // eyeMove consumes only the first result after creates-life ordering.
-      // Candidate order is stable, so the first life-creating move is final;
-      // no later candidate can outrank it.
-      if (stopAtFirstLife && newLiving > currentLiving) return result;
+      if (stopAtFirstLife && newLiving > currentLiving) break;
     }
-    const pause = checkpoint("eye-candidate");
-    if (pause) await pause;
   }
   return result.sort((a, b) => Number(b.createsLife) - Number(a.createsLife));
 }
@@ -296,23 +328,10 @@ function eyeBlockMove(
   analysis: GoAnalysis,
   player: Stone,
   available: readonly GoPoint[],
+  sharedCache?: OpponentPredictionCache,
 ): MoveOption | undefined {
   const enemy: Stone = player === "X" ? "O" : "X";
-  const enemyMoves = eyeCreationMoves(board, analysis, enemy, available, 5);
-  const life = enemyMoves.filter((move) => move.createsLife);
-  const eye = enemyMoves.filter((move) => !move.createsLife);
-  return life.length === 1 ? life[0] : life.length === 0 && eye.length === 1 ? eye[0] : undefined;
-}
-
-async function eyeBlockMoveCooperative(
-  board: GoBoard,
-  analysis: GoAnalysis,
-  player: Stone,
-  available: readonly GoPoint[],
-  checkpoint: (detail?: string) => Promise<void> | undefined,
-): Promise<MoveOption | undefined> {
-  const enemy: Stone = player === "X" ? "O" : "X";
-  const enemyMoves = await eyeCreationMovesCooperative(board, analysis, enemy, available, 5, checkpoint);
+  const enemyMoves = eyeCreationMoves(board, analysis, enemy, available, 5, false, sharedCache);
   const life = enemyMoves.filter((move) => move.createsLife);
   const eye = enemyMoves.filter((move) => !move.createsLife);
   return life.length === 1 ? life[0] : life.length === 0 && eye.length === 1 ? eye[0] : undefined;
@@ -344,21 +363,23 @@ function prepareOptionSpace(
   smart: boolean,
   history: readonly string[][],
   passCount: number,
+  historyHashes?: ReadonlySet<string>,
+  predictionCache?: OpponentPredictionCache,
 ): PreparedOptionSpace {
   const analysis = analyzeBoard(board);
   // Legality is one of the most expensive option-space passes. Reuse it for
   // both territory filtering and the final fallback validity check.
-  const legalMoves = legalPoints(board, player, history, analysis);
+  const legalMoves = legalPoints(board, player, history, analysis, historyHashes);
   const available = disputedTerritory(board, player, history, smart, analysis, legalMoves);
-  const contested = disputedMoves(analysis, available);
-  const endGame = contested.length === 0 && passCount > 0;
+  const contested = memo(() => disputedMoves(analysis, available).length > 0);
+  const endGame = memo(() => passCount > 0 && !contested());
   const expansions = memo(() => expansionMoves(board, analysis, available));
   const growthMoves = memo(() => libertyGrowthMoves(analysis, player, available));
   const defenses = memo(() => defendCandidates(growthMoves()));
   const surround = memo(() => surroundMove(analysis, player, available, smart));
-  const eyes = memo(() => endGame ? [] : eyeCreationMoves(board, analysis, player, available));
-  const eyeBlock = memo(() => endGame ? undefined : eyeBlockMove(board, analysis, player, available));
-  const patterns = memo(() => endGame ? [] : patternMoves(board, player, available, smart));
+  const eyes = memo(() => endGame() ? [] : eyeCreationMoves(board, analysis, player, available, 99, true, predictionCache));
+  const eyeBlock = memo(() => endGame() ? undefined : eyeBlockMove(board, analysis, player, available, predictionCache));
+  const patterns = memo(() => endGame() ? [] : patternMoves(board, player, available, smart));
   const jump = memo(() => expansions().filter(({ point }) => ([
       [point.x, point.y + 2], [point.x + 2, point.y], [point.x, point.y - 2], [point.x - 2, point.y],
     ] as const).some(([x, y]) => cellAt(board, x, y) === player)));
@@ -376,72 +397,7 @@ function prepareOptionSpace(
     patterns,
     jump,
     corner,
-    contested: contested.length > 0,
-    endGame,
-  };
-}
-
-async function prepareOptionSpaceCooperative(
-  board: GoBoard,
-  player: Stone,
-  smart: boolean,
-  history: readonly string[][],
-  passCount: number,
-  checkpoint: (detail?: string) => Promise<void> | undefined,
-): Promise<PreparedOptionSpace> {
-  const analysis = analyzeBoard(board);
-  let pause = checkpoint("analyze-board");
-  if (pause) await pause;
-  const legalMoves = await legalPointsCooperative(board, player, history, () => checkpoint("legal-row"), analysis);
-  const available = disputedTerritory(board, player, history, smart, analysis, legalMoves);
-  pause = checkpoint("disputed-territory");
-  if (pause) await pause;
-  const contested = await disputedMovesCooperative(analysis, available, 99, () => checkpoint("disputed-point"));
-  const expansions = expansionMoves(board, analysis, available);
-  pause = checkpoint("expansion");
-  if (pause) await pause;
-  const growthMoves = libertyGrowthMoves(analysis, player, available);
-  pause = checkpoint("growth");
-  if (pause) await pause;
-  const defenses = defendCandidates(growthMoves);
-  const surround = surroundMove(analysis, player, available, smart);
-  pause = checkpoint("defense-surround");
-  if (pause) await pause;
-  const endGame = contested.length === 0 && passCount > 0;
-  const eyes = endGame
-    ? []
-    : await eyeCreationMovesCooperative(
-      board, analysis, player, available, 99,
-      (detail) => checkpoint(`own-${detail ?? "eye"}`),
-      true,
-    );
-  const eyeBlock = endGame
-    ? undefined
-    : await eyeBlockMoveCooperative(
-      board, analysis, player, available,
-      (detail) => checkpoint(`block-${detail ?? "eye"}`),
-    );
-  const patterns = endGame
-    ? []
-    : await patternMovesCooperative(board, player, available, smart, () => checkpoint("pattern-row"));
-  const jump = expansions.filter(({ point }) => ([
-    [point.x, point.y + 2], [point.x + 2, point.y], [point.x, point.y - 2], [point.x - 2, point.y],
-  ] as const).some(([x, y]) => cellAt(board, x, y) === player));
-  const corner = cornerMove(board);
-  return {
-    board,
-    available,
-    legal: new Set(legalMoves.map(pointKey)),
-    expansions: () => expansions,
-    growthMoves: () => growthMoves,
-    defenses: () => defenses,
-    surround: () => surround,
-    eyes: () => eyes,
-    eyeBlock: () => eyeBlock,
-    patterns: () => patterns,
-    jump: () => jump,
-    corner: () => corner,
-    contested: contested.length > 0,
+    contested,
     endGame,
   };
 }
@@ -461,13 +417,13 @@ function makeOptions(space: PreparedOptionSpace, optionRoll: number, defend: Mov
       const moves = space.patterns();
       return moves.length ? { point: pick(moves, optionRoll)! } : undefined;
     } },
-    growth: { enumerable: true, get: () => space.endGame ? undefined : maximumGrowth(space.growthMoves(), optionRoll) },
+    growth: { enumerable: true, get: () => space.endGame() ? undefined : maximumGrowth(space.growthMoves(), optionRoll) },
     expansion: { enumerable: true, get: () => pick(space.expansions(), optionRoll) },
     jump: { enumerable: true, get: () => pick(space.jump(), optionRoll) },
     defend: { enumerable: true, get: () => defend },
     surround: { enumerable: true, get: () => space.surround() },
     corner: { enumerable: true, get: () => space.corner() },
-    random: { enumerable: true, get: () => space.contested && space.available.length
+    random: { enumerable: true, get: () => space.contested() && space.available.length
       ? { point: pick(space.available, optionRoll)! }
       : undefined },
   });
@@ -603,36 +559,15 @@ export function prepareOpponentPosition(
   opponent: GoRewardOpponent,
   previousBoards: readonly string[][] = [],
   passCount = 0,
+  historyHashes?: ReadonlySet<string>,
+  predictionCache?: OpponentPredictionCache,
 ): PreparedOpponentPosition {
   const canBeSmart = opponent !== "Netburners";
   const canBeReckless = opponent === "Netburners" || opponent === "Slum Snakes" || opponent === "The Black Hand";
   return {
     opponent,
-    ...(canBeSmart ? { smart: prepareOptionSpace(board, "O", true, previousBoards, passCount) } : {}),
-    ...(canBeReckless ? { reckless: prepareOptionSpace(board, "O", false, previousBoards, passCount) } : {}),
-  };
-}
-
-/** Fully materialize reply options while yielding inside large-board scans.
- * Production uses this path so exact-seed finalization contains selection and
- * one GPU dispatch, never a surprise multi-millisecond lazy analysis. */
-export async function prepareOpponentPositionCooperative(
-  board: GoBoard,
-  opponent: GoRewardOpponent,
-  previousBoards: readonly string[][],
-  passCount: number,
-  checkpoint: (detail?: string) => Promise<void> | undefined,
-): Promise<PreparedOpponentPosition> {
-  const canBeSmart = opponent !== "Netburners";
-  const canBeReckless = opponent === "Netburners" || opponent === "Slum Snakes" || opponent === "The Black Hand";
-  return {
-    opponent,
-    ...(canBeSmart
-      ? { smart: await prepareOptionSpaceCooperative(board, "O", true, previousBoards, passCount, checkpoint) }
-      : {}),
-    ...(canBeReckless
-      ? { reckless: await prepareOptionSpaceCooperative(board, "O", false, previousBoards, passCount, checkpoint) }
-      : {}),
+    ...(canBeSmart ? { smart: prepareOptionSpace(board, "O", true, previousBoards, passCount, historyHashes, predictionCache) } : {}),
+    ...(canBeReckless ? { reckless: prepareOptionSpace(board, "O", false, previousBoards, passCount, historyHashes, predictionCache) } : {}),
   };
 }
 
