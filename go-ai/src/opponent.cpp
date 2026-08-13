@@ -515,6 +515,16 @@ bool same_reply(const WeightedReply& left, const WeightedReply& right) {
     && left.wait.fixed_sleep_ms_after_seed == right.wait.fixed_sleep_ms_after_seed;
 }
 
+void append_illuminati_program(std::vector<ReplyBranch>& program, double roll) {
+  program.insert(program.end(), {
+    ReplyBranch::capture, ReplyBranch::defend_capture, ReplyBranch::eye_move,
+    ReplyBranch::surround, ReplyBranch::eye_block, ReplyBranch::corner,
+    ReplyBranch::pattern,
+  });
+  if (roll > 0.4) program.push_back(ReplyBranch::jump);
+  if (roll < 0.6) program.push_back(ReplyBranch::surround);
+}
+
 }  // namespace
 
 std::string_view opponent_name(Opponent opponent) {
@@ -557,20 +567,94 @@ std::string_view branch_name(ReplyBranch branch) {
   throw std::invalid_argument("unknown branch");
 }
 
-ReplyForecast predict_opponent_replies(const Position& position, Opponent opponent, double total_playtime_ms) {
+OpponentTurnBehavior opponent_turn_behavior(Opponent opponent, double total_playtime_ms) {
   const auto rolls = whrng(total_playtime_ms, 4);
-  const bool smart = opponent == Opponent::netburners ? false
-    : opponent == Opponent::slum_snakes ? rolls[0] < 0.3
-    : opponent == Opponent::black_hand ? rolls[0] < 0.8
-    : true;
-  const OptionSpace space = prepare_option_space(position, smart);
+  const double faction_roll = rolls.at(2);
+  std::vector<ReplyBranch> program;
+  if (opponent == Opponent::netburners) {
+    if (faction_roll < 0.2) append_illuminati_program(program, faction_roll);
+    if (faction_roll < 0.4) program.push_back(ReplyBranch::expansion);
+    if (faction_roll < 0.6) program.push_back(ReplyBranch::growth);
+    if (faction_roll < 0.75) program.push_back(ReplyBranch::random);
+  } else if (opponent == Opponent::slum_snakes) {
+    program.push_back(ReplyBranch::defend_capture);
+    if (faction_roll < 0.2) append_illuminati_program(program, faction_roll);
+    if (faction_roll < 0.6) program.push_back(ReplyBranch::growth);
+    if (faction_roll < 0.65) program.push_back(ReplyBranch::random);
+  } else if (opponent == Opponent::black_hand) {
+    program.insert(program.end(), {
+      ReplyBranch::capture, ReplyBranch::surround,
+      ReplyBranch::defend_capture, ReplyBranch::surround,
+    });
+    if (faction_roll < 0.3) append_illuminati_program(program, faction_roll);
+    if (faction_roll < 0.75) program.push_back(ReplyBranch::surround);
+    if (faction_roll < 0.8) program.push_back(ReplyBranch::random);
+  } else if (opponent == Opponent::tetrads) {
+    program.insert(program.end(), {
+      ReplyBranch::capture, ReplyBranch::defend_capture,
+      ReplyBranch::pattern, ReplyBranch::surround,
+    });
+    if (faction_roll < 0.4) append_illuminati_program(program, faction_roll);
+  } else if (opponent == Opponent::daedalus) {
+    if (faction_roll < 0.9) append_illuminati_program(program, faction_roll);
+  } else {
+    append_illuminati_program(program, faction_roll);
+  }
+  OpponentTurnBehavior result{
+    .smart = opponent == Opponent::netburners ? false
+      : opponent == Opponent::slum_snakes ? rolls.at(0) < 0.3
+      : opponent == Opponent::black_hand ? rolls.at(0) < 0.8
+      : true,
+    .option_roll = rolls.at(1),
+    .faction_roll = faction_roll,
+    .fallback_roll = rolls.at(3),
+  };
+  int rank = 0;
+  for (const ReplyBranch programmed : program) {
+    const auto branch = static_cast<std::size_t>(programmed);
+    if (result.priority_ranks[branch] == 0) {
+      result.priority_ranks[branch] = ++rank;
+    }
+  }
+  for (const ReplyBranch branch : {
+    ReplyBranch::growth, ReplyBranch::surround, ReplyBranch::defend,
+    ReplyBranch::expansion, ReplyBranch::pattern, ReplyBranch::eye_move,
+    ReplyBranch::eye_block, ReplyBranch::pass,
+  }) result.fallback_enabled[static_cast<std::size_t>(branch)] = 1.0;
+  return result;
+}
+
+std::vector<float> encode_opponent_turn_behavior(
+  const OpponentTurnBehavior& behavior,
+  double komi
+) {
+  std::vector<float> result(behavior_base_features + (komi >= 0 ? 1 : 0));
+  result[0] = behavior.smart ? 1.0F : 0.0F;
+  result[1] = static_cast<float>(behavior.option_roll);
+  result[2] = static_cast<float>(behavior.faction_roll);
+  result[3] = static_cast<float>(behavior.fallback_roll);
+  for (std::size_t index = 0; index < reply_branch_count; ++index) {
+    result[4 + index] = static_cast<float>(behavior.priority_ranks[index])
+      / static_cast<float>(reply_branch_count);
+    result[4 + reply_branch_count + index]
+      = static_cast<float>(behavior.fallback_enabled[index]);
+  }
+  if (komi >= 0) result.back() = static_cast<float>(komi / 10.0);
+  return result;
+}
+
+ReplyForecast predict_opponent_replies(const Position& position, Opponent opponent, double total_playtime_ms) {
+  const auto behavior = opponent_turn_behavior(opponent, total_playtime_ms);
+  const OptionSpace space = prepare_option_space(position, behavior.smart);
   std::vector<std::optional<MoveOption>> defenses;
   if (space.defenses.empty()) defenses.push_back(std::nullopt);
   else for (const auto& defense : space.defenses) defenses.push_back(defense);
   ReplyForecast forecast;
   const double probability = 1.0 / static_cast<double>(defenses.size());
   for (const auto& defense : defenses) {
-    WeightedReply reply = reply_for(make_options(space, rolls[1], defense), space, opponent, rolls[2], rolls[3]);
+    WeightedReply reply = reply_for(
+      make_options(space, behavior.option_roll, defense), space, opponent,
+      behavior.faction_roll, behavior.fallback_roll);
     reply.probability = probability;
     const auto duplicate = std::find_if(forecast.replies.begin(), forecast.replies.end(), [&](const WeightedReply& current) {
       return same_reply(current, reply);

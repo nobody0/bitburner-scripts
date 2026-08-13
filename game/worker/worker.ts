@@ -14,7 +14,7 @@ import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/jit.ts";
  * - "serve": a POOLED worker with fixed kind and threads that loops over jobs
  *   from the realm mailbox, parked between jobs on a `worker_wake` resolver
  *   raced against an idle timeout. One process serves many batch ops, which
- *   collapses exec churn — the browser-side (V8) cost of a fresh
+ *   collapses exec churn — the browser JavaScript-engine cost of a fresh
  *   WorkerScript + ns object + RAM recalc per op, ~5/sec at depth, forever.
  *
  * atExit is registered BEFORE any await, so normal completion, a kill/reset

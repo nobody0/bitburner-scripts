@@ -301,6 +301,7 @@ export class KataGoAdvisor {
     komi: number,
     visits: number,
     limit: number,
+    allowed?: ReadonlySet<string>,
   ): Promise<KataGoAdvice[]> {
     const id = this.nextQueryId("shortlist");
     const query = buildKataGoQuery(id, board, previousBoards, komi, visits);
@@ -314,10 +315,15 @@ export class KataGoAdvisor {
     const policyValue = (move: KataGoMove): number => move === "pass"
       ? policy[board.size * board.size] ?? -1
       : policy[move[1] * board.size + move[0]] ?? -1;
-    const ranked = legal.sort((a, b) => policyValue(b) - policyValue(a));
+    const allowedKey = (move: KataGoMove): string => move === "pass"
+      ? "pass" : `${move[0]},${move[1]}`;
+    const ranked = legal
+      .filter((move) => !allowed || allowed.has(allowedKey(move)))
+      .sort((a, b) => policyValue(b) - policyValue(a));
     const selected: KataGoMove[] = [];
     for (const info of searched) {
       const move = parseKataGoVertex(info.move, board.size);
+      if (allowed && !allowed.has(allowedKey(move))) continue;
       if (!selected.some((item) => moveVertex(item) === moveVertex(move))) selected.push(move);
       if (selected.length >= limit) break;
     }

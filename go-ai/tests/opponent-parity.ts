@@ -1,5 +1,9 @@
 import { playMove, type GoBoard } from "../../shared/strategy/go/rules.ts";
-import { predictOpponentReplies } from "../../shared/strategy/go/opponent.ts";
+import {
+  encodeOpponentTurnBehavior,
+  opponentTurnBehavior,
+  predictOpponentReplies,
+} from "../../shared/strategy/go/opponent.ts";
 import { alignedAiSeed } from "../../shared/strategy/go/rng.ts";
 import {
   configureGoArenaEngine,
@@ -18,6 +22,9 @@ interface NativeReply {
   fixedSleepMsAfterSeed: number;
 }
 
+const nativeOracle = process.env.GO_CPP_ORACLE
+  ?? `${import.meta.dir}/../build/release/go_cpp_oracle`;
+
 function nativeForecast(
   board: GoBoard,
   history: readonly string[][],
@@ -25,9 +32,8 @@ function nativeForecast(
   seed: number,
   opponent: string,
 ): { exact: boolean; replies: NativeReply[] } {
-  const executable = `${import.meta.dir}/../build/release/go_cpp_oracle`;
   const result = Bun.spawnSync([
-    executable,
+    nativeOracle,
     "reply",
     String(board.size),
     opponent,
@@ -73,7 +79,7 @@ const ordinary = GO_ARENA_OPPONENTS.filter(({ name }) => name !== "????????????"
 for (const opponent of ordinary) for (const size of [5, 7, 9, 13] as const) for (const seed of [1_000, 73_000, 29_999_800]) {
   const expected = oracleInitialBoard(size, opponent.oracle, seed);
   const result = Bun.spawnSync([
-    `${import.meta.dir}/../build/release/go_cpp_oracle`,
+    nativeOracle,
     "board",
     String(size),
     opponent.name,
@@ -90,13 +96,62 @@ const daemon = GO_ARENA_OPPONENTS.find(({ name }) => name === "????????????")!;
 for (const seed of [1_000, 73_000]) {
   const expected = oracleInitialBoard(13, daemon.oracle, seed);
   const result = Bun.spawnSync([
-    `${import.meta.dir}/../build/release/go_cpp_oracle`, "board", "13", daemon.name,
+    nativeOracle, "board", "13", daemon.name,
     String(seed), String((seed ^ 0xa5a5a5a5) >>> 0),
   ]);
   if (result.exitCode !== 0 || result.stdout.toString().trim().split("\t")[1] !== expected.rows.join("")) {
     throw new Error(`C++ BitVerse board mismatch at seed ${seed}`);
   }
 }
+for (const opponent of GO_ARENA_OPPONENTS) for (const seed of [1_000, 73_000, 29_999_800]) {
+  const komi = opponent.name === "????????????" ? undefined
+    : opponent.name === "Netburners" ? 1.5
+    : opponent.name === "Slum Snakes" || opponent.name === "The Black Hand" ? 3.5
+    : opponent.name === "Tetrads" || opponent.name === "Daedalus" ? 5.5 : 7.5;
+  const expected = encodeOpponentTurnBehavior(opponentTurnBehavior(opponent.name, seed), komi);
+  const native = Bun.spawnSync([
+    nativeOracle, "behavior", opponent.name,
+    String(seed), komi === undefined ? "-" : String(komi),
+  ]);
+  if (native.exitCode !== 0) throw new Error(native.stderr.toString());
+  const actual = native.stdout.toString().trim().split(",").map(Number);
+  if (actual.length !== expected.length
+    || actual.some((value, index) => Math.abs(value - expected[index]!) > 1e-7)) {
+    throw new Error(`C++ behavior signature mismatch for ${opponent.name} seed ${seed}`);
+  }
+}
+// Removing raw identity is sound only if two identities that collapse to one
+// semantic current-turn signature cannot produce contradictory candidate
+// responses. Audit real collisions (notably Illuminati/Daemon and some
+// Daedalus phases) on candidate-dependent boards.
+const collisionBoards: GoBoard[] = [
+  { size: 5, rows: [".....", ".....", ".....", ".....", "....."] },
+  { size: 5, rows: ["XX...", "OO...", ".X.O.", ".....", "....."] },
+  { size: 5, rows: ["XOX..", "OX...", "..O..", "...X.", "....."] },
+];
+let behaviorCollisions = 0;
+for (const seed of [1_000, 73_000, 29_999_800, 10_200, 10_400]) {
+  const groups = new Map<string, string[]>();
+  for (const opponent of GO_ARENA_OPPONENTS) {
+    const key = Array.from(encodeOpponentTurnBehavior(
+      opponentTurnBehavior(opponent.name, seed))).join(",");
+    const names = groups.get(key) ?? [];
+    names.push(opponent.name);
+    groups.set(key, names);
+  }
+  for (const names of groups.values()) {
+    if (names.length < 2) continue;
+    behaviorCollisions++;
+    for (const board of collisionBoards) {
+      const replies = names.map((name) => predictOpponentReplies(board, name, seed));
+      const reference = JSON.stringify(replies[0]);
+      if (replies.some((reply) => JSON.stringify(reply) !== reference)) {
+        throw new Error(`behavior signature collision changes a reply: ${names.join(", ")} seed ${seed}`);
+      }
+    }
+  }
+}
+if (!behaviorCollisions) throw new Error("behavior collision audit did not exercise any identity collapse");
 const scenarios = [
   ...ordinary.map((opponent, index) => ({ opponent, seed: goArenaSeeds(1, 73_000 + index * 2_000)[0]! })),
   ...([7, 9] as const).map((requestedSize, index) => ({

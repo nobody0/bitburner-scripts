@@ -81,9 +81,9 @@ export interface GoView {
   /** Most recent position first. IPvGO uses positional superko, so legality
    * needs the complete history rather than only the immediately prior board. */
   previousBoards: readonly string[][];
-  /** Cap on fully forecast candidates. Only oversized boards default below the
-   * full legal set; the cap keeps the 19x19 reply model inside the latency
-   * budget and is exposed for simulator A/B runs. */
+  /** Cap on candidates that proceed from the all-legal V9 proposal to exact
+   * reply forecasting and post-response value inference. Production defaults
+   * to eight; this override exists only for simulator quality/latency audits. */
   candidateLimit?: number;
   /** Consecutive public passes. A value of one means white just offered to end
    * the game, so black can lock in any current win immediately. */
@@ -234,19 +234,62 @@ export function playMove(
   return { board: next, captures };
 }
 
+/** Exact legal-placement indices with one group analysis per stone group.
+ * Most empty points are then O(1); only captures need to materialize a board
+ * to check positional superko. This matters when V9 asks for a legal plane on
+ * hundreds of post-response candidates. */
+export function legalMoveIndices(
+  board: GoBoard,
+  colour: Stone = "X",
+  previousHashes: ReadonlySet<string> = new Set(),
+): number[] {
+  const size = board.size;
+  const area = size * size;
+  const liberties = new Int16Array(area);
+  liberties.fill(-1);
+  for (let x = 0; x < size; x++) for (let y = 0; y < size; y++) {
+    const point = x * size + y;
+    const cell = at(board, x, y);
+    if ((cell !== "X" && cell !== "O") || liberties[point] >= 0) continue;
+    const found = fastGroup(board, x, y);
+    for (const stone of found.stones) liberties[stone] = found.liberties;
+  }
+  const result: number[] = [];
+  const enemy = other(colour);
+  const currentHash = previousHashes.size ? boardHash(board) : "";
+  for (let x = 0; x < size; x++) for (let y = 0; y < size; y++) {
+    if (at(board, x, y) !== ".") continue;
+    let survives = false;
+    let captures = false;
+    for (let direction = 0; direction < 4; direction++) {
+      const nx = x + (direction === 0 ? 1 : direction === 1 ? -1 : 0);
+      const ny = y + (direction === 2 ? 1 : direction === 3 ? -1 : 0);
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const cell = at(board, nx, ny);
+      if (cell === ".") survives = true;
+      else if (cell === colour && liberties[nx * size + ny]! > 1) survives = true;
+      else if (cell === enemy && liberties[nx * size + ny] === 1) captures = true;
+    }
+    const point = x * size + y;
+    const repeats = survives && !captures && previousHashes.size > 0
+      ? previousHashes.has(currentHash.slice(0, point) + colour + currentHash.slice(point + 1))
+      : false;
+    if (captures ? playMove(board, x, y, colour, previousHashes) : survives && !repeats) {
+      result.push(x * size + y);
+    }
+  }
+  return result;
+}
+
 export function legalMoves(
   board: GoBoard,
   colour: Stone = "X",
   previousBoards: readonly string[][] = [],
 ): [number, number][] {
   const history = new Set(previousBoards.map((prior) => prior.join("")));
-  const moves: [number, number][] = [];
-  for (let x = 0; x < board.size; x++) {
-    for (let y = 0; y < board.size; y++) {
-      if (playMove(board, x, y, colour, history)) moves.push([x, y]);
-    }
-  }
-  return moves;
+  return legalMoveIndices(board, colour, history).map((point) => [
+    Math.floor(point / board.size), point % board.size,
+  ]);
 }
 
 export function territory(board: GoBoard): { X: number; O: number } {

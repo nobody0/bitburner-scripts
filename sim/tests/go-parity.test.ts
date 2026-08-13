@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { group, playMove, scoreBoard, type GoBoard, type Stone } from "../../shared/strategy/go/rules.ts";
+import { group, legalMoveIndices, playMove, scoreBoard, type GoBoard, type Stone } from "../../shared/strategy/go/rules.ts";
 import { predictOpponentReplies } from "../../shared/strategy/go/opponent.ts";
 import { GO_ENGINE_CYCLE_MS, goAiWaitMs, nextGoTurnTiming, whrng } from "../../shared/strategy/go/rng.ts";
 import {
@@ -154,6 +154,9 @@ function assertPositionParity(state: BoardState, stone: Stone): [number, number]
       legal.push([x, y]);
     }
   }
+  expect(legalMoveIndices(handcrafted, stone, historyHashes)).toEqual(
+    legal.map(([x, y]) => x * rows.length + y),
+  );
   return legal;
 }
 
@@ -326,7 +329,7 @@ describe("handcrafted faction AI matches the pinned AI", () => {
     }
   });
 
-  test("branch wait traces reproduce upstream wall time and yield a distinct next-turn seed", async () => {
+  test("branch wait traces reproduce upstream wall time and response tick", async () => {
     const rows = Array.from({ length: 5 }, () => ".....");
     for (const bonusCycles of [0, 1, 4, 20]) {
       for (const seed of [1_000, 1_217, 4_019]) {
@@ -344,8 +347,7 @@ describe("handcrafted faction AI matches the pinned AI", () => {
         const placementMs = actual.type === GoPlayType.move ? (Go.storedCycles > 0 ? 40 : 200) : 0;
         const timing = nextGoTurnTiming(10_000, bonusCycles, reply!.wait);
         expect(timing.responseWallMs).toBe(sleepLog.reduce((sum, milliseconds) => sum + milliseconds, 0) + placementMs);
-        expect(timing.nextSeed).not.toBe(seed);
-        expect(timing.nextSeed).toBeGreaterThan(timing.responsePlaytimeMs);
+        expect(timing.responsePlaytimeMs).toBeGreaterThanOrEqual(10_000);
       }
     }
   });

@@ -2,12 +2,16 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import type { GoDodgeGlobals } from "../game/lib/go-dodge-shared.ts";
 import { emptyBoard, type DriverContext } from "../game/lib/features/index.ts";
-import { GO_ANCHOR_POLL_MS, goModule, setGoBackendFactoryForTest } from "../game/lib/features/remaining.ts";
+import { GO_ANCHOR_POLL_MS, goModule, setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 import { GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
+import { GO_DISPATCH_GUARD_MS } from "../shared/strategy/go/tick.ts";
 import { StubGoValueBackend } from "./support/go-value-backend.ts";
+import { TestGoNeuralRuntime } from "./support/go-neural-runtime.ts";
 import type { GameState } from "../game/lib/state.ts";
 import { resolveClaims } from "../shared/strategy/arbiter.ts";
 import { unknownForecast } from "../shared/strategy/progression/forecast.ts";
+import type { GoDecision } from "../shared/strategy/go/rules.ts";
+import type { GoWorkerEvaluation } from "../shared/strategy/go/neural/worker-protocol.ts";
 
 function goState(): GameState {
   return {
@@ -41,12 +45,12 @@ function goState(): GameState {
 const unknown = unknownForecast(0, "test", "test fixture");
 
 beforeEach(() => {
-  setGoBackendFactoryForTest((weights) => new StubGoValueBackend(weights));
+  setGoNeuralRuntimeForTest(new TestGoNeuralRuntime((weights) => new StubGoValueBackend(weights)));
   goModule.reset?.(goState(), "bitnode");
 });
 
 afterAll(() => {
-  setGoBackendFactoryForTest();
+  setGoNeuralRuntimeForTest();
 });
 
 async function runGrantedTurn(
@@ -136,13 +140,54 @@ describe("Go live seed observation", () => {
     // Real planning time has elapsed since the anchor, so the remaining margin
     // is whatever is left of the cycle — but never inside the guard band, or
     // the turn would have targeted the next cycle instead.
-    expect(state.topics.go?.plan?.prediction?.rolloverMarginMs).toBeGreaterThanOrEqual(20);
+    expect(state.topics.go?.plan?.prediction?.rolloverMarginMs).toBeGreaterThanOrEqual(GO_DISPATCH_GUARD_MS);
+    expect(state.topics.go?.plan?.prediction?.readyToDispatchMs).toBeGreaterThanOrEqual(0);
     expect(state.topics.go?.lastTurn?.timing).toMatchObject({
       alignment: "same-slot",
       dispatchPlaytime: 10_000,
       seed: 10_200,
+      readyToDispatchMs: state.topics.go?.plan?.prediction?.readyToDispatchMs,
     });
     expect(state.topics.go?.plan?.input.komi).toBe(1.5);
+  });
+
+  test("records chained Black-turn-to-dispatch latency", async () => {
+    const state = goState();
+    const clock = {
+      playtimes: [...ANCHOR_READS, ...Array<number>(32).fill(10_000)],
+      sleeps: [] as number[],
+    };
+    let calls = 0;
+    const opponentMove = (x?: number, y?: number) => {
+      for (let candidateX = 0; candidateX < 5; candidateX++) {
+        for (let candidateY = 0; candidateY < 5; candidateY++) {
+          if (candidateX !== x || candidateY !== y) {
+            return { type: "move" as const, x: candidateX, y: candidateY };
+          }
+        }
+      }
+      return { type: "pass" as const, x: null, y: null };
+    };
+    const response = async (x?: number, y?: number) => {
+      calls++;
+      return calls === 1
+        ? opponentMove(x, y)
+        : { type: "gameOver" as const, x: null, y: null };
+    };
+    await runGrantedTurn(state, {
+      go: {
+        makeMove: (x: number, y: number) => response(x, y),
+        passTurn: () => response(),
+      },
+    } as unknown as NS, clock);
+    for (let attempts = 0; attempts < 20 && calls < 2; attempts++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(calls).toBe(2);
+    const readyToDispatchMs = state.topics.go?.plan?.prediction?.readyToDispatchMs;
+    expect(readyToDispatchMs).toBeDefined();
+    expect(readyToDispatchMs!).toBeLessThan(50);
+    expect(state.topics.go?.lastTurn?.timing?.readyToDispatchMs).toBe(readyToDispatchMs);
   });
 
   test("claims the current lifecycle action before a prior plan exists", () => {
@@ -203,6 +248,50 @@ describe("Go live seed observation", () => {
     expect(state.topics.go?.lastTurn?.timing?.alignment).toBe("boundary-replan");
   });
 
+  test("a boundary replan executes the exact V9 action even when move flips to pass", async () => {
+    const move: GoDecision = {
+      action: { type: "move", x: 0, y: 0, why: "first seed" },
+      ranked: [], why: "test", finalists: 1, positionValue: 0.5, forecast: [],
+    };
+    const pass: GoDecision = {
+      action: { type: "pass", why: "second seed" },
+      ranked: [], why: "test", finalists: 1, positionValue: 0.5, forecast: [],
+    };
+    const evaluation = (decision: GoDecision): GoWorkerEvaluation => ({
+      decision,
+      preparationMs: 0,
+      finalizationMs: 0,
+      modelProfile: "small5",
+      modelExtent: 5,
+      cached: true,
+      pushed: false,
+      continuations: [],
+    });
+    setGoNeuralRuntimeForTest({
+      install: async () => ({ positionId: "flip", preparationMs: 0, cached: true }),
+      evaluate: async (_positionId, seeds) => evaluation(seeds[0] === 10_400 ? pass : move),
+      commit: () => "flip:test",
+      confirm() {},
+      async reset() {},
+      dispose() {},
+    });
+    const state = goState();
+    const clock = { playtimes: [...ANCHOR_READS, 10_000, 10_200, 10_200], sleeps: [] as number[] };
+    let moves = 0;
+    let passes = 0;
+    await runGrantedTurn(state, {
+      go: {
+        makeMove: async () => { moves++; return { type: "gameOver", x: null, y: null }; },
+        passTurn: async () => { passes++; return { type: "gameOver", x: null, y: null }; },
+      },
+    } as unknown as NS, clock);
+
+    expect(moves).toBe(0);
+    expect(passes).toBe(1);
+    expect(state.topics.go?.plan?.action).toEqual({ type: "pass" });
+    expect(state.topics.go?.plan?.prediction?.boundaryRetries).toBe(1);
+  });
+
   test("a reset discards an in-flight planning result before dispatch", async () => {
     let releaseBatch!: () => void;
     const batchReleased = new Promise<void>((resolve) => {
@@ -212,15 +301,23 @@ describe("Go live seed observation", () => {
     const batchStarted = new Promise<void>((resolve) => {
       markBatchStarted = resolve;
     });
-    setGoBackendFactoryForTest((weights) => ({
+    setGoNeuralRuntimeForTest(new TestGoNeuralRuntime((weights) => ({
       extent: weights.extent,
+      behaviorFeatures: weights.behaviorFeatures,
+      async evaluateProposal(batch) {
+        const candidates = weights.extent * weights.extent + 1;
+        return {
+          value: new Float32Array(batch.count * 3),
+          moves: new Float32Array(batch.count * candidates),
+        };
+      },
       async evaluateBatch(batch) {
         markBatchStarted();
         await batchReleased;
         return new Float32Array(batch.count * 3);
       },
       dispose() {},
-    }));
+    })));
     const state = goState();
     goModule.reset?.({ ...goState(), topics: {} } as GameState, "bitnode");
     let makeMoves = 0;
@@ -288,18 +385,18 @@ describe("Go live seed observation", () => {
     });
   });
 
-  test("a clock that keeps advancing still dispatches after exactly one replan", async () => {
+  test("a clock that keeps advancing replans until the dispatch read is stable", async () => {
     const state = goState();
-    // Every read returns a later tick. The old design retried per crossing and
-    // could stack delays; this one accepts the second read and dispatches, so
-    // a pathologically drifting clock costs one replan, never a loop.
+    // Every initial read returns a later tick. Dispatching after a fixed single
+    // retry knowingly used the wrong seed; the assured runner instead consumes
+    // the finite drift and calls Go only once two reads agree.
     const clock = { playtimes: [...ANCHOR_READS, 10_000, 10_200, 10_400, 10_600], sleeps: [] as number[] };
     await runGrantedTurn(state, {
       go: { makeMove: async () => ({ type: "gameOver", x: null, y: null }) },
     } as unknown as NS, clock);
 
     expect(dispatchSleeps(clock.sleeps)).toEqual([]);
-    expect(state.topics.go?.plan?.prediction?.boundaryRetries).toBe(1);
+    expect(state.topics.go?.plan?.prediction?.boundaryRetries).toBe(3);
     expect(state.topics.go?.lastTurn?.opponentResponse?.type).toBe("gameOver");
   });
 

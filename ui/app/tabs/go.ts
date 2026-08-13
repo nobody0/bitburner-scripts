@@ -172,8 +172,16 @@ function decisionMarkup(g: GoState): string {
   const prediction = plan.prediction;
   const firstSeed = prediction?.seedCandidates[0];
   const lastSeed = prediction?.seedCandidates.at(-1);
+  const seedRange = prediction && firstSeed !== undefined
+    ? prediction.seedCandidates.length === 1
+      ? `exact seed ${(firstSeed / 1_000).toFixed(3)}`
+      : `${prediction.seedCandidates.length} reachable seeds ${(firstSeed / 1_000).toFixed(3)}-${((lastSeed ?? firstSeed) / 1_000).toFixed(3)}`
+    : undefined;
+  const dispatchLatency = prediction?.readyToDispatchMs === undefined
+    ? "ready-to-play pending"
+    : `ready-to-play ${prediction.readyToDispatchMs.toFixed(1)} ms (${prediction.pushedPredictionHit ? "pushed hit" : "foreground miss"})`;
   const seedDetail = prediction && firstSeed !== undefined
-    ? `${prediction.model}; ${prediction.seedCandidates.length === 1 ? "exact seed " + (firstSeed / 1_000).toFixed(3) : prediction.seedCandidates.length + " reachable seeds " + (firstSeed / 1_000).toFixed(3) + "-" + (lastSeed! / 1_000).toFixed(3)} s on ${prediction.engineCycleMs} ms cycles; same-slot dispatch ${(prediction.dispatchPlaytime / 1_000).toFixed(3)} s; plan ${prediction.totalPlanningMs.toFixed(1)} ms (${prediction.preparationMs.toFixed(1)} prepare + ${prediction.finalizationMs.toFixed(1)} exact); ${prediction.boundaryRetries} boundary retries; AI cycle ${prediction.aiWaitMs} ms`
+    ? `${prediction.model}; ${seedRange} s on ${prediction.engineCycleMs} ms cycles; dispatch tick ${(prediction.dispatchPlaytime / 1_000).toFixed(3)} s; ${dispatchLatency}; plan ${prediction.totalPlanningMs.toFixed(1)} ms (${prediction.preparationMs.toFixed(1)} prepare + ${prediction.finalizationMs.toFixed(1)} exact); ${prediction.boundaryRetries} boundary retries; AI cycle ${prediction.aiWaitMs} ms`
     : "no playtime sample available";
   const result = g.lastTurn;
   const response = result?.opponentResponse

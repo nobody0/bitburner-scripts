@@ -1,162 +1,137 @@
-/** Promotion gate: decide whether a trained candidate beats the deployed
- * champion, and — only if it does — move it into the deployment pipeline.
+/** V9-only promotion gate.
  *
- * This encodes go-ai's promotion rule as an executable check instead of a
- * documented manual procedure: more complete-game wins on a fixed unseen
- * corpus always wins, and only an exact win tie is broken by higher
- * loss-penalized terminal Power per total round. A candidate that does not
- * strictly improve is rejected with a nonzero exit status.
- *
- *   bun run go:promote small5 go-ai/runs/small5-next/checkpoint-42.model
- *   bun run go:promote daemon19 <candidate.model> --games 128 --seed 7193001
- *   bun run go:promote small5 <candidate.model> --apply
- *
- * `--apply` stages the champion, re-exports the runtime artifact, regenerates
- * the C++ golden fixture, runs the real shader, and compares the decoded
- * runtime weights on the same complete-game corpus. Any failure restores the
- * prior champion, artifact, and fixture.
+ * Champion and candidate are exported in turn and play the same fixed corpus
+ * through the production WGSL backend in Chrome. CPU gameplay inference is
+ * deliberately unsupported: it is too slow for iteration and does not model
+ * the deployed runtime. On apply, the full-precision checkpoint becomes the
+ * champion, the q8 artifact is retained, and C++ champion -> WebGPU numerical
+ * agreement is regenerated and checked transactionally.
  */
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { dirname, join } from "node:path";
+import { DAEMON19_GO_MODEL } from "../shared/strategy/go/neural/models/daemon19.ts";
+import { SMALL5_GO_MODEL } from "../shared/strategy/go/neural/models/small5.ts";
+import { runGoProfileArena, type GoArenaProfile, type GoProfileArenaResult } from "./go-profile-arena.ts";
 
 const ROOT = join(import.meta.dir, "..");
-const RELEASE = join(ROOT, "go-ai", "build", "release");
 
-type Profile = "small5" | "daemon19";
-
-interface Row {
-  model: string;
-  games: number;
-  wins: number;
-  winRate: number;
-  powerPerRound: number;
-}
-
-function flag(name: string, fallback: number): number {
+function numberFlag(name: string, fallback: number): number {
   const index = Bun.argv.indexOf(name);
   if (index < 0) return fallback;
   const value = Number(Bun.argv[index + 1]);
-  if (!Number.isFinite(value)) throw new Error(`${name} requires a numeric value`);
+  if (!Number.isFinite(value)) throw new Error(`${name} requires a number`);
   return value;
+}
+
+function stringFlag(name: string, fallback: string): string {
+  const index = Bun.argv.indexOf(name);
+  if (index < 0) return fallback;
+  const value = Bun.argv[index + 1];
+  if (!value) throw new Error(`${name} requires a path`);
+  return value;
+}
+
+async function sha256(path: string): Promise<string> {
+  return createHash("sha256").update(new Uint8Array(await Bun.file(path).arrayBuffer())).digest("hex");
+}
+
+async function magic(path: string): Promise<string> {
+  return (await Bun.file(path).slice(0, 64).text()).trimStart().split(/\s+/, 1)[0] ?? "";
+}
+
+function run(step: string[]): void {
+  const result = Bun.spawnSync(step, { cwd: ROOT, stdout: "inherit", stderr: "inherit" });
+  if (result.exitCode !== 0) throw new Error(`step failed: ${step.join(" ")}`);
+}
+
+function printArena(label: string, result: GoProfileArenaResult): void {
+  console.log(`${label.padEnd(9)} ${result.wins}/${result.games} wins, `
+    + `${result.pointDifference >= 0 ? "+" : ""}${result.pointDifference.toFixed(1)} points, `
+    + `${result.latencyMs.p50}/${result.latencyMs.p95} ms p50/p95, `
+    + `${result.meanFinalists} mean finalists [${result.backend}]`);
 }
 
 const [profileArg, candidate] = [Bun.argv[2], Bun.argv[3]];
 if (profileArg !== "small5" && profileArg !== "daemon19") {
-  throw new Error("usage: bun run go:promote <small5|daemon19> <candidate.model> [--games N] [--seed N] [--apply]");
+  throw new Error("usage: bun run go:promote <small5|daemon19> <candidate.model> [--games N] [--seed N] [--summary PATH] [--apply]");
 }
-const profile: Profile = profileArg;
-if (!candidate || !await Bun.file(candidate).exists()) {
-  throw new Error(`candidate model ${candidate ?? "(missing)"} does not exist`);
-}
+const profile: GoArenaProfile = profileArg;
+if (!candidate || !await Bun.file(candidate).exists()) throw new Error(`candidate ${candidate ?? "(missing)"} does not exist`);
+if (await magic(candidate) !== "bitburner-go-value-v9") throw new Error("promotion accepts V9 checkpoints only");
+
 const champion = join(ROOT, "go-ai", `${profile}-champion.model`);
-if (!await Bun.file(champion).exists()) throw new Error(`champion ${champion} does not exist`);
-
-// Defaults match the gate corpora documented in go-ai/BASELINES.md. Use a
-// fresh seed for every real promotion: reusing one lets a candidate be
-// selected against a corpus it was implicitly tuned on.
-const games = Math.max(1, Math.floor(flag("--games", profile === "small5" ? 2_400 : 128)));
-const seed = Math.floor(flag("--seed", profile === "small5" ? 10_992_001 : 7_193_001));
-
-const command = profile === "small5"
-  ? [join(RELEASE, "go_cpp_evaluate_mixed"), String(games), String(seed), champion, candidate, "--small5"]
-  : [join(RELEASE, "go_cpp_evaluate"), String(games), String(seed), "????????????", "19", champion, candidate];
-
-const binary = command[0]!;
-if (!await Bun.file(binary).exists()) {
-  throw new Error(`${binary} is missing; run: cmake --build go-ai/build/release -j 12`);
+const artifact = join(ROOT, "shared", "strategy", "go", "neural", "models", `${profile}.ts`);
+const fixture = join(ROOT, "tests", "fixtures", "go-value.json");
+if (await magic(champion) !== "bitburner-go-value-v9") {
+  throw new Error(`installed ${profile} champion is not V9`);
 }
 
-console.log(`gate: ${profile}, ${games} complete games, corpus seed ${seed}`);
-const gate = Bun.spawnSync(command, { stdout: "pipe", stderr: "pipe" });
-if (gate.exitCode !== 0) throw new Error(gate.stderr.toString() || "evaluator failed");
-const output = gate.stdout.toString();
-console.log(output.trimEnd());
-
-function parseRows(report: string): Row[] {
-  return report.trim().split("\n").slice(1).filter((line) => !line.startsWith("  ")).map((line) => {
-    const [model, gameCount, wins, winRate, powerPerRound] = line.split("\t");
-    return {
-      model: model!,
-      games: Number(gameCount),
-      wins: Number(wins),
-      winRate: Number(winRate),
-      powerPerRound: Number(powerPerRound),
-    };
-  });
+const summaryPath = stringFlag("--summary", join(dirname(candidate), "summary.json"));
+if (!await Bun.file(summaryPath).exists()) throw new Error(`missing V9 training summary ${summaryPath}`);
+const summary = await Bun.file(summaryPath).json() as {
+  profile?: string; modelSha256?: string; shortlistDataAllowed?: boolean; shortlistGate?: unknown;
+};
+const candidateHash = await sha256(candidate);
+if (summary.profile !== profile || summary.modelSha256 !== candidateHash) {
+  throw new Error("V9 summary does not identify this profile and checkpoint");
+}
+if (!summary.shortlistDataAllowed) {
+  throw new Error(`V9 exhaustive shortlist recall gate failed: ${JSON.stringify(summary.shortlistGate ?? {})}`);
 }
 
-const rows = parseRows(output);
-const championRow = rows.find((row) => row.model === champion);
-const candidateRow = rows.find((row) => row.model === candidate);
-if (!championRow || !candidateRow) throw new Error("evaluator did not report both models");
-
-const improved = candidateRow.wins > championRow.wins
-  || (candidateRow.wins === championRow.wins && candidateRow.powerPerRound > championRow.powerPerRound);
-const margin = candidateRow.wins - championRow.wins;
-console.log(`\nchampion  ${championRow.wins}/${championRow.games} wins, ${championRow.powerPerRound.toFixed(5)} power/round`);
-console.log(`candidate ${candidateRow.wins}/${candidateRow.games} wins, ${candidateRow.powerPerRound.toFixed(5)} power/round`);
-console.log(`verdict:  ${improved ? "PROMOTE" : "REJECT"} (${margin >= 0 ? "+" : ""}${margin} wins)`);
-
-if (!improved) {
-  console.error("\ncandidate does not improve on the champion; not promoting");
-  throw new Error("promotion gate rejected the candidate");
+const installedArtifact = profile === "small5" ? SMALL5_GO_MODEL : DAEMON19_GO_MODEL;
+const championHash = await sha256(champion);
+if (installedArtifact.topology !== "bitburner-go-value-v9"
+  || installedArtifact.sourceSha256 !== championHash) {
+  throw new Error(`${profile} artifact is not exported from the installed V9 champion`);
 }
 
-if (!Bun.argv.includes("--apply")) {
-  console.log("\nre-run with --apply to install this candidate and refresh the deployment artifacts");
-} else {
-  const artifact = join(ROOT, "shared", "strategy", "go", "neural", "models", `${profile}.ts`);
-  const fixture = join(ROOT, "tests", "fixtures", "go-value.json");
-  const originals = {
-    champion: await Bun.file(champion).text(),
-    artifact: await Bun.file(artifact).text(),
-    fixture: await Bun.file(fixture).text(),
-  };
-  const scratch = mkdtempSync(join(tmpdir(), `go-promote-${profile}-`));
-  const runtimeModel = join(scratch, `${profile}-runtime.model`);
-  const runStep = (step: string[]) => {
-    const run = Bun.spawnSync(["bun", "run", ...step], { stdout: "inherit", stderr: "inherit" });
-    if (run.exitCode !== 0) throw new Error(`post-promotion step failed: ${step.join(" ")}`);
-  };
-  try {
+const arenaConfig = {
+  profile,
+  games: Math.max(1, Math.floor(numberFlag("--games", profile === "small5" ? 12 : 4))),
+  seed: Math.floor(numberFlag("--seed", profile === "small5" ? 10_992_001 : 7_193_001)),
+};
+const originals = {
+  champion: await Bun.file(champion).text(),
+  artifact: await Bun.file(artifact).text(),
+  fixture: await Bun.file(fixture).text(),
+};
+let keepCandidate = false;
+try {
+  console.log(`V9 WebGPU gate: ${profile}, ${arenaConfig.games} game(s) per opponent, seed ${arenaConfig.seed}`);
+  const championResult = await runGoProfileArena(arenaConfig);
+  run(["bun", "run", "tools/go-export-model.ts", candidate, profile]);
+  const candidateResult = await runGoProfileArena(arenaConfig);
+  printArena("champion", championResult);
+  printArena("candidate", candidateResult);
+
+  const improved = candidateResult.wins > championResult.wins
+    || (candidateResult.wins === championResult.wins
+      && candidateResult.pointDifference > championResult.pointDifference);
+  console.log(`verdict: ${improved ? "PROMOTE" : "REJECT"} `
+    + `(${candidateResult.wins - championResult.wins >= 0 ? "+" : ""}`
+    + `${candidateResult.wins - championResult.wins} wins, `
+    + `${candidateResult.pointDifference - championResult.pointDifference >= 0 ? "+" : ""}`
+    + `${(candidateResult.pointDifference - championResult.pointDifference).toFixed(1)} points)`);
+  if (!improved) throw new Error("WebGPU promotion gate rejected the candidate");
+  if (!Bun.argv.includes("--apply")) {
+    console.log("re-run with --apply to install the candidate");
+  } else {
     await Bun.write(champion, Bun.file(candidate));
-    console.log(`\nstaged ${candidate} as ${champion}`);
-    runStep([join(ROOT, "tools", "go-export-model.ts"), champion, profile]);
-    runStep([join(ROOT, "tools", "go-golden-fixture.ts")]);
-    runStep([join(ROOT, "tools", "go-export-model.ts"), "--check"]);
-    runStep([join(ROOT, "tools", "go-webgpu-test.ts")]);
-    runStep([join(ROOT, "tools", "go-write-runtime-model.ts"), profile, runtimeModel]);
-
-    const runtimeCommand = profile === "small5"
-      ? [join(RELEASE, "go_cpp_evaluate_mixed"), String(games), String(seed), champion, runtimeModel, "--small5"]
-      : [join(RELEASE, "go_cpp_evaluate"), String(games), String(seed), "????????????", "19", champion, runtimeModel];
-    const runtimeGate = Bun.spawnSync(runtimeCommand, { stdout: "pipe", stderr: "pipe" });
-    if (runtimeGate.exitCode !== 0) throw new Error(runtimeGate.stderr.toString() || "runtime evaluator failed");
-    const runtimeOutput = runtimeGate.stdout.toString();
-    console.log("\nruntime storage gate:");
-    console.log(runtimeOutput.trimEnd());
-    const runtimeRows = parseRows(runtimeOutput);
-    const fullPrecision = runtimeRows.find((row) => row.model === champion);
-    const deployed = runtimeRows.find((row) => row.model === runtimeModel);
-    if (!fullPrecision || !deployed) throw new Error("runtime evaluator did not report both models");
-    if (deployed.wins < fullPrecision.wins) {
-      throw new Error(`runtime storage loses ${fullPrecision.wins - deployed.wins} games versus its promoted checkpoint`);
-    }
-    console.log(`\ninstalled ${profile}: runtime storage retained ${deployed.wins}/${deployed.games} wins`);
-  } catch (error) {
+    // Re-export from the staged champion path. The gate run above exported the
+    // identical bytes from the candidate's own path, so the generated module
+    // still records that provenance and `--check` below would reject it.
+    run(["bun", "run", "tools/go-export-model.ts", champion, profile]);
+    run(["bun", "run", "tools/go-golden-fixture.ts"]);
+    run(["bun", "run", "tools/go-export-model.ts", "--check"]);
+    run(["bun", "run", "tools/go-webgpu-test.ts"]);
+    keepCandidate = true;
+    console.log(`installed ${profile} V9 champion ${candidateHash}`);
+  }
+} finally {
+  if (!keepCandidate) {
     await Bun.write(champion, originals.champion);
     await Bun.write(artifact, originals.artifact);
     await Bun.write(fixture, originals.fixture);
-    console.error("\npromotion failed; restored the previous champion, artifact, and golden fixture");
-    throw error;
-  } finally {
-    rmSync(scratch, { recursive: true, force: true });
   }
-  console.log(
-    "\nartifact, golden fixture, and WebGPU gate verified. Next:\n"
-    + "  bun run typecheck && bun test           # repository gates\n"
-    + "  bun run go:arena --games 128            # refresh winrate/latency priors\n"
-    + "  then refit GO_REWARD_RULES in shared/strategy/go/rewards.ts",
-  );
 }

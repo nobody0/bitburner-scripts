@@ -1,13 +1,11 @@
-#include "go/features.hpp"
 #include "go/board_generator.hpp"
-#include "go/network.hpp"
+#include "go/network_v9.hpp"
 #include "go/opponent.hpp"
 #include "go/reward.hpp"
 #include "go/rng.hpp"
 #include "go/rules.hpp"
 
 #include <cstdlib>
-#include <chrono>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -92,50 +90,49 @@ void reply(int argc, char** argv) {
   }
 }
 
-void reply_bench(int argc, char** argv) {
-  if (argc != 8) throw std::invalid_argument("reply-bench SIZE OPPONENT SEED PASS_COUNT ITERATIONS BOARD");
-  const int size = std::stoi(argv[2]);
-  const int iterations = std::stoi(argv[6]);
-  const Position position{
-    .board = board_from_hash(size, argv[7]),
-    .consecutive_passes = std::stoi(argv[5]),
-  };
-  std::size_t checksum = 0;
-  const auto started = std::chrono::steady_clock::now();
-  for (int iteration = 0; iteration < iterations; ++iteration) {
-    const auto forecast = predict_opponent_replies(
-      position,
-      parse_opponent(argv[3]),
-      std::stod(argv[4]) + iteration * 200.0);
-    checksum += forecast.replies.size();
-    for (const auto& reply : forecast.replies) {
-      checksum += static_cast<std::size_t>(reply.move.pass ? 1 : 2 + reply.move.point.x * size + reply.move.point.y);
-    }
+void behavior(int argc, char** argv) {
+  if (argc != 5) throw std::invalid_argument("behavior OPPONENT SEED [KOMI|-]");
+  const auto encoded = encode_opponent_turn_behavior(
+    opponent_turn_behavior(parse_opponent(argv[2]), std::stod(argv[3])),
+    std::string(argv[4]) == "-" ? -1.0 : std::stod(argv[4]));
+  std::cout << std::setprecision(17);
+  for (std::size_t index = 0; index < encoded.size(); ++index) {
+    if (index) std::cout << ',';
+    std::cout << encoded[index];
   }
-  const double elapsed_ms = std::chrono::duration<double, std::milli>(
-    std::chrono::steady_clock::now() - started).count();
-  std::cout << std::setprecision(10) << "iterations\t" << iterations
-    << "\ttotal_ms\t" << elapsed_ms
-    << "\tper_prediction_ms\t" << elapsed_ms / iterations
-    << "\tchecksum\t" << checksum << '\n';
+  std::cout << '\n';
 }
 
-// Golden vectors for the deployed TypeScript/WebGPU inference ports: raw
-// decoded predictions for result boards, bypassing reply prediction entirely.
-void value(int argc, char** argv) {
-  if (argc < 6) throw std::invalid_argument("value MODEL SIZE OPPONENT_INDEX BOARD [BOARD ...]");
-  std::ifstream input(argv[2]);
-  if (!input) throw std::runtime_error("cannot open model " + std::string(argv[2]));
-  const auto network = CandidateValueNetwork::load(input);
+void value_v9(int argc, char** argv) {
+  if (argc != 11) throw std::invalid_argument(
+    "value-v9 MODEL SIZE BOARD LEGAL PASS ELAPSED RESPONSE_PASS RESPONSE_NO_OP BEHAVIOR_CSV");
+  std::ifstream checkpoint(argv[2]);
+  if (!checkpoint) throw std::runtime_error("cannot open V9 model");
+  const auto network = GoNetworkV9::load(checkpoint);
   const int size = std::stoi(argv[3]);
-  const int opponent = std::stoi(argv[4]);
-  std::cout << std::setprecision(17);
-  for (int index = 5; index < argc; ++index) {
-    const Board board = board_from_hash(size, argv[index]);
-    const auto prediction = network.predict(encode_candidate(
-      board, Move::pass_turn(), Move::pass_turn(), board, network.extent(), opponent));
-    std::cout << prediction.win_probability << '\t' << prediction.terminal_power
-      << '\t' << prediction.remaining_turns << '\n';
+  const std::string legal_text = argv[5];
+  std::vector<float> legal(static_cast<std::size_t>(network.extent() * network.extent()));
+  if (legal_text.size() != legal.size()) {
+    throw std::invalid_argument("LEGAL must hold one flag per point of the model extent");
+  }
+  for (std::size_t index = 0; index < legal_text.size(); ++index) legal[index] = legal_text[index] == '1';
+  std::vector<float> encoded_behavior;
+  for (const auto& value : split(argv[10], ',')) encoded_behavior.push_back(std::stof(value));
+  const auto prediction = network.predict({
+    .board = board_from_hash(size, argv[4]),
+    .legal_black = std::move(legal),
+    .consecutive_passes = std::stof(argv[6]),
+    .elapsed_fraction = std::stof(argv[7]),
+    .response_pass = std::stof(argv[8]),
+    .response_no_op = std::stof(argv[9]),
+    .behavior = std::move(encoded_behavior),
+  });
+  std::cout << std::setprecision(17) << prediction.value.win_probability << '\t'
+    << prediction.value.terminal_power << '\t' << prediction.value.remaining_turns << '\n';
+  for (std::size_t candidate = 0; candidate < prediction.move_logits.size(); ++candidate) {
+    std::cout << candidate << '\t' << prediction.move_logits[candidate];
+    for (const double branch : prediction.branch_logits[candidate]) std::cout << '\t' << branch;
+    std::cout << '\n';
   }
 }
 
@@ -158,10 +155,10 @@ int main(int argc, char** argv) {
     const std::string command = argv[1];
     if (command == "analyze") analyze(argc, argv);
     else if (command == "whrng") random_values(argc, argv);
-    else if (command == "reply-bench") reply_bench(argc, argv);
     else if (command == "reward") reward(argc, argv);
     else if (command == "reply") reply(argc, argv);
-    else if (command == "value") value(argc, argv);
+    else if (command == "behavior") behavior(argc, argv);
+    else if (command == "value-v9") value_v9(argc, argv);
     else if (command == "board") board(argc, argv);
     else throw std::invalid_argument("unknown command");
     return EXIT_SUCCESS;

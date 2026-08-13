@@ -6,6 +6,8 @@ __pycache__/
 *.py[cod]
 /katago/models/
 /katago/results/
+/corpora/
+/remote-results/
 *.model
 !small5-champion.model
 !daemon19-champion.model

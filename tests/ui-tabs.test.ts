@@ -281,6 +281,7 @@ describe("tab rendering", () => {
           preparationMs: 1.2,
           finalizationMs: 0.8,
           totalPlanningMs: 2,
+          readyToDispatchMs: 0.4,
           engineCycleMs: 200,
           aiWaitMs: 200,
           seedCandidates: [100_200],
@@ -328,7 +329,8 @@ describe("tab rendering", () => {
     expect(html).toContain("clean-room-v3.0.1");
     expect(html).toContain("exact seed");
     expect(html).toContain("200 ms cycles");
-    expect(html).toContain("same-slot dispatch");
+    expect(html).toContain("dispatch tick 100.000 s");
+    expect(html).toContain("ready-to-play 0.4 ms");
     expect(html).toContain("AI cycle 200 ms");
     expect(html).toContain("class=\"go-point black chosen\"");
     expect(html).toContain("class=\"go-point white reply\"");

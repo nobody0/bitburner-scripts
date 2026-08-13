@@ -114,6 +114,7 @@ describe("telemetry record size", () => {
           preparationMs: 1,
           finalizationMs: 1,
           totalPlanningMs: 2,
+          readyToDispatchMs: 1,
           engineCycleMs: 200,
           aiWaitMs: 200,
           seedCandidates: [1_200],

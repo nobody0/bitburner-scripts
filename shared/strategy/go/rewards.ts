@@ -24,7 +24,8 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   // Win/score priors are fitted by sim/tests/go-selection.test.ts against
   // upstream obstacles and faction AI. Runtime records never tune the policy:
   // they are outcomes, not an excuse to learn around an incomplete predictor.
-  // Measured for the exported neural v7 champion artifacts with a 0.5 tie
+  // These are the last measured pre-V9 priors and must be refitted from the V9
+  // arena before they are treated as current policy performance. A 0.5 tie
   // roll: 128 fixed-corpus games per ordinary opponent and 512 for Illuminati.
   // Re-exporting the promoted checkpoint exposed that the previous table was
   // stale and substantially understated the stronger-faction win rates.

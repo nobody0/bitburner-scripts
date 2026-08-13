@@ -19,7 +19,6 @@ import {
   prepareNeuralGoDecision,
   type GoValueBackendFactory,
 } from "../shared/strategy/go/neural/engine.ts";
-import { predictPreparedOpponentReplies } from "../shared/strategy/go/opponent.ts";
 import { createRequiredWebGpuGoValueBackend } from "../shared/strategy/go/neural/webgpu.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
 import { oracleInitialBoard } from "./features/go-oracle.ts";
@@ -69,7 +68,8 @@ export interface GoArenaGameResult {
   durationMs: number;
   score: { X: number; O: number };
   planningMs: number[];
-  planningPhases: { preparationMs: number[]; predictionMs: number[]; gpuAndSelectionMs: number[] };
+  finalists: number[];
+  planningPhases: { preparationMs: number[]; gpuAndSelectionMs: number[] };
   trace?: GoArenaTurnTrace[];
 }
 
@@ -167,7 +167,7 @@ async function decideGoArenaBlack(
   dispatchPlaytime: number,
   consecutivePasses: number,
   candidateLimit?: number,
-): Promise<{ decision: GoDecision; preparationMs: number; predictionMs: number; gpuAndSelectionMs: number }> {
+): Promise<{ decision: GoDecision; preparationMs: number; gpuAndSelectionMs: number }> {
   const started = performance.now();
   const view = {
     board,
@@ -182,17 +182,15 @@ async function decideGoArenaBlack(
   const prepared = prepareNeuralGoDecision(view);
   const preparedAt = performance.now();
   const seed = alignedAiSeed(dispatchPlaytime, 0);
-  for (const candidate of prepared.candidates) {
-    if (!candidate.terminal) predictPreparedOpponentReplies(candidate.opponent!, seed);
-  }
-  const predictedAt = performance.now();
+  // V9 keeps exact opponent preparation lazy, so there is no separate
+  // prediction phase to measure: finalization owns reply prediction for the
+  // retained finalists and is timed as one phase with the GPU batch.
   const decision = await finalizeNeuralGoDecision(prepared, [seed], arenaEngine);
   const finalizedAt = performance.now();
   return {
     decision,
     preparationMs: preparedAt - started,
-    predictionMs: predictedAt - preparedAt,
-    gpuAndSelectionMs: finalizedAt - predictedAt,
+    gpuAndSelectionMs: finalizedAt - preparedAt,
   };
 }
 
@@ -218,7 +216,8 @@ export async function playGoArenaGame(
     ?? Math.floor(seed / GO_ENGINE_CYCLE_MS) * GO_ENGINE_CYCLE_MS;
   const startedPlaytime = dispatchPlaytime;
   const planningMs: number[] = [];
-  const planningPhases = { preparationMs: [] as number[], predictionMs: [] as number[], gpuAndSelectionMs: [] as number[] };
+  const finalists: number[] = [];
+  const planningPhases = { preparationMs: [] as number[], gpuAndSelectionMs: [] as number[] };
   const trace: GoArenaTurnTrace[] = [];
   const maxTurns = board.size * board.size * 4;
   const originalRandom = Math.random;
@@ -249,8 +248,8 @@ export async function playGoArenaGame(
           options.candidateLimit,
         );
         decision = planned.decision;
+        finalists.push(decision.finalists);
         planningPhases.preparationMs.push(planned.preparationMs);
-        planningPhases.predictionMs.push(planned.predictionMs);
         planningPhases.gpuAndSelectionMs.push(planned.gpuAndSelectionMs);
       }
       const elapsed = performance.now() - started;
@@ -335,6 +334,7 @@ export async function playGoArenaGame(
     durationMs: dispatchPlaytime - startedPlaytime,
     score,
     planningMs,
+    finalists,
     planningPhases,
     ...(includeTrace ? { trace } : {}),
   };

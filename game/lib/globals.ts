@@ -1,5 +1,6 @@
 import type { GameState } from "./state.ts";
 import type { ArtifactIdentity } from "../../shared/run-identity.ts";
+import type { GoNeuralRuntime } from "./go-neural-worker.ts";
 
 /** Typed cross-script cache on globalThis (same JS realm trick the dodger
  * uses). Everything the controller knows about the world lives in one store
@@ -22,6 +23,9 @@ export interface GameGlobals {
   /** Current install identity. Survives deployment handoffs in the page realm;
    * prestige kills the process and the next cold start resolves fresh epochs. */
   artifactIdentity?: ArtifactIdentity;
+  /** Persistent V9 worker. Its GPU device and position cache survive a
+   * controller handoff in the shared page realm. */
+  goNeuralWorker?: { buildId: string; runtime: GoNeuralRuntime };
 }
 
 export const gameGlobal = globalThis as typeof globalThis & GameGlobals;

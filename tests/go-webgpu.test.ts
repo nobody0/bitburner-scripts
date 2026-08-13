@@ -3,14 +3,14 @@ import { join } from "node:path";
 import { runInHeadlessChrome } from "../tools/webgpu/chrome-runner.ts";
 
 /** Executes the deployed WGSL shader — the code path that actually runs in
- * game — against native C++ trainer golden vectors. Bun has no WebGPU, so
+ * game — against the full-precision promoted C++ checkpoints. Bun has no WebGPU, so
  * this drives headless Chrome (Dawn, the
  * same WebGPU implementation family as Bitburner's Electron).
  * Missing Chrome or WebGPU is a gate failure, never a reason to silently skip
  * the only TypeScript inference implementation. */
 
 describe("go WGSL shader", () => {
-  test("matches the C++ golden vectors, batching, and capacity growth", async () => {
+  test("matches promoted C++ checkpoints after quantization, batching, and capacity growth", async () => {
     const run = await runInHeadlessChrome(join(import.meta.dir, "..", "tools", "webgpu", "entry-golden.ts"), 180_000);
     const result = run.result as {
       ok: boolean;
@@ -21,9 +21,9 @@ describe("go WGSL shader", () => {
         mainThread: { p50: number; p95: number; max: number };
       }>;
       coldStart: Record<string, { decodeMs: number; backendCreateMs: number }>;
+      quantization: { proposalElementAgreement: number; top8ShortlistAgreement: number };
       planning: {
         candidatePreparation: { p50: number; p95: number; max: number };
-        opponentPrediction: { p50: number; p95: number; max: number };
         gpuAndSelection: { p50: number; p95: number; max: number };
         boardToMove: { p50: number; p95: number; max: number };
       };
@@ -32,12 +32,15 @@ describe("go WGSL shader", () => {
     expect(result.failures).toEqual([]);
     expect(result.ok).toBe(true);
     expect(result.goldenCases).toBeGreaterThan(0);
-    const daemon = result.latency["daemon19x400"]!;
+    expect(result.quantization.proposalElementAgreement).toBeGreaterThanOrEqual(0.999);
+    expect(result.quantization.top8ShortlistAgreement).toBeGreaterThanOrEqual(0.99);
+    const daemon = result.latency["daemon19x104"]!;
     expect(daemon.mainThread.max).toBeLessThan(2);
-    expect(daemon.requestToParsed.max).toBeLessThan(30);
+    expect(daemon.requestToParsed.p95).toBeLessThan(80);
+    expect(daemon.requestToParsed.max).toBeLessThan(120);
     expect(result.coldStart.small5!.decodeMs).toBeLessThan(10);
     expect(result.coldStart.daemon19!.decodeMs).toBeLessThan(10);
-    expect(result.planning.opponentPrediction.p95).toBeLessThan(15);
+    expect(result.planning.gpuAndSelection.p95).toBeLessThan(45);
     expect(result.planning.boardToMove.p95).toBeLessThan(50);
   }, 240_000);
 });

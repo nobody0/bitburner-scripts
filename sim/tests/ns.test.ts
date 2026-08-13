@@ -1,12 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import type { Server } from "@ns";
-import { setGoBackendFactoryForTest } from "../../game/lib/features/remaining.ts";
+import { setGoNeuralRuntimeForTest } from "../../game/lib/features/remaining.ts";
 import { homeDodgeBudget } from "../../game/lib/probe-runner.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { only } from "../../shared/features/profile.ts";
 import { ramCostContext, runGame } from "../game-run.ts";
 import { getFunctionRamCost, getRamCost } from "../ns/ram-costs.ts";
 import { StubGoValueBackend } from "../../tests/support/go-value-backend.ts";
+import { TestGoNeuralRuntime } from "../../tests/support/go-neural-runtime.ts";
 
 /** The synthetic ns exists to run game/ for real. These pin the mechanics that
  * make that possible, and the end-to-end proof that it does. */
@@ -74,11 +75,11 @@ describe("ram costs", () => {
 
 describe("running game/ in the synthetic world", () => {
   beforeAll(() => {
-    setGoBackendFactoryForTest((weights) => new StubGoValueBackend(weights));
+    setGoNeuralRuntimeForTest(new TestGoNeuralRuntime((weights) => new StubGoValueBackend(weights)));
   });
 
   afterAll(() => {
-    setGoBackendFactoryForTest();
+    setGoNeuralRuntimeForTest();
   });
 
   test("the real controller completes Go games and records its selections", async () => {

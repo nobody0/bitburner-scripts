@@ -1,18 +1,19 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { setGoBackendFactoryForTest } from "../../game/lib/features/remaining.ts";
+import { setGoNeuralRuntimeForTest } from "../../game/lib/features/remaining.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { StubGoValueBackend } from "../../tests/support/go-value-backend.ts";
+import { TestGoNeuralRuntime } from "../../tests/support/go-neural-runtime.ts";
 import { only } from "../../shared/features/profile.ts";
 import { runGame } from "../game-run.ts";
 import { findProfile } from "../profiles.ts";
 
 describe("BN1 multi-install progression profile", () => {
   beforeAll(() => {
-    setGoBackendFactoryForTest((weights) => new StubGoValueBackend(weights));
+    setGoNeuralRuntimeForTest(new TestGoNeuralRuntime((weights) => new StubGoValueBackend(weights)));
   });
 
   afterAll(() => {
-    setGoBackendFactoryForTest();
+    setGoNeuralRuntimeForTest();
   });
 
   test("does not extrapolate a preloaded startup reset as fresh-cycle augmentation speed", async () => {

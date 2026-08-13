@@ -35,25 +35,24 @@ import {
   type GoView,
 } from "../../../shared/strategy/go/rules.ts";
 import {
-  finalizeNeuralGoDecision,
-  goModelProfile,
-  GoNeuralEngine,
-  prepareNeuralGoDecision,
-  type GoValueBackendFactory,
-  type GoModelProfile,
-} from "../../../shared/strategy/go/neural/engine.ts";
-import { createRequiredWebGpuGoValueBackend } from "../../../shared/strategy/go/neural/webgpu.ts";
-import {
   goChooseSeedTarget,
-  goDispatchDelayMs,
+  GO_DISPATCH_GUARD_MS,
   goPhaseAgrees,
+  goPredictedPlaytime,
   type GoSeedTarget,
   type GoTickPhase,
 } from "../../../shared/strategy/go/tick.ts";
+import { runGoNeuralSeedDispatch } from "../go-neural.ts";
+import { goNeuralWorkerRuntime, resetGoNeuralWorkerRuntime, type GoNeuralRuntime } from "../go-neural-worker.ts";
+import {
+  goNeuralPositionIdentity,
+  goSeedSetKey,
+  type GoWorkerContinuationHint,
+} from "../../../shared/strategy/go/neural/worker-protocol.ts";
 import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand } from "../../../shared/strategy/go/rewards.ts";
 import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
-import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
+import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs, nextGoTurnTiming } from "../../../shared/strategy/go/rng.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
 import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
@@ -753,9 +752,15 @@ type GoActionOutcome = {
   alignment: "none" | "same-slot" | "boundary-replan";
   dispatchPlaytime?: number;
   player?: ReturnType<NS["getPlayer"]>;
+  playerObservedAt?: number;
   action?: Extract<GoAction, { type: "move" | "pass" }>;
   decision?: GoDecision;
   prediction?: NonNullable<GoPlan["prediction"]>;
+  continuationHints?: GoWorkerContinuationHint[];
+  predictionParentId?: string;
+  responsePlayer?: ReturnType<NS["getPlayer"]>;
+  responseObservedAt?: number;
+  responseReadyAt?: number;
 };
 
 function normalizeGoResponse(response: RawGoResponse): GoResponse {
@@ -778,22 +783,26 @@ let goTurnRunning = false;
  * and dispatch two turns for one position. */
 let goPlanning = false;
 let goGeneration = 0;
+/** Parent commit accepted by the worker for the board expected on the next
+ * Black turn. A mismatching public board falls back to a full install. */
+let goPredictionParent: string | undefined;
+/** Exact on chained turns (the opponent promise resolution); cold starts use
+ * the first actionable Black-turn observation. */
+let goTurnReadyAt: number | undefined;
 
-/** Model weights live on the required WebGPU backend for the whole controller
- * lifetime; prestige resets dispose it and lazily rebuild it. */
-const requiredGoBackendFactory: GoValueBackendFactory = (weights) =>
-  createRequiredWebGpuGoValueBackend(weights);
-let goBackendFactory = requiredGoBackendFactory;
-const makeGoEngine = (): GoNeuralEngine => new GoNeuralEngine(goBackendFactory);
-let goEngine = makeGoEngine();
+let testGoRuntime: GoNeuralRuntime | undefined;
 
-/** Replace the backend only for Bun controller tests that do not evaluate the
- * model. Production always uses the required WebGPU factory above. */
-export function setGoBackendFactoryForTest(factory?: GoValueBackendFactory): void {
+function goNeuralRuntime(): GoNeuralRuntime {
+  return testGoRuntime ?? goNeuralWorkerRuntime();
+}
+
+/** Replace the browser worker only for Bun controller/simulator tests. The
+ * production bundle imports no direct V9 engine or model weights on the main
+ * thread; those exist solely inside the embedded worker source. */
+export function setGoNeuralRuntimeForTest(runtime?: GoNeuralRuntime): void {
   if (typeof Bun === "undefined") throw new Error("Go backend test injection is only available under Bun");
-  void goEngine.dispose();
-  goBackendFactory = factory ?? requiredGoBackendFactory;
-  goEngine = makeGoEngine();
+  testGoRuntime?.dispose();
+  testGoRuntime = runtime;
 }
 
 /** Wall-clock anchor for the 200 ms engine cycle, established by observing a
@@ -801,8 +810,8 @@ export function setGoBackendFactoryForTest(factory?: GoValueBackendFactory): voi
  * known for as long as the browser advances time normally. */
 let goTickPhase: GoTickPhase | undefined;
 
-/** Sampling period for the anchoring poll. Two milliseconds bounds the phase
- * error well inside the 20 ms guard band without busy-waiting. */
+/** Sampling period for the anchoring poll. Two milliseconds matches the final
+ * read-to-call guard without busy-waiting. */
 export const GO_ANCHOR_POLL_MS = 2;
 
 /** A game that is paused or hard-throttled never rolls over, and retrying a
@@ -945,6 +954,11 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       }
       return;
     }
+    if ((claimedAction === "move" || claimedAction === "pass") && goTurnReadyAt === undefined) {
+      // Cold start has no preceding Go promise to timestamp. The first pass
+      // with a complete actionable Black position is its truthful boundary.
+      goTurnReadyAt = Date.now();
+    }
     const joined = new Set(ctx.state.topics.factions?.joined ?? []);
     const stats = topic.stats;
     const allowWorldDaemon = Boolean(ctx.state.topics.progression?.ownedAugs?.["The Red Pill"]);
@@ -1034,16 +1048,34 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     // This decision is provisional: it uses the last observed playtime only to
     // fix the action type for RAM pricing and publish a plan digest.
     const planStartedAt = Date.now();
-    const prepared = prepareNeuralGoDecision(view);
-    const preparationMs = Date.now() - planStartedAt;
-    const provisionalSeed = alignedAiSeed(
-      ctx.state.topics.player?.totalPlaytime ?? 0,
-      topic.bonusCycles ?? 0,
+    const neuralRuntime = goNeuralRuntime();
+    const expectedPredictionParent = goPredictionParent;
+    const installed = await neuralRuntime.install(view, expectedPredictionParent);
+    const preparationMs = installed.preparationMs;
+    const provisionalAt = Date.now();
+    const observedPlaytime = goTickPhase
+      ? goPredictedPlaytime(goTickPhase, provisionalAt)
+      : ctx.state.topics.player?.totalPlaytime ?? 0;
+    const provisionalDispatch = goTickPhase
+      ? goChooseSeedTarget(
+        goTickPhase,
+        observedPlaytime,
+        provisionalAt,
+        GO_DISPATCH_GUARD_MS,
+      ).targetPlaytime
+      : observedPlaytime;
+    const provisionalSeeds = (topic.bonusCycles ?? 0) > 0
+      ? [provisionalDispatch, provisionalDispatch + GO_ENGINE_CYCLE_MS]
+      : [alignedAiSeed(provisionalDispatch, topic.bonusCycles)];
+    // This first request also covers a cold position. On normal chained
+    // turns the worker already holds both the position and likely seed set
+    // because it evaluated them during the preceding White response.
+    const provisionalEvaluation = await neuralRuntime.evaluate(
+      installed.positionId,
+      provisionalSeeds,
+      expectedPredictionParent,
     );
-    // The provisional pass warms every candidate's memoized reply analyses so
-    // dispatch-time finalization inside the dodge only resolves a seed delta.
-    decision = prepared.immediate
-      ?? await finalizeNeuralGoDecision(prepared, [provisionalSeed], goEngine);
+    decision = provisionalEvaluation.decision;
     if (generation !== goGeneration) return;
     const decisionAt = Date.now();
     const plan: GoPlan = {
@@ -1114,6 +1146,11 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         detail: result.detail,
       };
       if (reset) {
+        goPredictionParent = undefined;
+        // The new game's first Black turn has no preceding opponent promise to
+        // time from; leaving the finished game's boundary here would report a
+        // ready-to-play latency spanning the reset.
+        goTurnReadyAt = undefined;
         // A new opponent has a different komi. Clear every board-derived value
         // until the core probe supplies that public metadata; retaining the
         // completed game's score would make the first new-game record lie.
@@ -1157,12 +1194,16 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         goMethods(action.type),
         async (stubNs: NS): Promise<GoActionOutcome> => {
           let dispatchPlayer: ReturnType<NS["getPlayer"]> | undefined;
+          let dispatchPlayerObservedAt: number | undefined;
           let dispatchedAction = action.type === "move" || action.type === "pass" ? action : undefined;
           let dispatchedDecision: GoDecision | undefined;
           let dispatchPrediction: NonNullable<GoPlan["prediction"]> | undefined;
+          let continuationHints: GoWorkerContinuationHint[] | undefined;
+          let predictionParentId: string | undefined;
           let boundaryRetries = 0;
-          if (dispatchedAction && !prepared.immediate) {
-            const preparedAction = dispatchedAction;
+          let response: RawGoResponse | undefined;
+          let moveDispatchedAt: number | undefined;
+          if (dispatchedAction) {
             const finalizeForSlot = async (
               player: ReturnType<NS["getPlayer"]>,
               target?: GoSeedTarget,
@@ -1175,42 +1216,48 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
               const seeds = (topic.bonusCycles ?? 0) > 0
                 ? [dispatchPlaytime, dispatchPlaytime + GO_ENGINE_CYCLE_MS]
                 : [alignedAiSeed(dispatchPlaytime, topic.bonusCycles)];
-              const finalizationStartedAt = Date.now();
-              // A fresh seed can force a few reply branches that the
-              // provisional seed did not warm; repeated branches stay memoized.
-              let exactDecision = await finalizeNeuralGoDecision(prepared, seeds, goEngine);
+              // Usually this is a completed pushed result. A missed seed
+              // still reuses the worker's prepared position and GPU weights;
+              // the main game thread only performs this small RPC.
+              // The provisional lookup normally targeted this exact slot. Do
+              // not turn an already-consumed pushed result into a redundant
+              // worker round trip during the final verified dispatch path.
+              const evaluated = goSeedSetKey(seeds) === goSeedSetKey(provisionalSeeds)
+                ? provisionalEvaluation
+                : await neuralRuntime.evaluate(
+                  installed.positionId,
+                  seeds,
+                  expectedPredictionParent,
+                );
+              const exactDecision = evaluated.decision;
               const decisionAt = Date.now();
               const exactAction = exactDecision.action;
-              const chosenAction = exactAction.type === preparedAction.type
-                && (exactAction.type === "move" || exactAction.type === "pass")
-                ? exactAction
-                : preparedAction;
-              if (chosenAction === preparedAction && exactAction !== preparedAction) {
-                exactDecision = {
-                  ...exactDecision,
-                  action: preparedAction,
-                  why: `${exactDecision.why}; keep the prepared action type for immediate dispatch`,
-                };
+              if (exactAction.type !== "move" && exactAction.type !== "pass") {
+                throw new Error(`V9 returned ${exactAction.type} for an active Black turn`);
               }
-              const modelProfile = goModelProfile(view.board.size);
-              const backend = await goEngine.backendFor(view.board.size);
               return {
-                action: chosenAction,
+                action: exactAction,
                 decision: exactDecision,
+                positionId: installed.positionId,
+                seeds,
+                nextRolloverAt: target
+                  ? target.rolloverAt + (target.waitsForRollover ? GO_ENGINE_CYCLE_MS : 0)
+                  : undefined,
+                continuationHints: evaluated.continuations,
                 prediction: {
                   model: GO_OPPONENT_MODEL,
                   backend: "webgpu",
-                  modelProfile,
+                  modelProfile: evaluated.modelProfile,
                   // Every board above 5x5 is rated by the 19x19 daemon weights
-                  // on a padded board. That is deliberate migration handling
-                  // for inherited games, but it is out of distribution and
-                  // must be visible when such a game plays badly.
-                  ...(backend.extent !== view.board.size ? { paddedToExtent: backend.extent } : {}),
+                  // on a padded board. That is V9's deliberate profile routing
+                  // for the selectable intermediate sizes, but it is out of
+                  // distribution and must be visible when such a game plays badly.
+                  ...(evaluated.modelExtent !== view.board.size ? { paddedToExtent: evaluated.modelExtent } : {}),
                   sampledTotalPlaytime: player.totalPlaytime,
                   sampledAt,
                   decisionAt,
                   preparationMs,
-                  finalizationMs: decisionAt - finalizationStartedAt,
+                  finalizationMs: evaluated.finalizationMs,
                   totalPlanningMs: decisionAt - planStartedAt,
                   engineCycleMs: GO_ENGINE_CYCLE_MS,
                   aiWaitMs: goAiWaitMs(topic.bonusCycles),
@@ -1218,55 +1265,66 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                   dispatchPlaytime,
                   ...(target ? { rolloverMarginMs: target.marginMs, waitedForRollover: target.waitsForRollover } : {}),
                   boundaryRetries,
+                  positionCacheHit: installed.cached,
+                  pushedPredictionHit: evaluated.pushed,
+                  seedCacheHit: evaluated.cached,
                 } satisfies NonNullable<GoPlan["prediction"]>,
               };
             };
 
-            dispatchPlayer = stubNs["getPlayer"]();
-            const observedAt = Date.now();
-            // Anchor the 200 ms phase. Without it the tick value alone cannot
-            // say where inside a cycle we are, so a drifted or missing anchor
-            // is re-established in its own cheap dodge before planning; here
-            // we only use it.
-            if (goTickPhase && !goPhaseAgrees(goTickPhase, dispatchPlayer.totalPlaytime, observedAt)) {
-              goTickPhase = undefined;
-            }
-            const target = goTickPhase
-              ? goChooseSeedTarget(goTickPhase, dispatchPlayer.totalPlaytime, observedAt)
-              : undefined;
-
-            const finalized = await finalizeForSlot(dispatchPlayer, target);
-            dispatchedAction = finalized.action;
-            dispatchedDecision = finalized.decision;
-            dispatchPrediction = finalized.prediction;
-
-            if (target?.waitsForRollover) {
-              // The move was computed for the next cycle while the current one
-              // drained, so this wait is whatever is left of a <20 ms window.
-              const delay = goDispatchDelayMs(target, Date.now());
-              if (delay > 0) await stubNs["sleep"](delay);
-            }
-
-            // One verification read. A tick that still disagrees means the
-            // browser advanced time unpredictably; replan once against what is
-            // now current, which is cheap because the option spaces are warm.
-            const verified = stubNs["getPlayer"]();
-            const expected = target?.targetPlaytime ?? dispatchPlayer.totalPlaytime;
-            if (verified.totalPlaytime !== expected) {
-              boundaryRetries++;
-              // The two reads bracket a rollover a few milliseconds apart, so
-              // this doubles as a free anchor: no poll is needed to learn a
-              // phase the turn just walked into.
-              goTickPhase = { wallAt: Date.now(), playtime: verified.totalPlaytime };
-              dispatchPlayer = verified;
-              const replanned = await finalizeForSlot(verified);
-              dispatchedAction = replanned.action;
-              dispatchedDecision = replanned.decision;
-              dispatchPrediction = replanned.prediction;
-            }
+            const seeded = await runGoNeuralSeedDispatch({
+              phase: goTickPhase,
+              clock: {
+                now: Date.now,
+                player: () => stubNs["getPlayer"](),
+                sleep: async (ms) => { await stubNs["sleep"](ms); },
+              },
+              infer: finalizeForSlot,
+              dispatch: async (finalized): Promise<RawGoResponse> => {
+                // A reset invalidates both the board and the prepared batch.
+                // Check at the last possible instant, after inference and seed
+                // assurance but before the irreversible Go call.
+                if (generation !== goGeneration) throw new Error("Go generation changed before dispatch");
+                const dispatchWallAt = Date.now();
+                moveDispatchedAt = dispatchWallAt;
+                const responsePromise = finalized.action.type === "move"
+                  ? stubNs["go"]["makeMove"](finalized.action.x, finalized.action.y)
+                  : stubNs["go"]["passTurn"]();
+                // The game promise is now sleeping through White's response.
+                // Start likely successor evaluations without awaiting them or
+                // extending the RAM-holding main-thread dodge.
+                predictionParentId = neuralRuntime.commit(
+                  finalized.positionId,
+                  finalized.seeds,
+                  finalized.prediction.dispatchPlaytime,
+                  dispatchWallAt,
+                  finalized.nextRolloverAt ?? dispatchWallAt + GO_ENGINE_CYCLE_MS,
+                  topic.bonusCycles ?? 0,
+                  finalized.action,
+                  expectedPredictionParent,
+                );
+                return responsePromise;
+              },
+            });
+            goTickPhase = seeded.phase;
+            boundaryRetries = seeded.boundaryRetries;
+            dispatchPlayer = seeded.attempt.player;
+            dispatchPlayerObservedAt = seeded.attempt.observedAt;
+            dispatchedAction = seeded.attempt.value.action;
+            dispatchedDecision = seeded.attempt.value.decision;
+            dispatchPrediction = {
+              ...seeded.attempt.value.prediction,
+              dispatchPlaytime: seeded.attempt.dispatchPlaytime,
+              boundaryRetries,
+              readyToDispatchMs: Math.max(0, (moveDispatchedAt ?? Date.now()) - (goTurnReadyAt ?? planStartedAt)),
+            };
+            continuationHints = seeded.attempt.value.continuationHints;
+            response = seeded.response;
           }
-          let response: RawGoResponse;
-          if (dispatchedAction?.type === "move") {
+          if (response !== undefined) {
+            // Seed-assured neural dispatch above already started and awaited
+            // the Go action at the verified tick.
+          } else if (dispatchedAction?.type === "move") {
             response = await stubNs["go"]["makeMove"](dispatchedAction.x, dispatchedAction.y);
           } else if (action.type === "resume") {
             // makeMove/passTurn already await this same promise. This branch only
@@ -1277,13 +1335,25 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           } else {
             throw new Error(`invalid Go turn action ${action.type}`);
           }
+          const responseReadyAt = Date.now();
+          // Resume turns have no worker commit to confirm and their RAM claim
+          // intentionally excludes getPlayer. Only sample the compact clock
+          // confirmation after a neural move actually armed the worker.
+          const responsePlayer = predictionParentId ? stubNs["getPlayer"]() : undefined;
+          const responseObservedAt = responsePlayer ? Date.now() : undefined;
           return {
             response,
             alignment: dispatchPlayer ? boundaryRetries ? "boundary-replan" : "same-slot" : "none",
             ...(dispatchPlayer ? { dispatchPlaytime: dispatchPlayer.totalPlaytime, player: dispatchPlayer } : {}),
+            ...(dispatchPlayerObservedAt !== undefined ? { playerObservedAt: dispatchPlayerObservedAt } : {}),
             ...(dispatchedAction ? { action: dispatchedAction } : {}),
             ...(dispatchedDecision ? { decision: dispatchedDecision } : {}),
             ...(dispatchPrediction ? { prediction: dispatchPrediction } : {}),
+            ...(continuationHints ? { continuationHints } : {}),
+            ...(predictionParentId ? { predictionParentId } : {}),
+            ...(responsePlayer ? { responsePlayer } : {}),
+            ...(responseObservedAt !== undefined ? { responseObservedAt } : {}),
+            responseReadyAt,
           } satisfies GoActionOutcome;
         },
         (value) => ({
@@ -1304,7 +1374,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       }
       if (rawOutcome?.player) {
         set(ctx.state, "player", rawOutcome.player);
-        ctx.state.playerObservedAt = Date.now();
+        ctx.state.playerObservedAt = rawOutcome.playerObservedAt ?? Date.now();
       }
       if (!rawOutcome?.response) {
         merge(ctx.state, "go", {
@@ -1326,6 +1396,19 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         return;
       }
       const response = normalizeGoResponse(rawOutcome.response);
+      const matchingTiming = (rawOutcome.continuationHints ?? []).filter((hint) =>
+        response.type === "move"
+          ? hint.response.type === "move"
+            && hint.response.x === response.x && hint.response.y === response.y
+          : hint.response.type === "pass");
+      const remainingBonus = new Set(matchingTiming.map((hint) => nextGoTurnTiming(
+        rawOutcome.dispatchPlaytime ?? 0,
+        topic.bonusCycles ?? 0,
+        hint.wait,
+      ).bonusCycles));
+      const bonusCyclesAfterResponse = remainingBonus.size === 1
+        ? remainingBonus.values().next().value as number
+        : undefined;
 
       // makeMove/passTurn returns the AI's actual public response. Advance the
       // held board immediately so the driver never replays a stale move while
@@ -1344,6 +1427,25 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         previousBoards.unshift(board.rows);
         board = theirs.board;
       }
+      if (rawOutcome.predictionParentId && rawOutcome.responsePlayer && rawOutcome.responseObservedAt !== undefined) {
+        const confirmedPositionId = goNeuralPositionIdentity({
+          ...view,
+          board,
+          previousBoards,
+          currentPlayer: response.type === "gameOver" ? "None" : "Black",
+          status: response.type === "gameOver" ? "gameOver" : "inProgress",
+          consecutivePasses: response.type === "move" ? 0 : action.type === "pass" ? 2 : 1,
+        }).id;
+        neuralRuntime.confirm(
+          rawOutcome.predictionParentId,
+          response,
+          confirmedPositionId,
+          rawOutcome.responsePlayer.totalPlaytime,
+          rawOutcome.responseObservedAt,
+        );
+        set(ctx.state, "player", rawOutcome.responsePlayer);
+        ctx.state.playerObservedAt = rawOutcome.responseObservedAt;
+      }
       const predicted = decision.forecast ?? [];
       const predictionTotal = predicted.reduce((sum, candidate) => sum + candidate.count, 0);
       const matching = predicted.reduce((sum, candidate) => {
@@ -1358,6 +1460,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         board: board.rows,
         previousBoards,
         moveCount: previousBoards.length,
+        ...(bonusCyclesAfterResponse !== undefined ? { bonusCycles: bonusCyclesAfterResponse } : {}),
         territory: { black: controlled.X, white: controlled.O },
         ...(score ? { blackScore: score.X, whiteScore: score.O } : {}),
         currentPlayer: response.type === "gameOver" ? "None" : "Black",
@@ -1372,12 +1475,17 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             alignment: rawOutcome.alignment,
             ...(rawOutcome.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
             ...(plan.prediction ? { seed: plan.prediction.seedCandidates[0] } : {}),
+            ...(plan.prediction?.readyToDispatchMs !== undefined
+              ? { readyToDispatchMs: plan.prediction.readyToDispatchMs }
+              : {}),
           },
           ...(predictionTotal > 0 ? { predictionSupport: { matching, total: predictionTotal } } : {}),
           ok: result.ok,
           detail: result.detail,
         },
       });
+      goPredictionParent = response.type === "gameOver" ? undefined : rawOutcome.predictionParentId;
+      goTurnReadyAt = response.type === "gameOver" ? undefined : rawOutcome.responseReadyAt;
       turnCompleted = true;
       continueImmediately = response.type !== "gameOver";
       goContinuationReady = false;
@@ -2710,12 +2818,15 @@ export const goModule: FeatureModule = {
     // concurrently with the reset one.
     goCompletionReady = false;
     goContinuationReady = false;
-    // Release GPU buffers across a prestige; the next game lazily rebuilds
-    // the required backend against the successor Electron device.
-    void goEngine.dispose();
+    goPredictionParent = undefined;
+    goTurnReadyAt = undefined;
+    // Drop board/seed work crossing a prestige. The worker itself remains the
+    // single V9 owner across controller handoffs; its backend is rebuilt after
+    // this reset before the successor game is evaluated.
+    if (testGoRuntime) void testGoRuntime.reset();
+    else resetGoNeuralWorkerRuntime();
     goTickPhase = undefined;
     goAnchorFailedAt = 0;
-    goEngine = makeGoEngine();
     delete state.topics.go;
   },
   claims: (ctx) => {
@@ -2787,8 +2898,13 @@ function goMethods(action: string | undefined): readonly string[] {
   // getPlayer instead of the 4 GB go.makeMove grant, which must not be held
   // while waiting for an engine tick.
   if (action === "align") return ["getPlayer", "sleep"];
-  if (action === "move") return ["getPlayer", "sleep", "go.makeMove"];
-  if (action === "pass") return ["getPlayer", "sleep", "go.passTurn"];
+  // A dispatch-time seed change can legitimately flip the V9 decision between
+  // move and pass. Price both calls for every Black turn so the exact action is
+  // always executable. passTurn is zero-RAM in v3.0.1, so this does not enlarge
+  // the 4 GB move grant.
+  if (action === "move" || action === "pass") {
+    return ["getPlayer", "sleep", "go.makeMove", "go.passTurn"];
+  }
   if (action === "resume") return ["go.opponentNextTurn"];
   if (action === "newGame") return ["go.resetBoardState"];
   return [];

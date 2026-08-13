@@ -21,10 +21,10 @@ const config: BitburnerConfig = {
   entries: [{ source: "game/start.ts", target: "start.js" }],
 };
 
-/** Model artifacts are deliberately part of the controller bundle. Keep
- * enough headroom for normal strategy growth while preventing a checkpoint
- * export from silently returning start.js to its former >1 MB size. */
-const MAX_START_SOURCE_BYTES = 850_000;
+/** Both q8 V9 profiles are deliberately part of the controller bundle. Their
+ * generated base64 payload is ~1.35 MB; keep modest strategy headroom while
+ * preventing an exporter regression toward full-precision checkpoints. */
+const MAX_START_SOURCE_BYTES = 2_150_000;
 
 afterAll(async () => {
   await rm(config.buildDir, { recursive: true, force: true });

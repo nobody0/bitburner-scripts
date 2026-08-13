@@ -100,6 +100,9 @@ export interface GoPlan {
     preparationMs: number;
     finalizationMs: number;
     totalPlanningMs: number;
+    /** Time from the controller learning that Black owns the turn until the
+     * irreversible makeMove/passTurn call. */
+    readyToDispatchMs?: number;
     engineCycleMs: number;
     aiWaitMs: number;
     seedCandidates: number[];
@@ -107,6 +110,14 @@ export interface GoPlan {
     dispatchPlaytime: number;
     /** Number of warm replans after finalization crossed a tick boundary. */
     boundaryRetries: number;
+    /** Whether the position-wide preparation already existed when foreground
+     * planning began. */
+    positionCacheHit?: boolean;
+    /** Whether the worker had pushed the matching next-turn decision before
+     * foreground planning began. */
+    pushedPredictionHit?: boolean;
+    /** Whether dispatch-time assurance found its exact seed set complete. */
+    seedCacheHit?: boolean;
   };
   /** Full opponent/board comparison in the same ETA units used to decide. */
   selection: {
@@ -139,6 +150,7 @@ export interface GoTurnResult {
     alignment: "none" | "same-slot" | "boundary-replan";
     dispatchPlaytime?: number;
     seed?: number;
+    readyToDispatchMs?: number;
   };
   ok: boolean;
   detail: string;

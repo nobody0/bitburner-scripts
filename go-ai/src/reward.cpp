@@ -27,7 +27,7 @@ TerminalReward terminal_reward(
   return {
     .won = won,
     .game_power = power,
-    .training_power = won ? power : power * 0.5,
+    .training_power = score.black * (won ? 1.0 : 0.5),
   };
 }
 

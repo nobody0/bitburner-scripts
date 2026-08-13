@@ -59,7 +59,6 @@ async function main(): Promise<unknown> {
         },
         planningPhases: {
           preparation: phase("preparationMs"),
-          prediction: phase("predictionMs"),
           gpuAndSelection: phase("gpuAndSelectionMs"),
         },
       });

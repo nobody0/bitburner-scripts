@@ -1,9 +1,11 @@
 # KataGo IPvGO adviser
 
-This subtree patches a pinned KataGo checkout, provides the adviser used by
-`go_cpp_population trio`, and retains the independent arena that proved the
-policy before integration. KataGo does not load or overwrite either promoted
-bespoke model.
+This subtree patches a pinned KataGo checkout, provides the TypeScript adviser
+and its worker, and retains the independent arena that proved the policy before
+integration. KataGo does not load or overwrite either promoted bespoke model.
+
+The adviser serves the TypeScript arena and analysis tools. Nothing in the V9
+training pipeline consumes it.
 
 ## What is adapted
 
@@ -82,66 +84,3 @@ The retained recommendation is predictive KataGo for 5×5 and plain KataGo for
 the 19×19 daemon. Conditional search improved every 5×5 faction lane in the
 full proof, but its daemon sample was slower and earned less Power per round,
 so it is not the recommended daemon route. See `RESULTS.md`.
-
-## Population integration
-
-`go_cpp_population ... trio` plays three complete routes from every scheduled
-opening: handcrafted search, frozen champion, and Kata advice. It admits the
-route with the best terminal result using the existing strict ordering:
-complete-game win first, then loss-penalized terminal Power per round. The
-checkpoint log reports `challenger_selected` and `adviser_selected` counts.
-
-The C++ environment owns board generation, legality, positional superko,
-opponent forecasts, response sampling, terminal scoring and training features.
-A persistent Bun sidecar owns only KataGo queries. On 5×5 it receives the
-native modal immediate response for every legal Black candidate and runs the
-proved predictive shortlist; the genuinely unseeded defense tie remains a
-probability in the native environment and the played episode records the
-sampled result. On 19×19 it uses plain Kata advice, matching the benchmark
-reversal. The sidecar is serialized because one Kata process owns one analysis
-stream; native teacher and champion generation remain threaded.
-
-Defaults require no extra arguments after `trio` once `bootstrap.ts` has run:
-
-| Profile | Mode | Reply visits | Policy visits | Candidates |
-| --- | --- | ---: | ---: | ---: |
-| `small5` | predictive | 2 | 2 | 4 |
-| `daemon19` | plain | 8 | 2 (unused) | 4 |
-
-Override order is:
-`trio [KATAGO_BINARY] [KATAGO_MODEL] [KATAGO_CONFIG] [KATAGO_VISITS]
-[KATAGO_POLICY_VISITS] [KATAGO_CANDIDATES] [RETENTION_MODEL] [full|heads]
-[KATAGO_PROCESSES]`.
-
-`RETENTION_MODEL` defaults to `INIT_MODEL`. Supplying it separately lets a
-research lineage continue from a promising, not-yet-promoted checkpoint while
-the official champion remains frozen as the retention adviser. This does not
-change promotion: only independently confirmed fixed-corpus gates may replace
-either champion artifact.
-
-The final scope defaults to `full`. `heads` freezes the convolution and dense
-trunk while updating only the applicable three-value output head. It is useful
-for measuring and limiting cross-opponent interference on the balanced 5×5
-profile; it does not alter the model format.
-
-`KATAGO_PROCESSES` defaults to one. Values above one start independent adviser
-sidecars and assign population workers round-robin between them. This can
-increase low-visit throughput when one serialized command stream underfills the
-GPU, at the cost of another model/context allocation per process. Benchmark it
-on the target accelerator before making it the local default.
-
-KataGo rankings train the policy head, but KataGo value and score estimates
-never become bespoke outcome-head targets. The native environment replays all
-three routes and backs up only their real terminal win, Power and remaining-
-round labels; the best route alone supplies policy rankings. Missing
-dependencies fail before generation; a worker/query error
-fails the checkpoint rather than silently changing the requested adviser set.
-Existing `teacher` and `duel` modes do not start or depend on KataGo.
-
-`go_cpp_population ... kata` is the high-throughput pretraining variant. It
-plays only the exact native-environment Kata-advised route and trains from its
-complete terminal outcome and ranking labels. It omits the two additional
-handcrafted and frozen-champion trajectories that `trio` generates. Use it to
-produce research candidates when Kata wins essentially every route comparison,
-then pass finalists through a fresh `trio` CPU handoff and the unchanged
-fixed-corpus promotion gates. It is not itself a promotion proof.

@@ -1,13 +1,14 @@
 #include "go/arena.hpp"
 #include "go/board_generator.hpp"
-#include "go/features.hpp"
-#include "go/network.hpp"
+#include "go/network_v9.hpp"
 #include "go/opponent.hpp"
+#include "go/policy_v9.hpp"
 #include "go/reward.hpp"
 #include "go/rng.hpp"
 #include "go/rules.hpp"
-#include "go/search.hpp"
+#include "go/transition.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -58,167 +59,12 @@ void rewards() {
   const auto win = terminal_reward({.black = 10, .white = 9.5}, "Illuminati", 5);
   require(win.won, "tie-or-better is black win");
   require(win.game_power == 80, "single-game Power excludes streak state");
-  require(win.training_power == win.game_power, "wins are not penalized");
+  require(win.training_power == 10, "training utility is unscaled Black score");
 
   const auto loss = terminal_reward({.black = 10, .white = 10.5}, "Illuminati", 5);
   require(!loss.won, "lower black score is loss");
   require(loss.game_power == 80, "single-game Power excludes streak state");
-  require(loss.training_power == 40, "training halves a losing game's Power");
-}
-
-void features_and_training() {
-  static_assert(CandidateValueNetwork::output_size == 3);
-  const Board before{.size = 3, .columns = {"#..", ".X.", "..O"}};
-  const Board after{.size = 3, .columns = {"#..", ".XX", ".OO"}};
-  const auto features = encode_candidate(before, Move::at(1, 2), Move::at(2, 1), after, 5);
-  require(features.planes.size() == 8 * 25, "feature shape");
-  require(plane(features, FeaturePlane::before_unplayable)[0] == 1, "offline node encoded");
-  require(plane(features, FeaturePlane::before_unplayable)[4 * 5 + 4] == 1, "padding encoded as unplayable");
-  require(plane(features, FeaturePlane::candidate)[1 * 5 + 2] == 1, "candidate plane");
-  require(plane(features, FeaturePlane::response)[2 * 5 + 1] == 1, "response plane");
-
-  TrainingExample example{
-    .features = features,
-    .target = {.win_probability = 1, .terminal_power = 120, .remaining_turns = 4},
-  };
-  CandidateValueNetwork network(5, 16, 7);
-  const double initial = network.train_batch(std::span<const TrainingExample>(&example, 1), 0.01);
-  double final = initial;
-  for (int iteration = 0; iteration < 300; ++iteration) {
-    final = network.train_batch(std::span<const TrainingExample>(&example, 1), 0.01);
-  }
-  require(final < initial * 0.05, "reference network must learn a rollout target");
-
-  CandidateValueNetwork ranker(5, 16, 17);
-  auto alternate = features;
-  alternate.candidate_pass = true;
-  CandidateRankingGroup ranking{
-    .candidates = {&features, &alternate},
-    .preferred_index = 1,
-  };
-  for (int step = 0; step < 200; ++step) {
-    (void)ranker.train_ranking_batch(
-      std::span<const CandidateRankingGroup>(&ranking, 1), 0.02
-    );
-  }
-  require(
-    ranker.predict(alternate).win_probability > ranker.predict(features).win_probability,
-    "position-local ranking must learn the preferred candidate"
-  );
-  std::stringstream serialized;
-  network.save(serialized);
-  const auto restored = CandidateValueNetwork::load(serialized);
-  const auto original_prediction = network.predict(features);
-  const auto prepared_prediction = network.predict(
-    network.prepare(before), Move::at(1, 2), Move::at(2, 1), after);
-  require(std::abs(original_prediction.win_probability - prepared_prediction.win_probability) < 1e-12,
-    "prepared inference preserves win prediction");
-  require(std::abs(original_prediction.terminal_power - prepared_prediction.terminal_power) < 1e-10,
-    "prepared inference preserves Power prediction");
-  require(std::abs(original_prediction.remaining_turns - prepared_prediction.remaining_turns) < 1e-10,
-    "prepared inference preserves turns prediction");
-  const auto localized = CandidateValueNetwork::with_local_context(network);
-  const auto localized_prediction = localized.predict(features);
-  require(localized.uses_local_context(), "localized network enables candidate-relative context");
-  require(localized.input_size() == network.input_size() + local_context_size,
-    "localized network adds only the fixed relative context window");
-  require(std::abs(original_prediction.win_probability - localized_prediction.win_probability) < 1e-12,
-    "zero-initialized local context preserves the source policy exactly");
-  const auto board_only = CandidateValueNetwork::with_result_board_only(network);
-  require(board_only.result_board_only(), "board-value conversion enables result-board-only input");
-  require(board_only.input_size() == 3 * 25 + 7,
-    "board-value network has only result stones, unplayable cells, and enemy identity");
-  auto same_result_different_action = encode_candidate(
-    Board{.size = 3, .columns = {"...", "...", "..."}},
-    Move::pass_turn(), Move::pass_turn(), after, 5, 0);
-  const auto board_value = board_only.predict(features);
-  const auto invariant_value = board_only.predict(same_result_different_action);
-  require(board_value.win_probability == invariant_value.win_probability,
-    "board value is invariant to the prior board and explicit move coordinates");
-  require(board_value.terminal_power == invariant_value.terminal_power,
-    "board value Power is invariant to the prior board and explicit move coordinates");
-  const auto prepared_board_value = board_only.predict(
-    board_only.prepare(before, 0), Move::at(1, 2), Move::at(2, 1), after);
-  require(board_value.win_probability == prepared_board_value.win_probability,
-    "prepared board-value inference evaluates the resulting board");
-  std::stringstream board_serialized;
-  board_only.save(board_serialized);
-  const auto board_restored = CandidateValueNetwork::load(board_serialized);
-  require(board_restored.result_board_only(), "v6 model preserves board-value architecture");
-  require(board_restored.predict(features).win_probability == board_value.win_probability,
-    "v6 board-value model round trip");
-  const auto restored_prediction = restored.predict(features);
-  require(original_prediction.win_probability == restored_prediction.win_probability, "model win head round trip");
-  require(original_prediction.terminal_power == restored_prediction.terminal_power, "model Power head round trip");
-  require(original_prediction.remaining_turns == restored_prediction.remaining_turns, "model turns head round trip");
-  require(restored.opponent_features() == 7, "v3 model preserves opponent feature count");
-
-  CandidateValueNetwork small_profile(5, 8, 8, 6);
-  require(small_profile.input_size() == 8 * 25 + 2 + 6, "small profile has six enemy bits");
-  CandidateValueNetwork daemon_profile(19, 8, 9, 0);
-  require(daemon_profile.input_size() == 8 * 19 * 19 + 2, "daemon profile has no enemy bits");
-  CandidateValueNetwork small_board_profile(5, 8, 18, 6, false, true);
-  require(small_board_profile.input_size() == 3 * 25 + 6,
-    "small board-value profile has 81 inputs");
-  CandidateValueNetwork daemon_board_profile(19, 8, 19, 0, false, true);
-  require(daemon_board_profile.input_size() == 3 * 19 * 19,
-    "daemon board-value profile has 1083 inputs");
-  CandidateValueNetwork spatial_profile(5, 16, 20, 6, false, true, true);
-  require(spatial_profile.spatial_board(), "spatial profile enables shared-weight board trunk");
-  require(spatial_profile.input_size() == 3 * 25 + 6,
-    "spatial profile still exposes only result-board and enemy inputs");
-  const auto spatial_value = spatial_profile.predict(features);
-  const auto spatial_invariant = spatial_profile.predict(same_result_different_action);
-  require(spatial_value.win_probability == spatial_invariant.win_probability,
-    "spatial board value is invariant to explicit move coordinates");
-  const auto prepared_spatial_value = spatial_profile.predict(
-    spatial_profile.prepare(before, 0), Move::at(1, 2), Move::at(2, 1), after);
-  require(std::abs(spatial_value.win_probability - prepared_spatial_value.win_probability) < 1e-12,
-    "incremental spatial inference preserves win prediction");
-  require(std::abs(spatial_value.terminal_power - prepared_spatial_value.terminal_power) < 1e-10,
-    "incremental spatial inference preserves Power prediction");
-  const double spatial_initial = spatial_profile.train_batch(
-    std::span<const TrainingExample>(&example, 1), 0.01);
-  double spatial_final = spatial_initial;
-  for (int iteration = 0; iteration < 100; ++iteration) {
-    spatial_final = spatial_profile.train_batch(
-      std::span<const TrainingExample>(&example, 1), 0.01);
-  }
-  require(spatial_final < spatial_initial,
-    "spatial board-value trunk backpropagates a rollout target");
-  std::stringstream spatial_serialized;
-  spatial_profile.save(spatial_serialized);
-  const auto spatial_restored = CandidateValueNetwork::load(spatial_serialized);
-  require(spatial_restored.spatial_board(), "v7 model preserves spatial architecture");
-  require(spatial_restored.predict(features).win_probability
-      == spatial_profile.predict(features).win_probability,
-    "v7 spatial model round trip");
-
-  CandidateValueNetwork padded(19, 16, 10);
-  const auto compact = CandidateValueNetwork::project_profile(padded, 5, 6);
-  const auto padded_features = encode_candidate(before, Move::at(1, 2), Move::at(2, 1), after, 19, 3);
-  const auto compact_features = encode_candidate(before, Move::at(1, 2), Move::at(2, 1), after, 5, 3);
-  const auto padded_prediction = padded.predict(padded_features);
-  const auto compact_prediction = compact.predict(compact_features);
-  require(std::abs(padded_prediction.win_probability - compact_prediction.win_probability) < 1e-12,
-    "small projection preserves win prediction");
-  require(std::abs(padded_prediction.terminal_power - compact_prediction.terminal_power) < 1e-10,
-    "small projection preserves Power prediction");
-
-  const auto widened = CandidateValueNetwork::widen(compact, 37, 11);
-  const auto widened_prediction = widened.predict(compact_features);
-  require(std::abs(widened_prediction.win_probability - compact_prediction.win_probability) < 1e-12,
-    "widening preserves win prediction");
-  require(std::abs(widened_prediction.terminal_power - compact_prediction.terminal_power) < 1e-10,
-    "widening preserves Power prediction");
-  require(widened.hidden() == 37, "widening changes hidden width");
-
-  const ValuePrediction high_power{.win_probability = 1, .terminal_power = 80, .remaining_turns = 2};
-  const ValuePrediction low_power{.win_probability = 1, .terminal_power = 40, .remaining_turns = 2};
-  require(
-    expected_training_power_per_turn(high_power) == expected_training_power_per_turn(low_power) * 2,
-    "Power per turn is terminal training Power divided by total rounds"
-  );
+  require(loss.training_power == 5, "training halves unscaled score on a loss");
 }
 
 void opponent_and_arena() {
@@ -243,25 +89,52 @@ void opponent_and_arena() {
   require(first.trace.size() == second.trace.size(), "native arena trace is deterministic");
 }
 
-void monte_carlo_search() {
-  const Position position{.board = initial_board(5, Opponent::illuminati, 81'000, 17)};
-  SearchGraph first({.simulations = 12, .tree_depth = 5, .exploration = 1.2,
-    .graph_capacity = 10'000, .feature_extent = 5});
-  SearchGraph second(first.config());
-  std::mt19937_64 first_random(1234);
-  std::mt19937_64 second_random(1234);
-  const auto a = first.search(position, Opponent::illuminati, 9'200, 0, first_random);
-  const auto b = second.search(position, Opponent::illuminati, 9'200, 0, second_random);
-  require(a.move.pass == b.move.pass && a.move.point == b.move.point, "search is deterministic for its corpus seed");
-  require(!a.targets.empty() && first.edge_count() > 0 && first.edge_count() <= first.config().graph_capacity,
-    "search creates bounded visited edges and replay targets");
-  for (const auto& target : a.targets) {
-    require(target.features.opponent_index == static_cast<int>(Opponent::illuminati), "enemy is a one-hot feature");
-    require(target.features.planes.size() == 8 * 25, "seed is not present in spatial features");
-    require(target.visits > 0 && target.target.remaining_turns > 0, "terminal backup reaches visited actions");
+void behavior_and_v9() {
+  const auto slum = opponent_turn_behavior(Opponent::slum_snakes, 1000);
+  const auto rolls = whrng(1000, 4);
+  require(slum.smart == (rolls[0] < 0.3), "smart mode is exactly seed resolved");
+  require(slum.option_roll == rolls[1] && slum.faction_roll == rolls[2]
+    && slum.fallback_roll == rolls[3], "behavior exposes the three used rolls");
+  require(slum.priority_ranks[static_cast<std::size_t>(ReplyBranch::defend_capture)] == 1,
+    "Slum Snakes exposes defend-first semantics without an identity input");
+  require(encode_opponent_turn_behavior(slum, 3.5).size() == behavior_base_features + 1,
+    "small5 behavior includes komi");
+  require(encode_opponent_turn_behavior(
+    opponent_turn_behavior(Opponent::world_daemon, 1000)).size() == behavior_base_features,
+    "daemon behavior omits fixed komi");
+
+  const auto model = GoNetworkV9::create(
+    5, 4, 1, 8, 4, behavior_base_features + 1, 99);
+  V9Input input{
+    .board = board_from_hash(5, "........................."),
+    .legal_black = std::vector<float>(25, 1.0F),
+    .behavior = encode_opponent_turn_behavior(
+      opponent_turn_behavior(Opponent::illuminati, 1000), 7.5),
+  };
+  const auto prediction = model.predict(input);
+  require(prediction.move_logits.size() == 26 && prediction.branch_logits.size() == 26,
+    "V9 emits every point plus pass");
+  for (const auto& branches : prediction.branch_logits) for (const double value : branches) {
+    require(std::isfinite(value), "V9 branch logits are finite");
   }
-  CandidateValueNetwork network(5, 8, 9);
-  require(network.input_size() == 8 * 25 + 2 + 7, "network input is planes, pass bits, and enemy only");
+  std::stringstream checkpoint;
+  model.save(checkpoint);
+  const auto restored = GoNetworkV9::load(checkpoint);
+  const auto round_trip = restored.predict(input);
+  require(round_trip.value.win_probability == prediction.value.win_probability
+    && round_trip.move_logits == prediction.move_logits,
+    "V9 checkpoint round trip is exact");
+  const Position position{.board = input.board};
+  const auto decision = choose_with_v9(
+    position, Opponent::illuminati, 1000, 0, model);
+  require(decision.move.pass || play_move(position.board, decision.move.point, Stone::black),
+    "V9 proposal/value policy returns a legal move or pass");
+  require(!decision.known_replies.replies.empty(),
+    "V9 policy carries exact replies for its finalist");
+  std::stringstream v9_checkpoint;
+  model.save(v9_checkpoint);
+  require(GoNetworkV9::load(v9_checkpoint).extent() == 5,
+    "V9 checkpoint restores through the V9 loader");
 }
 
 }  // namespace
@@ -271,9 +144,8 @@ int main() {
     rules();
     random_stream();
     rewards();
-    features_and_training();
     opponent_and_arena();
-    monte_carlo_search();
+    behavior_and_v9();
     return EXIT_SUCCESS;
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';

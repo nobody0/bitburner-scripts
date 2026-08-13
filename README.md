@@ -162,8 +162,9 @@ import type { NS } from "@ns";
 - `bun run sim:compare a.jsonl b.jsonl` — A/B time-to-goal; either input may also be a `.session.json` manifest for all chained installs.
 - `bun run go:arena` — upstream-oracle IPvGO WebGPU smoke tournament and latency report (12 games per ordinary opponent, 2 World Daemon games).
 - `bun run go:gpu` — run the deployed WGSL shader in headless Chrome against native golden vectors and the production latency budgets.
-- `bun run go:promote <small5|daemon19> <candidate.model>` — fixed-corpus promotion gate; `--apply` installs the champion and refreshes the artifact and golden fixture.
-- `bun run go:export` / `go:golden` — regenerate the deployed weight artifact and its golden fixture from promoted checkpoints.
+- `bun run go:promote <small5|daemon19> <candidate.model>` — fixed-corpus WebGPU promotion gate; `--apply` installs and verifies the champion through export and full-precision-champion-to-WGSL correctness gates.
+- `bun run go:export` — automatically choose each profile's validated storage encoding and regenerate its runtime artifact; add `--inspect` for a non-writing decision/size report or `--check` for staleness.
+- `bun run go:golden` — regenerate the native golden fixture from the decoded runtime artifacts.
 - `bun run vendor` — re-extract the game formula core from the pinned tag.
 - `bun run typecheck` / `typecheck:vendor` / `bun test` — checks; run before commit.
 - `bun run types` — refresh type definitions from the running game.

@@ -8,3 +8,7 @@ declare const __TELEMETRY__: boolean;
  * same id is pushed as build-id.txt so running scripts can detect that a
  * newer version was synced and respawn themselves. Game bundles only. */
 declare const __BUILD_ID__: string;
+
+/** V9 worker bundle emitted by tools/build.ts and embedded into start.js so
+ * Bitburner does not need a separately addressable browser-worker file. */
+declare const __GO_NEURAL_WORKER_SOURCE__: string;

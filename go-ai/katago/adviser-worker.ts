@@ -129,6 +129,7 @@ async function main(): Promise<void> {
         } else {
           const shortlist = await kata.shortlist(
             board, history, request.komi, visits, candidateLimit,
+            new Set(request.candidates.map((candidate) => candidate.move)),
           );
           if (!shortlist[0]) throw new Error("KataGo returned an empty shortlist");
           selected = shortlist[0].move;

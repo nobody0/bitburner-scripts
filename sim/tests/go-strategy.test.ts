@@ -29,7 +29,7 @@ describe("Go neural policy", () => {
       komi: 7.5,
     }, [1_200], engine);
     expect(decision.ranked.length).toBeGreaterThan(0);
-    expect(decision.finalists).toBe(24);
+    expect(decision.finalists).toBe(16);
     for (const move of decision.ranked) {
       expect(move.forecastCertainty).toBe("exact");
       expect(move.predictedReplies!.length).toBeGreaterThan(0);

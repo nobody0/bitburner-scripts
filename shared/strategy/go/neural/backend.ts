@@ -1,4 +1,4 @@
-/** Backend contract for batched v7 board-value inference.
+/** Backend contract for batched board-value inference.
  *
  * Boards travel to a backend as 2-bit cell codes packed into u32 words, so a
  * worst-case 19x19 batch of ~400 result boards is ~38KB rather than megabytes
@@ -19,26 +19,45 @@ export interface GoValueBatch {
    * `wordsPerBoard` words per board. */
   packed: Uint32Array;
   count: number;
-  /** Head selector and one-hot input; ignored by zero-opponent profiles. */
-  opponentIndex: number;
+  /** V9 post-response legal-placement bits, 32 points per word. */
+  legal: Uint32Array;
+  /** V9 scalars per board: pass count / 2, elapsed fraction,
+   * response-pass, response-no-op. */
+  state: Float32Array;
+  /** V9 behavior signature, `behaviorFeatures` scalars per board. */
+  behavior: Float32Array;
+}
+
+export interface GoProposalRaw {
+  /** Three value pre-activations per board. */
+  value: Float32Array;
+  /** `extent*extent+1` move logits per board; pass is last. */
+  moves: Float32Array;
 }
 
 export interface GoValuePrediction {
   winProbability: number;
-  terminalPower: number;
+  /** Loss-penalized raw Black score at the terminal position. */
+  terminalScore: number;
   remainingRounds: number;
 }
 
 export interface GoValueBackend {
   readonly extent: number;
+  readonly behaviorFeatures: number;
   /** Raw pre-activations, `GO_VALUE_OUTPUTS` per board. The returned view is
    * only valid until the next call; callers must consume it immediately. */
   evaluateBatch(batch: GoValueBatch): Promise<Float32Array>;
+  evaluateProposal(batch: GoValueBatch): Promise<GoProposalRaw>;
   dispose(): void;
 }
 
 export function goBoardWords(extent: number): number {
   return Math.ceil((extent * extent) / 16);
+}
+
+export function goLegalWords(extent: number): number {
+  return Math.ceil((extent * extent) / 32);
 }
 
 /** Pack one board at `wordOffset`, padding cells beyond the board as offline
@@ -77,12 +96,12 @@ export function decodeGoValue(raw: ArrayLike<number>, board: number): GoValuePre
   const base = board * GO_VALUE_OUTPUTS;
   return {
     winProbability: sigmoid(raw[base]!),
-    terminalPower: Math.expm1(Math.min(softplus(raw[base + 1]!), 40)),
+    terminalScore: Math.expm1(Math.min(softplus(raw[base + 1]!), 40)),
     remainingRounds: Math.expm1(Math.min(softplus(raw[base + 2]!), 40)),
   };
 }
 
 /** Selection denominator shared with the trainer's promotion metric. */
-export function goPowerPerRound(prediction: GoValuePrediction, elapsedRounds: number): number {
-  return prediction.terminalPower / Math.max(elapsedRounds + prediction.remainingRounds, 1e-6);
+export function goScorePerRound(prediction: GoValuePrediction, elapsedRounds: number): number {
+  return prediction.terminalScore / Math.max(elapsedRounds + prediction.remainingRounds, 1e-6);
 }

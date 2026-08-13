@@ -20,10 +20,10 @@ export interface GoTickPhase {
   playtime: number;
 }
 
-/** Default guard band. Dispatching this close to a rollover risks landing in
- * the next cycle, so the engine deliberately targets that next cycle instead
- * and waits for it. */
-export const GO_ROLLOVER_GUARD_MS = 20;
+/** Only the synchronous verified-read to Go-call gap needs protection. Neural
+ * work is already pushed ahead by the worker and is never budgeted into this
+ * guard. */
+export const GO_DISPATCH_GUARD_MS = 2;
 
 /** Wall clock of the next rollover after `nowWall`, given an anchor. */
 export function goNextRolloverAt(phase: GoTickPhase, nowWall: number): number {
@@ -68,7 +68,7 @@ export function goChooseSeedTarget(
   phase: GoTickPhase,
   observedPlaytime: number,
   nowWall: number,
-  guardMs = GO_ROLLOVER_GUARD_MS,
+  guardMs = GO_DISPATCH_GUARD_MS,
 ): GoSeedTarget {
   const rolloverAt = goNextRolloverAt(phase, nowWall);
   const remaining = rolloverAt - nowWall;
@@ -88,5 +88,5 @@ export function goChooseSeedTarget(
  * yet at the instant the timer fires. */
 export function goDispatchDelayMs(target: GoSeedTarget, nowWall: number): number {
   if (!target.waitsForRollover) return 0;
-  return Math.max(0, target.rolloverAt - nowWall) + 1;
+  return Math.max(0, target.rolloverAt + 1 - nowWall);
 }

@@ -8,9 +8,11 @@ namespace bitburner::go {
 
 struct TerminalReward {
   bool won{};
+  /** Exact game reward, retained for reporting only. */
   double game_power{};
-  // Training deliberately halves a losing game's Power while win count remains
-  // the lexicographically primary objective.
+  /** Opponent-normalized learning utility: raw Black score, halved on a loss.
+   * The immutable difficulty multiplier must not dilute within-game move
+   * ranking. Kept under the historical field name until telemetry migrates. */
   double training_power{};
 };
 

@@ -63,6 +63,114 @@ export type OpponentBranch =
   | "corner" | "pattern" | "jump" | "growth" | "defend" | "expansion"
   | "random" | "pass";
 
+export const GO_OPPONENT_BRANCHES = [
+  "capture", "defendCapture", "eyeMove", "surround", "eyeBlock",
+  "corner", "pattern", "jump", "growth", "defend", "expansion",
+  "random", "pass",
+] as const satisfies readonly OpponentBranch[];
+
+export const GO_BEHAVIOR_BASE_FEATURES = 1 + 3
+  + GO_OPPONENT_BRANCHES.length * 2;
+
+/** The shared fallback pool is fixed by the upstream AI, not by opponent or
+ * seed. Build it once: opponentTurnBehavior() runs per candidate per seed. */
+const GO_FALLBACK_ENABLED: readonly number[] = GO_OPPONENT_BRANCHES.map((branch) => Number([
+  "growth", "surround", "defend", "expansion", "pattern", "eyeMove", "eyeBlock", "pass",
+].includes(branch)));
+
+export interface OpponentTurnBehavior {
+  /** Exact for this seed and opponent, never a probability. */
+  smart: boolean;
+  optionRoll: number;
+  factionRoll: number;
+  fallbackRoll: number;
+  /** Zero means unavailable. Positive values are one-based priority ranks;
+   * when a branch has multiple board-dependent guards, its earliest rank is
+   * retained and the branch remains enabled. */
+  priorityRanks: readonly number[];
+  /** Branches in the shared fallback pool. Pass is enabled because it occurs
+   * when no legal fallback survives on the candidate-dependent board. */
+  fallbackEnabled: readonly number[];
+}
+
+function appendIlluminatiPriority(
+  result: OpponentBranch[],
+  factionRoll: number,
+): void {
+  result.push("capture", "defendCapture", "eyeMove", "surround", "eyeBlock", "corner", "pattern");
+  if (factionRoll > 0.4) result.push("jump");
+  // The late <=2-liberty surround is a second candidate-dependent guard for
+  // the same semantic branch. Keeping it in the program preserves ranks of
+  // any following additions while the vector exposes one branch capability.
+  if (factionRoll < 0.6) result.push("surround");
+}
+
+/** Everything about the seeded selector that is known before hypothetical
+ * Black moves are enumerated. This deliberately does not claim to know the
+ * final response branch: branch availability still depends on each resulting
+ * board. The representation describes behavior, not faction identity. */
+export function opponentTurnBehavior(
+  opponent: GoRewardOpponent,
+  totalPlaytimeMs: number,
+): OpponentTurnBehavior {
+  const [smartRoll, optionRoll, factionRoll, fallbackRoll] = whrng(totalPlaytimeMs, 4) as
+    [number, number, number, number];
+  const smart = opponent === "Netburners" ? false
+    : opponent === "Slum Snakes" ? smartRoll < 0.3
+    : opponent === "The Black Hand" ? smartRoll < 0.8
+    : true;
+  const program: OpponentBranch[] = [];
+  if (opponent === "Netburners") {
+    if (factionRoll < 0.2) appendIlluminatiPriority(program, factionRoll);
+    if (factionRoll < 0.4) program.push("expansion");
+    if (factionRoll < 0.6) program.push("growth");
+    if (factionRoll < 0.75) program.push("random");
+  } else if (opponent === "Slum Snakes") {
+    program.push("defendCapture");
+    if (factionRoll < 0.2) appendIlluminatiPriority(program, factionRoll);
+    if (factionRoll < 0.6) program.push("growth");
+    if (factionRoll < 0.65) program.push("random");
+  } else if (opponent === "The Black Hand") {
+    program.push("capture", "surround", "defendCapture", "surround");
+    if (factionRoll < 0.3) appendIlluminatiPriority(program, factionRoll);
+    if (factionRoll < 0.75) program.push("surround");
+    if (factionRoll < 0.8) program.push("random");
+  } else if (opponent === "Tetrads") {
+    program.push("capture", "defendCapture", "pattern", "surround");
+    if (factionRoll < 0.4) appendIlluminatiPriority(program, factionRoll);
+  } else if (opponent === "Daedalus") {
+    if (factionRoll < 0.9) appendIlluminatiPriority(program, factionRoll);
+  } else {
+    appendIlluminatiPriority(program, factionRoll);
+  }
+  const priorityRanks = new Array<number>(GO_OPPONENT_BRANCHES.length).fill(0);
+  let rank = 0;
+  for (const programmed of program) {
+    const branch = GO_OPPONENT_BRANCHES.indexOf(programmed);
+    if (branch >= 0 && priorityRanks[branch] === 0) priorityRanks[branch] = ++rank;
+  }
+  return { smart, optionRoll, factionRoll, fallbackRoll, priorityRanks,
+    fallbackEnabled: GO_FALLBACK_ENABLED };
+}
+
+/** Dense, stable conditioning vector. Priority ranks are normalized to [0,1]
+ * and komi is present only for the multi-opponent small5 profile. */
+export function encodeOpponentTurnBehavior(
+  behavior: OpponentTurnBehavior,
+  komi?: number,
+): Float32Array {
+  const result = new Float32Array(GO_BEHAVIOR_BASE_FEATURES + (komi === undefined ? 0 : 1));
+  result[0] = Number(behavior.smart);
+  result.set([behavior.optionRoll, behavior.factionRoll, behavior.fallbackRoll], 1);
+  const rankScale = 1 / Math.max(GO_OPPONENT_BRANCHES.length, 1);
+  for (let index = 0; index < GO_OPPONENT_BRANCHES.length; index++) {
+    result[4 + index] = behavior.priorityRanks[index]! * rankScale;
+    result[4 + GO_OPPONENT_BRANCHES.length + index] = behavior.fallbackEnabled[index]!;
+  }
+  if (komi !== undefined) result[result.length - 1] = komi / 10;
+  return result;
+}
+
 export interface OpponentWaitTrace {
   /** The seed is constructed after the first waitCycle. These are the later
    * waitCycle calls through the response promise, including piece placement. */
@@ -579,11 +687,8 @@ export function predictPreparedOpponentReplies(
   prepared: PreparedOpponentPosition,
   totalPlaytimeMs: number,
 ): OpponentReplyForecast {
-  const [smartRoll, optionRoll, factionRoll, fallbackRoll] = whrng(totalPlaytimeMs, 4) as [number, number, number, number];
-  const smart = prepared.opponent === "Netburners" ? false
-    : prepared.opponent === "Slum Snakes" ? smartRoll < 0.3
-    : prepared.opponent === "The Black Hand" ? smartRoll < 0.8
-    : true;
+  const { smart, optionRoll, factionRoll, fallbackRoll } = opponentTurnBehavior(
+    prepared.opponent, totalPlaytimeMs);
   const space = smart ? prepared.smart : prepared.reckless;
   if (!space) throw new Error(`missing ${smart ? "smart" : "reckless"} ${prepared.opponent} option space`);
   const defenses = space.defenses();

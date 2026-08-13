@@ -10,61 +10,33 @@ add_library(bitburner_go
   src/analysis.cpp
   src/arena.cpp
   src/board_generator.cpp
-  src/features.cpp
-  src/kata_advisor.cpp
-  src/network.cpp
+  src/candidates.cpp
+  src/network_v9.cpp
   src/opponent.cpp
   src/patterns.cpp
-  src/policy.cpp
+  src/policy_v9.cpp
   src/reward.cpp
   src/rng.cpp
   src/rules.cpp
-  src/search.cpp
+  src/transition.cpp
 )
 target_include_directories(bitburner_go PUBLIC include)
 target_compile_options(bitburner_go PRIVATE
   $<$<CXX_COMPILER_ID:AppleClang,Clang,GNU>:-Wall;-Wextra;-Wpedantic;-Werror>
+  $<$<CXX_COMPILER_ID:GNU>:-Wno-missing-field-initializers;-Wno-range-loop-construct>
 )
 
 add_executable(go_cpp_oracle apps/oracle.cpp)
 target_link_libraries(go_cpp_oracle PRIVATE bitburner_go)
 
-add_executable(go_cpp_arena apps/arena.cpp)
-target_link_libraries(go_cpp_arena PRIVATE bitburner_go)
-
 add_executable(go_cpp_starting_states apps/starting_states.cpp)
 target_link_libraries(go_cpp_starting_states PRIVATE bitburner_go)
-
-add_executable(go_cpp_selfplay apps/selfplay.cpp)
-target_link_libraries(go_cpp_selfplay PRIVATE bitburner_go)
-
-add_executable(go_cpp_population apps/population.cpp)
-target_link_libraries(go_cpp_population PRIVATE bitburner_go)
-target_compile_definitions(go_cpp_population PRIVATE GO_AI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 add_executable(go_cpp_gpu_env apps/gpu_env.cpp)
 target_link_libraries(go_cpp_gpu_env PRIVATE bitburner_go)
 
-add_executable(go_cpp_evaluate apps/evaluate.cpp)
-target_link_libraries(go_cpp_evaluate PRIVATE bitburner_go)
-
-add_executable(go_cpp_evaluate_mixed apps/evaluate_mixed.cpp)
-target_link_libraries(go_cpp_evaluate_mixed PRIVATE bitburner_go)
-
-add_executable(go_cpp_teacher_train apps/teacher_train.cpp)
-target_link_libraries(go_cpp_teacher_train PRIVATE bitburner_go)
-
-add_executable(go_cpp_project apps/project.cpp)
-target_link_libraries(go_cpp_project PRIVATE bitburner_go)
-
-add_executable(go_cpp_widen apps/widen.cpp)
-target_link_libraries(go_cpp_widen PRIVATE bitburner_go)
-
-add_executable(go_cpp_localize apps/localize.cpp)
-target_link_libraries(go_cpp_localize PRIVATE bitburner_go)
-
-add_executable(go_cpp_boardify apps/boardify.cpp)
-target_link_libraries(go_cpp_boardify PRIVATE bitburner_go)
+add_executable(go_cpp_v9_init apps/v9_init.cpp)
+target_link_libraries(go_cpp_v9_init PRIVATE bitburner_go)
 
 enable_testing()
 add_executable(go_cpp_tests tests/go_test.cpp)
@@ -76,6 +48,9 @@ if(BUN_EXECUTABLE)
   add_test(
     NAME go_cpp_opponent_parity
     COMMAND ${BUN_EXECUTABLE} run ${CMAKE_CURRENT_SOURCE_DIR}/tests/opponent-parity.ts
+  )
+  set_tests_properties(go_cpp_opponent_parity PROPERTIES
+    ENVIRONMENT "GO_CPP_ORACLE=$<TARGET_FILE:go_cpp_oracle>"
   )
   add_test(
     NAME go_teacher_future_seed

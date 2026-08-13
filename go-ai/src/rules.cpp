@@ -142,10 +142,45 @@ std::optional<PlayedMove> play_move(
 
 std::vector<Point> legal_moves(const Position& position, Stone stone) {
   const std::unordered_set<std::string> history(position.previous_hashes.begin(), position.previous_hashes.end());
+  const int size = position.board.size;
+  const int area = size * size;
+  std::vector<int> liberties(static_cast<std::size_t>(area), -1);
+  for (int x = 0; x < size; ++x) for (int y = 0; y < size; ++y) {
+    const int point = x * size + y;
+    const char cell = at(position.board, x, y);
+    if ((cell != 'X' && cell != 'O') || liberties[static_cast<std::size_t>(point)] >= 0) continue;
+    const Group found = group(position.board, x, y);
+    for (const int member : found.stones) {
+      liberties[static_cast<std::size_t>(member)] = found.liberties;
+    }
+  }
   std::vector<Point> result;
-  for (int x = 0; x < position.board.size; ++x) {
-    for (int y = 0; y < position.board.size; ++y) {
-      if (play_move(position.board, {x, y}, stone, history)) result.push_back({x, y});
+  const std::string current_hash = history.empty() ? std::string{} : board_hash(position.board);
+  constexpr std::array<std::pair<int, int>, 4> directions{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
+  for (int x = 0; x < size; ++x) for (int y = 0; y < size; ++y) {
+    if (at(position.board, x, y) != '.') continue;
+    bool survives = false;
+    bool captures = false;
+    for (const auto [dx, dy] : directions) {
+      const int nx = x + dx;
+      const int ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
+      const char cell = at(position.board, nx, ny);
+      if (cell == '.') survives = true;
+      else if (cell == static_cast<char>(stone)
+        && liberties[static_cast<std::size_t>(nx * size + ny)] > 1) survives = true;
+      else if (cell == static_cast<char>(other(stone))
+        && liberties[static_cast<std::size_t>(nx * size + ny)] == 1) captures = true;
+    }
+    bool repeats = false;
+    if (survives && !captures && !history.empty()) {
+      std::string next_hash = current_hash;
+      next_hash[static_cast<std::size_t>(x * size + y)] = static_cast<char>(stone);
+      repeats = history.contains(next_hash);
+    }
+    if (captures ? play_move(position.board, {x, y}, stone, history).has_value()
+      : survives && !repeats) {
+      result.push_back({x, y});
     }
   }
   return result;

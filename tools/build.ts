@@ -34,6 +34,7 @@ async function bundleEntry(
   filename: string,
   buildId: string,
   options: BuildOptions,
+  goWorkerSource: string,
 ): Promise<BuiltArtifact> {
   const outfile = path.join(config.buildDir, filename);
   await mkdir(path.dirname(outfile), { recursive: true });
@@ -54,6 +55,7 @@ async function bundleEntry(
     define: {
       __TELEMETRY__: options.telemetry ? "true" : "false",
       __BUILD_ID__: JSON.stringify(buildId),
+      __GO_NEURAL_WORKER_SOURCE__: JSON.stringify(goWorkerSource),
     },
     // Keep bracket-notation ns calls intact (syntax minification rewrites
     // them and breaks dodge RAM accounting), while still removing guarded
@@ -61,6 +63,25 @@ async function bundleEntry(
     dropLabels: options.telemetry ? [] : ["TELEMETRY"],
   });
   return { filename, content: await readFile(outfile, "utf8") };
+}
+
+/** Bundle the V9 engine as a classic worker. The resulting source is embedded
+ * into start.js and opened through a Blob URL in game, which keeps deployment
+ * atomic and avoids relying on Bitburner's script server as a Worker URL. */
+export async function bundleGoWorkerSource(): Promise<string> {
+  const result = await build({
+    entryPoints: ["game/lib/go-neural-worker-entry.ts"],
+    bundle: true,
+    write: false,
+    platform: "browser",
+    format: "iife",
+    target: "es2022",
+    logLevel: "warning",
+    minifyWhitespace: true,
+  });
+  const output = result.outputFiles?.[0];
+  if (!output) throw new Error("V9 Go worker bundle produced no output");
+  return output.text;
 }
 
 /** Build one maintenance entrypoint without clearing or building the normal
@@ -73,7 +94,8 @@ export async function buildScript(
   safeBuildDir(config.buildDir);
   await mkdir(config.buildDir, { recursive: true });
   const buildId = createBuildId();
-  return bundleEntry(config, entry, artifactName(entry, buildId), buildId, options);
+  const goWorkerSource = await bundleGoWorkerSource();
+  return bundleEntry(config, entry, artifactName(entry, buildId), buildId, options, goWorkerSource);
 }
 
 export async function buildScripts(
@@ -84,12 +106,13 @@ export async function buildScripts(
   await rm(config.buildDir, { recursive: true, force: true });
   await mkdir(config.buildDir, { recursive: true });
   const buildId = createBuildId();
+  const goWorkerSource = await bundleGoWorkerSource();
 
   const built: { artifact: BuiltArtifact; versioned: boolean }[] = [];
   for (const entry of config.entries) {
     const filename = artifactName(entry, buildId);
     built.push({
-      artifact: await bundleEntry(config, entry, filename, buildId, options),
+      artifact: await bundleEntry(config, entry, filename, buildId, options, goWorkerSource),
       versioned: entry.versioned === true,
     });
   }

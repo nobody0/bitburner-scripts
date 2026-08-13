@@ -87,7 +87,9 @@ one-hour guess. The progression tab renders the same fields.
 
 Go decisions retain the exact public board/history input, bounded search
 ranking, sampled playtime and WHRNG seed window, observed-response support, and
-the full opponent/board reward comparison. Each candidate records simulator-
+the full opponent/board reward comparison. `readyToDispatchMs` measures from
+the opponent promise making Black actionable to the irreversible Go call, so
+cold-start cost and rare prediction misses remain visible. Each candidate records simulator-
 fitted win/score priors, heuristic duration, exact expected node power and
 multiplier change, transient install-ETA savings, expected nonlinear faction-
 favor gain, persistent faction-work savings and saved-seconds-per-game-second. This is enough to

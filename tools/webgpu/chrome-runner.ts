@@ -123,7 +123,11 @@ export interface ChromeWebGpuRun {
   result: unknown;
 }
 
-export async function runInHeadlessChrome(entryPath: string, timeoutMs = 300_000): Promise<ChromeWebGpuRun> {
+export async function runInHeadlessChrome(
+  entryPath: string,
+  timeoutMs = 300_000,
+  globals: Readonly<Record<string, unknown>> = {},
+): Promise<ChromeWebGpuRun> {
   const bundle = await esbuild.build({
     entryPoints: [entryPath],
     bundle: true,
@@ -138,7 +142,13 @@ export async function runInHeadlessChrome(entryPath: string, timeoutMs = 300_000
   const scratch = mkdtempSync(join(tmpdir(), "go-webgpu-"));
   const pagePath = join(scratch, "harness.html");
   const profileDir = join(scratch, "profile");
-  writeFileSync(pagePath, `<!doctype html><meta charset="utf-8"><title>go webgpu harness</title>\n<script>${bundle.outputFiles[0]!.text}</script>`);
+  const serializedGlobals = JSON.stringify(globals).replaceAll("<", "\\u003c");
+  writeFileSync(
+    pagePath,
+    `<!doctype html><meta charset="utf-8"><title>go webgpu harness</title>\n`
+      + `<script>Object.assign(globalThis,${serializedGlobals})</script>\n`
+      + `<script>${bundle.outputFiles[0]!.text}</script>`,
+  );
 
   const chrome = spawn({
     cmd: [
