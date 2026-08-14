@@ -4,9 +4,16 @@ import { parseGoal } from "../../shared/goals/presets.ts";
 import type { LogRecord } from "../../shared/telemetry/schema.ts";
 import type { Planner } from "../../shared/world.ts";
 import { DEFAULT_NETWORK } from "../network.ts";
-import { runSim } from "../run.ts";
+import { profileWorldForEntrance, runSim } from "../run.ts";
+import type { ExperimentIdentity } from "../../shared/experiment.ts";
 
 describe("runSim initialization", () => {
+  test("a selected checkpoint is not overwritten by a profile's synthetic world", () => {
+    const fixture = { startingMoney: 1e12 };
+    expect(profileWorldForEntrance(fixture, false)).toBe(fixture);
+    expect(profileWorldForEntrance(fixture, true)).toBeUndefined();
+  });
+
   test("reaches an initial money goal at time zero without invoking the planner", () => {
     let initCalls = 0;
     let planCalls = 0;
@@ -65,13 +72,18 @@ describe("runSim initialization", () => {
   });
 
   test("scenario identity includes the horizon and declarative world inputs", () => {
-    const fingerprint = (horizonMs: number, hasWseAccount = false): string => {
+    const fingerprint = (
+      horizonMs: number,
+      hasWseAccount = false,
+      experiment?: ExperimentIdentity,
+    ): string => {
       let value: string | undefined;
       runSim({
         goal: parseGoal("money:1000"),
         seed: 7,
         horizonMs,
         world: { gates: { hasWseAccount } },
+        ...(experiment ? { experiment } : {}),
         onRecord: (line) => {
           const record = JSON.parse(line) as LogRecord;
           if (record.kind === "event" && record.name === "sim.meta") {
@@ -86,6 +98,11 @@ describe("runSim initialization", () => {
     const baseline = fingerprint(1);
     expect(fingerprint(2)).not.toBe(baseline);
     expect(fingerprint(1, true)).not.toBe(baseline);
+    expect(fingerprint(1, false, {
+      class: "bitnode-route",
+      entrance: { kind: "fresh", bitNode: 1 },
+      route: { route: "all-source-files-3", leg: "bn1-first", index: 0, bitNode: 1 },
+    })).not.toBe(baseline);
   });
 
   test("continues emitting and evaluating records after an unsatisfied initial state", () => {

@@ -2,8 +2,8 @@
 
 A clean-sheet Bitburner automation codebase. The predecessor scripts
 ([`nobody01/bitburnerscript`](https://gitlab.com/nobody01/bitburnerscript),
-branch `2023`) are inspiration only; this repository starts with new history and
-a deliberately small architecture.
+branches `master` and `2023`) are inspiration only; this repository starts with
+new history and a deliberately small architecture.
 
 Four parts (see [spec/repo-layout.md](spec/repo-layout.md)):
 
@@ -38,31 +38,43 @@ dependency graph of shared resources.
   `bun run vendor` uses `BITBURNER_SRC` when set and otherwise looks for a
   sibling checkout at `../bitburner-src`, which is portable across machines.
 - Predecessor scripts:
-  [`nobody01/bitburnerscript`](https://gitlab.com/nobody01/bitburnerscript),
-  branch `2023` at commit `43e8585` (54 commits). This is the real predecessor:
-  it has the faction/augmentation planner (`src/_lib/factions.ts`,
-  `augmentations.ts`), four batchers, a batch optimizer, a predictive target
-  simulation, and the full reset/BitNode loop. Its `stubCall` RAM-dodger design
-  (`src/_lib/stub-call.ts`) is ported with credit into `game/lib/dodge.ts` —
-  see [spec/dodging.md](spec/dodging.md). Its local checkout name is deliberately
-  not part of this repository's configuration.
+  [`nobody01/bitburnerscript`](https://gitlab.com/nobody01/bitburnerscript).
+  **Two points in this repository's history are checked out, and they are not
+  interchangeable** — see the citation note below. Local checkout names are
+  deliberately not part of this repository's configuration.
 
 Both checkouts are reference material. New scripts and history belong only in
 this repository.
 
 ### A note on citations
 
-Comments across this repository credit two different predecessors, and the
-distinction matters because only one is still on disk:
+Comments across this repository credit three different predecessors. The
+distinction matters, because two of them are on disk and one is not, and
+because the two on disk are strong in different areas.
 
-- **the reference scripts** — `nobody01/bitburnerscript@2023`, the checkout
-  above. Cited by file (`src/_lib/optimizer.ts`), and verifiable.
+- **`nobody01/bitburnerscript@master`** (`dc0720b`, 42 commits) — the later
+  line, and **the reference for the batcher**:
+  `servers/home/imports/batchPlanner.ts` and `batchRunner.ts`. Pooled resident
+  workers, `additionalMsec` landing control, fractional thread strength, and
+  batch handoff. This is the version that actually ran well; cite it for any
+  HWGW/JIT scheduling claim. See [spec/jit-reference.md](spec/jit-reference.md).
+- **`nobody01/bitburnerscript@2023`** (`43e8585`, 54 commits) — the earlier
+  branch, and the reference for everything *except* the batcher: the
+  faction/augmentation planner (`src/_lib/factions.ts`, `augmentations.ts`),
+  progression, stock, and the `stubCall` RAM-dodger design
+  (`src/_lib/stub-call.ts`) ported with credit into `game/lib/dodge.ts` — see
+  [spec/dodging.md](spec/dodging.md). Its production hacking path was
+  `shotgun`+`prepare`+`filler`; **`src/_lib/batchers/jit.ts` on this branch is
+  unwired work-in-progress and must not be cited as proven.**
 - **an earlier rewrite** — `nobody0/bitburner`, which this project briefly
   treated as the predecessor and which is **no longer checked out**. It was an
   abandoned rewrite carrying none of the faction, augmentation or progression
   logic. Several designs here (the RAM heap's slab allocator, the `$/GB/sec`
   target score, the single-binary worker) came from it, and are attributed to
   it by name rather than repointed at a file that does not contain them.
+
+Because two checkouts are live, "the predecessor scripts on disk" is no longer
+an unambiguous phrase; cite the branch (`@master` or `@2023`) explicitly.
 
 ## Development loop
 
@@ -131,8 +143,34 @@ dodged ns call sites and cost the same 3.6 GB.
 bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h            # HWGW engine (default)
 bun run sim -- --goal earn:1e9 --seeds 1..10 --horizon 48h --baseline # naive planner
 bun run sim -- --profile bn1-full --horizon 72h --compact --perf      # full fixed-seed BN1, bounded benchmark
+bun run sim -- --profile bn1-full --save <checkpoint> --route <order> # alternate checkpoint/order
+bun run sim -- --profile bn1-full --fresh                             # explicitly use fresh BN1
 bun run sim:compare runs/<baseline>.session.json runs/<candidate>.session.json
 ```
+
+Profiles are explicitly either `bitnode-route` or `feature-scenario`. Route
+sessions carry their entrance identity in the manifest: fresh BN1, or a
+registered save id plus the SHA-256 of its exact bytes. Replacing bytes behind
+an existing save id is rejected, so downstream route evidence becomes stale
+instead of silently inheriting a different checkpoint. `--save` switches the
+entrance checkpoint; `--route` gives an alternate completion order its own
+lineage. The selected checkpoint must still be in the BitNode declared by that
+route leg. Synthetic pressure/calibration profiles cannot be promoted into the
+speedrun route.
+
+Controller simulations apply one declared speedrun allowance: active and owned
+SF4.3 is added to every entrance so the otherwise-manual Singularity boundary
+can be automated. The save/checkpoint bytes remain unchanged, and the allowance
+is recorded in `sim.meta`, scenario fingerprints, and the simulator model
+version. It does not grant SF14 or any Go reward advantage.
+
+Full-route CLI runs also use a declared aggregate Go lane: opponent choice,
+RAM admission, virtual duration, seeded W/L, streak/favor rewards and Node
+Power remain in the real controller lifecycle, while the per-move V9 interior
+is collapsed to the promoted WebGPU arena's measured win/score/time profile.
+`sim.meta.goFidelity` and the scenario fingerprint identify that lane. Exact
+move selection, opponent replies and WGSL execution stay in the Go arena and
+parity suites; aggregate evidence is never presented as action-by-action parity.
 
 The sim and live game emit the same telemetry schema and state keys, so the UI
 replays either source and goals evaluate identically. Both default to the 1 Hz
@@ -158,7 +196,10 @@ import type { NS } from "@ns";
 - `bun run sync` — one-shot build and push, then exit.
 - `bun run build` / `build:perf` — compile the allowlist to `build/`.
 - `bun run ui` — telemetry hub + viewer on port 12526, including manual sync.
-- `bun run sim -- --goal …` — run the simulator; per-install JSONLs and a session manifest land in `runs/`.
+- `bun run sim -- --goal …` — run the simulator; per-install JSONLs and a versioned session manifest land in `runs/`.
+- `bun run test:sim:correctness` / `test:sim:scenarios` — run simulator correctness or pressure-scenario lanes. Pressure cases run one process each; default `bun test` skips them so a long scenario cannot leak process-wide virtual time into parity tests.
+- `bun run bench:sim:jit-lategame` — run the intentionally long, high-RAM JIT lifecycle benchmark outside the correctness suite.
+- `bun run bench:sim:install-cadence` — run the synthetic two-install reset/favor-cadence benchmark.
 - `bun run sim:compare a.jsonl b.jsonl` — A/B time-to-goal; either input may also be a `.session.json` manifest for all chained installs.
 - `bun run go:arena` — upstream-oracle IPvGO WebGPU smoke tournament and latency report (12 games per ordinary opponent, 2 World Daemon games).
 - `bun run go:gpu` — run the deployed WGSL shader in headless Chrome against native golden vectors and the production latency budgets.

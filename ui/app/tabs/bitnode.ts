@@ -115,6 +115,8 @@ function forecastCard(forecast: TimeForecast, now: number): string {
 }
 
 type Plan = NonNullable<NonNullable<ProjectedState["topics"]["progression"]>["plan"]>;
+type Progression = NonNullable<ProjectedState["topics"]["progression"]>;
+type RamArena = NonNullable<Progression["ramArena"]>;
 
 /** The chosen ending and every route's estimate, with per-part attribution so
  * a wrong total points at the sub-heuristic that produced it. */
@@ -175,6 +177,43 @@ function routeCard(plan: Plan, now: number): string {
     )
     .join("");
   return header + rows + parts;
+}
+
+/** The dodge arena: how much RAM is held back from the batcher, which hosts
+ * carry it, and who is waiting. Reports the broker's own numbers — the split
+ * between the guaranteed floor (a request at or under it never queues) and
+ * growth that only a genuinely starved request can summon. Anything waiting
+ * past five seconds is the signal that the arena is too small for what the
+ * run is actually asking for. */
+function arenaBody(arena: Progression["ramArena"]): string {
+  if (!arena) return note("the RAM broker has not reported yet");
+  const starved = new Set(arena.starvation.map((request) => `${request.by}\0${request.id}`));
+  const summary = definitions([
+    ["hosts", arena.hosts.length ? arena.hosts.map((host: string) => esc(host)).join(", ") : "—"],
+    ["arena", `${fmtNum(arena.arenaGb, 1)} GB`],
+    ["instant up to", `${fmtNum(arena.guaranteedDynamicGb, 1)} GB`],
+    ["largest measured", `${fmtNum(arena.measuredDynamicGb, 1)} GB`],
+    ["foodnstuff promoted", arena.promoted ? "yes" : "no"],
+    ["farm opportunity cost", `${fmtMoney(arena.farmCostPerSec)}/sec`],
+  ]);
+  const waiting = arena.waits.length
+    ? table(
+        ["waiting", "request", "GB", "class", "lane", "waited"],
+        arena.waits.map((request: RamArena["waits"][number]) => [
+          starved.has(`${request.by}\0${request.id}`) ? "starved" : "queued",
+          esc(`${request.by}:${request.id}`),
+          fmtNum(request.gb, 1),
+          esc(request.class),
+          esc(request.lane),
+          fmtTime(request.waitMs),
+        ]),
+        { left: [0, 1, 3, 4] },
+      )
+    : note("nothing waiting for RAM");
+  const shortfall = arena.queueDepth > 0
+    ? note(`largest waiter needs ${fmtNum(arena.neededForLargestWaitingGb, 1)} GB contiguous`)
+    : "";
+  return summary + waiting + shortfall;
 }
 
 /** The install-vs-push cadence: what has accrued, what it must clear, and
@@ -371,6 +410,8 @@ export const bitnodeTab: Tab = {
         : note("default BitNode options");
 
     const needs = (p.needs ?? []).filter((need) => !need.satisfied);
+    const waterline = (resource: string, priority: number | undefined): number | undefined =>
+      p.arbitration?.waterlines?.find((entry) => entry.resource === resource && entry.priority === priority)?.lambda;
     const arbitrationRows = [
       ...(p.arbitration?.grants ?? []).map((grant) => [
         "granted",
@@ -380,6 +421,8 @@ export const bitnodeTab: Tab = {
         grant.resource === "money" ? fmtMoney(grant.amount) : fmtNum(grant.amount, 2),
         fmtNum(grant.priority),
         grant.returnPerDollarSec !== undefined ? fmtNum(grant.returnPerDollarSec, 8) : "–",
+        waterline(grant.resource, grant.priority) !== undefined ? fmtNum(waterline(grant.resource, grant.priority), 5) : "–",
+        grant.marginalValue !== undefined ? fmtNum(grant.marginalValue, 5) : "–",
       ]),
       ...(p.arbitration?.denied ?? []).map((denial) => [
         `denied: ${esc(denial.reason)}`,
@@ -389,6 +432,8 @@ export const bitnodeTab: Tab = {
         denial.resource === "money" ? fmtMoney(denial.wanted) : fmtNum(denial.wanted, 2),
         fmtNum(denial.priority),
         denial.returnPerDollarSec !== undefined ? fmtNum(denial.returnPerDollarSec, 8) : "–",
+        waterline(denial.resource, denial.priority) !== undefined ? fmtNum(waterline(denial.resource, denial.priority), 5) : "–",
+        "–",
       ]),
     ];
     const coordination =
@@ -406,7 +451,7 @@ export const bitnodeTab: Tab = {
           )
         : note("no open cross-feature needs")) +
       (arbitrationRows.length
-        ? table(["outcome", "feature", "claim", "resource", "amount", "priority", "return/$"], arbitrationRows, { left: [0, 1, 2, 3] })
+        ? table(["outcome", "feature", "claim", "resource", "amount", "priority", "return/$", "λ", "marginal"], arbitrationRows, { left: [0, 1, 2, 3] })
         : note("no contended resource claims"));
 
     return (
@@ -436,6 +481,7 @@ export const bitnodeTab: Tab = {
       ) +
       card("BitNode options", optionsBody) +
       card("Needs & investment arbiter", coordination) +
+      card("RAM arena", arenaBody(p.ramArena)) +
       `</div>`
     );
   },

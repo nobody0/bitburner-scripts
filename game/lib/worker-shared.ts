@@ -8,8 +8,12 @@
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91 */
 
 export interface WorkerInfo {
-  kind: "hack" | "grow" | "weaken";
+  kind: "hack" | "grow" | "weaken" | "share";
   target: string;
+  /** Live process id, filled by the driver immediately after a successful
+   * exec. Broker preemption uses the pid overload so the simulator and game
+   * follow the same kill path. */
+  pid?: number;
   additionalMsec?: number;
   /** Absolute wall-clock deadline for the padding portion of an HGW call.
    * The worker converts this to `additionalMsec` immediately before invoking
@@ -27,7 +31,7 @@ export interface WorkerInfo {
    *  `workerExit` completion so the dispatcher frees the reservation. The id
    *  in `ns.args[0]` is then a WORKER id (same counter as opIds, so the two
    *  spaces can never collide). Absent/undefined = the classic one-shot. */
-  mode?: "serve";
+  mode?: "serve" | "share";
 }
 
 export interface WorkerJob {
@@ -55,6 +59,10 @@ export interface WorkerGlobals {
   worker_jobs?: Map<number, WorkerJob[]>;
   /** workerId -> resolver parking that serve worker's idle race. */
   worker_wake?: Map<number, () => void>;
+  /** share-worker id -> resolver racing the current 10-second ns.share slice. */
+  worker_stop?: Map<number, () => void>;
+  /** Stop requested before the fresh worker installed its resolver. */
+  worker_stop_requested?: Set<number>;
   /** Completions waiting for the next dispatcher pump. */
   dispatch_done?: WorkerDone[];
   /** Poked by a finishing worker so the controller can wake early. */
@@ -79,6 +87,8 @@ export function workerGlobals(): WorkerGlobalThis {
   g.worker_info ??= new Map();
   g.worker_jobs ??= new Map();
   g.worker_wake ??= new Map();
+  g.worker_stop ??= new Map();
+  g.worker_stop_requested ??= new Set();
   g.dispatch_done ??= [];
   return g;
 }

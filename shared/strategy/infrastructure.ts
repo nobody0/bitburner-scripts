@@ -13,24 +13,30 @@ export function deferPrerequisitePurchase(
     && openNeeds.some((need) => need.kind === "money" && need.urgency === "blocking");
 }
 
-/** Cap optimistic marginal quotes by throughput the installed fleet has
+/** Cap optimistic marginal RAM quotes by throughput the installed fleet has
  * actually demonstrated. The evaluator's ideal $/s/GB is useful for ordinary
  * long-horizon ranking, but during an unsettled bootstrap it can price one new
  * server as if the whole target pipeline were already prepared. Cash-goal
- * crossover decisions need the conservative observed rate instead. */
+ * crossover decisions need the conservative observed rate instead.
+ *
+ * This is deliberately not a general valuation: a measured bn1-speedrun had
+ * a modelled 480 $/s/GB quote reduced to 1.63 $/s/GB, then fed that quote back
+ * into ranking. The fleet stalled at 156 GB because capacity was valued only
+ * by the income it could produce after that capacity had already been bought. */
 export function capInfrastructureByObservedFleet(
   options: readonly InfrastructureOption[],
   observedIncomePerSec: number,
-  installedRam: number,
 ): InfrastructureOption[] {
-  const observedPerGb = Math.max(0, observedIncomePerSec) / Math.max(1, installedRam);
-  return options.map((option) => ({
-    ...option,
-    incomePerSec: Math.min(
-      Math.max(0, option.incomePerSec),
-      observedPerGb * Math.max(0, option.addedRam),
-    ),
-  }));
+  const observedFleetIncome = Math.max(0, observedIncomePerSec);
+  return options.map((option) => option.addedRam > 0
+    ? {
+        ...option,
+        incomePerSec: Math.min(
+          Math.max(0, option.incomePerSec),
+          observedFleetIncome,
+        ),
+      }
+    : { ...option });
 }
 
 /** Keep only investments that make a blocking cash threshold arrive sooner.
@@ -46,6 +52,7 @@ export function infrastructureBeforeMoneyNeeds(
   money: number,
   currentIncomePerSec: number,
   needs: readonly Need[],
+  capByObservedFleet = false,
 ): InfrastructureOption[] {
   const target = needs.reduce(
     (highest, need) => need.kind === "money" && need.urgency === "blocking"
@@ -58,8 +65,14 @@ export function infrastructureBeforeMoneyNeeds(
   const remaining = target - money;
   const income = Math.max(0, currentIncomePerSec);
   const withoutSec = income > 0 ? remaining / income : Infinity;
-  return options.filter((option) => {
-    const withIncome = income + Math.max(0, option.incomePerSec);
+  // Observed throughput belongs only in this cash-arrival crossover. Return
+  // the original modelled quotes so ordinary ROI ranking can value capacity
+  // by the work it enables instead of creating a bootstrap feedback loop.
+  const crossover = capByObservedFleet
+    ? capInfrastructureByObservedFleet(options, income)
+    : options;
+  return options.filter((option, index) => {
+    const withIncome = income + Math.max(0, crossover[index]?.incomePerSec ?? 0);
     if (!(withIncome > 0)) return false;
     return (remaining + option.cost) / withIncome < withoutSec;
   });

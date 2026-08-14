@@ -3,6 +3,7 @@ import { unknownCapabilities, type Capabilities } from "../../shared/features/un
 import type { DebugRecord, EventRecord, LogRecord } from "../../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
 import type { ContractFailure } from "../../shared/telemetry/topics/side.ts";
+import type { ExperimentIdentity } from "../../shared/experiment.ts";
 
 /** The viewer's projection of a record stream.
  *
@@ -26,6 +27,7 @@ export interface SimRunMeta {
   driver?: string;
   scenario?: string;
   scenarioFingerprint?: string;
+  experiment?: ExperimentIdentity;
   bitnode?: number;
   features?: string;
   profile?: string;

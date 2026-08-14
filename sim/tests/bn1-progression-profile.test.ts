@@ -64,7 +64,7 @@ describe("BN1 multi-install progression profile", () => {
   // the Chromium/Dawn arena (`bun run go:arena`); Bun retains the independent
   // no-Go progression and lifecycle coverage above.
   test.skip("the late JIT profile installs The Red Pill, regrows, and benefits materially from Go", async () => {
-    const profile = findProfile("bn1-jit-stress");
+    const profile = findProfile("jit-lategame");
     const run = async (withGo: boolean, horizonMs = 2.5 * 60 * 60_000) => {
       let installedRedPill = false;
       const opponents = new Set<string>();

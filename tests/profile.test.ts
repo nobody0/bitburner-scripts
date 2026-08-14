@@ -75,10 +75,37 @@ describe("simulation profiles", () => {
     }
   });
 
-  test("profile ids are unique and unknown ids are rejected", () => {
+  test("only the genuine fresh BN1 benchmark is promotable route evidence", () => {
+    const routeProfiles = PROFILES.filter((profile) => profile.experiment === "bitnode-route");
+    expect(routeProfiles.map((profile) => profile.id)).toEqual(["bn1-full"]);
+    expect(routeProfiles[0]?.route).toEqual({ route: "all-source-files-3", leg: "bn1-first", index: 0, bitNode: 1 });
+    expect(routeProfiles[0]?.world?.playerState?.sourceFiles).toBeUndefined();
+    expect(findProfile("jit-lategame").experiment).toBe("feature-scenario");
+    expect(findProfile("bn1-full-sf12-30").experiment).toBe("feature-scenario");
+  });
+
+  test("profile ids are unique, retired aliases stay retired, and unknown ids are rejected", () => {
     const ids = PROFILES.map((p) => p.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(() => findProfile("nope")).toThrow(/unknown profile/);
+    // jit-process-pressure is deliberately NOT retired: it is the tier-1
+    // large-scale pressure profile. scenario-jit-stress covers the same three
+    // benchmarks in seconds, but only at small scale — the process-count
+    // regime this profile exists for is unreachable there.
+    for (const id of [
+      "hacking-only",
+      "install-favor",
+      "stock-manipulation",
+      "stock-manipulation-mid",
+      "stock-manipulation-large",
+    ]) {
+      expect(() => findProfile(id)).toThrow(/unknown profile/);
+    }
+
+    const hacking = findProfile("hacking-early");
+    expect(hacking.features).toEqual(only("hacking", "progression"));
+    expect(hacking.horizon).toBe("1h");
+    expect(findProfile("stock-only").horizon).toBe("8h");
   });
 
   test("full BN1 and cross-city cadence runs include the career gate owner", () => {

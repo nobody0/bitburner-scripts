@@ -11,6 +11,16 @@ import { join, relative } from "node:path";
 const ROOT = join(import.meta.dir, "..");
 const MODELS_DIR = join(ROOT, "shared", "strategy", "go", "neural", "models");
 
+/** Generated provenance is repository-relative and must be byte-stable across
+ * Windows and POSIX hosts. */
+function repositoryPath(path: string): string {
+  return relative(ROOT, path).replaceAll("\\", "/");
+}
+
+function normalizedText(text: string): string {
+  return text.replaceAll("\r\n", "\n");
+}
+
 export type Profile = "small5" | "daemon19";
 
 const PROFILE_POLICY = {
@@ -325,7 +335,7 @@ async function checkedCheckpoint(checkpointPath: string, profile: Profile): Prom
 }> {
   if (!await Bun.file(checkpointPath).exists()) throw new Error(`checkpoint ${checkpointPath} does not exist`);
   const sourceText = await Bun.file(checkpointPath).text();
-  const source = relative(ROOT, checkpointPath);
+  const source = repositoryPath(checkpointPath);
   const checkpoint = parseCheckpoint(sourceText, source);
   const required = PROFILE_POLICY[profile];
   for (const key of ["extent", "behaviorFeatures"] as const) {
@@ -350,12 +360,13 @@ async function exportModel(checkpointPath: string, profile: Profile,
   const { checkpoint, source, sourceText } = await checkedCheckpoint(checkpointPath, profile);
   if (factorPath && profile !== "small5") throw new Error("low-rank value export is proven for small5 only");
   const factor = factorPath ? parseValueFactor(
-    await Bun.file(factorPath).text(), relative(ROOT, factorPath), checkpoint) : undefined;
+    await Bun.file(factorPath).text(), repositoryPath(factorPath), checkpoint) : undefined;
   const generated = generatedModule(checkpoint, source, sourceText, profile, factor);
   const target = join(MODELS_DIR, `${profile}.ts`);
   if (mode === "check") {
-    if (!await Bun.file(target).exists() || await Bun.file(target).text() !== generated.module) {
-      throw new Error(`${relative(ROOT, target)} is stale; run bun run go:export`);
+    if (!await Bun.file(target).exists()
+      || normalizedText(await Bun.file(target).text()) !== normalizedText(generated.module)) {
+      throw new Error(`${repositoryPath(target)} is stale; run bun run go:export`);
     }
   } else if (mode === "write") {
     const staged = `${target}.${process.pid}.tmp`;
@@ -368,7 +379,7 @@ async function exportModel(checkpointPath: string, profile: Profile,
   }
   const parameterCount = blocks(checkpoint, factor).reduce((sum, [values,,, bias]) =>
     sum + values.length + bias.length, 0);
-  console.log(`${mode === "write" ? "wrote" : mode === "check" ? "checked" : "inspected"} ${profile}: ${source} -> ${relative(ROOT, target)}`);
+  console.log(`${mode === "write" ? "wrote" : mode === "check" ? "checked" : "inspected"} ${profile}: ${source} -> ${repositoryPath(target)}`);
   console.log(`  topology: v9, extent ${checkpoint.extent}, channels ${checkpoint.channels}, residual blocks ${checkpoint.residualBlocks}, ${parameterCount.toLocaleString()} parameters`);
   console.log(factor
     ? `  storage: q8-row-f16-bias-le, value rank ${factor.rank}`

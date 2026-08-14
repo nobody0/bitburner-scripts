@@ -10,46 +10,36 @@ spawns a temporary stub script that has bought a dynamic RAM budget, runs one
 closure with the stub's own ns, hands the raw result back, and dies — the
 caller pays only `ns.exec` (1.3 GB).
 
-## Mechanics (`game/lib/dodge.ts`, `game/lib/dodge-stub.ts`)
+## Mechanics (`game/lib/dodge.ts`)
 
-- All scripts share one JS realm; the rendezvous is four slots on
-  `globalThis` (`dodge_func/cb/reject/running`) — live references, no
-  serialization, class instances survive.
-- The stub (`lib/dodge-stub.<build-id>.js`, a versioned synced entry) references no ns members;
+- All scripts share one JS realm. One dodger implementation selects a lane
+  descriptor containing its four rendezvous slots, stub script, busy policy,
+  and watchdog policy. Live references cross the slots without serialization,
+  so class instances survive.
+- The **default** lane uses `dodge_func/cb/reject/running`, waits for a busy
+  owner, has a 10 s watchdog, and cleans its slots unconditionally. The
+  **long** lane uses `go_dodge_func/cb/reject/running`, rejects overlap with
+  `a Go turn is already running`, has no watchdog, and only clears slots it
+  still owns. Go's `makeMove`, `passTurn`, and recovery
+  `opponentNextTurn` calls await the opponent; they must not hold up ordinary
+  probes or be timed out while their worker remains alive.
+- Two tiny slot-specific stubs are retained: `lib/dodge-stub.<build-id>.js`
+  and `lib/go-dodge-stub.<build-id>.js`. They differ only in the slots they
+  read; keeping both avoids a lane argument and preserves the deployed and
+  simulator protocols. Each references no ns members;
   its RAM budget is declared at launch via `ns.exec(..., { ramOverride })` —
   `dodge(ns, fn, budgetGb)` sizes each call (default 2.5 GB dynamic; pass more
-  for e.g. contract batches). One stub file serves every budget. The reference
+  for e.g. contract batches). Each stub file serves every budget. The reference
   scripts default to 6.6 GB (5 + 1.6) and document their exceptions inline:
   graft 7.5, `codingcontract.attempt` 10,
   `destroyW0r1dD43m0n` 32, and a BN1 target of 3.5 to fit an 8 GB home.
-- Single-flight global mutex; 10 s watchdog; game-restart guard in the stub;
-  promise results are forwarded (not awaited) so synchronous closures resolve
-  before other scripts get a scheduling slot; a trailing microtask tick lets
-  the game reap the stub.
+- Both lanes share the same ten-attempt exec retry loop, with `ns.asleep(0)`
+  between failures. Promise results are forwarded (not awaited) so synchronous
+  closures resolve before another script gets a scheduling slot; two trailing
+  microtask ticks let the engine reap the stub.
 - Inside a dodged closure, call ns members with **bracket notation on the
   closure's ns argument** (`stubNs["getServer"](host)`) or the static parser
   charges the calling bundle anyway.
-
-## Dodged gets are state sync
-
-`makeDodger(ns, state).call("getServer", host)` is the typed form: result
-typed as `ReturnType<NS["getServer"]>`, mirrored into the game-state store
-(`game/lib/state.ts`) under `getServer:home`. It mirrors into the *store*, not
-into telemetry — reading state is storing state, and sending it is a separate,
-optional step (`spec/telemetry.md`). Two getter paths, one store:
-
-| path       | RAM                     | when                              |
-|------------|-------------------------|-----------------------------------|
-| direct     | static cost per getter  | hot-loop reads you always need    |
-| `dodger`   | 1.3 GB exec, per call   | occasional/expensive reads        |
-
-The controller takes the direct path for exactly three reads — `ns.getPlayer`
-every 2 s, and `getServerMoneyAvailable` / `getServerSecurityLevel` on the hot
-targets in `buildView` — because the dispatcher's 200 ms pass cannot afford a
-stub launch. Everything else dodges.
-
-`Dodger.batch(fn)` is the escape hatch: many calls in one stub launch,
-mirroring left to the caller.
 
 ## Placement (`shared/ram/placement.ts`, `game/lib/ram.ts`)
 
@@ -84,7 +74,8 @@ Two consequences that bite if forgotten:
 
 ## Constraints
 
-- One dodge in flight at a time; each spends one stub launch (~2 game ticks).
+- One dodge per lane may be in flight. A long Go turn does not hold the default
+  lane; each call still spends one stub launch (~2 game ticks).
 - Keep home RAM headroom so `ns.exec` of the stub never fails. The reference
   scripts sidestep this by passing a `hostname` to `stubCall` and running the
   stub on a rooted client (they run a 32 GB `destroyW0r1dD43m0n` stub that way);

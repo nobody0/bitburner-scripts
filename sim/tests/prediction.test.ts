@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import { makeHackContext, type HackContext } from "../../shared/formulas.ts";
-import { predictAtLanding, sizeBatchAtLanding, type LedgerOp } from "../../shared/strategy/prediction.ts";
+import { hackPercent, makeHackContext, type HackContext } from "../../shared/formulas.ts";
+import { hackThreadsAtLanding, predictAtLanding, sizeBatchAtLanding, type LedgerOp } from "../../shared/strategy/prediction.ts";
 import { solveCycle, type TargetStatics } from "../../shared/strategy/targeting.ts";
 import { applyGrow, applyHack, applyWeaken, serverFromSpec, type SimServer } from "../core/effects.ts";
 import { mockPerson, mockServer } from "../core/mocks.ts";
@@ -133,7 +133,7 @@ describe("predictAtLanding", () => {
 });
 
 describe("sizeBatchAtLanding", () => {
-  test("at 90% money the grow cover GROWS relative to the steady-state solve", () => {
+  test("at 90% money planning retains H and strengthens its support solve", () => {
     const { ctx } = scenario(300);
     const base = solveCycle(ctx, JOESGUNS)!;
     const sized = sizeBatchAtLanding(
@@ -145,6 +145,27 @@ describe("sizeBatchAtLanding", () => {
     expect(sized.hackThreads).toBe(base.hackThreads);
     expect(sized.growThreads).toBeGreaterThan(base.growThreads);
     expect(sized.weaken2Threads).toBeGreaterThanOrEqual(base.weaken2Threads);
+  });
+
+  test("dispatch shrink subtracts exactly the missing-money threads", () => {
+    const { ctx } = scenario(300);
+    const base = solveCycle(ctx, JOESGUNS)!;
+    const predicted = { hackDifficulty: JOESGUNS.minDifficulty, moneyAvailable: 0.9 * JOESGUNS.moneyMax };
+    const percentPerThread = hackPercent(ctx, JOESGUNS.minDifficulty, JOESGUNS.requiredHackingSkill);
+    expect(hackThreadsAtLanding(ctx, JOESGUNS, predicted, base.hackThreads)).toBe(
+      Math.max(0, base.hackThreads - Math.ceil(0.1 / percentPerThread)),
+    );
+  });
+
+  test("money too low for one safe thread cancels only the hack", () => {
+    const { ctx } = scenario(300);
+    const base = solveCycle(ctx, JOESGUNS)!;
+    expect(hackThreadsAtLanding(
+      ctx,
+      JOESGUNS,
+      { hackDifficulty: JOESGUNS.minDifficulty, moneyAvailable: 0 },
+      base.hackThreads,
+    )).toBe(0);
   });
 
   test("HGW sizes grow and weaken cover from admitted predicted security", () => {

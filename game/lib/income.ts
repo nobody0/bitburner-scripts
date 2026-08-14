@@ -1,5 +1,6 @@
 import { ENGINE_CYCLE_MS } from "../../shared/strategy/career/schedule.ts";
 import type { IncomeAnnouncement } from "../../shared/strategy/income.ts";
+import type { MeasuredMarginal } from "../../shared/strategy/progression/marginal.ts";
 import { bestAnnounced } from "../../shared/strategy/income.ts";
 import { MS_PER_TICK } from "../../shared/strategy/stock/market.ts";
 import type { GameState } from "./state.ts";
@@ -18,11 +19,11 @@ const CYCLES_PER_SEC = 1_000 / ENGINE_CYCLE_MS;
  * Announcements are whatever the feature can state cheaply and truthfully. A
  * measured rate is preferred where the game gives one; an expectation is fine where
  * it does not, because the comparison only needs the order right. A feature with
- * nothing honest to say announces NOTHING rather than zero — see `rateFraction` for
- * why a fabricated zero is worse than an absence.
+ * nothing honest to measure announces `unknown`, never a fabricated zero — see `rateFraction` for
+ * why that distinction is load-bearing.
  *
- * WHO IS MISSING, and why each is an absence rather than an oversight. Every one of
- * these makes the announced best too LOW, which flatters `career` — so they are
+ * WHO IS UNKNOWN, and why each is explicit rather than an oversight. Every one of
+ * these can make the measured best too LOW, which flatters `career` — so they are
  * worth closing, and the direction of the error is worth knowing:
  *
  *  - `sleeves` earn real money in parallel, and in BN10 a great deal of it. The
@@ -39,62 +40,74 @@ export function announcedIncome(state: GameState): IncomeAnnouncement[] {
   const out: IncomeAnnouncement[] = [];
 
   // The hacking farm, measured: ns.getTotalScriptIncome() reports [$/sec from
-  // currently running scripts, $/sec since the last augmentation]. The first
-  // figure describes what the live fleet is earning now.
-  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L1278-L1290
+  // currently running scripts, $/sec since the last augmentation].
   const scriptIncome = state.topics.fleet?.scriptIncome;
   const farmed = Array.isArray(scriptIncome) ? scriptIncome[0] : undefined;
-  if (farmed !== undefined && farmed > 0) {
-    out.push({ by: "hacking", perSec: farmed, why: "measured current script income" });
+  const farmEma = state.topics.farm?.moneyRate;
+  if (farmed !== undefined || farmEma !== undefined) {
+    out.push({
+      by: "hacking",
+      state: "measured",
+      perSec: Math.max(0, farmed ?? 0, farmEma ?? 0),
+      why: "measured current or rollup-smoothed script income",
+    });
+  } else {
+    out.push({ by: "hacking", state: "unknown", reason: "script income has not been observed", why: "current script income" });
   }
 
-  // Hacknet, measured — but only when it pays in money. On hacknet SERVERS the
-  // production is hashes, which are not dollars until they are spent, so announcing
-  // them here would compare a different currency as if it were cash.
+  // Hacknet production is dollars only for nodes. Hash production is a
+  // different currency until a spend decision converts it.
   const hacknet = state.topics.hacknet;
-  if (hacknet?.hashes === undefined && (hacknet?.productionPerSec ?? 0) > 0) {
-    out.push({ by: "hacknet", perSec: hacknet!.productionPerSec, why: "measured node production" });
+  if (hacknet?.hashes !== undefined) {
+    out.push({ by: "hacknet", state: "unknown", reason: "hash production has no measured dollar conversion rate", why: "node production" });
+  } else if (hacknet?.productionPerSec !== undefined) {
+    out.push({ by: "hacknet", state: "measured", perSec: Math.max(0, hacknet.productionPerSec), why: "measured node production" });
+  } else {
+    out.push({ by: "hacknet", state: "unknown", reason: "node production has not been observed", why: "node production" });
   }
 
-  // The gang, measured. UNITS: `GangGenInfo.moneyGainRate` is money "per game
-  // cycle" upstream, and a cycle is 200 ms — so it is five times smaller than a
-  // per-second figure. Announcing it raw would understate the gang fivefold and hand
-  // career a priority it did not earn.
-  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Gang/Gang.ts#L125-L142 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts#L17-L20
+  // GangGenInfo.moneyGainRate is money per 200ms engine cycle.
   const gangRate = state.topics.gang?.moneyGainRate;
-  if (gangRate !== undefined && gangRate > 0) {
-    out.push({ by: "gang", perSec: gangRate * CYCLES_PER_SEC, why: "measured gang money gain" });
+  if (gangRate !== undefined) {
+    out.push({ by: "gang", state: "measured", perSec: Math.max(0, gangRate) * CYCLES_PER_SEC, why: "measured gang money gain" });
   }
 
-  // The corporation, measured, and DIVIDENDS rather than revenue: revenue is the
-  // company's, dividends are the player's. `dividendEarnings` is documented upstream
-  // as "your earnings as a shareholder per second", so no conversion.
-  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Corporation.ts#L724-L737
+  // Corporation revenue belongs to the corporation; dividends reach the player.
   const dividends = state.topics.corp?.dividendEarnings;
-  if (dividends !== undefined && dividends > 0) {
-    out.push({ by: "corp", perSec: dividends, why: "measured shareholder dividends" });
+  if (dividends !== undefined) {
+    out.push({ by: "corp", state: "measured", perSec: Math.max(0, dividends), why: "measured shareholder dividends" });
   }
 
-  // The market, EXPECTED: the profit the planned entry expects, spread over the hold
-  // it expects to need. Not measured — this state stores no realised trading rate —
-  // but an expectation is what this comparison is for, and a market that intends to
-  // make $1b over ten minutes should not look like it earns nothing.
-  const entry = state.topics.stock?.plan?.entry;
+  // The market announces its expected profit over its expected hold.
+  const stock = state.topics.stock;
+  const entry = stock?.plan?.entry;
   if (entry && entry.expectedProfit > 0 && entry.holdTicks > 0) {
     out.push({
       by: "stock",
+      state: "measured",
       perSec: entry.expectedProfit / (entry.holdTicks * (MS_PER_TICK / 1_000)),
       why: "expected profit over the planned hold",
     });
+  } else if (stock) {
+    out.push({ by: "stock", state: "unknown", reason: "no priced position hold is published", why: "expected market profit" });
   }
 
-  // Career, from its own published ranking: the best money rate among the options it
-  // would actually take. Read from the digest rather than recomputed, so the claim
-  // stays pure and cannot disagree with the decision it came from.
-  const best = careerBestPerSec(state);
-  if (best > 0) {
-    out.push({ by: "career", perSec: best, why: "best ranked career option" });
+  // Career publishes the menu it would actually select from. A published empty
+  // or zero-paying menu is a measured zero; no plan is unknown.
+  const careerPlan = state.topics.career?.plan;
+  if (careerPlan) {
+    out.push({ by: "career", state: "measured", perSec: careerBestPerSec(state), why: "best ranked career option" });
+  } else {
+    out.push({ by: "career", state: "unknown", reason: "career has not published a ranked option", why: "best ranked career option" });
   }
+
+  // These features genuinely cannot turn their current topics into an income
+  // rate. Announce that explicitly so absence can never be read as zero.
+  out.push(
+    { by: "sleeves", state: "unknown", reason: "task options do not report assigned-sleeve earnings", why: "parallel sleeve income" },
+    { by: "bladeburner", state: "unknown", reason: "action ranking does not publish contract payouts", why: "contract income" },
+    { by: "side", state: "unknown", reason: "one-off contract rewards have no measured solve cadence", why: "coding-contract income" },
+  );
 
   return out;
 }
@@ -109,10 +122,51 @@ export function careerBestPerSec(state: GameState): number {
 }
 
 /** The best rate anyone announced, for scoring a claim against the field. */
-export function bestIncomePerSec(state: GameState): number {
+export function bestIncomePerSec(state: GameState) {
   return bestAnnounced(announcedIncome(state));
 }
 
+/** Convert an added $/sec per unit into BN-seconds saved per unit. The unit can
+ * be one atomic purchase (step pricing) or one dollar deployed (a continuous
+ * value curve); both must use this same measured conversion. */
+export function moneyRateValue(state: GameState, addedIncomePerUnit: number, now: number): MeasuredMarginal {
+  const marginal = state.topics.progression?.plan?.marginals?.money;
+  if (!marginal || marginal.state === "unknown") {
+    return { state: "unknown", reason: marginal?.reason ?? "the progression money marginal is not published" };
+  }
+  const added = Math.max(0, addedIncomePerUnit);
+  if (!(added > 0) || !(marginal.secondsPerRelativeRate > 0)) return { state: "measured", value: 0 };
+
+  const earned = state.topics.progression?.moneySources?.sinceInstall?.total;
+  const resetAt = state.topics.progression?.lastAugReset;
+  const elapsedSec = resetAt === undefined ? 0 : Math.max(0, (now - resetAt) / 1_000);
+  const observedIncomePerSec = Math.max(
+    0,
+    state.topics.fleet?.scriptIncome?.[0] ?? 0,
+    state.topics.farm?.moneyRate ?? 0,
+  );
+  // Prefer the live/EMA productive rate when available. The cumulative money
+  // probe runs on a slower cadence than claims, so requiring it exclusively
+  // left Hacknet unpriced during the one pass where it actually competed with
+  // infrastructure and reduced a real two-way auction to pricedClaimCount=1.
+  const currentIncomePerSec = observedIncomePerSec > 0
+    ? observedIncomePerSec
+    : earned !== undefined && earned > 0 && elapsedSec > 0
+      ? earned / elapsedSec
+      : undefined;
+  if (currentIncomePerSec === undefined) {
+    return { state: "unknown", reason: "since-install money income has not been measured over a positive interval" };
+  }
+  return {
+    state: "measured",
+    value: marginal.secondsPerRelativeRate * added / currentIncomePerSec,
+  };
+}
+
+/** Total BN-seconds saved by one lumpy income purchase. */
+export function moneyStepValue(state: GameState, addedIncomePerSec: number, now: number): MeasuredMarginal {
+  return moneyRateValue(state, addedIncomePerSec, now);
+}
 /** Best productive marginal return currently known to the central money
  * arbiter. Both grants and denials matter: money earned now can fund an
  * attractive investment even when the present bankroll cannot. Hacking's

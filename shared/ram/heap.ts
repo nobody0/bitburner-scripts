@@ -1,9 +1,11 @@
 /** Fleet RAM allocator — the slab-heap design from an earlier rewrite
  * (`nobody0/bitburner`, no longer checked out; see README's citation note) with
- * its known defects fixed. The predecessor scripts now on disk
- * (nobody01/bitburnerscript@2023) have no heap at all: their `cluster.ts`
- * re-reads ns.getServerUsedRam every pass and reconciles by killing non-HGW
- * workers, which is why this file cites the rewrite rather than them.
+ * its known defects fixed. Neither predecessor branch on disk has a heap:
+ * `@2023`'s `cluster.ts` re-reads ns.getServerUsedRam every pass and reconciles
+ * by killing non-HGW workers, and `@master` carries only a per-client
+ * `reservedRamForCurrentBatch` scalar with linear client scans
+ * (imports/batchPlanner.ts:348-414). That is why this file cites the rewrite
+ * rather than either of them.
  *
  * Pure data structure: the sim and the game driver each own an instance; all
  * mutation flows through #update (O(1) rebucket, single choke point).
@@ -15,19 +17,9 @@
  *
  * Fixes over the rewrite: allocations return Reservation handles with
  * idempotent release() (rollback on exec failure — its leak); failures are
- * typed values, never silent; the home reserve lives HERE, once, as explicit
+ * typed values, never silent; per-host broker arena reservations are explicit
  * reserved GB (not fake ramUsed); batch-atomic multi-request allocation
  * (all ops of an HWGW batch or none). */
-
-/** The single home-reserve BASE constant (the rewrite hardcoded its equivalent
- * in three places). Covers the transient dodge stub plus handoff overlap; the
- * controller's own RAM is already counted in the observed usedRam. Sim passes
- * 0 — nothing else runs on its home.
- *
- * This is a floor, not the whole reserve: shared/ram/reserve.ts raises it by
- * the largest dodge step the enabled features declare, so a feature whose probe
- * needs 8 GB is not permanently starved by the dispatcher. */
-export const HOME_RESERVE_GB = 4.5;
 
 export interface HeapHost {
   hostname: string;
@@ -184,8 +176,8 @@ export class Heap {
 
   /** Reserve a block on a NAMED host, for a consumer that has already chosen
    * where it is going — currently only dodge placement
-   * (shared/ram/placement.ts picks the host by policy, then this makes the
-   * choice visible to the dispatcher).
+   * (the broker picks the host by policy, then this makes the choice visible
+   * to the dispatcher).
    *
    * Without this a dodge stub would occupy RAM the heap still believed was
    * free, and the dispatcher would keep allocating it and keep getting pid 0

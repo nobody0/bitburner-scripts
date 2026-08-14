@@ -14,7 +14,10 @@ import { emit, type LocalProbe, type ProbeContext } from "./index.ts";
 /** Fleet aggregates from the sweep snapshot. Exported so the dodged
  * `hacking.cloud` probe can republish a complete FleetRollup rather than a
  * fragment. */
-export function fleetFrom(servers: Record<string, Server>): FleetRollup {
+export function fleetFrom(
+  servers: Record<string, Server>,
+  previousPurchased?: FleetRollup["purchased"],
+): FleetRollup {
   let rootedHosts = 0;
   let totalHosts = 0;
   let maxRam = 0;
@@ -47,7 +50,15 @@ export function fleetFrom(servers: Record<string, Server>): FleetRollup {
     maxRam,
     usedRam,
     portOpeners,
-    purchased: { count: purchasedCount, totalRam: purchasedRam },
+    // `limit` and `maxRamPerServer` come from the slower dodged cloud probe.
+    // The server map is also sweep-cadenced, while a successful action advances
+    // these totals immediately. Preserve that newer observation until the next
+    // complete cloud probe instead of rewinding it every local-probe pass.
+    purchased: {
+      ...previousPurchased,
+      count: Math.max(purchasedCount, previousPurchased?.count ?? 0),
+      totalRam: Math.max(purchasedRam, previousPurchased?.totalRam ?? 0),
+    },
     home: { maxRam: home?.maxRam ?? 0, usedRam: home?.ramUsed ?? 0, cores: home?.cpuCores ?? 1 },
   };
 }
@@ -94,8 +105,8 @@ const fleetProbe: LocalProbe = {
   feature: "hacking",
   everyMs: 5_000,
   merge: true,
-  run({ servers }: ProbeContext) {
-    return [emit("fleet", fleetFrom(servers))];
+  run({ servers, state }: ProbeContext) {
+    return [emit("fleet", fleetFrom(servers, state.topics.fleet?.purchased))];
   },
 };
 

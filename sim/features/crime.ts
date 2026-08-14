@@ -97,7 +97,7 @@ export class CrimeSystem {
     const person = this.#world.person;
     const focused = this.#player.currentWork?.focused ?? true;
     const focusBonus = focused || this.#player.augmentations.has("Neuroreceptor Management Implant") ? 1 : 0.8;
-    const success = this.#rng() < this.successChance(crime);
+    const success = this.#rng() <= this.successChance(crime);
     const exp = person.exp as unknown as Record<string, number>;
     const mults = person.mults as unknown as Record<string, number>;
     const addExp = (scale: number): void => {

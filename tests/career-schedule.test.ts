@@ -12,7 +12,7 @@ import type { GameState } from "../game/lib/state.ts";
 import { stepCareer, type CareerView } from "../shared/strategy/career/decide.ts";
 import type { CrimeContext, CrimePerson, CrimeStats } from "../shared/strategy/career/crimes.ts";
 import { careerSchedule, CONTINUOUS_REVIEW_MS, progressLockUntil, updateActivityRate } from "../shared/strategy/career/schedule.ts";
-import { PREEMPT_MARGIN, PRIORITY } from "../shared/strategy/arbiter.ts";
+import { PREEMPT_MARGIN, PRIORITY, type Claim } from "../shared/strategy/arbiter.ts";
 import { rateFraction, slotPriority } from "../shared/strategy/income.ts";
 import { postNeeds, type Need, type NeedUrgency } from "../shared/strategy/needs.ts";
 
@@ -144,7 +144,6 @@ describe("career review scheduling", () => {
       mirrors: {},
       mirrorDirty: new Set(),
       probeFailures: {},
-      probeSkips: {},
       featureLastRun: {},
     } as unknown as GameState;
     const board = postNeeds([need("employment", "ECorp", "wanted")]);
@@ -153,7 +152,7 @@ describe("career review scheduling", () => {
       board,
       now: 1,
       caps: {} as ClaimContext["caps"],
-      budgetGb: 100,
+      activeFeatures: new Set(),
       horizons: {
         node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "test", reason: "test" },
         install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "test", reason: "test" },
@@ -250,14 +249,14 @@ describe("the slot lock is bounded by the progress it protects", () => {
         },
       },
       dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
-      probeFailures: {}, probeSkips: {}, featureLastRun: {},
+      probeFailures: {}, featureLastRun: {},
     } as unknown as GameState;
     const claims = careerModule.claims!({
       state,
       board: postNeeds([]),
       now: over.now ?? 0,
       caps: {} as ClaimContext["caps"],
-      budgetGb: 100,
+      activeFeatures: new Set(),
       horizons: {
         node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
         install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
@@ -265,7 +264,7 @@ describe("the slot lock is bounded by the progress it protects", () => {
       ramPrice: (methods) => methods.length,
     });
     resetCareerState();
-    return claims.find((claim) => claim.id === "work")!;
+    return claims.find((claim): claim is Claim => claim.id === "work" && claim.resource !== "ram")!;
   }
 
   test("mid-crime it locks, and holdUntil is the moment progress banks", () => {
@@ -472,14 +471,14 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
           : {}),
       },
       dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
-      probeFailures: {}, probeSkips: {}, featureLastRun: {},
+      probeFailures: {}, featureLastRun: {},
     } as unknown as GameState;
     const claims = factionsModule.claims!({
       state,
       board: postNeeds([]),
       now: 0,
       caps: {} as ClaimContext["caps"],
-      budgetGb: 100,
+      activeFeatures: new Set(),
       horizons: {
         node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
         install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
@@ -596,14 +595,14 @@ describe("the work slot is scored on what it yields", () => {
           },
         },
         dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
-        probeFailures: {}, probeSkips: {}, featureLastRun: {},
+        probeFailures: {}, featureLastRun: {},
       } as unknown as GameState;
       const claims = careerModule.claims!({
         state,
         board: postNeeds([]),
         now: 0,
         caps: {} as ClaimContext["caps"],
-        budgetGb: 100,
+        activeFeatures: new Set(),
         horizons: {
           node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
           install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },

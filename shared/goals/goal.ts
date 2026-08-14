@@ -58,6 +58,9 @@ export interface GoalContext {
   installedAugmentations: Set<string>;
   /** Destructive augmentation installs observed in this run. */
   installs: number;
+  /** BitNodes whose terminal transition was actually invoked. Readiness for
+   * w0r1d_d43m0n is deliberately insufficient. */
+  completedBitNodes: Set<number>;
 }
 
 /** Sim-only initial conditions a goal may demand. */

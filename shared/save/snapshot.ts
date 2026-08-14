@@ -8,12 +8,14 @@
 
 export interface SaveServer {
   hostname: string;
+  ip: string;
   organizationName: string;
   programs: string[];
   messages: string[];
   /** Coding-contract filenames present on this server. */
   contracts: string[];
   hasAdminRights: boolean;
+  isConnectedTo: boolean;
   backdoorInstalled: boolean;
   purchasedByPlayer: boolean;
   maxRam: number;
@@ -30,6 +32,11 @@ export interface SaveServer {
   serverGrowth: number;
   numOpenPortsRequired: number;
   openPortCount: number;
+  sshPortOpen: boolean;
+  ftpPortOpen: boolean;
+  smtpPortOpen: boolean;
+  httpPortOpen: boolean;
+  sqlPortOpen: boolean;
   serversOnNetwork: string[];
   /** "Server" | "HacknetServer" | "DarknetServer" */
   kind: string;
@@ -61,8 +68,11 @@ export interface SavePlayer {
   money: number;
   karma: number;
   entropy: number;
+  exploits: string[];
+  persistentIntelligenceExp: number;
   city: string;
   location: string;
+  currentServer: string;
   skills: Record<string, number>;
   exp: Record<string, number>;
   mults: Record<string, number>;
@@ -106,7 +116,7 @@ export interface SaveCurrentWork {
   subject: string;
   workType?: string;
   cyclesWorked: number;
-  /** Crime/grafting progress is stored in milliseconds, not cycles. */
+  /** Crime/grafting/program progress is stored in effective milliseconds. */
   unitCompleted?: number;
   ctor: string;
 }
@@ -161,11 +171,13 @@ export interface SaveSnapshot {
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/Server.ts#L26-L57
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L381-L384 */
 export const SERVER_DEFAULTS: Omit<SaveServer, "hostname"> = {
+  ip: "",
   organizationName: "",
   programs: [],
   messages: [],
   contracts: [],
   hasAdminRights: false,
+  isConnectedTo: false,
   backdoorInstalled: false,
   purchasedByPlayer: false,
   maxRam: 0,
@@ -180,6 +192,11 @@ export const SERVER_DEFAULTS: Omit<SaveServer, "hostname"> = {
   serverGrowth: 1,
   numOpenPortsRequired: 5,
   openPortCount: 0,
+  sshPortOpen: false,
+  ftpPortOpen: false,
+  smtpPortOpen: false,
+  httpPortOpen: false,
+  sqlPortOpen: false,
   serversOnNetwork: [],
   kind: "Server",
 };

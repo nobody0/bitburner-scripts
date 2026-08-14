@@ -8,11 +8,11 @@ import {
   makeHackContext,
   type HackContext,
   type HackNodeMults,
-} from "../../shared/formulas.ts";
-import { solveCycle, type CycleKind, type RamCaps, type TargetStatics } from "../../shared/strategy/targeting.ts";
-import { scoreUpperBound, staticsFromRolls, type ServerGenMults } from "../../shared/strategy/bounds.ts";
-import { SERVER_RANGES, type Range } from "../../shared/features/servers.ts";
-import { mulberry32 } from "../core/rng.ts";
+} from "../shared/formulas.ts";
+import { solveCycle, type CycleKind, type RamCaps, type TargetStatics } from "../shared/strategy/targeting.ts";
+import { scoreUpperBound, staticsFromRolls, type ServerGenMults } from "../shared/strategy/bounds.ts";
+import { SERVER_RANGES, type Range } from "../shared/features/servers.ts";
+import { mulberry32 } from "../sim/core/rng.ts";
 
 /** The proof suite for shared/strategy/bounds.ts.
  *

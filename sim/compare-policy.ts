@@ -5,6 +5,7 @@ export interface ComparableRun {
   driver: string;
   scenario: string;
   scenarioFingerprint?: string;
+  experimentClass?: string;
   validity: RunValidity;
   gaps: string[];
 }
@@ -19,6 +20,10 @@ export function assertComparable(runs: readonly ComparableRun[], allowInvalid = 
   if (drivers.size > 1) throw new Error(`refusing to compare different drivers: ${[...drivers].join(" vs ")}`);
   const scenarios = new Set(runs.map((run) => run.scenario));
   if (scenarios.size > 1) throw new Error(`refusing to compare different scenario classes: ${[...scenarios].join(" vs ")}`);
+  const experiments = new Set(runs.map((run) => run.experimentClass ?? "legacy-unknown"));
+  if (experiments.size > 1) {
+    throw new Error(`refusing to compare different experiment classes: ${[...experiments].join(" vs ")}`);
+  }
   if (runs.some((run) => !run.scenarioFingerprint)) {
     throw new Error("refusing to compare legacy runs without a scenario fingerprint");
   }

@@ -171,16 +171,11 @@ export function parseGoal(spec: string): Goal {
       };
     }
     case "bn": {
-      // The Daedalus gate is a phase, not a terminal-state invariant: the
-      // install that activates The Red Pill resets cash and skills. Red Pill
-      // ownership proves that an acquisition route completed (Daedalus or the
-      // BN15/SF15 labyrinth); only the post-install daemon skill must coexist.
       const node = rest.length > 0 ? parseAmount(rest[0], spec) : 1;
-      const daemon = parseGoal(`wd:${node}`);
       return {
         id: spec,
-        describe: () => `installed ${RED_PILL}, then ${daemon.describe()}`,
-        done: (ctx) => ctx.installedAugmentations.has(RED_PILL) && daemon.done(ctx),
+        describe: () => `completed BitNode ${node} through w0r1d_d43m0n`,
+        done: (ctx) => ctx.completedBitNodes.has(node),
       };
     }
     default:

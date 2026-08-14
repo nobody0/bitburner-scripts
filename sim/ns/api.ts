@@ -4,15 +4,21 @@ import type { SimServer } from "../core/effects.ts";
 import type { Engine } from "../engine.ts";
 import type { HacknetSystem } from "../features/hacknet.ts";
 import type { GoSystem } from "../features/go-system.ts";
+import type { ShareSystem } from "../features/share.ts";
+import type { StanekSystem } from "../features/stanek.ts";
 import type { StockMarketSystem } from "../features/stock.ts";
 import { getBitNodeMultipliers as vendoredBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
+import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { StockMarketConstants as STOCK_CONSTANTS } from "../vendor/bitburner/src/StockMarket/data/Constants.ts";
 import { CodingContractName } from "../vendor/bitburner/src/CodingContract/Enums.ts";
-import { unmodeled } from "../realm/unmodeled.ts";
+import { noteUnmodeled, unmodeled } from "../realm/unmodeled.ts";
 import type { SimWorld } from "../world.ts";
 import { getCloudServerCost, getCloudServerLimit, getCloudServerMaxRam, getCloudServerUpgradeCost } from "../core/effects.ts";
 import { getFunctionRamCost, SCRIPT_BASE_RAM_GB, type RamCostContext } from "./ram-costs.ts";
 import { ProcessTable, ScriptDeath, type SimProcess } from "./process.ts";
+import { publicResetInfo, publicServer, resolveServer } from "./contracts.ts";
+import { makeStanek } from "./stanek.ts";
+import { ShareBonusTime } from "../vendor/bitburner/src/NetworkShare/Share.ts";
 
 /** A synthetic Netscript runtime over SimWorld, faithful enough to run
  * game/lib/controller.ts unmodified.
@@ -72,6 +78,8 @@ export interface SimNsHost {
   output: string[];
   /** Unhandled script errors, for the run summary. */
   crashes: { pid: number; filename: string; error: string }[];
+  /** BitNodeOptions.disableBladeburner, which is independent of API access. */
+  bladeburnerDisabled?: boolean;
   /** The game's SECOND timebase (sim/engine.ts).
    *
    *  Present so an ns call can poke a counter the way the game does —
@@ -89,6 +97,8 @@ export interface SimNsHost {
     installBackdoorWithDelay: (delay: (ms: number) => Promise<void>) => Promise<void>;
   };
   hacknet?: HacknetSystem;
+  share?: ShareSystem;
+  stanek?: StanekSystem;
   /** The World Stock Exchange, when a run wires one. Absent means the whole
    *  namespace degrades to the gate flags, which is what a run with no market
    *  model should see. */
@@ -195,10 +205,8 @@ function netscriptDelay(host: SimNsHost, process: SimProcess, ms: number, functi
   });
 }
 
-function requireServer(host: SimNsHost, hostname: string): SimServer {
-  const server = host.world.servers.get(hostname);
-  if (!server) throw new Error(`getServer: no such server ${hostname}`);
-  return server;
+function requireServer(host: SimNsHost, hostname: unknown, fallback = "home"): SimServer {
+  return resolveServer(host.world.servers, host.network, hostname, fallback);
 }
 
 /** Start a process's main() on the microtask queue. */
@@ -256,7 +264,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       if (threads > process.threads) {
         throw new Error(`${kind}: Too many threads requested. Requested: ${threads}. Has: ${process.threads}.`);
       }
-      const server = requireServer(host, target);
+      const server = requireServer(host, target, process.host);
       if (server.simKind === "DarknetServer") throw new Error(`${kind}: the server must not be a darknet server`);
       if (server.purchasedByPlayer) throw new Error(`${kind}: cannot target a purchased server`);
       if (!server.hasAdminRights) throw new Error(`${kind}: no admin rights on ${target}`);
@@ -275,7 +283,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       const stock = !!opts.stock;
       return netscriptDelay(host, process, durationMs, kind).then(
         () => {
-          const landed = world.land(kind, target, threads, cores, stock);
+          const landed = world.land(kind, server.hostname, threads, cores, stock);
           process.onlineExpGained += landed.result?.expGained ?? 0;
           if (kind === "hack") process.onlineMoneyMade += landed.nsValue;
           return landed.nsValue;
@@ -340,14 +348,15 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       host.contents.set(key, mode === "w" ? data : (host.contents.get(key) ?? "") + data);
       filesOn(host, process.host).add(filename);
     },
-    fileExists: (filename: string, hostname = process.host): boolean =>
-      filesOn(host, hostname).has(filename),
-    ls: (hostname: string, substring = ""): string[] =>
-      [...filesOn(host, hostname)].filter((f) => f.includes(substring)).sort(),
-    scp: (files: string | string[], destination: string, source = process.host): boolean => {
+    fileExists: (filename: string, hostname: unknown = process.host): boolean =>
+      filesOn(host, requireServer(host, hostname, process.host).hostname).has(filename),
+    ls: (hostname: unknown = process.host, substring = ""): string[] =>
+      [...filesOn(host, requireServer(host, hostname, process.host).hostname)].filter((f) => f.includes(substring)).sort(),
+    scp: (files: string | string[], rawDestination: unknown, rawSource: unknown = process.host): boolean => {
       const list = Array.isArray(files) ? files : [files];
+      const source = requireServer(host, rawSource, process.host).hostname;
+      const destination = requireServer(host, rawDestination, process.host).hostname;
       const from = filesOn(host, source);
-      if (!host.world.servers.has(destination)) return false;
       for (const file of list) {
         if (!from.has(file)) return false;
         filesOn(host, destination).add(file);
@@ -360,10 +369,11 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     // --- processes ------------------------------------------------------
     exec: (
       script: string,
-      hostname: string,
+      rawHostname: string,
       threadOrOptions?: number | { threads?: number; temporary?: boolean; ramOverride?: number },
       ...args: (string | number | boolean)[]
     ): number => {
+      const hostname = requireServer(host, rawHostname, process.host).hostname;
       if (!filesOn(host, hostname).has(script)) return 0;
       const options = typeof threadOrOptions === "object" ? threadOrOptions : undefined;
       const threads = (typeof threadOrOptions === "number" ? threadOrOptions : options?.threads) ?? 1;
@@ -382,8 +392,10 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       return started.pid;
     },
     kill: (pid: number): boolean => host.processes.kill(pid),
-    killall: (hostname: string): boolean => host.processes.killall(hostname, process.pid) > 0,
-    ps: (hostname = process.host) => host.processes.ps(hostname),
+    killall: (hostname: unknown = process.host): boolean =>
+      host.processes.killall(requireServer(host, hostname, process.host).hostname, process.pid) > 0,
+    ps: (hostname: unknown = process.host) =>
+      host.processes.ps(requireServer(host, hostname, process.host).hostname),
     getFunctionRamCost: (name: unknown): number => {
       if (typeof name !== "string" && typeof name !== "number") {
         throw new Error("getFunctionRamCost: 'name' must be a string");
@@ -393,7 +405,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
 
     // --- world reads ----------------------------------------------------
     getPlayer: (): Player => world.playerRecord(),
-    getResetInfo: (): ResetInfo => host.reset,
+    getResetInfo: (): ResetInfo => publicResetInfo(host.reset),
     getBitNodeMultipliers: (n?: number, lvl?: number) => {
       const currentNode = host.reset.currentNode ?? world.bitnode;
       const sf5 = host.reset.ownedSF?.get(5) ?? world.player.sourceFiles["5"] ?? 0;
@@ -425,33 +437,47 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       }
       return current;
     },
-    // Share is not an executable action in this simulator yet, so the exact
-    // power is its game default rather than an invented bonus.
-    getSharePower: (): number => 1,
+    share: (): Promise<void> => {
+      const share = host.share ?? unmodeled("subsystem", "NetworkShare");
+      const cores = requireServer(host, process.host).cpuCores;
+      const release = share.startSharing(process.threads, cores);
+      return netscriptDelay(host, process, ShareBonusTime, "share").finally(release);
+    },
+    getSharePower: (): number =>
+      (host.share ?? unmodeled("subsystem", "NetworkShare")).currentBonus(),
     getHostname: (): string => process.host,
     // A copy, like the game: the controller mutates its snapshot (setting
     // hasAdminRights after a root pass) and must not reach into the world.
-    getServer: (hostname = process.host): Server => {
-      const server = requireServer(host, hostname);
-      return { ...server, ...(server.hostname === "home" ? { moneyAvailable: world.player.money } : {}) };
-    },
-    scan: (hostname = process.host): string[] => {
-      const known = new Set(host.network.get(hostname) ?? []);
-      if (hostname === "home") {
+    getServer: (hostname: unknown = process.host): Server =>
+      publicServer(requireServer(host, hostname, process.host), world.player.money),
+    scan: (hostname: unknown = process.host, returnOpts?: unknown): string[] => {
+      const server = requireServer(host, hostname, process.host);
+      const returnByIP = !!(
+        returnOpts
+        && typeof returnOpts === "object"
+        && (returnOpts as { returnByIP?: unknown }).returnByIP
+      );
+      const known = new Set(host.network.get(server.hostname) ?? []);
+      if (server.hostname === "home") {
         for (const server of world.servers.values()) {
           if (server.hostname !== "home" && server.purchasedByPlayer) known.add(server.hostname);
         }
-      } else if (world.servers.get(hostname)?.purchasedByPlayer) {
+      } else if (server.purchasedByPlayer) {
         known.add("home");
       }
-      return [...known];
+      return [...known].map((entry) => {
+        const neighbour = requireServer(host, entry);
+        return returnByIP ? neighbour.ip : neighbour.hostname;
+      });
     },
-    hasRootAccess: (hostname: string): boolean => requireServer(host, hostname).hasAdminRights,
-    getServerMoneyAvailable: (hostname: string): number =>
-      hostname === "home" ? world.player.money : (requireServer(host, hostname).moneyAvailable ?? 0),
-    getServerSecurityLevel: (hostname: string): number => requireServer(host, hostname).hackDifficulty ?? 0,
-    getServerMaxRam: (hostname: string): number => requireServer(host, hostname).maxRam,
-    getServerUsedRam: (hostname: string): number => requireServer(host, hostname).ramUsed,
+    hasRootAccess: (hostname: unknown): boolean => requireServer(host, hostname, process.host).hasAdminRights,
+    getServerMoneyAvailable: (hostname: unknown): number => {
+      const server = requireServer(host, hostname, process.host);
+      return server.hostname === "home" ? world.player.money : server.moneyAvailable;
+    },
+    getServerSecurityLevel: (hostname: unknown): number => requireServer(host, hostname, process.host).hackDifficulty ?? 0,
+    getServerMaxRam: (hostname: unknown): number => requireServer(host, hostname, process.host).maxRam,
+    getServerUsedRam: (hostname: unknown): number => requireServer(host, hostname, process.host).ramUsed,
 
     // --- ops ------------------------------------------------------------
     hack: hgw("hack"),
@@ -484,10 +510,17 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         || world.bitnode === 7
         || (world.player.sourceFiles["6"] ?? 0) > 0
         || (world.player.sourceFiles["7"] ?? 0) > 0;
+      if (!access || host.bladeburnerDisabled || currentNodeMults.BladeburnerRank === 0) return false;
+      if (world.gates.inBladeburner) return true;
       const skills = world.person.skills;
       const combatReady = Math.min(skills.strength, skills.defense, skills.dexterity, skills.agility) >= 100;
-      if (!access || !combatReady) return false;
+      if (!combatReady) return false;
       world.gates.inBladeburner = true;
+      noteUnmodeled(
+        "subsystem",
+        "bladeburner",
+        "the division was joined but its autonomous engine lifecycle is not modeled",
+      );
       world.emit({ kind: "event", name: "bladeburner.joined", data: {} });
       return true;
     },
@@ -608,10 +641,16 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     getServerLimit: () => getCloudServerLimit(),
     getRamLimit: () => getCloudServerMaxRam(),
     getServerCost: (ram: number) => getCloudServerCost(ram),
-    getServerUpgradeCost: (hostname: string, ram: number) => {
-      const server = world.servers.get(hostname);
-      if (!server || !server.purchasedByPlayer || hostname === "home" || hostname.startsWith("hacknet-server-")) return -1;
-      return getCloudServerUpgradeCost(server.maxRam, ram);
+    getServerUpgradeCost: (hostname: unknown, ram: number) => {
+      try {
+        const server = requireServer(host, hostname, process.host);
+        if (!server.purchasedByPlayer || server.hostname === "home" || server.hostname.startsWith("hacknet-server-")) return -1;
+        return getCloudServerUpgradeCost(server.maxRam, ram);
+      } catch {
+        // Cloud.ts deliberately turns every validation/lookup failure into
+        // the API's sentinel rather than exposing the helper exception.
+        return -1;
+      }
     },
     getServerNames: () => [...world.servers.values()]
       .filter((server) => server.purchasedByPlayer && server.hostname !== "home" && !server.hostname.startsWith("hacknet-server-"))
@@ -628,7 +667,13 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       if (!homeLinks.includes(name)) host.network.set("home", [...homeLinks, name]);
       return name;
     },
-    upgradeServer: (hostname: string, ram: number) => world.execute({ type: "upgradeServer", host: hostname, ram }),
+    upgradeServer: (hostname: unknown, ram: number) => {
+      try {
+        return world.execute({ type: "upgradeServer", host: requireServer(host, hostname, process.host).hostname, ram });
+      } catch {
+        return false;
+      }
+    },
   }, "cloud", host, process);
   const goAnalysis = host.go
     ? namespace({
@@ -684,6 +729,20 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     host,
     process,
   );
+
+  if (host.stanek) {
+    impl["stanek"] = namespace(
+      makeStanek({
+        system: host.stanek,
+        process,
+        hostCores: () => requireServer(host, process.host).cpuCores,
+        delay: (ms) => netscriptDelay(host, process, ms, "stanek.chargeFragment"),
+      }),
+      "stanek",
+      host,
+      process,
+    );
+  }
 
   if (host.hacknet) {
     const hacknet = host.hacknet;

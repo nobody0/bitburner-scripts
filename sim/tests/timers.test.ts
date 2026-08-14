@@ -128,6 +128,8 @@ describe("virtual time", () => {
     const clock = install();
     expect(Date.now()).toBe(DEFAULT_EPOCH_MS);
     expect(new Date().getTime()).toBe(DEFAULT_EPOCH_MS);
+    expect(Date()).toBe(new Date().toString());
+    expect(new Date().constructor).toBe(Date);
     expect(performance.now()).toBe(0);
     setTimeout(() => {
       expect(Date.now()).toBe(DEFAULT_EPOCH_MS + 5_000);

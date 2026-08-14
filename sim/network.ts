@@ -7,8 +7,35 @@ import {
 } from "./vendor/bitburner/src/Server/data/ServerMetadata.ts";
 
 export interface GeneratedNetwork {
+  homeIp: string;
   network: ServerSpec[];
   topology: Record<string, string[]>;
+}
+
+/** The v3.0.1 darkweb root is created after the ordinary foreign-server tree.
+ * It exists before TOR is bought, but remains isolated until getTorRouter()
+ * connects it to home. */
+export function darkwebServerSpec(ip?: string): ServerSpec {
+  return {
+    hostname: "darkweb",
+    ...(ip !== undefined ? { ip } : {}),
+    organizationName: "",
+    hackDifficulty: 0,
+    moneyAvailable: 0,
+    requiredHackingSkill: 0,
+    serverGrowth: 0,
+    numOpenPortsRequired: 0,
+    maxRam: 16,
+    simKind: "DarknetServer",
+  };
+}
+
+/** Synthetic fixtures still model the always-present darkweb root. Generated
+ * vanilla worlds already include it with their authoritative rolled IP. */
+export function withDarkwebServer(network: readonly ServerSpec[]): ServerSpec[] {
+  return network.some((server) => server.hostname === "darkweb")
+    ? [...network]
+    : [...network, darkwebServerSpec()];
 }
 
 /** Dedicated world-generation seed for the full BN1 benchmark. Gameplay
@@ -48,16 +75,34 @@ function truthyMetadataValue(
  * IP values are irrelevant to Netscript here, but their random draws are
  * consumed because upstream creates an IP before rolling each server's stats. */
 export function generateVanillaNetwork(seed: number): GeneratedNetwork {
-  const rng = mulberry32(seed);
-  const ips = new Set<string>();
+  return generateInitialVanillaNetworkFromRng(mulberry32(seed));
+}
+
+function randomIp(rng: () => number): string {
+  const encoded = rng().toString(16) + "000000000";
+  return (encoded.match(/..?/g) ?? []).slice(1, 5).map((part) => parseInt(part, 16)).join(".");
+}
+
+/** Player.init creates home before initForeignServers, consuming one IP draw
+ * that an augmentation prestige does not repeat. */
+export function generateInitialVanillaNetworkFromRng(rng: () => number): GeneratedNetwork {
+  const homeIp = randomIp(rng);
+  return generateVanillaNetworkFromRng(rng, homeIp);
+}
+
+/** Stateful form used across augmentation prestiges. Upstream consumes the
+ * same world-generation RNG stream each time it recreates foreign servers;
+ * accepting the stream makes the successive worlds distinct without
+ * inventing per-install seed arithmetic. */
+export function generateVanillaNetworkFromRng(rng: () => number, homeIp = ""): GeneratedNetwork {
+  const ips = new Set<string>(homeIp ? [homeIp] : []);
   const network: ServerSpec[] = [];
   const layers: string[][] = Array.from({ length: 15 }, () => []);
 
   for (const metadata of Object.values(SERVER_METADATA)) {
     let ip: string;
     do {
-      const encoded = rng().toString(16) + "000000000";
-      ip = (encoded.match(/..?/g) ?? []).slice(1, 5).map((part) => parseInt(part, 16)).join(".");
+      ip = randomIp(rng);
     } while (ips.has(ip));
     ips.add(ip);
 
@@ -68,6 +113,7 @@ export function generateVanillaNetwork(seed: number): GeneratedNetwork {
     const serverGrowth = truthyMetadataValue(rng, metadata, "growth", metadata.growth, 1);
     const server: ServerSpec = {
       hostname: metadata.host,
+      ip,
       organizationName: metadata.org,
       hackDifficulty,
       moneyAvailable,
@@ -98,7 +144,13 @@ export function generateVanillaNetwork(seed: number): GeneratedNetwork {
     const parents = layers[layer - 1]!;
     for (const host of layers[layer]!) connect(host, parents[Math.floor(rng() * parents.length)]!);
   }
-  return { network, topology };
+  let darkwebIp: string;
+  do {
+    darkwebIp = randomIp(rng);
+  } while (ips.has(darkwebIp));
+  network.push(darkwebServerSpec(darkwebIp));
+  topology["darkweb"] = [];
+  return { homeIp, network, topology };
 }
 
 export const VANILLA_NETWORK = generateVanillaNetwork(VANILLA_NETWORK_SEED);

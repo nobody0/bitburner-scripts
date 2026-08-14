@@ -6,6 +6,7 @@ const BASE: ComparableRun = {
   driver: "game",
   scenario: "synthetic-early-game",
   scenarioFingerprint: "v1:same",
+  experimentClass: "feature-scenario",
   validity: "valid",
   gaps: [],
 };
@@ -25,5 +26,11 @@ describe("simulation comparison policy", () => {
     const invalid = { ...BASE, validity: "invalid-for-goal" as const, gaps: ["ns go.getBoardState"] };
     expect(() => assertComparable([invalid, { ...invalid }])).toThrow("refusing invalid-for-goal");
     expect(() => assertComparable([invalid, { ...invalid }], true)).not.toThrow();
+  });
+
+  test("route benchmarks cannot be compared with synthetic feature scenarios", () => {
+    expect(() => assertComparable([BASE, { ...BASE, experimentClass: "bitnode-route" }])).toThrow(
+      "different experiment classes",
+    );
   });
 });

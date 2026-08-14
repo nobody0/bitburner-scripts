@@ -19,6 +19,9 @@ export interface GoWorkerContinuationHint {
 
 export interface GoWorkerEvaluation {
   decision: GoDecision;
+  /** Production is WebGPU. Simulator aggregate runs label their deliberately
+   * collapsed policy interior so telemetry cannot claim action parity. */
+  backend?: "webgpu" | "aggregate";
   preparationMs: number;
   finalizationMs: number;
   modelProfile: "small5" | "daemon19";

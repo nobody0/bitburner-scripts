@@ -16,6 +16,45 @@ const COMMIT = "3162fd2590e221eadd0c0fbd46151913f7c4c41c";
 const SRC_REPO = path.resolve(process.env.BITBURNER_SRC ?? path.join(import.meta.dir, "..", "..", "bitburner-src"));
 const OUT_DIR = "sim/vendor/bitburner";
 
+/** Upstream files whose behavior is handwritten in sim/. Their hashes are
+ * emitted separately from vendored output hashes so a release bump forces an
+ * explicit audit even when these files are not importable in isolation. */
+const TRANSCRIPTION_SOURCE_PATHS = [
+  "src/engine.tsx",
+  "src/Netscript/RamCostGenerator.ts",
+  "src/Netscript/NetscriptHelpers.tsx",
+  "src/NetscriptFunctions.ts",
+  "src/NetscriptWorker.ts",
+  "src/Netscript/killWorkerScript.ts",
+  "src/Prestige.ts",
+  "src/PersonObjects/Person.ts",
+  "src/PersonObjects/Player/PlayerObjectGeneralMethods.ts",
+  "src/PersonObjects/Player/PlayerObjectServerMethods.ts",
+  "src/Server/Server.ts",
+  "src/Server/ServerHelpers.ts",
+  "src/Server/ServerPurchases.ts",
+  "src/NetscriptFunctions/Singularity.ts",
+  "src/NetscriptFunctions/Stanek.ts",
+  "src/NetscriptFunctions/Hacknet.ts",
+  "src/DarkWeb/DarkWebItems.ts",
+  "src/Faction/FactionHelpers.tsx",
+  "src/Faction/FactionJoinCondition.ts",
+  "src/Work/FactionWork.tsx",
+  "src/PersonObjects/Grafting/GraftingHelpers.ts",
+  "src/CotMG/StaneksGift.ts",
+  "src/Company/Company.ts",
+  "src/Work/CompanyWork.tsx",
+  "src/Work/ClassWork.tsx",
+  "src/Work/CrimeWork.ts",
+  "src/Work/CreateProgramWork.ts",
+  "src/Hacknet/HacknetHelpers.tsx",
+  "src/StockMarket/BuyingAndSelling.tsx",
+  "src/Gang/Gang.ts",
+  "src/Bladeburner/Bladeburner.ts",
+  "src/Corporation/Corporation.ts",
+  "src/PersonObjects/Sleeve/Sleeve.ts",
+] as const;
+
 interface Patch {
   find: string;
   replace: string;
@@ -77,6 +116,90 @@ const MANIFEST: VendorFile[] = [
   { path: "src/PersonObjects/formulas/skill.ts" },
   { path: "src/PersonObjects/formulas/intelligence.ts" },
   { path: "src/PersonObjects/Multipliers.ts" },
+  // --- Stanek's Gift -------------------------------------------------------
+  // The data, geometry and effect formula are import-light upstream, so keep
+  // them verbatim instead of proving a second hand transcription against
+  // itself. StaneksGift.ts is deliberately excluded: its class methods reach
+  // through Player/Factions/Augmentations/events/save revivers and are glued
+  // to simulator-owned state in sim/features/stanek.ts.
+  { path: "src/CotMG/data/Constants.ts" },
+  { path: "src/CotMG/formulas/effect.ts" },
+  { path: "src/CotMG/FragmentType.ts" },
+  { path: "src/CotMG/data/Shapes.ts" },
+  { path: "src/CotMG/Fragment.ts" },
+  { path: "src/CotMG/BaseGift.ts" },
+  {
+    path: "src/CotMG/ActiveFragment.ts",
+    patches: [
+      // Save serialization only; the simulator owns its in-memory gift state.
+      {
+        find: `import { Generic_fromJSON, Generic_toJSON, IReviverValue, constructorsForReviver } from "../utils/JSONReviver";\n`,
+        replace: "",
+      },
+      {
+        find: [
+          `  /** Serialize an active fragment to a JSON save state. */`,
+          `  toJSON(): IReviverValue {`,
+          `    return Generic_toJSON("ActiveFragment", this);`,
+          `  }`,
+          ``,
+          `  /** Initializes an active fragment from a JSON save state */`,
+          `  static fromJSON(value: IReviverValue): ActiveFragment {`,
+          `    return Generic_fromJSON(ActiveFragment, value.data);`,
+          `  }`,
+          `}`,
+          ``,
+          `constructorsForReviver.ActiveFragment = ActiveFragment;`,
+        ].join("\n"),
+        replace: `}`,
+      },
+    ],
+  },
+  // --- Network share -------------------------------------------------------
+  {
+    path: "src/NetworkShare/Share.ts",
+    patches: [
+      // @player is a process-global singleton upstream. The sim supplies the
+      // live intelligence immediately before each contribution starts.
+      {
+        find: `import { Player } from "@player";`,
+        replace: [
+          `const Player = { skills: { intelligence: 0 } };`,
+          `export function setShareContext(ctx: { intelligence: number }): void {`,
+          `  Player.skills.intelligence = ctx.intelligence;`,
+          `}`,
+        ].join("\n"),
+      },
+      // ServerHelpers pulls in the game; this exact one-line formula is the
+      // same portability patch already used by the vendored grow formula.
+      {
+        find: `import { getCoreBonus } from "../Server/ServerHelpers";`,
+        replace: `export const getCoreBonus = (cores = 1): number => 1 + (cores - 1) / 16;`,
+      },
+      // A Bun process can execute several unit simulations. Without this reset
+      // the upstream module-level accumulator would leak between them.
+      {
+        find: `let shareThreads = 1;`,
+        replace: [
+          `let shareThreads = 1;`,
+          `export function resetShareThreads(): void { shareThreads = 1; }`,
+        ].join("\n"),
+      },
+    ],
+  },
+  {
+    path: "src/SourceFile/applySourceFile.ts",
+    patches: [
+      {
+        find: `import { SourceFiles } from "./SourceFiles";`,
+        replace: `const SourceFiles: Record<string, true> = Object.fromEntries(Array.from({ length: 15 }, (_, i) => ["SourceFile" + (i + 1), true]));`,
+      },
+      {
+        find: `import { Player } from "@player";`,
+        replace: `import { Player } from "./SourceFileAdapter";`,
+      },
+    ],
+  },
   { path: "src/Hacknet/formulas/HacknetNodes.ts" },
   { path: "src/Hacknet/formulas/HacknetServers.ts" },
   {
@@ -90,6 +213,7 @@ const MANIFEST: VendorFile[] = [
     ],
   },
   { path: "src/Constants.ts" },
+  { path: "src/Exploits/Exploit.ts" },
   { path: "src/Casino/RNG.ts" },
   { path: "src/Go/Enums.ts" },
   {
@@ -343,6 +467,22 @@ for (const file of MANIFEST) {
   console.log(`vendored ${file.path}`);
 }
 
+const sourceFileAdapter = `// Portability adapter generated by tools/vendor.ts - DO NOT EDIT
+import type { Multipliers } from "../PersonObjects/Multipliers";
+
+export const Player = { mults: undefined as unknown as Multipliers };
+export function setSourceFileMultipliers(mults: Multipliers): void { Player.mults = mults; }
+`;
+const sourceFileAdapterPath = "src/SourceFile/SourceFileAdapter.ts";
+const sourceFileAdapterOut = path.join(OUT_DIR, sourceFileAdapterPath);
+mkdirSync(path.dirname(sourceFileAdapterOut), { recursive: true });
+writeFileSync(sourceFileAdapterOut, sourceFileAdapter, "utf8");
+written.push({
+  path: sourceFileAdapterPath,
+  output: sourceFileAdapterPath,
+  sha256: createHash("sha256").update(sourceFileAdapter).digest("hex"),
+});
+
 // Minimal adapters for branches outside the board-rules oracle. They keep the
 // source importable in tests without dragging Player, React, AI timing, or the
 // live singleton into the simulator. Parity tests never call these branches.
@@ -565,6 +705,20 @@ extractFunction(
     `Object.freeze(defaultMultipliers);`,
   ],
   "src/BitNode/BitNodeMults.ts",
+);
+
+// UCM's hourly roll. The work/prestige model needs the exact active
+// multiplier bag, but none of the surrounding augmentation registry/UI.
+extractFunction(
+  "src/Augmentation/CircadianModulator.ts",
+  "getRandomBonus",
+  [
+    `import type { Multipliers } from "../PersonObjects/Multipliers";`,
+    `import { WHRNG } from "../Casino/RNG";`,
+    `interface CircadianBonus { bonuses: Partial<Multipliers>; description: string; }`,
+  ],
+  "src/Augmentation/CircadianBonus.ts",
+  [{ find: `function getRandomBonus(): CircadianBonus {`, replace: `export function getRandomBonus(): CircadianBonus {` }],
 );
 
 // The Newton-Raphson grow-thread inverse: precision-tuned, worth vendoring
@@ -851,6 +1005,7 @@ extractSymbols(
     "forecastForecastChangeFromCompanyWork",
     "influenceStockThroughServerHack",
     "influenceStockThroughServerGrow",
+    "influenceStockThroughCompanyWork",
   ],
   [
     `import { Stock } from "./Stock";`,
@@ -861,11 +1016,13 @@ extractSymbols(
     `  organizationName: string;`,
     `  moneyMax: number;`,
     `}`,
+    `interface Company { name: string; }`,
   ],
   "src/StockMarket/PlayerInfluence.ts",
   [
     { find: `  if (Math.random() < percTotalMoneyHacked) {`, replace: `  if (stockRandom() < percTotalMoneyHacked) {` },
     { find: `  if (Math.random() < percTotalMoneyGrown) {`, replace: `  if (stockRandom() < percTotalMoneyGrown) {` },
+    { find: `  if (Math.random() < 0.002 * cyclesOfWork) {`, replace: `  if (stockRandom() < 0.002 * cyclesOfWork) {` },
   ],
 );
 
@@ -1549,6 +1706,12 @@ writeFileSync(
       definitionsSha256: createHash("sha256")
         .update(gitShow("src/ScriptEditor/NetscriptDefinitions.d.ts"))
         .digest("hex"),
+      transcriptionSources: Object.fromEntries(
+        TRANSCRIPTION_SOURCE_PATHS.map((sourcePath) => [
+          sourcePath,
+          createHash("sha256").update(gitShow(sourcePath)).digest("hex"),
+        ]),
+      ),
       files: written,
     },
     null,

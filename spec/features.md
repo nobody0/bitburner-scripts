@@ -92,8 +92,8 @@ the dispatcher everything above `HOME_RESERVE_GB`:
    detail tiers per feature. The runner prices each with
    `ns.getFunctionRamCost` (0 GB, and it already folds in the singularity
    16/4/1 multiplier), packs what fits the current budget into one stub, and
-   emits `probe.skipped {id, cost, budget}` for the rest. A panel that stays
-   empty says why.
+   hands the rest to the broker queue, which reports `ram.starvation` once one
+   has genuinely waited. A panel that stays empty says why.
 
 A dodged probe comes in two shapes. A **single-step** probe reads everything in
 one stub. A **stepped** probe (`SteppedProbe`) runs one dodge per step, so its

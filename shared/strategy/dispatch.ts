@@ -12,10 +12,13 @@ import {
 import { Heap, type Reservation } from "../ram/heap.ts";
 import type { Action, CompletionEvent, ServerView, StockInfluence, WorldView } from "../world.ts";
 import { WORKER_RAM } from "../world.ts";
+import { intelligenceBonus } from "./factions/rep.ts";
+import type { SharePricingInput } from "./share.ts";
 import type { SegmentKind, TargetDirective } from "./directive.ts";
 import {
   FARM_SOLVE_SHARE,
   WORKER_RAM_FLOOR,
+  adaptSegmentsToFleet,
   initEvaluator,
   staticsOf,
   stepEvaluator,
@@ -25,7 +28,8 @@ import {
 import { isPrepped, solveCycle, solvePrep, type CycleSolution, type RamCaps } from "./targeting.ts";
 import { coreEffect } from "../ram/heap.ts";
 import { decideMode, type FarmMode } from "./mode.ts";
-import { predictAtLanding, sizeBatchAtLanding, type LedgerOp } from "./prediction.ts";
+import { cheapestCloudQuote } from "./ram-supply.ts";
+import { applyLedgerOp, compareLedgerOps, hackThreadsAtLanding, predictAtLanding, sizeBatchAtLanding, type LedgerOp, type PredictedState } from "./prediction.ts";
 import {
   initPool,
   noteExit,
@@ -74,6 +78,13 @@ export const JIT_LAUNCH_GUARD_MS = TIMING_JIT_LAUNCH_GUARD_MS;
  * is landing precision, not a minimum time for staying on a target. */
 export const PREP_ORDER_MS = SPACER_MS;
 export const INTERVAL_MS = HWGW_MIN_INTERVAL_MS; // == targeting's BATCH_INTERVAL_S · 1000
+/** Fallback retry cadence for an op that is due but could not be placed. */
+export const OVERDUE_RETRY_MS = TIMING_WORKER_STARTUP_GUARD_MS;
+/** How far ahead one pass may reach for launchable work, spending padding to
+ * avoid a wake per landing gap. Capped by the reservation lead
+ * (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS) so an op reached early has
+ * already been reserved, and truncated at the next weaken landing at use. */
+export const JIT_LAUNCH_WINDOW_MS = TIMING_JIT_LAUNCH_GUARD_MS - TIMING_WORKER_STARTUP_GUARD_MS;
 /** Cap launches per pass so one scheduler call stays inside the tick budget. */
 export const MAX_BATCHES_PER_PASS = 8;
 /** Shotgun emits a whole wave per pass — every batch lands the same engine
@@ -97,10 +108,8 @@ export const POOL_REUSE_WINDOW_MS = 5_000;
  * count is actually pressuring the browser, just before HGW does. */
 export const POOL_PRESSURE_OPS = 1_000;
 const JIT_ROLE_PRIORITY: Record<JitRole["role"], number> = { w1: 0, w2: 1, g: 2, h: 3 };
-const PSERV_RAM = 64;
-const BUY_HEADROOM = 2;
 
-interface Tracked {
+export interface Tracked {
   /** SOURCE host the op's RAM is reserved on. */
   hostname: string;
   /** TARGET host the op acts on. */
@@ -134,16 +143,34 @@ interface PendingJitOp {
   kind: "hack" | "grow" | "weaken";
   /** One-core effect units. Core-aware placement may use fewer real threads. */
   threads: number;
-  /** Conservative native invocation deadline. */
+  /** Conservative launch deadline. `latestJitStart` derives it from the
+   * operation's landing, native duration, and security-boundary timeline. */
   startAt: number;
+  /** Launch deadline minus the existing measured dispatch-latency budget. */
+  reserveAt?: number;
   landing: number;
   stock: boolean;
+  /** Original max-money solve. Dispatch-time money validation may only reduce
+   * the already-planned hack, never expand it past its support solve. */
+  baseHackThreads?: number;
+  /** Physical heap block committed before the worker launch window. Once the
+   * action is emitted ownership transfers to `tracked`/workerExit. */
+  reservation?: Reservation;
+  reservedAt?: number;
+  /** A due contiguous allocation already failed. If its window expires, the
+   * miss is fragmentation/placement rather than scheduler lateness. */
+  placementBlocked?: boolean;
 }
 
 interface PendingJitBatch {
   target: string;
   ops: PendingJitOp[];
+  decisionId: number;
+  /** Cause counters describe a batch decision, not scheduler attempts. */
+  countedMisses?: Partial<Record<MissedWindowReason, true>>;
 }
+
+type JitReservationMode = "protected" | "launch";
 
 /** Prep weaken cover is launched first and owns the landing slot. The atomic
  * grow waits outside RAM until this deadline. */
@@ -159,7 +186,11 @@ interface PendingPrepGrow {
   startAt: number;
   landing: number;
   stock: boolean;
+  placementBlocked?: boolean;
 }
+
+export type MissedWindowReason = "deadline" | "arrival-security" | "arrival-money" | "placement";
+export type MissedWindowCounts = Record<MissedWindowReason, number>;
 
 export interface DispatchStats {
   launched: { hack: number; grow: number; weaken: number };
@@ -169,7 +200,11 @@ export interface DispatchStats {
   expEarned: number;
   hacks: number;
   allocFails: number;
+  allocFailsByPhase: { jit: number; prep: number; eager: number };
   batchesSkipped: number;
+  /** Cumulative, cause-labelled safety/window outcomes. Unlike
+   * batchesSkipped this distinguishes a real miss from the brake working. */
+  missedWindow: MissedWindowCounts;
   /** Ops that needed a fresh process (one-shots + pool spawns). The pooling
    * win is this staying flat while `launched` keeps climbing. */
   execs: number;
@@ -187,12 +222,23 @@ export interface DispatchStats {
   paddingRamMsBySegment: Record<SegmentKind, number>;
 }
 
+export interface ShareWorker {
+  workerId: number;
+  hostname: string;
+  threads: number;
+  gb: number;
+  effectiveThreads: number;
+  stopping: boolean;
+}
+
 export interface DispatchMemory {
   heap: Heap;
   evaluator: EvaluatorMemory;
   tracked: Map<number, Tracked>;
   inFlight: { hack: number; grow: number; weaken: number };
   segmentGb: Record<SegmentKind, number>;
+  /** Long-lived, cooperatively stoppable fragment consumers. */
+  shareWorkers: Map<number, ShareWorker>;
   /** host -> op count in flight, so prep fires in non-overlapping waves. */
   prepInFlight: Map<string, number>;
   /** Logical distributed weaken landings which have lost at least one
@@ -203,6 +249,13 @@ export interface DispatchMemory {
   nextOpId: number;
   nextServerIndex: number;
   lastAnchor: number;
+  /** Target/mode pipeline decision whose repeated scheduler retries must not
+   * inflate cumulative missed-window counters. */
+  jitDecisionId: number;
+  countedJitDecisionMisses: Set<string>;
+  /** Last observed pure clock, used when a driver reports an exec failure
+   * immediately after a planning pass. */
+  lastDispatchAt: number;
   /** Batches whose slow support has been planned but whose shorter operations
    * have not reached their just-in-time launch windows yet. */
   jitPending: PendingJitBatch[];
@@ -219,6 +272,8 @@ export interface DispatchMemory {
   hgw?: { host: string; generation: number; solution?: CycleSolution };
   /** Pooled serve workers (shared/strategy/worker-pool.ts). */
   pool: WorkerPoolMemory;
+  /** Existing pressure decision, published for arena promotion. */
+  pooling: boolean;
   /** The current farm target's pipeline demand ceiling in GB — one batch per
    * interval for one weakenTime (shared/strategy/economics.ts depthCapGb).
    * RAM beyond it earns nothing on THIS target; infrastructure valuation
@@ -233,13 +288,8 @@ export interface DispatchMemory {
 }
 
 export interface DispatchOptions {
-  /** GB kept free on home for the controller and dodge stubs. */
-  homeReserveGb?: number;
-  /** Home-reserve SHORTFALL to keep free on the largest fleet host instead —
-   *  nonzero only when the 40% home cap truncated the wanted reserve
-   *  (shared/ram/reserve.ts `capped`). Dodge placement may spend it exactly
-   *  like home's reserve. */
-  fleetReserveGb?: number;
+  /** Per-host executable dodge arena withheld from farm allocation. */
+  arenaReserves?: Readonly<Record<string, number>>;
   /** Money still needed for the active goal — sets the switch horizon. */
   goalRemaining?: number;
   /** Expected remaining run time in ms (the endgame route's estimate). Caps
@@ -270,6 +320,8 @@ export interface DispatchOptions {
    * its actions execute directly. A newly bought/rooted host is not usable RAM
    * until deployment completes. */
   sourceHosts?: ReadonlySet<string>;
+  /** Existing forecast/ETA currency for marginal farm-vs-share sizing. */
+  shareValue?: SharePricingInput;
 }
 
 export function initDispatch(): DispatchMemory {
@@ -279,17 +331,22 @@ export function initDispatch(): DispatchMemory {
     tracked: new Map(),
     inFlight: { hack: 0, grow: 0, weaken: 0 },
     segmentGb: { farm: 0, prep: 0, share: 0 },
+    shareWorkers: new Map(),
     prepInFlight: new Map(),
     failedWeakenGroups: new Set(),
     nextOpId: 1,
     nextServerIndex: 0,
     lastAnchor: -Infinity,
+    jitDecisionId: 0,
+    countedJitDecisionMisses: new Set(),
+    lastDispatchAt: 0,
     jitPending: [],
     prepPending: [],
     mode: "hwgw",
     modeSince: -Infinity,
     modeWhy: "initial",
     pool: initPool(),
+    pooling: false,
     stats: {
       launched: { hack: 0, grow: 0, weaken: 0 },
       landed: { hack: 0, grow: 0, weaken: 0 },
@@ -297,7 +354,9 @@ export function initDispatch(): DispatchMemory {
       expEarned: 0,
       hacks: 0,
       allocFails: 0,
+      allocFailsByPhase: { jit: 0, prep: 0, eager: 0 },
       batchesSkipped: 0,
+      missedWindow: { deadline: 0, "arrival-security": 0, "arrival-money": 0, placement: 0 },
       execs: 0,
       stockOps: 0,
       nativeRamMs: 0,
@@ -317,8 +376,7 @@ const HOST_BLOCKS_LIMIT = 64;
 function syncTopology(
   memory: DispatchMemory,
   view: WorldView,
-  homeReserveGb: number,
-  fleetReserveGb = 0,
+  arenaReserves: Readonly<Record<string, number>> = {},
   sourceHosts?: ReadonlySet<string>,
 ): FleetCapacity {
   // Our own in-flight ops are transient — their RAM frees within one batch
@@ -329,50 +387,29 @@ function syncTopology(
   // how a 32 GB home stalled the dispatcher outright.
   const ours = new Map<string, number>();
   for (const tracked of memory.tracked.values()) {
+    if (tracked.workerId !== undefined) continue;
     ours.set(tracked.hostname, (ours.get(tracked.hostname) ?? 0) + tracked.gb);
   }
-  // A home too small to hold the full feature-step reserve (the 40% cap in
-  // shared/ram/reserve.ts) spills the SHORTFALL onto a fleet host, so the
-  // biggest declared probe step stays affordable somewhere. Without this the
-  // farm packs every fleet block and the probe that is a feature's only
-  // signal source starves — measured: stock-manipulation observed 906/3600
-  // market ticks because the 10 GB sampler lost every sweep.
-  //
-  // SMALLEST host that fits, not the largest: the hack block must land as ONE
-  // contiguous call, so carving the reserve out of the biggest host shrinks
-  // `largestBlockGb` for every solve (measured on bn1-speedrun: fleet
-  // utilization fell ~90% → ~72% with the reserve parked on the top host).
-  // Same best-fit policy as dodgeHost. The largest host is a fallback only
-  // while the reserve itself still fits on it: consuming an undersized host
-  // would reduce farm capacity without making the starved dodge executable.
-  let reserveHost: string | undefined;
-  if (fleetReserveGb > 0) {
-    const fitsGb = fleetReserveGb + 4; // stub base + a couple of threads of churn
-    let largest: string | undefined;
-    let largestRam = 0;
-    let smallestFit: string | undefined;
-    let smallestFitRam = Infinity;
-    for (const server of view.servers) {
-      if (!server.hasAdminRights || server.hostname === "home" || server.maxRam < 2) continue;
-      if (sourceHosts && !sourceHosts.has(server.hostname)) continue;
-      if (server.maxRam > largestRam || (server.maxRam === largestRam && server.hostname < (largest ?? "￿"))) {
-        largest = server.hostname;
-        largestRam = server.maxRam;
-      }
-      if (
-        server.maxRam >= fitsGb &&
-        (server.maxRam < smallestFitRam || (server.maxRam === smallestFitRam && server.hostname < (smallestFit ?? "￿")))
-      ) {
-        smallestFit = server.hostname;
-        smallestFitRam = server.maxRam;
+  for (const worker of memory.pool.workers.values()) {
+    ours.set(worker.hostname, (ours.get(worker.hostname) ?? 0) + worker.gb);
+  }
+  for (const worker of memory.shareWorkers.values()) {
+    ours.set(worker.hostname, (ours.get(worker.hostname) ?? 0) + worker.gb);
+  }
+  for (const batch of memory.jitPending) {
+    for (const op of batch.ops) {
+      for (const block of op.reservation?.blocks ?? []) {
+        const gb = block.threads * WORKER_RAM[op.kind];
+        ours.set(block.hostname, (ours.get(block.hostname) ?? 0) + gb);
       }
     }
-    reserveHost = smallestFit ?? (largestRam >= fleetReserveGb ? largest : undefined);
   }
   let fleetGb = 0;
   let largestBlockGb = 0;
   const hostBlocksGb: number[] = [];
   const freeNowBlocksGb: number[] = [];
+  let effectiveShareThreads = 0;
+  let allocatableShareGb = 0;
   for (const server of view.servers) {
     if (!server.hasAdminRights || server.maxRam < 2) continue;
     if (sourceHosts && !sourceHosts.has(server.hostname)) {
@@ -389,12 +426,7 @@ function syncTopology(
       );
       continue;
     }
-    const reserved =
-      server.hostname === "home"
-        ? homeReserveGb
-        : server.hostname === reserveHost
-          ? fleetReserveGb
-          : 0;
+    const reserved = Math.min(server.maxRam, Math.max(0, arenaReserves[server.hostname] ?? 0));
     const existing = memory.heap.host(server.hostname);
     // The heap owns `used` (reservation ledger); topology comes from the view.
     memory.heap.upsert(
@@ -404,13 +436,19 @@ function syncTopology(
       server.cpuCores,
       reserved,
     );
-    const usable = Math.max(0, server.maxRam - reserved);
-    fleetGb += usable;
     const ledgerUsed = memory.heap.host(server.hostname)?.used ?? 0;
     const externalUsed = Math.max(0, ledgerUsed - (ours.get(server.hostname) ?? 0));
     const placeable = Math.max(0, server.maxRam - reserved - externalUsed);
+    // Capacity is what the farm can actually place after standing foreign
+    // usage (notably start.js), while our transient workers remain reusable.
+    // Counting max-reserved here fabricated the controller's 3.6 GB as farm
+    // capacity once the old home reserve disappeared.
+    fleetGb += placeable;
     if (placeable > largestBlockGb) largestBlockGb = placeable;
     if (placeable >= WORKER_RAM.hack) hostBlocksGb.push(placeable);
+    const shareThreads = Math.floor(placeable / WORKER_RAM.share);
+    effectiveShareThreads += shareThreads * intelligenceBonus(view.player.intelligence, 2) * coreEffect(server.cpuCores);
+    allocatableShareGb += shareThreads * WORKER_RAM.share;
     const freeNow = memory.heap.freeOn(server.hostname);
     if (freeNow >= WORKER_RAM.grow) freeNowBlocksGb.push(freeNow);
   }
@@ -425,7 +463,8 @@ function syncTopology(
   const previousPrepHost = memory.evaluator.directive.prep?.host;
   const prepWaveInFlight = previousPrepHost !== undefined && (memory.prepInFlight.get(previousPrepHost) ?? 0) > 0;
   if (hostBlocksGb.length > HOST_BLOCKS_LIMIT) hostBlocksGb.length = HOST_BLOCKS_LIMIT;
-  return { fleetGb, largestBlockGb, hostBlocksGb, prepWaveGb, prepFreeGb, prepWaveInFlight };
+  const effectiveShareThreadsPerGb = allocatableShareGb > 0 ? effectiveShareThreads / allocatableShareGb : 0;
+  return { fleetGb, largestBlockGb, hostBlocksGb, prepWaveGb, prepFreeGb, prepWaveInFlight, effectiveShareThreadsPerGb };
 }
 
 function release(memory: DispatchMemory, opId: number): void {
@@ -460,6 +499,79 @@ function releaseWorker(memory: DispatchMemory, workerId: number): void {
   memory.segmentGb.farm -= worker.gb;
 }
 
+/** A share worker owns one heap block for its process lifetime. Completion is
+ * the sole release point, matching pooled workers and making duplicate exits
+ * harmless. */
+function releaseShareWorker(memory: DispatchMemory, workerId: number): void {
+  const worker = memory.shareWorkers.get(workerId);
+  if (!worker) return;
+  memory.shareWorkers.delete(workerId);
+  memory.heap.free(worker.hostname, worker.gb);
+  memory.segmentGb.share -= worker.gb;
+}
+
+export function currentShareBonus(memory: DispatchMemory): number {
+  const effectiveThreads = 1 + [...memory.shareWorkers.values()]
+    .reduce((sum, worker) => sum + worker.effectiveThreads, 0);
+  return 1 + Math.log(effectiveThreads) / 25;
+}
+
+/** Ask enough divisible workers to leave for hacking's currently unfilled
+ * budget. The mailbox action is cooperative: worker.ts races the active share
+ * slice against it, then atExit produces the sole heap-release completion. */
+export function requestShareStops(
+  memory: DispatchMemory,
+  actions: Action[],
+  wantedGb: number,
+  selected?: ReadonlySet<number>,
+): number {
+  let requested = 0;
+  for (const worker of [...memory.shareWorkers.values()].sort((a, b) => b.gb - a.gb)) {
+    if (worker.stopping || (selected && !selected.has(worker.workerId))) continue;
+    worker.stopping = true;
+    actions.push({ type: "stopShare", opId: worker.workerId });
+    requested += worker.gb;
+    if (requested + 1e-9 >= wantedGb) break;
+  }
+  return requested;
+}
+
+/** Consume process-exit accounting without running a planning pass. The game
+ * adapter uses this before a broker drain so newly real-free RAM is leased
+ * before the farm can count it again. Both release helpers are idempotent. */
+export function releaseWorkerExits(memory: DispatchMemory, workerIds: Iterable<number>): void {
+  for (const workerId of workerIds) {
+    releaseShareWorker(memory, workerId);
+    releaseWorker(memory, workerId);
+  }
+}
+
+function launchShare(memory: DispatchMemory, actions: Action[], intelligence: number): void {
+  const threads = memory.heap.capacity(WORKER_RAM.share);
+  if (threads < 1) return;
+  const allocation = memory.heap.allocate({
+    blockSize: WORKER_RAM.share,
+    threads,
+    policy: "spread",
+  });
+  if (!allocation.ok) return;
+  for (const block of allocation.reservation.blocks) {
+    const workerId = memory.nextOpId++;
+    const gb = block.threads * WORKER_RAM.share;
+    memory.shareWorkers.set(workerId, {
+      workerId,
+      hostname: block.hostname,
+      threads: block.threads,
+      gb,
+      effectiveThreads: block.threads * intelligenceBonus(intelligence, 2) * coreEffect(block.cores),
+      stopping: false,
+    });
+    memory.segmentGb.share += gb;
+    memory.stats.execs++;
+    actions.push({ type: "share", source: block.hostname, threads: block.threads, opId: workerId });
+  }
+}
+
 /** Roll back ops the driver could not actually start (sim rejection, ns.exec
  * returning pid 0). Without this the reservation would never be freed — the
  * exact leak the earlier rewrite's dispatcher had (`nobody0/bitburner`; see
@@ -469,6 +581,10 @@ function releaseWorker(memory: DispatchMemory, workerId: number): void {
 export function releaseFailed(memory: DispatchMemory, opIds: Iterable<number>): void {
   let jitFailed = false;
   for (const opId of opIds) {
+    if (memory.shareWorkers.has(opId)) {
+      releaseShareWorker(memory, opId);
+      continue;
+    }
     const tracked = memory.tracked.get(opId);
     if (!tracked) continue;
     if (tracked.jitRole !== undefined) jitFailed = true;
@@ -482,7 +598,7 @@ export function releaseFailed(memory: DispatchMemory, opIds: Iterable<number>): 
   // launched its hack yet (hack is the last native start), so abandoning the
   // suffix preserves correctness; already-started support is harmless.
   if (jitFailed) {
-    memory.jitPending = [];
+    abandonJitPending(memory, memory.lastDispatchAt);
     memory.lastAnchor = -Infinity;
   }
 }
@@ -494,9 +610,8 @@ export function dispatch(
   completions: CompletionEvent[],
   options: DispatchOptions = {},
 ): { actions: Action[]; directive: TargetDirective; switched?: { from?: string; to: string } } {
-  // Default 0: the pure engine reserves nothing. The game driver passes
-  // HOME_RESERVE_GB so dodge stubs always have headroom.
-  const homeReserveGb = options.homeReserveGb ?? 0;
+  const arenaReserves = options.arenaReserves ?? {};
+  memory.lastDispatchAt = view.time;
 
   const byHost = new Map(view.servers.map((s) => [s.hostname, s]));
   const weakenWakeTargets = new Set<string>();
@@ -506,9 +621,11 @@ export function dispatch(
   for (const completion of completions) {
     if (completion.kind === "sleep") continue;
     if (completion.kind === "workerExit") {
-      // A serve worker's process ended (idle timeout, kill, reload): its RAM
-      // frees NOW, not when its jobs completed.
-      if (completion.opId !== undefined) releaseWorker(memory, completion.opId);
+      // Pooled and share workers both release only on process exit. Each map
+      // is its own idempotence guard, so a duplicate cannot double-free.
+      if (completion.opId !== undefined) {
+        releaseWorkerExits(memory, [completion.opId]);
+      }
       continue;
     }
     memory.stats.landed[completion.kind]++;
@@ -562,7 +679,7 @@ export function dispatch(
     memory.failedWeakenGroups.delete(group);
   }
 
-  const capacity = syncTopology(memory, view, homeReserveGb, options.fleetReserveGb ?? 0, options.sourceHosts);
+  const capacity = syncTopology(memory, view, arenaReserves, options.sourceHosts);
   const stepped = stepEvaluator(
     view,
     memory.evaluator,
@@ -574,10 +691,14 @@ export function dispatch(
         ? { reinvestmentReturnPerDollarSec: options.reinvestmentReturnPerDollarSec }
         : {}),
       ...(options.hackingSkillGoal !== undefined ? { hackingSkillGoal: options.hackingSkillGoal } : {}),
+      ...(options.shareValue ? { shareValue: options.shareValue } : {}),
     },
   );
   memory.evaluator = stepped.memory;
-  const directive = stepped.directive;
+  const directive = {
+    ...stepped.directive,
+    segments: adaptSegmentsToFleet(stepped.directive.segments, capacity.fleetGb),
+  };
   const activeTargets = new Set([directive.farm?.host, directive.prep?.host].filter((host): host is string => Boolean(host)));
   memory.prepPending = memory.prepPending.filter((op) => activeTargets.has(op.target));
 
@@ -587,8 +708,9 @@ export function dispatch(
   // cannot expose a hack without its covers. Later plans depended on the same
   // predicted ledger, so discard the whole pending suffix together.
   if (stepped.switched) {
-    memory.jitPending = [];
+    abandonJitPending(memory, view.time);
     memory.lastAnchor = -Infinity;
+    memory.jitDecisionId++;
   }
 
   const actions: Action[] = [];
@@ -614,12 +736,12 @@ export function dispatch(
     }
   }
   if (options.buyInfrastructure) {
-    const pservCost = view.prices.cloudServer[PSERV_RAM] ?? Infinity;
+    const cloud = cheapestCloudQuote(view.prices.cloudServer);
     const owned = view.servers.filter((s) => s.purchasedByPlayer && s.hostname !== "home").length;
-    if (owned < view.prices.cloudServerLimit && view.player.money >= BUY_HEADROOM * pservCost) {
-      actions.push({ type: "buyServer", ram: PSERV_RAM, name: `pserv-${memory.nextServerIndex++}` });
+    if (cloud && owned < view.prices.cloudServerLimit && view.player.money >= cloud.cost) {
+      actions.push({ type: "buyServer", ram: cloud.ram, name: `pserv-${memory.nextServerIndex++}` });
     }
-    if (view.player.money >= BUY_HEADROOM * view.prices.upgradeHomeRam) {
+    if (view.player.money >= view.prices.upgradeHomeRam) {
       actions.push({ type: "upgradeHomeRam" });
     }
   }
@@ -636,9 +758,39 @@ export function dispatch(
     memory.depthCapHost = undefined;
   }
   let spillGb = 0;
+  memory.pooling = false;
   for (const segment of directive.segments) {
-    if (segment.kind === "share") spillGb += Math.max(0, segment.gb - memory.segmentGb.share);
     if (segment.kind === "prep" && !prepActive) spillGb += Math.max(0, segment.gb - memory.segmentGb.prep);
+  }
+  const farmPriority = directive.segments.findIndex((segment) => segment.kind === "farm");
+  const segmentIsActive = (segment: (typeof directive.segments)[number]): boolean =>
+    segment.gb > 1e-9 && (segment.kind !== "prep" || prepActive);
+  const higherPriorityPrep = farmPriority >= 0 && directive.segments
+    .slice(0, farmPriority)
+    .some((segment) => segment.kind === "prep" && segmentIsActive(segment));
+  const lowerPriorityDemand = farmPriority >= 0 && directive.segments
+    .slice(farmPriority + 1)
+    .some(segmentIsActive);
+  const shareThreat = (directive.share?.reputationSecondsPerBonus ?? 0) > 0;
+  const farmReservationMode: JitReservationMode = shareThreat || memory.shareWorkers.size > 0
+    ? "protected"
+    : higherPriorityPrep
+      ? "launch"
+      : lowerPriorityDemand
+        ? "protected"
+        : "launch";
+  if (farmReservationMode !== "protected") {
+    // A commit-time farm reservation is valuable only when work below farm in
+    // the arbiter's current ordering could consume the block. With no such
+    // demand, farm-vs-farm contention is zero-sum: committing the winner early
+    // merely fixes topology on staler information. Active higher-priority prep
+    // also wins. Release only reservations whose own launch window has not
+    // opened; due farm work remains committed because its support is sunk.
+    for (const batch of memory.jitPending) {
+      for (const op of batch.ops) {
+        if (op.reservation && jitLaunchAt(op) > now) releasePendingReservation(memory, op, now);
+      }
+    }
   }
 
   for (const segment of directive.segments) {
@@ -693,8 +845,9 @@ export function dispatch(
           // Pending plans have the old mode's role shape and quotas. Hacks are
           // emitted only after every support op in their batch, so abandoning
           // this unlaunched suffix is safe; already-running support is benign.
-          memory.jitPending = [];
+          abandonJitPending(memory, now);
           memory.lastAnchor = -Infinity;
+          memory.jitDecisionId++;
           memory.mode = decision.mode;
           memory.modeSince = now;
         }
@@ -736,6 +889,7 @@ export function dispatch(
           options.pooling === true &&
           memory.tracked.size > POOL_PRESSURE_OPS &&
           weakenMs / depth <= POOL_REUSE_WINDOW_MS;
+        memory.pooling ||= pooling;
         launchBatches(
           memory,
           actions,
@@ -751,6 +905,7 @@ export function dispatch(
           options.jit !== false,
           borrow,
           capacity.hostBlocksGb,
+          farmReservationMode,
         );
       } else {
         launchDuePrep(memory, actions, server, now, launchCtx, segmentCap, weakenWakeTargets.has(server.hostname));
@@ -768,6 +923,59 @@ export function dispatch(
     }
   }
 
+  const nonShareDeficitGb = directive.segments
+    .filter((segment) => segment.kind !== "share")
+    .reduce((sum, segment) => sum + Math.max(0, segment.gb - memory.segmentGb[segment.kind]), 0);
+  const hadShareWorkers = memory.shareWorkers.size > 0;
+  // The reputation gate — not `share.allotmentGb` — is the correct predicate
+  // here. `allotmentGb` is the RESERVATION the crossing carves out of the farm
+  // segment before hack plans; share's actual slice is the residual left after
+  // hack has planned within its allotment, and that residual costs hacking
+  // nothing by construction. Gating this on the allotment would make share
+  // refuse genuinely idle RAM.
+  //
+  // TODO (measured, unfixed): `nonShareDeficitGb` below is UNUSED ALLOTMENT,
+  // not unmet demand. The JIT farm is designed not to consume its whole
+  // segment, so on the scenario-share reputation lane the deficit is > 0 on
+  // 2338 of 2338 passes (mean 210.6 GB against a mean farm segment of 408.1
+  // and mean farm usage of 197.5) while allocFails stays 0 and
+  // missedWindow.placement stays 1 for the entire run — the farm never
+  // actually failed to place anything. Combined with the `Math.max(
+  // WORKER_RAM.share, ...)` floor below, which stops a whole block even when
+  // free RAM already covers the deficit, share is stopped every pass and can
+  // only relaunch once fully drained (`!hadShareWorkers`): 908 stop-all cycles
+  // and 2443 execs against 180 with share disabled.
+  //
+  // Share itself is NOT stealing from the farm. A/B on that lane: farm work is
+  // bit-identical with and without share (nativeGbMs 3.933e7, same moneyRate,
+  // same missedWindow) while reputation goes 198.84 -> 269.48 (+35.5%). Only
+  // the churn is waste. Gating the stop on an actual blocked placement
+  // (`op.placementBlocked` on a pending jit/prep op) instead of the phantom
+  // deficit measured 1141 execs (-53%) with farm work still bit-identical, at
+  // a cost of 4.3% reputation (269.48 -> 257.96) on this single seed — worth a
+  // benchmark pass before adopting.
+  const shareEnabled = (directive.share?.reputationSecondsPerBonus ?? 0) > 0;
+  if (!shareEnabled) {
+    requestShareStops(memory, actions, Infinity);
+  } else if (nonShareDeficitGb > 1e-9 && memory.shareWorkers.size > 0) {
+    // Hacking has first refusal. Free at least one whole share block even when
+    // aggregate free GB looks sufficient: a failed atomic hack/grow placement
+    // can be a contiguity deficit rather than a total-capacity deficit.
+    requestShareStops(
+      memory,
+      actions,
+      Math.max(WORKER_RAM.share, nonShareDeficitGb - memory.heap.freeTotal()),
+    );
+  }
+
+  const shareStopping = [...memory.shareWorkers.values()].some((worker) => worker.stopping);
+  if (shareEnabled && !shareStopping && (nonShareDeficitGb <= 1e-9 || !hadShareWorkers)) {
+    // Stanek is deliberately absent: charge strength favors one occasional
+    // LARGE contiguous call (highestCharge under a log, repetitions^0.07), the
+    // opposite of a freely preemptible fragment consumer.
+    launchShare(memory, actions, view.player.intelligence);
+  }
+
 
   // Publish the earliest pending invocation deadline as a pure sleep action.
   // The standalone planner executes it directly; the game driver turns it
@@ -775,11 +983,25 @@ export function dispatch(
   // paths therefore exercise the same schedule without injecting a clock into
   // strategy code.
   if (memory.jitPending.length > 0 || memory.prepPending.length > 0) {
-    const nextStart = Math.min(
-      ...memory.jitPending.flatMap((batch) => batch.ops.map((op) => op.startAt)),
+    const pendingStarts = [
+      ...memory.jitPending.flatMap((batch) => batch.ops.map((op) =>
+        op.reservation ? jitLaunchAt(op) : jitReserveAt(op)
+      )),
       ...memory.prepPending.map((op) => op.startAt),
-    );
-    actions.push({ type: "sleep", ms: nextStart > now ? nextStart - now : SPACER_MS });
+    ];
+    const overdue = pendingStarts.some((at) => at <= now);
+    const nextStart = Math.min(...pendingStarts.filter((at) => at > now));
+    const exactMs = Number.isFinite(nextStart) ? nextStart - now : Infinity;
+    // An overdue op is one that could not be placed, almost always because its
+    // RAM is not free yet. That frees on a completion, which wakes us anyway,
+    // so this is a fallback retry rather than the primary path — and retrying
+    // faster than a worker can start cannot succeed. Deliberately NOT the
+    // landing gap: a backoff and a landing separation are unrelated, and tying
+    // them together turns a tight grid into a spin.
+    actions.push({
+      type: "sleep",
+      ms: overdue ? Math.min(OVERDUE_RETRY_MS, exactMs) : exactMs,
+    });
   }
 
   return { actions, directive, switched: stepped.switched };
@@ -863,6 +1085,68 @@ function accountRamWork(
   memory.stats.paddingRamMsBySegment[segment] += paddingRamMs;
 }
 
+function noteMissedWindow(memory: DispatchMemory, reason: MissedWindowReason): void {
+  memory.stats.missedWindow[reason]++;
+}
+
+function noteJitDecisionMissedWindow(
+  memory: DispatchMemory,
+  decisionId: number,
+  reason: MissedWindowReason,
+): boolean {
+  const key = decisionId + "\u0000" + reason;
+  if (memory.countedJitDecisionMisses.has(key)) return false;
+  memory.countedJitDecisionMisses.add(key);
+  noteMissedWindow(memory, reason);
+  return true;
+}
+
+function noteBatchMissedWindow(
+  memory: DispatchMemory,
+  batch: PendingJitBatch,
+  reason: MissedWindowReason,
+): boolean {
+  if (reason === "deadline" || reason === "placement") {
+    return noteJitDecisionMissedWindow(memory, batch.decisionId, reason);
+  }
+  batch.countedMisses ??= {};
+  if (batch.countedMisses[reason]) return false;
+  batch.countedMisses[reason] = true;
+  noteMissedWindow(memory, reason);
+  return true;
+}
+
+function accountReservedPadding(
+  memory: DispatchMemory,
+  op: PendingJitOp,
+  now: number,
+): void {
+  if (!op.reservation || op.reservedAt === undefined) return;
+  const gbMs = op.reservation.gb * Math.max(0, now - op.reservedAt);
+  memory.stats.paddingRamMs += gbMs;
+  memory.stats.paddingRamMsByKind[op.kind] += gbMs;
+  memory.stats.paddingRamMsBySegment.farm += gbMs;
+  op.reservedAt = now;
+}
+
+function releasePendingReservation(memory: DispatchMemory, op: PendingJitOp, now: number): void {
+  if (!op.reservation) return;
+  accountReservedPadding(memory, op, now);
+  memory.segmentGb.farm -= op.reservation.gb;
+  op.reservation.release();
+  op.reservation = undefined;
+  op.reservedAt = undefined;
+}
+
+/** Abandon the predicted suffix through the same physical reservation handles
+ * that a successful launch transfers to workerExit accounting. */
+function abandonJitPending(memory: DispatchMemory, now: number): void {
+  for (const batch of memory.jitPending) {
+    for (const op of batch.ops) releasePendingReservation(memory, op, now);
+  }
+  memory.jitPending = [];
+}
+
 /** Highest security an invocation can observe in a correctly interleaved
  * pipeline. Planning start windows against this state means a landing effect
  * can make the NEXT operation due early, but never make it already late. The
@@ -910,7 +1194,74 @@ function jitRoles(
   );
 }
 
-function jitLedger(memory: DispatchMemory, host: string): LedgerOp[] {
+/** A ledger op with a back-reference to the pending op it came from, so the
+ * launch loop can identify the operation it is currently validating without
+ * rebuilding the ledger to exclude it. */
+interface LedgerEntry {
+  op: LedgerOp;
+  source?: PendingJitOp;
+}
+
+/** The ledger with back-references, in construction order. Callers that fold
+ * it sort by `compareLedgerOps`; `jitSecurityEvents` relies on construction
+ * order, so sorting here would change which security boundary wins a tie. */
+function jitLedgerEntries(memory: DispatchMemory, host: string): LedgerEntry[] {
+  const entries: LedgerEntry[] = [];
+  for (const [opId, tracked] of memory.tracked) {
+    if (tracked.target !== host || tracked.landing === undefined) continue;
+    const threads = tracked.gb / WORKER_RAM[tracked.kind];
+    entries.push({
+      op: {
+        kind: tracked.kind,
+        threads,
+        effectThreads: tracked.effectThreads ?? threads,
+        landing: tracked.landing,
+        opId,
+      },
+    });
+  }
+  let pendingId = -1;
+  for (const batch of memory.jitPending) {
+    if (batch.target !== host) continue;
+    for (const op of batch.ops) {
+      entries.push({
+        op: {
+          kind: op.kind,
+          threads: op.threads,
+          effectThreads: op.threads,
+          landing: op.landing,
+          opId: pendingId--,
+        },
+        source: op,
+      });
+    }
+  }
+  for (const op of memory.prepPending) {
+    if (op.target !== host) continue;
+    entries.push({
+      op: {
+        kind: "grow",
+        threads: op.threads,
+        fortifyThreads: op.maxThreads,
+        effectThreads: op.effectThreads,
+        landing: op.landing,
+        opId: pendingId--,
+      },
+    });
+  }
+  return entries;
+}
+
+/** The ledger without back-references, optionally excluding one pending op.
+ *
+ * Deliberately NOT expressed as a filter over `jitLedgerEntries`. An omitted
+ * op there would still consume an opId, leaving a gap in the descending
+ * sequence; the ids are the tie-break for equal landings, and shifting them
+ * changes which of two same-instant ops folds first. That is observable —
+ * `sim/tests/dispatch.test.ts` "re-validates arrival security immediately
+ * before dispatching a pending hack" fails on it. The duplication is the
+ * cheaper of the two costs. */
+function jitLedger(memory: DispatchMemory, host: string, omit?: PendingJitOp): LedgerOp[] {
   const ops: LedgerOp[] = [];
   for (const [opId, tracked] of memory.tracked) {
     if (tracked.target !== host || tracked.landing === undefined) continue;
@@ -927,6 +1278,7 @@ function jitLedger(memory: DispatchMemory, host: string): LedgerOp[] {
   for (const batch of memory.jitPending) {
     if (batch.target !== host) continue;
     for (const op of batch.ops) {
+      if (op === omit) continue;
       ops.push({
         kind: op.kind,
         threads: op.threads,
@@ -1017,6 +1369,7 @@ function launchDuePrep(
     if (padding < WORKER_STARTUP_GUARD_MS - 1e-9) {
       memory.prepPending.splice(memory.prepPending.indexOf(op), 1);
       memory.stats.batchesSkipped++;
+      noteMissedWindow(memory, op.placementBlocked ? "placement" : "deadline");
       continue;
     }
     // Re-place the atomic effect at launch time. Holding its provisional host
@@ -1027,6 +1380,8 @@ function launchDuePrep(
     const fallback = memory.heap.allocate(allocFor("grow", op.effectThreads));
     if (!fallback.ok) {
       memory.stats.allocFails++;
+      memory.stats.allocFailsByPhase.prep++;
+      op.placementBlocked = true;
       break;
     }
     const reservation = fallback.reservation;
@@ -1084,9 +1439,21 @@ function orderJitStarts(ops: PendingJitOp[]): void {
   }
 }
 
-/** Launch every planned op whose conservative start window has opened. This
- * is the actual JIT boundary: the process holds RAM for its native operation
- * plus a small guard, never for the preceding weaken time. */
+/** Commit before the operation's own guarded launch deadline by the measured
+ * dispatch-latency portion of that guard. This is a derived timestamp, not a
+ * fixed wall-clock lead from the current scheduler pump. */
+function jitReserveAt(op: PendingJitOp): number {
+  return op.reserveAt ?? op.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
+}
+
+function jitLaunchAt(op: PendingJitOp): number {
+  return op.startAt;
+}
+
+/** Reserve each planned op at its conservative commit deadline, then launch at
+ * the end of the measured dispatch-latency budget. The block is protected
+ * from lower-priority work without launching a padded worker a weaken-time
+ * early. */
 function launchDueJit(
   memory: DispatchMemory,
   actions: Action[],
@@ -1096,6 +1463,7 @@ function launchDueJit(
   schedule: JitSchedule,
   segmentCapGb: number,
   pooling: boolean,
+  reservationMode: JitReservationMode,
 ): boolean {
   const required = server.requiredHackingSkill;
   const ledger = jitLedger(memory, server.hostname);
@@ -1112,7 +1480,10 @@ function launchDueJit(
       // when that bound opens. Re-folding the entire deep pipeline at every
       // weaken landing is O(pending × ledger) and dominated long simulations
       // without changing which not-yet-due operation could launch.
-      if (op.startAt <= now) op.startAt = jitStartAt(op, securityEvents, server, now, ctx);
+      if (!op.reservation && jitReserveAt(op) <= now) {
+        op.startAt = jitStartAt(op, securityEvents, server, now, ctx);
+        op.reserveAt = op.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
+      }
     }
     orderJitStarts(batch.ops);
   }
@@ -1127,19 +1498,177 @@ function launchDueJit(
   for (const worker of memory.pool.workers.values()) {
     if (worker.role) heldByRole[worker.role] += worker.gb;
   }
+  for (const batch of memory.jitPending) {
+    for (const op of batch.ops) heldByRole[op.role] += op.reservation?.gb ?? 0;
+  }
+
+  // Commit due blocks before emitting any work. Pool workers are themselves
+  // physical role reservations, so the early heap commitment is needed only
+  // on the one-shot path.
+  if (!pooling) {
+    reservePending:
+    for (const batch of memory.jitPending) {
+      if (batch.target !== server.hostname) continue;
+      const ordered = [...batch.ops].sort(
+        (a, b) => a.startAt - b.startAt || JIT_ROLE_PRIORITY[a.role] - JIT_ROLE_PRIORITY[b.role],
+      );
+      for (const op of ordered) {
+        if (op.reservation || jitReserveAt(op) > now) continue;
+        const requestedGb = op.threads * WORKER_RAM[op.kind];
+        if (jitLaunchAt(op) > now && reservationMode === "launch") continue;
+        const roleCapGb = Math.max(schedule.quotaGb[op.role], requestedGb);
+        if (
+          heldByRole[op.role] + requestedGb > roleCapGb + 1e-9 ||
+          memory.segmentGb.farm + requestedGb > segmentCapGb + 1e-9
+        ) break reservePending;
+        const allocation = memory.heap.allocate(allocFor(op.kind, op.threads));
+        if (!allocation.ok) {
+          op.placementBlocked = true;
+          break reservePending;
+        }
+        if (
+          heldByRole[op.role] + allocation.reservation.gb > roleCapGb + 1e-9 ||
+          memory.segmentGb.farm + allocation.reservation.gb > segmentCapGb + 1e-9
+        ) {
+          allocation.reservation.release();
+          break reservePending;
+        }
+        op.reservation = allocation.reservation;
+        op.reservedAt = now;
+        heldByRole[op.role] += allocation.reservation.gb;
+        memory.segmentGb.farm += allocation.reservation.gb;
+      }
+    }
+  }
+
+  // Arrival prediction, folded ONCE across the whole pass.
+  //
+  // Each hack needs the state at its own landing, excluding itself. Rebuilding
+  // and re-sorting the whole ledger per hack is O(depth) work per hack and
+  // therefore O(depth^2) per pass, which dominates once a deep pipeline is
+  // running. Hacks are reached in batch order and a batch's hack lands first,
+  // so their landings are non-decreasing and one forward cursor serves them
+  // all. `foldPredicted` returns the state at `at` with `skip` withheld;
+  // `commitFolded` then folds that op's FINAL threads, which is what keeps the
+  // cursor correct across the shrink and removal this loop performs.
+  //
+  // Caveat: within a group of exactly equal landings the withheld op folds
+  // last rather than in opId order. Equal landings are already a modelled
+  // tie-break rather than a Netscript guarantee (see prediction.ts).
+  const foldStatics = staticsOf(server);
+  const ledgerEntries = jitLedgerEntries(memory, server.hostname)
+    .sort((a, b) => compareLedgerOps(a.op, b.op));
+  let ledgerIndex = 0;
+  let foldedAt = -Infinity;
+  let foldState: PredictedState = {
+    hackDifficulty: server.hackDifficulty,
+    moneyAvailable: server.moneyAvailable,
+  };
+  let withheld: LedgerEntry | undefined;
+  const foldPredicted = (at: number, skip: PendingJitOp): PredictedState => {
+    // Landings should be non-decreasing; if that ever fails, fall back to the
+    // exact whole-ledger fold rather than silently reusing a cursor that has
+    // already advanced past `at`.
+    if (at < foldedAt) {
+      return predictAtLanding(
+        ctx,
+        foldStatics,
+        { hackDifficulty: server.hackDifficulty, moneyAvailable: server.moneyAvailable },
+        jitLedger(memory, server.hostname, skip),
+        at,
+      );
+    }
+    foldedAt = at;
+    while (ledgerIndex < ledgerEntries.length && ledgerEntries[ledgerIndex]!.op.landing <= at) {
+      const entry = ledgerEntries[ledgerIndex]!;
+      ledgerIndex++;
+      if (entry.source === skip) withheld = entry;
+      else foldState = applyLedgerOp(ctx, foldStatics, foldState, entry.op);
+    }
+    return foldState;
+  };
+  /** Fold the withheld op at the size it was actually dispatched at, or drop
+   * it when the loop removed it. */
+  const commitFolded = (threads: number | undefined): void => {
+    const entry = withheld;
+    withheld = undefined;
+    if (!entry || threads === undefined || threads <= 0) return;
+    foldState = applyLedgerOp(ctx, foldStatics, foldState, {
+      ...entry.op,
+      threads,
+      effectThreads: threads,
+    });
+  };
+
+  // How far past `now` this pass may reach forward for work.
+  //
+  // Waking once per operation start is one pass per landing-gap, which at a
+  // tight grid is most of the scheduler's cost. Launching an operation early
+  // does not move its landing — additionalMsec absorbs the difference — so a
+  // window is affordable; what it costs is padding, RAM resident while doing
+  // no native work, which is why it is bounded rather than open-ended.
+  //
+  // It is truncated at the next weaken landing, and that truncation is the
+  // important half. A weaken completion is the only moment security is known
+  // to be back at minimum, so it is both the safest trigger and the one with
+  // the least padding. Reaching past it would launch against a security the
+  // plan did not assume and pay for the whole interval; deferring to it is the
+  // generalisation `latestJitStart` already applies when choosing startAt
+  // (spec/jit-reference.md section 2). The periodic pass gets things rolling
+  // and recovers; the weaken wake remains the guarantee.
+  const nextWeakenLanding = ledgerEntries.find(
+    (entry) => entry.op.kind === "weaken" && entry.op.landing > now,
+  )?.op.landing ?? Infinity;
+  const launchHorizon = Math.min(now + JIT_LAUNCH_WINDOW_MS, nextWeakenLanding);
 
   let emitted = 0;
   for (const batch of memory.jitPending) {
     if (batch.target !== server.hostname) continue;
-    // Native start order, not landing order: slow weakens first, then grow,
-    // hack last. Use an explicit tie-break rather than relying on sort
-    // stability: shotgun depends on FIFO too, but deliberately bypasses JIT.
     const ordered = [...batch.ops].sort(
       (a, b) => a.startAt - b.startAt || JIT_ROLE_PRIORITY[a.role] - JIT_ROLE_PRIORITY[b.role],
     );
     for (const op of ordered) {
       if (emitted >= MAX_PREP_OPS_PER_PASS) return true;
-      if (op.startAt > now) break;
+      if (jitLaunchAt(op) > launchHorizon) continue;
+      if (!pooling && !op.reservation) continue;
+
+      // The plan-time fold sizes support, but only this point observes every
+      // state change which happened while H waited outside RAM. Validate H
+      // before the live-duration deadline: raised arrival security is the
+      // safety brake firing, not an accidental scheduler miss.
+      if (op.kind === "hack") {
+        const statics = foldStatics;
+        const predicted = foldPredicted(op.landing, op);
+        const baseHackThreads = op.baseHackThreads ?? op.threads;
+        const safeHackThreads = hackThreadsAtLanding(ctx, statics, predicted, baseHackThreads);
+        if (safeHackThreads === undefined) {
+          heldByRole[op.role] -= op.reservation?.gb ?? 0;
+          releasePendingReservation(memory, op, now);
+          batch.ops.splice(batch.ops.indexOf(op), 1);
+          memory.stats.batchesSkipped++;
+          noteBatchMissedWindow(memory, batch, "arrival-security");
+          commitFolded(undefined);
+          continue;
+        }
+        const shrunkThreads = Math.min(op.threads, safeHackThreads);
+        if (shrunkThreads < op.threads) {
+          // A committed atomic block may be larger than the newly-safe hack.
+          // Release and synchronously re-place the smaller call before any
+          // lower-priority allocator can observe the gap.
+          heldByRole[op.role] -= op.reservation?.gb ?? 0;
+          releasePendingReservation(memory, op, now);
+          noteBatchMissedWindow(memory, batch, "arrival-money");
+        }
+        op.threads = shrunkThreads;
+        if (op.threads < 1) {
+          batch.ops.splice(batch.ops.indexOf(op), 1);
+          memory.stats.batchesSkipped++;
+          noteBatchMissedWindow(memory, batch, "arrival-money");
+          commitFolded(undefined);
+          continue;
+        }
+        commitFolded(op.threads);
+      }
 
       // This is deliberately live: Netscript fixes duration when the HGW call
       // is invoked, not when the batch was planned.
@@ -1149,13 +1678,16 @@ function launchDueJit(
       // invoking Netscript. Less than the measured startup allowance is no
       // longer a safe launch even if the pure duration still fits on paper.
       if (padding < WORKER_STARTUP_GUARD_MS - 1e-9) {
-        memory.jitPending = [];
-        memory.stats.batchesSkipped++;
+        const reason = op.placementBlocked ? "placement" : "deadline";
+        if (noteBatchMissedWindow(memory, batch, reason)) memory.stats.batchesSkipped++;
+        abandonJitPending(memory, now);
         return false;
       }
 
       const requestedGb = op.threads * WORKER_RAM[op.kind];
-      const poolPlan = pooling
+      const poolPlan = op.reservation
+        ? { take: [], missThreads: 0 }
+        : pooling
         ? planTake(memory.pool, op.kind, op.threads, new Set(), op.role)
         : { take: [], missThreads: op.threads };
       const missRequestedGb = poolPlan.missThreads * WORKER_RAM[op.kind];
@@ -1176,18 +1708,24 @@ function launchDueJit(
         // expose a dependent hack while a required support launch is blocked.
         return true;
       }
-      let reservation: Reservation | undefined;
-      if (poolPlan.missThreads >= 1) {
+      let reservation: Reservation | undefined = op.reservation;
+      if (!reservation && poolPlan.missThreads >= 1) {
         const allocation = memory.heap.allocate(allocFor(op.kind, poolPlan.missThreads));
         if (!allocation.ok) {
-          memory.stats.allocFails++;
+          if (!op.placementBlocked) {
+            memory.stats.allocFails++;
+            memory.stats.allocFailsByPhase.jit++;
+          }
+          op.placementBlocked = true;
           return true;
         }
         reservation = allocation.reservation;
       }
       if (
-        heldByRole[op.role] + (reservation?.gb ?? 0) > roleCapGb + 1e-9 ||
-        memory.segmentGb.farm + (reservation?.gb ?? 0) > segmentCapGb + 1e-9
+        !op.reservation && (
+          heldByRole[op.role] + (reservation?.gb ?? 0) > roleCapGb + 1e-9 ||
+          memory.segmentGb.farm + (reservation?.gb ?? 0) > segmentCapGb + 1e-9
+        )
       ) {
         reservation?.release();
         return true;
@@ -1256,8 +1794,14 @@ function launchDueJit(
         );
         track(block.hostname, block.threads, effectThreads, gb, { id: workerId, spawn: true });
       }
-      heldByRole[op.role] += reservation?.gb ?? 0;
-      memory.segmentGb.farm += reservation?.gb ?? 0;
+      if (op.reservation) {
+        accountReservedPadding(memory, op, now);
+        op.reservation = undefined;
+        op.reservedAt = undefined;
+      } else {
+        heldByRole[op.role] += reservation?.gb ?? 0;
+        memory.segmentGb.farm += reservation?.gb ?? 0;
+      }
       batch.ops.splice(batch.ops.indexOf(op), 1);
       emitted += poolPlan.take.length + (reservation?.blocks.length ?? 0);
     }
@@ -1303,7 +1847,13 @@ function planJitBatches(
 
   for (let planned = 0; planned < MAX_BATCHES_PER_PASS; planned++) {
     if (memory.jitPending.length + memory.inFlight.hack >= maxDepth) return;
-    const anchor = Math.max(now + weakenMs, memory.lastAnchor + schedule.intervalMs);
+    // A cheap floor only: the exact one depends on batchWorstDifficulty, which
+    // is not known until the batch is sized, so any startAt still left in the
+    // past is corrected by the shift below.
+    let anchor = Math.max(
+      now + weakenMs,
+      memory.lastAnchor + schedule.intervalMs,
+    );
     const predicted = predictAtLanding(
       ctx,
       statics,
@@ -1313,7 +1863,9 @@ function planJitBatches(
     );
     const sized = sizeBatchAtLanding(ctx, statics, predicted, solution);
     if (!sized) {
-      memory.stats.batchesSkipped++;
+      if (noteJitDecisionMissedWindow(memory, memory.jitDecisionId, "arrival-security")) {
+        memory.stats.batchesSkipped++;
+      }
       return;
     }
     const ops: PendingJitOp[] = solution.kind === "hgw"
@@ -1328,6 +1880,10 @@ function planJitBatches(
           pending("g", "grow", sized.growThreads, anchor + 2 * SPACER_MS, influence?.side === "long"),
           pending("h", "hack", sized.hackThreads, anchor, influence?.side === "short"),
         ];
+    const pendingHack = ops.find((op) => op.kind === "hack");
+    if (pendingHack) {
+      pendingHack.baseHackThreads = solution.hackThreads;
+    }
     const batchWorstDifficulty = jitWorstDifficultyFor(
       solution.kind,
       sized.hackThreads,
@@ -1337,9 +1893,29 @@ function planJitBatches(
     for (const op of ops) {
       op.startAt = op.landing - opDurationMs(op.kind, ctx, batchWorstDifficulty, required) - JIT_LAUNCH_GUARD_MS;
     }
+    // An op whose startAt is already in the past can never launch on time, and
+    // the whole batch depends on it. Shift by the exact deficit rather than
+    // padding the anchor with a worst-case guess: the anchor is chosen before
+    // batchWorstDifficulty is known, so a guess large enough to always cover
+    // this would cost cadence on every batch instead of the rare one.
+    const deficit = ops.reduce((worst, op) => Math.max(worst, now - op.startAt), 0);
+    if (deficit > 0) {
+      anchor += deficit;
+      for (const op of ops) {
+        op.landing += deficit;
+        op.startAt += deficit;
+      }
+    }
     orderJitStarts(ops);
+    for (const op of ops) {
+      op.reserveAt = op.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
+    }
     const retained = ops.filter((op) => op.threads >= 1);
-    memory.jitPending.push({ target: server.hostname, ops: retained });
+    memory.jitPending.push({
+      target: server.hostname,
+      ops: retained,
+      decisionId: memory.jitDecisionId,
+    });
     for (const op of retained) {
       planningLedger.push({
         kind: op.kind,
@@ -1375,6 +1951,7 @@ function launchBatches(
    * land before the current prep wave, so the next wave can reclaim it. */
   borrow?: { gb: number; landingDeadline: number },
   hostBlocksGb?: readonly number[],
+  reservationMode: JitReservationMode = "protected",
 ): void {
   const host = server.hostname;
   const difficulty = server.hackDifficulty;
@@ -1407,16 +1984,16 @@ function launchBatches(
       // absolute cap creates a self-fulfilling RAM-growth stall.
       memory.depthCapGb = solution.jitSaturationGb ?? jitCapacity(roles, intervalMs).totalGb;
       memory.depthCapHost = host;
-      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling)) return;
+      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, reservationMode)) return;
       planJitBatches(memory, solution, server, now, ctx, schedule, influence);
-      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling);
+      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, reservationMode);
       return;
     }
     // Pending batches have not launched their hack yet. If the farm segment
     // shrank below the executable role envelope, abandon them safely and let
     // the simple atomic path take over once the target is genuinely prepped.
     if (memory.jitPending.some((batch) => batch.target === host)) {
-      memory.jitPending = [];
+      abandonJitPending(memory, now);
       memory.lastAnchor = -Infinity;
       if (!isPrepped(server)) return;
     }
@@ -1467,7 +2044,11 @@ function launchBatches(
       // Even weaken needs positive padding: its worker starts asynchronously,
       // so `now + weakenMs` would make it land after the shared FIFO deadline.
       ? now + weakenMs + JIT_LAUNCH_GUARD_MS
-      : Math.max(now + weakenMs + SPACER_MS, memory.lastAnchor + intervalMs);
+      // A launch budget, not a landing separation: ops are placed at
+      // `landing - duration - JIT_LAUNCH_GUARD_MS`, so an anchor closer than
+      // that guard puts the first weaken's startAt in the past and the whole
+      // batch is dropped.
+      : Math.max(now + weakenMs + JIT_LAUNCH_GUARD_MS, memory.lastAnchor + intervalMs);
 
     // Landing-state prediction (Q1): fold the in-flight ledger to the hack's
     // landing. isPrepped admits min+1 sec / 90 % money, so sizing against the
@@ -1485,31 +2066,39 @@ function launchBatches(
     const sized = sizeBatchAtLanding(ctx, statics, predicted, solution);
     if (!sized) {
       memory.stats.batchesSkipped++;
+      noteMissedWindow(memory, "arrival-security");
       return;
+    }
+    const safeHackThreads = hackThreadsAtLanding(ctx, statics, predicted, solution.hackThreads) ?? 0;
+    if (safeHackThreads < solution.hackThreads) {
+      noteMissedWindow(memory, "arrival-money");
+      if (safeHackThreads < 1) {
+        memory.stats.batchesSkipped++;
+      }
     }
 
     const ops = (
       shotgun
         ? solution.kind === "hgw"
           ? [
-              { kind: "hack" as const, threads: sized.hackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
+              { kind: "hack" as const, threads: safeHackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
               { kind: "grow" as const, threads: sized.growThreads, duration: growMs, landing: anchor, stock: influence?.side === "long" },
               { kind: "weaken" as const, threads: sized.weaken2Threads, duration: weakenMs, landing: anchor, stock: false },
             ]
           : [
-              { kind: "hack" as const, threads: sized.hackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
+              { kind: "hack" as const, threads: safeHackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
               { kind: "weaken" as const, threads: sized.weaken1Threads, duration: weakenMs, landing: anchor, stock: false },
               { kind: "grow" as const, threads: sized.growThreads, duration: growMs, landing: anchor, stock: influence?.side === "long" },
               { kind: "weaken" as const, threads: sized.weaken2Threads, duration: weakenMs, landing: anchor, stock: false },
             ]
         : solution.kind === "hgw"
         ? [
-            { kind: "hack" as const, threads: sized.hackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
+            { kind: "hack" as const, threads: safeHackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
             { kind: "grow" as const, threads: sized.growThreads, duration: growMs, landing: anchor + SPACER_MS, stock: influence?.side === "long" },
             { kind: "weaken" as const, threads: sized.weaken2Threads, duration: weakenMs, landing: anchor + 2 * SPACER_MS, stock: false },
           ]
         : [
-            { kind: "hack" as const, threads: sized.hackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
+            { kind: "hack" as const, threads: safeHackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
             { kind: "weaken" as const, threads: sized.weaken1Threads, duration: weakenMs, landing: anchor + SPACER_MS, stock: false },
             { kind: "grow" as const, threads: sized.growThreads, duration: growMs, landing: anchor + 2 * SPACER_MS, stock: influence?.side === "long" },
             { kind: "weaken" as const, threads: sized.weaken2Threads, duration: weakenMs, landing: anchor + 3 * SPACER_MS, stock: false },
@@ -1524,6 +2113,7 @@ function launchBatches(
 
     if (ops.some((op) => op.landing - now - op.duration < 0)) {
       memory.stats.batchesSkipped++;
+      noteMissedWindow(memory, "deadline");
       return;
     }
 
@@ -1568,6 +2158,7 @@ function launchBatches(
       const allocation = memory.heap.allocateAll(ops.map((op) => allocFor(op.kind, op.threads)));
       if (!allocation.ok) {
         memory.stats.allocFails++;
+        memory.stats.allocFailsByPhase.eager++;
         return;
       }
       memory.lastAnchor = anchor;
@@ -1618,6 +2209,7 @@ function launchBatches(
       const allocation = memory.heap.allocateAll(missRequests);
       if (!allocation.ok) {
         memory.stats.allocFails++;
+        memory.stats.allocFailsByPhase.eager++;
         return;
       }
       reservations = allocation.reservations;
@@ -1776,6 +2368,7 @@ function launchPrepWave(
     });
     if (!allocation.ok) {
       memory.stats.allocFails++;
+      memory.stats.allocFailsByPhase.prep++;
       return 0;
     }
     return emitReservation(kind, allocation.reservation, opCap, landing);

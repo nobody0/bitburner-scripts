@@ -2,6 +2,7 @@ import { mkdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
 import type { ArtifactMetadata } from "../shared/run-catalog.ts";
+import type { ExperimentIdentity } from "../shared/experiment.ts";
 import {
   bitNodeRunId,
   installRunId,
@@ -16,15 +17,37 @@ export interface SimSessionOptions {
   seed: number;
   bitNode?: number;
   seededFrom?: string;
+  experiment?: ExperimentIdentity;
   createdAt?: number;
 }
 
 export interface SimSessionManifest {
-  version: 1;
+  version: 2;
   identity: LineageIdentity;
   seed: number;
   bitNode?: number;
+  experiment?: ExperimentIdentity;
+  scenarioFingerprint?: string;
+  result?: {
+    reached: boolean;
+    timeToGoalMs: number;
+    validity: string;
+    stoppedBecause: string;
+  };
   artifacts: string[];
+}
+
+/** A speedrun checkpoint may only descend from a completed, fully valid route
+ * leg with complete experimental identity. Feature scenarios and diagnostic
+ * runs are useful evidence but can never become route state. */
+export function assertPromotableSession(manifest: SimSessionManifest): void {
+  if (manifest.experiment?.class !== "bitnode-route") {
+    throw new Error("only bitnode-route sessions can be promoted");
+  }
+  if (!manifest.scenarioFingerprint) throw new Error("route session has no scenario fingerprint");
+  if (!manifest.result?.reached || manifest.result.validity !== "valid") {
+    throw new Error("route session did not reach its goal with valid fidelity");
+  }
 }
 
 function uuid(): string {
@@ -50,6 +73,8 @@ export class SimArtifactSession {
   #rotate = false;
   #nextInstallStartedAt: number | undefined;
   #finalizations: Promise<void>[] = [];
+  #scenarioFingerprint: string | undefined;
+  #result: SimSessionManifest["result"];
 
   constructor(options: SimSessionOptions) {
     this.#options = options;
@@ -91,16 +116,39 @@ export class SimArtifactSession {
       // record arrives later in virtual time.
       this.#nextInstallStartedAt = record.t;
     }
+    if (record.kind === "event" && record.name === "sim.meta") {
+      const fingerprint = (record.data as { scenarioFingerprint?: unknown } | undefined)?.scenarioFingerprint;
+      if (typeof fingerprint === "string") this.#scenarioFingerprint = fingerprint;
+    }
+    if (record.kind === "event" && record.name === "sim.result") {
+      const data = record.data as Partial<NonNullable<SimSessionManifest["result"]>> | undefined;
+      if (
+        typeof data?.reached === "boolean"
+        && typeof data.timeToGoalMs === "number"
+        && typeof data.validity === "string"
+        && typeof data.stoppedBecause === "string"
+      ) {
+        this.#result = {
+          reached: data.reached,
+          timeToGoalMs: data.timeToGoalMs,
+          validity: data.validity,
+          stoppedBecause: data.stoppedBecause,
+        };
+      }
+    }
   }
 
   async close(): Promise<void> {
     this.#finishArtifact();
     await Promise.all(this.#finalizations);
     const manifest: SimSessionManifest = {
-      version: 1,
+      version: 2,
       identity: this.identity,
       seed: this.#options.seed,
       ...(this.#options.bitNode !== undefined ? { bitNode: this.#options.bitNode } : {}),
+      ...(this.#options.experiment !== undefined ? { experiment: this.#options.experiment } : {}),
+      ...(this.#scenarioFingerprint !== undefined ? { scenarioFingerprint: this.#scenarioFingerprint } : {}),
+      ...(this.#result !== undefined ? { result: this.#result } : {}),
       artifacts: this.files.map((file) => path.basename(file)),
     };
     writeFileSync(this.manifestFile, JSON.stringify(manifest, null, 2) + "\n");

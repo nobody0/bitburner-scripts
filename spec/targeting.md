@@ -6,6 +6,13 @@ in the background, and switches when it pays. The pure engine
 (virtual clock — the A/B oracle) and in the game (thin driver), so a policy
 measured in sim transfers directly.
 
+For the proven predecessor batcher's window model, pooled-worker architecture,
+thread-strength arithmetic and batch economics — plus a line-by-line gap map to
+this implementation — see [`spec/jit-reference.md`](jit-reference.md). That
+reference is `nobody01/bitburnerscript@master`
+(`servers/home/imports/batchPlanner.ts`, `batchRunner.ts`), **not** the `@2023`
+branch's unwired `src/_lib/batchers/jit.ts`.
+
 ## Cadences and budgets
 
 | Loop | Trigger | Budget | Measured |
@@ -27,8 +34,10 @@ Income `E = c·s·M`; RAM-seconds `R = t_h·(1.7H + 1.75·3.2·G + 1.75·4·W)`.
 **Score = E/R in $/GB/sec** — the RAM-bound unit. The insight came from an
 earlier rewrite's `analyze-profit.js` (`nobody0/bitburner`, no longer checked
 out; see README's citation note), with exact Newton grow threads here instead
-of its log approximation. The predecessor scripts on disk score by
-duration-weighted money per thread instead (`src/_lib/optimizer.ts:123`). The
+of its log approximation. The `@2023` predecessor scores by duration-weighted
+money per thread instead (`src/_lib/optimizer.ts:123`); `@master` scores by
+`moneyPerMs` derived from the achieved batch interval
+(`imports/batchPlanner.ts:864-865`). The
 Q2 audit proved the two are not constant-factor conversions (hack is 1.70 GB,
 grow/weaken 1.75 GB), but they are monotonic in the same duration-weighted
 non-hack/hack ratio and therefore induce the same ordering.
@@ -241,7 +250,9 @@ always spreads; only hack demands contiguity.
 ## RAM engine (`shared/ram/heap.ts`)
 
 Inherited from an earlier rewrite (`nobody0/bitburner`, no longer checked out;
-the predecessor scripts on disk have no heap at all) — 21 clz32 slabs, home
+neither predecessor branch has a heap — `@2023` re-reads used RAM every pass,
+`@master` tracks a per-client `reservedRamForCurrentBatch` scalar) — 21 clz32
+slabs, home
 pinned last, three policies (contiguous best-fit for hack, home-first for
 grow's core bonus, ascending-slab spread for weaken/prep so fragments get eaten
 first), two-phase-commit spread, O(1) rebucket through one `#update` choke

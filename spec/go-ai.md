@@ -147,6 +147,13 @@ a refit**: the BitNode route is planned from these numbers, and stale priors
 divert games into the wrong opponents. Live win/loss records never feed back
 into the policy or the priors.
 
+The promoted V9 priors were refitted on 2026-08-14 through Chromium/WebGPU at
+tie roll 0.5 and seed start 123456: 128 games for each ordinary opponent and
+512 for Illuminati. `GO_REWARD_RULES` stores the resulting win rate, mean black
+score per 23 playable intersections, and virtual upstream-AI seconds per 23.
+The simulator's full-route aggregate endpoint consumes exactly that table;
+`goFidelity` keeps those route results distinct from action-exact arena runs.
+
 ## Acceptance
 
 - Every game completes or reports its explicit turn cap.

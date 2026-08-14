@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { runInHeadlessChrome } from "./webgpu/chrome-runner.ts";
+import type { GoRewardOpponent } from "../shared/strategy/go/rules.ts";
 
 export type GoArenaProfile = "small5" | "daemon19";
 export interface GoProfileArenaConfig {
@@ -8,6 +9,7 @@ export interface GoProfileArenaConfig {
   games: number;
   seed: number;
   candidateLimit?: number;
+  opponent?: GoRewardOpponent;
 }
 export interface GoProfileArenaResult {
   ok: boolean;
@@ -48,9 +50,10 @@ function numberFlag(name: string, fallback: number): number {
 if (import.meta.main) {
   const profile = Bun.argv[2];
   if (profile !== "small5" && profile !== "daemon19") {
-    throw new Error("usage: bun run tools/go-profile-arena.ts <small5|daemon19> [--games N] [--seed N] [--candidate-limit N]");
+    throw new Error("usage: bun run tools/go-profile-arena.ts <small5|daemon19> [--games N] [--seed N] [--candidate-limit N] [--opponent NAME]");
   }
   const candidateLimitIndex = Bun.argv.indexOf("--candidate-limit");
+  const opponentIndex = Bun.argv.indexOf("--opponent");
   const result = await runGoProfileArena({
     profile,
     games: Math.max(1, Math.floor(numberFlag("--games", profile === "small5" ? 6 : 2))),
@@ -58,6 +61,7 @@ if (import.meta.main) {
     ...(candidateLimitIndex < 0 ? {} : {
       candidateLimit: Math.max(1, Math.floor(numberFlag("--candidate-limit", 8))),
     }),
+    ...(opponentIndex < 0 ? {} : { opponent: Bun.argv[opponentIndex + 1] as GoRewardOpponent }),
   });
   console.log(JSON.stringify(result, null, 2));
 }

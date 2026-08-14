@@ -58,6 +58,26 @@ describe("SimWorld", () => {
     expect(world.servers.get("home")!.cpuCores).toBe(coresBefore + 1);
   });
 
+  test("advanced home restrictions cap RAM and cores while successful BN5 upgrades grant intelligence", () => {
+    const restricted = new SimWorld({
+      seed: 1,
+      bitnode: 5,
+      homeRam: 128,
+      startingMoney: 1e15,
+      restrictHomePCUpgrade: true,
+    });
+    expect(restricted.view().prices.upgradeHomeRam).toBe(Infinity);
+    expect(restricted.execute({ type: "upgradeHomeRam" })).toBe(false);
+    expect(restricted.execute({ type: "upgradeHomeCore" })).toBe(false);
+    expect(restricted.person.exp.intelligence).toBe(0);
+
+    const ordinary = new SimWorld({ seed: 1, bitnode: 5, startingMoney: 1e15 });
+    expect(ordinary.execute({ type: "upgradeHomeRam" })).toBe(true);
+    expect(ordinary.execute({ type: "upgradeHomeCore" })).toBe(true);
+    expect(ordinary.person.exp.intelligence).toBe(6);
+    expect(ordinary.player.persistentIntelligenceExp).toBe(6);
+  });
+
   test("same seed produces identical record streams", () => {
     const run = (seed: number) => {
       const world = new SimWorld({ seed, network: DEFAULT_NETWORK, homeRam: 32, runId: "det" });
@@ -111,6 +131,14 @@ describe("HWGW seam support", () => {
 });
 
 describe("playerRecord", () => {
+  test("total playtime advances only when the engine accounts a complete cycle", () => {
+    const world = new SimWorld({ seed: 1, totalPlaytime: 123 });
+    world.clock.run(() => world.clock.now() >= 199, 199);
+    expect(world.playerRecord().totalPlaytime).toBe(123);
+    world.addPlaytime(200);
+    expect(world.playerRecord().totalPlaytime).toBe(323);
+  });
+
   test("is a SNAPSHOT — nested objects are copied, never aliased", () => {
     // The controller stores this in its game-state store and DECIDES from it.
     // The previous implementation spread `this.person`, so `skills`, `exp` and

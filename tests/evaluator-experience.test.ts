@@ -5,8 +5,8 @@ import {
   skillGateRuntimeSecondsPerExp,
   stepEvaluator,
   type FleetCapacity,
-} from "../../shared/strategy/evaluator.ts";
-import type { ServerView, WorldView } from "../../shared/world.ts";
+} from "../shared/strategy/evaluator.ts";
+import type { ServerView, WorldView } from "../shared/world.ts";
 
 const mults = {
   hacking: 1,

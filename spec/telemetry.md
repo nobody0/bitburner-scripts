@@ -13,9 +13,9 @@ Defined in `shared/telemetry/schema.ts`. Three kinds, all carrying
 
 - **state** — two families, both last-write-wins per key:
   - *Getter mirrors* (`Telemetry.mirror`), keyed `<getter>` or
-    `<getter>:<argKey>` (e.g. `getServer:home`). Fed by dodged getters
-    (`makeDodger(...).call`), which write into the store's mirror space; the
-    sink republishes `player` under the `getPlayer` mirror key as well, so
+    `<getter>:<argKey>` (e.g. `getServer:home`). Explicit mirror producers
+    write through `setMirror`; the sink republishes `player` under the
+    `getPlayer` mirror key as well, so
     `shared/goals/evaluate.ts` and the UI money chart keep working off one
     acquisition.
   - *Typed topics* (`Telemetry.state`), keyed by
@@ -53,10 +53,11 @@ come from the `farm` rollup when present, fall back to `hack.done` events, and
 are shown as unavailable when neither exists — the test for "do we have
 totals" is the presence of a source, never the `src` of the run.
 
-Feature probes add two events: `probe.skipped {id, cost, budget}` when a probe
-cannot afford its dodge budget (reported once per price, not per sweep) and
-`probe.failed {id, error}` when a body throws. Silence would read as "this
-feature has no data".
+Feature probes add `probe.failed {id, error}` when a body throws; silence would
+read as "this feature has no data". A probe that cannot be PLACED is no longer a
+probe-level event at all — it stays queued in the broker, and
+`ram.starvation {by, id, gb, waitMs, lane}` reports it once it has genuinely
+waited, from the one component that knows whether the RAM is coming.
 
 Coding contracts split repeated state from forensic detail. The `side` topic
 carries totals, solver coverage, the front 20 rows of a private 100-contract

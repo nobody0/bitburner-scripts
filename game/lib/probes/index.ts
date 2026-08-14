@@ -16,8 +16,9 @@ import { LOCAL_PROBES } from "./local.ts";
  *              no dodge, always runs. Karma, skills, joined factions, fleet
  *              totals all live here, so those panels are never empty.
  *  - DODGED  — runs inside a dodge stub, priced with ns.getFunctionRamCost.
- *              The runner packs what fits the current budget and reports the
- *              rest as `probe.skipped`.
+ *              The runner packs what fits the current budget and leaves the
+ *              rest queued in the broker, which reports `ram.starvation` once
+ *              one has genuinely waited.
  *
  * A dodged probe body must call ns through BRACKET NOTATION on its own stub
  * ns (`stubNs["gang"]["getGangInformation"]()`); a dotted call would be seen

@@ -96,6 +96,9 @@ export function evaluatePrep(args: {
   /** Candidate fleet shares for the prep segment. Defaults let the caller's
    * segment split follow the winning share. */
   shares?: readonly number[];
+  /** Executable allocation ceiling (placement, wave demand, and any atomic
+   * farm reservation). The value search still chooses below this ceiling. */
+  maxPrepGb?: number;
   /** Exact demand-driven allocation. When supplied, replaces `shares`. */
   prepGb?: number;
   /** Best currently observed marginal income/sec per invested dollar. */
@@ -103,9 +106,11 @@ export function evaluatePrep(args: {
 }): PrepEconomics | undefined {
   const { current, candidate, plan, fleetGb, horizonMs } = args;
   if (plan.prepped || fleetGb <= 0) return undefined;
-  const allocations = args.prepGb === undefined
+  const maxPrepGb = Math.min(fleetGb, Math.max(0, args.maxPrepGb ?? fleetGb));
+  const unconstrainedAllocations = args.prepGb === undefined
     ? (args.shares ?? [0.25, 0.6]).map((share) => fleetGb * share)
     : [Math.min(fleetGb, Math.max(0, args.prepGb))];
+  const allocations = [...new Set(unconstrainedAllocations.map((prepGb) => Math.min(maxPrepGb, prepGb)))];
   const timeScale = args.prepTimeScale ?? 1;
   const horizonS = horizonMs / 1_000;
   const currentRate = farmIncomeRate(current, fleetGb);

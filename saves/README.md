@@ -14,7 +14,7 @@ Saves come from the game, by hand — Options → Export Game writes
     bun run save:add bn5-start bitburnerSave_1754500000_BN5x1.json.gz "start of BN5"
     bun run saves            # list what is registered
 
-`index.json` is the registry: id, label, BitNode, and how far into the node the
+`index.json` is the registry: id, label, BitNode, exact-byte SHA-256, and how far into the node the
 save is. The blobs are committed alongside it, so a snapshot is reproducible on
 any machine — at the cost of a few megabytes of undeltifiable gzip per capture.
 
@@ -23,7 +23,11 @@ is a (small) mutation of the live game, not a pure read.
 
 ## Using one
 
-    bun run sim -- --profile hacking-only --save bn5-start --seeds 1..3
+    bun run sim -- --profile hacking-early --goal earn:5e6 --save bn5-start --seeds 1..3
+
+The content hash, not only the friendly id, is embedded in route lineage. Do
+not overwrite a registered blob in place; register a new checkpoint id so
+downstream route results remain explainable.
 
 ## Restoring one into the game
 

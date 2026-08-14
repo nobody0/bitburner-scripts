@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { makeHackContext } from "../../shared/formulas.ts";
-import { computeTargetBands, contendersAt, staticsFromRolls } from "../../shared/strategy/bounds.ts";
-import { TARGET_BANDS } from "../../shared/strategy/target-bands.ts";
-import { solveCycle, type TargetStatics } from "../../shared/strategy/targeting.ts";
-import { SERVER_RANGES, type Range } from "../../shared/features/servers.ts";
-import { mulberry32 } from "../core/rng.ts";
+import { makeHackContext } from "../shared/formulas.ts";
+import { computeTargetBands, contendersAt, staticsFromRolls } from "../shared/strategy/bounds.ts";
+import { TARGET_BANDS } from "../shared/strategy/target-bands.ts";
+import { solveCycle, type TargetStatics } from "../shared/strategy/targeting.ts";
+import { SERVER_RANGES, type Range } from "../shared/features/servers.ts";
+import { mulberry32 } from "../sim/core/rng.ts";
 
 /** Two obligations for the generated contention table:
  *

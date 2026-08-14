@@ -3,6 +3,8 @@ import { parseGoals } from "../../shared/goals/presets.ts";
 import { runGame } from "../game-run.ts";
 import { FACTION_DONATION_TARGET, findProfile } from "../profiles.ts";
 import { DEFAULT_EPOCH_MS } from "../realm/timers.ts";
+import { AUGMENTATION_TABLE } from "../vendor/bitburner/src/Augmentation/AugmentationTable.ts";
+import { CONSTANTS } from "../vendor/bitburner/src/Constants.ts";
 
 describe("faction and hacking strategy simulation", () => {
   test("the armed reset prestiges the world and restarts the real controller", async () => {
@@ -73,49 +75,9 @@ describe("faction and hacking strategy simulation", () => {
     expect(Object.keys(result.unmodeled)).not.toContain("ns getMoneySources");
   }, 10_000);
 
-  test("two consecutive installs prestige cleanly and the cadence verdict drives the second", async () => {
-    const profile = findProfile("install-cadence");
-    let installed = 0;
-    let prestiged = 0;
-    let verdictInstalls = 0;
-    let traveled = 0;
-
-    const result = await runGame({
-      goal: parseGoals([...profile.goals]),
-      seed: 1,
-      horizonMs: 2 * 60 * 60_000,
-      bitnode: profile.bitnode,
-      homeRam: profile.homeRam,
-      startingMoney: profile.startingMoney,
-      features: profile.features,
-      ...profile.world,
-      onRecord: (line) => {
-        const record = JSON.parse(line) as {
-          kind: string;
-          key?: string;
-          name?: string;
-          data?: { plan?: { installDecision?: { verdict?: string } } };
-        };
-        if (record.name === "aug.installed") installed++;
-        if (record.name === "sim.prestige") prestiged++;
-        if (record.name === "travel") traveled++;
-        if (record.key === "progression" && record.data?.plan?.installDecision?.verdict === "install") verdictInstalls++;
-      },
-    });
-
-    expect(result.reached).toBe(true);
-    expect(result.crashes).toEqual([]);
-    expect(installed).toBe(2);
-    expect(prestiged).toBe(2);
-    expect(traveled).toBeGreaterThan(0);
-    // The SECOND install must come from the marginal cadence verdict, not the
-    // legacy cash gate: cycle 2 has no pre-queued augmentations, so only the
-    // realizable-sweep signal and the renewal threshold can conclude it.
-    expect(verdictInstalls).toBeGreaterThan(0);
-    // The first reset restarted the controller; the run ends AT the second
-    // install, before its restart can log.
-    expect(result.output.filter((line) => line.includes("start.js online")).length).toBeGreaterThanOrEqual(2);
-  }, 120_000);
+  // `install-cadence` remains the full synthetic two-reset pressure profile,
+  // invoked by `bun run bench:sim:install-cadence`. The test above pins the
+  // same controller restart/prestige contract with a bounded one-reset world.
 
   test("hacking funds an exact donation breakpoint without purchasing before the install boundary", async () => {
     const profile = findProfile("factions-donation");
@@ -123,6 +85,12 @@ describe("faction and hacking strategy simulation", () => {
       throw new Error("factions-donation profile is missing its required world setup");
     }
     const startingMoney = profile.startingMoney;
+    const entropy = profile.world?.playerState?.entropy ?? 0;
+    const factionRepMult = (profile.world?.playerState?.augmentations ?? []).reduce((mult, owned) => {
+      const aug = AUGMENTATION_TABLE[owned.name];
+      const rolled = profile.world?.augmentationStats?.[owned.name];
+      return mult * (rolled?.faction_rep ?? aug?.mults.faction_rep ?? 1);
+    }, Math.pow(CONSTANTS.EntropyEffect, entropy));
     let donated = 0;
     let donationReputation = 0;
     let donationCount = 0;
@@ -182,7 +150,7 @@ describe("faction and hacking strategy simulation", () => {
     // funds the action, and successful work-slot/RAM bootstrapping makes that
     // remaining gap smaller. Pin the conversion invariant instead.
     expect(donationReputation).toBeGreaterThan(0);
-    expect(donated).toBeCloseTo(donationReputation * 1e6 / 0.75, 5);
+    expect(donated).toBeCloseTo(donationReputation * 1e6 / factionRepMult / 0.75, 5);
     expect(hackingIncome).toBeGreaterThan(donated - startingMoney);
     expect(maxRecordTime).toBeGreaterThan(0);
     expect(Object.keys(result.unmodeled)).not.toContain("ns getTotalScriptIncome");

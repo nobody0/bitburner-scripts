@@ -1,12 +1,21 @@
 import type { NS, Player, Server } from "@ns";
 import { versionedScript } from "../../shared/deployment.ts";
-import { HOME_RESERVE_GB } from "../../shared/ram/heap.ts";
 import type { HackNodeMults } from "../../shared/formulas.ts";
+import type { SharePricingInput } from "../../shared/strategy/share.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
-import type { CompletionEvent, HgwAction, ServerView, StockInfluence, WorldView } from "../../shared/world.ts";
+import type { CompletionEvent, HgwAction, ServerView, ShareAction, StockInfluence, WorldView } from "../../shared/world.ts";
 import { WORKER_RAM } from "../../shared/world.ts";
 import { gameBuildId } from "./build-id.ts";
 import { workerGlobals, type WorkerGlobalThis } from "./worker-shared.ts";
+
+import {
+  planReclamation,
+  type BrokerHost,
+  type BrokerRequest,
+  type PreemptibleFarmWorker,
+  type ReclamationPlan,
+} from '../../shared/ram/broker.ts';
+import { releaseWorkerExits, requestShareStops, type Tracked } from '../../shared/strategy/dispatch.ts';
 
 /** Game-side driver for the pure HWGW engine. It only moves data: builds a
  * WorldView from the cached scan plus live reads of the hot targets, hands
@@ -142,9 +151,7 @@ export function pump(
   view: WorldView,
   completions: CompletionEvent[],
   /** Planning options, passed straight through to planFarm.
-   *  - homeReserveGb: computed per pass by the controller — base reserve plus
-   *    the largest dodge step any unlocked feature declares
-   *    (shared/ram/reserve.ts); the constant is only the no-context fallback.
+   *  - arenaReserves: broker-owned per-host executable headroom.
    *  - horizonMs: expected remaining run time (endgame route decision).
    *  `goalRemaining` is deliberately NOT named here: the game has no money
    *  goal — that is the sim's device, and the sim sets it on planFarm
@@ -152,23 +159,23 @@ export function pump(
    *  three adjacent defaulted numbers in three different units transpose
    *  silently. */
   options: {
-    homeReserveGb?: number;
-    fleetReserveGb?: number;
+    arenaReserves?: Readonly<Record<string, number>>;
     horizonMs?: number;
     pooling?: boolean;
     reinvestmentReturnPerDollarSec?: number;
     hackingSkillGoal?: number;
+    shareValue?: SharePricingInput;
   } = {},
 ): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"]; nextWakeMs?: number } {
   const result = planFarm(view, state.memory, completions, {
-    homeReserveGb: options.homeReserveGb ?? HOME_RESERVE_GB,
-    ...(options.fleetReserveGb ? { fleetReserveGb: options.fleetReserveGb } : {}),
+    ...(options.arenaReserves ? { arenaReserves: options.arenaReserves } : {}),
     ...(options.reinvestmentReturnPerDollarSec !== undefined
       ? { reinvestmentReturnPerDollarSec: options.reinvestmentReturnPerDollarSec }
       : {}),
     ...(options.hackingSkillGoal !== undefined ? { hackingSkillGoal: options.hackingSkillGoal } : {}),
     ...(options.horizonMs !== undefined ? { horizonMs: options.horizonMs } : {}),
     ...(options.pooling ? { pooling: true } : {}),
+    ...(options.shareValue ? { shareValue: options.shareValue } : {}),
     sourceHosts: state.deployed,
   });
   state.memory = result.memory;
@@ -176,6 +183,16 @@ export function pump(
   const failed: number[] = [];
   let launched = 0;
   for (const action of result.actions) {
+    if (action.type === "stopShare") {
+      state.globals.worker_stop_requested?.add(action.opId);
+      state.globals.worker_stop?.get(action.opId)?.();
+      continue;
+    }
+    if (action.type === "share") {
+      if (startShare(ns, state, action)) launched++;
+      else failed.push(action.opId);
+      continue;
+    }
     if (action.type !== "hack" && action.type !== "grow" && action.type !== "weaken") continue;
     if (action.opId === undefined) continue;
     if (startOp(ns, state, action, action.opId, view.time)) launched++;
@@ -192,6 +209,33 @@ export function pump(
     directive: result.directive,
     ...(Number.isFinite(nextWakeMs) ? { nextWakeMs } : {}),
   };
+}
+
+function startShare(ns: NS, state: DriverState, action: ShareAction): boolean {
+  if (!state.deployed.has(action.source) || !state.globals.worker_info) return false;
+  state.globals.worker_info.set(action.opId, {
+    kind: "share",
+    target: "",
+    threads: action.threads,
+    mode: "share",
+  });
+  const pid = ns.exec(
+    workerScript(),
+    action.source,
+    // ramOverride is per thread, exactly as for HGW workers.
+    { threads: action.threads, temporary: true, ramOverride: WORKER_RAM.share },
+    action.opId,
+  );
+  if (pid !== 0) {
+    const info = state.globals.worker_info.get(action.opId);
+    if (info) info.pid = pid;
+    return true;
+  }
+  state.globals.worker_info.delete(action.opId);
+  state.globals.worker_stop?.delete(action.opId);
+  state.globals.worker_stop_requested?.delete(action.opId);
+  state.execFails++;
+  return false;
 }
 
 function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, plannedAt: number): boolean {
@@ -255,11 +299,15 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
     workerScript(),
     host,
     // ramOverride is per thread: the generic worker is billed exactly as the
-    // op it performs. One binary, deliberately — note that the predecessor
-    // scripts moved the OTHER way, to a script per batch role
-    // (src/workers/{hs,w1s,gs,w2s}.ts), to fix their shotgun batcher
-    // ("fixed shotgun by separating different workers", 8a8fb9c). The pooled
-    // serve mode answers the same need with per-role INSTANCES of one script.
+    // op it performs. One binary, deliberately — and the batcher reference
+    // agrees: nobody01/bitburnerscript@master execs a single
+    // `scripts/worker.js` for every role and varies only ramOverride
+    // (imports/batchRunner.ts:21-38), holding those processes resident in
+    // pools. Its earlier @2023 branch had moved the OTHER way, to a script per
+    // batch role (src/workers/{hs,w1s,gs,w2s}.ts), to fix that branch's shotgun
+    // batcher ("fixed shotgun by separating different workers", 8a8fb9c); the
+    // later line abandoned that split. Our pooled serve mode matches @master:
+    // per-role INSTANCES of one script.
     // Source (ramOverride is the per-thread RunningScript allocation): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L275-L310
     { threads: action.threads, temporary: true, ramOverride: WORKER_RAM[action.type] },
     execId,
@@ -270,7 +318,103 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
     state.execFails++;
     return false;
   }
+  const info = globals.worker_info!.get(execId);
+  if (info) info.pid = pid;
   return true;
+}
+
+export interface ReclamationExecution {
+  plan: ReclamationPlan;
+  preempted: boolean;
+}
+
+/** Execute the broker's pure ladder through the dispatcher's existing
+ * cooperative-stop and failure/worker-exit paths. */
+export function reclaimForDodge(
+  ns: NS,
+  state: DriverState,
+  request: BrokerRequest,
+  hosts: readonly BrokerHost[],
+): ReclamationExecution {
+  const dispatch = state.memory.dispatch;
+  const shares = [...dispatch.shareWorkers.values()];
+  const farmWorkers = preemptibleWorkers(state);
+  const plan = planReclamation(request, hosts, shares, farmWorkers, performance.now());
+  if (plan.action === 'wait') return { plan, preempted: false };
+
+  const actions: import('../../shared/world.ts').Action[] = [];
+  requestShareStops(dispatch, actions, plan.shareGb, new Set(plan.shareWorkerIds));
+  for (const action of actions) {
+    if (action.type !== 'stopShare') continue;
+    state.globals.worker_stop_requested?.add(action.opId);
+    state.globals.worker_stop?.get(action.opId)?.();
+  }
+  if (plan.action !== 'preempt') return { plan, preempted: false };
+
+  const info = state.globals.worker_info?.get(plan.victim.workerId);
+  const kill = Reflect.get(ns, ['ki', 'll'].join('')) as ((pid: number) => boolean) | undefined;
+  const killed = info?.pid !== undefined && kill?.(info.pid) === true;
+  if (!killed) return { plan, preempted: false };
+  if (plan.victim.opId !== undefined) reportFailed(state.memory, [plan.victim.opId]);
+  releaseWorkerExits(dispatch, [plan.victim.workerId]);
+  return { plan, preempted: true };
+}
+
+function preemptibleWorkers(state: DriverState): PreemptibleFarmWorker[] {
+  const dispatch = state.memory.dispatch;
+  const activeByWorker = new Map<number, { opId: number; tracked: Tracked }>();
+  for (const [opId, tracked] of dispatch.tracked) {
+    if (tracked.workerId !== undefined) activeByWorker.set(tracked.workerId, { opId, tracked });
+  }
+
+  const workers: PreemptibleFarmWorker[] = [];
+  for (const worker of dispatch.pool.workers.values()) {
+    if (state.globals.worker_info?.get(worker.workerId)?.pid === undefined) continue;
+    const active = activeByWorker.get(worker.workerId);
+    workers.push({
+      workerId: worker.workerId,
+      ...(active ? { opId: active.opId } : {}),
+      hostname: worker.hostname,
+      kind: worker.kind,
+      segment: active?.tracked.segment === 'prep' ? 'prep' : 'farm',
+      gb: worker.gb,
+      ...(active?.tracked.landing !== undefined ? { landing: active.tracked.landing } : {}),
+      active: active !== undefined,
+    });
+  }
+  for (const [opId, tracked] of dispatch.tracked) {
+    if (tracked.workerId !== undefined || tracked.segment === 'share') continue;
+    if (state.globals.worker_info?.get(opId)?.pid === undefined) continue;
+    workers.push({
+      workerId: opId,
+      opId,
+      hostname: tracked.hostname,
+      kind: tracked.kind,
+      segment: tracked.segment,
+      gb: tracked.gb,
+      ...(tracked.landing !== undefined ? { landing: tracked.landing } : {}),
+      active: true,
+    });
+  }
+  return workers;
+}
+
+/** Consume only broker-requested share exits, leaving every ordinary farm
+ * completion on the original pump-first wake path. This is resyncHeap's
+ * ordering barrier narrowed to the RAM the queued dodge is reclaiming. */
+export function settleBrokerShareExits(state: DriverState): number[] {
+  const done = state.globals.dispatch_done;
+  if (!done || done.length === 0) return [];
+  const workerIds: number[] = [];
+  for (let index = done.length - 1; index >= 0; index--) {
+    const completion = done[index]!;
+    if (completion.kind !== 'workerExit') continue;
+    if (!state.memory.dispatch.shareWorkers.get(completion.opId)?.stopping) continue;
+    workerIds.push(completion.opId);
+    done.splice(index, 1);
+  }
+  releaseWorkerExits(state.memory.dispatch, workerIds);
+  return workerIds;
 }
 
 /** Reconcile the heap against the game's real usage (30s sweep). Returns the
@@ -297,6 +441,11 @@ export function resyncHeap(state: DriverState, servers: Record<string, Server>):
       if (state.globals.worker_info?.has(opId)) liveGb += tracked.gb;
     }
     for (const worker of state.memory.dispatch.pool.workers.values()) {
+      if (worker.hostname !== server.hostname) continue;
+      accountedGb += worker.gb;
+      if (state.globals.worker_info?.has(worker.workerId)) liveGb += worker.gb;
+    }
+    for (const worker of state.memory.dispatch.shareWorkers.values()) {
       if (worker.hostname !== server.hostname) continue;
       accountedGb += worker.gb;
       if (state.globals.worker_info?.has(worker.workerId)) liveGb += worker.gb;

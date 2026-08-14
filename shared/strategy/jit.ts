@@ -17,16 +17,43 @@ export interface JitRole {
  * budgeted for another invocation at exactly t: promise continuation, exec
  * and timer jitter consume a few milliseconds even when the math is exact. */
 export const MINIMUM_WORKER_PRECISION_MS = 5;
-/** Conservative landing separation: forty measured handoff quanta. This is
- * intentionally wider than the zero-overhead 4:1 weaken:hack ratio suggests;
- * promise continuation, exec and browser-timer jitter consume real time. */
-export const MINIMUM_LANDING_GAP_MS = 40 * MINIMUM_WORKER_PRECISION_MS;
+
+/* Landing separation and launch slack are independent quantities. The engine
+ * fixes an operation's end time at the moment the Netscript call is made, so
+ * `additionalMsec` absorbs JS lateness without moving the landing — we send an
+ * absolute `delayUntil` resolved inside the worker immediately before the call
+ * (game/lib/worker-shared.ts, game/worker/worker.ts). Jitter therefore belongs
+ * in the launch budget, never in the landing grid; putting it in the grid costs
+ * pipeline depth directly, since depthCapGb scales as 1/interval.
+ * Reference: JOB_LATE_FINISH vs POSSIBLE_LAGS, imports/batchPlanner.ts:7-14. */
+
+/** Landing separation: how far apart effects inside a batch land, and the floor
+ * on the batch interval. Survivable this tight only because weaken is
+ * oversized — see THREAD_WEAKEN_UPSCALE. Two milliseconds wider than the
+ * reference's 3 ms because our workers also report telemetry and completions
+ * per invocation. */
+export const MINIMUM_LANDING_GAP_MS = MINIMUM_WORKER_PRECISION_MS;
+/** How late the JavaScript side may be without moving a landing. Absorbed by
+ * additionalMsec, so it buys safety at no cost to pipeline depth. */
+export const LAUNCH_SLACK_MS = 200;
 /** Measured allowance for dispatch plus a warm worker-module start. */
 export const WORKER_STARTUP_GUARD_MS = 30;
-/** A deadline wake replaces the old full-heartbeat allowance. */
-export const JIT_LAUNCH_GUARD_MS = WORKER_STARTUP_GUARD_MS + MINIMUM_LANDING_GAP_MS;
+/** Built from the launch slack rather than the landing gap: this budget exists
+ * to survive a late dispatch, which is what LAUNCH_SLACK_MS measures. */
+export const JIT_LAUNCH_GUARD_MS = WORKER_STARTUP_GUARD_MS + LAUNCH_SLACK_MS;
 export const HWGW_MIN_INTERVAL_MS = 4 * MINIMUM_LANDING_GAP_MS;
 export const HGW_MIN_INTERVAL_MS = 3 * MINIMUM_LANDING_GAP_MS;
+
+/** Ordering insurance. At a few milliseconds of separation a GC pause can
+ * reorder two effects; rather than prevent that, oversize weaken by 0.1% so the
+ * next already-queued weaken absorbs the residue instead of security ratcheting
+ * up (imports/batchPlanner.ts:21-27). Apply it ADDITIVELY — see
+ * targeting.ts weakenThreadsFor.
+ *
+ * The reference's paired THREAD_HACK_DOWNSCALE has no analogue here: it guards
+ * fractional hack counts against rounding up into an overdraw, and our hack
+ * count is the integer search variable itself. */
+export const THREAD_WEAKEN_UPSCALE = 1.001;
 
 export interface JitTopology {
   /** Placeable GB per host. Standing reservations are already subtracted. */

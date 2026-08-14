@@ -4,8 +4,9 @@
  * Transcribed rather than vendored: RamCostGenerator imports `@player` and
  * `NSFull`, and that import graph detonates into the whole game the same way
  * Hacking.ts's DarknetServer import does (see tools/vendor.ts). The tree below
- * is a pure literal, so copying it is safe — but it is NOT drift-detected.
- * Re-read the file when bumping the pinned tag.
+ * is a pure literal. Its upstream source hash is pinned by
+ * sim/tests/transcription-drift.test.ts, so a release bump forces a semantic
+ * audit before the accepted hash can be updated.
  *
  * This matters more than it looks. probe-runner prices every probe with
  * ns.getFunctionRamCost and packs what fits the dodge budget; if these numbers

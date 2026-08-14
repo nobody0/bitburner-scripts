@@ -48,6 +48,35 @@ describe("career parity with Bitburner v3.0.1", () => {
     expect(programs.start(program.name, true)).toBe(false);
   });
 
+  test("cancelled program work writes and resumes the exact incomplete file", () => {
+    const world = new SimWorld({ seed: 1, person: { skills: { hacking: 50 } } });
+    const files = new Set<string>();
+    const programs = new ProgramSystem(world, world.player, () => files);
+
+    expect(programs.start("brutessh.exe", true)).toBe(true);
+    programs.processWork(100);
+    expect(world.player.stopWork()).toBe(true);
+    expect(files).toEqual(new Set(["BruteSSH.exe-3.33%-INC"]));
+
+    expect(programs.start("BruteSSH.exe", true)).toBe(true);
+    expect(files.size).toBe(0);
+    expect(world.player.currentWork?.unitCompleted).toBeCloseTo(19_980, 10);
+  });
+
+  test("program work recomputes its rate from live skills each engine pass", () => {
+    const world = new SimWorld({ seed: 1, person: { skills: { hacking: 50 } } });
+    const files = new Set<string>();
+    const programs = new ProgramSystem(world, world.player, () => files);
+
+    expect(programs.start("BruteSSH.exe", true)).toBe(true);
+    programs.processWork(1_000); // 200,000 ms at hacking 50
+    world.person.skills.hacking = 500;
+    programs.processWork(714); // 399,840 ms at the new 560 ms/cycle rate
+    expect(files.has("BruteSSH.exe")).toBe(false);
+    programs.processWork(1);
+    expect(files.has("BruteSSH.exe")).toBe(true);
+  });
+
   test("a failed player crime banks quarter experience and karma on the exact completion cycle", async () => {
     const world = new SimWorld({ seed: 1 });
     const crimes = new CrimeSystem(world, world.player, () => 1); // always fail
@@ -83,15 +112,31 @@ describe("career parity with Bitburner v3.0.1", () => {
     expect(world.player.currentWork).toMatchObject({ kind: "class", subject: "strength" });
   });
 
-  test("training stops at the last affordable cycle", () => {
+  test("training keeps processing after the balance crosses zero, as ClassWork does", () => {
     const world = new SimWorld({ seed: 1, startingMoney: 1_000 });
     const education = new EducationSystem(world, world.player);
     expect(education.gymWorkout("Powerhouse Gym", "str", true)).toBe(true);
 
     education.processWork(5);
 
-    expect(world.player.money).toBe(40);
-    expect(world.player.currentWork).toBeUndefined();
+    expect(world.player.money).toBe(-1_400);
+    expect(world.player.currentWork).toMatchObject({ kind: "class", subject: "strength", cyclesWorked: 5 });
+  });
+
+  test("class work has no focus penalty and university work grants its independent intelligence rate", () => {
+    const focused = new SimWorld({ seed: 1, bitnode: 5, startingMoney: 10_000 });
+    const unfocused = new SimWorld({ seed: 1, bitnode: 5, startingMoney: 10_000 });
+    const a = new EducationSystem(focused, focused.player);
+    const b = new EducationSystem(unfocused, unfocused.player);
+    expect(a.universityCourse("Rothman University", "Algorithms", true)).toBe(true);
+    expect(b.universityCourse("Rothman University", "Algorithms", false)).toBe(true);
+
+    a.processWork(5);
+    b.processWork(5);
+
+    expect(unfocused.person.exp.hacking).toBe(focused.person.exp.hacking);
+    expect(unfocused.person.exp.intelligence).toBe(focused.person.exp.intelligence);
+    expect(focused.person.exp.intelligence).toBe(0.02);
   });
 
   test("company applications use the exact company skill offset and promote to the highest qualified job", () => {
@@ -128,6 +173,28 @@ describe("career parity with Bitburner v3.0.1", () => {
     expect(world.person.exp.hacking - hackingExpBefore).toBeCloseTo(position.expGain.hacking! * company.expMultiplier * 5, 12);
     expect(companies.rep(company.name)).toBeCloseTo(performance * 5, 12);
     expect(world.player.currentWork).toMatchObject({ kind: "company", subject: company.name, cyclesWorked: 5 });
+  });
+
+  test("SF15's charisma bonus affects company salary but not company experience", () => {
+    const base = new SimWorld({ seed: 1, person: { skills: { hacking: 250, charisma: 5_000 } } });
+    const sf15 = new SimWorld({
+      seed: 1,
+      person: { skills: { hacking: 250, charisma: 5_000 } },
+      playerState: { sourceFiles: { "15": 2 } },
+    });
+    const baseCompanies = new CompanySystem(base, base.player);
+    const sfCompanies = new CompanySystem(sf15, sf15.player);
+    expect(baseCompanies.apply("ECorp", "Software")).not.toBeNull();
+    expect(sfCompanies.apply("ECorp", "Software")).not.toBeNull();
+    expect(baseCompanies.startWork("ECorp", true)).toBe(true);
+    expect(sfCompanies.startWork("ECorp", true)).toBe(true);
+    const baseMoney = base.player.money;
+    const sfMoney = sf15.player.money;
+    baseCompanies.processWork(1);
+    sfCompanies.processWork(1);
+
+    expect(sf15.person.exp.hacking).toBe(base.person.exp.hacking);
+    expect(sf15.player.money - sfMoney).toBeGreaterThan(base.player.money - baseMoney);
   });
 
   test("company prestige banks reputation into favor and clears jobs", () => {
@@ -175,6 +242,20 @@ describe("career parity with Bitburner v3.0.1", () => {
     expect(grafting.start("BitWire", true)).toBe(true);
     grafting.processWork(duration / 400);
     expect(world.player.augmentations.has("BitWire")).toBe(false);
+  });
+
+  test("grafting applies only the augmentation body, not its prestige-time grants", () => {
+    const world = new SimWorld({ seed: 1, startingMoney: 1e15, playerState: { city: "New Tokyo" } });
+    const files = new Set<string>();
+    const grafting = new GraftingSystem(world, world.player, () => files);
+    const price = grafting.price("CashRoot Starter Kit");
+    const before = world.player.money;
+    expect(grafting.start("CashRoot Starter Kit", true)).toBe(true);
+    grafting.processWork(grafting.timeMs("CashRoot Starter Kit") / 200 + 1);
+
+    expect(world.player.money).toBe(before - price);
+    expect(files.has("BruteSSH.exe")).toBe(false);
+    expect(world.player.augmentations.has("CashRoot Starter Kit")).toBe(true);
   });
 
   test("an augmentation already queued for installation is not graftable", () => {

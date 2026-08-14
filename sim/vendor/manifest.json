@@ -2,6 +2,41 @@
   "tag": "v3.0.1",
   "commit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
   "definitionsSha256": "bfabb0f495cc89133ba042420f5d6d514c7f068502565e3bc5f90da5e60242ed",
+  "transcriptionSources": {
+    "src/engine.tsx": "f72b2f9aefeebcec7389a37c1b7f6393e764abb134972cf563e2731db78cb9ea",
+    "src/Netscript/RamCostGenerator.ts": "470f2c0de8fe624a7df74446961dfc127a7fd0dfacdf9028e94b600880c85da6",
+    "src/Netscript/NetscriptHelpers.tsx": "fc53dccf1de31ff671f76b84a8a16c27fb2064b9137a0293e3d1111204c5a48a",
+    "src/NetscriptFunctions.ts": "815cec4a1ee27ab3c0eaecac50be8a497f6cd41cf745d2e8e30460f2228d97bf",
+    "src/NetscriptWorker.ts": "4db68c6cf59e2cf3b889604ec49ead4416a54a6fc9b64de2ceba61f949049124",
+    "src/Netscript/killWorkerScript.ts": "f73c783cbeb44a695d65285fb9902d223a280f91bdad8eb1032fe966a02d3ad1",
+    "src/Prestige.ts": "463f393dec55f0e10942f36484509695cf16094e2f0a75b3dc284e1dbea43e4c",
+    "src/PersonObjects/Person.ts": "faaed91fc7eca4f544fa8961aeb31abf88a2af8d857b85bb4c8da25585425deb",
+    "src/PersonObjects/Player/PlayerObjectGeneralMethods.ts": "aca2bbc19ea3bdfc22c457d4c446be55efcf85353f1ca2a97fecce72afd41aea",
+    "src/PersonObjects/Player/PlayerObjectServerMethods.ts": "b6d76cadfeb787ffc67064425e6c45149caf90456f540ee312b9b3b689605699",
+    "src/Server/Server.ts": "d057a0fe5c6ed885d9d8d022140dea0fb552fffbf260d367bcaf67ff93aa79c1",
+    "src/Server/ServerHelpers.ts": "8bcdc914fa01fd21c645d2f2d704cdac419e205452d513bc6e7953ec7d9f5e83",
+    "src/Server/ServerPurchases.ts": "51007cb8c359a9983401fd4157285eb516173dff52d3f9579c501c83d6550449",
+    "src/NetscriptFunctions/Singularity.ts": "a194ab58a38ec4b907701293f6e8ffa86c35c2c5d3b95ff81619812a15df64fb",
+    "src/NetscriptFunctions/Stanek.ts": "e21dda879e86403efcfa0f7f5946099441a03c64d28a50e099e62f9f0409511b",
+    "src/NetscriptFunctions/Hacknet.ts": "98d50e09d96de646bf6556ce5df5496c86302509c1e973c03a8d90526d5678ff",
+    "src/DarkWeb/DarkWebItems.ts": "e423bf39194c71f2a118b51c9cecc79fbf83491040e1960d8957afe1cf0f161e",
+    "src/Faction/FactionHelpers.tsx": "ea2ee2cf4e28d59dbc55dd904e75e8f5560d7eaed760fff4509da811bad1d106",
+    "src/Faction/FactionJoinCondition.ts": "8b72ce8bf780b02e070610b262f049297f318e28bd3abbceaeaa334240aa3bb6",
+    "src/Work/FactionWork.tsx": "cdef5958472502c85d81d70bf81f882a2950cc0ad0dccd49f04b9fab5cba65a5",
+    "src/PersonObjects/Grafting/GraftingHelpers.ts": "0f8d3f0c706bcd42704244acdc3bb898e502bde796b05c0f5d4597ee71a36977",
+    "src/CotMG/StaneksGift.ts": "280839c40532b8c0f702416a06f10b04fe89c1446e618eac1cc8b7de13b71a1d",
+    "src/Company/Company.ts": "10cce37c289a07e5aebc9bd78bc099a84804ce439301d6519aa4c073bf660db3",
+    "src/Work/CompanyWork.tsx": "570e7030b83d2ae19623f57081fcf2372fe0551546f93812bc34e18f0391422d",
+    "src/Work/ClassWork.tsx": "949075993861b819102d554d185993740fd8d84d2ed806da41e7ea22ed45b8ab",
+    "src/Work/CrimeWork.ts": "654925923ac15babf63b830ddcf37c41eaaa93f2bd6c1e985fce1772b30aad68",
+    "src/Work/CreateProgramWork.ts": "45cd7ee4bbf89597d535668d4a928506c79950e1f353e18a43159d1561d68538",
+    "src/Hacknet/HacknetHelpers.tsx": "601f6ff36b5a0a3782b16daad52c987a7cfa7bcb914e5d6b92758e0f3902379f",
+    "src/StockMarket/BuyingAndSelling.tsx": "16d390c0032c5c46168bbbe80a5b0c3b3ee7bb8c6b60144b9b5ffa2e51fa28aa",
+    "src/Gang/Gang.ts": "7fb7eb00a37a1d8fd80759f45a05362da5b6839d8833783823e39f8c8685ccf3",
+    "src/Bladeburner/Bladeburner.ts": "1543543ccd643598c7bb323e0bcc6fa7471cff31aeacf01ce5ce45715053202d",
+    "src/Corporation/Corporation.ts": "8d66f56db09aaeebfe2c1af094ff3672d86610ec89d579d47a756874d4a68a9d",
+    "src/PersonObjects/Sleeve/Sleeve.ts": "21f3b3c71f8ec39c326bcae9bb49a252db52689b9aa32e9f22b3119e6c10c011"
+  },
   "files": [
     {
       "path": "src/Hacking.ts",
@@ -29,6 +64,51 @@
       "sha256": "07271244b0b2c720df3724878ef81d480156d793909952efa8ac16a3847af1f0"
     },
     {
+      "path": "src/CotMG/data/Constants.ts",
+      "output": "src/CotMG/data/Constants.ts",
+      "sha256": "c0103177aef4ebb05d745327f6369f8269c04d406ff744929e3342f45b4c8fba"
+    },
+    {
+      "path": "src/CotMG/formulas/effect.ts",
+      "output": "src/CotMG/formulas/effect.ts",
+      "sha256": "d4e0bde2febed81b3f430df2244dab9181cbe0cbf3fc6c12c14262113bdec57b"
+    },
+    {
+      "path": "src/CotMG/FragmentType.ts",
+      "output": "src/CotMG/FragmentType.ts",
+      "sha256": "542a81d49c62ff83a29a4e88518d8234c836578e8c09bb392c946a4694036bba"
+    },
+    {
+      "path": "src/CotMG/data/Shapes.ts",
+      "output": "src/CotMG/data/Shapes.ts",
+      "sha256": "789d17fcb06cb551b6f2f448b8c0e57be2f5f1ffa292b2dc2babe07fb6e6655d"
+    },
+    {
+      "path": "src/CotMG/Fragment.ts",
+      "output": "src/CotMG/Fragment.ts",
+      "sha256": "11dae4295595780fd822945b30fc949da282b30b684725700f8ee50767ec7484"
+    },
+    {
+      "path": "src/CotMG/BaseGift.ts",
+      "output": "src/CotMG/BaseGift.ts",
+      "sha256": "6892c9557e4adff247f969e53f9d89f91b681dbb59a1ed4dcdb9cd09d29cda84"
+    },
+    {
+      "path": "src/CotMG/ActiveFragment.ts",
+      "output": "src/CotMG/ActiveFragment.ts",
+      "sha256": "822937039a372040694470d764d2a3be09e50e564be920a4adfd4a3e2127b4cc"
+    },
+    {
+      "path": "src/NetworkShare/Share.ts",
+      "output": "src/NetworkShare/Share.ts",
+      "sha256": "60c0cac377bbc374da953facb56eca4a7c848edeff55ed532871e6ad40ccab23"
+    },
+    {
+      "path": "src/SourceFile/applySourceFile.ts",
+      "output": "src/SourceFile/applySourceFile.ts",
+      "sha256": "811cd6bddcb20d0443194c080c7041a6acc03e8d8fa74845b99d0f4b5478689d"
+    },
+    {
       "path": "src/Hacknet/formulas/HacknetNodes.ts",
       "output": "src/Hacknet/formulas/HacknetNodes.ts",
       "sha256": "f1cad082d19a0a70ca728d50c5ef1524ed99b762e88b02dcc135aa401c62e277"
@@ -47,6 +127,11 @@
       "path": "src/Constants.ts",
       "output": "src/Constants.ts",
       "sha256": "ed879c506d86a75ecdaf929e6c557f9d13c5b88a4c75290d28826e08904e2723"
+    },
+    {
+      "path": "src/Exploits/Exploit.ts",
+      "output": "src/Exploits/Exploit.ts",
+      "sha256": "72f8eab641b16d919c6c808823c5873ac63d05d904d04bc8263c3099032cfd0b"
     },
     {
       "path": "src/Casino/RNG.ts",
@@ -339,6 +424,11 @@
       "sha256": "7897558b4d103a997f09c8b7de699a802f1743dda7830a221e5828713b9146c5"
     },
     {
+      "path": "src/SourceFile/SourceFileAdapter.ts",
+      "output": "src/SourceFile/SourceFileAdapter.ts",
+      "sha256": "0494372a0a2cabfbdf6f6b5a4ab74ed7219baf5b3d69290e00ab7590388259a5"
+    },
+    {
       "path": "src/Go/OracleStubs.ts",
       "output": "src/Go/OracleStubs.ts",
       "sha256": "02b3127269a7b64e1a86183b7ec4eaa991000dc018e79b0b2ef296ab287aecce"
@@ -357,6 +447,11 @@
       "path": "src/BitNode/BitNode.tsx#getBitNodeMultipliers",
       "output": "src/BitNode/BitNodeMults.ts",
       "sha256": "1c549710ac88f9414fef7db6b74d8f0b0cfe8709c0bc61167c34e33b850975ce"
+    },
+    {
+      "path": "src/Augmentation/CircadianModulator.ts#getRandomBonus",
+      "output": "src/Augmentation/CircadianBonus.ts",
+      "sha256": "2c28c668c30f241aad962a092c6f2ee672552cc84b208e86832c6825d999dbf0"
     },
     {
       "path": "src/Server/ServerHelpers.ts#numCycleForGrowthCorrected",
@@ -394,9 +489,9 @@
       "sha256": "266d50fa92cca0465141a50684198962ee66751dd939905f0eec3cf21d4192e3"
     },
     {
-      "path": "src/StockMarket/PlayerInfluencing.ts#forecastForecastChangeFromHack,forecastForecastChangeFromCompanyWork,influenceStockThroughServerHack,influenceStockThroughServerGrow",
+      "path": "src/StockMarket/PlayerInfluencing.ts#forecastForecastChangeFromHack,forecastForecastChangeFromCompanyWork,influenceStockThroughServerHack,influenceStockThroughServerGrow,influenceStockThroughCompanyWork",
       "output": "src/StockMarket/PlayerInfluence.ts",
-      "sha256": "dc70147f7dfb5c5bc6acf9edc840c2debbcd73f78106dab80cff1d18cb64a1da"
+      "sha256": "fa3d6dfbef13db3f86b3d6f0c9d71b104a0712fd5e3001fea86ab19e4d989be6"
     },
     {
       "path": "src/Company/data/JobTracks.ts+src/Company/data/CompanyPositionsMetadata.ts+src/Company/data/CompaniesMetadata.ts#COMPANY_TABLE",

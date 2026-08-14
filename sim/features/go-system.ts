@@ -1,7 +1,6 @@
 import type { Play, BoardState, SimpleOpponentStats } from "../vendor/bitburner/src/Go/Types.ts";
 import type { SimWorld } from "../world.ts";
 import type { FactionSystem } from "./factions.ts";
-import { mulberry32 } from "../core/rng.ts";
 import { GoColor, GoOpponent, GoPlayType } from "../vendor/bitburner/src/Go/Enums.ts";
 import { getMove } from "../vendor/bitburner/src/Go/boardAnalysis/goAI.ts";
 import {
@@ -15,6 +14,7 @@ import { getNewBoardState, makeMove, passTurn } from "../vendor/bitburner/src/Go
 import { Go, Player as GoPlayer, sleepLog } from "../vendor/bitburner/src/Go/OracleStubs.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import {
+  GO_REWARD_RULES,
   goDifficultyMultiplier,
   goEffectMultiplier,
   goFavorRepCap,
@@ -24,6 +24,7 @@ import {
 import type { GoRewardOpponent } from "../../shared/strategy/go/rules.ts";
 
 type RewardOpponent = Exclude<GoOpponent, GoOpponent.none>;
+export type GoSystemMode = "exact" | "aggregate";
 
 interface SimGoOpponentStats {
   wins: number;
@@ -90,14 +91,18 @@ export class GoSystem {
   #settled = false;
   #appliedEffects = new Map<RewardOpponent, number>();
   #random: () => number;
+  #mode: GoSystemMode;
+  #requestedSize = 7;
+  #aggregateScore: { black: number; white: number } | undefined;
 
-  constructor(world: SimWorld, factions: FactionSystem, seed: number) {
+  constructor(world: SimWorld, factions: FactionSystem, random: () => number, mode: GoSystemMode = "exact") {
     this.#world = world;
     this.#factions = factions;
-    // Isolate the AI's unseeded tie-break from the hacking RNG.
-    this.#random = mulberry32(seed ^ 0x60_0301);
+    this.#random = random;
+    this.#mode = mode;
     // Upstream starts with a plain 7x7 Netburners game.
     this.#state = getNewBoardState(7, GoOpponent.Netburners, false);
+    this.#world.onMultipliersReset.push(() => this.reapplyEffectsAfterMultiplierReset());
     this.#activate();
   }
 
@@ -119,6 +124,7 @@ export class GoSystem {
   }
 
   getCurrentPlayer(): "White" | "Black" | "None" {
+    if (this.#aggregateScore) return "None";
     if (this.#state.previousPlayer === null) return "None";
     return this.#state.previousPlayer === GoColor.black ? "White" : "Black";
   }
@@ -135,8 +141,8 @@ export class GoSystem {
     const score = getScore(this.#state);
     return {
       currentPlayer: this.getCurrentPlayer(),
-      whiteScore: score[GoColor.white].sum,
-      blackScore: score[GoColor.black].sum,
+      whiteScore: this.#aggregateScore?.white ?? score[GoColor.white].sum,
+      blackScore: this.#aggregateScore?.black ?? score[GoColor.black].sum,
       previousMove: getPreviousMove(),
       komi: score[GoColor.white].komi,
       bonusCycles: this.storedCycles,
@@ -181,7 +187,7 @@ export class GoSystem {
     ) {
       throw new Error(`Invalid opponent requested (${opponentValue}), this opponent has not yet been discovered`);
     }
-    if (this.#state.previousPlayer !== null && this.#state.previousBoards.length) {
+    if (!this.#settled && this.#state.previousPlayer !== null && this.#state.previousBoards.length) {
       this.#recordLoss(this.#state.ai as RewardOpponent, false);
     }
     GoPlayer.totalPlaytime = this.#world.clock.now();
@@ -193,6 +199,8 @@ export class GoSystem {
       Math.random = originalRandom;
     }
     this.#pending = undefined;
+    this.#requestedSize = boardSize;
+    this.#aggregateScore = undefined;
     this.#lastResponse = { type: GoPlayType.gameOver, x: null, y: null };
     this.#settled = false;
     this.#activate();
@@ -203,19 +211,19 @@ export class GoSystem {
     this.#requireTurn(GoColor.black);
     this.#activate();
     if (!makeMove(this.#state, x, y, GoColor.black)) throw new Error(`Invalid Go move ${x},${y}`);
-    return this.#startOpponentTurn();
+    return this.#mode === "aggregate" ? this.#startAggregateCompletion() : this.#startOpponentTurn();
   }
 
   passTurn(): Promise<Play> {
     this.#requireTurn(GoColor.black);
     this.#activate();
     passTurn(this.#state, GoColor.black);
-    if (this.#state.previousPlayer === null) {
+    if (this.#mode === "exact" && this.#state.previousPlayer === null) {
       this.#settleGame();
       this.#lastResponse = { type: GoPlayType.gameOver, x: null, y: null };
       return Promise.resolve(this.#lastResponse);
     }
-    return this.#startOpponentTurn();
+    return this.#mode === "aggregate" ? this.#startAggregateCompletion() : this.#startOpponentTurn();
   }
 
   opponentNextTurn(): Promise<Play> {
@@ -239,6 +247,14 @@ export class GoSystem {
     this.#updateEffects();
   }
 
+  /** Player.applyEntropy rebuilds the base multiplier object before upstream
+   * updateGoMults applies the current Go factors. The bookkeeping therefore
+   * has no prior factor to divide out at this boundary. */
+  reapplyEffectsAfterMultiplierReset(): void {
+    this.#appliedEffects.clear();
+    this.#updateEffects();
+  }
+
   #requireTurn(colour: GoColor): void {
     if (this.#state.previousPlayer === null) throw new Error("Go game is over");
     if (this.#state.previousPlayer === colour) throw new Error("It is not your Go turn");
@@ -255,6 +271,57 @@ export class GoSystem {
       this.#pending = undefined;
     });
     return this.#pending;
+  }
+
+  #startAggregateCompletion(): Promise<Play> {
+    if (this.#pending) return this.#pending;
+    this.#pending = this.#completeAggregateGame().finally(() => {
+      this.#pending = undefined;
+    });
+    return this.#pending;
+  }
+
+  /** Collapse a complete promoted-policy game to one seeded outcome. The
+   * calibration uses the same measured win, score, and upstream-AI wait rates
+   * used by opponent selection; only the expensive interior move sequence is
+   * omitted. */
+  async #completeAggregateGame(): Promise<Play> {
+    const opponent = this.#state.ai as RewardOpponent;
+    const profile = GO_REWARD_RULES[opponent];
+    const sizeShift = this.#requestedSize <= 5
+      ? 0
+      : this.#requestedSize <= 7
+        ? 0.04
+        : this.#requestedSize <= 9
+          ? 0.07
+          : 0.1;
+    const winProbability = Math.min(1, profile.priorWinProbability + sizeShift);
+    const playable = simpleBoardFromBoard(this.#state.board)
+      .reduce((sum, column) => sum + [...column].filter((cell) => cell !== "#").length, 0);
+    const scoreFraction = Math.min(
+      1,
+      profile.scoreFraction + (winProbability - profile.priorWinProbability) * 0.25,
+    );
+    const expectedBlackScore = playable * scoreFraction;
+    const lowScore = Math.floor(expectedBlackScore);
+    const blackScore = Math.max(
+      1,
+      lowScore + Number(this.#random() < expectedBlackScore - lowScore),
+    );
+    const won = this.#random() < winProbability;
+    const whiteScore = won ? Math.max(0.5, blackScore - 0.5) : blackScore + 0.5;
+    const durationMs = Math.max(
+      1,
+      Math.round(playable * profile.aiSecondsPerPlayableNode * 1_000),
+    );
+    await new Promise<void>((resolve) => void this.#world.clock.in(durationMs, resolve));
+
+    this.#aggregateScore = { black: blackScore, white: whiteScore };
+    this.#state.previousPlayer = null;
+    this.#settled = true;
+    this.#recordGame(opponent, won, blackScore, whiteScore, "aggregate");
+    this.#lastResponse = { type: GoPlayType.gameOver, x: null, y: null };
+    return this.#lastResponse;
   }
 
   async #calculateOpponentTurn(): Promise<Play> {
@@ -323,9 +390,25 @@ export class GoSystem {
     if (this.#settled || !isRewardOpponent(this.#state.ai)) return;
     this.#settled = true;
     const opponent = this.#state.ai;
-    const stats = this.#stats(opponent);
     const score = getScore(this.#state);
     const won = score[GoColor.black].sum >= score[GoColor.white].sum;
+    this.#recordGame(
+      opponent,
+      won,
+      score[GoColor.black].sum,
+      score[GoColor.white].sum,
+      "exact",
+    );
+  }
+
+  #recordGame(
+    opponent: RewardOpponent,
+    won: boolean,
+    blackScore: number,
+    whiteScore: number,
+    fidelity: GoSystemMode,
+  ): void {
+    const stats = this.#stats(opponent);
     if (!won) {
       this.#recordLoss(opponent, true);
     } else {
@@ -349,7 +432,6 @@ export class GoSystem {
         stats.rep += reward.repGranted;
       }
     }
-    const blackScore = score[GoColor.black].sum;
     stats.nodePower += blackScore
       * goDifficultyMultiplier(opponent as GoRewardOpponent, this.#state.board.length)
       * goStreakMultiplier(stats.winStreak, stats.oldWinStreak);
@@ -360,9 +442,10 @@ export class GoSystem {
       name: "go.game",
       data: {
         opponent,
+        fidelity,
         won,
         blackScore,
-        whiteScore: score[GoColor.white].sum,
+        whiteScore,
         winStreak: stats.winStreak,
         nodePower: stats.nodePower,
       },

@@ -7,7 +7,7 @@ import {
   prepTimeDiscount,
   type FarmRateModel,
 } from "../shared/strategy/economics.ts";
-import { allocateSegments, retainPrepReservation } from "../shared/strategy/evaluator.ts";
+import { adaptSegmentsToFleet, allocateSegments, retainPrepReservation } from "../shared/strategy/evaluator.ts";
 import { BATCH_INTERVAL_S, type PrepPlan } from "../shared/strategy/targeting.ts";
 
 /** Prep opportunity-cost economics: the "3 hours of prep is 3 hours of lost
@@ -43,8 +43,12 @@ describe("farmIncomeRate", () => {
   });
 
   test("uses the dispatcher's floored depth for partial intervals", () => {
-    const m = model({ ramPerBatch: 10, weakenTimeS: 2.1 });
-    const cap = Math.floor(2.1 / BATCH_INTERVAL_S) * 10;
+    // Two and a half intervals: a partial interval exercises the floor, and
+    // stating it in interval units keeps the cap under the fleet size so the
+    // cap is what binds. A literal weaken time silently stops being capped
+    // when the batch interval tightens.
+    const m = model({ ramPerBatch: 10, weakenTimeS: 2.5 * BATCH_INTERVAL_S });
+    const cap = 2 * 10;
     expect(depthCapGb(m)).toBe(cap);
     expect(farmIncomeRate(m, 1_000)).toBe(cap);
   });
@@ -67,6 +71,18 @@ describe("dynamic RAM allocation", () => {
   test("an atomic grow/weaken wave cannot lose its reservation at the transient grow landing", () => {
     expect(retainPrepReservation(1.75, 350, true)).toBe(350);
     expect(retainPrepReservation(1.75, 350, false)).toBe(1.75);
+  });
+
+  test("a fleet contraction preserves the farm/share tail proportion", () => {
+    expect(adaptSegmentsToFleet([
+      { kind: "prep", gb: 20 },
+      { kind: "farm", gb: 480 },
+      { kind: "share", gb: 500 },
+    ], 118)).toEqual([
+      { kind: "prep", gb: 20 },
+      { kind: "farm", gb: 48 },
+      { kind: "share", gb: 50 },
+    ]);
   });
 
   test("prefers the executable JIT role envelope and cadence when available", () => {
@@ -180,8 +196,13 @@ describe("evaluatePrep", () => {
     // incumbent's cadence-derived cap, so lost = 0 and any better candidate pays.
     const current = model({ score: 1, ramPerBatch: 10, weakenTimeS: 80 });
     expect(depthCapGb(current)).toBe(Math.floor(80 / BATCH_INTERVAL_S) * 10);
-    const capped = model({ score: 1, ramPerBatch: 10, weakenTimeS: 8 });
-    const candidate = model({ score: 1.5, ramPerBatch: 10, weakenTimeS: 8 });
+    // Expressed in cadence units, not a hardcoded 8s: the depth cap is
+    // `floor(weakenTimeS / BATCH_INTERVAL_S) * ramPerBatch`, so a literal
+    // weaken time silently stops being "capped" when the batch interval
+    // tightens. Three intervals of depth is 30 GB — far under the fleet.
+    const cappedWeakenTimeS = 3 * BATCH_INTERVAL_S;
+    const capped = model({ score: 1, ramPerBatch: 10, weakenTimeS: cappedWeakenTimeS });
+    const candidate = model({ score: 1.5, ramPerBatch: 10, weakenTimeS: cappedWeakenTimeS });
     const p = plan({ ramSec: 60_000, weakenTimeS: 100 });
     const result = evaluatePrep({ current: capped, candidate, plan: p, fleetGb: 1_000, horizonMs: 1_800_000 })!;
     const gain = (farmIncomeRate(candidate, 1_000) - farmIncomeRate(capped, 1_000)) * (1_800 - result.prepSeconds);
@@ -212,6 +233,19 @@ describe("evaluatePrep", () => {
     })!;
     expect(ramBound.prepShare).toBe(0.6);
     expect(latencyBound.prepShare).toBe(0.25);
+  });
+
+  test('the value search stays within the executable prep ceiling', () => {
+    const result = evaluatePrep({
+      current: model({ score: 1, ramPerBatch: 1, weakenTimeS: 800 }),
+      candidate: model({ score: 20, ramPerBatch: 1, weakenTimeS: 800 }),
+      plan: plan({ ramSec: 500_000, weakenTimeS: 10 }),
+      fleetGb: 1_000,
+      horizonMs: 1_800_000,
+      maxPrepGb: 300,
+    })!;
+    expect(result.prepGb).toBe(300);
+    expect(result.prepShare).toBe(0.3);
   });
 
   test("a prepped plan or an empty fleet yields no economics", () => {

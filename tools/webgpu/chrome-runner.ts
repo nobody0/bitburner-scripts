@@ -17,6 +17,10 @@ import { spawn, type Subprocess } from "bun";
 import * as esbuild from "esbuild";
 
 const CHROME_CANDIDATES = [
+  "C:/Program Files/Google/Chrome/Application/chrome.exe",
+  "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe",
+  "C:/Program Files/Microsoft/Edge/Application/msedge.exe",
+  "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe",
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
   "/Applications/Chromium.app/Contents/MacOS/Chromium",
   "/usr/bin/google-chrome",
@@ -157,7 +161,7 @@ export async function runInHeadlessChrome(
       "--remote-debugging-port=0",
       `--user-data-dir=${profileDir}`,
       "--no-first-run",
-      "--use-angle=metal",
+      `--use-angle=${process.platform === "darwin" ? "metal" : "default"}`,
       "--enable-unsafe-webgpu",
       "--enable-features=WebGPU",
       "about:blank",

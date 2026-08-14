@@ -18,6 +18,7 @@ export function initialContext(): GoalContext {
     augmentations: new Set(),
     installedAugmentations: new Set(),
     installs: 0,
+    completedBitNodes: new Set(),
   };
 }
 
@@ -129,6 +130,10 @@ export function reduceRecord(ctx: GoalContext, record: LogRecord): GoalContext {
     return reduceHackDone(ctx, record);
   }
   if (record.kind === "event" && record.name === "aug.installed") ctx.installs++;
+  if (record.kind === "event" && record.name === "bitnode.reset") {
+    const from = (record.data as { from?: unknown } | undefined)?.from;
+    if (typeof from === "number") ctx.completedBitNodes.add(from);
+  }
   return ctx;
 }
 

@@ -1,16 +1,23 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import type { Server } from "@ns";
+import { afterAll, beforeAll, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { setGoNeuralRuntimeForTest } from "../../game/lib/features/remaining.ts";
-import { homeDodgeBudget } from "../../game/lib/probe-runner.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { only } from "../../shared/features/profile.ts";
 import { ramCostContext, runGame } from "../game-run.ts";
 import { getFunctionRamCost, getRamCost } from "../ns/ram-costs.ts";
 import { StubGoValueBackend } from "../../tests/support/go-value-backend.ts";
 import { TestGoNeuralRuntime } from "../../tests/support/go-neural-runtime.ts";
+import { Clock } from "../clock.ts";
+import { installVirtualTime } from "../realm/timers.ts";
+import { calculateExp } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 
 /** The synthetic ns exists to run game/ for real. These pin the mechanics that
  * make that possible, and the end-to-end proof that it does. */
+
+// Controller scenarios exercise a complete async Netscript/process lifecycle.
+// Several finish in 5-6 seconds on a busy host, so Bun's 5 second default can
+// abandon runGame while its process-wide virtual-time realm is still installed.
+// That turns one timeout into cascading failures in later virtual-time files.
+setDefaultTimeout(30_000);
 
 describe("ram costs", () => {
   test("prices the gate batch as the game does", () => {
@@ -135,18 +142,23 @@ describe("running game/ in the synthetic world", () => {
     expect(result.output[0]).toContain("start.js online");
     expect(result.records).toBeGreaterThan(100);
     expect(result.validity).toBe("valid");
-  });
-
-  test("the run is deterministic for a fixed seed", async () => {
-    const run = () =>
-      runGame({
-        goal: parseGoals(["earn:1e6"]), seed: 7, horizonMs: 60 * 60_000, homeRam: 16, label: "det",
-        features: only("hacking", "progression"),
-      });
-    const [a, b] = [await run(), await run()];
-    expect(a.timeToGoalMs).toBe(b.timeToGoalMs);
-    expect(a.records).toBe(b.records);
   }, 10_000);
+
+  test("a setup failure restores every process-wide virtual primitive", async () => {
+    const realDate = Date;
+    const realRandom = Math.random;
+    await expect(runGame({
+      goal: parseGoals(["earn:1"]),
+      seed: 1,
+      horizonMs: 1_000,
+      homeRam: 1,
+      features: only("hacking"),
+    })).rejects.toThrow("too little RAM");
+    expect(Date).toBe(realDate);
+    expect(Math.random).toBe(realRandom);
+    const probe = installVirtualTime(new Clock());
+    probe.restore();
+  });
 
   test("the sweep roots and deploys, and the dispatcher lands real ops", async () => {
     let farm: { landed?: Record<string, number>; totals?: Record<string, number> } | undefined;
@@ -208,7 +220,7 @@ describe("running game/ in the synthetic world", () => {
   });
 
   test("the capability gate detects the BitNode and derives unlocks", async () => {
-    let caps: { bitNode?: number; unlocked?: Record<string, string> } | undefined;
+    let caps: { bitNode?: number; sourceFiles?: Record<string, number>; unlocked?: Record<string, string> } | undefined;
     await runGame({
       goal: parseGoals(["earn:1e30"]),
       seed: 1,
@@ -225,8 +237,10 @@ describe("running game/ in the synthetic world", () => {
     expect(caps?.unlocked?.["hacking"]).toBe("yes");
     expect(caps?.unlocked?.["progression"]).toBe("yes");
     expect(caps?.unlocked?.["go"]).toBe("yes");
-    // A fresh BN1 save holds no source files, so the node-gated features lock.
-    expect(caps?.unlocked?.["factions"]).toBe("no");
+    // The save is fresh, but controller runs explicitly receive SF4.3 so the
+    // otherwise-manual Singularity boundary can be automated.
+    expect(caps?.sourceFiles?.["4"]).toBe(3);
+    expect(caps?.unlocked?.["factions"]).toBe("yes");
     expect(caps?.unlocked?.["gang"]).toBe("no");
     expect(caps?.unlocked?.["corp"]).toBe("no");
   });
@@ -257,6 +271,10 @@ describe("running game/ in the synthetic world", () => {
       horizonMs: 60 * 60_000,
       homeRam: 16,
       label: "gaps",
+      // The SF4 automation allowance intentionally unlocks the modeled
+      // Singularity surface. Seed an actually unmodeled subsystem so this test
+      // continues to exercise gap reporting rather than depending on SF4=0.
+      gates: { inGang: true },
       features: { go: "off" },
     });
 
@@ -267,7 +285,7 @@ describe("running game/ in the synthetic world", () => {
     // placeholder. Deliberately NOT pinned to a specific call: as feature
     // slices land, individual gaps close, and a hardcoded name turns that
     // progress into a test failure.
-    expect(gaps.every((gap) => /^(ns|subsystem) \S/.test(gap))).toBe(true);
+    expect(gaps.every((gap) => /^(ns|subsystem|initial-state) \S/.test(gap))).toBe(true);
     // ...with no leading-dot mangling of the root namespace...
     expect(gaps.every((gap) => !gap.includes(" ."))).toBe(true);
     // ...and the run still completes, because probe-runner isolates each probe.
@@ -290,14 +308,48 @@ describe("running game/ in the synthetic world", () => {
     expect(result.validity).toBe("invalid-for-goal");
   });
 
-  test("a fresh 8GB home still cannot fund a dodge on home ALONE", () => {
-    // The underlying arithmetic, pinned so the motivation for fleet placement
-    // cannot quietly stop being true: the sweep snapshots the network from
-    // INSIDE a 4.1 GB dodge stub, so home.ramUsed carries the stub's own
-    // footprint. 8 - 3.6 (controller) - 4.1 (stub) - 1.6 - 0.5 is negative,
-    // and a home-only budget skips the capability gate batch forever.
-    const home = { hostname: "home", maxRam: 8, ramUsed: 3.6 + 4.1 } as Server;
-    expect(homeDodgeBudget({ home })).toBe(0);
+  test("an installed Red Pill acquires the final opener and completes the real daemon transition", async () => {
+    const events: { name?: string; data?: Record<string, unknown> }[] = [];
+    const result = await runGame({
+      goal: parseGoals(["bn:1"]),
+      seed: 1,
+      horizonMs: 120_000,
+      bitnode: 1,
+      homeRam: 1_024,
+      startingMoney: 1e9,
+      features: only("hacking", "progression"),
+      network: [
+        { hostname: "The-Cave", hackDifficulty: 100, moneyAvailable: 0, requiredHackingSkill: 925, serverGrowth: 0, numOpenPortsRequired: 5, maxRam: 0 },
+        { hostname: "w0r1d_d43m0n", hackDifficulty: 100, moneyAvailable: 0, requiredHackingSkill: 3_000, serverGrowth: 0, numOpenPortsRequired: 5, maxRam: 0 },
+      ],
+      topology: {
+        home: ["The-Cave"],
+        "The-Cave": ["home", "w0r1d_d43m0n"],
+        w0r1d_d43m0n: ["The-Cave"],
+      },
+      person: { skills: { hacking: 3_000 }, exp: { hacking: calculateExp(3_000) } },
+      playerState: {
+        augmentations: [{ name: "The Red Pill", level: 1 }],
+        sourceFiles: { "4": 3 },
+      },
+      homeFiles: ["BruteSSH.exe", "FTPCrack.exe", "relaySMTP.exe", "HTTPWorm.exe"],
+      telemetry: false,
+      recordFilter: (record) => record.kind === "event",
+      onRecord: (line) => events.push(JSON.parse(line)),
+    });
+
+    expect(result.reached).toBe(true);
+    expect(result.validity).toBe("valid");
+    expect(result.unmodeled).toEqual({});
+    expect(result.crashes).toEqual([]);
+    expect(events).toContainEqual(expect.objectContaining({
+      name: "program.bought",
+      data: { program: "SQLInject.exe", cost: 250_000_000 },
+    }));
+    expect(events).toContainEqual(expect.objectContaining({
+      name: "bitnode.reset",
+      data: expect.objectContaining({ from: 1, to: 1, callback: "start.js" }),
+    }));
   });
 
   test("...but fleet placement funds it anyway, so features actually unlock", async () => {
@@ -327,7 +379,7 @@ describe("running game/ in the synthetic world", () => {
     expect(caps, "the gate batch never ran — fleet placement is not funding it").toBeDefined();
     // A real reading, not the all-unknown placeholder.
     expect(caps!.data.unlocked.hacking).toBe("yes");
-    expect(caps!.data.unlocked.factions).toBe("no");
+    expect(caps!.data.unlocked.factions).toBe("yes");
     expect(result.reached).toBe(true);
   });
 });

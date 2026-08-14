@@ -787,11 +787,6 @@ describe("progression", () => {
     expect(phaseOf(view({ earnedThisRun: 100, money: 60, queued: ["a"] }))).toBe("ending");
   });
 
-  test("the home-RAM budget rises from 10% to 50% in finishUp", () => {
-    expect(stepProgression(view()).homeRamBudgetFraction).toBe(0.1);
-    expect(stepProgression(view({ affordableValueProduct: 2 })).homeRamBudgetFraction).toBe(0.5);
-  });
-
   test("favor crossings are the exact install-timing crossover", () => {
     // Favor is banked ONLY at install, and crossing the donation threshold
     // converts every future rep requirement from hours of work into money.
@@ -800,6 +795,21 @@ describe("progression", () => {
     expect(crossings[0]!.favorAfter).toBeGreaterThanOrEqual(150);
     // A faction nowhere near the threshold does not cross.
     expect(favorCrossings(view({ factions: { CyberSec: { rep: 10, favor: 0 } } }))).toHaveLength(0);
+  });
+
+  test("a favor crossing opens the end-loaded sweep before factions reports ready", () => {
+    // factionsReadyToInstall can only become true after installWanted asks the
+    // faction driver to run its final purchase sweep. Requiring readiness here
+    // would deadlock an empty-queue cycle at the exact crossing.
+    const decision = stepProgression(view({
+      factions: { CyberSec: { rep: 1e9, favor: 0 } },
+      resetRealizable: true,
+      marginalInstall: false,
+      factionsReadyToInstall: false,
+    }));
+    expect(decision.installWanted).toBe(true);
+    expect(decision.installReady).toBe(false);
+    expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["factions", "augmentations"]);
   });
 
   test("installing is recommended only in `ending` with something queued", () => {
@@ -1234,7 +1244,6 @@ describe("progression survives its own published plan", () => {
     phase: "ending",
     install: false,
     why: "waiting for factions to finish its final purchase and donation sweep",
-    homeRamBudgetFraction: 0.5,
     favorCrossings: [],
     route: "daedalus",
     routeWhy: "daedalus remains the fastest route",

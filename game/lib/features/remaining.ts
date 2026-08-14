@@ -1,6 +1,6 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
-import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
+import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import {
   isSoA,
   NEUROFLUX,
@@ -89,6 +89,7 @@ import {
   type PlanningHorizons,
   usableForecastSec,
 } from "../../../shared/strategy/progression/forecast.ts";
+import { progressionMarginals } from "../../../shared/strategy/progression/marginal.ts";
 import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/topics/progression.ts";
 import type {
   GoActionDigest,
@@ -109,6 +110,7 @@ import { merge, set, type GameState } from "../state.ts";
 import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions, resetSleeveCompletions } from "../sleeve-completion.ts";
 import type { WorkTaskLike } from "../work-completion.ts";
 import { actionRamClaim, featureDodge, featureGoDodge } from "./dodge.ts";
+import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
 /** Drivers for the features whose game-side work is a thin execution layer
@@ -120,16 +122,9 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
  * one of them can move to its own file the moment it needs more than that —
  * `factions`, `career`, `hacknet` and `stock` already have. */
 
-/** Every driver here reports its own peak dodge step so the home reserve can
- * cover it (shared/ram/reserve.ts). */
-const STEP_GB = { gang: 6, corp: 24, bladeburner: 10, sleeves: 12, go: 4, stanek: 6, dnet: 8, progression: 8 };
-/** `singularity.destroyW0r1dD43m0n` is progression's peak dodge, and it is four
- * times the feature's ordinary step. Held as a STATIC peak it would tax the
- * home reserve — and a contiguous fleet block — from the first pass of every
- * run, starving the early farm of the income needed to buy that RAM, for a call
- * that fires once at the end of a node and only with SF4. `reserveStepGb` holds
- * it only while the completion action is actually armed. */
-const PROGRESSION_COMPLETE_GB = 32;
+/** Go's pure ROI policy needs a cold estimate before a runtime request exists;
+ * this is not used for broker sizing or placement. */
+const GO_ESTIMATED_GB = 4;
 const GO_MAX_FLEET_SHARE = 0.01;
 const BLADES_SIMULACRUM = "The Blade's Simulacrum";
 
@@ -194,7 +189,7 @@ function maybeActionClaim(
   ctx: ClaimContext,
   action: string | undefined,
   methods: readonly string[],
-): Claim[] {
+): FeatureClaim[] {
   if (!action || methods.length === 0) return [];
   return [actionRamClaim(ctx, by, actionClaimId(action), methods, `${by} ${action}`)];
 }
@@ -876,7 +871,7 @@ function goActionAdmitted(state: GameState, caps: DriverContext["caps"]): boolea
     state.topics.progression?.multipliers,
   );
   const rewardScale = (nodeMults?.GoPower ?? 1) * (sfLevel(caps.sourceFiles, 14) > 0 ? 2 : 1);
-  return usableGb > 0 && STEP_GB.go / usableGb <= GO_MAX_FLEET_SHARE * rewardScale;
+  return usableGb > 0 && GO_ESTIMATED_GB / usableGb <= GO_MAX_FLEET_SHARE * rewardScale;
 }
 
 /** A Go candidate reports route-seconds saved per second spent playing. Its
@@ -886,7 +881,7 @@ function goActionAdmitted(state: GameState, caps: DriverContext["caps"]): boolea
  * its next increment is smaller than the hacking throughput it displaces. */
 export function goGamePaysForRam(utilityPerSec: number, usableGb: number): boolean {
   if (!(utilityPerSec > 0) || !(usableGb > 0)) return false;
-  return utilityPerSec > STEP_GB.go / usableGb;
+  return utilityPerSec > GO_ESTIMATED_GB / usableGb;
 }
 
 const go: FeatureDriver = {
@@ -1246,7 +1241,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                 continuationHints: evaluated.continuations,
                 prediction: {
                   model: GO_OPPONENT_MODEL,
-                  backend: "webgpu",
+                  backend: evaluated.backend ?? "webgpu",
                   modelProfile: evaluated.modelProfile,
                   // Every board above 5x5 is rated by the 19x19 daemon weights
                   // on a padded board. That is V9's deliberate profile routing
@@ -2530,6 +2525,13 @@ function progressionRefresh(ctx: NeedContext): void {
       }, installBasis)
     : forecastAt(previousInstallForecast!, ctx.now);
   const forecasts: PlanningHorizons = { node: nextNodeForecast, install: nextInstallForecast };
+  const marginals = progressionMarginals({
+    view,
+    decision: endgame,
+    rates,
+    ...(choice ? { selectedRoute: choice.route } : {}),
+    install: nextInstallForecast,
+  });
   const nextBitNode = selectedEta?.complete && view.bitNode !== undefined
     ? chooseNextBitNode(view.bitNode, view.sourceFiles)
     : undefined;
@@ -2561,7 +2563,6 @@ function progressionRefresh(ctx: NeedContext): void {
       ...(armedAt !== undefined ? { installArmedAt: armedAt } : {}),
       queuedAugmentations: pending,
       install: decision.installReady && armedAt !== undefined,
-      homeRamBudgetFraction: decision.homeRamBudgetFraction,
       favorCrossings: decision.favorCrossings,
       installDecision: {
         verdict: rawVerdict.verdict,
@@ -2583,6 +2584,7 @@ function progressionRefresh(ctx: NeedContext): void {
       routes: routesDigest,
       routeInstallRequired: routeRequiresInstall,
       forecasts,
+      marginals,
       ...(routeAction ? { routeAction } : {}),
       ...(nextBitNode
         ? {
@@ -2643,7 +2645,7 @@ const progression: FeatureDriver = {
           return true;
         },
       );
-      if (!outcome.ok) progressionMemory.nodeCompletionArmedAt = undefined;
+      if (!outcome.ok && !outcome.queued) progressionMemory.nodeCompletionArmedAt = undefined;
       return;
     }
     if (plan?.routeAction?.type === "joinBladeburner") {
@@ -2695,7 +2697,7 @@ const progression: FeatureDriver = {
         return true;
       },
     );
-    if (!outcome.ok) {
+    if (!outcome.ok && !outcome.queued) {
       progressionMemory.installArmedAt = undefined;
       progressionMemory.installQueueKey = undefined;
       const { installArmedAt: _armed, ...disarmed } = plan;
@@ -2731,7 +2733,6 @@ export const gangModule: FeatureModule = {
     const action = ctx.state.topics.gang?.plan?.actions.find((entry) => entry.type !== "idle")?.type;
     return maybeActionClaim("gang", ctx, action, gangMethods(action));
   },
-  peakStepGb: STEP_GB.gang,
 };
 
 export const corpModule: FeatureModule = {
@@ -2746,7 +2747,6 @@ export const corpModule: FeatureModule = {
   // the bankroll crossed $150b. Re-post it (at `corp:seed`) the day execute()
   // spends money.
   claims: () => [],
-  peakStepGb: STEP_GB.corp,
 };
 
 export const bladeburnerModule: FeatureModule = {
@@ -2762,6 +2762,9 @@ export const bladeburnerModule: FeatureModule = {
         id: "work",
         resource: "time",
         amount: 1,
+        shape: "step",
+        pricing: "hard",
+        value: { state: "unknown", reason: "the player-time slot is ordered by hard priority" },
         priority: PRIORITY["factions:work"],
         mode: "spend",
         why: "Bladeburner action occupies Player.currentWork without The Blade's Simulacrum",
@@ -2788,7 +2791,6 @@ export const bladeburnerModule: FeatureModule = {
       },
     ];
   },
-  peakStepGb: STEP_GB.bladeburner,
 };
 
 export const sleevesModule: FeatureModule = {
@@ -2805,7 +2807,6 @@ export const sleevesModule: FeatureModule = {
     if (methods.length === 0 && pendingSleeveCompletions().size === 0) return [];
     return [actionRamClaim(ctx, "sleeves", "action:batch", methods.length > 0 ? methods : ["sleeve.getTask"], "update and arm sleeve work")];
   },
-  peakStepGb: STEP_GB.sleeves,
 };
 
 export const goModule: FeatureModule = {
@@ -2837,7 +2838,6 @@ export const goModule: FeatureModule = {
     if (!action || methods.length === 0) return [];
     return [actionRamClaim(ctx, "go", goActionClaimId(action), methods, `go ${action}`)];
   },
-  peakStepGb: STEP_GB.go,
 };
 
 export const stanekModule: FeatureModule = {
@@ -2849,7 +2849,6 @@ export const stanekModule: FeatureModule = {
     ctx.state.topics.stanek?.plan?.chargeOrder?.length ? "charge" : undefined,
     ["stanek.chargeFragment"],
   ),
-  peakStepGb: STEP_GB.stanek,
 };
 
 export const dnetModule: FeatureModule = {
@@ -2860,7 +2859,6 @@ export const dnetModule: FeatureModule = {
     return maybeActionClaim("dnet", ctx, action === "idle" ? undefined : action, dnetMethods(action));
   },
   needs: dnetNeeds,
-  peakStepGb: STEP_GB.dnet,
 };
 
 function gangMethods(action: string | undefined): readonly string[] {
@@ -2920,6 +2918,38 @@ function dnetMethods(_action: string | undefined): readonly string[] {
   // Every planned Darknet action currently refuses locally; none should
   // reserve RAM or launch a misleading no-op dodge.
   return [];
+}
+
+/** A dollar held through the install transaction advances the binding money
+ * clock by 1 / measuredIncome seconds. Scale by how much of the install clock
+ * the published money marginal actually binds. Missing income or marginal
+ * evidence stays unknown; it is never fabricated as a zero curve. */
+function progressionReserveValueCurve(claim: Claim, ctx: ClaimContext): ClaimValueCurve | undefined {
+  if (
+    claim.resource !== "money"
+    || claim.shape !== "continuous"
+    || (claim.id !== "imminent-install" && claim.id !== "install-freeze")
+  ) return undefined;
+  const marginal = ctx.state.topics.progression?.plan?.marginals?.money;
+  if (!marginal || marginal.state === "unknown") return undefined;
+  if (!(marginal.secondsPerRelativeRate > 0)) return { demandAt: () => 0 };
+
+  const progression = ctx.state.topics.progression;
+  const earned = progression?.moneySources?.sinceInstall?.total;
+  const resetAt = progression?.lastAugReset;
+  const elapsedSec = resetAt === undefined ? 0 : Math.max(0, (ctx.now - resetAt) / 1_000);
+  if (earned === undefined || !(earned > 0) || !(elapsedSec > 0)) return undefined;
+  const incomePerSec = earned / elapsedSec;
+  if (!(incomePerSec > 0)) return undefined;
+
+  const installSec = usableForecastSec(ctx.horizons.install);
+  const bindingFraction = installSec !== undefined && installSec > 0
+    ? Math.min(1, marginal.secondsPerRelativeRate / installSec)
+    : 1;
+  const valuePerDollar = bindingFraction / incomePerSec;
+  return {
+    demandAt: (lambda) => Math.max(0, lambda) <= valuePerDollar ? claim.amount : 0,
+  };
 }
 
 export const progressionModule: FeatureModule = {
@@ -2989,13 +3019,14 @@ export const progressionModule: FeatureModule = {
         "action:complete-bitnode",
         ["singularity.destroyW0r1dD43m0n"],
         `complete the BitNode and enter BN${plan.completion.nextBitNode}`,
+        PRIORITY["progression:terminal-action"],
       )];
     }
     // A pending route action is additive: it does NOT excuse the bankroll
     // reservations below. An unfunded createGang/joinBladeburner can stay
     // pending for many arbitration passes, and leaving the install brakes off
     // for that window lets investments spend cash the armed reset would wipe.
-    const routeClaims: Claim[] = [];
+    const routeClaims: FeatureClaim[] = [];
     if (plan?.routeAction?.type === "createGang") {
       routeClaims.push(actionRamClaim(
         ctx,
@@ -3029,20 +3060,20 @@ export const progressionModule: FeatureModule = {
           amount: ctx.state.topics.player?.money ?? 0,
           priority: PRIORITY["progression:imminent-install"],
           mode: "reserve",
-          divisible: true,
+          shape: "continuous",
           why: `install expected in ${Math.round(installSec)}s; investment ROI windows are closed`,
         });
       }
       return routeClaims;
     }
-    const claims: Claim[] = [...routeClaims, {
+    const claims: FeatureClaim[] = [...routeClaims, {
       by: "progression",
       id: "install-freeze",
       resource: "money",
       amount: ctx.state.topics.player?.money ?? 0,
       priority: PRIORITY["progression:install-freeze"],
       mode: "reserve",
-      divisible: true,
+      shape: "continuous",
       why: "freeze cash after the final augmentation sweep until the armed install executes",
     }];
     if (plan.install) {
@@ -3052,11 +3083,10 @@ export const progressionModule: FeatureModule = {
         "action:install",
         ["singularity.installAugmentations"],
         "install queued augmentations and restart /start.js",
+        PRIORITY["progression:terminal-action"],
       ));
     }
     return claims;
   },
-  peakStepGb: PROGRESSION_COMPLETE_GB,
-  reserveStepGb: (state) =>
-    readablePlan(state)?.completion?.execute === true ? PROGRESSION_COMPLETE_GB : STEP_GB.progression,
+  valueCurve: progressionReserveValueCurve,
 };

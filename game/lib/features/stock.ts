@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
-import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
+import { linearValueCurve, PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import { usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { secondsForTicks, TICKS_PER_CYCLE } from "../../../shared/strategy/stock/market.ts";
 import {
@@ -20,8 +20,10 @@ import {
 import { resetHistory } from "../../../shared/strategy/stock/history.ts";
 import type { StockManipulation, StockPlan as StockPlanDigest, StockState } from "../../../shared/telemetry/topics/stock.ts";
 import { isScriptDeath } from "../errors.ts";
+import { moneyRateValue, moneyStepValue } from "../income.ts";
 import { merge } from "../state.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
+import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
 
 /** The stock driver.
@@ -65,7 +67,6 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  *
  * The old declaration was 8 GB, which under-priced the 11.5 GB forecast probe of
  * the time — a home reserve too small for the step it was reserving for. */
-const PEAK_STEP_GB = 12.1;
 
 let memory: StockMemory = initStockMemory();
 let lastPlan: StockPlan | undefined;
@@ -176,9 +177,9 @@ export function buildView(ctx: DriverContext): StockView | undefined {
 
   // Liquidate on IMMINENCE, not on phase.
   //
-  // THE BUG this replaces: `plan.phase === "ending"`. That phase is an economic
-  // test — `money > earnedThisRun / 2` with something queued — not a statement that
-  // an install is close. On a real BN1 run with $72t banked and a Daedalus route
+  // THE BUG this replaces: `plan.phase === "ending"`. That legacy cash-ratio
+  // phase was not a statement that an install was close. On a real BN1 run
+  // with $72t banked and a Daedalus route
   // ~525h out it latched on the first tick and never cleared: 9811 progression
   // records, every one of them "ending", and the market sat flat the entire run
   // refusing FSIG at a 0.673 forecast and a 3.4-tick break-even. The phase is the
@@ -467,9 +468,9 @@ function wantedActions(plan: StockPlan): StockAction[] {
   ];
 }
 
-function claims(ctx: ClaimContext): Claim[] {
+function claims(ctx: ClaimContext): FeatureClaim[] {
   const plan = lastPlan;
-  const out: Claim[] = [];
+  const out: FeatureClaim[] = [];
   if (!plan) return out;
 
   const wanted = wantedActions(plan);
@@ -488,7 +489,9 @@ function claims(ctx: ClaimContext): Claim[] {
       mode: "spend",
       // Indivisible: half a TIX API is nothing. Unlike a position, there is no
       // smaller version of this purchase.
-      divisible: false,
+      shape: "step",
+      pricing: "economic",
+      value: moneyStepValue(ctx.state, plan.unlock.gainPerSec, ctx.now),
       ratePerSec: plan.unlock.gainPerSec,
       returnPerDollarSec: plan.unlock.gainPerSec / Math.max(1, plan.unlock.investmentCost),
       why: plan.unlock.why,
@@ -508,7 +511,7 @@ function claims(ctx: ClaimContext): Claim[] {
       mode: "spend",
       // Divisible: a position is continuous, and fundedActions re-checks that
       // the reduced size still clears its round trip before buying it.
-      divisible: true,
+      shape: "continuous",
       ratePerSec: plan.entry.expectedProfit / Math.max(1, plan.entry.holdTicks * 6),
       returnPerDollarSec:
         plan.entry.expectedProfit / Math.max(1, plan.entry.cost * plan.entry.holdTicks * 6),
@@ -516,6 +519,21 @@ function claims(ctx: ClaimContext): Claim[] {
     });
   }
   return out;
+}
+
+/** A position's expected profit is linear in deployed dollars at the selected
+ * symbol/side. Convert that $/sec/$ slope to BN-sec/$ with progression's
+ * measured money-rate marginal. An absent rate stays absent; a measured zero
+ * returns a real zero-value curve. */
+function valueCurve(claim: Claim, ctx: ClaimContext): ClaimValueCurve | undefined {
+  if (claim.id !== POSITION_CLAIM_ID || claim.resource !== "money" || claim.shape !== "continuous") return undefined;
+  if (!(claim.amount > 0)) return { demandAt: () => 0 };
+  const marginalIncomePerDollar = (claim.ratePerSec ?? 0) / claim.amount;
+  const value = moneyRateValue(ctx.state, marginalIncomePerDollar, ctx.now);
+  if (value.state === "unknown") return undefined;
+  // A zero marginal is evidence for zero demand, not an absent measurement and
+  // not linearValueCurve(0), whose inclusive lambda=0 boundary means "take all".
+  return value.value > 0 ? linearValueCurve(value.value, claim.amount) : { demandAt: () => 0 };
 }
 
 function stockClaimId(actions: readonly StockAction[]): string {
@@ -560,11 +578,9 @@ export const stockModule: FeatureModule = {
     delete state.topics.stock;
   },
   claims,
-  peakStepGb: PEAK_STEP_GB,
+  valueCurve,
   // Outside BN8, the base reserve already fits account observation and either
   // half of WSE/TIX acquisition. The 12.1 GB market/trade reserve has value
   // only after TIX exists. BN8 keeps it from the first pass because TIX is a
   // node starting condition that may not have reached the topic yet.
-  reserveStepGb: (state, caps) =>
-    caps.bitNode === 8 || state.topics.stock?.hasTixApiAccess === true ? PEAK_STEP_GB : 0,
 };

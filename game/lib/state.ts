@@ -20,19 +20,6 @@ import { gameGlobal } from "./globals.ts";
 
 export type Topics = { [K in StateKey]?: StateMap[K] };
 
-/** A probe that could not afford its dodge budget, with the price that made it
- * unaffordable — so the sink can report a price change once rather than the
- * same skip every sweep. */
-export interface ProbeSkip {
-  cost: number;
-  budget: number;
-  /** When the skip was last observed. A skip that stops being re-recorded is
-   *  a need that went away without a successful retry (the invite arrived
-   *  another way, the decision moved on) — consumers age those out rather
-   *  than letting a dead entry hold the fleet reserve forever. */
-  at: number;
-}
-
 export interface ProbeBatch {
   ids: string[];
   cost: number;
@@ -43,13 +30,12 @@ export interface GameState {
   topics: Topics;
   /** Topic keys written since the last flush. */
   dirty: Set<StateKey>;
-  /** Getter-mirror key space (`getServer:home`), fed by makeDodger. Kept apart
-   *  from topics: it is keyed by the ns call, not by the state map. */
+  /** Getter-mirror key space (`getServer:home`). Kept apart from topics: it
+   *  is keyed by the ns call, not by the state map. */
   mirrors: Record<string, unknown>;
   mirrorDirty: Set<string>;
   /** Last error per probe id; cleared when the probe next succeeds. */
   probeFailures: Record<string, string>;
-  probeSkips: Record<string, ProbeSkip>;
   probeBatch?: ProbeBatch;
   /** Last tick each feature driver ran, by feature id. Survives handoffs, so a
    *  build push does not restart every cadence. */
@@ -76,7 +62,6 @@ function emptyState(): GameState {
     mirrors: {},
     mirrorDirty: new Set(),
     probeFailures: {},
-    probeSkips: {},
     featureLastRun: {},
   };
 }
@@ -143,8 +128,4 @@ export function recordProbeFailure(state: GameState, id: string, error: unknown)
 
 export function clearProbeFailure(state: GameState, id: string): void {
   delete state.probeFailures[id];
-}
-
-export function recordProbeSkip(state: GameState, id: string, cost: number, budget: number): void {
-  state.probeSkips[id] = { cost, budget, at: Date.now() };
 }

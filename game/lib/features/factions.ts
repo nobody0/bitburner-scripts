@@ -29,6 +29,7 @@ import { merge, type GameState } from "../state.ts";
 import { signalInstallCheck } from "../install-signal.ts";
 import { armWorkCompletion, disarmWorkCompletion, peekWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
+import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
 /** The factions driver: build a view, decide, execute ONE action, report.
@@ -55,7 +56,6 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
 /** Largest single dodge step this feature needs, declared next to the driver
  * so it cannot drift from the probes. Two singularity methods in one step at
  * SF4 level 3 is ~10 GB; the augmentation probe's `rep` step is the widest. */
-const PEAK_STEP_GB = 12;
 const SHADOWS_OF_ANARCHY = "Shadows of Anarchy";
 /** These factions are joined/progressed through their own mechanics, not by
  * satisfying the ordinary invitation/work loop.
@@ -973,10 +973,10 @@ function nextWorkFaction(state: GameState): string | undefined {
 }
 
 /** What this feature is bidding for. */
-function claims(ctx: ClaimContext): Claim[] {
+function claims(ctx: ClaimContext): FeatureClaim[] {
   const topic = ctx.state.topics.factions;
   const plan = topic?.plan;
-  const out: Claim[] = [];
+  const out: FeatureClaim[] = [];
 
   if (!plan) return out;
 
@@ -1073,7 +1073,9 @@ function claims(ctx: ClaimContext): Claim[] {
       amount: Math.max(plan.nextBuy.price, probed?.price ?? 0),
       priority: PRIORITY["factions:aug-fund"],
       mode: "reserve",
-      divisible: true,
+      shape: "step",
+      pricing: "hard",
+      value: { state: "unknown", reason: "hard-priority atomic claim" },
       why: `buying ${plan.nextBuy.name}`,
     });
     // The decision is made at tick time, AFTER this pass's arbitration — so a
@@ -1110,7 +1112,9 @@ function claims(ctx: ClaimContext): Claim[] {
         amount: graft.price,
         priority: PRIORITY["factions:aug-fund"],
         mode: "reserve",
-        divisible: false,
+        shape: "step",
+        pricing: "hard",
+        value: { state: "unknown", reason: "hard-priority atomic claim" },
         why: `graft ${graft.name}`,
       },
       {
@@ -1118,6 +1122,9 @@ function claims(ctx: ClaimContext): Claim[] {
         id: `graft:${graft.name}`,
         resource: "time",
         amount: 1,
+        shape: "step",
+        pricing: "hard",
+        value: { state: "unknown", reason: "the player-time slot is ordered by hard priority" },
         priority: PRIORITY["factions:work"],
         mode: "spend",
         why: `grafting ${graft.name} occupies Player.currentWork`,
@@ -1132,7 +1139,9 @@ function claims(ctx: ClaimContext): Claim[] {
       amount: 200_000,
       priority: PRIORITY["factions:aug-fund"],
       mode: "spend",
-      divisible: false,
+      shape: "step",
+      pricing: "hard",
+      value: { state: "unknown", reason: "hard-priority atomic claim" },
       why: "travel costs $200,000",
     });
   }
@@ -1148,7 +1157,9 @@ function claims(ctx: ClaimContext): Claim[] {
       // it to augmentations.
       priority: PRIORITY["factions:donate"],
       mode: "reserve",
-      divisible: true,
+      shape: "step",
+      pricing: "hard",
+      value: { state: "unknown", reason: "hard-priority atomic claim" },
       why: `donating exactly enough for ${plan.action.faction}'s reputation breakpoint and preserving its purchase`,
     });
   }
@@ -1171,6 +1182,9 @@ function claims(ctx: ClaimContext): Claim[] {
       id: `work:${wanted}`,
       resource: "time",
       amount: 1,
+      shape: "step",
+      pricing: "hard",
+      value: { state: "unknown", reason: "the player-time slot is ordered by hard priority" },
       // Scored on what the slot yields, like every other claimant — see
       // `shared/strategy/income.ts`. Faction work is the only source of faction
       // reputation, so whenever it wants the slot it IS the best reputation option
@@ -1222,5 +1236,4 @@ export const factionsModule: FeatureModule = {
   },
   claims,
   needs,
-  peakStepGb: PEAK_STEP_GB,
 };

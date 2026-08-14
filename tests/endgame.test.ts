@@ -283,7 +283,7 @@ describe("endgame routes", () => {
 });
 
 describe("BitNode goal presets", () => {
-  test("bn: retains the completed Red Pill phase across the post-install regrow", () => {
+  test("bn: requires the observed terminal transition, not Red Pill readiness", () => {
     const goal = parseGoal("bn:1");
     const ctx = {
       time: 0,
@@ -295,19 +295,14 @@ describe("BitNode goal presets", () => {
       augmentations: new Set(Array.from({ length: 30 }, (_, i) => `aug${i}`)),
       installedAugmentations: new Set<string>(),
       installs: 0,
+      completedBitNodes: new Set<number>(),
     };
-    // 30 augs, the money and the skill, but no Red Pill: not done.
     expect(goal.done(ctx)).toBe(false);
     ctx.augmentations.add("The Red Pill");
     expect(goal.done(ctx)).toBe(false);
     ctx.installedAugmentations.add("The Red Pill");
-    expect(goal.done(ctx)).toBe(true);
-    // The install resets the pre-Pill Daedalus money/skill gate; it must not
-    // invalidate that completed phase while the second skill climb begins.
-    ctx.player.money = 1_000;
-    ctx.player.hackingSkill = 1;
     expect(goal.done(ctx)).toBe(false);
-    ctx.player.hackingSkill = 3_000;
+    ctx.completedBitNodes.add(1);
     expect(goal.done(ctx)).toBe(true);
   });
 

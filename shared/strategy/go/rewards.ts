@@ -24,17 +24,16 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   // Win/score priors are fitted by sim/tests/go-selection.test.ts against
   // upstream obstacles and faction AI. Runtime records never tune the policy:
   // they are outcomes, not an excuse to learn around an incomplete predictor.
-  // These are the last measured pre-V9 priors and must be refitted from the V9
-  // arena before they are treated as current policy performance. A 0.5 tie
-  // roll: 128 fixed-corpus games per ordinary opponent and 512 for Illuminati.
-  // Re-exporting the promoted checkpoint exposed that the previous table was
-  // stale and substantially understated the stronger-faction win rates.
-  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 0.961, scoreFraction: 0.736, aiSecondsPerPlayableNode: 0.2133 },
-  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 0.969, scoreFraction: 0.714, aiSecondsPerPlayableNode: 0.2948 },
-  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.961, scoreFraction: 0.679, aiSecondsPerPlayableNode: 0.3699 },
-  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 0.852, scoreFraction: 0.607, aiSecondsPerPlayableNode: 0.4287 },
-  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 0.836, scoreFraction: 0.602, aiSecondsPerPlayableNode: 0.3928 },
-  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.523, scoreFraction: 0.454, aiSecondsPerPlayableNode: 0.5067 },
+  // Promoted V9 WebGPU refit, 2026-08-14, tie roll 0.5 and seed start
+  // 123456: 128 fixed-corpus games per ordinary opponent and 512 for
+  // Illuminati. scoreFraction and aiSecondsPerPlayableNode divide the corpus
+  // mean by the 5x5 arena's 23 expected playable intersections.
+  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 1, scoreFraction: 0.673573, aiSecondsPerPlayableNode: 0.200815 },
+  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 0.992188, scoreFraction: 0.688179, aiSecondsPerPlayableNode: 0.296807 },
+  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.976563, scoreFraction: 0.649796, aiSecondsPerPlayableNode: 0.394022 },
+  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 0.828125, scoreFraction: 0.582201, aiSecondsPerPlayableNode: 0.507405 },
+  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 0.875, scoreFraction: 0.598166, aiSecondsPerPlayableNode: 0.407065 },
+  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.509766, scoreFraction: 0.389946, aiSecondsPerPlayableNode: 0.588043 },
   // The daemon win prior pools the promoted checkpoint's two independent
   // 128-game gates (12 + 21 wins). Score and duration come from the much more
   // expensive four-game deployed TypeScript arena sample.

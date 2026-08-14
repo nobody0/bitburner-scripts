@@ -22,7 +22,6 @@ export function makeSink(tel: Telemetry): TelemetrySink {
   // what it has already said about them, so a permanently unaffordable probe
   // reports once per PRICE and a permanently failing one once per MESSAGE,
   // rather than crowding everything else out of the event feed every sweep.
-  const sentSkips = new Map<string, number>();
   const sentFailures = new Map<string, string>();
   const sentContractFailures = new Set<string>();
   let sentBatch: string | undefined;
@@ -163,15 +162,6 @@ export function makeSink(tel: Telemetry): TelemetrySink {
         tel.mirror(key, state.mirrors[key]);
       }
       state.mirrorDirty.clear();
-
-      for (const [id, skip] of Object.entries(state.probeSkips)) {
-        if (sentSkips.get(id) === skip.cost) continue;
-        sentSkips.set(id, skip.cost);
-        tel.event("probe.skipped", { id, cost: skip.cost, budget: skip.budget });
-      }
-      for (const id of sentSkips.keys()) {
-        if (state.probeSkips[id] === undefined) sentSkips.delete(id);
-      }
 
       for (const [id, error] of Object.entries(state.probeFailures)) {
         if (sentFailures.get(id) === error) continue;

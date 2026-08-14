@@ -39,6 +39,7 @@ import {
   type RamCaps,
   type TargetStatics,
 } from "./targeting.ts";
+import { hackMarginalValue, shareCutover, type ShareCutover, type SharePricingInput } from "./share.ts";
 
 /** Incremental target evaluation. Steady-state scores depend only on static
  * fields + HackContext, so the round-robin can work off a stale snapshot: a
@@ -56,6 +57,10 @@ export const SWITCH_MARGIN = 0.1;
 /** Minimum time on a target before switching away. */
 export const DWELL_MS = 60_000;
 export const HORIZON_MIN_MS = 60_000;
+/** Near-term farm-choice window. Unlike a secondary prep investment, a cold
+ * farm earns nothing before this target is ready, so its first payoff must
+ * fit the established 30-minute farming horizon. */
+export const FARM_HORIZON_MAX_MS = 30 * 60_000;
 /** Prep INVESTMENT may amortize further out than the 30-minute farming
  * horizon: a target upgrade pays for the rest of the run, and capping its
  * window at 30 minutes priced every multi-hour prep on a small fleet out of
@@ -178,20 +183,38 @@ function withJitEconomics(
  * entire remainder and may deadline-borrow idle prep RAM. Keeping this tiny
  * policy pure makes the no-static-ratio invariant explicit and independently
  * testable. */
-export function allocateSegments(fleetGb: number, prepDemandGb = 0): Segment[] {
+export function allocateSegments(fleetGb: number, prepDemandGb = 0, shareDemandGb = 0): Segment[] {
   const fleet = Math.max(0, fleetGb);
   const prep = Math.min(fleet, Math.max(0, prepDemandGb));
+  const share = Math.min(fleet - prep, Math.max(0, shareDemandGb));
   return prep > 0
     ? [
         { kind: "prep", gb: prep },
-        { kind: "farm", gb: fleet - prep },
-        { kind: "share", gb: 0 },
+        { kind: "farm", gb: fleet - prep - share },
+        { kind: "share", gb: share },
       ]
     : [
-        { kind: "farm", gb: fleet },
+        { kind: "farm", gb: fleet - share },
         { kind: "prep", gb: 0 },
-        { kind: "share", gb: 0 },
+        { kind: "share", gb: share },
       ];
+}
+
+/** Rebase an existing absolute segment plan onto live capacity. Prep remains
+ * an atomic wave demand; farm and share preserve their planned proportion in
+ * the remaining tail. This matters across prestige, where a pre-install TB
+ * reservation must not become "all RAM" merely because the fleet contracted
+ * before the next evaluator gate. */
+export function adaptSegmentsToFleet(segments: readonly Segment[], fleetGb: number): Segment[] {
+  const fleet = Math.max(0, fleetGb);
+  const plannedPrep = Math.max(0, segments.find((segment) => segment.kind === "prep")?.gb ?? 0);
+  const plannedFarm = Math.max(0, segments.find((segment) => segment.kind === "farm")?.gb ?? 0);
+  const plannedShare = Math.max(0, segments.find((segment) => segment.kind === "share")?.gb ?? 0);
+  const prep = Math.min(fleet, plannedPrep);
+  const plannedTail = plannedFarm + plannedShare;
+  const shareFraction = plannedTail > 0 ? plannedShare / plannedTail : 0;
+  const share = Math.max(0, fleet - prep) * shareFraction;
+  return allocateSegments(fleet, prep, share);
 }
 
 /** Keep an atomic prep wave's capacity claim stable between its grow landing
@@ -222,6 +245,8 @@ export interface FleetCapacity {
   /** True until every op of the active prep wave has landed. The reservation
    * must survive transient G-before-W2 state during that atomic wave. */
   prepWaveInFlight?: boolean;
+  /** Fleet-weighted effective shared threads contributed by one GB. */
+  effectiveShareThreadsPerGb?: number;
 }
 
 export interface TargetEntry {
@@ -246,6 +271,10 @@ export interface EvaluatorMemory {
   lastGateAt: number;
   directive: TargetDirective;
   farmSince: number;
+  /** First observation that the current farm was ready to launch. Retained
+   * across ordinary post-hack state dips; reset only when the farm changes. */
+  farmReadyHost?: string;
+  farmReadySince?: number;
   /** Set when something invalidates scores before the next scheduled gate. */
   forceGate: boolean;
   /** Fingerprint of the stock influence the cached solutions were scored under.
@@ -350,6 +379,9 @@ export function stepEvaluator(
     reinvestmentReturnPerDollarSec?: number;
     /** Open route-owned hacking skill gate, if any. */
     hackingSkillGoal?: number;
+    /** Existing ETA/forecast currency inputs. The evaluator supplies the
+     * chosen farm's marginal money/experience curves. */
+    shareValue?: SharePricingInput;
   },
 ): { memory: EvaluatorMemory; directive: TargetDirective; switched?: { from?: string; to: string } } {
   const now = view.time;
@@ -685,7 +717,7 @@ export function stepEvaluator(
       const prepGb = prepGbFor(plan);
       const rawSec = prepTimeSeconds(plan, prepGb);
       const scaledSec = rawSec * prepScaleOf(candidate, rawSec);
-      const horizonSec = prepHorizonMs / 1_000;
+      const horizonSec = Math.min(FARM_HORIZON_MAX_MS, prepHorizonMs) / 1_000;
       return incomePresentValue(
         farmIncomeRate(candidate.solution, fleetGb),
         scaledSec,
@@ -737,53 +769,81 @@ export function stepEvaluator(
   // 5%-margin rate·(T−prepTime) pick, 10/10 seeds.
   const farmModel = farmEntry?.solution;
   const currentRateNow = farmIncomeRate(farmModel, fleetGb);
+  // A secondary prep is affordable only from RAM above the farm's complete
+  // JIT pipeline. Every batch slot across one weaken-time has future launch
+  // windows backed by this envelope; RAM that happens to be idle now is not
+  // surplus until the whole depth cap is covered.
+  const secondaryPrepGbLimit = Math.max(0, fleetGb - (farmModel ? depthCapGb(farmModel) : 0));
   let prepEntry: TargetEntry | undefined;
   let prepPlan: PrepPlan | undefined;
+  let chosenPrepGb: number | undefined;
   let bestRuntimeNet = 0.02 * (prepHorizonMs / 1_000); // 2% of the valued run window
-  for (const candidate of ranked) {
-    if (candidate === farmEntry) continue;
-    const plan = prepOf(candidate);
-    if (!plan || plan.prepped) continue;
-    const candidatePrepGb = prepGbFor(plan);
-    if (candidatePrepGb <= 0) continue;
-    const retainedFarmRate = farmIncomeRate(farmModel, fleetGb - candidatePrepGb);
-    const ramGrowthRate = reinvestmentRate * (currentRateNow > 0 ? retainedFarmRate / currentRateNow : 0);
-    const rawPrepSec = prepTimeSeconds(plan, candidatePrepGb, ramGrowthRate);
-    const economics = evaluatePrep({
-      current: farmModel,
-      candidate: candidate.solution!,
-      plan,
-      fleetGb,
-      horizonMs: prepHorizonMs,
-      prepTimeScale: prepScaleOf(candidate, rawPrepSec),
-      prepGb: candidatePrepGb,
-      reinvestmentReturnPerDollarSec: reinvestmentRate,
-    });
-    if (!economics) continue;
-    const secondsAfterPrep = Math.max(0, prepHorizonMs / 1_000 - economics.prepSeconds);
-    const currentExpRate = farmModel ? experienceRate(farmModel) : 0;
-    const candidateExpRate = experienceRate(candidate.solution!);
-    // Keep the two effects in their natural units until the final comparison:
-    // economic NPV buys completion seconds at the best current income rate;
-    // experience buys the cached seconds/exp of the next skill or unlock gate.
-    const incomeSeconds = bestIncomeRate > 0 ? economics.net / bestIncomeRate : 0;
-    // The cached conversion describes ONE next skill/unlock milestone. Do not
-    // linearly sell the same runtime saving over and over for every multiple
-    // of expNeeded earned during the horizon; the evaluator will re-score at
-    // the milestone with a fresh context. This was not a harmless optimism:
-    // it could dedicate the whole fleet to an hour-long cold prep for a small
-    // post-prep exp-rate edge.
-    const experienceDelta = (candidateExpRate - currentExpRate) * secondsAfterPrep;
-    const boundedExperienceDelta = Math.max(
-      -projection.expNeeded,
-      Math.min(projection.expNeeded, experienceDelta),
-    );
-    const experienceSeconds = boundedExperienceDelta * secondsSavedPerExp;
-    const runtimeNet = incomeSeconds + experienceSeconds;
-    if (runtimeNet <= bestRuntimeNet) continue;
-    bestRuntimeNet = runtimeNet;
-    prepEntry = candidate;
-    prepPlan = plan;
+  // A cold farm's prep quote assumes the executable capacity above. Do not
+  // sell that same capacity to a secondary investment before the farm reaches
+  // its first earning state, or the value comparison ceases to describe the
+  // directive we execute. Once income is live, ordinary prep economics may
+  // bank it and move up; an already-started prep remains sticky below.
+  const farmHost = farmEntry?.statics.hostname;
+  if (memory.farmReadyHost !== farmHost) {
+    memory.farmReadyHost = undefined;
+    memory.farmReadySince = undefined;
+  }
+  if (farmEntry && prepOf(farmEntry)?.prepped && memory.farmReadyHost === undefined) {
+    memory.farmReadyHost = farmHost;
+    memory.farmReadySince = now;
+  }
+  const firstIncomeWindowElapsed =
+    farmEntry !== undefined &&
+    memory.farmReadyHost === farmHost &&
+    memory.farmReadySince !== undefined &&
+    now - memory.farmReadySince >= farmEntry.solution!.weakenTimeS * 1_000;
+  if (firstIncomeWindowElapsed) {
+    for (const candidate of ranked) {
+      if (candidate === farmEntry) continue;
+      const plan = prepOf(candidate);
+      if (!plan || plan.prepped) continue;
+      const candidatePrepGb = Math.min(prepGbFor(plan), secondaryPrepGbLimit);
+      if (candidatePrepGb <= 0) continue;
+      const retainedFarmRate = farmIncomeRate(farmModel, fleetGb - candidatePrepGb);
+      const ramGrowthRate = reinvestmentRate * (currentRateNow > 0 ? retainedFarmRate / currentRateNow : 0);
+      const rawPrepSec = prepTimeSeconds(plan, candidatePrepGb, ramGrowthRate);
+      const economics = evaluatePrep({
+        current: farmModel,
+        candidate: candidate.solution!,
+        plan,
+        fleetGb,
+        horizonMs: prepHorizonMs,
+        prepTimeScale: prepScaleOf(candidate, rawPrepSec),
+        maxPrepGb: candidatePrepGb,
+        reinvestmentReturnPerDollarSec: reinvestmentRate,
+      });
+      if (!economics) continue;
+      const secondsAfterPrep = Math.max(0, prepHorizonMs / 1_000 - economics.prepSeconds);
+      const currentExpRate = farmModel ? experienceRate(farmModel) : 0;
+      const candidateExpRate = experienceRate(candidate.solution!);
+      // Keep the two effects in their natural units until the final comparison:
+      // economic NPV buys completion seconds at the best current income rate;
+      // experience buys the cached seconds/exp of the next skill or unlock gate.
+      const incomeSeconds = bestIncomeRate > 0 ? economics.net / bestIncomeRate : 0;
+      // The cached conversion describes ONE next skill/unlock milestone. Do not
+      // linearly sell the same runtime saving over and over for every multiple
+      // of expNeeded earned during the horizon; the evaluator will re-score at
+      // the milestone with a fresh context. This was not a harmless optimism:
+      // it could dedicate the whole fleet to an hour-long cold prep for a small
+      // post-prep exp-rate edge.
+      const experienceDelta = (candidateExpRate - currentExpRate) * secondsAfterPrep;
+      const boundedExperienceDelta = Math.max(
+        -projection.expNeeded,
+        Math.min(projection.expNeeded, experienceDelta),
+      );
+      const experienceSeconds = boundedExperienceDelta * secondsSavedPerExp;
+      const runtimeNet = incomeSeconds + experienceSeconds;
+      if (runtimeNet <= bestRuntimeNet) continue;
+      bestRuntimeNet = runtimeNet;
+      prepEntry = candidate;
+      prepPlan = plan;
+      chosenPrepGb = economics.prepGb;
+    }
   }
 
   const previousPrepHost = memory.directive.prep?.host;
@@ -800,18 +860,39 @@ export function stepEvaluator(
       // longer exists/has a feasible plan.
       prepEntry = previous;
       prepPlan = plan;
+      chosenPrepGb = memory.directive.segments.find((segment) => segment.kind === 'prep')?.gb;
     }
   }
   // Binary economic decision, continuous utilization: if future income wins,
   // prep claims exactly what its next wave can execute and runs first; the
   // current best server receives every remaining GB. With no paying prep,
   // farming receives the entire fleet.
-  let prepReservationGb = prepEntry && prepPlan ? prepReservationGbFor(prepPlan) : 0;
+  let prepReservationGb = prepEntry && prepPlan
+    ? Math.min(prepReservationGbFor(prepPlan), secondaryPrepGbLimit, chosenPrepGb ?? 0)
+    : 0;
   if (prepEntry?.statics.hostname === previousPrepHost && capacity.prepWaveInFlight) {
     const previousReservation = memory.directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
     prepReservationGb = retainPrepReservation(prepReservationGb, previousReservation, true);
   }
-  const segments = allocateSegments(fleetGb, prepReservationGb);
+  let share: ShareCutover | undefined;
+  if (opts?.shareValue) {
+    const solution = farmEntry?.solution;
+    const hackMarginal = hackMarginalValue({
+      ...opts.shareValue,
+      moneyPerSecPerGb: solution?.score ?? 0,
+      hackingExpPerSecPerGb: solution?.experienceScore ?? 0,
+    });
+    share = shareCutover(
+      {
+        hackMarginal,
+        reputationSecondsPerBonus: opts.shareValue.reputationSecondsPerBonus,
+        effectiveThreadsPerGb: capacity.effectiveShareThreadsPerGb ?? 0,
+      },
+      fleetGb,
+      solution ? depthCapGb(solution) : 0,
+    );
+  }
+  const segments = allocateSegments(fleetGb, prepReservationGb, share?.allotmentGb ?? 0);
 
   memory.directive = {
     farm:
@@ -820,6 +901,7 @@ export function stepEvaluator(
         : undefined,
     prep: prepEntry && prepPlan ? { host: prepEntry.statics.hostname, statics: prepEntry.statics, plan: prepPlan } : undefined,
     segments,
+    ...(share ? { share } : {}),
     ctxGeneration: memory.generation,
     decidedAt: now,
   };

@@ -108,8 +108,25 @@ export interface HgwAction {
   worker?: { id: number; spawn: boolean };
 }
 
+/** Long-lived fragment worker. It loops ns.share until the dispatcher asks
+ * it to stop through the realm mailbox. */
+export interface ShareAction {
+  type: "share";
+  source: string;
+  threads: number;
+  opId: number;
+}
+
+/** Cooperative cancellation of one share worker. */
+export interface StopShareAction {
+  type: "stopShare";
+  opId: number;
+}
+
 export type Action =
   | HgwAction
+  | ShareAction
+  | StopShareAction
   | { type: "nuke"; target: string }
   | { type: "buyServer"; ram: number; name: string }
   | { type: "upgradeServer"; host: string; ram: number }
@@ -146,6 +163,11 @@ export interface Planner<M> {
 }
 
 /** Per-thread worker script RAM — fidelity constants matching the in-game
- * cost of a worker that calls one of hack/grow/weaken (1.6 base + fn cost).
+ * cost of a worker that calls one of hack/grow/weaken/share (1.6 base + fn
+ * cost). These are what the driver passes as `ramOverride`, and the game
+ * compares its DYNAMIC usage (base + every ns function actually invoked)
+ * against exactly that number: a worker whose override omits the base 1.6
+ * dies on its first call with "Dynamic RAM usage calculated to be greater
+ * than initial RAM usage". `share` is therefore 1.6 + 2.4, not 2.4.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts#L10-L20 */
-export const WORKER_RAM = { hack: 1.7, grow: 1.75, weaken: 1.75 } as const;
+export const WORKER_RAM = { hack: 1.7, grow: 1.75, weaken: 1.75, share: 4.0 } as const;

@@ -106,6 +106,52 @@ describe("engine cycle", () => {
     expect(order).toEqual(["store", "process"]);
   });
 
+  test("subsystems run in the pinned v3.0.1 engine order", () => {
+    const clock = new Clock();
+    const order: string[] = [];
+    const engine = new Engine(clock, {
+      addPlaytime: () => void order.push("playtime"),
+      terminalProcess: () => void order.push("terminal"),
+      processWork: () => void order.push("work"),
+      processStockPrices: () => void order.push("stock"),
+      gangProcess: () => void order.push("gang"),
+      staneksGiftProcess: () => void order.push("stanek"),
+      corporationStoreCycles: () => void order.push("corp-store"),
+      corporationProcess: () => void order.push("corp-process"),
+      bladeburnerStoreCycles: () => void order.push("bladeburner-store"),
+      sleeveProcess: () => void order.push("sleeves"),
+      darknetProcess: () => void order.push("darknet"),
+      updateOnlineScriptTimes: () => void order.push("scripts"),
+      processHacknetEarnings: () => void order.push("hacknet"),
+    });
+    engine.updateGame(1);
+    expect(order).toEqual([
+      "playtime", "terminal", "work", "stock", "gang", "stanek",
+      "corp-store", "corp-process", "bladeburner-store", "sleeves",
+      "darknet", "scripts", "hacknet",
+    ]);
+  });
+
+  test("message and autosave counters preserve Red Pill and settings behavior", () => {
+    const clock = new Clock();
+    let messages = 0;
+    let saves = 0;
+    let interval: number | null = null;
+    const engine = new Engine(clock, {
+      checkMessages: () => void messages++,
+      hasRedPill: () => true,
+      autosaveIntervalSeconds: () => interval,
+      setAutosaveIntervalSeconds: (value) => void (interval = value),
+      autosave: () => void saves++,
+    });
+    engine.updateGame(300);
+    expect(messages).toBe(1);
+    expect(engine.counters.messages).toBe(4500);
+    expect(interval as number | null).toBe(60);
+    expect(engine.counters.autoSaveCounter).toBe(300);
+    expect(saves).toBe(1);
+  });
+
   test("stop() halts the tick", () => {
     const clock = new Clock();
     const engine = new Engine(clock);

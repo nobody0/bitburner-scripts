@@ -39,6 +39,8 @@ allowed to read both sides:
 | `shared/features/stocks.ts` | pure shared data read by `ui/` | `sim/tests/stock-parity.test.ts` |
 | `shared/strategy/stock/market.ts` | ships inside the game bundle | `sim/tests/stock-parity.test.ts` |
 | `shared/strategy/side/contracts.ts` | handcrafted solvers ship inside the game bundle | `sim/tests/contracts-parity.test.ts` |
+| `shared/strategy/stanek/pack.ts` | ships inside the game bundle | `sim/tests/stanek-parity.test.ts` |
+| `shared/strategy/ram-supply.ts` | ships inside the game bundle | `sim/tests/ram-supply-parity.test.ts` |
 
 The stock pair is worth a note, because three of its constants are inline
 literals upstream rather than named exports — the 0.45 cycle-flip chance, the

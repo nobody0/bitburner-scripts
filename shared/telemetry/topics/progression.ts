@@ -3,6 +3,7 @@ import type { FeatureId } from "../../features/ids.ts";
 import type { DenyReason, ResourceId } from "../../strategy/arbiter.ts";
 import type { NeedKind, NeedUrgency } from "../../strategy/needs.ts";
 import type { PlanningHorizons } from "../../strategy/progression/forecast.ts";
+import type { ProgressionMarginals } from "../../strategy/progression/marginal.ts";
 import type { OptionalInstallPolicy, RouteId, RouteNeed } from "../../strategy/progression/endgame.ts";
 
 /** Progression feature — the meta layer. Problem: pick the destroy order and
@@ -55,7 +56,22 @@ export interface Progression {
    *  `capped: true` is a real blocker — a feature's probe cannot be afforded
    *  on this home no matter how long we wait, and the answer is more home RAM
    *  (or a bigger rooted host to place the dodge on). */
-  homeReserve?: { gb: number; capped: boolean; driver?: FeatureId };
+  /** Change-filtered digest of the pure RAM broker. */
+  ramArena?: {
+    hosts: string[];
+    arenaGb: number;
+    targetGb: number;
+    guaranteedDynamicGb: number;
+    measuredDynamicGb: number;
+    queueDepth: number;
+    largestWaitingGb: number;
+    neededForLargestWaitingGb: number;
+    waits: { by: string; id: string; gb: number; waitMs: number; class: 'instant' | 'deferrable'; lane: 'default' | 'long' }[];
+    starvation: { by: string; id: string; gb: number; waitMs: number }[];
+    demand: Record<string, number>;
+    promoted: boolean;
+    farmCostPerSec: number;
+  };
   plan?: ProgressionPlan;
 }
 
@@ -86,6 +102,8 @@ export interface GrantDigest {
   priority?: number;
   ratePerSec?: number;
   returnPerDollarSec?: number;
+  /** BN-seconds saved by the next unit at the resolved allocation. */
+  marginalValue?: number;
 }
 
 export interface DenialDigest {
@@ -103,10 +121,20 @@ export interface DenialDigest {
 export interface ArbitrationDigest {
   grants: GrantDigest[];
   denied: DenialDigest[];
+  /** Marginal threshold per independently resolved hard-priority band. */
+  waterlines?: {
+    resource: "money";
+    priority: number;
+    lambda: number;
+    claimCount: number;
+    pricedClaimCount: number;
+  }[];
+  stepLoop?: { iterations: number; cap: number; capHit: boolean };
+  warnings?: string[];
   /** Who holds Player.currentWork, and for how long. */
   slot?: { by: FeatureId; id: string; priority: number; heldMs: number };
   preempted?: { by: FeatureId; id: string; heldMs: number };
-  remaining: { money: number; ram: number };
+  remaining: { money: number };
 }
 
 export interface ProgressionPlan {
@@ -129,7 +157,6 @@ export interface ProgressionPlan {
   /** Exact queue the armed transaction revalidates before executing. */
   queuedAugmentations: string[];
   install: boolean;
-  homeRamBudgetFraction: number;
   /** Factions that would cross the donation threshold on install — the
    *  strongest single argument for resetting now. */
   favorCrossings: { faction: string; favorNow: number; favorAfter: number }[];
@@ -181,6 +208,8 @@ export interface ProgressionPlan {
   /** Independently anchored forecasts for the next destructive install and
    * the end of the BitNode. Neither is capped or silently defaulted. */
   forecasts: PlanningHorizons;
+  /** Local BN-time sensitivity of the current plan to productive rates. */
+  marginals?: ProgressionMarginals;
 }
 
 export interface RouteEtaDigest {

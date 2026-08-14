@@ -1,4 +1,5 @@
 import type { CycleSolution, PrepPlan, TargetStatics } from "./targeting.ts";
+import type { ShareCutover } from "./share.ts";
 
 /** Contract between the evaluator (which target, which strategy) and the
  * dispatcher (which ops, where, when). Both halves are pure; the drivers
@@ -17,6 +18,8 @@ export interface TargetDirective {
   prep?: { host: string; statics: TargetStatics; plan: PrepPlan };
   /** Ordered — the reorder rule can put prep ahead of farm. */
   segments: Segment[];
+  /** Marginal-value evidence behind the share reservation. */
+  share?: ShareCutover;
   /** Context generation the solutions were scored under (never mix). */
   ctxGeneration: number;
   decidedAt: number;

@@ -1,7 +1,6 @@
-import type { NS, Server } from "@ns";
-import { dodgeCapacityGb, STUB_BASE_GB, type HostRam } from "../../shared/ram/placement.ts";
+import type { NS } from "@ns";
 import { dodge } from "./dodge.ts";
-import type { DodgeLease } from "./ram.ts";
+import type { DodgeAcquire } from "./ram.ts";
 import {
   DODGED_PROBES,
   DIRECT_PROBES,
@@ -21,7 +20,6 @@ import {
   clearProbeFailure,
   merge,
   recordProbeFailure,
-  recordProbeSkip,
   set,
   type GameState,
 } from "./state.ts";
@@ -52,7 +50,6 @@ import {
  * way (stepped probes necessarily launch once per step). */
 
 /** Left free on top of the stub so ns.exec of the stub itself never fails. */
-export const SAFETY_GB = 0.5;
 /** Fallback when getFunctionRamCost cannot price a name (renamed API, typo).
  * Matches dodge.ts's conservative SF4-level-1 SingularityFn3 ceiling. */
 const UNKNOWN_METHOD_GB = 80;
@@ -111,18 +108,6 @@ function priceProbe(ns: NS, runner: ProbeRunner, probe: DodgedProbe): number {
  * rooted 64 GB client dwarfs anything home will have for hours, and a probe
  * priced against home alone would report itself unaffordable while 200 GB sat
  * idle two hops away. */
-export function dodgeBudget(hosts: readonly HostRam[]): number {
-  return Math.max(0, dodgeCapacityGb(hosts) - SAFETY_GB);
-}
-
-/** Home-only budget, kept for the cold-boot path: before the first sweep has
- * scp'd anything, home is the only host that holds the stub. */
-export function homeDodgeBudget(servers: Record<string, Server>): number {
-  const home = servers["home"];
-  if (!home) return 0;
-  return Math.max(0, home.maxRam - home.ramUsed - STUB_BASE_GB - SAFETY_GB);
-}
-
 function publish(state: GameState, emissions: Emission[], mergeTopic: boolean): void {
   for (const emission of emissions) {
     if (mergeTopic) merge(state, emission.key, emission.data);
@@ -144,30 +129,24 @@ function publish(state: GameState, emissions: Emission[], mergeTopic: boolean): 
 export async function runGateProbe(
   ns: NS,
   state: GameState,
-  hosts: readonly HostRam[],
-  acquire: (budgetGb: number) => DodgeLease | undefined,
+  acquire: (budgetGb: number, id: string) => DodgeAcquire,
 ): Promise<void> {
-  return runGateBatch(ns, state, dodgeBudget(hosts), acquire);
+  return runGateBatch(ns, state, acquire);
 }
 
 async function runGateBatch(
   ns: NS,
   state: GameState,
-  budget: number,
-  acquire: (budgetGb: number) => DodgeLease | undefined,
+  acquire: (budgetGb: number, id: string) => DodgeAcquire,
 ): Promise<void> {
-  const lease = budget >= GATE_PROBE.cost ? acquire(GATE_PROBE.cost) : undefined;
-  if (!lease) {
-    recordProbeSkip(state, GATE_PROBE.id, GATE_PROBE.cost, budget);
-    return;
-  }
+  const lease = acquire(GATE_PROBE.cost, GATE_PROBE.id);
+  if (lease.status === 'queued') return;
   try {
     const gates = await dodge(ns, GATE_PROBE.run, GATE_PROBE.cost, { host: lease.host });
     set(state, "capabilities", gates.caps);
     if (gates.progression) merge(state, "progression", gates.progression);
     if (gates.failures.length > 0) recordProbeFailure(state, GATE_PROBE.id, gates.failures.join(", "));
     else clearProbeFailure(state, GATE_PROBE.id);
-    delete state.probeSkips[GATE_PROBE.id];
   } catch (error) {
     recordProbeFailure(state, GATE_PROBE.id, error);
   } finally {
@@ -193,18 +172,15 @@ export async function runProbes(
   ns: NS,
   runner: ProbeRunner,
   state: GameState,
-  hosts: readonly HostRam[],
   /** Reserves the chosen host's RAM for the life of the stub, so the
    *  dispatcher plans around it instead of racing it. */
-  acquire: (budgetGb: number) => DodgeLease | undefined,
+  acquire: (budgetGb: number, id: string) => DodgeAcquire,
 ): Promise<void> {
   const servers = state.topics.servers;
   const player = state.topics.player;
   if (!servers || !player) return;
 
   const now = Date.now();
-  const budget = dodgeBudget(hosts);
-
   const ctx: ProbeContext = { player, servers, caps: caps(state), state };
   const applicable = (probe: DodgedProbe | DirectProbe | (typeof LOCAL_PROBES)[number]): boolean => {
     // A probe never runs while its OWN feature reads "no". Mirrors the same
@@ -258,46 +234,34 @@ export async function runProbes(
   // could not be afforded otherwise, and it should not lose its slot to
   // cheaper company.
   for (const probe of dueProbes) {
-    if (isStepped(probe)) await runSteppedProbe(ns, runner, state, probe, ctx, budget, acquire, now);
+    if (isStepped(probe)) await runSteppedProbe(ns, runner, state, probe, ctx, acquire, now);
   }
 
-  // One packed batch for everything else.
+  // ONE probe per pass, not a packed batch. Keeping the broker request
+  // identity stable while it is queued matters more than sharing a stub: a
+  // cheap arrival joining an older waiting request would change that request's
+  // executable footprint under the broker and restart its wait.
   const batch: SingleStepProbe[] = [];
-  const methods = new Set<string>();
   let cost = 0;
   for (const probe of dueProbes) {
     if (isStepped(probe)) continue;
-    // Shared methods are charged once for the whole stub, so the marginal cost
-    // of adding a probe is only its methods we are not already paying for.
-    let marginal = 0;
-    for (const method of new Set(probe.methods)) {
-      if (!methods.has(method)) marginal += methodCost(ns, method);
-    }
-    if (cost + marginal > budget) {
-      // Only a probe that cannot fit an EMPTY stub is genuinely unaffordable;
-      // one merely crowded out of this pass will run next sweep.
-      const solo = priceProbe(ns, runner, probe);
-      if (solo > budget) recordProbeSkip(state, probe.id, solo, budget);
-      continue;
-    }
     batch.push(probe);
-    for (const method of probe.methods) methods.add(method);
-    cost += marginal;
-    delete state.probeSkips[probe.id];
+    cost = priceMethods(ns, probe.methods);
+    break;
   }
 
   if (batch.length === 0) return;
   for (const probe of batch) runner.lastRunAt.set(probe.id, now);
-  state.probeBatch = { ids: batch.map((p) => p.id), cost, budget };
+  state.probeBatch = { ids: batch.map((p) => p.id), cost, budget: cost };
 
-  const lease = acquire(cost);
-  if (!lease) {
+  const lease = acquire(cost, `batch:${batch.map((probe) => probe.id).join(',')}`);
+  if (lease.status === 'queued') {
     // Placement moved under us between pricing and launching. Report it as a
     // skip against every member rather than a failure — nothing went wrong,
     // the RAM simply went elsewhere first. Each probe is reported at ITS OWN
     // price, not the batch's: telling the panel that `hacknet.core` costs the
     // whole batch's 13.2 GB would be a plain lie about that probe.
-    for (const probe of batch) recordProbeSkip(state, probe.id, priceProbe(ns, runner, probe), budget);
+    for (const probe of batch) runner.lastRunAt.delete(probe.id);
     return;
   }
 
@@ -357,20 +321,22 @@ async function runSteppedProbe(
   state: GameState,
   probe: SteppedProbe,
   ctx: ProbeContext,
-  budget: number,
-  acquire: (budgetGb: number) => DodgeLease | undefined,
+  acquire: (budgetGb: number, id: string) => DodgeAcquire,
   now: number,
 ): Promise<void> {
   runner.lastRunAt.set(probe.id, now);
   const acc: ProbeAcc = {};
   let ran = 0;
-  let skipped: { id: string; cost: number } | undefined;
 
   for (const step of probe.steps) {
     const cost = priceMethods(ns, step.methods);
-    const lease = acquire(cost);
-    if (!lease) {
-      skipped = { id: step.id, cost };
+    const lease = acquire(cost, `${probe.id}:${step.id}`);
+    if (lease.status === 'queued') {
+      // BREAK, not return: the steps that already ran spent real RAM, and this
+      // function's contract (see the docstring) is that their partial digest is
+      // published rather than discarded. Returning here silently threw away
+      // everything the probe had already learned.
+      runner.lastRunAt.delete(probe.id);
       break;
     }
     try {
@@ -395,8 +361,6 @@ async function runSteppedProbe(
     }
   }
 
-  if (skipped) recordProbeSkip(state, `${probe.id}:${skipped.id}`, skipped.cost, budget);
-  else delete state.probeSkips[probe.id];
 }
 
 function lastRun(runner: ProbeRunner, id: string): number {

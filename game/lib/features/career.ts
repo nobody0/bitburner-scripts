@@ -33,6 +33,7 @@ import {
   type WorkTaskLike,
 } from "../work-completion.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
+import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
 
 /** The career driver.
@@ -54,7 +55,6 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L965-L1065 */
 
 /** commitCrime + getCrimeStats + getCrimeChance, all SingularityFn3-ish. */
-const PEAK_STEP_GB = 12;
 const JOB_FIELDS = [
   "Software", "IT", "Network Engineer", "Security Engineer",
   "Business", "Software Consultant", "Business Consultant",
@@ -65,6 +65,7 @@ const TRAVEL_COST = 200_000;
 
 let lastDecision: CareerDecision | undefined;
 let lastResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
+let actionQueued = false;
 let lastReviewedAt: number | undefined;
 let lastWorkMode: CareerWorkMode | undefined;
 let lastCompletion: WorkCompletionNotice | undefined;
@@ -273,6 +274,7 @@ function taskDigest(task: ((Record<string, unknown> & WorkTaskLike) | null)): Wo
 }
 
 async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): Promise<boolean> {
+  actionQueued = false;
   const at = Date.now();
   const record = (ok: boolean, detail: string): void => {
     lastResult = { action: decision.action.type, ok, detail, at };
@@ -282,6 +284,7 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
   const run = async <T>(methods: readonly string[], body: (stubNs: NS) => T | Promise<T>): Promise<T | typeof refused> => {
     const outcome = await featureDodge(ctx, "career", actionClaimId(decision.action.type), methods, body);
     if (!outcome.ok) {
+      if (outcome.queued) actionQueued = true;
       record(false, outcome.reason);
       return refused;
     }
@@ -529,6 +532,12 @@ const driver: FeatureDriver = {
     const actionKey = `${decision.action.type}:${decision.action.subject ?? ""}:${decision.action.field ?? ""}`;
     try {
       let handled = false;
+      // Per-PASS state, not per-execute: `execute` is skipped entirely on an
+      // idle decision or while the action is backed off, and a stale `true`
+      // left over from an earlier pass then blocks `consumeWorkCompletion`
+      // forever — career keeps re-deciding against a completion that already
+      // happened for as long as it stays idle.
+      actionQueued = false;
       if (!completion && decision.action.type === "idle" && needsCompletionWatcher(ctx.state) && !workCompletionArmed()) {
         handled = await observeAndArm(ctx);
       }
@@ -536,7 +545,7 @@ const driver: FeatureDriver = {
         handled = (await execute(ctx.ns, ctx, decision)) || handled;
       }
       if (handled) lastWorkMode = careerWorkMode(ctx.state.topics.career?.currentWork?.type);
-      if (completion && (handled || !ctx.grants.slot)) consumeWorkCompletion();
+      if (completion && !actionQueued && (handled || !ctx.grants.slot)) consumeWorkCompletion();
     } catch (error) {
       if (isScriptDeath(error)) throw error;
       executeBackoff.set(actionKey, Date.now() + EXECUTE_BACKOFF_MS);
@@ -547,8 +556,8 @@ const driver: FeatureDriver = {
 
 /** Career posts no needs of its own — it consumes the requests other features
  * queue on the needs board. */
-function claims(ctx: ClaimContext): Claim[] {
-  const out: Claim[] = [];
+function claims(ctx: ClaimContext): FeatureClaim[] {
+  const out: FeatureClaim[] = [];
   const completion = peekWorkCompletion();
   const schedule = careerSchedule({
     now: ctx.now,
@@ -592,7 +601,9 @@ function claims(ctx: ClaimContext): Claim[] {
       amount: TRAVEL_COST,
       priority: moneyPriority,
       mode: "spend",
-      divisible: false,
+      shape: "step",
+      pricing: "hard",
+      value: { state: "unknown", reason: "hard-priority atomic claim" },
       why: `travel costs ${formatMoney(TRAVEL_COST)}`,
     });
   }
@@ -608,7 +619,9 @@ function claims(ctx: ClaimContext): Claim[] {
         amount: costPerSec * TRAINING_FUND_WINDOW_SEC,
         priority: moneyPriority,
         mode: "reserve",
-        divisible: false,
+        shape: "step",
+        pricing: "hard",
+        value: { state: "unknown", reason: "hard-priority atomic claim" },
         why: "fund the next training window",
       });
     }
@@ -624,7 +637,9 @@ function claims(ctx: ClaimContext): Claim[] {
       amount: trainingCostPerSec * TRAINING_FUND_WINDOW_SEC,
       priority: moneyPriority,
       mode: "reserve",
-      divisible: false,
+      shape: "step",
+      pricing: "hard",
+      value: { state: "unknown", reason: "hard-priority atomic claim" },
       why: "an active course drains continuously; keep its window funded",
     });
   } else if (ctx.state.topics.career?.currentWork?.type !== "CLASS") {
@@ -663,6 +678,9 @@ function claims(ctx: ClaimContext): Claim[] {
     id: "work",
     resource: "time",
     amount: 1,
+    shape: "step",
+    pricing: "hard",
+    value: { state: "unknown", reason: "the player-time slot is ordered by hard priority" },
     priority: lockUntil !== undefined ? PRIORITY["career:progress-lock"] : candidatePriority,
     mode: "spend",
     ...(lockUntil !== undefined ? { holdUntil: lockUntil } : {}),
@@ -732,10 +750,12 @@ function priorityForBand(band: CareerPriorityBand, state: GameState): number {
     case "blocking": return PRIORITY["career:blocking-need"];
     case "wanted": return PRIORITY["career:wanted-request"];
     case "nice": return PRIORITY["career:nice-request"];
-    case "income":
+    case "income": {
+      const best = bestIncomePerSec(state);
       return slotPriority({
-        moneyFraction: rateFraction(careerBestPerSec(state), bestIncomePerSec(state)),
+        moneyFraction: rateFraction(careerBestPerSec(state), best.state === "measured" ? best.value : 0),
       });
+    }
   }
 }
 
@@ -821,5 +841,4 @@ export const careerModule: FeatureModule = {
     delete state.topics.career;
   },
   claims,
-  peakStepGb: PEAK_STEP_GB,
 };

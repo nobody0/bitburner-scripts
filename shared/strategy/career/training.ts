@@ -6,6 +6,8 @@ export interface TrainingOption {
   name: string;
   skill: TrainingSkill;
   expPerSec: number;
+  /** Intelligence experience is not affected by ordinary stat multipliers. */
+  intelligenceExpPerSec?: number;
   costPerSec: number;
   location: string;
   aliases?: readonly string[];
@@ -18,6 +20,7 @@ export const CAREER_TRAINING_OPTIONS: readonly TrainingOption[] = [
     name: "Algorithms",
     skill: "hacking",
     expPerSec: 8,
+    intelligenceExpPerSec: 0.02,
     costPerSec: 960,
     location: "Rothman University",
   },
@@ -26,6 +29,7 @@ export const CAREER_TRAINING_OPTIONS: readonly TrainingOption[] = [
     name: "Leadership",
     skill: "charisma",
     expPerSec: 8,
+    intelligenceExpPerSec: 0.02,
     costPerSec: 960,
     location: "Rothman University",
   },

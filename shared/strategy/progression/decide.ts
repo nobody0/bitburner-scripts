@@ -140,8 +140,6 @@ export interface ProgressionDecision {
   installBlockers: InstallBlocker[];
   /** The reset is economically wanted and every observed barrier is clear. */
   installReady: boolean;
-  /** Fraction of cash the home-RAM budget may take this phase. */
-  homeRamBudgetFraction: number;
   /** Factions whose banked reputation would cross the donation threshold on
    *  install — the strongest single argument for resetting. */
   favorCrossings: { faction: string; favorNow: number; favorAfter: number }[];
@@ -152,8 +150,6 @@ export interface ProgressionDecision {
  * or FINISH_UP_IDLE with no faction work running. */
 export const FINISH_UP_VALUE = 2.0;
 export const FINISH_UP_IDLE_VALUE = 1.5;
-/** Home RAM budget as a fraction of cash, per phase. */
-export const HOME_RAM_BUDGET = { start: 0.1, finishUp: 0.5, ending: 0.5 };
 /** Minimum remaining NODE time for an install cycle to repay its overhead
  * (kill everything, reboot, regrow). Below this, finish the node instead. */
 export const INSTALL_MIN_PAYBACK_SEC = 600;
@@ -256,9 +252,11 @@ export function installVerdict(view: {
 }
 
 export function phaseOf(view: ProgressionView): RunPhase {
-  // `ending` once cash exceeds half of what the run earned: at that point the
-  // run is accumulating rather than converting, and the conversion (install)
-  // is what compounds.
+  // This threshold is an install-state signal, not a claimant veto. The value
+  // curves can decide how cash is shared only AFTER progression has posted an
+  // install reserve; they cannot decide that a queued augmentation should be
+  // activated or open the factions/stock liquidation handshake. Keep the
+  // existing arm until install timing itself has a measured decision model.
   if (view.earnedThisRun > 0 && view.money > view.earnedThisRun / 2 && view.queued.length > 0) return "ending";
   if (view.affordableValueProduct >= FINISH_UP_VALUE) return "finishUp";
   if (view.affordableValueProduct >= FINISH_UP_IDLE_VALUE && !view.factionWorkInProgress) return "finishUp";
@@ -319,7 +317,7 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
     view.optionalInstallAllowed !== false &&
     nodeAllowsOptionalInstall &&
     somethingToActivate &&
-    (endingArm || (crossings.length > 0 && view.factionsReadyToInstall));
+    (endingArm || crossings.length > 0);
   const installWanted = routeInstallWanted || optionalInstallWanted;
   const liquidationWanted =
     installWanted || ((view.routeRequiresInstall || nodeAllowsOptionalInstall) && view.factionsNeedLiquidation);
@@ -365,7 +363,6 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
     liquidationWanted,
     installBlockers,
     installReady,
-    homeRamBudgetFraction: HOME_RAM_BUDGET[phase],
     favorCrossings: crossings,
     why,
   };

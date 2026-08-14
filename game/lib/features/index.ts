@@ -2,15 +2,16 @@ import type { NS } from "@ns";
 import type { PrestigeKind } from "../../../shared/reset.ts";
 import { FEATURE_IDS, type FeatureId } from "../../../shared/features/ids.ts";
 import type { Capabilities } from "../../../shared/features/unlock.ts";
-import type { ArbiterResult, Claim } from "../../../shared/strategy/arbiter.ts";
+import type { ArbiterResult, Claim, ClaimValueCurve, StepClaim } from "../../../shared/strategy/arbiter.ts";
 import { emptyArbitration, grantedAmount, holdsSlot } from "../../../shared/strategy/arbiter.ts";
-import type { HostRam } from "../../../shared/ram/placement.ts";
 import type { Need, NeedBoard } from "../../../shared/strategy/needs.ts";
 import { emptyBoard } from "../../../shared/strategy/needs.ts";
 import type { RouteId } from "../../../shared/strategy/progression/endgame.ts";
 import type { PlanningHorizons } from "../../../shared/strategy/progression/forecast.ts";
 import type { GameState } from "../state.ts";
-import type { DodgeLease } from "../ram.ts";
+import type { DodgeAcquire } from "../ram.ts";
+import type { ArenaPlan, BrokerRequest } from '../../../shared/ram/broker.ts';
+import type { FeatureClaim, RamClaim } from "./claims.ts";
 import { careerModule } from "./career.ts";
 import { factionsModule } from "./factions.ts";
 import { hacknetModule } from "./hacknet.ts";
@@ -48,20 +49,14 @@ export interface DriverContext {
   ns: NS;
   state: GameState;
   caps: Capabilities;
-  /** Largest dodge budget any host could serve right now. This is the
-   *  whole-fleet figure; what this feature may actually spend is
-   *  `grants.ram`, which the arbiter has already cut down. */
-  budgetGb: number;
-  /** Where a dodge may be placed, with each host's free RAM. Feature actions
-   * use featureDodge(), which validates their claim and leases this heap. */
-  dodgeHosts: readonly HostRam[];
-  /** Home RAM the dispatcher must leave free this pass, already accounting for
-   *  every unlocked feature's declared dodge step (shared/ram/reserve.ts). */
-  homeReserveGb: number;
-  /** The part of the wanted reserve the home cap truncated, kept free on the
-   *  largest fleet host instead (dispatch syncTopology). Zero when home holds
-   *  the full reserve. */
-  fleetReserveGb: number;
+  /** Features whose drivers can actually run in this pass. This includes a
+   * driver's dependency (`requires`), unlike checking only its own capability.
+   * Providers use it before delegating work onto the needs board, so an
+   * isolation profile cannot leave a request that no enabled consumer can
+   * satisfy. */
+  activeFeatures: ReadonlySet<FeatureId>;
+  /** Current broker arena and its guaranteed dynamic boundary. */
+  arena: ArenaPlan;
   /** Controller tick counter, for drivers that want a phase offset. */
   tick: number;
   /** What everyone wants, this tick. A driver satisfying another feature's
@@ -78,14 +73,18 @@ export interface DriverContext {
    *  the Daedalus combat branch) — never to gate its whole tick. */
   route?: RouteId;
   /** Atomically choose a host and reserve its RAM in the dispatcher's heap. */
-  acquireDodge(budgetGb: number): DodgeLease | undefined;
+  acquireDodge(
+    budgetGb: number,
+    request: Omit<BrokerRequest, 'gb' | 'class'>,
+  ): DodgeAcquire;
 }
 
 /** The arbiter's answer, pre-narrowed to one feature so a driver cannot
  * accidentally read another's grant. */
 export interface FeatureGrants {
   money: number;
-  ram: number;
+  /** Broker priorities declared by this feature for the current pass. */
+  ramClaims: ReadonlyMap<string, RamClaim>;
   /** True when this feature holds Player.currentWork this tick. A driver that
    *  does not hold it must not start player work — the game would silently
    *  cancel whatever is running. */
@@ -101,10 +100,11 @@ export interface NeedContext {
   state: GameState;
   caps: Capabilities;
   now: number;
+  /** All enabled drivers, not merely the subset due on this cadence. */
+  activeFeatures: ReadonlySet<FeatureId>;
 }
 
 export interface ClaimContext extends NeedContext {
-  budgetGb: number;
   /** Same typed payoff windows later handed to the drivers. */
   horizons: PlanningHorizons;
   /** Runtime dynamic-RAM price supplied by the controller. The claim remains
@@ -151,16 +151,15 @@ export interface FeatureModule {
    *  route and horizon in their context. */
   refresh?(ctx: NeedContext): void;
   /** PURE. Called for every due module BEFORE any tick(). */
-  claims?(ctx: ClaimContext): Claim[];
+  claims?(ctx: ClaimContext): FeatureClaim[];
+  /** PURE. Fresh BN-seconds economics for one of this module's standing
+   * claims. It is evaluated after the contribution cache is assembled, so a
+   * cached claim never carries a stale closure across feature cadences. */
+  valueCurve?(claim: Claim, ctx: ClaimContext): ClaimValueCurve | undefined;
+  /** PURE. Return the next indivisible rung after this exact one is granted. */
+  nextStep?(claim: StepClaim, ctx: ClaimContext): StepClaim | undefined;
   /** PURE. Outcomes this feature wants from others, this tick. */
   needs?(ctx: NeedContext): Need[];
-  /** Largest single dodge step this feature needs to function, in GB. Declared
-   *  next to the driver so it cannot drift from the probe, and folded into the
-   *  home reserve by shared/ram/reserve.ts. */
-  peakStepGb?: number;
-  /** Optional state-aware demand below the declared peak. This is pure and may
-   * only reduce RAM for a phase where the expensive step cannot run yet. */
-  reserveStepGb?(state: GameState, caps: Capabilities): number;
 }
 
 export const FEATURE_MODULES: Readonly<Record<FeatureId, FeatureModule>> = {
@@ -194,28 +193,17 @@ export function resetAllFeatures(state: GameState, kind: PrestigeKind): void {
   for (const id of FEATURE_IDS) FEATURE_MODULES[id].reset?.(state, kind);
 }
 
-/** Current dodge step per enabled feature, for shared/ram/reserve.ts. Without
- * state, return every declared peak for static validation and reporting. */
-export function featureRamDemand(
-  state?: GameState,
-  caps?: Capabilities,
-): Partial<Record<FeatureId, number>> {
-  const demand: Partial<Record<FeatureId, number>> = {};
-  for (const id of FEATURE_IDS) {
-    const module = FEATURE_MODULES[id];
-    const peak = state && caps && module.reserveStepGb
-      ? module.reserveStepGb(state, caps)
-      : module.peakStepGb;
-    if (peak !== undefined) demand[id] = peak;
-  }
-  return demand;
-}
-
 /** Narrow a whole arbitration to one feature's share. */
-export function grantsFor(result: ArbiterResult, id: FeatureId): FeatureGrants {
+export function grantsFor(
+  result: ArbiterResult,
+  id: FeatureId,
+  ramClaims: readonly RamClaim[] = [],
+): FeatureGrants {
   return {
     money: grantedAmount(result, id, "money"),
-    ram: grantedAmount(result, id, "ram"),
+    ramClaims: new Map(
+      ramClaims.filter((claim) => claim.by === id).map((claim) => [claim.id, claim]),
+    ),
     slot: holdsSlot(result, id),
     result,
   };
@@ -223,7 +211,7 @@ export function grantsFor(result: ArbiterResult, id: FeatureId): FeatureGrants {
 
 /** The grants a driver sees before any claim has been resolved. */
 export function noGrants(): FeatureGrants {
-  return { money: 0, ram: 0, slot: false, result: emptyArbitration() };
+  return { money: 0, ramClaims: new Map(), slot: false, result: emptyArbitration() };
 }
 
 export { emptyBoard };

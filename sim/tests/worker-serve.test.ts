@@ -16,6 +16,8 @@ function cleanupRealm(): void {
   delete g.worker_info;
   delete g.worker_jobs;
   delete g.worker_wake;
+  delete g.worker_stop;
+  delete g.worker_stop_requested;
   delete g.dispatch_done;
   delete g.dispatch_wake;
   delete g.dispatch_wake_pending;
@@ -42,6 +44,7 @@ function mockNs(pending: MockOp[]): { ns: unknown; exitCbs: (() => void)[] } {
     hack: op,
     grow: op,
     weaken: op,
+    share: () => op(""),
   };
   return { ns, exitCbs };
 }
@@ -104,6 +107,35 @@ describe("serve-mode worker", () => {
     expect(g.worker_info!.has(WORKER_ID)).toBe(false);
     expect(g.worker_jobs!.has(WORKER_ID)).toBe(false);
     expect(g.worker_wake!.has(WORKER_ID)).toBe(false);
+  });
+
+  test("share loop exits immediately through the cooperative stop mailbox", async () => {
+    cleanupRealm();
+    const g = workerGlobals();
+    g.worker_info!.set(WORKER_ID, { kind: "share", target: "", threads: 7, mode: "share" });
+    const done: WorkerDone[] = g.dispatch_done!;
+    const pending: MockOp[] = [];
+    const { ns, exitCbs } = mockNs(pending);
+
+    let returned = false;
+    const run = workerMain(ns as never).then(() => {
+      returned = true;
+      for (const cb of exitCbs) cb();
+    });
+    await drainMicrotasks();
+    expect(pending).toHaveLength(1);
+    expect(g.worker_stop!.has(WORKER_ID)).toBe(true);
+
+    // The ten-second share promise is deliberately left unresolved. The
+    // mailbox wins the race, main returns, and the host's atExit is the sole
+    // reservation-release completion.
+    g.worker_stop_requested!.add(WORKER_ID);
+    g.worker_stop!.get(WORKER_ID)!();
+    await drainMicrotasks();
+    await run;
+    expect(returned).toBe(true);
+    expect(done).toEqual([{ opId: WORKER_ID, kind: "workerExit", target: "", threads: 7 }]);
+    expect(g.worker_info!.has(WORKER_ID)).toBe(false);
   });
 
   test("a kill mid-job reports the in-flight op AND the workerExit", async () => {

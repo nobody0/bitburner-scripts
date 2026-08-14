@@ -1,93 +1,97 @@
-import type { Server } from "@ns";
-import type { Heap } from "../../shared/ram/heap.ts";
-import { dodgeHost, STUB_BASE_GB, type HostRam } from "../../shared/ram/placement.ts";
+import type { Server } from '@ns';
+import {
+  RamBroker,
+  STUB_BASE_GB,
+  type ArenaPlan,
+  type BrokerHost,
+  type BrokerRequest,
+  type BrokerSnapshot,
+} from '../../shared/ram/broker.ts';
+import type { Heap } from '../../shared/ram/heap.ts';
 
-/** Game-side glue between the live RAM ledgers and the pure placement policy
- * (shared/ram/placement.ts). No ns calls: everything here reads the sweep
- * snapshot and the dispatcher's heap, both of which the controller already
- * holds.
- *
- * Which ledger to trust is the whole content of this file:
- *
- *  - **the heap**, when it knows the host. It is updated the instant the
- *    dispatcher reserves, so it already accounts for ops that have been
- *    allocated but not yet `exec`d. Placing a dodge on the scan's view instead
- *    would race the dispatcher and take RAM an HWGW batch was counting on.
- *  - **the scan snapshot**, otherwise. A host the heap has never seen carries
- *    no reservations, so its observed usage is the truth.
- *
- * Home asks with its reserve INCLUDED, because the home reserve is exactly
- * what a dodge stub is meant to spend. Fleet hosts ask without: nothing is
- * reserved there, and if something ever is, it is not ours. */
-export function dodgeHosts(
-  servers: Record<string, Server>,
-  deployed: ReadonlySet<string>,
-  heap?: Heap,
-): HostRam[] {
-  const hosts: HostRam[] = [];
-  for (const server of Object.values(servers)) {
-    if (!server.hasAdminRights) continue;
-    const isHome = server.hostname === "home";
-    const known = heap?.host(server.hostname) !== undefined;
-    // Reserves are FOR dodge stubs, wherever they live: home's always, and the
-    // spilled fleet reserve (dispatch syncTopology places the home shortfall
-    // on the largest fleet host when the 40% home cap truncated it). No other
-    // writer sets a fleet host's reserve, so including it never spends
-    // someone else's headroom.
-    const freeGb = known
-      ? heap!.freeOn(server.hostname, true)
-      : Math.max(0, server.maxRam - server.ramUsed);
-    hosts.push({
-      hostname: server.hostname,
-      freeGb,
-      // Home always holds the stub — it is where the build pushes to. A fleet
-      // host holds it only once the sweep has scp'd this session.
-      hasStub: isHome || deployed.has(server.hostname),
-    });
-  }
-  return hosts;
-}
-
-/** A dodge's hold on its host's RAM, for the duration of the stub. */
 export interface DodgeLease {
   host: string;
   release(): void;
 }
 
-/** Pick a host for a dodge AND take the heap lease for it, atomically.
- *
- * These are one operation on purpose. Choosing a host and then reserving it
- * as two steps leaves a window in which the dispatcher can take the RAM in
- * between, and the failure mode is invisible: `ns.exec` returns 0, the dodge
- * burns its retries, and the probe reports as unaffordable on a host that had
- * room a microsecond earlier.
- *
- * `undefined` means nothing in the realm can host this dodge right now — a
- * real answer the caller reports as a skip with the price that did not fit. */
-export function acquireDodge(
-  hosts: readonly HostRam[],
-  heap: Heap | undefined,
-  budgetGb: number,
-): DodgeLease | undefined {
-  const host = dodgeHost(hosts, budgetGb);
-  if (host === undefined) return undefined;
+export type DodgeAcquire = ({ status: 'placed' } & DodgeLease) | { status: 'queued' };
 
-  // A host the heap has never seen has no competing reservations on it, so
-  // there is nothing to coordinate with and the lease is a no-op. This case is
-  // NOT hypothetical and getting it wrong is expensive: the heap is empty on
-  // the very first sweep, and a host only enters it once the dispatcher has
-  // planned against it. Treating "unknown to the heap" as "cannot place here"
-  // made every probe on a cold boot report itself skipped at a price the
-  // budget plainly covered.
+/** Build the broker's pure host view from state the controller already holds. */
+export function brokerHosts(
+  servers: Record<string, Server>,
+  deployed: ReadonlySet<string>,
+  heap?: Heap,
+): BrokerHost[] {
+  return Object.values(servers).map((server) => ({
+    hostname: server.hostname,
+    maxRam: server.maxRam,
+    freeGb: heap?.host(server.hostname)
+      ? heap.freeOn(server.hostname, true)
+      : Math.max(0, server.maxRam - server.ramUsed),
+    rooted: server.hasAdminRights,
+    deployed: server.hostname === 'home' || deployed.has(server.hostname),
+  }));
+}
+
+function requestKey(request: BrokerRequest): string {
+  return `${request.by}\0${request.id}\0${request.lane}`;
+}
+
+/** Commit pure broker placements to the same Heap the farm allocates from. */
+export class DodgeBrokerDriver {
+  readonly broker = new RamBroker();
+  #ready = new Map<string, { lease: DodgeLease; request: BrokerRequest; at: number }>();
+
+  request(
+    request: BrokerRequest,
+    hosts: readonly BrokerHost[],
+    heap: Heap | undefined,
+    arena: ArenaPlan,
+    now: number,
+  ): DodgeAcquire {
+    const ready = this.#ready.get(requestKey(request));
+    if (ready) {
+      this.#ready.delete(requestKey(request));
+      if (ready.request.gb === request.gb) return { status: 'placed', ...ready.lease };
+      ready.lease.release();
+    }
+    const decision = this.broker.request(request, hosts, arena, now);
+    if (decision.status === 'queued') return { status: 'queued' };
+    const lease = commitLease(heap, decision.host, STUB_BASE_GB + request.gb);
+    if (lease) return { status: 'placed', ...lease };
+    this.broker.enqueue(request, now);
+    return { status: 'queued' };
+  }
+
+  /** A landing placement is leased immediately and made due. If its owner no
+   * longer asks for it, the one-second ready window expires and drops it
+   * instead of pinning that RAM (or a stale queue entry) indefinitely. */
+  drain(hosts: readonly BrokerHost[], heap: Heap | undefined, arena: ArenaPlan, now: number): BrokerRequest[] {
+    for (const [key, ready] of this.#ready) {
+      if (now - ready.at < 1_000) continue;
+      ready.lease.release();
+      this.#ready.delete(key);
+    }
+    const ready: BrokerRequest[] = [];
+    for (const decision of this.broker.drain(hosts, arena, now)) {
+      const lease = commitLease(heap, decision.host, STUB_BASE_GB + decision.request.gb);
+      if (!lease) {
+        this.broker.enqueue(decision.request, now);
+        continue;
+      }
+      this.#ready.set(requestKey(decision.request), { lease, request: decision.request, at: now });
+      ready.push(decision.request);
+    }
+    return ready;
+  }
+
+  snapshot(now: number): BrokerSnapshot {
+    return this.broker.snapshot(now);
+  }
+}
+
+function commitLease(heap: Heap | undefined, host: string, gb: number): DodgeLease | undefined {
   if (!heap || heap.host(host) === undefined) return { host, release: () => {} };
-
-  // includeReserved on EVERY host, matching dodgeHosts above: a reserve only
-  // exists where we put one (home, or the spilled fleet-reserve host), and it
-  // exists precisely so a stub can launch there.
-  const lease = heap.reserveOn(host, STUB_BASE_GB + budgetGb, true);
-  // The heap knows this host and says it is fuller than the snapshot placement
-  // was built from. Rather than guess a different host, decline: the next
-  // sweep rebuilds placement from the fresher ledger.
-  if (!lease) return undefined;
-  return { host, release: () => lease.release() };
+  const lease = heap.reserveOn(host, gb, true);
+  return lease ? { host, release: () => lease.release() } : undefined;
 }

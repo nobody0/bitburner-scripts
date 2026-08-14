@@ -1,31 +1,35 @@
 import type { NS } from "@ns";
 import type { FeatureOverrides } from "../../shared/features/profile.ts";
+import { roundSigFigs } from '../../shared/format.ts';
 import { capsDelta, type Capabilities } from "../../shared/features/unlock.ts";
-import type { HostRam } from "../../shared/ram/placement.ts";
-import type { Claim, SlotState } from "../../shared/strategy/arbiter.ts";
+import { PRIORITY, type Claim, type SlotState } from "../../shared/strategy/arbiter.ts";
 import { classifyReset, type PrestigeKind, type ResetIdentity } from "../../shared/reset.ts";
 import { coordinate, emptyDigest, postNeeds, type Coordination } from "../../shared/strategy/coordination.ts";
 import type { Need } from "../../shared/strategy/needs.ts";
 import { forecastAt, unknownForecast, usableForecastSec } from "../../shared/strategy/progression/forecast.ts";
 import { FEATURE_IDS } from "../../shared/features/ids.ts";
-import { fleetDodgeReserveGb, homeReserveGb, starvationDodgeReserveGb } from "../../shared/ram/reserve.ts";
+import type { ArenaPlan, BrokerRequest } from '../../shared/ram/broker.ts';
 import { priceCalls } from "./dodge.ts";
 import { isScriptDeath } from "./errors.ts";
+import { bestIncomePerSec, bestReinvestmentReturnPerDollarSec } from "./income.ts";
 import { ContributionCache } from "./features/contributions.ts";
-import { hackingState, pumpOnWake, takeTargetSwitch } from "./features/hacking.ts";
+import { hackingState, plannerPassId, pumpOnWake, takeTargetSwitch } from "./features/hacking.ts";
 import { armWake, sleepOrWake } from "./wake.ts";
 import { workerGlobals } from "./worker-shared.ts";
 import { takeRouteChange } from "./features/remaining.ts";
-import { driverEnabled, featureModule, featureRamDemand, grantsFor, resetAllFeatures, selectDueModules } from "./features/index.ts";
+import { driverEnabled, featureModule, grantsFor, resetAllFeatures, selectDueModules } from "./features/index.ts";
 import type { ClaimContext, NeedContext } from "./features/index.ts";
+import { isRamClaim, type FeatureClaim } from "./features/claims.ts";
 import { sweepFleet } from "./fleet.ts";
 import { gameGlobal } from "./globals.ts";
-import { dodgeBudget, initProbeRunner, runGateProbe, runProbes, SAFETY_GB } from "./probe-runner.ts";
+import { initProbeRunner, runGateProbe, runProbes } from "./probe-runner.ts";
 import { ALL_PROBES, probeCadenceMs } from "./probes/index.ts";
-import { acquireDodge, dodgeHosts } from "./ram.ts";
+import { brokerHosts, DodgeBrokerDriver } from "./ram.ts";
 import { caps, initState, merge, set, type GameState } from "./state.ts";
 import { republish, type TelemetrySink } from "./telemetry-sink.ts";
 import type { Telemetry } from "./telemetry.ts";
+
+import { reclaimForDodge, settleBrokerShareExits } from './dispatch-driver.ts';
 
 /** The core loop.
  *
@@ -44,9 +48,6 @@ const PLAYER_EVERY_TICKS = 10; // 2s
  *  reset walk keys off. Genuinely 30 s work — it is not the probe cadence, which
  *  it used to be by accident. */
 const SWEEP_EVERY_TICKS = 150; // 30s
-/** How long the demand-driven fleet reserve stays engaged after the last
- * dodge-starvation report, so it cannot flap at probe/action cadence. */
-const FLEET_RESERVE_HOLD_MS = 600_000;
 /** Acquisition cadence, DERIVED from the probe table rather than chosen here.
  *
  *  Whatever the fastest `everyMs` in the table is, that is how often the runner is
@@ -76,6 +77,17 @@ export async function runController(
   const state = initState();
   if (featureOverrides) state.featureOverrides = featureOverrides;
   const probes = initProbeRunner();
+  const ramBroker = new DodgeBrokerDriver();
+  const brokerStarvationReported = new Set<string>();
+  // Every arena build reports the pooling verdict of the planner pass it can
+  // see. Several builds share one pass — the sweep's gate arena, the probe
+  // arena and the feature pass all run with no pump between them — so the pass
+  // id is what stops the broker's demotion window from being spent inside a
+  // single tick.
+  const buildArena = (at: number) => {
+    ramBroker.broker.observePooling(hackingState().memory.dispatch.pooling, plannerPassId());
+    return ramBroker.broker.arena(brokerPlacement(state), at, state.topics.farm?.moneyPerSecPerGb ?? 0);
+  };
 
   let reportedRespawnFailure: string | undefined;
   let nextTick = Date.now();
@@ -89,14 +101,9 @@ export async function runController(
   // Last coordination digest written to the store, so an unchanged board is
   // not rewritten every pass. `undefined` means "nothing posted".
   let publishedCoordination: string | undefined;
-  // The fleet reserve (home-reserve shortfall spilled onto a fleet host) is
-  // DEMAND-DRIVEN: it engages only while probes actually report themselves
-  // unaffordable, and holds for a while so it does not flap at probe cadence.
-  // A standing reserve taxed every small-fleet profile ~10-25% of its farm for
-  // insurance most runs never needed; a starving profile (BN8's market
-  // sampler) latches it within one sweep.
-  let fleetReserveHoldUntil = 0;
-  let fleetReserveDemandGb = 0;
+  let publishedArena: string | undefined;
+  // Broker arena publication is change-filtered; queue and demand state remain
+  // unconditional game state even in a --perf build.
   // Standing needs, by poster. Replaced wholesale when that feature next
   // runs, so a satisfied need disappears the moment its poster stops asking.
   const contributions = new ContributionCache();
@@ -146,8 +153,8 @@ export async function runController(
       // The capability gate, last in the sweep: pure observation, so it yields to
       // rooting and deployment for the dodge mutex. It prices itself against the
       // whole realm's spare RAM, not just home's — a probe that cannot fit a
-      // 4.5 GB home reserve may fit a rooted 64 GB client comfortably
-      // (shared/ram/placement.ts).
+      // cold-home arena may fit a rooted 64 GB client comfortably
+      // once the broker can place it fleet-wide.
       //
       // The gate belongs to the sweep and not to the acquisition cadence below,
       // in both directions: capabilities change on the scale of a BitNode, and
@@ -162,10 +169,10 @@ export async function runController(
       const previousReset = resetIdentity(previousProgression);
       const nodeStartedAt = previousProgression?.lastNodeReset;
       const before = caps(state);
-      const gateHosts = placement(state);
-      await runGateProbe(ns, state, gateHosts, (gb) =>
-        acquireDodge(gateHosts, hackingState().memory.dispatch.heap, gb),
-      );
+      const gateArena = buildArena(Date.now());
+      await runGateProbe(ns, state, (gb, id) => brokerAcquire(
+        ns, tel, ramBroker, state, gateArena, gb, { by: 'gate', id, lane: 'default', priority: PRIORITY['probe:gate'] },
+      ));
       const delta = capsDelta(before, caps(state));
       const currentReset = resetIdentity(state.topics.progression);
       const resetKind = classifyReset(previousReset, currentReset);
@@ -236,10 +243,10 @@ export async function runController(
     // this pass sees fresh capabilities and a fresh scan — the ordering the sweep
     // used to give it by construction.
     if (tick % PROBE_EVERY_TICKS === 0) {
-      const probeHosts = placement(state);
-      await runProbes(ns, probes, state, probeHosts, (gb) =>
-        acquireDodge(probeHosts, hackingState().memory.dispatch.heap, gb),
-      );
+      const probeArena = buildArena(Date.now());
+      await runProbes(ns, probes, state, (gb, id) => brokerAcquire(
+        ns, tel, ramBroker, state, probeArena, gb, { by: 'probe', id, lane: 'default', priority: PRIORITY['probe:background'] },
+      ));
     }
 
     // Feature pass, refresh/act: refresh (evaluate -> store) -> collect
@@ -250,65 +257,14 @@ export async function runController(
     // rather than claimed by whoever the loop happened to reach first.
     const now = Date.now();
     const active = caps(state);
-    const hosts = placement(state);
-    const budgetGb = dodgeBudget(hosts);
-    const {
-      reserveGb,
-      fleetReserveGb: reserveShortfallGb,
-      contiguousFleetReserveGb,
-    } = computeReserve(state, active);
-    // A live starvation re-records its skip on every retry; an entry that has
-    // stopped refreshing is a need that went away without a successful retry
-    // (dodge.ts only deletes on grant+lease). Age those out here, or one dead
-    // entry re-arms the reserve hold for the rest of the run.
-    for (const [id, skip] of Object.entries(state.probeSkips)) {
-      if (skip.at !== undefined && Date.now() - skip.at > FLEET_RESERVE_HOLD_MS) delete state.probeSkips[id];
-    }
-    // Feature ACTIONS use the same dodge launcher as probes. A denied RAM
-    // claim is therefore just as strong a starvation signal as a skipped
-    // probe: unless the farm releases a contiguous fleet block, the action
-    // can remain impossible forever (for example, a feature cannot replace a
-    // repeating low-value crime on an 8 GB home). The previous arbitration
-    // is already in the unconditional state store, so this changes telemetry
-    // and --perf builds identically and opens the reserve on the next pass.
-    const deniedActionGb = state.topics.progression?.arbitration?.denied.reduce(
-      (largest, denial) => denial.resource === "ram" && denial.wanted > denial.available
-        ? Math.max(largest, denial.wanted)
-        : largest,
-      0,
-    ) ?? 0;
-    const starvedReserveGb = starvationDodgeReserveGb(
-      Object.values(state.probeSkips).map((skip) => skip.cost),
-      deniedActionGb,
-      SAFETY_GB,
-    );
-    if (
-      reserveShortfallGb > 0
-      && starvedReserveGb > 0
-    ) {
-      fleetReserveHoldUntil = Date.now() + FLEET_RESERVE_HOLD_MS;
-      // Arbiter RAM claims and probe skips carry the DYNAMIC API price. A
-      // runnable dodge needs one CONTIGUOUS block containing that price plus
-      // the executable stub and the placement safety margin. Reserving only
-      // the claim amount lets dispatch legally occupy the missing 2.1 GB; the
-      // arbiter then keeps denying the same action forever even though a
-      // "reserve" is visible. Keep the demand exact to the starved action,
-      // rather than substituting the feature's potentially much larger peak.
-      fleetReserveDemandGb = Math.max(fleetReserveDemandGb, starvedReserveGb);
-    }
-    if (Date.now() >= fleetReserveHoldUntil) fleetReserveDemandGb = 0;
-    // BN8 starts with the market API and hacked cash is worthless. Reserve the
-    // spill host from the first pass so fallback prep/experience work cannot
-    // occupy it for a full weaken cycle before the market sampler first runs.
-    // Other nodes retain the demand-driven hold and its zero steady-state cost.
-    const stockPrimary = active.bitNode === 8;
-    const fleetReserveGb = reserveShortfallGb > 0 && (stockPrimary || Date.now() < fleetReserveHoldUntil)
-      // The standing BN8 reserve must fit the executable stub, not just its
-      // dynamic calls. Otherwise an XP worker can consume the apparent slack
-      // and make the market action miss its tick.
-      ? (stockPrimary ? contiguousFleetReserveGb : fleetReserveDemandGb)
-      : 0;
+    const arena = buildArena(now);
+    // The broker queue owns RAM starvation. A request that cannot be placed
+    // remains queued, and only a request that has actually waited past the
+    // starvation threshold grows the arena on a later pass.
     const dueModules = selectDueModules(state.featureLastRun, active, now);
+    const activeFeatures = new Set(
+      FEATURE_IDS.filter((id) => driverEnabled(featureModule(id).driver, active)),
+    );
 
     // A locked/disabled feature cannot leave a stale need, reservation or slot
     // claim behind merely because it will never become due again.
@@ -324,7 +280,7 @@ export async function runController(
     //    previous one — the resolution of the "endgame needs the enriched
     //    state, features need the chosen route" ordering. The sort is stable,
     //    so everyone else keeps registry order.
-    const needContext: NeedContext = { state, caps: active, now };
+    const needContext: NeedContext = { state, caps: active, now, activeFeatures };
     const refreshOrder = [...dueModules].sort(
       (a, b) => Number(a.driver.id === "progression") - Number(b.driver.id === "progression"),
     );
@@ -380,12 +336,11 @@ export async function runController(
     const board = postNeeds(needs);
     const claimContext: ClaimContext = {
       ...needContext,
-      budgetGb,
       board,
       horizons,
       ramPrice: (methods) => priceCalls(ns, methods),
     };
-    const transientClaims: Claim[] = [];
+    const transientClaims: FeatureClaim[] = [];
     for (const module of dueModules) {
       if (!module.claims) {
         contributions.replaceClaims(module.driver.id, []);
@@ -401,17 +356,31 @@ export async function runController(
         }
       }
     }
-    const claims: Claim[] = contributions.claims(transientClaims);
+    const allClaims = contributions.claims(transientClaims);
+    const ramClaims = allClaims.filter(isRamClaim);
+    const claims: Claim[] = allClaims
+      .filter((claim): claim is Claim => !isRamClaim(claim))
+      .map((claim): Claim => {
+        if (claim.shape !== "continuous") return claim;
+        const valueCurve = featureModule(claim.by).valueCurve?.(claim, claimContext);
+        return valueCurve ? { ...claim, valueCurve } : claim;
+      });
 
     // 3) One pure allocation of money, the work slot and dodge RAM.
     const coordination = coordinate({
       now,
       money: state.topics.player?.money ?? 0,
-      ramGb: budgetGb,
       board,
       claims,
+      expectedIncomePerSec: bestIncomePerSec(state),
+      reinvestmentReturnPerDollarSec: bestReinvestmentReturnPerDollarSec(state),
+      // The remaining pool is deliberately not forwarded: a FeatureModule's
+      // next rung is a pure function of its own ladder, and the arbiter
+      // re-prices affordability itself on the following iteration.
+      nextStep: (claim) => featureModule(claim.by).nextStep?.(claim, claimContext),
       ...(workSlot ? { slot: workSlot } : {}),
     });
+    for (const warning of coordination.arbitration.warnings) ns.print("WARNING: " + warning);
     workSlot = coordination.arbitration.slot;
     publishedCoordination = publishCoordination(state, coordination.digest, publishedCoordination);
 
@@ -424,13 +393,11 @@ export async function runController(
           ns,
           state,
           caps: active,
-          budgetGb,
-          dodgeHosts: hosts,
-          homeReserveGb: reserveGb,
-          fleetReserveGb,
+          activeFeatures,
+          arena,
           tick,
           board,
-          grants: grantsFor(coordination.arbitration, driver.id),
+          grants: grantsFor(coordination.arbitration, driver.id, ramClaims),
           horizons,
           ...(plan?.route !== undefined ? { route: plan.route } : {}),
           // Placement is rebuilt AT CLAIM TIME, not from the pass-start
@@ -440,7 +407,7 @@ export async function runController(
           // then fails and the dodge starves for the whole pass (measured:
           // half the install profile's time-to-goal). The live heap also lets
           // the pick fall through to home's reserve, which exists for this.
-          acquireDodge: (gb) => acquireDodge(placement(state), hackingState().memory.dispatch.heap, gb),
+          acquireDodge: (gb, request) => brokerAcquire(ns, tel, ramBroker, state, arena, gb, request),
         });
       } catch (error) {
         // One feature must never take the loop down with it — but a kill is
@@ -465,6 +432,33 @@ export async function runController(
     const routeSwitch = takeRouteChange();
     TELEMETRY: if (__TELEMETRY__ && routeSwitch) tel!.event("endgame.route", routeSwitch);
 
+    const ready = ramBroker.drain(brokerPlacement(state), hackingState().memory.dispatch.heap, arena, Date.now());
+    for (const request of ready) {
+      if (FEATURE_IDS.includes(request.by as (typeof FEATURE_IDS)[number])) state.featureLastRun[request.by] = 0;
+    }
+    if (ready.some((request) => request.by === 'gate')) {
+      await runGateProbe(ns, state, (gb, id) => brokerAcquire(
+        ns, tel, ramBroker, state, arena, gb, { by: 'gate', id, lane: 'default', priority: PRIORITY['probe:gate'] },
+      ));
+    }
+    if (ready.some((request) => request.by === 'probe')) {
+      await runProbes(ns, probes, state, (gb, id) => brokerAcquire(
+        ns, tel, ramBroker, state, arena, gb, { by: 'probe', id, lane: 'default', priority: PRIORITY['probe:background'] },
+      ));
+    }
+    const brokerSnapshot = ramBroker.snapshot(Date.now());
+    publishedArena = publishArena(state, arena, brokerSnapshot, publishedArena);
+    TELEMETRY: if (__TELEMETRY__) {
+      const starving = new Set(brokerSnapshot.starvation.map((request) => `${request.by}\0${request.id}\0${request.lane}`));
+      for (const request of brokerSnapshot.starvation) {
+        const key = `${request.by}\0${request.id}\0${request.lane}`;
+        if (brokerStarvationReported.has(key)) continue;
+        brokerStarvationReported.add(key);
+        tel!.event('ram.starvation', { by: request.by, id: request.id, gb: request.gb, waitMs: request.waitMs, lane: request.lane });
+      }
+      for (const key of brokerStarvationReported) if (!starving.has(key)) brokerStarvationReported.delete(key);
+    }
+
     TELEMETRY: if (__TELEMETRY__) sink!.flush(state);
 
     // Absolute deadline with catch-up clamp; a `sleep(TICK_MS)` loop
@@ -487,7 +481,36 @@ export async function runController(
       wakePromise = armWake(workerGlobals());
       if (active.unlocked["hacking"] !== "yes") continue;
       try {
-        pumpOnWake(ns, state, active, reserveGb, fleetReserveGb, usableForecastSec(horizons.install));
+        // A worker releases real RAM before its completion is drained. Settle
+        // only process exits, let the broker lease that exact block, then run
+        // the planner with the lease visible as foreign usage.
+        const brokerShareExits = settleBrokerShareExits(hackingState());
+        if (brokerShareExits.length === 0) {
+          pumpOnWake(ns, state, active, arena.reserves, usableForecastSec(horizons.install));
+        }
+        const wakeArena = buildArena(Date.now());
+        const wakeReady = ramBroker.drain(
+          brokerPlacement(state),
+          hackingState().memory.dispatch.heap,
+          wakeArena,
+          Date.now(),
+        );
+        if (brokerShareExits.length > 0) {
+          pumpOnWake(ns, state, active, wakeArena.reserves, usableForecastSec(horizons.install));
+        }
+        for (const request of wakeReady) {
+          if (FEATURE_IDS.includes(request.by as (typeof FEATURE_IDS)[number])) state.featureLastRun[request.by] = 0;
+        }
+        if (wakeReady.some((request) => request.by === 'gate')) {
+          await runGateProbe(ns, state, (gb, id) => brokerAcquire(
+            ns, tel, ramBroker, state, wakeArena, gb, { by: 'gate', id, lane: 'default', priority: PRIORITY['probe:gate'] },
+          ));
+        }
+        if (wakeReady.some((request) => request.by === 'probe')) {
+          await runProbes(ns, probes, state, (gb, id) => brokerAcquire(
+            ns, tel, ramBroker, state, wakeArena, gb, { by: 'probe', id, lane: 'default', priority: PRIORITY['probe:background'] },
+          ));
+        }
       } catch (error) {
         if (isScriptDeath(error)) throw error;
         TELEMETRY: if (__TELEMETRY__) {
@@ -505,50 +528,110 @@ export async function runController(
  * sweep's own record of which hosts it has scp'd to this session; since the
  * sweep copies the worker and the stub together, "the worker is here" and "the
  * stub is here" are the same fact. */
-function placement(state: GameState): HostRam[] {
+function brokerPlacement(state: GameState) {
   const servers = state.topics.servers;
   if (!servers) return [];
   const fleet = hackingState();
-  return dodgeHosts(servers, fleet.deployed, fleet.memory.dispatch.heap);
+  return brokerHosts(servers, fleet.deployed, fleet.memory.dispatch.heap);
 }
 
-/** Home RAM to keep out of the dispatcher's hands this pass.
- *
- * Recomputed rather than constant because it depends on which features are
- * unlocked: each declares the largest dodge step it needs, and the reserve has
- * to cover the biggest of them or that feature's probe is unaffordable forever
- * (see shared/ram/reserve.ts). A reserve that had to be capped is written to
- * the store as a blocker — the feature is not silently starved. */
-function computeReserve(
+function brokerAcquire(
+  ns: NS,
+  tel: Telemetry | undefined,
+  driver: DodgeBrokerDriver,
   state: GameState,
-  active: Capabilities,
-): { reserveGb: number; fleetReserveGb: number; contiguousFleetReserveGb: number } {
-  const home = state.topics.servers?.["home"];
-  const result = homeReserveGb({
-    enabled: FEATURE_IDS.filter((id) => active.unlocked[id] === "yes"),
-    demand: featureRamDemand(state, active),
-    homeMaxRam: home?.maxRam ?? 8,
-  });
-  const previous = state.topics.progression?.homeReserve;
-  if (!previous || previous.gb !== result.reserveGb || previous.capped !== result.capped) {
-    merge(state, "progression", {
-      homeReserve: {
-        gb: result.reserveGb,
-        capped: result.capped,
-        ...(result.driver !== undefined ? { driver: result.driver } : {}),
+  arena: ArenaPlan,
+  gb: number,
+  request: Omit<BrokerRequest, 'gb' | 'class'>,
+) {
+  const hosts = brokerPlacement(state);
+  const brokerRequest = { ...request, gb, class: driver.broker.classify(gb, arena) };
+  const acquired = driver.request(
+    brokerRequest,
+    hosts,
+    hackingState().memory.dispatch.heap,
+    arena,
+    Date.now(),
+  );
+  if (acquired.status === 'placed') return acquired;
+
+  const execution = reclaimForDodge(ns, hackingState(), brokerRequest, hosts);
+  TELEMETRY: if (__TELEMETRY__ && execution.preempted && execution.plan.action === 'preempt') {
+    const victim = execution.plan.victim;
+    tel!.event('ram.preempt', {
+      victim: {
+        workerId: victim.workerId,
+        ...(victim.opId !== undefined ? { opId: victim.opId } : {}),
+        host: victim.hostname,
+        kind: victim.kind,
+        segment: victim.segment,
+        gb: roundSigFigs(victim.gb, 3),
       },
+      beneficiary: {
+        by: brokerRequest.by,
+        id: brokerRequest.id,
+        lane: brokerRequest.lane,
+        gb: roundSigFigs(brokerRequest.gb, 3),
+        priority: brokerRequest.priority,
+      },
+      reason: execution.plan.reason,
+      threshold: execution.plan.threshold,
+      shareGb: roundSigFigs(execution.plan.shareGb, 3),
     });
   }
-  // A capped reserve is not just REPORTED any more: the shortfall spills onto
-  // the largest fleet host (dispatch syncTopology), so the feature step that
-  // outgrew a small home still has a launch site. This is what keeps the
-  // 10 GB market sampler alive on an 8 GB home once the farm fills the fleet.
-  const fleetReserveGb = result.capped ? Math.max(0, result.wantedGb - result.reserveGb) : 0;
-  return {
-    reserveGb: result.reserveGb,
-    fleetReserveGb,
-    contiguousFleetReserveGb: fleetDodgeReserveGb(result),
+  if (!execution.preempted) return acquired;
+
+  // ns.kill releases real RAM synchronously. The executor has already routed
+  // the dispatch ledger through reportFailed/workerExit, so retry the queue
+  // before the farm gets another chance to count this block.
+  const after = brokerPlacement(state);
+  driver.drain(after, hackingState().memory.dispatch.heap, arena, Date.now());
+  return driver.request(
+    brokerRequest,
+    after,
+    hackingState().memory.dispatch.heap,
+    arena,
+    Date.now(),
+  );
+}
+
+function publishArena(
+  state: GameState,
+  arena: ArenaPlan,
+  snapshot: ReturnType<DodgeBrokerDriver['snapshot']>,
+  published: string | undefined,
+): string {
+  const sig3 = (value: number): number => roundSigFigs(value, 3);
+  const digest = {
+    hosts: arena.hosts,
+    arenaGb: sig3(arena.arenaGb),
+    targetGb: sig3(arena.targetGb),
+    guaranteedDynamicGb: sig3(arena.guaranteedDynamicGb),
+    measuredDynamicGb: sig3(arena.measuredDynamicGb),
+    queueDepth: snapshot.queueDepth,
+    largestWaitingGb: sig3(snapshot.largestWaitingGb),
+    neededForLargestWaitingGb: sig3(snapshot.neededForLargestWaitingGb),
+    waits: snapshot.waits.map((request) => ({
+      by: request.by,
+      id: request.id,
+      gb: sig3(request.gb),
+      waitMs: Math.round(request.waitMs / 1_000) * 1_000,
+      class: request.class,
+      lane: request.lane,
+    })),
+    starvation: snapshot.starvation.map((request) => ({
+      by: request.by,
+      id: request.id,
+      gb: sig3(request.gb),
+      waitMs: Math.round(request.waitMs / 1_000) * 1_000,
+    })),
+    demand: snapshot.demand,
+    promoted: arena.promoted,
+    farmCostPerSec: sig3(arena.farmCostPerSec),
   };
+  const encoded = JSON.stringify(digest);
+  if (encoded !== published) merge(state, 'progression', { ramArena: digest });
+  return encoded;
 }
 
 /** Write the coordination digest into the store, but only when it changed.
@@ -600,7 +683,6 @@ function onWorldReset(state: GameState, kind: PrestigeKind): void {
   state.mirrors = {};
   state.mirrorDirty.clear();
   state.probeFailures = {};
-  state.probeSkips = {};
   delete state.probeBatch;
   gameGlobal.farmTarget = undefined;
   // The server snapshot is the fleet substrate's, owned by no feature; the

@@ -34,11 +34,17 @@ export interface SimWork {
   /** Repeating-unit progress when it differs from upstream's cumulative
    * `cyclesWorked` counter (currently crimes). */
   unitCycles?: number;
+  /** Effective milliseconds completed for work whose rate can change while
+   * it is running (notably CreateProgramWork). */
+  unitCompleted?: number;
   /** Unfocused work is ×0.8 unless NeuroreceptorManager is owned. */
   focused: boolean;
   /** Modeled Task.nextCompletion. Kept live across the NS API copy. */
   nextCompletion: Promise<void>;
   resolveNextCompletion: () => void;
+  /** Upstream Work.finish(cancelled). Simulator systems use this for
+   * cancellation effects such as an incomplete program file. */
+  finish?: (cancelled: boolean) => void;
 }
 
 export interface SimPlayerOptions {
@@ -46,12 +52,17 @@ export interface SimPlayerOptions {
   city?: string;
   location?: string;
   karma?: number;
+  entropy?: number;
+  exploits?: string[];
+  persistentIntelligenceExp?: number;
   numPeopleKilled?: number;
   factions?: string[];
   factionInvitations?: string[];
   augmentations?: { name: string; level: number }[];
   queuedAugmentations?: { name: string; level: number }[];
   sourceFiles?: Record<string, number>;
+  /** Durable ownership before advanced-option overrides are applied. */
+  ownedSourceFiles?: Record<string, number>;
   jobs?: Record<string, string>;
   /** Player.gang.facName. Needed because that faction receives no passive
    * reputation while it is the player's gang. */
@@ -66,7 +77,9 @@ export class SimPlayer {
    *  direction. */
   karma: number;
   numPeopleKilled: number;
-  entropy = 0;
+  entropy: number;
+  exploits: string[];
+  persistentIntelligenceExp: number;
   city: string;
   location: string;
   /** Company name -> job title. */
@@ -86,6 +99,7 @@ export class SimPlayer {
   queuedAugmentations: Map<string, number> = new Map();
   /** SF number (as string) -> level. */
   sourceFiles: Record<string, number>;
+  ownedSourceFiles: Record<string, number>;
   gangFaction: string | undefined;
   currentWork: SimWork | undefined;
   focus = true;
@@ -93,6 +107,9 @@ export class SimPlayer {
   constructor(options: SimPlayerOptions = {}) {
     this.money = options.money ?? 1_000;
     this.karma = options.karma ?? 0;
+    this.entropy = options.entropy ?? 0;
+    this.exploits = [...(options.exploits ?? [])];
+    this.persistentIntelligenceExp = options.persistentIntelligenceExp ?? 0;
     this.numPeopleKilled = options.numPeopleKilled ?? 0;
     this.city = options.city ?? "Sector-12";
     this.location = options.location ?? "home";
@@ -100,6 +117,7 @@ export class SimPlayer {
     this.factions = [...(options.factions ?? [])];
     this.factionInvitations = [...(options.factionInvitations ?? [])];
     this.sourceFiles = { ...(options.sourceFiles ?? {}) };
+    this.ownedSourceFiles = { ...(options.ownedSourceFiles ?? options.sourceFiles ?? {}) };
     this.gangFaction = options.gangFaction;
     this.focus = options.focus ?? true;
     this.augmentations = new Map((options.augmentations ?? []).map((a) => [a.name, a.level]));
@@ -129,10 +147,14 @@ export class SimPlayer {
     work.resolveNextCompletion = resolveNextCompletion;
   }
 
-  stopWork(): boolean {
+  stopWork(cancelled = true): boolean {
     const work = this.currentWork;
     if (!work) return false;
-    this.currentWork = undefined;
+    work.finish?.(cancelled);
+    // Work.finish runs while Player.currentWork still identifies that work in
+    // the game. Preserve that ordering for finish callbacks that need the
+    // final cycle/progress counters.
+    if (this.currentWork === work) this.currentWork = undefined;
     work.resolveNextCompletion();
     return true;
   }

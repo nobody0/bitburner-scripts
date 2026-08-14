@@ -34,6 +34,7 @@ interface FixtureOptions {
   gang?: unknown;
   focus?: boolean;
   stockMarket?: unknown;
+  currentServer?: string;
 }
 
 function buildSaveJson(options: FixtureOptions = {}): string {
@@ -41,10 +42,13 @@ function buildSaveJson(options: FixtureOptions = {}): string {
     money: 1_234_567,
     bitNodeN: options.bitNodeN ?? 1,
     karma: -54,
-    entropy: 0,
+    entropy: 2,
+    exploits: ["Bypass", "N00dles"],
+    persistentIntelligenceData: { exp: 1_234 },
     city: "Sector-12",
     location: "Travel Agency",
-    hp: { current: 10, max: 10 },
+    currentServer: options.currentServer ?? "home",
+    hp: { current: 7, max: 20 },
     skills: { hacking: 812, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1, intelligence: 3 },
     exp: { hacking: 1e6, strength: 0, defense: 0, dexterity: 0, agility: 0, charisma: 0, intelligence: 12 },
     mults: { hacking: 1.5, hacking_exp: 2, hacking_money: 1.1 },
@@ -92,14 +96,16 @@ function buildSaveJson(options: FixtureOptions = {}): string {
     {
       home: server({
         hostname: "home",
+        ip: "10.20.30.40",
         programs: ["NUKE.exe", "BruteSSH.exe"],
         messages: ["hackers-starting-handbook.lit", "j0.msg"],
         contracts: [{ ctor: "CodingContract", data: { fn: "saved.cct", type: "Find Largest Prime Factor" } }],
         maxRam: 64,
         cpuCores: 4,
         hasAdminRights: true,
+        isConnectedTo: true,
         purchasedByPlayer: true,
-        serversOnNetwork: ["n00dles", "run4theh111z"],
+        serversOnNetwork: ["n00dles", "run4theh111z", "darkweb"],
         runningScripts: [
           { filename: "start.js", threads: 1, ramUsage: 3.6 },
           { filename: "worker/worker.js", threads: 10, ramUsage: 1.75 },
@@ -127,12 +133,22 @@ function buildSaveJson(options: FixtureOptions = {}): string {
         moneyAvailable: 0,
         numOpenPortsRequired: 4,
         openPortCount: 2,
+        ftpPortOpen: true,
+        httpPortOpen: true,
         requiredHackingSkill: 505,
         serversOnNetwork: ["home"],
       }),
       "hacknet-server-0": { ctor: "HacknetServer", data: {
         hostname: "hacknet-server-0", maxRam: 8, cpuCores: 3, level: 42, cache: 4,
         totalHashesGenerated: 1234, onlineTimeSeconds: 5678, hasAdminRights: true,
+      } },
+      darkweb: { ctor: "DarknetServer", data: {
+        hostname: "darkweb", ip: "10.20.30.41", maxRam: 16, hasAdminRights: true,
+        serversOnNetwork: ["home"],
+      } },
+      "dnet-movable": { ctor: "DarknetServer", data: {
+        hostname: "dnet-movable", ip: "10.20.30.42", maxRam: 8,
+        serversOnNetwork: ["darkweb"],
       } },
     },
   );
@@ -305,6 +321,30 @@ describe("seeding a simulation from a save", () => {
   test("uses the save's own topology", () => {
     expect(seed.topology["home"]).toContain("n00dles");
     expect(seed.topology["n00dles"]).toEqual(["home"]);
+    expect(seed.topology["home"]).toContain("darkweb");
+    expect(seed.topology["darkweb"]).toEqual(["home"]);
+    expect(seed.servers.find((server) => server.hostname === "darkweb")?.simKind).toBe("DarknetServer");
+  });
+
+  test("rejects saves connected to an unsupported movable darknet server", () => {
+    const connectedToDarknet = decodeSaveJson(buildSaveJson({ currentServer: "dnet-movable" }));
+    expect(() => saveToSeed(connectedToDarknet)).toThrow("movable darknet terminal state is not modeled");
+  });
+
+  test("normalizes resumable class and program work without losing effective progress", () => {
+    const classSave = decodeSaveJson(buildSaveJson({
+      currentWork: { ctor: "ClassWork", data: { classType: "Algorithms", location: "Rothman University", cyclesWorked: 12 } },
+    }));
+    expect(classSave.player.currentWork).toEqual({
+      kind: "class", subject: "Algorithms", workType: "Algorithms", cyclesWorked: 12, ctor: "ClassWork",
+    });
+
+    const programSave = decodeSaveJson(buildSaveJson({
+      currentWork: { ctor: "CreateProgramWork", data: { programName: "BruteSSH.exe", cyclesWorked: 50, unitCompleted: 12_345 } },
+    }));
+    expect(programSave.player.currentWork).toEqual({
+      kind: "createProgram", subject: "BruteSSH.exe", cyclesWorked: 50, unitCompleted: 12_345, ctor: "CreateProgramWork",
+    });
   });
 
   test("keeps hacknet servers in the fleet and preserves their economy", () => {
@@ -318,21 +358,24 @@ describe("seeding a simulation from a save", () => {
     expect(seed.hacknet.hashLevels["Sell for Money"]).toBe(2);
   });
 
-  test("reproduces the open-port count as individual flags", () => {
-    // Only the count is stored; canRoot() and nuke() read the flags.
+  test("preserves the exact independently serialized port flags", () => {
     const target = seed.servers.find((s) => s.hostname === "run4theh111z")!;
     expect(target.openPortCount).toBe(2);
     expect([target.sshPortOpen, target.ftpPortOpen, target.smtpPortOpen, target.httpPortOpen]).toEqual([
-      true,
+      false,
       true,
       false,
-      false,
+      true,
     ]);
   });
 
   test("derives home spec, money and the capability gates", () => {
     expect(seed.homeRam).toBe(64);
     expect(seed.homeCores).toBe(4);
+    expect(seed.servers.find((server) => server.hostname === "home")?.ip).toBe("10.20.30.40");
+    expect(seed.servers.find((server) => server.hostname === "home")?.isConnectedTo).toBe(true);
+    expect(seed.currentServer).toBe("home");
+    expect(seed.hasTor).toBe(true);
     expect(seed.startingMoney).toBe(1_234_567);
     expect(seed.bitnode).toBe(1);
     expect(seed.sourceFileLevel).toBe(3);
@@ -344,6 +387,10 @@ describe("seeding a simulation from a save", () => {
   test("carries the player's real skills and multipliers", () => {
     expect(seed.person.skills["hacking"]).toBe(812);
     expect(seed.person.mults["hacking"]).toBe(1.5);
+    expect(seed.person.hp).toEqual({ current: 7, max: 20 });
+    expect(seed.playerState.entropy).toBe(2);
+    expect(seed.playerState.exploits).toEqual(["Bypass", "N00dles"]);
+    expect(seed.playerState.persistentIntelligenceExp).toBe(1_234);
   });
 
   test("carries every non-Person field needed by faction requirements", () => {
@@ -351,14 +398,24 @@ describe("seeding a simulation from a save", () => {
     expect(seed.playerState.augmentations).toHaveLength(2);
     expect(seed.playerState.queuedAugmentations).toEqual([{ name: "PCMatrix", level: 1 }]);
     expect(seed.playerState.sourceFiles).toEqual({ "1": 3 });
+    expect(seed.playerState.ownedSourceFiles).toEqual({ "1": 3 });
     expect(seed.factions["CyberSec"]).toEqual({ rep: 1_000_000, favor: 20 });
-    expect(seed.companies["Noodle Bar"]).toBe(100_000);
+    expect(seed.companies["Noodle Bar"]).toEqual({ rep: 100_000, favor: 100 });
     expect(seed.bladeburnerRank).toBe(40);
     expect(seed.homeFiles).toEqual(["NUKE.exe", "BruteSSH.exe", "hackers-starting-handbook.lit", "j0.msg", "saved.cct"]);
     expect(seed.servers.find((server) => server.hostname === "home")?.contractFiles).toEqual(["saved.cct"]);
     expect(seed.playtimeSinceLastAug).toBe(3_600_000);
     expect(seed.playtimeSinceLastBitnode).toBe(7_200_000);
+    expect(seed.totalPlaytime).toBe(99_000_000);
+    expect(seed.sleeveCount).toBe(2);
+    expect(seed.version).toBe(51);
     expect(seed.servers.find((server) => server.hostname === "n00dles")?.organizationName).toBe("Noodle Bar");
+  });
+
+  test("rejects save schemas other than the pinned game version", () => {
+    const stale = decodeSaveJson(buildSaveJson());
+    stale.version = 50;
+    expect(() => saveToSeed(stale)).toThrow("expected 51");
   });
 
   test("preserves gang identity, focus, current work progress, and stock state", () => {

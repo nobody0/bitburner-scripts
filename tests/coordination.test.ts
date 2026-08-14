@@ -7,6 +7,9 @@ import { holdsSlot, PRIORITY, resolveClaims, type Claim } from "../shared/strate
 import { coordinate, emptyDigest, postNeeds } from "../shared/strategy/coordination.ts";
 import { emptyBoard, type Need } from "../shared/strategy/needs.ts";
 
+const unknownStep = { shape: "step",
+    pricing: "hard", value: { state: "unknown", reason: "test hard step" } } as const;
+
 const karmaNeed: Need = {
   by: "factions",
   kind: "karma",
@@ -24,6 +27,7 @@ const workClaim: Claim = {
   amount: 1,
   priority: PRIORITY["factions:work"],
   mode: "spend",
+  ...unknownStep,
   why: "hacking contracts for CyberSec",
 };
 
@@ -34,6 +38,7 @@ const crimeClaim: Claim = {
   amount: 1,
   priority: PRIORITY["career:blocking-need"],
   mode: "spend",
+  ...unknownStep,
   why: "clearing a blocking karma need",
 };
 
@@ -41,13 +46,13 @@ describe("the coordination pass", () => {
   test("stays completely silent when nothing is posted", () => {
     // The Phase-0 neutrality property: a hacking-only run must not gain a
     // single telemetry record from this machinery existing.
-    const result = coordinate({ now: 0, money: 1e6, ramGb: 8, board: postNeeds([]), claims: [] });
+    const result = coordinate({ now: 0, money: 1e6, board: postNeeds([]), claims: [] });
     expect(result.digest).toBeUndefined();
     expect(result.arbitration.grants).toEqual([]);
   });
 
   test("a need alone is enough to report, even with no claims", () => {
-    const result = coordinate({ now: 0, money: 0, ramGb: 0, board: postNeeds([karmaNeed]), claims: [] });
+    const result = coordinate({ now: 0, money: 0, board: postNeeds([karmaNeed]), claims: [] });
     expect(result.digest!.needs).toHaveLength(1);
     expect(result.digest!.needs[0]).toMatchObject({
       by: "factions",
@@ -62,7 +67,7 @@ describe("the coordination pass", () => {
     // The end-to-end point of the whole mechanism: factions asks for karma
     // rather than for a crime, and career — which knows HOW — wins the slot.
     const board = postNeeds([karmaNeed]);
-    const result = coordinate({ now: 1_000, money: 0, ramGb: 0, board, claims: [workClaim, crimeClaim] });
+    const result = coordinate({ now: 1_000, money: 0, board, claims: [workClaim, crimeClaim] });
     expect(result.arbitration.slot).toMatchObject({ by: "career", claimId: "crime:Mug" });
     expect(result.digest!.arbitration.denied).toEqual([
       expect.objectContaining({ by: "factions", id: "work:CyberSec", reason: "slot-held" }),
@@ -75,7 +80,7 @@ describe("the coordination pass", () => {
     const satisfied = postNeeds([{ ...karmaNeed, have: -50 }]);
     expect(satisfied.open).toEqual([]);
     const idleCrime: Claim = { ...crimeClaim, priority: PRIORITY["career:income"] };
-    const result = coordinate({ now: 1_000, money: 0, ramGb: 0, board: satisfied, claims: [workClaim, idleCrime] });
+    const result = coordinate({ now: 1_000, money: 0, board: satisfied, claims: [workClaim, idleCrime] });
     expect(result.arbitration.slot).toMatchObject({ by: "factions" });
   });
 
@@ -87,7 +92,6 @@ describe("the coordination pass", () => {
     const result = coordinate({
       now: 65_000,
       money: 0,
-      ramGb: 0,
       board,
       claims: [workClaim],
       slot: { claimId: "work:CyberSec", by: "factions", priority: PRIORITY["factions:work"], since: 1_500 },
@@ -104,7 +108,6 @@ describe("the coordination pass", () => {
     const result = coordinate({
       now: 5_000,
       money: 0,
-      ramGb: 0,
       board: postNeeds([karmaNeed]),
       claims: [workClaim, crimeClaim],
       slot: { claimId: "work:CyberSec", by: "factions", priority: PRIORITY["factions:work"], since: 1_000 },
@@ -123,6 +126,7 @@ describe("the coordination pass", () => {
       amount: 5e6,
       priority: PRIORITY["factions:aug-fund"],
       mode: "reserve",
+      ...unknownStep,
       why: "Cranial Signal Processors G1",
     };
     const upgrade: Claim = {
@@ -132,12 +136,12 @@ describe("the coordination pass", () => {
       amount: 4e6,
       priority: PRIORITY["hacknet:upgrade"],
       mode: "spend",
+      ...unknownStep,
       why: "node 0 level 40->50",
     };
     const result = coordinate({
       now: 0,
       money: 6e6,
-      ramGb: 0,
       board: postNeeds([]),
       claims: [fund, upgrade, workClaim],
     });
@@ -159,6 +163,34 @@ describe("the coordination pass", () => {
     expect(result.digest!.arbitration.remaining.money).toBe(1e6);
   });
 
+  test("the digest reports the resolved waterline and each grant's marginal", () => {
+    const priced: Claim = {
+      by: "stock",
+      id: "position",
+      resource: "money",
+      amount: 100,
+      priority: PRIORITY["income:investment"],
+      mode: "spend",
+      shape: "continuous",
+      valueCurve: { marginalValueAt: (granted) => 10 - granted / 10 },
+      why: "linear test position",
+    };
+    const result = coordinate({
+      now: 0,
+      money: 40,
+      board: postNeeds([]),
+      claims: [priced],
+    });
+    expect(result.digest!.arbitration.waterlines).toEqual([{
+      resource: "money",
+      priority: PRIORITY["income:investment"],
+      lambda: 6,
+      claimCount: 1,
+      pricedClaimCount: 1,
+    }]);
+    expect(result.digest!.arbitration.grants[0]).toMatchObject({ amount: 40, marginalValue: 6 });
+  });
+
   test("the empty digest clears rather than leaving a stale board behind", () => {
     // merge() drops undefined fields, so `arbitration: undefined` would leave
     // the last arbitration on screen forever — reading as "still blocked" when
@@ -172,10 +204,10 @@ describe("the coordination pass", () => {
 });
 
 const timeClaim = (by: Claim["by"], id: string, priority: number, holdUntil?: number): Claim => ({
-  by, id, resource: "time", amount: 1, priority, mode: "reserve", why: "test", ...(holdUntil ? { holdUntil } : {}),
+  by, id, resource: "time", amount: 1, priority, mode: "reserve", ...unknownStep, why: "test", ...(holdUntil ? { holdUntil } : {}),
 });
 const moneyClaim = (by: Claim["by"], id: string, amount: number, mode: Claim["mode"]): Claim => ({
-  by, id, resource: "money", amount, priority: 50, mode, why: "test",
+  by, id, resource: "money", amount, priority: 50, mode, ...unknownStep, why: "test",
 });
 
 describe("standing feature contributions", () => {
@@ -208,7 +240,7 @@ describe("standing feature contributions", () => {
       state,
       now: 0,
       caps: {} as ClaimContext["caps"],
-      budgetGb: 8,
+      activeFeatures: new Set(),
       board: emptyBoard(),
       horizons: {} as ClaimContext["horizons"],
       ramPrice: () => 3.5,
@@ -235,7 +267,7 @@ describe("standing feature contributions", () => {
       state,
       now: 0,
       caps: {} as ClaimContext["caps"],
-      budgetGb: 8,
+      activeFeatures: new Set(),
       board: emptyBoard(),
       horizons: {} as ClaimContext["horizons"],
       ramPrice: () => 3.5,
@@ -250,21 +282,21 @@ describe("standing feature contributions", () => {
   test("faction work survives hacking-only passes and career holdUntil remains effective", () => {
     const cache = new ContributionCache();
     cache.replaceClaims("factions", [timeClaim("factions", "work:CyberSec", 60)]);
-    let result = resolveClaims({ now: 1_000, pools: { money: 0, ram: 0 }, claims: cache.claims() });
+    let result = resolveClaims({ now: 1_000, pools: { money: 0 }, claims: cache.claims() as Claim[] });
     expect(holdsSlot(result, "factions")).toBe(true);
 
     // No faction collection on these passes: only the cached contribution is
     // supplied again, exactly as on hacking's 200 ms cadence.
-    result = resolveClaims({ now: 1_200, pools: { money: 0, ram: 0 }, claims: cache.claims(), slot: result.slot });
+    result = resolveClaims({ now: 1_200, pools: { money: 0 }, claims: cache.claims() as Claim[], slot: result.slot });
     expect(holdsSlot(result, "factions")).toBe(true);
 
     cache.replaceClaims("career", [timeClaim("career", "crime", 75, 2_000)]);
-    result = resolveClaims({ now: 1_300, pools: { money: 0, ram: 0 }, claims: cache.claims(), slot: result.slot });
+    result = resolveClaims({ now: 1_300, pools: { money: 0 }, claims: cache.claims() as Claim[], slot: result.slot });
     expect(holdsSlot(result, "career")).toBe(true);
     cache.replaceClaims("factions", [timeClaim("factions", "urgent", 99)]);
-    result = resolveClaims({ now: 1_999, pools: { money: 0, ram: 0 }, claims: cache.claims(), slot: result.slot });
+    result = resolveClaims({ now: 1_999, pools: { money: 0 }, claims: cache.claims() as Claim[], slot: result.slot });
     expect(holdsSlot(result, "career")).toBe(true);
-    result = resolveClaims({ now: 2_000, pools: { money: 0, ram: 0 }, claims: cache.claims(), slot: result.slot });
+    result = resolveClaims({ now: 2_000, pools: { money: 0 }, claims: cache.claims() as Claim[], slot: result.slot });
     expect(holdsSlot(result, "factions")).toBe(true);
   });
 
@@ -272,9 +304,9 @@ describe("standing feature contributions", () => {
     const cache = new ContributionCache();
     cache.replaceClaims("factions", [timeClaim("factions", "work", 60)]);
     cache.replaceNeeds("factions", [{ by: "factions", kind: "backdoor", subject: "CSEC", target: 1, have: 0, weight: 1, urgency: "blocking", why: "test" }]);
-    const first = resolveClaims({ now: 1, pools: { money: 0, ram: 0 }, claims: cache.claims() });
+    const first = resolveClaims({ now: 1, pools: { money: 0 }, claims: cache.claims() as Claim[] });
     cache.replaceClaims("factions", []);
-    const released = resolveClaims({ now: 2, pools: { money: 0, ram: 0 }, claims: cache.claims(), slot: first.slot });
+    const released = resolveClaims({ now: 2, pools: { money: 0 }, claims: cache.claims() as Claim[], slot: first.slot });
     expect(released.slot).toBeUndefined();
     cache.remove("factions");
     expect(cache.claims()).toEqual([]);
@@ -286,14 +318,14 @@ describe("standing feature contributions", () => {
     const transient = cache.replaceClaims("factions", [
       moneyClaim("factions", "aug-fund", 70, "reserve"),
       moneyClaim("factions", "buy-now", 10, "spend"),
-      { by: "factions", id: "action", resource: "ram", amount: 2, priority: 50, mode: "spend", why: "test" },
+      { by: "factions", id: "action", resource: "ram", amount: 2, priority: 50, why: "test" },
     ]);
     expect(transient.map((claim) => claim.id)).toEqual(["buy-now", "action"]);
-    const due = resolveClaims({ now: 1, pools: { money: 100, ram: 2 }, claims: cache.claims(transient) });
+    const dueClaims = cache.claims(transient).filter((claim): claim is Claim => claim.resource !== "ram");
+    const due = resolveClaims({ now: 1, pools: { money: 100 }, claims: dueClaims });
     expect(due.remaining.money).toBe(20);
-    const between = resolveClaims({ now: 2, pools: { money: 100, ram: 2 }, claims: cache.claims() });
+    const between = resolveClaims({ now: 2, pools: { money: 100 }, claims: cache.claims() as Claim[] });
     expect(between.remaining.money).toBe(30);
-    expect(between.remaining.ram).toBe(2);
     expect(between.grants.map((grant) => grant.claimId)).toEqual(["aug-fund"]);
   });
 });

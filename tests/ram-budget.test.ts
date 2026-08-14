@@ -3,6 +3,7 @@ import { rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
+import { WORKER_RAM } from "../shared/world.ts";
 import type { NS } from "@ns";
 
 /** Declared RAM is the fresh-game constraint: start.js plus a transient dodge
@@ -33,6 +34,7 @@ const RAM_COSTS: Record<string, number> = {
   "ns.hack": 0.1,
   "ns.grow": 0.15,
   "ns.weaken": 0.15,
+  "ns.share": 2.4,
 };
 const BASE_GB = 1.6;
 /** start.js + dodge stub (1.6 + 2.5) must stay under an 8 GB home. */
@@ -131,14 +133,25 @@ describe("in-game static RAM budget", () => {
     expect(restore.content).toContain("indexedDB");
   });
 
-  test("the puppet worker references only the three ops it performs", async () => {
+  test("the puppet worker references only the ops it performs", async () => {
     const artifacts = await buildScripts(config, { telemetry: true });
     const worker = artifacts.find((a) => a.filename === "worker/worker.js")!;
-    // The worker is billed per launch via ramOverride (1.7 / 1.75), not by its
-    // own static cost — but only because it references nothing with a RAM
-    // charge beyond the three ops. disableLog is a zero-RAM hot-path guard;
+    // The worker is billed per launch via ramOverride, not by its own static
+    // cost — but only because it references nothing with a RAM charge beyond
+    // the ops it actually invokes. disableLog is a zero-RAM hot-path guard;
     // anything else would exceed the declared override and kill the worker.
     const { members } = staticRam(worker.content);
-    expect(members).toEqual(["ns.disableLog", "ns.grow", "ns.hack", "ns.weaken"]);
+    expect(members).toEqual(["ns.disableLog", "ns.grow", "ns.hack", "ns.share", "ns.weaken"]);
+  });
+
+  test("every worker ramOverride covers the base plus the call it makes", () => {
+    // The game charges DYNAMIC RAM against `ramOverride`, starting from the
+    // 1.6 GB script base. An override that omits the base kills the worker on
+    // its first ns call with "Dynamic RAM usage calculated to be greater than
+    // initial RAM usage" — invisible in the simulator, which does not model
+    // the dynamic check.
+    for (const kind of ["hack", "grow", "weaken", "share"] as const) {
+      expect(WORKER_RAM[kind]).toBeGreaterThanOrEqual(BASE_GB + RAM_COSTS[`ns.${kind}`]! - 1e-9);
+    }
   });
 });

@@ -1,7 +1,7 @@
 import { trainingOption, type TrainingOption } from "../../shared/strategy/career/training.ts";
+import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import type { SimPlayer } from "../core/player.ts";
 import type { SimWorld } from "../world.ts";
-import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 
 /** The class/gym slice exercised by the career planner.
  *
@@ -30,10 +30,8 @@ export class EducationSystem {
   }
 
   private start(subject: string, course: TrainingOption, location: string, focus: boolean): boolean {
-    // ClassWork refuses to start when the player cannot pay even its first
-    // 200 ms cycle. This also keeps a zero-bankroll caller from repeatedly
-    // replacing useful work with a class that immediately terminates.
-    if (this.player.money < course.costPerSec / 5) return false;
+    // Upstream does not perform an affordability check. ClassWork keeps
+    // applying its negative money rate even after the balance crosses zero.
     this.player.startWork({
       kind: "class",
       subject,
@@ -55,29 +53,25 @@ export class EducationSystem {
     const course = baseCourse && this.effective(baseCourse);
     if (!course) return;
 
-    const costPerCycle = course.costPerSec / 5;
-    const payableCycles = Math.min(cycles, Math.floor((this.player.money + 1e-9) / costPerCycle));
-    if (payableCycles > 0) {
-      const focused = work.focused || this.player.augmentations.has("Neuroreceptor Management Implant");
-      const focusBonus = focused ? 1 : 0.8;
-      const mults = this.world.person.mults as unknown as Record<string, number>;
-      const exp = this.world.person.exp as unknown as Record<string, number>;
-      const gained = course.expPerSec * (payableCycles / 5)
-        * (mults[`${course.skill}_exp`] ?? 1)
-        * currentNodeMults.ClassGymExpGain
-        * focusBonus;
-      const cost = costPerCycle * payableCycles;
-      exp[course.skill] = (exp[course.skill] ?? 0) + gained;
-      this.player.money -= cost;
-      this.world.recordMoney("other", -cost);
-      work.cyclesWorked += payableCycles;
-      this.world.recalculateSkills();
-    }
-
-    if (payableCycles < cycles) {
-      this.player.stopWork();
-      this.world.emit({ kind: "event", name: "class.ended", data: { reason: "insufficient money" } });
-    }
+    const mults = this.world.person.mults as unknown as Record<string, number>;
+    const exp = this.world.person.exp as unknown as Record<string, number>;
+    // Upstream applies ClassGymExpGain to class/gym earnings via
+    // `applyWorkStatsExpMult` inside `calculateClassEarnings`. Dropping it made
+    // BN4/BN13 training run 2x too fast and disagree with the controller's own
+    // forecaster, which does apply it (game/lib/features/career.ts). There is
+    // deliberately NO focus penalty here: unlike company/faction work,
+    // `ClassWork.process` never calls `focusBonus()` (pinned by
+    // sim/tests/career-parity.test.ts).
+    const gained = course.expPerSec * (cycles / 5)
+      * (mults[`${course.skill}_exp`] ?? 1)
+      * currentNodeMults.ClassGymExpGain;
+    const cost = course.costPerSec * (cycles / 5);
+    exp[course.skill] = (exp[course.skill] ?? 0) + gained;
+    this.world.gainIntelligenceExp((course.intelligenceExpPerSec ?? 0) * (cycles / 5));
+    this.player.money -= cost;
+    this.world.recordMoney("class", -cost);
+    work.cyclesWorked += cycles;
+    this.world.recalculateSkills();
   }
 
   private courseFor(subject: string, skill?: string): TrainingOption | undefined {
@@ -91,6 +85,7 @@ export class EducationSystem {
     return {
       ...course,
       expPerSec: course.expPerSec * expMult,
+      intelligenceExpPerSec: (course.intelligenceExpPerSec ?? 0) * expMult,
       costPerSec: course.costPerSec * (server?.backdoorInstalled ? 0.9 : 1),
     };
   }

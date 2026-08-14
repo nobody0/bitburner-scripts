@@ -1,12 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
   generateVanillaNetwork,
+  generateVanillaNetworkFromRng,
   isSeededVanillaNetwork,
   VANILLA_NETWORK,
   VANILLA_NETWORK_SEED,
 } from "../network.ts";
+import { mulberry32 } from "../core/rng.ts";
 import { findProfile } from "../profiles.ts";
 import { SERVER_METADATA, type Range } from "../vendor/bitburner/src/Server/data/ServerMetadata.ts";
+import { runGame } from "../game-run.ts";
+import { parseGoal } from "../../shared/goals/presets.ts";
+import { only } from "../../shared/features/profile.ts";
 
 function inRange(value: number, range: Range | undefined): boolean {
   return range !== undefined && value >= range[0] && value <= range[1];
@@ -15,12 +20,16 @@ function inRange(value: number, range: Range | undefined): boolean {
 describe("seeded vanilla network", () => {
   test("contains the complete standard server population", () => {
     const hosts = VANILLA_NETWORK.network.map((server) => server.hostname).sort();
-    expect(hosts).toEqual(Object.keys(SERVER_METADATA).sort());
-    expect(hosts).toHaveLength(70);
+    expect(hosts.filter((host) => host !== "darkweb")).toEqual(Object.keys(SERVER_METADATA).sort());
+    expect(hosts).toHaveLength(71);
     expect(hosts).toContain("n00dles");
     expect(hosts).toContain("The-Cave");
     expect(hosts).toContain("w0r1d_d43m0n");
+    expect(hosts).toContain("darkweb");
     expect(hosts).not.toContain("late-farm");
+    const ips = [VANILLA_NETWORK.homeIp, ...VANILLA_NETWORK.network.map((server) => server.ip!)];
+    expect(ips.every((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip))).toBe(true);
+    expect(new Set(ips).size).toBe(ips.length);
   });
 
   test("is fixed by its dedicated seed, independently of gameplay seeds", () => {
@@ -29,8 +38,52 @@ describe("seeded vanilla network", () => {
     expect(generateVanillaNetwork(VANILLA_NETWORK_SEED + 1)).not.toEqual(VANILLA_NETWORK);
   });
 
+  test("fixed vanilla worlds still use the declared seed for gameplay randomness", async () => {
+    const initialEcorpPrice = async (seed: number): Promise<number> => {
+      let price: number | undefined;
+      await runGame({
+        goal: parseGoal("wealth:1e99"),
+        seed,
+        horizonMs: 2_000,
+        bitnode: 8,
+        startingMoney: 250e6,
+        features: only("stock", "progression"),
+        ...VANILLA_NETWORK,
+        onRecord: (line) => {
+          const record = JSON.parse(line) as {
+            kind: string;
+            key?: string;
+            data?: { positions?: { sym: string; price: number }[] };
+          };
+          if (record.kind !== "state" || record.key !== "stock") return;
+          price ??= record.data?.positions?.find((position) => position.sym === "ECP")?.price;
+        },
+      });
+      if (price === undefined) throw new Error("controller emitted no ECP quote");
+      return price;
+    };
+
+    const seedOne = await initialEcorpPrice(1);
+    expect(await initialEcorpPrice(1)).toBe(seedOne);
+    expect(await initialEcorpPrice(2)).not.toBe(seedOne);
+  });
+
+  test("successive augmentation worlds consume one continuous generation stream", () => {
+    const rngA = mulberry32(VANILLA_NETWORK_SEED);
+    const first = generateVanillaNetworkFromRng(rngA);
+    const second = generateVanillaNetworkFromRng(rngA);
+    const rngB = mulberry32(VANILLA_NETWORK_SEED);
+    expect(first).toEqual(generateVanillaNetworkFromRng(rngB));
+    expect(second).toEqual(generateVanillaNetworkFromRng(rngB));
+    expect(second).not.toEqual(first);
+  });
+
   test("rolls every field inside the pinned upstream ranges", () => {
     for (const server of VANILLA_NETWORK.network) {
+      if (server.hostname === "darkweb") {
+        expect(server).toMatchObject({ simKind: "DarknetServer", maxRam: 16, numOpenPortsRequired: 0 });
+        continue;
+      }
       const metadata = SERVER_METADATA[server.hostname]!;
       expect(server.organizationName).toBe(metadata.org);
       expect(server.numOpenPortsRequired).toBe(metadata.ports);
@@ -52,8 +105,9 @@ describe("seeded vanilla network", () => {
 
   test("uses the vanilla layer tree and leaves the daemon hidden until Red Pill install", () => {
     const { topology } = VANILLA_NETWORK;
-    expect(Object.keys(topology)).toHaveLength(71);
+    expect(Object.keys(topology)).toHaveLength(72);
     expect(topology["w0r1d_d43m0n"]).toEqual([]);
+    expect(topology["darkweb"]).toEqual([]);
 
     let directedEdges = 0;
     for (const [host, neighbours] of Object.entries(topology)) {
@@ -84,14 +138,14 @@ describe("seeded vanilla network", () => {
     const world = profile.world!;
     expect(world.network).toEqual(VANILLA_NETWORK.network);
     expect(world.topology).toEqual(VANILLA_NETWORK.topology);
-    expect(world.network).toHaveLength(70);
+    expect(world.network).toHaveLength(71);
     expect(profile.homeRam).toBe(8);
     expect(profile.startingMoney).toBeUndefined();
     expect(world.person).toBeUndefined();
     expect(world.factions).toBeUndefined();
     expect(world.playerState?.augmentations).toBeUndefined();
     expect(world.playerState?.queuedAugmentations).toBeUndefined();
-    expect(world.playerState?.sourceFiles).toEqual({ "4": 3, "14": 3 });
+    expect(world.playerState?.sourceFiles).toBeUndefined();
     expect(isSeededVanillaNetwork(world.network, world.topology)).toBe(true);
     expect(isSeededVanillaNetwork(world.network?.slice(1), world.topology)).toBe(false);
   });

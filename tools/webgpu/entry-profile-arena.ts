@@ -9,9 +9,16 @@ import {
   type GoArenaGameResult,
 } from "../../sim/go-arena.ts";
 import { createRequiredWebGpuGoValueBackend } from "../../shared/strategy/go/neural/webgpu.ts";
+import type { GoRewardOpponent } from "../../shared/strategy/go/rules.ts";
 
 type Profile = "small5" | "daemon19";
-interface ArenaConfig { profile: Profile; games: number; seed: number; candidateLimit?: number }
+interface ArenaConfig {
+  profile: Profile;
+  games: number;
+  seed: number;
+  candidateLimit?: number;
+  opponent?: GoRewardOpponent;
+}
 
 function percentile(values: readonly number[], fraction: number): number {
   if (!values.length) return 0;
@@ -28,7 +35,9 @@ async function main(): Promise<unknown> {
     throw new Error("arena games and seed must be finite positive integers");
   }
   const selected = GO_ARENA_OPPONENTS.filter((opponent) =>
-    config.profile === "daemon19" ? opponent.name === "????????????" : opponent.requestedSize === 5);
+    (config.profile === "daemon19" ? opponent.name === "????????????" : opponent.requestedSize === 5)
+    && (config.opponent === undefined || opponent.name === config.opponent));
+  if (selected.length === 0) throw new Error(`opponent ${String(config.opponent)} is not in profile ${config.profile}`);
   configureGoArenaEngine((weights) => createRequiredWebGpuGoValueBackend(weights));
   const allGames: GoArenaGameResult[] = [];
   const opponents: unknown[] = [];
@@ -49,8 +58,11 @@ async function main(): Promise<unknown> {
         opponent: summary.opponent,
         games: summary.games,
         wins: summary.wins,
+        winRate: summary.winRate,
         completed: summary.completed,
         pointDifference: summary.pointDifference,
+        meanBlackScore: summary.meanBlackScore,
+        meanDurationMs: summary.meanDurationMs,
         decisions: summary.decisions,
         latencyMs: {
           p50: +summary.latencyMs.p50.toFixed(2),

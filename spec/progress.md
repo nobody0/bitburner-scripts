@@ -46,6 +46,64 @@ The acceptance bar for a feature is the full vertical slice:
 
 ### Provenance corrections
 
+#### Second correction: the batcher reference is `@master`, not `@2023`
+
+The batcher was anchored to the wrong branch. `spec/jit-reference.md` derived
+its entire window model from `bitburner-2023/src/_lib/batchers/jit.ts` — which
+is **unwired work-in-progress** on that branch; its production hacking path was
+`shotgun`+`prepare`+`filler`. The proven batcher is on
+**`nobody01/bitburnerscript@master`** (`dc0720b`, 42 commits):
+`servers/home/imports/batchPlanner.ts` and `batchRunner.ts`.
+
+The consequential error this introduced: `@2023/jit.ts` exposes a single
+`minimumWorkerPrecision = 3 ms`, which we generalized into
+`MINIMUM_LANDING_GAP_MS = 40 × 5 ms = 200 ms` on the theory that promise and
+timer jitter must be absorbed by landing separation. `@master` shows these are
+two independent constants — `JOB_LATE_FINISH = 3` (landing separation) and
+`POSSIBLE_LAGS = 200` (launch slack, absorbed by `additionalMsec`) — and that
+conflating them costs ~66× of pipeline depth, because
+`depthCapGb = floor(weakenMs / interval) × ramPerBatch`. That is the direct
+cause of the idle-RAM figure in the JIT stress scenario. `spec/jit-reference.md`
+was rewritten against `@master` and the constants split.
+
+What shipped: `MINIMUM_LANDING_GAP_MS` 200ms -> **5ms** (the reference's 3ms
+plus headroom for our per-invocation telemetry), a new `LAUNCH_SLACK_MS = 200`
+carrying the jitter budget, and `THREAD_WEAKEN_UPSCALE` as ordering insurance.
+`JIT_LAUNCH_GUARD_MS` is numerically unchanged at 230ms, now derived from the
+launch slack rather than the landing gap. HWGW batch interval: **800ms -> 20ms**.
+
+Three things the split exposed, all fixed. Each was a place where a value that
+had nothing to do with landing separation was nonetheless spelled `SPACER_MS`,
+and worked only because 200ms happened to be large enough:
+
+- **Anchors.** Both the JIT and eager anchors used the spacer as a LAUNCH
+  cushion. Below the launch guard the first weaken's `startAt` fell in the past
+  and whole batches were dropped. The eager path now names
+  `JIT_LAUNCH_GUARD_MS`; the JIT path shifts a batch by its exact deficit once
+  ops are placed at `batchWorstDifficulty`.
+- **Overdue retry.** The backoff for an op that is due but unplaceable was
+  `min(SPACER_MS, exact)`. At 5ms that became a spin: ~1.2M planner passes over
+  900s of simulated time, and one dispatch fixture went from ~1s to 472s of
+  wall-clock. It is now `OVERDUE_RETRY_MS = WORKER_STARTUP_GUARD_MS` — retrying
+  faster than a worker can start cannot succeed, and the RAM it waits on frees
+  on a completion, which wakes the dispatcher anyway.
+- **Weaken insurance.** `ceil(x * 1.001)` is not a 0.1% margin on integer thread
+  counts. Applied naively it cost a **doubled batch interval (7.6s -> 15.1s) on
+  a 256 GB fleet** by pushing the role envelope past a `chooseJitSchedule`
+  quantization boundary. The insurance is added, not multiplied.
+
+An intermediate 20ms gap was tried first, on the theory that a worker landing at
+`t` could be needed again at `t + gap` because our pool is sized by RAM rather
+than by the reference's duration-scaled pool counts. That theory was wrong: once
+the anchors and the retry spin were fixed, 5ms is clean. The RAM envelope is
+already duration-scaled through `jitCapacity`'s `ceil(holdMs / interval)`.
+
+`@2023` remains the reference for factions, augmentations, progression, stock
+and the `stubCall` dodger. Citations must now name the branch: "the predecessor
+scripts on disk" is ambiguous with two checkouts live.
+
+#### First correction: `@2023`, not `nobody0/bitburner`
+
 The predecessor was misidentified. The reference is now
 **`gitlab.com/nobody01/bitburnerscript` branch `2023`** (commit `43e8585`),
 which has the faction/augmentation planner, four batchers, an optimizer, a
@@ -851,8 +909,11 @@ per-claim grants (aug/graft/donation/travel) and verifies the fund before a
 purchase; donations post at their own 70 band; install-lifetime horizons
 never fall back above the node's (`installHorizonSec`); a
 `progression:imminent-install` reserve (50) brakes investment bands when the
-reset is forecast within `IMMINENT_INSTALL_SEC`; `HOME_RAM_BUDGET` is finally
-consumed; the arbiter's `RETURN_TOLERANCE` band makes "similar payback →
+reset is forecast within `IMMINENT_INSTALL_SEC`; the former phase-keyed
+`HOME_RAM_BUDGET` veto has been deleted in favor of central value curves;
+the cash/earned `ending` arm remains only as the install and liquidation
+state-machine trigger (allocation curves cannot initiate that handshake);
+the arbiter's `RETURN_TOLERANCE` band makes "similar payback →
 bigger earner" real while fast payback stays the primary key.
 
 **Fixes the sweep itself surfaced:** the backdoor service head-of-line block
@@ -937,7 +998,7 @@ injectable y-formatter, per-canvas geometry (the module-level geom singleton
 would have corrupted hover on any second chart).
 
 **New profiles** (both BN4): `install-cadence` — banked-rep fixture (owns
-nothing, rep banked at CyberSec/Sector-12/Aevum), goal `installs:2`, 2h.
+nothing, rep banked at CyberSec/Sector-12/Aevum), goal `installs:2`, 125m.
 The first fixture owned every augmentation, and the rule correctly refused
 to install for 5 favor — a fixture where later installs are worthless cannot
 prove cadence, so the fixture was redesigned until each install is genuinely
@@ -1009,6 +1070,52 @@ layer and a flat +1 in the other.
 | install-cadence | 1 install, then push-forever (0/3 seeds) | **reached ×3: 2 installs in 70.2m** — boot noise self-corrects at 20m via the dwell, value accrues while the Tian Di Hui package is worked, its landing clears the ~2.9 threshold and the verdict concludes the cycle |
 | install-favor | NOT ×3 (6h): one install, cycles never conclude | 2 installs on seeds 1/3 (72m+280m, 42m+249m), 1 on seed 2; favor:75 still NOT in 6h — favor conversion works and late cycles stay alive (verdict honestly "push" at zero accrued value), but the goal is rep-physics-bound (recorded, kept as the stretch profile) |
 | all nine existing profiles | — | per-seed parity with final6 (bn1 2.44–2.46h, join 85.1/90.1/85.1m, stock-only 5.95h/NOT/5.26h, hacking/career identical); stock-manipulation stays 1-of-3 with the reaching seed swapped (known decision-timing noise); factions-install 48s → 4.0s — the conclude-signal converts the cash in hand instead of waiting out the farm |
+
+### Simulation tier cleanup (August 2026)
+
+BN-level profiles now carry only stable optimization targets. Focused tests own
+mechanism regressions, and one-off policy comparisons remain reproducible from
+the CLI instead of running in every `bun test`:
+
+```
+# Former hacking-only profile: hacking-early differs only by goal and seeds.
+bun run sim -- --profile hacking-early --goal earn:5e6 --seeds 1..3
+
+# Go treatment/control comparison formerly asserted by bn1-progression-profile.
+bun run sim -- --profile jit-lategame --seeds 1
+bun run sim -- --profile jit-lategame --seeds 1 --only hacking,factions,progression
+```
+
+Retired profiles: `jit-process-pressure` (worker-count/HGW/pooling are covered
+by the focused JIT, dispatch, and mode tests); `install-favor` (the favor goal
+never landed on any seed and was rep-physics-bound, while `install-cadence`
+pins two reachable installs); `stock-manipulation` and its `-mid`/`-large`
+aliases (the comparison was unstable and tied its control; focused stock
+strategy and dispatch scenarios pin the mechanism). The `hacking-only` alias
+was merged into `hacking-early` via the command above. `stock-only` now uses
+an 8h horizon so its 6h-boundary outcomes are measurements rather than
+censoring.
+
+### JIT batcher tuning surface
+
+The profile ledgers above are the top tier: BitNode outcomes say what the
+automation optimises toward. The fast JIT scenarios are the diagnostic tier:
+they isolate why a profile moved and keep the best-known local measurement in
+the same file as its regression guard.
+
+- `sim/tests/scenario-jit-target-switch.test.ts` isolates old-target work still
+  in flight when the evaluator retargets.
+- `sim/tests/scenario-jit-share-churn.test.ts` isolates cooperative 10-second
+  share slices yielding pipeline RAM and reclaiming it afterward.
+- `sim/tests/scenario-jit-fragmentation.test.ts` isolates contiguous hack
+  placement while cloud and home slabs change under a live pipeline.
+- `sim/tests/scenario-jit-stress.test.ts` remains the all-at-once integration
+  case after the three focused scenarios pass.
+
+Each focused file records median idle share, landed/launched hacks, and steady
+money/sec with an explicit tolerance. When tuning beats a number, update the
+recorded optimum and its assertion in the same change; never move the ledger
+downward to bless a regression.
 
 ## Known gaps in the current implementation
 

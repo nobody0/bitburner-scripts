@@ -83,6 +83,7 @@ export type RouteNeedKind =
   | "combatSkills"
   | "charisma"
   | "factionRep"
+  | "root"
   | "bladeburnerRank"
   | "augCount";
 
@@ -279,7 +280,13 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
         complete: false,
         blocker: "root w0r1d_d43m0n",
         stage: "world-daemon-root",
-        needs: [],
+        needs: [{
+          kind: "root",
+          subject: "w0r1d_d43m0n",
+          target: 1,
+          have: 0,
+          why: "acquire the port openers required to root the world daemon",
+        }],
         optionalInstall: { allowed: false, why: "another reset would erase the post-Red-Pill hacking regrow" },
       };
     }

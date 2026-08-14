@@ -54,6 +54,8 @@ export function initialCounters(): Record<string, number> {
  * simply not modelled — the gap surfaces where a driver reaches for the ns API,
  * not here, so an unmodelled subsystem costs nothing per tick. */
 export interface EngineSubsystems {
+  addPlaytime?(milliseconds: number): void;
+  terminalProcess?(cycles: number): void;
   updateOnlineScriptTimes?(cycles: number): void;
   processWork?(cycles: number): void;
   processStockPrices?(cycles: number): void;
@@ -63,12 +65,20 @@ export interface EngineSubsystems {
   corporationProcess?(): void;
   bladeburnerStoreCycles?(cycles: number): void;
   sleeveProcess?(cycles: number): void;
+  darknetProcess?(cycles: number): void;
   processHacknetEarnings?(cycles: number): void;
   /** checkCounters callbacks. */
   checkFactionInvitations?(): void;
   processPassiveFactionRepGain?(cycles: number): void;
   bladeburnerProcess?(): void;
   generateContracts?(): void;
+  checkMessages?(): void;
+  hasRedPill?(): boolean;
+  calculateAchievements?(): void;
+  autosaveIntervalSeconds?(): number | null;
+  setAutosaveIntervalSeconds?(seconds: number): void;
+  warnAutosaveDisabled?(): void;
+  autosave?(): void;
 }
 
 export class Engine {
@@ -116,6 +126,8 @@ export class Engine {
     this.updates++;
     const s = this.#subsystems;
 
+    s.addPlaytime?.(numCycles * MILLI_PER_CYCLE);
+    s.terminalProcess?.(numCycles);
     s.processWork?.(numCycles);
     s.processStockPrices?.(numCycles);
     s.gangProcess?.(numCycles);
@@ -126,6 +138,7 @@ export class Engine {
     }
     s.bladeburnerStoreCycles?.(numCycles);
     s.sleeveProcess?.(numCycles);
+    s.darknetProcess?.(numCycles);
     s.updateOnlineScriptTimes?.(numCycles);
     s.processHacknetEarnings?.(numCycles);
 
@@ -152,7 +165,8 @@ export class Engine {
       this.counters["passiveFactionGrowth"] = 5;
     }
     if (this.counters["messages"]! <= 0) {
-      this.counters["messages"] = 150;
+      s.checkMessages?.();
+      this.counters["messages"] = s.hasRedPill?.() ? 4500 : 150;
     }
     if (this.counters["mechanicProcess"]! <= 0) {
       s.bladeburnerProcess?.();
@@ -163,12 +177,22 @@ export class Engine {
       this.counters["contractGeneration"] = 3000;
     }
     if (this.counters["achievementsCounter"]! <= 0) {
+      s.calculateAchievements?.();
       this.counters["achievementsCounter"] = 5;
     }
     // Autosave is last in the game because it can serialise the world; keeping
     // the order means a future save-on-tick model lands in the right place.
     if (this.counters["autoSaveCounter"]! <= 0) {
-      this.counters["autoSaveCounter"] = 300;
+      let interval = s.autosaveIntervalSeconds?.() ?? 60;
+      if (interval === 0) {
+        s.warnAutosaveDisabled?.();
+        this.counters["autoSaveCounter"] = 300;
+      } else {
+        if (!Number.isFinite(interval)) interval = 60;
+        s.setAutosaveIntervalSeconds?.(interval);
+        this.counters["autoSaveCounter"] = interval * 5;
+        s.autosave?.();
+      }
     }
   }
 }

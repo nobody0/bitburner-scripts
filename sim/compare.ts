@@ -4,6 +4,7 @@ import type { RunValidity, ScenarioClass } from "./fidelity.ts";
 import { assertComparable } from "./compare-policy.ts";
 import path from "node:path";
 import type { SimSessionManifest } from "./artifacts.ts";
+import type { ExperimentIdentity } from "../shared/experiment.ts";
 
 /** A/B compare stored sim runs:
  *   bun run sim:compare runs/a.jsonl runs/b.jsonl [more...]
@@ -20,6 +21,7 @@ interface RunInfo {
   driver: string;
   scenario: ScenarioClass | string;
   scenarioFingerprint?: string;
+  experimentClass?: string;
   validity: RunValidity;
   gaps: string[];
 }
@@ -30,7 +32,15 @@ async function readRun(file: string): Promise<RunInfo> {
     const manifest = JSON.parse(await Bun.file(file).text()) as SimSessionManifest;
     inputs = manifest.artifacts.map((artifact) => path.join(path.dirname(file), artifact));
   }
-  let meta: { goal?: string; label?: string; seed?: number; driver?: string; scenario?: string; scenarioFingerprint?: string } = {};
+  let meta: {
+    goal?: string;
+    label?: string;
+    seed?: number;
+    driver?: string;
+    scenario?: string;
+    scenarioFingerprint?: string;
+    experiment?: ExperimentIdentity;
+  } = {};
   let result: {
     goal?: string;
     reached?: boolean;
@@ -61,6 +71,7 @@ async function readRun(file: string): Promise<RunInfo> {
     driver: meta.driver ?? "legacy-unknown",
     scenario: result.scenario ?? meta.scenario ?? "legacy-unknown",
     scenarioFingerprint: meta.scenarioFingerprint,
+    experimentClass: meta.experiment?.class,
     validity: result.validity ?? "invalid-for-goal",
     gaps: Object.keys(result.unmodeled ?? {}).sort(),
   };
@@ -77,7 +88,10 @@ const runs = await Promise.all(files.map(readRun));
 assertComparable(runs, allowInvalid);
 
 const baseline = runs[0]!;
-console.log(`goal: ${baseline.goal}  driver: ${baseline.driver}  scenario: ${baseline.scenario}\n`);
+console.log(
+  `goal: ${baseline.goal}  driver: ${baseline.driver}  experiment: ${baseline.experimentClass ?? "legacy-unknown"}  ` +
+  `scenario: ${baseline.scenario}\n`,
+);
 for (const run of runs) {
   const time = run.reached ? formatDuration(run.timeToGoalMs) : "not reached";
   let delta = "";

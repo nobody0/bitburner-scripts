@@ -5,7 +5,7 @@ import {
   UNLIMITED_RAM,
   type RamCaps,
   type TargetStatics,
-} from "../../shared/strategy/targeting.ts";
+} from "../shared/strategy/targeting.ts";
 import {
   growThreads,
   growthLogPerThread,
@@ -15,8 +15,8 @@ import {
   makeHackContext,
   weakenEffect,
   type HackContext,
-} from "../../shared/formulas.ts";
-import { WORKER_RAM } from "../../shared/world.ts";
+} from "../shared/formulas.ts";
+import { WORKER_RAM } from "../shared/world.ts";
 
 function statics(over: Partial<TargetStatics> = {}): TargetStatics {
   return {

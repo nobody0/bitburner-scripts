@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,6 +28,9 @@ export interface SaveEntry {
   capturedAt: number;
   /** Game playtime in the current BitNode, ms — the useful "when" for a save. */
   playtimeSinceLastBitnode: number;
+  /** SHA-256 of the registered file's exact bytes. Optional only for legacy
+   * index entries; every newly registered checkpoint records it. */
+  sha256?: string;
   notes?: string;
 }
 
@@ -102,10 +106,26 @@ export function findSave(id: string): SaveEntry {
   return entry;
 }
 
+/** Content identity for route checkpoint lineage. Reusing a registry id for
+ * different bytes must not silently preserve downstream benchmark validity. */
+export function saveFileSha256(entry: SaveEntry): string {
+  const full = path.isAbsolute(entry.file) ? entry.file : path.join(SAVES_DIR, entry.file);
+  if (!existsSync(full)) throw new Error(`save file not found: ${full}`);
+  const actual = createHash("sha256").update(readFileSync(full)).digest("hex");
+  if (entry.sha256 !== undefined && entry.sha256 !== actual) {
+    throw new Error(
+      `registered save "${entry.id}" changed bytes (index ${entry.sha256}, file ${actual}); ` +
+      "register it under a new id or intentionally re-register it",
+    );
+  }
+  return actual;
+}
+
 /** Register an exported save under an id. The blob is decoded once up front so
  * a corrupt file fails here rather than at the start of a simulation. */
 export function registerSave(id: string, file: string, label?: string, notes?: string): SaveEntry {
   const snapshot = readSnapshot(file);
+  const source = path.isAbsolute(file) ? file : path.join(SAVES_DIR, file);
   const index = readIndex();
   const entry: SaveEntry = {
     id,
@@ -114,6 +134,7 @@ export function registerSave(id: string, file: string, label?: string, notes?: s
     bitNode: snapshot.bitNode,
     capturedAt: Date.now(),
     playtimeSinceLastBitnode: snapshot.player.playtimeSinceLastBitnode,
+    sha256: createHash("sha256").update(readFileSync(source)).digest("hex"),
     ...(notes !== undefined ? { notes } : {}),
   };
   const existing = index.saves.findIndex((save) => save.id === id);

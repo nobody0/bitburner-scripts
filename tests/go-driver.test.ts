@@ -8,7 +8,7 @@ import { GO_DISPATCH_GUARD_MS } from "../shared/strategy/go/tick.ts";
 import { StubGoValueBackend } from "./support/go-value-backend.ts";
 import { TestGoNeuralRuntime } from "./support/go-neural-runtime.ts";
 import type { GameState } from "../game/lib/state.ts";
-import { resolveClaims } from "../shared/strategy/arbiter.ts";
+import { emptyArbitration } from "../shared/strategy/arbiter.ts";
 import { unknownForecast } from "../shared/strategy/progression/forecast.ts";
 import type { GoDecision } from "../shared/strategy/go/rules.ts";
 import type { GoWorkerEvaluation } from "../shared/strategy/go/neural/worker-protocol.ts";
@@ -37,7 +37,6 @@ function goState(): GameState {
     mirrors: {},
     mirrorDirty: new Set(),
     probeFailures: {},
-    probeSkips: {},
     featureLastRun: {},
   } as unknown as GameState;
 }
@@ -87,17 +86,20 @@ async function runGrantedTurn(
       return 1;
     },
   } as unknown as NS;
-  const result = resolveClaims({
-    now: 0,
-    pools: { money: 0, ram: 10 },
-    claims: [{ by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50, mode: "spend", why: "test" }],
-  });
+  const result = emptyArbitration();
   await goModule.driver.tick({
     ns,
     state,
     caps: { bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} },
     board: emptyBoard(),
-    grants: { money: 0, ram: 10, slot: false, result },
+    grants: {
+      money: 0,
+      ramClaims: new Map([["action:turn", {
+        by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50, why: "test",
+      }]]),
+      slot: false,
+      result,
+    },
     horizons: { node: unknown, install: unknown },
     acquireDodge: () => ({ host: "home", release: () => {} }),
   } as unknown as DriverContext);
@@ -346,17 +348,20 @@ describe("Go live seed observation", () => {
         return 1;
       },
     } as unknown as NS;
-    const result = resolveClaims({
-      now: 0,
-      pools: { money: 0, ram: 10 },
-      claims: [{ by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50, mode: "spend", why: "test" }],
-    });
+    const result = emptyArbitration();
     const tick = goModule.driver.tick({
       ns,
       state,
       caps: { bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} },
       board: emptyBoard(),
-      grants: { money: 0, ram: 10, slot: false, result },
+      grants: {
+        money: 0,
+        ramClaims: new Map([["action:turn", {
+          by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50, why: "test",
+        }]]),
+        slot: false,
+        result,
+      },
       horizons: { node: unknown, install: unknown },
       acquireDodge: () => ({ host: "home", release: () => {} }),
     } as unknown as DriverContext);

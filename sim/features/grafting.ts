@@ -5,14 +5,6 @@ import { CONSTANTS } from "../vendor/bitburner/src/Constants.ts";
 import { calculateIntelligenceBonus } from "../vendor/bitburner/src/PersonObjects/formulas/intelligence.ts";
 
 const CONGRUITY = "violet Congruity Implant";
-const ENTROPY_FIELDS = [
-  "hacking_chance", "hacking_speed", "hacking_money", "hacking_grow",
-  "hacking", "strength", "defense", "dexterity", "agility", "charisma",
-  "hacking_exp", "strength_exp", "defense_exp", "dexterity_exp", "agility_exp", "charisma_exp",
-  "company_rep", "faction_rep", "crime_money", "crime_success", "dnet_money",
-  "hacknet_node_money", "work_money", "bladeburner_max_stamina", "bladeburner_stamina_gain",
-  "bladeburner_analysis", "bladeburner_success_chance",
-] as const;
 
 /** Controlled model of v3.0.1 GraftingWork. Money is paid at start and never
  * refunded; cancelling loses all progress; entropy and the augmentation land
@@ -20,13 +12,11 @@ const ENTROPY_FIELDS = [
 export class GraftingSystem {
   #world: SimWorld;
   #player: SimPlayer;
-  #homeFiles?: () => Set<string>;
   #unitCompleted = 0;
 
-  constructor(world: SimWorld, player: SimPlayer, homeFiles?: () => Set<string>) {
+  constructor(world: SimWorld, player: SimPlayer, _homeFiles?: () => Set<string>) {
     this.#world = world;
     this.#player = player;
-    this.#homeFiles = homeFiles;
   }
 
   prestige(): void {
@@ -50,7 +40,7 @@ export class GraftingSystem {
 
   timeMs(name: string): number {
     const aug = this.#availableAug(name);
-    const sum = Object.values(aug.mults).filter((value) => value !== 1).reduce((total, value) => total + value, 0);
+    const sum = Object.values(this.#multipliers(aug)).filter((value) => value !== 1).reduce((total, value) => total + value, 0);
     const base = (CONSTANTS.AugmentationGraftingTimeBase * Math.log2(Math.max(sum, 1)) + CONSTANTS.MillisecondsPerHalfHour) / 2;
     return base / calculateIntelligenceBonus(this.#world.person.skills.intelligence, 1);
   }
@@ -87,22 +77,19 @@ export class GraftingSystem {
     if (this.#unitCompleted < this.#baseTimeMs(work.subject)) return;
 
     const aug = AUGMENTATION_TABLE[work.subject]!;
-    this.#applyAugmentation(aug);
     this.#player.augmentations.set(aug.name, 1);
     this.#player.queuedAugmentations.delete(aug.name);
-    const mults = this.#world.person.mults as unknown as Record<string, number>;
     if (aug.name === CONGRUITY) {
-      const nerf = Math.pow(CONSTANTS.EntropyEffect, this.#player.entropy);
-      if (nerf > 0) for (const field of ENTROPY_FIELDS) mults[field] = (mults[field] ?? 1) / nerf;
       this.#player.entropy = 0;
     } else if (!this.#player.augmentations.has(CONGRUITY)) {
       this.#player.entropy += 1;
-      for (const field of ENTROPY_FIELDS) mults[field] = (mults[field] ?? 1) * CONSTANTS.EntropyEffect;
     }
-    this.#world.person.exp.intelligence +=
-      (CONSTANTS.IntelligenceGraftBaseExpGain * work.cyclesWorked * 200) / 10_000;
+    this.#world.rebuildMultipliers();
+    this.#world.gainIntelligenceExp(
+      (CONSTANTS.IntelligenceGraftBaseExpGain * work.cyclesWorked * CONSTANTS.MilliPerCycle) / 10_000,
+    );
     this.#world.recalculateSkills();
-    this.#player.stopWork();
+    this.#player.stopWork(false);
     this.#world.emit({ kind: "event", name: "graft.done", data: { augmentation: aug.name, entropy: this.#player.entropy } });
   }
 
@@ -114,17 +101,11 @@ export class GraftingSystem {
 
   #baseTimeMs(name: string): number {
     const aug = AUGMENTATION_TABLE[name]!;
-    const sum = Object.values(aug.mults).filter((value) => value !== 1).reduce((total, value) => total + value, 0);
+    const sum = Object.values(this.#multipliers(aug)).filter((value) => value !== 1).reduce((total, value) => total + value, 0);
     return (CONSTANTS.AugmentationGraftingTimeBase * Math.log2(Math.max(sum, 1)) + CONSTANTS.MillisecondsPerHalfHour) / 2;
   }
 
-  #applyAugmentation(aug: VendoredAugmentation): void {
-    const mults = this.#world.person.mults as unknown as Record<string, number>;
-    for (const [field, value] of Object.entries(aug.mults)) mults[field] = (mults[field] ?? 1) * value;
-    if (aug.startingMoney) {
-      this.#player.money += aug.startingMoney;
-      this.#world.recordMoney("augmentations", aug.startingMoney);
-    }
-    for (const program of aug.programs ?? []) this.#homeFiles?.().add(program);
+  #multipliers(aug: VendoredAugmentation): Readonly<Record<string, number>> {
+    return aug.multsUnknown ? this.#world.augmentationStats(aug.name) ?? {} : aug.mults;
   }
 }

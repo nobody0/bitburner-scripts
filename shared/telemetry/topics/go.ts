@@ -83,7 +83,7 @@ export interface GoPlan {
   prediction?: {
     model: typeof GO_OPPONENT_MODEL;
     /** Value-network execution path actually used for this decision. */
-    backend?: "webgpu";
+    backend?: "webgpu" | "aggregate";
     /** Weight profile that rated the candidates. */
     modelProfile?: "small5" | "daemon19";
     /** Set when the board is smaller than the profile's feature extent, i.e.

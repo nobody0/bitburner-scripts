@@ -1,4 +1,4 @@
-// Vendored from bitburner-src v3.0.1:src/StockMarket/PlayerInfluencing.ts (4 symbols, extracted by
+// Vendored from bitburner-src v3.0.1:src/StockMarket/PlayerInfluencing.ts (5 symbols, extracted by
 // tools/vendor.ts — the rest of that file is not portable) — DO NOT EDIT
 import { Stock } from "./Stock";
 import { StockMarket, stockRandom } from "./MarketAdapter";
@@ -8,6 +8,7 @@ interface Server {
   organizationName: string;
   moneyMax: number;
 }
+interface Company { name: string; }
 
 export const forecastForecastChangeFromHack = 0.1;
 
@@ -42,5 +43,23 @@ export function influenceStockThroughServerGrow(server: Server, moneyGrown: numb
   const percTotalMoneyGrown = moneyGrown / server.moneyMax;
   if (stockRandom() < percTotalMoneyGrown) {
     stock.changeForecastForecast(stock.otlkMagForecast + forecastForecastChangeFromHack);
+  }
+}
+
+export function influenceStockThroughCompanyWork(
+  company: Company,
+  performanceMult: number,
+  cyclesOfWork: number,
+): void {
+  const compName = company.name;
+  let stock: Stock | null = null;
+  stock = StockMarket[compName];
+  if (!(stock instanceof Stock)) {
+    return;
+  }
+
+  if (stockRandom() < 0.002 * cyclesOfWork) {
+    const change = forecastForecastChangeFromCompanyWork * performanceMult;
+    stock.changeForecastForecast(stock.otlkMagForecast + change);
   }
 }

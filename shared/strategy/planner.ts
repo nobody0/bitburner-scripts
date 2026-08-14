@@ -1,5 +1,6 @@
 import type { Action, Planner, ServerView, WorldView } from "../world.ts";
 import { WORKER_RAM } from "../world.ts";
+import { cheapestCloudQuote } from "./ram-supply.ts";
 
 /** Baseline strategy — the code under A/B test. PURE: decisions come only
  * from the WorldView; sim/run.ts owns side effects today and a future game
@@ -10,11 +11,9 @@ export interface PlannerMemory {
   nextPservIndex: number;
 }
 
-const PSERV_RAM = 64;
 const WEAKEN_THRESHOLD = 5; // weaken when security exceeds min by this
 const GROW_THRESHOLD = 0.75; // grow when money below this fraction of max
 const HACK_FRACTION = 0.25; // fraction of capacity to spend hacking
-const BUY_HEADROOM = 2; // only buy infra when money >= headroom * cost
 
 function freeThreads(server: ServerView, ramPerThread: number): number {
   return Math.max(0, Math.floor((server.maxRam - server.usedRam) / ramPerThread));
@@ -47,12 +46,12 @@ export const defaultPlanner: Planner<PlannerMemory> = {
     }
 
     const owned = view.servers.filter((s) => s.purchasedByPlayer && s.hostname !== "home");
-    const pservCost = view.prices.cloudServer[PSERV_RAM] ?? Infinity;
-    if (owned.length < view.prices.cloudServerLimit && money >= BUY_HEADROOM * pservCost) {
-      actions.push({ type: "buyServer", ram: PSERV_RAM, name: `pserv-${memory.nextPservIndex}` });
+    const cloud = cheapestCloudQuote(view.prices.cloudServer);
+    if (cloud && owned.length < view.prices.cloudServerLimit && money >= cloud.cost) {
+      actions.push({ type: "buyServer", ram: cloud.ram, name: `pserv-${memory.nextPservIndex}` });
       memory = { ...memory, nextPservIndex: memory.nextPservIndex + 1 };
     }
-    if (money >= BUY_HEADROOM * view.prices.upgradeHomeRam) {
+    if (money >= view.prices.upgradeHomeRam) {
       actions.push({ type: "upgradeHomeRam" });
     }
 

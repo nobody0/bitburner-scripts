@@ -60,7 +60,6 @@ describe("contract failure telemetry", () => {
       mirrors: {},
       mirrorDirty: new Set(),
       probeFailures: {},
-      probeSkips: {},
       featureLastRun: {},
       contractQuarantine: { ["n00dles\0bad.cct"]: first },
     } as unknown as GameState;
@@ -124,7 +123,6 @@ describe("faction decision telemetry", () => {
       mirrors: {},
       mirrorDirty: new Set(),
       probeFailures: {},
-      probeSkips: {},
       featureLastRun: {},
     } as unknown as GameState;
     const sink = makeSink(tel);
@@ -213,7 +211,6 @@ describe("decision telemetry", () => {
       mirrors: {},
       mirrorDirty: new Set(),
       probeFailures: {},
-      probeSkips: {},
       featureLastRun: {},
     } as unknown as GameState;
     const sink = makeSink(tel);

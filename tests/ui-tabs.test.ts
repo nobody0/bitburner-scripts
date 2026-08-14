@@ -506,7 +506,7 @@ describe("stream projection", () => {
     const state = project(
       [
         { ...base, kind: "state", key: "capabilities", data: deriveCapabilities({ bitNode: 3 }) },
-        { ...base, seq: 1, kind: "event", name: "probe.skipped", data: { id: "corp.core" } },
+        { ...base, seq: 1, kind: "event", name: "probe.failed", data: { id: "corp.core" } },
       ] as LogRecord[],
       Infinity,
       { id: "r", src: "game", live: true, t0: 0 },
@@ -640,7 +640,6 @@ describe("panel view state", () => {
         installReady: false,
         queuedAugmentations: ["BitWire"],
         install: false,
-        homeRamBudgetFraction: 0.1,
         favorCrossings: [],
         forecasts: {
           install: {
@@ -689,7 +688,6 @@ describe("panel view state", () => {
         installReady: false,
         queuedAugmentations: [],
         install: false,
-        homeRamBudgetFraction: 0.1,
         favorCrossings: [{ faction: "CyberSec", favorNow: 120, favorAfter: 152 }],
         route: "daedalus",
         decidedAt: now - 300_000,

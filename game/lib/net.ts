@@ -15,8 +15,6 @@ const CRACKERS = [
   { file: "SQLInject.exe", portFlag: "sqlPortOpen" },
 ] as const;
 
-export { HOME_RESERVE_GB } from "../../shared/ram/heap.ts";
-
 /** Budget: ls 0.2. Returns the cracker files present on home, in game order. */
 export function listPortOpeners(stubNs: NS): string[] {
   const files = new Set(stubNs["ls"]("home", ".exe"));

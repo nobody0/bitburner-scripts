@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
-import { extname, relative, resolve, sep } from "node:path";
+import { dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const sourceExtensions = new Set([".ts", ".js"]);
@@ -26,27 +26,40 @@ function display(path: string): string {
 }
 
 describe("sub-project boundaries", () => {
-  test("game does not import simulator, UI, or host runtime APIs", () => {
+  test("game runtime imports stay inside game/shared and avoid host APIs", () => {
+    const gameRoot = resolve(root, "game");
+    const sharedRoot = resolve(root, "shared");
     const violations = sourceFiles("game").flatMap((path) =>
       importedModules(path)
-        .filter((module) =>
-          /(?:^|\/)\.{0,2}\/?(?:sim|ui)(?:\/|$)/.test(module)
-          || module.includes("bitburner-src")
-          || /^(?:bun|node:)/.test(module),
-        )
+        .filter((module) => {
+          if (module.includes("bitburner-src") || /^(?:bun|node:)/.test(module)) return true;
+          if (!module.startsWith(".") && !isAbsolute(module)) return false;
+          const target = resolve(dirname(path), module);
+          return !target.startsWith(`${gameRoot}${sep}`) && !target.startsWith(`${sharedRoot}${sep}`);
+        })
         .map((module) => `${display(path)} -> ${module}`),
     );
     expect(violations).toEqual([]);
   });
 
-  test("shared stays pure and independent of compile-time game flags", () => {
+  test("shared is self-contained and independent of runtime/project-specific code", () => {
+    const sharedRoot = resolve(root, "shared");
     const violations = sourceFiles("shared").flatMap((path) => {
       const imports = importedModules(path)
-        .filter((module) => /^(?:bun|node:)/.test(module) || /(?:^|\/)\.{0,2}\/?(?:game|sim|ui)(?:\/|$)/.test(module))
+        .filter((module) => {
+          if (module.startsWith(".")) return !resolve(dirname(path), module).startsWith(`${sharedRoot}${sep}`);
+          // @ns is erased type information supplied by the game. Shared may
+          // describe its public data shapes with it, but may not depend on a
+          // runtime package or host API.
+          return module !== "@ns";
+        })
         .map((module) => `${display(path)} -> ${module}`);
-      return readFileSync(path, "utf8").includes("__TELEMETRY__")
-        ? [...imports, `${display(path)} -> __TELEMETRY__`]
-        : imports;
+      const source = readFileSync(path, "utf8");
+      if (/(?:import|export)\s+(?!type\b)[^;]*?from\s*["']@ns["']|import\(\s*["']@ns["']\s*\)/s.test(source)) {
+        imports.push(`${display(path)} -> runtime @ns`);
+      }
+      if (source.includes("__TELEMETRY__")) imports.push(`${display(path)} -> __TELEMETRY__`);
+      return imports;
     });
     expect(violations).toEqual([]);
   });

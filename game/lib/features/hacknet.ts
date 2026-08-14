@@ -2,7 +2,7 @@ import type { NS } from "@ns";
 import { bitNodeMultipliers, effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { makeHackContext } from "../../../shared/formulas.ts";
-import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
+import { linearValueCurve, PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import { installHorizonSec } from "../../../shared/strategy/progression/forecast.ts";
 import {
   stepHacknet,
@@ -27,8 +27,10 @@ import {
 import { coarseHorizonSec, scoreInvestment } from "../../../shared/strategy/investment.ts";
 import type { NeedUrgency } from "../../../shared/strategy/needs.ts";
 import { isScriptDeath } from "../errors.ts";
+import { moneyRateValue } from "../income.ts";
 import { merge } from "../state.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
+import type { FeatureClaim } from "./claims.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
 
 /** The hacknet driver.
@@ -42,7 +44,6 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * API RAM costs: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/RamCostGenerator.ts */
 
 /** ns.hacknet.* is cheap; this covers the whole read + one purchase. */
-const PEAK_STEP_GB = 5;
 
 let lastResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
 let lastHashResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
@@ -448,11 +449,11 @@ const driver: FeatureDriver = {
   },
 };
 
-function claims(ctx: ClaimContext): Claim[] {
+function claims(ctx: ClaimContext): FeatureClaim[] {
   const view = buildView(ctx, Infinity);
   const decision = view ? stepHacknet(view) : undefined;
   const best = decision?.buy;
-  const out: Claim[] = [];
+  const out: FeatureClaim[] = [];
   if (best) {
     out.push(actionRamClaim(ctx, "hacknet", hacknetClaimId(best.kind), hacknetMethods(best.kind), `hacknet ${best.kind}`));
   }
@@ -469,9 +470,11 @@ function claims(ctx: ClaimContext): Claim[] {
       amount: best.cost,
       priority,
       mode: "spend",
-      // One upgrade is atomic. If it is unaffordable the arbiter leaves the
-      // cash available to another positive-return investment.
-      divisible: false,
+      // Value is continuous in deployed dollars; stepHacknet still requires a
+      // complete grant before executing the atomic game purchase. Splitting a
+      // tied waterline can therefore delay a rung by one pass, which is the
+      // deliberate execution-only lumpiness of this model.
+      shape: "continuous",
       ratePerSec: best.deltaProduction,
       returnPerDollarSec: scored.returnPerDollarSec,
       why: best.milestone?.why ?? `${best.kind}${best.node !== undefined ? ` #${best.node}` : ""} pays back in ${Math.round(scored.paybackSec)}s`,
@@ -482,6 +485,23 @@ function claims(ctx: ClaimContext): Claim[] {
     out.push(actionRamClaim(ctx, "hacknet", "action:spend-hashes", HASH_SPEND_METHODS, hashes.spend.why));
   }
   return out;
+}
+
+/** Convert an ordinary income upgrade's $/sec/$ slope through progression's
+ * measured money marginal. Non-income milestones stay governed by their hard
+ * priority band and retain the legacy unpriced continuous fallback. */
+function valueCurve(claim: Claim, ctx: ClaimContext): ClaimValueCurve | undefined {
+  if (
+    claim.by !== "hacknet"
+    || claim.id !== "upgrade"
+    || claim.resource !== "money"
+    || claim.shape !== "continuous"
+    || claim.priority !== PRIORITY["income:investment"]
+  ) return undefined;
+  if (!(claim.amount > 0)) return { demandAt: () => 0 };
+  const value = moneyRateValue(ctx.state, (claim.ratePerSec ?? 0) / claim.amount, ctx.now);
+  if (value.state === "unknown") return undefined;
+  return value.value > 0 ? linearValueCurve(value.value, claim.amount) : { demandAt: () => 0 };
 }
 
 function hacknetClaimId(kind: string): string { return `action:${kind}`; }
@@ -504,5 +524,5 @@ export const hacknetModule: FeatureModule = {
     delete state.topics.hacknet;
   },
   claims,
-  peakStepGb: PEAK_STEP_GB,
+  valueCurve,
 };

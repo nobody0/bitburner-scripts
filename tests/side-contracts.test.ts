@@ -4,7 +4,7 @@ import type { DodgeGlobals } from "../game/lib/dodge-shared.ts";
 import { sideModule } from "../game/lib/features/side.ts";
 import type { DriverContext } from "../game/lib/features/index.ts";
 import type { GameState } from "../game/lib/state.ts";
-import { resolveClaims } from "../shared/strategy/arbiter.ts";
+import { emptyArbitration } from "../shared/strategy/arbiter.ts";
 
 function harness(attempt: (answer: unknown) => string) {
   let execs = 0;
@@ -42,18 +42,21 @@ function harness(attempt: (answer: unknown) => string) {
         unsolvableTotal: 0,
       },
     },
-    dirty: new Set(), mirrors: {}, mirrorDirty: new Set(), probeFailures: {}, probeSkips: {}, featureLastRun: {},
+    dirty: new Set(), mirrors: {}, mirrorDirty: new Set(), probeFailures: {}, featureLastRun: {},
   } as GameState;
-  const result = resolveClaims({
-    now: 0,
-    pools: { money: 0, ram: 20 },
-    claims: [{ by: "side", id: "action:contract", resource: "ram", amount: 10.5, priority: 50, mode: "spend", why: "test" }],
-  });
+  const result = emptyArbitration();
   const ctx = {
     ns,
     state,
     caps: { unlocked: {} },
-    grants: { money: 0, ram: 10.5, slot: false, result },
+    grants: {
+      money: 0,
+      ramClaims: new Map([["action:contract", {
+        by: "side", id: "action:contract", resource: "ram", amount: 10.5, priority: 50, why: "test",
+      }]]),
+      slot: false,
+      result,
+    },
     acquireDodge: () => ({ host: "home", release: () => {} }),
   } as unknown as DriverContext;
   return { ctx, state, execs: () => execs };
@@ -67,7 +70,7 @@ describe("Side contract execution", () => {
 
     expect(submitted).toEqual([1]);
     expect(h.execs()).toBe(3);
-    expect(sideModule.peakStepGb).toBe(11);
+    expect(sideModule).not.toHaveProperty('peakStepGb');
     expect(h.state.topics.side?.contracts).toEqual([]);
     expect(h.state.topics.side?.contractTotal).toBe(0);
     expect(h.state.contractQuarantine).toEqual({});

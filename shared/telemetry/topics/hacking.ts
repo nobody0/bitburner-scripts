@@ -28,12 +28,15 @@ export interface FarmRollup {
   moneyMax?: number;
   ramPie?: { farm: number; prep: number; share: number; free: number; reserve: number };
   allocFails?: number;
+  allocFailsByPhase?: { jit: number; prep: number; eager: number };
   /** Fresh processes started (one-shots + pool spawns). Pooling keeps this
    * flat while `launched` climbs — the browser-RAM churn figure. */
   execs?: number;
   /** Resident serve-mode processes. Jobs can outnumber these over time; that
    * gap is the process-churn reduction pooling exists to create. */
   pool?: { workers: number; busy: number };
+  /** Existing dispatch pressure signal consumed by RAM-arena promotion. */
+  pooling?: boolean;
   /** Ops launched with a `{stock:true}` influence flag — the observable link
    * between manipulation intent and nudges actually rolled. */
   stockOps?: number;
@@ -41,8 +44,25 @@ export interface FarmRollup {
    * interval for one weakenTime). Infrastructure valuation reads it so RAM
    * beyond saturation prices at its true ~0 marginal income. */
   depthCapGb?: number;
+  /** Change-filtered, sig3 evidence behind the marginal share cutover. */
+  shareDecision?: {
+    threads: number;
+    bonus: number;
+    cutoverGb: number;
+    allotmentGb: number;
+    hackMarginal: number;
+    shareMarginal: number;
+  };
   execFails?: number;
   batchesSkipped?: number;
+  /** Cumulative cause-labelled outcomes. Rounded to three significant digits
+   * at publication so a high-volume run does not churn the change filter. */
+  missedWindow?: {
+    deadline: number;
+    "arrival-security": number;
+    "arrival-money": number;
+    placement: number;
+  };
   ramWork?: {
     /** Cumulative scheduled work; padding is deliberately separate because
      * every GB·ms held by additionalMsec is idle, not native HGW work. */

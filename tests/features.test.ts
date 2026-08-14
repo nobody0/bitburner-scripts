@@ -11,7 +11,6 @@ import {
   FEATURE_DRIVERS,
   FEATURE_MODULES,
   featureModule,
-  featureRamDemand,
   resetAllFeatures,
   selectDue,
 } from "../game/lib/features/index.ts";
@@ -43,7 +42,6 @@ function freshState(): GameState {
     mirrors: {},
     mirrorDirty: new Set(),
     probeFailures: {},
-    probeSkips: {},
     featureLastRun: {},
   };
 }
@@ -354,6 +352,45 @@ function singleProbe(id: string) {
 }
 
 describe("v3.0.1 feature observation contracts", () => {
+  test("the fast fleet probe preserves cloud limits between dodged observations", () => {
+    const state = freshState();
+    state.topics.fleet = {
+      rootedHosts: 1,
+      totalHosts: 1,
+      maxRam: 8,
+      usedRam: 0,
+      portOpeners: 0,
+      purchased: { count: 0, totalRam: 0, limit: 25, maxRamPerServer: 1_048_576 },
+      home: { maxRam: 8, usedRam: 0, cores: 1 },
+    };
+    const probe = LOCAL_PROBES.find((entry) => entry.id === "hacking.fleet")!;
+    const servers = {
+      home: {
+        hostname: "home",
+        hasAdminRights: true,
+        maxRam: 8,
+        ramUsed: 0,
+        cpuCores: 1,
+        purchasedByPlayer: true,
+        openPortCount: 0,
+      },
+    };
+
+    const [emission] = probe.run({
+      servers: servers as never,
+      state,
+      player: {} as never,
+      caps: unknownCapabilities(),
+    });
+
+    expect((emission.data as { purchased: unknown }).purchased).toEqual({
+      count: 0,
+      totalRam: 0,
+      limit: 25,
+      maxRamPerServer: 1_048_576,
+    });
+  });
+
   test("Bladeburner reads exact rank gain and Black Op rank gates", async () => {
     const probe = singleProbe("bladeburner.actions");
     expect(probe.methods).toContain("bladeburner.getActionRankGain");
@@ -467,7 +504,7 @@ describe("feature modules", () => {
           ? { augMeta: Object.fromEntries(Object.entries(over.prereqs).map(([name, prereqs]) => [name, { prereqs }])) }
           : {}),
       } as unknown as GameState["topics"]["factions"];
-      return { state, caps: unknownCapabilities(), now: 0 };
+      return { state, caps: unknownCapabilities(), now: 0, activeFeatures: new Set(FEATURE_IDS) };
     }
 
     const oneOff = { name: "Cranial Signal Processors - Gen I", faction: "CyberSec", price: 1e6, affordableRep: true };
@@ -573,7 +610,6 @@ describe("feature modules", () => {
         installReady: false,
         queuedAugmentations: [],
         install: false,
-        homeRamBudgetFraction: 0.1,
         favorCrossings: [],
         forecasts: {
           node: { state: "unknown", evaluatedAt: 0, nextRecalibrationAt: 1, basis: "test", reason: "test" },
@@ -628,23 +664,11 @@ describe("feature modules", () => {
     }
   });
 
-  test("declared RAM demand is positive", () => {
-    for (const [id, gb] of Object.entries(featureRamDemand())) {
-      expect(gb, `${id} declares a non-positive peak step`).toBeGreaterThan(0);
+  test("feature modules do not declare guessed peak RAM demand", () => {
+    for (const module of Object.values(FEATURE_MODULES)) {
+      expect(module).not.toHaveProperty('peakStepGb');
+      expect(module).not.toHaveProperty('reserveStepGb');
     }
-  });
-
-  test("stock reserves its expensive steps only when the market can use them", () => {
-    const state = freshState();
-    const bn1 = deriveCapabilities({ bitNode: 1, sourceFiles: {} });
-    expect(featureRamDemand(state, bn1).stock).toBe(0);
-
-    state.topics.stock = { hasTixApiAccess: true } as GameState["topics"]["stock"];
-    expect(featureRamDemand(state, bn1).stock).toBe(12.1);
-
-    delete state.topics.stock;
-    const bn8 = deriveCapabilities({ bitNode: 8, sourceFiles: {} });
-    expect(featureRamDemand(state, bn8).stock).toBe(12.1);
   });
 });
 
@@ -794,11 +818,12 @@ describe("feature dodges are centralised and priced", () => {
     }
   });
 
-  test("the one feature dodge helper prices calls and requires a matching grant and lease", () => {
+  test("the one feature dodge helper prices calls and asks the broker for a keyed lease", () => {
     const source = readFileSync(resolve(root, "game/lib/features/dodge.ts"), "utf8");
     expect(source).toContain("priceCalls(ctx.ns, methods)");
-    expect(source).toContain("grantFor(ctx.grants.result, by, claimId)");
-    expect(source).toContain("ctx.acquireDodge(budgetGb)");
+    expect(source).not.toContain("grantFor(ctx.grants.result");
+    expect(source).toContain("ctx.acquireDodge(budgetGb, {");
+    expect(source).toContain("lease.status === 'queued'");
     expect(source).toContain("lease.release()");
   });
 });

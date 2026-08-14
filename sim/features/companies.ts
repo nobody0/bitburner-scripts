@@ -4,6 +4,7 @@ import { COMPANY_TABLE, type VendoredCompany, type VendoredCompanyPosition } fro
 import { CONSTANTS } from "../vendor/bitburner/src/Constants.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { addRepToFavor } from "../vendor/bitburner/src/Faction/formulas/favor.ts";
+import { influenceStockThroughCompanyWork } from "../vendor/bitburner/src/StockMarket/PlayerInfluence.ts";
 
 export interface SimCompanyStanding {
   rep: number;
@@ -21,11 +22,18 @@ export class CompanySystem {
   #world: SimWorld;
   #player: SimPlayer;
 
-  constructor(world: SimWorld, player: SimPlayer, initial: Record<string, number> = {}) {
+  constructor(
+    world: SimWorld,
+    player: SimPlayer,
+    initial: Record<string, number | Partial<SimCompanyStanding>> = {},
+  ) {
     this.#world = world;
     this.#player = player;
     for (const name of Object.keys(COMPANY_TABLE.companies)) {
-      this.standings.set(name, { rep: initial[name] ?? 0, favor: 0 });
+      const standing = initial[name];
+      this.standings.set(name, typeof standing === "number"
+        ? { rep: standing, favor: 0 }
+        : { rep: standing?.rep ?? 0, favor: standing?.favor ?? 0 });
     }
   }
 
@@ -70,10 +78,10 @@ export class CompanySystem {
     const track = COMPANY_TABLE.jobTracks[field];
     if (!track) throw new Error(`Invalid job field: '${field}'`);
     const entry = track[0];
-    if (!entry) return null;
+    if (!entry || !company.positions.includes(entry)) return null;
     let best: string | undefined;
     for (const name of track) {
-      if (!company.positions.includes(name)) continue;
+      if (!company.positions.includes(name)) break;
       const position = this.position(name);
       if (!this.qualified(company, position)) break;
       best = name;
@@ -134,7 +142,7 @@ export class CompanySystem {
     const exp = person.exp as unknown as Record<string, number>;
     for (const [skill, base] of Object.entries(position.expGain)) {
       exp[skill] = (exp[skill] ?? 0) + base * company.expMultiplier
-        * currentNodeMults.CompanyWorkExpGain * (mults[`${skill}_exp`] ?? 1) * sf15Mult * focus * cycles;
+        * currentNodeMults.CompanyWorkExpGain * (mults[`${skill}_exp`] ?? 1) * focus * cycles;
     }
 
     let weightedSkill = 0;
@@ -143,8 +151,10 @@ export class CompanySystem {
     }
     const performance = position.repMultiplier * weightedSkill / CONSTANTS.MaxSkillLevel
       + person.skills.intelligence / CONSTANTS.MaxSkillLevel;
-    standing.rep += performance * (mults["company_rep"] ?? 1) * favorMult
-      * currentNodeMults.CompanyWorkRepGain * focus * cycles;
+    const reputationRate = performance * (mults["company_rep"] ?? 1) * favorMult
+      * currentNodeMults.CompanyWorkRepGain * focus;
+    standing.rep += reputationRate * cycles;
+    influenceStockThroughCompanyWork(company, reputationRate, cycles);
     work.cyclesWorked += cycles;
     this.#world.recalculateSkills();
   }

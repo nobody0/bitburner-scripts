@@ -12,45 +12,51 @@ import type { GameState } from "../game/lib/state.ts";
 function state(topics: Record<string, unknown> = {}): GameState {
   return {
     topics, dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
-    probeFailures: {}, probeSkips: {}, featureLastRun: {},
+    probeFailures: {}, featureLastRun: {},
   } as unknown as GameState;
 }
 const by = (s: GameState, who: string) => announcedIncome(s).find((a) => a.by === who);
+const perSec = (s: GameState, who: string): number | undefined => {
+  const entry = by(s, who);
+  return entry?.state === "measured" ? entry.perSec : undefined;
+};
 
 describe("income announcements", () => {
   test("the gang is converted from per-CYCLE to per-second", () => {
     // `GangGenInfo.moneyGainRate` is money per 200ms game cycle upstream. Announcing
     // it raw would understate the gang fivefold and hand career a priority it did not
     // earn — the exact kind of unit slip this comparison is most vulnerable to.
-    expect(by(state({ gang: { moneyGainRate: 200 } }), "gang")?.perSec).toBe(1_000);
+    expect(perSec(state({ gang: { moneyGainRate: 200 } }), "gang")).toBe(1_000);
   });
 
   test("corp announces DIVIDENDS, not revenue", () => {
     // Revenue is the company's money; only dividends reach the player.
     const s = state({ corp: { revenue: 1e9, dividendEarnings: 500 } });
-    expect(by(s, "corp")?.perSec).toBe(500);
-    expect(bestIncomePerSec(s)).toBe(500);
+    expect(perSec(s, "corp")).toBe(500);
+    expect(bestIncomePerSec(s)).toEqual({ state: "measured", value: 500 });
   });
 
   test("stock spreads its expected profit over the hold it expects to need", () => {
     const s = state({ stock: { plan: { entry: { expectedProfit: 6_000, holdTicks: 10 } } } });
     // 10 ticks x 6s = 60s, so $100/sec.
-    expect(by(s, "stock")?.perSec).toBeCloseTo(6_000 / (10 * (MS_PER_TICK / 1_000)), 9);
+    expect(perSec(s, "stock")).toBeCloseTo(6_000 / (10 * (MS_PER_TICK / 1_000)), 9);
   });
 
   test("hacknet is silent in HASH mode — hashes are not dollars", () => {
-    expect(by(state({ hacknet: { productionPerSec: 500, hashes: { current: 1 } } }), "hacknet")).toBeUndefined();
-    expect(by(state({ hacknet: { productionPerSec: 500 } }), "hacknet")?.perSec).toBe(500);
+    expect(by(state({ hacknet: { productionPerSec: 500, hashes: { current: 1 } } }), "hacknet")).toMatchObject({ state: "unknown" });
+    expect(perSec(state({ hacknet: { productionPerSec: 500 } }), "hacknet")).toBe(500);
   });
 
-  test("nothing to say means NO announcement, never a zero", () => {
-    // A fabricated zero would look like a real measurement of "earns nothing", and
-    // `rateFraction` would then divide by it. Absence is the honest signal.
-    expect(announcedIncome(state())).toEqual([]);
-    expect(bestIncomePerSec(state())).toBe(0);
-    expect(announcedIncome(state({ gang: { moneyGainRate: 0 }, corp: { dividendEarnings: 0 } }))).toEqual([]);
-  });
+  test("unknown income remains unknown rather than reading as zero", () => {
+    const empty = bestIncomePerSec(state());
+    expect(empty.state).toBe("unknown");
+    expect(announcedIncome(state()).filter((entry) => entry.state === "unknown").map((entry) => entry.by))
+      .toEqual(expect.arrayContaining(["hacking", "hacknet", "career", "sleeves", "bladeburner", "side"]));
 
+    // Measured zeros remain distinct, but unknown parallel earners prevent
+    // them from being promoted to a known best-of-field zero.
+    expect(bestIncomePerSec(state({ gang: { moneyGainRate: 0 }, corp: { dividendEarnings: 0 } })).state).toBe("unknown");
+  });
   test("the best rate wins across features", () => {
     const s = state({
       fleet: { scriptIncome: [1_000, 0] },
@@ -58,8 +64,8 @@ describe("income announcements", () => {
       career: { plan: { ranked: [{ moneyPerSec: 300 }] } },
     });
     // gang 400/cycle = 2000/sec beats the farm's 1000.
-    expect(bestIncomePerSec(s)).toBe(2_000);
-    expect(announcedIncome(s).map((a) => a.by).sort()).toEqual(["career", "gang", "hacking"]);
+    expect(bestIncomePerSec(s)).toEqual({ state: "measured", value: 2_000 });
+    expect(announcedIncome(s).filter((a) => a.state === "measured").map((a) => a.by).sort()).toEqual(["career", "gang", "hacking"]);
   });
 });
 

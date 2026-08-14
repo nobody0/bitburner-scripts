@@ -2,6 +2,8 @@ import type { NS } from "@ns";
 import { armWorkCompletion, workDetail, type WorkTaskLike } from "../work-completion.ts";
 import { armSleeveCompletion } from "../sleeve-completion.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
+import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
+import { marginalCostPerGb } from "../../../shared/strategy/ram-supply.ts";
 import {
   canSolve,
   CONTRACT_QUEUE_LIMIT,
@@ -25,7 +27,8 @@ import { fleetFrom } from "./local.ts";
  * HOME_RESERVE_GB belongs to the dispatcher, so the dodge budget stays near
  * ~2.5 GB indefinitely; a cheap core tier that fits is worth far more than
  * one perfect probe that is skipped forever. Anything still too expensive
- * reports `probe.skipped` with its price rather than failing silently. */
+ * waits in the broker queue and surfaces as `ram.starvation` rather than
+ * failing silently. */
 
 /** Cadences as plain literals, never `2 * MINUTE`. esbuild cannot prove a
  * multiplication pure (an operand could have a valueOf), so an arithmetic
@@ -56,7 +59,7 @@ const hackingCloud: DodgedProbe = {
     "cloud.getServerLimit", "cloud.getRamLimit", "cloud.getServerCost", "cloud.getServerUpgradeCost",
     "getTotalScriptIncome", "getTotalScriptExpGain", "getSharePower",
   ],
-  run(stubNs: NS, { servers }: ProbeContext) {
+  run(stubNs: NS, { servers, caps }: ProbeContext) {
     const fleet = fleetFrom(servers);
     fleet.purchased.limit = stubNs["cloud"]["getServerLimit"]();
     fleet.purchased.maxRamPerServer = stubNs["cloud"]["getRamLimit"]();
@@ -64,37 +67,49 @@ const hackingCloud: DodgedProbe = {
     const cloudServers = Object.values(servers).filter((server) =>
       server.purchasedByPlayer && server.hostname !== "home" && !server.hostname.startsWith("hacknet-server-"),
     );
+    const mults = effectiveBitNodeMultipliers(caps.bitNode, sfLevel(caps.sourceFiles, 12), undefined);
+    const costMultiplier = mults?.CloudServerCost ?? 1;
+    const softcap = mults?.CloudServerSoftcap ?? 1;
     if (cloudServers.length < fleet.purchased.limit) {
-      // Quote a LADDER of sizes, not just the 8 GB starter. Cloud cost is
-      // linear in RAM, so return-per-dollar ties across sizes and the ranking
-      // then prefers the largest income — which is exactly the compounding a
-      // growing bankroll wants. The driver filters the ladder to what the
-      // current bankroll can actually pay (a quote that cannot execute this
-      // pass would freeze the whole infrastructure lane behind it). Measured
-      // before this: an hour-long run bought fifteen 8 GB servers while the
-      // bank could long since have carried 512 GB ones.
-      // The ladder starts at the cap when the cap is below the 8 GB starter
-      // (a node multiplier can push it there — with no rung the fleet would
-      // silently lose the ability to buy servers at all), and always includes
-      // the cap itself: 8·4^k only visits odd exponents, so the game's
-      // even-exponent maximum (2^20) was otherwise never quoted.
-      const maxRam = fleet.purchased.maxRamPerServer;
-      const rungs = new Set<number>();
-      // Ladder base floored at 1: with maxRam <= 0 (a degenerate probe value)
-      // a 0 start would loop forever (0 <= 0, 0*4 = 0) inside the dodge stub.
-      for (let targetRam = Math.max(1, Math.min(8, maxRam)); targetRam <= maxRam; targetRam *= 4) rungs.add(targetRam);
-      if (maxRam >= 2) rungs.add(maxRam);
-      for (const targetRam of [...rungs].sort((a, b) => a - b)) {
-        const cost = stubNs["cloud"]["getServerCost"](targetRam);
-        if (targetRam >= 2 && Number.isFinite(cost)) options.push({ kind: "buyServer", cost, addedRam: targetRam, targetRam });
+      // Quote the largest cheapest-per-GB rung. With a softcap above one this
+      // derives 2^6 GB, the last exponent before the penalty; a neutral or
+      // different multiplier is handled by the same formula.
+      const quote = marginalCostPerGb("cloud", {
+        cloud: {
+          costMultiplier,
+          softcap,
+          maxRam: fleet.purchased.maxRamPerServer,
+          slotsAvailable: 1,
+          servers: [],
+        },
+      });
+      if (quote) {
+        const cost = stubNs["cloud"]["getServerCost"](quote.targetRam);
+        if (Number.isFinite(cost)) {
+          options.push({ kind: "buyServer", cost, addedRam: quote.addedRam, targetRam: quote.targetRam });
+        }
       }
     }
     for (const server of cloudServers) {
-      const targetRam = Math.min(fleet.purchased.maxRamPerServer, server.maxRam * 2);
-      if (targetRam <= server.maxRam) continue;
-      const cost = stubNs["cloud"]["getServerUpgradeCost"](server.hostname, targetRam);
+      const quote = marginalCostPerGb("cloud", {
+        cloud: {
+          costMultiplier,
+          softcap,
+          maxRam: fleet.purchased.maxRamPerServer,
+          slotsAvailable: 0,
+          servers: [{ host: server.hostname, ram: server.maxRam }],
+        },
+      });
+      if (!quote) continue;
+      const cost = stubNs["cloud"]["getServerUpgradeCost"](server.hostname, quote.targetRam);
       if (Number.isFinite(cost) && cost > 0) {
-        options.push({ kind: "upgradeServer", host: server.hostname, cost, addedRam: targetRam - server.maxRam, targetRam });
+        options.push({
+          kind: "upgradeServer",
+          host: server.hostname,
+          cost,
+          addedRam: quote.addedRam,
+          targetRam: quote.targetRam,
+        });
       }
     }
     fleet.infrastructureOptions = options;

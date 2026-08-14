@@ -1,3 +1,5 @@
+import type { MeasuredMarginal } from "./progression/marginal.ts";
+
 /** What competing for `Player.currentWork` is worth, in the currencies the slot
  * actually produces.
  *
@@ -37,14 +39,22 @@ export const REP_SPAN = 60;
 /** The best money option scores this. Above {@link REP_SPAN} on purpose — see above. */
 export const MONEY_SPAN = 80;
 
-/** One feature's announced earning rate. */
-export interface IncomeAnnouncement {
-  /** Feature id, for the digest — this module stays free of the feature registry. */
-  by: string;
-  /** Money per second this feature expects to earn if left alone. */
-  perSec: number;
-  why: string;
-}
+/** One feature's explicit earning-rate announcement. Unknown is a first-class
+ * statement, never a numeric zero. */
+export type IncomeAnnouncement =
+  | {
+      by: string;
+      state: "measured";
+      /** Money per second this feature expects to earn if left alone. */
+      perSec: number;
+      why: string;
+    }
+  | {
+      by: string;
+      state: "unknown";
+      reason: string;
+      why: string;
+    };
 
 /** Our rate as a fraction of the best anyone announced, clamped to `[0, 1]`.
  *
@@ -64,11 +74,23 @@ export function slotPriority(input: { repFraction?: number; moneyFraction?: numb
   return rep * REP_SPAN + money * MONEY_SPAN;
 }
 
-/** The largest announced rate, or 0 when nobody announced one. */
-export function bestAnnounced(announcements: readonly IncomeAnnouncement[]): number {
+/** The largest positive measured rate. If nobody can measure a positive rate,
+ * preserve the distinction between a measured zero and an unknown field. */
+export function bestAnnounced(announcements: readonly IncomeAnnouncement[]): MeasuredMarginal {
   let best = 0;
+  let measured = false;
+  const unknown: string[] = [];
   for (const entry of announcements) {
+    if (entry.state === "unknown") {
+      unknown.push(entry.by + ": " + entry.reason);
+      continue;
+    }
+    measured = true;
     if (entry.perSec > best) best = entry.perSec;
   }
-  return best;
+  if (best > 0 || (measured && unknown.length === 0)) return { state: "measured", value: best };
+  return {
+    state: "unknown",
+    reason: unknown.length > 0 ? unknown.join("; ") : "no feature has announced an income observation",
+  };
 }

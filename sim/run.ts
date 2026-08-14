@@ -11,9 +11,21 @@ import { defaultPlanner } from "../shared/strategy/planner.ts";
 import type { CompletionEvent, Planner } from "../shared/world.ts";
 import { DEFAULT_NETWORK } from "./network.ts";
 import { SimWorld, type SimOptions } from "./world.ts";
-import { SIM_FEATURE_COVERAGE, type RunValidity, type ScenarioClass } from "./fidelity.ts";
+import {
+  AGGREGATE_GO_MODEL,
+  SIM_FEATURE_COVERAGE,
+  SIMULATOR_MODEL_VERSION,
+  SIMULATOR_VENDOR_COMMIT,
+  type RunValidity,
+  type ScenarioClass,
+} from "./fidelity.ts";
 import { scenarioFingerprint } from "./scenario.ts";
 import { SimArtifactSession } from "./artifacts.ts";
+import {
+  assertValidExperiment,
+  type EntranceIdentity,
+  type ExperimentIdentity,
+} from "../shared/experiment.ts";
 
 export interface RunOptions {
   goal: Goal;
@@ -24,6 +36,7 @@ export interface RunOptions {
   farm?: boolean;
   world?: Partial<SimOptions>;
   label?: string;
+  experiment?: ExperimentIdentity;
   onRecord?: (line: string) => void;
 }
 
@@ -76,6 +89,12 @@ function resolveFeatures(
   return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
+/** Registered saves are complete entrance state. Profile worlds are synthetic
+ * fixtures and may only supply state when no checkpoint was selected. */
+export function profileWorldForEntrance<T>(world: T | undefined, hasSave: boolean): T | undefined {
+  return hasSave ? undefined : world;
+}
+
 export function runSim(options: RunOptions): RunResult {
   const { goal, seed, horizonMs } = options;
   const planner = (options.planner ?? defaultPlanner) as Planner<unknown>;
@@ -104,9 +123,13 @@ export function runSim(options: RunOptions): RunResult {
       label: options.label,
       seed,
       driver: "planner",
+      ...(options.experiment !== undefined ? { experiment: options.experiment } : {}),
       scenario: "synthetic-early-game",
       scenarioFingerprint: scenarioFingerprint({
+        simulatorModel: SIMULATOR_MODEL_VERSION,
+        vendorCommit: SIMULATOR_VENDOR_COMMIT,
         driver: "planner",
+        experiment: options.experiment ?? null,
         goal: goal.id,
         goalSetup: goal.setup ?? null,
         horizonMs,
@@ -136,6 +159,8 @@ export function runSim(options: RunOptions): RunResult {
           .sort((a, b) => a.hostname.localeCompare(b.hostname)),
       }),
       coverage: SIM_FEATURE_COVERAGE,
+      simulatorModel: SIMULATOR_MODEL_VERSION,
+      vendorCommit: SIMULATOR_VENDOR_COMMIT,
     },
   });
 
@@ -288,6 +313,8 @@ if (import.meta.main) {
   let driver: "game" | "planner" = "game";
   let profileId: string | undefined;
   let saveId: string | undefined;
+  let freshEntrance = false;
+  let routeId: string | undefined;
   let child = false;
   let featureOnly: FeatureId[] | undefined;
   let featureAdd: FeatureId[] | undefined;
@@ -316,6 +343,8 @@ if (import.meta.main) {
     else if (arg === "--only") featureOnly = parseFeatureList(next());
     else if (arg === "--features") featureAdd = parseFeatureList(next());
     else if (arg === "--save") saveId = next();
+    else if (arg === "--fresh") freshEntrance = true;
+    else if (arg === "--route") routeId = next();
     else if (arg === "--driver") {
       const value = next();
       if (value !== "game" && value !== "planner") throw new Error(`--driver wants game|planner, got ${value}`);
@@ -323,17 +352,20 @@ if (import.meta.main) {
     } else if (arg === "--child") child = true;
     else if (arg === "--list") {
       const { PROFILES } = await import("./profiles.ts");
-      for (const entry of PROFILES) console.log(`${entry.id.padEnd(16)} ${entry.description}`);
+      for (const entry of PROFILES) {
+        console.log(`${entry.id.padEnd(20)} ${entry.experiment.padEnd(16)} ${entry.description}`);
+      }
       process.exit(0);
     } else throw new Error(`unknown argument: ${arg}`);
   }
 
   const profile = profileId ? (await import("./profiles.ts")).findProfile(profileId) : undefined;
+  if (freshEntrance && saveId !== undefined) throw new Error("--fresh and --save are mutually exclusive");
   const specs = goalSpecs.length > 0 ? goalSpecs : [...(profile?.goals ?? [])];
   const goal = parseGoals(specs);
   const runSeeds = seeds ?? profile?.seeds ?? [1];
   const horizon = horizonMs ?? (profile ? parseDuration(profile.horizon) : parseDuration("24h"));
-  const save = saveId ?? profile?.save;
+  const save = freshEntrance ? undefined : saveId ?? profile?.save;
   const runLabel = label ?? profile?.id;
   // `--only` replaces the profile's isolation; `--features` widens it by
   // clearing the "off" for the named features.
@@ -349,10 +381,37 @@ if (import.meta.main) {
   }
   mkdirSync(outDir, { recursive: true });
 
+  const experimentClass = profile?.experiment ?? "feature-scenario";
+  const saveEntry = save ? (await import("../tools/save-io.ts")).findSave(save) : undefined;
+  const entrance: EntranceIdentity = saveEntry
+    ? {
+        kind: "save",
+        saveId: saveEntry.id,
+        bitNode: saveEntry.bitNode,
+        sha256: (await import("../tools/save-io.ts")).saveFileSha256(saveEntry),
+      }
+    : experimentClass === "bitnode-route"
+      ? { kind: "fresh", bitNode: 1 }
+      : { kind: "synthetic", bitNode: runBitnode, ...(profileId ? { profile: profileId } : {}) };
+  const experiment: ExperimentIdentity = {
+    class: experimentClass,
+    entrance,
+    ...(profile?.route ? { route: { ...profile.route, route: routeId ?? profile.route.route } } : {}),
+  };
+  if (routeId !== undefined && profile?.route === undefined) {
+    throw new Error("--route requires a bitnode-route profile");
+  }
+  assertValidExperiment(experiment);
+  if (experiment.class === "bitnode-route" && entrance.kind === "fresh" && runBitnode !== 1) {
+    throw new Error(`fresh route entrance is BN1, but profile/CLI selected BN${runBitnode}`);
+  }
+
   console.log(`goal: ${goal.describe()}`);
   console.log(
-    `driver: ${driver}  rev: ${gitRev}${runLabel ? `  profile: ${runLabel}` : ""}` +
-      `${save ? `  save: ${save}` : ""}  horizon: ${formatDuration(horizon)}`,
+    `driver: ${driver}  experiment: ${experiment.class}  rev: ${gitRev}` +
+      `${runLabel ? `  profile: ${runLabel}` : ""}` +
+      `${entrance.kind === "save" ? `  save: ${entrance.saveId}@${entrance.sha256.slice(0, 12)}` : `  entrance: ${entrance.kind}`}` +
+      `  horizon: ${formatDuration(horizon)}`,
   );
 
   // A multi-seed game run fans out to one child process per seed, because the
@@ -372,7 +431,7 @@ if (import.meta.main) {
   }
 
   const times: number[] = [];
-  const saveBitNode = save ? (await import("../tools/save-io.ts")).findSave(save).bitNode : undefined;
+  const saveBitNode = saveEntry?.bitNode;
   for (const seed of runSeeds) {
     const artifacts = new SimArtifactSession({
       outDir,
@@ -380,6 +439,7 @@ if (import.meta.main) {
       seed,
       bitNode: saveBitNode ?? (driver === "game" ? runBitnode : bitnode),
       ...(save ? { seededFrom: save } : {}),
+      experiment,
     });
 
     let result: {
@@ -396,8 +456,9 @@ if (import.meta.main) {
         seed,
         horizonMs: horizon,
         label: runLabel ?? gitRev,
+        experiment,
         farm,
-        world: { bitnode, homeRam, startingMoney, verbose },
+        world: { bitnode: runBitnode, homeRam, startingMoney: runMoney, verbose },
         onRecord: (line) => artifacts.write(line),
       });
     } else {
@@ -414,9 +475,14 @@ if (import.meta.main) {
         horizonMs: horizon,
         label: runLabel ?? gitRev,
         verbose,
-        ...(profile?.world ?? {}),
+        // A registered checkpoint is the authoritative route entrance. A
+        // profile's synthetic fixture must not overwrite its topology/player
+        // state merely because the profile supplies strategy/goals.
+        ...(profileWorldForEntrance(profile?.world, save !== undefined) ?? {}),
         ...(profileId !== undefined ? { profile: profileId } : {}),
         ...(save !== undefined ? { saveId: save } : {}),
+        experiment,
+        goFidelity: AGGREGATE_GO_MODEL,
         ...(seedData ? { save: seedData } : { bitnode: runBitnode }),
         ...(features ? { features } : {}),
         ...(homeRam !== undefined ? { homeRam } : profile?.homeRam !== undefined ? { homeRam: profile.homeRam } : {}),

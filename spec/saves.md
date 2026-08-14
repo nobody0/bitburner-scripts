@@ -18,12 +18,17 @@ the save JSON as `bitburnerSave_<epoch>_BN<n>x<lvl>.json.gz`. Drop it in
     bun run save:add bn5-start bitburnerSave_1754500000_BN5x1.json.gz "start of BN5"
     bun run saves
 
-`saves/index.json` is the registry — id, label, BitNode, and how far into the
+`saves/index.json` is the registry — id, label, BitNode, exact-byte SHA-256, and how far into the
 node the save is. Blobs are committed next to it, so a snapshot is reproducible
 on any machine, at a few megabytes of undeltifiable gzip per capture.
 
 Exporting calls `giveExportBonus()`, so it mutates the live game slightly. It is
 not a pure read.
+
+The SHA-256 is route lineage, not decoration. The simulator verifies it before
+loading a registered checkpoint and embeds it in the session experiment
+identity. Replacing a blob behind an existing id therefore fails loudly; use a
+new id for a different checkpoint or intentionally re-register the entry.
 
 ## The format
 

@@ -15,7 +15,6 @@ import type { DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
 
 const CONTRACT_REPLAY_LIMIT = 4_096;
 const CONTRACT_REASON_LIMIT = 512;
-const PEAK_STEP_GB = 11;
 const CLAIM_ID = "action:contract";
 
 type Result = { action: string; ok: boolean; detail: string; at: number };
@@ -38,6 +37,12 @@ interface ContractJob extends InspectedContract {
 type ContractInspectionResult = InspectedContract | (ContractRef & { error: string });
 type ContractDataResult = (InspectedContract & { data: unknown }) | (InspectedContract & { error: string });
 type ContractAttemptResult = { key: string; reward: string } | { key: string; error: string };
+
+/** Queued broker stages retain their data-dependent inputs. A ready getData
+ * lease must resume getData, not restart inspection with the wrong budget. */
+let pipelineBatch: ContractRef[] | undefined;
+let pipelineInspection: ContractInspectionResult[] | undefined;
+let pipelineData: ContractDataResult[] | undefined;
 
 /** The exact solver boundary shipped to the game. Simulator parity tests use
  * this export so they verify deployed wiring as well as the pure registry. */
@@ -115,15 +120,19 @@ const side: FeatureDriver = {
     const solvable = queue.filter((contract) => !quarantine[contractKey(contract)]);
     const solvableTotal = topic.solvableTotal ?? solvable.length;
 
-    const batch = solvable.slice(0, CONTRACT_BATCH_SIZE).map(({ host, file }) => ({ host, file }));
+    const batch = pipelineBatch
+      ?? solvable.slice(0, CONTRACT_BATCH_SIZE).map(({ host, file }) => ({ host, file }));
     if (batch.length === 0) return;
+    pipelineBatch = batch;
 
     // Three separate dodges keep getData's RAM out of attempt's peak. Each
     // method is paid once for the whole batch, regardless of its file count.
-    const inspection = await featureDodge(
+    const inspection = pipelineInspection
+      ? { ok: true as const, value: pipelineInspection }
+      : await featureDodge(
       ctx,
       "side",
-      CLAIM_ID,
+      `${CLAIM_ID}:inspect`,
       ["codingcontract.getContractType", "codingcontract.getNumTriesRemaining"],
       (stubNs: NS) => batch.map((contract): ContractInspectionResult => {
         try {
@@ -138,9 +147,12 @@ const side: FeatureDriver = {
       }),
     );
     if (!inspection.ok) {
+      if (inspection.queued) return;
+      pipelineBatch = undefined;
       merge(ctx.state, "side", { lastResult: record(false, inspection.reason) });
       return;
     }
+    pipelineInspection = inspection.value;
 
     const inspected: InspectedContract[] = [];
     const failures: ContractFailure[] = [];
@@ -159,10 +171,12 @@ const side: FeatureDriver = {
 
     const jobs: ContractJob[] = [];
     if (inspected.length > 0) {
-      const dataResult = await featureDodge(
+      const dataResult = pipelineData
+        ? { ok: true as const, value: pipelineData }
+        : await featureDodge(
         ctx,
         "side",
-        CLAIM_ID,
+        `${CLAIM_ID}:data`,
         ["codingcontract.getData"],
         (stubNs: NS) => inspected.map((contract): ContractDataResult => {
           try {
@@ -173,9 +187,13 @@ const side: FeatureDriver = {
         }),
       );
       if (!dataResult.ok) {
+        if (dataResult.queued) return;
+        pipelineBatch = undefined;
+        pipelineInspection = undefined;
         merge(ctx.state, "side", { lastResult: record(false, dataResult.reason) });
         return;
       }
+      pipelineData = dataResult.value;
       for (const result of dataResult.value) {
         if ("error" in result) {
           finished.add(contractKey(result));
@@ -198,7 +216,7 @@ const side: FeatureDriver = {
       const attemptResult = await featureDodge(
         ctx,
         "side",
-        CLAIM_ID,
+        `${CLAIM_ID}:attempt`,
         ["codingcontract.attempt"],
         (stubNs: NS) => jobs.map((job): ContractAttemptResult => {
           try {
@@ -209,6 +227,10 @@ const side: FeatureDriver = {
         }),
       );
       if (!attemptResult.ok) {
+        if (attemptResult.queued) return;
+        pipelineBatch = undefined;
+        pipelineInspection = undefined;
+        pipelineData = undefined;
         merge(ctx.state, "side", { lastResult: record(false, attemptResult.reason) });
         return;
       }
@@ -249,6 +271,9 @@ const side: FeatureDriver = {
       quarantinedTotal: allFailures.length,
       lastResult: result,
     });
+    pipelineBatch = undefined;
+    pipelineInspection = undefined;
+    pipelineData = undefined;
   },
 };
 
@@ -259,9 +284,11 @@ export const sideModule: FeatureModule = {
     state.contractQuarantine = {};
     delete state.contractQueue;
     state.contractSolverVersion = CONTRACT_SOLVER_VERSION;
+    pipelineBatch = undefined;
+    pipelineInspection = undefined;
+    pipelineData = undefined;
   },
   claims: (ctx) => (ctx.state.contractQueue?.length ?? ctx.state.topics.side?.contracts?.length)
     ? [actionRamClaim(ctx, "side", CLAIM_ID, ["codingcontract.attempt"], "side contract")]
     : [],
-  peakStepGb: PEAK_STEP_GB,
 };

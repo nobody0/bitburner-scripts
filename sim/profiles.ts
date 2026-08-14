@@ -3,6 +3,7 @@ import type { GameRunOptions } from "./game-run.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 import { calculateExp } from "./vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { VANILLA_NETWORK } from "./network.ts";
+import type { ExperimentClass, RouteLegIdentity } from "../shared/experiment.ts";
 
 /** Named simulation runs.
  *
@@ -19,6 +20,13 @@ import { VANILLA_NETWORK } from "./network.ts";
 export interface SimProfile {
   id: string;
   description: string;
+  /** Route benchmarks produce promotable speedrun evidence. Feature scenarios
+   * are deliberately synthetic pressure/recovery experiments. */
+  experiment: ExperimentClass;
+  /** Required only for route benchmarks. The entrance save remains overridable
+   * with `--save`, so alternate checkpoints and completion orders need no code
+   * changes. */
+  route?: RouteLegIdentity;
   /** Absent = every feature the save unlocks. */
   features?: FeatureOverrides;
   goals: string[];
@@ -39,7 +47,7 @@ export interface SimProfile {
   /** Focused synthetic initial conditions. Kept separate from the common CLI
    * fields so profiles can pose a precise cross-feature experiment without
    * teaching the simulator a magic scenario name. */
-  world?: Pick<GameRunOptions, "network" | "topology" | "augmentationStats" | "person" | "playerState" | "factions" | "companies" | "bladeburnerRank" | "homeFiles">;
+  world?: Pick<GameRunOptions, "network" | "topology" | "homeIp" | "augmentationStats" | "person" | "playerState" | "factions" | "companies" | "bladeburnerRank" | "homeFiles">;
 }
 
 export const FACTION_DONATION_TARGET = "Synaptic Enhancement Implant";
@@ -69,7 +77,23 @@ function augmentationMultiplierSnapshot(
   return result;
 }
 
+const CYBERSEC_DONATION_AUGMENTATIONS = Object.values(AUGMENTATION_TABLE)
+  // This fixture tests an ordinary economic install. An installed Red Pill
+  // would put the real planner in its no-extra-resets daemon-regrow phase.
+  .filter((aug) =>
+    aug.name !== FACTION_DONATION_TARGET
+    && aug.name !== "NeuroFlux Governor"
+    && aug.name !== "The Red Pill"
+  )
+  .map((aug) => ({ name: aug.name, level: 1 }));
+
+const CYBERSEC_DONATION_MULTS = augmentationMultiplierSnapshot(
+  CYBERSEC_DONATION_AUGMENTATIONS.map((aug) => aug.name),
+  UCM_FIXTURE_ROLL,
+);
+
 const CYBERSEC_DONATION_WORLD: NonNullable<SimProfile["world"]> = {
+  augmentationStats: { "Unstable Circadian Modulator": UCM_FIXTURE_ROLL },
   network: [
     {
       hostname: "faction-farm",
@@ -83,20 +107,13 @@ const CYBERSEC_DONATION_WORLD: NonNullable<SimProfile["world"]> = {
   ],
   person: {
     skills: { hacking: 1_000 },
-    exp: { hacking: calculateExp(1_000) },
+    // Synthetic skill and experience must describe the same reachable state.
+    // The simulator will derive the installed augmentation multiplier below.
+    exp: { hacking: calculateExp(1_000, CYBERSEC_DONATION_MULTS.hacking) },
   },
   playerState: {
     factions: ["CyberSec"],
-    augmentations: Object.values(AUGMENTATION_TABLE)
-      // This fixture tests an ordinary economic install. An installed Red
-      // Pill would put the real planner in its no-extra-resets daemon-regrow
-      // phase, where refusing this synthetic reset is the correct behavior.
-      .filter((aug) =>
-        aug.name !== FACTION_DONATION_TARGET
-        && aug.name !== "NeuroFlux Governor"
-        && aug.name !== "The Red Pill"
-      )
-      .map((aug) => ({ name: aug.name, level: 1 })),
+    augmentations: CYBERSEC_DONATION_AUGMENTATIONS,
   },
   factions: { CyberSec: { rep: 0, favor: 150 } },
 };
@@ -129,6 +146,7 @@ const CYBERSEC_CADENCE_WORLD: NonNullable<SimProfile["world"]> = {
   // Hui instead of continuing into a worthwhile runner.
   person: {
     ...CYBERSEC_INSTALL_WORLD.person,
+    exp: { hacking: calculateExp(1_000) },
     mults: { faction_rep: 10 },
   },
   playerState: {
@@ -139,6 +157,10 @@ const CYBERSEC_CADENCE_WORLD: NonNullable<SimProfile["world"]> = {
     CyberSec: { rep: 100_000, favor: 149 },
     "Sector-12": { rep: 60_000, favor: 0 },
     Aevum: { rep: 50_000, favor: 0 },
+    // Favor is permanent even before membership. Cycle 2 joins Tian Di Hui,
+    // earns the small exact crossing, then exercises a second reset without
+    // relying on reputation that prestige must erase.
+    "Tian Di Hui": { rep: 0, favor: 149.9 },
   },
 };
 
@@ -206,7 +228,7 @@ const BN1_PROGRESSION_WORLD: NonNullable<SimProfile["world"]> = {
   },
 };
 
-/** Late-BN1 stress fixture retaining the final package, Daedalus, Red Pill
+/** Late-game JIT fixture retaining the final package, Daedalus, Red Pill
  * install, and post-install world-daemon regrow phases. This is deliberately
  * separate from bn1-full, whose contract is a cold 8 GB bootstrap. */
 const BN1_LATE_INSTALLED = [
@@ -219,7 +241,7 @@ const BN1_LATE_INSTALLED = [
   "Unstable Circadian Modulator",
 ] as const;
 
-const BN1_JIT_STRESS_WORLD: NonNullable<SimProfile["world"]> = {
+const JIT_LATEGAME_WORLD: NonNullable<SimProfile["world"]> = {
   ...VANILLA_NETWORK,
   augmentationStats: { "Unstable Circadian Modulator": UCM_FIXTURE_ROLL },
   person: {
@@ -245,11 +267,42 @@ const BN1_JIT_STRESS_WORLD: NonNullable<SimProfile["world"]> = {
   },
 };
 
-/** Synthetic process-pressure laboratory. Unlike bn1-full this deliberately
- * isolates one deep pipeline: high minimum security creates a long weaken
- * horizon, while the enormous home removes game RAM as the limiting factor.
- * That makes live worker count â€” the quantity which motivates HGW and pooled
- * workers â€” observable without pretending this is a normal BN1 bootstrap. */
+
+/** Full first-route benchmark: a genuinely fresh BN1 save fixture. It grants
+ * no earned Source Files, augmentations, money, skill, reputation, fleet or
+ * home upgrades. The controller harness separately applies the declared SF4.3
+ * automation allowance; unlike the older calibration fixture, it grants no
+ * SF14 policy/reward advantage. */
+const BN1_FULL_WORLD: NonNullable<SimProfile["world"]> = {
+  ...VANILLA_NETWORK,
+  augmentationStats: { "Unstable Circadian Modulator": UCM_FIXTURE_ROLL },
+};
+
+/** Same cold BN1 benchmark with the exact persistent benefit granted by
+ * SF12.30: one installed NeuroFlux object at level 30 and its multiplier
+ * applied thirty times. This is a calibration accelerator, not a planner
+ * shortcut; all money, skills, reputation, programs and infrastructure still
+ * start from prestige state and the real controller sees ordinary APIs. */
+const SF12_CALIBRATION_LEVEL = 30;
+const BN1_FULL_SF12_30_WORLD: NonNullable<SimProfile["world"]> = {
+  ...BN1_FULL_WORLD,
+  person: {
+    mults: augmentationMultiplierSnapshot(
+      Array.from({ length: SF12_CALIBRATION_LEVEL }, () => "NeuroFlux Governor"),
+    ),
+  },
+  playerState: {
+    sourceFiles: { "4": 3, "12": SF12_CALIBRATION_LEVEL, "14": 3 },
+    augmentations: [{ name: "NeuroFlux Governor", level: SF12_CALIBRATION_LEVEL }],
+  },
+};
+
+/** Synthetic late-game JIT laboratory. Unlike the BN profiles this removes
+ * game RAM as the limiting factor entirely, so live worker count — the
+ * quantity that motivates HGW and pooled workers — becomes observable on its
+ * own. Kept as a TIER-1 pressure profile: `sim/tests/scenario-jit-stress.test.ts`
+ * covers the same benchmarks in seconds, but only at small scale, and the
+ * process-count behaviour it cannot reach is exactly what this exists for. */
 const JIT_PROCESS_PRESSURE_WORLD: NonNullable<SimProfile["world"]> = {
   network: [{
     hostname: "jit-pressure",
@@ -272,37 +325,10 @@ const JIT_PROCESS_PRESSURE_WORLD: NonNullable<SimProfile["world"]> = {
   },
 };
 
-/** Full BN1 benchmark: only cross-node capabilities are present. Everything
- * else—money, skill, programs, augmentations, reputation, fleet and home
- * upgrades—must be bootstrapped by the real controller. */
-const BN1_FULL_WORLD: NonNullable<SimProfile["world"]> = {
-  ...VANILLA_NETWORK,
-  augmentationStats: { "Unstable Circadian Modulator": UCM_FIXTURE_ROLL },
-  playerState: { sourceFiles: { "4": 3, "14": 3 } },
-};
-
-/** Same cold BN1 benchmark with the exact persistent benefit granted by
- * SF12.30: one installed NeuroFlux object at level 30 and its multiplier
- * applied thirty times. This is a calibration accelerator, not a planner
- * shortcut; all money, skills, reputation, programs and infrastructure still
- * start from prestige state and the real controller sees ordinary APIs. */
-const SF12_CALIBRATION_LEVEL = 30;
-const BN1_FULL_SF12_30_WORLD: NonNullable<SimProfile["world"]> = {
-  ...BN1_FULL_WORLD,
-  person: {
-    mults: augmentationMultiplierSnapshot(
-      Array.from({ length: SF12_CALIBRATION_LEVEL }, () => "NeuroFlux Governor"),
-    ),
-  },
-  playerState: {
-    sourceFiles: { "4": 3, "12": SF12_CALIBRATION_LEVEL, "14": 3 },
-    augmentations: [{ name: "NeuroFlux Governor", level: SF12_CALIBRATION_LEVEL }],
-  },
-};
-
 export const PROFILES: readonly SimProfile[] = [
   {
     id: "bn1-speedrun",
+    experiment: "feature-scenario",
     description: "Synthetic early-game fixture: how fast does the small deterministic BN1 network reach $1b?",
     goals: ["earn:1e9"],
     horizon: "8h",
@@ -310,6 +336,7 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "bn1-progression",
+    experiment: "feature-scenario",
     description:
       "Mid-BN1 route across three installs: reach 13 augmentations while Go follows the changing reputation and income bottlenecks.",
     bitnode: 1,
@@ -324,8 +351,10 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "bn1-full",
+    experiment: "bitnode-route",
+    route: { route: "all-source-files-3", leg: "bn1-first", index: 0, bitNode: 1 },
     description:
-      "Full BN1 cold start on the fixed vanilla network: bootstrap from 8 GB through strategy-chosen installs, Red Pill, and w0r1d_d43m0n.",
+      "Complete BN1 cold start on the fixed vanilla network: bootstrap from 8 GB through strategy-chosen installs and the actual w0r1d_d43m0n transition, with the declared SF4.3 automation allowance.",
     bitnode: 1,
     // Full-route benchmark: career must be live because city, karma, kills and
     // combat gates are genuine competing faction paths. Disabling it makes
@@ -345,6 +374,7 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "bn1-full-sf12-30",
+    experiment: "feature-scenario",
     description:
       "Full BN1 calibration run with the exact free NeuroFlux level and multipliers granted by SF12.30.",
     bitnode: 1,
@@ -356,20 +386,22 @@ export const PROFILES: readonly SimProfile[] = [
     seeds: [1],
   },
   {
-    id: "bn1-jit-stress",
+    id: "jit-lategame",
+    experiment: "feature-scenario",
     description:
-      "Late BN1 endgame/regrow fixture on vanilla targets; validates Red Pill and JIT lifecycle, not process-pressure mode thresholds.",
+      "Late-game fixture with large home RAM; validates Red Pill and JIT regrowth lifecycle, not process-pressure mode thresholds.",
     bitnode: 1,
     features: only("hacking", "factions", "progression", "go"),
     goals: ["bn:1", "installs:2"],
     homeRam: 32_768,
     startingMoney: 1e11,
-    world: BN1_JIT_STRESS_WORLD,
-    horizon: "2.5h",
+    world: JIT_LATEGAME_WORLD,
+    horizon: "2.7h",
     seeds: [1, 2, 3],
   },
   {
     id: "jit-process-pressure",
+    experiment: "feature-scenario",
     description:
       "Synthetic late-game JIT laboratory: game RAM is abundant and a long high-security pipeline stresses live worker count, HGW, and pooling.",
     bitnode: 1,
@@ -381,21 +413,8 @@ export const PROFILES: readonly SimProfile[] = [
     seeds: [1],
   },
   {
-    id: "hacking-only",
-    description: "Hacking in isolation: money earned per unit time, nothing else contributing.",
-    features: only("hacking", "progression"),
-    // Calibrated to the default fixture's physics, not aspiration: its eight
-    // servers top out around $12k/sec under a PERFECT joesguns farm, so the
-    // old earn:1e9 was two orders of magnitude out of reach and the profile
-    // produced no A/B gradient (every run: NOT reached). $5m is earned around
-    // minute 40 by the current strategy — reliably reached, with most of the
-    // hour left as headroom for targeting/prep improvements to show up in.
-    goals: ["earn:5e6"],
-    horizon: "1h",
-    seeds: [1, 2, 3],
-  },
-  {
     id: "hacking-early",
+    experiment: "feature-scenario",
     description: "The first million, for fast A/B of dispatcher and targeting changes.",
     features: only("hacking", "progression"),
     goals: ["earn:1e6"],
@@ -404,6 +423,7 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "bn5-hacking",
+    experiment: "feature-scenario",
     description:
       "BN5 control: hacking alone grows a $12b mid-run bankroll to $20b on the vendored omega-net midpoint.",
     bitnode: 5,
@@ -417,6 +437,7 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "bn5-hacking-stock",
+    experiment: "feature-scenario",
     description:
       "BN5 treatment: the identical hacking run may buy and trade stocks through the shared money arbiter.",
     bitnode: 5,
@@ -430,6 +451,7 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "factions-join",
+    experiment: "feature-scenario",
     description:
       "Faction progress in BN4, with hacking as the only income and skill source. Joining CyberSec needs a backdoor on CSEC.",
     // BN4 is load-bearing, not a detail. In BN1 deriveCapabilities reports
@@ -450,6 +472,7 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "factions-donation",
+    experiment: "feature-scenario",
     description:
       "Hacking must close CyberSec's exact donation cash gap; the unlocked augmentation stays banked until an end-loaded install sweep.",
     bitnode: 4,
@@ -466,6 +489,7 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "factions-install",
+    experiment: "feature-scenario",
     description:
       "Faction + hacking install lifecycle: bank a favor breakpoint, prestige every reset-sensitive system, and restart the controller.",
     bitnode: 4,
@@ -479,6 +503,7 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "install-cadence",
+    experiment: "feature-scenario",
     description:
       "Two consecutive install resets on the banked-rep fixture: prestige soundness and the install-vs-push cadence at speed.",
     bitnode: 4,
@@ -491,37 +516,14 @@ export const PROFILES: readonly SimProfile[] = [
     homeRam: 256,
     startingMoney: 1.5e9,
     world: CYBERSEC_CADENCE_WORLD,
-    // Cycle 1 converts the banked rep in ~3 min. Cycle 2 is real physics: the
-    // frontier's next package (Tian Di Hui, 4 augs at 6,250 rep) takes ~80
-    // minutes of rep work at cycle-2 rates, and the cadence verdict flips
-    // when that package's value lands. installs:3 would need ~2.5h and prove
-    // nothing more about the machinery.
-    horizon: "2h",
-    seeds: [1, 2, 3],
-  },
-  {
-    id: "install-favor",
-    description:
-      "The honest cadence experiment: fresh-ish BN4 on the default network, two installs banking CyberSec favor to 75 — exercises favor conversion, route recalibration and the install-vs-push heuristic across cycles.",
-    bitnode: 4,
-    features: only("hacking", "factions", "career", "progression"),
-    goals: ["favor:CyberSec:75", "installs:2"],
-    homeRam: 64,
-    startingMoney: 1_000_000,
-    world: {
-      playerState: {
-        factions: ["CyberSec"],
-        // CashRoot re-grants $1m + BruteSSH.exe on EVERY reset, so cycle 2+
-        // does not restart from an unopenable network at $1,000.
-        augmentations: [{ name: "CashRoot Starter Kit", level: 1 }],
-      },
-      factions: { CyberSec: { rep: 15_000, favor: 0 } },
-    },
-    horizon: "6h",
+    // Cycle 1 converts the banked rep immediately. Cycle 2 rejoins Tian Di Hui,
+    // earns a real permanent-favor crossing, and converts its package.
+    horizon: "125m",
     seeds: [1, 2, 3],
   },
   {
     id: "career-karma",
+    experiment: "feature-scenario",
     description:
       "Career serving a posted karma need in isolation: how fast does crime reach the Slum Snakes threshold?",
     bitnode: 4,
@@ -532,53 +534,18 @@ export const PROFILES: readonly SimProfile[] = [
   },
   {
     id: "stock-only",
+    experiment: "feature-scenario",
     description:
       "The market in isolation, in BN8 where it is the only income: how fast does $250m become $1b with hacking " +
       "switched off entirely? Answers 'does the trading model make money on its own', with no farm to confound it.",
     bitnode: 8,
     features: only("stock", "progression"),
     goals: ["wealth:1e9"],
-    horizon: "6h",
+    horizon: "8h",
     seeds: [1, 2, 3],
     // BN8's starting money (Prestige.ts: BitNode8StartingMoney). Below roughly
     // this the $200k round trip dominates any position the bankroll can fund.
     startingMoney: 250e6,
-  },
-  {
-    id: "stock-manipulation",
-    description:
-      "Early BN8 market + farm on an 8 GB home: does driving grow/hack at the held symbol beat trading alone? " +
-      "The A/B against `stock-only` is the whole value of the hacking tie-in.",
-    bitnode: 8,
-    features: only("stock", "hacking", "progression"),
-    goals: ["wealth:1e9"],
-    horizon: "6h",
-    seeds: [1, 2, 3],
-    startingMoney: 250e6,
-  },
-  {
-    id: "stock-manipulation-mid",
-    description:
-      "Mid-scale BN8 stock manipulation on a 128 GB home, keeping the same market seed and target network.",
-    bitnode: 8,
-    features: only("stock", "hacking", "progression"),
-    goals: ["wealth:1e9"],
-    horizon: "6h",
-    seeds: [1, 2, 3],
-    startingMoney: 250e6,
-    homeRam: 128,
-  },
-  {
-    id: "stock-manipulation-large",
-    description:
-      "Large-fleet BN8 stock manipulation on a 2 TB home, for throughput and saturation regressions.",
-    bitnode: 8,
-    features: only("stock", "hacking", "progression"),
-    goals: ["wealth:1e9"],
-    horizon: "6h",
-    seeds: [1, 2, 3],
-    startingMoney: 250e6,
-    homeRam: 2_048,
   },
 ] as const;
 

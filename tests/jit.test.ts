@@ -4,7 +4,7 @@ import {
   jitCapacity,
   latestJitStart,
   type JitRole,
-} from "../../shared/strategy/jit.ts";
+} from "../shared/strategy/jit.ts";
 
 const roles: JitRole[] = [
   { role: "h", kind: "hack", gb: 10, holdMs: 1_000 },

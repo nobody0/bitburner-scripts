@@ -83,6 +83,25 @@ Daedalus; 8/12 against Illuminati; and 0/2 against the World Daemon. Ordinary
 opponent p95 decision latency was 4.5–6.0 ms. World Daemon latency was 23.3 ms
 p50 and 54.1 ms p95.
 
+### V9 route-prior refit (2026-08-14)
+
+The simulator economics table was refitted through the promoted Chromium/WGSL
+runtime with tie roll 0.5 and seed start 123456. Ordinary opponents use 128
+games each; Illuminati uses 512. Scores and durations below are corpus means:
+
+| Opponent | Wins | Mean black score | Mean AI duration |
+|---|---:|---:|---:|
+| Netburners | 128/128 | 15.4922 | 4.6188 s |
+| Slum Snakes | 127/128 | 15.8281 | 6.8266 s |
+| The Black Hand | 125/128 | 14.9453 | 9.0625 s |
+| Tetrads | 106/128 | 13.3906 | 11.6703 s |
+| Daedalus | 112/128 | 13.7578 | 9.3625 s |
+| Illuminati | 261/512 | 8.9688 | 13.5250 s |
+
+`GO_REWARD_RULES` normalizes the latter two columns by the 5x5 arena's 23
+expected playable intersections. The World Daemon retains its prior pooled
+128-game promotion gates because this refit did not rerun that expensive lane.
+
 The synchronized worker smoke measured a 49.1 ms cold 5x5 decision, a 0.2 ms
 repeated RPC cache hit, and a 0.2 ms consumed pushed prediction. The unsolicited
 next decision arrived 79 ms before its modeled Black-turn deadline. The same

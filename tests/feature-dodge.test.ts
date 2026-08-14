@@ -6,9 +6,9 @@ import type { DodgeGlobals } from "../game/lib/dodge-shared.ts";
 import { featureDodge } from "../game/lib/features/dodge.ts";
 import type { DriverContext } from "../game/lib/features/index.ts";
 import { Heap } from "../shared/ram/heap.ts";
-import { resolveClaims } from "../shared/strategy/arbiter.ts";
+import { PRIORITY } from "../shared/strategy/arbiter.ts";
 
-function harness(grantedId = "action:join", acquire = true) {
+function harness(acquire = true) {
   let execs = 0;
   let acquired = 0;
   let released = 0;
@@ -29,34 +29,40 @@ function harness(grantedId = "action:join", acquire = true) {
       return 1;
     },
   } as unknown as NS;
-  const result = resolveClaims({
-    now: 0,
-    pools: { money: 0, ram: 10 },
-    claims: [{ by: "factions", id: grantedId, resource: "ram", amount: 1.5, priority: 50, mode: "spend", why: "test" }],
-  });
   const ctx = {
     ns,
-    // Starvation reporting writes probeSkips (see featureDodge); real
-    // GameState always carries it via initState.
-    state: { probeSkips: {} },
-    grants: { money: 0, ram: 1.5, slot: false, result },
-    acquireDodge: () => {
+    state: {},
+    grants: {
+      ramClaims: new Map([["action:join", {
+        by: "factions",
+        id: "action:join",
+        resource: "ram",
+        amount: 1,
+        priority: PRIORITY["progression:terminal-action"],
+        why: "test",
+      }]]),
+    },
+    acquireDodge: (_gb: number, request: { by: string; id: string }) => {
       acquired++;
-      return acquire ? { host: "n00dles", release: () => released++ } : undefined;
+      expect(request).toMatchObject({
+        by: "factions",
+        id: "action:join",
+        priority: PRIORITY["progression:terminal-action"],
+      });
+      return acquire
+        ? { status: "placed", host: "n00dles", release: () => released++ }
+        : { status: "queued" };
     },
   } as unknown as DriverContext;
   return { ctx, counts: () => ({ execs, acquired, released }) };
 }
 
-describe("feature dodge grants and heap leases", () => {
-  test("denied, mismatched, and unplaceable actions never call ns.exec", async () => {
-    const denied = harness("different");
-    expect((await featureDodge(denied.ctx, "factions", "action:join", ["singularity.joinFaction"], () => true)).ok).toBe(false);
-    expect(denied.counts()).toEqual({ execs: 0, acquired: 0, released: 0 });
-
-    const noHost = harness("action:join", false);
-    expect((await featureDodge(noHost.ctx, "factions", "action:join", ["singularity.joinFaction"], () => true)).ok).toBe(false);
-    expect(noHost.counts()).toEqual({ execs: 0, acquired: 1, released: 0 });
+describe("feature dodge broker and heap leases", () => {
+  test("queued is distinct from denial and never calls ns.exec", async () => {
+    const queued = harness(false);
+    expect(await featureDodge(queued.ctx, "factions", "action:join", ["singularity.joinFaction"], () => true))
+      .toMatchObject({ ok: false, queued: true });
+    expect(queued.counts()).toEqual({ execs: 0, acquired: 1, released: 0 });
   });
 
   test("one granted action acquires and releases exactly one lease", async () => {

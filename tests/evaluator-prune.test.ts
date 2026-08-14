@@ -1,15 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import type { HackNodeMults } from "../../shared/formulas.ts";
-import { staticsFromRolls, type ServerGenMults } from "../../shared/strategy/bounds.ts";
+import type { HackNodeMults } from "../shared/formulas.ts";
+import { staticsFromRolls, type ServerGenMults } from "../shared/strategy/bounds.ts";
 import {
   initEvaluator,
   stepEvaluator,
   type EvaluatorMemory,
   type FleetCapacity,
-} from "../../shared/strategy/evaluator.ts";
-import { SERVER_RANGES, type Range } from "../../shared/features/servers.ts";
-import type { ServerView, StockInfluence, WorldView } from "../../shared/world.ts";
-import { mulberry32 } from "../core/rng.ts";
+} from "../shared/strategy/evaluator.ts";
+import { SERVER_RANGES, type Range } from "../shared/features/servers.ts";
+import type { ServerView, StockInfluence, WorldView } from "../shared/world.ts";
+import { mulberry32 } from "../sim/core/rng.ts";
 
 /** End-to-end proof that the upper-bound prune is decision-free: two
  * evaluators walk the SAME randomized timeline — servers rolled from the real
@@ -168,12 +168,11 @@ describe("depth-capped incumbent: the prep pick is rate-based, not score-based",
   // threshold WOULD have pruned the winner (preconditions asserted, so the
   // test fails loudly if tuning drifts instead of silently covering nothing).
   test("a lower-score deeper-pipeline upgrade survives the prune and wins prep", async () => {
-    const { makeHackContext } = await import("../../shared/formulas.ts");
-    const { solveCycle } = await import("../../shared/strategy/targeting.ts");
-    const { scoreUpperBound } = await import("../../shared/strategy/bounds.ts");
-    const { farmIncomeRate } = await import("../../shared/strategy/economics.ts");
+    const { makeHackContext } = await import("../shared/formulas.ts");
+    const { solveCycle } = await import("../shared/strategy/targeting.ts");
+    const { scoreUpperBound } = await import("../shared/strategy/bounds.ts");
+    const { depthCapGb, farmIncomeRate } = await import("../shared/strategy/economics.ts");
 
-    const fleetGb = 65_536;
     const neutralMults = { hacking: 1, hacking_exp: 1, hacking_money: 1, hacking_grow: 1, hacking_speed: 1, hacking_chance: 1 };
     const skill = 1_000;
     const smallfast = { hostname: "smallfast", minDifficulty: 1, moneyMax: 5e7, requiredHackingSkill: 1, serverGrowth: 100, baseDifficulty: 3 };
@@ -187,6 +186,11 @@ describe("depth-capped incumbent: the prep pick is rate-based, not score-based",
     const ctx = makeHackContext({ skill, intelligence: 0, mults: neutralMults }, {});
     const curSolution = solveCycle(ctx, smallfast)!;
     const candSolution = solveCycle(ctx, bigslow)!;
+    // The premise is a fleet FAR beyond the incumbent's pipeline depth, so
+    // derive it from that depth rather than fixing a literal: the cap scales
+    // as 1/BATCH_INTERVAL_S, and a literal quietly stops being "far beyond"
+    // when the landing grid tightens.
+    const fleetGb = Math.max(depthCapGb(candSolution), depthCapGb(curSolution) * 2);
     // Preconditions that make this a regression test at all:
     expect(candSolution.score).toBeLessThan(curSolution.score); // score says keep farming smallfast...
     expect(scoreUpperBound(ctx, bigslow)).toBeLessThan(curSolution.score); // ...and the OLD threshold would prune bigslow...

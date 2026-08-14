@@ -166,11 +166,13 @@ function decodeServer(hostname: string, raw: unknown): SaveServer {
   const bag = asBag(raw);
   const server: SaveServer = { ...SERVER_DEFAULTS, hostname, serversOnNetwork: [] };
   server.kind = str(bag["__ctor"], "Server");
+  server.ip = str(bag["ip"], SERVER_DEFAULTS.ip);
   server.organizationName = str(bag["organizationName"], SERVER_DEFAULTS.organizationName);
   server.programs = strList(bag["programs"]);
   server.messages = strList(bag["messages"]);
   server.contracts = contractNames(bag["contracts"]);
   server.hasAdminRights = bool(bag["hasAdminRights"]);
+  server.isConnectedTo = bool(bag["isConnectedTo"]);
   server.backdoorInstalled = bool(bag["backdoorInstalled"]);
   server.purchasedByPlayer = bool(bag["purchasedByPlayer"]);
   server.maxRam = num(bag["maxRam"], SERVER_DEFAULTS.maxRam);
@@ -184,6 +186,11 @@ function decodeServer(hostname: string, raw: unknown): SaveServer {
   server.serverGrowth = num(bag["serverGrowth"], SERVER_DEFAULTS.serverGrowth);
   server.numOpenPortsRequired = num(bag["numOpenPortsRequired"], SERVER_DEFAULTS.numOpenPortsRequired);
   server.openPortCount = num(bag["openPortCount"], SERVER_DEFAULTS.openPortCount);
+  server.sshPortOpen = bool(bag["sshPortOpen"]);
+  server.ftpPortOpen = bool(bag["ftpPortOpen"]);
+  server.smtpPortOpen = bool(bag["smtpPortOpen"]);
+  server.httpPortOpen = bool(bag["httpPortOpen"]);
+  server.sqlPortOpen = bool(bag["sqlPortOpen"]);
   server.serversOnNetwork = Array.isArray(bag["serversOnNetwork"])
     ? (bag["serversOnNetwork"] as unknown[]).filter((h): h is string => typeof h === "string")
     : [];
@@ -220,6 +227,7 @@ function strList(raw: unknown): string[] {
 function decodePlayer(raw: unknown): SavePlayer {
   const bag = asBag(raw);
   const hp = asBag(bag["hp"]);
+  const persistentIntelligence = asBag(bag["persistentIntelligenceData"]);
   const sleeves = bag["sleeves"];
   const hashManager = asBag(bag["hashManager"]);
   const bladeburner = asBag(bag["bladeburner"]);
@@ -246,8 +254,14 @@ function decodePlayer(raw: unknown): SavePlayer {
     money: typeof bag["money"] === "string" ? Number.parseFloat(bag["money"]) : num(bag["money"], 0),
     karma: num(bag["karma"], 0),
     entropy: num(bag["entropy"], 0),
+    exploits: strList(bag["exploits"]),
+    persistentIntelligenceExp: num(
+      persistentIntelligence["exp"],
+      num(asBag(bag["exp"])["intelligence"], 0),
+    ),
     city: str(bag["city"], "Sector-12"),
     location: str(bag["location"]),
+    currentServer: str(bag["currentServer"], "home"),
     skills: skillBag(bag["skills"]),
     exp: skillBag(bag["exp"]),
     mults: Object.fromEntries(
@@ -302,9 +316,14 @@ function decodeCurrentWork(raw: unknown): SaveCurrentWork | undefined {
   };
   if (ctor === "CompanyWork") return { ...common, kind: "company", subject: str(work["companyName"]) };
   if (ctor === "ClassWork") return {
-    ...common, kind: "class", subject: str(work["location"]), workType: str(work["classType"]),
+    ...common, kind: "class", subject: str(work["classType"]), workType: str(work["classType"]),
   };
-  if (ctor === "CreateProgramWork") return { ...common, kind: "createProgram", subject: str(work["programName"]) };
+  if (ctor === "CreateProgramWork") return {
+    ...common,
+    kind: "createProgram",
+    subject: str(work["programName"]),
+    unitCompleted: num(work["unitCompleted"], 0),
+  };
   return { ...common, kind: "unknown", subject: "" };
 }
 

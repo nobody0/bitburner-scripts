@@ -30,6 +30,7 @@ export type NeedKind =
   | "employment"
   | "quitCompany"
   | "city"
+  | "root"
   | "backdoor"
   | "hacknetRam"
   | "hacknetCores"
@@ -51,6 +52,7 @@ export const NEED_KINDS: readonly NeedKind[] = [
   "employment",
   "quitCompany",
   "city",
+  "root",
   "backdoor",
   "hacknetRam",
   "hacknetCores",
@@ -83,6 +85,7 @@ const DIRECTION: Record<NeedKind, NeedDirection> = {
   employment: "atLeast",
   quitCompany: "atMost",
   city: "atLeast",
+  root: "atLeast",
   backdoor: "atLeast",
   hacknetRam: "atLeast",
   hacknetCores: "atLeast",

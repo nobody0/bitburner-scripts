@@ -72,7 +72,6 @@ describe("compile-time telemetry elimination", () => {
       "feature.failed",
       "augmentation.reset",
       "bitnode.reset",
-      "probe.skipped",
       "probe.failed",
       "probe.batch",
       "contract.quarantined",

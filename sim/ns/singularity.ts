@@ -21,6 +21,7 @@ import { AugmentationName } from "../vendor/bitburner/src/Augmentation/Enums.ts"
 import { calculateHackingTime } from "../vendor/bitburner/src/Hacking.ts";
 import { getUpgradeHomeRamCost } from "../core/effects.ts";
 import { CONSTANTS } from "../vendor/bitburner/src/Constants.ts";
+import { nsString, resolveServer } from "./contracts.ts";
 
 /** The `ns.singularity` namespace, plus `ns.getFavorToDonate` and `ns.enums`.
  *
@@ -61,17 +62,49 @@ export interface SingularityDeps {
   augmentationStats?: Readonly<Record<string, Readonly<Record<string, number>>>>;
   assertPrestigeSupported?(): void;
   onPrestige?: (cbScript: string | undefined, newlyInstalled: ReadonlyMap<string, number>) => void;
+  /** Terminal BitNode transition. The simulator stops at this boundary; the
+   * next BitNode is a separate scenario, just as augmentation prestige is a
+   * separate controller epoch. */
+  onBitNodeComplete?: (
+    nextBitNode: number,
+    cbScript: string | undefined,
+    options: SimBitNodeOptions,
+  ) => void;
 }
 
-/** Darkweb prices @ v3.0.1 (src/DarkWeb/DarkWebItems.ts). Port openers only —
- * the rest are not on any path the strategy takes yet. */
+export interface SimBitNodeOptions {
+  sourceFileOverrides: Map<number, number>;
+  intelligenceOverride: number | undefined;
+  restrictHomePCUpgrade: boolean;
+  disableGang: boolean;
+  disableCorporation: boolean;
+  disableBladeburner: boolean;
+  disable4SData: boolean;
+  disableHacknetServer: boolean;
+  disableSleeveExpAndAugmentation: boolean;
+}
+
+/** Darkweb inventory @ v3.0.1 (src/DarkWeb/DarkWebItems.ts). It is kept in
+ * declaration order because getDarkwebPrograms
+ * exposes that order. */
 const DARKWEB_PRICES: Record<string, number> = {
   "BruteSSH.exe": 500_000,
   "FTPCrack.exe": 1_500_000,
   "relaySMTP.exe": 5_000_000,
   "HTTPWorm.exe": 30_000_000,
   "SQLInject.exe": 250_000_000,
+  "ServerProfiler.exe": 500_000,
+  "DeepscanV1.exe": 500_000,
+  "DeepscanV2.exe": 25_000_000,
+  "AutoLink.exe": 1_000_000,
+  "DarkscapeNavigator.exe": 50_000_000,
+  "Formulas.exe": 5_000_000_000,
 };
+
+function darkwebItem(name: string): [string, number] | undefined {
+  const lower = name.toLowerCase();
+  return Object.entries(DARKWEB_PRICES).find(([program]) => program.toLowerCase() === lower);
+}
 
 /** The 1.9^queued escalation, restricted to non-SoA augmentations. */
 const SOA_SET = new Set([
@@ -98,6 +131,82 @@ export interface SingularityNamespace {
 
 export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
   const { world, player, factions, clock } = deps;
+  const connectTorRoot = (): void => {
+    const darkweb = world.servers.get("darkweb");
+    if (!darkweb || darkweb.simKind !== "DarknetServer") {
+      return unmodeled(
+        "subsystem",
+        "darkweb root",
+        "purchaseTor requires the always-present v3.0.1 DarknetServer and its network edge",
+      );
+    }
+    const homeLinks = deps.network.get("home") ?? [];
+    const darkwebLinks = deps.network.get("darkweb") ?? [];
+    if (!homeLinks.includes("darkweb")) homeLinks.push("darkweb");
+    if (!darkwebLinks.includes("home")) darkwebLinks.push("home");
+    deps.network.set("home", homeLinks);
+    deps.network.set("darkweb", darkwebLinks);
+  };
+  const requireSingularityAccess = (): void => {
+    if (deps.bitNode === 4 || (player.sourceFiles["4"] ?? 0) > 0) return;
+    throw new Error(
+      "You do not currently have access to the Singularity API. This is either because you are not in BitNode 4 or because you do not have Source-File 4",
+    );
+  };
+  const validateBitNodeOptions = (raw: unknown): SimBitNodeOptions => {
+    const defaults: SimBitNodeOptions = {
+      sourceFileOverrides: new Map(),
+      intelligenceOverride: undefined,
+      restrictHomePCUpgrade: false,
+      disableGang: false,
+      disableCorporation: false,
+      disableBladeburner: false,
+      disable4SData: false,
+      disableHacknetServer: false,
+      disableSleeveExpAndAugmentation: false,
+    };
+    if (raw == null) return defaults;
+    if (typeof raw !== "object") {
+      throw new Error(`bitNodeOptions must be an object if it's specified. It was ${String(raw)}.`);
+    }
+    const options = raw as Record<string, unknown>;
+    if (!(options["sourceFileOverrides"] instanceof Map)) {
+      throw new Error("sourceFileOverrides must be a Map.");
+    }
+    const overrides = options["sourceFileOverrides"] as Map<unknown, unknown>;
+    for (const [rawNumber, rawLevel] of overrides) {
+      if (typeof rawNumber !== "number" || !Number.isInteger(rawNumber) || rawNumber < 1 || rawNumber > 15) {
+        throw new Error(`sourceFileOverrides is invalid. Reason: Invalid BitNode: ${String(rawNumber)}.`);
+      }
+      if (typeof rawLevel !== "number" || !Number.isFinite(rawLevel)) {
+        throw new Error(`sourceFileOverrides is invalid. Reason: Invalid SF level: ${String(rawLevel)}.`);
+      }
+      const maxLevel = player.ownedSourceFiles[String(rawNumber)] ?? 0;
+      if (rawLevel > maxLevel) {
+        throw new Error(
+          `sourceFileOverrides is invalid. Reason: Invalid SF level: ${rawLevel}. Max level: ${maxLevel}.`,
+        );
+      }
+      defaults.sourceFileOverrides.set(rawNumber, rawLevel);
+    }
+    if (options["intelligenceOverride"] !== undefined) {
+      const value = typeof options["intelligenceOverride"] === "string"
+        ? Number.parseFloat(options["intelligenceOverride"])
+        : options["intelligenceOverride"];
+      if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) {
+        throw new Error(`intelligenceOverride must be a positive integer, was ${String(value)}`);
+      }
+      defaults.intelligenceOverride = value;
+    }
+    defaults.restrictHomePCUpgrade = !!options["restrictHomePCUpgrade"];
+    defaults.disableGang = !!options["disableGang"];
+    defaults.disableCorporation = !!options["disableCorporation"];
+    defaults.disableBladeburner = !!options["disableBladeburner"];
+    defaults.disable4SData = !!options["disable4SData"];
+    defaults.disableHacknetServer = !!options["disableHacknetServer"];
+    defaults.disableSleeveExpAndAugmentation = !!options["disableSleeveExpAndAugmentation"];
+    return defaults;
+  };
   const requireGraftingAccess = (): void => {
     if (deps.bitNode === 10 || (player.sourceFiles["10"] ?? 0) > 0) return;
     throw new Error(
@@ -141,6 +250,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
   const favorToDonate = (): number => Math.floor(150 * currentNodeMults.FavorToDonateToFaction);
 
   const installBackdoorWithDelay = async (delay: (ms: number) => Promise<void>): Promise<void> => {
+    requireSingularityAccess();
     const server = world.servers.get(deps.terminal.host);
     if (!server) throw new Error(`installBackdoor: server '${deps.terminal.host}' does not exist`);
     if (server.simKind === "DarknetServer") {
@@ -160,11 +270,12 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
 
   const singularity: Record<string, unknown> = {
     // --- factions -----------------------------------------------------
-    getFactionRep: (name: string): number => factions.get(name)?.rep ?? 0,
-    getFactionFavor: (name: string): number => factions.get(name)?.favor ?? 0,
-    getFactionEnemies: (name: string): string[] => factions.enemies(name),
+    getFactionRep: (rawName: unknown): number => factions.get(factionName(rawName))?.rep ?? 0,
+    getFactionFavor: (rawName: unknown): number => factions.get(factionName(rawName))?.favor ?? 0,
+    getFactionEnemies: (rawName: unknown): string[] => factions.enemies(factionName(rawName)),
 
-    getFactionWorkTypes: (name: string): string[] => {
+    getFactionWorkTypes: (rawName: unknown): string[] => {
+      const name = factionName(rawName);
       // Load-bearing, not decoration: the planner refuses to work a type a
       // faction does not offer, so an empty or fabricated answer here would
       // make every faction unworkable (or make the sim disagree with the game
@@ -176,7 +287,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       if (offers.security) out.push("security");
       return out;
     },
-    getFactionInviteRequirements: (name: string): PlayerRequirement[] => factions.requirements(name),
+    getFactionInviteRequirements: (rawName: unknown): PlayerRequirement[] => factions.requirements(factionName(rawName)),
 
     checkFactionInvitations: (): string[] => {
       // The real call re-checks immediately rather than waiting out the 2 s
@@ -187,13 +298,23 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       return [...player.factionInvitations];
     },
 
-    joinFaction: (name: string): boolean => factions.join(name),
+    joinFaction: (rawName: unknown): boolean => {
+      const name = factionName(rawName);
+      const joined = factions.join(name);
+      if (joined) world.gainIntelligenceExp(CONSTANTS.IntelligenceSingFnBaseExpGain * 5);
+      return joined;
+    },
 
-    workForFaction: (name: string, type: string, focus = true): boolean => {
+    workForFaction: (rawName: unknown, rawType: unknown, focus = true): boolean => {
+      const name = factionName(rawName);
+      const type = nsString("workType", rawType);
+      if (type !== "hacking" && type !== "field" && type !== "security") {
+        throw new Error(`Invalid faction work type: '${type}'`);
+      }
       const faction = factions.get(name);
       if (!faction || !faction.joined) return false;
       const offers = factions.offersWork(name);
-      const key = type === "hacking" ? "hacking" : type === "field" ? "field" : "security";
+      const key = type;
       if (!offers[key as keyof typeof offers]) return false;
       // Silently CANCELS whatever was running — the single most important
       // behaviour for the strategy's continuation guard to be tested against.
@@ -335,8 +456,8 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       };
     },
 
-    donateToFaction: (name: string, amount: number): boolean =>
-      factions.donate(name, amount, favorToDonate()) > 0,
+    donateToFaction: (rawName: unknown, amount: number): boolean =>
+      factions.donate(factionName(rawName), amount, favorToDonate()) > 0,
 
     travelToCity: (city: string): boolean => {
       // Invalid enum input throws; valid travel costs $200k and insufficient
@@ -348,6 +469,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       player.money -= cost;
       world.recordMoney("other", -cost);
       player.city = city;
+      world.gainIntelligenceExp(CONSTANTS.IntelligenceSingFnBaseExpGain / 50_000);
       world.emit({ kind: "event", name: "travel", data: { city } });
       return true;
     },
@@ -358,19 +480,22 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
     // Does NOT require membership upstream (Singularity.ts:128-133) — and it
     // must not, or the planner could never value a faction it has not joined
     // and would have no basis for choosing which to join.
-    getAugmentationsFromFaction: (name: string): string[] =>
-      Object.values(AUGMENTATION_TABLE)
+    getAugmentationsFromFaction: (rawName: unknown): string[] => {
+      const name = factionName(rawName);
+      return Object.values(AUGMENTATION_TABLE)
         .filter((aug) => aug.factions.includes(name))
         // Upstream removes The Red Pill from Daedalus in BN15.
         // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L204-L208
         .filter((aug) => !(deps.bitNode === 15 && name === "Daedalus" && aug.name === "The Red Pill"))
-        .map((aug) => aug.name),
+        .map((aug) => aug.name);
+    },
 
-    getAugmentationPrice: (name: string): number => priceOf(name).moneyCost,
-    getAugmentationRepReq: (name: string): number => priceOf(name).repCost,
-    getAugmentationPrereq: (name: string): string[] => AUGMENTATION_TABLE[name]?.prereqs ?? [],
-    getAugmentationStats: (name: string): Record<string, number> => {
-      const aug = AUGMENTATION_TABLE[name];
+    getAugmentationPrice: (rawName: unknown): number => priceOf(augmentationName(rawName)).moneyCost,
+    getAugmentationRepReq: (rawName: unknown): number => priceOf(augmentationName(rawName)).repCost,
+    getAugmentationPrereq: (rawName: unknown): string[] => [...AUGMENTATION_TABLE[augmentationName(rawName)]!.prereqs],
+    getAugmentationStats: (rawName: unknown): Record<string, number> => {
+      const name = augmentationName(rawName);
+      const aug = AUGMENTATION_TABLE[name]!;
       // A randomised augmentation has no stable stats to report. Reporting
       // the empty placeholder would be a fabricated value; this is the one
       // place the simulator must refuse rather than guess.
@@ -382,11 +507,13 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       return { ...(aug?.mults ?? {}) };
     },
 
-    purchaseAugmentation: (factionName: string, augName: string): boolean => {
-      const faction = factions.get(factionName);
-      const aug = AUGMENTATION_TABLE[augName];
-      if (!faction?.joined || !aug) return false;
-      if (!aug.factions.includes(factionName)) return false;
+    purchaseAugmentation: (rawFactionName: unknown, rawAugName: unknown): boolean => {
+      const factionKey = factionName(rawFactionName);
+      const augName = augmentationName(rawAugName);
+      const faction = factions.get(factionKey);
+      const aug = AUGMENTATION_TABLE[augName]!;
+      if (!faction?.joined) return false;
+      if (!aug.factions.includes(factionKey)) return false;
       if (player.hasAugmentation(augName) && augName !== "NeuroFlux Governor") return false;
       // Prerequisites must be owned or queued.
       if (aug.prereqs.some((prereq) => !player.hasAugmentation(prereq))) return false;
@@ -396,7 +523,8 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       player.money -= moneyCost;
       world.recordMoney("augmentations", -moneyCost);
       player.queuedAugmentations.set(augName, (player.queuedAugmentations.get(augName) ?? 0) + 1);
-      world.emit({ kind: "event", name: "aug.purchased", data: { faction: factionName, augmentation: augName, cost: moneyCost } });
+      world.gainIntelligenceExp(CONSTANTS.IntelligenceSingFnBaseExpGain * 10);
+      world.emit({ kind: "event", name: "aug.purchased", data: { faction: factionKey, augmentation: augName, cost: moneyCost } });
       return true;
     },
 
@@ -404,6 +532,7 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       if (player.queuedAugmentations.size === 0) return false;
       deps.assertPrestigeSupported?.();
       const newlyInstalled = new Map(player.queuedAugmentations);
+      world.gainIntelligenceExp(CONSTANTS.IntelligenceSingFnBaseExpGain * 10);
       // Reputation banks into favor HERE and nowhere else — the reason a
       // donation-gated faction is a reset decision rather than a wait.
       factions.prestigeAugmentation();
@@ -425,29 +554,56 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
     // root, no backdoor, and CyberSec can never be joined. Prices are the
     // game's darkweb prices (src/DarkWeb/DarkWebItems.ts @ v3.0.1).
     purchaseTor: (): boolean => {
-      if (deps.hasTor()) return true;
+      if (deps.hasTor()) {
+        connectTorRoot();
+        return true;
+      }
       if (player.money < 200_000) return false;
+      // Validate the modeled world before mutating money. A missing darkweb
+      // root is incomplete simulator state, not a failed in-game purchase.
+      connectTorRoot();
       player.money -= 200_000;
       world.recordMoney("other", -200_000);
       deps.setTor(true);
+      world.gainIntelligenceExp(CONSTANTS.IntelligenceSingFnBaseExpGain / 500);
       return true;
     },
 
-    purchaseProgram: (name: string): boolean => {
+    purchaseProgram: (rawName: unknown): boolean => {
       if (!deps.hasTor()) return false;
-      const cost = DARKWEB_PRICES[name];
-      if (cost === undefined) return false;
-      if (deps.homeFiles().has(name)) return true;
+      const name = nsString("programName", rawName);
+      const item = darkwebItem(name);
+      if (!item) return false;
+      const [program, cost] = item;
+      if (deps.homeFiles().has(program)) return true;
       if (player.money < cost) return false;
+      if (program === "DarkscapeNavigator.exe") {
+        return unmodeled(
+          "subsystem",
+          "darknet population",
+          "buying DarkscapeNavigator.exe generates the movable darknet graph, authentication state, and labyrinth",
+        );
+      }
+      // Upstream pushes the completed file before cancelling matching work;
+      // its finish hook therefore does not leave a stale partial file.
+      deps.homeFiles().add(program);
+      if (player.currentWork?.kind === "createProgram" && player.currentWork.subject === program) {
+        player.stopWork(true);
+      }
       player.money -= cost;
       world.recordMoney("other", -cost);
-      deps.homeFiles().add(name);
-      world.emit({ kind: "event", name: "program.bought", data: { program: name, cost } });
+      world.gainIntelligenceExp(CONSTANTS.IntelligenceSingFnBaseExpGain / 5_000);
+      world.emit({ kind: "event", name: "program.bought", data: { program, cost } });
       return true;
     },
 
-    getDarkwebProgramCost: (name: string): number => DARKWEB_PRICES[name] ?? -1,
-    getDarkwebPrograms: (): string[] => Object.keys(DARKWEB_PRICES),
+    getDarkwebProgramCost: (name: string): number => {
+      if (!deps.hasTor()) return -1;
+      const item = darkwebItem(name);
+      if (!item) throw new Error(`No such exploit ('${name.toLowerCase()}') found on the darkweb!`);
+      return deps.homeFiles().has(item[0]) ? 0 : item[1];
+    },
+    getDarkwebPrograms: (): string[] => deps.hasTor() ? Object.keys(DARKWEB_PRICES) : [],
 
     // --- home infrastructure -----------------------------------------
     getUpgradeHomeRamCost: (): number => {
@@ -467,12 +623,14 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
     // --- terminal / backdoors -----------------------------------------
     getCurrentServer: (): string => deps.terminal.host,
 
-    connect: (hostname: string): boolean => {
-      const server = world.servers.get(hostname);
-      if (!server) return false;
-      const adjacent = deps.network.get(deps.terminal.host)?.includes(hostname) ?? false;
+    connect: (rawHost: unknown): boolean => {
+      const server = resolveServer(world.servers, deps.network, rawHost, deps.terminal.host);
+      const adjacent = deps.network.get(deps.terminal.host)?.includes(server.hostname) ?? false;
       if (!adjacent && !server.backdoorInstalled && !server.purchasedByPlayer) return false;
-      deps.terminal.host = hostname;
+      const previous = world.servers.get(deps.terminal.host);
+      if (previous) previous.isConnectedTo = false;
+      server.isConnectedTo = true;
+      deps.terminal.host = server.hostname;
       return true;
     },
 
@@ -480,12 +638,72 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       installBackdoorWithDelay((ms) => new Promise<void>((resolve) => void clock.in(ms, resolve))),
 
     b1tflum3: (): never => unmodeled("ns", "singularity.b1tflum3", "one BitNode per process (see spec/simulator.md)"),
-    destroyW0r1dD43m0n: (): never =>
-      unmodeled("ns", "singularity.destroyW0r1dD43m0n", "one BitNode per process (see spec/simulator.md)"),
+    destroyW0r1dD43m0n: (
+      rawNextBitNode: unknown,
+      rawCbScript?: unknown,
+      rawBitNodeOptions?: unknown,
+    ): void => {
+      const nextBitNode = typeof rawNextBitNode === "string"
+        ? Number.parseFloat(rawNextBitNode)
+        : rawNextBitNode;
+      if (typeof nextBitNode !== "number" || !Number.isInteger(nextBitNode) || nextBitNode < 1 || nextBitNode > 15) {
+        throw new Error(`Invalid BitNode: '${String(rawNextBitNode)}'`);
+      }
+      const cbScript = rawCbScript
+        ? nsString("cbScript", rawCbScript).replace(/^\/+/, "")
+        : undefined;
+      const daemon = world.servers.get("w0r1d_d43m0n");
+      if (!daemon || daemon.simKind === "DarknetServer") {
+        throw new Error("WorldDaemon is not a normal server. This is a simulator bug.");
+      }
+      const hackingComplete = daemon.hasAdminRights && world.person.skills.hacking >= daemon.requiredHackingSkill;
+      if (!hackingComplete) {
+        if (world.gates.inBladeburner) {
+          return unmodeled(
+            "subsystem",
+            "Bladeburner BitNode completion",
+            "the number of completed Black Operations is not retained by this world model",
+          );
+        }
+        return;
+      }
+      // Upstream validates these inside enterBitNode(), after the completion
+      // requirements. An invalid options object is therefore unobservable
+      // while the daemon route is incomplete.
+      const bitNodeOptions = validateBitNodeOptions(rawBitNodeOptions);
+      daemon.backdoorInstalled = true;
+      deps.onBitNodeComplete?.(
+        nextBitNode,
+        cbScript,
+        bitNodeOptions,
+      );
+    },
+  };
+  const factionName = (raw: unknown): string => {
+    const name = nsString("faction", raw);
+    if (!FACTION_TABLE[name]) throw new Error(`Invalid faction name: '${name}'`);
+    return name;
+  };
+  const augmentationName = (raw: unknown): string => {
+    const name = nsString("augmentation", raw);
+    if (!AUGMENTATION_TABLE[name]) throw new Error(`Invalid augmentation name: '${name}'`);
+    return name;
   };
 
+  const guardedSingularity = Object.fromEntries(
+    Object.entries(singularity).map(([name, member]) => [
+      name,
+      typeof member === "function"
+        ? (...args: unknown[]) => {
+            requireSingularityAccess();
+            return (member as (...inner: unknown[]) => unknown)(...args);
+          }
+        : member,
+    ]),
+  );
+
   return {
-    singularity,
+    singularity: guardedSingularity,
     grafting: {
       getGraftableAugmentations: () => {
         requireGraftingAccess();

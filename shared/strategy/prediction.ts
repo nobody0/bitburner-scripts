@@ -65,24 +65,43 @@ export function predictAtLanding(
 ): PredictedState {
   const relevant = ops
     .filter((op) => op.landing <= at)
-    .sort((a, b) => a.landing - b.landing || a.opId - b.opId);
-  let sec = current.hackDifficulty;
-  let money = current.moneyAvailable;
+    .sort(compareLedgerOps);
+  let state = current;
+  for (const op of relevant) state = applyLedgerOp(ctx, statics, state, op);
+  return state;
+}
+
+/** Landing order, with opId as the deterministic tie-break. Exported so an
+ * incremental fold sorts by exactly the same key as the whole-ledger one. */
+export function compareLedgerOps(a: LedgerOp, b: LedgerOp): number {
+  return a.landing - b.landing || a.opId - b.opId;
+}
+
+/** Fold ONE op over a state. The single definition of what an in-flight
+ * operation does to its target, shared by the whole-ledger fold above and by
+ * the dispatcher's incremental cursor — a second copy would be free to drift,
+ * and the two are compared against each other by the dispatcher tests. */
+export function applyLedgerOp(
+  ctx: HackContext,
+  statics: TargetStatics,
+  state: PredictedState,
+  op: LedgerOp,
+): PredictedState {
   const maxSec = 100;
-  for (const op of relevant) {
-    if (op.kind === "hack") {
-      const percent = hackPercent(ctx, sec, statics.requiredHackingSkill);
-      const steal = Math.min(1, op.threads * percent);
-      money = Math.max(0, money * (1 - steal));
-      sec = Math.min(maxSec, sec + 0.002 * (op.fortifyThreads ?? op.threads));
-    } else if (op.kind === "grow") {
-      const k = growthLogPerThread(ctx, sec, statics.serverGrowth, 1);
-      const grown = (money + op.threads) * (k === -Infinity ? 1 : Math.exp(k * op.effectThreads));
-      money = Math.min(statics.moneyMax, grown);
-      sec = Math.min(maxSec, sec + 0.004 * (op.fortifyThreads ?? op.threads));
-    } else {
-      sec = Math.max(statics.minDifficulty, sec - weakenEffect(ctx, 1, 1) * op.effectThreads);
-    }
+  let sec = state.hackDifficulty;
+  let money = state.moneyAvailable;
+  if (op.kind === "hack") {
+    const percent = hackPercent(ctx, sec, statics.requiredHackingSkill);
+    const steal = Math.min(1, op.threads * percent);
+    money = Math.max(0, money * (1 - steal));
+    sec = Math.min(maxSec, sec + 0.002 * (op.fortifyThreads ?? op.threads));
+  } else if (op.kind === "grow") {
+    const k = growthLogPerThread(ctx, sec, statics.serverGrowth, 1);
+    const grown = (money + op.threads) * (k === -Infinity ? 1 : Math.exp(k * op.effectThreads));
+    money = Math.min(statics.moneyMax, grown);
+    sec = Math.min(maxSec, sec + 0.004 * (op.fortifyThreads ?? op.threads));
+  } else {
+    sec = Math.max(statics.minDifficulty, sec - weakenEffect(ctx, 1, 1) * op.effectThreads);
   }
   return { hackDifficulty: sec, moneyAvailable: money };
 }
@@ -94,14 +113,33 @@ export interface SizedBatch {
   weaken2Threads: number;
 }
 
+/** Re-check the only destructive operation against its predicted arrival
+ * state. Security invalidates the duration/percent solve entirely; short
+ * money instead removes the threads which would have drained the missing
+ * fraction of max money. The caller may still cap this result to an earlier
+ * planning-time size, but must never send more than this many threads. */
+export function hackThreadsAtLanding(
+  ctx: HackContext,
+  statics: TargetStatics,
+  predicted: PredictedState,
+  plannedThreads: number,
+): number | undefined {
+  if (predicted.hackDifficulty > statics.minDifficulty + PREPPED_SEC_TOLERANCE) return undefined;
+  if (statics.moneyMax <= 0 || plannedThreads <= 0) return 0;
+  const missingFraction = Math.max(0, 1 - predicted.moneyAvailable / statics.moneyMax);
+  if (missingFraction <= 0) return plannedThreads;
+  const percentPerThread = hackPercent(ctx, predicted.hackDifficulty, statics.requiredHackingSkill);
+  if (percentPerThread <= 0) return 0;
+  return Math.max(0, plannedThreads - Math.ceil(missingFraction / percentPerThread));
+}
+
 /** Resize the cached solution for the state the batch will actually land on.
  *
  * Security above the prepped tolerance at the hack's landing means the batch
  * must not launch at all (percent and duration assumptions are broken):
- * returns undefined. Otherwise the hack keeps its solved thread count (it
- * steals a FRACTION, correct at any money level) and the grow/W2 cover is
- * re-solved from the predicted post-hack money — the piece that actually
- * drifts when `isPrepped` admits 90 % money. */
+ * returns undefined. Otherwise retain the full planned H while re-solving
+ * support from the lower predicted state. H is shrunk only at its actual
+ * dispatch boundary, after its already-scheduled support has become sunk. */
 export function sizeBatchAtLanding(
   ctx: HackContext,
   statics: TargetStatics,

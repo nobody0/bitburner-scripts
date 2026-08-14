@@ -1,6 +1,6 @@
 import type { ArbitrationDigest, NeedDigest } from "../telemetry/topics/progression.ts";
 import { roundSigFigs } from "../format.ts";
-import { resolveClaims, type ArbiterResult, type Claim, type SlotState } from "./arbiter.ts";
+import { resolveClaims, type ArbiterInput, type ArbiterResult, type Claim, type SlotState } from "./arbiter.ts";
 import { needProgress, isSatisfied, postNeeds, type Need, type NeedBoard } from "./needs.ts";
 
 /** The coordination pass: one pure function from "what every feature wants
@@ -21,14 +21,16 @@ import { needProgress, isSatisfied, postNeeds, type Need, type NeedBoard } from 
 
 export interface CoordinationInput {
   now: number;
-  /** Pools to allocate: the player's spendable cash and the dodge budget. */
+  /** Fungible pool to allocate: the player's spendable cash. */
   money: number;
-  ramGb: number;
   /** The board, already posted — the caller needs it before this call to build
    *  the claim context, and passing it in rather than re-deriving it here
    *  guarantees the drivers and the claim phase saw the SAME object. */
   board: NeedBoard;
   claims: readonly Claim[];
+  expectedIncomePerSec?: ArbiterInput["expectedIncomePerSec"];
+  reinvestmentReturnPerDollarSec?: number;
+  nextStep?: ArbiterInput["nextStep"];
   /** Work-slot holder carried from the previous pass. */
   slot?: SlotState;
 }
@@ -47,8 +49,11 @@ export interface Coordination {
 export function coordinate(input: CoordinationInput): Coordination {
   const arbitration = resolveClaims({
     now: input.now,
-    pools: { money: input.money, ram: input.ramGb },
+    pools: { money: input.money },
     claims: input.claims,
+    ...(input.expectedIncomePerSec ? { expectedIncomePerSec: input.expectedIncomePerSec } : {}),
+    ...(input.reinvestmentReturnPerDollarSec !== undefined ? { reinvestmentReturnPerDollarSec: input.reinvestmentReturnPerDollarSec } : {}),
+    ...(input.nextStep ? { nextStep: input.nextStep } : {}),
     ...(input.slot ? { slot: input.slot } : {}),
   });
 
@@ -70,7 +75,7 @@ export function coordinate(input: CoordinationInput): Coordination {
  * arbitration on screen forever. A stale board outliving the feature that
  * posted it reads as "still blocked" when the truth is "nobody asked". */
 export function emptyDigest(): NonNullable<Coordination["digest"]> {
-  return { needs: [], arbitration: { grants: [], denied: [], remaining: { money: 0, ram: 0 } } };
+  return { needs: [], arbitration: { grants: [], denied: [], remaining: { money: 0 } } };
 }
 
 /** Re-exported so a caller has exactly one import for the whole pass. */
@@ -118,6 +123,7 @@ export function arbitrationDigest(result: ArbiterResult, now: number, claims: re
         amount: sig3(grant.amount),
         mode: grant.mode,
         partial: grant.partial,
+        ...(grant.marginalValue !== undefined ? { marginalValue: sig3(grant.marginalValue) } : {}),
         ...(claim ? {
           wanted: sig3(claim.amount),
           priority: claim.priority,
@@ -142,12 +148,25 @@ export function arbitrationDigest(result: ArbiterResult, now: number, claims: re
         } : {}),
       };
     }),
+    ...(result.waterlines.length > 0 ? {
+      waterlines: result.waterlines.map((waterline) => ({
+        resource: waterline.resource,
+        priority: waterline.priority,
+        lambda: sig3(waterline.lambda),
+        claimCount: waterline.claimCount,
+        pricedClaimCount: waterline.pricedClaimCount,
+      })),
+    } : {}),
+    ...(result.stepLoop.iterations > 0 || result.stepLoop.capHit
+      ? { stepLoop: result.stepLoop }
+      : {}),
+    ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     ...(result.slot
       ? { slot: { by: result.slot.by, id: result.slot.claimId, priority: result.slot.priority, heldMs: heldBucketMs(now - result.slot.since) } }
       : {}),
     ...(result.preempted
       ? { preempted: { by: result.preempted.by, id: result.preempted.claimId, heldMs: heldBucketMs(result.preempted.heldMs) } }
       : {}),
-    remaining: { money: sig3(result.remaining.money), ram: sig3(result.remaining.ram) },
+    remaining: { money: sig3(result.remaining.money) },
   };
 }

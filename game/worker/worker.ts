@@ -9,16 +9,18 @@ import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/jit.ts";
  * the descriptor and the accounting.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L275-L310 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L434-L474
  *
- * Two modes, selected by the descriptor:
+ * Three modes, selected by the descriptor:
  * - one-shot (default): perform one op, exit. Used for prep waves and shotgun.
  * - "serve": a POOLED worker with fixed kind and threads that loops over jobs
  *   from the realm mailbox, parked between jobs on a `worker_wake` resolver
  *   raced against an idle timeout. One process serves many batch ops, which
  *   collapses exec churn — the browser JavaScript-engine cost of a fresh
  *   WorkerScript + ns object + RAM recalc per op, ~5/sec at depth, forever.
+ * - "share": loop over fixed 10-second share slices until the cooperative
+ *   stop mailbox wins the race, then report workerExit.
  *
  * atExit is registered BEFORE any await, so normal completion, a kill/reset
- * teardown, or an error reports the in-flight op AND (for serve) the worker's
+ * teardown, or an error reports the in-flight op AND (for serve/share) the worker's
  * own exit, freeing the reservation. A hard browser reload simply discards the
  * whole realm, including both sides of this mailbox. The idle race uses the
  * REALM timer, which is free of Netscript RAM cost and virtualized identically
@@ -27,7 +29,7 @@ import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/jit.ts";
 
 const IDLE_MS = 5_000;
 
-function wakeDispatcher(kind: "hack" | "grow" | "weaken"): void {
+function wakeDispatcher(kind: "hack" | "grow" | "weaken" | "share"): void {
   const g = workerGlobals();
   if (kind !== "weaken") {
     signalWake(g);
@@ -74,12 +76,36 @@ export async function main(ns: NS): Promise<void> {
     return ns.weaken(target, opts);
   };
 
+  if (info.mode === "share") {
+    ns.atExit(() => {
+      g.worker_info?.delete(id);
+      g.worker_stop?.delete(id);
+      g.worker_stop_requested?.delete(id);
+      g.dispatch_done?.push({ opId: id, kind: "workerExit", target: "", threads: info.threads });
+      wakeDispatcher("share");
+    }, `share${id}`);
+    for (;;) {
+      if (g.worker_stop_requested?.delete(id)) return;
+      const stopped = new Promise<boolean>((resolve) => {
+        g.worker_stop?.set(id, () => resolve(true));
+      });
+      const shouldStop = await Promise.race([
+        ns.share().then(() => false),
+        stopped,
+      ]);
+      g.worker_stop?.delete(id);
+      if (shouldStop || !g.worker_info?.has(id)) return;
+    }
+  }
+  if (info.kind === "share") return;
+  const hgwKind = info.kind;
+
   if (info.mode !== "serve") {
     let result: number | undefined;
     ns.atExit(() => {
       g.worker_info?.delete(id);
-      g.dispatch_done?.push({ opId: id, kind: info.kind, target: info.target, threads: info.threads, result });
-      wakeDispatcher(info.kind);
+      g.dispatch_done?.push({ opId: id, kind: hgwKind, target: info.target, threads: info.threads, result });
+      wakeDispatcher(hgwKind);
     }, `op${id}`);
     result = await run(info.target, options(info));
     return;
@@ -93,10 +119,10 @@ export async function main(ns: NS): Promise<void> {
     g.worker_jobs?.delete(id);
     g.worker_wake?.delete(id);
     if (current) {
-      g.dispatch_done?.push({ opId: current.opId, kind: info.kind, target: current.target, threads: info.threads });
+      g.dispatch_done?.push({ opId: current.opId, kind: hgwKind, target: current.target, threads: info.threads });
     }
     g.dispatch_done?.push({ opId: id, kind: "workerExit", target: "", threads: info.threads });
-    wakeDispatcher(info.kind);
+    wakeDispatcher(hgwKind);
   }, `worker${id}`);
 
   for (;;) {
@@ -126,7 +152,7 @@ export async function main(ns: NS): Promise<void> {
     // reported this job — re-check liveness before reporting it again.
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91
     if (!g.worker_info?.has(id)) return;
-    g.dispatch_done?.push({ opId: job.opId, kind: info.kind, target: job.target, threads: info.threads, result });
-    wakeDispatcher(info.kind);
+    g.dispatch_done?.push({ opId: job.opId, kind: hgwKind, target: job.target, threads: info.threads, result });
+    wakeDispatcher(hgwKind);
   }
 }

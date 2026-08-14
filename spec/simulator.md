@@ -12,6 +12,28 @@ Two drivers, both driven from `sim/run.ts`:
   `SimWorld`. Narrower and older, kept because it isolates planner changes from
   driver changes.
 
+## Two performance experiment classes
+
+- `bitnode-route` runs are the only promotable speedrun evidence. Each is one
+  BitNode leg with a stable route/leg id and an entrance of either fresh BN1 or
+  a registered save checkpoint. Session manifests carry the save's exact-byte
+  SHA-256, scenario fingerprint and terminal validity/result. The entrance's
+  BitNode must equal the leg's declared BitNode. A route session is promotable
+  only when it reached the goal with `valid` fidelity.
+- `feature-scenario` runs are synthetic ideal, stress, recovery or mixed-feature
+  pressure experiments. They may use arbitrary focused worlds, but comparison
+  policy refuses to compare them with route legs and promotion rejects them.
+
+`--save <id>` replaces the profile fixture with that complete checkpoint;
+profile world fields never overwrite decoded save state. `--fresh` explicitly
+ignores a profile's default save. `--route <id>` forks lineage for a different
+BitNode completion order without changing the checkpoint registry.
+
+Pressure tests (`sim/tests/scenario-*.test.ts`) are disabled in the default
+correctness process and run with `bun run test:sim:scenarios`. That runner
+starts one Bun process per test case: long virtual-time soaks retain their assertions
+without a timeout leaving patched global clocks behind for unrelated tests.
+
 ## Time: two clocks, neither of them injected
 
 This is the constraint the whole harness is built around. Bitburner has two
@@ -27,7 +49,8 @@ independent timebases and they never synchronise:
 
 Both live *below* the script, so a clock injected into `game/` would control
 neither. Instead `sim/realm/timers.ts` replaces `setTimeout`, `setInterval`,
-`Date.now`, `new Date()` and `performance.now()` for the whole process, and
+`Date.now`, callable `Date()`, `new Date()`, `performance.now()` and
+`Math.random()` for the whole process, and
 `sim/clock.ts` becomes the event loop. `game/` is untouched.
 
 Ordering that is reproduced because code depends on it:
@@ -56,12 +79,17 @@ Ordering that is reproduced because code depends on it:
   v3.0.1 source). Both drivers share one implementation through `SimWorld.land`.
 - **RAM costs are transcribed** (`sim/ns/ram-costs.ts`) rather than vendored:
   `RamCostGenerator.ts` imports `@player` and `NSFull`, and that graph detonates
-  into the whole game. It is therefore **not** drift-detected — re-read it when
-  bumping the tag. These numbers decide which probes the runner can afford, so
+  into the whole game. Its upstream source hash is pinned alongside every
+  other handwritten simulator surface; a tag bump fails until the table is
+  re-audited and its accepted hash is updated. These numbers decide which probes the runner can afford, so
   getting them wrong makes the probe schedule fiction.
-- **Randomness**: hacking, crime and stock each use deterministic, independent
-  seeded streams. `Date.now()` is virtual, so a `(seed, profile, save)` triple
-  is fully reproducible.
+- **Randomness**: the realm and every gameplay subsystem share one deterministic
+  stream keyed by the declared run seed, preserving cross-feature
+  `Math.random` ordering. The fixed vanilla fixture uses a second, dedicated
+  world-generation stream: it consumes the authoritative initial population
+  before play and continues across later prestiges. This keeps the experimental
+  world fixed while seeds 1/2/3 still produce genuinely different gameplay. A
+  `(seed, profile, save)` triple remains fully reproducible.
 
 ## Not modelling something is a first-class result
 
@@ -84,8 +112,11 @@ Every result is also classified:
 - `invalid-for-goal` — an unmodeled call, incomplete seeded state, or script
   crash could have changed the outcome. The CLI exits non-zero for this class.
 
-`sim.meta` includes the driver, scenario class, static per-feature coverage and
-a versioned fingerprint of the complete experimental input. `sim:compare`
+`sim.meta` includes the driver, scenario class, static per-feature coverage,
+the handwritten model version, the pinned upstream commit and a fingerprint of
+the complete experimental input. Controller runs additionally name their Go
+fidelity: `action-exact` for correctness harnesses or the versioned promoted-
+arena aggregate model used by the full-route CLI. `sim:compare`
 refuses different fingerprints, drivers, scenarios, goals or gap sets, and
 refuses invalid runs unless `--allow-invalid` is supplied for diagnostics.
 
@@ -111,26 +142,46 @@ benchmarks, and the normal telemetry path when inspecting detailed decisions.
 
 ## Known gaps
 
+- `bn1-full` is the first promotable route leg and its save fixture is genuinely
+  fresh BN1. The controller harness explicitly grants active and owned SF4.3
+  to every run so an unattended speedrun can cross interactions that would
+  otherwise require manual Singularity input. This declared allowance is
+  included in `sim.meta`, scenario fingerprints and the simulator model
+  version. It grants no SF14 reward/policy advantage, and low-level `SimWorld`
+  tests remain able to exercise the real no-SF4 rules.
+
 - **One run per process.** `currentNodeMults` is module state in the vendored
   core, `game/` keeps its hacking ledger in module state, and the dodge/worker
   rendezvous lives on `globalThis`. `sim/run.ts` fans multi-seed runs out to one
   child process per seed.
+- A full-BitNode goal stops at the real `destroyW0r1dD43m0n` call and records
+  its `bitnode.reset` transition. It does not fabricate the next node's world
+  inside the completed scenario; that node starts as a separate run.
 - Controller-facing models currently cover hacking, factions, crimes,
   grafting, Hacknet and the stock lifecycle used by the shipped controller.
   Career and progression are partial; user-created stock order mutation/fills,
-  gang, corporation, Bladeburner, sleeves, Stanek and Darknet remain
-  unmodeled. Go and coding-contract rules have oracle tests but their Netscript
-  lifecycles are not wired, so they report a gap instead of returning synthetic
-  gameplay state.
+  gang, corporation, Bladeburner, sleeves and Darknet remain unmodeled.
+  Stanek's placement, charging, effects, battery and multiplier lifecycle are
+  modeled for fresh/controller worlds; gift acceptance, sleeves and
+  save-seeded gift state remain explicit gaps. Go has a controller-facing
+  lifecycle for fresh worlds. Full-route runs collapse a whole game to one
+  seeded arena-calibrated endpoint result (measured win probability, black
+  score and upstream-AI virtual duration); exact per-move mechanics remain in
+  `sim/go-arena.ts`, `sim/features/go-system.ts`'s exact mode, and their parity
+  suites. Coding
+  contracts remain oracle-only. A save-seeded Go probe fails loudly because the
+  decoder cannot reconstruct the live board and history from the current seed.
 - Unprofiled runs use the small deterministic early-game fixture. `bn1-full`
   instead generates the complete vanilla v3.0.1 foreign-server population and
-  topology from a fixed dedicated seed; `bn1-jit-stress` and
-  `jit-process-pressure` are explicitly synthetic late-game laboratories.
+  topology from a fixed dedicated seed; `jit-lategame` is an explicitly
+  synthetic high-RAM lifecycle fixture.
   Save-seeded runs use the real saved topology and live state. Scenario classes
   prevent accidental comparison of these inputs.
-- Save seeding restores supported current work and the stock market's prices,
-  forecasts, positions and cycle state. Unsupported work kinds and nonempty
-  stock order books invalidate the run rather than being silently discarded.
+- Save seeding accepts only the pinned save schema, preserves individual port
+  flags and total playtime, and restores supported current work plus stock
+  prices, forecasts, positions and cycle state. Unsupported work kinds,
+  nonempty stock order books, active gang/corporation/Bladeburner state, or any
+  sleeves invalidate the run rather than being silently advanced or discarded.
 - Cold-module compile latency is not modelled, so the simulator will not
   reproduce the desynced first batch a real cold start produces.
 - Stock's update gate reads real `Date.now()` in the game; under the virtual

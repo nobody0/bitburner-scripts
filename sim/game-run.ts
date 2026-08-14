@@ -9,7 +9,7 @@ import { Clock } from "./clock.ts";
 import type { SimPlayerOptions } from "./core/player.ts";
 import type { ServerSpec } from "./core/effects.ts";
 import { mulberry32 } from "./core/rng.ts";
-import { Engine, initialCounters } from "./engine.ts";
+import { Engine } from "./engine.ts";
 import { CrimeSystem } from "./features/crime.ts";
 import { EducationSystem } from "./features/education.ts";
 import { CompanySystem } from "./features/companies.ts";
@@ -18,20 +18,42 @@ import { FactionSystem } from "./features/factions.ts";
 import { GraftingSystem } from "./features/grafting.ts";
 import { HacknetSystem } from "./features/hacknet.ts";
 import { GoSystem } from "./features/go-system.ts";
+import { AggregateGoNeuralRuntime } from "./features/go-aggregate-runtime.ts";
+import { ShareSystem } from "./features/share.ts";
+import { StanekSystem } from "./features/stanek.ts";
 import { StockMarketSystem } from "./features/stock.ts";
 import { satisfiesAll, type SatisfyContext } from "./features/requirements.ts";
-import { DEFAULT_NETWORK, isSeededVanillaNetwork } from "./network.ts";
+import {
+  DEFAULT_NETWORK,
+  generateInitialVanillaNetworkFromRng,
+  generateVanillaNetworkFromRng,
+  isSeededVanillaNetwork,
+  VANILLA_NETWORK_SEED,
+  withDarkwebServer,
+} from "./network.ts";
 import { makeSingularity } from "./ns/singularity.ts";
 import { launch, makeSimNs, type ScriptMain, type SimNsHost } from "./ns/api.ts";
 import { ProcessTable } from "./ns/process.ts";
-import { installVirtualTime } from "./realm/timers.ts";
+import { installVirtualTime, type VirtualTime } from "./realm/timers.ts";
 import { noteUnmodeled, resetUnmodeled, setUnmodeledReporter, unmodeled, unmodeledCounts } from "./realm/unmodeled.ts";
 import { SimWorld, type GateFlags, type SimOptions } from "./world.ts";
 import { scenarioFingerprint } from "./scenario.ts";
-import { SIM_FEATURE_COVERAGE, scenarioClass, type RunValidity, type ScenarioClass } from "./fidelity.ts";
+import {
+  AGGREGATE_GO_MODEL,
+  CONTROLLER_AUTOMATION_SOURCE_FILES,
+  SIM_FEATURE_COVERAGE,
+  SIMULATOR_MODEL_VERSION,
+  SIMULATOR_VENDOR_COMMIT,
+  scenarioClass,
+  type RunValidity,
+  type ScenarioClass,
+  type GoSimulationFidelity,
+} from "./fidelity.ts";
+import type { ExperimentIdentity } from "../shared/experiment.ts";
 import { AUGMENTATION_TABLE } from "./vendor/bitburner/src/Augmentation/AugmentationTable.ts";
 import type { GameState } from "../game/lib/state.ts";
 import { gameGlobal } from "../game/lib/globals.ts";
+import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 
 /** Run the REAL game/ controller against the synthetic world.
  *
@@ -58,6 +80,7 @@ export interface GameRunOptions {
   sourceFileLevel?: number;
   homeRam?: number;
   homeCores?: number;
+  homeIp?: string;
   startingMoney?: number;
   network?: ServerSpec[];
   /** Explicit foreign-server graph. When absent, small synthetic fixtures use
@@ -69,7 +92,7 @@ export interface GameRunOptions {
   factions?: Record<string, { rep: number; favor: number }>;
   /** Synthetic equivalents of save-only invitation state. A genuinely fresh
    * world has exact zero/empty defaults. */
-  companies?: Record<string, number>;
+  companies?: Record<string, number | { rep?: number; favor?: number }>;
   bladeburnerRank?: number;
   homeFiles?: string[];
   gates?: Partial<GateFlags>;
@@ -83,12 +106,18 @@ export interface GameRunOptions {
   /** Run identity, echoed into sim.meta so a stored JSONL is self-describing. */
   profile?: string;
   saveId?: string;
+  /** Performance experiment identity. It affects comparability and artifact
+   * lineage only; it is never exposed to game/ decision code. */
+  experiment?: ExperimentIdentity;
   runId?: string;
   label?: string;
   verbose?: boolean;
   /** Exercise the telemetry-free build path. Acquisition and decisions remain
    * identical; SimWorld's authoritative records still drive goals/validity. */
   telemetry?: boolean;
+  /** Exact is the correctness lane. Full-route CLI runs use the calibrated
+   * aggregate endpoint so Bun never pretends to provide WebGPU inference. */
+  goFidelity?: GoSimulationFidelity;
   onRecord?: (line: string) => void;
   /** Optional artifact filter. Every record still reaches the goal reducer;
    * this only controls which already-observed records are serialized. */
@@ -99,6 +128,19 @@ export interface GameRunOptions {
  * never by the Source File associated with the current BitNode. */
 export function ramCostContext(bitNode: number, sourceFiles: Readonly<Record<string, number>>) {
   return { bitNode, sf4Level: sourceFiles["4"] ?? 0 };
+}
+
+/** Merge the simulator's declared automation allowance into both the active
+ * and durable Source File views. Taking the maximum preserves stronger save
+ * state and makes checkpoint replacement independent of this policy. */
+function controllerPlayerState(playerState: SimPlayerOptions | undefined): SimPlayerOptions {
+  const active = { ...(playerState?.sourceFiles ?? {}) };
+  const owned = { ...(playerState?.ownedSourceFiles ?? playerState?.sourceFiles ?? {}) };
+  for (const [sourceFile, level] of Object.entries(CONTROLLER_AUTOMATION_SOURCE_FILES)) {
+    active[sourceFile] = Math.max(active[sourceFile] ?? 0, level);
+    owned[sourceFile] = Math.max(owned[sourceFile] ?? 0, level);
+  }
+  return { ...(playerState ?? {}), sourceFiles: active, ownedSourceFiles: owned };
 }
 
 export interface GameRunResult {
@@ -160,6 +202,7 @@ export interface GameRunResult {
     progressionInstallWanted?: boolean;
     progressionInstallReady?: boolean;
     progressionInstallBlockers: string[];
+    coordinationNeeds: { by: string; kind: string; subject?: string; have: number; target: number }[];
     factionArbitration: string[];
     routeParts: { what: string; sec: number; measured: boolean }[];
     factionObjectiveRep?: number;
@@ -187,6 +230,8 @@ const REALM_SLOTS = [
   "worker_info",
   "worker_jobs",
   "worker_wake",
+  "worker_stop",
+  "worker_stop_requested",
   "dispatch_done",
   "dispatch_wake",
   "dispatch_wake_pending",
@@ -245,7 +290,13 @@ function buildResetInfo(
   };
 }
 
-export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
+async function runGameInstalled(
+  options: GameRunOptions,
+  clock: Clock,
+  virtualTime: VirtualTime,
+  random: () => number,
+  vanillaPrestigeRng?: () => number,
+): Promise<GameRunResult> {
   const { goal, seed, horizonMs, save } = options;
   const bitnode = options.bitnode ?? save?.bitnode ?? 1;
   const sourceFileLevel = options.sourceFileLevel ?? save?.sourceFileLevel ?? 0;
@@ -253,9 +304,11 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     save !== undefined,
     isSeededVanillaNetwork(options.network, options.topology),
   );
-
-  clearRealm();
-  resetUnmodeled();
+  const goFidelity = options.goFidelity ?? "action-exact";
+  // Consume the initial world's rolls. The supplied profile is that exact
+  // first world; the next call must therefore produce the first post-install
+  // regeneration rather than replaying it.
+  if (vanillaPrestigeRng) generateInitialVanillaNetworkFromRng(vanillaPrestigeRng);
 
   // Compile-time flags become runtime globals. Normal runs exercise the real
   // publish path; --perf exercises the pinned telemetry-free behavior while
@@ -264,29 +317,32 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   realm["__TELEMETRY__"] = options.telemetry ?? true;
   realm["__BUILD_ID__"] = "sim";
 
-  const clock = new Clock();
-  const virtualTime = installVirtualTime(clock);
-
   const ctx = initialContext();
   let recordCount = 0;
   const person = options.person ?? save?.person;
-  const playerState = options.playerState ?? save?.playerState;
+  const playerState = controllerPlayerState(options.playerState ?? save?.playerState);
 
   const world = new SimWorld({
     seed,
+    random,
     clock,
     bitnode,
     sourceFileLevel,
+    intelligenceOverride: save?.bitNodeOptions.intelligenceOverride,
     homeRam: goal.setup?.homeRam ?? options.homeRam ?? save?.homeRam ?? 8,
     homeCores: options.homeCores ?? save?.homeCores ?? 1,
+    homeIp: options.homeIp ?? save?.servers.find((server) => server.hostname === "home")?.ip,
+    restrictHomePCUpgrade: save?.bitNodeOptions.restrictHomePCUpgrade ?? false,
     startingMoney: goal.setup?.startingMoney ?? options.startingMoney ?? save?.startingMoney ?? 1_000,
-    network: options.network ?? DEFAULT_NETWORK,
+    network: save ? options.network ?? DEFAULT_NETWORK : withDarkwebServer(options.network ?? DEFAULT_NETWORK),
     ...(save ? { liveServers: save.servers } : {}),
     ...(person ? { person } : {}),
-    ...(playerState ? { playerState } : {}),
+    playerState,
+    ...(options.augmentationStats ? { augmentationStats: options.augmentationStats } : {}),
     runId: options.runId ?? `${options.label ?? "game"}-seed${seed}`,
     verbose: options.verbose ?? false,
     retainRecords: false,
+    totalPlaytime: save?.totalPlaytime ?? 0,
     ...(save || options.gates ? { gates: { ...save?.gates, ...options.gates } } : {}),
     onRecord: (record: LogRecord) => {
       recordCount++;
@@ -296,22 +352,57 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   });
 
   setUnmodeledReporter((report) => world.emit({ kind: "event", name: "sim.unmodeled", data: report }));
+  if (world.gates.inGang) noteUnmodeled("initial-state", "gang", "an active gang advances autonomously but is not modeled");
+  if (world.gates.hasCorporation) {
+    noteUnmodeled("initial-state", "corporation", "an active corporation advances autonomously but is not modeled");
+  }
+  if (world.gates.inBladeburner) {
+    noteUnmodeled("initial-state", "bladeburner", "an active Bladeburner division advances autonomously but is not modeled");
+  }
+  if ((save?.sleeveCount ?? 0) > 0) {
+    noteUnmodeled("initial-state", "sleeves", `${save!.sleeveCount} sleeves advance autonomously but are not modeled`);
+  }
+  if (save?.playerState.augmentations.some((augmentation) => augmentation.name === "Stanek's Gift - Genesis")) {
+    noteUnmodeled(
+      "initial-state",
+      "Stanek's Gift",
+      "the save decoder does not retain placed fragments, charge, or stored cycles",
+    );
+  }
 
   // The game's SECOND timebase, constructed AFTER the world so each feature
   // slice can hand it a subsystem that closes over real state. Order matters:
   // a subsystem cannot be wired to a world that does not exist yet, and
   // retrofitting a second timebase under models written against the first
   // would mean redoing all of them.
-  const factions = new FactionSystem(world, world.player, options.factions ?? save?.factions);
+  const share = new ShareSystem(world);
+  const factions = new FactionSystem(world, world.player, options.factions ?? save?.factions, share);
   const companies = new CompanySystem(world, world.player, options.companies ?? save?.companies);
-  const go = save ? undefined : new GoSystem(world, factions, seed);
-  const terminal = { host: "home" };
-  const hasTor = { value: false };
+  const stanek = save ? undefined : new StanekSystem(world, world.player, factions);
+  const go = save ? undefined : new GoSystem(
+    world,
+    factions,
+    random,
+    goFidelity === AGGREGATE_GO_MODEL ? "aggregate" : "exact",
+  );
+  const terminal = { host: save?.currentServer ?? "home" };
   const initialHomeFiles = new Set(
     save
       ? [START_SCRIPT, DODGE_STUB, GO_DODGE_STUB, WORKER_SCRIPT, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
       : [START_SCRIPT, DODGE_STUB, GO_DODGE_STUB, WORKER_SCRIPT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
   );
+  const permanentDarknetAccess = (): boolean => bitnode === 15 || (world.player.sourceFiles["15"] ?? 0) > 0;
+  if (permanentDarknetAccess()) {
+    noteUnmodeled(
+      "initial-state",
+      "darknet",
+      "Darknet advances autonomously on the 200 ms engine clock but is not modeled",
+    );
+  }
+  if (permanentDarknetAccess()) initialHomeFiles.add("DarkscapeNavigator.exe");
+  const hasTor = {
+    value: save?.hasTor === true || permanentDarknetAccess() || initialHomeFiles.has("DarkscapeNavigator.exe"),
+  };
   // Netburners' requirements are hacknet totals, so they have to be real
   // rather than the zeros a stub would report.
   const hacknetTotals = (): { ram: number; cores: number; levels: number } =>
@@ -344,15 +435,20 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   });
 
   const crimes = new CrimeSystem(world, world.player, world.crimeRng);
-  // The closure is invoked only after `host` is constructed, when a graft
-  // actually completes. This lets program-granting augmentations update the
-  // same home file set observed by ns.ls.
-  const grafting = new GraftingSystem(world, world.player, () => host.files.get("home")!);
+  const grafting = new GraftingSystem(world, world.player);
+  // Invoked only after `host` is constructed, when program work starts or
+  // finishes, so it observes the same home file set as ns.ls.
   const programs = new ProgramSystem(world, world.player, () => host.files.get("home")!);
   const savedWork = save?.currentWork;
   if (savedWork) {
     const focused = save?.playerState.focus ?? true;
-    if (savedWork.kind === "faction" || savedWork.kind === "company" || savedWork.kind === "crime" || savedWork.kind === "graft") {
+    if (
+      savedWork.kind === "faction"
+      || savedWork.kind === "company"
+      || savedWork.kind === "crime"
+      || savedWork.kind === "graft"
+      || savedWork.kind === "class"
+    ) {
       world.player.startWork({
         kind: savedWork.kind,
         subject: savedWork.subject,
@@ -363,6 +459,10 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
         focused,
       });
       if (savedWork.kind === "graft") grafting.restoreProgress(savedWork.unitCompleted ?? 0);
+    } else if (savedWork.kind === "createProgram") {
+      if (!programs.restore(savedWork.subject, savedWork.cyclesWorked, savedWork.unitCompleted ?? 0, focused)) {
+        noteUnmodeled("initial-state", "currentWork.createProgram", `unknown program ${savedWork.subject}`);
+      }
     } else {
       noteUnmodeled(
         "initial-state",
@@ -371,17 +471,12 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       );
     }
   }
-  // The market gets its OWN seeded stream, offset like crimeRng: sharing the HGW
-  // stream would make a price tick shift every subsequent hack roll, so two runs
-  // differing only in trading activity would diverge in their farm results and
-  // the A/B comparison would be meaningless.
-  const stockRng = mulberry32(seed + 0x517cc1b7);
   // BN8 and SF8.1 grant WSE + TIX permanently (Prestige.ts:149). SF8 specifically
   // — `sourceFileLevel` is the level of the CURRENT node's file, which only
   // implies stock access when that node IS 8.
   const sf8 = save?.sourceFiles["8"] ?? (bitnode === 8 ? sourceFileLevel : 0);
   const freeAccess = bitnode === 8 || sf8 > 0;
-  const stock = new StockMarketSystem(world, world.player, stockRng, {
+  const stock = new StockMarketSystem(world, world.player, random, {
     hasWseAccount: freeAccess || world.gates.hasWseAccount,
     hasTixApiAccess: freeAccess || world.gates.hasTixApiAccess,
     has4SData: world.gates.has4SData,
@@ -398,6 +493,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   const education = new EducationSystem(world, world.player, (name) => hacknet.hashLevels[name] ?? 0);
 
   const engine: Engine = new Engine(clock, {
+    addPlaytime: (milliseconds) => world.addPlaytime(milliseconds),
     updateOnlineScriptTimes: (cycles) => host.processes.updateOnlineTimes(cycles),
     // One work slot, so exactly one of these can be active — each returns
     // immediately unless it owns `currentWork`.
@@ -409,6 +505,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       grafting.processWork(cycles);
       programs.processWork(cycles);
     },
+    staneksGiftProcess: (cycles) => stanek?.process(cycles),
     checkFactionInvitations: () => factions.checkInvitations((reqs) => satisfiesAll(reqs, satisfyContext())),
     // The one counter that compensates for a fat catch-up tick, and the one
     // that SKIPS the faction currently being worked.
@@ -450,14 +547,30 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     for (const [hostname, neighbours] of Object.entries(save.topology)) network.set(hostname, neighbours);
   } else if (options.topology) {
     for (const [hostname, neighbours] of Object.entries(options.topology)) network.set(hostname, [...neighbours]);
+    network.set("darkweb", network.get("darkweb") ?? []);
   } else {
-    const others = [...world.servers.keys()].filter((h) => h !== "home");
+    const others = [...world.servers.values()]
+      .filter((server) => server.hostname !== "home" && server.simKind !== "DarknetServer")
+      .map((server) => server.hostname);
     network.set("home", others);
     for (const host of others) network.set(host, ["home"]);
+    if (world.servers.has("darkweb")) network.set("darkweb", []);
   }
   const prestigeNetwork = new Map(
     [...network].map(([hostname, neighbours]) => [hostname, [...neighbours]] as const),
   );
+  const connectTor = (): void => {
+    if (!world.servers.has("darkweb")) {
+      return unmodeled("subsystem", "darkweb root", "the TOR edge cannot exist without the v3.0.1 darkweb server");
+    }
+    const home = network.get("home") ?? [];
+    const darkweb = network.get("darkweb") ?? [];
+    if (!home.includes("darkweb")) home.push("darkweb");
+    if (!darkweb.includes("home")) darkweb.push("home");
+    network.set("home", home);
+    network.set("darkweb", darkweb);
+  };
+  if (hasTor.value) connectTor();
 
   const host: SimNsHost = {
     world,
@@ -490,8 +603,12 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     ),
     output: [],
     crashes: [],
+    ...(save ? { goState: null } : {}),
+    bladeburnerDisabled: save?.bitNodeOptions.disableBladeburner ?? false,
     engine,
     hacknet,
+    share,
+    ...(stanek ? { stanek } : {}),
     stock,
     singularity: makeSingularity({
       world,
@@ -513,9 +630,28 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       homeFiles: () => host.files.get("home")!,
       hasTor: () => hasTor.value,
       setTor: (value) => void (hasTor.value = value),
-      augmentationStats: options.augmentationStats,
+      augmentationStats: new Proxy({}, {
+        get: (_target, name) => typeof name === "string" ? world.augmentationStats(name) : undefined,
+      }),
       assertPrestigeSupported: () => world.assertPrestigeSupported(),
       onPrestige: (cbScript, newlyInstalled) => host.onPrestige?.(cbScript, newlyInstalled),
+      onBitNodeComplete: (nextBitNode, cbScript, bitNodeOptions) => {
+        share.reset();
+        stanek?.prestigeSourceFile();
+        world.emit({
+          kind: "event",
+          name: "bitnode.reset",
+          data: {
+            from: bitnode,
+            to: nextBitNode,
+            callback: cbScript,
+            bitNodeOptions: {
+              ...bitNodeOptions,
+              sourceFileOverrides: [...bitNodeOptions.sourceFileOverrides],
+            },
+          },
+        });
+      },
     }),
     // An augmentation install kills every process but preserves the browser
     // realm. The successor controller must detect and invalidate the stale
@@ -561,6 +697,8 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   // stale-state bugs in the install callback path.
   host.onPrestige = (cbScript, newlyInstalled): void => {
     host.processes.killAll();
+    host.processes.resetPidCounter();
+    share.reset();
     // The install destroys the cycle state immediately. Preserve the real
     // controller's final, already-held decision beside the simulated prestige
     // so cadence tuning can explain each batch instead of inferring it from
@@ -569,6 +707,13 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     const topics = gameGlobal.state?.topics;
     const progressionPlan = topics?.progression?.plan;
     const factionPlan = topics?.factions?.plan;
+    const regenerated = vanillaPrestigeRng
+      ? generateVanillaNetworkFromRng(vanillaPrestigeRng, world.servers.get("home")?.ip)
+      : undefined;
+    // Stanek and Go clear their install-reset state before applyEntropy
+    // rebuilds and reapplies both multiplier systems in that upstream order.
+    stanek?.prestigeAugmentation();
+    go?.prestigeAugmentation();
     world.prestigeAugmentation(newlyInstalled, {
       money: world.player.money,
       progression: progressionPlan
@@ -589,18 +734,27 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
             drainCeiling: factionPlan.drainCeiling,
           }
         : undefined,
-    });
+    }, regenerated?.network);
     hacknet.prestige();
     stock.prestige();
     grafting.prestige();
     programs.prestige();
-    go?.prestigeAugmentation();
-    hasTor.value = false;
+    hasTor.value = permanentDarknetAccess();
+    terminal.host = "home";
 
+    const oldHomeFiles = host.files.get("home") ?? new Set<string>();
+    const hadBitflume = oldHomeFiles.has("b1t_flum3.exe");
     const homeFiles = new Set(
-      [...(host.files.get("home") ?? [])].filter((file) => !file.toLowerCase().endsWith(".exe")),
+      [...oldHomeFiles].filter((file) =>
+        !/\.exe(?:-.*%-INC)?$/i.test(file)
+        && !/\.(?:lit|msg)$/i.test(file),
+      ),
     );
     homeFiles.add("NUKE.exe");
+    homeFiles.add("hackers-starting-handbook.lit");
+    if (hadBitflume) homeFiles.add("b1t_flum3.exe");
+    if (bitnode === 5 || (world.player.sourceFiles["5"] ?? 0) > 0) homeFiles.add("Formulas.exe");
+    if (permanentDarknetAccess()) homeFiles.add("DarkscapeNavigator.exe");
     for (const name of world.player.augmentations.keys()) {
       for (const program of AUGMENTATION_TABLE[name]?.programs ?? []) homeFiles.add(program);
     }
@@ -610,11 +764,14 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       const separator = key.indexOf("\0");
       const hostname = key.slice(0, separator);
       const filename = key.slice(separator + 1);
-      if (hostname !== "home" || filename.toLowerCase().endsWith(".exe")) host.contents.delete(key);
+      if (hostname !== "home" || !homeFiles.has(filename)) host.contents.delete(key);
     }
 
     host.network.clear();
-    for (const [hostname, neighbours] of prestigeNetwork) {
+    const resetTopology = regenerated
+      ? new Map(Object.entries(regenerated.topology).map(([hostname, neighbours]) => [hostname, [...neighbours]]))
+      : prestigeNetwork;
+    for (const [hostname, neighbours] of resetTopology) {
       if (!world.servers.has(hostname)) continue;
       host.network.set(hostname, neighbours.filter((neighbour) => world.servers.has(neighbour)));
     }
@@ -626,13 +783,12 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
         if (!daemon.includes("The-Cave")) daemon.push("The-Cave");
       }
     }
+    if (permanentDarknetAccess()) connectTor();
     host.reset = {
       ...host.reset,
       lastAugReset: virtualTime.nowMs(),
       ownedAugs: new Map(world.player.augmentations),
     };
-    Object.assign(engine.counters, initialCounters());
-
     const callback = cbScript?.replace(/^\/+/, "");
     if (!callback || !host.files.get("home")?.has(callback) || !host.scripts.has(callback)) return;
     clock.in(500, () => {
@@ -681,11 +837,16 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   host.scripts.set(START_SCRIPT, ((ns: NS) => startMain(ns, options.features)) as ScriptMain);
 
   const scenarioId = scenarioFingerprint({
+    simulatorModel: SIMULATOR_MODEL_VERSION,
+    vendorCommit: SIMULATOR_VENDOR_COMMIT,
     driver: "game",
+    experiment: options.experiment ?? null,
     goal: goal.id,
     horizonMs,
     seed,
     scenario,
+    goFidelity,
+    controllerAutomationSourceFiles: CONTROLLER_AUTOMATION_SOURCE_FILES,
     bitnode,
     sourceFileLevel,
     features: options.features ?? {},
@@ -702,6 +863,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
         sourceFileLevel: options.sourceFileLevel,
         homeRam: options.homeRam,
         homeCores: options.homeCores,
+        homeIp: options.homeIp,
         startingMoney: options.startingMoney,
         network: options.network,
         topology: options.topology,
@@ -763,9 +925,14 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
       label: options.label,
       seed,
       driver: "game",
+      ...(options.experiment !== undefined ? { experiment: options.experiment } : {}),
       scenario,
       scenarioFingerprint: scenarioId,
       coverage: SIM_FEATURE_COVERAGE,
+      simulatorModel: SIMULATOR_MODEL_VERSION,
+      vendorCommit: SIMULATOR_VENDOR_COMMIT,
+      goFidelity,
+      controllerAutomationSourceFiles: CONTROLLER_AUTOMATION_SOURCE_FILES,
       bitnode,
       features: describeOverrides(options.features),
       ...(options.saveId !== undefined ? { save: options.saveId } : {}),
@@ -797,9 +964,7 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
     // ScriptDeath after a valid result has already been emitted.
     host.processes.killAll(false);
     engine.stop();
-    virtualTime.restore();
     globalThis.WebSocket = originalWebSocket;
-    setUnmodeledReporter(undefined);
   }
 
   const reached = stoppedBecause === "goal";
@@ -902,6 +1067,13 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
           }
         : {}),
       progressionInstallBlockers: progressionPlan?.installBlockers.map((blocker) => blocker.kind) ?? [],
+      coordinationNeeds: (terminalState?.progression?.needs ?? []).map((need) => ({
+        by: need.by,
+        kind: need.kind,
+        ...(need.subject !== undefined ? { subject: need.subject } : {}),
+        have: need.have,
+        target: need.target,
+      })),
       factionArbitration: [
         ...(terminalState?.progression?.arbitration?.grants ?? [])
           .filter((grant) => grant.by === "factions")
@@ -931,6 +1103,39 @@ export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
   world.emit({ kind: "event", name: "sim.result", data: { goal: goal.id, ...result } });
   clearRealm();
   return result;
+}
+
+/** Install process-wide browser primitives around the entire construction and
+ * execution path. Setup failures are just as important as normal teardown:
+ * neither virtual Date/timers/random nor game realm slots may leak into the
+ * next test or simulation. */
+export async function runGame(options: GameRunOptions): Promise<GameRunResult> {
+  clearRealm();
+  resetUnmodeled();
+  const scenario = scenarioClass(
+    options.save !== undefined,
+    isSeededVanillaNetwork(options.network, options.topology),
+  );
+  // Experimental gameplay variance is keyed by the declared run seed. The
+  // fixed vanilla fixture has its own world-generation stream so successive
+  // prestige worlds remain exact without collapsing seeds 1/2/3 into the
+  // same stock/crime/Go/HGW random sequence.
+  const random = mulberry32(options.seed);
+  const vanillaPrestigeRng = scenario === "seeded-vanilla" ? mulberry32(VANILLA_NETWORK_SEED) : undefined;
+  const clock = new Clock();
+  const virtualTime = installVirtualTime(clock, { random });
+  const aggregateRuntime = options.goFidelity === AGGREGATE_GO_MODEL
+    ? new AggregateGoNeuralRuntime()
+    : undefined;
+  if (aggregateRuntime) setGoNeuralRuntimeForTest(aggregateRuntime);
+  try {
+    return await runGameInstalled(options, clock, virtualTime, random, vanillaPrestigeRng);
+  } finally {
+    if (aggregateRuntime) setGoNeuralRuntimeForTest();
+    setUnmodeledReporter(undefined);
+    virtualTime.restore();
+    clearRealm();
+  }
 }
 
 /** Exported for tests that want to drive the harness by hand. */

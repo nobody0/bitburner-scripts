@@ -43,6 +43,7 @@ export interface RealPrimitives {
   dateNow: () => number;
   Date: DateConstructor;
   performanceNow: () => number;
+  random: () => number;
 }
 
 export interface VirtualTime {
@@ -63,7 +64,7 @@ function virtualNow(): number {
   return active ? active.epochMs + active.clock.now() : Date.now();
 }
 
-export function installVirtualTime(clock: Clock, opts: { epochMs?: number } = {}): VirtualTime {
+export function installVirtualTime(clock: Clock, opts: { epochMs?: number; random?: () => number } = {}): VirtualTime {
   if (active) throw new Error("virtual time is already installed");
 
   const real: RealPrimitives = {
@@ -74,6 +75,7 @@ export function installVirtualTime(clock: Clock, opts: { epochMs?: number } = {}
     dateNow: Date.now,
     Date: globalThis.Date,
     performanceNow: globalThis.performance.now.bind(globalThis.performance),
+    random: Math.random,
   };
 
   const epochMs = opts.epochMs ?? DEFAULT_EPOCH_MS;
@@ -137,15 +139,18 @@ export function installVirtualTime(clock: Clock, opts: { epochMs?: number } = {}
     timers.delete(Number(id));
   }
 
-  class VirtualDate extends real.Date {
-    constructor(...args: unknown[]) {
-      if (args.length === 0) super(virtualNow());
-      else super(...(args as [number]));
-    }
-    static override now(): number {
-      return virtualNow();
-    }
-  }
+  // Date is both a constructor and a callable function. A class patch gets
+  // `new Date()` right but makes legacy `Date()` throw; Reflect.construct plus
+  // a normal function preserves both sides of the native contract.
+  const VirtualDate = function(this: unknown, ...args: unknown[]): Date | string {
+    if (!new.target) return new real.Date(virtualNow()).toString();
+    return Reflect.construct(real.Date, args.length === 0 ? [virtualNow()] : args, new.target);
+  };
+  Object.setPrototypeOf(VirtualDate, real.Date);
+  VirtualDate.prototype = Object.create(real.Date.prototype, {
+    constructor: { value: VirtualDate, writable: true, configurable: true },
+  }) as Date;
+  Object.defineProperty(VirtualDate, "now", { value: virtualNow, configurable: true });
 
   const patched = {
     setTimeout: ((cb: unknown, ms?: unknown, ...args: unknown[]) => schedule(cb, ms, args)) as unknown,
@@ -160,6 +165,7 @@ export function installVirtualTime(clock: Clock, opts: { epochMs?: number } = {}
   globalThis.clearInterval = patched.clearInterval as typeof globalThis.clearInterval;
   globalThis.Date = VirtualDate as unknown as DateConstructor;
   globalThis.performance.now = () => clock.now();
+  if (opts.random) Math.random = opts.random;
 
   return {
     clock,
@@ -172,6 +178,7 @@ export function installVirtualTime(clock: Clock, opts: { epochMs?: number } = {}
       globalThis.clearInterval = real.clearInterval;
       globalThis.Date = real.Date;
       globalThis.performance.now = real.performanceNow;
+      Math.random = real.random;
       timers.clear();
       active = undefined;
     },

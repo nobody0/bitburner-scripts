@@ -116,6 +116,13 @@ export const overviewTab: Tab = {
           { label: "goal", value: state.simResult.reached ? "reached" : "not reached" },
           { label: "stopped", value: state.simResult.stoppedBecause ?? "unknown" },
           { label: "driver", value: state.simMeta?.driver ?? "unknown" },
+          { label: "experiment", value: state.simMeta?.experiment?.class ?? "legacy" },
+          {
+            label: "entrance",
+            value: state.simMeta?.experiment?.entrance.kind === "save"
+              ? state.simMeta.experiment.entrance.saveId
+              : state.simMeta?.experiment?.entrance.kind ?? "unknown",
+          },
           { label: "scenario", value: state.simResult.scenario ?? state.simMeta?.scenario ?? "unknown" },
           { label: "seed", value: state.simMeta?.seed !== undefined ? String(state.simMeta.seed) : "unknown" },
         ])

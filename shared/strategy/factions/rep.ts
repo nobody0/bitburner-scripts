@@ -142,6 +142,19 @@ export function workRepPerSec(
   return workRepGain(type, person, favor, ctx) * penalty * 5;
 }
 
+/** Exact local work-rate slope with respect to the share bonus. All three
+ * formulas are affine in the bonus; this preserves their distinct dilution. */
+export function workRepPerSecPerShareBonus(
+  type: WorkType,
+  person: RepPerson,
+  favor: number,
+  ctx: RepContext,
+  focused: boolean,
+): number {
+  const at = (shareBonus: number) => workRepPerSec(type, person, favor, { ...ctx, shareBonus }, focused);
+  return Math.max(0, at(ctx.shareBonus + 1) - at(ctx.shareBonus));
+}
+
 /** Best work type available at a faction, and its rate. `undefined` when the
  * faction offers no work at all (Shadows of Anarchy). */
 export function bestWorkType(
@@ -181,6 +194,15 @@ export function passiveRepPerSec(person: RepPerson, favor: number, ctx: RepConte
   return bestPerCycle
     * (ctx.factionPassiveRepGain ?? 1)
     * 5;
+}
+
+/** Local passive-rate slope. The tiny right derivative retains the active
+ * max branch and the constant passive floor without duplicating that formula. */
+export function passiveRepPerSecPerShareBonus(person: RepPerson, favor: number, ctx: RepContext): number {
+  const epsilon = 1e-6;
+  const base = passiveRepPerSec(person, favor, ctx);
+  const next = passiveRepPerSec(person, favor, { ...ctx, shareBonus: ctx.shareBonus + epsilon });
+  return Math.max(0, (next - base) / epsilon);
 }
 
 /** The skill at which working a faction first beats idling on passive rep.

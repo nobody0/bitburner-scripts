@@ -153,6 +153,12 @@ export class ProcessTable {
     return this.#processes.values();
   }
 
+  /** Prestige.resetPidCounter. Safe only after every process has been killed. */
+  resetPidCounter(): void {
+    if (this.#processes.size !== 0) throw new Error("cannot reset pid counter while scripts are running");
+    this.#nextPid = 1;
+  }
+
   /** updateOnlineScriptTimes, called from the 200 ms engine cycle. */
   updateOnlineTimes(cycles: number): void {
     const seconds = cycles * 0.2;

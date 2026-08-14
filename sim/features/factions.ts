@@ -9,8 +9,10 @@ import {
   getFactionFieldWorkRepGain,
   getFactionSecurityWorkRepGain,
   getHackingWorkRepGain,
+  setReputationContext,
 } from "../vendor/bitburner/src/PersonObjects/formulas/Reputation.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
+import type { ShareSystem } from "./share.ts";
 
 /** The faction subsystem.
  *
@@ -46,10 +48,17 @@ export class FactionSystem {
   readonly factions = new Map<string, SimFaction>();
   #world: SimWorld;
   #player: SimPlayer;
+  #share: ShareSystem | undefined;
 
-  constructor(world: SimWorld, player: SimPlayer, initial: Record<string, { rep: number; favor: number }> = {}) {
+  constructor(
+    world: SimWorld,
+    player: SimPlayer,
+    initial: Record<string, { rep: number; favor: number }> = {},
+    share?: ShareSystem,
+  ) {
     this.#world = world;
     this.#player = player;
+    this.#share = share;
     for (const name of Object.keys(FACTION_TABLE)) {
       const standing = initial[name];
       this.factions.set(name, {
@@ -87,6 +96,12 @@ export class FactionSystem {
 
   get(name: string): SimFaction | undefined {
     return this.factions.get(name);
+  }
+
+  gainReputation(name: string, amount: number): void {
+    const faction = this.factions.get(name);
+    if (!faction) throw new Error("Unknown simulated faction: " + name);
+    faction.rep += amount;
   }
 
   requirements(name: string): PlayerRequirement[] {
@@ -152,6 +167,7 @@ export class FactionSystem {
    * Skips the faction currently being worked — which is what creates the
    * work-vs-idle crossover the strategy tests for. */
   passiveGain(cycles: number, workingFaction: string | undefined): void {
+    this.#setFormulaContext();
     const person = this.#world.person;
     for (const faction of this.factions.values()) {
       if (!faction.joined) continue;
@@ -171,10 +187,18 @@ export class FactionSystem {
 
   /** Reputation per cycle for one work type, from the vendored formulas. */
   workRepGain(type: SimWorkType, favor: number): number {
+    this.#setFormulaContext();
     const person = this.#world.person;
     if (type === "hacking") return getHackingWorkRepGain(person as never, favor);
     if (type === "security") return getFactionSecurityWorkRepGain(person as never, favor);
     return getFactionFieldWorkRepGain(person as never, favor);
+  }
+
+  #setFormulaContext(): void {
+    setReputationContext({
+      shareBonus: this.#share?.currentBonus() ?? 1,
+      sf15Level: this.#player.sourceFiles["15"] ?? 0,
+    });
   }
 
   /** Engine hook: `processWork(numCycles)` for faction work.

@@ -16,16 +16,29 @@ import {
   PRIORITY,
   priorityOf,
   resolveClaims,
+  STEP_LOOP_CAP,
+  waterFill,
   type ArbiterInput,
   type Claim,
+  type StepClaim,
 } from "../shared/strategy/arbiter.ts";
+import { shareCutover, type ShareValueCurve } from "../shared/strategy/share.ts";
 
 function claim(partial: Partial<Claim> & Pick<Claim, "id" | "resource" | "amount" | "priority">): Claim {
-  return { by: "factions", mode: "spend", why: "test", ...partial };
+  return { by: "factions", mode: "spend", shape: "step",
+    pricing: "hard", value: { state: "measured", value: Infinity }, why: "test", ...partial } as Claim;
 }
 
-function input(partial: Partial<ArbiterInput> & Pick<ArbiterInput, "claims">): ArbiterInput {
-  return { now: 1_000, pools: { money: 0, ram: 0 }, ...partial };
+function stepClaim(partial: Parameters<typeof claim>[0]): StepClaim {
+  return claim(partial) as StepClaim;
+}
+type TestArbiterInput = Omit<Partial<ArbiterInput>, "pools"> & Pick<ArbiterInput, "claims"> & {
+  pools?: { money: number; ram?: number };
+};
+
+function input(partial: TestArbiterInput): ArbiterInput {
+  const { pools, ...rest } = partial;
+  return { now: 1_000, pools: { money: pools?.money ?? 0 }, ...rest };
 }
 
 describe("money arbitration", () => {
@@ -68,7 +81,7 @@ describe("money arbitration", () => {
     const result = resolveClaims(
       input({
         pools: { money: 30, ram: 0 },
-        claims: [claim({ id: "levels", by: "hacknet", resource: "money", amount: 100, priority: 25, divisible: true })],
+        claims: [claim({ id: "levels", by: "hacknet", resource: "money", amount: 100, priority: 25, shape: "continuous" })],
       }),
     );
     const grant = grantFor(result, "hacknet", "levels")!;
@@ -123,22 +136,362 @@ describe("money arbitration", () => {
     expect(winners(backward)).toEqual(winners(forward));
   });
 
-  test("ram is arbitrated on the same rules as money, in its own pool", () => {
-    const result = resolveClaims(
-      input({
-        pools: { money: 0, ram: 8 },
-        claims: [
-          claim({ id: "detail", by: "gang", resource: "ram", amount: 6, priority: PRIORITY["probe:detail"] }),
-          claim({ id: "core", by: "factions", resource: "ram", amount: 5, priority: PRIORITY["probe:core"] }),
-        ],
-      }),
-    );
-    expect(grantedAmount(result, "factions", "ram")).toBe(5);
-    expect(grantedAmount(result, "gang", "ram")).toBe(0);
-    expect(result.remaining.ram).toBe(3);
+});
+
+describe("marginal-value water-filling", () => {
+  test("lambda converges and exhausts the pool for mixed linear and log curves", () => {
+    const logNumerator = 8;
+    const logSlope = 0.05;
+    const result = waterFill(80, [
+      {
+        id: "linear",
+        amount: 100,
+        curve: { marginalValueAt: (granted) => Math.max(0, 10 - 0.1 * granted) },
+      },
+      {
+        id: "log",
+        amount: 100,
+        curve: {
+          demandAt: (lambda) => lambda <= 0
+            ? 100
+            : Math.max(0, Math.min(100, (logNumerator / lambda - 1) / logSlope)),
+        },
+      },
+    ]);
+    expect(result.grants.reduce((sum, grant) => sum + grant.amount, 0)).toBeCloseTo(80, 8);
+    expect(result.remaining).toBeCloseTo(0, 8);
+    expect(result.grants[0]!.marginalValue).toBeCloseTo(result.lambda, 7);
+    expect(result.grants[1]!.marginalValue).toBeCloseTo(result.lambda, 7);
+  });
+
+  test("the general solver reproduces shareCutover's two-claimant crossing", () => {
+    const fleetGb = 100;
+    const curve: ShareValueCurve = {
+      hackMarginal: { state: "measured", value: 0.5 },
+      reputationSecondsPerBonus: 250,
+      effectiveThreadsPerGb: 1,
+    };
+    const analytic = shareCutover(curve, fleetGb, Infinity, 1e-9);
+    const result = waterFill(fleetGb, [
+      {
+        id: "share",
+        amount: fleetGb,
+        curve: {
+          // shareMarginal = k*c/(1+c*g), so g = k/lambda - 1/c.
+          demandAt: (lambda) => lambda <= 0
+            ? fleetGb
+            : Math.max(0, Math.min(fleetGb, 10 / lambda - 1)),
+        },
+      },
+      {
+        id: "hacking",
+        amount: fleetGb,
+        curve: {
+          // Re-express hackMarginalAt in hacking allocation h=fleet-share.
+          demandAt: (lambda) => lambda <= 0.5
+            ? fleetGb
+            : Math.min(fleetGb, fleetGb * Math.sqrt(0.5 / lambda)),
+        },
+      },
+    ]);
+    expect(result.grants.find((grant) => grant.id === "share")!.amount).toBeCloseTo(analytic.cutoverGb, 6);
+    expect(result.grants.reduce((sum, grant) => sum + grant.amount, 0)).toBeCloseTo(fleetGb, 8);
+  });
+
+  test("a huge divisible demand is fully resolved once, not in tiny grant increments", () => {
+    let samples = 0;
+    const result = waterFill(10_000_000_000, [{
+      id: "tiny-increments",
+      amount: 10_000_000_000,
+      curve: {
+        marginalValueAt: () => {
+          samples += 1;
+          return 1;
+        },
+      },
+    }]);
+    expect(result.grants[0]!.amount).toBe(10_000_000_000);
+    expect(result.remaining).toBe(0);
+    expect(samples).toBeLessThan(100);
+  });
+
+  test("hard bands resolve before curves, while peers share one waterline", () => {
+    const result = resolveClaims(input({
+      pools: { money: 100, ram: 0 },
+      claims: [
+        claim({ id: "hard", resource: "money", amount: 20, priority: 90 }),
+        claim({
+          id: "a",
+          by: "stock",
+          resource: "money",
+          amount: 100,
+          priority: 25,
+          shape: "continuous",
+          valueCurve: { marginalValueAt: (granted) => 10 - granted / 10 },
+        }),
+        claim({
+          id: "b",
+          by: "hacknet",
+          resource: "money",
+          amount: 100,
+          priority: 25,
+          shape: "continuous",
+          valueCurve: { marginalValueAt: (granted) => 8 - granted / 10 },
+        }),
+      ],
+    }));
+    expect(grantFor(result, "factions", "hard")?.amount).toBe(20);
+    expect(grantFor(result, "stock", "a")!.amount).toBeGreaterThan(0);
+    expect(grantFor(result, "hacknet", "b")!.amount).toBeGreaterThan(0);
+    expect(grantedAmount(result, "stock", "money") + grantedAmount(result, "hacknet", "money")).toBeCloseTo(80, 8);
+    expect(result.waterlines).toHaveLength(1);
+    expect(result.waterlines[0]).toMatchObject({ claimCount: 2, pricedClaimCount: 2 });
   });
 });
 
+describe("lumpy step pricing", () => {
+  const continuous = (marginal: number, amount = 10_000_000_000): Claim => claim({
+    by: "stock",
+    id: "continuous",
+    resource: "money",
+    amount,
+    priority: PRIORITY["income:investment"],
+    shape: "continuous",
+    valueCurve: { demandAt: (lambda) => lambda <= marginal ? amount : 0 },
+  });
+
+  test("an exact rung is bought and surplus returns to continuous claimants", () => {
+    const billion = 1_000_000_000;
+    const first = claim({
+      by: "hacking",
+      id: "home:8->16",
+      resource: "money",
+      amount: billion,
+      priority: PRIORITY["income:investment"],
+      mode: "reserve",
+      shape: "step",
+      pricing: "economic",
+      value: { state: "measured", value: 2 * billion },
+    });
+    const result = resolveClaims(input({
+      pools: { money: 2 * billion, ram: 0 },
+      claims: [first, continuous(0.5)],
+      nextStep: () => stepClaim({
+        by: "hacking",
+        id: "home:16->32",
+        resource: "money",
+        amount: 4 * billion,
+        priority: PRIORITY["income:investment"],
+        mode: "reserve",
+        shape: "step",
+        pricing: "economic",
+        value: { state: "measured", value: 0 },
+      }),
+    }));
+
+    expect(grantFor(result, "hacking", "home:8->16")?.amount).toBe(billion);
+    expect(grantedAmount(result, "stock", "money")).toBeCloseTo(billion, 2);
+    expect(result.remaining.money).toBeCloseTo(0, 2);
+  });
+
+  test("two economic features choose by value, independent of collection order", () => {
+    // This belongs at the pure boundary: the production registry has one fixed
+    // collection order, while resolveClaims is the contract that must ignore it.
+    const claims = [
+      claim({
+        by: "hacking", id: "ram", resource: "money", amount: 80,
+        priority: PRIORITY["income:investment"], shape: "step", pricing: "economic",
+        value: { state: "measured", value: 800 },
+      }),
+      claim({
+        by: "hacknet", id: "node", resource: "money", amount: 80,
+        priority: PRIORITY["income:investment"], shape: "step", pricing: "economic",
+        value: { state: "measured", value: 400 },
+      }),
+    ];
+    const winner = (ordered: Claim[]) => resolveClaims(input({ pools: { money: 80 }, claims: ordered })).grants[0]?.by;
+    expect(winner(claims)).toBe("hacking");
+    expect(winner([...claims].reverse())).toBe("hacking");
+  });
+
+  test("an install-freeze hard reserve dominates an arbitrarily valuable investment", () => {
+    // Hard safety policy is intentionally outside the economic objective. A
+    // larger modeled payoff must never spend cash frozen for an imminent reset.
+    const result = resolveClaims(input({
+      pools: { money: 100 },
+      claims: [
+        claim({
+          by: "hacknet", id: "fantastic-investment", resource: "money", amount: 100,
+          priority: PRIORITY["income:investment"], shape: "step", pricing: "economic",
+          value: { state: "measured", value: Number.MAX_VALUE },
+        }),
+        claim({
+          by: "progression", id: "install-freeze", resource: "money", amount: 100,
+          priority: PRIORITY["progression:install-freeze"], mode: "reserve",
+        }),
+      ],
+    }));
+    expect(grantFor(result, "progression", "install-freeze")?.amount).toBe(100);
+    expect(grantFor(result, "hacknet", "fantastic-investment")).toBeUndefined();
+  });
+
+  test("a tiny continuous request is fully resolved in one pass against a huge pool", () => {
+    // Pins the small-increment defect at the pure resolve boundary: observable
+    // output is one complete grant, irrespective of the solver implementation.
+    const result = resolveClaims(input({
+      pools: { money: 1_000_000_000 },
+      claims: [claim({
+        by: "hacknet", id: "tiny", resource: "money", amount: 0.001,
+        priority: PRIORITY["income:investment"], shape: "continuous",
+        valueCurve: { demandAt: () => 0.001 },
+      })],
+    }));
+    expect(grantFor(result, "hacknet", "tiny")).toMatchObject({ amount: 0.001, partial: false });
+    expect(result.remaining.money).toBeCloseTo(999_999_999.999, 6);
+  });
+
+  test("a long wait loses at the going lambda, then wins when income rises or lambda falls", () => {
+    const step = claim({
+      by: "hacking",
+      id: "rung",
+      resource: "money",
+      amount: 1_000,
+      priority: PRIORITY["income:investment"],
+      mode: "reserve",
+      shape: "step",
+      pricing: "economic",
+      value: { state: "measured", value: 600 },
+    });
+    const slow = resolveClaims(input({
+      pools: { money: 500, ram: 0 },
+      claims: [step, continuous(0.5, 1_000)],
+      expectedIncomePerSec: { state: "measured", value: 1 },
+      reinvestmentReturnPerDollarSec: 0.01,
+    }));
+    expect(grantFor(slow, "hacking", "rung")).toBeUndefined();
+    expect(grantedAmount(slow, "stock", "money")).toBeCloseTo(500, 8);
+
+    const fasterIncome = resolveClaims(input({
+      pools: { money: 500, ram: 0 },
+      claims: [step, continuous(0.5, 1_000)],
+      expectedIncomePerSec: { state: "measured", value: 1_000 },
+      reinvestmentReturnPerDollarSec: 0.01,
+    }));
+    expect(grantFor(fasterIncome, "hacking", "rung")).toMatchObject({
+      amount: 500,
+      mode: "reserve",
+      partial: true,
+    });
+
+    const lowerLambda = resolveClaims(input({
+      pools: { money: 500, ram: 0 },
+      claims: [step, continuous(0.001, 1_000)],
+      expectedIncomePerSec: { state: "measured", value: 1 },
+      reinvestmentReturnPerDollarSec: 0.01,
+    }));
+    expect(grantFor(lowerLambda, "hacking", "rung")?.mode).toBe("reserve");
+  });
+
+  test("the callback's next rung is priced against the updated pool", () => {
+    const first = claim({
+      by: "hacking",
+      id: "first",
+      resource: "money",
+      amount: 40,
+      priority: PRIORITY["income:investment"],
+      mode: "reserve",
+      shape: "step",
+      pricing: "economic",
+      value: { state: "measured", value: 40 },
+    });
+    const result = resolveClaims(input({
+      pools: { money: 100, ram: 0 },
+      claims: [
+        first,
+        claim({
+          by: "stock",
+          id: "curve",
+          resource: "money",
+          amount: 100,
+          priority: PRIORITY["income:investment"],
+          shape: "continuous",
+          valueCurve: { marginalValueAt: (granted) => 10 - granted / 10 },
+        }),
+      ],
+      nextStep: () => stepClaim({
+        by: "hacking",
+        id: "second",
+        resource: "money",
+        amount: 40,
+        priority: PRIORITY["income:investment"],
+        mode: "reserve",
+        shape: "step",
+        pricing: "economic",
+        value: { state: "measured", value: 80 },
+      }),
+    }));
+
+    expect(grantFor(result, "hacking", "first")?.amount).toBe(40);
+    expect(grantFor(result, "hacking", "second")).toBeUndefined();
+    expect(grantedAmount(result, "stock", "money")).toBeCloseTo(60, 8);
+    expect(result.waterlines[0]?.lambda).toBeCloseTo(4, 7);
+  });
+
+  test("the callback loop is bounded and reports a cap hit", () => {
+    let rung = 0;
+    const result = resolveClaims(input({
+      pools: { money: 100, ram: 0 },
+      claims: [claim({
+        by: "hacking",
+        id: "rung:0",
+        resource: "money",
+        amount: 1,
+        priority: PRIORITY["income:investment"],
+        shape: "step",
+        pricing: "economic",
+        value: { state: "measured", value: 100 },
+      })],
+      nextStep: () => stepClaim({
+        by: "hacking",
+        id: "rung:" + (++rung),
+        resource: "money",
+        amount: 1,
+        priority: PRIORITY["income:investment"],
+        shape: "step",
+        pricing: "economic",
+        value: { state: "measured", value: 100 },
+      }),
+    }));
+
+    expect(result.stepLoop).toEqual({ iterations: STEP_LOOP_CAP, cap: STEP_LOOP_CAP, capHit: true });
+    expect(result.grants).toHaveLength(STEP_LOOP_CAP);
+    expect(result.warnings[0]).toContain("step loop hit cap");
+  });
+
+  test("unknown income cannot masquerade as zero wait", () => {
+    const result = resolveClaims(input({
+      pools: { money: 500, ram: 0 },
+      claims: [
+        claim({
+          by: "hacking",
+          id: "unknown-wait",
+          resource: "money",
+          amount: 1_000,
+          priority: PRIORITY["income:investment"],
+          mode: "reserve",
+          shape: "step",
+          pricing: "economic",
+          value: { state: "measured", value: 10_000 },
+        }),
+        continuous(0.01, 1_000),
+      ],
+      expectedIncomePerSec: { state: "unknown", reason: "no measured income" },
+      reinvestmentReturnPerDollarSec: 0.01,
+    }));
+    expect(grantFor(result, "hacking", "unknown-wait")).toBeUndefined();
+    expect(grantedAmount(result, "stock", "money")).toBeCloseTo(500, 8);
+  });
+});
 describe("the player-time slot", () => {
   const work = (id: string, by: Claim["by"], priority: number, extra: Partial<Claim> = {}) =>
     claim({ id, by, resource: "time", amount: 1, priority, ...extra });
@@ -223,7 +576,7 @@ describe("arbiter shape", () => {
     const claims = [claim({ id: "a", resource: "money", amount: 10, priority: 5 })];
     const args = input({ pools: { money: 10, ram: 0 }, claims });
     resolveClaims(args);
-    expect(args.pools).toEqual({ money: 10, ram: 0 });
+    expect(args.pools).toEqual({ money: 10 });
     expect(args.claims).toEqual(claims);
   });
 
@@ -348,7 +701,7 @@ describe("the imminent-install band sits where the endgame needs it", () => {
           amount: 100,
           priority: PRIORITY["progression:imminent-install"],
           mode: "reserve",
-          divisible: true,
+          shape: "continuous",
         }),
         claim({
           id: "port-opener",
@@ -366,14 +719,21 @@ describe("the imminent-install band sits where the endgame needs it", () => {
 });
 
 describe("cross-feature investments", () => {
-  test("cash-goal crossover caps ideal marginal RAM by observed fleet throughput", () => {
+  test("cash-goal crossover caps ideal marginal RAM by whole-fleet throughput", () => {
     const [capped] = capInfrastructureByObservedFleet([{
       kind: "buyServer",
       cost: 440_000,
       addedRam: 8,
       incomePerSec: 6_300,
-    }], 5_400, 580);
-    expect(capped?.incomePerSec).toBeCloseTo(5_400 / 580 * 8, 10);
+    }], 5_400);
+    expect(capped?.incomePerSec).toBe(5_400);
+  });
+
+  test("observed throughput preserves a modelled core gain", () => {
+    const [capped] = capInfrastructureByObservedFleet([
+      { kind: "homeCore", cost: 500_000, addedRam: 0, incomePerSec: 250 },
+    ], 5_400);
+    expect(capped?.incomePerSec).toBe(250);
   });
 
   test("a wanted paid prerequisite waits behind a blocking cash milestone", () => {
@@ -408,6 +768,21 @@ describe("cross-feature investments", () => {
     expect(infrastructureBeforeMoneyNeeds([fast], 15_000_000, 1_000, [sector12])).toEqual([]);
     expect(infrastructureBeforeMoneyNeeds([fast], 20_000_000, 1_000, [{ ...sector12, urgency: "wanted" }])).toEqual([fast]);
     expect(infrastructureBeforeMoneyNeeds([fast], 20_000_000, 1_000, [])).toEqual([fast]);
+  });
+
+  test("cash crossover preserves the modelled quote used for ROI ranking", () => {
+    const modelled = { kind: "buyServer" as const, cost: 440_000, addedRam: 8, incomePerSec: 3_840 };
+    const need = {
+      by: "factions" as const,
+      kind: "money" as const,
+      target: 15_000_000,
+      have: 5_000_000,
+      weight: 1,
+      urgency: "blocking" as const,
+      why: "Sector-12 invitation",
+    };
+    const [eligible] = infrastructureBeforeMoneyNeeds([modelled], 5_000_000, 100, [need], true);
+    expect(eligible).toEqual(modelled);
   });
 
   test("home RAM is rejected when its payoff is beyond the run horizon", () => {

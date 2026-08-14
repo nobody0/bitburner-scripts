@@ -1,12 +1,25 @@
 # Working in bitburner-scripts
 
 This is a clean-sheet Bitburner automation project. The predecessor scripts
-(`nobody01/bitburnerscript@2023`, commit `43e8585`)
-are inspiration only: do not copy their history, and explicitly do not copy
-their architecture — a 1621-line `main()` coordinating every subsystem through a
-mutable `globalThis.globalState` is the shape this repository exists to replace.
+(`nobody01/bitburnerscript`) are inspiration only: do not copy their history,
+and explicitly do not copy their architecture — a 1621-line `main()`
+coordinating every subsystem through a mutable `globalThis.globalState` is the
+shape this repository exists to replace.
+
+**Two branches of that repository are checked out and they are not
+interchangeable.** Cite the branch explicitly; never write "the predecessor
+scripts on disk".
+
+- `@master` (`dc0720b`) — **the batcher reference**. Any HWGW/JIT scheduling,
+  timing, pooling or batch-economics claim cites
+  `servers/home/imports/batchPlanner.ts` or `batchRunner.ts`. See
+  `spec/jit-reference.md`.
+- `@2023` (`43e8585`) — everything else: factions, augmentations, progression,
+  stock, the `stubCall` dodger. Its `src/_lib/batchers/jit.ts` is **unwired
+  work-in-progress**; do not cite it as proven for anything.
+
 Designs credited to "an earlier rewrite" (`nobody0/bitburner`) refer to a
-different, abandoned repository that is no longer checked out; see the citation
+third, abandoned repository that is no longer checked out; see the citation
 note in `README.md`.
 
 - Author game scripts in `game/` as TypeScript; only `game/` is ever synced to

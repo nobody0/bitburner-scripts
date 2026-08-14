@@ -9,7 +9,7 @@ import {
   type HackContext,
 } from "../formulas.ts";
 import { WORKER_RAM } from "../world.ts";
-import { HGW_MIN_INTERVAL_MS, HWGW_MIN_INTERVAL_MS } from "./jit.ts";
+import { HGW_MIN_INTERVAL_MS, HWGW_MIN_INTERVAL_MS, THREAD_WEAKEN_UPSCALE } from "./jit.ts";
 
 /** Per-target strategy solve — the inner half of "find the optimal target".
  * Pure math on shared/formulas.ts. Small domains are exhaustively searched;
@@ -20,7 +20,7 @@ import { HGW_MIN_INTERVAL_MS, HWGW_MIN_INTERVAL_MS } from "./jit.ts";
  * right unit for a RAM-bound dispatcher. The insight came from an earlier
  * rewrite's `analyze-profit.js` (`nobody0/bitburner`, no longer checked out —
  * see README's citation note); we compute it with exact thread counts instead
- * of its log-approximation. The predecessor scripts on disk score differently
+ * of its log-approximation. The `@2023` predecessor scores differently
  * and arguably better — `src/_lib/optimizer.ts:123` weights money per thread by
  * op duration, `(moneyHack + moneyStocks)·hackChance / (1 + growPerHack·3.2 +
  * weakPerHack·4) / hackTime`, which prices grow and weaken holding RAM longer.
@@ -166,6 +166,22 @@ interface CycleEval {
   ram: number;
 }
 
+/** Weaken threads for an exact requirement, plus ordering insurance
+ * (THREAD_WEAKEN_UPSCALE).
+ *
+ * The insurance is added, not multiplied, and the distinction is load-bearing.
+ * The reference carries fractional thread counts, so `x * 1.001` really is
+ * +0.1%; ours are integers behind a ceil, where `ceil(x * 1.001)` becomes a
+ * whole extra thread whenever x is near-integral — +20% on a five-thread
+ * weaken. Because role RAM reaches chooseJitSchedule through
+ * `ceil(holdMs / interval)`, that is not a rounding detail: measured on a
+ * 256 GB fleet, one extra thread crossed a quantization boundary and doubled
+ * the batch interval. `ceil` alone already covers the sub-thread residue at
+ * small counts; the proportional term engages once 0.1% is a real thread. */
+function weakenThreadsFor(exact: number): number {
+  return Math.ceil(exact) + Math.floor(exact * (THREAD_WEAKEN_UPSCALE - 1));
+}
+
 const GOLDEN = (Math.sqrt(5) - 1) / 2;
 /** Steal-fraction ceiling; exported so the score bounds (bounds.ts) share the
  * solver's exact thread-domain edge instead of re-declaring it. */
@@ -255,11 +271,11 @@ export function solveCycle(
     if (growK === -Infinity) return undefined;
     const growThreadCount = growThreads(growK, moneyMax, postHack, moneyMax);
     if (!Number.isFinite(growThreadCount)) return undefined;
-    const weaken1 = kind === "hgw" ? 0 : Math.ceil((0.002 * hackThreads) / weakenPerThread);
+    const weaken1 = kind === "hgw" ? 0 : weakenThreadsFor((0.002 * hackThreads) / weakenPerThread);
     const weaken2 =
       kind === "hgw"
-        ? Math.ceil((0.002 * hackThreads + 0.004 * growThreadCount) / weakenPerThread)
-        : Math.ceil((0.004 * growThreadCount) / weakenPerThread);
+        ? weakenThreadsFor((0.002 * hackThreads + 0.004 * growThreadCount) / weakenPerThread)
+        : weakenThreadsFor((0.004 * growThreadCount) / weakenPerThread);
     // ScriptHackMoneyGain, NOT ScriptHackMoney: the latter is already folded
     // into `percent` (and therefore `steal`, which sizes the grow). This is the
     // player's cut of what was drained, and it is 0 in BN8 — where the farm
@@ -476,7 +492,10 @@ export function solvePrep(
   const k = growthLogPerThread(ctx, statics.minDifficulty, statics.serverGrowth, cores);
   const grow = statics.moneyMax > 0 ? growThreads(k, statics.moneyMax, current.moneyAvailable, statics.moneyMax) : 0;
   const growCount = Number.isFinite(grow) ? grow : 0;
-  const weaken2Threads = Math.ceil((0.004 * growCount) / weakenPerThread);
+  // Same ordering insurance as the cycle solve: this weaken is paired with a
+  // grow and must still cover it if the two land out of order. W1 needs no
+  // upscale — it is sized from an exact observed security excess.
+  const weaken2Threads = weakenThreadsFor((0.004 * growCount) / weakenPerThread);
 
   const hackTimeAtMin = hackTimeSeconds(ctx, statics.minDifficulty, statics.requiredHackingSkill);
   const weaken1RamSec = weakenTimeS * WORKER_RAM.weaken * weaken1Threads;
