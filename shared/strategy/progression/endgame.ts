@@ -56,6 +56,12 @@ export const GANG_FACTIONS = [
  * requirement, never a BN1 count. */
 export const DAEDALUS_FINAL_BATCH_FRACTION = 1 / 3;
 export const DAEDALUS_LATE_BATCH_PROGRESS_FRACTION = 1 / 2;
+/** Before consolidation, accept a smaller partial tranche: half the progress
+ * demanded once resets become expensive. This is derived from the route's
+ * phase policy and scales with the live requirement, independent of any
+ * observed run, fixed catalog or purchase-price milestone. */
+export const DAEDALUS_EARLY_BATCH_PROGRESS_FRACTION =
+  DAEDALUS_LATE_BATCH_PROGRESS_FRACTION / 2;
 /** In the closing quarter, another partial reset only creates another cold
  * bootstrap before the same discrete gate. Finish the remaining unique slots
  * in one transaction so execution matches the route ETA's final package. */

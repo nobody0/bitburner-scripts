@@ -156,6 +156,11 @@ export interface ProgressionPlan {
   installArmedAt?: number;
   /** Exact queue the armed transaction revalidates before executing. */
   queuedAugmentations: string[];
+  /** Rep-met, jointly affordable one-shot names whose value armed an optional
+   * install. Factions freezes these into the final sweep so execution cannot
+   * substitute a smaller, differently weighted set. NeuroFlux is omitted: the
+   * sweep prices its repeatable ladder separately. */
+  installFundedAugmentations?: string[];
   install: boolean;
   /** Factions that would cross the donation threshold on install — the
    *  strongest single argument for resetting now. */

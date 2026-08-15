@@ -176,6 +176,10 @@ export interface InstallForecastView {
   /** Remaining time for reset-activated value to reach the renewal cadence
    * threshold. A package breakpoint is not automatically an install. */
   cadenceSec?: number;
+  /** A finite-count route may require a substantial funded tranche even after
+   * the generic economic cadence crosses. There is no honest ETA until the
+   * planner can forecast that discrete set. */
+  countCadenceReady?: boolean;
   /** Whether the selected route can survive an economic reset right now. */
   optionalInstallAllowed?: boolean;
   /** Earliest reset imposed by the selected route. */
@@ -234,6 +238,13 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
     return mandatoryComponents
       ? estimatedForecast(now, basis, mandatoryComponents)
       : unknownForecast(now, basis, "the selected route stage forbids an optional install");
+  }
+  if (view.countCadenceReady === false) {
+    return unknownForecast(
+      now,
+      basis,
+      "the funded augmentation set has not reached the route's reset tranche",
+    );
   }
   if (!intent) {
     if (view.queuedCount > 0 && view.phase === "ending") {

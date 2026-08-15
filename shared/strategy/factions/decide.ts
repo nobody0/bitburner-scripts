@@ -357,9 +357,11 @@ function decideFactions(
   // banked The Red Pill, an optional wish list must not hold the terminal reset
   // hostage.  Require the route-critical dependency closure to fit, then let
   // the final-sweep solver freeze the best affordable subset of the rest.
-  // Ordinary (non-terminal) packages retain the stronger all-banked-items gate:
-  // cadence selected those as the base package, so silently dropping one would
-  // make its renewal calculation describe different work from what we buy.
+  // For ordinary packages progression prices the same jointly affordable
+  // subset the final sweep will freeze. Requiring every reputation-banked name
+  // to fit instead deadlocks whenever one more 1.9x slot is unaffordable: the
+  // cadence requests a valid partial reset while factions waits for the entire
+  // bank. Terminal route dependencies retain the stronger closure gate below.
   const terminalBanked = (view.route === "daedalus" || view.route === "gang")
     && bankedAugmentations.has("The Red Pill");
   const terminalRequired = terminalBanked
@@ -727,11 +729,14 @@ function decideFactions(
       || view.routeInstallRequired === true
       || view.queued.size > 0
       || drainLatched;
-    const recommendation = (view.installRequested && !activePackageInFlight && bankedFunded && bankedAugmentations.size > 0
+    const recommendation = (view.installRequested
+        && !activePackageInFlight
+        && bankedAugmentations.size > 0
+        && (terminalRequired.length === 0 || bankedFunded)
         ? {
             why: terminalRequired.length > 0
               ? "the end-loaded route-critical package is reputation-complete and funded; freeze the best affordable sweep"
-              : "the end-loaded base package is reputation-complete and fully funded",
+              : "progression requested the reset; freeze the best jointly affordable subset of the reputation-complete bank",
             augmentations: [...bankedAugmentations],
           }
         : undefined)
@@ -770,8 +775,17 @@ function decideFactions(
     // cash on hand) — or when the remaining node cannot repay it. One-shot
     // augmentations keep nextPurchase's own patience rules (hold only while
     // liquidation proceeds with a settlement date cover the gap).
+    const cadenceRequired = view.routeInstallRequired === true
+      ? []
+      : (view.installFundedAugmentations ?? []).filter(
+          (name) => name !== NEUROFLUX && !view.owned.has(name),
+        );
     const proposedSweep = recommendation
-      ? finalSweepWanted(view, proposedCeiling ?? Infinity, terminalRequired)
+      ? finalSweepWanted(
+          view,
+          proposedCeiling ?? Infinity,
+          [...terminalRequired, ...cadenceRequired],
+        )
       : [];
     const startNfgLevel = memory.drainStartNeurofluxLevel ?? view.priceContext.neurofluxLevel;
     let consumedNfg = Math.max(0, view.priceContext.neurofluxLevel - startNfgLevel);

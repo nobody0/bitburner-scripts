@@ -30,6 +30,7 @@ import {
   bestOrdering,
   favorCrossings,
   installCadencePushRate,
+  installCadenceRemainingSec,
   installVerdict,
   routeCountInstallValue,
   orderingCost,
@@ -1030,6 +1031,24 @@ describe("progression", () => {
     expect(rate).toBeLessThan(0.001);
   });
 
+  test("cadence ETA follows a bootstrap overhead that keeps growing", () => {
+    const remaining = installCadenceRemainingSec({
+      runSec: 1_000,
+      resetValueMult: 0.5,
+      pushMarginalRate: 0.001,
+      bootstrapExponent: 2,
+    });
+    const fixedThreshold = Math.sqrt(2 * 500 * 0.001) * PUSH_MARGIN;
+    const fixedThresholdSec = (fixedThreshold - 0.5) / 0.001;
+
+    expect(remaining).toBeDefined();
+    expect(remaining!).toBeGreaterThan(fixedThresholdSec);
+    const futureRunSec = 1_000 + remaining!;
+    const futureValue = 0.5 + 0.001 * remaining!;
+    const futureThreshold = Math.sqrt(2 * (futureRunSec / 2) * 0.001) * PUSH_MARGIN;
+    expect(futureValue).toBeCloseTo(futureThreshold, 9);
+  });
+
   test("a zero speed slope keeps count-only route progress on the observed cadence", () => {
     const rate = installCadencePushRate({
       runSec: 5_400,
@@ -1065,9 +1084,15 @@ describe("progression", () => {
   });
 
   test("a consolidation-sized count tranche has route value without reopening tiny resets", () => {
-    expect(earlyCountBatchAllowed(30, 1, 2)).toBe(false);
-    expect(earlyCountBatchAllowed(30, 1, 10)).toBe(true);
-    expect(earlyCountBatchAllowed(30, 6, 8)).toBe(true);
+    expect(earlyCountBatchAllowed(30, 1, 7)).toBe(false);
+    expect(earlyCountBatchAllowed(30, 1, 8)).toBe(true);
+    expect(earlyCountBatchAllowed(30, 6, 6)).toBe(true);
+    // The same fractional rule scales with other live route requirements; it
+    // does not encode BN1's 30-slot gate or a particular observed package.
+    expect(earlyCountBatchAllowed(20, 0, 4)).toBe(false);
+    expect(earlyCountBatchAllowed(20, 0, 5)).toBe(true);
+    expect(earlyCountBatchAllowed(35, 5, 7)).toBe(false);
+    expect(earlyCountBatchAllowed(35, 5, 8)).toBe(true);
     expect(routeCountInstallValue({
       required: 30,
       installed: 13,

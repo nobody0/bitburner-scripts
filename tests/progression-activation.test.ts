@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import {
+  activationCatalog,
   countClosureAffordable,
   countSlotValueFor,
   fundedActivationBatch,
   routeCountVerdict,
   type ActivationOffer,
 } from "../shared/strategy/progression/activation.ts";
-import { defaultWeights, totalCost, type PriceContext } from "../shared/strategy/factions/augs.ts";
+import { defaultWeights, NEUROFLUX, scoreAug, totalCost, type PriceContext } from "../shared/strategy/factions/augs.ts";
 import { AUGMENTATIONS } from "../shared/features/augmentations.ts";
 
 const CTX: PriceContext = {
@@ -29,6 +30,29 @@ function offersFor(names: readonly string[], faction = "CyberSec"): ActivationOf
 }
 
 describe("reset-activated bankroll value", () => {
+  test("the funded set starts with the highest augmentation value per dollar", () => {
+    const names = [BITWIRE, SYNAPTIC, CSP1];
+    const weights = defaultWeights();
+    const ranked = [...activationCatalog(names).values()].sort((a, b) =>
+      a.baseCost / Math.max(1e-9, scoreAug(a, weights))
+      - b.baseCost / Math.max(1e-9, scoreAug(b, weights)),
+    );
+    const best = ranked[0]!;
+
+    const batch = fundedActivationBatch({
+      realizable: names,
+      offers: offersFor(names),
+      joined: new Set(["CyberSec"]),
+      owned: new Set(),
+      weights,
+      countSlotValue: 0,
+      ctx: CTX,
+      money: best.baseCost,
+    });
+
+    expect(batch.map((candidate) => candidate.name)).toEqual([best.name]);
+  });
+
   test("the funded batch pays the queue escalation, not the sum of sticker prices", () => {
     const names = [BITWIRE, SYNAPTIC, CSP1];
     const sticker = names.reduce((sum, name) => sum + AUGMENTATIONS[name]!.cost, 0);
@@ -74,6 +98,25 @@ describe("reset-activated bankroll value", () => {
       ...base,
       offers: offersFor(names).map((offer) => ({ ...offer, affordableRep: false })),
     })).toHaveLength(0);
+  });
+
+  test("the first countable NeuroFlux level can fill one funded route slot", () => {
+    const base = {
+      realizable: [NEUROFLUX],
+      offers: offersFor([NEUROFLUX]),
+      joined: new Set(["CyberSec"]),
+      owned: new Set<string>(),
+      weights: defaultWeights(),
+      countSlotValue: 1,
+      ctx: CTX,
+      money: 1e12,
+    };
+
+    // Off a finite-count route NFG remains excluded from the one-shot value
+    // search. On that route its first level is one permanent distinct name.
+    expect(fundedActivationBatch(base)).toHaveLength(0);
+    expect(fundedActivationBatch({ ...base, neurofluxCountable: true }))
+      .toMatchObject([{ name: NEUROFLUX }]);
   });
 
   test("the count closure answers on the escalated price of the whole set", () => {

@@ -347,6 +347,26 @@ describe("anchored uncapped forecasts", () => {
     }, "cadence");
     expect(cadenceHeld).toMatchObject({ state: "estimated", remainingSec: 960 });
 
+    const trancheHeld = installForecast(0, {
+      installNow: false,
+      queuedCount: 0,
+      phase: "start",
+      workMeasured: true,
+      moneyMeasured: true,
+      finalSweepReady: false,
+      cadenceSec: 0,
+      countCadenceReady: false,
+      intent: {
+        faction: "CyberSec", repTarget: 100, augmentations: ["a"], value: 1, etaSec: 1, rate: 1,
+        marginalRate: 1, unlockSec: 0, repSec: 0, moneySec: 0, favorAfterInstall: 0,
+        totalCost: 1, purchaseCost: 1, donationCost: 0, purpose: "augmentations",
+      },
+    }, "count tranche");
+    expect(trancheHeld).toMatchObject({
+      state: "unknown",
+      reason: "the funded augmentation set has not reached the route's reset tranche",
+    });
+
     const committed = installForecast(0, {
       installNow: false,
       installWanted: true,

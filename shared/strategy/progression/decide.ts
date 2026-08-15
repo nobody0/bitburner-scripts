@@ -2,6 +2,7 @@ import { formatScientific } from "../../format.ts";
 import { countSlotWeight } from "../factions/augs.ts";
 import { addRepToFavor } from "../factions/rep.ts";
 import { BITNODE_SPEEDRUN_PLAN } from "./bitnode-order.ts";
+import { DAEDALUS_EARLY_BATCH_PROGRESS_FRACTION } from "./endgame.ts";
 import { INSTALL_OVERHEAD_SEC } from "./eta.ts";
 
 /** Progression: install timing, reset cadence and BitNode ordering.
@@ -22,11 +23,15 @@ import { INSTALL_OVERHEAD_SEC } from "./eta.ts";
 
 export type RunPhase = "start" | "finishUp" | "ending";
 
-/** Require early count-only installs to bank a target-relative tranche. */
+/** Require early count-only installs to bank a target-relative tranche. The
+ * fraction comes from the route phase policy, rather than a node-specific
+ * augmentation count or observed purchase threshold. */
 export function earlyCountBatchAllowed(required: number, installed: number, fundedDistinct: number): boolean {
   if (!(required > 0) || installed >= required) return false;
   return Math.max(0, Math.floor(fundedDistinct))
-    >= Math.ceil((required - Math.max(0, installed)) / 3);
+    >= Math.ceil(
+      (required - Math.max(0, installed)) * DAEDALUS_EARLY_BATCH_PROGRESS_FRACTION,
+    );
 }
 
 /** Persistent value of installing a sufficiently large partial tranche toward
@@ -249,6 +254,49 @@ export function installVerdict(view: {
     threshold,
     why: `accrued value ${formatScientific(accrued)} below the cadence threshold ${formatScientific(threshold)} at push rate ${formatScientific(pushRate)}/s`,
   };
+}
+
+/** Forecast the cadence crossing while preserving the measured bootstrap
+ * shape used by {@link installVerdict}.
+ *
+ * A convex cumulative-money curve makes the equivalent reset delay grow as
+ * `runSec * (1 - 1 / exponent)`. Holding today's threshold fixed therefore
+ * predicts a crossing too early. Freeze the measured exponent and push rate,
+ * then solve the resulting linear-value / square-root-threshold intersection.
+ * This is still an estimate, but it forecasts the same model the next verdict
+ * will evaluate instead of a threshold that cannot remain fixed. */
+export function installCadenceRemainingSec(view: {
+  runSec: number;
+  resetValueMult: number;
+  pushMarginalRate?: number;
+  bootstrapExponent?: number;
+}): number | undefined {
+  const pushRate = view.pushMarginalRate;
+  if (pushRate === undefined || !Number.isFinite(pushRate) || pushRate < 0) return undefined;
+  if (pushRate === 0) return 0;
+
+  const runSec = Math.max(0, view.runSec);
+  const accrued = Math.max(0, view.resetValueMult);
+  const exponent = Math.max(1, view.bootstrapExponent ?? 1);
+  const overheadSlope = exponent > 1 ? 1 - 1 / exponent : 0;
+  const currentOverhead = Math.max(INSTALL_VERDICT_OVERHEAD_SEC, overheadSlope * runSec);
+  const currentThreshold = Math.sqrt(2 * currentOverhead * pushRate) * PUSH_MARGIN;
+  if (accrued >= currentThreshold) return 0;
+
+  const fixedCrossingSec = (currentThreshold - accrued) / pushRate;
+  if (overheadSlope <= 0) return fixedCrossingSec;
+
+  const dynamicStartsAt = INSTALL_VERDICT_OVERHEAD_SEC / overheadSlope;
+  if (runSec + fixedCrossingSec <= dynamicStartsAt) return fixedCrossingSec;
+
+  // (accrued + rate*x)^2 = 2 * margin^2 * rate * slope * (runSec + x)
+  const dynamicScale = 2 * PUSH_MARGIN * PUSH_MARGIN * pushRate * overheadSlope;
+  const a = pushRate * pushRate;
+  const b = 2 * accrued * pushRate - dynamicScale;
+  const c = accrued * accrued - dynamicScale * runSec;
+  const discriminant = Math.max(0, b * b - 4 * a * c);
+  const crossingSec = (-b + Math.sqrt(discriminant)) / (2 * a);
+  return Number.isFinite(crossingSec) ? Math.max(0, crossingSec) : undefined;
 }
 
 export function phaseOf(view: ProgressionView): RunPhase {

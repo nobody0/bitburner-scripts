@@ -55,7 +55,7 @@ import { sfLevel } from "../../../shared/features/unlock.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs, nextGoTurnTiming } from "../../../shared/strategy/go/rng.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
-import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
+import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installCadenceRemainingSec, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
 import {
   DAEDALUS_COMBAT,
   GANG_FACTIONS,
@@ -2262,6 +2262,7 @@ function progressionRefresh(ctx: NeedContext): void {
     owned: activationOwned,
     weights: verdictWeights,
     countSlotValue: countSlotValueFor(daedalusRequired ?? Infinity, view.augCount),
+    neurofluxCountable: daedalusRequired !== undefined && !activationOwned.has(NEUROFLUX),
     ctx: activationPriceContext,
     money: sweepBudget,
   });
@@ -2478,12 +2479,12 @@ function progressionRefresh(ctx: NeedContext): void {
     progressionMemory.installQueueKey = undefined;
   }
   const armedAt = progressionMemory.installArmedAt;
-  const cadenceRemainingSec =
-    rawVerdict.pushRate !== undefined
-    && rawVerdict.pushRate > 0
-    && rawVerdict.threshold !== undefined
-      ? Math.max(0, (rawVerdict.threshold - resetValueMult) / rawVerdict.pushRate)
-      : undefined;
+  const cadenceRemainingSec = installCadenceRemainingSec({
+    runSec,
+    resetValueMult,
+    ...(rawVerdict.pushRate !== undefined ? { pushMarginalRate: rawVerdict.pushRate } : {}),
+    ...(bootstrapExponent !== undefined ? { bootstrapExponent } : {}),
+  });
 
   const installBasis = JSON.stringify({
     phase: decision.phase,
@@ -2492,6 +2493,7 @@ function progressionRefresh(ctx: NeedContext): void {
     ready: decision.installReady,
     blockers: decision.installBlockers.map((blocker) => blocker.kind),
     optionalAllowed: selectedStatus?.optionalInstall.allowed,
+    countCadenceReady,
     mandatory: selectedEta?.nextMandatoryInstall,
     queue: pending,
     intent: factions?.plan?.objective?.intent
@@ -2520,6 +2522,7 @@ function progressionRefresh(ctx: NeedContext): void {
             ? { committedPackageSec: factions.plan.objective.intent.etaSec }
             : {}),
         ...(cadenceRemainingSec !== undefined ? { cadenceSec: cadenceRemainingSec } : {}),
+        countCadenceReady,
         optionalInstallAllowed: selectedStatus?.optionalInstall.allowed ?? true,
         ...(selectedEta?.nextMandatoryInstall ? { mandatory: selectedEta.nextMandatoryInstall } : {}),
       }, installBasis)
@@ -2562,6 +2565,13 @@ function progressionRefresh(ctx: NeedContext): void {
       installReady: decision.installReady,
       ...(armedAt !== undefined ? { installArmedAt: armedAt } : {}),
       queuedAugmentations: pending,
+      ...(!routeRequiresInstall && decision.installWanted
+        ? {
+            installFundedAugmentations: fundedActivation
+              .map((candidate) => candidate.name)
+              .filter((name) => name !== NEUROFLUX),
+          }
+        : {}),
       install: decision.installReady && armedAt !== undefined,
       favorCrossings: decision.favorCrossings,
       installDecision: {

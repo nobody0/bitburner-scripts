@@ -95,8 +95,8 @@ function candidatesFor(
  *
  * "Every item fits on its own" is not a funded set: the second and later
  * purchases pay the queue escalation. Summing individually affordable offers
- * fabricated reset value and armed early installs (measured in the BN1
- * harness: eight candidates valued, five actually bought). Selection uses the
+ * fabricates reset value whenever the priced queue can buy fewer candidates
+ * than the independent checks admit. Selection uses the
  * same value-order / payment-order split as the transaction boundary, so the
  * value cadence sees is the value the sweep would really buy. */
 export function fundedActivationBatch(input: {
@@ -109,10 +109,15 @@ export function fundedActivationBatch(input: {
   weights: ObjectiveWeights;
   /** Flat route value of one distinct count slot, or 0 off a count route. */
   countSlotValue: number;
+  /** Include the first NeuroFlux level when it can still add the one distinct
+   * name the installed-count gate observes. Later repeat levels never do. */
+  neurofluxCountable?: boolean;
   ctx: PriceContext;
   money: number;
 }): PurchaseCandidate[] {
-  const catalog = activationCatalog(input.realizable);
+  const catalog = activationCatalog(input.realizable, {
+    includeNeuroflux: input.neurofluxCountable === true,
+  });
   // Cheapest value first, so a bankroll that cannot buy everything buys the
   // most activation per dollar. The count slot is worth the same on every
   // candidate, so it enters the denominator rather than the ranking.

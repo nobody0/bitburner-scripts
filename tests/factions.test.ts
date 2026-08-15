@@ -956,6 +956,60 @@ describe("faction breakpoint package planner", () => {
     expect(funded.decision.drainCeiling).toBe(1_000);
   });
 
+  test("a cadence-requested reset freezes the affordable subset of a larger bank", () => {
+    const faction = packageStanding("A", { rep: 100 });
+    const cheap = aug("A-cheap", {
+      factions: ["A"], baseCost: 1_000, baseRepRequirement: 100, mults: { hacking: 1.1 },
+    });
+    const dear = aug("A-dear", {
+      factions: ["A"], baseCost: 1e12, baseRepRequirement: 100, mults: { hacking: 1.2 },
+    });
+    const result = stepFactions(factionsView({
+      factions: [faction],
+      catalog: new Map([[cheap.name, cheap], [dear.name, dear]]),
+      installRequested: true,
+      moneyAvailable: 1_000,
+      moneyGranted: 1_000,
+    }), {
+      ...initFactionMemory(),
+      bankedAugmentations: [cheap.name, dear.name],
+    });
+
+    expect(result.decision.action).toMatchObject({
+      type: "purchaseAugmentation",
+      augmentation: cheap.name,
+    });
+    expect(result.memory.drainOrder).toEqual([cheap.name]);
+    expect(result.decision.drainCeiling).toBe(1_000);
+  });
+
+  test("the final sweep preserves the exact one-shot subset progression funded", () => {
+    const faction = packageStanding("A", { rep: 100 });
+    const cadence = aug("cadence-funded", {
+      factions: ["A"], baseCost: 1_000, baseRepRequirement: 100, mults: { hacking: 1.01 },
+    });
+    const tempting = aug("tempting-substitute", {
+      factions: ["A"], baseCost: 1_000, baseRepRequirement: 100, mults: { hacking: 10 },
+    });
+    const result = stepFactions(factionsView({
+      factions: [faction],
+      catalog: new Map([[cadence.name, cadence], [tempting.name, tempting]]),
+      installRequested: true,
+      installFundedAugmentations: [cadence.name],
+      moneyAvailable: 1_000,
+      moneyGranted: 1_000,
+    }), {
+      ...initFactionMemory(),
+      bankedAugmentations: [cadence.name, tempting.name],
+    });
+
+    expect(result.memory.drainOrder).toEqual([cadence.name]);
+    expect(result.decision.action).toMatchObject({
+      type: "purchaseAugmentation",
+      augmentation: cadence.name,
+    });
+  });
+
   test("an unaffordable optional bank cannot hold a funded Red Pill reset hostage", () => {
     const faction = packageStanding("Daedalus", { rep: 2_500_000 });
     const pill = aug("The Red Pill", {

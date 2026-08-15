@@ -373,6 +373,9 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     // Progression owns the install cadence: when its published plan wants the
     // reset, this feature concludes (stops working, runs the final sweep).
     ...(ctx.state.topics.progression?.plan?.installWanted === true ? { installRequested: true } : {}),
+    ...(ctx.state.topics.progression?.plan?.installFundedAugmentations
+      ? { installFundedAugmentations: ctx.state.topics.progression.plan.installFundedAugmentations }
+      : {}),
     ...(ctx.state.topics.progression?.plan?.routeInstallRequired === true
       ? { routeInstallRequired: true }
       : {}),

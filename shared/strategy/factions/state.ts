@@ -74,6 +74,8 @@ export interface FactionsView {
    * (published installWanted). This feature must conclude: stop pushing the
    * objective and run the final sweep with the reputation already banked. */
   installRequested?: boolean;
+  /** One-shot subset progression actually priced when it requested the reset. */
+  installFundedAugmentations?: readonly string[];
   /** The selected high-level route itself requires this reset now. */
   routeInstallRequired?: boolean;
   /** Money the arbiter granted the AUGMENTATION FUND this tick — the per-claim
