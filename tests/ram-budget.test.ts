@@ -2,14 +2,16 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
+import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
 import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
 import { WORKER_RAM } from "../shared/world.ts";
 import type { NS } from "@ns";
 
 /** Declared RAM is the fresh-game constraint: start.js plus a transient dodge
- * stub must fit an 8 GB home. The source-level override makes the allocation
- * explicit; the direct-call scan independently proves the controller's dynamic
- * RAM can never exceed that declaration. */
+ * stub must fit an 8 GB home. Every assertion here runs against the artifacts
+ * the sync actually pushes — minified deployment builds — through a faithful
+ * port of the game's own static analyzer (tools/ram-analysis.ts), so the
+ * numbers below are the numbers `ls -l` shows in game. */
 
 const RAM_COSTS: Record<string, number> = {
   // Only the members the controller is allowed to touch directly.
@@ -56,7 +58,10 @@ afterAll(async () => {
   await rm(config.buildDir, { recursive: true, force: true });
 });
 
-/** Approximate the dynamic RAM surface: direct dotted ns member references. */
+/** Approximate the dynamic RAM surface: direct dotted ns member references.
+ * The `ns` receiver-name convention only exists in source names, so this scan
+ * runs on a names-preserved build; the surface-bridge test below proves that
+ * build and the shipped minified one expose an identical billable surface. */
 function staticRam(source: string): { total: number; members: string[] } {
   const members = new Set<string>();
   for (const [member] of Object.entries(RAM_COSTS)) {
@@ -68,11 +73,20 @@ function staticRam(source: string): { total: number; members: string[] } {
   return { total, members: [...members].sort() };
 }
 
-/** v3.0.1 recognises a numeric-literal ramOverride only when it is the first
- * statement in main. Match the built artifact, not merely the TypeScript. */
-function declaredRam(source: string): number | undefined {
-  const match = source.match(/function main\([^)]*\)\s*\{\s*ns\.ramOverride\((\d+(?:\.\d+)?)\);/);
-  return match ? Number(match[1]) : undefined;
+/** Occurrence counts of every billable RAM name in the two positions
+ * identifier minification is forbidden to touch: property access (`.name`,
+ * where the game bills it) and string literals (`"name"`, the dodge
+ * bracket-call surface). Local identifiers are deliberately excluded — the
+ * minifier renames those, and losing a billable local name only removes
+ * accidental static charges. */
+function billableSurface(source: string): Map<string, number> {
+  const billable = billableRamNames();
+  const counts = new Map<string, number>();
+  for (const match of source.matchAll(/(?<!\.)\.([A-Za-z_$][\w$]*)|"([A-Za-z_$][\w$]*)"/g)) {
+    const name = match[1] ?? match[2]!;
+    if (billable.has(name)) counts.set(name, (counts.get(name) ?? 0) + 1);
+  }
+  return counts;
 }
 
 describe("in-game static RAM budget", () => {
@@ -81,10 +95,54 @@ describe("in-game static RAM budget", () => {
     expect(priceCalls(ns, ["renamed.method"])).toBe(UNKNOWN_CALL_GB + 0.5);
   });
 
-  test("start.js stays within its fresh-game budget", async () => {
+  test("the game bills the shipped start.js at exactly its declared budget", async () => {
+    // This is the autostart contract: start.js is launched by the game
+    // (autoexec, destroyW0r1dD43m0n) with no way to pass an override, so the
+    // static analyzer itself must resolve to the declared 3.6 GB.
     const [start] = await buildScripts(config, { telemetry: true });
+    const analysis = analyzeScriptRam(start!.content);
+    expect(analysis.overridden).toBe(true);
+    expect(analysis.cost).toBe(START_BUDGET_GB);
+  });
+
+  test("the override decoy is doing real work, not masking an empty walk", async () => {
+    // Strip the appended decoy declaration and the pessimistic walk must
+    // reappear; if this ever reads 3.6 without the decoy, the analyzer port
+    // is broken and the previous test proves nothing.
+    const [start] = await buildScripts(config, { telemetry: true });
+    const withoutDecoy = start!.content.replace(/async function main\(ns\)\{ns\.ramOverride\([\d.]+\)\}\s*$/, "");
+    expect(withoutDecoy.length).toBeLessThan(start!.content.length);
+    const analysis = analyzeScriptRam(withoutDecoy);
+    expect(analysis.overridden).toBe(false);
+    expect(analysis.cost).toBeGreaterThan(START_BUDGET_GB);
+  });
+
+  test("the --perf build costs exactly the same static RAM", async () => {
+    const [telemetryBuild] = await buildScripts(config, { telemetry: true });
+    const [perfBuild] = await buildScripts(config, { telemetry: false });
+    for (const build of [telemetryBuild!, perfBuild!]) {
+      const analysis = analyzeScriptRam(build.content);
+      expect(analysis.overridden).toBe(true);
+      expect(analysis.cost).toBe(START_BUDGET_GB);
+    }
+  });
+
+  test("identifier minification cannot move the billable surface", async () => {
+    // The dynamic-surface scan below needs source receiver names, which only
+    // a names-preserved build has. This bridge makes that legitimate: the
+    // shipped minified bundle and the names-preserved bundle must contain
+    // exactly the same billable-name occurrences, so whatever the scan proves
+    // about one holds for the other. Mangled identifiers are frequency-
+    // assigned short names; if one ever collides with a billable name (e.g.
+    // `rm`, `ps`), the counts diverge and this fails before the game does.
+    const [shipped] = await buildScripts(config, { telemetry: true });
+    const [readable] = await buildScripts(config, { telemetry: true, minifyNames: false });
+    expect(billableSurface(shipped!.content)).toEqual(billableSurface(readable!.content));
+  });
+
+  test("start.js stays within its fresh-game budget", async () => {
+    const [start] = await buildScripts(config, { telemetry: true, minifyNames: false });
     const { total, members } = staticRam(start!.content);
-    expect(declaredRam(start!.content)).toBe(START_BUDGET_GB);
     console.log(`start.js dynamic RAM <=${total.toFixed(2)}GB via ${members.join(", ")}`);
     expect(total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
     // The hot path must never dodge, so these two live reads are expected...
@@ -96,26 +154,12 @@ describe("in-game static RAM budget", () => {
     expect(members).not.toContain("ns.scan");
   });
 
-  test("the --perf build costs exactly the same static RAM", async () => {
-    // Compiling acquisition into perf builds is only affordable because
-    // Bitburner charges for DOTTED ns references, not bundle size: every probe
-    // body calls through bracket notation on its own stub ns, so the whole
-    // probe table is free here. If a probe ever reaches for `ns.foo` directly,
-    // this is where the fresh-game story breaks — not in-game at 3 a.m.
-    const [telemetryBuild] = await buildScripts(config, { telemetry: true });
-    const [perfBuild] = await buildScripts(config, { telemetry: false });
-    const perf = staticRam(perfBuild!.content);
-    expect(declaredRam(telemetryBuild!.content)).toBe(START_BUDGET_GB);
-    expect(declaredRam(perfBuild!.content)).toBe(START_BUDGET_GB);
-    expect(perf.total).toBeLessThanOrEqual(START_BUDGET_GB + 1e-9);
-    expect(perf.members).toEqual(staticRam(telemetryBuild!.content).members);
-  });
-
   test("the controller can never reach the save", async () => {
     // restore.js overwrites the real save. It is a separate entrypoint so that
     // no code path the controller runs can reach IndexedDB or a page reload —
     // an accidental import here is the difference between a bug and lost
-    // progress.
+    // progress. String literals survive minification, so this runs on the
+    // shipped artifact.
     const [start] = await buildScripts(config, { telemetry: true });
     expect(start!.content).not.toContain("indexedDB");
     expect(start!.content).not.toContain("location.reload");
@@ -124,12 +168,14 @@ describe("in-game static RAM budget", () => {
 
   test("restore.js stays cheap and read-only against the game", async () => {
     const restore = await buildScript(config, config.restoreEntry!, { telemetry: true });
-    const { total, members } = staticRam(restore.content);
     // It only inspects the live game to describe what it is about to
     // overwrite; everything destructive goes through browser globals, which
-    // cost no ns RAM.
-    expect(members).toEqual(["ns.getResetInfo"]);
-    expect(total).toBe(BASE_GB + 1);
+    // cost no ns RAM — but window/document references do, and the game's
+    // analyzer bills them here.
+    const analysis = analyzeScriptRam(restore.content);
+    expect(analysis.overridden).toBe(false);
+    expect(analysis.entries.map((entry) => entry.name)).toEqual(["getResetInfo"]);
+    expect(analysis.cost).toBe(BASE_GB + 1);
     expect(restore.content).toContain("indexedDB");
   });
 
@@ -138,10 +184,12 @@ describe("in-game static RAM budget", () => {
     const worker = artifacts.find((a) => a.filename === "worker/worker.js")!;
     // The worker is billed per launch via ramOverride, not by its own static
     // cost — but only because it references nothing with a RAM charge beyond
-    // the ops it actually invokes. disableLog is a zero-RAM hot-path guard;
-    // anything else would exceed the declared override and kill the worker.
-    const { members } = staticRam(worker.content);
-    expect(members).toEqual(["ns.disableLog", "ns.grow", "ns.hack", "ns.share", "ns.weaken"]);
+    // the ops it actually invokes. Billed by the game's own analyzer: base
+    // plus exactly hack, grow, weaken, share.
+    const analysis = analyzeScriptRam(worker.content);
+    expect(analysis.overridden).toBe(false);
+    expect(analysis.entries.map((entry) => entry.name).sort()).toEqual(["grow", "hack", "share", "weaken"]);
+    expect(analysis.cost).toBeCloseTo(BASE_GB + 0.1 + 0.15 + 0.15 + 2.4, 10);
   });
 
   test("every worker ramOverride covers the base plus the call it makes", () => {

@@ -33,10 +33,16 @@ afterAll(async () => {
   await rm(config.buildDir, { recursive: true, force: true });
 });
 
-/** Every dodged ns call site in a bundle. This is the surface that decides what
- * the script actually does to the game. */
-function stubCalls(source: string): string[] {
-  return [...new Set(source.match(/stubNs\[[^\]]*\]/g) ?? [])].sort();
+/** Every dodged ns call site in a bundle: chains of string-literal bracket
+ * accesses. Receiver names are minified away in shipped artifacts, but the
+ * bracket strings — the entire dodge mechanism — survive verbatim, so this
+ * surface is comparable across real deployment builds. */
+function stubCalls(source: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const match of source.matchAll(/(?:\["[A-Za-z_$][\w$]*"\])+/g)) {
+    counts.set(match[0], (counts.get(match[0]) ?? 0) + 1);
+  }
+  return counts;
 }
 
 describe("compile-time telemetry elimination", () => {
@@ -83,29 +89,32 @@ describe("compile-time telemetry elimination", () => {
     }
     // Dead-code elimination must not use syntax minification: bracket access
     // is what keeps dodged ns calls out of the controller's static RAM bill.
-    expect(main!.content).toContain('stubNs["scp"]');
+    expect(main!.content).toContain('["scp"]');
   });
 
   test("--perf build keeps every acquisition path", async () => {
     // These are the reads the CONTROLLER depends on, not decorations: the gate
     // batch decides which feature drivers may run, and the probe table is the
     // script's model of the world. Stripping any of them would make the perf
-    // build a different program.
+    // build a different program. Bracket-call strings survive minification,
+    // so this runs against the shipped artifact.
     const [main] = await buildScripts(config, { telemetry: false });
-    expect(main!.content).toContain('stubNs["getResetInfo"]');
-    expect(main!.content).toContain("deriveCapabilities");
-    expect(main!.content).toContain('stubNs["gang"]["getGangInformation"]');
-    expect(main!.content).toContain('stubNs["corporation"]["getCorporation"]');
+    expect(main!.content).toContain('["getResetInfo"]');
+    expect(main!.content).toContain('["gang"]["getGangInformation"]');
+    expect(main!.content).toContain('["corporation"]["getCorporation"]');
   });
 
   test("--perf build keeps the feature-override seam", async () => {
     // Injected feature switches are a DECISION, applied inside caps(). If they
     // were ever stripped from a perf build, the two builds would gate their
     // feature drivers differently — i.e. play different games — and every
-    // --perf measurement would stop describing the real one.
+    // --perf measurement would stop describing the real one. The seam is an
+    // internal function whose name only exists in a names-preserved build;
+    // the dodged-surface equality test below covers the shipped artifacts.
     for (const telemetry of [true, false]) {
-      const [main] = await buildScripts(config, { telemetry });
+      const [main] = await buildScripts(config, { telemetry, minifyNames: false });
       expect(main!.content).toContain("applyOverrides");
+      expect(main!.content).toContain("deriveCapabilities");
     }
   });
 
