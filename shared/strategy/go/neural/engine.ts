@@ -26,6 +26,7 @@ import {
 import {
   applyGoCheat,
   boardHash,
+  goObservedBoardSizeFor,
   legalMoveIndices,
   placeCheatRouterRaw,
   playMove,
@@ -294,9 +295,13 @@ function immediateDecision(view: GoView): GoDecision | undefined {
   // when the bottleneck model wants a different game rather than spending
   // minutes finishing an irrelevant default. Once either side has moved, the
   // normal finish-what-we-started rule applies.
+  // Compare against the size the reset actually produces: the secret opponent
+  // ignores the requested size and always plays 19x19, so a fresh daemon board
+  // must not read as a mismatch and re-roll forever.
   const pristineRetarget = view.nextGame !== undefined
     && view.previousBoards.length === 0
-    && (view.opponent !== preferredOpponent || view.board.size !== boardSize);
+    && (view.opponent !== preferredOpponent
+      || view.board.size !== goObservedBoardSizeFor(preferredOpponent, boardSize));
   if (view.status === "gameOver" || view.currentPlayer === "None" || pristineRetarget) {
     return {
       action: {

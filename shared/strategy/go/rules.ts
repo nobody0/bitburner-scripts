@@ -38,6 +38,15 @@ export function isGoRewardOpponent(value: GoOpponent): value is GoRewardOpponent
   return value !== "No AI";
 }
 
+/** The board size resetBoardState actually produces: the secret opponent
+ * ignores the requested size and always plays the fixed 19x19 BitVerse. */
+export function goObservedBoardSizeFor(
+  opponent: GoRewardOpponent,
+  requestedSize: GoSelectableBoardSize,
+): GoObservedBoardSize {
+  return opponent === "????????????" ? 19 : requestedSize;
+}
+
 export interface GoBoard {
   /** Columns exactly as ns.go.getBoardState returns them. */
   rows: string[];

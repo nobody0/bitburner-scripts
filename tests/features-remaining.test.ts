@@ -548,6 +548,21 @@ describe("go", () => {
     expect(invested.action.type).toBe("move");
   });
 
+  test("a fresh daemon 19x19 board is not retargeted over its requested size", async () => {
+    // The secret opponent ignores the requested board size and always produces
+    // 19x19; a pristine daemon game must count as matching its own nextGame
+    // preference rather than re-rolling forever.
+    const decision = await decideGoNeural({
+      board: board(Array.from({ length: 19 }, () => ".".repeat(19))),
+      currentPlayer: "White",
+      status: "waitingOnAI",
+      opponent: "????????????",
+      previousBoards: [],
+      nextGame: { opponent: "????????????", boardSize: 13, why: "node completion" },
+    }, [0], engine);
+    expect(decision.action.type).toBe("resume");
+  });
+
   test("opponent choice follows feature needs and rewards a pending favor win", () => {
     const ranked = rankGoGames({
       opponents: ["Daedalus", "The Black Hand"],

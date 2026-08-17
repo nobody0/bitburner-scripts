@@ -1,9 +1,10 @@
-import type {
-  GoFactionOpponent,
-  GoObservedBoardSize,
-  GoOpponentStat,
-  GoRewardOpponent,
-  GoSelectableBoardSize,
+import {
+  goObservedBoardSizeFor,
+  type GoFactionOpponent,
+  type GoObservedBoardSize,
+  type GoOpponentStat,
+  type GoRewardOpponent,
+  type GoSelectableBoardSize,
 } from "./rules.ts";
 import { addRepToFavor } from "../factions/rep.ts";
 
@@ -177,7 +178,7 @@ function expectedPerformance(
   requestedSize: GoSelectableBoardSize,
   probability: number,
 ): { size: GoObservedBoardSize; expectedBlackScore: number; expectedGameSec: number } {
-  const size: GoObservedBoardSize = opponent === "????????????" ? 19 : requestedSize;
+  const size: GoObservedBoardSize = goObservedBoardSizeFor(opponent, requestedSize);
   // The fixed BitVerse board has exactly 267 playable intersections; the
   // requested size is ignored for this opponent.
   const playable = size === 19 ? 267 : size * size * 0.92;
