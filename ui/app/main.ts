@@ -65,7 +65,8 @@ function renderTabs(): void {
       .filter(Boolean)
       .join(" ");
     const title = feature ? feature.problem : "Cross-feature view";
-    return `<a class="tab ${cls}" href="#/${tab.id}" title="${esc(title)}">${esc(tab.label)}</a>`;
+    const mark = unlocked === "no" ? "✕ " : unlocked === "unknown" ? "? " : "";
+    return `<a class="tab ${cls}" href="#/${tab.id}" title="${esc(title)}">${mark}${esc(tab.label)}</a>`;
   }).join("");
 }
 
@@ -76,14 +77,13 @@ function lockedPanel(id: TabId): string | null {
   const unlocked = state.caps.unlocked[feature.id];
   if (unlocked === "yes") return null;
   const reason = state.caps.reason[feature.id] ?? "not available";
-  const nodes = feature.bitnodes.length ? `Themed by ${feature.bitnodes.map((n) => `BN${n}`).join(", ")}.` : "";
+  const nodes = feature.bitnodes.length ? feature.bitnodes.map((n) => `BN${n}`).join(", ") : "";
+  const facts = [nodes, feature.api ? "" : "no ns API"].filter(Boolean).join(" · ");
   return (
     `<section class="card locked-card">` +
     `<h2>${esc(feature.label)} — ${unlocked === "no" ? "locked" : "not probed yet"}</h2>` +
     `<p>${esc(reason)}</p>` +
-    `<p class="muted">${esc(feature.problem)}</p>` +
-    (nodes ? `<p class="muted">${esc(nodes)}</p>` : "") +
-    (feature.api ? "" : `<p class="muted">No ns API exists for this feature.</p>`) +
+    (facts ? `<p class="muted">${esc(facts)}</p>` : "") +
     `</section>`
   );
 }
@@ -308,7 +308,7 @@ function refreshPicker(): void {
 async function loadStored(file: string): Promise<void> {
   const size = storedRuns.find((r) => r.file === file)?.size ?? 0;
   const compact = size > compactOverBytes;
-  $("status").textContent = `loading ${file}…`;
+  setStatus(`loading ${file}…`);
 
   let records: LogRecord[];
   let total: number;
@@ -355,10 +355,17 @@ async function loadStored(file: string): Promise<void> {
 
   state = emptyState();
   state.compacted = compact;
-  $("status").textContent = compact
-    ? `compacted — ${total} records folded, ${records.length} kept (${fmtBytes(size)}; too large to scrub)`
-    : `replay — ${total} records`;
+  setStatus(
+    compact ? `compacted · ${total}→${records.length} records (${fmtBytes(size)})` : `replay — ${total} records`,
+    compact ? "run too large to load whole: topics are folded server-side, so there is no timeline to scrub" : "",
+  );
   render();
+}
+
+function setStatus(text: string, title = ""): void {
+  const status = $("status");
+  status.textContent = text;
+  status.title = title;
 }
 
 function fmtBytes(bytes: number): string {
@@ -429,10 +436,11 @@ interface HubMessage {
 function connect(): void {
   const ws = new WebSocket(`ws://${location.host}/live`);
   ws.onopen = () => {
+    $("status").title = "";
     $("status").innerHTML = '<span class="live">connected</span>';
   };
   ws.onclose = () => {
-    $("status").textContent = "disconnected — retrying…";
+    setStatus("disconnected — retrying…");
     setTimeout(connect, 2000);
   };
   ws.onmessage = (ev) => {
@@ -466,7 +474,7 @@ function connect(): void {
       if (msg.stored) storedRuns = msg.stored;
       if (run.id === msg.run.id) {
         run.live = false;
-        $("status").textContent = "run ended";
+        setStatus("run ended");
       }
       refreshPicker();
     } else if (msg.type === "runs-changed") {
@@ -482,10 +490,10 @@ function connect(): void {
         storedRuns = msg.stored;
         refreshPicker();
       }
-      $("status").textContent = `sim finished (exit ${msg.code})`;
+      setStatus(`sim finished (exit ${msg.code})`);
     } else if (msg.type === "sync-status") {
       $<HTMLButtonElement>("sync").disabled = Boolean(msg.busy);
-      if (msg.busy) $("status").textContent = "sync waiting for Bitburner…";
+      if (msg.busy) setStatus("sync: waiting for game…");
     } else if (msg.type === "sync-finished") {
       $<HTMLButtonElement>("sync").disabled = false;
       const status = $("status");
@@ -529,13 +537,13 @@ $("sync").addEventListener("click", async () => {
     const body = (await res.json()) as { error?: string };
     if (!res.ok) {
       button.disabled = false;
-      $("status").textContent = `sync failed: ${body.error ?? res.statusText}`;
+      setStatus(`sync failed: ${body.error ?? res.statusText}`);
     } else {
-      $("status").textContent = "sync waiting for Bitburner…";
+      setStatus("sync: waiting for game…");
     }
   } catch (error) {
     button.disabled = false;
-    $("status").textContent = `sync failed: ${String(error)}`;
+    setStatus(`sync failed: ${String(error)}`);
   }
 });
 
@@ -559,9 +567,9 @@ $("simrun").addEventListener("click", async () => {
   const body = (await res.json()) as { error?: string };
   if (!res.ok) {
     $<HTMLButtonElement>("simrun").disabled = false;
-    $("status").textContent = `sim error: ${body.error}`;
+    setStatus(`sim error: ${body.error}`);
   } else {
-    $("status").textContent = "sim running…";
+    setStatus("sim running…");
   }
 });
 
@@ -575,7 +583,7 @@ $("simpin").addEventListener("click", async () => {
     body: JSON.stringify({ file }),
   });
   const body = (await res.json()) as { error?: string; pinned?: string };
-  $("status").textContent = res.ok ? `pinned ${body.pinned} — it will survive the sweep` : `pin failed: ${body.error}`;
+  setStatus(res.ok ? `pinned ${body.pinned}` : `pin failed: ${body.error}`);
 });
 
 active = readHash();

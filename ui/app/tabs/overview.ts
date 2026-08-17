@@ -1,7 +1,7 @@
 import { FEATURES } from "../../../shared/features/registry.ts";
 import { factsOnly } from "../../../shared/telemetry/schema.ts";
 import { attachChartHover, drawChart } from "../lib/chart.ts";
-import { card, filters, meter, note, search, table, tiles } from "../lib/dom.ts";
+import { card, filters, hint, meter, note, search, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { Markup } from "../lib/html.ts";
@@ -185,17 +185,17 @@ export const overviewTab: Tab = {
     // A compacted run kept only the tail; saying so beats letting the feed
     // look like the run started three minutes before it ended.
     const compactNote = state.compacted
-      ? note("this run was too large to load whole — topics are the last write of each, and the feed is the tail")
+      ? note(hint("compacted run", "too large to load whole: topics are the last write of each, and the feed is the tail"))
       : "";
 
     return (
-      `<div class="col">` +
+      `<div class="col wide">` +
       card("Money", money + chart) +
       card(
         "Income by feature",
         income.length
           ? table(["feature", "since install", "share"], income, { left: [0] })
-          : note("waiting for ns.getMoneySources() — probed every 2 minutes"),
+          : waiting("ns.getMoneySources()", "probed every 2 minutes"),
       ) +
       card("Features", statusChips(state)) +
       `</div>` +

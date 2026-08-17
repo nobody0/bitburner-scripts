@@ -1,0 +1,83 @@
+{
+  "schema": "go-deep-eval-screen-v1",
+  "screenOnly": true,
+  "promotionEligible": false,
+  "seedUseId": "2026-08-16T09:22:11.153Z-screen-small5",
+  "config": {
+    "profile": "small5",
+    "games": 128,
+    "seed": 77777701,
+    "handicapSeed": 77777702,
+    "defenseSeed": 77777703
+  },
+  "latencyBudgetP95Ms": 50,
+  "championSha256": "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+  "arms": [
+    {
+      "label": "baseline-flat-default",
+      "wins": 667,
+      "games": 768,
+      "points": 1576,
+      "powerPerTurn": 0.608564,
+      "meanTurns": 22.44,
+      "meanFinalists": 9.12,
+      "latencyMs": {
+        "p50": 2.7,
+        "p95": 4.5,
+        "max": 66.7
+      },
+      "withinLatencyBudget": true
+    },
+    {
+      "label": "deep-k4-f3-u0",
+      "wins": 718,
+      "games": 768,
+      "points": 4016,
+      "powerPerTurn": 0.748668,
+      "meanTurns": 20.29,
+      "meanFinalists": 5.33,
+      "latencyMs": {
+        "p50": 4.4,
+        "p95": 7,
+        "max": 82.4
+      },
+      "withinLatencyBudget": true,
+      "rootK": 4,
+      "followUpK": 3,
+      "uncertaintyTicks": 0,
+      "pairedVersusBaseline": {
+        "favorableWinFlips": 75,
+        "unfavorableWinFlips": 24,
+        "oneSidedWinPValue": 1.3832862372642758e-7,
+        "powerPerTurnLower95": 0.09757507093506396,
+        "fewerTurnsLower95": 1.3820211405228968
+      }
+    },
+    {
+      "label": "deep-k4-f3-u1",
+      "wins": 718,
+      "games": 768,
+      "points": 4148,
+      "powerPerTurn": 0.753705,
+      "meanTurns": 20.3,
+      "meanFinalists": 5.32,
+      "latencyMs": {
+        "p50": 5.2,
+        "p95": 8.9,
+        "max": 97.8
+      },
+      "withinLatencyBudget": true,
+      "rootK": 4,
+      "followUpK": 3,
+      "uncertaintyTicks": 1,
+      "pairedVersusBaseline": {
+        "favorableWinFlips": 76,
+        "unfavorableWinFlips": 25,
+        "oneSidedWinPValue": 1.8615711638770777e-7,
+        "powerPerTurnLower95": 0.10232990346744647,
+        "fewerTurnsLower95": 1.3711677758096734
+      }
+    }
+  ],
+  "recordedAt": "2026-08-16T09:24:20.707Z"
+}

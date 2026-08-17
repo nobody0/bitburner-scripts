@@ -1,9 +1,11 @@
 import type { GoAction, GoView } from "../../shared/strategy/go/rules.ts";
 import {
   goNeuralPositionIdentity,
-  goSeedSetKey,
+  goDispatchKey,
+  type GoWorkerCertified,
   type GoWorkerEvaluation,
   type GoWorkerOpponentResponse,
+  type GoWorkerPlaybookRoute,
   type GoWorkerPrediction,
   type GoWorkerRequest,
   type GoWorkerResponse,
@@ -33,20 +35,26 @@ interface PendingRequest {
 
 type GoWorkerRpcRequest =
   | { type: "install"; positionId: string; view: GoView; parentTurnId?: string }
-  | { type: "evaluate"; positionId: string; seeds: number[] }
+  | { type: "evaluate"; positionId: string; dispatchPlaytime: number }
+  | { type: "playbook"; positionId: string; dispatchPlaytime: number; credit: number }
+  | { type: "playbookRoute"; playtime: number; opponent: string }
   | { type: "reset" };
 
 export interface GoNeuralRuntime {
   install(view: GoView, parentTurnId?: string): Promise<{ positionId: string; preparationMs: number; cached: boolean }>;
-  evaluate(positionId: string, seeds: readonly number[], parentTurnId?: string): Promise<GoWorkerEvaluation>;
+  evaluate(positionId: string, dispatchPlaytime: number, parentTurnId?: string): Promise<GoWorkerEvaluation>;
+  /** Certified merged-playbook action for an installed position at an exact
+   * dispatch tick, or undefined off the certified line (or with no playbook
+   * embedded in this build). */
+  playbook(positionId: string, dispatchPlaytime: number, credit: number): Promise<GoWorkerCertified | undefined>;
+  /** Best certified root route for an opponent from an absolute engine tick. */
+  playbookRoute(playtime: number, opponent: string): Promise<GoWorkerPlaybookRoute | undefined>;
   commit(
     positionId: string,
-    seeds: readonly number[],
     dispatchPlaytime: number,
     dispatchWallAt: number,
     nextRolloverAt: number,
-    bonusCycles: number,
-    action: Extract<GoAction, { type: "move" | "pass" }>,
+    action: Exclude<GoAction, { type: "resume" | "newGame" }>,
     sourceParentTurnId?: string,
   ): string;
   confirm(
@@ -125,9 +133,9 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
     return { positionId: response.positionId, preparationMs: response.preparationMs, cached: response.cached };
   }
 
-  async evaluate(positionId: string, seeds: readonly number[], parentTurnId?: string): Promise<GoWorkerEvaluation> {
+  async evaluate(positionId: string, dispatchPlaytime: number, parentTurnId?: string): Promise<GoWorkerEvaluation> {
     if (parentTurnId) {
-      const key = this.#predictionKey(parentTurnId, positionId, seeds);
+      const key = this.#predictionKey(parentTurnId, positionId, dispatchPlaytime);
       const pushed = this.#predictions.get(key);
       if (pushed) {
         this.#predictions.delete(key);
@@ -137,20 +145,39 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
     const response = await this.#request({
       type: "evaluate",
       positionId,
-      seeds: seeds.map(normalizeGoPlaytime),
+      dispatchPlaytime: normalizeGoPlaytime(dispatchPlaytime),
     });
     if (response.type !== "evaluated") throw new Error(`unexpected Go worker response ${response.type}`);
     return response.value;
   }
 
+  async playbook(
+    positionId: string,
+    dispatchPlaytime: number,
+    credit: number,
+  ): Promise<GoWorkerCertified | undefined> {
+    const response = await this.#request({
+      type: "playbook",
+      positionId,
+      dispatchPlaytime: normalizeGoPlaytime(dispatchPlaytime),
+      credit,
+    });
+    if (response.type !== "playbook") throw new Error(`unexpected Go worker response ${response.type}`);
+    return response.certified;
+  }
+
+  async playbookRoute(playtime: number, opponent: string): Promise<GoWorkerPlaybookRoute | undefined> {
+    const response = await this.#request({ type: "playbookRoute", playtime, opponent });
+    if (response.type !== "playbookRoute") throw new Error(`unexpected Go worker response ${response.type}`);
+    return response.route;
+  }
+
   commit(
     positionId: string,
-    seeds: readonly number[],
     dispatchPlaytime: number,
     dispatchWallAt: number,
     nextRolloverAt: number,
-    bonusCycles: number,
-    action: Extract<GoAction, { type: "move" | "pass" }>,
+    action: Exclude<GoAction, { type: "resume" | "newGame" }>,
     sourceParentTurnId?: string,
   ): string {
     if (sourceParentTurnId) this.#finishParent(sourceParentTurnId);
@@ -160,14 +187,14 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
       type: "commit",
       turnId,
       positionId,
-      seeds: seeds.map(normalizeGoPlaytime),
       dispatchPlaytime: normalizeGoPlaytime(dispatchPlaytime),
       dispatchWallAt,
       nextRolloverAt,
-      bonusCycles,
-      action: action.type === "move"
-        ? { type: "move", x: action.x, y: action.y }
-        : { type: "pass" },
+      action: action.type === "cheatTwoMoves"
+        ? { type: action.type, x1: action.x1, y1: action.y1, x2: action.x2, y2: action.y2 }
+        : action.type === "pass"
+          ? { type: action.type }
+          : { type: action.type, x: action.x, y: action.y },
     });
     return turnId;
   }
@@ -239,7 +266,7 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
       this.#predictions.set(this.#predictionKey(
         prediction.parentTurnId,
         prediction.positionId,
-        prediction.seeds,
+        prediction.dispatchPlaytime,
       ), prediction);
       return;
     }
@@ -282,8 +309,8 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
     this.#pending.clear();
   }
 
-  #predictionKey(parentTurnId: string, positionId: string, seeds: readonly number[]): string {
-    return `${parentTurnId}|${positionId}|${goSeedSetKey(seeds)}`;
+  #predictionKey(parentTurnId: string, positionId: string, dispatchPlaytime: number): string {
+    return `${parentTurnId}|${positionId}|${goDispatchKey(dispatchPlaytime)}`;
   }
 
   /** Retain only work for the confirmed successor until its first install. */

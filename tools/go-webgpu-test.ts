@@ -34,7 +34,23 @@ if (!goldenOk) {
 }
 
 if (Bun.argv.includes("--arena")) {
-  const arena = await runInHeadlessChrome(join(HERE, "entry-arena.ts"), 900_000);
+  const valueAfter = (name: string): string | undefined => {
+    const exact = Bun.argv.indexOf(name);
+    if (exact >= 0) return Bun.argv[exact + 1];
+    return Bun.argv.find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
+  };
+  const arena = await runInHeadlessChrome(join(HERE, "entry-arena.ts"), 900_000, {
+    __goArenaOptions: {
+      cheat: Bun.argv.includes("--cheat"),
+      games: Number(valueAfter("--games") ?? 12),
+      opponent: valueAfter("--opponent"),
+      cheatChance: valueAfter("--cheat-chance") === undefined
+        ? undefined : Number(valueAfter("--cheat-chance")),
+      cheatK: valueAfter("--cheat-k") === undefined ? undefined : Number(valueAfter("--cheat-k")),
+      cheatDoubleK: valueAfter("--cheat-double-k") === undefined
+        ? undefined : Number(valueAfter("--cheat-double-k")),
+    },
+  });
   console.log(JSON.stringify(arena.result, null, 2));
   const arenaOk = (arena.result as { ok?: boolean })?.ok === true;
   if (!arenaOk) {

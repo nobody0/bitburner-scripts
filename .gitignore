@@ -4,3 +4,13 @@ coverage/
 runs/
 .DS_Store
 
+# Certificate generation and its 28 GB corpus live outside this repository;
+# the merged playbook the game embeds is committed under game/lib/generated.
+ipvgobruteforce/
+ipvgo-playbook-web/
+go-ai/corpora/
+# Regenerable deployment artifacts: rebuild with go:playbook:residual,
+# go:playbook:pack, and go:combined:standalone.
+go-ai/derivatives/playbook-combined/
+go-ai/derivatives/playbook-residual/
+go-ai/derivatives/combined-standalone.js

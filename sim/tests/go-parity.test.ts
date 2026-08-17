@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { group, legalMoveIndices, playMove, scoreBoard, type GoBoard, type Stone } from "../../shared/strategy/go/rules.ts";
 import { predictOpponentReplies } from "../../shared/strategy/go/opponent.ts";
-import { GO_ENGINE_CYCLE_MS, goAiWaitMs, nextGoTurnTiming, whrng } from "../../shared/strategy/go/rng.ts";
+import {
+  GO_ENGINE_CYCLE_MS,
+  goAiWaitMs,
+  goSuccessorDispatchCandidates,
+  nextGoTurnTiming,
+  whrng,
+} from "../../shared/strategy/go/rng.ts";
 import {
   goDifficultyMultiplier,
   goEffectMultiplier,
@@ -121,6 +127,24 @@ describe("Go WHRNG parity with pinned game source", () => {
     expect(GO_ENGINE_CYCLE_MS).toBe(CONSTANTS.MilliPerCycle);
     expect(goAiWaitMs(0)).toBe(200);
     expect(goAiWaitMs(10)).toBe(40);
+  });
+
+  test("successor dispatch candidates extend the exact one-step timing by uncertainty ticks", () => {
+    for (const [bonusCycles, trace] of [
+      [0, { cycleWaitsAfterSeed: 2, fixedSleepMsAfterSeed: 0 }],
+      [0, { cycleWaitsAfterSeed: 3, fixedSleepMsAfterSeed: 90 }],
+      [6, { cycleWaitsAfterSeed: 1, fixedSleepMsAfterSeed: 40 }],
+    ] as const) {
+      const timing = nextGoTurnTiming(10_000, bonusCycles, trace);
+      const exact = goSuccessorDispatchCandidates(10_000, bonusCycles, trace, 0);
+      expect(exact.timing).toEqual(timing);
+      expect(exact.candidates).toEqual([timing.responsePlaytimeMs]);
+      const window = goSuccessorDispatchCandidates(10_000, bonusCycles, trace, 1);
+      expect(window.candidates).toEqual([
+        timing.responsePlaytimeMs,
+        timing.responsePlaytimeMs + GO_ENGINE_CYCLE_MS,
+      ]);
+    }
   });
 });
 

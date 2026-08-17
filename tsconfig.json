@@ -16,6 +16,7 @@
   },
   "include": [
     "game/**/*.ts",
+    "ipvgobruteforce/arena/**/*.ts",
     "shared/**/*.ts",
     "sim/**/*.ts",
     "ui/**/*.ts",

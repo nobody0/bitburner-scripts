@@ -105,20 +105,10 @@ function appendIlluminatiPriority(
   if (factionRoll < 0.6) result.push("surround");
 }
 
-/** Everything about the seeded selector that is known before hypothetical
- * Black moves are enumerated. This deliberately does not claim to know the
- * final response branch: branch availability still depends on each resulting
- * board. The representation describes behavior, not faction identity. */
-export function opponentTurnBehavior(
+function priorityProgram(
   opponent: GoRewardOpponent,
-  totalPlaytimeMs: number,
-): OpponentTurnBehavior {
-  const [smartRoll, optionRoll, factionRoll, fallbackRoll] = whrng(totalPlaytimeMs, 4) as
-    [number, number, number, number];
-  const smart = opponent === "Netburners" ? false
-    : opponent === "Slum Snakes" ? smartRoll < 0.3
-    : opponent === "The Black Hand" ? smartRoll < 0.8
-    : true;
+  factionRoll: number,
+): OpponentBranch[] {
   const program: OpponentBranch[] = [];
   if (opponent === "Netburners") {
     if (factionRoll < 0.2) appendIlluminatiPriority(program, factionRoll);
@@ -143,13 +133,47 @@ export function opponentTurnBehavior(
   } else {
     appendIlluminatiPriority(program, factionRoll);
   }
-  const priorityRanks = new Array<number>(GO_OPPONENT_BRANCHES.length).fill(0);
+  return program;
+}
+
+function priorityRanks(program: readonly OpponentBranch[]): number[] {
+  const result = new Array<number>(GO_OPPONENT_BRANCHES.length).fill(0);
   let rank = 0;
   for (const programmed of program) {
     const branch = GO_OPPONENT_BRANCHES.indexOf(programmed);
-    if (branch >= 0 && priorityRanks[branch] === 0) priorityRanks[branch] = ++rank;
+    if (branch >= 0 && result[branch] === 0) result[branch] = ++rank;
   }
-  return { smart, optionRoll, factionRoll, fallbackRoll, priorityRanks,
+  return result;
+}
+
+/** Everything about the seeded selector that is known before hypothetical
+ * Black moves are enumerated. This deliberately does not claim to know the
+ * final response branch: branch availability still depends on each resulting
+ * board. The representation describes behavior, not faction identity. */
+export function opponentTurnBehavior(
+  opponent: GoRewardOpponent,
+  totalPlaytimeMs: number,
+): OpponentTurnBehavior {
+  return opponentTurnBehaviorFromRolls(
+    opponent,
+    whrng(totalPlaytimeMs, 4) as [number, number, number, number],
+  );
+}
+
+/** Build the semantic signature from already-known WHRNG outputs. Exported for
+ * corpus audits/migrations; live callers should normally use
+ * opponentTurnBehavior() so the rolls stay tied to the authoritative seed. */
+export function opponentTurnBehaviorFromRolls(
+  opponent: GoRewardOpponent,
+  rolls: readonly [number, number, number, number],
+): OpponentTurnBehavior {
+  const [smartRoll, optionRoll, factionRoll, fallbackRoll] = rolls;
+  const smart = opponent === "Netburners" ? false
+    : opponent === "Slum Snakes" ? smartRoll < 0.3
+    : opponent === "The Black Hand" ? smartRoll < 0.8
+    : true;
+  const ranks = priorityRanks(priorityProgram(opponent, factionRoll));
+  return { smart, optionRoll, factionRoll, fallbackRoll, priorityRanks: ranks,
     fallbackEnabled: GO_FALLBACK_ENABLED };
 }
 
@@ -166,6 +190,41 @@ export function encodeOpponentTurnBehavior(
   for (let index = 0; index < GO_OPPONENT_BRANCHES.length; index++) {
     result[4 + index] = behavior.priorityRanks[index]! * rankScale;
     result[4 + GO_OPPONENT_BRANCHES.length + index] = behavior.fallbackEnabled[index]!;
+  }
+  if (komi !== undefined) result[result.length - 1] = komi / 10;
+  return result;
+}
+
+/** Stable conditioning for a board whose next White roll is not known yet.
+ *
+ * The three roll fields use -1, which cannot collide with an exact WHRNG
+ * value. The smart field becomes the opponent's true long-run smart fraction,
+ * while each priority field is the roll-integrated normalized rank of that
+ * branch. This preserves which responses the opponent can favor, how early it
+ * tends to try them, and how often the relevant faction path is active without
+ * pretending that one already-consumed seed still describes the future. */
+export function encodeOpponentFutureBehavior(
+  opponent: GoRewardOpponent,
+  komi?: number,
+): Float32Array {
+  const result = new Float32Array(GO_BEHAVIOR_BASE_FEATURES + (komi === undefined ? 0 : 1));
+  result[0] = opponent === "Netburners" ? 0
+    : opponent === "Slum Snakes" ? 0.3
+    : opponent === "The Black Hand" ? 0.8
+    : 1;
+  result.set([-1, -1, -1], 1);
+  const boundaries = [0, 0.2, 0.3, 0.4, 0.6, 0.65, 0.75, 0.8, 0.9, 1];
+  const rankScale = 1 / Math.max(GO_OPPONENT_BRANCHES.length, 1);
+  for (let interval = 0; interval + 1 < boundaries.length; interval++) {
+    const low = boundaries[interval]!;
+    const high = boundaries[interval + 1]!;
+    const ranks = priorityRanks(priorityProgram(opponent, (low + high) / 2));
+    for (let branch = 0; branch < ranks.length; branch++) {
+      result[4 + branch]! += (high - low) * ranks[branch]! * rankScale;
+    }
+  }
+  for (let branch = 0; branch < GO_OPPONENT_BRANCHES.length; branch++) {
+    result[4 + GO_OPPONENT_BRANCHES.length + branch] = GO_FALLBACK_ENABLED[branch]!;
   }
   if (komi !== undefined) result[result.length - 1] = komi / 10;
   return result;

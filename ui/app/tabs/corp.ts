@@ -1,4 +1,4 @@
-import { card, definitions, note, table, tiles } from "../lib/dom.ts";
+import { card, definitions, note, outcome, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct } from "../lib/format.ts";
 import { html } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
@@ -8,7 +8,7 @@ export const corpTab: Tab = {
   id: "corp",
   render(state: ProjectedState) {
     const c = state.topics.corp;
-    if (!c) return note("waiting for the corporation probe (getCorporation is 10 GB — it needs home headroom)");
+    if (!c) return waiting("the corporation probe", "getCorporation is 10 GB — it needs home headroom");
 
     const profit = c.revenue - c.expenses;
     const summary = tiles([
@@ -92,15 +92,13 @@ export const corpTab: Tab = {
         (plan.completed.length
           ? table(["completed stage"], plan.completed.map((stage) => [esc(stage)]), { left: [0] })
           : note("no stages complete yet")) +
-        (plan.lastResult
-          ? note(`${plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${plan.lastResult.detail}`)
-          : "")
-      : note("waiting for the first corporation decision");
+        (plan.lastResult ? outcome(plan.lastResult) : "")
+      : waiting("the first corporation decision");
 
     return (
       `<div class="col wide">` +
       card("Corporation", summary + divisions) +
-      card("Stage decision", decision) +
+      card("Decision", decision) +
       detail +
       `</div>` +
       `<div class="col">` +

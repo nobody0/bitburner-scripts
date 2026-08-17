@@ -10,7 +10,8 @@ import {
   simpleBoardFromBoardString,
 } from "../vendor/bitburner/src/Go/boardAnalysis/boardAnalysis.ts";
 import { getScore } from "../vendor/bitburner/src/Go/boardAnalysis/ScoringOracle.ts";
-import { getNewBoardState, makeMove, passTurn } from "../vendor/bitburner/src/Go/boardState/boardState.ts";
+import { getNewBoardState, makeMove, passTurn, updateCaptures } from "../vendor/bitburner/src/Go/boardState/boardState.ts";
+import { whrng } from "../../shared/strategy/go/rng.ts";
 import { Go, Player as GoPlayer, sleepLog } from "../vendor/bitburner/src/Go/OracleStubs.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import {
@@ -226,6 +227,51 @@ export class GoSystem {
     return this.#mode === "aggregate" ? this.#startAggregateCompletion() : this.#startOpponentTurn();
   }
 
+  getCheatCount(): number {
+    this.#requireCheatAccess();
+    return this.#state.cheatCount;
+  }
+
+  getCheatSuccessChance(count = this.#state.cheatCount): number {
+    this.#requireCheatAccess();
+    const sf14 = this.#world.player.sourceFiles["14"] ?? 0;
+    const sourceFileBonus = sf14 === 3 ? 0.25 : 0;
+    const scalar = (0.7 - 0.02 * count) ** count;
+    return Math.max(0, Math.min(1,
+      0.6 * scalar * (this.#world.person.mults.crime_success ?? 1) + sourceFileBonus));
+  }
+
+  removeRouter(x: number, y: number): Promise<Play> {
+    const point = this.#state.board[x]?.[y];
+    if (!point || point.color === GoColor.empty) throw new Error(`Invalid cheat router ${x},${y}`);
+    return this.#cheat(() => { point.color = GoColor.empty; });
+  }
+
+  playTwoMoves(x1: number, y1: number, x2: number, y2: number): Promise<Play> {
+    const first = this.#state.board[x1]?.[y1];
+    const second = this.#state.board[x2]?.[y2];
+    if (!first || !second || first.color !== GoColor.empty || second.color !== GoColor.empty) {
+      throw new Error(`Invalid double cheat ${x1},${y1} ${x2},${y2}`);
+    }
+    return this.#cheat(() => {
+      first.color = GoColor.black;
+      second.color = GoColor.black;
+    });
+  }
+
+  repairOfflineNode(x: number, y: number): Promise<Play> {
+    if (this.#state.board[x]?.[y]) throw new Error(`Invalid repair cheat ${x},${y}`);
+    return this.#cheat(() => {
+      this.#state.board[x]![y] = { chain: "", liberties: null, x, y, color: GoColor.empty };
+    });
+  }
+
+  destroyNode(x: number, y: number): Promise<Play> {
+    const point = this.#state.board[x]?.[y];
+    if (!point || point.color !== GoColor.empty) throw new Error(`Invalid destroy cheat ${x},${y}`);
+    return this.#cheat(() => { this.#state.board[x]![y] = null; });
+  }
+
   opponentNextTurn(): Promise<Play> {
     if (this.#pending) return this.#pending;
     if (this.getCurrentPlayer() === "White") return this.#startOpponentTurn();
@@ -258,6 +304,36 @@ export class GoSystem {
   #requireTurn(colour: GoColor): void {
     if (this.#state.previousPlayer === null) throw new Error("Go game is over");
     if (this.#state.previousPlayer === colour) throw new Error("It is not your Go turn");
+  }
+
+  #requireCheatAccess(): void {
+    const sf14 = this.#world.player.sourceFiles["14"] ?? 0;
+    if (!(sf14 > 1 || (this.#world.bitnode === 14 && sf14 === 1))) {
+      throw new Error("The go.cheat API requires Source-File 14.2");
+    }
+  }
+
+  #cheat(effect: () => void): Promise<Play> {
+    this.#requireCheatAccess();
+    this.#requireTurn(GoColor.black);
+    this.#activate();
+    this.#state.passCount = 0;
+    const priorCount = this.#state.cheatCount;
+    const [success, eject] = whrng(this.#world.clock.now(), 2);
+    if (success! <= this.getCheatSuccessChance(priorCount)) {
+      effect();
+    } else if (priorCount > 0 && eject! < 0.1) {
+      this.#state.previousPlayer = null;
+      this.#recordLoss(this.#state.ai as RewardOpponent, false);
+      this.#lastResponse = { type: GoPlayType.gameOver, x: null, y: null };
+      return Promise.resolve(this.#lastResponse);
+    } else {
+      passTurn(this.#state, GoColor.black, false);
+    }
+    this.#state.cheatCount++;
+    this.#state.previousPlayer = GoColor.black;
+    updateCaptures(this.#state.board, GoColor.black, true);
+    return this.#startOpponentTurn();
   }
 
   #activate(): void {

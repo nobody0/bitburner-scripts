@@ -9,9 +9,15 @@ import {
   type GoNeuralPrepared,
   type GoValueBackendFactory,
 } from "../../shared/strategy/go/neural/engine.ts";
-import { goNeuralPositionIdentity, type GoWorkerEvaluation } from "../../shared/strategy/go/neural/worker-protocol.ts";
+import {
+  goNeuralPositionIdentity,
+  type GoWorkerCertified,
+  type GoWorkerEvaluation,
+  type GoWorkerPlaybookRoute,
+} from "../../shared/strategy/go/neural/worker-protocol.ts";
 import type { GoWorkerOpponentResponse } from "../../shared/strategy/go/neural/worker-protocol.ts";
 import type { GoNeuralRuntime } from "../../game/lib/go-neural-worker.ts";
+import { goOpponentSeedCandidates } from "../../shared/strategy/go/rng.ts";
 
 export class TestGoNeuralRuntime implements GoNeuralRuntime {
   readonly engine: GoNeuralEngine;
@@ -30,33 +36,46 @@ export class TestGoNeuralRuntime implements GoNeuralRuntime {
     return { positionId, preparationMs: Date.now() - startedAt, cached: false };
   }
 
-  async evaluate(positionId: string, seeds: readonly number[]): Promise<GoWorkerEvaluation> {
+  async evaluate(positionId: string, dispatchPlaytime: number): Promise<GoWorkerEvaluation> {
     const prepared = this.positions.get(positionId);
     if (!prepared) throw new Error(`test Go runtime does not hold position ${positionId}`);
     const startedAt = Date.now();
-    const decision = await finalizeNeuralGoDecision(prepared, seeds, this.engine);
+    const seeds = goOpponentSeedCandidates(dispatchPlaytime, prepared.view.bonusCycles ?? 0);
+    const decision = await finalizeNeuralGoDecision(prepared, seeds, this.engine, dispatchPlaytime);
     const backend = await this.engine.backendFor(prepared.view.board.size);
     return {
       decision,
+      opponentSeeds: seeds,
       preparationMs: 0,
       finalizationMs: Date.now() - startedAt,
       modelProfile: goModelProfile(prepared.view.board.size),
       modelExtent: backend.extent,
       cached: false,
       pushed: false,
-      continuations: neuralGoContinuations(prepared, seeds, decision)
+      continuations: neuralGoContinuations(prepared, seeds, decision, dispatchPlaytime)
         .map(({ seed, probability, response, wait }) => ({ seed, probability, response, wait })),
     };
   }
 
+  /** Optional per-test certified-playbook stub; the default is playbook-less
+   * (every lookup misses), matching a build without an installed playbook. */
+  playbookStub?: (positionId: string, dispatchPlaytime: number, credit: number) => GoWorkerCertified | undefined;
+  playbookRouteStub?: (playtime: number, opponent: string) => GoWorkerPlaybookRoute | undefined;
+
+  async playbook(positionId: string, dispatchPlaytime: number, credit: number): Promise<GoWorkerCertified | undefined> {
+    return this.playbookStub?.(positionId, dispatchPlaytime, credit);
+  }
+
+  async playbookRoute(playtime: number, opponent: string): Promise<GoWorkerPlaybookRoute | undefined> {
+    return this.playbookRouteStub?.(playtime, opponent);
+  }
+
   commit(
     _positionId: string,
-    _seeds: readonly number[],
     _dispatchPlaytime: number,
     _dispatchWallAt: number,
     _nextRolloverAt: number,
-    _bonusCycles: number,
-    _action: Extract<GoAction, { type: "move" | "pass" }>,
+    _action: Exclude<GoAction, { type: "resume" | "newGame" }>,
   ): string {
     return `test:${this.#nextTurn++}`;
   }

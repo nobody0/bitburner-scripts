@@ -85,7 +85,7 @@ an unambiguous phrase; cite the branch (`@master` or `@2023`) explicitly.
    reconnection delay `5`.
 4. In **Options → System**, set the autoexec script to `start.js` so it
    starts whenever the game loads (cold boot: scan, root, redeploy).
-5. Edit TypeScript under `game/` (and `shared/`), then click **sync to game** in
+5. Edit TypeScript under `game/` (and `shared/`), then click **sync** in
    the dashboard. You can instead run `bun run sync` from a terminal.
    There is deliberately no file watcher: only an explicit action can push a
    build. A disconnected game makes the attempt fail after 30 seconds instead
@@ -202,6 +202,8 @@ import type { NS } from "@ns";
 - `bun run bench:sim:install-cadence` — run the synthetic two-install reset/favor-cadence benchmark.
 - `bun run sim:compare a.jsonl b.jsonl` — A/B time-to-goal; either input may also be a `.session.json` manifest for all chained installs.
 - `bun run go:arena` — upstream-oracle IPvGO WebGPU smoke tournament and latency report (12 games per ordinary opponent, 2 World Daemon games).
+- `bun run go:bruteforce:pack` — merge all completed 5x5 certificate corpora into one globally selected, route-pruned JavaScript playbook.
+- `bun run go:bruteforce:arena` — execute the merged playbook against its selected upstream opponents; add `-- --timing maximum --games 46220` for every retained policy.
 - `bun run go:gpu` — run the deployed WGSL shader in headless Chrome against native golden vectors and the production latency budgets.
 - `bun run go:promote <small5|daemon19> <candidate.model>` — fixed-corpus WebGPU promotion gate; `--apply` installs and verifies the champion through export and full-precision-champion-to-WGSL correctness gates.
 - `bun run go:export` — automatically choose each profile's validated storage encoding and regenerate its runtime artifact; add `--inspect` for a non-writing decision/size report or `--check` for staleness.

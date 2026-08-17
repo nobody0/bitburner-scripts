@@ -63,6 +63,10 @@ std::vector<float> encode_opponent_turn_behavior(
   const OpponentTurnBehavior& behavior,
   double komi = -1.0
 );
+std::vector<float> encode_opponent_future_behavior(
+  Opponent opponent,
+  double komi = -1.0
+);
 
 // total_playtime_ms is the current seed observed after the AI's initial wait.
 // The sole remaining ambiguity is the upstream unseeded defense tie-break.

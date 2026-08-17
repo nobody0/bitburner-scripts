@@ -7,7 +7,8 @@ import {
   serverRanges,
   type RootState,
 } from "../../../shared/features/servers.ts";
-import { bar, card, dataTable, dot, filters, meter, note, search, table, tiles, type Column } from "../lib/dom.ts";
+import { bar, card, dataTable, dot, filters, hint, meter, outcome, rankedTable, search, table, tiles, waiting, type Column } from "../lib/dom.ts";
+import { decisionHistory } from "../lib/history.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
@@ -261,7 +262,7 @@ export const hackingTab: Tab = {
           },
           { label: "share power", value: fleet.sharePower !== undefined ? fmtNum(fleet.sharePower, 2) : "–" },
         ])
-      : note("waiting for the fleet probe");
+      : waiting("the fleet probe");
 
     const homeRamPlan = fleet?.homeRamPlan
       ? table(
@@ -283,14 +284,11 @@ export const hackingTab: Tab = {
           { label: "cash / grant", value: `${fmtMoney(fleet.infrastructurePlan.moneyAvailable)} / ${fmtMoney(fleet.infrastructurePlan.moneyGranted)}` },
           { label: "farm value", value: `${fmtMoney(fleet.infrastructurePlan.incomePerSecPerGb)}/s/GB` },
         ]) +
-        (fleet.infrastructurePlan.lastResult
-          ? note(`${fleet.infrastructurePlan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${fleet.infrastructurePlan.lastResult.detail}`)
-          : "") +
+        (fleet.infrastructurePlan.lastResult ? outcome(fleet.infrastructurePlan.lastResult) : "") +
         (fleet.infrastructurePlan.ranked.length
-          ? table(
-              ["pick", "option", "adds", "cost", "adds $/sec", "return/$", "payback", "horizon net", "status"],
+          ? rankedTable(
+              ["option", "adds", "cost", "adds $/sec", "payback", "horizon net", "status"],
               fleet.infrastructurePlan.ranked.map((entry) => [
-                entry.selected ? "▶" : "",
                 esc(entry.kind === "upgradeServer"
                   ? `${entry.host ?? "server"} → ${fmtRam(entry.targetRam)}`
                   : entry.kind === "buyServer"
@@ -301,48 +299,25 @@ export const hackingTab: Tab = {
                 entry.addedRam === undefined ? "–" : entry.addedRam > 0 ? fmtRam(entry.addedRam) : "+1 core",
                 fmtMoney(entry.cost),
                 fmtMoney(entry.incomePerSec),
-                fmtNum(entry.returnPerDollarSec, 8),
-                fmtTime(entry.paybackSec * 1000),
+                hint(fmtTime(entry.paybackSec * 1000), `return/$ ${fmtNum(entry.returnPerDollarSec, 8)}`),
                 fmtMoney(entry.netOverHorizon),
                 entry.worthBuying === true ? "repays" : entry.worthBuying === false ? "past horizon" : "–",
               ]),
-              { left: [1, 8] },
+              {
+                selected: (i) => fleet.infrastructurePlan!.ranked[i]!.selected,
+                left: [0, 6],
+                shown: fleet.infrastructurePlan.ranked.length,
+                total: fleet.infrastructurePlan.rankedTotal,
+              },
             )
-          : "") +
-        (fleet.infrastructurePlan.rankedTotal > fleet.infrastructurePlan.ranked.length
-          ? note(`showing ${fleet.infrastructurePlan.ranked.length} of ${fleet.infrastructurePlan.rankedTotal} scored options`)
           : "")
       : "";
 
-    const infrastructureHistory = state.events
-      .filter((event) => event.kind === "event" &&
-        (event.name === "investment.decision" || event.name === "investment.result") &&
-        (event.data as { subsystem?: string } | undefined)?.subsystem === "infrastructure")
-      .slice(-10)
-      .reverse()
-      .map((event) => {
-        const data = event.data as {
-          plan?: { buy?: { kind?: string }; candidate?: { kind?: string } };
-          result?: { detail?: string };
-          arbitration?: {
-            grants?: { by: string; id: string; amount: number }[];
-            denied?: { by: string; id: string; reason: string }[];
-          };
-        } | undefined;
-        const denied = data?.arbitration?.denied?.find((entry) => entry.by === "hacking" && entry.id.startsWith("infrastructure:"));
-        const winners = data?.arbitration?.grants?.filter((entry) => entry.by !== "hacking" || !entry.id.startsWith("infrastructure:")) ?? [];
-        const arbiter = denied
-          ? `${denied.reason}${winners.length ? `; funded ${winners.map((entry) => `${entry.by}:${entry.id} ${fmtMoney(entry.amount)}`).join(", ")}` : ""}`
-          : data?.arbitration ? "funded" : "–";
-        return [
-          fmtTime(event.t - (state.t0 ?? event.t)),
-          esc(event.kind === "event" ? event.name : ""),
-          data?.result?.detail
-            ? esc(data.result.detail)
-            : esc(data?.plan?.buy?.kind ?? data?.plan?.candidate?.kind ?? "hold"),
-          esc(arbiter),
-        ];
-      });
+    const infrastructureHistory = decisionHistory(state, {
+      subsystem: "infrastructure",
+      by: "hacking",
+      idPrefix: "infrastructure:",
+    });
 
     // --- servers ---
     const all = buildRows(state);
@@ -370,38 +345,31 @@ export const hackingTab: Tab = {
         "hacking.servers",
         [
           { value: "money", label: "worth hacking" },
-          { value: "rooted", label: "rooted", badge: String(counts.rooted) },
-          { value: "ready", label: "rootable", badge: String(counts.ready) },
-          { value: "blocked", label: "blocked", badge: String(counts.blocked) },
-          { value: "prepped", label: "prepped", badge: String(counts.prepped) },
+          { value: "rooted", label: "rooted", badge: String(counts.rooted), title: "root access held" },
+          { value: "ready", label: "rootable", badge: String(counts.ready), title: "rootable now" },
+          { value: "blocked", label: "blocked", badge: String(counts.blocked), title: "needs more skill or port openers" },
+          { value: "prepped", label: "prepped", badge: String(counts.prepped), title: "at max money and min security" },
           { value: "all", label: "all", badge: String(all.length) },
         ],
         "money",
       ) + search("hacking.search", "host…");
 
-    const servers =
-      dataTable("hacking.servers", rows, COLUMNS, {
-        defaultSort: { key: "money", dir: -1 },
-        empty: "no servers match this filter",
-        limit: 120,
-      }) +
-      note(
-        "● rooted · ● rootable now · ● needs more skill or port openers. " +
-          "Hover skill, money and security for this save's generated ranges; hover RAM/cores for the core effect.",
-      );
+    const servers = dataTable("hacking.servers", rows, COLUMNS, {
+      defaultSort: { key: "money", dir: -1 },
+      empty: "no servers match this filter",
+      limit: 120,
+    });
 
     return (
       `<div class="col wide">` +
-      card("Farm", farm ? farmTiles + ops : note("no farm rollup — the dispatcher publishes one per second")) +
+      card("Farm", farm ? farmTiles + ops : waiting("the farm rollup", "the dispatcher publishes one per second")) +
       card("Servers", servers, serverControls) +
       `</div>` +
       `<div class="col">` +
       card("Fleet", fleetTiles) +
       (infrastructurePlan ? card("Infrastructure ROI", infrastructurePlan) :
         homeRamPlan ? card("Home RAM investment", homeRamPlan) : "") +
-      (infrastructureHistory.length
-        ? card("Infrastructure history", table(["at", "transition", "selection / outcome", "arbiter"], infrastructureHistory, { left: [1, 2, 3] }))
-        : "") +
+      (infrastructureHistory ? card("Decision history", infrastructureHistory) : "") +
       (pie ? card("RAM segments", pie) : "") +
       (health ? card("Dispatcher health", health) : "") +
       `</div>`

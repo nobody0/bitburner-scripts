@@ -8,7 +8,10 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace bitburner::go {
@@ -174,27 +177,38 @@ StartingBoardFamily starting_board_family(int requested_size, Opponent opponent,
     }};
     Board board{.size = 19, .columns = std::vector<std::string>(shape.begin(), shape.end())};
     board = rotate(board);
+    std::vector<Point> daemon_points = expansion_points(board);
+    const bool daemon_absent = handicap(19, opponent) > 0 && daemon_points.empty();
     return {
       .board_before_handicap = board,
       .handicap = handicap(19, opponent),
-      .possible_handicap_points = expansion_points(board),
+      .possible_handicap_points = std::move(daemon_points),
+      .handicap_may_be_absent = daemon_absent,
     };
   }
   Board board{.size = requested_size, .columns = std::vector<std::string>(static_cast<std::size_t>(requested_size), std::string(static_cast<std::size_t>(requested_size), '.'))};
   WhRandom random(obstacle_seed);
   const bool remove_corner = random.integer(0, 4) == 0;
   const bool remove_row = !remove_corner && random.integer(0, 4) == 0;
-  const bool center_break = !remove_corner && !remove_row && random.integer(0, 3) != 0;
-  const int obstacle_types = static_cast<int>(remove_corner) + static_cast<int>(remove_row) + static_cast<int>(center_break);
+  // Upstream keeps the raw 0..3 result of `a && b && random(0, 3)`.
+  // Its truthiness decides whether to add the center break, while its numeric
+  // value is also included in obstacleTypeCount. Collapsing this to bool makes
+  // rolls 2 and 3 generate too many edge obstacles.
+  const int center_break_roll = !remove_corner && !remove_row ? random.integer(0, 3) : 0;
+  const int obstacle_types = static_cast<int>(remove_corner) + static_cast<int>(remove_row) + center_break_roll;
   const int edge_dead = random.integer(1, (scale(board.size) + 2 - obstacle_types) * 1.5);
   if (remove_corner) board = add_dead_corners(std::move(board), random);
-  if (center_break) board = add_center_break(std::move(board), random);
+  if (center_break_roll != 0) board = add_center_break(std::move(board), random);
   board = random_rotation(std::move(board), random);
   if (remove_row) board = remove_rows(std::move(board), random);
   board = add_edge_nodes(std::move(board), random, edge_dead);
   if (board_hash(board).find('#') == std::string::npos) board.columns[0][0] = '#';
   remove_islands(board);
   std::vector<Point> points = expansion_points(board);
+  // The unseeded placement loop only draws from the expansion list. When that
+  // list is empty, the 20% center shortcut (added below when reachable) is the
+  // sole way a stone appears, so the no-stone outcome is possible too.
+  const bool may_be_absent = handicap(board.size, opponent) > 0 && points.empty();
   int available = 0;
   for (const auto& column : board.columns) available += static_cast<int>(std::count(column.begin(), column.end(), '.'));
   if (requested_size == 5 && available < 26 && at(board, 2, 2) != '#'
@@ -203,6 +217,7 @@ StartingBoardFamily starting_board_family(int requested_size, Opponent opponent,
     .board_before_handicap = board,
     .handicap = handicap(board.size, opponent),
     .possible_handicap_points = std::move(points),
+    .handicap_may_be_absent = may_be_absent,
   };
 }
 
@@ -212,6 +227,32 @@ Board initial_board(int requested_size, Opponent opponent, double obstacle_seed,
   LcgRandom unseeded(handicap_seed);
   apply_handicap(board, family.handicap, unseeded);
   return board;
+}
+
+std::vector<StartingBoardVariant> starting_board_variants(const StartingBoardFamily& family) {
+  if (family.handicap > 1 && !family.possible_handicap_points.empty()) {
+    throw std::invalid_argument("starting_board_variants supports at most one handicap stone");
+  }
+  std::vector<StartingBoardVariant> result;
+  std::vector<std::string> seen;
+  const auto add = [&](Board board, std::optional<Point> point) {
+    std::string hash = board_hash(board);
+    if (std::find(seen.begin(), seen.end(), hash) != seen.end()) return;
+    seen.push_back(std::move(hash));
+    result.push_back({std::move(board), point});
+  };
+  if (family.handicap > 0) {
+    for (const Point point : family.possible_handicap_points) {
+      Board board = family.board_before_handicap;
+      board.columns[static_cast<std::size_t>(point.x)][static_cast<std::size_t>(point.y)] = 'O';
+      add(std::move(board), point);
+    }
+  }
+  if (family.handicap <= 0 || family.possible_handicap_points.empty()
+    || family.handicap_may_be_absent) {
+    add(family.board_before_handicap, std::nullopt);
+  }
+  return result;
 }
 
 }  // namespace bitburner::go

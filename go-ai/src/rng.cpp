@@ -5,6 +5,27 @@
 
 namespace bitburner::go {
 
+double normalize_go_playtime(double total_playtime_ms) {
+  const double phase = std::fmod(total_playtime_ms, go_whrng_period_ms);
+  return phase < 0 ? phase + go_whrng_period_ms : phase;
+}
+
+double aligned_opponent_seed(double dispatch_playtime_ms) {
+  return normalize_go_playtime(dispatch_playtime_ms + go_engine_cycle_ms);
+}
+
+double next_go_dispatch_playtime(
+  double dispatch_playtime_ms,
+  int cycle_waits_after_seed,
+  int fixed_sleep_ms_after_seed
+) {
+  const double wall_ms = go_engine_cycle_ms
+    + static_cast<double>(std::max(0, cycle_waits_after_seed)) * go_engine_cycle_ms
+    + static_cast<double>(std::max(0, fixed_sleep_ms_after_seed));
+  const double elapsed_ticks = std::floor(wall_ms / go_engine_cycle_ms);
+  return normalize_go_playtime(dispatch_playtime_ms + elapsed_ticks * go_engine_cycle_ms);
+}
+
 std::vector<double> whrng(double total_playtime_ms, int count) {
   const double seed = std::fmod(total_playtime_ms / 1000.0, 30000.0);
   double s1 = seed;

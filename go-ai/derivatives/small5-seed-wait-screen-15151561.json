@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-08-17T17:10:47.597Z",
+  "seedUseId": "2026-08-17T17:07:55.779Z-screen-small5",
+  "config": {
+    "profile": "small5",
+    "games": 384,
+    "seed": 15151561,
+    "handicapSeed": 15151562,
+    "defenseSeed": 15151563,
+    "opponent": "Illuminati",
+    "seedWait": {
+      "mode": "rollout",
+      "lossThreshold": 0.5,
+      "minimumGain": 0.05,
+      "rolloutPlies": 40
+    }
+  },
+  "control": {
+    "wins": 292,
+    "games": 384,
+    "winRate": 0.7604166666666666,
+    "powerPerTurn": 0.504341,
+    "meanTurns": 26.7,
+    "latencyMs": {
+      "p50": 6,
+      "p95": 13.8,
+      "max": 75.1
+    },
+    "seedWaits": 0
+  },
+  "waited": {
+    "wins": 296,
+    "games": 384,
+    "winRate": 0.7708333333333334,
+    "powerPerTurn": 0.520609,
+    "meanTurns": 26.16,
+    "latencyMs": {
+      "p50": 20.6,
+      "p95": 55.5,
+      "max": 119.4
+    },
+    "seedWaits": 148
+  },
+  "flips": {
+    "favorable": 7,
+    "unfavorable": 3
+  },
+  "perOpponent": {
+    "Illuminati": {
+      "games": 384,
+      "control": 292,
+      "waited": 296
+    }
+  }
+}

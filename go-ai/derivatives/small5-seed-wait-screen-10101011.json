@@ -1,0 +1,78 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-08-17T16:21:03.621Z",
+  "seedUseId": "2026-08-17T16:15:45.602Z-screen-small5",
+  "config": {
+    "profile": "small5",
+    "games": 384,
+    "seed": 10101011,
+    "handicapSeed": 10101012,
+    "defenseSeed": 10101013,
+    "seedWait": {
+      "lossThreshold": 0.5,
+      "minimumGain": 0.05
+    }
+  },
+  "control": {
+    "wins": 2151,
+    "games": 2304,
+    "winRate": 0.93359375,
+    "powerPerTurn": 0.760399,
+    "meanTurns": 20.08,
+    "latencyMs": {
+      "p50": 5.1,
+      "p95": 10,
+      "max": 63.6
+    },
+    "seedWaits": 0
+  },
+  "waited": {
+    "wins": 2153,
+    "games": 2304,
+    "winRate": 0.9344618055555556,
+    "powerPerTurn": 0.760712,
+    "meanTurns": 20.09,
+    "latencyMs": {
+      "p50": 5.5,
+      "p95": 11.1,
+      "max": 65.2
+    },
+    "seedWaits": 22
+  },
+  "flips": {
+    "favorable": 4,
+    "unfavorable": 2
+  },
+  "perOpponent": {
+    "Netburners": {
+      "games": 384,
+      "control": 382,
+      "waited": 383
+    },
+    "Slum Snakes": {
+      "games": 384,
+      "control": 384,
+      "waited": 384
+    },
+    "The Black Hand": {
+      "games": 384,
+      "control": 380,
+      "waited": 380
+    },
+    "Tetrads": {
+      "games": 384,
+      "control": 360,
+      "waited": 360
+    },
+    "Daedalus": {
+      "games": 384,
+      "control": 369,
+      "waited": 368
+    },
+    "Illuminati": {
+      "games": 384,
+      "control": 276,
+      "waited": 278
+    }
+  }
+}

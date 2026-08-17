@@ -1,130 +1,259 @@
-# V9 training checkpoint — 2026-08-13
+# V9 training checkpoint
 
-This is the restart point for the next training agent. Read
-[`README.md`](README.md) and [`gpu/README.md`](gpu/README.md) for the model and
-loss contracts, then [`MAC_TO_WINDOWS_HANDOFF.md`](MAC_TO_WINDOWS_HANDOFF.md)
-for the two-machine workflow. Windows setup details are in
-[`MAC_TO_WINDOWS_SETUP.md`](MAC_TO_WINDOWS_SETUP.md) and exact worker commands
-are in [`remote/README.md`](remote/README.md).
+This is the authoritative restart point. Read [`README.md`](README.md), then
+[`gpu/README.md`](gpu/README.md) and
+[`MAC_TO_WINDOWS_HANDOFF.md`](MAC_TO_WINDOWS_HANDOFF.md) before launching work.
 
-## Priorities and objective
+## 2026-08-17 daemon19 promotion: data and capacity were jointly binding
 
-Optimize win rate first. Win utility is quadratic because the game rewards win
-streaks increasingly; Power per **total** turn is the linear tie-break, so fewer
-turns are better. Train both `small5` and `daemon19`, concentrating most compute
-on daemon19 because it is much further behind, but always keep a small5 lane
-active and screen it regularly. Never promote from training-game wins or a
-tiny ad-hoc sample. Promotion remains Mac-owned and requires the exhaustive
-shortlist gate plus the production WebGPU arena.
+`219f83c701fd...` replaced `aaaefd114d9f...` after **453/512 (88.48%)** versus
+**408/512 (79.69%)** on fresh corpus `81555501`: 93/48 favorable/unfavorable
+flips (`p=0.000094`), +0.045229 Power/turn with a positive 95% lower bound
+(+0.026403), 1.60 fewer mean turns, +5,451 points, latency 3.2/4.6 ms against
+the 15/18 ms strict-K=1 budget. Golden fixture regenerated and the WGSL gate
+passed before install.
 
-## Deployed champions
+The causal story is that **neither change worked alone**:
 
-The authoritative deployed files and hashes are recorded in
-[`BASELINES.md`](BASELINES.md):
+| Arm | held-out exact KataGo | good-set |
+|---|---:|---:|
+| champion `aaaefd11` (16x4 r16, 35,835 params) | 34.70% | 62.32% |
+| 16x4 r16 + 2.7x DAgger data | 34.97% | 62.55% |
+| **32x6 r32 + same data (promoted)** | **36.19%** | **64.82%** |
+| 48x8 r48 + same data | 36.74% | 65.61% |
 
-- `small5-champion.model`: `437f1cfecabcec061c2b85eb578667f6a89272b7e854ff758956bde84c47c942`
-- `daemon19-champion.model`: `c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e`
+All four measured on the identical 3,960-position held-out split. More data at
+the old capacity bought +0.27 points and no champion; adding capacity converted
+the same corpus into +8.8 arena points. "Capacity does not help daemon19" was an
+artifact of only ever testing capacity at the old data volume. Always vary data
+and capacity together before concluding either is saturated.
 
-Every new training stage must use the matching installed V9 champion as
-`--teacher`. The current trainer rejects legacy V7 teachers and old V7/V8
-streams. Old research models below are useful only as optional `--init`
-warm-starts; their historical summaries cannot authorize continuation actors
-or promotion.
+The new DAgger shard is
+`corpora/v9-daemon19-katago-dagger-scaled-v1-aaaefd-20260823-g256-p28.jsonl.gz`
+(4,075 labels from 256 fresh champion routes, 2,865 genuine corrections, student
+won 204/256); the composed training corpus is
+`corpora/v9-daemon19-component-split-tactical-dagger-scaled-v1-20260823-g256-c32-d128-d256.jsonl.gz`
+(SHA-256 `2d11b4cf364dd0ce1854e6e26f1df53b869faf07605e161b235224a0c301cfe8`,
+71,152 records, 39,907 KataGo actors, zero findings).
 
-## Retained research evidence
+**Imitation is now saturating.** 48x8 is ~13x the original parameters for
++0.15 points over 32x6, so distillation alone will not close the remaining gap
+to KataGo's 255/256. The structural difference left is search: KataGo uses 8
+visits per move, daemon19 plays strict K=1 with a neutral value head.
 
-The pruned historical campaign keeps only these non-deployed candidates:
+## daemon19 deploys at strict K=1: search is ruled out on latency
 
-- `runs/v9-campaign-20260813/small5-value-head-384/v9.64.model`: best fixed
-  accelerated screen, `1776/2048 = 86.71875%`. Later value-head checkpoints
-  regressed. SHA-256: `f1dc7240224c28a89061e9e2983e5f206062be6f19b482aa0a8df994f0a847fa`.
-  Its historical corpus/summary does not satisfy the current V9 teacher and
-  recall contract.
-- `runs/v9-campaign-20260813/daemon19-joint-anchor-3072/v9.model`: strongest
-  fixed-screened daemon reference, `1/128 = 0.78125%` at production `K=16`,
-  averaging `234.80` rounds. Historical held-out metrics were 78.97% safe
-  top-K recall, 73.97% target-set recall, 98.87% pass recall, and 47.64% bait
-  recall. SHA-256: `056d8be6a30d40fe4f94a6c0ea65c79449bec523ae0b243cd3188dd33d8063ac`.
-- `runs/v9-campaign-20260813/daemon19-cache-joint-1024/v9.model`: later,
-  unscreened continuation with better historical recall: 80.26% safe, 75.18%
-  set, 98.95% pass, and 49.14% bait. Treat it as an optional initialization,
-  not as a winner. SHA-256:
-  `11d83080b760d8d4a212c1e1b6d05851356563e157cb4c226be45cced7860aa0`.
+`GO_PROFILE_CANDIDATE_LIMITS.daemon19 = 1` and `GO_PROFILE_DEEP_SEARCH` has no
+daemon19 entry. This is a **hard deployment constraint, not an open research
+gate**: a 19x19 K>1 turn needs the TypeScript oracle to apply an exact reply per
+candidate plus a multi-board value dispatch (measured 29.3 ms p50 for 104
+boards) against a 15/18 ms budget. No value head makes that fit.
 
-Fresh current-champion labels subsequently rejected that daemon warm start: on
-4,946 unseen positions it retained only 49.27% safe, 48.40% set, 63.87% pass,
-and 19.52% bait recall (49.36/48.42/64.73/19.90 after one no-update evaluation
-game). Its historical ~80% result was stale-teacher/corpus-specific. Do not use
-it as the default initialization for the resumed campaign.
+A value head was trained on 22,118 KataGo leaf evaluations before this was
+checked (`corpora/v9-daemon19-lookahead-leafvalues-v2-219f83c7-20260904.jsonl.gz`,
+checkpoint `38ff58de1694`, parity 7.2e-06). It is sound work with no consumer
+unless the latency budget changes; screen corpus `61000001` was burned finding
+this out. **Check the deployment table before building anything that assumes
+search.**
 
-The daemon trajectory moved from 44.06% safe recall and 9.33% bait recall to
-roughly 80% and 49%. Removing consumed current-turn RNG conditioning from the
-single-opponent daemon value head was the main correctness fix. Direct value
-ranking reduced weighted reply-win MAE from about 0.093 to 0.012. A dedicated
-safe-anchor loss plus the four-move safe/upside set loss required shared-trunk
-training; head-only proposal runs plateaued near 65% recall. The first fixed
-daemon win is promising, but one win is not statistical evidence of beating
-the historical V7 rate.
+`validate_corpus.py` gained a `STATIC_VALUE_AUTHORS` allow-list so an external
+evaluator's score of an independent post-reply board can be stored without
+route-shaped checks, while forcing `score`/`remaining` to stay 0. That keeps a
+static estimate from ever being recorded as rollout evidence. It is reusable if
+a K>1 profile ever exists.
 
-## How to continue
+## The K=1-compatible use of the lookahead playbook
 
-### 2026-08-13 resumed campaign update
+`teacher/export-lookahead-playbook.ts` searches Black candidate -> exact White
+reply -> Black follow-up -> both successor-seed White replies -> KataGo leaf,
+and emits roots where the backed-up best action beats KataGo's own root choice.
+White never branches, so the tree is effectively single-player, and
+`goSuccessorDispatchCandidates` already narrows the second reply to two exact
+seeds, so no phase marginalisation is needed.
 
-A fresh 12,288-game small5 corpus established the installed champion at 98.15%
-safe top-8 recall, 92.32% four-move-set recall, and 95.21% pass recall over
-15,331 unseen positions. Joint replay produced research leader
-`a178f1d1a4bb59891a794bfb7251efd9ad6fe54375939eb4ff447f93bfbef573`:
-99.37% safe recall, 95.54% set recall, 97.97% pass recall, and 0.00269 mean
-regret. On a paired 432-game production WebGPU screen it won 373 games with
-+901 points versus the installed champion's 368 and +757. It remains
-unpromotable because the exhaustive set/pass gates have not passed; continue
-from it with top-K-aware set-margin pressure and value retention. Do not use
-the earlier strict maximum-outsider margin: it optimizes a stronger ordering
-than shortlist retention requires and regressed safe/pass recall immediately.
-The first all-positive margin continuation reached 99.59% safe recall and
-98.86% pass recall but left whole-set recall at 96.10%. The next targeted branch
-should reduce `--proposal-anchor-weight` from its normal `0.5` while increasing
-`--proposal-margin-weight`; reject it if safe recall or the paired arena falls.
+Three independent runs replicated closely:
 
-Fresh daemon data confirmed the installed bootstrap is much further behind: at
-256 games it had 44.66% safe top-16 recall, 44.15% set recall, 19.75% bait
-recall, and 0 wins. The daemon remains the primary compute target as soon as
-the fresh corpus closes.
+| Run | Routes | Roots searched | Entries | Exploit rate | Median win margin |
+|---|---:|---:|---:|---:|---:|
+| v1 | 48 | 88 | 34 | 38.6% | +0.112 |
+| v2 | 160 | 345 | 120 | 34.8% | +0.116 |
+| v3 | 240 | 539 | 185 | 34.3% | +0.097 |
 
-Start by generating fresh exhaustive corpora with the installed V9 champions,
-using new seeds and immutable run directories. Use the old research leader only
-as an A/B initialization against a clean/current-champion initialization. Do
-not reuse old V7-teacher corpora for ordinary training. Keep proposal, value
-distillation, and candidate-ranking supervision together when adapting the
-shared trunk; periodically use a short value-head-only ranking calibration,
-and reject it as soon as unseen ranking/MAE regresses. Do not enable
-`--self-actor-fraction` until the hash-matched unseen summary reports
-`shortlistDataAllowed: true`.
+Roughly a third of *live* roots (about 19% of all roots survive the
+non-saturated filter) have a better answer than KataGo's, worth a median +10 to
++12 points of win probability.
 
-Generate labels with `--updates-per-game 0` when an unchanged-champion baseline
-and reusable corpus are wanted, then train independent replay branches from
-that corpus. The gate counts unseen positions rather than games: short small5
-games need roughly 12,288 games or several compatible corpora to clear the
-10,000-position minimum. `--pretrain-updates` runs every enabled loss, and
-candidate ranking defaults off, so record all loss weights explicitly.
-Use `--pretrain-checkpoint-updates 500` or `1000` for long replay stages; the
-intermediate unseen metrics are the trajectory, and the final update is not
-automatically the best candidate.
+Because search cannot run at inference, the only usable consumer is **policy
+distillation**: `teacher/export-lookahead-actors.ts` converts entries into
+`source: "self"` actor labels, so the search cost is paid once during generation
+and the deployed player still does one argmax. `--exact-actor-source self` was
+added to `train_v9.py` for this. Do not relabel these as `katago`: they are by
+construction the moves KataGo does not choose.
 
-Send long replay-pretraining jobs to the RTX 4090 using the immutable snapshot
-and content-addressed input workflow. Keep Mac CPU corpus/evaluation shards,
-strict screening, C++/TypeScript/WebGPU gates, and all promotion decisions on
-the Mac. Pipeline the profiles: while CUDA trains daemon19, screen or generate
-small5 data on the Mac; then train small5 on CUDA while the Mac screens daemon.
-Use `--replay-cache-dir` on both machines. Measured packed-replay daemon
-training reached about 4.8 updates/s at batch 256 on MPS, roughly 70% faster
-than unpacked replay; batch 1024 did not improve Mac wall time. CUDA is the
-preferred sustained training device.
+**Status: unproven and currently under-powered.** A 280-label pilot (252 train,
+28 held out) moved held-out exploit recall from the champion's 78.57% to 75.00%
+and 71.43% — differences of one and two positions, i.e. noise. The useful signal
+from it is that the champion *already* holds the exploit action in its shortlist
+on ~79% of these roots, so the deficit is argmax ranking, not shortlist
+coverage, which is exactly what K>1 would have fixed and K=1 cannot.
 
-For each candidate, first check C++ parity and held-out shortlist metrics, then
-run `tools/go-screen-v9.ts` on the Mac. Only candidates with a matching summary
-and passed exhaustive gate may enter the production `go:promote` arena. Compare
-wins first and Power/total-turn only as the tie-break; record average rounds so
-a model that merely prolongs games cannot look better. Never average
-checkpoints, never let a learned shortlist generate its own labels before the
-gate, and never promote directly from Windows.
+The open question is whether ~1,000 entries can move the argmax. A 800-route
+generation is running toward that. Judge it only on a 512-game K=1 gate; the
+held-out sets here are far too small to select on.
+
+## Current champions
+
+| Profile | Full-f32 SHA-256 | Production selector | Status |
+|---|---|---|---|
+| `small5` | `4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf` | K=4 plus exact replies and round-two finalization | Installed; no qualified replacement |
+| `daemon19` | `219f83c701fdc21faed575d1f0da22221b45385231744994af9f0f1c5b7e24ea` | strict K=1 policy-only | Installed 2026-08-17 at 88.48%; still the priority |
+
+The champion files are `small5-champion.model` and
+`daemon19-champion.model`. There is no pending model candidate: the daemon19
+32x6 candidate was promoted and installed, and every Small5 certified-transfer
+candidate was rejected on a full gate. The next work item is the KataGo-
+evaluated exact-reply lookahead generator described above.
+
+## Retained training inputs
+
+Only these composed inputs are current:
+
+| Purpose | Artifact | SHA-256 |
+|---|---|---|
+| Small5 certified actor transfer | `corpora/v9-small5-certified-v16-absolute-seed-component-split-20260821-c48379.jsonl.gz` | `8c5c56eb299b727401c1aec7eeefca9b17ee54621f3d50a6e1de5c50e9d850d3` |
+| daemon19 first independent regret wave | `corpora/v9-daemon19-student-root-future-marginalized-ranked-v6-timing-v16-k1-aaaefd-20260821-g128-p8.jsonl.gz` | `92ededabe47b881b69bdf08229176f6eb797e915f04756d850d42deba45f0297` |
+| daemon19 second-wave manifest | `corpora/v9-daemon19-student-root-manifest-v6b-20260822-g128.json.gz` | `b1aab3fc72af6913901c4f7de4b59f973d24d48341338b49f394591013726d19` |
+
+The six source playbook exports under `ipvgobruteforce/data/training/` are the
+`*-v16-absolute-seed-20260821` files. Their component-safe combined Small5
+snapshot above is the training input; the per-opponent files remain immutable
+source authority.
+
+## Why the current data contract exists
+
+The corrected v16 exporter uses absolute `playtimeEpoch`. The WHRNG's later
+draws are not periodic in the old modulo timing phase, so a modulo-only export
+produces self-consistent-looking but wrong behavior tensors. Training and
+arenas must use the stochastic future-timing implementation and fresh paired
+streams.
+
+Certified actions are often opponent exploits. They remain conditional on the
+semantic behavior input; KataGo agreement is evidence that an action is also
+generally sound. KataGo supplies actor preferences, not value targets. Numeric
+or terminal targets retain their actual rollout author.
+
+Every composition groups complete route families and shared f32 inputs before
+splitting. Fresh seeds alone do not prevent identical neural states from
+crossing train/held-out.
+
+## Small5 is closed: certified data cannot enter the weights
+
+Champion `4ff250e3...` is final for the near future. Two independent fresh
+12,288-game gates measured it at 11,478/12,288 (93.41%) and 11,432/12,288
+(93.03%). Per opponent (2,048 games each): Netburners 2,045, Slum Snakes 2,045,
+The Black Hand 2,013, Daedalus 1,973, Tetrads 1,966, **Illuminati 1,436
+(70.1%)** — Illuminati carries roughly 72% of all remaining losses.
+
+Six independent training routes were tested against the full gate and all
+regressed. Ordered by how much they lost:
+
+| Route | Result |
+|---|---|
+| agree-only (KataGo-approved rows, no bait at all) | **-1,282 wins** |
+| interleaved full-trunk rehearsal, 20k updates | -1,178 wins |
+| whole certified corpus, frozen trunk | -82 wins |
+| Illuminati-targeted, conditioning retention | target metric never moved |
+| conditioning-only (exploit rows) | 76.4% recall ceiling, 0.00% both-correct |
+| frozen-trunk retention curve, 3 rates x 4 levels | frontier step-size invariant |
+
+The mechanism is **shortlist collapse, not bait**. Certified training sharpens
+the policy onto a single action: mean finalists fall 5.32 -> 4.38 while mean
+turns rise 20.29 -> 22.91. Production Small5 is K=4 *plus* deep search, which
+reinvests a diverse shortlist into round-two depth, so starving that shortlist
+costs more than better root moves gain. Removing bait does not help because
+bait was never the cause — the agree-only arm lost the most.
+
+A second measured fact constrains any retry: the champion is *completely*
+behaviour-blind, changing its action on 0.00% of 1,180 held-out pairs where only
+the enemy-behaviour vector differs. Training makes this worse, not better —
+either-correct climbs 86.9% -> 96.5% while both-correct falls to 0 — because
+~88% of certified rows are behaviour-invariant, so the loss is minimised by
+memorising boards. V9 also consumes behaviour only through per-block
+conditioning that is broadcast over every board point, so it can express
+"against this opponent prefer this kind of move" but never "play bait here".
+
+Do not retry certified-to-weights transfer without first changing one of those
+two structural facts. The playbook's proven home is the runtime
+(`go:playbook:residual` -> `go:playbook:pack` -> `go:combined:arena`), where v16
+wins 120/120 committed entries.
+## Active daemon19 work
+
+The student-root regret waves (v6/v6b, 256 groups, 4,335 continuations) are
+**closed and their corpora deleted**: held-out correction sat at exactly 1/25 at
+every checkpoint and both retention levels while general-Go retention decayed to
+79.7--86.3%. Doubling independent regret evidence produced no learnable signal.
+
+Retained daemon19 inputs:
+
+| Purpose | Artifact |
+|---|---|
+| current training corpus (R1+R2) | `corpora/v9-daemon19-component-split-dagger-r1r2-20260901-g256-c32-d128-d256-d256b.jsonl.gz` |
+| champion provenance corpus | `corpora/v9-daemon19-component-split-tactical-dagger-scaled-v1-20260823-g256-c32-d128-d256.jsonl.gz` |
+| DAgger shards (round 1, round 2) | `...-katago-dagger-scaled-v1-aaaefd-...`, `...-katago-dagger-round2-219f83c7-...` |
+| lookahead playbook entries (v1-v3) | `...-lookahead-playbook-v1/v2/v3-219f83c7-...jsonl.gz` |
+| lookahead K=1 policy labels | `corpora/v9-daemon19-lookahead-actors-v1-219f83c7-20260906.jsonl.gz` (280 actors, 252/28) |
+| lookahead leaf values (no consumer at K=1) | `...-lookahead-leafvalues-v2-219f83c7-20260904.jsonl.gz` |
+
+Generate DAgger rounds with `teacher/export-katago-dagger.ts` and playbook
+evidence with `teacher/export-lookahead-playbook.ts`. Both must run detached
+(`nohup`) and must not share the Mac with a WebGPU arena: the inference backend
+is killed under that memory pressure (`EPIPE`).
+
+## Arena defect fixed: upstream no-op aborted a promotion gate
+
+The first 12,288-game Small5 apply gate did not return a verdict. It crashed
+with `upstream oracle returned illegal 2,2` after roughly a full arm, burning
+corpus `61888801` for nothing.
+
+This was a real gap in promotion-authority code, not a model problem. Upstream
+validates fallback moves but **not** faction-priority moves, so positional
+superko can very rarely reject the AI's own chosen coordinate. Bitburner logs it
+and advances to black without changing the board and without counting a pass.
+`opponent.cpp` marks that exact `no_op`, and both `transition.cpp` and the
+native `arena.cpp` apply it as "return without touching board, history, or the
+pass counter". Only the TypeScript arena threw instead.
+
+`sim/go-arena.ts` now models the same no-op and reports `whiteNoOps` per game
+rather than swallowing it. The change is safe for comparability: it only affects
+the path that previously raised, so every previously completed game is
+bit-identical and no past result moves. Black-side illegal moves still throw,
+because those would be a genuine policy or rules defect.
+
+Two sibling sites still throw on the same condition and should be reviewed by
+their owners: `sim/features/go-system.ts` (live play) and
+`go-ai/teacher/export.ts`. A rare live crash there would surface as a failed Go
+turn rather than an aborted gate.
+
+## Promotion process
+
+The Mac owns all screens and promotion decisions. Use `go:promote` with the
+profile selector (`--candidate-limit 4` for Small5, `1` for daemon19), explicit
+fresh seed streams, and the full minimum arena. The tool records burned streams
+and restores the installed artifact transactionally on rejection.
+
+Promotion requires the paired win-flip gate. On an exact win tie, require a
+positive paired 95% lower bound for Power/turn, then for fewer turns. Never
+replace a `.model` manually and never promote from native, held-out, or CPU-only
+evidence.
+
+## Work boundaries
+
+- Train and promote both profiles; prioritize daemon19 until its win rate
+  catches Small5.
+- Keep full-f32 training authority separate from quantization, pruning, and
+  derivative installation.
+- Do not tune arbitrary coefficients or launch an unbounded campaign.
+- Keep only immutable source snapshots, current composed corpora, champions,
+  and a qualified active candidate.
+- Record verified facts separately from hypotheses and state the smallest
+  falsifiable next experiment.

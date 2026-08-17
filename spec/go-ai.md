@@ -33,12 +33,21 @@ tie.
 ## Decision
 
 Per turn the engine enumerates every legal move plus pass and runs V9 once on
-the original board for each reachable dispatch seed. It normally retains 8
-finalists for either profile, expands a flat boundary, and reserves some
-moves from each seed before averaging. Only finalists run exact seeded faction
-prediction and post-response value inference. Candidates are ranked by win
-probability, with loss-penalized raw Black score per total round breaking exact
-ties—the same normalized metric the trainer promotes on.
+the original board for each reachable dispatch seed. The finalist budget is
+profile-specific (`GO_PROFILE_CANDIDATE_LIMITS` in the engine): daemon19 is
+strict K=1 — the seed-averaged policy argmax plays directly, with no
+post-response value dispatch, because the installed champion's value head is
+deliberately neutral — while small5 retains 4 finalists (expanding a flat
+boundary and reserving some moves from each seed before averaging) and
+finalizes them with the production deep-search mode
+(`GO_PROFILE_DEEP_SEARCH`): after each exact first White reply it predicts
+the successor dispatch-tick seeds from the reply's wait trace, shortlists
+three follow-ups under each successor seed's exact behavior, applies White's
+exact second reply, and value-evaluates the round-two boards. Candidates are
+ranked by win probability, with loss-penalized raw Black score per total
+round breaking exact ties—the same normalized metric the trainer promotes
+on. Boards 7/9/13 use the daemon19 weights and inherit its strict-K=1
+contract.
 
 The model receives no raw enemy category. A rules-derived behavior signature
 contains the exact smart/reckless result, the three remaining WHRNG values,
@@ -133,10 +142,12 @@ game cannot re-poll every turn.
 
 Only 5x5 has dedicated weights. Every larger board is rated by the 19x19 World
 Daemon profile on a padded board, which is out of distribution for those
-weights: they never saw a 7x7-13x13 position in training. V9 routes an active
-intermediate-size game this way so it can be finished, and the plan digest
-flags it (`modelProfile`, `paddedToExtent`) so its out-of-distribution play is
-attributable.
+weights: they never saw a 7x7-13x13 position in training. These boards inherit
+the daemon19 strict-K=1 contract from the profile table (previously they fell
+through to the mixed K=8 finalizer, which the neutral value head degraded to
+scan-order selection). V9 routes an active intermediate-size game this way so
+it can be finished, and the plan digest flags it (`modelProfile`,
+`paddedToExtent`) so its out-of-distribution play is attributable.
 
 ## Reward priors
 

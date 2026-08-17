@@ -525,6 +525,52 @@ void append_illuminati_program(std::vector<ReplyBranch>& program, double roll) {
   if (roll < 0.6) program.push_back(ReplyBranch::surround);
 }
 
+std::vector<ReplyBranch> priority_program(Opponent opponent, double faction_roll) {
+  std::vector<ReplyBranch> program;
+  if (opponent == Opponent::netburners) {
+    if (faction_roll < 0.2) append_illuminati_program(program, faction_roll);
+    if (faction_roll < 0.4) program.push_back(ReplyBranch::expansion);
+    if (faction_roll < 0.6) program.push_back(ReplyBranch::growth);
+    if (faction_roll < 0.75) program.push_back(ReplyBranch::random);
+  } else if (opponent == Opponent::slum_snakes) {
+    program.push_back(ReplyBranch::defend_capture);
+    if (faction_roll < 0.2) append_illuminati_program(program, faction_roll);
+    if (faction_roll < 0.6) program.push_back(ReplyBranch::growth);
+    if (faction_roll < 0.65) program.push_back(ReplyBranch::random);
+  } else if (opponent == Opponent::black_hand) {
+    program.insert(program.end(), {
+      ReplyBranch::capture, ReplyBranch::surround,
+      ReplyBranch::defend_capture, ReplyBranch::surround,
+    });
+    if (faction_roll < 0.3) append_illuminati_program(program, faction_roll);
+    if (faction_roll < 0.75) program.push_back(ReplyBranch::surround);
+    if (faction_roll < 0.8) program.push_back(ReplyBranch::random);
+  } else if (opponent == Opponent::tetrads) {
+    program.insert(program.end(), {
+      ReplyBranch::capture, ReplyBranch::defend_capture,
+      ReplyBranch::pattern, ReplyBranch::surround,
+    });
+    if (faction_roll < 0.4) append_illuminati_program(program, faction_roll);
+  } else if (opponent == Opponent::daedalus) {
+    if (faction_roll < 0.9) append_illuminati_program(program, faction_roll);
+  } else {
+    append_illuminati_program(program, faction_roll);
+  }
+  return program;
+}
+
+std::array<int, reply_branch_count> priority_ranks(
+  const std::vector<ReplyBranch>& program
+) {
+  std::array<int, reply_branch_count> result{};
+  int rank = 0;
+  for (const ReplyBranch programmed : program) {
+    const auto branch = static_cast<std::size_t>(programmed);
+    if (result[branch] == 0) result[branch] = ++rank;
+  }
+  return result;
+}
+
 }  // namespace
 
 std::string_view opponent_name(Opponent opponent) {
@@ -570,36 +616,6 @@ std::string_view branch_name(ReplyBranch branch) {
 OpponentTurnBehavior opponent_turn_behavior(Opponent opponent, double total_playtime_ms) {
   const auto rolls = whrng(total_playtime_ms, 4);
   const double faction_roll = rolls.at(2);
-  std::vector<ReplyBranch> program;
-  if (opponent == Opponent::netburners) {
-    if (faction_roll < 0.2) append_illuminati_program(program, faction_roll);
-    if (faction_roll < 0.4) program.push_back(ReplyBranch::expansion);
-    if (faction_roll < 0.6) program.push_back(ReplyBranch::growth);
-    if (faction_roll < 0.75) program.push_back(ReplyBranch::random);
-  } else if (opponent == Opponent::slum_snakes) {
-    program.push_back(ReplyBranch::defend_capture);
-    if (faction_roll < 0.2) append_illuminati_program(program, faction_roll);
-    if (faction_roll < 0.6) program.push_back(ReplyBranch::growth);
-    if (faction_roll < 0.65) program.push_back(ReplyBranch::random);
-  } else if (opponent == Opponent::black_hand) {
-    program.insert(program.end(), {
-      ReplyBranch::capture, ReplyBranch::surround,
-      ReplyBranch::defend_capture, ReplyBranch::surround,
-    });
-    if (faction_roll < 0.3) append_illuminati_program(program, faction_roll);
-    if (faction_roll < 0.75) program.push_back(ReplyBranch::surround);
-    if (faction_roll < 0.8) program.push_back(ReplyBranch::random);
-  } else if (opponent == Opponent::tetrads) {
-    program.insert(program.end(), {
-      ReplyBranch::capture, ReplyBranch::defend_capture,
-      ReplyBranch::pattern, ReplyBranch::surround,
-    });
-    if (faction_roll < 0.4) append_illuminati_program(program, faction_roll);
-  } else if (opponent == Opponent::daedalus) {
-    if (faction_roll < 0.9) append_illuminati_program(program, faction_roll);
-  } else {
-    append_illuminati_program(program, faction_roll);
-  }
   OpponentTurnBehavior result{
     .smart = opponent == Opponent::netburners ? false
       : opponent == Opponent::slum_snakes ? rolls.at(0) < 0.3
@@ -609,13 +625,7 @@ OpponentTurnBehavior opponent_turn_behavior(Opponent opponent, double total_play
     .faction_roll = faction_roll,
     .fallback_roll = rolls.at(3),
   };
-  int rank = 0;
-  for (const ReplyBranch programmed : program) {
-    const auto branch = static_cast<std::size_t>(programmed);
-    if (result.priority_ranks[branch] == 0) {
-      result.priority_ranks[branch] = ++rank;
-    }
-  }
+  result.priority_ranks = priority_ranks(priority_program(opponent, faction_roll));
   for (const ReplyBranch branch : {
     ReplyBranch::growth, ReplyBranch::surround, ReplyBranch::defend,
     ReplyBranch::expansion, ReplyBranch::pattern, ReplyBranch::eye_move,
@@ -639,6 +649,35 @@ std::vector<float> encode_opponent_turn_behavior(
     result[4 + reply_branch_count + index]
       = static_cast<float>(behavior.fallback_enabled[index]);
   }
+  if (komi >= 0) result.back() = static_cast<float>(komi / 10.0);
+  return result;
+}
+
+std::vector<float> encode_opponent_future_behavior(Opponent opponent, double komi) {
+  std::vector<float> result(behavior_base_features + (komi >= 0 ? 1 : 0));
+  result[0] = opponent == Opponent::netburners ? 0.0F
+    : opponent == Opponent::slum_snakes ? 0.3F
+    : opponent == Opponent::black_hand ? 0.8F
+    : 1.0F;
+  result[1] = result[2] = result[3] = -1.0F;
+  constexpr std::array<double, 10> boundaries{
+    0, 0.2, 0.3, 0.4, 0.6, 0.65, 0.75, 0.8, 0.9, 1,
+  };
+  for (std::size_t interval = 0; interval + 1 < boundaries.size(); ++interval) {
+    const double low = boundaries[interval];
+    const double high = boundaries[interval + 1];
+    const auto ranks = priority_ranks(priority_program(opponent, (low + high) / 2));
+    for (std::size_t branch = 0; branch < reply_branch_count; ++branch) {
+      result[4 + branch] += static_cast<float>(
+        (high - low) * static_cast<double>(ranks[branch])
+        / static_cast<double>(reply_branch_count));
+    }
+  }
+  for (const ReplyBranch branch : {
+    ReplyBranch::growth, ReplyBranch::surround, ReplyBranch::defend,
+    ReplyBranch::expansion, ReplyBranch::pattern, ReplyBranch::eye_move,
+    ReplyBranch::eye_block, ReplyBranch::pass,
+  }) result[4 + reply_branch_count + static_cast<std::size_t>(branch)] = 1.0F;
   if (komi >= 0) result.back() = static_cast<float>(komi / 10.0);
   return result;
 }

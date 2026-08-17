@@ -7,20 +7,7 @@ import type {
   GateBlocker,
 } from "../../../shared/telemetry/topics/factions.ts";
 import { formatScientific } from "../../../shared/format.ts";
-import {
-  card,
-  collapsible,
-  dataTable,
-  dot,
-  filters,
-  meter,
-  note,
-  search,
-  table,
-  tiles,
-  type Column,
-  type Status,
-} from "../lib/dom.ts";
+import { card, collapsible, dataTable, dot, filters, hint, meter, note, search, table, tiles, waiting, type Column, type Status } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
@@ -228,7 +215,7 @@ function planCard(state: ProjectedState): string {
   if (plan.nextBuy) {
     parts.push(
       `<div><strong>next purchase:</strong> ${esc(plan.nextBuy.name)} at ${fmtMoney(plan.nextBuy.price)}</div>` +
-        note("priced at its slot in the purchase order, dearest first — this is what the money claim reserves"),
+        note(hint("priced at purchase-order slot, dearest first", "this is what the money claim reserves")),
     );
   }
 
@@ -565,7 +552,7 @@ export const factionsTab: Tab = {
   id: "factions",
   render(state: ProjectedState) {
     const f = state.topics.factions;
-    if (!f) return note("waiting for the factions probe");
+    if (!f) return waiting("the factions probe");
 
     const rows = factionRows(state);
     // One predicate per filter, used for BOTH the badge and the filtering. A

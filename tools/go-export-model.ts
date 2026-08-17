@@ -5,7 +5,7 @@
  *   bun run go:export <checkpoint.model> <small5|daemon19> [--check|--inspect]
  */
 import { createHash } from "node:crypto";
-import { renameSync, rmSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
@@ -30,10 +30,12 @@ const PROFILE_POLICY = {
   small5: { extent: 5, behaviorFeatures: 31,
     maximum: { hidden: 256, channels: 32, residualBlocks: 4, valueTower: 64 },
     minimum: { hidden: 32, channels: 8, residualBlocks: 1, valueTower: 8 } },
-  // 19x19 compression has not been proven yet, so retain its exact contract.
+  // V9 runtime dimensions are checkpoint metadata, not profile constants.
+  // Daemon19 uses the same vectorized kernel constraints as small5; promotion
+  // remains arena-gated rather than being encoded as one historical shape.
   daemon19: { extent: 19, behaviorFeatures: 30,
     maximum: { hidden: 256, channels: 48, residualBlocks: 8, valueTower: 64 },
-    minimum: { hidden: 256, channels: 48, residualBlocks: 8, valueTower: 64 } },
+    minimum: { hidden: 32, channels: 8, residualBlocks: 1, valueTower: 8 } },
 } as const;
 
 interface Checkpoint {
@@ -44,6 +46,8 @@ interface Checkpoint {
   valueTower: number;
   behaviorFeatures: number;
   responseBranches: 13;
+  globalPolicyRank: number;
+  inputChannels: 8 | 16;
   stem: Float32Array;
   stemBias: Float32Array;
   residual: Float32Array;
@@ -64,6 +68,10 @@ interface Checkpoint {
   branchB: Float32Array;
   passBranchW: Float32Array;
   passBranchB: Float32Array;
+  globalPolicyW1: Float32Array;
+  globalPolicyB1: Float32Array;
+  globalPolicyW2: Float32Array;
+  globalPolicyB2: Float32Array;
 }
 
 interface ValueFactor {
@@ -81,8 +89,16 @@ function usage(): string {
   bun run go:export --inspect
   bun run go:export <checkpoint.model> <small5|daemon19> [--check|--inspect]
     [--value-factor checkpoint.factor]
+    [--strip-neutral-value]
+    [--output-module path.ts --constant EXPORTED_CONSTANT]
 
-Only bitburner-go-value-v9 checkpoints are supported. Runtime storage is
+--strip-neutral-value emits a policy-only deployment derivative: it removes
+the value head (refused unless every value tensor is exactly zero, keeping the
+transform lossless) and binds the artifact to the source champion SHA. The
+champion-default export and --check reproduce an installed derivative
+automatically.
+
+Only V9, global-policy, and tactical-global-policy checkpoints are supported. Runtime storage is
 q8-row-f16-bias-le and every installed artifact must pass the promotion
 pipeline's champion-oracle and complete-game WebGPU gates.`;
 }
@@ -105,8 +121,10 @@ function parseCheckpoint(text: string, source: string): Checkpoint {
     return value;
   };
   const magic = next();
-  if (magic !== "bitburner-go-value-v9") {
-    throw new Error(`${source}: unsupported checkpoint ${magic}; deployment requires bitburner-go-value-v9`);
+  if (magic !== "bitburner-go-value-v9"
+    && magic !== "bitburner-go-value-v9-global-policy-v1"
+    && magic !== "bitburner-go-value-v9-tactical-global-policy-v1") {
+    throw new Error(`${source}: unsupported checkpoint ${magic}`);
   }
   const extent = number();
   const channels = number();
@@ -115,10 +133,15 @@ function parseCheckpoint(text: string, source: string): Checkpoint {
   const valueTower = number();
   const behaviorFeatures = number();
   const responseBranches = number();
+  const globalPolicyRank = magic !== "bitburner-go-value-v9" ? number() : 0;
+  const inputChannels = magic === "bitburner-go-value-v9-tactical-global-policy-v1" ? 16 : 8;
   for (const [name, value] of Object.entries({
     extent, channels, residualBlocks, hidden, valueTower, behaviorFeatures, responseBranches,
   })) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${source}: ${name} must be a positive integer`);
+  }
+  if (!Number.isSafeInteger(globalPolicyRank) || globalPolicyRank < 0 || globalPolicyRank > 256) {
+    throw new Error(`${source}: globalPolicyRank must be an integer in [0, 256]`);
   }
   if (responseBranches !== 13) throw new Error(`${source}: V9 requires 13 response branches`);
   const vector = (expected: number, name: string): Float32Array => {
@@ -129,7 +152,8 @@ function parseCheckpoint(text: string, source: string): Checkpoint {
   const pooled = channels * 25;
   const checkpoint: Checkpoint = {
     extent, channels, residualBlocks, hidden, valueTower, behaviorFeatures, responseBranches,
-    stem: vector(channels * 8 * 9, "stem"),
+    globalPolicyRank, inputChannels,
+    stem: vector(channels * inputChannels * 9, "stem"),
     stemBias: vector(channels, "stemBias"),
     residual: vector(residualBlocks * 2 * channels * channels * 9, "residual"),
     residualBias: vector(residualBlocks * 2 * channels, "residualBias"),
@@ -149,6 +173,14 @@ function parseCheckpoint(text: string, source: string): Checkpoint {
     branchB: vector(responseBranches, "branchB"),
     passBranchW: vector(responseBranches * pooled, "passBranchW"),
     passBranchB: vector(responseBranches, "passBranchB"),
+    globalPolicyW1: globalPolicyRank
+      ? vector(globalPolicyRank * pooled, "globalPolicyW1") : new Float32Array(),
+    globalPolicyB1: globalPolicyRank
+      ? vector(globalPolicyRank, "globalPolicyB1") : new Float32Array(),
+    globalPolicyW2: globalPolicyRank
+      ? vector(extent * extent * globalPolicyRank, "globalPolicyW2") : new Float32Array(),
+    globalPolicyB2: globalPolicyRank
+      ? vector(extent * extent, "globalPolicyB2") : new Float32Array(),
   };
   if (cursor !== tokens.length) throw new Error(`${source}: ${tokens.length - cursor} trailing tokens`);
   return checkpoint;
@@ -258,47 +290,85 @@ function encodeF16(values: Float32Array, bytes: Uint8Array, offset: number): num
 
 /** Runtime tensors only. V9's response-branch head is an auxiliary training
  * objective; production resolves exact branches with the rules engine. */
-type RuntimeBlock = readonly [Float32Array, number, number, Float32Array];
+type RuntimeBlock = readonly [Float32Array, number, number, Float32Array, "q8" | "f16"];
 
-function blocks(checkpoint: Checkpoint, factor?: ValueFactor): readonly RuntimeBlock[] {
+function blocks(checkpoint: Checkpoint, factor?: ValueFactor,
+  stripValue = false): readonly RuntimeBlock[] {
   const pooled = checkpoint.channels * 25;
+  const policyStorage = checkpoint.globalPolicyRank ? "f16" : "q8";
   return [
-    [checkpoint.stem, checkpoint.channels, 8 * 9, checkpoint.stemBias],
+    [checkpoint.stem, checkpoint.channels, checkpoint.inputChannels * 9,
+      checkpoint.stemBias, policyStorage],
     [checkpoint.residual, checkpoint.residualBlocks * 2 * checkpoint.channels,
-      checkpoint.channels * 9, checkpoint.residualBias],
+      checkpoint.channels * 9, checkpoint.residualBias, policyStorage],
     [checkpoint.conditioningW, checkpoint.residualBlocks * checkpoint.channels,
-      checkpoint.behaviorFeatures, checkpoint.conditioningB],
-    ...(factor ? [
-      [factor.left, checkpoint.hidden, factor.rank, new Float32Array()] as const,
-      [factor.right, factor.rank, pooled, checkpoint.valueB1] as const,
-    ] : [[checkpoint.valueW1, checkpoint.hidden, pooled, checkpoint.valueB1] as const]),
-    [checkpoint.valueW2, checkpoint.valueTower, checkpoint.hidden, checkpoint.valueB2],
-    [checkpoint.valueOutW, 3, checkpoint.valueTower, checkpoint.valueOutB],
-    [checkpoint.policyW, 1, checkpoint.channels, checkpoint.policyB],
-    [checkpoint.passW, 1, pooled, checkpoint.passB],
+      checkpoint.behaviorFeatures, checkpoint.conditioningB, policyStorage],
+    ...(stripValue ? [] : [
+      ...(factor ? [
+        [factor.left, checkpoint.hidden, factor.rank, new Float32Array(), "q8"] as const,
+        [factor.right, factor.rank, pooled, checkpoint.valueB1, "q8"] as const,
+      ] : [[checkpoint.valueW1, checkpoint.hidden, pooled, checkpoint.valueB1, "q8"] as const]),
+      [checkpoint.valueW2, checkpoint.valueTower, checkpoint.hidden, checkpoint.valueB2, "q8"] as const,
+      [checkpoint.valueOutW, 3, checkpoint.valueTower, checkpoint.valueOutB, "q8"] as const,
+    ]),
+    [checkpoint.policyW, 1, checkpoint.channels, checkpoint.policyB, policyStorage],
+    ...(checkpoint.globalPolicyRank ? [
+      [checkpoint.globalPolicyW1, checkpoint.globalPolicyRank, pooled,
+        checkpoint.globalPolicyB1, "f16"] as const,
+      [checkpoint.globalPolicyW2, checkpoint.extent * checkpoint.extent,
+        checkpoint.globalPolicyRank, checkpoint.globalPolicyB2, "f16"] as const,
+    ] : []),
+    [checkpoint.passW, 1, pooled, checkpoint.passB, policyStorage],
   ];
 }
 
-function encode(checkpoint: Checkpoint, factor?: ValueFactor): Uint8Array {
-  const tensors = blocks(checkpoint, factor);
-  const bytes = new Uint8Array(tensors.reduce((sum, [, rows, columns, bias]) =>
-    sum + q8BlockBytes(rows, columns) + bias.length * 2, 0));
+/** The strip transform is lossless only for an exactly-zero value head. */
+function requireNeutralValueHead(checkpoint: Checkpoint, source: string): void {
+  const heads: readonly [string, Float32Array][] = [
+    ["valueW1", checkpoint.valueW1], ["valueB1", checkpoint.valueB1],
+    ["valueW2", checkpoint.valueW2], ["valueB2", checkpoint.valueB2],
+    ["valueOutW", checkpoint.valueOutW], ["valueOutB", checkpoint.valueOutB],
+  ];
+  for (const [name, tensor] of heads) {
+    for (const value of tensor) {
+      if (value !== 0) {
+        throw new Error(`${source}: --strip-neutral-value requires an exactly-zero value head; ${name} is nonzero`);
+      }
+    }
+  }
+}
+
+function encode(checkpoint: Checkpoint, factor?: ValueFactor, stripValue = false): Uint8Array {
+  const tensors = blocks(checkpoint, factor, stripValue);
+  const bytes = new Uint8Array(tensors.reduce((sum, [values, rows, columns, bias, storage]) =>
+    sum + (storage === "q8" ? q8BlockBytes(rows, columns) : values.length * 2)
+      + bias.length * 2, 0));
   let offset = 0;
-  for (const [values, rows, columns, bias] of tensors) {
-    offset = encodeQ8Rows(values, rows, columns, bytes, offset);
+  for (const [values, rows, columns, bias, storage] of tensors) {
+    offset = storage === "q8" ? encodeQ8Rows(values, rows, columns, bytes, offset)
+      : encodeF16(values, bytes, offset);
     offset = encodeF16(bias, bytes, offset);
   }
   if (offset !== bytes.length) throw new Error("internal V9 artifact size mismatch");
   return bytes;
 }
 
+interface DerivativeMeta {
+  championSha256: string;
+  transform: "strip-neutral-value-v1" | "structured-distill-v1";
+}
+
 function generatedModule(checkpoint: Checkpoint, source: string, sourceText: string,
-  profile: Profile, factor?: ValueFactor):
+  profile: Profile, factor?: ValueFactor, constantOverride?: string, stripValue = false,
+  derivative?: DerivativeMeta):
   { module: string; payload: Uint8Array; sourceSha: string; payloadSha: string } {
-  const payload = encode(checkpoint, factor);
+  const payload = encode(checkpoint, factor, stripValue);
   const sourceSha = sha256(sourceText);
   const payloadSha = sha256(payload);
-  const constant = `${profile.toUpperCase()}_GO_MODEL`;
+  const constant = constantOverride ?? `${profile.toUpperCase()}_GO_MODEL`;
+  if (!/^[A-Z][A-Z0-9_]*$/.test(constant)) {
+    throw new Error(`invalid generated model constant ${JSON.stringify(constant)}`);
+  }
   return {
     payload, sourceSha, payloadSha,
     module: `/** Generated by tools/go-export-model.ts from ${source}. Do not edit. */
@@ -307,19 +377,27 @@ import type { GoValueModelArtifact } from "../artifact.ts";
 export const ${constant}: GoValueModelArtifact = {
   format: "bitburner-go-runtime-v9",
   topology: "bitburner-go-value-v9",
-  encoding: "q8-row-f16-bias-le",
+  encoding: "${checkpoint.globalPolicyRank
+    ? "mixed-f16-policy-q8-value-le" : "q8-row-f16-bias-le"}",
   extent: ${checkpoint.extent},
   hidden: ${checkpoint.hidden},
   channels: ${checkpoint.channels},
   residualBlocks: ${checkpoint.residualBlocks},
   valueTower: ${checkpoint.valueTower},
   behaviorFeatures: ${checkpoint.behaviorFeatures},
-  valueRank: ${factor?.rank ?? 0},
-  byteLength: ${payload.length},
+${checkpoint.inputChannels === 16 ? `  inputFeatures: "tactical-v1",
+` : ""}  valueRank: ${factor?.rank ?? 0},
+${checkpoint.globalPolicyRank ? `  globalPolicyRank: ${checkpoint.globalPolicyRank},
+  globalPolicyEncoding: "f16-policy",
+` : ""}  byteLength: ${payload.length},
   source: ${JSON.stringify(source)},
   sourceSha256: "${sourceSha}",
 ${factor ? `  factorSource: ${JSON.stringify(factor.source)},
   factorSha256: "${sha256(factor.sourceText)}",
+` : ""}${derivative ? `  derivative: {
+    championSha256: "${derivative.championSha256}",
+    transform: "${derivative.transform}",
+  },
 ` : ""}  payloadSha256: "${payloadSha}",
   weights:
     "${Buffer.from(payload).toString("base64")}",
@@ -356,19 +434,43 @@ async function checkedCheckpoint(checkpointPath: string, profile: Profile): Prom
 }
 
 async function exportModel(checkpointPath: string, profile: Profile,
-  mode: "write" | "check" | "inspect", factorPath?: string): Promise<void> {
+  mode: "write" | "check" | "inspect", factorPath?: string,
+  targetOverride?: string, constantOverride?: string, stripValue = false,
+  derivativeOfPath?: string): Promise<void> {
   const { checkpoint, source, sourceText } = await checkedCheckpoint(checkpointPath, profile);
   if (factorPath && profile !== "small5") throw new Error("low-rank value export is proven for small5 only");
+  if (factorPath && stripValue) throw new Error("--strip-neutral-value and --value-factor are mutually exclusive");
+  if (stripValue && derivativeOfPath) {
+    throw new Error("--strip-neutral-value and --derivative-of are mutually exclusive transforms");
+  }
+  if (stripValue) requireNeutralValueHead(checkpoint, source);
+  let derivative: DerivativeMeta | undefined;
+  if (stripValue) {
+    derivative = { championSha256: sha256(sourceText), transform: "strip-neutral-value-v1" };
+  } else if (derivativeOfPath) {
+    if (!await Bun.file(derivativeOfPath).exists()) {
+      throw new Error(`--derivative-of champion ${derivativeOfPath} does not exist`);
+    }
+    const championText = await Bun.file(derivativeOfPath).text();
+    if (championText === sourceText) {
+      throw new Error("--derivative-of expects a distilled student, not the champion itself");
+    }
+    derivative = { championSha256: sha256(championText), transform: "structured-distill-v1" };
+  }
   const factor = factorPath ? parseValueFactor(
     await Bun.file(factorPath).text(), repositoryPath(factorPath), checkpoint) : undefined;
-  const generated = generatedModule(checkpoint, source, sourceText, profile, factor);
-  const target = join(MODELS_DIR, `${profile}.ts`);
+  const generated = generatedModule(
+    checkpoint, source, sourceText, profile, factor, constantOverride, stripValue, derivative);
+  const target = targetOverride
+    ? (targetOverride.startsWith("/") ? targetOverride : join(ROOT, targetOverride))
+    : join(MODELS_DIR, `${profile}.ts`);
   if (mode === "check") {
     if (!await Bun.file(target).exists()
       || normalizedText(await Bun.file(target).text()) !== normalizedText(generated.module)) {
       throw new Error(`${repositoryPath(target)} is stale; run bun run go:export`);
     }
   } else if (mode === "write") {
+    mkdirSync(join(target, ".."), { recursive: true });
     const staged = `${target}.${process.pid}.tmp`;
     try {
       await Bun.write(staged, generated.module);
@@ -377,13 +479,25 @@ async function exportModel(checkpointPath: string, profile: Profile,
       rmSync(staged, { force: true });
     }
   }
-  const parameterCount = blocks(checkpoint, factor).reduce((sum, [values,,, bias]) =>
+  const parameterCount = blocks(checkpoint, factor, stripValue).reduce((sum, [values,,, bias]) =>
     sum + values.length + bias.length, 0);
   console.log(`${mode === "write" ? "wrote" : mode === "check" ? "checked" : "inspected"} ${profile}: ${source} -> ${repositoryPath(target)}`);
-  console.log(`  topology: v9, extent ${checkpoint.extent}, channels ${checkpoint.channels}, residual blocks ${checkpoint.residualBlocks}, ${parameterCount.toLocaleString()} parameters`);
+  console.log(`  topology: v9${checkpoint.globalPolicyRank ? ` global-policy rank ${checkpoint.globalPolicyRank}` : ""}${checkpoint.inputChannels === 16 ? " tactical-v1" : ""}, extent ${checkpoint.extent}, channels ${checkpoint.channels}, residual blocks ${checkpoint.residualBlocks}, ${parameterCount.toLocaleString()} parameters`);
+  if (stripValue) {
+    const fullCount = blocks(checkpoint, factor, false).reduce((sum, [values,,, bias]) =>
+      sum + values.length + bias.length, 0);
+    const fullBytes = encode(checkpoint, factor, false).length;
+    console.log(`  derivative: strip-neutral-value-v1 removed ${(fullCount - parameterCount).toLocaleString()} `
+      + `neutral value parameters (${(fullBytes - generated.payload.length).toLocaleString()} payload bytes); `
+      + `policy tensors are byte-identical to the champion export`);
+  } else if (derivative) {
+    console.log(`  derivative: ${derivative.transform} bound to champion ${derivative.championSha256}`);
+  }
   console.log(factor
     ? `  storage: q8-row-f16-bias-le, value rank ${factor.rank}`
-    : "  storage: q8-row-f16-bias-le (sole V9 deployment format)");
+    : checkpoint.globalPolicyRank
+      ? "  storage: mixed f16 policy / q8 value"
+      : "  storage: q8-row-f16-bias-le (sole V9 deployment format)");
   console.log(`  size: ${generated.payload.length.toLocaleString()} payload bytes, ${generated.module.length.toLocaleString()} TypeScript bytes; ${(100 * (1 - generated.payload.length / (parameterCount * 4))).toFixed(1)}% below float32`);
   console.log(`  source sha256:  ${generated.sourceSha}`);
   if (factor) {
@@ -391,6 +505,24 @@ async function exportModel(checkpointPath: string, profile: Profile,
     console.log(`  factor sha256:  ${sha256(factor.sourceText)}`);
   }
   console.log(`  payload sha256: ${generated.payloadSha}`);
+}
+
+interface InstalledDerivative {
+  transform: "strip-neutral-value-v1" | "structured-distill-v1";
+  source: string;
+}
+
+async function installedDerivative(target: string): Promise<InstalledDerivative | undefined> {
+  if (!await Bun.file(target).exists()) return undefined;
+  const text = await Bun.file(target).text();
+  const transform = text.match(/transform: "(strip-neutral-value-v1|structured-distill-v1)"/)?.[1];
+  if (!transform) return undefined;
+  const source = text.match(/^ {2}source: ("(?:[^"\\]|\\.)*"),$/m)?.[1];
+  if (!source) throw new Error(`${target}: derivative module does not record its source checkpoint`);
+  return {
+    transform: transform as InstalledDerivative["transform"],
+    source: JSON.parse(source) as string,
+  };
 }
 
 async function main(): Promise<void> {
@@ -405,9 +537,26 @@ async function main(): Promise<void> {
   const factorIndex = args.indexOf("--value-factor");
   const factorPath = factorIndex < 0 ? undefined : args[factorIndex + 1];
   if (factorIndex >= 0 && !factorPath) throw new Error("--value-factor requires a path");
+  const outputIndex = args.indexOf("--output-module");
+  const outputModule = outputIndex < 0 ? undefined : args[outputIndex + 1];
+  if (outputIndex >= 0 && !outputModule) throw new Error("--output-module requires a path");
+  const constantIndex = args.indexOf("--constant");
+  const constant = constantIndex < 0 ? undefined : args[constantIndex + 1];
+  if (constantIndex >= 0 && !constant) throw new Error("--constant requires a name");
+  if ((outputModule === undefined) !== (constant === undefined)) {
+    throw new Error("--output-module and --constant must be supplied together");
+  }
+  const stripFlag = args.includes("--strip-neutral-value");
+  const derivativeOfIndex = args.indexOf("--derivative-of");
+  const derivativeOf = derivativeOfIndex < 0 ? undefined : args[derivativeOfIndex + 1];
+  if (derivativeOfIndex >= 0 && !derivativeOf) throw new Error("--derivative-of requires a champion path");
+  const consumed = new Set([factorIndex + 1, outputIndex + 1, constantIndex + 1,
+    derivativeOfIndex + 1].filter((index) => index > 0));
   const positional = args.filter((argument, index) => argument !== "--check"
     && argument !== "--inspect" && argument !== "--value-factor"
-    && (factorIndex < 0 || index !== factorIndex + 1));
+    && argument !== "--output-module" && argument !== "--constant"
+    && argument !== "--strip-neutral-value" && argument !== "--derivative-of"
+    && !consumed.has(index));
   if (positional.length !== 0 && (positional.length !== 2
     || (positional[1] !== "small5" && positional[1] !== "daemon19"))) {
     throw new Error(usage());
@@ -419,8 +568,29 @@ async function main(): Promise<void> {
       [join(ROOT, "go-ai", "daemon19-champion.model"), "daemon19"],
     ];
   const mode = inspect ? "inspect" : check ? "check" : "write";
-  if (factorPath && !positional.length) throw new Error("--value-factor requires an explicit checkpoint and profile");
-  for (const [checkpoint, profile] of targets) await exportModel(checkpoint, profile, mode, factorPath);
+  if ((factorPath || outputModule || stripFlag || derivativeOf) && !positional.length) {
+    throw new Error("custom export options require an explicit checkpoint and profile");
+  }
+  for (const [checkpoint, profile] of targets) {
+    // Champion-default exports must reproduce the installed transform: after a
+    // derivative install, a plain re-export or --check would otherwise clobber
+    // or reject the installed module. A strip derivative re-exports the
+    // champion itself; a structured-distill derivative re-exports its retained
+    // student checkpoint with the champion binding.
+    let effectiveCheckpoint = checkpoint;
+    let stripValue = positional.length ? stripFlag : false;
+    let derivativeOfPath = positional.length ? derivativeOf : undefined;
+    if (!positional.length) {
+      const installed = await installedDerivative(join(MODELS_DIR, `${profile}.ts`));
+      if (installed?.transform === "strip-neutral-value-v1") stripValue = true;
+      else if (installed?.transform === "structured-distill-v1") {
+        effectiveCheckpoint = join(ROOT, installed.source);
+        derivativeOfPath = checkpoint;
+      }
+    }
+    await exportModel(effectiveCheckpoint, profile, mode, factorPath, outputModule, constant,
+      stripValue, derivativeOfPath);
+  }
   if (inspect) console.log("\ninspection only: no files written; deployment still requires go:promote --apply");
   else if (!check) console.log("\nnext: bun run go:golden && bun run go:gpu");
 }

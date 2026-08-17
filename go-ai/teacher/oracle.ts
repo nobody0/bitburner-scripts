@@ -19,12 +19,17 @@ function randomFor(seed: number): () => number {
   };
 }
 
-/** Exact upstream obstacle generation plus a deterministic sample of the one
- * intentionally unseeded handicap tie-break. */
-export function oracleInitialBoard(size: 5 | 7 | 9 | 13, opponent: GoOpponent, seed: number): GoBoard {
+/** Exact upstream obstacle generation plus a reproducible, independently
+ * seeded sample of the intentionally unseeded handicap placement. */
+export function oracleInitialBoard(
+  size: 5 | 7 | 9 | 13,
+  opponent: GoOpponent,
+  obstacleSeed: number,
+  handicapSeed: number,
+): GoBoard {
   const originalRandom = Math.random;
-  Player.totalPlaytime = seed;
-  Math.random = randomFor(seed ^ 0xa5a5a5a5);
+  Player.totalPlaytime = obstacleSeed;
+  Math.random = randomFor(handicapSeed);
   try {
     const state = getNewBoardState(size, opponent, true);
     return { size: state.board.length, rows: simpleBoardFromBoard(state.board) };

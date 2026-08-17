@@ -53,6 +53,17 @@ void random_stream() {
   require(values.size() == 2, "WHRNG count");
   require(std::abs(values[0] - 0.016930906199656093) < 1e-15, "WHRNG first value");
   require(std::abs(values[1] - 0.8952539112379991) < 1e-15, "WHRNG second value");
+
+  require(aligned_opponent_seed(1000) == 1200,
+    "opponent seed follows the initial engine wait");
+  require(next_go_dispatch_playtime(1000, 0, 0) == 1200,
+    "a reply with no post-seed waits advances one tick");
+  require(next_go_dispatch_playtime(1000, 2, 0) == 1600,
+    "post-seed waitCycle calls advance distinct ticks");
+  require(next_go_dispatch_playtime(1000, 2, 399) == 1800,
+    "fixed pattern sleeps advance only completed engine ticks");
+  require(next_go_dispatch_playtime(29'999'800, 0, 0) == 0,
+    "training playtime wraps at the WHRNG period");
 }
 
 void rewards() {
@@ -102,6 +113,12 @@ void behavior_and_v9() {
   require(encode_opponent_turn_behavior(
     opponent_turn_behavior(Opponent::world_daemon, 1000)).size() == behavior_base_features,
     "daemon behavior omits fixed komi");
+  const auto future = encode_opponent_future_behavior(Opponent::slum_snakes, 3.5);
+  require(future.size() == behavior_base_features + 1,
+    "small5 future behavior includes komi");
+  require(future[0] == 0.3F && future[1] == -1.0F
+    && future[2] == -1.0F && future[3] == -1.0F,
+    "future behavior preserves smart tendency and marks unknown rolls");
 
   const auto model = GoNetworkV9::create(
     5, 4, 1, 8, 4, behavior_base_features + 1, 99);
@@ -112,6 +129,8 @@ void behavior_and_v9() {
       opponent_turn_behavior(Opponent::illuminati, 1000), 7.5),
   };
   const auto prediction = model.predict(input);
+  require(model.predict_policy(input) == prediction.move_logits,
+    "policy-only inference exactly matches full-reference policy logits");
   require(prediction.move_logits.size() == 26 && prediction.branch_logits.size() == 26,
     "V9 emits every point plus pass");
   for (const auto& branches : prediction.branch_logits) for (const double value : branches) {
@@ -131,6 +150,20 @@ void behavior_and_v9() {
     "V9 proposal/value policy returns a legal move or pass");
   require(!decision.known_replies.replies.empty(),
     "V9 policy carries exact replies for its finalist");
+  require(!decision.finalists.empty(), "V9 policy exposes its audited finalist set");
+  const auto repeated_seed = choose_with_v9(
+    position, Opponent::illuminati, std::vector<double>{1000, 1000}, 0, model);
+  require(repeated_seed.move.pass == decision.move.pass
+    && repeated_seed.move.point == decision.move.point
+    && repeated_seed.finalists == decision.finalists,
+    "duplicating one seed preserves the selector decision and finalist set");
+  const auto strict_actor = choose_with_v9(
+    position, Opponent::illuminati, 1000, 0, model, 1);
+  require(strict_actor.finalists.size() == 1,
+    "strict K=1 never widens into value-head arbitration");
+  require(select_strict_v9_move(position, Opponent::illuminati, 1000, 0, model)
+      == strict_actor.move,
+    "policy-only actor matches K=1 selection without value arbitration");
   std::stringstream v9_checkpoint;
   model.save(v9_checkpoint);
   require(GoNetworkV9::load(v9_checkpoint).extent() == 5,

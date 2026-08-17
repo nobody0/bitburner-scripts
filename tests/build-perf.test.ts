@@ -21,10 +21,13 @@ const config: BitburnerConfig = {
   entries: [{ source: "game/start.ts", target: "start.js" }],
 };
 
-/** Both q8 V9 profiles are deliberately part of the controller bundle. Their
- * generated base64 payload is ~1.35 MB; keep modest strategy headroom while
- * preventing an exporter regression toward full-precision checkpoints. */
-const MAX_START_SOURCE_BYTES = 2_150_000;
+/** Both q8 V9 profiles are deliberately part of the controller bundle (their
+ * generated payloads are ~1.35 MB), and the certified merged playbook —
+ * ~3.6 MB installed by go:playbook:install — is embedded into the V9 worker
+ * source. Keep modest strategy headroom while preventing regressions toward
+ * full-precision checkpoints or an unstripped playbook (the certificate
+ * corpus alone would be tens of MB). */
+const MAX_START_SOURCE_BYTES = 5_500_000;
 
 afterAll(async () => {
   await rm(config.buildDir, { recursive: true, force: true });

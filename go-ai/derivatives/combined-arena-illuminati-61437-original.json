@@ -1,0 +1,68 @@
+{
+  "ok": true,
+  "backend": "webgpu",
+  "config": {
+    "games": 192,
+    "startPhase": 61437,
+    "phaseStride": 104729,
+    "timing": "random",
+    "defenseSeed": 20260819,
+    "playbook": "original",
+    "opponent": "Illuminati",
+    "arms": [
+      "combined",
+      "playbookOnly",
+      "neuralOnly"
+    ]
+  },
+  "arms": {
+    "combined": {
+      "games": 192,
+      "wins": 192,
+      "completed": 192,
+      "winRate": 1,
+      "certifiedTurns": 3984,
+      "neuralTurns": 0,
+      "neuralReturns": 0,
+      "powerPerTurn": 1.3224864413850648,
+      "neuralLatencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "count": 0
+      },
+      "failures": []
+    },
+    "playbookOnly": {
+      "games": 192,
+      "wins": 192,
+      "completed": 192,
+      "winRate": 1,
+      "certifiedTurns": 3984,
+      "neuralTurns": 0,
+      "neuralReturns": 0,
+      "powerPerTurn": 1.3224864413850648,
+      "neuralLatencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "count": 0
+      },
+      "failures": []
+    },
+    "neuralOnly": {
+      "games": 192,
+      "wins": 87,
+      "completed": 192,
+      "winRate": 0.453125,
+      "certifiedTurns": 0,
+      "neuralTurns": 2793,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.48549946294307195,
+      "neuralLatencyMs": {
+        "p50": 2.9,
+        "p95": 4.7,
+        "count": 2793
+      },
+      "failures": []
+    }
+  }
+}

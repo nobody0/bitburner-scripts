@@ -89,14 +89,50 @@ export interface GoView {
    * the game, so black can lock in any current win immediately. */
   consecutivePasses?: number;
   komi?: number;
+  /** Offline cycles determine whether White seeds its reply in the dispatch
+   * tick or the following 200 ms engine tick. The worker owns that derivation
+   * once this public value has been hydrated. */
+  bonusCycles?: number;
+  /** Present only when the main thread has proved that go.cheat is available
+   * and hydrated the current game's attempt count. Chance entries are read
+   * from the API up front so the Web Worker never needs Netscript access. */
+  cheat?: GoCheatState;
   nextGame?: { opponent: GoRewardOpponent; boardSize: GoSelectableBoardSize; why: string };
 }
 
-export type GoAction =
+export interface GoCheatState {
+  unlocked: boolean;
+  count: number;
+  successByCount: readonly number[];
+  /** Per-family exact-reply finalist budget. */
+  candidateLimit: number;
+  /** Number of first placements whose best continuation becomes a double-move
+   * finalist. A pass ranked first suppresses the double-move family. */
+  doubleMoveLimit: number;
+}
+
+export type GoCheatAction =
+  | { type: "cheatTwoMoves"; x1: number; y1: number; x2: number; y2: number }
+  | { type: "cheatRemoveRouter"; x: number; y: number }
+  | { type: "cheatDestroyNode"; x: number; y: number }
+  | { type: "cheatRepairNode"; x: number; y: number };
+
+export type GoPlayingAction =
   | { type: "move"; x: number; y: number; why: string }
   | { type: "pass"; why: string }
+  | (GoCheatAction & { why: string });
+
+export type GoAction =
+  | GoPlayingAction
   | { type: "resume"; why: string }
   | { type: "newGame"; opponent: GoRewardOpponent; boardSize: GoSelectableBoardSize; why: string };
+
+export function isGoCheatAction(action: GoAction): action is GoCheatAction & { why: string } {
+  return action.type === "cheatTwoMoves"
+    || action.type === "cheatRemoveRouter"
+    || action.type === "cheatDestroyNode"
+    || action.type === "cheatRepairNode";
+}
 
 export interface GoDecision {
   action: GoAction;
@@ -109,9 +145,23 @@ export interface GoDecision {
   /** Reply forecast for the chosen action; present even when it is a pass,
    * which never appears in the move-only ranking. */
   forecast?: GoPredictedReply[];
+  /** Aggregated win probability of the selected action after the opponent's
+   * predicted reply. Absent on the policy-only contract, whose value head is
+   * neutral by construction and carries no such signal. */
+  predictedWin?: number;
+  /** Engine cycles this decision must be delayed by. Non-zero only when every
+   * candidate was predicted to lose at the requested tick and waiting reached
+   * a seed where one wins; the caller must dispatch in that later tick or the
+   * decision does not describe the game it will be played in. */
+  dispatchOffsetMs?: number;
 }
 
 interface PlayedMove {
+  board: GoBoard;
+  captures: number;
+}
+
+export interface GoCheatTransition {
   board: GoBoard;
   captures: number;
 }
@@ -232,6 +282,66 @@ export function playMove(
   if (fastGroup(next, x, y).liberties === 0) return undefined;
   if (previousHashes.has(boardHash(next))) return undefined;
   return { board: next, captures };
+}
+
+/** Resolve captures exactly like updateCaptures(): remove every captured
+ * enemy chain, or captured friendly chains only when no enemy chain was
+ * removed. Cheat actions mutate the board first and invoke this once. */
+function resolveCheatCaptures(board: GoBoard, colour: Stone): GoCheatTransition {
+  const enemy = other(colour);
+  const enemyBefore = board.rows.reduce((sum, column) =>
+    sum + [...column].filter((cell) => cell === enemy).length, 0);
+  const captured = (target: Stone): number[] => {
+    const seen = new Uint8Array(board.size * board.size);
+    const result: number[] = [];
+    for (let x = 0; x < board.size; x++) for (let y = 0; y < board.size; y++) {
+      const point = x * board.size + y;
+      if (seen[point] || at(board, x, y) !== target) continue;
+      const found = fastGroup(board, x, y);
+      for (const stone of found.stones) seen[stone] = 1;
+      if (found.liberties === 0) result.push(...found.stones);
+    }
+    return result;
+  };
+  const capturedEnemy = captured(enemy);
+  const removed = capturedEnemy.length ? capturedEnemy : captured(colour);
+  let next = board;
+  for (const point of removed) next = write(next, Math.floor(point / board.size), point % board.size, ".");
+  const enemyAfter = next.rows.reduce((sum, column) =>
+    sum + [...column].filter((cell) => cell === enemy).length, 0);
+  return { board: next, captures: Math.max(0, enemyBefore - enemyAfter) };
+}
+
+/** First half of playTwoMoves. This deliberately performs no legality,
+ * capture, suicide or repetition processing. */
+export function placeCheatRouterRaw(board: GoBoard, x: number, y: number): GoBoard | undefined {
+  return at(board, x, y) === "." ? write(board, x, y, "X") : undefined;
+}
+
+/** Apply any successful go.cheat action. Unlike an ordinary move, upstream
+ * does not add the pre-cheat board to previousBoards. */
+export function applyGoCheat(board: GoBoard, action: GoCheatAction): GoCheatTransition | undefined {
+  if (action.type === "cheatTwoMoves") {
+    const first = placeCheatRouterRaw(board, action.x1, action.y1);
+    if (!first) return undefined;
+    // Upstream validates both coordinates against the original board and even
+    // permits identical points; assigning the same point twice is a one-router
+    // cheat. Production generation uses distinct points.
+    const second = action.x1 === action.x2 && action.y1 === action.y2
+      ? first
+      : placeCheatRouterRaw(first, action.x2, action.y2);
+    return second ? resolveCheatCaptures(second, "X") : undefined;
+  }
+  if (action.type === "cheatRemoveRouter") {
+    if (at(board, action.x, action.y) !== "O") return undefined;
+    return resolveCheatCaptures(write(board, action.x, action.y, "."), "X");
+  }
+  if (action.type === "cheatDestroyNode") {
+    if (at(board, action.x, action.y) !== ".") return undefined;
+    return resolveCheatCaptures(write(board, action.x, action.y, "#"), "X");
+  }
+  if (at(board, action.x, action.y) !== "#") return undefined;
+  return resolveCheatCaptures(write(board, action.x, action.y, "."), "X");
 }
 
 /** Exact legal-placement indices with one group analysis per stone group.

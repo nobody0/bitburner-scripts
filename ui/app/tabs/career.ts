@@ -1,6 +1,6 @@
 import { skillProgress } from "../../../shared/formulas.ts";
 import type { CareerPlan } from "../../../shared/telemetry/topics/career.ts";
-import { card, collapsible, dataTable, definitions, dot, meter, note, table, tiles, type Column } from "../lib/dom.ts";
+import { card, collapsible, dataTable, dot, meter, note, table, tiles, waiting, type Column } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -172,7 +172,7 @@ export const careerTab: Tab = {
   id: "career",
   render(state: ProjectedState) {
     const c = state.topics.career;
-    if (!c) return note("waiting for the career probe");
+    if (!c) return waiting("the career probe");
 
     // --- observed work and the structured decision beside it ---
     const work = c.currentWork;
@@ -225,7 +225,7 @@ export const careerTab: Tab = {
         );
       }
     } else {
-      nowParts.push(note("waiting for the first career decision"));
+      nowParts.push(waiting("the first career decision"));
     }
 
     // --- karma, the gate other features wait on ---

@@ -65,9 +65,18 @@ async function bundleEntry(
   return { filename, content: await readFile(outfile, "utf8") };
 }
 
+/** Installed by `go:playbook:install`; absent builds ship without a certified
+ * playbook and every worker lookup reports a miss. */
+export const GO_PLAYBOOK_MODULE = "game/lib/generated/go-playbook.phase.js";
+
 /** Bundle the V9 engine as a classic worker. The resulting source is embedded
  * into start.js and opened through a Blob URL in game, which keeps deployment
- * atomic and avoids relying on Bitburner's script server as a Worker URL. */
+ * atomic and avoids relying on Bitburner's script server as a Worker URL.
+ *
+ * The merged phase playbook cannot join the IIFE bundle (it inflates its
+ * certificate blob with top-level await), so it is prepended as an inlined
+ * classic script that publishes `__combinedPlaybook`/`__combinedPlaybookReady`
+ * on the worker global — the same transform the standalone build uses. */
 export async function bundleGoWorkerSource(): Promise<string> {
   const result = await build({
     entryPoints: ["game/lib/go-neural-worker-entry.ts"],
@@ -81,7 +90,10 @@ export async function bundleGoWorkerSource(): Promise<string> {
   });
   const output = result.outputFiles?.[0];
   if (!output) throw new Error("V9 Go worker bundle produced no output");
-  return output.text;
+  const playbookSource = await readFile(GO_PLAYBOOK_MODULE, "utf8").catch(() => undefined);
+  if (playbookSource === undefined) return output.text;
+  const { inlinePlaybookScript } = await import("./go-playbook-inline.ts");
+  return `${inlinePlaybookScript(playbookSource)}\n${output.text}`;
 }
 
 /** Build one maintenance entrypoint without clearing or building the normal

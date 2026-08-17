@@ -1,5 +1,5 @@
 import type { ContractFailure } from "../../../shared/telemetry/topics/side.ts";
-import { card, collapsible, definitions, note, table, tiles } from "../lib/dom.ts";
+import { card, collapsible, definitions, note, shownOf, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtNum, fmtTime } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -35,7 +35,7 @@ export const sideTab: Tab = {
   id: "side",
   render(state: ProjectedState) {
     const s = state.topics.side;
-    if (!s) return note("waiting for the side probe");
+    if (!s) return waiting("the side probe");
 
     const candidates = s.solvableTotal ?? s.contracts.length;
     const quarantined = s.quarantinedTotal ?? s.failures?.length ?? 0;
@@ -70,7 +70,7 @@ export const sideTab: Tab = {
         { empty: "no contract candidates waiting", left: [1] },
       )
       + (candidates > s.contracts.length
-        ? note(`showing the front ${s.contracts.length} of ${fmtNum(candidates)} candidates; one 20-contract batch is published`)
+        ? shownOf(s.contracts.length, candidates, "one 20-contract batch is published")
         : note("the visible batch is the complete candidate queue"));
 
     const last = s.lastResult;
@@ -107,7 +107,7 @@ export const sideTab: Tab = {
             failure.triesBefore === undefined ? "–" : String(failure.triesBefore),
           ]),
           { wrap: [2, 3], left: [1, 2, 3] },
-        ) + note(`showing ${s.failures.length} of ${quarantined}; quarantined files are never retried automatically`)
+        ) + shownOf(s.failures.length, quarantined, "quarantined files are never retried")
       : note("no contract has been quarantined");
 
     const replay = latestReplay(state);

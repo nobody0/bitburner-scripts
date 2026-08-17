@@ -1,0 +1,89 @@
+{
+  "ok": true,
+  "backend": "webgpu",
+  "config": {
+    "games": 192,
+    "startPhase": 61437,
+    "phaseStride": 104729,
+    "timing": "random",
+    "defenseSeed": 20260819,
+    "playbook": "/private/tmp/claude-501/-Users-bob-git-bitburner-scripts/41fd7f83-0257-4663-9e70-40523f059354/scratchpad/agg-pack/playbook.phase.js",
+    "opponent": "Illuminati",
+    "arms": [
+      "combined",
+      "playbookOnly",
+      "neuralOnly"
+    ]
+  },
+  "arms": {
+    "combined": {
+      "games": 192,
+      "wins": 128,
+      "completed": 192,
+      "winRate": 0.6666666666666666,
+      "certifiedTurns": 381,
+      "neuralTurns": 2213,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.8339364696421391,
+      "neuralLatencyMs": {
+        "p50": 2.6,
+        "p95": 4.9,
+        "count": 2213
+      },
+      "failures": []
+    },
+    "playbookOnly": {
+      "games": 192,
+      "wins": 0,
+      "completed": 0,
+      "winRate": 0,
+      "certifiedTurns": 332,
+      "neuralTurns": 0,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.26717557251908397,
+      "neuralLatencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "count": 0
+      },
+      "failures": [
+        "Illuminati@61437: playbook miss at phase 61519, round 1",
+        "Illuminati@16166: playbook miss at phase 16376, round 2",
+        "Illuminati@120895: playbook miss at phase 121006, round 1",
+        "Illuminati@75624: playbook miss at phase 76414, round 1",
+        "Illuminati@30353: playbook miss at phase 30637, round 4",
+        "Illuminati@135082: playbook miss at phase 136825, round 1",
+        "Illuminati@89811: playbook miss at phase 90545, round 2",
+        "Illuminati@44540: playbook miss at phase 45341, round 1",
+        "Illuminati@149269: playbook miss at phase 149931, round 1",
+        "Illuminati@103998: playbook miss at phase 104664, round 1",
+        "Illuminati@58727: playbook miss at phase 60904, round 2",
+        "Illuminati@13456: playbook miss at phase 13677, round 1",
+        "Illuminati@118185: playbook miss at phase 119247, round 0",
+        "Illuminati@72914: playbook miss at phase 73962, round 1",
+        "Illuminati@27643: playbook miss at phase 28472, round 1",
+        "Illuminati@132372: playbook miss at phase 132897, round 2",
+        "Illuminati@87101: playbook miss at phase 87225, round 1",
+        "Illuminati@41830: playbook miss at phase 41842, round 1",
+        "Illuminati@146559: playbook miss at phase 1098, round 1",
+        "Illuminati@101288: playbook miss at phase 101488, round 1"
+      ]
+    },
+    "neuralOnly": {
+      "games": 192,
+      "wins": 87,
+      "completed": 192,
+      "winRate": 0.453125,
+      "certifiedTurns": 0,
+      "neuralTurns": 2793,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.48549946294307195,
+      "neuralLatencyMs": {
+        "p50": 2.5,
+        "p95": 4.8,
+        "count": 2793
+      },
+      "failures": []
+    }
+  }
+}

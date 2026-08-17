@@ -1,0 +1,76 @@
+{
+  "schema": "go-deployment-derivative-summary-v1",
+  "profile": "daemon19",
+  "transform": "strip-neutral-value-v1",
+  "championSha256": "219f83c701fdc21faed575d1f0da22221b45385231744994af9f0f1c5b7e24ea",
+  "derivativePayloadSha256": "9e118d5baeea42dc0d3a1bdc40a4130e504b37a32127a8a519c2784599898fe0",
+  "bytes": {
+    "fullPrecisionChampionCheckpoint": 3507695,
+    "fullArtifactPayload": 346032,
+    "derivativePayload": 319894,
+    "fullModule": 462176,
+    "derivativeModule": 427478
+  },
+  "parameters": {
+    "full": 185870,
+    "retained": 159947
+  },
+  "decisionParity": {
+    "ok": true,
+    "backend": "webgpu",
+    "mode": "exact",
+    "games": 64,
+    "states": 8038,
+    "actionAgreement": 1,
+    "finalistAgreement": 1,
+    "scoreAgreement": 1,
+    "forecastAgreement": 1,
+    "logitMaxAbsDiff": 0,
+    "exact": true,
+    "examples": []
+  },
+  "pairedArena": {
+    "seedUseId": "2026-08-17T14:12:46.325Z-derivative-apply-daemon19",
+    "config": {
+      "profile": "daemon19",
+      "games": 128,
+      "seed": 62626201,
+      "handicapSeed": 62626202,
+      "defenseSeed": 62626203
+    },
+    "champion": {
+      "wins": 113,
+      "games": 128,
+      "points": 3777,
+      "powerPerTurn": 0.581898,
+      "meanTurns": 246.73,
+      "latencyMs": {
+        "p50": 3.3,
+        "p95": 4.9,
+        "max": 57.2
+      }
+    },
+    "derivative": {
+      "wins": 113,
+      "games": 128,
+      "points": 3777,
+      "powerPerTurn": 0.581898,
+      "meanTurns": 246.73,
+      "latencyMs": {
+        "p50": 3.3,
+        "p95": 4.9,
+        "max": 55.2
+      }
+    },
+    "gameForGameIdentical": true,
+    "evidence": {
+      "favorableWinFlips": 0,
+      "unfavorableWinFlips": 0,
+      "oneSidedWinPValue": 1,
+      "powerPerTurnLower95": 0,
+      "fewerTurnsLower95": 0
+    }
+  },
+  "applied": true,
+  "recordedAt": "2026-08-17T14:39:29.190Z"
+}

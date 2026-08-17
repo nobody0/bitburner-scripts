@@ -681,6 +681,28 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         getControlledEmptyNodes: () => host.go!.getControlledEmptyNodes(),
       }, "go.analysis", host, process)
     : namespace({}, "go.analysis", host, process);
+  const goCheat = host.go
+    ? namespace({
+        getCheatSuccessChance: (count?: number, playAsWhite = false) => playAsWhite
+          ? unmodeled("ns", "go.cheat.getCheatSuccessChance", "white-side No AI Go is not modeled")
+          : host.go!.getCheatSuccessChance(count),
+        getCheatCount: (playAsWhite = false) => playAsWhite
+          ? unmodeled("ns", "go.cheat.getCheatCount", "white-side No AI Go is not modeled")
+          : host.go!.getCheatCount(),
+        removeRouter: (x: number, y: number, playAsWhite = false) => playAsWhite
+          ? unmodeled("ns", "go.cheat.removeRouter", "white-side No AI Go is not modeled")
+          : host.go!.removeRouter(x, y),
+        playTwoMoves: (x1: number, y1: number, x2: number, y2: number, playAsWhite = false) => playAsWhite
+          ? unmodeled("ns", "go.cheat.playTwoMoves", "white-side No AI Go is not modeled")
+          : host.go!.playTwoMoves(x1, y1, x2, y2),
+        repairOfflineNode: (x: number, y: number, playAsWhite = false) => playAsWhite
+          ? unmodeled("ns", "go.cheat.repairOfflineNode", "white-side No AI Go is not modeled")
+          : host.go!.repairOfflineNode(x, y),
+        destroyNode: (x: number, y: number, playAsWhite = false) => playAsWhite
+          ? unmodeled("ns", "go.cheat.destroyNode", "white-side No AI Go is not modeled")
+          : host.go!.destroyNode(x, y),
+      }, "go.cheat", host, process)
+    : namespace({}, "go.cheat", host, process);
   impl["go"] = namespace(
     host.go
       ? {
@@ -694,6 +716,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
           passTurn: () => host.go!.passTurn(),
           opponentNextTurn: () => host.go!.opponentNextTurn(),
           analysis: goAnalysis,
+          cheat: goCheat,
         }
       : {
         getGameState: () => {
@@ -718,6 +741,7 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         });
         },
         analysis: goAnalysis,
+        cheat: goCheat,
       },
     "go",
     host,

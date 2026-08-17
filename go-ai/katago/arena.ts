@@ -7,11 +7,13 @@
  */
 import {
   GO_ARENA_OPPONENTS,
-  goArenaSeeds,
+  goArenaSeedPairs,
   playGoArenaImmediateReply,
-  playGoArenaGame,
+  playGoArenaPolicyGame,
   summarizeGoArena,
+  type ForcedBlackAction,
   type GoArenaGameResult,
+  type GoArenaInitialState,
   type GoArenaOpponent,
 } from "../teacher/arena.ts";
 import { oracleInitialBoard } from "../teacher/oracle.ts";
@@ -32,9 +34,15 @@ import {
 } from "./advisor.ts";
 import { PredictiveKataGoAdvisor, type PredictiveKataGoAdvice } from "./predictive-advisor.ts";
 
-interface AdviserGameResult extends GoArenaGameResult {
+export interface AdviserGameResult extends GoArenaGameResult {
   advice: KataGoAdvice[];
   offlinePoints: number;
+}
+
+function isPredictiveAdvice(
+  advice: KataGoAdvice | PredictiveKataGoAdvice,
+): advice is PredictiveKataGoAdvice {
+  return "predictedWhite" in advice;
 }
 
 function summarizeWithPower(
@@ -86,38 +94,60 @@ function oracleState(
   return state;
 }
 
-async function playAdviserGame(
+export async function playAdviserGame(
   adviser: KataGoAdvisor,
   predictive: PredictiveKataGoAdvisor | undefined,
   definition: GoArenaOpponent,
   seed: number,
-  tieRoll: number,
+  handicapSeed: number,
+  defenseSeed: number | null,
+  tieRoll: number | null,
   visits: number,
   policyVisits: number,
   candidates: number,
   includeTrace: boolean,
+  initialState?: GoArenaInitialState,
+  forcedOpening?: ForcedBlackAction,
 ): Promise<AdviserGameResult> {
-  let board = oracleInitialBoard(definition.requestedSize, definition.oracle, seed);
+  let board = initialState
+    ? { size: initialState.board.size, rows: [...initialState.board.rows] }
+    : oracleInitialBoard(definition.requestedSize, definition.oracle, seed, handicapSeed);
   const offlinePoints = board.rows.reduce((count, column) =>
     count + [...column].filter((cell) => cell === "#").length, 0);
-  const history: string[][] = [];
-  let consecutivePasses = 0;
+  const history: string[][] = initialState
+    ? initialState.previousBoards.map((position) => [...position])
+    : [];
+  let consecutivePasses = initialState?.consecutivePasses ?? 0;
   let turns = 0;
-  let dispatchPlaytime = Math.floor(seed / GO_ENGINE_CYCLE_MS) * GO_ENGINE_CYCLE_MS;
+  let dispatchPlaytime = initialState?.dispatchPlaytime
+    ?? Math.floor(seed / GO_ENGINE_CYCLE_MS) * GO_ENGINE_CYCLE_MS;
   const startedPlaytime = dispatchPlaytime;
   const planningMs: number[] = [];
   const advice: KataGoAdvice[] = [];
   const trace: NonNullable<GoArenaGameResult["trace"]> = [];
-  const maxTurns = board.size * board.size * 4;
+  const maxTurns = board.size * board.size * 8;
   const originalRandom = Math.random;
+  if (defenseSeed === null && tieRoll === null) {
+    throw new Error("fixed-roll diagnostics require an explicit tie roll");
+  }
+  let defenseState = (defenseSeed ?? 0) >>> 0;
+  const defenseRandom = defenseSeed === null
+    ? () => tieRoll!
+    : () => {
+      defenseState = (Math.imul(defenseState, 1_664_525) + 1_013_904_223) >>> 0;
+      return defenseState / 0x1_0000_0000;
+    };
   try {
     while (consecutivePasses < 2 && turns < maxTurns) {
+      const turnDefenseRoll = defenseRandom();
       const before = [...board.rows];
       const beforeHistory = history.map((position) => [...position]);
       const beforePasses = consecutivePasses;
       const beforePlaytime = dispatchPlaytime;
       const started = performance.now();
-      const selected: KataGoAdvice | PredictiveKataGoAdvice = predictive
+      const selected: KataGoAdvice | PredictiveKataGoAdvice = turns === 0 && forcedOpening
+        ? { move: forcedOpening, proposalMoves: [forcedOpening], visits: 0 }
+        : predictive
         ? await predictive.advise({
           board,
           previousBoards: history,
@@ -130,7 +160,7 @@ async function playAdviserGame(
           predict: async (candidate) => {
             const prediction = await playGoArenaImmediateReply(
               definition,
-              tieRoll,
+              turnDefenseRoll,
               {
                 board,
                 previousBoards: history,
@@ -156,7 +186,15 @@ async function playAdviserGame(
             };
           },
         })
-        : await adviser.advise(board, history, definition.komi, visits);
+        : await (async (): Promise<KataGoAdvice> => {
+          const proposals = await adviser.shortlist(
+            board, history, definition.komi, visits,
+            Math.max(1, Math.floor(candidates)),
+          );
+          const best = proposals[0];
+          if (!best) throw new Error("KataGo returned an empty adviser shortlist");
+          return { ...best, proposalMoves: proposals.map((proposal) => proposal.move) };
+        })();
       planningMs.push(performance.now() - started);
       advice.push(selected);
 
@@ -175,17 +213,35 @@ async function playAdviserGame(
         consecutivePasses = 0;
       }
       turns++;
-      if (consecutivePasses >= 2) break;
+      if (consecutivePasses >= 2) {
+        if (includeTrace) {
+          trace.push({
+            turn: turns - 1,
+            dispatchPlaytime: beforePlaytime,
+            board: before,
+            previousBoards: beforeHistory,
+            consecutivePasses: beforePasses,
+            black: selected.move === "pass"
+              ? { type: "pass" }
+              : { type: "move", x: selected.move[0], y: selected.move[1] },
+            policyBook: false,
+            predicted: [],
+            white: { type: "pass" },
+            planningMs: planningMs.at(-1)!,
+          });
+        }
+        break;
+      }
 
       const state = oracleState(board, history, consecutivePasses, definition.oracle);
-      Math.random = () => tieRoll;
+      Math.random = () => turnDefenseRoll;
       sleepLog.length = 0;
       const white = await getMove(
         state, GoColor.white, definition.oracle, false, alignedAiSeed(dispatchPlaytime, 0),
       );
       const waitMs = sleepLog.reduce((sum, milliseconds) => sum + milliseconds, 0)
         + (white.type === GoPlayType.move ? GO_ENGINE_CYCLE_MS : 0);
-      if ("predictedWhite" in selected) {
+      if (isPredictiveAdvice(selected)) {
         const actual: KataGoMove = white.type === GoPlayType.move ? [white.x, white.y] : "pass";
         const same = selected.predictedWhite === "pass"
           ? actual === "pass"
@@ -197,15 +253,19 @@ async function playAdviserGame(
         }
       }
       dispatchPlaytime += Math.floor(waitMs / GO_ENGINE_CYCLE_MS) * GO_ENGINE_CYCLE_MS;
+      let whiteNoOp = false;
       if (white.type === GoPlayType.move) {
         const played = playMove(
           board, white.x, white.y, "O",
           new Set(history.map((position) => position.join(""))),
         );
-        if (!played) throw new Error(`upstream oracle returned illegal ${white.x},${white.y}`);
-        history.unshift(board.rows);
-        board = played.board;
-        consecutivePasses = 0;
+        if (played) {
+          history.unshift(board.rows);
+          board = played.board;
+          consecutivePasses = 0;
+        } else {
+          whiteNoOp = true;
+        }
       } else consecutivePasses++;
 
       if (includeTrace) {
@@ -219,13 +279,13 @@ async function playAdviserGame(
             ? { type: "pass" }
             : { type: "move", x: selected.move[0], y: selected.move[1] },
           policyBook: false,
-          predicted: "predictedWhite" in selected
+          predicted: isPredictiveAdvice(selected)
             ? [selected.predictedWhite === "pass"
               ? { x: null, y: null, count: 1 }
               : { x: selected.predictedWhite[0], y: selected.predictedWhite[1], count: 1 }]
             : [],
           white: white.type === GoPlayType.move
-            ? { type: "move", x: white.x, y: white.y }
+            ? { type: "move", x: white.x, y: white.y, ...(whiteNoOp ? { noOp: true } : {}) }
             : { type: "pass" },
           planningMs: planningMs.at(-1)!,
         });
@@ -240,7 +300,9 @@ async function playAdviserGame(
   return {
     opponent: definition.name,
     seed,
-    tieRoll,
+    handicapSeed,
+    defenseSeed,
+    tieRoll: defenseSeed === null ? tieRoll! : null,
     size: board.size,
     won: score.X >= score.O,
     completed: consecutivePasses >= 2,
@@ -267,6 +329,8 @@ async function main(): Promise<void> {
   const games = Math.max(1, Math.floor(numberFlag("--games", 16)));
   const visits = Math.max(2, Math.floor(numberFlag("--visits", 32)));
   const seedStart = numberFlag("--seed", 31_337_000);
+  const handicapSeedStart = numberFlag("--handicap-seed", 1_618_033_988);
+  const defenseSeedStart = numberFlag("--defense-seed", 1_013_904_223);
   const defaultBackend = process.platform === "darwin" ? "opencl" : "eigen";
   const binary = stringFlag("--binary", `go-ai/.deps/KataGo/build/ipvgo-${defaultBackend}/katago`);
   const config = stringFlag("--config", "go-ai/katago/config/analysis.cfg");
@@ -276,8 +340,11 @@ async function main(): Promise<void> {
   const predictiveMode = Bun.argv.includes("--predictive");
   const policyVisits = Math.max(2, Math.floor(numberFlag("--policy-visits", 2)));
   const requestedProfile = stringFlag("--profile", "");
-  const ties = Bun.argv.includes("--all-ties") ? [0, 0.25, 0.5, 0.75, 0.999999] : [0.5];
-  const seeds = goArenaSeeds(games, seedStart);
+  const allTies = Bun.argv.includes("--all-ties");
+  const ties: (number | null)[] = allTies
+    ? [0, 0.25, 0.5, 0.75, 0.999999]
+    : [null];
+  const cases = goArenaSeedPairs(games, seedStart, handicapSeedStart, defenseSeedStart);
   const summaries: unknown[] = [];
 
   for (const profile of ["small5", "daemon19"] as const) {
@@ -294,12 +361,14 @@ async function main(): Promise<void> {
     try {
       for (const opponent of opponents) {
         const adviserGames: AdviserGameResult[] = [];
-        for (const seed of seeds) for (const tie of ties) {
+        for (const { seed, handicapSeed, defenseSeed } of cases) for (const tie of ties) {
           const game = await playAdviserGame(
             adviser,
             predictive,
             opponent,
             seed,
+            handicapSeed,
+            allTies ? null : defenseSeed,
             tie,
             visits,
             policyVisits,
@@ -314,8 +383,11 @@ async function main(): Promise<void> {
         // parallel control games would cross-contaminate one another.
         const controlGames: GoArenaGameResult[] = [];
         if (includeControl) {
-          for (const seed of seeds) for (const tie of ties) {
-            controlGames.push(await playGoArenaGame(opponent, seed, tie));
+          for (const { seed, handicapSeed, defenseSeed } of cases) for (const tie of ties) {
+            controlGames.push(await playGoArenaPolicyGame(
+              opponent, seed, tie ?? undefined, false, undefined, handicapSeed,
+              allTies ? null : defenseSeed,
+            ));
           }
         }
         const controlSummary = includeControl

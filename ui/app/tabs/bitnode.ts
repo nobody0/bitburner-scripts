@@ -8,7 +8,7 @@ import {
 import { featureForBitNode } from "../../../shared/features/registry.ts";
 import { formatScientific } from "../../../shared/format.ts";
 import { attachChartHover, drawSeries } from "../lib/chart.ts";
-import { card, collapsible, definitions, dot, filters, note, table, tiles } from "../lib/dom.ts";
+import { NONE, card, collapsible, definitions, dot, filters, note, rankedTable, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtTime } from "../lib/format.ts";
 import { html } from "../lib/html.ts";
 import { view } from "../lib/viewstate.ts";
@@ -122,7 +122,7 @@ type RamArena = NonNullable<Progression["ramArena"]>;
  * a wrong total points at the sub-heuristic that produced it. */
 function routeCard(plan: Plan, now: number): string {
   if (!plan.routes || plan.routes.length === 0) {
-    return note("waiting for the endgame route estimates");
+    return waiting("the endgame route estimates");
   }
   const chosen = plan.route;
   const selected = plan.routes.find((route) => route.id === chosen);
@@ -137,26 +137,24 @@ function routeCard(plan: Plan, now: number): string {
         },
         {
           label: "decided",
-          value: plan.decidedAt !== undefined ? `${fmtTime(Math.max(0, now - plan.decidedAt))} ago` : "–",
+          value: plan.decidedAt !== undefined ? `${fmtTime(Math.max(0, now - plan.decidedAt))} ago` : NONE,
         },
       ])
     : note("no route decided yet");
-  const rows = table(
-    ["", "route", "status", "blocker", "eta"],
-    [...plan.routes]
-      .sort((a, b) => a.etaSec - b.etaSec)
-      .map((route) => [
-        route.id === chosen ? "▶" : "",
-        esc(route.id),
-        route.complete
-          ? dot("good", "complete") + " complete"
-          : route.available
-            ? dot("good", "available") + " available"
-            : dot("wait", "blocked") + " blocked",
-        esc(route.blocker || "–"),
-        Number.isFinite(route.etaSec) ? fmtTime(route.etaSec * 1_000) : "∞",
-      ]),
-    { left: [1, 2, 3] },
+  const sorted = [...plan.routes].sort((a, b) => a.etaSec - b.etaSec);
+  const rows = rankedTable(
+    ["route", "status", "blocker", "eta"],
+    sorted.map((route) => [
+      esc(route.id),
+      route.complete
+        ? dot("good", "complete") + " complete"
+        : route.available
+          ? dot("good", "available") + " available"
+          : dot("wait", "blocked") + " blocked",
+      esc(route.blocker || NONE),
+      Number.isFinite(route.etaSec) ? fmtTime(route.etaSec * 1_000) : "∞",
+    ]),
+    { selected: (i) => sorted[i]!.id === chosen, left: [0, 1, 2] },
   );
   const parts = plan.routes
     .map((route) =>
@@ -221,7 +219,7 @@ function arenaBody(arena: Progression["ramArena"]): string {
  * crossing IS the decision. */
 function cadenceCard(plan: Plan, hasSeries: boolean): string {
   const decision = plan.installDecision;
-  if (!decision) return note("waiting for the cadence verdict (needs a route ETA and a factions frontier)");
+  if (!decision) return waiting("the cadence verdict", "needs a route ETA and a factions frontier");
   const verdictDot =
     decision.effective === "install" ? dot("ready", "install") : decision.effective === "push" ? dot("good", "push") : dot("off", "legacy");
   const header = tiles([
@@ -267,7 +265,7 @@ export const bitnodeTab: Tab = {
   id: "progression",
   render(state: ProjectedState) {
     const p = state.topics.progression;
-    if (!p) return note("waiting for the gate probe (ns.getResetInfo, ~1 GB, every sweep)");
+    if (!p) return waiting("the gate probe", "ns.getResetInfo, ~1 GB, every sweep");
 
     const current = BITNODES.find((b) => b.n === p.bitNode);
     const grid =
@@ -300,7 +298,7 @@ export const bitnodeTab: Tab = {
           "Expected next installation",
           forecastCard(p.plan.forecasts.install, now),
         ) + card("Expected BitNode completion", forecastCard(p.plan.forecasts.node, now))
-      : card("Time forecasts", note("waiting for the progression planner"));
+      : card("Time forecasts", waiting("the progression planner"));
     // Same guard as the forecasts above, applied once for the whole card: every
     // field it reads was added to the plan after runs already existed on disk, and
     // the viewer replays those runs.

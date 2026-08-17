@@ -3,12 +3,15 @@
 #include "go/candidates.hpp"
 #include "go/opponent.hpp"
 #include "go/reward.hpp"
+#include "go/rng.hpp"
 #include "go/rules.hpp"
 #include "go/transition.hpp"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -30,6 +33,31 @@ constexpr std::array<Opponent, 6> ordinary_opponents{
   Opponent::netburners, Opponent::slum_snakes, Opponent::black_hand,
   Opponent::tetrads, Opponent::daedalus, Opponent::illuminati,
 };
+
+using ProfileClock = std::chrono::steady_clock;
+
+struct WorkProfile {
+  std::uint64_t candidate_generation_ns{};
+  std::uint64_t opponent_analysis_ns{};
+  std::uint64_t protocol_serialization_ns{};
+  std::uint64_t candidates{};
+  std::uint64_t replies{};
+
+  WorkProfile& operator+=(const WorkProfile& other) {
+    candidate_generation_ns += other.candidate_generation_ns;
+    opponent_analysis_ns += other.opponent_analysis_ns;
+    protocol_serialization_ns += other.protocol_serialization_ns;
+    candidates += other.candidates;
+    replies += other.replies;
+    return *this;
+  }
+};
+
+std::uint64_t elapsed_ns(ProfileClock::time_point started) {
+  return static_cast<std::uint64_t>(
+    std::chrono::duration_cast<std::chrono::nanoseconds>(
+      ProfileClock::now() - started).count());
+}
 
 double sampled_seed(std::mt19937_64& random, bool portable = false) {
   // Live decisions are aligned to 200 ms ticks. Across WHRNG's 30,000-second
@@ -69,6 +97,14 @@ struct Slot {
   Position position;
   std::mt19937_64 environment;
   std::mt19937_64 counterfactual;
+  double dispatch_playtime{};
+  /** Wall-clock milliseconds past the last engine rollover at dispatch. The
+   * engine converts wall time to Player.totalPlaytime in 200 ms ticks, so the
+   * branch-exact reply base slips one extra tick whenever this offset plus
+   * the turn's fractional time crosses a rollover. White's seed is
+   * unaffected: its first wait is a full cycle, so the seed phase is always
+   * dispatch + 1 regardless of the offset. */
+  double sub_tick_offset_ms{};
   int rounds{};
   bool portable_benchmark{};
   std::vector<Move> candidates;
@@ -77,8 +113,11 @@ struct Slot {
   // Index of the sampled reply within each candidate's forecast, in the same
   // order the V9 record lists them.
   std::vector<std::size_t> candidate_reply_indices;
+  std::vector<double> candidate_next_dispatch_playtimes;
+  std::vector<double> candidate_next_offsets;
   std::string v9_original_input;
   std::string v9_behavior;
+  std::string v9_future_behavior;
   std::vector<std::string> v9_candidates;
 };
 
@@ -119,8 +158,13 @@ Slot make_slot(
     .portable_benchmark = portable_benchmark,
   };
   const int size = profile == "small5" ? 5 : 19;
+  const double board_seed = sampled_seed(slot.environment, portable_benchmark);
+  slot.dispatch_playtime = board_seed;
+  // The live controller resets and dispatches early in the entry tick (its
+  // safe opening window is the first 50 ms).
+  slot.sub_tick_offset_ms = static_cast<double>(slot.environment() % 50ULL);
   slot.position.board = initial_board(
-    size, slot.opponent, sampled_seed(slot.environment, portable_benchmark),
+    size, slot.opponent, board_seed,
     static_cast<std::uint32_t>(slot.environment()));
   return slot;
 }
@@ -146,13 +190,17 @@ std::string comma_values(const std::vector<float>& values) {
   return output.str();
 }
 
-void prepare_candidates(Slot& slot) {
+void prepare_candidates(Slot& slot, WorkProfile* profile = nullptr) {
+  const auto enumeration_started = profile ? ProfileClock::now() : ProfileClock::time_point{};
   slot.candidates.clear();
   slot.candidate_positions.clear();
   slot.candidate_boards.clear();
   slot.candidate_reply_indices.clear();
+  slot.candidate_next_dispatch_playtimes.clear();
+  slot.candidate_next_offsets.clear();
   slot.v9_original_input.clear();
   slot.v9_behavior.clear();
+  slot.v9_future_behavior.clear();
   slot.v9_candidates.clear();
   slot.candidates = ordered_legal_moves(slot.position, 0);
   slot.candidates.push_back(Move::pass_turn());
@@ -169,18 +217,35 @@ void prepare_candidates(Slot& slot) {
         move.point.x * slot.position.board.size + move.point.y, true);
     }
   }
-  const double reply_seed = sampled_seed(slot.environment, slot.portable_benchmark);
+  if (profile) {
+    profile->candidate_generation_ns += elapsed_ns(enumeration_started);
+    profile->candidates += slot.candidates.size();
+  }
+  const auto header_started = profile ? ProfileClock::now() : ProfileClock::time_point{};
+  const double reply_seed = aligned_opponent_seed(slot.dispatch_playtime);
   slot.v9_original_input = encoded_input(slot.position, Move{});
   const double komi = slot.position.board.size == 5 ? opponent_komi(slot.opponent) : -1.0;
   slot.v9_behavior = comma_values(encode_opponent_turn_behavior(
     opponent_turn_behavior(slot.opponent, reply_seed), komi));
+  slot.v9_future_behavior = comma_values(
+    encode_opponent_future_behavior(slot.opponent, komi));
+  if (profile) profile->protocol_serialization_ns += elapsed_ns(header_started);
   slot.v9_candidates.reserve(slot.candidates.size());
   slot.candidate_positions.reserve(slot.candidates.size());
   slot.candidate_boards.reserve(slot.candidates.size());
   slot.candidate_reply_indices.reserve(slot.candidates.size());
+  slot.candidate_next_dispatch_playtimes.reserve(slot.candidates.size());
+  slot.candidate_next_offsets.reserve(slot.candidates.size());
+  // One draw per turn: other scripts and Black's own planning consume an
+  // uncontrolled 5..90 ms of CPU between observing the reply and the next
+  // dispatch. Shared across candidates so counterfactuals stay paired; drawn
+  // from raw 64-bit output so libc++ and libstdc++ benchmarks agree.
+  const double turn_jitter_ms = 5.0 + static_cast<double>(slot.counterfactual() % 86ULL);
   for (const Move move : slot.candidates) {
+    const auto candidate_started = profile ? ProfileClock::now() : ProfileClock::time_point{};
     Position after_black = slot.position;
     apply_to_position(after_black, move, Stone::black);
+    if (profile) profile->candidate_generation_ns += elapsed_ns(candidate_started);
     ReplyForecast forecast;
     if (after_black.consecutive_passes >= 2) {
       forecast = {.replies = {{
@@ -188,16 +253,38 @@ void prepare_candidates(Slot& slot) {
         .branch = ReplyBranch::pass,
       }}, .exact = true};
     } else {
+      const auto opponent_started = profile ? ProfileClock::now() : ProfileClock::time_point{};
       forecast = predict_opponent_replies(after_black, slot.opponent, reply_seed);
+      if (profile) profile->opponent_analysis_ns += elapsed_ns(opponent_started);
     }
+    if (profile) profile->replies += forecast.replies.size();
+    const auto transition_started = profile ? ProfileClock::now() : ProfileClock::time_point{};
     const std::size_t reply_index = sample_reply_index(
       forecast, slot.counterfactual, slot.portable_benchmark);
     const Move reply = forecast.replies[reply_index].move;
     slot.candidate_reply_indices.push_back(reply_index);
+    const ReplyWait wait = forecast.replies[reply_index].wait;
+    // Branch-exact wall time (pre-seed cycle + per-branch waitCycles + fixed
+    // pattern sleeps) plus the turn's uncontrolled jitter, converted to ticks
+    // through the tracked sub-tick offset. This reproduces live play's
+    // base/base+1 arrival window instead of always landing on the base.
+    const double wall_ms = go_engine_cycle_ms
+      * (1.0 + static_cast<double>(std::max(0, wait.cycle_waits_after_seed)))
+      + static_cast<double>(std::max(0, wait.fixed_sleep_ms_after_seed))
+      + turn_jitter_ms;
+    const double advanced_ms = slot.sub_tick_offset_ms + wall_ms;
+    const double elapsed_ticks = std::floor(advanced_ms / go_engine_cycle_ms);
+    slot.candidate_next_dispatch_playtimes.push_back(normalize_go_playtime(
+      slot.dispatch_playtime + elapsed_ticks * go_engine_cycle_ms));
+    slot.candidate_next_offsets.push_back(
+      advanced_ms - elapsed_ticks * go_engine_cycle_ms);
     Position after = after_black;
     if (after.consecutive_passes < 2) apply_to_position(after, reply, Stone::white);
     slot.candidate_boards.push_back(board_hash(after.board));
+    if (profile) profile->candidate_generation_ns += elapsed_ns(transition_started);
     {
+      const auto serialization_started = profile
+        ? ProfileClock::now() : ProfileClock::time_point{};
       std::ostringstream record;
       const int move_index = move.pass ? after.board.size * after.board.size
         : move.point.x * after.board.size + move.point.y;
@@ -223,23 +310,30 @@ void prepare_candidates(Slot& slot) {
         }
       }
       slot.v9_candidates.push_back(record.str());
+      if (profile) profile->protocol_serialization_ns += elapsed_ns(serialization_started);
     }
     slot.candidate_positions.push_back(std::move(after));
   }
 }
 
-void prepare_all(std::vector<Slot>& slots, int thread_count) {
+void prepare_all(
+  std::vector<Slot>& slots,
+  int thread_count,
+  WorkProfile* profile = nullptr
+) {
   const std::size_t workers = std::min(
     slots.size(), static_cast<std::size_t>(std::max(thread_count, 1)));
   std::atomic<std::size_t> next{};
   std::exception_ptr failure;
   std::mutex failure_mutex;
+  std::vector<WorkProfile> slot_profiles;
+  if (profile) slot_profiles.resize(slots.size());
   const auto work = [&] {
     try {
       while (true) {
         const std::size_t index = next.fetch_add(1);
         if (index >= slots.size()) break;
-        prepare_candidates(slots[index]);
+        prepare_candidates(slots[index], profile ? &slot_profiles[index] : nullptr);
       }
     } catch (...) {
       std::lock_guard lock(failure_mutex);
@@ -252,6 +346,9 @@ void prepare_all(std::vector<Slot>& slots, int thread_count) {
   work();
   for (auto& thread : threads) thread.join();
   if (failure) std::rethrow_exception(failure);
+  if (profile) {
+    for (const auto& slot_profile : slot_profiles) *profile += slot_profile;
+  }
 }
 
 }  // namespace
@@ -303,8 +400,10 @@ int main(int argc, char** argv) {
 
     std::vector<TransitionEvent> transitions;
     std::vector<ResultEvent> results;
+    std::uint64_t profile_block = 0;
     std::cout << std::setprecision(17);
     while (!slots.empty()) {
+      WorkProfile work_profile;
       for (const auto& transition : transitions) {
         std::cout << "T\t" << transition.slot << '\t' << transition.episode << '\t'
           << transition.turn << '\t' << transition.opponent << '\t'
@@ -317,16 +416,32 @@ int main(int argc, char** argv) {
           << result.rounds << '\n';
       }
       results.clear();
-      prepare_all(slots, thread_count);
+      const auto prepare_started = portable_benchmark
+        ? ProfileClock::now() : ProfileClock::time_point{};
+      prepare_all(slots, thread_count, portable_benchmark ? &work_profile : nullptr);
+      const std::uint64_t prepare_wall_ns = portable_benchmark
+        ? elapsed_ns(prepare_started) : 0;
+      const auto output_started = portable_benchmark
+        ? ProfileClock::now() : ProfileClock::time_point{};
       for (auto& slot : slots) {
         std::cout << "S9\t" << slot.id << '\t' << slot.episode << '\t'
           << static_cast<int>(slot.opponent) << '\t' << slot.rounds << '\t'
-          << slot.v9_behavior << '\t' << slot.v9_original_input << '\t'
+          << slot.v9_behavior << '\t' << slot.v9_future_behavior << '\t'
+          << slot.v9_original_input << '\t'
           << slot.v9_candidates.size();
         for (const auto& candidate : slot.v9_candidates) std::cout << '\t' << candidate;
         std::cout << '\n';
       }
       std::cout << "READY\n" << std::flush;
+      if (portable_benchmark) {
+        const std::uint64_t output_wall_ns = elapsed_ns(output_started);
+        std::cerr << "PROFILE\t" << profile_block++ << '\t' << slots.size() << '\t'
+          << work_profile.candidate_generation_ns << '\t'
+          << work_profile.opponent_analysis_ns << '\t'
+          << work_profile.protocol_serialization_ns << '\t'
+          << prepare_wall_ns << '\t' << output_wall_ns << '\t'
+          << work_profile.candidates << '\t' << work_profile.replies << '\n';
+      }
 
       std::unordered_map<int, std::pair<int, std::size_t>> actions;
       std::string line;
@@ -357,6 +472,8 @@ int main(int argc, char** argv) {
         const std::size_t action = found->second.second;
         const int turn = slot.rounds;
         slot.position = std::move(slot.candidate_positions[action]);
+        slot.dispatch_playtime = slot.candidate_next_dispatch_playtimes[action];
+        slot.sub_tick_offset_ms = slot.candidate_next_offsets[action];
         ++slot.rounds;
         transitions.push_back({
           .slot = slot.id,
@@ -370,8 +487,12 @@ int main(int argc, char** argv) {
 
       for (std::size_t index = slots.size(); index-- > 0;) {
         auto& slot = slots[index];
-        const int cap = 4 * slot.position.board.size * slot.position.board.size;
-        if (slot.position.consecutive_passes < 2 && slot.rounds * 2 < cap) continue;
+        const int max_rounds = 8 * slot.position.board.size * slot.position.board.size;
+        if (slot.position.consecutive_passes < 2 && slot.rounds < max_rounds) continue;
+        if (slot.position.consecutive_passes < 2) {
+          throw std::runtime_error(
+            "V9 environment game did not terminate before the safety cap");
+        }
         const auto reward = terminal_reward(
           score_board(slot.position.board, opponent_komi(slot.opponent)),
           opponent_name(slot.opponent), slot.position.board.size);

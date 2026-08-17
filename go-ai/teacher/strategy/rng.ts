@@ -20,6 +20,11 @@ export function whrng(totalPlaytimeMs: number, count = 1): number[] {
 /** Player.totalPlaytime advances by this amount in Engine.updateGame().
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts */
 export const GO_ENGINE_CYCLE_MS = 200;
+export const GO_WHRNG_PERIOD_MS = 30_000_000;
+
+export function normalizeGoPlaytime(totalPlaytimeMs: number): number {
+  return ((totalPlaytimeMs % GO_WHRNG_PERIOD_MS) + GO_WHRNG_PERIOD_MS) % GO_WHRNG_PERIOD_MS;
+}
 
 /** The AI waits once before constructing WHRNG. Bonus time shortens this wall
  * wait, but it does not change totalPlaytime's 200 ms engine-cycle quantum.
@@ -60,9 +65,6 @@ export interface GoResponseTiming {
   responseWallMs: number;
   responsePlaytimeMs: number;
   bonusCycles: number;
-  /** Neutral later engine tick reserved for the precomputed continuation. */
-  nextDispatchPlaytimeMs: number;
-  nextSeed: number;
 }
 
 /** Propagate one predicted white branch to the distinct seed of the following
@@ -73,20 +75,15 @@ export function nextGoTurnTiming(
   dispatchPlaytimeMs: number,
   bonusCycles: number,
   trace: { cycleWaitsAfterSeed: number; fixedSleepMsAfterSeed: number },
-  dispatchLeadCycles = 3,
 ): GoResponseTiming {
   const initial = consumeGoWaits(bonusCycles, 1);
   const remainder = consumeGoWaits(initial.bonusCycles, trace.cycleWaitsAfterSeed);
   const responseWallMs = initial.wallMs + remainder.wallMs + trace.fixedSleepMsAfterSeed;
   const elapsedTicks = Math.floor(responseWallMs / GO_ENGINE_CYCLE_MS);
   const responsePlaytimeMs = dispatchPlaytimeMs + elapsedTicks * GO_ENGINE_CYCLE_MS;
-  const nextDispatchPlaytimeMs = responsePlaytimeMs
-    + Math.max(1, Math.floor(dispatchLeadCycles)) * GO_ENGINE_CYCLE_MS;
   return {
     responseWallMs,
     responsePlaytimeMs,
     bonusCycles: remainder.bonusCycles,
-    nextDispatchPlaytimeMs,
-    nextSeed: alignedAiSeed(nextDispatchPlaytimeMs, remainder.bonusCycles),
   };
 }

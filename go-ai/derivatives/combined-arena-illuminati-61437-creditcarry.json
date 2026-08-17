@@ -1,0 +1,123 @@
+{
+  "ok": true,
+  "backend": "webgpu",
+  "config": {
+    "games": 192,
+    "startPhase": 61437,
+    "phaseStride": 104729,
+    "timing": "random",
+    "defenseSeed": 20260819,
+    "playbook": "stripped",
+    "opponent": "Illuminati",
+    "arms": [
+      "combined",
+      "playbookOnly",
+      "neuralOnly",
+      "neuralUnrouted",
+      "combinedUnrouted"
+    ]
+  },
+  "arms": {
+    "combined": {
+      "games": 192,
+      "wins": 192,
+      "completed": 192,
+      "winRate": 1,
+      "certifiedTurns": 3398,
+      "neuralTurns": 626,
+      "neuralReturns": 126,
+      "powerPerTurn": 1.3224864413850648,
+      "neuralLatencyMs": {
+        "p50": 2.8,
+        "p95": 3.9,
+        "count": 626
+      },
+      "failures": []
+    },
+    "playbookOnly": {
+      "games": 192,
+      "wins": 1,
+      "completed": 1,
+      "winRate": 0.005208333333333333,
+      "certifiedTurns": 2201,
+      "neuralTurns": 0,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.5563099041533547,
+      "neuralLatencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "count": 0
+      },
+      "failures": [
+        "Illuminati@61437: playbook miss at phase 61550, round 7",
+        "Illuminati@16166: playbook miss at phase 16386, round 4",
+        "Illuminati@120895: playbook miss at phase 121021, round 4",
+        "Illuminati@75624: playbook miss at phase 76419, round 2",
+        "Illuminati@30353: playbook miss at phase 30643, round 5",
+        "Illuminati@135082: playbook miss at phase 136835, round 3",
+        "Illuminati@89811: playbook miss at phase 90581, round 9",
+        "Illuminati@44540: playbook miss at phase 45382, round 9",
+        "Illuminati@149269: playbook miss at phase 149941, round 3",
+        "Illuminati@103998: playbook miss at phase 104707, round 9",
+        "Illuminati@58727: playbook miss at phase 60935, round 8",
+        "Illuminati@13456: playbook miss at phase 13698, round 5",
+        "Illuminati@118185: playbook miss at phase 119274, round 6",
+        "Illuminati@27643: playbook miss at phase 28492, round 5",
+        "Illuminati@132372: playbook miss at phase 132897, round 2",
+        "Illuminati@87101: playbook miss at phase 87255, round 7",
+        "Illuminati@41830: playbook miss at phase 41891, round 11",
+        "Illuminati@146559: playbook miss at phase 1126, round 6",
+        "Illuminati@101288: playbook miss at phase 101518, round 7",
+        "Illuminati@56017: playbook miss at phase 56934, round 6"
+      ]
+    },
+    "neuralOnly": {
+      "games": 192,
+      "wins": 87,
+      "completed": 192,
+      "winRate": 0.453125,
+      "certifiedTurns": 0,
+      "neuralTurns": 2793,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.48549946294307195,
+      "neuralLatencyMs": {
+        "p50": 2.8,
+        "p95": 4.6,
+        "count": 2793
+      },
+      "failures": []
+    },
+    "neuralUnrouted": {
+      "games": 192,
+      "wins": 145,
+      "completed": 192,
+      "winRate": 0.7552083333333334,
+      "certifiedTurns": 0,
+      "neuralTurns": 2673,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.9506172839506173,
+      "neuralLatencyMs": {
+        "p50": 3.3,
+        "p95": 5.5,
+        "count": 2673
+      },
+      "failures": []
+    },
+    "combinedUnrouted": {
+      "games": 192,
+      "wins": 145,
+      "completed": 192,
+      "winRate": 0.7552083333333334,
+      "certifiedTurns": 0,
+      "neuralTurns": 2673,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.9506172839506173,
+      "neuralLatencyMs": {
+        "p50": 3.2,
+        "p95": 5.6,
+        "count": 2673
+      },
+      "failures": []
+    }
+  }
+}

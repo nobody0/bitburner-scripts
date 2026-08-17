@@ -1,0 +1,536 @@
+{
+  "schema": "go-deployment-derivative-summary-v1",
+  "profile": "small5",
+  "transform": "structured-distill-v1",
+  "championSha256": "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+  "derivativeCheckpoint": "go-ai/derivatives/small5-5dc8310252c9.model",
+  "derivativeCheckpointSha256": "5dc8310252c9b19eb06d36ec69d0b1a0f09596ffcb5c2331f07f5b816edc5b33",
+  "derivativePayloadSha256": "7519fe20a711b57b76019ddb4b14aec5a9b28929b39c6a1ea937aa41654c8559",
+  "bytes": {
+    "fullPrecisionChampionCheckpoint": 6687982,
+    "fullPrecisionDerivativeCheckpoint": 5438536,
+    "fullArtifactPayload": 306654,
+    "derivativePayload": 247758,
+    "fullModule": 409565,
+    "derivativeModule": 331218
+  },
+  "parameters": {
+    "full": 302949,
+    "retained": 244453
+  },
+  "decisionParity": {
+    "ok": true,
+    "backend": "webgpu",
+    "mode": "report",
+    "games": 64,
+    "states": 3668,
+    "actionAgreement": 0.6319520174482006,
+    "finalistAgreement": 1,
+    "scoreAgreement": 0.013904034896401308,
+    "forecastAgreement": 0.9934569247546347,
+    "logitMaxAbsDiff": 0,
+    "exact": false,
+    "examples": [
+      {
+        "opponent": "Netburners",
+        "turn": 0,
+        "dispatchPlaytime": 16464600,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.994 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.994 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 2,
+        "dispatchPlaytime": 16465200,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 1,
+          "y": 3,
+          "why": "move neural value 0.997 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 1,
+          "y": 3,
+          "why": "move neural value 0.997 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 4,
+        "dispatchPlaytime": 16465600,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 3,
+          "y": 3,
+          "why": "move neural value 0.998 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 3,
+          "y": 3,
+          "why": "move neural value 0.998 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 6,
+        "dispatchPlaytime": 16466400,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 3,
+          "y": 2,
+          "why": "move neural value 0.992 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 3,
+          "y": 2,
+          "why": "move neural value 0.992 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 8,
+        "dispatchPlaytime": 16467000,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 4,
+          "y": 2,
+          "why": "move neural value 0.996 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 4,
+          "y": 2,
+          "why": "move neural value 0.996 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 0,
+        "dispatchPlaytime": 7410400,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.989 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.989 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 2,
+        "dispatchPlaytime": 7410800,
+        "mismatch": {
+          "action": true,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.965 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.964 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 4,
+        "dispatchPlaytime": 7411200,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 3,
+          "y": 3,
+          "why": "move neural value 0.980 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 3,
+          "y": 3,
+          "why": "move neural value 0.980 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 6,
+        "dispatchPlaytime": 7411600,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 1,
+          "y": 2,
+          "why": "move neural value 0.988 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 1,
+          "y": 2,
+          "why": "move neural value 0.988 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 8,
+        "dispatchPlaytime": 7412000,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "pass",
+          "why": "passing rates above every legal move"
+        },
+        "derivative": {
+          "type": "pass",
+          "why": "passing rates above every legal move"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 0,
+        "dispatchPlaytime": 28356200,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.995 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.995 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 2,
+        "dispatchPlaytime": 28356800,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 3,
+          "y": 2,
+          "why": "move neural value 0.993 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 3,
+          "y": 2,
+          "why": "move neural value 0.993 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 4,
+        "dispatchPlaytime": 28357200,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.996 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.996 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 6,
+        "dispatchPlaytime": 28357600,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.997 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 2,
+          "y": 2,
+          "why": "move neural value 0.997 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 8,
+        "dispatchPlaytime": 28358200,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 3,
+          "y": 1,
+          "why": "move neural value 0.997 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 3,
+          "y": 1,
+          "why": "move neural value 0.997 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 10,
+        "dispatchPlaytime": 28358600,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 1,
+          "y": 1,
+          "why": "move neural value 0.997 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 1,
+          "y": 1,
+          "why": "move neural value 0.997 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 12,
+        "dispatchPlaytime": 28359200,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 0,
+          "y": 2,
+          "why": "move neural value 0.996 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 0,
+          "y": 2,
+          "why": "move neural value 0.996 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 14,
+        "dispatchPlaytime": 28360000,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 4,
+          "y": 1,
+          "why": "move neural value 0.998 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 4,
+          "y": 1,
+          "why": "move neural value 0.998 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 0,
+        "dispatchPlaytime": 19302000,
+        "mismatch": {
+          "action": true,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 0,
+          "y": 1,
+          "why": "move neural value 0.991 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 0,
+          "y": 1,
+          "why": "move neural value 0.992 win"
+        }
+      },
+      {
+        "opponent": "Netburners",
+        "turn": 2,
+        "dispatchPlaytime": 19303200,
+        "mismatch": {
+          "action": false,
+          "finalists": false,
+          "score": true,
+          "forecast": false
+        },
+        "champion": {
+          "type": "move",
+          "x": 3,
+          "y": 3,
+          "why": "move neural value 0.982 win"
+        },
+        "derivative": {
+          "type": "move",
+          "x": 3,
+          "y": 3,
+          "why": "move neural value 0.982 win"
+        }
+      }
+    ]
+  },
+  "pairedArena": {
+    "seedUseId": "2026-08-17T12:18:29.131Z-derivative-apply-small5",
+    "config": {
+      "profile": "small5",
+      "games": 384,
+      "seed": 45454501,
+      "handicapSeed": 45454502,
+      "defenseSeed": 45454503
+    },
+    "champion": {
+      "wins": 2145,
+      "games": 2304,
+      "points": 12272,
+      "powerPerTurn": 0.757141,
+      "meanTurns": 20.13,
+      "latencyMs": {
+        "p50": 4.9,
+        "p95": 8.4,
+        "max": 64
+      }
+    },
+    "derivative": {
+      "wins": 2146,
+      "games": 2304,
+      "points": 12415,
+      "powerPerTurn": 0.759114,
+      "meanTurns": 20.12,
+      "latencyMs": {
+        "p50": 4.9,
+        "p95": 8.5,
+        "max": 66.9
+      }
+    },
+    "gameForGameIdentical": false,
+    "evidence": {
+      "favorableWinFlips": 7,
+      "unfavorableWinFlips": 6,
+      "oneSidedWinPValue": 0.4999999999999999,
+      "powerPerTurnLower95": -0.004235602084275103,
+      "fewerTurnsLower95": -0.0934902545336184
+    }
+  },
+  "applied": true,
+  "recordedAt": "2026-08-17T12:23:57.679Z"
+}

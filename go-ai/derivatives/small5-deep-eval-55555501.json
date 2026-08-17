@@ -1,0 +1,133 @@
+{
+  "schema": "go-deep-eval-screen-v1",
+  "screenOnly": true,
+  "promotionEligible": false,
+  "seedUseId": "2026-08-16T09:17:37.812Z-screen-small5",
+  "config": {
+    "profile": "small5",
+    "games": 128,
+    "seed": 55555501,
+    "handicapSeed": 55555502,
+    "defenseSeed": 55555503
+  },
+  "latencyBudgetP95Ms": 50,
+  "championSha256": "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+  "arms": [
+    {
+      "label": "baseline-flat-default",
+      "wins": 671,
+      "games": 768,
+      "points": 1948,
+      "powerPerTurn": 0.620592,
+      "meanTurns": 22.52,
+      "meanFinalists": 9.16,
+      "latencyMs": {
+        "p50": 2.7,
+        "p95": 4.6,
+        "max": 68.6
+      },
+      "withinLatencyBudget": true
+    },
+    {
+      "label": "deep-k4-f2-u0",
+      "wins": 702,
+      "games": 768,
+      "points": 3820,
+      "powerPerTurn": 0.715587,
+      "meanTurns": 21.16,
+      "meanFinalists": 5.32,
+      "latencyMs": {
+        "p50": 4,
+        "p95": 6.2,
+        "max": 66.1
+      },
+      "withinLatencyBudget": true,
+      "rootK": 4,
+      "followUpK": 2,
+      "uncertaintyTicks": 0,
+      "pairedVersusBaseline": {
+        "favorableWinFlips": 66,
+        "unfavorableWinFlips": 35,
+        "oneSidedWinPValue": 0.0013268930286142527,
+        "powerPerTurnLower95": 0.05232138555648287,
+        "fewerTurnsLower95": 0.5684150174968863
+      }
+    },
+    {
+      "label": "deep-k4-f2-u1",
+      "wins": 698,
+      "games": 768,
+      "points": 3623,
+      "powerPerTurn": 0.70585,
+      "meanTurns": 21.3,
+      "meanFinalists": 5.31,
+      "latencyMs": {
+        "p50": 4.6,
+        "p95": 7.6,
+        "max": 73.8
+      },
+      "withinLatencyBudget": true,
+      "rootK": 4,
+      "followUpK": 2,
+      "uncertaintyTicks": 1,
+      "pairedVersusBaseline": {
+        "favorableWinFlips": 64,
+        "unfavorableWinFlips": 37,
+        "oneSidedWinPValue": 0.004667524060322399,
+        "powerPerTurnLower95": 0.04247958313306283,
+        "fewerTurnsLower95": 0.4209631724896723
+      }
+    },
+    {
+      "label": "deep-k4-f3-u0",
+      "wins": 724,
+      "games": 768,
+      "points": 4578,
+      "powerPerTurn": 0.77965,
+      "meanTurns": 20.01,
+      "meanFinalists": 5.35,
+      "latencyMs": {
+        "p50": 4.3,
+        "p95": 7,
+        "max": 76.5
+      },
+      "withinLatencyBudget": true,
+      "rootK": 4,
+      "followUpK": 3,
+      "uncertaintyTicks": 0,
+      "pairedVersusBaseline": {
+        "favorableWinFlips": 73,
+        "unfavorableWinFlips": 20,
+        "oneSidedWinPValue": 1.460072438485731e-8,
+        "powerPerTurnLower95": 0.11778428198279861,
+        "fewerTurnsLower95": 1.7649003857606538
+      }
+    },
+    {
+      "label": "deep-k4-f3-u1",
+      "wins": 723,
+      "games": 768,
+      "points": 4591,
+      "powerPerTurn": 0.771355,
+      "meanTurns": 20.23,
+      "meanFinalists": 5.36,
+      "latencyMs": {
+        "p50": 5.2,
+        "p95": 9,
+        "max": 80.5
+      },
+      "withinLatencyBudget": true,
+      "rootK": 4,
+      "followUpK": 3,
+      "uncertaintyTicks": 1,
+      "pairedVersusBaseline": {
+        "favorableWinFlips": 73,
+        "unfavorableWinFlips": 21,
+        "oneSidedWinPValue": 3.3268328120462706e-8,
+        "powerPerTurnLower95": 0.10895671869553865,
+        "fewerTurnsLower95": 1.5287006466644597
+      }
+    }
+  ],
+  "recordedAt": "2026-08-16T09:21:17.265Z"
+}

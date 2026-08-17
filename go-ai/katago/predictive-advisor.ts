@@ -150,6 +150,7 @@ export class PredictiveKataGoAdvisor {
     if (!selected) throw new Error("KataGo predictive shortlist was empty");
     return {
       move: selected.move,
+      proposalMoves: evaluated.map((candidate) => candidate.move),
       visits: selected.evaluation.visits,
       ...(selected.prior !== undefined ? { prior: selected.prior } : {}),
       winrate: selected.evaluation.winrate,

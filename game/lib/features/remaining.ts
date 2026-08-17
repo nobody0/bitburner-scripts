@@ -23,6 +23,8 @@ import { stepGang } from "../../../shared/strategy/gang/decide.ts";
 import {
   GO_OPPONENTS,
   GO_REWARD_OPPONENTS,
+  applyGoCheat,
+  isGoCheatAction,
   isGoRewardOpponent,
   playMove,
   scoreBoard,
@@ -30,6 +32,7 @@ import {
   type GoAction,
   type GoDecision,
   type GoObservedBoardSize,
+  type GoPlayingAction,
   type GoFactionOpponent,
   type GoRewardOpponent,
   type GoView,
@@ -46,13 +49,11 @@ import { runGoNeuralSeedDispatch } from "../go-neural.ts";
 import { goNeuralWorkerRuntime, resetGoNeuralWorkerRuntime, type GoNeuralRuntime } from "../go-neural-worker.ts";
 import {
   goNeuralPositionIdentity,
-  goSeedSetKey,
-  type GoWorkerContinuationHint,
 } from "../../../shared/strategy/go/neural/worker-protocol.ts";
 import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand } from "../../../shared/strategy/go/rewards.ts";
 import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
-import { alignedAiSeed, GO_ENGINE_CYCLE_MS, goAiWaitMs, nextGoTurnTiming } from "../../../shared/strategy/go/rng.ts";
+import { GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
 import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installCadenceRemainingSec, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
@@ -125,6 +126,11 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
 /** Go's pure ROI policy needs a cold estimate before a runtime request exists;
  * this is not used for broker sizing or placement. */
 const GO_ESTIMATED_GB = 4;
+const GO_CHEAT_CANDIDATE_LIMIT = 4;
+const GO_CHEAT_DOUBLE_MOVE_LIMIT = 2;
+// This is far beyond the useful portion of the rapidly decaying chance curve
+// and keeps the worker independent of Netscript throughout practical games.
+const GO_CHEAT_CHANCE_SAMPLES = 1_024;
 const GO_MAX_FLEET_SHARE = 0.01;
 const BLADES_SIMULACRUM = "The Blade's Simulacrum";
 
@@ -180,6 +186,7 @@ function actionClaimId(action: string): string { return `action:${action}`; }
  * own dodge is far smaller than the grant already reserved for that turn. */
 function goActionClaimId(action: string): string {
   return action === "move" || action === "pass" || action === "resume" || action === "align"
+    || action.startsWith("cheat")
     ? "action:turn"
     : actionClaimId(action);
 }
@@ -690,6 +697,12 @@ const sleeves: FeatureDriver = {
 function goActionDigest(action: GoAction): GoActionDigest {
   switch (action.type) {
     case "move": return { type: action.type, x: action.x, y: action.y };
+    case "cheatTwoMoves": return {
+      type: action.type, x1: action.x1, y1: action.y1, x2: action.x2, y2: action.y2,
+    };
+    case "cheatRemoveRouter":
+    case "cheatDestroyNode":
+    case "cheatRepairNode": return { type: action.type, x: action.x, y: action.y };
     case "newGame": return { type: action.type, opponent: action.opponent, boardSize: action.boardSize };
     case "pass":
     case "resume": return { type: action.type };
@@ -748,14 +761,14 @@ type GoActionOutcome = {
   dispatchPlaytime?: number;
   player?: ReturnType<NS["getPlayer"]>;
   playerObservedAt?: number;
-  action?: Extract<GoAction, { type: "move" | "pass" }>;
+  action?: GoPlayingAction;
   decision?: GoDecision;
   prediction?: NonNullable<GoPlan["prediction"]>;
-  continuationHints?: GoWorkerContinuationHint[];
   predictionParentId?: string;
   responsePlayer?: ReturnType<NS["getPlayer"]>;
   responseObservedAt?: number;
   responseReadyAt?: number;
+  responseBonusCycles?: number;
 };
 
 function normalizeGoResponse(response: RawGoResponse): GoResponse {
@@ -778,12 +791,73 @@ let goTurnRunning = false;
  * and dispatch two turns for one position. */
 let goPlanning = false;
 let goGeneration = 0;
+/** Large worker-only chance table. Keeping it out of the telemetry topic avoids
+ * sending 1,024 redundant values on every Go update. */
+let goCheatSuccessByCount: number[] | undefined;
 /** Parent commit accepted by the worker for the board expected on the next
  * Black turn. A mismatching public board falls back to a full install. */
 let goPredictionParent: string | undefined;
 /** Exact on chained turns (the opponent promise resolution); cold starts use
  * the first actionable Black-turn observation. */
 let goTurnReadyAt: number | undefined;
+
+/** Certified playbook lines in live play.
+ *
+ * The playbook is consulted for every 5x5 opponent it covers: a certified hit
+ * is a proven move and a miss costs one table lookup, so mid-game consultation
+ * is free upside (measured: never below the neural baseline, +3 games for
+ * Tetrads).
+ *
+ * `maxWaitPhases` is separate and expensive. A certified line is only entered
+ * from a phase-aligned game start, so the controller must defer the game until
+ * the route's entry phase, playing no Go at all meanwhile. That is worth doing
+ * only where the certified line beats ordinary neural play by enough to pay
+ * for the wait. Per-opponent 192-game combined arenas on one fresh corpus
+ * (2026-08-17, `go:combined:arena --unrouted-baseline`), certified-root
+ * routing versus the neural baseline on ordinary phases:
+ *
+ * | Opponent | routed line | neural, unrouted |
+ * |---|---:|---:|
+ * | Illuminati | 192/192 | 139/192 |
+ * | Daedalus | 192/192 | 184/192 |
+ * | Tetrads | 192/192 | 187/192 |
+ * | The Black Hand | 192/192 | 191/192 |
+ * | Netburners | 192/192 | 192/192 |
+ * | Slum Snakes | 192/192 | 192/192 |
+ *
+ * So Illuminati justifies a long wait, Daedalus and Tetrads a short one, and
+ * the remaining three justify none — their certified lines win no games the
+ * network does not already win. */
+const GO_PLAYBOOK_OPPONENTS: Readonly<Record<string, { maxWaitPhases: number }>> = {
+  Illuminati: { maxWaitPhases: 5_000 },
+  Daedalus: { maxWaitPhases: 900 },
+  Tetrads: { maxWaitPhases: 900 },
+  "The Black Hand": { maxWaitPhases: 0 },
+  Netburners: { maxWaitPhases: 0 },
+  "Slum Snakes": { maxWaitPhases: 0 },
+};
+/** Proceed with the aligned reset once the route entry is this close: the
+ * remaining seconds are absorbed tick-exactly by the first move's dispatch
+ * target. Must exceed the driver's 5 s go cadence so an approaching window
+ * cannot fall between two passes, and cover reset plus first-turn planning. */
+const GO_PLAYBOOK_START_SLACK_PHASES = 30;
+/** A certified sleep longer than this abandons the line instead of holding
+ * the controller's turn loop mid-game. */
+const GO_PLAYBOOK_MAX_SLEEP_PHASES = 25;
+/** Alignment credit for the certified line of the active game (mirrors the
+ * standalone combined driver's per-game credit). */
+let goPlaybookCredit = 0;
+/** Credit grant that becomes effective once the engine clock reaches the
+ * given tick — the controller-shaped form of the standalone driver sleeping
+ * an align/sleep entry before continuing the line. */
+let goPlaybookPendingCredit: { atPlaytime: number; credit: number } | undefined;
+/** Committed phase-aligned game start; consumed by the first Black move. */
+let goPlaybookEntry: { opponent: string; entryPlaytime: number } | undefined;
+
+function resetGoPlaybookLine(): void {
+  goPlaybookCredit = 0;
+  goPlaybookPendingCredit = undefined;
+}
 
 let testGoRuntime: GoNeuralRuntime | undefined;
 
@@ -798,6 +872,11 @@ export function setGoNeuralRuntimeForTest(runtime?: GoNeuralRuntime): void {
   if (typeof Bun === "undefined") throw new Error("Go backend test injection is only available under Bun");
   testGoRuntime?.dispose();
   testGoRuntime = runtime;
+}
+
+export function setGoCheatSuccessTableForTest(chances?: number[]): void {
+  if (typeof Bun === "undefined") throw new Error("Go cheat test injection is only available under Bun");
+  goCheatSuccessByCount = chances;
 }
 
 /** Wall-clock anchor for the 200 ms engine cycle, established by observing a
@@ -844,15 +923,20 @@ function sameGoPosition(plan: GoPlan | undefined, topic: NonNullable<GameState["
 /** Claims are collected before tick() computes the next plan. Derive lifecycle
  * transitions from the current public board so a freshly completed promise can
  * act immediately even though the stored plan describes the preceding turn. */
-function goClaimAction(state: GameState): GoAction["type"] | "hydrate" | undefined {
+function goCheatUnlocked(caps: DriverContext["caps"]): boolean {
+  const level = sfLevel(caps.sourceFiles, 14);
+  return level > 1 || (caps.bitNode === 14 && level === 1);
+}
+
+function goClaimAction(state: GameState, caps: DriverContext["caps"]): GoAction["type"] | "hydrate" | undefined {
   const topic = state.topics.go;
   if (!topic?.status || !topic.currentPlayer) return undefined;
-  if (!topic.board || !topic.previousBoards) return "hydrate";
+  if (!topic.board || !topic.previousBoards || (goCheatUnlocked(caps) && (!topic.cheat || !goCheatSuccessByCount))) return "hydrate";
   if (topic.status === "gameOver" || topic.currentPlayer === "None") return "newGame";
   if (topic.currentPlayer !== "Black") return "resume";
   if (sameGoPosition(topic.plan, topic)) {
     const planned = topic.plan!.action.type;
-    if (planned === "move" || planned === "pass" || planned === "newGame") return planned;
+    if (planned === "move" || planned === "pass" || planned === "newGame" || planned.startsWith("cheat")) return planned;
   }
   return topic.board.some((column) => column.includes(".")) ? "move" : "pass";
 }
@@ -921,21 +1005,30 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       !topic?.status || !topic.currentPlayer || !topic.opponent || !topic.stats || !isGoRewardOpponent(topic.opponent)
     ) return;
     if (!goActionAdmitted(ctx.state, ctx.caps)) return;
-    const claimedAction = goClaimAction(ctx.state);
-    if (!topic.board || !topic.boardSize || !topic.previousBoards) {
+    const claimedAction = goClaimAction(ctx.state, ctx.caps);
+    const cheatUnlocked = goCheatUnlocked(ctx.caps);
+    if (!topic.board || !topic.boardSize || !topic.previousBoards
+      || (cheatUnlocked && (!topic.cheat || !goCheatSuccessByCount))) {
       const hydrated = await act(
         ctx,
         "go",
         "hydrate",
-        goMethods("hydrate"),
+        goMethods("hydrate", cheatUnlocked),
         (stubNs: NS) => ({
           board: stubNs["go"]["getBoardState"](),
           history: stubNs["go"]["getMoveHistory"](),
+          cheat: cheatUnlocked ? {
+            unlocked: true,
+            count: stubNs["go"]["cheat"]["getCheatCount"](),
+            successByCount: Array.from({ length: GO_CHEAT_CHANCE_SAMPLES }, (_, count) =>
+              stubNs["go"]["cheat"]["getCheatSuccessChance"](count)),
+          } : undefined,
         }),
         (value) => ({ ok: value.board.length > 0, detail: `read ${value.board.length}x${value.board.length} Go board` }),
       );
       if (generation !== goGeneration) return;
       if (hydrated) {
+        if (hydrated.cheat) goCheatSuccessByCount = hydrated.cheat.successByCount;
         const boardSize = observedGoBoardSize(hydrated.board);
         const controlled = goTerritory({ rows: hydrated.board, size: boardSize });
         merge(ctx.state, "go", {
@@ -944,6 +1037,11 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           previousBoards: hydrated.history,
           moveCount: hydrated.history.length,
           territory: { black: controlled.X, white: controlled.O },
+          ...(hydrated.cheat ? { cheat: {
+            unlocked: true,
+            count: hydrated.cheat.count,
+            successChance: hydrated.cheat.successByCount[hydrated.cheat.count] ?? 0,
+          } } : {}),
         });
         goContinuationReady = true;
       }
@@ -996,6 +1094,21 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       // scoring identical.
       komi: topic.komi ?? GO_REWARD_RULES[topic.opponent].komi,
       consecutivePasses: topic.lastTurn?.opponentResponse?.type === "pass" ? 1 : 0,
+      bonusCycles: topic.bonusCycles ?? 0,
+      // candidateLimit is deliberately absent: the engine resolves the
+      // production finalist budget from GO_PROFILE_CANDIDATE_LIMITS (strict
+      // K=1 for the policy-only daemon19 profile, including 7/9/13 boards;
+      // K=4 for small5), so live play and the arenas share one contract.
+      ...(topic.cheat && goCheatSuccessByCount ? { cheat: {
+        unlocked: topic.cheat.unlocked,
+        count: topic.cheat.count,
+        successByCount: goCheatSuccessByCount,
+        // Exact faction analysis dominates 19x19 latency on cheat-created
+        // states. There the strongest family gets the whole budget; selectable
+        // boards retain four finalists per topology-changing family.
+        candidateLimit: topic.boardSize === 19 ? 0 : GO_CHEAT_CANDIDATE_LIMIT,
+        doubleMoveLimit: topic.boardSize === 19 ? 1 : GO_CHEAT_DOUBLE_MOVE_LIMIT,
+      } } : {}),
       nextGame: {
         opponent: preferred.opponent,
         boardSize: preferred.boardSize,
@@ -1045,33 +1158,93 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     const planStartedAt = Date.now();
     const neuralRuntime = goNeuralRuntime();
     const expectedPredictionParent = goPredictionParent;
+    const playbookEnabled = view.status === "inProgress"
+      && view.currentPlayer === "Black"
+      && view.board.size === 5
+      && GO_PLAYBOOK_OPPONENTS[view.opponent] !== undefined
+      // Certified lines were proven against the plain rules. With cheats
+      // unlocked the engine may dispatch a cheat action instead of a move,
+      // whose board change is not on any certified line, and the turn's RAM
+      // grant is priced for the claimed action — a playbook move substituted
+      // into a cheat turn would not even be affordable. Cheat games therefore
+      // stay purely neural.
+      && view.cheat?.unlocked !== true;
+    // A committed aligned start binds only the first Black move of its game.
+    const committedEntry = playbookEnabled
+      && goPlaybookEntry
+      && goPlaybookEntry.opponent === view.opponent
+      && view.previousBoards.length === 0
+      ? goPlaybookEntry
+      : undefined;
     const installed = await neuralRuntime.install(view, expectedPredictionParent);
     const preparationMs = installed.preparationMs;
     const provisionalAt = Date.now();
     const observedPlaytime = goTickPhase
       ? goPredictedPlaytime(goTickPhase, provisionalAt)
       : ctx.state.topics.player?.totalPlaytime ?? 0;
+    if (playbookEnabled && goPlaybookPendingCredit) {
+      if (observedPlaytime >= goPlaybookPendingCredit.atPlaytime) {
+        goPlaybookCredit = goPlaybookPendingCredit.credit;
+        goPlaybookPendingCredit = undefined;
+      } else {
+        // A certified align/sleep wait is in progress; the line resumes on a
+        // later pass once the engine clock reaches the granted tick.
+        goContinuationReady = true;
+        return;
+      }
+    }
     const provisionalDispatch = goTickPhase
       ? goChooseSeedTarget(
         goTickPhase,
         observedPlaytime,
         provisionalAt,
         GO_DISPATCH_GUARD_MS,
+        committedEntry?.entryPlaytime,
       ).targetPlaytime
       : observedPlaytime;
-    const provisionalSeeds = (topic.bonusCycles ?? 0) > 0
-      ? [provisionalDispatch, provisionalDispatch + GO_ENGINE_CYCLE_MS]
-      : [alignedAiSeed(provisionalDispatch, topic.bonusCycles)];
     // This first request also covers a cold position. On normal chained
     // turns the worker already holds both the position and likely seed set
     // because it evaluated them during the preceding White response.
     const provisionalEvaluation = await neuralRuntime.evaluate(
       installed.positionId,
-      provisionalSeeds,
+      provisionalDispatch,
       expectedPredictionParent,
     );
     decision = provisionalEvaluation.decision;
     if (generation !== goGeneration) return;
+    const certifiedProvisional = playbookEnabled
+      ? await neuralRuntime.playbook(installed.positionId, provisionalDispatch, goPlaybookCredit)
+        .catch(() => undefined)
+      : undefined;
+    if (generation !== goGeneration) return;
+    const provisionalPlaybookAction = certifiedProvisional?.action;
+    if (provisionalPlaybookAction?.kind === "align") {
+      goPlaybookPendingCredit = {
+        atPlaytime: provisionalDispatch + GO_ENGINE_CYCLE_MS,
+        credit: certifiedProvisional!.alignmentBoards,
+      };
+      goContinuationReady = true;
+      return;
+    }
+    if (provisionalPlaybookAction?.kind === "sleep"
+      && provisionalPlaybookAction.variant <= GO_PLAYBOOK_MAX_SLEEP_PHASES) {
+      goPlaybookPendingCredit = {
+        atPlaytime: provisionalDispatch + provisionalPlaybookAction.variant * GO_ENGINE_CYCLE_MS,
+        credit: certifiedProvisional!.alignmentCredit,
+      };
+      goContinuationReady = true;
+      return;
+    }
+    if (provisionalPlaybookAction?.kind === "move") {
+      decision = { ...decision, action: {
+        type: "move",
+        x: provisionalPlaybookAction.x,
+        y: provisionalPlaybookAction.y,
+        why: "certified playbook line",
+      } };
+    } else if (provisionalPlaybookAction?.kind === "pass") {
+      decision = { ...decision, action: { type: "pass", why: "certified playbook line" } };
+    }
     const decisionAt = Date.now();
     const plan: GoPlan = {
       action: goActionDigest(decision.action),
@@ -1087,6 +1260,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         ...(topic.whiteScore !== undefined ? { whiteScore: topic.whiteScore } : {}),
         komi: view.komi,
         ...(topic.bonusCycles !== undefined ? { bonusCycles: topic.bonusCycles } : {}),
+        ...(topic.cheat ? { cheatCount: topic.cheat.count } : {}),
       },
       planning: { finalistCount: decision.finalists, positionValue: decision.positionValue },
       selection: {
@@ -1117,13 +1291,54 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       const usableGb = pie ? pie.farm + pie.prep + pie.share + pie.free + pie.reserve : 0;
       if (!goGamePaysForRam(preferred.utilityPerSec, usableGb)) return;
       const newGameAction = action;
+      // Certified playbook lines are only reachable from a phase-aligned game
+      // start. The opening board itself — obstacles and the Illuminati
+      // handicap stone — is generated from the engine tick the game is created
+      // in, so the reset, not merely the first move, has to land on the
+      // route's entry phase. Hold the reset while an affordable window
+      // approaches, then dispatch it tick-exactly.
+      goPlaybookEntry = undefined;
+      const playbookStart = GO_PLAYBOOK_OPPONENTS[newGameAction.opponent];
+      if (playbookStart && newGameAction.boardSize === 5 && goTickPhase) {
+        const routeAt = Date.now();
+        const route = await neuralRuntime
+          .playbookRoute(goPredictedPlaytime(goTickPhase, routeAt), newGameAction.opponent)
+          .catch(() => undefined);
+        if (generation !== goGeneration) return;
+        if (route && playbookStart.maxWaitPhases > 0 && route.waits <= playbookStart.maxWaitPhases) {
+          // Too far out: hold on the driver's ordinary 5 s cadence. The slack
+          // window is wider than that cadence, so the approach cannot be
+          // skipped between passes.
+          if (route.waits > GO_PLAYBOOK_START_SLACK_PHASES) return;
+          goPlaybookEntry = { opponent: newGameAction.opponent, entryPlaytime: route.entryPlaytime };
+        }
+      }
+      const alignedEntry = goPlaybookEntry;
       const actionStartedAt = Date.now();
       const reset = await act(
         ctx,
         "go",
         action.type,
-        goMethods(action.type),
-        (stubNs: NS) => stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize),
+        goMethods(action.type, cheatUnlocked, alignedEntry !== undefined),
+        async (stubNs: NS) => {
+          if (!alignedEntry || !goTickPhase) {
+            return stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize);
+          }
+          const seeded = await runGoNeuralSeedDispatch({
+            phase: goTickPhase,
+            notBeforePlaytime: alignedEntry.entryPlaytime,
+            clock: {
+              now: Date.now,
+              player: () => stubNs["getPlayer"](),
+              sleep: async (ms) => { await stubNs["sleep"](ms); },
+            },
+            infer: async () => undefined,
+            dispatch: async () =>
+              stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize),
+          });
+          goTickPhase = seeded.phase;
+          return seeded.response;
+        },
         (value) => ({
           ok: value !== undefined,
           detail: value
@@ -1141,6 +1356,9 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         detail: result.detail,
       };
       if (reset) {
+        // A fresh game starts a fresh certified line at zero credit; a
+        // committed goPlaybookEntry deliberately survives for its first move.
+        resetGoPlaybookLine();
         goPredictionParent = undefined;
         // The new game's first Black turn has no preceding opponent promise to
         // time from; leaving the finished game's boundary here would report a
@@ -1159,6 +1377,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           status: "inProgress",
           opponent: action.opponent,
           territory: { black: 0, white: 0 },
+          ...(topic.cheat ? { cheat: { ...topic.cheat, count: 0 } } : {}),
           plan,
           lastTurn,
         };
@@ -1186,14 +1405,14 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         ctx,
         "go",
         action.type,
-        goMethods(action.type),
+        goMethods(action.type, cheatUnlocked),
         async (stubNs: NS): Promise<GoActionOutcome> => {
           let dispatchPlayer: ReturnType<NS["getPlayer"]> | undefined;
           let dispatchPlayerObservedAt: number | undefined;
-          let dispatchedAction = action.type === "move" || action.type === "pass" ? action : undefined;
+          let dispatchedAction: GoPlayingAction | undefined = action.type === "resume" || action.type === "newGame"
+            ? undefined : action;
           let dispatchedDecision: GoDecision | undefined;
           let dispatchPrediction: NonNullable<GoPlan["prediction"]> | undefined;
-          let continuationHints: GoWorkerContinuationHint[] | undefined;
           let predictionParentId: string | undefined;
           let boundaryRetries = 0;
           let response: RawGoResponse | undefined;
@@ -1208,38 +1427,56 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
               // for the tick this turn will actually land in rather than the
               // one that happens to be current while planning.
               const dispatchPlaytime = target?.targetPlaytime ?? player.totalPlaytime;
-              const seeds = (topic.bonusCycles ?? 0) > 0
-                ? [dispatchPlaytime, dispatchPlaytime + GO_ENGINE_CYCLE_MS]
-                : [alignedAiSeed(dispatchPlaytime, topic.bonusCycles)];
               // Usually this is a completed pushed result. A missed seed
               // still reuses the worker's prepared position and GPU weights;
               // the main game thread only performs this small RPC.
               // The provisional lookup normally targeted this exact slot. Do
               // not turn an already-consumed pushed result into a redundant
               // worker round trip during the final verified dispatch path.
-              const evaluated = goSeedSetKey(seeds) === goSeedSetKey(provisionalSeeds)
+              const evaluated = dispatchPlaytime === provisionalDispatch
                 ? provisionalEvaluation
                 : await neuralRuntime.evaluate(
                   installed.positionId,
-                  seeds,
+                  dispatchPlaytime,
                   expectedPredictionParent,
                 );
               const exactDecision = evaluated.decision;
+              // The certified lookup is bound to the exact dispatch tick. A
+              // boundary retry that slips the slot re-consults; when the new
+              // slot is off the line (including an align/sleep there), the
+              // neural decision for that same slot takes over.
+              const certified = !playbookEnabled
+                ? undefined
+                : dispatchPlaytime === provisionalDispatch
+                  ? certifiedProvisional
+                  : await neuralRuntime.playbook(installed.positionId, dispatchPlaytime, goPlaybookCredit)
+                    .catch(() => undefined);
+              const certifiedAction = certified?.action;
+              const playbookAction = certifiedAction?.kind === "move"
+                ? { type: "move" as const, x: certifiedAction.x, y: certifiedAction.y, why: "certified playbook line" }
+                : certifiedAction?.kind === "pass"
+                  ? { type: "pass" as const, why: "certified playbook line" }
+                  : undefined;
               const decisionAt = Date.now();
-              const exactAction = exactDecision.action;
-              if (exactAction.type !== "move" && exactAction.type !== "pass") {
+              const exactAction = playbookAction ?? exactDecision.action;
+              if (exactAction.type === "resume" || exactAction.type === "newGame") {
                 throw new Error(`V9 returned ${exactAction.type} for an active Black turn`);
               }
               return {
                 action: exactAction,
-                decision: exactDecision,
+                decision: playbookAction ? { ...exactDecision, action: playbookAction } : exactDecision,
+                playbookCertified: playbookAction ? certified : undefined,
                 positionId: installed.positionId,
-                seeds,
+                seeds: evaluated.opponentSeeds,
                 nextRolloverAt: target
                   ? target.rolloverAt + (target.waitsForRollover ? GO_ENGINE_CYCLE_MS : 0)
                   : undefined,
-                continuationHints: evaluated.continuations,
+                // A certified move is not the committed neural action, so the
+                // worker's push-ahead commit (which verifies its own decision)
+                // is skipped; the next turn issues a fresh install/evaluate.
+                continuationHints: playbookAction ? [] : evaluated.continuations,
                 prediction: {
+                  ...(playbookAction ? { playbook: true as const } : {}),
                   model: GO_OPPONENT_MODEL,
                   backend: evaluated.backend ?? "webgpu",
                   modelProfile: evaluated.modelProfile,
@@ -1256,7 +1493,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                   totalPlanningMs: decisionAt - planStartedAt,
                   engineCycleMs: GO_ENGINE_CYCLE_MS,
                   aiWaitMs: goAiWaitMs(topic.bonusCycles),
-                  seedCandidates: seeds,
+                  seedCandidates: evaluated.opponentSeeds,
                   dispatchPlaytime,
                   ...(target ? { rolloverMarginMs: target.marginMs, waitedForRollover: target.waitsForRollover } : {}),
                   boundaryRetries,
@@ -1269,6 +1506,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
 
             const seeded = await runGoNeuralSeedDispatch({
               phase: goTickPhase,
+              ...(committedEntry ? { notBeforePlaytime: committedEntry.entryPlaytime } : {}),
               clock: {
                 now: Date.now,
                 player: () => stubNs["getPlayer"](),
@@ -1284,20 +1522,31 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                 moveDispatchedAt = dispatchWallAt;
                 const responsePromise = finalized.action.type === "move"
                   ? stubNs["go"]["makeMove"](finalized.action.x, finalized.action.y)
-                  : stubNs["go"]["passTurn"]();
+                  : finalized.action.type === "pass"
+                    ? stubNs["go"]["passTurn"]()
+                    : finalized.action.type === "cheatTwoMoves"
+                      ? stubNs["go"]["cheat"]["playTwoMoves"](
+                        finalized.action.x1, finalized.action.y1,
+                        finalized.action.x2, finalized.action.y2,
+                      )
+                      : finalized.action.type === "cheatRemoveRouter"
+                        ? stubNs["go"]["cheat"]["removeRouter"](finalized.action.x, finalized.action.y)
+                        : finalized.action.type === "cheatDestroyNode"
+                          ? stubNs["go"]["cheat"]["destroyNode"](finalized.action.x, finalized.action.y)
+                          : stubNs["go"]["cheat"]["repairOfflineNode"](finalized.action.x, finalized.action.y);
                 // The game promise is now sleeping through White's response.
                 // Start likely successor evaluations without awaiting them or
                 // extending the RAM-holding main-thread dodge.
-                predictionParentId = neuralRuntime.commit(
-                  finalized.positionId,
-                  finalized.seeds,
-                  finalized.prediction.dispatchPlaytime,
-                  dispatchWallAt,
-                  finalized.nextRolloverAt ?? dispatchWallAt + GO_ENGINE_CYCLE_MS,
-                  topic.bonusCycles ?? 0,
-                  finalized.action,
-                  expectedPredictionParent,
-                );
+                if (finalized.continuationHints.length) {
+                  predictionParentId = neuralRuntime.commit(
+                    finalized.positionId,
+                    finalized.prediction.dispatchPlaytime,
+                    dispatchWallAt,
+                    finalized.nextRolloverAt ?? dispatchWallAt + GO_ENGINE_CYCLE_MS,
+                    finalized.action,
+                    expectedPredictionParent,
+                  );
+                }
                 return responsePromise;
               },
             });
@@ -1313,8 +1562,24 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
               boundaryRetries,
               readyToDispatchMs: Math.max(0, (moveDispatchedAt ?? Date.now()) - (goTurnReadyAt ?? planStartedAt)),
             };
-            continuationHints = seeded.attempt.value.continuationHints;
             response = seeded.response;
+            if (playbookEnabled) {
+              // Every dispatched turn spends one board of alignment credit,
+              // certified or not. The credit records how many further boards
+              // the certificate proved under controlled timing — a property of
+              // the environment and our own prompt dispatch, not of who chose
+              // the move — and it is part of an entry's lookup key, so zeroing
+              // it on a turn the network merely reproduced would strand the
+              // rest of the line (the residual pass strips exactly such
+              // entries). A genuine divergence yields a board and history no
+              // entry on the line carries, so the surviving credit cannot
+              // match a wrong entry.
+              const dispatchedCertified = seeded.attempt.value.playbookCertified;
+              goPlaybookCredit = Math.max(0,
+                (dispatchedCertified?.alignmentCredit ?? goPlaybookCredit) - 1);
+              goPlaybookPendingCredit = undefined;
+            }
+            if (goPlaybookEntry?.opponent === view.opponent) goPlaybookEntry = undefined;
           }
           if (response !== undefined) {
             // Seed-assured neural dispatch above already started and awaited
@@ -1331,6 +1596,10 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             throw new Error(`invalid Go turn action ${action.type}`);
           }
           const responseReadyAt = Date.now();
+          // Predictions are intentionally absent on the latency-bounded 19x19
+          // cheat path. Observe this public state unconditionally so offline
+          // bonus-cycle accounting never depends on speculative continuations.
+          const responseBonusCycles = stubNs["go"]["getGameState"]().bonusCycles;
           // Resume turns have no worker commit to confirm and their RAM claim
           // intentionally excludes getPlayer. Only sample the compact clock
           // confirmation after a neural move actually armed the worker.
@@ -1344,11 +1613,11 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             ...(dispatchedAction ? { action: dispatchedAction } : {}),
             ...(dispatchedDecision ? { decision: dispatchedDecision } : {}),
             ...(dispatchPrediction ? { prediction: dispatchPrediction } : {}),
-            ...(continuationHints ? { continuationHints } : {}),
             ...(predictionParentId ? { predictionParentId } : {}),
             ...(responsePlayer ? { responsePlayer } : {}),
             ...(responseObservedAt !== undefined ? { responseObservedAt } : {}),
             responseReadyAt,
+            responseBonusCycles,
           } satisfies GoActionOutcome;
         },
         (value) => ({
@@ -1391,19 +1660,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         return;
       }
       const response = normalizeGoResponse(rawOutcome.response);
-      const matchingTiming = (rawOutcome.continuationHints ?? []).filter((hint) =>
-        response.type === "move"
-          ? hint.response.type === "move"
-            && hint.response.x === response.x && hint.response.y === response.y
-          : hint.response.type === "pass");
-      const remainingBonus = new Set(matchingTiming.map((hint) => nextGoTurnTiming(
-        rawOutcome.dispatchPlaytime ?? 0,
-        topic.bonusCycles ?? 0,
-        hint.wait,
-      ).bonusCycles));
-      const bonusCyclesAfterResponse = remainingBonus.size === 1
-        ? remainingBonus.values().next().value as number
-        : undefined;
+      const bonusCyclesAfterResponse = rawOutcome.responseBonusCycles;
 
       // makeMove/passTurn returns the AI's actual public response. Advance the
       // held board immediately so the driver never replays a stale move while
@@ -1415,6 +1672,13 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         if (!ours) throw new Error(`Go rules drift: accepted move ${action.x},${action.y} was locally illegal`);
         previousBoards.unshift(board.rows);
         board = ours.board;
+      } else if (isGoCheatAction(action)) {
+        const cheated = applyGoCheat(board, action);
+        if (!cheated) throw new Error(`Go rules drift: accepted ${action.type} was locally invalid`);
+        // Upstream cheats do not push the pre-cheat board into positional-
+        // superko history. White's subsequent ordinary placement pushes this
+        // post-cheat board below.
+        board = cheated.board;
       }
       if (response.type === "move") {
         const theirs = playMove(board, response.x, response.y, "O", new Set(previousBoards.map((prior) => prior.join(""))));
@@ -1430,6 +1694,11 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           currentPlayer: response.type === "gameOver" ? "None" : "Black",
           status: response.type === "gameOver" ? "gameOver" : "inProgress",
           consecutivePasses: response.type === "move" ? 0 : action.type === "pass" ? 2 : 1,
+          ...(bonusCyclesAfterResponse !== undefined ? { bonusCycles: bonusCyclesAfterResponse } : {}),
+          ...(view.cheat ? { cheat: {
+            ...view.cheat,
+            count: view.cheat.count + (isGoCheatAction(action) ? 1 : 0),
+          } } : {}),
         }).id;
         neuralRuntime.confirm(
           rawOutcome.predictionParentId,
@@ -1456,6 +1725,13 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         previousBoards,
         moveCount: previousBoards.length,
         ...(bonusCyclesAfterResponse !== undefined ? { bonusCycles: bonusCyclesAfterResponse } : {}),
+        ...(topic.cheat ? { cheat: {
+          ...topic.cheat,
+          count: topic.cheat.count + (isGoCheatAction(action) ? 1 : 0),
+          successChance: goCheatSuccessByCount?.[
+            topic.cheat.count + (isGoCheatAction(action) ? 1 : 0)
+          ] ?? 0,
+        } } : {}),
         territory: { black: controlled.X, white: controlled.O },
         ...(score ? { blackScore: score.X, whiteScore: score.O } : {}),
         currentPlayer: response.type === "gameOver" ? "None" : "Black",
@@ -2830,7 +3106,10 @@ export const goModule: FeatureModule = {
     goCompletionReady = false;
     goContinuationReady = false;
     goPredictionParent = undefined;
+    goCheatSuccessByCount = undefined;
     goTurnReadyAt = undefined;
+    resetGoPlaybookLine();
+    goPlaybookEntry = undefined;
     // Drop board/seed work crossing a prestige. The worker itself remains the
     // single V9 owner across controller handoffs; its backend is rebuilt after
     // this reset before the successor game is evaluated.
@@ -2843,8 +3122,8 @@ export const goModule: FeatureModule = {
   claims: (ctx) => {
     if (goTurnRunning || (goCompletionReady && !goContinuationReady)) return [];
     if (!goActionAdmitted(ctx.state, ctx.caps)) return [];
-    const action = goClaimAction(ctx.state);
-    const methods = goMethods(action);
+    const action = goClaimAction(ctx.state, ctx.caps);
+    const methods = goMethods(action, goCheatUnlocked(ctx.caps));
     if (!action || methods.length === 0) return [];
     return [actionRamClaim(ctx, "go", goActionClaimId(action), methods, `go ${action}`)];
   },
@@ -2900,8 +3179,18 @@ function sleeveMethods(action: string | undefined): readonly string[] {
   }
 }
 
-function goMethods(action: string | undefined): readonly string[] {
-  if (action === "hydrate") return ["go.getBoardState", "go.getMoveHistory"];
+function goMethods(
+  action: string | undefined,
+  cheatUnlocked = false,
+  /** A phase-aligned certified start waits for its exact engine tick inside
+   * the dodge, which needs the same cheap clock reads a Black turn prices. */
+  alignedStart = false,
+): readonly string[] {
+  if (action === "hydrate") return [
+    "go.getBoardState",
+    "go.getMoveHistory",
+    ...(cheatUnlocked ? ["go.cheat.getCheatCount", "go.cheat.getCheatSuccessChance"] : []),
+  ];
   // Seed anchoring is split out precisely because it is cheap: 0.5 GB of
   // getPlayer instead of the 4 GB go.makeMove grant, which must not be held
   // while waiting for an engine tick.
@@ -2910,11 +3199,20 @@ function goMethods(action: string | undefined): readonly string[] {
   // move and pass. Price both calls for every Black turn so the exact action is
   // always executable. passTurn is zero-RAM in v3.0.1, so this does not enlarge
   // the 4 GB move grant.
-  if (action === "move" || action === "pass") {
-    return ["getPlayer", "sleep", "go.makeMove", "go.passTurn"];
+  if (action === "move" || action === "pass" || action?.startsWith("cheat")) {
+    // Every cheat action costs the same 8 GB and exactly one is called. Pricing
+    // one representative method reserves the exact maximum dynamic-RAM path
+    // without incorrectly summing four mutually exclusive calls.
+    return cheatUnlocked
+      ? ["getPlayer", "sleep", "go.getGameState", "go.cheat.playTwoMoves"]
+      : ["getPlayer", "sleep", "go.getGameState", "go.makeMove", "go.passTurn"];
   }
-  if (action === "resume") return ["go.opponentNextTurn"];
-  if (action === "newGame") return ["go.resetBoardState"];
+  if (action === "resume") return ["go.getGameState", "go.opponentNextTurn"];
+  if (action === "newGame") {
+    return alignedStart
+      ? ["getPlayer", "sleep", "go.resetBoardState"]
+      : ["go.resetBoardState"];
+  }
   return [];
 }
 

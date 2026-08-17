@@ -3,21 +3,29 @@
 import {
   configureGoArenaEngine,
   GO_ARENA_OPPONENTS,
-  goArenaSeeds,
+  goProfileArenaSeedCases,
   playGoArenaGame,
   summarizeGoArena,
   type GoArenaGameResult,
 } from "../../sim/go-arena.ts";
 import { createRequiredWebGpuGoValueBackend } from "../../shared/strategy/go/neural/webgpu.ts";
-import type { GoRewardOpponent } from "../../shared/strategy/go/rules.ts";
+import type { GoDeepSearchV1, GoSeedWaitV1 } from "../../shared/strategy/go/neural/engine.ts";
 
 type Profile = "small5" | "daemon19";
 interface ArenaConfig {
   profile: Profile;
   games: number;
   seed: number;
+  handicapSeed: number;
+  defenseSeed: number;
   candidateLimit?: number;
-  opponent?: GoRewardOpponent;
+  /** Explicit config, or null to force flat finalization for baseline arms;
+   * absent resolves the per-profile production default. */
+  deepSearch?: GoDeepSearchV1 | null;
+  /** Explicit one-cycle seed-wait policy, or null to disable it. */
+  seedWait?: GoSeedWaitV1 | null;
+  /** Restrict the corpus to one opponent; omit for the full field. */
+  opponent?: string;
 }
 
 function percentile(values: readonly number[], fraction: number): number {
@@ -31,24 +39,41 @@ async function main(): Promise<unknown> {
   if (!config || (config.profile !== "small5" && config.profile !== "daemon19")) {
     throw new Error("missing or invalid __goArenaConfig");
   }
-  if (!Number.isInteger(config.games) || config.games < 1 || !Number.isFinite(config.seed)) {
-    throw new Error("arena games and seed must be finite positive integers");
+  if (!Number.isInteger(config.games) || config.games < 1
+    || !Number.isFinite(config.seed) || !Number.isFinite(config.handicapSeed)
+    || !Number.isFinite(config.defenseSeed)) {
+    throw new Error("arena games, playtime seed, handicap seed, and defense seed must be finite integers");
   }
   const selected = GO_ARENA_OPPONENTS.filter((opponent) =>
     (config.profile === "daemon19" ? opponent.name === "????????????" : opponent.requestedSize === 5)
+    // A single-opponent screen spends the whole corpus where the question is,
+    // instead of paying for five opponents to answer about one.
     && (config.opponent === undefined || opponent.name === config.opponent));
   if (selected.length === 0) throw new Error(`opponent ${String(config.opponent)} is not in profile ${config.profile}`);
-  configureGoArenaEngine((weights) => createRequiredWebGpuGoValueBackend(weights));
+  configureGoArenaEngine(
+    (weights) => createRequiredWebGpuGoValueBackend(weights), {}, config.deepSearch,
+    config.seedWait);
   const allGames: GoArenaGameResult[] = [];
   const opponents: unknown[] = [];
   const originalRandom = Math.random;
-  Math.random = () => 0.5;
   try {
-    for (let opponentIndex = 0; opponentIndex < selected.length; opponentIndex++) {
-      const opponent = selected[opponentIndex]!;
+    const corpora = goProfileArenaSeedCases(
+      config.profile,
+      config.games,
+      config.seed,
+      config.handicapSeed,
+      config.defenseSeed,
+    );
+    for (const corpus of corpora) {
+      const opponent = selected.find((value) => value.name === corpus.opponent);
+      // A single-opponent screen still draws the full seed plan, so the other
+      // opponents' corpora are skipped rather than played.
+      if (!opponent) continue;
       const games: GoArenaGameResult[] = [];
-      for (const seed of goArenaSeeds(config.games, config.seed + opponentIndex * 20_003)) {
-        games.push(await playGoArenaGame(opponent, seed, 0.5, false, {
+      for (const { seed, handicapSeed, defenseSeed } of corpus.cases) {
+        games.push(await playGoArenaGame(opponent, seed, undefined, false, {
+          handicapSeed,
+          defenseSeed,
           ...(config.candidateLimit === undefined ? {} : { candidateLimit: config.candidateLimit }),
         }));
       }
@@ -88,6 +113,11 @@ async function main(): Promise<unknown> {
     completed,
     pointDifference: allGames.reduce((sum, game) => sum + game.score.X - game.score.O, 0),
     decisions: latencies.length,
+    meanTurns: +(allGames.reduce((sum, game) => sum + game.turns, 0)
+      / Math.max(1, allGames.length)).toFixed(2),
+    meanPowerPerTurn: +(allGames.reduce((sum, game) => sum
+      + game.score.X * (game.won ? 1 : 0.5), 0)
+      / Math.max(1, allGames.reduce((sum, game) => sum + game.turns, 0))).toFixed(6),
     meanFinalists: +(finalists.reduce((sum, value) => sum + value, 0)
       / Math.max(1, finalists.length)).toFixed(2),
     latencyMs: {
@@ -95,6 +125,19 @@ async function main(): Promise<unknown> {
       p95: +percentile(latencies, 0.95).toFixed(2),
       max: +percentile(latencies, 1).toFixed(2),
     },
+    seedWaits: allGames.reduce((sum, game) => sum + game.seedWaits, 0),
+    gameMetrics: allGames.map((game) => ({
+      opponent: game.opponent,
+      seed: game.seed,
+      handicapSeed: game.handicapSeed,
+      defenseSeed: game.defenseSeed,
+      completed: game.completed,
+      won: game.won,
+      power: game.score.X * (game.won ? 1 : 0.5),
+      turns: game.turns,
+      blackScore: game.score.X,
+      whiteScore: game.score.O,
+    })),
     opponents,
   };
 }

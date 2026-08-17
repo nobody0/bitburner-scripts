@@ -1,4 +1,4 @@
-import { bar, card, note, table, tiles } from "../lib/dom.ts";
+import { bar, card, dataTable, NONE, note, outcome, rankedTable, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -7,7 +7,7 @@ export const bladeburnerTab: Tab = {
   id: "bladeburner",
   render(state: ProjectedState) {
     const b = state.topics.bladeburner;
-    if (!b) return note("waiting for the bladeburner probe");
+    if (!b) return waiting("the bladeburner probe");
 
     const [stamina, staminaMax] = b.stamina;
     const summary = tiles([
@@ -27,23 +27,25 @@ export const bladeburnerTab: Tab = {
       { label: "spent", value: Math.max(0, staminaMax - stamina), className: "s4" },
     ]);
 
-    const actions = table(
-      ["type", "action", "success", "time", "remaining", "level"],
-      (b.actions ?? [])
-        .slice()
-        .sort((a, b2) => b2.chance[0] - a.chance[0])
-        .map((a) => [
-          esc(a.type),
-          esc(a.name),
-          a.chance[0] === a.chance[1]
-            ? fmtPct(a.chance[0])
-            : `${fmtPct(a.chance[0])} – ${fmtPct(a.chance[1])}`,
-          fmtTime(a.timeMs),
-          a.countRemaining >= 1e9 ? "∞" : fmtNum(a.countRemaining, 0),
-          a.maxLevel ? `${a.level ?? 0}/${a.maxLevel}` : "–",
-        ]),
-      { empty: "waiting for the bladeburner.actions probe", left: [0, 1] },
-    );
+    const actions = dataTable("bladeburner.actions", b.actions ?? [], [
+      { id: "type", label: "type", left: true, cell: (a) => esc(a.type), sort: (a) => a.type },
+      { id: "action", label: "action", left: true, cell: (a) => esc(a.name), sort: (a) => a.name },
+      {
+        id: "success",
+        label: "success",
+        cell: (a) =>
+          a.chance[0] === a.chance[1] ? fmtPct(a.chance[0]) : `${fmtPct(a.chance[0])} – ${fmtPct(a.chance[1])}`,
+        sort: (a) => a.chance[0],
+      },
+      { id: "time", label: "time", cell: (a) => fmtTime(a.timeMs), sort: (a) => a.timeMs },
+      {
+        id: "remaining",
+        label: "remaining",
+        cell: (a) => (a.countRemaining >= 1e9 ? "∞" : fmtNum(a.countRemaining, 0)),
+        sort: (a) => a.countRemaining,
+      },
+      { id: "level", label: "level", cell: (a) => (a.maxLevel ? `${a.level ?? 0}/${a.maxLevel}` : NONE) },
+    ], { defaultSort: { key: "success", dir: -1 }, empty: "waiting for the bladeburner.actions probe" });
 
     const skills = Object.keys(b.skills ?? {}).length
       ? table(
@@ -84,21 +86,23 @@ export const bladeburnerTab: Tab = {
           },
           { label: "candidates", value: String(plan.ranked.length) },
         ]) +
-        table(
-          ["pick", "type", "action", "rank/sec", "min success"],
+        rankedTable(
+          ["type", "action", "rank/sec", "min success"],
           plan.ranked.map((entry) => [
-            entry.name === plan.action.name && entry.actionType === plan.action.actionType ? "▶" : "",
             esc(entry.actionType),
             esc(entry.name),
             fmtNum(entry.rankPerSec, 3),
             fmtPct(entry.chanceLow),
           ]),
-          { empty: "no viable rank actions", left: [1, 2] },
+          {
+            selected: (i) =>
+              plan.ranked[i]!.name === plan.action.name && plan.ranked[i]!.actionType === plan.action.actionType,
+            empty: "no viable rank actions",
+            left: [0, 1],
+          },
         ) +
-        (plan.lastResult
-          ? note(`${plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${plan.lastResult.detail}`)
-          : "")
-      : note("waiting for the first Bladeburner decision");
+        (plan.lastResult ? outcome(plan.lastResult) : "")
+      : waiting("the first Bladeburner decision");
 
     return (
       `<div class="col wide">` +

@@ -8,7 +8,8 @@
 import {
   GO_ARENA_OPPONENTS,
   decideGoArenaBlack,
-  goArenaSeeds,
+  goArenaDefenseRoll,
+  goArenaSeedPairs,
   playGoArenaImmediateReply,
   playGoArenaPolicyGame,
   type ForcedBlackAction,
@@ -75,7 +76,11 @@ async function main(): Promise<void> {
   let examples = 0;
   let totalTrainingPower = 0;
   let totalRounds = 0;
-  const seeds = goArenaSeeds(games + gameOffset, seedStart).slice(gameOffset);
+  const handicapStart = Math.floor(numberFlag("--handicap-seed", Math.floor(seedStart) ^ 0xa5a5a5a5));
+  const defenseStart = Math.floor(numberFlag("--defense-seed", Math.floor(seedStart) ^ 0x3c6ef372));
+  const cases = goArenaSeedPairs(
+    games + gameOffset, seedStart, handicapStart, defenseStart,
+  ).slice(gameOffset);
   for (let game = 0; game < games; game++) {
     const globalGame = game + gameOffset;
     const definition = daemon19
@@ -83,13 +88,15 @@ async function main(): Promise<void> {
       : { ...GO_ARENA_OPPONENTS[(globalGame + Math.floor(seedStart / 200)) % 6]!, requestedSize: 5 as const };
     const opponentIndex = GO_ARENA_OPPONENTS.findIndex(({ name }) => name === definition.name);
     const modelPolicy = loadedModel ? candidateModelPolicy(loadedModel, opponentIndex) : undefined;
+    const { seed, handicapSeed, defenseSeed } = cases[game]!;
     const baseline = await playGoArenaPolicyGame(
       definition,
-      seeds[game]!,
-      0.5,
+      seed,
+      undefined,
       true,
       teacherTrajectories ? undefined : modelPolicy,
-      (globalGame * 2_654_435_761 + Math.floor(seedStart)) >>> 0,
+      handicapSeed,
+      defenseSeed,
     );
     if (!baseline.completed) throw new Error(`teacher trajectory ${globalGame} did not terminate`);
     wins += Number(baseline.won);
@@ -144,7 +151,13 @@ async function main(): Promise<void> {
         : [...legalMoves(state.board, "X", state.previousBoards), "pass"];
       for (let candidateIndex = 0; candidateIndex < actions.length; candidateIndex++) {
         const action = actions[candidateIndex]!;
-        const reply = await playGoArenaImmediateReply(definition, 0.5, state, action);
+        const replySeed = (
+          defenseSeed
+          ^ Math.imul(stateIndex + 1, 2_246_822_519)
+        ) >>> 0;
+        const reply = await playGoArenaImmediateReply(
+          definition, goArenaDefenseRoll(replySeed), state, action,
+        );
         const [bx, by] = fields(action);
         const [wx, wy] = reply.white.type === "move"
           ? [reply.white.x, reply.white.y] : [-1, -1];

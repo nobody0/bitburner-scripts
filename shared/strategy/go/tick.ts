@@ -69,9 +69,22 @@ export function goChooseSeedTarget(
   observedPlaytime: number,
   nowWall: number,
   guardMs = GO_DISPATCH_GUARD_MS,
+  notBeforePlaytime?: number,
 ): GoSeedTarget {
   const rolloverAt = goNextRolloverAt(phase, nowWall);
   const remaining = rolloverAt - nowWall;
+  if (notBeforePlaytime !== undefined && notBeforePlaytime > observedPlaytime) {
+    // A committed playbook entry is bound to one exact engine tick. Waiting
+    // whole cycles for it reuses the ordinary rollover-wait dispatch path;
+    // the caller keeps such waits short by only dispatching near the target.
+    const cycles = Math.ceil((notBeforePlaytime - observedPlaytime) / GO_ENGINE_CYCLE_MS);
+    return {
+      targetPlaytime: observedPlaytime + cycles * GO_ENGINE_CYCLE_MS,
+      rolloverAt: rolloverAt + (cycles - 1) * GO_ENGINE_CYCLE_MS,
+      waitsForRollover: true,
+      marginMs: GO_ENGINE_CYCLE_MS,
+    };
+  }
   if (remaining < guardMs) {
     return {
       targetPlaytime: observedPlaytime + GO_ENGINE_CYCLE_MS,

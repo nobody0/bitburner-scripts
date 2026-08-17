@@ -172,6 +172,13 @@ describe("tab rendering", () => {
       goPlayable: true,
     });
     renderAll(state);
+
+    // The dense per-entity tables are sortable, one viewstate id each.
+    expect(TABS["gang"].render(state)).toContain('data-sort-table="gang.members"');
+    expect(TABS["sleeves"].render(state)).toContain('data-sort-table="sleeves.list"');
+    expect(TABS["bladeburner"].render(state)).toContain('data-sort-table="bladeburner.actions"');
+    expect(TABS["stock"].render(state)).toContain('data-sort-table="stock.positions"');
+    expect(TABS["hacknet"].render(state)).toContain('data-sort-table="hacknet.nodes"');
   });
 
   test("structured plans expose decision evidence without authored rationale", () => {
@@ -363,7 +370,7 @@ describe("tab rendering", () => {
     expect(html).toContain("go-point empty territory-black");
     expect(html).toContain("go-point dead");
     expect(html).toContain("go-link north black");
-    expect(html).toContain("C3 (2,2) - no signal");
+    expect(html).toContain("C3 (2,2) — no signal");
   });
 
   test("Side shows compact status plus the latest report-once replay", () => {

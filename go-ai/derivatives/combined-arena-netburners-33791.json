@@ -1,0 +1,123 @@
+{
+  "ok": true,
+  "backend": "webgpu",
+  "config": {
+    "games": 192,
+    "startPhase": 33791,
+    "phaseStride": 104729,
+    "timing": "random",
+    "defenseSeed": 20260821,
+    "playbook": "/Users/bob/git/bitburner-scripts/go-ai/derivatives/playbook-combined/merged/playbook.phase.js",
+    "opponent": "Netburners",
+    "arms": [
+      "combined",
+      "playbookOnly",
+      "neuralOnly",
+      "neuralUnrouted",
+      "combinedUnrouted"
+    ]
+  },
+  "arms": {
+    "combined": {
+      "games": 192,
+      "wins": 192,
+      "completed": 192,
+      "winRate": 1,
+      "certifiedTurns": 4816,
+      "neuralTurns": 548,
+      "neuralReturns": 184,
+      "powerPerTurn": 1.204879679144385,
+      "neuralLatencyMs": {
+        "p50": 2.1,
+        "p95": 4.3,
+        "count": 548
+      },
+      "failures": []
+    },
+    "playbookOnly": {
+      "games": 192,
+      "wins": 11,
+      "completed": 11,
+      "winRate": 0.057291666666666664,
+      "certifiedTurns": 3290,
+      "neuralTurns": 0,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.6634132738427216,
+      "neuralLatencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "count": 0
+      },
+      "failures": [
+        "Netburners@33791: playbook miss at phase 33890, round 11",
+        "Netburners@93249: playbook miss at phase 93341, round 11",
+        "Netburners@47978: playbook miss at phase 48063, round 10",
+        "Netburners@2707: playbook miss at phase 2787, round 4",
+        "Netburners@107436: playbook miss at phase 107526, round 11",
+        "Netburners@62165: playbook miss at phase 62279, round 12",
+        "Netburners@16894: playbook miss at phase 16990, round 11",
+        "Netburners@121623: playbook miss at phase 121700, round 8",
+        "Netburners@76352: playbook miss at phase 76439, round 9",
+        "Netburners@31081: playbook miss at phase 31191, round 7",
+        "Netburners@135810: playbook miss at phase 135932, round 17",
+        "Netburners@90539: playbook miss at phase 90615, round 4",
+        "Netburners@45268: playbook miss at phase 45346, round 6",
+        "Netburners@149997: playbook miss at phase 26, round 8",
+        "Netburners@104726: playbook miss at phase 104825, round 9",
+        "Netburners@59455: playbook miss at phase 59478, round 5",
+        "Netburners@14184: playbook miss at phase 14213, round 9",
+        "Netburners@118913: playbook miss at phase 118956, round 12",
+        "Netburners@73642: playbook miss at phase 73669, round 8",
+        "Netburners@28371: playbook miss at phase 28410, round 11"
+      ]
+    },
+    "neuralOnly": {
+      "games": 192,
+      "wins": 191,
+      "completed": 192,
+      "winRate": 0.9947916666666666,
+      "certifiedTurns": 0,
+      "neuralTurns": 1862,
+      "neuralReturns": 0,
+      "powerPerTurn": 1.7932330827067668,
+      "neuralLatencyMs": {
+        "p50": 3.2,
+        "p95": 8,
+        "count": 1862
+      },
+      "failures": []
+    },
+    "neuralUnrouted": {
+      "games": 192,
+      "wins": 192,
+      "completed": 192,
+      "winRate": 1,
+      "certifiedTurns": 0,
+      "neuralTurns": 1839,
+      "neuralReturns": 0,
+      "powerPerTurn": 1.790647090810223,
+      "neuralLatencyMs": {
+        "p50": 3.1,
+        "p95": 7.3,
+        "count": 1839
+      },
+      "failures": []
+    },
+    "combinedUnrouted": {
+      "games": 192,
+      "wins": 192,
+      "completed": 192,
+      "winRate": 1,
+      "certifiedTurns": 0,
+      "neuralTurns": 1839,
+      "neuralReturns": 0,
+      "powerPerTurn": 1.790647090810223,
+      "neuralLatencyMs": {
+        "p50": 3.1,
+        "p95": 7.3,
+        "count": 1839
+      },
+      "failures": []
+    }
+  }
+}

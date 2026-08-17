@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import type { GoDodgeGlobals } from "../game/lib/go-dodge-shared.ts";
 import { emptyBoard, type DriverContext } from "../game/lib/features/index.ts";
-import { GO_ANCHOR_POLL_MS, goModule, setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
+import { GO_ANCHOR_POLL_MS, goModule, setGoCheatSuccessTableForTest, setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 import { GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
 import { GO_DISPATCH_GUARD_MS } from "../shared/strategy/go/tick.ts";
 import { StubGoValueBackend } from "./support/go-value-backend.ts";
@@ -56,11 +56,18 @@ async function runGrantedTurn(
   state: GameState,
   stubNs: NS,
   clock?: { playtimes: number[]; sleeps: number[] },
+  caps: DriverContext["caps"] = {
+    bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {},
+  } as DriverContext["caps"],
+  ramOverrides: number[] = [],
 ): Promise<void> {
   let dodgedPlaytime = 10_000;
   let clockRead = 0;
   const dodgedNs = {
     ...stubNs,
+    go: Object.assign({
+      getGameState: () => ({ bonusCycles: 0 }),
+    }, stubNs.go),
     getPlayer: () => ({
       totalPlaytime: clock?.playtimes[Math.min(clockRead++, clock.playtimes.length - 1)] ?? dodgedPlaytime,
       money: 0,
@@ -73,8 +80,10 @@ async function runGrantedTurn(
   const ns = {
     getPlayer: () => ({ totalPlaytime: 10_000, money: 0 }),
     sleep: async () => {},
-    getFunctionRamCost: () => 1,
-    exec: () => {
+    getFunctionRamCost: (method: string) => method === "go.cheat.playTwoMoves"
+      ? 8 : method === "go.makeMove" ? 4 : method === "getPlayer" ? 0.5 : 0,
+    exec: (_script: string, _host: string, options: { ramOverride?: number }) => {
+      if (options.ramOverride !== undefined) ramOverrides.push(options.ramOverride);
       const globals = globalThis as typeof globalThis & GoDodgeGlobals;
       queueMicrotask(async () => {
         try {
@@ -90,7 +99,7 @@ async function runGrantedTurn(
   await goModule.driver.tick({
     ns,
     state,
-    caps: { bitNode: 14, sourceFiles: {}, unlocked: {}, reason: {}, restrictions: {} },
+    caps,
     board: emptyBoard(),
     grants: {
       money: 0,
@@ -261,6 +270,7 @@ describe("Go live seed observation", () => {
     };
     const evaluation = (decision: GoDecision): GoWorkerEvaluation => ({
       decision,
+      opponentSeeds: [],
       preparationMs: 0,
       finalizationMs: 0,
       modelProfile: "small5",
@@ -271,7 +281,9 @@ describe("Go live seed observation", () => {
     });
     setGoNeuralRuntimeForTest({
       install: async () => ({ positionId: "flip", preparationMs: 0, cached: true }),
-      evaluate: async (_positionId, seeds) => evaluation(seeds[0] === 10_400 ? pass : move),
+      evaluate: async (_positionId, dispatchPlaytime) => evaluation(dispatchPlaytime === 10_200 ? pass : move),
+      playbook: async () => undefined,
+      playbookRoute: async () => undefined,
       commit: () => "flip:test",
       confirm() {},
       async reset() {},
@@ -292,6 +304,38 @@ describe("Go live seed observation", () => {
     expect(passes).toBe(1);
     expect(state.topics.go?.plan?.action).toEqual({ type: "pass" });
     expect(state.topics.go?.plan?.prediction?.boundaryRetries).toBe(1);
+  });
+
+  test("dispatches a predicted successful cheat and advances the local count", async () => {
+    const state = goState();
+    state.topics.go!.cheat = { unlocked: true, count: 0, successChance: 1 };
+    setGoCheatSuccessTableForTest([1, 1]);
+    const calls: number[][] = [];
+    const ramOverrides: number[] = [];
+    await runGrantedTurn(state, {
+      go: {
+        getGameState: () => ({ bonusCycles: 17 }),
+        cheat: {
+          playTwoMoves: async (...coordinates: number[]) => {
+            calls.push(coordinates);
+            return { type: "gameOver", x: null, y: null };
+          },
+        },
+      },
+    } as unknown as NS, { playtimes: [...ANCHOR_READS, 10_000], sleeps: [] }, {
+      bitNode: 1,
+      sourceFiles: { "14": 2 },
+      unlocked: {}, reason: {}, restrictions: {},
+    } as unknown as DriverContext["caps"], ramOverrides);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toHaveLength(4);
+    expect(state.topics.go?.lastTurn?.action.type).toBe("cheatTwoMoves");
+    expect(state.topics.go?.cheat?.count).toBe(1);
+    expect(state.topics.go?.bonusCycles).toBe(17);
+    // 1.6 GB stub + 8 GB cheat + 0.5 GB player read + pricing margin.
+    // This catches execution accidentally resizing the granted cheat dodge to
+    // the cheaper ordinary-move method list.
+    expect(ramOverrides.at(-1)).toBeGreaterThan(10);
   });
 
   test("a reset discards an in-flight planning result before dispatch", async () => {
@@ -469,6 +513,200 @@ describe("Go live seed observation", () => {
     expect(calls).toEqual([[false, false]]);
     expect(state.topics.go?.lastTurn?.action.type).toBe("resume");
     expect(goModule.driver.wake?.()).toBe(true);
+    goModule.reset?.(state, "bitnode");
+  });
+});
+
+describe("Go certified playbook integration", () => {
+  const neuralMove: GoDecision = {
+    action: { type: "move", x: 2, y: 2, why: "neural" },
+    ranked: [], why: "test", finalists: 1, positionValue: 0.5, forecast: [],
+  };
+  const evaluation = (decision: GoDecision): GoWorkerEvaluation => ({
+    decision,
+    opponentSeeds: [],
+    preparationMs: 0,
+    finalizationMs: 0,
+    modelProfile: "small5",
+    modelExtent: 5,
+    cached: true,
+    pushed: false,
+    continuations: [],
+  });
+  const playbookState = (): GameState => {
+    const state = goState();
+    state.topics.go!.opponent = "Illuminati";
+    return state;
+  };
+
+  test("a certified hit dispatches the playbook move and spends alignment credit", async () => {
+    const credits: number[] = [];
+    setGoNeuralRuntimeForTest({
+      install: async () => ({ positionId: "cert", preparationMs: 0, cached: true }),
+      evaluate: async () => evaluation(neuralMove),
+      playbook: async (_positionId, _dispatchPlaytime, credit) => {
+        credits.push(credit);
+        return {
+          action: { kind: "move", x: 4, y: credits.length === 1 ? 4 : 3 },
+          alignmentCredit: 5,
+          alignmentBoards: 12,
+        };
+      },
+      playbookRoute: async () => undefined,
+      commit: () => "cert:test",
+      confirm() {},
+      async reset() {},
+      dispose() {},
+    });
+    const state = playbookState();
+    const moves: Array<[number, number]> = [];
+    const stubNs = {
+      go: {
+        makeMove: async (x: number, y: number) => {
+          moves.push([x, y]);
+          // A White reply chains straight into the next Black turn, which
+          // must consult with the spent credit (5 - 1) of the first hit.
+          return moves.length === 1 ? { type: "move", x: 0, y: 0 } : { type: "gameOver", x: null, y: null };
+        },
+      },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+    // Chained turns keep running after the first turn's record; settle them.
+    for (let settle = 0; settle < 200 && moves.length < 2; settle++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    expect(moves).toEqual([[4, 4], [4, 3]]);
+    expect(credits).toEqual([0, 4]);
+    expect(state.topics.go?.plan?.prediction?.playbook).toBe(true);
+    expect(state.topics.go?.plan?.action.type).toBe("move");
+    goModule.reset?.(state, "bitnode");
+  });
+
+  test("a miss keeps the neural action and carries the line credit", async () => {
+    const credits: number[] = [];
+    let hits = 0;
+    let neuralCalls = 0;
+    setGoNeuralRuntimeForTest({
+      install: async () => ({ positionId: "miss", preparationMs: 0, cached: true }),
+      evaluate: async () => evaluation({
+        ...neuralMove,
+        action: { type: "move", x: 2, y: ++neuralCalls, why: "neural" },
+      }),
+      playbook: async (_positionId, _dispatchPlaytime, credit) => {
+        credits.push(credit);
+        return hits++ === 0
+          ? { action: { kind: "move", x: 4, y: 4 }, alignmentCredit: 5, alignmentBoards: 12 }
+          : undefined;
+      },
+      playbookRoute: async () => undefined,
+      commit: () => "miss:test",
+      confirm() {},
+      async reset() {},
+      dispose() {},
+    });
+    const state = playbookState();
+    const moves: Array<[number, number]> = [];
+    const stubNs = {
+      go: {
+        makeMove: async (x: number, y: number) => {
+          moves.push([x, y]);
+          return moves.length < 3
+            ? { type: "move", x: 0, y: moves.length - 1 }
+            : { type: "gameOver", x: null, y: null };
+        },
+      },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+    for (let settle = 0; settle < 300 && moves.length < 3; settle++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    // Hit at credit 0 grants 5 and spends one; the miss at credit 4 hands the
+    // turn to the network but still spends a board, so the third lookup sees
+    // 3 rather than 0 — that carry is what keeps a stripped entry's line
+    // matchable once the network reproduces its move.
+    expect(credits).toEqual([0, 4, 3]);
+    expect(moves.length).toBe(3);
+    expect(moves[0]).toEqual([4, 4]);
+    expect(moves[1]?.[0]).toBe(2);
+    expect(moves[2]?.[0]).toBe(2);
+    expect(state.topics.go?.plan?.prediction?.playbook).toBeUndefined();
+    goModule.reset?.(state, "bitnode");
+  });
+
+  test("a certified align entry holds the turn instead of dispatching", async () => {
+    setGoNeuralRuntimeForTest({
+      install: async () => ({ positionId: "align", preparationMs: 0, cached: true }),
+      evaluate: async () => evaluation(neuralMove),
+      playbook: async () => ({ action: { kind: "align" }, alignmentCredit: 0, alignmentBoards: 12 }),
+      playbookRoute: async () => undefined,
+      commit: () => "align:test",
+      confirm() {},
+      async reset() {},
+      dispose() {},
+    });
+    const state = playbookState();
+    let moves = 0;
+    const stubNs = {
+      go: { makeMove: async () => { moves++; return { type: "gameOver", x: null, y: null }; } },
+    } as unknown as NS;
+    await expect(runGrantedTurn(
+      state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] },
+    )).rejects.toThrow("detached Go action did not complete");
+    expect(moves).toBe(0);
+    expect(state.topics.go?.lastTurn).toBeUndefined();
+    // The hold waits on the engine clock, so the driver asks to be re-run.
+    expect(goModule.driver.wake?.()).toBe(true);
+    goModule.reset?.(state, "bitnode");
+  });
+
+  test("a cheat-unlocked game never consults the playbook", async () => {
+    let consulted = 0;
+    setGoCheatSuccessTableForTest(Array.from({ length: 32 }, () => 1));
+    setGoNeuralRuntimeForTest({
+      install: async () => ({ positionId: "cheat", preparationMs: 0, cached: true }),
+      evaluate: async () => evaluation(neuralMove),
+      playbook: async () => { consulted++; return undefined; },
+      playbookRoute: async () => undefined,
+      commit: () => "cheat:test",
+      confirm() {},
+      async reset() {},
+      dispose() {},
+    });
+    const state = playbookState();
+    state.topics.go!.cheat = { unlocked: true, count: 0, successChance: 1 };
+    const stubNs = {
+      go: { makeMove: async () => ({ type: "gameOver", x: null, y: null }) },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+    expect(consulted).toBe(0);
+    setGoCheatSuccessTableForTest();
+    goModule.reset?.(state, "bitnode");
+  });
+
+  test("a 19x19 board never consults the 5x5 playbook", async () => {
+    let consulted = 0;
+    setGoNeuralRuntimeForTest({
+      install: async () => ({ positionId: "nb", preparationMs: 0, cached: true }),
+      evaluate: async () => evaluation(neuralMove),
+      playbook: async () => { consulted++; return undefined; },
+      playbookRoute: async () => undefined,
+      commit: () => "nb:test",
+      confirm() {},
+      async reset() {},
+      dispose() {},
+    });
+    const state = goState();
+    state.topics.go!.boardSize = 19;
+    state.topics.go!.board = Array.from({ length: 19 }, () => ".".repeat(19));
+    state.topics.go!.previousBoards = [state.topics.go!.board.map((column) => column)];
+    const stubNs = {
+      go: { makeMove: async () => ({ type: "gameOver", x: null, y: null }) },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+    expect(consulted).toBe(0);
+    expect(state.topics.go?.lastTurn?.action.type).toBe("move");
     goModule.reset?.(state, "bitnode");
   });
 });

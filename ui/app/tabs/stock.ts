@@ -1,5 +1,5 @@
 import { STOCK_METADATA } from "../../../shared/features/stocks.ts";
-import { card, dataTable, meter, note, table, tiles } from "../lib/dom.ts";
+import { NONE, card, dataTable, hint, meter, note, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct } from "../lib/format.ts";
 import { html } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
@@ -9,7 +9,7 @@ export const stockTab: Tab = {
   id: "stock",
   render(state: ProjectedState) {
     const s = state.topics.stock;
-    if (!s) return note("waiting for the stock probe");
+    if (!s) return waiting("the stock probe");
 
     // Every field below `hasWseAccount` can be genuinely absent: the four
     // account flags come from `stock.account`, which runs unconditionally, while
@@ -63,10 +63,10 @@ export const stockTab: Tab = {
           ["action", "symbol", "side", "shares", "cost"],
           plan.actions.map((action) => [
             esc(action.type),
-            esc(action.sym ?? "-"),
-            action.short === undefined ? "-" : action.short ? "short" : "long",
-            action.shares === undefined ? "-" : fmtNum(action.shares, 0),
-            action.cost === undefined ? "-" : fmtMoney(action.cost),
+            esc(action.sym ?? NONE),
+            action.short === undefined ? NONE : action.short ? "short" : "long",
+            action.shares === undefined ? NONE : fmtNum(action.shares, 0),
+            action.cost === undefined ? NONE : fmtMoney(action.cost),
           ]),
           { empty: "no actions this tick", left: [0, 1, 2] },
         ) +
@@ -76,21 +76,19 @@ export const stockTab: Tab = {
       : note("no plan yet");
 
     const held = positions.filter((p) => p.shares > 0 || p.sharesShort > 0);
-    const positionsTable = table(
-      ["sym", "shares", "avg", "bid", "value", "P/L"],
-      held.map((p) => {
-        const gain = p.value - p.costBasis;
-        return [
-          esc(p.sym),
-          fmtNum(p.shares || -p.sharesShort, 0),
-          fmtMoney(p.shares > 0 ? p.avgPx : p.avgPxShort),
-          fmtMoney(p.bid),
-          fmtMoney(p.value),
-          `<span class="${gain >= 0 ? "good" : "bad"}">${fmtMoney(gain)}</span>`,
-        ];
-      }),
-      { empty: "no open positions", left: [0] },
-    );
+    const positionsTable = dataTable("stock.positions", held, [
+      { id: "sym", label: "sym", left: true, cell: (p) => esc(p.sym), sort: (p) => p.sym },
+      { id: "shares", label: "shares", cell: (p) => fmtNum(p.shares || -p.sharesShort, 0), sort: (p) => p.shares || -p.sharesShort },
+      { id: "avg", label: "avg", cell: (p) => fmtMoney(p.shares > 0 ? p.avgPx : p.avgPxShort), sort: (p) => (p.shares > 0 ? p.avgPx : p.avgPxShort) },
+      { id: "bid", label: "bid", cell: (p) => fmtMoney(p.bid), sort: (p) => p.bid },
+      { id: "value", label: "value", cell: (p) => fmtMoney(p.value), sort: (p) => p.value },
+      {
+        id: "pl",
+        label: "P/L",
+        cell: (p) => `<span class="${p.value - p.costBasis >= 0 ? "good" : "bad"}">${fmtMoney(p.value - p.costBasis)}</span>`,
+        sort: (p) => p.value - p.costBasis,
+      },
+    ], { defaultSort: { key: "value", dir: -1 }, empty: "no open positions" });
 
     // Prices come from stock.tick, the 4S signal from stock.forecast — two
     // probes gated on different flags, joined here by symbol. The organization
@@ -182,12 +180,8 @@ export const stockTab: Tab = {
       (s.has4SDataApi
         ? ""
         : card(
-            "4S market data",
-            note(
-              "no 4S API: forecasts below are ESTIMATED from up-tick frequency and the volatility " +
-                "from the shared per-tick roll. The $1b 4S Market Data is deliberately never bought — " +
-                "only the $25b TIX API unlocks getForecast for a script.",
-            ),
+            html`Forecasts (${hint("estimated", "no 4S API: forecasts are estimated from up-tick frequency and the shared per-tick volatility roll. The $1b 4S Market Data is deliberately never bought — only the $25b TIX API unlocks getForecast for a script.")})`,
+            note("no 4S API — hover for how forecasts are estimated"),
           )) +
       `</div>`
     );

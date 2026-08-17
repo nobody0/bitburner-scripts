@@ -13,6 +13,8 @@ import {
   goBoardWords,
   goLegalWords,
   packGoBoard,
+  packGoTactical,
+  type GoValueBatch,
   type GoValueBackend,
   type GoValuePrediction,
 } from "../../shared/strategy/go/neural/backend.ts";
@@ -99,10 +101,10 @@ async function evaluateOne(
 ): Promise<GoValuePrediction> {
   const packed = new Uint32Array(goBoardWords(backend.extent));
   packGoBoard(board, backend.extent, packed, 0);
-  const raw = await backend.evaluateBatch({
+  const raw = await backend.evaluateBatch(withTactical(backend, {
     packed, count: 1,
     ...v9Fields(backend, [input]),
-  });
+  }));
   return decodeGoValue(raw, 0);
 }
 
@@ -113,7 +115,16 @@ async function evaluateProposalOne(
 ) {
   const packed = new Uint32Array(goBoardWords(backend.extent));
   packGoBoard(board, backend.extent, packed, 0);
-  return backend.evaluateProposal({ packed, count: 1, ...v9Fields(backend, [input]) });
+  return backend.evaluateProposal(withTactical(backend, {
+    packed, count: 1, ...v9Fields(backend, [input]),
+  }));
+}
+
+function withTactical(backend: GoValueBackend, batch: GoValueBatch): GoValueBatch {
+  if (backend.inputChannels === 16) {
+    batch.tactical = packGoTactical(batch.packed, batch.legal, batch.count, backend.extent);
+  }
+  return batch;
 }
 
 function v9Fields(backend: GoValueBackend, inputs: readonly FixtureCase[]): {
@@ -290,10 +301,17 @@ async function main(): Promise<unknown> {
     requestToParsed: { p50: number; p95: number; max: number };
     mainThread: { p50: number; p95: number; max: number };
   }> = {};
-  for (const [label, backend, count] of [
-    ["small5x28", gpu.small5, 28],
-    ["daemon19x104", gpu.daemon19, 104],
-  ] as const) {
+  // A policy-only daemon19 derivative has no value dispatch: probe the
+  // proposal pass at the deployed seed-batch shape instead, since the value
+  // workload it replaces no longer exists in deployment.
+  const daemonPolicyOnly = gpu.daemon19.valuePath === "absent";
+  const probes: readonly (readonly [string, typeof gpu.small5, number, "value" | "proposal"])[] = [
+    ["small5x28", gpu.small5, 28, "value"],
+    daemonPolicyOnly
+      ? ["daemon19-proposal-x2", gpu.daemon19, 2, "proposal"]
+      : ["daemon19x104", gpu.daemon19, 104, "value"],
+  ];
+  for (const [label, backend, count, probe] of probes) {
     const words = goBoardWords(backend.extent);
     const packed = new Uint32Array(words * count);
     const board = boardFromHash(
@@ -301,12 +319,16 @@ async function main(): Promise<unknown> {
       label === "small5x28" ? template.board : fixtureCases.find((golden) => golden.size === 19)!.board,
     );
     for (let index = 0; index < count; index++) packGoBoard(board, backend.extent, packed, index * words);
+    const repeated = backend.extent === 5 ? template
+      : fixtureCases.find((golden) => golden.size === 19)!;
+    const batch = withTactical(backend, {
+      packed, count, ...v9Fields(backend, Array.from({ length: count }, () => repeated)),
+    });
     const requestSamples: number[] = [];
     const mainThreadSamples: number[] = [];
     for (let round = 0; round < 60; round++) {
-      await backend.evaluateBatch({ packed, count,
-        ...v9Fields(backend, Array.from({ length: count }, () =>
-          backend.extent === 5 ? template : fixtureCases.find((golden) => golden.size === 19)!)) });
+      if (probe === "value") await backend.evaluateBatch(batch);
+      else await backend.evaluateProposal(batch);
       requestSamples.push(backend.lastTiming!.requestToParsedMs);
       mainThreadSamples.push(backend.lastTiming!.mainThreadMs);
     }
@@ -328,50 +350,81 @@ async function main(): Promise<unknown> {
 
   // 5. Benchmark the production planner. V9 prepares opponent option spaces
   // lazily only after proposal selection, so finalization owns reply
-  // prediction and is measured together with the GPU batch.
+  // prediction and is measured together with the GPU batch. The deployment
+  // view resolves the daemon19 profile default (strict K=1); the explicit
+  // K=8 arm keeps the historical mixed-finalizer thresholds binding so the
+  // profile-default change cannot silently loosen this gate.
   const daemonFixture = fixtureCases.find((golden) => golden.size === 19)!;
   const daemonBoard = boardFromHash(19, daemonFixture.board);
   const plannerEngine = new GoNeuralEngine(() => gpu.daemon19);
-  const candidatePreparationSamples: number[] = [];
-  const gpuAndSelectionSamples: number[] = [];
-  const boardToMoveSamples: number[] = [];
-  for (let round = 0; round < 30; round++) {
-    const started = performance.now();
-    const prepared = prepareNeuralGoDecision({
-      board: daemonBoard,
-      currentPlayer: "Black",
-      status: "inProgress",
-      opponent: "????????????",
-      previousBoards: [],
-      komi: 9.5,
-    });
-    const preparedAt = performance.now();
-    const seed = 1_200 + round * 200;
-    await finalizeNeuralGoDecision(prepared, [seed], plannerEngine);
-    const finalizedAt = performance.now();
-    candidatePreparationSamples.push(preparedAt - started);
-    gpuAndSelectionSamples.push(finalizedAt - preparedAt);
-    boardToMoveSamples.push(performance.now() - started);
-  }
+  const measurePlanning = async (candidateLimit?: number) => {
+    const candidatePreparationSamples: number[] = [];
+    const gpuAndSelectionSamples: number[] = [];
+    const boardToMoveSamples: number[] = [];
+    for (let round = 0; round < 30; round++) {
+      const started = performance.now();
+      const prepared = prepareNeuralGoDecision({
+        board: daemonBoard,
+        currentPlayer: "Black",
+        status: "inProgress",
+        opponent: "????????????",
+        previousBoards: [],
+        komi: 9.5,
+        ...(candidateLimit === undefined ? {} : { candidateLimit }),
+      });
+      const preparedAt = performance.now();
+      const seed = 1_200 + round * 200;
+      await finalizeNeuralGoDecision(prepared, [seed], plannerEngine);
+      const finalizedAt = performance.now();
+      candidatePreparationSamples.push(preparedAt - started);
+      gpuAndSelectionSamples.push(finalizedAt - preparedAt);
+      boardToMoveSamples.push(performance.now() - started);
+    }
+    return {
+      candidatePreparation: summarize(candidatePreparationSamples),
+      gpuAndSelection: summarize(gpuAndSelectionSamples),
+      boardToMove: summarize(boardToMoveSamples),
+    };
+  };
+  const planningDeployment = await measurePlanning();
+  // A policy-only artifact has no K>1 path: attempting the K=8 control throws
+  // by design, and the full-champion export must be restored to measure it.
+  const planningK8 = daemonPolicyOnly ? undefined : await measurePlanning(8);
+  const planningAlias = planningK8 ?? planningDeployment;
   const planning = {
-    candidatePreparation: summarize(candidatePreparationSamples),
-    gpuAndSelection: summarize(gpuAndSelectionSamples),
-    boardToMove: summarize(boardToMoveSamples),
+    deploymentK1: planningDeployment,
+    k8Control: planningK8 ?? null,
+    // Retained top-level shape for existing consumers: the binding historical
+    // thresholds apply to the K=8 mixed-finalizer control when it exists.
+    candidatePreparation: planningAlias.candidatePreparation,
+    gpuAndSelection: planningAlias.gpuAndSelection,
+    boardToMove: planningAlias.boardToMove,
   };
 
-  const daemonLatency = latency["daemon19x104"]!;
+  const daemonProbe = daemonPolicyOnly ? "daemon19-proposal-x2" : "daemon19x104";
+  const daemonLatency = latency[daemonProbe]!;
   if (daemonLatency.mainThread.max >= 2) {
-    failures.push(`daemon19x104 main-thread work ${daemonLatency.mainThread.max}ms exceeded 2ms`);
+    failures.push(`${daemonProbe} main-thread work ${daemonLatency.mainThread.max}ms exceeded 2ms`);
   }
   if (daemonLatency.requestToParsed.p95 >= 80 || daemonLatency.requestToParsed.max >= 120) {
-    failures.push(`daemon19x104 request-to-result p95/max `
+    failures.push(`${daemonProbe} request-to-result p95/max `
       + `${daemonLatency.requestToParsed.p95}/${daemonLatency.requestToParsed.max}ms exceeded 80/120ms`);
   }
-  if (planning.gpuAndSelection.p95 >= 45) {
-    failures.push(`finalization p95 ${planning.gpuAndSelection.p95}ms exceeded 45ms`);
+  if (planningK8 && planningK8.gpuAndSelection.p95 >= 45) {
+    failures.push(`K=8 finalization p95 ${planningK8.gpuAndSelection.p95}ms exceeded 45ms`);
   }
-  if (planning.boardToMove.p95 >= 50) {
-    failures.push(`19x19 board-to-move p95 ${planning.boardToMove.p95}ms exceeded 50ms`);
+  if (planningK8 && planningK8.boardToMove.p95 >= 50) {
+    failures.push(`K=8 19x19 board-to-move p95 ${planningK8.boardToMove.p95}ms exceeded 50ms`);
+  }
+  // Deployment strict K=1 evaluates one finalist and skips the value batch;
+  // hold it to the measured envelope recorded in go-ai/BASELINES.md
+  // (2026-08-16: p95 2.4ms finalization / 3.0ms board-to-move) rather than
+  // the loose K=8 bound.
+  if (planningDeployment.gpuAndSelection.p95 >= 15) {
+    failures.push(`deployment K=1 finalization p95 ${planningDeployment.gpuAndSelection.p95}ms exceeded 15ms`);
+  }
+  if (planningDeployment.boardToMove.p95 >= 18) {
+    failures.push(`deployment K=1 board-to-move p95 ${planningDeployment.boardToMove.p95}ms exceeded 18ms`);
   }
   for (const [profile, timing] of Object.entries(coldStart)) {
     timing.decodeMs = +timing.decodeMs.toFixed(2);
@@ -385,6 +438,7 @@ async function main(): Promise<unknown> {
     ok: failures.length === 0,
     optimizations,
     goldenCases: fixtureCases.length,
+    policyOnly: { daemon19: daemonPolicyOnly },
     maxDeviation: {
       winProbability: +goldenDeviation.winProbability.toExponential(2),
       terminalScoreRelative: +goldenDeviation.terminalScore.toExponential(2),

@@ -7,7 +7,7 @@
 import {
   configureGoArenaEngine,
   GO_ARENA_OPPONENTS,
-  goArenaSeeds,
+  goArenaSeedPairs,
   playGoArenaGame,
   summarizeGoArena,
   type GoArenaGameResult,
@@ -16,27 +16,48 @@ import { createRequiredWebGpuGoValueBackend } from "../../shared/strategy/go/neu
 
 async function playCorpus(
   opponent: (typeof GO_ARENA_OPPONENTS)[number],
-  seeds: readonly number[],
+  cases: readonly { seed: number; handicapSeed: number; defenseSeed: number }[],
 ): Promise<GoArenaGameResult[]> {
   const games: GoArenaGameResult[] = [];
-  for (const seed of seeds) games.push(await playGoArenaGame(opponent, seed));
+  const config = globalThis.__goArenaOptions;
+  for (const { seed, handicapSeed, defenseSeed } of cases) games.push(await playGoArenaGame(opponent, seed, undefined, false, {
+    handicapSeed,
+    defenseSeed,
+    ...(config?.cheat ? { cheat: {
+      enabled: true,
+      ...(config.cheatChance !== undefined ? { successChance: config.cheatChance } : {}),
+      ...(config.cheatK !== undefined ? { candidateLimit: config.cheatK } : {}),
+      ...(config.cheatDoubleK !== undefined ? { doubleMoveLimit: config.cheatDoubleK } : {}),
+    } } : {}),
+  }));
   return games;
 }
 
 async function main(): Promise<unknown> {
   const failures: string[] = [];
   const originalRandom = Math.random;
-  Math.random = () => 0.5;
   const summaries: unknown[] = [];
   try {
-    for (const opponent of GO_ARENA_OPPONENTS) {
+    const config = globalThis.__goArenaOptions;
+    const selected = GO_ARENA_OPPONENTS.filter((opponent) => {
+      if (!config?.opponent) return true;
+      const query = config.opponent.toLowerCase();
+      if (query === "ordinary" || query === "factions") return opponent.name !== "????????????";
+      if ((query === "secret" || query === "world-daemon") && opponent.name === "????????????") return true;
+      return opponent.name.toLowerCase().includes(query);
+    });
+    for (const opponent of selected) {
       const daemon = opponent.name === "????????????";
-      const seeds = goArenaSeeds(daemon ? 2 : 12, 123_456);
+      const cases = goArenaSeedPairs(
+        daemon ? Math.min(2, config?.games ?? 12) : config?.games ?? 12,
+        123_456,
+        3_203_338_803,
+      );
 
       configureGoArenaEngine(async (weights) => {
         return createRequiredWebGpuGoValueBackend(weights);
       });
-      const gpuGames = await playCorpus(opponent, seeds);
+      const gpuGames = await playCorpus(opponent, cases);
       for (const game of gpuGames) {
         if (!game.completed) failures.push(`${opponent.name} seed ${game.seed}: game did not complete`);
       }
@@ -47,10 +68,18 @@ async function main(): Promise<unknown> {
         const at = (fraction: number) => values[Math.min(values.length - 1, Math.floor(values.length * fraction))] ?? 0;
         return { p50: +at(0.5).toFixed(2), p95: +at(0.95).toFixed(2), max: +(values.at(-1) ?? 0).toFixed(2) };
       };
+      const actionLatency = Object.fromEntries([...new Set(gpuGames.flatMap((game) => game.actions))].map((action) => {
+        const values = gpuGames.flatMap((game) => game.planningMs
+          .filter((_, index) => game.actions[index] === action)).sort((a, b) => a - b);
+        const at = (fraction: number) => values[Math.min(values.length - 1, Math.floor(values.length * fraction))] ?? 0;
+        return [action, { count: values.length, p50: +at(0.5).toFixed(2), p95: +at(0.95).toFixed(2), max: +(values.at(-1) ?? 0).toFixed(2) }];
+      }));
       summaries.push({
         opponent: summary.opponent,
         games: summary.games,
         wins: summary.wins,
+        winRate: +summary.winRate.toFixed(4),
+        meanCheatsPlayed: +summary.meanCheatsPlayed.toFixed(2),
         decisions: summary.decisions,
         latencyMs: {
           p50: +summary.latencyMs.p50.toFixed(2),
@@ -61,6 +90,7 @@ async function main(): Promise<unknown> {
           preparation: phase("preparationMs"),
           gpuAndSelection: phase("gpuAndSelectionMs"),
         },
+        actionLatency,
       });
     }
   } finally {
@@ -77,6 +107,14 @@ async function main(): Promise<unknown> {
 declare global {
   // eslint-disable-next-line no-var
   var __goWebGpuResult: Promise<unknown>;
+  var __goArenaOptions: {
+    cheat: boolean;
+    games: number;
+    opponent?: string;
+    cheatChance?: number;
+    cheatK?: number;
+    cheatDoubleK?: number;
+  } | undefined;
 }
 globalThis.__goWebGpuResult = main().catch((error: unknown) => ({
   ok: false,

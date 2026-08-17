@@ -1,0 +1,115 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-08-17T14:51:27.488Z",
+  "seedUseId": "2026-08-17T14:47:33.168Z-screen-small5",
+  "config": {
+    "profile": "small5",
+    "games": 384,
+    "seed": 51515101,
+    "handicapSeed": 51515102,
+    "defenseSeed": 51515103
+  },
+  "reference": "go-ai/small5-champion.model",
+  "installed": {
+    "wins": 2137,
+    "games": 2304,
+    "winRate": 0.9275173611111112,
+    "powerPerTurn": 0.750434,
+    "latencyMs": {
+      "p50": 3.7,
+      "p95": 7.2,
+      "max": 60.9
+    }
+  },
+  "referenceArm": {
+    "wins": 2139,
+    "games": 2304,
+    "winRate": 0.9283854166666666,
+    "powerPerTurn": 0.755126,
+    "latencyMs": {
+      "p50": 3.7,
+      "p95": 7.3,
+      "max": 61.5
+    }
+  },
+  "opponents": [
+    {
+      "opponent": "Daedalus",
+      "games": 384,
+      "installedWins": 363,
+      "referenceWins": 365,
+      "installedWinRate": 0.9453125,
+      "referenceWinRate": 0.9505208333333334,
+      "retention": 0.9945205479452055,
+      "favorableWinFlips": 0,
+      "unfavorableWinFlips": 2,
+      "installedPowerPerTurn": 0.733585007415397,
+      "referencePowerPerTurn": 0.7464173604476594
+    },
+    {
+      "opponent": "Illuminati",
+      "games": 384,
+      "installedWins": 261,
+      "referenceWins": 259,
+      "installedWinRate": 0.6796875,
+      "referenceWinRate": 0.6744791666666666,
+      "retention": 1.0077220077220077,
+      "favorableWinFlips": 6,
+      "unfavorableWinFlips": 4,
+      "installedPowerPerTurn": 0.41375707444492815,
+      "referencePowerPerTurn": 0.40794161091319836
+    },
+    {
+      "opponent": "Netburners",
+      "games": 384,
+      "installedWins": 384,
+      "referenceWins": 383,
+      "installedWinRate": 1,
+      "referenceWinRate": 0.9973958333333334,
+      "retention": 1.0026109660574412,
+      "favorableWinFlips": 1,
+      "unfavorableWinFlips": 0,
+      "installedPowerPerTurn": 0.9648511256354394,
+      "referencePowerPerTurn": 0.972016818906771
+    },
+    {
+      "opponent": "Slum Snakes",
+      "games": 384,
+      "installedWins": 384,
+      "referenceWins": 384,
+      "installedWinRate": 1,
+      "referenceWinRate": 1,
+      "retention": 1,
+      "favorableWinFlips": 0,
+      "unfavorableWinFlips": 0,
+      "installedPowerPerTurn": 1.0259534736508942,
+      "referencePowerPerTurn": 1.0318895763921943
+    },
+    {
+      "opponent": "Tetrads",
+      "games": 384,
+      "installedWins": 366,
+      "referenceWins": 369,
+      "installedWinRate": 0.953125,
+      "referenceWinRate": 0.9609375,
+      "retention": 0.991869918699187,
+      "favorableWinFlips": 0,
+      "unfavorableWinFlips": 3,
+      "installedPowerPerTurn": 0.7674482380364733,
+      "referencePowerPerTurn": 0.7844695385473303
+    },
+    {
+      "opponent": "The Black Hand",
+      "games": 384,
+      "installedWins": 379,
+      "referenceWins": 379,
+      "installedWinRate": 0.9869791666666666,
+      "referenceWinRate": 0.9869791666666666,
+      "retention": 1,
+      "favorableWinFlips": 0,
+      "unfavorableWinFlips": 0,
+      "installedPowerPerTurn": 0.8402873722022658,
+      "referencePowerPerTurn": 0.8388338833883389
+    }
+  ]
+}

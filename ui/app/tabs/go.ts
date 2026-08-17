@@ -1,4 +1,4 @@
-import { card, note, table, tiles } from "../lib/dom.ts";
+import { NONE, card, note, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtNum, fmtPct } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { GoMoveDigest, GoResponse, GoState } from "../../../shared/telemetry/topics/go.ts";
@@ -25,7 +25,7 @@ function coordinate(x: number | null, y: number | null): string {
 function predictions(move: GoMoveDigest): string {
   const replies = move.predictedReplies ?? [];
   const total = replies.reduce((sum, reply) => sum + reply.count, 0);
-  if (!total) return "-";
+  if (!total) return NONE;
   return replies
     .map((reply) => `${coordinate(reply.x, reply.y)} ${fmtNum(reply.count, 2)}/${fmtNum(total, 0)}`)
     .join("; ");
@@ -127,7 +127,7 @@ function gridMarkup(
       const pointLabel = cell === "X" ? "black stone" : cell === "O" ? "white stone" : cell === "." ? "empty node" : "no signal";
       const title = [coordinateLabel, pointLabel, flags.includes("chosen") ? "our selected move" : "", flags.includes("reply") ? "observed reply" : ""]
         .filter(Boolean)
-        .join(" - ");
+        .join(" — ");
       const owner = cell === "." ? owners.get(`${x}:${y}`) : undefined;
       const links = DIRECTIONS.map((direction) => {
         const color = linkColor(board, owners, x, y, direction.dx, direction.dy);
@@ -146,7 +146,7 @@ function gridMarkup(
 }
 
 function boardMarkup(g: GoState): string {
-  if (!g.board?.length) return note("waiting for the board probe");
+  if (!g.board?.length) return waiting("the board probe");
   const chosen = g.plan?.action.type === "move" ? g.plan.action : undefined;
   const response = g.lastTurn?.opponentResponse;
   const actual = response?.type === "move" ? response : undefined;
@@ -158,14 +158,14 @@ function boardMarkup(g: GoState): string {
   const legend = `<div class="barkey"><span class="go-mark chosen"></span>selected move` +
     `<span class="go-mark reply"></span>observed reply</div>`;
   const territory = g.territory
-    ? note(`controlled empty nodes - black ${g.territory.black}, white ${g.territory.white}`)
+    ? note(`controlled empty nodes — black ${g.territory.black}, white ${g.territory.white}`)
     : "";
   return `${comparison}${legend}${territory}`;
 }
 
 function decisionMarkup(g: GoState): string {
   const plan = g.plan;
-  if (!plan) return note("waiting for a Go decision");
+  if (!plan) return waiting("a Go decision");
   const action = plan.action.type === "move"
     ? `${plan.action.type} ${coordinate(plan.action.x, plan.action.y)}`
     : plan.action.type;
@@ -196,7 +196,7 @@ function decisionMarkup(g: GoState): string {
     ? plan.ranked.find((move) => move.x === selectedAction.x && move.y === selectedAction.y)
     : undefined;
   const timingDetail = timing
-    ? `${timing.alignment}; dispatch ${timing.dispatchPlaytime === undefined ? "-" : (timing.dispatchPlaytime / 1_000).toFixed(3) + "s"}; seed ${timing.seed === undefined ? "-" : (timing.seed / 1_000).toFixed(3) + "s"}; full turn ${result!.durationMs.toFixed(0)} ms`
+    ? `${timing.alignment}; dispatch ${timing.dispatchPlaytime === undefined ? NONE : (timing.dispatchPlaytime / 1_000).toFixed(3) + "s"}; seed ${timing.seed === undefined ? NONE : (timing.seed / 1_000).toFixed(3) + "s"}; full turn ${result!.durationMs.toFixed(0)} ms`
     : result ? `${result.durationMs.toFixed(0)} ms` : "waiting";
   return (
     tiles([
@@ -219,7 +219,7 @@ function rankingMarkup(g: GoState): string {
       esc(coordinate(move.x, move.y)),
       fmtPct(move.score),
       fmtNum(move.powerPerRound, 2),
-      move.forecastCertainty ?? "-",
+      move.forecastCertainty ?? NONE,
       String(move.captures),
       esc(predictions(move)),
     ]),
@@ -261,7 +261,7 @@ export const goTab: Tab = {
   id: "go",
   render(state: ProjectedState) {
     const g = state.topics.go;
-    if (!g) return note("waiting for the Go probe");
+    if (!g) return waiting("the Go probe");
 
     const summary = tiles([
       { label: "opponent", value: g.opponent ?? "waiting" },
@@ -291,14 +291,14 @@ export const goTab: Tab = {
       : note("no games played yet");
 
     return (
-      `<div class="col">` +
-      card("Subnet", summary + boardMarkup(g)) +
-      card("Latest turn", decisionMarkup(g)) +
-      `</div>` +
-      `<div class="col go-analysis">` +
+      `<div class="col wide">` +
       card("Candidate analysis", rankingMarkup(g)) +
       card("Opponent reward choice", opponentMarkup(g)) +
       card("Record", stats) +
+      `</div>` +
+      `<div class="col">` +
+      card("Subnet", summary + boardMarkup(g)) +
+      card("Latest turn", decisionMarkup(g)) +
       `</div>`
     );
   },

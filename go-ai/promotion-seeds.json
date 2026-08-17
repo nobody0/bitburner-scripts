@@ -1,0 +1,1289 @@
+{
+  "schema": "go-arena-promotion-seeds-v1",
+  "uses": [
+    {
+      "id": "2026-08-14T08:02:55.519Z-screen-daemon19",
+      "recordedAt": "2026-08-14T08:02:55.519Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 14876543,
+      "effectiveFirstSeed": 14876400,
+      "handicapSeed": 3781942611,
+      "defenseSeed": 2163407921,
+      "candidateSha256": [
+        "c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e",
+        "056d8be6a30d40fe4f94a6c0ea65c79449bec523ae0b243cd3188dd33d8063ac"
+      ]
+    },
+    {
+      "id": "2026-08-14T15:03:43.250Z-screen-daemon19",
+      "recordedAt": "2026-08-14T15:03:43.250Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 2,
+      "seed": 2026081563,
+      "effectiveFirstSeed": 16081400,
+      "handicapSeed": 2026081564,
+      "defenseSeed": 2026081565,
+      "candidateSha256": [
+        "d4a4b23a8ea16b3ffb4e785229b1d9ae43c59d43b813b99b2ce1549669b66065",
+        "91cbf2f86a05b5050bdb4bf78bfb77df69e1d09e0329b007fa0556c866dc1de8",
+        "7995691904fcfe3bcdc37087457fc4c5cd0bd672cf37d42013efdc8e0df50f35"
+      ]
+    },
+    {
+      "id": "2026-08-14T15:04:59.873Z-screen-daemon19",
+      "recordedAt": "2026-08-14T15:04:59.873Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 8,
+      "seed": 2026081567,
+      "effectiveFirstSeed": 16081400,
+      "handicapSeed": 2026081568,
+      "defenseSeed": 2026081569,
+      "candidateSha256": [
+        "d4a4b23a8ea16b3ffb4e785229b1d9ae43c59d43b813b99b2ce1549669b66065",
+        "91cbf2f86a05b5050bdb4bf78bfb77df69e1d09e0329b007fa0556c866dc1de8",
+        "7995691904fcfe3bcdc37087457fc4c5cd0bd672cf37d42013efdc8e0df50f35"
+      ]
+    },
+    {
+      "id": "2026-08-14T15:39:30.129Z-screen-daemon19",
+      "recordedAt": "2026-08-14T15:39:30.129Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 8,
+      "seed": 2026081571,
+      "effectiveFirstSeed": 16081400,
+      "handicapSeed": 2026081572,
+      "defenseSeed": 2026081573,
+      "candidateSha256": [
+        "154f76fb4affb7c6f86583b023e1e327ce754925540cc10626774d88bda97064",
+        "7995691904fcfe3bcdc37087457fc4c5cd0bd672cf37d42013efdc8e0df50f35"
+      ]
+    },
+    {
+      "id": "2026-08-14T22:17:06.468Z-screen-daemon19",
+      "recordedAt": "2026-08-14T22:17:06.468Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 8,
+      "seed": 2026081595,
+      "effectiveFirstSeed": 16081400,
+      "handicapSeed": 2026081596,
+      "defenseSeed": 2026081597,
+      "candidateSha256": [
+        "d4a4b23a8ea16b3ffb4e785229b1d9ae43c59d43b813b99b2ce1549669b66065",
+        "b1ac3ac849acd19021e5c471bc6c1ab3917f9eece726aaff828f8812521b47ee",
+        "8be76403b38fb9c65f45fe66cf19f697a96bf4efd0263c9e29bf0381bb394077"
+      ]
+    },
+    {
+      "id": "2026-08-15T03:12:43.749Z-screen-daemon19",
+      "recordedAt": "2026-08-15T03:12:43.749Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 9876543,
+      "effectiveFirstSeed": 9876400,
+      "handicapSeed": 3141592653,
+      "defenseSeed": 2718281828,
+      "candidateSha256": [
+        "c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e",
+        "d4a4b23a8ea16b3ffb4e785229b1d9ae43c59d43b813b99b2ce1549669b66065",
+        "7fc68a9a4ed76d72c21c49b6b280e11af62b99e4a788cb9e27ad0d7b86e93ab1"
+      ]
+    },
+    {
+      "id": "2026-08-15T03:19:34.391Z-screen-daemon19",
+      "recordedAt": "2026-08-15T03:19:34.391Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 8,
+      "seed": 11223344,
+      "effectiveFirstSeed": 11223200,
+      "handicapSeed": 1618033988,
+      "defenseSeed": 1414213562,
+      "candidateSha256": [
+        "c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e",
+        "b6bf488584147403ea48110687de2f0da818d4cb1f3e2cd332c2cdf95d30a260"
+      ]
+    },
+    {
+      "id": "2026-08-15T03:31:32.307Z-screen-daemon19",
+      "recordedAt": "2026-08-15T03:31:32.307Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 13579135,
+      "effectiveFirstSeed": 13579000,
+      "handicapSeed": 246813579,
+      "defenseSeed": 362436069,
+      "candidateSha256": [
+        "c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e",
+        "6ab1dff0e5916f6ed06d5c8129a344fc700333fe99e1c02da362e8512d69254a",
+        "891f08348b876bf62de2cb046519346c026e32686692c5a9288e19cb286173c1",
+        "4f7e8b942730a43b28e781a80c777d15d92be27a2c86ef929630fba66759dc15"
+      ]
+    },
+    {
+      "id": "2026-08-15T03:41:41.965Z-screen-daemon19",
+      "recordedAt": "2026-08-15T03:41:41.965Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 17320508,
+      "effectiveFirstSeed": 17320400,
+      "handicapSeed": 1234567891,
+      "defenseSeed": 987654319,
+      "candidateSha256": [
+        "c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e",
+        "677cd5ba22e7c6113bc1443ae69475eb39e87056d79850e19cfa8524a332d9e6",
+        "a1e17d3b71c2a86d1629ee613bfa898aeb39257f291f5a30a1c7f6f0a934e330"
+      ]
+    },
+    {
+      "id": "2026-08-15T03:58:34.073Z-screen-daemon19",
+      "recordedAt": "2026-08-15T03:58:34.073Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 27182818,
+      "effectiveFirstSeed": 27182800,
+      "handicapSeed": 1618033988,
+      "defenseSeed": 1414213562,
+      "candidateSha256": [
+        "c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e",
+        "326150d9d40b55e4d3e63d14027f6f937e677678bc4e4decd12c3b44c7f2ccce"
+      ]
+    },
+    {
+      "id": "2026-08-15T04:00:05.240Z-screen-daemon19",
+      "recordedAt": "2026-08-15T04:00:05.240Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 31415926,
+      "effectiveFirstSeed": 1415800,
+      "handicapSeed": 2718281828,
+      "defenseSeed": 2236067977,
+      "candidateSha256": [
+        "c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e",
+        "326150d9d40b55e4d3e63d14027f6f937e677678bc4e4decd12c3b44c7f2ccce"
+      ]
+    },
+    {
+      "id": "2026-08-15T04:02:11.206Z-screen-daemon19",
+      "recordedAt": "2026-08-15T04:02:11.206Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 32,
+      "seed": 16180339,
+      "effectiveFirstSeed": 16180200,
+      "handicapSeed": 1732050807,
+      "defenseSeed": 2449489743,
+      "candidateSha256": [
+        "c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e",
+        "326150d9d40b55e4d3e63d14027f6f937e677678bc4e4decd12c3b44c7f2ccce"
+      ]
+    },
+    {
+      "id": "2026-08-15T04:09:05.249Z-screen-daemon19",
+      "recordedAt": "2026-08-15T04:09:05.249Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 42424242,
+      "effectiveFirstSeed": 12424200,
+      "handicapSeed": 987654321,
+      "defenseSeed": 3141592653,
+      "candidateSha256": [
+        "326150d9d40b55e4d3e63d14027f6f937e677678bc4e4decd12c3b44c7f2ccce",
+        "a2a7ba5a0c732e05be461628de705d8c87cdf99b6eaddfe9a9f6d0942c6bc39d"
+      ]
+    },
+    {
+      "id": "2026-08-15T04:11:58.301Z-screen-daemon19",
+      "recordedAt": "2026-08-15T04:11:58.301Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 32,
+      "seed": 57721566,
+      "effectiveFirstSeed": 27721400,
+      "handicapSeed": 1414213562,
+      "defenseSeed": 2645751311,
+      "candidateSha256": [
+        "c73cb5811a441e466c4a6112da313c53f37219d68ef499b69c5e8a39ac71703e",
+        "a2a7ba5a0c732e05be461628de705d8c87cdf99b6eaddfe9a9f6d0942c6bc39d"
+      ]
+    },
+    {
+      "id": "2026-08-15T05:30:05.854Z-screen-daemon19",
+      "recordedAt": "2026-08-15T05:30:05.854Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026082201,
+      "effectiveFirstSeed": 16082200,
+      "handicapSeed": 2026082202,
+      "defenseSeed": 2026082203,
+      "candidateSha256": [
+        "a2a7ba5a0c732e05be461628de705d8c87cdf99b6eaddfe9a9f6d0942c6bc39d",
+        "d53da7f6c38b32f263f5a30499b48d613460fc14ed7c5f6c374d33a39a6ef5df"
+      ]
+    },
+    {
+      "id": "2026-08-15T05:45:19.522Z-screen-daemon19",
+      "recordedAt": "2026-08-15T05:45:19.522Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026082301,
+      "effectiveFirstSeed": 16082200,
+      "handicapSeed": 2026082302,
+      "defenseSeed": 2026082303,
+      "candidateSha256": [
+        "a2a7ba5a0c732e05be461628de705d8c87cdf99b6eaddfe9a9f6d0942c6bc39d",
+        "bd9f1ea7176fbefba9e5ee9eb40adde101d52f21b85002378439f784074af072"
+      ]
+    },
+    {
+      "id": "2026-08-15T08:36:44.920Z-screen-daemon19",
+      "recordedAt": "2026-08-15T08:36:44.920Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026090101,
+      "effectiveFirstSeed": 16090000,
+      "handicapSeed": 3031090102,
+      "defenseSeed": 4041090103,
+      "candidateSha256": [
+        "1f79deec783e7d430b474bb416d0ce544f60e63d5952f972656df2c570379c70",
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ]
+    },
+    {
+      "id": "2026-08-15T08:46:46.790Z-screen-daemon19",
+      "recordedAt": "2026-08-15T08:46:46.790Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026110101,
+      "effectiveFirstSeed": 16110000,
+      "handicapSeed": 3031110102,
+      "defenseSeed": 4041110103,
+      "candidateSha256": [
+        "1f79deec783e7d430b474bb416d0ce544f60e63d5952f972656df2c570379c70",
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ]
+    },
+    {
+      "id": "2026-08-15T09:00:41.720Z-screen-daemon19",
+      "recordedAt": "2026-08-15T09:00:41.720Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026130101,
+      "effectiveFirstSeed": 16130000,
+      "handicapSeed": 3031130102,
+      "defenseSeed": 4041130103,
+      "candidateSha256": [
+        "16fe6604a2c10365a0a45dbf2edd913162fdd86f7489f3cf1801f1678309fc0f",
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ]
+    },
+    {
+      "id": "2026-08-15T09:11:05.203Z-screen-daemon19",
+      "recordedAt": "2026-08-15T09:11:05.203Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026150101,
+      "effectiveFirstSeed": 16150000,
+      "handicapSeed": 3031150102,
+      "defenseSeed": 4041150103,
+      "candidateSha256": [
+        "16fe6604a2c10365a0a45dbf2edd913162fdd86f7489f3cf1801f1678309fc0f",
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ]
+    },
+    {
+      "id": "2026-08-15T10:14:21.571Z-screen-daemon19",
+      "recordedAt": "2026-08-15T10:14:21.571Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026190101,
+      "effectiveFirstSeed": 16190000,
+      "handicapSeed": 3031190102,
+      "defenseSeed": 4041190103,
+      "candidateSha256": [
+        "c3bad9e47a48c7d6338e80729e2663d8bb1d3fa49b39c35fa145afbc9afecfdb",
+        "80a84c40ec22524a20886477f456c4089785064c36edc0db219dcfd46be44d8a"
+      ]
+    },
+    {
+      "id": "2026-08-15T10:24:54.985Z-screen-daemon19",
+      "recordedAt": "2026-08-15T10:24:54.985Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026210101,
+      "effectiveFirstSeed": 16210000,
+      "handicapSeed": 3031210102,
+      "defenseSeed": 4041210103,
+      "candidateSha256": [
+        "c3bad9e47a48c7d6338e80729e2663d8bb1d3fa49b39c35fa145afbc9afecfdb",
+        "80a84c40ec22524a20886477f456c4089785064c36edc0db219dcfd46be44d8a"
+      ]
+    },
+    {
+      "id": "2026-08-15T10:40:07.988Z-screen-daemon19",
+      "recordedAt": "2026-08-15T10:40:07.988Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026230101,
+      "effectiveFirstSeed": 16230000,
+      "handicapSeed": 3031230102,
+      "defenseSeed": 4041230103,
+      "candidateSha256": [
+        "16fe6604a2c10365a0a45dbf2edd913162fdd86f7489f3cf1801f1678309fc0f",
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ]
+    },
+    {
+      "id": "2026-08-15T10:50:36.046Z-screen-daemon19",
+      "recordedAt": "2026-08-15T10:50:36.046Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026250101,
+      "effectiveFirstSeed": 16250000,
+      "handicapSeed": 3031250102,
+      "defenseSeed": 4041250103,
+      "candidateSha256": [
+        "16fe6604a2c10365a0a45dbf2edd913162fdd86f7489f3cf1801f1678309fc0f",
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ]
+    },
+    {
+      "id": "2026-08-15T11:01:48.478Z-screen-daemon19",
+      "recordedAt": "2026-08-15T11:01:48.478Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 2026270101,
+      "effectiveFirstSeed": 16270000,
+      "handicapSeed": 3031270102,
+      "defenseSeed": 4041270103,
+      "candidateSha256": [
+        "16fe6604a2c10365a0a45dbf2edd913162fdd86f7489f3cf1801f1678309fc0f",
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ]
+    },
+    {
+      "id": "2026-08-15T13:18:01.889Z-screen-small5",
+      "recordedAt": "2026-08-15T13:18:01.889Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 8,
+      "seed": 2026085101,
+      "effectiveFirstSeed": 16085000,
+      "handicapSeed": 2026085102,
+      "defenseSeed": 2026085103,
+      "candidateSha256": [
+        "75b26cdb911fe6f65fedc04cc85dd196443b88908ac85531c827d47390e2e3bb",
+        "15752c6920fda88ab1da8c29a6f8354cf8ab394cc87dad97b9a84b34ed310bd3"
+      ]
+    },
+    {
+      "id": "2026-08-15T13:18:19.121Z-screen-small5",
+      "recordedAt": "2026-08-15T13:18:19.121Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 16,
+      "seed": 2026085201,
+      "effectiveFirstSeed": 16085200,
+      "handicapSeed": 2026085202,
+      "defenseSeed": 2026085203,
+      "candidateSha256": [
+        "75b26cdb911fe6f65fedc04cc85dd196443b88908ac85531c827d47390e2e3bb",
+        "15752c6920fda88ab1da8c29a6f8354cf8ab394cc87dad97b9a84b34ed310bd3"
+      ]
+    },
+    {
+      "id": "2026-08-15T13:24:32.557Z-screen-small5",
+      "recordedAt": "2026-08-15T13:24:32.557Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 16,
+      "seed": 2026085301,
+      "effectiveFirstSeed": 16085200,
+      "handicapSeed": 2026085302,
+      "defenseSeed": 2026085303,
+      "candidateSha256": [
+        "75b26cdb911fe6f65fedc04cc85dd196443b88908ac85531c827d47390e2e3bb",
+        "ce312f51e87685ff11f0bfa6e3c1588b516f114726c29be25580bf493d1f409b"
+      ]
+    },
+    {
+      "id": "2026-08-15T13:26:01.918Z-screen-small5",
+      "recordedAt": "2026-08-15T13:26:01.918Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 32,
+      "seed": 2026085401,
+      "effectiveFirstSeed": 16085400,
+      "handicapSeed": 2026085402,
+      "defenseSeed": 2026085403,
+      "candidateSha256": [
+        "75b26cdb911fe6f65fedc04cc85dd196443b88908ac85531c827d47390e2e3bb"
+      ]
+    },
+    {
+      "id": "2026-08-15T14:58:33.672Z-screen-small5",
+      "recordedAt": "2026-08-15T14:58:33.672Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 32,
+      "seed": 2026290401,
+      "effectiveFirstSeed": 16290400,
+      "handicapSeed": 2026290402,
+      "defenseSeed": 2026290403,
+      "candidateSha256": [
+        "a53536c90404436e513a836bc1d3e1129559ebfc7707a28ee3fa624049e66480",
+        "4205c9fb2e02555b69aca14e8c3f0f574f28badc091257c1b518a1b323625637"
+      ]
+    },
+    {
+      "id": "2026-08-15T16:49:31.724Z-screen-daemon19",
+      "recordedAt": "2026-08-15T16:49:31.724Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 2026084101,
+      "effectiveFirstSeed": 16084000,
+      "handicapSeed": 2026084102,
+      "defenseSeed": 2026084103,
+      "candidateSha256": [
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83",
+        "7f3cd5b28dd3d6136ace8c963adf3d28223be95777ca18eb75fb303d35f83a8d"
+      ]
+    },
+    {
+      "id": "2026-08-15T17:11:49.493Z-promotion-apply-daemon19",
+      "recordedAt": "2026-08-15T17:11:49.493Z",
+      "kind": "promotion-apply",
+      "profile": "daemon19",
+      "gamesPerOpponent": 512,
+      "seed": 2026084201,
+      "effectiveFirstSeed": 16084200,
+      "handicapSeed": 2026084202,
+      "defenseSeed": 2026084203,
+      "candidateSha256": [
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ]
+    },
+    {
+      "id": "2026-08-15T19:25:58.941Z-promotion-dry-run-small5",
+      "recordedAt": "2026-08-15T19:25:58.941Z",
+      "kind": "promotion-dry-run",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 2026300101,
+      "effectiveFirstSeed": 16300000,
+      "handicapSeed": 3031300102,
+      "defenseSeed": 4041300103,
+      "candidateSha256": [
+        "5dfdcadb89b2f5a17be163cf3bc09698fd23a7cd5c6dd4d7b2c32db65e08671c"
+      ]
+    },
+    {
+      "id": "2026-08-15T19:28:43.246Z-promotion-dry-run-small5",
+      "recordedAt": "2026-08-15T19:28:43.246Z",
+      "kind": "promotion-dry-run",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 2026300201,
+      "effectiveFirstSeed": 16300200,
+      "handicapSeed": 3031300202,
+      "defenseSeed": 4041300203,
+      "candidateSha256": [
+        "4317ba9c2b9dba9021bac20da4db069a635d63b8a1bd39d6db8908dfd6989d96"
+      ]
+    },
+    {
+      "id": "2026-08-15T19:29:33.702Z-promotion-dry-run-small5",
+      "recordedAt": "2026-08-15T19:29:33.702Z",
+      "kind": "promotion-dry-run",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 2026300301,
+      "effectiveFirstSeed": 16300200,
+      "handicapSeed": 3031300302,
+      "defenseSeed": 4041300303,
+      "candidateSha256": [
+        "4317ba9c2b9dba9021bac20da4db069a635d63b8a1bd39d6db8908dfd6989d96"
+      ]
+    },
+    {
+      "id": "2026-08-15T19:30:35.188Z-promotion-apply-small5",
+      "recordedAt": "2026-08-15T19:30:35.188Z",
+      "kind": "promotion-apply",
+      "profile": "small5",
+      "gamesPerOpponent": 2048,
+      "seed": 5151300401,
+      "effectiveFirstSeed": 21300400,
+      "handicapSeed": 6161300402,
+      "defenseSeed": 7171300403,
+      "candidateSha256": [
+        "4317ba9c2b9dba9021bac20da4db069a635d63b8a1bd39d6db8908dfd6989d96"
+      ]
+    },
+    {
+      "id": "2026-08-15T19:48:23.697Z-promotion-dry-run-small5",
+      "recordedAt": "2026-08-15T19:48:23.697Z",
+      "kind": "promotion-dry-run",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 6262300501,
+      "effectiveFirstSeed": 22300400,
+      "handicapSeed": 7272300502,
+      "defenseSeed": 8282300503,
+      "candidateSha256": [
+        "73df67db4cbdb94349870d041b07434ac81fdabfa68bdd26126a699eab8211dd"
+      ]
+    },
+    {
+      "id": "2026-08-15T21:37:35.877Z-screen-daemon19",
+      "recordedAt": "2026-08-15T21:37:35.877Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 2026081672,
+      "effectiveFirstSeed": 16081600,
+      "handicapSeed": 2026081673,
+      "defenseSeed": 2026081674,
+      "candidateSha256": [
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ]
+    },
+    {
+      "id": "2026-08-15T21:39:19.838Z-screen-daemon19",
+      "recordedAt": "2026-08-15T21:39:19.838Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 2026081672,
+      "effectiveFirstSeed": 16081600,
+      "handicapSeed": 2026081673,
+      "defenseSeed": 2026081674,
+      "candidateSha256": [
+        "3f3df0d6ab24d66b1cf8fad670632c56502e3b8194abb0cf33d4b52a04777d42"
+      ]
+    },
+    {
+      "id": "2026-08-16T08:17:55.728Z-screen-daemon19",
+      "recordedAt": "2026-08-16T08:17:55.728Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 16,
+      "seed": 11111101,
+      "effectiveFirstSeed": 11111000,
+      "handicapSeed": 11111102,
+      "defenseSeed": 11111103,
+      "candidateSha256": [
+        "aaaefd114d9f5095d89ad5ebf46f9a4c7a31a2ba45c4630b351f237716194b83"
+      ],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-16T08:20:54.841Z-screen-small5",
+      "recordedAt": "2026-08-16T08:20:54.841Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 22222201,
+      "effectiveFirstSeed": 22222200,
+      "handicapSeed": 22222202,
+      "defenseSeed": 22222203,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T08:25:10.283Z-screen-small5",
+      "recordedAt": "2026-08-16T08:25:10.283Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 24444401,
+      "effectiveFirstSeed": 24444400,
+      "handicapSeed": 24444402,
+      "defenseSeed": 24444403,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T08:50:45.861Z-derivative-apply-daemon19",
+      "recordedAt": "2026-08-16T08:50:45.861Z",
+      "kind": "derivative-apply",
+      "profile": "daemon19",
+      "gamesPerOpponent": 128,
+      "seed": 33333301,
+      "effectiveFirstSeed": 3333200,
+      "handicapSeed": 33333302,
+      "defenseSeed": 33333303,
+      "candidateSha256": [
+        "149faf54b0b9bb3ff63384882f942d67a6e4804a49e649e2ec485be5b9c74bc9"
+      ],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-16T08:50:45.872Z-screen-daemon19",
+      "recordedAt": "2026-08-16T08:50:45.872Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 40,
+      "seed": 44444401,
+      "effectiveFirstSeed": 14444400,
+      "handicapSeed": 44444402,
+      "defenseSeed": 44444403,
+      "candidateSha256": [
+        "149faf54b0b9bb3ff63384882f942d67a6e4804a49e649e2ec485be5b9c74bc9"
+      ],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-16T09:17:37.812Z-screen-small5",
+      "recordedAt": "2026-08-16T09:17:37.812Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 128,
+      "seed": 55555501,
+      "effectiveFirstSeed": 25555400,
+      "handicapSeed": 55555502,
+      "defenseSeed": 55555503,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf"
+      ],
+      "candidateLimit": 8
+    },
+    {
+      "id": "2026-08-16T09:22:11.153Z-screen-small5",
+      "recordedAt": "2026-08-16T09:22:11.153Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 128,
+      "seed": 77777701,
+      "effectiveFirstSeed": 17777600,
+      "handicapSeed": 77777702,
+      "defenseSeed": 77777703,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf"
+      ],
+      "candidateLimit": 8
+    },
+    {
+      "id": "2026-08-16T09:25:38.554Z-screen-small5",
+      "recordedAt": "2026-08-16T09:25:38.554Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 16,
+      "seed": 88888801,
+      "effectiveFirstSeed": 28888800,
+      "handicapSeed": 88888802,
+      "defenseSeed": 88888803,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T10:40:09.923Z-screen-small5",
+      "recordedAt": "2026-08-16T10:40:09.923Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 2026081984,
+      "effectiveFirstSeed": 16081800,
+      "handicapSeed": 2026081985,
+      "defenseSeed": 2026081986,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+        "f325773bb9a24cf498322bed98ceb77319d568e6a4cca8329cec7b024a2a64cd"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T10:41:24.113Z-screen-small5",
+      "recordedAt": "2026-08-16T10:41:24.113Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 2026081987,
+      "effectiveFirstSeed": 16081800,
+      "handicapSeed": 2026081988,
+      "defenseSeed": 2026081989,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+        "f325773bb9a24cf498322bed98ceb77319d568e6a4cca8329cec7b024a2a64cd"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T10:42:38.583Z-screen-small5",
+      "recordedAt": "2026-08-16T10:42:38.583Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 2026081990,
+      "effectiveFirstSeed": 16081800,
+      "handicapSeed": 2026081991,
+      "defenseSeed": 2026081992,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+        "6b1b3c2c8d6081f66859361ef3fd7d6491ad8cc9188fbf5991ade1a3e584335f"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T10:43:45.620Z-screen-small5",
+      "recordedAt": "2026-08-16T10:43:45.620Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 2026081993,
+      "effectiveFirstSeed": 16081800,
+      "handicapSeed": 2026081994,
+      "defenseSeed": 2026081995,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+        "f325773bb9a24cf498322bed98ceb77319d568e6a4cca8329cec7b024a2a64cd"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T11:34:21.216Z-derivative-apply-small5",
+      "recordedAt": "2026-08-16T11:34:21.216Z",
+      "kind": "derivative-apply",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 12121201,
+      "effectiveFirstSeed": 12121200,
+      "handicapSeed": 12121202,
+      "defenseSeed": 12121203,
+      "candidateSha256": [
+        "b63e702e423ea4790be6dd2762702218eb0a5d2d91eeeec91b15dee02ef17da5"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T11:34:21.230Z-screen-small5",
+      "recordedAt": "2026-08-16T11:34:21.230Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 13131301,
+      "effectiveFirstSeed": 13131200,
+      "handicapSeed": 13131302,
+      "defenseSeed": 13131303,
+      "candidateSha256": [
+        "b63e702e423ea4790be6dd2762702218eb0a5d2d91eeeec91b15dee02ef17da5"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T15:50:01.552Z-screen-small5",
+      "recordedAt": "2026-08-16T15:50:01.552Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 2026082301,
+      "effectiveFirstSeed": 16082200,
+      "handicapSeed": 2026082302,
+      "defenseSeed": 2026082303,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+        "58fb203955f1b9d87c74ccfe5984b63f04541dae36b7164c4da5c75834e86da0",
+        "6cf89c766214d4f692cefe3b66e941f5a25518fbc4370f7d74cf653f284312af"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T20:24:54.261Z-promotion-dry-run-daemon19",
+      "recordedAt": "2026-08-16T20:24:54.261Z",
+      "kind": "promotion-dry-run",
+      "profile": "daemon19",
+      "gamesPerOpponent": 32,
+      "seed": 7193211,
+      "effectiveFirstSeed": 7193200,
+      "handicapSeed": 3265482941,
+      "defenseSeed": 1013904433,
+      "candidateSha256": [
+        "9e8e25357c22afdb84afedb48f00d9f1fe4b56455050268294ec5c434321c72b"
+      ],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-16T20:34:32.024Z-promotion-dry-run-small5",
+      "recordedAt": "2026-08-16T20:34:32.024Z",
+      "kind": "promotion-dry-run",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 81240531,
+      "effectiveFirstSeed": 21240400,
+      "handicapSeed": 2246822519,
+      "defenseSeed": 3266489917,
+      "candidateSha256": [
+        "545333cb2f9856ce1b136ab97cedbe6b2670fd3a4c1998df23b55b73f955ef70"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T20:36:50.417Z-promotion-dry-run-small5",
+      "recordedAt": "2026-08-16T20:36:50.417Z",
+      "kind": "promotion-dry-run",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 91240539,
+      "effectiveFirstSeed": 1240400,
+      "handicapSeed": 2654435789,
+      "defenseSeed": 1013904247,
+      "candidateSha256": [
+        "d267f4bc4a1d192dfec128ae0c4418bf0c79d66ea575d052813d222092541c0c"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T20:38:02.252Z-promotion-apply-small5",
+      "recordedAt": "2026-08-16T20:38:02.252Z",
+      "kind": "promotion-apply",
+      "profile": "small5",
+      "gamesPerOpponent": 2048,
+      "seed": 131240547,
+      "effectiveFirstSeed": 11240400,
+      "handicapSeed": 362436069,
+      "defenseSeed": 521288629,
+      "candidateSha256": [
+        "d267f4bc4a1d192dfec128ae0c4418bf0c79d66ea575d052813d222092541c0c"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T21:06:36.721Z-promotion-dry-run-small5",
+      "recordedAt": "2026-08-16T21:06:36.721Z",
+      "kind": "promotion-dry-run",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 171240563,
+      "effectiveFirstSeed": 21240400,
+      "handicapSeed": 88675123,
+      "defenseSeed": 5783321,
+      "candidateSha256": [
+        "929214b9ff00850cec5bf2870d9373ea884c3f0dd68da005ad18525288ff8ac6"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T21:10:23.188Z-promotion-dry-run-small5",
+      "recordedAt": "2026-08-16T21:10:23.188Z",
+      "kind": "promotion-dry-run",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 191240571,
+      "effectiveFirstSeed": 11240400,
+      "handicapSeed": 123456789,
+      "defenseSeed": 362436071,
+      "candidateSha256": [
+        "2754b4b3e55d5b073c22d91316a2c8372614bc6b7f583fe64755b122ddee8aaf"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T22:06:51.645Z-screen-small5",
+      "recordedAt": "2026-08-16T22:06:51.645Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 33355501,
+      "effectiveFirstSeed": 3355400,
+      "handicapSeed": 33355502,
+      "defenseSeed": 33355503,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+        "c68dddf50eb7215441be7e596b55a2dcdf312e5b656176c8cbb28639f69708ee",
+        "838c365b203ae6a48016210a67b409eee625b41bfb537959ce996399069a8bf7",
+        "49e2dbe27a1ac57915d7418477d651ea9e6b0a3652f352358f4be0c67d3ffa06"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T22:08:58.749Z-screen-small5",
+      "recordedAt": "2026-08-16T22:08:58.749Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 33355501,
+      "effectiveFirstSeed": 3355400,
+      "handicapSeed": 33355502,
+      "defenseSeed": 33355503,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+        "c68dddf50eb7215441be7e596b55a2dcdf312e5b656176c8cbb28639f69708ee",
+        "838c365b203ae6a48016210a67b409eee625b41bfb537959ce996399069a8bf7",
+        "49e2dbe27a1ac57915d7418477d651ea9e6b0a3652f352358f4be0c67d3ffa06"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T22:30:31.592Z-screen-small5",
+      "recordedAt": "2026-08-16T22:30:31.592Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 44466601,
+      "effectiveFirstSeed": 14466600,
+      "handicapSeed": 44466602,
+      "defenseSeed": 44466603,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+        "41e52d6b3ef5cc8b37649e0fe8d6fee7d6d0371f0a12e27a593b85be063073ed",
+        "1a5168b3458c7383c6a6fafde27d867eccda094d8b58eaa20b36d61d4d583e47",
+        "97b30c0704a8b67af10d28e71837fd9d559bf2c06a9cef8818c1a0c469d47bbd"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T22:32:59.520Z-screen-small5",
+      "recordedAt": "2026-08-16T22:32:59.520Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 55577701,
+      "effectiveFirstSeed": 25577600,
+      "handicapSeed": 55577702,
+      "defenseSeed": 55577703,
+      "candidateSha256": [
+        "4ff250e3cfd9e55bf5219c08eab8d02fc9dee7aafc385aad7cb521fa5b5e89bf",
+        "41e52d6b3ef5cc8b37649e0fe8d6fee7d6d0371f0a12e27a593b85be063073ed",
+        "1a5168b3458c7383c6a6fafde27d867eccda094d8b58eaa20b36d61d4d583e47"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T22:47:22.780Z-promotion-apply-small5",
+      "recordedAt": "2026-08-16T22:47:22.780Z",
+      "kind": "promotion-apply",
+      "profile": "small5",
+      "gamesPerOpponent": 2048,
+      "seed": 61888801,
+      "effectiveFirstSeed": 1888800,
+      "handicapSeed": 61888802,
+      "defenseSeed": 61888803,
+      "candidateSha256": [
+        "1a5168b3458c7383c6a6fafde27d867eccda094d8b58eaa20b36d61d4d583e47"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-16T23:09:19.286Z-promotion-apply-small5",
+      "recordedAt": "2026-08-16T23:09:19.286Z",
+      "kind": "promotion-apply",
+      "profile": "small5",
+      "gamesPerOpponent": 2048,
+      "seed": 71999901,
+      "effectiveFirstSeed": 11999800,
+      "handicapSeed": 71999902,
+      "defenseSeed": 71999903,
+      "candidateSha256": [
+        "1a5168b3458c7383c6a6fafde27d867eccda094d8b58eaa20b36d61d4d583e47"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T05:48:42.029Z-promotion-apply-daemon19",
+      "recordedAt": "2026-08-17T05:48:42.029Z",
+      "kind": "promotion-apply",
+      "profile": "daemon19",
+      "gamesPerOpponent": 512,
+      "seed": 81555501,
+      "effectiveFirstSeed": 21555400,
+      "handicapSeed": 81555502,
+      "defenseSeed": 81555503,
+      "candidateSha256": [
+        "219f83c701fdc21faed575d1f0da22221b45385231744994af9f0f1c5b7e24ea"
+      ],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-17T09:23:22.668Z-promotion-apply-small5",
+      "recordedAt": "2026-08-17T09:23:22.668Z",
+      "kind": "promotion-apply",
+      "profile": "small5",
+      "gamesPerOpponent": 2048,
+      "seed": 33000007,
+      "effectiveFirstSeed": 3000000,
+      "handicapSeed": 33000008,
+      "defenseSeed": 33000009,
+      "candidateSha256": [
+        "135b6d0b5bd2bcf768bf70968b8018bb69d03ddd2b356e0a8dc5ef4f926a23f1"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T10:05:05.316Z-promotion-apply-daemon19",
+      "recordedAt": "2026-08-17T10:05:05.316Z",
+      "kind": "promotion-apply",
+      "profile": "daemon19",
+      "gamesPerOpponent": 512,
+      "seed": 41000001,
+      "effectiveFirstSeed": 11000000,
+      "handicapSeed": 41000002,
+      "defenseSeed": 41000003,
+      "candidateSha256": [
+        "6a8250fed3005ff11563742e0f96f5174cd31790602dc84949c5073a397950a8"
+      ],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-17T10:23:16.205Z-promotion-apply-small5",
+      "recordedAt": "2026-08-17T10:23:16.205Z",
+      "kind": "promotion-apply",
+      "profile": "small5",
+      "gamesPerOpponent": 2048,
+      "seed": 53000004,
+      "effectiveFirstSeed": 23000000,
+      "handicapSeed": 53000005,
+      "defenseSeed": 53000006,
+      "candidateSha256": [
+        "faa60ca2411b83bdaa6dfd15163ceee901eaaa77842b14bf8f385dd2e8aaa0aa"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T11:31:36.681Z-screen-daemon19",
+      "recordedAt": "2026-08-17T11:31:36.681Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 61000001,
+      "effectiveFirstSeed": 1000000,
+      "handicapSeed": 61000002,
+      "defenseSeed": 61000003,
+      "candidateSha256": [
+        "219f83c701fdc21faed575d1f0da22221b45385231744994af9f0f1c5b7e24ea",
+        "38ff58de1694d111478850cee7a719081fda483439f70768cfe0b5d7ec2cf3bf"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T12:18:29.131Z-derivative-apply-small5",
+      "recordedAt": "2026-08-17T12:18:29.131Z",
+      "kind": "derivative-apply",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 45454501,
+      "effectiveFirstSeed": 15454400,
+      "handicapSeed": 45454502,
+      "defenseSeed": 45454503,
+      "candidateSha256": [
+        "7519fe20a711b57b76019ddb4b14aec5a9b28929b39c6a1ea937aa41654c8559"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T12:18:29.152Z-screen-small5",
+      "recordedAt": "2026-08-17T12:18:29.152Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 64,
+      "seed": 46464601,
+      "effectiveFirstSeed": 16464600,
+      "handicapSeed": 46464602,
+      "defenseSeed": 46464603,
+      "candidateSha256": [
+        "7519fe20a711b57b76019ddb4b14aec5a9b28929b39c6a1ea937aa41654c8559"
+      ],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T14:12:46.325Z-derivative-apply-daemon19",
+      "recordedAt": "2026-08-17T14:12:46.325Z",
+      "kind": "derivative-apply",
+      "profile": "daemon19",
+      "gamesPerOpponent": 128,
+      "seed": 62626201,
+      "effectiveFirstSeed": 2626200,
+      "handicapSeed": 62626202,
+      "defenseSeed": 62626203,
+      "candidateSha256": [
+        "9e118d5baeea42dc0d3a1bdc40a4130e504b37a32127a8a519c2784599898fe0"
+      ],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-17T14:12:46.329Z-screen-daemon19",
+      "recordedAt": "2026-08-17T14:12:46.329Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 63636301,
+      "effectiveFirstSeed": 3636200,
+      "handicapSeed": 63636302,
+      "defenseSeed": 63636303,
+      "candidateSha256": [
+        "9e118d5baeea42dc0d3a1bdc40a4130e504b37a32127a8a519c2784599898fe0"
+      ],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-17T14:47:33.168Z-screen-small5",
+      "recordedAt": "2026-08-17T14:47:33.168Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 51515101,
+      "effectiveFirstSeed": 21515000,
+      "handicapSeed": 51515102,
+      "defenseSeed": 51515103,
+      "candidateSha256": [],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T15:47:55.936Z-screen-small5",
+      "recordedAt": "2026-08-17T15:47:55.936Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 71717101,
+      "effectiveFirstSeed": 11717000,
+      "handicapSeed": 71717102,
+      "defenseSeed": 71717103,
+      "candidateSha256": [],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T15:52:39.427Z-screen-small5",
+      "recordedAt": "2026-08-17T15:52:39.427Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 82828201,
+      "effectiveFirstSeed": 22828200,
+      "handicapSeed": 82828202,
+      "defenseSeed": 82828203,
+      "candidateSha256": [],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T15:57:52.736Z-screen-small5",
+      "recordedAt": "2026-08-17T15:57:52.736Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 93939301,
+      "effectiveFirstSeed": 3939200,
+      "handicapSeed": 93939302,
+      "defenseSeed": 93939303,
+      "candidateSha256": [],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T16:15:45.602Z-screen-small5",
+      "recordedAt": "2026-08-17T16:15:45.602Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 10101011,
+      "effectiveFirstSeed": 10101000,
+      "handicapSeed": 10101012,
+      "defenseSeed": 10101013,
+      "candidateSha256": [],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T16:21:03.668Z-screen-daemon19",
+      "recordedAt": "2026-08-17T16:21:03.668Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 128,
+      "seed": 10101021,
+      "effectiveFirstSeed": 10101000,
+      "handicapSeed": 10101022,
+      "defenseSeed": 10101023,
+      "candidateSha256": [],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-17T16:41:03.932Z-screen-small5",
+      "recordedAt": "2026-08-17T16:41:03.932Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 11111121,
+      "effectiveFirstSeed": 11111000,
+      "handicapSeed": 11111122,
+      "defenseSeed": 11111123,
+      "candidateSha256": [],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T16:41:25.699Z-screen-daemon19",
+      "recordedAt": "2026-08-17T16:41:25.699Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 64,
+      "seed": 13131341,
+      "effectiveFirstSeed": 13131200,
+      "handicapSeed": 13131342,
+      "defenseSeed": 13131343,
+      "candidateSha256": [],
+      "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-17T16:41:34.899Z-screen-small5",
+      "recordedAt": "2026-08-17T16:41:34.899Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 14141451,
+      "effectiveFirstSeed": 14141400,
+      "handicapSeed": 14141452,
+      "defenseSeed": 14141453,
+      "candidateSha256": [],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T17:07:55.779Z-screen-small5",
+      "recordedAt": "2026-08-17T17:07:55.779Z",
+      "kind": "screen",
+      "profile": "small5",
+      "gamesPerOpponent": 384,
+      "seed": 15151561,
+      "effectiveFirstSeed": 15151400,
+      "handicapSeed": 15151562,
+      "defenseSeed": 15151563,
+      "candidateSha256": [],
+      "candidateLimit": 4
+    },
+    {
+      "id": "2026-08-17T17:11:36.622Z-screen-daemon19",
+      "recordedAt": "2026-08-17T17:11:36.622Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 48,
+      "seed": 16161671,
+      "effectiveFirstSeed": 16161600,
+      "handicapSeed": 16161672,
+      "defenseSeed": 16161673,
+      "candidateSha256": [],
+      "candidateLimit": 1
+    }
+  ]
+}

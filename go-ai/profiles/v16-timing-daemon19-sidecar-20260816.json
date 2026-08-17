@@ -1,0 +1,44 @@
+{
+  "schema": "bitburner-go-v9-sidecar-benchmark-v2",
+  "profile": "daemon19",
+  "command": [
+    "/Users/bob/git/bitburner-scripts/go-ai/build/release/go_cpp_gpu_env",
+    "4",
+    "2026081601",
+    "4",
+    "daemon19",
+    "12",
+    "v9",
+    "deterministic-benchmark"
+  ],
+  "binarySha256": "bb666017648c942eb440a2d514e2c91dd1db3e31d914d4daec0ea4b03c84bda2",
+  "platform": "macOS-26.5.2-arm64-arm-64bit",
+  "cpuThreads": 12,
+  "environments": 4,
+  "blocks": 2,
+  "positions": 8,
+  "candidates": 2084,
+  "replies": 2084,
+  "elapsedSeconds": 0.18992050003726035,
+  "childCpuSeconds": 0.6336919999999999,
+  "aggregateCpuUtilizationPercent": 333.6617162842749,
+  "positionsPerSecond": 42.12288825287679,
+  "candidatesPerSecond": 10973.012389874404,
+  "protocolSha256": "21bd15df77dd4b9bc980a9276d6aad49e6c8dd4d73aabdea4973d2de5f03962b",
+  "protocolTimings": {
+    "actionWriteFlush": 9.737489745020866e-05,
+    "sidecarReadWait": 0.17206062423065305,
+    "sidecarResponseParsing": 0.007456168998032808
+  },
+  "protocolCounts": {
+    "sidecarProtocolBytes": 1559987,
+    "sidecarProtocolLines": 14
+  },
+  "nativeBreakdown": {
+    "candidateGenerationCpuSeconds": 0.012651492,
+    "opponentAnalysisCpuSeconds": 0.528848977,
+    "protocolSerializationCpuSeconds": 0.09262101,
+    "prepareWallSeconds": 0.166622458,
+    "protocolOutputWallSeconds": 0.009294167
+  }
+}

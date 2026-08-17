@@ -10,7 +10,8 @@ import subprocess
 import time
 
 from device import auto_device
-from train_v9 import configure_accelerator, load_v9, read_block, v9_actor_actions
+from train_v9 import (DEPLOYMENT_BASE_K, configure_accelerator, load_v9,
+                      read_block, v9_actor_actions)
 
 
 GO_AI = pathlib.Path(__file__).resolve().parents[1]
@@ -23,7 +24,7 @@ def run(args: argparse.Namespace) -> None:
     expected_extent = 5 if args.profile == "small5" else 19
     if model.shape.extent != expected_extent:
         raise RuntimeError("model extent does not match evaluation profile")
-    top_k = args.top_k or (8 if args.profile == "small5" else 16)
+    top_k = args.top_k or DEPLOYMENT_BASE_K
     environment = subprocess.Popen([
         args.environment, str(args.games), str(args.seed), str(args.environments),
         args.profile, str(args.cpu_threads), "v9",
@@ -71,7 +72,7 @@ def run(args: argparse.Namespace) -> None:
         "winRate": wins / max(completed, 1),
         "averageRounds": rounds / max(completed, 1),
         "normalizedScorePerRound": score / max(rounds, 1),
-        "topK": top_k,
+        "baseK": top_k,
         "winTolerance": args.win_tolerance,
         "proposalOnly": args.proposal_only,
         "elapsedSeconds": elapsed,
@@ -90,7 +91,8 @@ def parser() -> argparse.ArgumentParser:
         GO_AI / "build/release/go_cpp_gpu_env"))
     result.add_argument("--environments", type=int, default=32)
     result.add_argument("--cpu-threads", type=int, default=12)
-    result.add_argument("--top-k", type=int, default=0)
+    result.add_argument("--top-k", type=int, default=0,
+                        help="actor base K before adaptive boundary expansion (default: 8)")
     result.add_argument("--inference-batch", type=int, default=4096)
     result.add_argument("--win-tolerance", type=float, default=0,
                         help="score-rank finalists within this distance of best win probability")

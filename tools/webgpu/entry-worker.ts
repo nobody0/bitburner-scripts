@@ -28,7 +28,7 @@ interface WorkerSmokeResult {
 
 type WorkerRpcRequest =
   | { type: "install"; positionId: string; view: GoView }
-  | { type: "evaluate"; positionId: string; seeds: number[] }
+  | { type: "evaluate"; positionId: string; dispatchPlaytime: number }
   | { type: "reset" };
 
 async function smokeWorker(): Promise<WorkerSmokeResult> {
@@ -97,17 +97,17 @@ async function smokeWorker(): Promise<WorkerSmokeResult> {
     const installed = await request({ type: "install", positionId, view });
     if (installed.type !== "installed") throw new Error(`unexpected ${installed.type}`);
     const coldAt = performance.now();
-    const evaluated = await request({ type: "evaluate", positionId, seeds: [10_200] });
+    const evaluated = await request({ type: "evaluate", positionId, dispatchPlaytime: 10_000 });
     const coldMs = performance.now() - coldAt;
     if (evaluated.type !== "evaluated") throw new Error(`unexpected ${evaluated.type}`);
     const cachedAt = performance.now();
-    const repeated = await request({ type: "evaluate", positionId, seeds: [10_200] });
+    const repeated = await request({ type: "evaluate", positionId, dispatchPlaytime: 10_000 });
     const cachedMs = performance.now() - cachedAt;
     if (repeated.type !== "evaluated") throw new Error(`unexpected ${repeated.type}`);
     const hint = evaluated.value.continuations[0];
     if (!hint) throw new Error("cold decision produced no continuation to precompute");
     const action = evaluated.value.decision.action;
-    if (action.type !== "move" && action.type !== "pass") throw new Error(`unexpected ${action.type}`);
+    if (action.type === "resume" || action.type === "newGame") throw new Error(`unexpected ${action.type}`);
     const turnId = "worker-smoke:1";
     const timing = nextGoTurnTiming(10_000, 0, hint.wait);
     const dispatchWallAt = Date.now() - timing.responseWallMs + 250;
@@ -119,12 +119,12 @@ async function smokeWorker(): Promise<WorkerSmokeResult> {
       type: "commit",
       turnId,
       positionId,
-      seeds: [10_200],
       dispatchPlaytime: 10_000,
       dispatchWallAt,
       nextRolloverAt: dispatchWallAt + GO_ENGINE_CYCLE_MS,
-      bonusCycles: 0,
-      action,
+      action: action.type === "cheatTwoMoves"
+        ? { type: action.type, x1: action.x1, y1: action.y1, x2: action.x2, y2: action.y2 }
+        : action.type === "pass" ? { type: action.type } : { type: action.type, x: action.x, y: action.y },
     } satisfies GoWorkerRequest);
     const pushed = await predicted;
     const pushedMs = performance.now() - pushedAt;
@@ -154,7 +154,7 @@ async function smokeWorker(): Promise<WorkerSmokeResult> {
     const pushedCached = await request({
       type: "evaluate",
       positionId: pushed.prediction.positionId,
-      seeds: pushed.prediction.seeds,
+      dispatchPlaytime: pushed.prediction.dispatchPlaytime,
     });
     const pushedCachedMs = performance.now() - pushedCachedAt;
     if (pushedCached.type !== "evaluated" || !pushedCached.value.cached) {
@@ -169,12 +169,12 @@ async function smokeWorker(): Promise<WorkerSmokeResult> {
       type: "commit",
       turnId: badTurnId,
       positionId,
-      seeds: [10_200],
       dispatchPlaytime: 10_000,
       dispatchWallAt: badDispatchAt,
       nextRolloverAt: badDispatchAt + GO_ENGINE_CYCLE_MS,
-      bonusCycles: 0,
-      action,
+      action: action.type === "cheatTwoMoves"
+        ? { type: action.type, x1: action.x1, y1: action.y1, x2: action.x2, y2: action.y2 }
+        : action.type === "pass" ? { type: action.type } : { type: action.type, x: action.x, y: action.y },
     } satisfies GoWorkerRequest);
     worker.postMessage({
       type: "confirm",
@@ -198,7 +198,7 @@ async function smokeWorker(): Promise<WorkerSmokeResult> {
     if (reinstalled.type !== "installed" || reinstalled.cached) {
       throw new Error("worker reset retained a prepared position");
     }
-    const afterReset = await request({ type: "evaluate", positionId, seeds: [10_200] });
+    const afterReset = await request({ type: "evaluate", positionId, dispatchPlaytime: 10_000 });
     if (afterReset.type !== "evaluated") throw new Error(`unexpected ${afterReset.type}`);
     return {
       ok: true,

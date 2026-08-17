@@ -21,7 +21,7 @@ describe("aggregate Go simulation lane", () => {
   test("uses no WebGPU while retaining exact immediate transitions and a legal trigger", async () => {
     const runtime = new AggregateGoNeuralRuntime();
     const installed = await runtime.install(activeView);
-    const evaluated = await runtime.evaluate(installed.positionId, [0]);
+    const evaluated = await runtime.evaluate(installed.positionId, 10_000);
     expect(evaluated.backend).toBe("aggregate");
     expect(evaluated.decision.action).toMatchObject({ type: "move" });
     expect(evaluated.decision.positionValue).toBe(GO_REWARD_RULES.Netburners.priorWinProbability);
@@ -33,7 +33,7 @@ describe("aggregate Go simulation lane", () => {
       nextGame: { opponent: "Daedalus", boardSize: 5, why: "test" },
     };
     const next = await runtime.install(completed);
-    expect((await runtime.evaluate(next.positionId, [0])).decision.action).toMatchObject({
+    expect((await runtime.evaluate(next.positionId, 10_000)).decision.action).toMatchObject({
       type: "newGame",
       opponent: "Daedalus",
       boardSize: 5,

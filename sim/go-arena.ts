@@ -7,17 +7,26 @@
  * WebGPU; run this arena through `bun run go:gpu -- --arena` in Chromium.
  */
 import {
+  applyGoCheat,
+  isGoCheatAction,
   playMove,
   scoreBoard,
   type GoBoard,
   type GoDecision,
+  type GoCheatState,
+  type GoPlayingAction,
   type GoRewardOpponent,
 } from "../shared/strategy/go/rules.ts";
 import {
   finalizeNeuralGoDecision,
+  type GoSeedWaitV1,
+  GO_PROFILE_CANDIDATE_LIMITS,
+  goModelProfile,
   GoNeuralEngine,
   prepareNeuralGoDecision,
   type GoValueBackendFactory,
+  type GoDeepSearchV1,
+  type GoModelArtifactOverrides,
 } from "../shared/strategy/go/neural/engine.ts";
 import { createRequiredWebGpuGoValueBackend } from "../shared/strategy/go/neural/webgpu.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
@@ -55,10 +64,81 @@ export function goArenaSeeds(count: number, start = 1_000): number[] {
     ((startTick + index * strideTicks) % periodTicks) * GO_ENGINE_CYCLE_MS);
 }
 
+function mixUint32(value: number): number {
+  let mixed = value >>> 0;
+  mixed = Math.imul(mixed ^ (mixed >>> 16), 0x7feb352d) >>> 0;
+  mixed = Math.imul(mixed ^ (mixed >>> 15), 0x846ca68b) >>> 0;
+  return (mixed ^ (mixed >>> 16)) >>> 0;
+}
+
+function randomFor(seed: number): () => number {
+  let state = Math.floor(seed) >>> 0;
+  return () => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    return state / 0x1_0000_0000;
+  };
+}
+
+export function goArenaDefenseRoll(seed: number): number {
+  return randomFor(seed)();
+}
+
+/** A second deterministic corpus stream for Bitburner's unseeded handicap
+ * placement. `start` is independent of the playtime seed used by WHRNG. */
+export function goArenaHandicapSeeds(count: number, start: number): number[] {
+  const length = Math.max(0, Math.floor(count));
+  const initial = Math.floor(start) >>> 0;
+  return Array.from({ length }, (_, index) =>
+    mixUint32((initial + Math.imul(index, 0x9e3779b9)) >>> 0));
+}
+
+export function goArenaSeedPairs(
+  count: number,
+  playtimeStart = 1_000,
+  handicapStart = mixUint32(Math.floor(playtimeStart) ^ 0xa5a5a5a5),
+  defenseStart = mixUint32(Math.floor(playtimeStart) ^ 0x3c6ef372),
+): { seed: number; handicapSeed: number; defenseSeed: number }[] {
+  const seeds = goArenaSeeds(count, playtimeStart);
+  const handicapSeeds = goArenaHandicapSeeds(count, handicapStart);
+  const defenseSeeds = goArenaHandicapSeeds(count, defenseStart);
+  return seeds.map((seed, index) => ({
+    seed,
+    handicapSeed: handicapSeeds[index]!,
+    defenseSeed: defenseSeeds[index]!,
+  }));
+}
+
+export type GoArenaProfile = "small5" | "daemon19";
+
+/** The exact fixed corpus used by profile screens and promotion. Keeping the
+ * opponent offsets here makes browser play, pair validation, and seed-reuse
+ * checks share one definition. */
+export function goProfileArenaSeedCases(
+  profile: GoArenaProfile,
+  gamesPerOpponent: number,
+  playtimeStart: number,
+  handicapStart: number,
+  defenseStart: number,
+): { opponent: GoRewardOpponent; cases: ReturnType<typeof goArenaSeedPairs> }[] {
+  const selected = GO_ARENA_OPPONENTS.filter((opponent) =>
+    profile === "daemon19" ? opponent.name === "????????????" : opponent.requestedSize === 5);
+  return selected.map((opponent, opponentIndex) => ({
+    opponent: opponent.name,
+    cases: goArenaSeedPairs(
+      gamesPerOpponent,
+      playtimeStart + opponentIndex * 20_003,
+      handicapStart + opponentIndex * 104_729,
+      defenseStart + opponentIndex * 65_537,
+    ),
+  }));
+}
+
 export interface GoArenaGameResult {
   opponent: GoRewardOpponent;
   seed: number;
-  tieRoll: number;
+  handicapSeed: number;
+  defenseSeed: number | null;
+  tieRoll: number | null;
   size: number;
   won: boolean;
   completed: boolean;
@@ -68,7 +148,15 @@ export interface GoArenaGameResult {
   durationMs: number;
   score: { X: number; O: number };
   planningMs: number[];
+  actions: GoPlayingAction["type"][];
   finalists: number[];
+  cheatsPlayed: number;
+  /** Turns that spent one engine cycle to reach a seed with a winning
+   * continuation, after every candidate at the original tick lost. */
+  seedWaits: number;
+  /** Upstream faction-priority moves rejected by positional superko, which
+   * Bitburner advances past without changing the board or counting a pass. */
+  whiteNoOps: number;
   planningPhases: { preparationMs: number[]; gpuAndSelectionMs: number[] };
   trace?: GoArenaTurnTrace[];
 }
@@ -79,7 +167,11 @@ export interface GoArenaTurnTrace {
   board: string[];
   previousBoards: string[][];
   consecutivePasses: number;
-  black: { type: "move"; x: number; y: number } | { type: "pass" };
+  black:
+    | { type: "move"; x: number; y: number }
+    | { type: "pass" }
+    | { type: "cheatTwoMoves"; x1: number; y1: number; x2: number; y2: number }
+    | { type: "cheatRemoveRouter" | "cheatDestroyNode" | "cheatRepairNode"; x: number; y: number };
   predicted: { x: number | null; y: number | null; count: number }[];
   white: { type: "move"; x: number; y: number } | { type: "pass" };
   planningMs: number;
@@ -93,6 +185,7 @@ export interface GoArenaInitialState {
   previousBoards: readonly string[][];
   consecutivePasses: number;
   dispatchPlaytime: number;
+  cheatCount?: number;
 }
 
 export interface GoArenaSummary {
@@ -107,8 +200,15 @@ export interface GoArenaSummary {
   meanBlackScore: number;
   meanDurationMs: number;
   decisions: number;
+  meanCheatsPlayed: number;
   latencyMs: { p50: number; p95: number; p99: number; p999: number; max: number };
-  losingSeeds: { seed: number; tieRoll: number; margin: number }[];
+  losingSeeds: {
+    seed: number;
+    handicapSeed: number;
+    defenseSeed: number | null;
+    tieRoll: number | null;
+    margin: number;
+  }[];
 }
 
 export interface GoArenaOptions {
@@ -117,6 +217,45 @@ export interface GoArenaOptions {
   forcedOpening?: readonly [number, number];
   initialBoard?: GoBoard;
   initialState?: GoArenaInitialState;
+  /** Independent seed for the game's unseeded initial handicap placement. */
+  handicapSeed?: number;
+  /** Independent stream for the upstream AI's unseeded defense tie-break.
+   * Pass null only for deliberate fixed-roll diagnostics such as --all-ties. */
+  defenseSeed?: number | null;
+  /** Disabled by default for clean A/B comparisons. `true` enables the SF14.2
+   * count-decay schedule; an object exposes latency budgets and an optional
+   * fixed success chance for stress tests. */
+  cheat?: boolean | {
+    enabled: boolean;
+    successChance?: number;
+    candidateLimit?: number;
+    doubleMoveLimit?: number;
+  };
+}
+
+function arenaCheatConfig(options: GoArenaOptions, boardSize: number): Omit<GoCheatState, "count"> | undefined {
+  if (!options.cheat) return undefined;
+  const config = options.cheat === true ? { enabled: true } : options.cheat;
+  if (!config.enabled) return undefined;
+  if (config.successChance !== undefined
+    && (!Number.isFinite(config.successChance) || config.successChance < 0 || config.successChance > 1)) {
+    throw new Error(`arena cheat successChance must be between 0 and 1, got ${config.successChance}`);
+  }
+  const candidateLimit = config.candidateLimit ?? (boardSize === 19 ? 0 : 4);
+  const doubleMoveLimit = config.doubleMoveLimit ?? (boardSize === 19 ? 1 : 2);
+  if (!Number.isFinite(candidateLimit) || candidateLimit < 0) {
+    throw new Error(`arena cheat candidateLimit must be nonnegative, got ${candidateLimit}`);
+  }
+  if (!Number.isFinite(doubleMoveLimit) || doubleMoveLimit < 1) {
+    throw new Error(`arena cheat doubleMoveLimit must be positive, got ${doubleMoveLimit}`);
+  }
+  return {
+    unlocked: true,
+    successByCount: Array.from({ length: 1_024 }, (_, cheatCount) => config.successChance
+      ?? Math.max(0, Math.min(1, 0.6 * (0.7 - 0.02 * cheatCount) ** cheatCount))),
+    candidateLimit: Math.floor(candidateLimit),
+    doubleMoveLimit: Math.floor(doubleMoveLimit),
+  };
 }
 
 function percentile(sorted: readonly number[], fraction: number): number {
@@ -154,9 +293,19 @@ let arenaEngine = new GoNeuralEngine((weights) => createRequiredWebGpuGoValueBac
 
 /** Swap the value backend under the arena for planner-only tests. Production
  * and browser arenas use the required WebGPU factory above. */
-export function configureGoArenaEngine(factory: GoValueBackendFactory): void {
+/** Arena-wide seed-wait policy; `undefined` resolves the production default,
+ * `null` disables it for a baseline arm. */
+let arenaSeedWait: GoSeedWaitV1 | null | undefined;
+
+export function configureGoArenaEngine(
+  factory: GoValueBackendFactory,
+  artifacts: GoModelArtifactOverrides = {},
+  deepSearch?: GoDeepSearchV1 | null,
+  seedWait?: GoSeedWaitV1 | null,
+): void {
   void arenaEngine.dispose();
-  arenaEngine = new GoNeuralEngine(factory);
+  arenaEngine = new GoNeuralEngine(factory, artifacts, deepSearch);
+  arenaSeedWait = seedWait;
 }
 
 async function decideGoArenaBlack(
@@ -167,6 +316,7 @@ async function decideGoArenaBlack(
   dispatchPlaytime: number,
   consecutivePasses: number,
   candidateLimit?: number,
+  cheat?: GoCheatState,
 ): Promise<{ decision: GoDecision; preparationMs: number; gpuAndSelectionMs: number }> {
   const started = performance.now();
   const view = {
@@ -177,6 +327,8 @@ async function decideGoArenaBlack(
     previousBoards: history,
     komi,
     consecutivePasses,
+    bonusCycles: 0,
+    ...(cheat ? { cheat } : {}),
     ...(candidateLimit !== undefined ? { candidateLimit } : {}),
   } as const;
   const prepared = prepareNeuralGoDecision(view);
@@ -185,7 +337,8 @@ async function decideGoArenaBlack(
   // V9 keeps exact opponent preparation lazy, so there is no separate
   // prediction phase to measure: finalization owns reply prediction for the
   // retained finalists and is timed as one phase with the GPU batch.
-  const decision = await finalizeNeuralGoDecision(prepared, [seed], arenaEngine);
+  const decision = await finalizeNeuralGoDecision(prepared, [seed], arenaEngine, dispatchPlaytime,
+    arenaSeedWait === undefined ? undefined : { seedWait: arenaSeedWait });
   const finalizedAt = performance.now();
   return {
     decision,
@@ -197,29 +350,57 @@ async function decideGoArenaBlack(
 export async function playGoArenaGame(
   definition: GoArenaOpponent,
   seed: number,
-  tieRoll = 0.5,
+  tieRoll: number | undefined = undefined,
   includeTrace = false,
   options: GoArenaOptions = {},
 ): Promise<GoArenaGameResult> {
   const { initialState, initialBoard, forcedOpening } = options;
+  const handicapSeed = options.handicapSeed
+    ?? goArenaHandicapSeeds(1, mixUint32(Math.floor(seed) ^ 0xa5a5a5a5))[0]!;
+  const defenseSeed = options.defenseSeed === null
+    ? null
+    : options.defenseSeed
+      ?? goArenaHandicapSeeds(1, mixUint32(Math.floor(seed) ^ 0x3c6ef372))[0]!;
+  if (defenseSeed === null && tieRoll === undefined) {
+    throw new Error("fixed-roll diagnostics require an explicit tie roll");
+  }
+  const defenseRandom = defenseSeed === null ? () => tieRoll! : randomFor(defenseSeed);
   let board = initialState
     ? { size: initialState.board.size, rows: [...initialState.board.rows] }
     : initialBoard
       ? { size: initialBoard.size, rows: [...initialBoard.rows] }
-    : oracleInitialBoard(definition.requestedSize, definition.oracle, seed);
+    : oracleInitialBoard(definition.requestedSize, definition.oracle, seed, handicapSeed);
   const history: string[][] = initialState
     ? initialState.previousBoards.map((position) => [...position])
     : [];
   let consecutivePasses = initialState?.consecutivePasses ?? 0;
+  let cheatCount = initialState?.cheatCount ?? 0;
+  let cheatsPlayed = 0;
+  let whiteNoOps = 0;
   let turns = 0;
+  let seedWaits = 0;
   let dispatchPlaytime = initialState?.dispatchPlaytime
     ?? Math.floor(seed / GO_ENGINE_CYCLE_MS) * GO_ENGINE_CYCLE_MS;
   const startedPlaytime = dispatchPlaytime;
+  // Sub-tick wall clock the engine has not yet converted into a tick. Other
+  // scripts and Black's own planning consume an uncontrolled 5..90 ms per
+  // turn, so the branch-exact reply base can slip one extra tick — exactly
+  // the base/base+1 window live play exhibits. White's seed is unaffected:
+  // its first wait is a full cycle, so the seed phase stays dispatch + 1.
+  // Seeded per game so paired A/B candidate runs see identical timing noise.
+  const timingRandom = randomFor(mixUint32(Math.floor(seed) ^ 0x1b873593));
+  let subTickOffsetMs = Math.floor(timingRandom() * 50);
   const planningMs: number[] = [];
+  const actions: GoPlayingAction["type"][] = [];
   const finalists: number[] = [];
   const planningPhases = { preparationMs: [] as number[], gpuAndSelectionMs: [] as number[] };
   const trace: GoArenaTurnTrace[] = [];
-  const maxTurns = board.size * board.size * 4;
+  const cheatConfig = arenaCheatConfig(options, board.size);
+  // This is a runaway guard, not a game rule. A valid 5x5 candidate exceeded
+  // the former 4*area cap during a large promotion screen, which truncated a
+  // real game and made the entire paired corpus unusable. Keep the cap high
+  // enough for long legal fights and still fail the arena if play never ends.
+  const maxTurns = board.size * board.size * 8;
   const originalRandom = Math.random;
   try {
     while (consecutivePasses < 2 && turns < maxTurns) {
@@ -246,6 +427,7 @@ export async function playGoArenaGame(
           dispatchPlaytime,
           consecutivePasses,
           options.candidateLimit,
+          cheatConfig ? { ...cheatConfig, count: cheatCount } : undefined,
         );
         decision = planned.decision;
         finalists.push(decision.finalists);
@@ -254,6 +436,18 @@ export async function playGoArenaGame(
       }
       const elapsed = performance.now() - started;
       planningMs.push(elapsed);
+      if (decision.action.type === "resume" || decision.action.type === "newGame") {
+        throw new Error(`arena received non-playing decision ${decision.action.type}`);
+      }
+      // The decision may have been computed for a later tick because every
+      // continuation at this one was predicted to lose. Spend that cycle: the
+      // action is only correct in the tick it was chosen for, since White's
+      // reply is seeded from the dispatch tick.
+      if (decision.dispatchOffsetMs) {
+        dispatchPlaytime += decision.dispatchOffsetMs;
+        seedWaits++;
+      }
+      actions.push(decision.action.type);
       if (decision.action.type === "move") {
         const played = playMove(
           board,
@@ -266,23 +460,31 @@ export async function playGoArenaGame(
         history.unshift(board.rows);
         board = played.board;
         consecutivePasses = 0;
+      } else if (isGoCheatAction(decision.action)) {
+        const cheated = applyGoCheat(board, decision.action);
+        if (!cheated) throw new Error(`arena black returned invalid ${decision.action.type}`);
+        board = cheated.board;
+        consecutivePasses = 0;
+        cheatCount++;
+        cheatsPlayed++;
       } else if (decision.action.type === "pass") {
         consecutivePasses++;
-      } else {
-        throw new Error(`arena received non-playing decision ${decision.action.type}`);
       }
       turns++;
       if (consecutivePasses >= 2) break;
 
       const state = oracleState(board, history, consecutivePasses, definition.oracle);
       const aiSeed = alignedAiSeed(dispatchPlaytime, 0);
-      Math.random = () => tieRoll;
+      Math.random = defenseRandom;
       sleepLog.length = 0;
       const white = await getMove(state, GoColor.white, definition.oracle, false, aiSeed);
       const waitMs = sleepLog.reduce((sum, milliseconds) => sum + milliseconds, 0)
         // handleNextTurn performs one final wait before placing a non-pass.
         + (white.type === GoPlayType.move ? GO_ENGINE_CYCLE_MS : 0);
-      dispatchPlaytime += Math.floor(waitMs / GO_ENGINE_CYCLE_MS) * GO_ENGINE_CYCLE_MS;
+      const jitterMs = 5 + Math.floor(timingRandom() * 86);
+      const advancedMs = subTickOffsetMs + waitMs + jitterMs;
+      dispatchPlaytime += Math.floor(advancedMs / GO_ENGINE_CYCLE_MS) * GO_ENGINE_CYCLE_MS;
+      subTickOffsetMs = advancedMs % GO_ENGINE_CYCLE_MS;
       if (white.type === GoPlayType.move) {
         const played = playMove(
           board,
@@ -291,17 +493,23 @@ export async function playGoArenaGame(
           "O",
           new Set(history.map((position) => position.join(""))),
         );
-        if (!played) throw new Error(`upstream oracle returned illegal ${white.x},${white.y}`);
-        history.unshift(board.rows);
-        board = played.board;
-        consecutivePasses = 0;
+        if (played) {
+          history.unshift(board.rows);
+          board = played.board;
+          consecutivePasses = 0;
+        } else {
+          // Upstream validates fallback moves but not faction-priority moves, so
+          // positional superko can very rarely reject the AI's chosen coordinate.
+          // Bitburner logs it and advances to black without changing the board and
+          // without counting a pass. `apply_to_position()` and the native arena
+          // model that exact no-op; crashing here instead aborted a whole gate.
+          whiteNoOps++;
+        }
       } else {
         consecutivePasses++;
       }
       if (includeTrace) {
-        const black = decision.action.type === "move"
-          ? { type: "move" as const, x: decision.action.x, y: decision.action.y }
-          : { type: "pass" as const };
+        const { why: _why, ...black } = decision.action;
         trace.push({
           turn: turns - 1,
           dispatchPlaytime: inputDispatchPlaytime,
@@ -326,7 +534,9 @@ export async function playGoArenaGame(
   return {
     opponent: definition.name,
     seed,
-    tieRoll,
+    handicapSeed,
+    defenseSeed,
+    tieRoll: defenseSeed === null ? tieRoll! : null,
     size: board.size,
     won: score.X >= score.O,
     completed: consecutivePasses >= 2,
@@ -334,7 +544,11 @@ export async function playGoArenaGame(
     durationMs: dispatchPlaytime - startedPlaytime,
     score,
     planningMs,
+    actions,
     finalists,
+    cheatsPlayed,
+    seedWaits,
+    whiteNoOps,
     planningPhases,
     ...(includeTrace ? { trace } : {}),
   };
@@ -352,6 +566,7 @@ export function playGoArenaPosition(
   return playGoArenaGame(definition, seed, tieRoll, false, {
     initialState,
     forcedOpening: forcedAction,
+    defenseSeed: null,
   });
 }
 
@@ -370,6 +585,7 @@ export function summarizeGoArena(opponent: GoRewardOpponent, games: readonly GoA
     meanBlackScore: games.length ? games.reduce((sum, game) => sum + game.score.X, 0) / games.length : 0,
     meanDurationMs: games.length ? games.reduce((sum, game) => sum + game.durationMs, 0) / games.length : 0,
     decisions: times.length,
+    meanCheatsPlayed: games.length ? games.reduce((sum, game) => sum + game.cheatsPlayed, 0) / games.length : 0,
     latencyMs: {
       p50: percentile(times, 0.5),
       p95: percentile(times, 0.95),
@@ -379,7 +595,13 @@ export function summarizeGoArena(opponent: GoRewardOpponent, games: readonly GoA
     },
     losingSeeds: games
       .filter((game) => !game.won)
-      .map((game) => ({ seed: game.seed, tieRoll: game.tieRoll, margin: game.score.X - game.score.O })),
+      .map((game) => ({
+        seed: game.seed,
+        handicapSeed: game.handicapSeed,
+        defenseSeed: game.defenseSeed,
+        tieRoll: game.tieRoll,
+        margin: game.score.X - game.score.O,
+      })),
   };
 }
 
@@ -403,15 +625,32 @@ function coordinateFlag(name: string): readonly [number, number] | undefined {
 async function main(): Promise<void> {
   const count = Math.max(1, Math.floor(numberFlag("--games", 24)));
   const start = numberFlag("--seed", 1_000);
+  const handicapStart = numberFlag("--handicap-seed", Math.floor(start) ^ 0xa5a5a5a5);
+  const defenseStart = numberFlag("--defense-seed", Math.floor(start) ^ 0x3c6ef372);
   const stepIndex = Bun.argv.indexOf("--seed-step");
   const seeds = stepIndex >= 0
     ? Array.from({ length: count }, (_, index) => start + index * Number(Bun.argv[stepIndex + 1] ?? 4_000))
     : goArenaSeeds(count, start);
-  const requested = Bun.argv.includes("--all-ties") ? [0, 0.25, 0.5, 0.75, 0.999999] : [0.5];
+  const handicapSeeds = goArenaHandicapSeeds(count, handicapStart);
+  const defenseSeeds = goArenaHandicapSeeds(count, defenseStart);
+  const allTies = Bun.argv.includes("--all-ties");
+  const requested: (number | undefined)[] = allTies
+    ? [0, 0.25, 0.5, 0.75, 0.999999]
+    : [undefined];
   const includeTrace = Bun.argv.includes("--trace");
   const candidateLimitIndex = Bun.argv.indexOf("--candidate-limit");
   const candidateLimit = candidateLimitIndex >= 0 ? Number(Bun.argv[candidateLimitIndex + 1]) : undefined;
   const forcedOpening = coordinateFlag("--opening");
+  const cheatEnabled = Bun.argv.includes("--cheat");
+  const cheatChance = Bun.argv.includes("--cheat-chance")
+    ? numberFlag("--cheat-chance", 1)
+    : undefined;
+  const cheatCandidateLimit = Bun.argv.includes("--cheat-k")
+    ? Math.max(0, Math.floor(numberFlag("--cheat-k", 4)))
+    : undefined;
+  const cheatDoubleMoveLimit = Bun.argv.includes("--cheat-double-k")
+    ? Math.max(1, Math.floor(numberFlag("--cheat-double-k", 2)))
+    : undefined;
   const selected = GO_ARENA_OPPONENTS.filter((opponent) => {
     const index = Bun.argv.indexOf("--opponent");
     if (index < 0) return true;
@@ -425,12 +664,28 @@ async function main(): Promise<void> {
     const opponent = boardSize === 5 || boardSize === 7 || boardSize === 9 || boardSize === 13
       ? { ...selectedOpponent, requestedSize: boardSize as 5 | 7 | 9 | 13 }
       : selectedOpponent;
+    // The secret opponent plays on a 19x19 board regardless of requested size.
+    const playedSize = opponent.name === "????????????" ? 19 : opponent.requestedSize;
+    console.log(JSON.stringify({ type: "config", opponent: opponent.name,
+      candidateLimit: candidateLimit ?? GO_PROFILE_CANDIDATE_LIMITS[goModelProfile(playedSize)],
+      candidateLimitSource: candidateLimit === undefined ? "profile-default" : "explicit" }));
     const games: GoArenaGameResult[] = [];
-    for (const seed of seeds) {
+    for (let seedIndex = 0; seedIndex < seeds.length; seedIndex++) {
+      const seed = seeds[seedIndex]!;
+      const handicapSeed = handicapSeeds[seedIndex]!;
+      const defenseSeed = defenseSeeds[seedIndex]!;
       for (const tieRoll of requested) {
         const game = await playGoArenaGame(opponent, seed, tieRoll, includeTrace, {
+          handicapSeed,
+          defenseSeed: allTies ? null : defenseSeed,
           ...(candidateLimit !== undefined ? { candidateLimit } : {}),
           ...(forcedOpening ? { forcedOpening } : {}),
+          ...(cheatEnabled ? { cheat: {
+            enabled: true,
+            ...(cheatChance !== undefined ? { successChance: cheatChance } : {}),
+            ...(cheatCandidateLimit !== undefined ? { candidateLimit: cheatCandidateLimit } : {}),
+            ...(cheatDoubleMoveLimit !== undefined ? { doubleMoveLimit: cheatDoubleMoveLimit } : {}),
+          } } : {}),
         });
         games.push(game);
         if (includeTrace) console.log(JSON.stringify({ type: "game", ...game }));

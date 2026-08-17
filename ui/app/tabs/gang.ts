@@ -1,4 +1,4 @@
-import { bar, card, meter, note, table, tiles } from "../lib/dom.ts";
+import { bar, card, dataTable, meter, note, outcome, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -7,7 +7,7 @@ export const gangTab: Tab = {
   id: "gang",
   render(state: ProjectedState) {
     const g = state.topics.gang;
-    if (!g) return note("waiting for the gang probe");
+    if (!g) return waiting("the gang probe");
 
     const summary = tiles([
       { label: "faction", value: g.faction, sub: g.isHacking ? "hacking gang" : "combat gang" },
@@ -24,24 +24,32 @@ export const gangTab: Tab = {
       ...(g.bonusTime ? [{ label: "bonus time", value: fmtTime(g.bonusTime) }] : []),
     ]);
 
-    const members = table(
-      ["member", "task", "respect/s", "wanted/s", "$/s", "hack", "str", "def", "dex", "agi", "cha", "aug"],
-      g.members.map((m) => [
-        esc(m.name),
-        esc(m.task),
-        fmtNum(m.respectGain, 3),
-        `<span class="${m.wantedLevelGain > 0 ? "bad" : "good"}">${fmtNum(m.wantedLevelGain, 3)}</span>`,
-        fmtMoney(m.moneyGain),
-        String(m.skills.hack),
-        String(m.skills.str),
-        String(m.skills.def),
-        String(m.skills.dex),
-        String(m.skills.agi),
-        String(m.skills.cha),
-        String(m.augmentations),
-      ]),
-      { empty: "no members recruited", left: [0, 1] },
-    );
+    type Member = (typeof g.members)[number];
+    const skillColumn = (id: keyof Member["skills"]) => ({
+      id: String(id),
+      label: String(id),
+      cell: (m: Member) => String(m.skills[id]),
+      sort: (m: Member) => m.skills[id],
+    });
+    const members = dataTable("gang.members", g.members, [
+      { id: "name", label: "member", left: true, cell: (m) => esc(m.name), sort: (m) => m.name },
+      { id: "task", label: "task", left: true, cell: (m) => esc(m.task), sort: (m) => m.task },
+      { id: "respect", label: "respect/s", cell: (m) => fmtNum(m.respectGain, 3), sort: (m) => m.respectGain },
+      {
+        id: "wanted",
+        label: "wanted/s",
+        cell: (m) => `<span class="${m.wantedLevelGain > 0 ? "bad" : "good"}">${fmtNum(m.wantedLevelGain, 3)}</span>`,
+        sort: (m) => m.wantedLevelGain,
+      },
+      { id: "money", label: "$/s", cell: (m) => fmtMoney(m.moneyGain), sort: (m) => m.moneyGain },
+      skillColumn("hack"),
+      skillColumn("str"),
+      skillColumn("def"),
+      skillColumn("dex"),
+      skillColumn("agi"),
+      skillColumn("cha"),
+      { id: "aug", label: "aug", cell: (m) => String(m.augmentations), sort: (m) => m.augmentations },
+    ], { defaultSort: { key: "respect", dir: -1 }, empty: "no members recruited" });
 
     const clash = g.clashChances
       ? table(
@@ -76,17 +84,15 @@ export const gangTab: Tab = {
           }),
           { empty: "no priced assignment", left: [0, 1, 3] },
         ) +
-        (plan.lastResult
-          ? note(`${plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${plan.lastResult.detail}`)
-          : "")
+        (plan.lastResult ? outcome(plan.lastResult) : "")
       : plan
         ? note("this replay predates structured gang assignment scores")
-        : note("waiting for the first gang decision");
+        : waiting("the first gang decision");
 
     return (
       `<div class="col wide">` +
       card("Gang", summary + members) +
-      card("Assignment decision", decision) +
+      card("Decision", decision) +
       `</div>` +
       `<div class="col">` +
       card("Territory", territoryBar + note(g.territoryWarfareEngaged ? "warfare engaged" : "warfare disengaged")) +

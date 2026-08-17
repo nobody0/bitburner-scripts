@@ -12,6 +12,7 @@ import { ShareSystem } from "../features/share.ts";
 import { StanekSystem } from "../features/stanek.ts";
 import { Fragments } from "../vendor/bitburner/src/CotMG/Fragment.ts";
 import { resetUnmodeled } from "../realm/unmodeled.ts";
+import { GoOpponent } from "../vendor/bitburner/src/Go/Enums.ts";
 
 function harness(programs: string[] = [], withStock = false, bitnode = 1): { ns: NS; host: SimNsHost; world: SimWorld } {
   const world = new SimWorld({
@@ -405,6 +406,47 @@ describe("Netscript contract fidelity", () => {
     expect(ns.go.getOpponent()).toBe("Illuminati");
     expect(ns.go.analysis.getStats().Netburners?.losses).toBe(1);
     expect(ns.go.analysis.getControlledEmptyNodes()).toHaveLength(5);
+  });
+
+  test("the Go cheat surface enforces access and advances one successful cheat turn", async () => {
+    const locked = harness();
+    expect(() => locked.ns.go.cheat.getCheatCount()).toThrow("Source-File 14.2");
+
+    const { ns, host, world } = harness();
+    world.player.sourceFiles["14"] = 2;
+    expect(ns.go.cheat.getCheatCount()).toBe(0);
+    expect(ns.go.cheat.getCheatSuccessChance(0)).toBe(0.6);
+    expect(() => ns.go.cheat.getCheatCount(true)).toThrow("white-side No AI Go is not modeled");
+    let settled = false;
+    const pending = ns.go.cheat.playTwoMoves(0, 0, 6, 6).finally(() => { settled = true; });
+    expect(await host.clock.runAsync(() => settled, 60_000)).toBe("goal");
+    await pending;
+    expect(ns.go.cheat.getCheatCount()).toBe(1);
+    expect(ns.go.getBoardState().join("").split("X")).toHaveLength(3);
+  });
+
+  test("a critical cheat failure ends the game without deepening an existing dry streak", async () => {
+    const { ns, host, world } = harness();
+    world.player.sourceFiles["14"] = 2;
+    host.go!.boardState.cheatCount = 1;
+    host.go!.stats.set(GoOpponent.Netburners, {
+      wins: 0,
+      losses: 0,
+      nodes: 0,
+      nodePower: 0,
+      winStreak: -1,
+      oldWinStreak: 0,
+      highestWinStreak: 0,
+      rep: 0,
+    });
+    // WHRNG(24_200): first draw narrowly fails count-1's 0.408 chance;
+    // second draw is below the 10% ejection threshold.
+    host.clock.in(24_200, () => {});
+    host.clock.run();
+    const response = await ns.go.cheat.destroyNode(0, 0);
+    expect(response.type).toBe("gameOver");
+    expect(ns.go.cheat.getCheatCount()).toBe(1);
+    expect(host.go!.stats.get(GoOpponent.Netburners)).toMatchObject({ losses: 1, winStreak: -1 });
   });
 
   test("script totals report live per-process rates and since-install hacking separately", () => {

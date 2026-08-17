@@ -131,6 +131,12 @@ export async function runInHeadlessChrome(
   entryPath: string,
   timeoutMs = 300_000,
   globals: Readonly<Record<string, unknown>> = {},
+  /** Raw classic-script sources injected before the bundle. Used for
+   * generated data modules (e.g. the merged phase playbook) whose sheer size
+   * makes esbuild's parser blow past memory limits: the caller pre-transforms
+   * them to assign a global and the bundle reads that global instead of
+   * importing the file. */
+  preludeScripts: readonly string[] = [],
 ): Promise<ChromeWebGpuRun> {
   const bundle = await esbuild.build({
     entryPoints: [entryPath],
@@ -140,6 +146,7 @@ export async function runInHeadlessChrome(
     write: false,
     target: "chrome120",
   });
+  const bundleText = bundle.outputFiles[0]!.text;
   // The bundle is fully materialized above. Do not leave esbuild's service
   // child keeping a one-shot gate or Bun test process alive afterward.
   esbuild.stop();
@@ -151,7 +158,11 @@ export async function runInHeadlessChrome(
     pagePath,
     `<!doctype html><meta charset="utf-8"><title>go webgpu harness</title>\n`
       + `<script>Object.assign(globalThis,${serializedGlobals})</script>\n`
-      + `<script>${bundle.outputFiles[0]!.text}</script>`,
+      // `<\/` and `</` are identical inside JS string literals, so this HTML
+      // guard cannot change a data blob's contents.
+      + preludeScripts.map((script) =>
+        `<script>${script.replaceAll("</script", "<\\/script")}</script>\n`).join("")
+      + `<script>${bundleText}</script>`,
   );
 
   const chrome = spawn({

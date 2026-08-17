@@ -1,0 +1,199 @@
+@font-face {
+  font-family: "JetBrainsMono";
+  font-display: swap;
+  src: url("/fonts/JetBrainsMono.woff2") format("woff2");
+}
+
+/* Bitburner v3.0.1's default theme, expressed as viewer tokens. The series
+   aliases keep charts legible while every shared primitive uses the same
+   black/green/grey vocabulary as the game. This file is the shared
+   foundation: tokens plus element and primitive styles only — no
+   viewer-specific selectors (those live in app.css). */
+:root {
+  color-scheme: dark;
+  --bb-primary-light: #0f0;
+  --bb-primary: #0c0;
+  --bb-primary-dark: #090;
+  --bb-secondary-light: #aaa;
+  --bb-secondary: #888;
+  --bb-secondary-dark: #666;
+  --bb-well-light: #444;
+  --bb-well: #222;
+  --bb-button: #333;
+  --bb-background: #000;
+  --bb-white: #fff;
+  --bb-black: #000;
+  --bb-error: #c00;
+  --bb-warning: #cc0;
+  --bb-info: #36c;
+  --bb-hp: #dd3434;
+  --bb-money: #ffd700;
+  --bb-hack: #adff2f;
+  --bb-cha: #a671d1;
+  --bb-int: #6495ed;
+
+  --surface-1: var(--bb-background);
+  --surface-2: var(--bb-well);
+  --page: var(--bb-background);
+  --text-primary: var(--bb-primary);
+  --text-secondary: var(--bb-secondary-light);
+  --muted: var(--bb-secondary);
+  --grid: var(--bb-well);
+  --baseline: var(--bb-well-light);
+  --border: var(--bb-well-light);
+  --series-1: var(--bb-info);
+  --series-2: var(--bb-cha);
+  --series-3: var(--bb-hack);
+  --series-4: var(--bb-secondary);
+  --series-5: var(--bb-money);
+  --good: var(--bb-primary);
+  --critical: var(--bb-error);
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-base: 14px;
+  --fs-lg: 18px;
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --font-mono: JetBrainsMono, "Courier New", monospace;
+}
+
+* { box-sizing: border-box; }
+html { min-height: 100%; background: var(--bb-background); }
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--page);
+  color: var(--text-primary);
+  font: var(--fs-base)/1.5 var(--font-mono);
+  letter-spacing: 0.01em;
+}
+
+select, input, button {
+  background: var(--bb-button);
+  color: var(--bb-primary);
+  border: 1px solid var(--bb-well-light);
+  padding: var(--sp-1) var(--sp-2);
+  font: inherit;
+}
+select { max-width: 46ch; }
+button { cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: default; }
+select:hover,
+input:hover,
+button:hover:not(:disabled) {
+  background: var(--bb-background);
+  border-color: var(--bb-primary-dark);
+}
+select:focus-visible,
+input:focus-visible,
+button:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--bb-primary-light);
+  outline-offset: 2px;
+}
+input::placeholder { color: var(--bb-primary-dark); opacity: 1; }
+input[type="range"] { accent-color: var(--bb-primary); }
+input.search { padding: 2px var(--sp-2); font-size: var(--fs-sm); min-width: 18ch; }
+
+.muted { color: var(--bb-secondary); }
+.good { color: var(--bb-primary-light); }
+.bad, .fail { color: var(--critical); }
+.warn { color: var(--bb-warning); }
+
+/* A loose flex line of label/value fragments (factions plan, career). */
+.row { display: flex; gap: var(--sp-2); align-items: baseline; padding: 1px 0; flex-wrap: wrap; }
+
+/* Prose whose full explanation lives in the title tooltip. */
+.hint { border-bottom: 1px dotted var(--bb-secondary-dark); cursor: help; }
+
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: right; padding: 2px var(--sp-2); border-bottom: 1px solid var(--bb-well); white-space: nowrap; }
+/* Opt-in wrapping for prose columns (requirement trees, rationales). Without
+   it a long string forces the whole card into horizontal scroll, which is
+   both ugly and makes the rest of the panel unreadable. */
+th.wrap, td.wrap { white-space: normal; overflow-wrap: anywhere; text-align: left; }
+th.l, td.l { text-align: left; }
+th { color: var(--bb-secondary); font-weight: 500; font-size: var(--fs-sm); }
+td { color: var(--bb-primary); }
+th:first-child, td:first-child { text-align: left; }
+tbody tr:hover td { background: var(--bb-well); }
+/* The chosen row of a ranked table. */
+tr.picked td { background: rgba(0, 204, 0, 0.08); }
+tr.picked td:first-child { box-shadow: inset 2px 0 0 var(--bb-primary); }
+
+/* Sortable headers. A button, not a click handler on the th, so keyboard
+   users get the same control. */
+th .sortby {
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+th .sortby:hover,
+th .sortby.sel { color: var(--bb-primary-light); }
+th .sortby.sel { font-weight: 600; }
+
+/* --- status dot: one vocabulary across every panel --- */
+.dot { font-size: 10px; line-height: 1; margin-right: 5px; }
+.dot.good { color: var(--good); }
+.dot.ready { color: var(--series-1); }
+.dot.wait { color: var(--series-5); }
+.dot.bad { color: var(--critical); }
+.dot.off { color: var(--baseline); }
+
+/* --- in-cell meter: a bar behind its own label --- */
+.meter {
+  position: relative;
+  display: inline-block;
+  min-width: 13ch;
+  padding: 0 5px;
+  background: var(--bb-well);
+  overflow: hidden;
+  text-align: right;
+}
+.meter .fill { position: absolute; inset: 0 auto 0 0; background: var(--bb-info); opacity: 0.45; }
+.meter.done .fill { background: var(--bb-primary); opacity: 0.45; }
+.meter .lab { position: relative; }
+
+/* --- chips: statuses and clickable filters --- */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chips.filters { gap: var(--sp-1); }
+.chip { font-size: var(--fs-sm); padding: 2px var(--sp-2); border: 1px solid var(--border); }
+.chip.on { background: var(--bb-primary-dark); color: var(--bb-white); border-color: transparent; }
+.chip.idle { color: var(--text-secondary); }
+.chip.off { color: var(--muted); opacity: 0.55; }
+.chip.unknown { color: var(--muted); font-style: italic; }
+.chip.pick { cursor: pointer; background: none; color: var(--text-secondary); font: inherit; font-size: var(--fs-sm); }
+.chip.pick:hover { color: var(--bb-primary-light); }
+.chip.pick.sel { background: var(--bb-primary-dark); color: var(--bb-white); border-color: transparent; }
+.chip .badge { margin-left: 5px; opacity: 0.7; font-variant-numeric: tabular-nums; }
+
+/* --- proportional bar --- */
+.bar { display: flex; height: 14px; overflow: hidden; background: var(--grid); }
+.barkey { display: flex; gap: var(--sp-3); align-items: center; font-size: var(--fs-sm); color: var(--muted); margin-top: var(--sp-1); flex-wrap: wrap; }
+.barkey .seg { width: 10px; height: 10px; display: inline-block; margin-right: var(--sp-1); }
+.seg { display: block; height: 100%; }
+.seg.s1 { background: var(--series-1); }
+.seg.s2 { background: var(--series-2); }
+.seg.s3 { background: var(--series-3); }
+.seg.s4 { background: var(--series-4); }
+.seg.s5 { background: var(--series-5); }
+
+dl.defs { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 0; }
+dl.defs dt { color: var(--muted); font-size: var(--fs-sm); }
+dl.defs dd { margin: 0; font-variant-numeric: tabular-nums; }
+
+details { margin: 2px 0; }
+details > summary { cursor: pointer; color: var(--text-secondary); font-size: var(--fs-sm); }
+details > summary:hover { color: var(--bb-primary-light); }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; animation: none !important; }
+}

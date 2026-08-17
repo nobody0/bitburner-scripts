@@ -16,7 +16,7 @@
 import {
   type GoV9Weights,
 } from "./artifact.ts";
-import { goBoardWords, goLegalWords, type GoProposalRaw, type GoValueBackend, type GoValueBatch } from "./backend.ts";
+import { goBoardWords, goLegalWords, packGoTactical, type GoProposalRaw, type GoValueBackend, type GoValueBatch } from "./backend.ts";
 
 interface GpuBufferLike {
   mapAsync(mode: number, offset?: number, size?: number): Promise<void>;
@@ -101,6 +101,10 @@ function v9ShaderSource(weights: GoV9Weights, flags: GoWebGpuOptimizationFlags):
   const area = weights.extent * weights.extent;
   const candidates = area + 1;
   const stride = 3 + candidates;
+  // A policy-only derivative has no value tensors: its aggregate pass writes
+  // the raw zeros a neutral head would produce (decode: {0.5, 1, 1}) and the
+  // value-only entry point is not compiled at all.
+  const valueAbsent = weights.valuePath === "absent";
   let offset = 0;
   const stem = offset; offset += weights.stem.length;
   const stemBias = offset; offset += weights.stemBias.length;
@@ -117,6 +121,10 @@ function v9ShaderSource(weights: GoV9Weights, flags: GoWebGpuOptimizationFlags):
   const valueOutB = offset; offset += weights.valueOutB.length;
   const policyW = offset; offset += weights.policyW.length;
   const policyB = offset; offset += weights.policyB.length;
+  const globalPolicyW1 = offset; offset += weights.globalPolicyW1.length;
+  const globalPolicyB1 = offset; offset += weights.globalPolicyB1.length;
+  const globalPolicyW2 = offset; offset += weights.globalPolicyW2.length;
+  const globalPolicyB2 = offset; offset += weights.globalPolicyB2.length;
   const passW = offset; offset += weights.passW.length;
   const passB = offset; offset += weights.passB.length;
   const activationStorage = flags.f16Activations ? "f16" : "f32";
@@ -137,9 +145,11 @@ const CHANNELS:u32=${weights.channels}u; const BLOCKS:u32=${weights.residualBloc
 const BEHAVIOR:u32=${weights.behaviorFeatures}u; const HIDDEN:u32=${weights.hidden}u;
 const TOWER:u32=${weights.valueTower}u;
 const VALUE_RANK:u32=${weights.valueRank}u;
+const GLOBAL_POLICY_RANK:u32=${weights.globalPolicyRank}u;
 const WORKGROUP_CACHE:bool=${flags.workgroupCache};
 const VECTOR_CHANNELS:bool=${flags.vectorizedChannels};
 const CANDIDATES:u32=${candidates}u; const STRIDE:u32=${stride}u; const POOLED:u32=${weights.channels * 25}u;
+const INPUTS:u32=${weights.inputChannels}u;
 const STEM:u32=${stem}u; const STEM_BIAS:u32=${stemBias}u;
 const RESIDUAL:u32=${residual}u; const RESIDUAL_BIAS:u32=${residualBias}u;
 const COND_W:u32=${conditioningW}u; const COND_B:u32=${conditioningB}u;
@@ -148,6 +158,8 @@ const VALUE_W1_RIGHT:u32=${valueW1Right}u;
 const VALUE_W2:u32=${valueW2}u; const VALUE_B2:u32=${valueB2}u;
 const VALUE_OUT_W:u32=${valueOutW}u; const VALUE_OUT_B:u32=${valueOutB}u;
 const POLICY_W:u32=${policyW}u; const POLICY_B:u32=${policyB}u;
+const GLOBAL_POLICY_W1:u32=${globalPolicyW1}u; const GLOBAL_POLICY_B1:u32=${globalPolicyB1}u;
+const GLOBAL_POLICY_W2:u32=${globalPolicyW2}u; const GLOBAL_POLICY_B2:u32=${globalPolicyB2}u;
 const PASS_W:u32=${passW}u; const PASS_B:u32=${passB}u;
 struct Params { count:u32, block:u32, unused0:u32, unused1:u32 }
 @group(0) @binding(0) var<uniform> params:Params;
@@ -160,6 +172,7 @@ struct Params { count:u32, block:u32, unused0:u32, unused1:u32 }
 @group(0) @binding(7) var<storage,read_write> scratch:array<${activationStorage}>;
 @group(0) @binding(8) var<storage,read_write> results:array<f32>;
 @group(0) @binding(9) var<storage,read_write> values:array<f32>;
+@group(0) @binding(10) var<storage,read> tactical:array<u32>;
 fn ai(board:u32,channel:u32,point:u32)->u32{return(board*CHANNELS+channel)*AREA+point;}
 fn weightAt(index:u32)->f32{return weights[index];}
 ${activationHelpers}
@@ -167,7 +180,9 @@ fn inputValue(board:u32,channel:u32,point:u32)->f32{
   if(channel<3u){let code=(boards[board*BOARD_WORDS+(point>>4u)]>>((point&15u)*2u))&3u;
     return select(0.0,1.0,code==channel+1u);}
   if(channel==3u){return f32((legal[board*LEGAL_WORDS+(point>>5u)]>>(point&31u))&1u);}
-  return states[board*4u+channel-4u];
+  if(channel<8u){return states[board*4u+channel-4u];}
+  let plane=channel-8u;
+  return f32((tactical[(board*8u+plane)*LEGAL_WORDS+(point>>5u)]>>(point&31u))&1u);
 }
 fn behaviorCondition(board:u32,output:u32)->f32{
   let row=(params.block*CHANNELS+output)*BEHAVIOR;
@@ -176,10 +191,10 @@ fn behaviorCondition(board:u32,output:u32)->f32{
     condition+=weightAt(COND_W+row+feature)*behaviors[board*BEHAVIOR+feature];}
   return condition;
 }
-var<workgroup> convolutionKernel:array<f32,${weights.channels * 9}>;
+var<workgroup> convolutionKernel:array<f32,${Math.max(weights.channels, weights.inputChannels) * 9}>;
 var<workgroup> sharedCondition:f32;
 fn stemKernel(output:u32,input:u32,kernel:u32)->f32{
-  let local=input*9u+kernel;var value=weightAt(STEM+output*72u+local);
+  let local=input*9u+kernel;var value=weightAt(STEM+output*INPUTS*9u+local);
   if(WORKGROUP_CACHE){value=convolutionKernel[local];}return value;
 }
 fn residualKernel(base:u32,output:u32,input:u32,kernel:u32)->f32{
@@ -195,7 +210,7 @@ fn stemPass(@builtin(global_invocation_id) id:vec3<u32>,
   @builtin(local_invocation_index) lane:u32){
   let point=id.x;let output=id.y;let board=id.z;
   if(WORKGROUP_CACHE){
-    for(var task=lane;task<72u;task+=64u){convolutionKernel[task]=weightAt(STEM+output*72u+task);}
+    for(var task=lane;task<INPUTS*9u;task+=64u){convolutionKernel[task]=weightAt(STEM+output*INPUTS*9u+task);}
     workgroupBarrier();}
   if(point>=AREA||board>=params.count){return;}
   let x=i32(point/EXTENT);let y=i32(point%EXTENT);var value=weightAt(STEM_BIAS+output);
@@ -203,12 +218,12 @@ fn stemPass(@builtin(global_invocation_id) id:vec3<u32>,
     let nx=x+dx;if(nx<0i||nx>=i32(EXTENT)){continue;}
     for(var dy=-1i;dy<=1i;dy++){let ny=y+dy;if(ny<0i||ny>=i32(EXTENT)){continue;}
       let source=u32(nx)*EXTENT+u32(ny);let kernel=u32(dx+1i)*3u+u32(dy+1i);
-      for(var input=0u;input<8u;input+=4u){
+      for(var input=0u;input<INPUTS;input+=4u){
         let w=vec4<f32>(stemKernel(output,input,kernel),stemKernel(output,input+1u,kernel),
           stemKernel(output,input+2u,kernel),stemKernel(output,input+3u,kernel));
         let a=vec4<f32>(inputValue(board,input,source),inputValue(board,input+1u,source),
           inputValue(board,input+2u,source),inputValue(board,input+3u,source));value+=dot(w,a);}
-  }}}else{for(var input=0u;input<8u;input++){for(var dx=-1i;dx<=1i;dx++){
+  }}}else{for(var input=0u;input<INPUTS;input++){for(var dx=-1i;dx<=1i;dx++){
     let nx=x+dx;if(nx<0i||nx>=i32(EXTENT)){continue;}
     for(var dy=-1i;dy<=1i;dy++){let ny=y+dy;if(ny<0i||ny>=i32(EXTENT)){continue;}
       value+=stemKernel(output,input,u32(dx+1i)*3u+u32(dy+1i))
@@ -293,9 +308,10 @@ fn pointHeads(@builtin(global_invocation_id) id:vec3<u32>,
   results[base+3u+point]=moveScore;
 }
 var<workgroup> pooled:array<f32,${weights.channels * 25}>;
-var<workgroup> valueHidden:array<f32,${weights.hidden}>;
+${valueAbsent ? "" : `var<workgroup> valueHidden:array<f32,${weights.hidden}>;
 var<workgroup> valueRankHidden:array<f32,${Math.max(weights.valueRank, 1)}>;
 var<workgroup> tower:array<f32,${weights.valueTower}>;
+`}var<workgroup> globalPolicyHidden:array<f32,${Math.max(weights.globalPolicyRank, 1)}>;
 fn binStart(bin:u32)->u32{return (bin*EXTENT+4u)/5u;}
 fn poolValueInput(board:u32,lane:u32){
   for(var task=lane;task<POOLED;task+=256u){let channel=task/25u;let bin=task%25u;
@@ -303,25 +319,34 @@ fn poolValueInput(board:u32,lane:u32){
     for(var x=x0;x<x1;x++){for(var y=y0;y<y1;y++){sum+=activationAt(ai(board,channel,x*EXTENT+y));}}
     pooled[task]=sum/f32((x1-x0)*(y1-y0));}workgroupBarrier();
 }
-fn firstValueLayer(lane:u32){
+${valueAbsent ? "" : `fn firstValueLayer(lane:u32){
   if(VALUE_RANK>0u){
     if(lane<VALUE_RANK){var sum=0.0;for(var i=0u;i<POOLED;i++){sum+=weightAt(VALUE_W1_RIGHT+lane*POOLED+i)*pooled[i];}valueRankHidden[lane]=sum;}
     workgroupBarrier();
     if(lane<HIDDEN){var sum=weightAt(VALUE_B1+lane);for(var i=0u;i<VALUE_RANK;i++){sum+=weightAt(VALUE_W1+lane*VALUE_RANK+i)*valueRankHidden[i];}valueHidden[lane]=tanh(sum);}
   }else if(lane<HIDDEN){var sum=weightAt(VALUE_B1+lane);for(var i=0u;i<POOLED;i++){sum+=weightAt(VALUE_W1+lane*POOLED+i)*pooled[i];}valueHidden[lane]=tanh(sum);}workgroupBarrier();
 }
-@compute @workgroup_size(256)
+`}@compute @workgroup_size(256)
 fn aggregateHeads(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32){
   let board=group.x;if(board>=params.count){return;}let base=board*STRIDE;
-  poolValueInput(board,lane);firstValueLayer(lane);
+  poolValueInput(board,lane);
+  if(lane<GLOBAL_POLICY_RANK){var sum=weightAt(GLOBAL_POLICY_B1+lane);for(var i=0u;i<POOLED;i++){
+    sum+=weightAt(GLOBAL_POLICY_W1+lane*POOLED+i)*pooled[i];}globalPolicyHidden[lane]=tanh(sum);}workgroupBarrier();
+  if(GLOBAL_POLICY_RANK>0u){for(var point=lane;point<AREA;point+=256u){var correction=weightAt(GLOBAL_POLICY_B2+point);for(var i=0u;i<GLOBAL_POLICY_RANK;i++){
+    correction+=weightAt(GLOBAL_POLICY_W2+point*GLOBAL_POLICY_RANK+i)*globalPolicyHidden[i];}
+    results[base+3u+point]+=correction;}}workgroupBarrier();
+${valueAbsent
+    ? `  if(lane<3u){results[base+lane]=0.0;}
+`
+    : `  firstValueLayer(lane);
   if(lane<TOWER){var sum=weightAt(VALUE_B2+lane);for(var i=0u;i<HIDDEN;i++){sum+=weightAt(VALUE_W2+lane*HIDDEN+i)*valueHidden[i];}
     tower[lane]=tanh(sum);}workgroupBarrier();
   if(lane<3u){var sum=weightAt(VALUE_OUT_B+lane);for(var i=0u;i<TOWER;i++){sum+=weightAt(VALUE_OUT_W+lane*TOWER+i)*tower[i];}
     results[base+lane]=sum;}
-  if(lane==3u){var sum=weightAt(PASS_B);for(var i=0u;i<POOLED;i++){sum+=weightAt(PASS_W+i)*pooled[i];}
+`}  if(lane==3u){var sum=weightAt(PASS_B);for(var i=0u;i<POOLED;i++){sum+=weightAt(PASS_W+i)*pooled[i];}
     results[base+3u+AREA]=sum;}
 }
-@compute @workgroup_size(256)
+${valueAbsent ? "" : `@compute @workgroup_size(256)
 fn aggregateValue(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32){
   let board=group.x;if(board>=params.count){return;}
   poolValueInput(board,lane);firstValueLayer(lane);
@@ -329,24 +354,30 @@ fn aggregateValue(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocati
     tower[lane]=tanh(sum);}workgroupBarrier();
   if(lane<3u){var sum=weightAt(VALUE_OUT_B+lane);for(var i=0u;i<TOWER;i++){sum+=weightAt(VALUE_OUT_W+lane*TOWER+i)*tower[i];}
     values[board*3u+lane]=sum;}
-}`;
+}
+`}`;
 }
 
 type V9PipelineName = "stemPass" | "residualFirst" | "residualSecond" | "pointHeads" | "aggregateHeads" | "aggregateValue";
 type V9BindGroups = { stemPass: unknown; residualFirst: unknown[]; residualSecond: unknown[];
-  pointHeads: unknown; aggregateHeads: unknown; aggregateValue: unknown };
+  pointHeads: unknown; aggregateHeads: unknown; aggregateValue?: unknown };
 
 class V9WebGpuGoBackend implements GoValueBackend {
   readonly extent: number;
   readonly behaviorFeatures: number;
+  readonly inputChannels: 8 | 16;
+  readonly valuePath: "trained" | "absent";
   lastTiming: WebGpuInferenceTiming | undefined;
   #device: GpuDeviceLike;
-  #pipelines: Record<V9PipelineName, { getBindGroupLayout(index: number): unknown }>;
+  #pipelines: Partial<Record<V9PipelineName, { getBindGroupLayout(index: number): unknown }>>
+    & Record<Exclude<V9PipelineName, "aggregateValue">, { getBindGroupLayout(index: number): unknown }>;
   #weights: GpuBufferLike;
   #params: GpuBufferLike;
   #blockParams: GpuBufferLike[];
   #boards!: GpuBufferLike;
   #legal!: GpuBufferLike;
+  #tactical!: GpuBufferLike;
+  #tacticalData = new Uint32Array();
   #state!: GpuBufferLike;
   #behavior!: GpuBufferLike;
   #activation!: GpuBufferLike;
@@ -372,6 +403,8 @@ class V9WebGpuGoBackend implements GoValueBackend {
     this.extent = weights.extent;
     this.behaviorFeatures = weights.behaviorFeatures;
     this.#channels = weights.channels;
+    this.inputChannels = weights.inputChannels;
+    this.valuePath = weights.valuePath;
     this.#blocks = weights.residualBlocks;
     this.#activationBytes = flags.f16Activations ? 2 : 4;
     const candidates = weights.extent * weights.extent + 1;
@@ -387,7 +420,7 @@ class V9WebGpuGoBackend implements GoValueBackend {
       residualSecond: pipeline("residualSecond"),
       pointHeads: pipeline("pointHeads"),
       aggregateHeads: pipeline("aggregateHeads"),
-      aggregateValue: pipeline("aggregateValue"),
+      ...(this.valuePath === "absent" ? {} : { aggregateValue: pipeline("aggregateValue") }),
     };
     this.#weights = device.createBuffer({ size: weights.flat.byteLength,
       usage: BUFFER_STORAGE | BUFFER_COPY_DST });
@@ -425,6 +458,9 @@ class V9WebGpuGoBackend implements GoValueBackend {
     const storage = BUFFER_STORAGE | BUFFER_COPY_DST;
     this.#boards = this.#device.createBuffer({ size: this.#capacity * goBoardWords(this.extent) * 4, usage: storage });
     this.#legal = this.#device.createBuffer({ size: this.#capacity * goLegalWords(this.extent) * 4, usage: storage });
+    this.#tactical = this.#device.createBuffer({
+      size: this.#capacity * 8 * goLegalWords(this.extent) * 4, usage: storage });
+    this.#tacticalData = new Uint32Array(this.#capacity * 8 * goLegalWords(this.extent));
     this.#state = this.#device.createBuffer({ size: this.#capacity * 16, usage: storage });
     this.#behavior = this.#device.createBuffer({ size: this.#capacity * this.behaviorFeatures * 4, usage: storage });
     const activation = this.#capacity * this.#channels * this.extent * this.extent
@@ -446,7 +482,7 @@ class V9WebGpuGoBackend implements GoValueBackend {
     return {
       stemPass: this.#device.createBindGroup({ layout: this.#pipelines.stemPass.getBindGroupLayout(0), entries: [
         entry(0, this.#params), entry(1, this.#weights), entry(2, this.#boards), entry(3, this.#legal),
-        entry(4, this.#state), entry(6, this.#activation)] }),
+        entry(4, this.#state), entry(6, this.#activation), entry(10, this.#tactical)] }),
       residualFirst: this.#blockParams.map((params) => this.#device.createBindGroup({
         layout: this.#pipelines.residualFirst.getBindGroupLayout(0), entries: spatial(params) })),
       residualSecond: this.#blockParams.map((params) => this.#device.createBindGroup({
@@ -456,8 +492,9 @@ class V9WebGpuGoBackend implements GoValueBackend {
         entry(0, this.#params), entry(1, this.#weights), entry(6, this.#activation), entry(8, this.#results)] }),
       aggregateHeads: this.#device.createBindGroup({ layout: this.#pipelines.aggregateHeads.getBindGroupLayout(0), entries: [
         entry(0, this.#params), entry(1, this.#weights), entry(6, this.#activation), entry(8, this.#results)] }),
-      aggregateValue: this.#device.createBindGroup({ layout: this.#pipelines.aggregateValue.getBindGroupLayout(0), entries: [
-        entry(0, this.#params), entry(1, this.#weights), entry(6, this.#activation), entry(9, this.#values)] }),
+      ...(this.#pipelines.aggregateValue ? { aggregateValue: this.#device.createBindGroup({
+        layout: this.#pipelines.aggregateValue.getBindGroupLayout(0), entries: [
+          entry(0, this.#params), entry(1, this.#weights), entry(6, this.#activation), entry(9, this.#values)] }) } : {}),
     };
   }
 
@@ -468,7 +505,7 @@ class V9WebGpuGoBackend implements GoValueBackend {
     if (needsSpatial) this.#capacity = Math.ceil(count * 1.25);
     if (proposal && needsOutput) this.#proposalCapacity = Math.ceil(count * 1.25);
     if (!proposal && needsOutput) this.#valueCapacity = Math.ceil(count * 1.25);
-    for (const buffer of [this.#boards, this.#legal, this.#state, this.#behavior,
+    for (const buffer of [this.#boards, this.#legal, this.#tactical, this.#state, this.#behavior,
       this.#activation, this.#scratch, this.#results, this.#staging,
       this.#values, this.#valueStaging]) buffer.destroy();
     this.#allocate();
@@ -483,6 +520,10 @@ class V9WebGpuGoBackend implements GoValueBackend {
   }
 
   async evaluateBatch(batch: GoValueBatch): Promise<Float32Array> {
+    if (this.valuePath === "absent") {
+      throw new Error("policy-only Go artifact cannot serve post-response value batches; "
+        + "restore the full champion export for any K>1 evaluation");
+    }
     const requested = performance.now();
     const run = this.#queue.then(() => this.#evaluate(batch, requested, false) as Promise<Float32Array>);
     this.#queue = run.then(() => undefined, () => undefined);
@@ -511,6 +552,14 @@ class V9WebGpuGoBackend implements GoValueBackend {
     const queue = this.#device.queue;
     queue.writeBuffer(this.#boards, 0, batch.packed, 0, boardValues);
     queue.writeBuffer(this.#legal, 0, batch.legal, 0, legalValues);
+    if (this.inputChannels === 16) {
+      const tactical = batch.tactical ?? packGoTactical(
+        batch.packed, batch.legal, batch.count, this.extent, this.#tacticalData);
+      if (tactical.length < batch.count * 8 * goLegalWords(this.extent)) {
+        throw new Error("V9 inference requires complete tactical-v1 tensors");
+      }
+      queue.writeBuffer(this.#tactical, 0, tactical);
+    }
     queue.writeBuffer(this.#state, 0, batch.state, 0, stateValues);
     queue.writeBuffer(this.#behavior, 0, batch.behavior, 0, behaviorValues);
     this.#uniform.set([batch.count, 0, 0, 0]);
@@ -538,8 +587,10 @@ class V9WebGpuGoBackend implements GoValueBackend {
       pass.setBindGroup(0, this.#bindGroup.pointHeads);
       pass.dispatchWorkgroups(groups, batch.count);
     }
-    pass.setPipeline(proposal ? this.#pipelines.aggregateHeads : this.#pipelines.aggregateValue);
-    pass.setBindGroup(0, proposal ? this.#bindGroup.aggregateHeads : this.#bindGroup.aggregateValue);
+    // The non-proposal path is unreachable for a policy-only artifact:
+    // evaluateBatch throws before dispatch.
+    pass.setPipeline(proposal ? this.#pipelines.aggregateHeads : this.#pipelines.aggregateValue!);
+    pass.setBindGroup(0, proposal ? this.#bindGroup.aggregateHeads : this.#bindGroup.aggregateValue!);
     pass.dispatchWorkgroups(batch.count);
     pass.end();
     const bytes = batch.count * (proposal ? this.#stride : 3) * 4;

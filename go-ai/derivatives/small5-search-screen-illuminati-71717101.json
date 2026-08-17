@@ -1,0 +1,164 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-08-17T15:51:41.164Z",
+  "seedUseId": "2026-08-17T15:47:55.936Z-screen-small5",
+  "config": {
+    "profile": "small5",
+    "games": 384,
+    "seed": 71717101,
+    "handicapSeed": 71717102,
+    "defenseSeed": 71717103,
+    "opponent": "Illuminati"
+  },
+  "decisionBudgetMs": 50,
+  "baseline": {
+    "wins": 265,
+    "games": 384
+  },
+  "arms": [
+    {
+      "label": "production K=4 f3 u1",
+      "candidateLimit": 4,
+      "deepSearch": {
+        "schema": "bitburner-go-deep-search-v1",
+        "followUpK": 3,
+        "uncertaintyTicks": 1
+      },
+      "wins": 265,
+      "games": 384,
+      "winRate": 0.6901041666666666,
+      "powerPerTurn": 0.432852,
+      "meanTurns": 28.68,
+      "latencyMs": {
+        "p50": 4.4,
+        "p95": 6.8,
+        "max": 62.4
+      },
+      "withinBudget": true,
+      "flips": {
+        "favorable": 0,
+        "unfavorable": 0
+      }
+    },
+    {
+      "label": "K=4 f5 u1",
+      "candidateLimit": 4,
+      "deepSearch": {
+        "schema": "bitburner-go-deep-search-v1",
+        "followUpK": 5,
+        "uncertaintyTicks": 1
+      },
+      "wins": 267,
+      "games": 384,
+      "winRate": 0.6953125,
+      "powerPerTurn": 0.433225,
+      "meanTurns": 28.78,
+      "latencyMs": {
+        "p50": 4.9,
+        "p95": 8.6,
+        "max": 66.9
+      },
+      "withinBudget": true,
+      "flips": {
+        "favorable": 27,
+        "unfavorable": 25
+      }
+    },
+    {
+      "label": "K=6 f3 u1",
+      "candidateLimit": 6,
+      "deepSearch": {
+        "schema": "bitburner-go-deep-search-v1",
+        "followUpK": 3,
+        "uncertaintyTicks": 1
+      },
+      "wins": 279,
+      "games": 384,
+      "winRate": 0.7265625,
+      "powerPerTurn": 0.462972,
+      "meanTurns": 28.1,
+      "latencyMs": {
+        "p50": 4.8,
+        "p95": 8.9,
+        "max": 61.5
+      },
+      "withinBudget": true,
+      "flips": {
+        "favorable": 39,
+        "unfavorable": 25
+      }
+    },
+    {
+      "label": "K=6 f5 u1",
+      "candidateLimit": 6,
+      "deepSearch": {
+        "schema": "bitburner-go-deep-search-v1",
+        "followUpK": 5,
+        "uncertaintyTicks": 1
+      },
+      "wins": 287,
+      "games": 384,
+      "winRate": 0.7473958333333334,
+      "powerPerTurn": 0.491539,
+      "meanTurns": 26.93,
+      "latencyMs": {
+        "p50": 5.6,
+        "p95": 11.6,
+        "max": 70.8
+      },
+      "withinBudget": true,
+      "flips": {
+        "favorable": 49,
+        "unfavorable": 27
+      }
+    },
+    {
+      "label": "K=8 f5 u1",
+      "candidateLimit": 8,
+      "deepSearch": {
+        "schema": "bitburner-go-deep-search-v1",
+        "followUpK": 5,
+        "uncertaintyTicks": 1
+      },
+      "wins": 295,
+      "games": 384,
+      "winRate": 0.7682291666666666,
+      "powerPerTurn": 0.509916,
+      "meanTurns": 26.39,
+      "latencyMs": {
+        "p50": 6.1,
+        "p95": 14,
+        "max": 76.8
+      },
+      "withinBudget": true,
+      "flips": {
+        "favorable": 51,
+        "unfavorable": 21
+      }
+    },
+    {
+      "label": "K=6 f5 u2",
+      "candidateLimit": 6,
+      "deepSearch": {
+        "schema": "bitburner-go-deep-search-v1",
+        "followUpK": 5,
+        "uncertaintyTicks": 2
+      },
+      "wins": 285,
+      "games": 384,
+      "winRate": 0.7421875,
+      "powerPerTurn": 0.481245,
+      "meanTurns": 27.28,
+      "latencyMs": {
+        "p50": 6.3,
+        "p95": 14.7,
+        "max": 77.2
+      },
+      "withinBudget": true,
+      "flips": {
+        "favorable": 48,
+        "unfavorable": 28
+      }
+    }
+  ]
+}

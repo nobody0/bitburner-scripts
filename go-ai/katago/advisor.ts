@@ -182,6 +182,9 @@ export function parseKataGoVertex(text: string, size: number): KataGoMove {
 
 export interface KataGoAdvice {
   move: KataGoMove;
+  /** Promising root moves returned by the same analysis query. The adviser
+   * still executes `move`; this set is policy supervision only. */
+  proposalMoves?: KataGoMove[];
   visits: number;
   prior?: number;
   winrate?: number;
@@ -195,8 +198,10 @@ export interface KataGoForcedEvaluation {
   utility?: number;
 }
 
+export type KataGoPositionEvaluation = KataGoForcedEvaluation;
+
 export class KataGoAdvisor {
-  readonly process: ReturnType<typeof Bun.spawn>;
+  readonly process: Bun.Subprocess<"pipe", "pipe", "inherit">;
   private readonly pending = new Map<string, {
     resolve: (response: KataGoResponse) => void;
     reject: (error: Error) => void;
@@ -205,9 +210,15 @@ export class KataGoAdvisor {
   private nextId = 0;
   private static readonly REQUEST_TIMEOUT_MS = 120_000;
 
-  constructor(binary: string, model: string, config: string) {
+  constructor(
+    binary: string,
+    model: string,
+    config: string,
+    overrides: readonly string[] = [],
+  ) {
     this.process = Bun.spawn([
       binary, "analysis", "-model", model, "-config", config,
+      ...overrides.flatMap((value) => ["-override-config", value]),
     ], { stdin: "pipe", stdout: "pipe", stderr: "inherit" });
     this.pump = this.readResponses();
   }
@@ -359,6 +370,30 @@ export class KataGoAdvisor {
     const value = forced ?? response.rootInfo;
     if (!value || value.winrate === undefined || value.scoreLead === undefined) {
       throw new Error(`KataGo returned no forced-reply value for ${id}`);
+    }
+    return {
+      visits: value.visits ?? visits,
+      winrate: value.winrate,
+      scoreLead: value.scoreLead,
+      ...(value.utility !== undefined ? { utility: value.utility } : {}),
+    };
+  }
+
+  /** Evaluate the current Black-to-play position itself. Unlike `advise`, this
+   * returns rootInfo rather than the value attached to KataGo's chosen child. */
+  async evaluatePosition(
+    board: GoBoard,
+    previousBoards: readonly string[][],
+    komi: number,
+    visits: number,
+  ): Promise<KataGoPositionEvaluation> {
+    const id = this.nextQueryId("position");
+    const response = await this.query(buildKataGoQuery(
+      id, board, previousBoards, komi, visits,
+    ));
+    const value = response.rootInfo;
+    if (!value || value.winrate === undefined || value.scoreLead === undefined) {
+      throw new Error(`KataGo returned no root value for ${id}`);
     }
     return {
       visits: value.visits ?? visits,

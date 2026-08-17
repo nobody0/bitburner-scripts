@@ -29,6 +29,8 @@ describe("Go neural policy", () => {
       komi: 7.5,
     }, [1_200], engine);
     expect(decision.ranked.length).toBeGreaterThan(0);
+    // Illuminati's per-opponent budget is K=8, adaptively doubled on this flat
+    // proposal boundary.
     expect(decision.finalists).toBe(16);
     for (const move of decision.ranked) {
       expect(move.forecastCertainty).toBe("exact");

@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>bitburner telemetry</title>
+<link rel="stylesheet" href="/theme.css" />
 <link rel="stylesheet" href="/app.css" />
 </head>
 <body>
@@ -12,10 +13,10 @@
   <div class="group">
     <select id="runpick"></select>
     <span id="status">connecting…</span>
-    <button id="simpin" title="Move this stored run into runs/pinned/, where the retention sweep cannot delete it">📌 pin</button>
+    <button id="simpin" title="Move this stored run into runs/pinned/, where the retention sweep cannot delete it">pin</button>
   </div>
   <div class="group launch">
-    <button id="sync" title="Build all configured game entrypoints and push the complete build through the Remote File API">sync to game</button>
+    <button id="sync" title="Build all configured game entrypoints and push the complete build through the Remote File API">sync</button>
     <select id="simprofile" title="A named profile carries its own features, goals, seeds and horizon"></select>
     <select id="simsave" title="Start the run from a registered save snapshot"></select>
     <input id="simgoal" placeholder="earn:1e6" value="earn:1e6" size="14" title="Goal expression, when no profile is selected" />

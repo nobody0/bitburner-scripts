@@ -3,7 +3,7 @@
 import type { GoBoard } from "../../shared/strategy/go/rules.ts";
 import type { AsyncGoPolicy } from "./go.ts";
 import { GoColor, GoOpponent, GoPlayType } from "../vendor/bitburner/src/Go/Enums.ts";
-import { getMove } from "../vendor/bitburner/src/Go/boardAnalysis/goAI.ts";
+import { getExpansionMoveArray, getMove } from "../vendor/bitburner/src/Go/boardAnalysis/goAI.ts";
 import { simpleBoardFromBoard } from "../vendor/bitburner/src/Go/boardAnalysis/boardAnalysis.ts";
 import {
   getNewBoardState,
@@ -19,18 +19,59 @@ function randomFor(seed: number): () => number {
   };
 }
 
-/** Exact upstream obstacle generation plus a deterministic sample of the one
- * intentionally unseeded handicap tie-break. */
-export function oracleInitialBoard(size: 5 | 7 | 9 | 13, opponent: GoOpponent, seed: number): GoBoard {
+/** Exact upstream obstacle generation plus a reproducible sample of the
+ * intentionally unseeded handicap placement. The two seeds are deliberately
+ * separate so an evaluation can pair the same start across candidates without
+ * coupling handicap layouts to total playtime. */
+export function oracleInitialBoard(
+  size: 5 | 7 | 9 | 13,
+  opponent: GoOpponent,
+  obstacleSeed: number,
+  handicapSeed: number,
+): GoBoard {
   const originalRandom = Math.random;
-  Player.totalPlaytime = seed;
-  Math.random = randomFor(seed ^ 0xa5a5a5a5);
+  Player.totalPlaytime = obstacleSeed;
+  Math.random = randomFor(handicapSeed);
   try {
     const state = getNewBoardState(size, opponent, true);
     return { size: state.board.length, rows: simpleBoardFromBoard(state.board) };
   } finally {
     Math.random = originalRandom;
   }
+}
+
+/** Enumerates every distinct initial board the game can create. Illuminati's
+ * 5x5 handicap stone uses Math.random and therefore is not determined by the
+ * obstacle/AI seed. */
+export function oracleInitialBoards(
+  size: 5,
+  opponent: GoOpponent,
+  obstacleSeed: number,
+): GoBoard[] {
+  if (opponent !== GoOpponent.Illuminati) {
+    return [oracleInitialBoard(size, opponent, obstacleSeed, 0)];
+  }
+  Player.totalPlaytime = obstacleSeed;
+  const state = getNewBoardState(size, GoOpponent.Netburners, true);
+  const rows = simpleBoardFromBoard(state.board);
+  const available = state.board.flat().filter((point) => point !== null);
+  const expansion = getExpansionMoveArray(state.board, available).map((move) => move.point);
+  const points = [...expansion];
+  if (state.board[2]?.[2]) points.push(state.board[2][2]!);
+  const boards = new Map<string, GoBoard>();
+  if (expansion.length === 0) {
+    // applyHandicap draws only from the expansion list; when it is empty, the
+    // 20% center shortcut is the sole way a stone appears, so the untouched
+    // board is a possible (and with an open center, the likeliest) opening.
+    boards.set(rows.join(""), { size, rows: [...rows] });
+  }
+  for (const point of points) {
+    const variant = rows.map((row) => row.split(""));
+    variant[point.x]![point.y] = "O";
+    const board = { size, rows: variant.map((row) => row.join("")) };
+    boards.set(board.rows.join(""), board);
+  }
+  return [...boards.values()];
 }
 
 export function oracleWhitePolicy(opponent: GoOpponent, seedAtTurn: (turn: number) => number): AsyncGoPolicy {

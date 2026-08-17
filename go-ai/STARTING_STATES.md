@@ -10,10 +10,17 @@ Measured against the v3.0.1 transcription:
 
 | Family | Unique starting boards |
 |---|---:|
-| Any non-handicap 5x5 faction | 9,761 |
-| Illuminati 5x5, including its one white handicap stone | 54,155 |
-| Union of all relevant 5x5 starts | 63,916 |
+| Any non-handicap 5x5 faction | 8,164 |
+| Illuminati 5x5, including its one white handicap stone | 46,258 |
+| Union of all relevant 5x5 starts | 54,422 |
 | World Daemon 19x19 | 407,340,975,756 |
+
+The 2026-08-14 parity fix preserved these support counts but changed the 5x5
+sampling weights. Upstream's raw `centerBreak` roll contributes numerically to
+`obstacleTypeCount`; treating it as a boolean over-sampled edge obstacles for
+rolls 2 and 3. A matching unique-board census therefore does **not** prove that
+an old sampled playbook has the correct distribution. All pre-fix small5
+playbooks are incompatible with current training. Daemon19 is unaffected.
 
 The World Daemon's offline-node topology is fixed, but its seven initial white
 stones are an unseeded selection from 157 expansion locations. The count is

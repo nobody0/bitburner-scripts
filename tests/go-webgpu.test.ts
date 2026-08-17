@@ -34,7 +34,9 @@ describe("go WGSL shader", () => {
     expect(result.goldenCases).toBeGreaterThan(0);
     expect(result.quantization.proposalElementAgreement).toBeGreaterThanOrEqual(0.999);
     expect(result.quantization.top8ShortlistAgreement).toBeGreaterThanOrEqual(0.99);
-    const daemon = result.latency["daemon19x104"]!;
+    // With a policy-only daemon19 derivative installed, the value-batch probe
+    // is replaced by the deployed proposal-shaped probe at the same budgets.
+    const daemon = (result.latency["daemon19x104"] ?? result.latency["daemon19-proposal-x2"])!;
     expect(daemon.mainThread.max).toBeLessThan(2);
     expect(daemon.requestToParsed.p95).toBeLessThan(80);
     expect(daemon.requestToParsed.max).toBeLessThan(120);

@@ -34,15 +34,30 @@ describe("generated Go runtime artifacts", () => {
 
       const weights = loadGoValueWeights(artifact);
       expect(weights.topology).toBe(9);
-      expect(weights.stem.length).toBe(weights.channels * 8 * 3 * 3);
-      expect(weights.valueW1.length).toBe(
-        weights.hidden * (weights.valueRank || weights.channels * 25),
-      );
-      expect(weights.valueW1Right.length).toBe(weights.valueRank * weights.channels * 25);
+      expect(weights.stem.length).toBe(weights.channels * weights.inputChannels * 3 * 3);
+      if (artifact.derivative?.transform === "strip-neutral-value-v1") {
+        expect(weights.valuePath).toBe("absent");
+        expect(weights.valueW1.length).toBe(0);
+        expect(weights.valueW2.length).toBe(0);
+        expect(weights.valueOutW.length).toBe(0);
+      } else {
+        expect(weights.valuePath).toBe("trained");
+        expect(weights.valueW1.length).toBe(
+          weights.hidden * (weights.valueRank || weights.channels * 25),
+        );
+        expect(weights.valueW1Right.length).toBe(weights.valueRank * weights.channels * 25);
+      }
       expect(weights.policyW.length).toBe(weights.channels);
     }
-    expect(SMALL5_GO_MODEL.encoding).toBe("q8-row-f16-bias-le");
-    expect(DAEMON19_GO_MODEL.encoding).toBe("q8-row-f16-bias-le");
+    // Per-profile deployment encodings: dense small5 stays all-q8, while the
+    // compact daemon19 global-policy checkpoint stores its policy path in f16
+    // because all-q8 failed the strict per-logit golden gate.
+    const expectedEncodings = {
+      small5: "q8-row-f16-bias-le",
+      daemon19: "mixed-f16-policy-q8-value-le",
+    } as const;
+    expect(SMALL5_GO_MODEL.encoding).toBe(expectedEncodings.small5);
+    expect(DAEMON19_GO_MODEL.encoding).toBe(expectedEncodings.daemon19);
     expect(encodedBytes).toBeLessThanOrEqual(1_360_000);
   });
 
@@ -157,6 +172,52 @@ describe("generated Go runtime artifacts", () => {
     expect(weights.valueW1.length).toBe(2);
     expect(weights.valueW1Right.length).toBe(100);
     expect(weights.valueB1.length).toBe(2);
+  });
+
+  test("decodes the optional whole-board policy correction", () => {
+    const chunks: number[] = [];
+    const block = (rows: number, columns: number, biases: number) => {
+      chunks.push(...new Array(rows * columns).fill(0));
+      for (let row = 0; row < rows; row++) chunks.push(0, 0, 128, 63);
+      chunks.push(...new Array(biases * 2).fill(0));
+    };
+    const f16Block = (values: number, biases: number) => {
+      chunks.push(...new Array((values + biases) * 2).fill(0));
+    };
+    f16Block(4 * 72, 4);
+    f16Block(8 * 36, 8);
+    f16Block(4 * 31, 4);
+    block(1, 100, 1);
+    block(1, 1, 1);
+    block(3, 1, 3);
+    f16Block(4, 1);
+    f16Block(2 * 100, 2);  // pooled board context
+    f16Block(25 * 2, 25);  // point-specific global correction
+    f16Block(100, 1);
+    const payload = Uint8Array.from(chunks);
+    const weights = loadGoValueWeights({
+      format: "bitburner-go-runtime-v9",
+      topology: "bitburner-go-value-v9",
+      encoding: "mixed-f16-policy-q8-value-le",
+      extent: 5,
+      hidden: 1,
+      channels: 4,
+      residualBlocks: 1,
+      valueTower: 1,
+      behaviorFeatures: 31,
+      valueRank: 0,
+      globalPolicyRank: 2,
+      globalPolicyEncoding: "f16-policy",
+      weights: Buffer.from(payload).toString("base64"),
+      byteLength: payload.length,
+      source: "synthetic",
+      sourceSha256: "",
+      payloadSha256: "",
+    });
+    expect(weights.globalPolicyW1.length).toBe(200);
+    expect(weights.globalPolicyB1.length).toBe(2);
+    expect(weights.globalPolicyW2.length).toBe(50);
+    expect(weights.globalPolicyB2.length).toBe(25);
   });
 
   test("explains the automatic storage decision without writing", async () => {

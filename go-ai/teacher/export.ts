@@ -8,7 +8,8 @@
  */
 import {
   GO_ARENA_OPPONENTS,
-  goArenaSeeds,
+  goArenaDefenseRoll,
+  goArenaSeedPairs,
   decideGoArenaBlack,
   playGoArenaPolicyGame,
   playGoArenaPositionTrace,
@@ -186,7 +187,9 @@ async function main(): Promise<void> {
   let continuationFallbacks = 0;
   let totalTrainingPower = 0;
   let totalRounds = 0;
-  const seeds = goArenaSeeds(games + gameOffset, start).slice(gameOffset);
+  const handicapStart = Math.floor(numberFlag("--handicap-seed", Math.floor(start) ^ 0xa5a5a5a5));
+  const defenseStart = Math.floor(numberFlag("--defense-seed", Math.floor(start) ^ 0x3c6ef372));
+  const cases = goArenaSeedPairs(games + gameOffset, start, handicapStart, defenseStart).slice(gameOffset);
   for (let game = 0; game < games; game++) {
     const globalGame = game + gameOffset;
     const definition = mixed ? mixedDefinition(globalGame, start)
@@ -217,26 +220,29 @@ async function main(): Promise<void> {
       );
       modelPolicies.set(opponentIndex, modelPolicy);
     }
-    const seed = seeds[game]!;
+    const { seed, handicapSeed, defenseSeed } = cases[game]!;
     const trajectoryPolicy = modelPolicy
       ? exploratoryPolicy(modelPolicy, exploration, globalGame ^ Math.floor(start))
       : undefined;
     let baseline = await playGoArenaPolicyGame(
-      definition, seed, 0.5, true, trajectoryPolicy,
-      (globalGame * 2_654_435_761 + Math.floor(start)) >>> 0,
+      definition, seed, undefined, true, trajectoryPolicy,
+      handicapSeed,
+      defenseSeed,
     );
     if (!baseline.completed && exploration > 0 && modelPolicy) {
       trajectoryFallbacks++;
       baseline = await playGoArenaPolicyGame(
-        definition, seed, 0.5, true, modelPolicy,
-        (globalGame * 2_654_435_761 + Math.floor(start)) >>> 0,
+        definition, seed, undefined, true, modelPolicy,
+        handicapSeed,
+        defenseSeed,
       );
     }
     if (!baseline.completed && modelPolicy) {
       trajectoryFallbacks++;
       baseline = await playGoArenaPolicyGame(
-        definition, seed, 0.5, true, undefined,
-        (globalGame * 2_654_435_761 + Math.floor(start)) >>> 0,
+        definition, seed, undefined, true, undefined,
+        handicapSeed,
+        defenseSeed,
       );
     }
     if (!baseline.completed) {
@@ -288,13 +294,16 @@ async function main(): Promise<void> {
             ^ Math.imul(variation + 1, 668_265_263)
           ) >>> 0;
           let continuation = await playGoArenaPositionTrace(
-            definition, seed, 0.5, state, action, salt,
+            definition, seed, goArenaDefenseRoll(salt), state, action,
             learnerContinuations ? modelPolicy : undefined,
+            salt,
           );
           if (!continuation.completed && learnerContinuations) {
             continuationFallbacks++;
             continuation = await playGoArenaPositionTrace(
-              definition, seed, 0.5, state, action, salt,
+              definition, seed, goArenaDefenseRoll(salt), state, action,
+              undefined,
+              salt,
             );
           }
           continuations.push(continuation);

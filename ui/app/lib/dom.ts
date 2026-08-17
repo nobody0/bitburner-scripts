@@ -56,6 +56,8 @@ export interface TableOptions {
   left?: number[];
   /** Header cells rendered as-is (already escaped) — used for sort controls. */
   rawHeaders?: boolean;
+  /** Optional class for a row, by index — used for the ranked `.picked` row. */
+  rowClass?(index: number): string;
 }
 
 /** A table. Cells are pre-escaped HTML fragments so a column can carry a
@@ -80,7 +82,12 @@ export function table(
     `<table><thead><tr>${headers
       .map((h, i) => `<th${cls(i)}>${options.rawHeaders ? h : inline(h)}</th>`)
       .join("")}</tr></thead><tbody>` +
-    rows.map((cells) => `<tr>${cells.map((c, i) => `<td${cls(i)}>${c}</td>`).join("")}</tr>`).join("") +
+    rows
+      .map((cells, r) => {
+        const rc = options.rowClass?.(r);
+        return `<tr${rc ? ` class="${rc}"` : ""}>${cells.map((c, i) => `<td${cls(i)}>${c}</td>`).join("")}</tr>`;
+      })
+      .join("") +
     `</tbody></table>`
   );
 }
@@ -96,6 +103,32 @@ export function definitions(pairs: [Markup, Markup][]): string {
 
 export function note(text: Markup): string {
   return `<p class="muted">${inline(text)}</p>`;
+}
+
+/** The empty-value convention: an en dash in a cell that has no value yet.
+ * Em dashes are prose separators; `note("no data")` is the empty TABLE. */
+export const NONE = "–";
+
+/** The "nothing yet" note, worded once. A longer explanation (which probe,
+ * how often, what it costs) belongs in `hint`, shown on hover. */
+export function waiting(probe: Markup, hint = ""): string {
+  return `<p class="muted"${hint ? ` title="${esc(hint)}"` : ""}>waiting for ${inline(probe)}</p>`;
+}
+
+/** The last action's result as a coloured dot plus its detail — replaces the
+ * per-tab "last action succeeded/failed: …" sentences. */
+export function outcome(result: { ok: boolean; detail: Markup }): string {
+  return `<p class="muted">${dot(result.ok ? "good" : "bad", result.ok ? "last action succeeded" : "last action failed")} ${inline(result.detail)}</p>`;
+}
+
+/** The truncation note, worded once. */
+export function shownOf(shown: number, total: number, hint = "sort or filter to see the rest"): string {
+  return note(`${shown} of ${total} — ${hint}`);
+}
+
+/** Prose whose full explanation lives in the title tooltip. */
+export function hint(text: Markup, tip: string): Html {
+  return html`<span class="hint" title="${tip}">${text}</span>`;
 }
 
 /** Horizontal proportional bar — used for the RAM pie and territory splits. */
@@ -164,6 +197,8 @@ export interface FilterOption {
   label: string;
   /** Shown after the label, e.g. a count. */
   badge?: string;
+  /** Hover explanation of what the filter selects. */
+  title?: string;
 }
 
 /** A row of filter chips. `key` is the viewstate key; the selected value is
@@ -176,7 +211,7 @@ export function filters(key: string, options: FilterOption[], fallback: string):
       .map(
         (o) =>
           `<button class="chip pick${o.value === current ? " sel" : ""}" data-view-key="${esc(key)}" ` +
-          `data-view-value="${esc(o.value)}">${esc(o.label)}` +
+          `data-view-value="${esc(o.value)}"${o.title ? ` title="${esc(o.title)}"` : ""}>${esc(o.label)}` +
           (o.badge ? `<span class="badge">${esc(o.badge)}</span>` : "") +
           `</button>`,
       )
@@ -210,6 +245,40 @@ export function collapsible(key: string, summary: Markup, body: Markup, defaultO
   );
 }
 
+export interface RankedOptions {
+  /** Which row (by index) is the chosen one. */
+  selected(index: number): boolean;
+  empty?: Markup;
+  wrap?: number[];
+  left?: number[];
+  /** When the caller truncated the list, say so once via shownOf(). */
+  shown?: number;
+  total?: number;
+  /** What the hidden rows are, e.g. "scored options". */
+  truncationHint?: string;
+}
+
+/** A ranked-candidates table: a `▶` marker column plus a `.picked` row class
+ * on the chosen option. One implementation for every "options considered"
+ * panel. Column indices in `wrap`/`left` refer to the caller's columns. */
+export function rankedTable(headers: Markup[], rows: readonly Markup[][], options: RankedOptions): string {
+  const body = table(
+    [raw(`<span title="chosen option"></span>`), ...headers],
+    rows.map((cells, i) => [options.selected(i) ? `<span class="good" title="chosen option">▶</span>` : "", ...cells]),
+    {
+      empty: options.empty ?? "no data",
+      wrap: (options.wrap ?? []).map((i) => i + 1),
+      left: (options.left ?? []).map((i) => i + 1),
+      rowClass: (i) => (options.selected(i) ? "picked" : ""),
+    },
+  );
+  const truncated =
+    options.shown !== undefined && options.total !== undefined && options.total > options.shown
+      ? shownOf(options.shown, options.total, options.truncationHint ?? "scored options")
+      : "";
+  return body + truncated;
+}
+
 // --- data tables -----------------------------------------------------------
 
 export interface Column<T> {
@@ -237,7 +306,12 @@ export interface DataTableOptions<T> {
 export function dataTable<T>(id: string, rows: readonly T[], columns: Column<T>[], options: DataTableOptions<T>): string {
   if (rows.length === 0) return note(options.empty ?? "no data");
   const active = sortOf(id, options.defaultSort);
-  const column = columns.find((c) => c.id === active.key && c.sort) ?? columns.find((c) => c.sort);
+  // A persisted key can outlive its column (mode-dependent columns, renames);
+  // fall back to the DECLARED default, not whichever column sorts first.
+  const column =
+    columns.find((c) => c.id === active.key && c.sort) ??
+    columns.find((c) => c.id === options.defaultSort.key && c.sort) ??
+    columns.find((c) => c.sort);
   const sorted = column?.sort
     ? [...rows].sort((a, b) => {
         const av = column.sort!(a);
@@ -269,8 +343,6 @@ export function dataTable<T>(id: string, rows: readonly T[], columns: Column<T>[
   );
 
   const truncated =
-    options.limit !== undefined && sorted.length > options.limit
-      ? note(`showing ${options.limit} of ${sorted.length} — sort or filter to see the rest`)
-      : "";
+    options.limit !== undefined && sorted.length > options.limit ? shownOf(options.limit, sorted.length) : "";
   return body + truncated;
 }

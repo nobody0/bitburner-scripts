@@ -16,7 +16,13 @@ printf '%s\n' "$snapshot_id" > "$run/SNAPSHOT_ID"
   echo '#!/usr/bin/env bash'
   echo 'set -euo pipefail'
   printf 'cd %q\n' "$scratch/work/$snapshot_id/source/go-ai"
-  printf 'export PYTHONDONTWRITEBYTECODE=1\nexec '
+  printf 'export PYTHONDONTWRITEBYTECODE=1\n'
+  printf 'export PYTHONUNBUFFERED=1\n'
+  # V9 alternates large, differently shaped proposal/value/ranking batches.
+  # PyTorch's fixed CUDA segments otherwise retain about 24 GB after the first
+  # cycle on a 4090 even though peak live allocations are much smaller.
+  printf 'export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}\n'
+  printf 'exec '
   printf '%q ' "$@"
   echo
 } > "$run/command.sh"

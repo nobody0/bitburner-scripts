@@ -10,15 +10,22 @@ import {
 import { createRequiredWebGpuGoValueBackend } from "../../shared/strategy/go/neural/webgpu.ts";
 import {
   goNeuralPositionIdentity,
-  goSeedSetKey,
+  goDispatchKey,
+  type GoWorkerCertified,
   type GoWorkerEvaluation,
   type GoWorkerAction,
+  type GoWorkerPlaybookRoute,
   type GoWorkerRequest,
   type GoWorkerResponse,
 } from "../../shared/strategy/go/neural/worker-protocol.ts";
 import {
-  alignedAiSeed,
+  packCombinedBoard,
+  validateMergedPlaybook,
+  type MergedPlaybook,
+} from "../../shared/strategy/go/playbook-facade.ts";
+import {
   GO_ENGINE_CYCLE_MS,
+  goOpponentSeedCandidates,
   nextGoTurnTiming,
   normalizeGoPlaytime,
 } from "../../shared/strategy/go/rng.ts";
@@ -74,6 +81,85 @@ const FUTURE_DISPATCH_TICKS = 5;
  * long before it. */
 const PREDICTION_LIFETIME_MS = 10_000;
 const PREDICTION_READY_AHEAD_MS = 75;
+
+/** The build prepends the merged phase playbook as an inlined classic script
+ * (its module form uses top-level await, which an IIFE worker bundle cannot
+ * contain). A build without an installed playbook simply leaves these globals
+ * undefined and every certified lookup reports a miss. */
+let playbookResolved: MergedPlaybook | null | undefined;
+async function mergedPlaybook(): Promise<MergedPlaybook | null> {
+  if (playbookResolved !== undefined) return playbookResolved;
+  const injected = globalThis as {
+    __combinedPlaybook?: unknown;
+    __combinedPlaybookReady?: Promise<unknown>;
+  };
+  await injected.__combinedPlaybookReady;
+  playbookResolved = injected.__combinedPlaybook === undefined
+    ? null
+    : validateMergedPlaybook(injected.__combinedPlaybook);
+  return playbookResolved;
+}
+
+async function certifiedPlaybookAction(
+  positionId: string,
+  dispatchPlaytime: number,
+  credit: number,
+): Promise<GoWorkerCertified | undefined> {
+  const playbook = await mergedPlaybook();
+  if (!playbook) return undefined;
+  const position = positions.get(positionId);
+  if (!position) throw new Error(`Go worker does not hold position ${positionId}`);
+  const view = position.prepared.view;
+  if (view.board.size !== playbook.BOARD_SIZE || !playbook.OPPONENTS.includes(view.opponent)) {
+    return undefined;
+  }
+  const certified = playbook.certifiedAction(
+    view.opponent,
+    playbook.phaseNow(dispatchPlaytime),
+    view.bonusCycles ?? 0,
+    packCombinedBoard(view.board.rows),
+    view.consecutivePasses ?? 0,
+    credit,
+    // GoView history is newest first; the certificate column is oldest first.
+    [...view.previousBoards].reverse().map(packCombinedBoard),
+  );
+  if (!certified) return undefined;
+  const described = certified.action;
+  const action: GoWorkerCertified["action"] | undefined = described.kind === "move"
+    ? { kind: "move", x: described.x, y: described.y }
+    : described.kind === "sleep"
+      ? { kind: "sleep", variant: described.variant }
+      : described.kind === "pass" || described.kind === "align"
+        ? { kind: described.kind }
+        : undefined;
+  if (!action) return undefined;
+  return {
+    action,
+    alignmentCredit: certified.alignmentCredit,
+    alignmentBoards: playbook.modelFor(view.opponent).alignmentBoards,
+  };
+}
+
+async function playbookRoute(
+  playtime: number,
+  opponent: string,
+): Promise<GoWorkerPlaybookRoute | undefined> {
+  const playbook = await mergedPlaybook();
+  if (!playbook || !playbook.OPPONENTS.includes(opponent)) return undefined;
+  let route;
+  try {
+    route = playbook.selectRoot(playbook.phaseNow(playtime), opponent);
+  } catch {
+    return undefined;
+  }
+  if (!route || route.enemy !== opponent) return undefined;
+  return {
+    enemy: route.enemy,
+    entryPhase: route.entryPhase,
+    waits: route.waits,
+    entryPlaytime: playtime + route.waits * GO_ENGINE_CYCLE_MS,
+  };
+}
 
 function tickAt(commit: ActiveCommit, wallAt: number): number {
   if (wallAt < commit.nextRolloverAt) return commit.dispatchPlaytime;
@@ -150,22 +236,24 @@ function install(view: GoView, requestedId?: string): { id: string; position: Ca
   return { id: identity.id, position, cached: false };
 }
 
-function evaluate(positionId: string, seeds: readonly number[]): CachedEvaluation {
+function evaluate(positionId: string, dispatchPlaytime: number): CachedEvaluation {
   const position = positions.get(positionId);
   if (!position) throw new Error(`Go worker does not hold position ${positionId}`);
   position.touched = ++touch;
-  const key = goSeedSetKey(seeds);
+  const key = goDispatchKey(dispatchPlaytime);
   const found = position.evaluations.get(key);
   if (found) return found;
   const entry = {} as CachedEvaluation;
   const run = evaluationQueue.then(async () => {
     const startedAt = performance.now();
-    const decision = await finalizeNeuralGoDecision(position.prepared, seeds, engine);
+    const seeds = goOpponentSeedCandidates(dispatchPlaytime, position.prepared.view.bonusCycles ?? 0);
+    const decision = await finalizeNeuralGoDecision(position.prepared, seeds, engine, dispatchPlaytime);
     const backend = await engine.backendFor(position.prepared.view.board.size);
     entry.decision = decision;
-    entry.continuations = neuralGoContinuations(position.prepared, seeds, decision);
+    entry.continuations = neuralGoContinuations(position.prepared, seeds, decision, dispatchPlaytime);
     return {
       decision,
+      opponentSeeds: seeds,
       preparationMs: position.preparationMs,
       finalizationMs: performance.now() - startedAt,
       modelProfile: goModelProfile(position.prepared.view.board.size),
@@ -190,11 +278,16 @@ function evaluate(positionId: string, seeds: readonly number[]): CachedEvaluatio
 }
 
 function sameAction(
-  left: Extract<GoDecision["action"], { type: "move" | "pass" }>,
+  left: Exclude<GoDecision["action"], { type: "resume" | "newGame" }>,
   right: GoWorkerAction,
 ): boolean {
-  return left.type === right.type && (left.type === "pass"
-    || (right.type === "move" && left.x === right.x && left.y === right.y));
+  if (left.type !== right.type) return false;
+  if (left.type === "pass") return true;
+  if (left.type === "cheatTwoMoves" && right.type === "cheatTwoMoves") {
+    return left.x1 === right.x1 && left.y1 === right.y1 && left.x2 === right.x2 && left.y2 === right.y2;
+  }
+  return right.type !== "pass" && right.type !== "cheatTwoMoves"
+    && "x" in left && left.x === right.x && left.y === right.y;
 }
 
 async function predictNextTurns(
@@ -203,10 +296,11 @@ async function predictNextTurns(
   expectedEpoch: number,
 ): Promise<void> {
   const source = positions.get(request.positionId);
-  const evaluated = source?.evaluations.get(goSeedSetKey(request.seeds));
+  if (!source) throw new Error(`committed position is missing for ${request.positionId}`);
+  const evaluated = source?.evaluations.get(goDispatchKey(request.dispatchPlaytime));
   if (!evaluated) throw new Error(`committed evaluation is missing for ${request.positionId}`);
   const committed = await evaluated.promise;
-  if (committed.decision.action.type !== "move" && committed.decision.action.type !== "pass") {
+  if (committed.decision.action.type === "resume" || committed.decision.action.type === "newGame") {
     throw new Error(`committed V9 decision is ${committed.decision.action.type}`);
   }
   if (!sameAction(committed.decision.action, request.action)) {
@@ -250,7 +344,7 @@ async function predictNextTurns(
       position,
       timing: nextGoTurnTiming(
         request.dispatchPlaytime,
-        request.bonusCycles,
+        source.prepared.view.bonusCycles ?? 0,
         alternative.wait,
       ),
     }];
@@ -260,7 +354,6 @@ async function predictNextTurns(
     alternative: GoNeuralContinuation;
     positionId: string;
     dispatchPlaytime: number;
-    seeds: number[];
     startAt: number;
   }> = [];
   const scheduled = new Set<string>();
@@ -272,10 +365,7 @@ async function predictNextTurns(
         ? responseAt
         : firstLaterTickAt + (lateCycles - 1) * GO_ENGINE_CYCLE_MS;
       const dispatchPlaytime = tickAt(active, neededAt);
-      const seeds = candidate.timing.bonusCycles > 0
-        ? [dispatchPlaytime, dispatchPlaytime + GO_ENGINE_CYCLE_MS]
-        : [alignedAiSeed(dispatchPlaytime, candidate.timing.bonusCycles)];
-      const key = `${candidate.position.id}|${goSeedSetKey(seeds)}`;
+      const key = `${candidate.position.id}|${goDispatchKey(dispatchPlaytime)}`;
       if (scheduled.has(key)) continue;
       scheduled.add(key);
       const perPositionAllowance = candidate.alternative.view.board.size > 5 ? 75 : 15;
@@ -284,7 +374,6 @@ async function predictNextTurns(
         alternative: candidate.alternative,
         positionId: candidate.position.id,
         dispatchPlaytime,
-        seeds,
         startAt: neededAt - PREDICTION_READY_AHEAD_MS - computeAllowance,
       });
     }
@@ -298,7 +387,7 @@ async function predictNextTurns(
     await waitUntil(task.startAt);
     if (generation !== expectedGeneration || predictionEpoch !== expectedEpoch
       || Date.now() >= deadline) return;
-    const value = await evaluate(task.positionId, task.seeds).promise;
+    const value = await evaluate(task.positionId, task.dispatchPlaytime).promise;
     if (generation !== expectedGeneration || predictionEpoch !== expectedEpoch) return;
     port.postMessage({
       type: "predicted",
@@ -306,7 +395,6 @@ async function predictNextTurns(
         parentTurnId: request.turnId,
         positionId: task.positionId,
         dispatchPlaytime: task.dispatchPlaytime,
-        seeds: task.seeds,
         response: task.alternative.response,
         value,
       },
@@ -340,15 +428,37 @@ port.onmessage = (event) => {
       return;
     }
     if (request.type === "evaluate") {
-      const entry = evaluate(request.positionId, request.seeds);
+      const entry = evaluate(request.positionId, request.dispatchPlaytime);
       const cached = entry.decision !== undefined;
       const value = await entry.promise;
       port.postMessage({
         type: "evaluated",
         requestId: request.requestId,
         positionId: request.positionId,
-        seeds: request.seeds,
+        dispatchPlaytime: request.dispatchPlaytime,
         value: { ...value, cached },
+      });
+      return;
+    }
+    if (request.type === "playbook") {
+      const certified = await certifiedPlaybookAction(
+        request.positionId,
+        request.dispatchPlaytime,
+        request.credit,
+      );
+      port.postMessage({
+        type: "playbook",
+        requestId: request.requestId,
+        ...(certified ? { certified } : {}),
+      });
+      return;
+    }
+    if (request.type === "playbookRoute") {
+      const route = await playbookRoute(request.playtime, request.opponent);
+      port.postMessage({
+        type: "playbookRoute",
+        requestId: request.requestId,
+        ...(route ? { route } : {}),
       });
       return;
     }

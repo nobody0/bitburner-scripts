@@ -50,8 +50,21 @@ function syntheticBoard(size: number, seed: number, offline: boolean): string {
   return board;
 }
 
-const small5Model = join(ROOT, "go-ai", "small5-champion.model");
-const daemon19Model = join(ROOT, "go-ai", "daemon19-champion.model");
+/** The fixture is generated from the full-precision checkpoint the installed
+ * module was exported from. For a plain champion export and for the lossless
+ * value-strip derivative that is the champion file itself; for a
+ * structured-distill derivative it is the retained student checkpoint named
+ * by the module's `source`, so the browser gate measures the deployed
+ * weights' own export/shader error. */
+function installedCheckpoint(profile: "small5" | "daemon19"): string {
+  const championPath = join(ROOT, "go-ai", `${profile}-champion.model`);
+  const artifact = profile === "small5" ? SMALL5_GO_MODEL : DAEMON19_GO_MODEL;
+  if (artifact.derivative?.transform !== "structured-distill-v1") return championPath;
+  return join(ROOT, artifact.source);
+}
+
+const small5Model = installedCheckpoint("small5");
+const daemon19Model = installedCheckpoint("daemon19");
 
 const CASES: { profile: "small5" | "daemon19"; model: string; size: number; opponentIndex: number; board: string }[] = [];
 

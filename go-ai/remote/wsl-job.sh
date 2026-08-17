@@ -13,7 +13,7 @@ printf '{"schema":"bitburner-go-remote-run-v1","started":"%s","finished":"%s","e
   "$started" "$finished" "$status" > "$run/JOB.json"
 (
   cd "$run"
-  find . -type f \( -name '*.model' -o -name '*.json' -o -name '*.jsonl.gz' -o -name '*.log' \
+  find . -type f \( -name '*.model' -o -name '*.json' -o -name '*.json.gz' -o -name '*.jsonl.gz' -o -name '*.log' \
     -o -name '*.txt' -o -name 'EXIT_CODE' -o -name 'SNAPSHOT_ID' -o -name 'COMMAND.txt' \) \
     ! -name 'RESULTS.sha256' -print | LC_ALL=C sort | while IFS= read -r path; do
       sha256sum "${path#./}"

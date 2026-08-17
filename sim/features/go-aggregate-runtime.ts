@@ -5,10 +5,13 @@ import {
 } from "../../shared/strategy/go/neural/engine.ts";
 import {
   goNeuralPositionIdentity,
+  type GoWorkerCertified,
   type GoWorkerEvaluation,
   type GoWorkerOpponentResponse,
+  type GoWorkerPlaybookRoute,
 } from "../../shared/strategy/go/neural/worker-protocol.ts";
 import { GO_REWARD_RULES } from "../../shared/strategy/go/rewards.ts";
+import { goOpponentSeedCandidates } from "../../shared/strategy/go/rng.ts";
 import type { GoAction, GoDecision, GoView } from "../../shared/strategy/go/rules.ts";
 
 /** Fast controller-simulation runtime. It performs the exact immediate-state
@@ -26,7 +29,7 @@ export class AggregateGoNeuralRuntime implements GoNeuralRuntime {
     return { positionId, preparationMs: 0, cached };
   }
 
-  async evaluate(positionId: string, _seeds: readonly number[]): Promise<GoWorkerEvaluation> {
+  async evaluate(positionId: string, dispatchPlaytime: number): Promise<GoWorkerEvaluation> {
     const prepared = this.positions.get(positionId);
     if (!prepared) throw new Error(`aggregate Go runtime does not hold position ${positionId}`);
     const decision = prepared.immediate ?? this.#legalAggregateDecision(prepared);
@@ -34,6 +37,7 @@ export class AggregateGoNeuralRuntime implements GoNeuralRuntime {
     return {
       decision,
       backend: "aggregate",
+      opponentSeeds: goOpponentSeedCandidates(dispatchPlaytime, prepared.view.bonusCycles ?? 0),
       preparationMs: 0,
       finalizationMs: 0,
       modelProfile: small ? "small5" : "daemon19",
@@ -44,14 +48,22 @@ export class AggregateGoNeuralRuntime implements GoNeuralRuntime {
     };
   }
 
+  /** The aggregate endpoint settles games from a calibrated profile rather
+   * than walking certified lines, so it never holds a playbook. */
+  async playbook(): Promise<GoWorkerCertified | undefined> {
+    return undefined;
+  }
+
+  async playbookRoute(): Promise<GoWorkerPlaybookRoute | undefined> {
+    return undefined;
+  }
+
   commit(
     _positionId: string,
-    _seeds: readonly number[],
     _dispatchPlaytime: number,
     _dispatchWallAt: number,
     _nextRolloverAt: number,
-    _bonusCycles: number,
-    _action: Extract<GoAction, { type: "move" | "pass" }>,
+    _action: Exclude<GoAction, { type: "resume" | "newGame" }>,
   ): string {
     return `aggregate:${this.#nextTurn++}`;
   }
@@ -85,6 +97,9 @@ export class AggregateGoNeuralRuntime implements GoNeuralRuntime {
         finalists: 1,
         positionValue: profile.priorWinProbability,
       };
+    }
+    if (candidate.action.type !== "move") {
+      throw new Error(`aggregate Go candidate is ${candidate.action.type}`);
     }
     const { x, y } = candidate.action;
     return {

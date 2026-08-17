@@ -10,9 +10,10 @@ import pathlib
 import platform
 import resource
 import subprocess
+import threading
 import time
 
-from train_v9 import read_block
+from train_v9 import PhaseTimings, read_block
 
 
 GO_AI = pathlib.Path(__file__).resolve().parents[1]
@@ -38,10 +39,19 @@ def run(args: argparse.Namespace) -> None:
     process = subprocess.Popen(
         command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, bufsize=1)
+    stderr_lines: list[str] = []
+    assert process.stderr is not None
+    stderr_thread = threading.Thread(
+        target=lambda: stderr_lines.extend(process.stderr), daemon=True)
+    stderr_thread.start()
+    timings = PhaseTimings()
+    protocol_digest = hashlib.sha256()
     positions = candidates = replies = completed_blocks = 0
     try:
         while completed_blocks < args.blocks:
-            states, _, done = read_block(process)
+            states, _, done = read_block(
+                process, timings,
+                lambda line: protocol_digest.update(line.encode()))
             if done:
                 break
             completed_blocks += 1
@@ -50,19 +60,51 @@ def run(args: argparse.Namespace) -> None:
             replies += sum(len(candidate.replies) for state in states
                            for candidate in state.candidates)
             assert process.stdin is not None
+            write_started = time.perf_counter()
             for state in states:
                 process.stdin.write(
                     f"A\t{state.slot}\t{state.episode}\t{len(state.candidates) - 1}\n")
             process.stdin.write("GO\n")
             process.stdin.flush()
+            timings.seconds["actionWriteFlush"] += time.perf_counter() - write_started
     finally:
-        process.terminate()
+        if process.poll() is None:
+            process.terminate()
         process.wait()
+        stderr_thread.join()
+    stderr = "".join(stderr_lines)
+    native_totals = {
+        "blocks": 0,
+        "positions": 0,
+        "candidateGenerationNanoseconds": 0,
+        "opponentAnalysisNanoseconds": 0,
+        "protocolSerializationNanoseconds": 0,
+        "prepareWallNanoseconds": 0,
+        "protocolOutputWallNanoseconds": 0,
+        "candidates": 0,
+        "replies": 0,
+    }
+    for line in stderr.splitlines():
+        parts = line.split("\t")
+        if parts[0] != "PROFILE" or len(parts) != 10:
+            continue
+        native_totals["blocks"] += 1
+        native_totals["positions"] += int(parts[2])
+        for key, value in zip((
+                "candidateGenerationNanoseconds", "opponentAnalysisNanoseconds",
+                "protocolSerializationNanoseconds", "prepareWallNanoseconds",
+                "protocolOutputWallNanoseconds", "candidates", "replies",
+        ), parts[3:], strict=True):
+            native_totals[key] += int(value)
+    if native_totals["blocks"] != completed_blocks:
+        raise RuntimeError(
+            f"sidecar emitted {native_totals['blocks']} profiles for "
+            f"{completed_blocks} blocks: {stderr}")
     elapsed = time.perf_counter() - started
     after = resource.getrusage(resource.RUSAGE_CHILDREN)
     cpu_seconds = (after.ru_utime + after.ru_stime) - (before.ru_utime + before.ru_stime)
     summary = {
-        "schema": "bitburner-go-v9-sidecar-benchmark-v1",
+        "schema": "bitburner-go-v9-sidecar-benchmark-v2",
         "profile": args.profile,
         "command": command,
         "binarySha256": sha256(binary),
@@ -78,6 +120,20 @@ def run(args: argparse.Namespace) -> None:
         "aggregateCpuUtilizationPercent": 100 * cpu_seconds / max(elapsed, 1e-9),
         "positionsPerSecond": positions / max(elapsed, 1e-9),
         "candidatesPerSecond": candidates / max(elapsed, 1e-9),
+        "protocolSha256": protocol_digest.hexdigest(),
+        "protocolTimings": timings.as_dict(),
+        "protocolCounts": timings.counts_dict(),
+        "nativeBreakdown": {
+            "candidateGenerationCpuSeconds":
+                native_totals["candidateGenerationNanoseconds"] / 1e9,
+            "opponentAnalysisCpuSeconds":
+                native_totals["opponentAnalysisNanoseconds"] / 1e9,
+            "protocolSerializationCpuSeconds":
+                native_totals["protocolSerializationNanoseconds"] / 1e9,
+            "prepareWallSeconds": native_totals["prepareWallNanoseconds"] / 1e9,
+            "protocolOutputWallSeconds":
+                native_totals["protocolOutputWallNanoseconds"] / 1e9,
+        },
     }
     encoded = json.dumps(summary, indent=2) + "\n"
     if args.out:

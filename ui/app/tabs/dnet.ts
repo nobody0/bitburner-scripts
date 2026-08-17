@@ -1,4 +1,4 @@
-import { card, note, table, tiles } from "../lib/dom.ts";
+import { NONE, card, note, outcome, rankedTable, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtNum, fmtPct, fmtRam } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -7,7 +7,7 @@ export const dnetTab: Tab = {
   id: "dnet",
   render(state: ProjectedState) {
     const d = state.topics.dnet;
-    if (!d) return note("waiting for the darknet probe");
+    if (!d) return waiting("the darknet probe");
 
     const summary = tiles([
       { label: "reachable servers", value: String(d.reachable) },
@@ -26,9 +26,9 @@ export const dnetTab: Tab = {
           esc(s.hostname),
           String(s.depth),
           fmtRam(s.blockedRam),
-          s.requiredCharisma !== undefined ? fmtNum(s.requiredCharisma, 0) : "–",
+          s.requiredCharisma !== undefined ? fmtNum(s.requiredCharisma, 0) : NONE,
           `<span class="${s.isOnline ? "good" : "muted"}">${s.isOnline ? "yes" : "no"}</span>`,
-          s.stasisLinked ? `<span class="good">linked</span>` : "–",
+          s.stasisLinked ? `<span class="good">linked</span>` : NONE,
         ]),
       { empty: "nothing probed", left: [0] },
     );
@@ -40,25 +40,22 @@ export const dnetTab: Tab = {
           { label: "charisma gate", value: plan.charismaNeeded === undefined ? "clear" : fmtNum(plan.charismaNeeded, 0) },
           { label: "topology", value: d.topologyComplete ? "complete" : "partial" },
         ]) +
-        table(
-          ["pick", "host", "depth", "servers kept reachable"],
-          plan.ranked.map((entry) => [
-            entry.hostname === plan.action.hostname ? "▶" : "",
-            esc(entry.hostname),
-            String(entry.depth),
-            String(entry.unlocks),
-          ]),
-          { empty: "no stasis candidates", left: [1] },
+        rankedTable(
+          ["host", "depth", "servers kept reachable"],
+          plan.ranked.map((entry) => [esc(entry.hostname), String(entry.depth), String(entry.unlocks)]),
+          {
+            selected: (i) => plan.ranked[i]!.hostname === plan.action.hostname,
+            empty: "no stasis candidates",
+            left: [0],
+          },
         ) +
-        (plan.lastResult
-          ? note(`${plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${plan.lastResult.detail}`)
-          : "")
-      : note("waiting for the first darknet decision");
+        (plan.lastResult ? outcome(plan.lastResult) : "")
+      : waiting("the first darknet decision");
 
     return (
       `<div class="col wide">` +
       card("Darknet", summary + servers) +
-      card("Traversal decision", decision) +
+      card("Decision", decision) +
       `</div>` +
       `<div class="col">` +
       card(

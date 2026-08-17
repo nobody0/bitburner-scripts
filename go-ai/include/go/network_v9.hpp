@@ -33,7 +33,8 @@ struct V9Prediction {
  * free implementation is the serialization and numerical-parity oracle. */
 class GoNetworkV9 {
  public:
-  static constexpr std::size_t input_channels = 8;
+  static constexpr std::size_t base_input_channels = 8;
+  static constexpr std::size_t tactical_input_channels = 16;
   static constexpr int pool_extent = 5;
 
   static GoNetworkV9 create(
@@ -43,11 +44,15 @@ class GoNetworkV9 {
     std::size_t value_hidden,
     std::size_t value_tower,
     std::size_t behavior_features,
-    std::uint64_t seed
+    std::uint64_t seed,
+    std::size_t input_channels = base_input_channels
   );
   static GoNetworkV9 load(std::istream& input);
   void save(std::ostream& output) const;
   [[nodiscard]] V9Prediction predict(const V9Input& input) const;
+  /** Policy logits only. The global-policy K=1 deployment never consumes the
+   * intentionally untrained value and auxiliary branch heads. */
+  [[nodiscard]] std::vector<double> predict_policy(const V9Input& input) const;
 
   [[nodiscard]] int extent() const { return extent_; }
   [[nodiscard]] std::size_t channels() const { return channels_; }
@@ -55,19 +60,26 @@ class GoNetworkV9 {
   [[nodiscard]] std::size_t value_hidden() const { return value_hidden_; }
   [[nodiscard]] std::size_t value_tower() const { return value_tower_; }
   [[nodiscard]] std::size_t behavior_features() const { return behavior_features_; }
+  [[nodiscard]] std::size_t global_policy_rank() const { return global_policy_rank_; }
+  [[nodiscard]] std::size_t input_channels() const { return input_channels_; }
 
  private:
+  [[nodiscard]] V9Prediction predict_impl(const V9Input& input, bool policy_only) const;
   int extent_{};
   std::size_t channels_{};
   std::size_t residual_blocks_{};
   std::size_t value_hidden_{};
   std::size_t value_tower_{};
   std::size_t behavior_features_{};
+  std::size_t global_policy_rank_{};
+  std::size_t input_channels_{base_input_channels};
 
   std::vector<double> stem_, stem_bias_, residual_, residual_bias_;
   std::vector<double> conditioning_w_, conditioning_b_;
   std::vector<double> value_w1_, value_b1_, value_w2_, value_b2_, value_out_w_, value_out_b_;
   std::vector<double> policy_w_, policy_b_, pass_w_, pass_b_;
+  std::vector<double> global_policy_w1_, global_policy_b1_;
+  std::vector<double> global_policy_w2_, global_policy_b2_;
   std::vector<double> branch_w_, branch_b_, pass_branch_w_, pass_branch_b_;
 };
 

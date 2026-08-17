@@ -28,6 +28,8 @@ export interface GoOpponentStats {
 
 export type GoActionDigest =
   | { type: "move"; x: number; y: number }
+  | { type: "cheatTwoMoves"; x1: number; y1: number; x2: number; y2: number }
+  | { type: "cheatRemoveRouter" | "cheatDestroyNode" | "cheatRepairNode"; x: number; y: number }
   | { type: "pass" | "resume" }
   | { type: "newGame"; opponent: GoRewardOpponent; boardSize: 5 | 7 | 9 | 13 };
 export type GoMoveDigest = Omit<GoMove, "why">;
@@ -52,6 +54,11 @@ export interface GoState {
   blackScore?: number;
   komi?: number;
   bonusCycles?: number;
+  cheat?: {
+    unlocked: boolean;
+    count: number;
+    successChance: number;
+  };
   moveCount?: number;
   /** Controlled empty territory per colour, from ns.go.analysis. */
   territory?: { black: number; white: number };
@@ -78,6 +85,7 @@ export interface GoPlan {
     whiteScore?: number;
     komi?: number;
     bonusCycles?: number;
+    cheatCount?: number;
   };
   planning: { finalistCount: number; positionValue: number };
   prediction?: {
@@ -118,6 +126,9 @@ export interface GoPlan {
     pushedPredictionHit?: boolean;
     /** Whether dispatch-time assurance found its exact seed set complete. */
     seedCacheHit?: boolean;
+    /** True when the dispatched action came from the certified merged
+     * playbook rather than the neural decision. */
+    playbook?: true;
   };
   /** Full opponent/board comparison in the same ETA units used to decide. */
   selection: {

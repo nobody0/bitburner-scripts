@@ -1,4 +1,4 @@
-import { card, note, table, tiles } from "../lib/dom.ts";
+import { NONE, card, note, outcome, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtNum } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -10,7 +10,7 @@ export const stanekTab: Tab = {
   id: "stanek",
   render(state: ProjectedState) {
     const s = state.topics.stanek;
-    if (!s) return note("waiting for the Stanek probe");
+    if (!s) return waiting("the Stanek probe");
 
     const summary = tiles([
       { label: "grid", value: `${s.width} x ${s.height}` },
@@ -71,25 +71,23 @@ export const stanekTab: Tab = {
               String(index + 1),
               String(id),
               placement ? `${placement.x},${placement.y}` : "observed only",
-              placement ? String(placement.rotation) : "–",
-              observed ? fmtNum(observed.numCharge, 0) : "–",
+              placement ? String(placement.rotation) : NONE,
+              observed ? fmtNum(observed.numCharge, 0) : NONE,
             ];
           }),
           { empty: "no chargeable fragments selected", left: [2] },
         ) +
-        (plan.lastResult
-          ? note(`${plan.lastResult.ok ? "last action succeeded" : "last action failed"}: ${plan.lastResult.detail}`)
-          : "")
-      : note("waiting for the first packing decision");
+        (plan.lastResult ? outcome(plan.lastResult) : "")
+      : waiting("the first packing decision");
 
     return (
-      `<div class="col">` +
-      card("Gift", summary + grid) +
-      card("Packing decision", decision) +
-      `</div>` +
       `<div class="col wide">` +
       card("Placed fragments", fragments) +
       (available ? card("Fragment catalogue", available) : "") +
+      `</div>` +
+      `<div class="col">` +
+      card("Gift", summary + grid) +
+      card("Decision", decision) +
       `</div>`
     );
   },

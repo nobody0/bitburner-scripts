@@ -1,4 +1,4 @@
-import { card, note, table, tiles } from "../lib/dom.ts";
+import { card, dataTable, note, outcome, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -7,7 +7,7 @@ export const sleevesTab: Tab = {
   id: "sleeves",
   render(state: ProjectedState) {
     const s = state.topics.sleeves;
-    if (!s) return note("waiting for the sleeves probe");
+    if (!s) return waiting("the sleeves probe");
 
     const avgShock = s.sleeves.length ? s.sleeves.reduce((sum, x) => sum + x.shock, 0) / s.sleeves.length : 0;
     const avgSync = s.sleeves.length ? s.sleeves.reduce((sum, x) => sum + x.sync, 0) / s.sleeves.length : 0;
@@ -18,24 +18,38 @@ export const sleevesTab: Tab = {
       ...(s.nextSleeveCost ? [{ label: "next sleeve", value: fmtMoney(s.nextSleeveCost) }] : []),
     ]);
 
-    const rows = table(
-      ["#", "task", "shock", "sync", "city", "hp", "hack", "str", "def", "dex", "agi", "cha"],
-      s.sleeves.map((x) => [
-        String(x.index),
-        esc(x.task ? `${x.task.type}${x.task.detail ? `: ${x.task.detail}` : ""}` : "idle"),
-        `<span class="${x.shock > 0 ? "bad" : "good"}">${x.shock.toFixed(1)}</span>`,
-        x.sync.toFixed(1),
-        esc(x.city),
-        `${x.hp.current}/${x.hp.max}`,
-        String(x.skills.hacking),
-        String(x.skills.strength),
-        String(x.skills.defense),
-        String(x.skills.dexterity),
-        String(x.skills.agility),
-        String(x.skills.charisma),
-      ]),
-      { empty: "no sleeves", left: [1, 4] },
-    );
+    type Sleeve = (typeof s.sleeves)[number];
+    const skillColumn = (id: string, label: string, pick: (x: Sleeve) => number) => ({
+      id,
+      label,
+      cell: (x: Sleeve) => String(pick(x)),
+      sort: pick,
+    });
+    const rows = dataTable("sleeves.list", s.sleeves, [
+      { id: "index", label: "#", cell: (x) => String(x.index), sort: (x) => x.index },
+      {
+        id: "task",
+        label: "task",
+        left: true,
+        cell: (x) => esc(x.task ? `${x.task.type}${x.task.detail ? `: ${x.task.detail}` : ""}` : "idle"),
+        sort: (x) => (x.task ? x.task.type : "idle"),
+      },
+      {
+        id: "shock",
+        label: "shock",
+        cell: (x) => `<span class="${x.shock > 0 ? "bad" : "good"}">${x.shock.toFixed(1)}</span>`,
+        sort: (x) => x.shock,
+      },
+      { id: "sync", label: "sync", cell: (x) => x.sync.toFixed(1), sort: (x) => x.sync },
+      { id: "city", label: "city", left: true, cell: (x) => esc(x.city), sort: (x) => x.city },
+      { id: "hp", label: "hp", cell: (x) => `${x.hp.current}/${x.hp.max}` },
+      skillColumn("hack", "hack", (x) => x.skills.hacking),
+      skillColumn("str", "str", (x) => x.skills.strength),
+      skillColumn("def", "def", (x) => x.skills.defense),
+      skillColumn("dex", "dex", (x) => x.skills.dexterity),
+      skillColumn("agi", "agi", (x) => x.skills.agility),
+      skillColumn("cha", "cha", (x) => x.skills.charisma),
+    ], { defaultSort: { key: "index", dir: 1 }, empty: "no sleeves" });
 
     const augs = s.sleeves
       .filter((x) => x.purchasableAugs?.length)
@@ -68,13 +82,11 @@ export const sleevesTab: Tab = {
           ]),
           { empty: "no task candidates", left: [1, 3] },
         ) +
-        (plan.lastResult
-          ? note(`${plan.lastResult.ok ? "last batch succeeded" : "last batch failed"}: ${plan.lastResult.detail}`)
-          : "")
+        (plan.lastResult ? outcome(plan.lastResult) : "")
       : plan
         ? note("this replay predates structured sleeve scores")
-        : note("waiting for the first sleeve decision");
+        : waiting("the first sleeve decision");
 
-    return `<div class="col wide">` + card("Sleeves", summary + rows) + card("Assignment decision", decision) + `</div>` + (augs ? `<div class="col">${augs}</div>` : "");
+    return `<div class="col wide">` + card("Sleeves", summary + rows) + card("Decision", decision) + `</div>` + `<div class="col">${augs || card("Augmentations", note("no data"))}</div>`;
   },
 };

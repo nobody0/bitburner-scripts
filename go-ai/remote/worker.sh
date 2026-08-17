@@ -33,7 +33,7 @@ snapshot() {
     printf '%s\n' package.json bun.lock tsconfig.json shared/strategy/factions/rep.ts
   ) | LC_ALL=C sort -u | while IFS= read -r path; do
     case "$path" in
-      go-ai/build/*|go-ai/corpora/*|go-ai/runs/*|go-ai/remote-results/*|go-ai/.venv*/*|go-ai/.deps/*|go-ai/katago/models/*|go-ai/katago/results/*|*/.git/*|*/__pycache__/*|*.pyc|*.model|build/*|node_modules/*)
+      go-ai/build/*|go-ai/corpora/*|go-ai/runs/*|go-ai/remote-results/*|go-ai/.cache/*|go-ai/.venv*/*|go-ai/.deps/*|go-ai/katago/models/*|go-ai/katago/results/*|*/.git/*|*/__pycache__/*|*.pyc|*.model|build/*|node_modules/*)
         continue
         ;;
       tools/*)
@@ -65,6 +65,15 @@ snapshot() {
     while IFS= read -r path; do shasum -a 256 "$path"; done < "$list"
   ) > "$stage/MANIFEST.sha256"
   digest=$(local_sha256 "$stage/MANIFEST.sha256")
+  # OpenSSL 3.6.2 on macOS can incorrectly return SHA-256(empty) for one
+  # particular non-empty, 20 KiB manifest shape. A comment is valid input to
+  # both shasum -c and sha256sum -c and changes the outer message length.
+  if test -s "$stage/MANIFEST.sha256" \
+      && test "$digest" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; then
+    printf '# source-snapshot-manifest-v1\n' >> "$stage/MANIFEST.sha256"
+    digest=$(local_sha256 "$stage/MANIFEST.sha256")
+  fi
+  test "$digest" != "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
   snapshot_id="${stamp}-${digest:0:12}"
   printf '{"schema":"bitburner-go-source-snapshot-v1","id":"%s","manifestSha256":"%s"}\n' \
     "$snapshot_id" "$digest" > "$stage/SNAPSHOT.json"

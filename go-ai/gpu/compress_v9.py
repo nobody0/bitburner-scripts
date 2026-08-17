@@ -134,6 +134,13 @@ def load_knowledge(paths: list[str], maximum: int, seed: int) -> tuple[
                     raise RuntimeError(f"{raw_path}:{line_number}: compression proof accepts small5 only")
                 if record.get("opponentOracle") != OPPONENT_ORACLE:
                     raise RuntimeError(f"{raw_path}:{line_number}: opponent oracle mismatch")
+                # Online/self-play corpora also contain positive-only actor
+                # records and complete-trajectory returns.  Compression uses
+                # exhaustive proposal positions plus their frozen-teacher
+                # reply values; the other record kinds have different shapes
+                # and are intentionally irrelevant here.
+                if record.get("kind", "proposal") != "proposal":
+                    continue
                 example = ProposalExample(**record["example"])
                 values = [DistillExample(**value) for value in record.get("distill", ())]
                 if record.get("split") == "heldout":

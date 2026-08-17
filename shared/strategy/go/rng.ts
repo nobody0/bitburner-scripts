@@ -64,6 +64,19 @@ export function alignedAiSeed(dispatchPlaytimeMs: number, bonusCycles = 0): numb
   return dispatchPlaytimeMs + (bonusCycles > 0 ? 0 : GO_ENGINE_CYCLE_MS);
 }
 
+/** Every cheat action uses the first draw from a fresh dispatch-tick WHRNG. */
+export function goCheatSucceeds(dispatchPlaytimeMs: number, successChance: number): boolean {
+  return whrng(dispatchPlaytimeMs, 1)[0]! <= successChance;
+}
+
+/** White constructs a separate WHRNG after its first waitCycle. A 40 ms
+ * offline-cycle wait may stay in the dispatch tick or cross one rollover. */
+export function goOpponentSeedCandidates(dispatchPlaytimeMs: number, bonusCycles = 0): number[] {
+  return bonusCycles > 0
+    ? [dispatchPlaytimeMs, dispatchPlaytimeMs + GO_ENGINE_CYCLE_MS]
+    : [alignedAiSeed(dispatchPlaytimeMs, bonusCycles)];
+}
+
 export interface GoResponseTiming {
   responseWallMs: number;
   responsePlaytimeMs: number;
@@ -88,5 +101,26 @@ export function nextGoTurnTiming(
     responseWallMs,
     responsePlaytimeMs,
     bonusCycles: remainder.bonusCycles,
+  };
+}
+
+/** Candidate engine ticks at which our next decision can dispatch after the
+ * predicted white branch. `nextGoTurnTiming` gives the earliest tick under
+ * exact timing; each extra uncertainty tick covers 200 ms of unmodeled script
+ * and AI processing, the live analogue of ipvgobruteforce's
+ * `runtime_uncertainty_ticks` successor window (base, base+1 by default).
+ * Deterministic replay (the arena) uses zero uncertainty ticks. */
+export function goSuccessorDispatchCandidates(
+  dispatchPlaytimeMs: number,
+  bonusCycles: number,
+  trace: { cycleWaitsAfterSeed: number; fixedSleepMsAfterSeed: number },
+  uncertaintyTicks = 1,
+): { timing: GoResponseTiming; candidates: number[] } {
+  const timing = nextGoTurnTiming(dispatchPlaytimeMs, bonusCycles, trace);
+  const extra = Math.max(0, Math.floor(uncertaintyTicks));
+  return {
+    timing,
+    candidates: Array.from({ length: extra + 1 },
+      (_, index) => timing.responsePlaytimeMs + index * GO_ENGINE_CYCLE_MS),
   };
 }

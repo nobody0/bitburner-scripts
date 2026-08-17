@@ -59,6 +59,9 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
   infer(player: GoPlayer, target?: GoSeedTarget): Promise<T>;
   dispatch(value: T): Promise<R>;
   maxReplans?: number;
+  /** Earliest engine tick allowed to dispatch, for phase-exact committed
+   * playbook turns. Requires an agreeing anchor; ignored without one. */
+  notBeforePlaytime?: number;
 }): Promise<GoNeuralSeedDispatch<T, R>> {
   const maxReplans = options.maxReplans ?? GO_MAX_SEED_REPLANS;
   let phase = options.phase;
@@ -69,7 +72,7 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
     const observedAt = options.clock.now();
     if (phase && !goPhaseAgrees(phase, player.totalPlaytime, observedAt)) phase = undefined;
     const target = phase
-      ? goChooseSeedTarget(phase, player.totalPlaytime, observedAt, GO_DISPATCH_GUARD_MS)
+      ? goChooseSeedTarget(phase, player.totalPlaytime, observedAt, GO_DISPATCH_GUARD_MS, options.notBeforePlaytime)
       : undefined;
     const dispatchPlaytime = target?.targetPlaytime ?? player.totalPlaytime;
 

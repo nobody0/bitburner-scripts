@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "recordedAt": "2026-08-17T16:40:44.959Z",
+  "seedUseId": "2026-08-17T16:21:03.668Z-screen-daemon19",
+  "config": {
+    "profile": "daemon19",
+    "games": 128,
+    "seed": 10101021,
+    "handicapSeed": 10101022,
+    "defenseSeed": 10101023,
+    "seedWait": {
+      "lossThreshold": 0.5,
+      "minimumGain": 0.05
+    }
+  },
+  "control": {
+    "wins": 111,
+    "games": 128,
+    "winRate": 0.8671875,
+    "powerPerTurn": 0.580501,
+    "meanTurns": 246.16,
+    "latencyMs": {
+      "p50": 3.2,
+      "p95": 4.8,
+      "max": 59.8
+    },
+    "seedWaits": 0
+  },
+  "waited": {
+    "wins": 111,
+    "games": 128,
+    "winRate": 0.8671875,
+    "powerPerTurn": 0.580501,
+    "meanTurns": 246.16,
+    "latencyMs": {
+      "p50": 3.1,
+      "p95": 4.7,
+      "max": 26.2
+    },
+    "seedWaits": 0
+  },
+  "flips": {
+    "favorable": 0,
+    "unfavorable": 0
+  },
+  "perOpponent": {
+    "????????????": {
+      "games": 128,
+      "control": 111,
+      "waited": 111
+    }
+  }
+}
