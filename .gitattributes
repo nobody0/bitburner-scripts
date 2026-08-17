@@ -1,3 +1,7 @@
 # Promoted champions are opaque weight blobs. A text diff is technically
 # possible and completely meaningless, so store them in LFS.
 *.model filter=lfs diff=lfs merge=lfs -text
+
+# The playbook inline transform is anchored to the packer's exact LF output;
+# autocrlf checkout on Windows must not rewrite it.
+game/lib/generated/*.js text eol=lf

@@ -13,6 +13,9 @@
 export const COMBINED_PLAYBOOK_GLOBAL = "__combinedPlaybook";
 
 export function inlinePlaybookScript(moduleSource: string): string {
+  // Git's autocrlf can check the generated module out with CRLF endings on
+  // Windows; the anchors below assume the packer's LF output.
+  moduleSource = moduleSource.replace(/\r\n/g, "\n");
   const exportBlock = /\nexport \{\n/;
   if (!exportBlock.test(moduleSource)) {
     throw new Error("playbook module does not contain the expected export block");
