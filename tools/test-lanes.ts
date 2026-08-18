@@ -1,6 +1,6 @@
 export {};
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,20 +18,6 @@ import { join } from "node:path";
  * poisons everything after it in the same process; one process per case means
  * a blown soak costs exactly that soak. */
 
-/** Lane files that cannot declare themselves: they import `ipvgobruteforce/`,
- * the certificate tree and its 28 GB corpus that live outside this repository,
- * so the import throws before any lane() call is reached. `bunfig.toml` keeps
- * them out of the default `bun test` — this is where they get their tags
- * back. Keep the two lists in step. */
-const EXTERNAL: { file: string; tags: string[]; requires: string }[] = [
-  { file: "tests/ipvgo-bruteforce-arena.test.ts", tags: ["go"], requires: "ipvgobruteforce" },
-  { file: "tests/ipvgo-bruteforce-multi-arena.test.ts", tags: ["go"], requires: "ipvgobruteforce" },
-  { file: "tests/go-certified-terminal-regret.test.ts", tags: ["go"], requires: "ipvgobruteforce" },
-];
-
-/** bunfig's ignore list applies to explicitly named files too, so a lane run
- * has to override it. Any glob that matches nothing will do. */
-const NO_IGNORES = "**/.lane-runner-ignores-nothing/**";
 /** Discovery must register every case without executing one. */
 const MATCHES_NO_TEST = "__lane_discovery_matches_no_test__";
 
@@ -66,7 +52,8 @@ interface Case {
   /** Undefined for a whole-file lane: run the file, not one case in it. */
   name?: string;
   tags: string[];
-  requires?: string;
+  /** Fixtures the lane declared that this checkout does not have. */
+  missing: string[];
 }
 
 /** Register every lane case without running any of it, and read back what
@@ -98,14 +85,20 @@ async function discover(): Promise<Case[]> {
     const cases: Case[] = [];
     for (const line of readFileSync(manifest, "utf8").split("\n")) {
       if (line.trim().length === 0) continue;
-      const entry = JSON.parse(line) as { kind: string; name: string; file?: string; tags: string[] };
+      const entry = JSON.parse(line) as
+        { kind: string; name: string; file?: string; tags: string[]; missing: string[] };
       if (entry.file === undefined) {
         console.error(`lane "${entry.name}" did not report a file; running it by name across the suite`);
       }
       const key = `${entry.file ?? ""}::${entry.name}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      cases.push({ file: relative(entry.file), name: entry.name, tags: entry.tags });
+      cases.push({
+        file: relative(entry.file),
+        name: entry.name,
+        tags: entry.tags,
+        missing: entry.missing,
+      });
     }
     return cases;
   } finally {
@@ -119,11 +112,7 @@ const relative = (file: string | undefined): string =>
 
 const escapeRegex = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-const discovered = await discover();
-const all: Case[] = [
-  ...discovered,
-  ...EXTERNAL.map((entry) => ({ file: entry.file, tags: entry.tags, requires: entry.requires })),
-];
+const all: Case[] = await discover();
 
 if (listOnly) {
   const byToken = new Map<string, Case[]>();
@@ -160,7 +149,7 @@ const failed: Case[] = [];
 const unavailable: Case[] = [];
 let done = 0;
 for (const entry of chosen) {
-  if (entry.requires !== undefined && !existsSync(join(root, entry.requires))) {
+  if (entry.missing.length > 0) {
     unavailable.push(entry);
     continue;
   }
@@ -172,8 +161,6 @@ for (const entry of chosen) {
     ...(entry.name === undefined ? [] : ["--test-name-pattern", escapeRegex(entry.name)]),
     "--timeout",
     String(timeoutMs),
-    "--path-ignore-patterns",
-    NO_IGNORES,
   ], {
     env: { ...process.env, BB_LANES: selection },
     stdout: "inherit",
@@ -185,7 +172,7 @@ for (const entry of chosen) {
 const ran = chosen.length - unavailable.length;
 const plural = (count: number): string => (count === 1 ? "case" : "cases");
 for (const entry of unavailable) {
-  console.log(`\nskipped ${label(entry)}: ${entry.requires}/ is not present in this checkout`);
+  console.log(`\nunavailable ${label(entry)}: this checkout has no ${entry.missing.join(", ")}`);
 }
 if (failed.length > 0) {
   // Named, not counted: a lane run is long enough that scrolling back through

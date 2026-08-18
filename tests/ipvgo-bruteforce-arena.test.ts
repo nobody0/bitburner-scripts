@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import {
@@ -14,6 +14,7 @@ import {
   playPlaybookArenaGame,
 } from "../sim/ipvgobruteforce-arena.ts";
 import { playMove } from "../shared/strategy/go/rules.ts";
+import { lane } from "./support/lanes.ts";
 
 const PLAYBOOK_PATH = join(
   import.meta.dir,
@@ -24,10 +25,11 @@ const COLLISION_REPORT_PATH = join(
   "../ipvgobruteforce/data/seeded-phases/netburners-5x5-epoch2697-v16-sweep/merged/phase-collisions.tsv",
 );
 
-// The generated corpus under ipvgobruteforce/data/ is transferred out of band,
-// so a clone has the sources but not this fixture. Skip rather than fail, the
-// same way the merged multi-opponent suite does.
-describe.skipIf(!existsSync(PLAYBOOK_PATH))("IPvGO brute-force phase playbook", () => {
+// An arena run over a 150,000-phase playbook: a measurement, not a unit check,
+// and the corpus under ipvgobruteforce/data/ is transferred out of band, so a
+// clone has the sources but not this fixture. `bun run long go`, which reports
+// the lane as unavailable rather than failing it where the corpus is absent.
+lane({ feature: "go", requires: PLAYBOOK_PATH }).describe("IPvGO brute-force phase playbook", () => {
   test("all root routes commit to valid entry phases with legal openings", async () => {
     const playbook = await loadPhasePlaybook(PLAYBOOK_PATH);
     const routes = auditPlaybookRoutes(playbook);

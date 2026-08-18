@@ -1,5 +1,6 @@
 import { describe, test } from "bun:test";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
 
 /** LANES — the split between correctness tests and simulations.
  *
@@ -32,9 +33,9 @@ import { appendFileSync } from "node:fs";
  *     bun run long hacking stock two features at once
  *     bun run long --all
  *
- * A handful of lane files import `ipvgobruteforce/`, which lives outside this
- * repository, and so throw before any call here can run. Those are excluded by
- * `bunfig.toml` and listed in `tools/test-lanes.ts` instead. */
+ * A lane whose fixture is transferred out of band declares it with `requires`
+ * and skips wherever that fixture is absent, so a clone without the 28 GB
+ * seeded-phase search reports the lane as unavailable instead of failing it. */
 
 /** The subsystem a simulation exercises. Deliberately coarse: a token is
  * useful when it answers "I changed X, what should I re-measure?", and a
@@ -51,6 +52,11 @@ export interface LaneTags {
   feature?: Feature | Feature[];
   /** Which BitNode it is specific to. Omit when the run is node-agnostic. */
   bn?: number | number[];
+  /** Fixtures this run cannot proceed without, repository-relative or
+   * absolute. Missing ones skip the lane and are reported as unavailable —
+   * `ipvgobruteforce/data/` is the case this exists for: the sources are
+   * committed, the 28 GB search they produced is not. */
+  requires?: string | string[];
 }
 
 const list = <T>(value: T | T[] | undefined): T[] =>
@@ -89,12 +95,24 @@ function callerFile(): string | undefined {
   return undefined;
 }
 
-function announce(kind: "describe" | "test", name: string, tags: LaneTags): void {
+const ROOT = join(import.meta.dir, "..", "..");
+
+/** The fixtures a lane declared that this checkout does not have, named the way
+ * the repository names them so the runner's report stays readable. */
+const missing = (tags: LaneTags): string[] =>
+  list(tags.requires)
+    .filter((path) => !existsSync(isAbsolute(path) ? path : join(ROOT, path)))
+    .map((path) => (isAbsolute(path) ? relative(ROOT, path) : path).replaceAll("\\", "/"));
+
+function announce(
+  kind: "describe" | "test",
+  name: string,
+  tags: LaneTags,
+  absent: string[],
+): void {
   if (manifestPath === undefined) return;
-  appendFileSync(
-    manifestPath,
-    JSON.stringify({ kind, name, file: callerFile(), tags: laneTokens(tags) }) + "\n",
-  );
+  const entry = { kind, name, file: callerFile(), tags: laneTokens(tags), missing: absent };
+  appendFileSync(manifestPath, JSON.stringify(entry) + "\n");
 }
 
 export interface Lane {
@@ -112,15 +130,16 @@ export function lane(tags: LaneTags): Lane {
   if (laneTokens(tags).length === 0) {
     throw new Error("a lane needs at least one feature or bn tag, or nothing can select it");
   }
+  const absent = missing(tags);
   // Discovery registers everything: it is the pass that learns what exists.
-  const run = manifestPath !== undefined || isRequested(tags);
+  const run = absent.length === 0 && (manifestPath !== undefined || isRequested(tags));
   return {
     describe: (name, body) => {
-      announce("describe", name, tags);
+      announce("describe", name, tags, absent);
       (run ? describe : describe.skip)(name, body);
     },
     test: (name, body, options) => {
-      announce("test", name, tags);
+      announce("test", name, tags, absent);
       (run ? test : test.skip)(name, body, options);
     },
   };

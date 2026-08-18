@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -20,6 +20,7 @@ import {
 } from "../sim/ipvgobruteforce-arena.ts";
 import { auditGeneration } from "../ipvgobruteforce/arena/main.ts";
 import { playMove } from "../shared/strategy/go/rules.ts";
+import { lane } from "./support/lanes.ts";
 
 const MERGED = join(
   import.meta.dir,
@@ -32,7 +33,9 @@ function initialBoard(playbook: PhasePlaybook, enemy: string, phase: number) {
   return playbookInitialBoardAtPlaytime(enemy, epoch * 30_000_000 + phase * 200, 1);
 }
 
-describe.skipIf(!existsSync(PLAYBOOK))("merged IPvGO brute-force 5x5 playbook", () => {
+// The merged multi-opponent arena, over a corpus transferred out of band:
+// `bun run long go`, unavailable rather than failed without it.
+lane({ feature: "go", requires: PLAYBOOK }).describe("merged IPvGO brute-force 5x5 playbook", () => {
   test("ordinary wall delay includes every mandatory AI wait cycle", () => {
     expect(ordinaryTurnTicks(() => 0, "minimum").ticks).toBe(1);
     expect(ordinaryTurnTicks(() => 0.999999, "maximum").ticks).toBe(2);
