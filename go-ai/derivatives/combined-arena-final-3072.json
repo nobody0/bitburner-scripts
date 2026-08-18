@@ -1,0 +1,740 @@
+{
+  "ok": true,
+  "backend": "webgpu",
+  "config": {
+    "games": 3072,
+    "startPhase": 118301,
+    "phaseStride": 41213,
+    "timing": "random",
+    "defenseSeed": 20260819,
+    "playbook": "/Users/bob/git/bitburner-scripts/go-ai/derivatives/playbook-combined/merged/playbook.phase.js",
+    "arms": [
+      "combined",
+      "playbookOnly",
+      "neuralOnly",
+      "neuralUnrouted",
+      "combinedUnrouted"
+    ]
+  },
+  "arms": {
+    "combined": {
+      "games": 3072,
+      "wins": 3065,
+      "completed": 3072,
+      "winRate": 0.9977213541666666,
+      "certifiedTurns": 60396,
+      "neuralTurns": 7833,
+      "neuralReturns": 1883,
+      "powerPerTurn": 1.374642273098937,
+      "neuralLatencyMs": {
+        "p50": 2.8,
+        "p95": 5.2,
+        "count": 7833
+      },
+      "failures": []
+    },
+    "playbookOnly": {
+      "games": 3072,
+      "wins": 95,
+      "completed": 95,
+      "winRate": 0.030924479166666668,
+      "certifiedTurns": 44388,
+      "neuralTurns": 0,
+      "neuralReturns": 0,
+      "powerPerTurn": 0.6633134170629598,
+      "neuralLatencyMs": {
+        "p50": 0,
+        "p95": 0,
+        "count": 0
+      },
+      "failures": [
+        "Netburners@118301: playbook miss at phase 118377, round 8",
+        "Slum Snakes@9514: playbook miss at phase 9551, round 7",
+        "The Black Hand@50727: playbook miss at phase 50754, round 5",
+        "Tetrads@91940: playbook miss at phase 91997, round 8",
+        "Daedalus@133153: playbook miss at phase 133196, round 9",
+        "Illuminati@24366: playbook miss at phase 24635, round 12",
+        "Netburners@65579: playbook miss at phase 65604, round 5",
+        "Slum Snakes@106792: playbook miss at phase 106950, round 13",
+        "The Black Hand@148005: playbook miss at phase 148050, round 8",
+        "Tetrads@39218: playbook miss at phase 39257, round 3",
+        "Daedalus@80431: playbook miss at phase 80473, round 8",
+        "Illuminati@121644: playbook miss at phase 122359, round 7",
+        "Netburners@12857: playbook miss at phase 12871, round 4",
+        "Slum Snakes@54070: playbook miss at phase 54155, round 10",
+        "The Black Hand@95283: playbook miss at phase 95352, round 13",
+        "Tetrads@136496: playbook miss at phase 136578, round 8",
+        "Daedalus@27709: playbook miss at phase 27751, round 8",
+        "Illuminati@68922: playbook miss at phase 69253, round 4",
+        "Netburners@110135: playbook miss at phase 110195, round 17",
+        "Slum Snakes@1348: playbook miss at phase 1367, round 5"
+      ]
+    },
+    "neuralOnly": {
+      "games": 3072,
+      "wins": 2761,
+      "completed": 3072,
+      "winRate": 0.8987630208333334,
+      "certifiedTurns": 0,
+      "neuralTurns": 31190,
+      "neuralReturns": 0,
+      "powerPerTurn": 1.4121673613337609,
+      "neuralLatencyMs": {
+        "p50": 3.7,
+        "p95": 8.5,
+        "count": 31190
+      },
+      "failures": []
+    },
+    "neuralUnrouted": {
+      "games": 3072,
+      "wins": 2870,
+      "completed": 3072,
+      "winRate": 0.9342447916666666,
+      "certifiedTurns": 0,
+      "neuralTurns": 32573,
+      "neuralReturns": 0,
+      "powerPerTurn": 1.460028244251374,
+      "neuralLatencyMs": {
+        "p50": 3.7,
+        "p95": 8.6,
+        "count": 32573
+      },
+      "failures": []
+    },
+    "combinedUnrouted": {
+      "games": 3072,
+      "wins": 2875,
+      "completed": 3072,
+      "winRate": 0.9358723958333334,
+      "certifiedTurns": 1956,
+      "neuralTurns": 31822,
+      "neuralReturns": 59,
+      "powerPerTurn": 1.4524867596030924,
+      "neuralLatencyMs": {
+        "p50": 3.7,
+        "p95": 8.6,
+        "count": 31822
+      },
+      "failures": []
+    }
+  },
+  "perOpponent": {
+    "combined": {
+      "Netburners": {
+        "games": 512,
+        "wins": 512,
+        "completed": 512,
+        "winRate": 1,
+        "certifiedTurns": 10743,
+        "neuralTurns": 1222,
+        "neuralReturns": 300,
+        "powerPerTurn": 1.4949707251163489,
+        "neuralLatencyMs": {
+          "p50": 2.4,
+          "p95": 4.8,
+          "count": 1222
+        },
+        "failures": []
+      },
+      "Slum Snakes": {
+        "games": 512,
+        "wins": 512,
+        "completed": 512,
+        "winRate": 1,
+        "certifiedTurns": 11144,
+        "neuralTurns": 1235,
+        "neuralReturns": 311,
+        "powerPerTurn": 1.4439158016147635,
+        "neuralLatencyMs": {
+          "p50": 2.5,
+          "p95": 4.8,
+          "count": 1235
+        },
+        "failures": []
+      },
+      "The Black Hand": {
+        "games": 512,
+        "wins": 512,
+        "completed": 512,
+        "winRate": 1,
+        "certifiedTurns": 9129,
+        "neuralTurns": 1048,
+        "neuralReturns": 337,
+        "powerPerTurn": 1.3839410939691446,
+        "neuralLatencyMs": {
+          "p50": 2.8,
+          "p95": 4.6,
+          "count": 1048
+        },
+        "failures": []
+      },
+      "Tetrads": {
+        "games": 512,
+        "wins": 512,
+        "completed": 512,
+        "winRate": 1,
+        "certifiedTurns": 10400,
+        "neuralTurns": 1275,
+        "neuralReturns": 313,
+        "powerPerTurn": 1.2870247077970114,
+        "neuralLatencyMs": {
+          "p50": 2.8,
+          "p95": 5.2,
+          "count": 1275
+        },
+        "failures": []
+      },
+      "Daedalus": {
+        "games": 512,
+        "wins": 512,
+        "completed": 512,
+        "winRate": 1,
+        "certifiedTurns": 10232,
+        "neuralTurns": 1283,
+        "neuralReturns": 300,
+        "powerPerTurn": 1.298602853745541,
+        "neuralLatencyMs": {
+          "p50": 2.8,
+          "p95": 5.2,
+          "count": 1283
+        },
+        "failures": []
+      },
+      "Illuminati": {
+        "games": 512,
+        "wins": 505,
+        "completed": 512,
+        "winRate": 0.986328125,
+        "certifiedTurns": 8748,
+        "neuralTurns": 1770,
+        "neuralReturns": 322,
+        "powerPerTurn": 1.3382167611846252,
+        "neuralLatencyMs": {
+          "p50": 3.4,
+          "p95": 5.6,
+          "count": 1770
+        },
+        "failures": []
+      }
+    },
+    "playbookOnly": {
+      "Netburners": {
+        "games": 512,
+        "wins": 21,
+        "completed": 21,
+        "winRate": 0.041015625,
+        "certifiedTurns": 8200,
+        "neuralTurns": 0,
+        "neuralReturns": 0,
+        "powerPerTurn": 0.717761830006728,
+        "neuralLatencyMs": {
+          "p50": 0,
+          "p95": 0,
+          "count": 0
+        },
+        "failures": [
+          "Netburners@118301: playbook miss at phase 118377, round 8",
+          "Netburners@65579: playbook miss at phase 65604, round 5",
+          "Netburners@12857: playbook miss at phase 12871, round 4",
+          "Netburners@110135: playbook miss at phase 110195, round 17",
+          "Netburners@57413: playbook miss at phase 57480, round 10",
+          "Netburners@101969: playbook miss at phase 102012, round 12",
+          "Netburners@49247: playbook miss at phase 49277, round 8",
+          "Netburners@146525: playbook miss at phase 146589, round 8",
+          "Netburners@93803: playbook miss at phase 93850, round 12",
+          "Netburners@41081: playbook miss at phase 41101, round 6",
+          "Netburners@138359: playbook miss at phase 138383, round 8",
+          "Netburners@85637: playbook miss at phase 85687, round 12",
+          "Netburners@32915: playbook miss at phase 32939, round 4",
+          "Netburners@77471: playbook miss at phase 77555, round 7",
+          "Netburners@24749: playbook miss at phase 24788, round 8",
+          "Netburners@122027: playbook miss at phase 122064, round 11",
+          "Netburners@69305: playbook miss at phase 69355, round 12",
+          "Netburners@16583: playbook miss at phase 16685, round 13",
+          "Netburners@113861: playbook miss at phase 113900, round 6",
+          "Netburners@61139: playbook miss at phase 61182, round 8"
+        ]
+      },
+      "Slum Snakes": {
+        "games": 512,
+        "wins": 16,
+        "completed": 16,
+        "winRate": 0.03125,
+        "certifiedTurns": 8612,
+        "neuralTurns": 0,
+        "neuralReturns": 0,
+        "powerPerTurn": 0.6865433673469388,
+        "neuralLatencyMs": {
+          "p50": 0,
+          "p95": 0,
+          "count": 0
+        },
+        "failures": [
+          "Slum Snakes@9514: playbook miss at phase 9551, round 7",
+          "Slum Snakes@106792: playbook miss at phase 106950, round 13",
+          "Slum Snakes@54070: playbook miss at phase 54155, round 10",
+          "Slum Snakes@1348: playbook miss at phase 1367, round 5",
+          "Slum Snakes@98626: playbook miss at phase 98681, round 13",
+          "Slum Snakes@45904: playbook miss at phase 45949, round 9",
+          "Slum Snakes@143182: playbook miss at phase 143255, round 6",
+          "Slum Snakes@90460: playbook miss at phase 90492, round 7",
+          "Slum Snakes@37738: playbook miss at phase 37789, round 10",
+          "Slum Snakes@135016: playbook miss at phase 135133, round 5",
+          "Slum Snakes@82294: playbook miss at phase 82364, round 9",
+          "Slum Snakes@29572: playbook miss at phase 29633, round 12",
+          "Slum Snakes@126850: playbook miss at phase 126910, round 9",
+          "Slum Snakes@74128: playbook miss at phase 74264, round 12",
+          "Slum Snakes@21406: playbook miss at phase 21450, round 7",
+          "Slum Snakes@118684: playbook miss at phase 118738, round 9",
+          "Slum Snakes@65962: playbook miss at phase 66023, round 13",
+          "Slum Snakes@13240: playbook miss at phase 13364, round 15",
+          "Slum Snakes@110518: playbook miss at phase 110581, round 6",
+          "Slum Snakes@57796: playbook miss at phase 57832, round 7"
+        ]
+      },
+      "The Black Hand": {
+        "games": 512,
+        "wins": 34,
+        "completed": 34,
+        "winRate": 0.06640625,
+        "certifiedTurns": 6831,
+        "neuralTurns": 0,
+        "neuralReturns": 0,
+        "powerPerTurn": 0.7429106474050294,
+        "neuralLatencyMs": {
+          "p50": 0,
+          "p95": 0,
+          "count": 0
+        },
+        "failures": [
+          "The Black Hand@50727: playbook miss at phase 50754, round 5",
+          "The Black Hand@148005: playbook miss at phase 148050, round 8",
+          "The Black Hand@95283: playbook miss at phase 95352, round 13",
+          "The Black Hand@42561: playbook miss at phase 42602, round 8",
+          "The Black Hand@139839: playbook miss at phase 139880, round 7",
+          "The Black Hand@87117: playbook miss at phase 87166, round 6",
+          "The Black Hand@131673: playbook miss at phase 131701, round 4",
+          "The Black Hand@78951: playbook miss at phase 79090, round 13",
+          "The Black Hand@26229: playbook miss at phase 26284, round 7",
+          "The Black Hand@123507: playbook miss at phase 123555, round 9",
+          "The Black Hand@70785: playbook miss at phase 70817, round 6",
+          "The Black Hand@18063: playbook miss at phase 18125, round 7",
+          "The Black Hand@115341: playbook miss at phase 115396, round 12",
+          "The Black Hand@62619: playbook miss at phase 62663, round 9",
+          "The Black Hand@9897: playbook miss at phase 9940, round 5",
+          "The Black Hand@107175: playbook miss at phase 107221, round 7",
+          "The Black Hand@54453: playbook miss at phase 54509, round 8",
+          "The Black Hand@1731: playbook miss at phase 1766, round 4",
+          "The Black Hand@99009: playbook miss at phase 99063, round 6",
+          "The Black Hand@46287: playbook miss at phase 46320, round 6"
+        ]
+      },
+      "Tetrads": {
+        "games": 512,
+        "wins": 9,
+        "completed": 9,
+        "winRate": 0.017578125,
+        "certifiedTurns": 7569,
+        "neuralTurns": 0,
+        "neuralReturns": 0,
+        "powerPerTurn": 0.6317663817663818,
+        "neuralLatencyMs": {
+          "p50": 0,
+          "p95": 0,
+          "count": 0
+        },
+        "failures": [
+          "Tetrads@91940: playbook miss at phase 91997, round 8",
+          "Tetrads@39218: playbook miss at phase 39257, round 3",
+          "Tetrads@136496: playbook miss at phase 136578, round 8",
+          "Tetrads@83774: playbook miss at phase 83843, round 9",
+          "Tetrads@31052: playbook miss at phase 31221, round 11",
+          "Tetrads@128330: playbook miss at phase 128393, round 6",
+          "Tetrads@75608: playbook miss at phase 75648, round 8",
+          "Tetrads@22886: playbook miss at phase 22923, round 5",
+          "Tetrads@120164: playbook miss at phase 120280, round 8",
+          "Tetrads@67442: playbook miss at phase 67495, round 11",
+          "Tetrads@14720: playbook miss at phase 14750, round 5",
+          "Tetrads@111998: playbook miss at phase 112079, round 8",
+          "Tetrads@59276: playbook miss at phase 59344, round 9",
+          "Tetrads@6554: playbook miss at phase 6617, round 11",
+          "Tetrads@103832: playbook miss at phase 103882, round 6",
+          "Tetrads@51110: playbook miss at phase 51188, round 13",
+          "Tetrads@148388: playbook miss at phase 148440, round 4",
+          "Tetrads@42944: playbook miss at phase 42986, round 8",
+          "Tetrads@140222: playbook miss at phase 140266, round 8",
+          "Tetrads@87500: playbook miss at phase 87545, round 7"
+        ]
+      },
+      "Daedalus": {
+        "games": 512,
+        "wins": 12,
+        "completed": 12,
+        "winRate": 0.0234375,
+        "certifiedTurns": 7518,
+        "neuralTurns": 0,
+        "neuralReturns": 0,
+        "powerPerTurn": 0.609491604477612,
+        "neuralLatencyMs": {
+          "p50": 0,
+          "p95": 0,
+          "count": 0
+        },
+        "failures": [
+          "Daedalus@133153: playbook miss at phase 133196, round 9",
+          "Daedalus@80431: playbook miss at phase 80473, round 8",
+          "Daedalus@27709: playbook miss at phase 27751, round 8",
+          "Daedalus@124987: playbook miss at phase 125024, round 5",
+          "Daedalus@72265: playbook miss at phase 72288, round 4",
+          "Daedalus@19543: playbook miss at phase 19605, round 7",
+          "Daedalus@116821: playbook miss at phase 116870, round 9",
+          "Daedalus@64099: playbook miss at phase 64166, round 10",
+          "Daedalus@11377: playbook miss at phase 11441, round 12",
+          "Daedalus@108655: playbook miss at phase 108705, round 11",
+          "Daedalus@55933: playbook miss at phase 55974, round 8",
+          "Daedalus@3211: playbook miss at phase 3296, round 8",
+          "Daedalus@100489: playbook miss at phase 100527, round 5",
+          "Daedalus@47767: playbook miss at phase 47854, round 13",
+          "Daedalus@145045: playbook miss at phase 145075, round 3",
+          "Daedalus@92323: playbook miss at phase 92389, round 8",
+          "Daedalus@39601: playbook miss at phase 39659, round 6",
+          "Daedalus@136879: playbook miss at phase 136908, round 6",
+          "Daedalus@84157: playbook miss at phase 84218, round 8",
+          "Daedalus@31435: playbook miss at phase 31476, round 8"
+        ]
+      },
+      "Illuminati": {
+        "games": 512,
+        "wins": 3,
+        "completed": 3,
+        "winRate": 0.005859375,
+        "certifiedTurns": 5658,
+        "neuralTurns": 0,
+        "neuralReturns": 0,
+        "powerPerTurn": 0.5740162398500936,
+        "neuralLatencyMs": {
+          "p50": 0,
+          "p95": 0,
+          "count": 0
+        },
+        "failures": [
+          "Illuminati@24366: playbook miss at phase 24635, round 12",
+          "Illuminati@121644: playbook miss at phase 122359, round 7",
+          "Illuminati@68922: playbook miss at phase 69253, round 4",
+          "Illuminati@16200: playbook miss at phase 16401, round 7",
+          "Illuminati@113478: playbook miss at phase 114008, round 4",
+          "Illuminati@60756: playbook miss at phase 60930, round 7",
+          "Illuminati@8034: playbook miss at phase 8093, round 5",
+          "Illuminati@105312: playbook miss at phase 105427, round 8",
+          "Illuminati@52590: playbook miss at phase 53332, round 5",
+          "Illuminati@149868: playbook miss at phase 149951, round 5",
+          "Illuminati@97146: playbook miss at phase 97460, round 4",
+          "Illuminati@44424: playbook miss at phase 44541, round 9",
+          "Illuminati@141702: playbook miss at phase 142219, round 2",
+          "Illuminati@88980: playbook miss at phase 89423, round 9",
+          "Illuminati@36258: playbook miss at phase 40073, round 4",
+          "Illuminati@133536: playbook miss at phase 136861, round 8",
+          "Illuminati@80814: playbook miss at phase 80855, round 7",
+          "Illuminati@28092: playbook miss at phase 28493, round 5",
+          "Illuminati@125370: playbook miss at phase 126076, round 9",
+          "Illuminati@19926: playbook miss at phase 19986, round 5"
+        ]
+      }
+    },
+    "neuralOnly": {
+      "Netburners": {
+        "games": 512,
+        "wins": 511,
+        "completed": 512,
+        "winRate": 0.998046875,
+        "certifiedTurns": 0,
+        "neuralTurns": 4849,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.80593936894205,
+        "neuralLatencyMs": {
+          "p50": 3.2,
+          "p95": 7.8,
+          "count": 4849
+        },
+        "failures": []
+      },
+      "Slum Snakes": {
+        "games": 512,
+        "wins": 511,
+        "completed": 512,
+        "winRate": 0.998046875,
+        "certifiedTurns": 0,
+        "neuralTurns": 4584,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.8847076788830714,
+        "neuralLatencyMs": {
+          "p50": 3.8,
+          "p95": 8.8,
+          "count": 4584
+        },
+        "failures": []
+      },
+      "The Black Hand": {
+        "games": 512,
+        "wins": 497,
+        "completed": 512,
+        "winRate": 0.970703125,
+        "certifiedTurns": 0,
+        "neuralTurns": 4954,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.5874041178845377,
+        "neuralLatencyMs": {
+          "p50": 3.3,
+          "p95": 5.5,
+          "count": 4954
+        },
+        "failures": []
+      },
+      "Tetrads": {
+        "games": 512,
+        "wins": 474,
+        "completed": 512,
+        "winRate": 0.92578125,
+        "certifiedTurns": 0,
+        "neuralTurns": 5082,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.3715072805981896,
+        "neuralLatencyMs": {
+          "p50": 4.5,
+          "p95": 9.3,
+          "count": 5082
+        },
+        "failures": []
+      },
+      "Daedalus": {
+        "games": 512,
+        "wins": 488,
+        "completed": 512,
+        "winRate": 0.953125,
+        "certifiedTurns": 0,
+        "neuralTurns": 4895,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.498467824310521,
+        "neuralLatencyMs": {
+          "p50": 4.1,
+          "p95": 7.8,
+          "count": 4895
+        },
+        "failures": []
+      },
+      "Illuminati": {
+        "games": 512,
+        "wins": 280,
+        "completed": 512,
+        "winRate": 0.546875,
+        "certifiedTurns": 0,
+        "neuralTurns": 6826,
+        "neuralReturns": 0,
+        "powerPerTurn": 0.6563140931731615,
+        "neuralLatencyMs": {
+          "p50": 3.6,
+          "p95": 10.1,
+          "count": 6826
+        },
+        "failures": []
+      }
+    },
+    "neuralUnrouted": {
+      "Netburners": {
+        "games": 512,
+        "wins": 511,
+        "completed": 512,
+        "winRate": 0.998046875,
+        "certifiedTurns": 0,
+        "neuralTurns": 4954,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.8211546225272508,
+        "neuralLatencyMs": {
+          "p50": 3.1,
+          "p95": 7.4,
+          "count": 4954
+        },
+        "failures": []
+      },
+      "Slum Snakes": {
+        "games": 512,
+        "wins": 511,
+        "completed": 512,
+        "winRate": 0.998046875,
+        "certifiedTurns": 0,
+        "neuralTurns": 4513,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.9266563261688456,
+        "neuralLatencyMs": {
+          "p50": 3.6,
+          "p95": 8.2,
+          "count": 4513
+        },
+        "failures": []
+      },
+      "The Black Hand": {
+        "games": 512,
+        "wins": 507,
+        "completed": 512,
+        "winRate": 0.990234375,
+        "certifiedTurns": 0,
+        "neuralTurns": 5236,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.5989304812834224,
+        "neuralLatencyMs": {
+          "p50": 3.3,
+          "p95": 5.5,
+          "count": 5236
+        },
+        "failures": []
+      },
+      "Tetrads": {
+        "games": 512,
+        "wins": 487,
+        "completed": 512,
+        "winRate": 0.951171875,
+        "certifiedTurns": 0,
+        "neuralTurns": 5204,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.4391813989239046,
+        "neuralLatencyMs": {
+          "p50": 4.4,
+          "p95": 8.5,
+          "count": 5204
+        },
+        "failures": []
+      },
+      "Daedalus": {
+        "games": 512,
+        "wins": 490,
+        "completed": 512,
+        "winRate": 0.95703125,
+        "certifiedTurns": 0,
+        "neuralTurns": 5161,
+        "neuralReturns": 0,
+        "powerPerTurn": 1.4551443518697926,
+        "neuralLatencyMs": {
+          "p50": 3.8,
+          "p95": 7,
+          "count": 5161
+        },
+        "failures": []
+      },
+      "Illuminati": {
+        "games": 512,
+        "wins": 364,
+        "completed": 512,
+        "winRate": 0.7109375,
+        "certifiedTurns": 0,
+        "neuralTurns": 7505,
+        "neuralReturns": 0,
+        "powerPerTurn": 0.8619586942038641,
+        "neuralLatencyMs": {
+          "p50": 4.5,
+          "p95": 11.5,
+          "count": 7505
+        },
+        "failures": []
+      }
+    },
+    "combinedUnrouted": {
+      "Netburners": {
+        "games": 512,
+        "wins": 511,
+        "completed": 512,
+        "winRate": 0.998046875,
+        "certifiedTurns": 430,
+        "neuralTurns": 4781,
+        "neuralReturns": 10,
+        "powerPerTurn": 1.8059611922384478,
+        "neuralLatencyMs": {
+          "p50": 3.1,
+          "p95": 7.3,
+          "count": 4781
+        },
+        "failures": []
+      },
+      "Slum Snakes": {
+        "games": 512,
+        "wins": 511,
+        "completed": 512,
+        "winRate": 0.998046875,
+        "certifiedTurns": 385,
+        "neuralTurns": 4406,
+        "neuralReturns": 15,
+        "powerPerTurn": 1.8959011060507482,
+        "neuralLatencyMs": {
+          "p50": 3.6,
+          "p95": 8.2,
+          "count": 4406
+        },
+        "failures": []
+      },
+      "The Black Hand": {
+        "games": 512,
+        "wins": 507,
+        "completed": 512,
+        "winRate": 0.990234375,
+        "certifiedTurns": 479,
+        "neuralTurns": 5044,
+        "neuralReturns": 11,
+        "powerPerTurn": 1.576952093549604,
+        "neuralLatencyMs": {
+          "p50": 3.3,
+          "p95": 5.5,
+          "count": 5044
+        },
+        "failures": []
+      },
+      "Tetrads": {
+        "games": 512,
+        "wins": 492,
+        "completed": 512,
+        "winRate": 0.9609375,
+        "certifiedTurns": 329,
+        "neuralTurns": 5024,
+        "neuralReturns": 12,
+        "powerPerTurn": 1.457219765429725,
+        "neuralLatencyMs": {
+          "p50": 4.5,
+          "p95": 8.5,
+          "count": 5024
+        },
+        "failures": []
+      },
+      "Daedalus": {
+        "games": 512,
+        "wins": 490,
+        "completed": 512,
+        "winRate": 0.95703125,
+        "certifiedTurns": 321,
+        "neuralTurns": 5064,
+        "neuralReturns": 10,
+        "powerPerTurn": 1.4400076423385555,
+        "neuralLatencyMs": {
+          "p50": 3.8,
+          "p95": 7,
+          "count": 5064
+        },
+        "failures": []
+      },
+      "Illuminati": {
+        "games": 512,
+        "wins": 364,
+        "completed": 512,
+        "winRate": 0.7109375,
+        "certifiedTurns": 12,
+        "neuralTurns": 7503,
+        "neuralReturns": 1,
+        "powerPerTurn": 0.8622618889036899,
+        "neuralLatencyMs": {
+          "p50": 4.5,
+          "p95": 11.9,
+          "count": 7503
+        },
+        "failures": []
+      }
+    }
+  }
+}

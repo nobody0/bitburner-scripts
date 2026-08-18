@@ -101,6 +101,36 @@ These runs optimised temperature-softened KL over the whole legal distribution.
 objective names the gated quantity; it was added after these runs and has not
 been measured.
 
+## Combined runtime, 3,072 games
+
+`go:combined:arena --games 3072 --unrouted-baseline` (2026-08-18, start phase
+118301, stride 41213, defense seed 20260819), 512 games per opponent, every
+game played to a two-pass finish:
+
+| Opponent | Combined, routed | Neural alone, ordinary phases | Neural alone, at certified roots |
+|---|---:|---:|---:|
+| Netburners | 512/512 | 511/512 | 511/512 |
+| Slum Snakes | 512/512 | 511/512 | 511/512 |
+| Tetrads | 512/512 | 487/512 | 474/512 |
+| The Black Hand | 512/512 | 507/512 | 497/512 |
+| Daedalus | 512/512 | 490/512 | 488/512 |
+| Illuminati | 505/512 | 364/512 | 280/512 |
+| **Total** | **3,065/3,072 (99.77%)** | 2,870/3,072 (93.42%) | 2,761/3,072 (89.88%) |
+
+Decision latency 2.8/5.2 ms p50/p95, Power/turn 1.375, with 88% of turns played
+from certificates and the rest by the network.
+
+Five opponents at 512/512 are not a sampling artifact: the routed arm enters
+lines the generator proved, so a clean sweep is the expected result whenever
+the certificates hold and the runtime reproduces them. The number that carries
+information is Illuminati's seven losses, and the gap beneath it — the same
+network scores 71.1% on ordinary phases and 54.7% when it starts at certified
+roots without the playbook, which is why those phases are worth routing to.
+
+What no arena settles is whether the timing model the certificates were proven
+against matches the live game; the v7 generation swept its own arena and won
+0/120 once timing was corrected. That check belongs to the standalone build.
+
 ## Measured and not adopted
 
 A one-cycle **seed wait** — when the lookahead says every continuation loses,
