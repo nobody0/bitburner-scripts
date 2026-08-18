@@ -79,6 +79,28 @@ next decision arrived 79 ms before its modeled Black-turn deadline. The same
 test confirms compact clock/response synchronization, deliberate desync
 detection, and reset/reinstall recovery.
 =======
+### daemon19 post-training compression: rejected
+
+`go:compress:v9 --profile daemon19` (policy lane, 2026-08-18, seed 2026081801)
+distilled the champion over 130,101 actor positions with 15,167 held out:
+
+| Student | Updates | Held-out argmax agreement | Teacher top-1 in student top-K | Deployed parameters |
+|---|---:|---:|---:|---:|
+| 32x4 | 9,630 | 74.66% | 99.87% | -21.0% |
+| 24x6 | 9,457 | 73.78% | 99.78% | -34.5% |
+
+Neither approaches the 99.5% argmax gate, so neither was installed and the
+champion's own lossless strip remains deployed. The shape of the failure is
+worth keeping: the teacher's chosen move is inside the student's shortlist
+about 99.8% of the time, so coverage is nearly perfect and only the ranking of
+the top slot diverges — the same wall the exploit-corpus training run hit from
+the other direction. A strict-K=1 deployment consumes nothing but that slot.
+
+These runs optimised temperature-softened KL over the whole legal distribution.
+`--argmax-weight` now adds the teacher's argmax as a hard label so the
+objective names the gated quantity; it was added after these runs and has not
+been measured.
+
 ## Measured and not adopted
 
 A one-cycle **seed wait** — when the lookahead says every continuation loses,

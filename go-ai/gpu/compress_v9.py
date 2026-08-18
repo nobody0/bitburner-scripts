@@ -258,14 +258,30 @@ def policy_distillation_loss(
     student_policy, _ = student.forward_proposal(inputs, behavior)
     temperature = args.temperature
     losses: list[Tensor] = []
+    argmax_losses: list[Tensor] = []
     for row, position in enumerate(positions):
         moves = torch.tensor(position.moves, dtype=torch.long, device=device)
+        student_legal = student_policy[row, moves]
+        teacher_legal = teacher_policy[row, moves]
         losses.append(F.kl_div(
-            F.log_softmax(student_policy[row, moves] / temperature, dim=0),
-            F.softmax(teacher_policy[row, moves] / temperature, dim=0),
+            F.log_softmax(student_legal / temperature, dim=0),
+            F.softmax(teacher_legal / temperature, dim=0),
             reduction="sum") * temperature * temperature)
+        if args.argmax_weight > 0:
+            # Temperature-softened KL spends capacity on the whole ranking,
+            # while a strict-K=1 deployment consumes exactly one thing: which
+            # legal move is the maximum. Name that target directly.
+            argmax_losses.append(F.cross_entropy(
+                student_legal.unsqueeze(0),
+                teacher_legal.argmax().detach().unsqueeze(0)))
     policy_loss = torch.stack(losses).mean()
-    return policy_loss, {"policy": float(policy_loss.detach().cpu())}
+    argmax_loss = torch.stack(argmax_losses).mean() if argmax_losses \
+        else torch.zeros((), device=device)
+    total = args.policy_weight * policy_loss + args.argmax_weight * argmax_loss
+    return total, {
+        "policy": float(policy_loss.detach().cpu()),
+        "argmax": float(argmax_loss.detach().cpu()),
+    }
 
 
 @torch.no_grad()
@@ -1005,6 +1021,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--gradient-clip", type=float, default=5.0)
     result.add_argument("--temperature", type=float, default=2.0)
     result.add_argument("--report-updates", type=int, default=100)
+    result.add_argument("--argmax-weight", type=float, default=1.0,
+                        help="daemon19: weight on the teacher's argmax as a hard label")
     result.add_argument("--min-policy-top1-agreement", type=float, default=0.995,
                         help="daemon19: held-out argmax agreement a student must reach")
     result.add_argument("--structured-init", type=on_off, default=True, metavar="on|off")
