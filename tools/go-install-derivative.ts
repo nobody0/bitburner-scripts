@@ -7,6 +7,9 @@
  *   value head is stripped. Gate ladder: exact decision parity over a traced
  *   battery (max logit diff 0), the full WGSL golden gate, and a paired arena
  *   that must complete game-for-game identically.
+ * - daemon19 `policy-distill-strip-v1` (lossy): a distilled smaller student of
+ *   the policy-only champion, deployed without a value head. Gated like any
+ *   lossy transform — reported parity plus a lexicographic paired arena.
  * - small5 `structured-distill-v1` (lossy): a distilled student checkpoint
  *   (`--candidate`) is retained under go-ai/derivatives/ and exported with
  *   the champion binding. Gate ladder: decision parity in report mode (the
@@ -102,7 +105,14 @@ if (profileArg !== "daemon19" && profileArg !== "small5") {
   throw new Error("usage: bun run go:derivative:install <daemon19|small5> [--candidate student.model] [flags] [--apply]");
 }
 const profile: "daemon19" | "small5" = profileArg === "daemon19" ? "daemon19" : "small5";
-const transform = profile === "daemon19" ? "strip-neutral-value-v1" : "structured-distill-v1";
+const candidateFlagEarly = stringFlag("--candidate", "");
+// daemon19 has two derivative routes: the champion's own lossless strip, and a
+// distilled smaller student that is also value-free. small5 has one.
+const transform = profile === "small5"
+  ? "structured-distill-v1"
+  : candidateFlagEarly
+    ? "policy-distill-strip-v1"
+    : "strip-neutral-value-v1";
 const applyRequested = Bun.argv.includes("--apply");
 const champion = join(ROOT, "go-ai", `${profile}-champion.model`);
 const moduleTarget = join(ROOT, "shared", "strategy", "go", "neural", "models", `${profile}.ts`);
@@ -110,12 +120,9 @@ const fixtureTarget = join(ROOT, "tests", "fixtures", "go-value.json");
 const championSha = await sha256File(champion);
 const seedLedgerPath = stringFlag("--seed-ledger", DEFAULT_GO_ARENA_SEED_LEDGER);
 
-const candidateFlag = stringFlag("--candidate", "");
+const candidateFlag = candidateFlagEarly;
 if (profile === "small5" && !candidateFlag) {
   throw new Error("small5 structured-distill install requires --candidate <student.model>");
-}
-if (profile === "daemon19" && candidateFlag) {
-  throw new Error("the daemon19 strip transform derives from the champion; --candidate is invalid");
 }
 
 const arenaConfig = {
@@ -151,7 +158,11 @@ try {
   }
   const championModule = exportStagedModule(champion, profile, scratch, "champion", []);
   const derivativeModule = exportStagedModule(derivativeCheckpoint, profile, scratch, "derivative",
-    profile === "daemon19" ? ["--strip-neutral-value"] : ["--derivative-of", champion]);
+    transform === "strip-neutral-value-v1"
+      ? ["--strip-neutral-value"]
+      : transform === "policy-distill-strip-v1"
+        ? ["--strip-neutral-value", "--derivative-of", champion]
+        : ["--derivative-of", champion]);
   const championExport = await importStagedModule(championModule);
   const derivativeExport = await importStagedModule(derivativeModule);
   const derivative = derivativeExport.artifact;
@@ -170,7 +181,9 @@ try {
 
   // 1. Decision parity over a traced battery: exact for the lossless strip,
   // report mode for a lossy student.
-  const parityMode = profile === "daemon19" ? "exact" : "report";
+  // Only the lossless strip can promise identical decisions; a distilled
+  // student is compared, not asserted.
+  const parityMode = transform === "strip-neutral-value-v1" ? "exact" : "report";
   const parityRun = await runInHeadlessChrome(
     join(import.meta.dir, "webgpu", "entry-derivative-parity.ts"),
     Math.max(1_800_000, parityConfig.games * 30_000),
@@ -200,7 +213,7 @@ try {
   const championArena = await runGoProfileArena(arenaConfig);
   await Bun.write(moduleTarget, derivativeExport.moduleText.replace(
     "STAGED_GO_MODEL", `${profile.toUpperCase()}_GO_MODEL`));
-  if (transform === "structured-distill-v1") {
+  if (transform !== "strip-neutral-value-v1") {
     run(["bun", "run", "tools/go-golden-fixture.ts"]);
   }
   run(["bun", "run", "tools/go-export-model.ts", "--check"]);
@@ -223,7 +236,7 @@ try {
   if (transform === "strip-neutral-value-v1" && !identical) {
     throw new Error("lossless derivative diverged from the champion in the paired arena");
   }
-  if (transform === "structured-distill-v1") {
+  if (transform !== "strip-neutral-value-v1") {
     // Wins first; Power/turn breaks an exact win tie; fewer turns break the
     // next tie. The derivative must not be lexicographically worse.
     const lexicographicPass = derivativeArena.wins > championArena.wins

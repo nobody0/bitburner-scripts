@@ -49,6 +49,33 @@ describe("policy-only deployment derivative", () => {
     }
   });
 
+  test("a distilled policy-only student binds to the champion and carries no value path", async () => {
+    const scratch = await mkdtemp(join(tmpdir(), "go-policy-distill-"));
+    const module = join(scratch, "student.ts");
+    try {
+      // The champion stands in for a distilled student here: the transform's
+      // contract is the binding and the missing value path, and a real student
+      // is only smaller. Any checkpoint with a zero value head exercises both.
+      const result = Bun.spawnSync([
+        "bun", "run", "tools/go-export-model.ts",
+        "go-ai/daemon19-champion.model", "daemon19",
+        "--strip-neutral-value", "--derivative-of", "go-ai/small5-champion.model",
+        "--output-module", module, "--constant", "STUDENT_GO_MODEL",
+      ], { cwd: ROOT, stdout: "pipe", stderr: "pipe" });
+      expect(result.stderr.toString()).toBe("");
+      expect(result.exitCode).toBe(0);
+      const text = await Bun.file(module).text();
+      expect(text).toContain('transform: "policy-distill-strip-v1"');
+      const artifact = (await import(module)).STUDENT_GO_MODEL as GoValueModelArtifact;
+      expect(artifact.derivative?.transform).toBe("policy-distill-strip-v1");
+      const weights = loadGoValueWeights(artifact);
+      expect(weights.valuePath).toBe("absent");
+      expect(weights.valueW1.length).toBe(0);
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
+  });
+
   test("unknown derivative transforms are rejected before any decoding", () => {
     expect(() => loadGoValueWeights({
       ...SMALL5_GO_MODEL,

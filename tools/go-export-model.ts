@@ -355,7 +355,7 @@ function encode(checkpoint: Checkpoint, factor?: ValueFactor, stripValue = false
 
 interface DerivativeMeta {
   championSha256: string;
-  transform: "strip-neutral-value-v1" | "structured-distill-v1";
+  transform: "strip-neutral-value-v1" | "structured-distill-v1" | "policy-distill-strip-v1";
 }
 
 function generatedModule(checkpoint: Checkpoint, source: string, sourceText: string,
@@ -440,12 +440,23 @@ async function exportModel(checkpointPath: string, profile: Profile,
   const { checkpoint, source, sourceText } = await checkedCheckpoint(checkpointPath, profile);
   if (factorPath && profile !== "small5") throw new Error("low-rank value export is proven for small5 only");
   if (factorPath && stripValue) throw new Error("--strip-neutral-value and --value-factor are mutually exclusive");
-  if (stripValue && derivativeOfPath) {
-    throw new Error("--strip-neutral-value and --derivative-of are mutually exclusive transforms");
-  }
   if (stripValue) requireNeutralValueHead(checkpoint, source);
   let derivative: DerivativeMeta | undefined;
-  if (stripValue) {
+  if (stripValue && derivativeOfPath) {
+    // A distilled student of a policy-only champion: lossy against the
+    // champion, and value-free for the same reason the champion's own strip
+    // is — the profile never evaluates a value head. Both facts belong in the
+    // recorded transform, so it gets its own name rather than borrowing the
+    // lossless one.
+    if (!await Bun.file(derivativeOfPath).exists()) {
+      throw new Error(`--derivative-of champion ${derivativeOfPath} does not exist`);
+    }
+    const championText = await Bun.file(derivativeOfPath).text();
+    if (championText === sourceText) {
+      throw new Error("--derivative-of expects a distilled student, not the champion itself");
+    }
+    derivative = { championSha256: sha256(championText), transform: "policy-distill-strip-v1" };
+  } else if (stripValue) {
     derivative = { championSha256: sha256(sourceText), transform: "strip-neutral-value-v1" };
   } else if (derivativeOfPath) {
     if (!await Bun.file(derivativeOfPath).exists()) {
@@ -487,7 +498,8 @@ async function exportModel(checkpointPath: string, profile: Profile,
     const fullCount = blocks(checkpoint, factor, false).reduce((sum, [values,,, bias]) =>
       sum + values.length + bias.length, 0);
     const fullBytes = encode(checkpoint, factor, false).length;
-    console.log(`  derivative: strip-neutral-value-v1 removed ${(fullCount - parameterCount).toLocaleString()} `
+    console.log(`  derivative: ${derivative?.transform ?? "strip-neutral-value-v1"} removed `
+      + `${(fullCount - parameterCount).toLocaleString()} `
       + `neutral value parameters (${(fullBytes - generated.payload.length).toLocaleString()} payload bytes); `
       + `policy tensors are byte-identical to the champion export`);
   } else if (derivative) {
@@ -508,14 +520,15 @@ async function exportModel(checkpointPath: string, profile: Profile,
 }
 
 interface InstalledDerivative {
-  transform: "strip-neutral-value-v1" | "structured-distill-v1";
+  transform: "strip-neutral-value-v1" | "structured-distill-v1" | "policy-distill-strip-v1";
   source: string;
 }
 
 async function installedDerivative(target: string): Promise<InstalledDerivative | undefined> {
   if (!await Bun.file(target).exists()) return undefined;
   const text = await Bun.file(target).text();
-  const transform = text.match(/transform: "(strip-neutral-value-v1|structured-distill-v1)"/)?.[1];
+  const transform = text.match(
+    /transform: "(strip-neutral-value-v1|structured-distill-v1|policy-distill-strip-v1)"/)?.[1];
   if (!transform) return undefined;
   const source = text.match(/^ {2}source: ("(?:[^"\\]|\\.)*"),$/m)?.[1];
   if (!source) throw new Error(`${target}: derivative module does not record its source checkpoint`);
@@ -586,6 +599,10 @@ async function main(): Promise<void> {
       else if (installed?.transform === "structured-distill-v1") {
         effectiveCheckpoint = join(ROOT, installed.source);
         derivativeOfPath = checkpoint;
+      } else if (installed?.transform === "policy-distill-strip-v1") {
+        effectiveCheckpoint = join(ROOT, installed.source);
+        derivativeOfPath = checkpoint;
+        stripValue = true;
       }
     }
     await exportModel(effectiveCheckpoint, profile, mode, factorPath, outputModule, constant,

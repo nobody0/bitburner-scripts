@@ -31,6 +31,7 @@ class RecordingBackend implements GoValueBackend {
   constructor(readonly inner: GoValueBackend) {}
   get extent(): number { return this.inner.extent; }
   get behaviorFeatures(): number { return this.inner.behaviorFeatures; }
+  get valuePath(): GoValueBackend["valuePath"] { return this.inner.valuePath; }
   evaluateBatch(batch: GoValueBatch): Promise<Float32Array> {
     return this.inner.evaluateBatch(batch);
   }
@@ -65,9 +66,24 @@ async function main(): Promise<unknown> {
   };
   const engine = new GoNeuralEngine((_weights, profile) => backends[profile]);
   const results: unknown[] = [];
+  const skipped: { name: string; reason: string }[] = [];
   for (const auditCase of cases) {
     const profile: GoModelProfile = auditCase.view.board.size <= 5 ? "small5" : "daemon19";
     const backend = backends[profile];
+    // A deployed policy-only artifact has no value head to serve post-response
+    // batches, so K>1 research cases cannot run on this leg at all — the
+    // engine refuses them loudly, which is the guarantee the strip derivative
+    // exists to provide. The other runtimes still cover K>1 against the
+    // champion's own full-precision weights.
+    const requestedLimit = auditCase.view.candidateLimit
+      ?? GO_PROFILE_CANDIDATE_LIMITS[profile];
+    if (backend.valuePath === "absent" && requestedLimit !== 1) {
+      skipped.push({
+        name: auditCase.name,
+        reason: `deployed ${profile} artifact is policy-only; K=${requestedLimit} needs the full champion export`,
+      });
+      continue;
+    }
     backend.proposals.length = 0;
     const prepared = prepareNeuralGoDecision(auditCase.view);
     const decision = await finalizeNeuralGoDecision(
@@ -100,7 +116,7 @@ async function main(): Promise<unknown> {
     });
   }
   await engine.dispose();
-  return { ok: true, results };
+  return { ok: true, results, skipped };
 }
 
 declare global {

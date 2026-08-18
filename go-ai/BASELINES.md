@@ -79,6 +79,38 @@ next decision arrived 79 ms before its modeled Black-turn deadline. The same
 test confirms compact clock/response synchronization, deliberate desync
 detection, and reset/reinstall recovery.
 =======
+## Measured and not adopted
+
+A one-cycle **seed wait** — when the lookahead says every continuation loses,
+dispatch a tick later at a different White seed instead — is implemented behind
+`GO_PROFILE_SEED_WAIT` and left disabled. Two detectors were measured:
+
+| Detector | Corpus | Control | With wait | Waits | Decision p50/p95 |
+|---|---|---:|---:|---:|---:|
+| value head, below 0.5 win | Small5 field, 2,304 games | 2,151 | 2,153 | 22 | 5.1/10 ms |
+| value head, below 0.9 win | Illuminati, 384 games | 294 | 291 | 109 | 8.5/24.9 ms |
+| rollout, 40 ply | Illuminati, 384 games | 283 | 294 | 151 | 20.6/55.8 ms |
+| rollout, 40 ply (replication) | Illuminati, 384 games | 292 | 296 | 148 | 20.6/55.5 ms |
+| value head, below 0.5 win | daemon19, 128 games | 111 | 111 | 0 | 3.1/4.7 ms |
+| rollout, 30 ply | daemon19, 48 games | 40 | 42 | 194 | 218.5/292.6 ms |
+
+The value head is not a usable loss signal: on Small5 it fires almost never at
+0.5, and at 0.9 it fires often and loses games, because "unsure" does not
+identify which seed is better. On the policy-only profile it reports nothing at
+all — its value head is neutral by construction, so the wait never triggers and
+the games are identical.
+
+Playing the line out does work: pooled over two disjoint Illuminati corpora the
+rollout detector wins 590/768 against 575/768, +20/-5 paired flips. The
+daemon19 rollout arm points the same way at 42/48 against 40/48, but +4/-2 on
+48 games decides nothing.
+
+It stays disabled because of where the cost lands, not whether it helps: a
+rollout costs one policy pass per ply, which is 55 ms p95 on Small5 against a
+50 ms budget and 292 ms on daemon19 against 18 ms. The work belongs in the
+worker's push-ahead window, computed for likely successor positions while the
+opponent is thinking, so a turn spends only the remainder of its own cycle.
+
 ## Promotion gate
 >>>>>>> e2a40c1b (Finalize the 5x5 Go pipeline and embed the certified playbook)
 

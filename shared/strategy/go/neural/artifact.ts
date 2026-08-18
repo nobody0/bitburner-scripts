@@ -42,7 +42,7 @@ export interface GoValueModelArtifact {
    * decodes normally. */
   derivative?: {
     championSha256: string;
-    transform: "strip-neutral-value-v1" | "structured-distill-v1";
+    transform: "strip-neutral-value-v1" | "structured-distill-v1" | "policy-distill-strip-v1";
   };
 }
 
@@ -110,6 +110,11 @@ function halfToFloat(half: number, scratch: DataView): number {
 }
 
 /** Decode the only supported deployment topology into float32 tensor views. */
+/** Transforms whose deployed artifact carries no value tensors. */
+function stripTransform(transform: string): boolean {
+  return transform === "strip-neutral-value-v1" || transform === "policy-distill-strip-v1";
+}
+
 export function loadGoValueWeights(artifact: GoValueModelArtifact): GoV9Weights {
   if (artifact.format !== "bitburner-go-runtime-v9"
     || artifact.topology !== "bitburner-go-value-v9"
@@ -145,17 +150,22 @@ export function loadGoValueWeights(artifact: GoValueModelArtifact): GoV9Weights 
   const derivative = artifact.derivative;
   if (derivative !== undefined) {
     if (derivative.transform !== "strip-neutral-value-v1"
-      && derivative.transform !== "structured-distill-v1") {
+      && derivative.transform !== "structured-distill-v1"
+      && derivative.transform !== "policy-distill-strip-v1") {
       throw new Error(`V9 artifact declares unknown derivative transform ${String(derivative.transform)}`);
     }
     if (!/^[0-9a-f]{64}$/.test(derivative.championSha256)) {
       throw new Error("V9 derivative artifact must bind a champion SHA-256");
     }
-    if (derivative.transform === "strip-neutral-value-v1" && valueRank !== 0) {
+    if (stripTransform(derivative.transform) && valueRank !== 0) {
       throw new Error("a value-stripped derivative cannot also declare a value factorization");
     }
   }
-  const stripValue = derivative?.transform === "strip-neutral-value-v1";
+  // Both stripping transforms deploy without a value path: the lossless one
+  // removes the champion's own zero head, and the policy distillation trains a
+  // smaller student whose value head is held at zero for the same reason.
+  const stripValue = derivative?.transform === "strip-neutral-value-v1"
+    || derivative?.transform === "policy-distill-strip-v1";
   const binary = atob(artifact.weights);
   if (binary.length !== artifact.byteLength) {
     throw new Error(`V9 artifact holds ${binary.length} bytes; metadata declares ${artifact.byteLength}`);

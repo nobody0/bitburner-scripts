@@ -58,6 +58,17 @@ requires a fresh export/gate sequence.
   smaller value path against the installed champion. Its model is retained
   under `go-ai/derivatives/` and is valid only for the champion SHA recorded in
   its summary.
+- daemon19 `policy-distill-strip-v1`: a distilled smaller student of the
+  policy-only champion, deployed without a value head. The Small5 proof does
+  not apply to this profile — it distils the value path, and this champion's
+  value head is exactly zero — so `go:compress:v9 --profile daemon19` runs a
+  policy lane instead: plain actor corpora (the teacher supplies the labels by
+  being run on each position), KL over the legal moves, the student's value
+  head held at zero so the same lossless strip applies to it, and a gate on
+  held-out argmax agreement, which is the only quantity a strict-K=1
+  deployment consumes. Being lossy, it is gated like any lossy transform:
+  reported parity, a regenerated golden fixture, and a lexicographic paired
+  arena it must not lose.
 
 Derivatives are owned by post-training polish. They are not warm starts or
 promotion candidates.

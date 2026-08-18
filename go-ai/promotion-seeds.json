@@ -1284,6 +1284,19 @@
       "defenseSeed": 16161673,
       "candidateSha256": [],
       "candidateLimit": 1
+    },
+    {
+      "id": "2026-08-18T00:22:00.334Z-screen-daemon19",
+      "recordedAt": "2026-08-18T00:22:00.334Z",
+      "kind": "screen",
+      "profile": "daemon19",
+      "gamesPerOpponent": 48,
+      "seed": 21212101,
+      "effectiveFirstSeed": 21212000,
+      "handicapSeed": 21212102,
+      "defenseSeed": 21212103,
+      "candidateSha256": [],
+      "candidateLimit": 1
     }
   ]
 }

@@ -27,6 +27,7 @@ from torch.nn.utils import parametrize
 
 from device import auto_device
 from train_v9 import (
+    VALUE_HEAD_PARAMETERS,
     BRANCHES,
     CORPUS_SCHEMA,
     OPPONENT_ORACLE,
@@ -78,11 +79,17 @@ def parse_shape(value: str) -> CompressionShape:
 
 
 def parameter_counts(shape: V9Shape, value_rank: int = 0) -> tuple[int, int, int]:
+    # The trunk pools any extent into the same 5x5 grid, so `pooled` does not
+    # depend on board size; the input plane count and the optional whole-board
+    # policy correction do.
     pooled = shape.channels * 25
+    points = shape.extent * shape.extent
     value_w1 = shape.hidden * pooled if value_rank == 0 \
         else shape.hidden * value_rank + value_rank * pooled
+    global_policy = (shape.policy_rank * pooled + shape.policy_rank
+                     + points * shape.policy_rank + points) if shape.policy_rank else 0
     deployed = (
-        shape.channels * 8 * 9 + shape.channels
+        shape.channels * shape.input_channels * 9 + shape.channels
         + shape.blocks * 2 * shape.channels * shape.channels * 9
         + shape.blocks * 2 * shape.channels
         + shape.blocks * shape.channels * shape.behavior + shape.blocks * shape.channels
@@ -90,13 +97,14 @@ def parameter_counts(shape: V9Shape, value_rank: int = 0) -> tuple[int, int, int
         + shape.tower * shape.hidden + shape.tower
         + 3 * shape.tower + 3
         + shape.channels + 1 + pooled + 1
+        + global_policy
     )
     auxiliary = BRANCHES * shape.channels + BRANCHES \
         + BRANCHES * pooled + BRANCHES
     # Every deployed matrix uses one int8 per weight plus one f32 scale per
     # output row; every bias uses f16.  This exactly mirrors the TS exporter.
     matrices = [
-        (shape.channels, 8 * 9, shape.channels),
+        (shape.channels, shape.input_channels * 9, shape.channels),
         (shape.blocks * 2 * shape.channels, shape.channels * 9,
          shape.blocks * 2 * shape.channels),
         (shape.blocks * shape.channels, shape.behavior, shape.blocks * shape.channels),
@@ -114,6 +122,13 @@ def parameter_counts(shape: V9Shape, value_rank: int = 0) -> tuple[int, int, int
         ]
     artifact_bytes = sum(rows * columns + rows * 4 + biases * 2
                          for rows, columns, biases in matrices)
+    if shape.policy_rank:
+        # A global-policy checkpoint deploys every policy tensor as f16 (the
+        # runtime refuses any other encoding for it), so those bytes are two
+        # per weight with no row scales.
+        artifact_bytes += 2 * (shape.policy_rank * pooled + shape.policy_rank
+                               + points * shape.policy_rank + points
+                               + shape.channels + 1 + pooled + 1)
     return deployed + auxiliary, deployed, artifact_bytes
 
 
@@ -162,6 +177,129 @@ def load_knowledge(paths: list[str], maximum: int, seed: int) -> tuple[
         training_values = training_values[:maximum * 16]
         heldout_values = heldout_values[:max(1, maximum * 16 // 5)]
     return training, heldout, training_values, heldout_values
+
+
+@dataclasses.dataclass(frozen=True)
+class PolicyPosition:
+    """One decision input plus its legal action set.
+
+    The policy-only contract needs nothing else: the teacher supplies the
+    labels by being run on the position, so an actor corpus is enough and no
+    precomputed distillation values are required.
+    """
+
+    state: str
+    behavior: list[float]
+    elapsed: int
+    moves: list[int]
+
+
+def load_policy_positions(paths: list[str], profile: str, maximum: int,
+                          seed: int) -> tuple[list[PolicyPosition], list[PolicyPosition]]:
+    training: list[PolicyPosition] = []
+    heldout: list[PolicyPosition] = []
+    for raw_path in paths:
+        with gzip.open(raw_path, "rt") as source:
+            for line_number, line in enumerate(source, 1):
+                record = json.loads(line)
+                if record.get("schema") != CORPUS_SCHEMA:
+                    raise RuntimeError(f"{raw_path}:{line_number}: incompatible corpus schema")
+                if record.get("profile") != profile:
+                    raise RuntimeError(
+                        f"{raw_path}:{line_number}: corpus is {record.get('profile')}, not {profile}")
+                if record.get("opponentOracle") != OPPONENT_ORACLE:
+                    raise RuntimeError(f"{raw_path}:{line_number}: opponent oracle mismatch")
+                # Trajectory records carry returns rather than a decision input.
+                if record.get("kind") not in ("actor", "actor-ranking", "proposal"):
+                    continue
+                example = record["example"]
+                moves = example.get("moves")
+                if not moves:
+                    continue
+                position = PolicyPosition(
+                    state=example["state"],
+                    behavior=example["behavior"],
+                    elapsed=example["elapsed"],
+                    moves=list(moves),
+                )
+                (heldout if record.get("split") == "heldout" else training).append(position)
+    if not training or not heldout:
+        raise RuntimeError("policy compression needs both training and held-out positions")
+    randomizer = random.Random(seed ^ 0x510E527F)
+    randomizer.shuffle(training)
+    randomizer.shuffle(heldout)
+    if maximum > 0:
+        training = training[:maximum]
+        heldout = heldout[:max(1, maximum // 5)]
+    return training, heldout
+
+
+def encoded_policy_batch(positions: list[PolicyPosition], shape: V9Shape,
+                         device: torch.device) -> tuple[Tensor, Tensor]:
+    inputs = set_elapsed(
+        encode_states([position.state for position in positions], shape.extent, device,
+                      shape.input_channels),
+        [position.elapsed for position in positions], shape.extent)
+    behavior = torch.tensor(
+        [position.behavior for position in positions], dtype=torch.float32, device=device)
+    return inputs, behavior
+
+
+def policy_distillation_loss(
+    student: V9Net,
+    teacher: V9Net,
+    positions: list[PolicyPosition],
+    device: torch.device,
+    args: argparse.Namespace,
+) -> tuple[Tensor, dict[str, float]]:
+    inputs, behavior = encoded_policy_batch(positions, teacher.shape, device)
+    with torch.no_grad():
+        teacher_policy, _ = teacher.forward_proposal(inputs, behavior)
+    student_policy, _ = student.forward_proposal(inputs, behavior)
+    temperature = args.temperature
+    losses: list[Tensor] = []
+    for row, position in enumerate(positions):
+        moves = torch.tensor(position.moves, dtype=torch.long, device=device)
+        losses.append(F.kl_div(
+            F.log_softmax(student_policy[row, moves] / temperature, dim=0),
+            F.softmax(teacher_policy[row, moves] / temperature, dim=0),
+            reduction="sum") * temperature * temperature)
+    policy_loss = torch.stack(losses).mean()
+    return policy_loss, {"policy": float(policy_loss.detach().cpu())}
+
+
+@torch.no_grad()
+def policy_agreement(student: V9Net, teacher: V9Net, positions: list[PolicyPosition],
+                     device: torch.device, batch_size: int, top_k: int) -> dict[str, float]:
+    """Agreement on the quantity the deployment actually uses: the argmax.
+
+    A strict-K=1 profile plays `argmax` over legal policy logits, so a student
+    that reproduces the teacher's top-1 everywhere plays an identical game
+    regardless of how the remaining logits move. Top-k recall is reported as
+    context, not as the gate.
+    """
+    top1 = topk_hits = total = 0
+    for start in range(0, len(positions), batch_size):
+        batch = positions[start:start + batch_size]
+        inputs, behavior = encoded_policy_batch(batch, teacher.shape, device)
+        teacher_policy, _ = teacher.forward_proposal(inputs, behavior)
+        student_policy, _ = student.forward_proposal(inputs, behavior)
+        for row, position in enumerate(batch):
+            moves = torch.tensor(position.moves, dtype=torch.long, device=device)
+            teacher_best = int(moves[int(teacher_policy[row, moves].argmax())])
+            student_best = int(moves[int(student_policy[row, moves].argmax())])
+            total += 1
+            if teacher_best == student_best:
+                top1 += 1
+            count = min(top_k, moves.numel())
+            student_top = moves[top_indices(student_policy[row, moves], count)]
+            if teacher_best in {int(value) for value in student_top}:
+                topk_hits += 1
+    return {
+        "positions": total,
+        "teacherTop1Agreement": top1 / max(1, total),
+        "teacherTop1InStudentTopK": topk_hits / max(1, total),
+    }
 
 
 def top_indices(score: Tensor, count: int) -> Tensor:
@@ -441,6 +579,103 @@ def agreement_metrics(student: V9Net, teacher: V9Net,
     }
 
 
+def train_policy_student(
+    teacher: V9Net,
+    requested: CompressionShape,
+    training: list[PolicyPosition],
+    heldout: list[PolicyPosition],
+    output_dir: pathlib.Path,
+    device: torch.device,
+    deadline: float | None,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    """Structured distillation for a policy-only profile.
+
+    The deployed artifact of such a profile carries no value path — daemon19's
+    value head is exactly zero and the deployment strips it — so the whole
+    budget goes to the trunk and the policy heads, and the student's value
+    tensors are held at zero so the same lossless strip applies to it.
+    """
+    shape = dataclasses.replace(
+        teacher.shape, channels=requested.channels, blocks=requested.blocks)
+    label = requested.label
+    student = load_v9(pathlib.Path(args.student_init), device) \
+        if args.student_init else V9Net(shape, device, args.seed)
+    if student.shape != shape:
+        raise RuntimeError(f"--student-init shape {student.shape} does not match {shape}")
+    if args.structured_init and not args.student_init:
+        structured_initialize(student, teacher)
+    for name in VALUE_HEAD_PARAMETERS:
+        parameter = getattr(student, name)
+        with torch.no_grad():
+            parameter.zero_()
+        parameter.requires_grad_(False)
+    optimizer = torch.optim.AdamW(
+        (parameter for parameter in student.parameters() if parameter.requires_grad),
+        lr=args.learning_rate, weight_decay=args.weight_decay)
+    shape_seed = int.from_bytes(hashlib.sha256(label.encode()).digest()[:8], "little")
+    randomizer = random.Random(args.seed ^ shape_seed)
+    started = time.monotonic()
+    updates = 0
+    student.train()
+    while not args.evaluate_only and (args.updates <= 0 or updates < args.updates):
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        batch = randomizer.choices(training, k=min(args.batch_size, len(training)))
+        loss, latest = policy_distillation_loss(student, teacher, batch, device, args)
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(student.parameters(), args.gradient_clip)
+        optimizer.step()
+        updates += 1
+        if updates == 1 or updates % args.report_updates == 0:
+            print(json.dumps({
+                "shape": label, "updates": updates,
+                "elapsedSeconds": time.monotonic() - started,
+                "loss": float(loss.detach().cpu()), **latest,
+            }), flush=True)
+
+    model_path = output_dir / f"{label}.model"
+    save_model(student, model_path)
+    student.eval()
+    agreement = policy_agreement(
+        student, teacher, heldout, device, args.batch_size, args.top_k)
+    trained, deployed, artifact_bytes = parameter_counts(shape)
+    teacher_trained, teacher_deployed, teacher_bytes = parameter_counts(teacher.shape)
+    cpp_error = verify_cpp(student, model_path, args.oracle, device)
+    gate_passed = agreement["teacherTop1Agreement"] >= args.min_policy_top1_agreement
+    result: dict[str, object] = {
+        "profile": args.profile,
+        "stage": "post-training-policy-distillation-v1",
+        "shape": dataclasses.asdict(requested),
+        "model": str(model_path),
+        "modelSha256": file_sha256(model_path),
+        "teacherSha256": args.teacher_sha256,
+        "updates": updates,
+        "elapsedSeconds": time.monotonic() - started,
+        "flags": {"structuredInit": args.structured_init, "valueHeadZeroed": True},
+        "parameters": {
+            "trained": trained, "deployed": deployed,
+            "teacherTrained": teacher_trained, "teacherDeployed": teacher_deployed,
+            "deployedReduction": 1 - deployed / teacher_deployed,
+        },
+        "estimatedArtifactBytes": artifact_bytes,
+        "teacherArtifactBytes": teacher_bytes,
+        "artifactReduction": 1 - artifact_bytes / teacher_bytes,
+        "agreement": agreement,
+        "cppParityRelativeError": cpp_error,
+        "minPolicyTop1Agreement": args.min_policy_top1_agreement,
+        "policyGatePassed": gate_passed,
+        # The argmax gate is necessary, never sufficient: a paired WebGPU arena
+        # owns the strength claim.
+        "exportCandidate": gate_passed,
+        "requiresWebGpuArena": True,
+    }
+    (output_dir / f"{label}.summary.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(json.dumps(result), flush=True)
+    return result
+
+
 def train_student(
     teacher: V9Net,
     requested: CompressionShape,
@@ -590,8 +825,9 @@ def train_student(
 
 
 def run(args: argparse.Namespace) -> None:
-    if args.profile != "small5":
-        raise RuntimeError("the structured-distillation proof currently supports small5 only")
+    if args.profile == "daemon19":
+        run_policy_distillation(args)
+        return
     if not args.corpus_in:
         raise RuntimeError("at least one --corpus-in is required")
     if args.time_budget_minutes < 0 or args.updates < 0:
@@ -669,10 +905,84 @@ def run(args: argparse.Namespace) -> None:
     print(json.dumps(summary), flush=True)
 
 
+def run_policy_distillation(args: argparse.Namespace) -> None:
+    """Post-training compression for the strict-K=1 policy-only profile."""
+    if not args.corpus_in:
+        raise RuntimeError("at least one --corpus-in is required")
+    if args.time_budget_minutes < 0 or args.updates < 0:
+        raise RuntimeError("time budget and updates must be nonnegative")
+    if not args.evaluate_only and args.time_budget_minutes == 0 and args.updates == 0:
+        raise RuntimeError("set a positive --time-budget-minutes or --updates")
+    if args.evaluate_only and not args.student_init:
+        raise RuntimeError("--evaluate-only=on requires --student-init")
+    device = auto_device(args.device)
+    configure_accelerator(device)
+    teacher_path = pathlib.Path(args.teacher)
+    teacher = load_v9(teacher_path, device)
+    if teacher.shape.extent != 19 or teacher.shape.policy_rank <= 0:
+        raise RuntimeError(f"daemon19 compression expects a 19x19 global-policy teacher, got {teacher.shape}")
+    for name in VALUE_HEAD_PARAMETERS:
+        if float(getattr(teacher, name).abs().max()) != 0.0:
+            raise RuntimeError(
+                f"daemon19 teacher {name} is nonzero; this lane distills the policy path only "
+                "and holds the student's value head at zero")
+    teacher.eval()
+    for parameter in teacher.parameters():
+        parameter.requires_grad_(False)
+    args.teacher_sha256 = file_sha256(teacher_path)
+    if not args.shape:
+        raise RuntimeError("at least one --shape is required")
+    for shape in args.shape:
+        if shape.channels > teacher.shape.channels or shape.blocks > teacher.shape.blocks:
+            raise RuntimeError(f"{shape.label} is not smaller than the teacher")
+    training, heldout = load_policy_positions(
+        args.corpus_in, args.profile, args.max_positions, args.seed)
+    output_dir = pathlib.Path(args.out_dir)
+    if output_dir.exists() and any(output_dir.iterdir()):
+        raise RuntimeError("output directory must be empty")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(json.dumps({
+        "device": str(device), "profile": args.profile,
+        "teacherSha256": args.teacher_sha256, "teacherShape": str(teacher.shape),
+        "trainingPositions": len(training), "heldoutPositions": len(heldout),
+        "shapes": [shape.label for shape in args.shape],
+    }), flush=True)
+    overall_deadline = time.monotonic() + args.time_budget_minutes * 60 \
+        if args.time_budget_minutes > 0 else None
+    results: list[dict[str, object]] = []
+    for index, shape in enumerate(args.shape):
+        if overall_deadline is None:
+            deadline = None
+        else:
+            remaining = max(0.0, overall_deadline - time.monotonic())
+            deadline = time.monotonic() + remaining / (len(args.shape) - index)
+        results.append(train_policy_student(
+            teacher, shape, training, heldout, output_dir, device, deadline, args))
+    eligible = [result for result in results if result["exportCandidate"]]
+    best = min(eligible, key=lambda value: int(value["estimatedArtifactBytes"])) \
+        if eligible else None
+    if best:
+        shutil.copyfile(str(best["model"]), output_dir / "export-candidate.model")
+        best["exportCandidateModel"] = str(output_dir / "export-candidate.model")
+    summary = {
+        "profile": args.profile,
+        "stage": "post-training-policy-distillation-v1",
+        "teacher": str(teacher_path),
+        "teacherSha256": args.teacher_sha256,
+        "results": results,
+        "selected": best,
+        "selectionRule": "smallest student meeting the argmax-agreement gate; "
+                         "a paired WebGPU arena still owns the strength claim",
+    }
+    (output_dir / "compression-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+    print(json.dumps(summary), flush=True)
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument("--profile", choices=("small5", "daemon19"), default="small5")
-    result.add_argument("--teacher", default=str(GO_AI / "small5-champion.model"))
+    result.add_argument("--teacher", default=str(GO_AI / "small5-champion.model"),
+                        help="champion checkpoint to distil; must match --profile")
     result.add_argument("--student-init",
                         help="evaluate/resume an already compressed student of the requested shape")
     result.add_argument("--corpus-in", action="append", default=[])
@@ -695,6 +1005,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--gradient-clip", type=float, default=5.0)
     result.add_argument("--temperature", type=float, default=2.0)
     result.add_argument("--report-updates", type=int, default=100)
+    result.add_argument("--min-policy-top1-agreement", type=float, default=0.995,
+                        help="daemon19: held-out argmax agreement a student must reach")
     result.add_argument("--structured-init", type=on_off, default=True, metavar="on|off")
     result.add_argument("--freeze-trunk", type=on_off, default=True, metavar="on|off",
                         help="train only the compressed value head; preserves proposal outputs exactly")

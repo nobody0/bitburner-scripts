@@ -424,7 +424,15 @@ for (const auditCase of cases) {
 const browser = await runInHeadlessChrome(
   join(ROOT, "tools", "webgpu", "entry-selector-audit.ts"), 300_000,
   { __goSelectorAuditCases: cases.map(({ python: _python, ...auditCase }) => auditCase) });
-const browserResult = browser.result as { ok: boolean; results?: SelectorResult[]; failures?: string[] };
+const browserResult = browser.result as {
+  ok: boolean;
+  results?: SelectorResult[];
+  failures?: string[];
+  skipped?: { name: string; reason: string }[];
+};
+for (const skip of browserResult.skipped ?? []) {
+  divergences.push(`${skip.name}: not measured on the q8/f16 WebGPU leg — ${skip.reason}`);
+}
 if (!browserResult.ok || !browserResult.results) {
   failures.push(...(browserResult.failures ?? ["WebGPU selector audit did not return results"]));
 } else {
