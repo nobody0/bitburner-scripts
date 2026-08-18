@@ -11,6 +11,12 @@ __pycache__/
 *.model
 !small5-champion.model
 !daemon19-champion.model
+# A deployed derivative's module records its student checkpoint as the source
+# it re-exports from, so `go:export --check` and golden-fixture regeneration
+# both resolve to it. Keeping it out of the repository would leave the
+# installed artifact unreproducible from a clean clone. They are LFS blobs
+# like the champions (.gitattributes).
+!derivatives/*.model
 *.tsv
 *.log
 *.worker-*
