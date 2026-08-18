@@ -812,18 +812,18 @@ let goTurnReadyAt: number | undefined;
  * from a phase-aligned game start, so the controller must defer the game until
  * the route's entry phase, playing no Go at all meanwhile. That is worth doing
  * only where the certified line beats ordinary neural play by enough to pay
- * for the wait. Per-opponent 192-game combined arenas on one fresh corpus
- * (2026-08-17, `go:combined:arena --unrouted-baseline`), certified-root
- * routing versus the neural baseline on ordinary phases:
+ * for the wait. Per-opponent results from one 3,072-game combined arena
+ * (2026-08-18, `go:combined:arena --games 3072 --unrouted-baseline`, 512 games
+ * each), certified-root routing versus the neural baseline on ordinary phases:
  *
  * | Opponent | routed line | neural, unrouted |
  * |---|---:|---:|
- * | Illuminati | 192/192 | 139/192 |
- * | Daedalus | 192/192 | 184/192 |
- * | Tetrads | 192/192 | 187/192 |
- * | The Black Hand | 192/192 | 191/192 |
- * | Netburners | 192/192 | 192/192 |
- * | Slum Snakes | 192/192 | 192/192 |
+ * | Illuminati | 505/512 | 364/512 |
+ * | Tetrads | 512/512 | 487/512 |
+ * | Daedalus | 512/512 | 490/512 |
+ * | The Black Hand | 512/512 | 507/512 |
+ * | Netburners | 512/512 | 511/512 |
+ * | Slum Snakes | 512/512 | 511/512 |
  *
  * So Illuminati justifies a long wait, Daedalus and Tetrads a short one, and
  * the remaining three justify none — their certified lines win no games the
