@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 import { only } from "../../shared/features/profile.ts";
 import { parseGoal } from "../../shared/goals/presets.ts";
 import { runGame } from "../game-run.ts";
+import { lane } from "../../tests/support/lanes.ts";
 
-describe("BN8 stock isolation validity", () => {
+/** The real controller against a fresh BN8 market, where hacked money is
+ * worth nothing and the market is the only income. `bun run long bn8`. */
+lane({ feature: "stock", bn: 8 }).describe("BN8 stock isolation validity", () => {
   test("the real controller can observe and trade a fresh BN8 market with no fidelity gaps", async () => {
     const result = await runGame({
       goal: parseGoal("wealth:1e99"),

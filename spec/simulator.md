@@ -29,10 +29,14 @@ profile world fields never overwrite decoded save state. `--fresh` explicitly
 ignores a profile's default save. `--route <id>` forks lineage for a different
 BitNode completion order without changing the checkpoint registry.
 
-Pressure tests (`sim/tests/scenario-*.test.ts`) are disabled in the default
-correctness process and run with `bun run test:sim:scenarios`. That runner
-starts one Bun process per test case: long virtual-time soaks retain their assertions
-without a timeout leaving patched global clocks behind for unrelated tests.
+Simulations — pressure scenarios (`sim/tests/scenario-*.test.ts`), the
+synthetic-world controller runs, the BN progression profiles, the dispatcher's
+minutes-long band soaks — are disabled in the default correctness process.
+They declare a lane in `tests/support/lanes.ts` and run with
+`bun run long <feature|bnN>`; `bun run long --list` enumerates them. That
+runner starts one Bun process per test case: long virtual-time soaks retain
+their assertions without a timeout leaving patched global clocks behind for
+unrelated tests.
 
 ## Time: two clocks, neither of them injected
 

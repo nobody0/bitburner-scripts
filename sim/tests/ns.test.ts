@@ -9,6 +9,7 @@ import { TestGoNeuralRuntime } from "../../tests/support/go-neural-runtime.ts";
 import { Clock } from "../clock.ts";
 import { installVirtualTime } from "../realm/timers.ts";
 import { calculateExp } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
+import { lane } from "../../tests/support/lanes.ts";
 
 /** The synthetic ns exists to run game/ for real. These pin the mechanics that
  * make that possible, and the end-to-end proof that it does. */
@@ -80,7 +81,11 @@ describe("ram costs", () => {
   });
 });
 
-describe("running game/ in the synthetic world", () => {
+/** The whole controller driven through virtual game time — the integration
+ * run, not a unit check. It installs process-wide virtual time, so it also has
+ * to stay out of a process shared with anything else. `bun run long world`,
+ * or `bun run long bn1`. */
+lane({ feature: "world", bn: 1 }).describe("running game/ in the synthetic world", () => {
   beforeAll(() => {
     setGoNeuralRuntimeForTest(new TestGoNeuralRuntime((weights) => new StubGoValueBackend(weights)));
   });

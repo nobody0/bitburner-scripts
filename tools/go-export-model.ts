@@ -6,7 +6,7 @@
  */
 import { createHash } from "node:crypto";
 import { mkdirSync, renameSync, rmSync } from "node:fs";
-import { join, relative } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 
 const ROOT = join(import.meta.dir, "..");
 const MODELS_DIR = join(ROOT, "shared", "strategy", "go", "neural", "models");
@@ -473,7 +473,9 @@ async function exportModel(checkpointPath: string, profile: Profile,
   const generated = generatedModule(
     checkpoint, source, sourceText, profile, factor, constantOverride, stripValue, derivative);
   const target = targetOverride
-    ? (targetOverride.startsWith("/") ? targetOverride : join(ROOT, targetOverride))
+    // isAbsolute, not a leading slash: a Windows temp dir is C:\..., which a
+    // slash test misses and join() then glues onto ROOT.
+    ? (isAbsolute(targetOverride) ? targetOverride : join(ROOT, targetOverride))
     : join(MODELS_DIR, `${profile}.ts`);
   if (mode === "check") {
     if (!await Bun.file(target).exists()

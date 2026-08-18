@@ -15,6 +15,12 @@ import { WORKER_RAM } from "../../shared/world.ts";
 import type { ServerSpec } from "../core/effects.ts";
 import { DEFAULT_NETWORK } from "../network.ts";
 import { SimWorld } from "../world.ts";
+import { lane } from "../../tests/support/lanes.ts";
+
+/** Virtual-time soaks: minutes of simulated farming to prove the bands and the
+ * landing grid hold over a whole run, not at one instant. Out of the default
+ * suite — `bun run long hacking`. */
+const soak = lane({ feature: "hacking" });
 
 /** A settled JIT pipeline produces hundreds of thousands of samples, which
  * overflows the argument list of a spread-based Math.max/min. Fold instead. */
@@ -244,7 +250,7 @@ describe("HWGW dispatcher", () => {
       .toBeLessThanOrEqual(JIT_LAUNCH_GUARD_MS + 1e-6);
   });
 
-  test("a farm-ready tolerance state can bootstrap into the steady-state JIT envelope", () => {
+  soak.test("a farm-ready tolerance state can bootstrap into the steady-state JIT envelope", () => {
     const h = harness({
       homeRam: 1_024,
       network: JIT_TEST_NETWORK,
@@ -369,7 +375,7 @@ describe("HWGW dispatcher", () => {
     expect(hgw.memory.dispatch.jitPending.every((batch) => batch.ops.every((op) => op.role !== "w1"))).toBe(true);
   });
 
-  test("batches land in H -> W1 -> G -> W2 order, one spacer apart", () => {
+  soak.test("batches land in H -> W1 -> G -> W2 order, one spacer apart", () => {
     const h = harness({
       homeRam: 256,
       network: JIT_TEST_NETWORK,
@@ -395,7 +401,7 @@ describe("HWGW dispatcher", () => {
     }
   });
 
-  test("hgw mode lands H -> G -> W, one spacer apart, and stays in band", () => {
+  soak.test("hgw mode lands H -> G -> W, one spacer apart, and stays in band", () => {
     const h = harness({ homeRam: 256, plan: { modeOverride: "hgw" } });
     h.run(900_000);
     expect(h.memory.dispatch.mode).toBe("hgw");
@@ -450,7 +456,7 @@ describe("HWGW dispatcher", () => {
     }
   });
 
-  test("keeps the farm target inside its security and money bands", () => {
+  soak.test("keeps the farm target inside its security and money bands", () => {
     const h = harness({ seed: 2, homeRam: 256 });
     h.run(1_800_000);
     expect(h.memory.dispatch.stats.hacks).toBeGreaterThan(0);
@@ -883,7 +889,7 @@ describe("shotgun mode", () => {
 // --- pooled workers ------------------------------------------------------------
 
 describe("worker pooling", () => {
-  test("proper JIT creates role-isolated workers that are eligible for reuse", () => {
+  soak.test("proper JIT creates role-isolated workers that are eligible for reuse", () => {
     const h = harness({
       seed: 3,
       homeRam: 4_096,

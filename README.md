@@ -197,7 +197,9 @@ import type { NS } from "@ns";
 - `bun run build` / `build:perf` — compile the allowlist to `build/`.
 - `bun run ui` — telemetry hub + viewer on port 12526, including manual sync.
 - `bun run sim -- --goal …` — run the simulator; per-install JSONLs and a versioned session manifest land in `runs/`.
-- `bun run test:sim:correctness` / `test:sim:scenarios` — run simulator correctness or pressure-scenario lanes. Pressure cases run one process each; default `bun test` skips them so a long scenario cannot leak process-wide virtual time into parity tests.
+- `bun test` — the correctness suite: parity against the pinned game source plus our own logic, ~30 s, everything in it cheap and deterministic.
+- `bun run long <token>` — the simulations: virtual-time soaks, full BitNode runs, and arenas that measure how the scripts GROW rather than whether a function is right. Tokens are features (`go`, `hacking`, `progression`, `stock`, `world`) and BitNodes (`bn1`, `bn8`); `--all` runs every lane, `--list` shows what exists, `--file <substring>` narrows to matching files. Every case gets its own Bun process, so a soak that times out cannot leave process-wide virtual time installed for the next one.
+- `bun run test:sim:correctness` / `test:sim:scenarios` — the simulator's own correctness files, and the pressure scenarios (`bun run long hacking --file scenario-`).
 - `bun run bench:sim:jit-lategame` — run the intentionally long, high-RAM JIT lifecycle benchmark outside the correctness suite.
 - `bun run bench:sim:install-cadence` — run the synthetic two-install reset/favor-cadence benchmark.
 - `bun run sim:compare a.jsonl b.jsonl` — A/B time-to-goal; either input may also be a `.session.json` manifest for all chained installs.

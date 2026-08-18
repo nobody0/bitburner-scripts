@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { scenarioDescribe } from "./scenario-lane.ts";
+import { lane } from "../../tests/support/lanes.ts";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { DEFAULT_NETWORK } from "../network.ts";
 import {
@@ -33,7 +33,7 @@ const RECORDED = {
   moneyPerSec: 1.199933e3,
 } as const;
 
-scenarioDescribe("scenario: BN1 bootstrap from a cold start", () => {
+lane({ feature: "hacking", bn: 1 }).describe("scenario: BN1 bootstrap from a cold start", () => {
   test("reaches its first money milestone while building a productive fleet", async () => {
     const steadyFromMs = 2 * 60_000;
     const run = await runJitScenario({

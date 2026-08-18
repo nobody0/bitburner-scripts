@@ -10,6 +10,7 @@ import {
 import { SERVER_RANGES, type Range } from "../shared/features/servers.ts";
 import type { ServerView, StockInfluence, WorldView } from "../shared/world.ts";
 import { mulberry32 } from "../sim/core/rng.ts";
+import { lane } from "./support/lanes.ts";
 
 /** End-to-end proof that the upper-bound prune is decision-free: two
  * evaluators walk the SAME randomized timeline — servers rolled from the real
@@ -252,7 +253,11 @@ describe("depth-capped incumbent: the prep pick is rate-based, not score-based",
   });
 });
 
-describe("upper-bound pruning is decision-free", () => {
+/** A/B comparison over three full seeded scenarios: the same evaluator run
+ * twice, pruned and unpruned, and asserted identical. Seconds per scenario,
+ * and it reports wall-clock, so it belongs with the measurements rather than
+ * the correctness suite. `bun run long hacking`. */
+lane({ feature: "hacking" }).describe("upper-bound pruning is decision-free", () => {
   for (const scenario of SCENARIOS) {
     test(`scenario 0x${scenario.seed.toString(16)}: identical decisions with and without pruning`, () => {
       // First pass of each mode warms the JIT; the second pass is measured.

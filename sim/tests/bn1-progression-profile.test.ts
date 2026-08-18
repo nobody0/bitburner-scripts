@@ -6,8 +6,11 @@ import { TestGoNeuralRuntime } from "../../tests/support/go-neural-runtime.ts";
 import { only } from "../../shared/features/profile.ts";
 import { runGame } from "../game-run.ts";
 import { findProfile } from "../profiles.ts";
+import { lane } from "../../tests/support/lanes.ts";
 
-describe("BN1 multi-install progression profile", () => {
+/** A full BN1 run across installs: what the augmentation cadence and the Red
+ * Pill regrowth actually look like end to end. `bun run long bn1`. */
+lane({ feature: "progression", bn: 1 }).describe("BN1 multi-install progression profile", () => {
   beforeAll(() => {
     setGoNeuralRuntimeForTest(new TestGoNeuralRuntime((weights) => new StubGoValueBackend(weights)));
   });

@@ -34,7 +34,9 @@ note in `README.md`.
   deletes in-game files.
 - Keep pure decision logic separate from Netscript side effects and cover it
   with `bun test`.
-- Run `bun run typecheck` and `bun test` before committing.
+- Run `bun run typecheck` and `bun test` before committing. `bun test` is the
+  correctness suite only; simulations live in lanes (`bun run long --list`)
+  and are worth running when the feature they measure changed.
 - Use the pinned upstream checkout documented in `spec/game-source.md` when game
   behavior or API details are unclear.
 - Strategy belongs in `shared/strategy/` as pure functions; `game/` drivers
