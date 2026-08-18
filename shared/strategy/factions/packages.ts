@@ -352,7 +352,16 @@ export function factionPackageFrontier(
       // the horizon at that point would select Red Pill too early and starve
       // the ordinary packages that satisfy those blockers.
       && (standing.joined || standing.invited);
-    if (etaSec > view.horizonSec && !routeMandatory) {
+    // Beyond-horizon packages are discounted, not cliffed: joins, company rep
+    // and faction rep persist within the node, so partial progress toward a
+    // longer unlock retains the realizable fraction of its value. A package so
+    // far out that under half its value is realizable is treated as noise —
+    // the estimate has too little evidence at that range to bid against
+    // in-horizon work (this also bounds estimator-corruption blast radius).
+    const horizonFraction = etaSec > view.horizonSec && !routeMandatory
+      ? Math.max(0, Math.min(1, view.horizonSec / etaSec))
+      : 1;
+    if (horizonFraction < 0.5) {
       if (stats) stats.horizonDropped++;
       continue;
     }
@@ -361,8 +370,8 @@ export function factionPackageFrontier(
       faction: standing.name,
       repTarget,
       augmentations: augs.map((aug) => aug.name),
-      value,
-      activationValue: values.activation,
+      value: value * horizonFraction,
+      activationValue: values.activation * horizonFraction,
       etaSec,
       marginalRate: 0,
       marginalActivationRate: 0,
@@ -374,7 +383,7 @@ export function factionPackageFrontier(
       totalCost,
       purchaseCost,
       donationCost,
-      rate: value / etaSec,
+      rate: value * horizonFraction / etaSec,
       why: "",
     });
   }

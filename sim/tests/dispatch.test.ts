@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  HACK_ZERO_DESYNC_STREAK,
   JIT_LAUNCH_GUARD_MS,
   PREP_ORDER_MS,
   SPACER_MS,
@@ -260,6 +261,57 @@ describe("HWGW dispatcher", () => {
 
     expect(h.launches.some((entry) => entry.action.type === "hack" && entry.action.target === "jit-target")).toBe(true);
     expect(h.memory.dispatch.stats.hacks).toBeGreaterThan(0);
+  });
+
+  test("a run of money-zeroed hacks abandons the pipeline and falls back to prep", () => {
+    const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+    prepareJitTestWorld(world);
+    const initial = planFarm(world.view(), initFarm(), [], { jit: true });
+    const ready = reachFirstHackWindow(world, initial);
+    const target = world.servers.get("jit-target")!;
+    const before = ready.memory.dispatch.stats.missedWindow["arrival-money"];
+
+    // A deep externally-observed money deficit: every pending hack is zeroed
+    // by the arrival-money check while support ops keep landing, and later
+    // grows are sized from the same short predicted ledger — without the
+    // desync detector this is a stable zero-hack state. Money is pinned low
+    // across passes so in-flight grows cannot mask the deficit.
+    let memory = ready.memory;
+    let inbox: CompletionEvent[] = [];
+    world.onSettled = (event) => inbox.push(event);
+    let sawHack = false;
+    for (let pass = 0; pass < 40_000 && memory.dispatch.jitPending.length > 0; pass++) {
+      target.moneyAvailable = target.moneyMax * 0.4;
+      const result = planFarm(world.view(), memory, inbox, { jit: true });
+      inbox = [];
+      memory = result.memory;
+      sawHack ||= result.actions.some((action) => action.type === "hack" && action.target === target.hostname);
+      for (const action of result.actions) world.execute(action);
+      const nextDue = memory.dispatch.jitPending
+        .flatMap((batch) => batch.ops)
+        .reduce((earliest, op) => {
+          const due = op.reservation
+            ? op.startAt
+            : op.reserveAt ?? op.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
+          return due > world.clock.now() ? Math.min(earliest, due) : earliest;
+        }, Infinity);
+      if (Number.isFinite(nextDue)) world.clock.run(() => inbox.length > 0, nextDue);
+    }
+
+    // The streak trips: the pending set is abandoned after at most
+    // HACK_ZERO_DESYNC_STREAK zeroed hacks instead of being drained one
+    // doomed batch per landing window (the old behavior skips every batch of
+    // the pipeline), and no zero-thread hack ever reached the world.
+    expect(memory.dispatch.jitPending.length).toBe(0);
+    expect(sawHack).toBe(false);
+    expect(memory.dispatch.stats.missedWindow["arrival-money"]).toBeGreaterThanOrEqual(before + 1);
+    expect(memory.dispatch.stats.batchesSkipped).toBeLessThanOrEqual(HACK_ZERO_DESYNC_STREAK);
+    expect(memory.dispatch.hackZeroStreak).toBe(0);
+    // With the pending set gone and the target genuinely under the prepped
+    // band, the farm branch's existing `isPrepped` gate routes the next
+    // passes through the prep path (dispatch.ts farm-segment else-branch),
+    // re-seeding money from the OBSERVED state — the old behavior instead
+    // kept the doomed pipeline, replanning and zeroing batches indefinitely.
   });
 
   test("re-validates arrival security immediately before dispatching a pending hack", () => {

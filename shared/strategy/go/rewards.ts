@@ -76,13 +76,27 @@ export interface GoRewardView {
   stats: readonly GoOpponentStat[];
   joinedFactions: ReadonlySet<string>;
   /** Current favor and faction-work time that this persistent favor increase
-   * can accelerate. Entries exist only for joined Go factions. */
-  factionFavor: Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>>;
+   * can accelerate. Entries exist only for joined Go factions.
+   * `remainingWorkSec` spans the remaining NODE (favor persists through
+   * installs). `pointValue` adds the one-time donation-gate value: seconds
+   * saved if favor crosses `donateThreshold`, from the factions layer's
+   * favorValue model. */
+  factionFavor: Partial<Record<GoFactionOpponent, {
+    favor: number;
+    remainingWorkSec: number;
+    pointValue?: { donationUnlockSec: number; donateThreshold: number };
+  }>>;
   demands: Partial<Record<GoRewardOpponent, GoEtaDemand>>;
   goPower: number;
   hasSourceFile14: boolean;
   favorRepCap: number;
   installRemainingSec: number;
+  /** Certified playbook entry windows measured by the driver at planning
+   * time (worker `playbookRoute`). Present only for opponents whose aligned
+   * start is worth offering: within the per-opponent wait cap, phase clock
+   * anchored, and cheats locked (certified lines are unreachable in cheat
+   * games). Absent entry ⇒ the opponent plays unaligned only. */
+  playbookEntries?: Partial<Record<GoRewardOpponent, { waitSec: number; entryPlaytime: number }>>;
 }
 
 export interface GoGameCandidate {
@@ -91,6 +105,15 @@ export interface GoGameCandidate {
   boardSize: GoSelectableBoardSize;
   /** Board actually produced by the game. */
   observedBoardSize: GoSelectableBoardSize | 19;
+  /** True for the phase-aligned certified-playbook variant of an opponent;
+   * such a candidate pays `waitSec` before its game and wins at the routed
+   * probability. The unaligned variant of the same opponent starts now. */
+  aligned: boolean;
+  /** Seconds until the certified entry phase (0 for unaligned candidates). */
+  waitSec: number;
+  /** Engine playtime of the certified entry tick, passed through so the
+   * driver can commit the aligned start without a second route lookup. */
+  entryPlaytime?: number;
   winProbability: number;
   expectedBlackScore: number;
   expectedGameSec: number;
@@ -187,8 +210,7 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
-function simulatedWinProbability(opponent: GoRewardOpponent, size: number): number {
-  const prior = GO_REWARD_RULES[opponent].priorWinProbability;
+function simulatedWinProbability(opponent: GoRewardOpponent, size: number, prior: number): number {
   // Fixed komi becomes less important as area grows. These deltas are offline
   // simulator policy, never adapted from the live save's W/L record.
   const sizeShift = size <= 5 ? 0 : size <= 7 ? 0.04 : size <= 9 ? 0.07 : 0.1;
@@ -232,6 +254,9 @@ interface HorizonState {
   rep: number;
   /** Remaining faction reputation work in seconds at the initial favor rate. */
   favorWork: number;
+  /** One-time donation-gate seconds banked when favor crossed the threshold
+   * on this branch. */
+  unlockSaved: number;
 }
 
 function goHorizon(
@@ -243,16 +268,19 @@ function goHorizon(
   difficulty: number,
   favorEligible: boolean,
   initialFavor: number,
+  /** Seconds spent waiting for the certified entry phase before game one. */
+  waitSec: number,
 ): {
   games: number;
   nodePower: number;
   transientSecSaved: number;
   favorSecSaved: number;
 } {
-  const horizonSec = Math.max(performance.expectedGameSec, view.installRemainingSec);
+  const firstGameSec = waitSec + performance.expectedGameSec;
+  const horizonSec = Math.max(firstGameSec, view.installRemainingSec);
   const games = Math.max(
     1,
-    Math.min(GO_PLANNING_GAMES_MAX, Math.floor(horizonSec / performance.expectedGameSec)),
+    Math.min(GO_PLANNING_GAMES_MAX, Math.floor((horizonSec - waitSec) / performance.expectedGameSec)),
   );
   const initialPower = inferGoNodePower(stat?.bonusPercent ?? 0, opponent, view.goPower, view.hasSourceFile14);
   const faction = isFactionOpponent(opponent) ? view.factionFavor[opponent] : undefined;
@@ -263,9 +291,13 @@ function goHorizon(
     favor: initialFavor,
     rep: stat?.rep ?? 0,
     favorWork: Math.max(0, faction?.remainingWorkSec ?? 0),
+    unlockSaved: 0,
   }];
   const initialFavorRate = 1 + initialFavor / 100;
   for (let game = 0; game < games; game++) {
+    // The first game settles only after the alignment wait; faction work
+    // farms through the wait at the old favor rate.
+    const gameElapsedSec = (game === 0 ? waitSec : 0) + performance.expectedGameSec;
     const next: HorizonState[] = [];
     for (const state of states) {
       for (const won of [true, false]) {
@@ -282,14 +314,19 @@ function goHorizon(
         const favorRate = 1 + favor / 100;
         const favorWork = Math.max(
           0,
-          state.favorWork - performance.expectedGameSec * favorRate / initialFavorRate,
+          state.favorWork - gameElapsedSec * favorRate / initialFavorRate,
         );
+        let unlockSaved = state.unlockSaved;
         if (won && favorEligible && streak.current > 0 && streak.current % 2 === 0 && rep < view.favorRepCap) {
           const reward = goFavorReward(favor, rep, view.favorRepCap);
+          const threshold = faction?.pointValue?.donateThreshold;
+          if (threshold !== undefined && favor < threshold && reward.favorAfter >= threshold) {
+            unlockSaved += faction?.pointValue?.donationUnlockSec ?? 0;
+          }
           favor = reward.favorAfter;
           rep += reward.repGranted;
         }
-        next.push({ probability: branchProbability, streak: streak.current, power, favor, rep, favorWork });
+        next.push({ probability: branchProbability, streak: streak.current, power, favor, rep, favorWork, unlockSaved });
       }
     }
     states = next;
@@ -299,16 +336,21 @@ function goHorizon(
     * goEffectMultiplier(state.power, opponent, view.goPower, view.hasSourceFile14), 0);
   const multiplierBefore = 1 + Math.max(0, stat?.bonusPercent ?? 0) / 100;
   const demand = view.demands[opponent];
-  const runway = Math.min(Math.max(0, demand?.seconds ?? 0), horizonSec);
+  // Bounded by the horizon minus the wait only — see the runway comment in
+  // rankGoGames: the deadline is a recalibrating estimate, not a wall.
+  const runway = Math.min(Math.max(0, demand?.seconds ?? 0), Math.max(0, horizonSec - waitSec));
   const transientSecSaved = demand
     ? runway * clamp01(demand.share) * Math.max(0, 1 - multiplierBefore / expectedMultiplier)
     : 0;
-  const baselineFavorWork = Math.max(0, (faction?.remainingWorkSec ?? 0) - games * performance.expectedGameSec);
+  const baselineFavorWork = Math.max(0, (faction?.remainingWorkSec ?? 0) - waitSec - games * performance.expectedGameSec);
   const expectedFavorWork = states.reduce((sum, state) => {
     const relativeRate = (1 + state.favor / 100) / initialFavorRate;
     return sum + state.probability * state.favorWork / relativeRate;
   }, 0);
-  const favorSecSaved = favorEligible ? Math.max(0, baselineFavorWork - expectedFavorWork) : 0;
+  const expectedUnlockSaved = states.reduce((sum, state) => sum + state.probability * state.unlockSaved, 0);
+  const favorSecSaved = favorEligible
+    ? Math.max(0, baselineFavorWork - expectedFavorWork) + expectedUnlockSaved
+    : 0;
   return {
     games,
     nodePower: Math.max(0, expectedPower - initialPower),
@@ -343,7 +385,35 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
     const sizes: readonly GoSelectableBoardSize[] = [5];
     const stat = stats.get(opponent);
     for (const boardSize of sizes) {
-      const winProbability = simulatedWinProbability(opponent, boardSize);
+      // An opponent with a certified entry window is offered TWICE: the
+      // aligned variant pays its wait and wins at the routed probability; the
+      // unaligned variant starts now at the neural prior. Pricing the wait
+      // inside utilityPerSec is what lets a slightly weaker opponent that is
+      // available immediately beat a stronger one behind a long window.
+      //
+      // An entry exists only for the opponents the controller routes, and for
+      // exactly those `priorWinProbability` IS the certified line's rate — so
+      // the aligned variant takes it and the unaligned variant falls back to
+      // the playbook-disabled network rate. For every other opponent the prior
+      // already describes the only way it is ever played.
+      const entry = boardSize === 5 ? view.playbookEntries?.[opponent] : undefined;
+      const rules = GO_REWARD_RULES[opponent];
+      const unroutedPrior = entry !== undefined
+        ? rules.neuralBaselineWinProbability
+        : rules.priorWinProbability;
+      const variants: { aligned: boolean; waitSec: number; entryPlaytime?: number; winProbability: number }[] = [
+        { aligned: false, waitSec: 0, winProbability: simulatedWinProbability(opponent, boardSize, unroutedPrior) },
+      ];
+      if (entry !== undefined) {
+        variants.push({
+          aligned: true,
+          waitSec: Math.max(0, entry.waitSec),
+          entryPlaytime: entry.entryPlaytime,
+          winProbability: clamp01(rules.priorWinProbability),
+        });
+      }
+      for (const variant of variants) {
+      const winProbability = variant.winProbability;
       const performance = expectedPerformance(opponent, boardSize, winProbability);
       const difficulty = goDifficultyMultiplier(opponent, performance.size);
       const currentStreak = stat?.winStreak ?? 0;
@@ -365,7 +435,16 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
       const afterLoss = goEffectMultiplier(currentPower + powerIfLoss, opponent, view.goPower, view.hasSourceFile14);
       const multiplierAfter = winProbability * afterWin + (1 - winProbability) * afterLoss;
       const demand = view.demands[opponent];
-      const runway = Math.min(Math.max(0, demand?.seconds ?? 0), view.installRemainingSec);
+      // The runway is bounded by the remaining install/node forecast MINUS the
+      // alignment wait, and deliberately NOT minus the game's own duration:
+      // the deadline is an estimate that recalibrates (often optimistic near
+      // the end), and treating it as a hard wall zeroed every candidate and
+      // idled Go for as long as the forecast stayed short. Long games still
+      // lose fairly — utilityPerSec divides by their full duration.
+      const runway = Math.min(
+        Math.max(0, demand?.seconds ?? 0),
+        Math.max(0, view.installRemainingSec - variant.waitSec),
+      );
       const transientSecSaved = demand
         ? runway * clamp01(demand.share) * Math.max(0, 1 - multiplierBefore / multiplierAfter)
         : 0;
@@ -381,10 +460,20 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
       const expectedFavorGain = favorEventProbability * favorReward.favorGain;
       const rateBefore = 1 + (faction?.favor ?? 0) / 100;
       const rateAfter = 1 + favorReward.favorAfter / 100;
+      const firstGameSec = variant.waitSec + performance.expectedGameSec;
+      // One-time donation-gate value when this game's possible favor event
+      // pushes the faction across the donation threshold.
+      const crossingSaved = favorEligible
+        && faction.pointValue !== undefined
+        && faction.favor < faction.pointValue.donateThreshold
+        && favorReward.favorAfter >= faction.pointValue.donateThreshold
+        ? faction.pointValue.donationUnlockSec
+        : 0;
       const favorSecSaved = favorEligible
         ? favorEventProbability
-          * Math.max(0, faction.remainingWorkSec - performance.expectedGameSec)
-          * Math.max(0, 1 - rateBefore / rateAfter)
+          * (Math.max(0, faction.remainingWorkSec - firstGameSec)
+            * Math.max(0, 1 - rateBefore / rateAfter)
+            + crossingSaved)
         : 0;
       const totalSecSaved = transientSecSaved + favorSecSaved;
       const horizon = goHorizon(
@@ -396,20 +485,30 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
         difficulty,
         favorEligible,
         faction?.favor ?? 0,
+        variant.waitSec,
       );
-      // Receding-horizon control commits only the next game. Price that game's
-      // exact marginal return at full weight, then add (without double-counting
-      // it) the average continuation value of preserving/building the streak.
+      // Rank by the AVERAGE saving rate over the candidate's whole planning
+      // tree, not the first game's instantaneous rate. Power per second is
+      // roughly board-size-invariant (score and duration both scale with
+      // area), but the effect curve is logarithmic — so a short game's
+      // first-game rate cannot be sustained by chaining, and pricing it as if
+      // it could made six diminishing 27s games look ~6x better than one
+      // thick 159s game that actually delivers its saving. The tree already
+      // contains each candidate's own diminishing tail; dividing by the full
+      // tree duration (wait charged once) compares them honestly.
       const continuationSaved = Math.max(
         0,
         horizon.transientSecSaved + horizon.favorSecSaved - totalSecSaved,
       );
-      const utilityPerSec = totalSecSaved / performance.expectedGameSec
-        + continuationSaved / (horizon.games * performance.expectedGameSec);
+      const utilityPerSec = (totalSecSaved + continuationSaved)
+        / (variant.waitSec + horizon.games * performance.expectedGameSec);
       candidates.push({
         opponent,
         boardSize,
         observedBoardSize: performance.size,
+        aligned: variant.aligned,
+        waitSec: variant.waitSec,
+        ...(variant.entryPlaytime !== undefined ? { entryPlaytime: variant.entryPlaytime } : {}),
         winProbability,
         expectedBlackScore: performance.expectedBlackScore,
         expectedGameSec: performance.expectedGameSec,
@@ -434,8 +533,9 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
         horizonNodePower: horizon.nodePower,
         horizonTransientSecSaved: horizon.transientSecSaved,
         horizonFavorSecSaved: horizon.favorSecSaved,
-        why: `${demand?.why ?? "no transient ETA component"}; ${favorEligible ? `${favorReward.repGranted} rep converted to favor on each even winning streak` : "no favor event value"}; exact ${horizon.games}-game streak tree`,
+        why: `${demand?.why ?? "no transient ETA component"}; ${favorEligible ? `${favorReward.repGranted} rep converted to favor on each even winning streak` : "no favor event value"}; exact ${horizon.games}-game streak tree${variant.aligned ? `; certified entry in ${Math.round(variant.waitSec)}s` : ""}`,
       });
+      }
     }
   }
   return candidates.sort((a, b) =>
@@ -443,6 +543,8 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
     || b.totalSecSaved - a.totalSecSaved
     || b.expectedFavorGain - a.expectedFavorGain
     || b.expectedNodePower / b.expectedGameSec - a.expectedNodePower / a.expectedGameSec
+    || a.waitSec - b.waitSec
+    || Number(b.aligned) - Number(a.aligned)
     || a.opponent.localeCompare(b.opponent)
     || a.boardSize - b.boardSize
   );

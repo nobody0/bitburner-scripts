@@ -91,6 +91,7 @@ export function needDigest(need: Need): NeedDigest {
     have: need.have,
     progress: needProgress(need),
     weight: need.weight,
+    ...(need.valueSec !== undefined ? { valueSec: roundSigFigs(need.valueSec, 3) } : {}),
     urgency: need.urgency,
     satisfied: isSatisfied(need),
   };

@@ -318,20 +318,61 @@ export function solveCycle(
       // floors at the landing interval and RAM-bound rate; when RAM binds the
       // score degenerates to income/ramSec.
       const growTimeS = 3.2 * hackTimeS;
-      const hackSlotsNeeded = Math.max(1, Math.ceil(hackTimeS / intervalS));
-      const growSlotsNeeded = Math.max(1, Math.ceil(growTimeS / intervalS));
-      let hackSlots = 0;
-      let growSlots = caps.growBlockGb === undefined ? Infinity : 0;
-      for (const hostGb of caps.hostBlocksGb) {
-        hackSlots += Math.floor(hostGb / hackGb);
-        if (caps.growBlockGb !== undefined) growSlots += Math.floor(hostGb / growGb);
-        if (hackSlots >= hackSlotsNeeded && growSlots >= growSlotsNeeded) break;
+      // Joint packing: hack and grow slots compete for the SAME host bytes.
+      // Counting each role's slots independently lets a hack sized to 100% of
+      // the largest host coexist on paper with a grow that also only fits
+      // there — the dispatcher then discovers the conflict and slows the
+      // whole grid. A period sustains the cadence only when its resident
+      // slots — ceil(hackTime/period) hacks AND ceil(growTime/period) grows —
+      // pack into the hosts simultaneously (the LARGER block placed first per
+      // host: it fragments worse in a residual). Which role that is has to be
+      // decided from the sizes, not assumed to be grow — hosts arrive largest
+      // first, so hard-coding grow-first rejects a perfectly placeable layout
+      // whenever hack is the bigger block (e.g. blocks [100, 60] with a 100 GB
+      // hack and a 60 GB grow: grow-first eats the only host hack fits on).
+      const packsAt = (periodS: number): boolean => {
+        let hackNeed = Math.ceil(hackTimeS / periodS);
+        let growNeed = caps.growBlockGb === undefined ? 0 : Math.ceil(growTimeS / periodS);
+        const growFirst = growGb >= hackGb;
+        for (const hostGb of caps.hostBlocksGb!) {
+          let residualGb = hostGb;
+          const place = (blockGb: number, need: number): number => {
+            if (need <= 0) return need;
+            if (blockGb <= 0) return 0; // a zero-sized role always fits
+            const taken = Math.min(need, Math.floor(residualGb / blockGb));
+            residualGb -= taken * blockGb;
+            return need - taken;
+          };
+          if (growFirst) {
+            growNeed = place(growGb, growNeed);
+            hackNeed = place(hackGb, hackNeed);
+          } else {
+            hackNeed = place(hackGb, hackNeed);
+            growNeed = place(growGb, growNeed);
+          }
+          if (hackNeed <= 0 && growNeed <= 0) return true;
+        }
+        return false;
+      };
+      const slowestPeriodS = Math.max(hackTimeS, caps.growBlockGb === undefined ? 0 : growTimeS);
+      if (!packsAt(slowestPeriodS)) return undefined;
+      // Feasibility is monotone in the period (slower cadence → same or fewer
+      // resident slots, per role and jointly), so bisect for the fastest one.
+      let jointPeriodS = slowestPeriodS;
+      if (packsAt(intervalS)) jointPeriodS = intervalS;
+      else {
+        let low = intervalS;
+        let high = slowestPeriodS;
+        for (let i = 0; i < 24 && high - low > 1e-3 * high; i++) {
+          const mid = (low + high) / 2;
+          if (packsAt(mid)) high = mid;
+          else low = mid;
+        }
+        jointPeriodS = high;
       }
-      if (hackSlots < 1 || growSlots < 1) return undefined;
       const period = Math.max(
         ramSec / caps.farmGb,
-        hackTimeS / hackSlots,
-        caps.growBlockGb === undefined ? 0 : growTimeS / growSlots,
+        jointPeriodS,
         intervalS,
       );
       score = (income + stockIncome) / (period * caps.farmGb);

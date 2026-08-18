@@ -108,7 +108,7 @@ describe("tab rendering", () => {
           },
           selection: {
           preferred: {
-            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, winProbability: 0.8,
+            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, aligned: false, waitSec: 0, winProbability: 0.8,
             expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
             currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
             multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
@@ -117,7 +117,7 @@ describe("tab rendering", () => {
             planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0, why: "hacking throughput",
           },
           candidates: [{
-            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, winProbability: 0.8,
+            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, aligned: false, waitSec: 0, winProbability: 0.8,
             expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
             currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
             multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
@@ -297,7 +297,7 @@ describe("tab rendering", () => {
         },
         selection: {
           preferred: {
-            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, winProbability: 0.8,
+            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, aligned: false, waitSec: 0, winProbability: 0.8,
             expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
             currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
             multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
@@ -306,7 +306,7 @@ describe("tab rendering", () => {
             planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0,
           },
           candidates: [{
-            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, winProbability: 0.8,
+            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, aligned: false, waitSec: 0, winProbability: 0.8,
             expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
             currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
             multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,

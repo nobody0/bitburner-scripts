@@ -12,6 +12,7 @@ import {
   setReputationContext,
 } from "../vendor/bitburner/src/PersonObjects/formulas/Reputation.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
+import { CONSTANTS } from "../vendor/bitburner/src/Constants.ts";
 import type { ShareSystem } from "./share.ts";
 
 /** The faction subsystem.
@@ -105,7 +106,41 @@ export class FactionSystem {
   }
 
   requirements(name: string): PlayerRequirement[] {
-    return (FACTION_TABLE[name]?.inviteReqs ?? []) as PlayerRequirement[];
+    return this.#effectiveInviteReqs((FACTION_TABLE[name]?.inviteReqs ?? []) as PlayerRequirement[]);
+  }
+
+  /** `getFactionInviteRequirements` parity: the live game serializes company
+   * reputation requirements at their EFFECTIVE value — the base multiplied by
+   * `CompanyRequiredReputationMultiplier` (0.75) whenever a server with the
+   * company's `organizationName` is backdoored. The vendored table holds only
+   * the base, so the same discount is applied here, both to what the query
+   * reports and to what the invitation checker tests (no double discount:
+   * sim/features/requirements.ts compares the serialized number as-is).
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Company/utils.ts */
+  #effectiveInviteReqs(requirements: readonly PlayerRequirement[]): PlayerRequirement[] {
+    return requirements.map((requirement) => this.#effectiveReq(requirement));
+  }
+
+  #effectiveReq(requirement: PlayerRequirement): PlayerRequirement {
+    switch (requirement.type) {
+      case "companyReputation": {
+        const backdoored = [...this.#world.servers.values()].some(
+          (server) => server.organizationName === requirement.company && server.backdoorInstalled,
+        );
+        return backdoored
+          ? { ...requirement, reputation: requirement.reputation * CONSTANTS.CompanyRequiredReputationMultiplier }
+          : requirement;
+      }
+      case "not":
+        return { type: "not", condition: this.#effectiveReq(requirement.condition) };
+      case "someCondition":
+        return { type: "someCondition", conditions: requirement.conditions.map((entry) => this.#effectiveReq(entry)) };
+      case "everyCondition":
+        return { type: "everyCondition", conditions: requirement.conditions.map((entry) => this.#effectiveReq(entry)) };
+      default:
+        return requirement;
+    }
   }
 
   enemies(name: string): string[] {
@@ -153,7 +188,7 @@ export class FactionSystem {
       // "join" Bladeburners by satisfying an empty requirement list.
       if (!info || info.special) continue;
       if (info.inviteReqs.length === 0) continue;
-      if (!satisfies(info.inviteReqs as PlayerRequirement[])) continue;
+      if (!satisfies(this.#effectiveInviteReqs(info.inviteReqs as PlayerRequirement[]))) continue;
       faction.invited = true;
       if (!this.#player.factionInvitations.includes(faction.name)) {
         this.#player.factionInvitations.push(faction.name);

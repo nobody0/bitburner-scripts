@@ -134,6 +134,13 @@ export interface EndgameView {
   /** True once an install has happened while owning the pill — i.e. the
    *  world daemon is actually in the network graph. */
   redPillInstalled: boolean;
+  /** Observed `requiredHackingSkill` of the w0r1d_d43m0n server, once it is
+   * in the network graph. AUTHORITATIVE over the static formula when
+   * present: the static table computed the BN12 recursion one level low
+   * (owned SF12 level vs the current node's level), which made the planner
+   * believe a 4222-skill player had met a 4285 gate and report the node "1s
+   * from completion" for the rest of the run. */
+  worldDaemonRequiredSkill?: number;
   /** destroyW0r1dD43m0n also requires admin rights on the daemon. Fleet
    * upkeep normally supplies this immediately after the pill exposes it. */
   worldDaemonRooted: boolean;
@@ -252,7 +259,7 @@ export function daedalusAugsRequired(bitNode: number | undefined, sf12Level = 0)
 
 export function stepEndgame(view: EndgameView): EndgameDecision {
   const sf12 = view.sf12Level ?? sf(view, 12);
-  const wdSkill = worldDaemonSkill(view.bitNode, sf12);
+  const wdSkill = view.worldDaemonRequiredSkill ?? worldDaemonSkill(view.bitNode, sf12);
   const augsNeeded = daedalusAugsRequired(view.bitNode, sf12);
   const hasWorldDaemonSkill = wdSkill !== undefined && view.hackingSkill >= wdSkill;
 

@@ -238,11 +238,16 @@ function opponentMarkup(g: GoState): string {
         { label: "ETA demands", value: String(Object.keys(context.demands).length) },
       ])
     : "";
-  return evidence + table(
-    ["opponent", "board", "win", "streak", "horizon", "node power", "transient saved", "favor event", "favor gain", "favor saved", "saved/min"],
+  const schedule = g.plan?.selection.schedule;
+  const scheduleNote = schedule && schedule.kind !== "play"
+    ? note(esc(`schedule: ${schedule.kind}${schedule.kind === "filler" && schedule.fillerOpponent ? ` (${schedule.fillerOpponent})` : ""}${schedule.kind === "hold" && schedule.holdSec !== undefined ? ` ${fmtNum(schedule.holdSec, 0)}s` : ""} — ${schedule.why}`))
+    : "";
+  return evidence + scheduleNote + table(
+    ["opponent", "board", "wait", "win", "streak", "horizon", "node power", "transient saved", "favor event", "favor gain", "favor saved", "saved/min"],
     candidates.map((candidate) => [
       esc(candidate.opponent),
       `${candidate.observedBoardSize}x${candidate.observedBoardSize}`,
+      candidate.aligned ? `${fmtNum(candidate.waitSec, 0)}s aligned` : "now",
       fmtPct(candidate.winProbability),
       String(candidate.currentWinStreak),
       `${candidate.planningGames} games / ${fmtNum(candidate.planningGames * candidate.expectedGameSec, 0)}s`,

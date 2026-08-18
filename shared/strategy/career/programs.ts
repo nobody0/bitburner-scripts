@@ -31,17 +31,48 @@ export function programCreateTimeMs(program: ProgramOption, hacking: number, int
   return program.baseTimeMs / Math.max(0.01, rate);
 }
 
-/** Writing wins when its player-slot opportunity cost is below buying. TOR is
- * included only when it has not already been acquired. */
+/** What the career slot would deliver if it did NOT write this program.
+ *
+ * Both channels matter, and the old money-only comparison saw one of them.
+ * The slot also produces posted-need progress — faction and company rep,
+ * karma, combat stats — that nothing else on the board can produce. A
+ * ten-minute BruteSSH write is ten minutes a blocking karma or companyRep
+ * need does not advance, and that cost does not appear in dollars. Measured:
+ * early runs spent the first ten to thirty minutes writing openers with the
+ * whole server-access pipeline stalled behind them. */
+export interface ProgramAlternative {
+  /** Money per second the slot reverts to earning once the top need is
+   * saturated — its income fallback, not the top option's own rate. */
+  moneyPerSec: number;
+  /** BN-seconds of posted-need value the slot would deliver DURING the write
+   * window, already saturation-capped: a need that completes in fifteen
+   * seconds is forgone once, not forty times over a ten-minute window. */
+  valueSec: number;
+}
+
+/** Writing wins when its FULL player-slot opportunity cost is below buying.
+ *
+ * Both sides are denominated in BN-seconds, using the arbiter's own shadow
+ * price of a dollar (`valueSecPerDollar`, a money waterline lambda). TOR is
+ * included in the purchase only when it has not already been acquired.
+ *
+ * Without a price for money — no auction has priced a money band yet — the
+ * comparison degrades to the historical money-only test rather than
+ * fabricating an exchange rate. */
 export function preferProgramCreation(
   program: ProgramOption,
   hacking: number,
   intelligence: number,
-  playerWorkIncomePerSec: number,
+  alternative: ProgramAlternative,
   hasTor: boolean,
+  valueSecPerDollar?: number,
 ): boolean {
   const timeMs = programCreateTimeMs(program, hacking, intelligence);
   if (!Number.isFinite(timeMs)) return false;
+  const timeSec = timeMs / 1_000;
   const buyCost = program.purchaseCost + (hasTor ? 0 : 200_000);
-  return (timeMs / 1_000) * Math.max(0, playerWorkIncomePerSec) < buyCost;
+  const forgoneMoney = timeSec * Math.max(0, alternative.moneyPerSec);
+  if (valueSecPerDollar === undefined || !(valueSecPerDollar > 0)) return forgoneMoney < buyCost;
+  const writeValueSec = forgoneMoney * valueSecPerDollar + Math.max(0, alternative.valueSec);
+  return writeValueSec < buyCost * valueSecPerDollar;
 }

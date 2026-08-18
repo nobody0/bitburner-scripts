@@ -68,6 +68,12 @@ export interface PlanBlocker {
   owner: FeatureId;
   reachable: boolean;
   negated?: boolean;
+  /** The interpreter's observation-aware seconds-to-satisfy estimate, when it
+   *  priced this blocker (backdoor install + skill wait, company promotion
+   *  walks, title ladders). Consumers that rank a blocker against its siblings
+   *  MUST prefer it: without it they silently fall back to the coarse nominal
+   *  per-unit table the estimate exists to replace. */
+  etaSec?: number;
 }
 
 /** One unmet invite requirement, without the faction name — the gate it
@@ -180,6 +186,20 @@ export interface FactionPlan {
   drainCeiling?: number;
 }
 
+/** What one favor event buys at a joined faction, in work-seconds — the
+ * `factionFavorPointValues` digest, published rather than recomputed.
+ *
+ * Go prices its own favor rewards from this. It used to call
+ * `buildFactionsView` + `factionFavorPointValues` itself on every five-second
+ * tick, rebuilding the whole augmentation catalogue and re-walking every
+ * joined faction's rep ladder to read three numbers. Favor value is a
+ * factions fact; Go is a consumer of it. */
+export interface FavorPointValueDigest {
+  remainingWorkSec: number;
+  donationUnlockSec: number;
+  donateThreshold: number;
+}
+
 export interface FactionsState {
   /** Faction names from Player.factions — free, always available. */
   joined: string[];
@@ -214,6 +234,9 @@ export interface FactionsState {
   augMeta?: Record<string, AugmentationMeta>;
   augTotal?: number;
   graftable?: GraftOffer[];
+  /** Per-JOINED-faction favor economics. Absent without the singularity API,
+   *  exactly like `standings`. */
+  favorPointValues?: Record<string, FavorPointValueDigest>;
   /** The decision digest. */
   plan?: FactionPlan;
 }

@@ -5,6 +5,10 @@ import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
 import { marginalTrainingShare, skillRepTradeoff, stepCareer, TRAINING_FUND_WINDOW_SEC, type CareerDecision, type CareerPriorityBand, type CareerView } from "../../../shared/strategy/career/decide.ts";
 import { expForSkill } from "../../../shared/formulas.ts";
 import type { CrimeStats } from "../../../shared/strategy/career/crimes.ts";
+import { trainingBackdoorSavedRate } from "../../../shared/strategy/access/value.ts";
+import type { Need } from "../../../shared/strategy/needs.ts";
+import { COMPANY_POSITIONS } from "../../../shared/features/companies.ts";
+import { applyOutcomes, companyRepPerSec, trackFieldFor } from "../../../shared/strategy/career/company.ts";
 import {
   careerSchedule,
   careerWorkMode,
@@ -17,7 +21,7 @@ import { PORT_OPENER_PROGRAMS, programCreateTimeMs } from "../../../shared/strat
 import { CAREER_TRAINING_OPTIONS } from "../../../shared/strategy/career/training.ts";
 import { rateFraction, slotPriority } from "../../../shared/strategy/income.ts";
 import { isScriptDeath } from "../errors.ts";
-import { bestIncomePerSec, careerBestPerSec } from "../income.ts";
+import { bestIncomePerSec, careerBestPerSec, moneyRateValue } from "../income.ts";
 import { merge, type GameState } from "../state.ts";
 import {
   armWorkCompletion,
@@ -34,7 +38,7 @@ import {
 } from "../work-completion.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { FeatureClaim } from "./claims.ts";
-import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
+import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
 /** The career driver.
  *
@@ -83,6 +87,21 @@ export const EXECUTE_BACKOFF_MS = 30_000;
  * posted so the STANDING reserve stays correctly sized for the course's
  * whole life (the ranked option that priced it is only in scope at start). */
 let trainingCostPerSec = 0;
+/** Where that course runs, latched with it: a backdoor on the location's
+ * server discounts the drain 10%, and the needs producer below asks for one
+ * while a paid course is planned or running. */
+let trainingLocation: string | undefined;
+
+/** The game's location -> server binding for the two paid training venues.
+ * A transcription, not a heuristic: the gym's server organization is
+ * "Powerhouse Fitness" while its location is "Powerhouse Gym", so an
+ * organizationName match cannot recover this. Matches the hostnames the
+ * discount read in buildCareerView already uses.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Locations/data/LocationsMetadata.ts */
+const TRAINING_LOCATION_SERVERS: Record<string, string> = {
+  "Rothman University": "rothman-uni",
+  "Powerhouse Gym": "powerhouse-fitness",
+};
 /** The pure view that produced lastDecision. Claims run much more frequently
  * than career's five-second review; rebuilding every crime/course/company
  * option merely to re-price the same slot claim is wasted planner time. */
@@ -90,6 +109,7 @@ let lastView: CareerView | undefined;
 
 export function resetCareerState(): void {
   trainingCostPerSec = 0;
+  trainingLocation = undefined;
   lastDecision = undefined;
   lastView = undefined;
   lastResult = undefined;
@@ -154,6 +174,7 @@ function buildCareerView(
   const programs = PORT_OPENER_PROGRAMS.slice(ownedOpeners)
     .map((program) => ({ ...program, timeMs: programCreateTimeMs(program, skills["hacking"] ?? 0, intelligence) }))
     .filter((program) => Number.isFinite(program.timeMs));
+  const companyWork = companyModelInputs(state)!;
   const factionWorkType = state.topics.factions?.plan?.action.workType;
   const fallbackCandidates = factionWorkType === "security"
     ? ["hacking", "strength", "defense", "dexterity", "agility"]
@@ -222,7 +243,15 @@ function buildCareerView(
     companies: Object.entries(career?.companies ?? {}).map(([name, company]) => ({
       name,
       rep: company.rep,
+      favor: company.favor,
       ...(companyRates.get(name)?.perSec !== undefined ? { repPerSec: companyRates.get(name)!.perSec } : {}),
+      ...(() => {
+        const title = (player.jobs as Record<string, string> | undefined)?.[name];
+        const held = title !== undefined ? COMPANY_POSITIONS[String(title)] : undefined;
+        return held
+          ? { estimatedRepPerSec: companyRepPerSec(companyWork.person, held, company.favor, companyWork.ctx) }
+          : {};
+      })(),
       ...(company.salaryPerCycle !== undefined
         ? {
             moneyPerSec: company.salaryPerCycle * 5
@@ -246,7 +275,98 @@ function buildCareerView(
     moneyGranted,
     externalIncomePerSec: state.topics.farm?.moneyRate ?? 0,
     defaultSkill,
+    companyWork,
   };
+}
+
+/** Work-line model inputs: exact v3.0.1 position formulas, so companies we
+ * have never measured still rank by a real rate instead of the neutral
+ * exploration constant. Career starts company work focused, so no 0.8. */
+function companyModelInputs(state: GameState): NonNullable<CareerView["companyWork"]> | undefined {
+  const player = state.topics.player;
+  if (!player) return undefined;
+  const mults = (player.mults ?? {}) as unknown as Record<string, number>;
+  const progression = state.topics.progression;
+  const nodeMults = effectiveBitNodeMultipliers(
+    progression?.bitNode,
+    progression?.sourceFiles["12"] ?? 0,
+    progression?.multipliers,
+  ) ?? {};
+  const skills = { ...(player.skills ?? {}) } as unknown as Record<string, number>;
+  const charisma = skills["charisma"] ?? 0;
+  const sf15SalaryMult = (progression?.sourceFiles["15"] ?? 0) > 1
+    ? 1 + 0.5 * (1 - Math.exp(-0.0002 * charisma)) + 0.9 * (1 - Math.exp(-0.00004 * charisma))
+    : 1;
+  return {
+    person: {
+      skills,
+      mults: {
+        company_rep: mults["company_rep"] ?? 1,
+        work_money: mults["work_money"] ?? 1,
+      },
+    },
+    ctx: {
+      companyWorkRepGain: nodeMults["CompanyWorkRepGain"] ?? 1,
+      companyWorkMoney: nodeMults["CompanyWorkMoney"] ?? 1,
+      focusMult: 1,
+      sf11SalaryFavor: (progression?.sourceFiles["11"] ?? 0) > 0,
+      sf15SalaryMult,
+    },
+  };
+}
+
+/** Whether any server the game attributes to this company is backdoored. The
+ * game discounts every position's reputation requirement by 25% while one is,
+ * so a model that ignores it under-reports the rung the player qualifies for —
+ * and `promotionField` then declines to ask for a promotion the game would
+ * grant on the spot. */
+function companyBackdoored(state: GameState, company: string): boolean {
+  for (const server of Object.values(state.topics.servers ?? {})) {
+    if (server.organizationName === company && server.backdoorInstalled) return true;
+  }
+  return false;
+}
+
+/** The field to re-apply on when a better position than the held one is
+ * qualified right now, else undefined. */
+function promotionField(state: GameState, company: string | undefined): string | undefined {
+  if (company === undefined) return undefined;
+  const work = companyModelInputs(state);
+  const held = (state.topics.player?.jobs as Record<string, string> | undefined)?.[company];
+  if (!work || held === undefined) return undefined;
+  // Strictly WITHIN the held track. `applyToCompany` assigns whatever rung the
+  // requested field resolves to, higher or lower, so following a cross-field
+  // rate comparison here would silently drop the current title — including one
+  // a jobTitle objective is mid-climb toward (the strategy's chosen track
+  // arrives through the `apply`/`promote` actions, which carry their field).
+  const field = trackFieldFor(String(held));
+  if (field === undefined) return undefined;
+  const standing = state.topics.career?.companies?.[company];
+  const ctx = { ...work.ctx, backdoored: companyBackdoored(state, company) };
+  const best = applyOutcomes(company, work.person, standing?.rep ?? 0, standing?.favor ?? 0, ctx)
+    .find((outcome) => outcome.field === field);
+  return best !== undefined && best.position !== String(held) ? best.field : undefined;
+}
+
+/** Application field order: qualified tracks best-rate-first from the position
+ * table, the strategy's explicit field (title paths) up front, and the blind
+ * preference sweep only when the model sees nothing. */
+function applyFieldOrder(state: GameState, company: string | undefined, preferred: string | undefined): string[] {
+  const work = company !== undefined ? companyModelInputs(state) : undefined;
+  const standing = company !== undefined ? state.topics.career?.companies?.[company] : undefined;
+  const ranked = work && company !== undefined
+    ? applyOutcomes(
+        company,
+        work.person,
+        standing?.rep ?? 0,
+        standing?.favor ?? 0,
+        { ...work.ctx, backdoored: companyBackdoored(state, company) },
+      )
+        .sort((a, b) => b.repPerSec - a.repPerSec || b.salaryPerSec - a.salaryPerSec)
+        .map((outcome) => outcome.field)
+    : [];
+  const fields = ranked.length > 0 ? ranked : [...JOB_FIELDS];
+  return preferred !== undefined ? [preferred, ...fields.filter((field) => field !== preferred)] : fields;
 }
 
 function sampleCompanyRates(state: GameState, now: number): void {
@@ -375,8 +495,17 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
       return true;
     }
     case "company": {
-      const result = await replaceWork(["singularity.workForCompany"], (stubNs: NS) =>
-        stubNs["singularity"]["workForCompany"](decision.action.subject as never, true),
+      // Promotion is free value on the same call budget: the game's apply
+      // takes the highest qualified rung, so when the work-line model says a
+      // better position than the held one is qualified, re-apply before
+      // starting the work. A null return (nothing better) is harmless.
+      const promotion = promotionField(ctx.state, decision.action.subject);
+      const result = await replaceWork(
+        promotion ? ["singularity.applyToCompany", "singularity.workForCompany"] : ["singularity.workForCompany"],
+        (stubNs: NS) => {
+          if (promotion) stubNs["singularity"]["applyToCompany"](decision.action.subject as never, promotion as never);
+          return stubNs["singularity"]["workForCompany"](decision.action.subject as never, true);
+        },
       );
       if (result === refused) return false;
       const ok = result.value;
@@ -384,10 +513,15 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
       return true;
     }
     case "apply": {
-      // Preference order: productive specialist tracks first, universal
-      // fallback jobs last. Stop at the first accepted application.
+      // Field order comes from the position table: only tracks whose entry
+      // rung this company offers and this player qualifies for, best rep rate
+      // first. The blind full-list sweep (which threw for every field the
+      // company lacks) remains only as the fallback when the model sees no
+      // qualified track — the game is authoritative, so one last sweep is
+      // cheaper than wrongly recording "no eligible position".
+      const fields = applyFieldOrder(ctx.state, decision.action.subject, decision.action.field);
       const result = await replaceWork(["singularity.applyToCompany"], (stubNs: NS) => {
-        for (const field of JOB_FIELDS) {
+        for (const field of fields) {
           const job = stubNs["singularity"]["applyToCompany"](decision.action.subject as never, field as never);
           if (job) return String(job);
         }
@@ -612,6 +746,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
     const costPerSec = Math.max(0, -(option?.moneyPerSec ?? 0));
     if (costPerSec > 0) {
       trainingCostPerSec = costPerSec;
+      trainingLocation = option?.action.location ?? trainingLocation;
       out.push({
         by: "career",
         id: "training-fund",
@@ -644,6 +779,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
     });
   } else if (ctx.state.topics.career?.currentWork?.type !== "CLASS") {
     trainingCostPerSec = 0;
+    trainingLocation = undefined;
   }
   // At a completion boundary another feature may win the work slot before
   // career ticks. Keep a separately-priced observation available even when
@@ -702,7 +838,8 @@ function careerMethods(type: string | undefined): readonly string[] {
     case "crime": return ["singularity.commitCrime", "singularity.getCurrentWork"];
     case "gym": return ["singularity.gymWorkout", "singularity.getCurrentWork"];
     case "class": return ["singularity.universityCourse", "singularity.getCurrentWork"];
-    case "company": return ["singularity.workForCompany", "singularity.getCurrentWork"];
+    // applyToCompany rides along for the opportunistic promotion check.
+    case "company": return ["singularity.workForCompany", "singularity.applyToCompany", "singularity.getCurrentWork"];
     case "apply": return ["singularity.applyToCompany", "singularity.getCurrentWork"];
     case "promote": return ["singularity.applyToCompany", "singularity.getCurrentWork"];
     case "quit": return ["singularity.quitJob", "singularity.getCurrentWork"];
@@ -841,4 +978,27 @@ export const careerModule: FeatureModule = {
     delete state.topics.career;
   },
   claims,
+  // While a PAID course is planned or running, a backdoor on the venue's
+  // server is worth 10% of the drain. Posted as "nice" with the measured
+  // BN-second value of that saved rate: it accelerates training, it gates
+  // nothing, and it disappears the moment training stops. hacking owns the
+  // `backdoor` kind and decides when the install is worth its RAM.
+  needs: (ctx: NeedContext): Need[] => {
+    if (!(trainingCostPerSec > 0) || trainingLocation === undefined) return [];
+    const host = TRAINING_LOCATION_SERVERS[trainingLocation];
+    const server = host !== undefined ? ctx.state.topics.servers?.[host] : undefined;
+    if (!server || server.backdoorInstalled) return [];
+    const value = moneyRateValue(ctx.state, trainingBackdoorSavedRate(trainingCostPerSec), ctx.now);
+    return [{
+      by: "career",
+      kind: "backdoor",
+      subject: server.hostname,
+      target: 1,
+      have: 0,
+      weight: 1,
+      ...(value.state === "measured" && value.value > 0 ? { valueSec: value.value } : {}),
+      urgency: "nice",
+      why: `training at ${trainingLocation} costs 10% less once ${server.hostname} is backdoored`,
+    }];
+  },
 };

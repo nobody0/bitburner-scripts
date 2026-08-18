@@ -334,7 +334,10 @@ export const bitnodeTab: Tab = {
               )
             : note(lifecycle.installWanted
                 ? "all destructive-reset barriers acknowledged"
-                : "install is not economically due yet")),
+                : "install is not economically due yet"))
+          // An install that runs THROUGH a guard is the one decision a reader
+          // will not be able to reconstruct from the barriers above.
+          + (lifecycle.installOverrideWhy ? note(`guard overridden: ${esc(lifecycle.installOverrideWhy)}`) : ""),
         )
       : "";
     // Both cards read only optional plan fields (they postdate recorded runs).
@@ -437,13 +440,14 @@ export const bitnodeTab: Tab = {
     const coordination =
       (needs.length
         ? table(
-            ["urgency", "requested by", "need", "progress", "weight"],
+            ["urgency", "requested by", "need", "progress", "weight", "value (s)"],
             needs.map((need) => [
               esc(need.urgency),
               esc(need.by),
               esc(`${need.kind}${need.subject ? `: ${need.subject}` : ""}`),
               `${fmtNum(need.have, 1)} / ${fmtNum(need.target, 1)}`,
               fmtNum(need.weight, 2),
+              need.valueSec !== undefined ? fmtNum(need.valueSec, 0) : "–",
             ]),
             { left: [0, 1, 2] },
           )

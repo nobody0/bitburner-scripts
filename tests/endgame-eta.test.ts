@@ -12,6 +12,7 @@ import {
   ROUTE_DWELL_MS,
   chooseRoute,
   noRates,
+  regrowInstallOverrideWhy,
   routeEtas,
   type RouteChoice,
   type RouteRates,
@@ -421,5 +422,62 @@ describe("endgame view invariants the driver relies on", () => {
     expect(rep.sec).toBeGreaterThan(0);
     expect(rep.measured).toBe(false);
     expect(rep.sec * 50).toBeCloseTo(RED_PILL_REP, 0);
+  });
+});
+/** The post-Red-Pill regrow guard is a SHORT-tail protection, and it inverts
+ * when the remaining climb is longer than installing and re-climbing. The
+ * inversion is a deliberately surprising decision, so it must carry a reason
+ * the run record can show. */
+describe("regrow install override", () => {
+  const rates = (overrides: Partial<RouteRates> = {}): RouteRates => ({
+    ...noRates(),
+    hackingSkillPerSec: 0.01,
+    postInstallHackingSkillMult: 10,
+    ...overrides,
+  });
+
+  test("a long remaining climb inverts the guard and says why", () => {
+    const why = regrowInstallOverrideWhy({
+      stage: "world-daemon-regrow",
+      optionalInstallAllowed: false,
+      worldDaemonSkill: 3_000,
+      hackingSkill: 10,
+      rates: rates(),
+    });
+    expect(why).toContain("re-climbing after an install");
+    expect(why).toContain("beats finishing the current climb");
+  });
+
+  test("a short tail leaves the guard standing", () => {
+    expect(regrowInstallOverrideWhy({
+      stage: "world-daemon-regrow",
+      optionalInstallAllowed: false,
+      worldDaemonSkill: 3_000,
+      hackingSkill: 2_999,
+      rates: rates(),
+    })).toBeUndefined();
+  });
+
+  test("only a REFUSAL on the regrow stage can be overridden", () => {
+    const inverted = {
+      worldDaemonSkill: 3_000,
+      hackingSkill: 10,
+      rates: rates(),
+    };
+    // The guard already allows it — there is nothing to override.
+    expect(regrowInstallOverrideWhy({
+      ...inverted, stage: "world-daemon-regrow", optionalInstallAllowed: true,
+    })).toBeUndefined();
+    // A different stage carries a different guard, with its own reasons.
+    expect(regrowInstallOverrideWhy({
+      ...inverted, stage: "red-pill", optionalInstallAllowed: false,
+    })).toBeUndefined();
+    // Without a measured skill rate neither path can be priced.
+    expect(regrowInstallOverrideWhy({
+      ...inverted,
+      stage: "world-daemon-regrow",
+      optionalInstallAllowed: false,
+      rates: rates({ hackingSkillPerSec: 0 }),
+    })).toBeUndefined();
   });
 });

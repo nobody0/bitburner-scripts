@@ -223,7 +223,43 @@ function redPillTail(view: EndgameView, wdSkill: number | undefined, rates: Rout
   return parts;
 }
 
-function postInstallRegrow(skill: number, rates: RouteRates): EtaPart {
+/** The post-Red-Pill regrow guard ("never reset again") protects a SHORT
+ * tail. When the remaining climb to the daemon's destroy gate is LONGER than
+ * installing the queued augmentations and re-climbing with their multipliers,
+ * the guard inverts: the reset IS the fastest path to the gate. Both paths are
+ * compared in measured seconds rather than either being hardcoded.
+ *
+ * Returns the REASON when the guard should be overridden, so a deliberately
+ * surprising install carries its justification into the run record; undefined
+ * when the guard stands. */
+export function regrowInstallOverrideWhy(input: {
+  /** Route stage; only "world-daemon-regrow" carries this guard. */
+  stage?: string;
+  /** The guard's own verdict. Only a REFUSAL can be overridden. */
+  optionalInstallAllowed?: boolean;
+  /** Hacking skill the daemon's destroy gate requires. */
+  worldDaemonSkill?: number;
+  hackingSkill: number;
+  rates: RouteRates;
+}): string | undefined {
+  const gate = input.worldDaemonSkill;
+  if (
+    input.optionalInstallAllowed !== false
+    || input.stage !== "world-daemon-regrow"
+    || gate === undefined
+    || input.hackingSkill >= gate
+    || input.rates.hackingSkillPerSec <= 0
+  ) {
+    return undefined;
+  }
+  const remainNowSec = (gate - input.hackingSkill) / input.rates.hackingSkillPerSec;
+  const remainAfterSec = INSTALL_OVERHEAD_SEC + postInstallRegrow(gate, input.rates).sec;
+  if (remainAfterSec >= remainNowSec) return undefined;
+  return `re-climbing after an install (~${Math.round(remainAfterSec)}s with queued multipliers)`
+    + ` beats finishing the current climb (~${Math.round(remainNowSec)}s)`;
+}
+
+export function postInstallRegrow(skill: number, rates: RouteRates): EtaPart {
   const equivalentSkill = skill / Math.max(1, rates.postInstallHackingSkillMult);
   const rate = rates.hackingSkillPerSec > 0 ? rates.hackingSkillPerSec : 1 / FALLBACK_SEC_PER_HACK_LEVEL;
   return curvePart("regrow", "hacking", equivalentSkill - 1, (equivalentSkill / rate) * REGROW_DISCOUNT, rates);

@@ -86,6 +86,8 @@ export interface NeedDigest {
   have: number;
   progress: number;
   weight: number;
+  /** Measured BN-seconds satisfying the need saves, when the poster priced it. */
+  valueSec?: number;
   urgency: NeedUrgency;
   satisfied: boolean;
 }
@@ -139,6 +141,11 @@ export interface ArbitrationDigest {
 
 export interface ProgressionPlan {
   phase: "start" | "finishUp" | "ending";
+  /** The node is about to end by DESTROY with no install planned first.
+   * Opposite money policy to an imminent install: augs, favor and cash all
+   * die with the node, so install-shaped reserves (aug-fund, donations)
+   * release and speedup spending is the only remaining use of money. */
+  endingByDestroy?: boolean;
   /** Economic reset decision before safety barriers. */
   installWanted: boolean;
   /** Whether stock should liquidate, including an empty-queue first-purchase
@@ -146,6 +153,12 @@ export interface ProgressionPlan {
   liquidationWanted: boolean;
   /** Why the reset cannot execute yet. */
   installBlockers: { kind: "factions" | "stock" | "graft" | "augmentations" }[];
+  /** Why an install ran DESPITE a guard that forbids one — currently only the
+   * post-Red-Pill regrow guard, inverted because re-climbing with the queued
+   * multipliers reaches the daemon's gate sooner than finishing the current
+   * climb. Deliberately surprising decisions must carry their reason into the
+   * run record, or the plan shows an install the guard says cannot happen. */
+  installOverrideWhy?: string;
   /** Every reset-sensitive subsystem has acknowledged readiness. */
   installReady: boolean;
   /** Route mechanics require the current final sweep/reset. This is broader

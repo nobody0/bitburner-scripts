@@ -134,6 +134,9 @@ export interface GoPlan {
   selection: {
     preferred: GoGameCandidateDigest;
     candidates: GoGameCandidateDigest[];
+    /** New-game scheduling verdict: play the preferred candidate, fit a
+     * filler game inside its certified entry window, or hold the cadence. */
+    schedule?: { kind: "play" | "filler" | "hold"; fillerOpponent?: GoRewardOpponent; holdSec?: number; why: string };
     context: {
       goPower: number;
       hasSourceFile14: boolean;
@@ -141,7 +144,11 @@ export interface GoPlan {
       installRemainingSec?: number;
       joinedFactions: string[];
       demands: Partial<Record<GoRewardOpponent, GoEtaDemandDigest>>;
-      factionFavor: Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>>;
+      factionFavor: Partial<Record<GoFactionOpponent, {
+        favor: number;
+        remainingWorkSec: number;
+        pointValue?: { donationUnlockSec: number; donateThreshold: number };
+      }>>;
     };
   };
 }

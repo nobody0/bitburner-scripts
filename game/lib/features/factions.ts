@@ -17,13 +17,25 @@ import { blockersFor, stepFactions } from "../../../shared/strategy/factions/dec
 import { initFactionMemory, type FactionAction, type FactionDecision, type FactionMemory } from "../../../shared/strategy/factions/plan.ts";
 import { donationForRep, repFromDonation } from "../../../shared/strategy/factions/rep.ts";
 import type { FactionStanding, FactionsView } from "../../../shared/strategy/factions/state.ts";
-import { isReachable, type RequirementView } from "../../../shared/strategy/factions/requirements.ts";
+import { estimateBlockerSec, isReachable, type RequirementView } from "../../../shared/strategy/factions/requirements.ts";
+import {
+  backdoorCostSeconds,
+  companyBackdoorSavedSeconds,
+  factionGateSavedSeconds,
+} from "../../../shared/strategy/access/value.ts";
+import { makeHackContext } from "../../../shared/formulas.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
 import { slotPriority } from "../../../shared/strategy/income.ts";
 import { COMMISSION } from "../../../shared/strategy/stock/market.ts";
 import { daedalusAugsRequired } from "../../../shared/strategy/progression/endgame.ts";
-import { usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
-import type { FactionGate, FactionPlan } from "../../../shared/telemetry/topics/factions.ts";
+import { DEFAULT_PLANNING_HORIZON_SEC, forecastAt, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
+import { factionFavorPointValues } from "../../../shared/strategy/factions/favorValue.ts";
+import type {
+  FactionGate,
+  FactionPlan,
+  FavorPointValueDigest,
+  PlanBlocker,
+} from "../../../shared/telemetry/topics/factions.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge, type GameState } from "../state.ts";
 import { signalInstallCheck } from "../install-signal.ts";
@@ -100,7 +112,47 @@ function moneyGrantFor(ctx: Pick<DriverContext, "grants">, claimId: string): num
 
 // --- view assembly ----------------------------------------------------------
 
-function requirementView(state: GameState): RequirementView {
+type ServerSnapshot = NonNullable<GameState["topics"]["servers"]>[string];
+
+/** Company organization -> every server the game attributes to it, hostname
+ * order. A MULTIMAP on purpose: `fulcrumtech` and `fulcrumassets` share the
+ * organization "Fulcrum Technologies", and the game's 0.75x required-reputation
+ * discount fires when ANY of a company's servers is backdoored. A
+ * last-write-wins map would miss the discount half the time. */
+function serversByOrganization(state: GameState): Map<string, ServerSnapshot[]> {
+  const out = new Map<string, ServerSnapshot[]>();
+  for (const server of Object.values(state.topics.servers ?? {})) {
+    if (!server.organizationName) continue;
+    const list = out.get(server.organizationName) ?? [];
+    list.push(server);
+    out.set(server.organizationName, list);
+  }
+  for (const list of out.values()) list.sort((a, b) => (a.hostname < b.hostname ? -1 : 1));
+  return out;
+}
+
+/** Companies whose required reputation the game is ALREADY discounting. */
+function backdooredCompanies(state: GameState): Set<string> {
+  const out = new Set<string>();
+  for (const [organization, servers] of serversByOrganization(state)) {
+    if (servers.some((server) => server.backdoorInstalled)) out.add(organization);
+  }
+  return out;
+}
+
+/** Company -> the best reputation rate career has actually observed there. */
+function measuredCompanyRepPerSec(state: GameState): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const entry of state.topics.career?.plan?.ranked ?? []) {
+    for (const contribution of entry.contributions ?? []) {
+      if (contribution.kind !== "companyRep" || !contribution.subject || !(contribution.perSec > 0)) continue;
+      out.set(contribution.subject, Math.max(out.get(contribution.subject) ?? 0, contribution.perSec));
+    }
+  }
+  return out;
+}
+
+function requirementView(state: GameState, companyWork?: RequirementView["companyWork"]): RequirementView {
   const player = state.topics.player;
   const servers = state.topics.servers ?? {};
   const factions = state.topics.factions;
@@ -114,6 +166,43 @@ function requirementView(state: GameState): RequirementView {
     if (server.backdoorInstalled) backdoored.add(server.hostname);
   }
   const files = new Set(factions?.files ?? []);
+
+  // Price backdoor blockers with the real formulas (hackTime/4 at the acting
+  // skill, measured exp rate for the wait) instead of the interpreter's
+  // nominal constants. Optional by construction: without a player snapshot
+  // the interpreter degrades to the old coarse estimate.
+  const viewNodeMults = effectiveBitNodeMultipliers(
+    progression?.bitNode,
+    progression?.sourceFiles["12"] ?? 0,
+    progression?.multipliers,
+  ) ?? {};
+  const playerMults = (player?.mults ?? {}) as unknown as Record<string, number>;
+  const hackCtx = player
+    ? makeHackContext({
+        skill: player.skills?.hacking ?? 1,
+        intelligence: player.skills?.intelligence ?? 0,
+        mults: {
+          hacking_chance: playerMults["hacking_chance"] ?? 1,
+          hacking_money: playerMults["hacking_money"] ?? 1,
+          hacking_speed: playerMults["hacking_speed"] ?? 1,
+          hacking_exp: playerMults["hacking_exp"] ?? 1,
+          hacking_grow: playerMults["hacking_grow"] ?? 1,
+        },
+      }, viewNodeMults)
+    : undefined;
+  const expRate = state.topics.farm?.expRate;
+  const accessEstimates = (server: (typeof servers)[string]): { installSec: number; skillWaitSec: number } | undefined => {
+    if (!hackCtx || !player) return undefined;
+    const cost = backdoorCostSeconds({
+      requiredHackingSkill: server.requiredHackingSkill ?? 1,
+      hackDifficulty: server.hackDifficulty ?? server.minDifficulty ?? 1,
+      ctx: hackCtx,
+      hackingExp: player.exp?.hacking ?? 0,
+      hackingSkillMult: playerMults["hacking"] ?? 1,
+      ...(expRate !== undefined ? { expPerSec: expRate } : {}),
+    });
+    return { installSec: cost.actionSec, skillWaitSec: cost.skillWaitSec };
+  };
 
   // Invitation requirements count INSTALLED augmentations for positive
   // targets; queued purchases do not qualify. getResetInfo().ownedAugs is the
@@ -140,6 +229,7 @@ function requirementView(state: GameState): RequirementView {
         requiredHackingSkill: server.requiredHackingSkill ?? 0,
         numOpenPortsRequired: server.numOpenPortsRequired ?? 0,
         openPortCount: server.openPortCount ?? 0,
+        ...(accessEstimates(server) ?? {}),
       }]),
     ),
     portOpeners: state.topics.fleet?.portOpeners ?? 0,
@@ -155,6 +245,7 @@ function requirementView(state: GameState): RequirementView {
     // authoritative proof that one infiltration was completed.
     numInfiltrations: factions?.joined.includes(SHADOWS_OF_ANARCHY)
       || factions?.invites?.includes(SHADOWS_OF_ANARCHY) ? 1 : 0,
+    ...(companyWork ? { companyWork } : {}),
   };
 }
 
@@ -330,7 +421,36 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
       skills: { ...(player.skills ?? {}) } as never,
       mults: { faction_rep: mults["faction_rep"] ?? 1 },
     } as FactionsView["person"],
-    requirementView: requirementView(state),
+    // Company blockers (employment / companyRep / jobTitle) are priced with
+    // the real work-line model. Company reputation at never-held employers is
+    // invisible to telemetry, so those walks start from 0 — an underestimate
+    // of progress, never of cost. `focusMult` is 1, not the unfocused 0.8:
+    // career always starts company work focused (`workForCompany(name, true)`),
+    // so 0.8 would price every ladder 25% slower than the driver delivers.
+    requirementView: requirementView(state, {
+      person: {
+        skills: { ...(player.skills ?? {}) } as Record<string, number>,
+        mults: {
+          company_rep: mults["company_rep"] ?? 1,
+          work_money: mults["work_money"] ?? 1,
+        },
+      },
+      ctx: {
+        companyWorkRepGain: nodeMults["CompanyWorkRepGain"] ?? 1,
+        companyWorkMoney: nodeMults["CompanyWorkMoney"] ?? 1,
+        focusMult: 1,
+      },
+      favor: Object.fromEntries(
+        Object.entries(state.topics.career?.companies ?? {}).map(([name, standing]) => [name, standing.favor]),
+      ),
+      // Server -> company identity IS observable (`organizationName`), so the
+      // promotion ladder's reputation gates get the same 0.75x discount the
+      // game applies once any of the company's servers is backdoored.
+      // `measuredRepPerSec` stays unset deliberately: the walker attributes a
+      // measured rate to the FIRST rung of whichever track it walks, which is
+      // only the observed one when career happens to hold that same track.
+      backdooredCompanies: backdooredCompanies(state),
+    }),
     availableOwners: new Set(FEATURE_IDS.filter((id) => caps.unlocked[id] !== "no")),
     repContext: {
       factionWorkRepGain: nodeMults["FactionWorkRepGain"] ?? 1,
@@ -685,6 +805,7 @@ function planDigest(decision: FactionDecision, view: FactionsView, bankedAugment
       owner: blocker.owner,
       reachable: blocker.reachable,
       ...(blocker.negated ? { negated: true } : {}),
+      ...(blocker.etaSec !== undefined ? { etaSec: blocker.etaSec } : {}),
     })),
     ...(decision.until ? { until: decision.until } : {}),
     ...(lastResult ? { lastResult } : {}),
@@ -740,10 +861,25 @@ function gatesFrom(view: FactionsView): Record<string, FactionGate> {
         owner: blocker.owner,
         reachable: blocker.reachable,
         ...(blocker.negated ? { negated: true } : {}),
+        ...(blocker.etaSec !== undefined ? { etaSec: blocker.etaSec } : {}),
       })),
     };
   }
   return gates;
+}
+
+/** Publish the favor economics this view already implies. Rounded to whole
+ * seconds: these feed a five-second Go decision, not an accounting ledger. */
+export function favorPointValuesFrom(view: FactionsView): Record<string, FavorPointValueDigest> {
+  const values: Record<string, FavorPointValueDigest> = {};
+  for (const [faction, value] of factionFavorPointValues(view)) {
+    values[faction] = {
+      remainingWorkSec: Math.round(value.remainingWorkSec),
+      donationUnlockSec: Math.round(value.donationUnlockSec),
+      donateThreshold: value.donateThreshold,
+    };
+  }
+  return values;
 }
 
 // --- module -----------------------------------------------------------------
@@ -804,7 +940,11 @@ const driver: FeatureDriver = {
     if ((decision.recommendInstall && !decision.nextBuy) || decision.liquidationNeeded) signalInstallCheck();
 
     annotateOffers(ctx.state, view);
-    merge(ctx.state, "factions", { plan: planDigest(decision, view, memory.bankedAugmentations), gates: gatesFrom(view) });
+    merge(ctx.state, "factions", {
+      plan: planDigest(decision, view, memory.bankedAugmentations),
+      gates: gatesFrom(view),
+      favorPointValues: favorPointValuesFrom(view),
+    });
 
     try {
       await execute(ctx.ns, ctx, decision.action, view);
@@ -849,12 +989,70 @@ function needs(ctx: NeedContext): Need[] {
     remaining.set(blocker.faction, (remaining.get(blocker.faction) ?? 0) + 1);
   }
 
+  // The megacorp unlock chain (apply -> work -> 400k rep -> invite) is
+  // SEQUENTIAL work owned by career: the rep grind is unservable until the
+  // job exists, so counting both blockers kept every corporate faction at
+  // "wanted" forever and career fell through to crime. For these
+  // career-chain kinds the FIRST ACTIONABLE step of the objective's chain is
+  // genuinely blocking — the objective is by construction the best value/sec
+  // use of the slot (same rationale as the until-rep need below). Other kinds
+  // keep the last-blocker rule: a far-off skill/combat gate marked blocking
+  // is exactly the career-starves-factions failure documented above.
+  const jobs = (ctx.state.topics.player?.jobs ?? {}) as Record<string, string>;
+  const chainKinds = new Set(["employment", "companyRep", "jobTitle"]);
+  const actionable = (blocker: { kind: string; subject?: string }): boolean =>
+    blocker.kind === "companyRep" ? Object.hasOwn(jobs, blocker.subject ?? "") : true;
+  const chainHead = new Set<(typeof plan.blockers)[number]>();
+  const byFaction = new Map<string, (typeof plan.blockers)[number][]>();
+  for (const blocker of plan.blockers) {
+    if (!blocker.reachable || blocker.owner === "factions" || !chainKinds.has(blocker.kind)) continue;
+    const chain = byFaction.get(blocker.faction) ?? [];
+    chain.push(blocker);
+    byFaction.set(blocker.faction, chain);
+  }
+  for (const chain of byFaction.values()) {
+    const head = chain.find((blocker) => blocker.kind === "employment")
+      ?? chain.find(actionable)
+      ?? chain[0]!;
+    chainHead.add(head);
+  }
+
+  // BN-second economics for ACCESS blockers (root and backdoor): the gate is
+  // worth the remaining horizon minus what the faction's other unmet blockers
+  // still cost — the LAST blocker of a faction is worth the whole horizon,
+  // and a backdoor whose faction is still far away ranks accordingly. The
+  // consumer (hacking) uses this `valueSec` to order server-access actions
+  // and to decide whether an install may preempt farm RAM.
+  const nodeForecast = ctx.state.topics.progression?.plan?.forecasts?.node;
+  const horizonSec = (nodeForecast ? usableForecastSec(forecastAt(nodeForecast, ctx.now)) : undefined)
+    ?? DEFAULT_PLANNING_HORIZON_SEC;
+  const incomePerSec = plan.context?.incomePerSec ?? 0;
+  const blockerSec = (blocker: Omit<PlanBlocker, "faction">): number =>
+    estimateBlockerSec({ ...blocker, why: "" } as Parameters<typeof estimateBlockerSec>[0], incomePerSec);
+  const accessValueSec = (
+    blocker: Omit<PlanBlocker, "faction"> & { kind: string },
+    siblings: readonly Omit<PlanBlocker, "faction">[],
+  ): number | undefined => {
+    if (blocker.kind !== "root" && blocker.kind !== "backdoor") return undefined;
+    const otherBlockersSec = siblings
+      .filter((other) => other !== blocker && other.reachable)
+      .reduce((sum, other) => sum + blockerSec(other), 0);
+    const savedSec = factionGateSavedSeconds({ horizonSec, otherBlockersSec });
+    // `valueSec` is "measured, or absent" — never zero (see needs.ts). A gate
+    // whose siblings already outrun the horizon has no measurement to offer,
+    // and posting a literal 0 would suppress `rankingValueSec`'s weight-based
+    // fallback and sink the need below every unpriced one.
+    return savedSec > 0 ? savedSec : undefined;
+  };
+
   const out: Need[] = [];
   for (const blocker of plan.blockers) {
     if (!blocker.reachable) continue;
     if (blocker.owner === "factions") continue; // ours to solve
     // Non-deliverable kinds have no owner to ask.
     if (blocker.kind === "bitNode" || blocker.kind === "sourceFile" || blocker.kind === "location") continue;
+    const isChainHead = chainHead.has(blocker) && actionable(blocker);
+    const valueSec = accessValueSec(blocker, plan.blockers.filter((other) => other.faction === blocker.faction));
     out.push({
       by: "factions",
       kind: blocker.kind as Need["kind"],
@@ -863,9 +1061,10 @@ function needs(ctx: NeedContext): Need[] {
       have: blocker.have,
       // Weight rises as the blocker nears completion: finishing a nearly-done
       // requirement unblocks a whole faction, while a barely-started one is
-      // speculative.
-      weight: 1 + blocker.progress * 4,
-      urgency: (remaining.get(blocker.faction) ?? 0) <= 1 ? "blocking" : "wanted",
+      // speculative. The chain head carries the until-rep parity weight.
+      weight: isChainHead ? 6 : 1 + blocker.progress * 4,
+      ...(valueSec !== undefined ? { valueSec } : {}),
+      urgency: isChainHead || (remaining.get(blocker.faction) ?? 0) <= 1 ? "blocking" : "wanted",
       why: `${blocker.faction} ${blocker.kind} ${blocker.subject ?? ""} ${blocker.have}/${blocker.target}`,
     });
   }
@@ -879,22 +1078,96 @@ function needs(ctx: NeedContext): Need[] {
   const gates = ctx.state.topics.factions?.gates ?? {};
   const posted = new Set(plan.blockers.map((blocker) => `${blocker.kind}\0${blocker.subject ?? ""}`));
   for (const [faction, gate] of Object.entries(gates)) {
-    if (gate.joined || gate.invited || gate.missing.length !== 1) continue;
-    const blocker = gate.missing[0]!;
-    if (!blocker.reachable || blocker.owner === "factions") continue;
-    if (blocker.kind === "bitNode" || blocker.kind === "sourceFile" || blocker.kind === "location") continue;
+    if (gate.joined || gate.invited || gate.missing.length === 0) continue;
+    // A multi-blocker gate posts only the FIRST ACTIONABLE step of its chain
+    // (employment before the rep it enables), and only when the whole chain
+    // is reachable — half a dead chain is not worth anyone's time. Weight
+    // shrinks with chain length so long unlocks rank below near ones.
+    if (!gate.missing.every((blocker) => blocker.reachable)) continue;
+    const deliverable = gate.missing.filter(
+      (blocker) =>
+        blocker.owner !== "factions"
+        && blocker.kind !== "bitNode" && blocker.kind !== "sourceFile" && blocker.kind !== "location",
+    );
+    const blocker = deliverable.find((entry) => entry.kind === "employment")
+      ?? deliverable.find(actionable)
+      ?? deliverable[0];
+    if (!blocker) continue;
     const key = `${blocker.kind}\0${blocker.subject ?? ""}`;
     if (posted.has(key)) continue;
     posted.add(key);
+    const valueSec = accessValueSec(blocker, gate.missing);
     out.push({
       by: "factions",
       kind: blocker.kind as Need["kind"],
       ...(blocker.subject !== undefined ? { subject: blocker.subject } : {}),
       target: blocker.target,
       have: blocker.have,
-      weight: 1 + blocker.progress * 2,
+      weight: (1 + blocker.progress * 2) / gate.missing.length,
+      ...(valueSec !== undefined ? { valueSec } : {}),
       urgency: "wanted",
       why: `${faction} ${blocker.kind} ${blocker.subject ?? ""} ${blocker.have}/${blocker.target}`,
+    });
+  }
+  // Megacorp company servers: a backdoor multiplies the company's required
+  // reputation by 0.75 — for the faction's companyRep invite gate AND for job
+  // promotions — but the game only reveals the discounted number AFTER the
+  // backdoor exists, so the requirement tree alone never asks for it. Post
+  // the backdoor with the measured grinding time it saves. An unmeasured rep
+  // rate uses the modest nominal fallback, which is exactly the "deprioritize
+  // corps we are not actually working for" behaviour with no per-company
+  // rule; once career works there and a rate is measured, the value grows on
+  // its own. Objective-chain companies post at "wanted", speculative gate
+  // companies at "nice" — never "blocking": the discount accelerates a grind,
+  // it does not gate one.
+  const serversByOrg = serversByOrganization(ctx.state);
+  const measuredRepPerSec = measuredCompanyRepPerSec(ctx.state);
+  const companyGates: { faction: string; company: string; target: number; have: number; urgency: Need["urgency"] }[] = [];
+  for (const blocker of plan.blockers) {
+    if (blocker.kind !== "companyRep" || !blocker.reachable || !blocker.subject) continue;
+    companyGates.push({ faction: blocker.faction, company: blocker.subject, target: blocker.target, have: blocker.have, urgency: "wanted" });
+  }
+  for (const [faction, gate] of Object.entries(gates)) {
+    if (gate.joined || gate.invited) continue;
+    for (const blocker of gate.missing) {
+      if (blocker.kind !== "companyRep" || !blocker.reachable || !blocker.subject) continue;
+      companyGates.push({ faction, company: blocker.subject, target: blocker.target, have: blocker.have, urgency: "nice" });
+    }
+  }
+  for (const gate of companyGates) {
+    // The discount is per COMPANY, not per server, and Fulcrum Technologies
+    // owns two of them — so one backdoored server anywhere in the organization
+    // has already discounted `gate.target`, and asking for a second install
+    // would buy a saving that was banked and double-count it.
+    const servers = serversByOrg.get(gate.company) ?? [];
+    if (servers.length === 0 || servers.some((entry) => entry.backdoorInstalled)) continue;
+    const server = servers[0]!;
+    const key = `backdoor\0${server.hostname}`;
+    if (posted.has(key)) continue;
+    const rate = measuredRepPerSec.get(gate.company);
+    const savedSec = companyBackdoorSavedSeconds({
+      repTarget: gate.target,
+      repHave: gate.have,
+      ...(rate !== undefined ? { repPerSec: rate } : {}),
+    });
+    if (!(savedSec > 0)) continue;
+    posted.add(key);
+    out.push({
+      by: "factions",
+      kind: "backdoor",
+      subject: server.hostname,
+      target: 1,
+      have: 0,
+      weight: 1,
+      // `valueSec` is MEASURED-or-absent (needs.ts). Without an observed
+      // company rep rate `savedSec` rests on the nominal 10 rep/sec constant,
+      // and publishing that as a measurement let a corp we have never worked
+      // for set `routeHackingSkillGoal` through hacking's `backdoorSkillGoal`
+      // — the exact hijack that gate is documented to prevent. Unmeasured, the
+      // need still ranks through `rankingValueSec`'s weight fallback.
+      ...(rate !== undefined ? { valueSec: savedSec } : {}),
+      urgency: gate.urgency,
+      why: `${gate.faction} companyRep gate: a backdoor on ${server.hostname} cuts ${gate.company}'s required rep by 25%`,
     });
   }
   if (plan.until?.kind === "rep" && plan.until.faction && plan.until.have < plan.until.target) {
@@ -1065,9 +1338,14 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   // investments instead of sitting in a 90-priority reserve). The fund claim
   // therefore exists only while the final-sweep drain is live: install
   // recommended, drain running, or a purchase actually in flight.
+  // ENDING BY DESTROY: everything this fund can buy — augmentations, NFG,
+  // donated favor — is erased with the node, while the reserved cash could be
+  // speeding up the destroy (infrastructure RAM). Release every install-shaped
+  // money reserve; an install-shaped ending keeps them.
+  const endingByDestroy = ctx.state.topics.progression?.plan?.endingByDestroy === true;
   const endgame =
     plan.recommendInstall !== undefined || plan.drainCeiling !== undefined || plan.action.type === "purchaseAugmentation";
-  if (endgame && plan.nextBuy && !graft && plan.action.type !== "donate") {
+  if (endgame && !endingByDestroy && plan.nextBuy && !graft && plan.action.type !== "donate") {
     const probed = (topic?.offers ?? []).find((offer) => offer.name === plan.nextBuy!.name);
     out.push({
       by: "factions",
@@ -1149,7 +1427,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
     });
   }
 
-  if (plan.action.type === "donate" && plan.action.amount && plan.action.amount > 0) {
+  if (plan.action.type === "donate" && plan.action.amount && plan.action.amount > 0 && !endingByDestroy) {
     out.push({
       by: "factions",
       id: "donation-fund",

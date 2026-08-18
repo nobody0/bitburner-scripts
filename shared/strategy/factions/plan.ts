@@ -21,7 +21,11 @@ export interface FactionObjective {
   intent?: FactionIntent;
   /** Intent absent ONLY because the planning horizon filtered every raw
    * candidate — a transient forecast state, not a concluded frontier. The
-   * install verdict must not treat it as "nothing left to push for". */
+   * install verdict must not treat it as "nothing left to push for".
+   *
+   * Specifically: every candidate was DROPPED as noise (beyond twice the
+   * horizon). A merely discounted package is still selectable, so it is not
+   * starvation and does not set this. */
   horizonStarved?: boolean;
   /** Best alternative package at the same decision point. Its marginal rate
    * is the opportunity cost that stops us pushing `intent` indefinitely. */

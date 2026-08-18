@@ -2,6 +2,14 @@ import type { PlayerRequirement } from "@ns";
 import type { FeatureId } from "../../features/ids.ts";
 import { formatMoney } from "../../format.ts";
 import type { NeedKind } from "../needs.ts";
+import { COMPANIES } from "../../features/companies.ts";
+import {
+  applyOutcomes,
+  bestTitlePath,
+  promotionAwareEtaSec,
+  type CompanyPerson,
+  type CompanyWorkContext,
+} from "../career/company.ts";
 
 /** Interpreter for the game's own `PlayerRequirement` tree.
  *
@@ -66,6 +74,14 @@ export interface RequirementView {
     requiredHackingSkill: number;
     numOpenPortsRequired: number;
     openPortCount: number;
+    /** Driver-precomputed hackTime/4 at the skill the install will run at
+     * (shared/strategy/access/value.ts backdoorCostSeconds). Optional so the
+     * interpreter degrades to the coarse constants when the driver has not
+     * priced the host. */
+    installSec?: number;
+    /** Driver-precomputed seconds until the skill requirement is met, from
+     * the measured fleet exp rate. */
+    skillWaitSec?: number;
   }>>;
   /** Port-opening programs observed by the fleet sweep. */
   portOpeners?: number;
@@ -77,6 +93,22 @@ export interface RequirementView {
   sourceFiles: Record<string, number>;
   bladeburnerRank: number;
   numInfiltrations: number;
+  /** Inputs for pricing company blockers (`employment`, `companyRep`,
+   * `jobTitle`) with the real work-line model instead of the nominal
+   * per-unit rates. The nominal rates priced a 400k-rep megacorp gate at
+   * ~40,000s, which pushed every corporate faction past the planning horizon
+   * and starved career of the whole apply→work→invite chain. Optional so the
+   * evaluator stays usable from contexts without a player snapshot. */
+  companyWork?: {
+    person: CompanyPerson;
+    ctx: CompanyWorkContext;
+    /** Company name -> favor (salary and rep rates scale with it). */
+    favor: Readonly<Record<string, number>>;
+    /** Company name -> measured rep/sec for the position actually worked. */
+    measuredRepPerSec?: Readonly<Record<string, number>>;
+    /** Companies whose server is backdoored (reputation gates discounted). */
+    backdooredCompanies?: ReadonlySet<string>;
+  };
 }
 
 /** Blocker kinds extend the need kinds with three that no feature can deliver
@@ -249,26 +281,76 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
         : [blocker("augCount", requirement.numAugmentations, counted, `needs ${requirement.numAugmentations} augmentations`)];
     }
 
-    case "employedBy":
-      return Object.hasOwn(view.jobs, requirement.company)
-        ? []
-        : [blocker("employment", 1, 0, `needs a job at ${requirement.company}`, { subject: requirement.company })];
+    case "employedBy": {
+      if (Object.hasOwn(view.jobs, requirement.company)) return [];
+      // Hiring is instant once a track's entry rung is qualified; the walkers
+      // below price the grind that follows. Stat-gated hiring keeps the
+      // nominal estimate — training time belongs to a different owner.
+      const work = view.companyWork;
+      const hirable = work
+        ? applyOutcomes(
+            requirement.company,
+            work.person,
+            view.companyRep[requirement.company] ?? 0,
+            work.favor[requirement.company] ?? 0,
+            companyCtx(work, requirement.company),
+          ).length > 0
+        : false;
+      return [blocker("employment", 1, 0, `needs a job at ${requirement.company}`, {
+        subject: requirement.company,
+        ...(hirable ? { etaSec: 60 } : {}),
+      })];
+    }
 
     case "companyReputation": {
       const have = view.companyRep[requirement.company] ?? 0;
-      return have >= requirement.reputation
-        ? []
-        : [
-            blocker("companyRep", requirement.reputation, have, `needs ${requirement.company} reputation`, {
-              subject: requirement.company,
-            }),
-          ];
+      if (have >= requirement.reputation) return [];
+      const work = view.companyWork;
+      const walk = work
+        ? promotionAwareEtaSec(
+            requirement.company,
+            work.person,
+            have,
+            work.favor[requirement.company] ?? 0,
+            companyCtx(work, requirement.company),
+            { repTarget: requirement.reputation },
+            work.measuredRepPerSec?.[requirement.company],
+          )
+        : undefined;
+      return [
+        blocker("companyRep", requirement.reputation, have, `needs ${requirement.company} reputation`, {
+          subject: requirement.company,
+          ...(walk && Number.isFinite(walk.seconds) ? { etaSec: walk.seconds } : {}),
+        }),
+      ];
     }
 
-    case "jobTitle":
-      return view.jobTitles.includes(requirement.jobTitle)
-        ? []
-        : [blocker("jobTitle", 1, 0, `needs the job title ${requirement.jobTitle}`, { subject: requirement.jobTitle })];
+    case "jobTitle": {
+      if (view.jobTitles.includes(requirement.jobTitle)) return [];
+      // Price the title across every company that offers its track, from the
+      // reputation already held there. The someCondition combiner then picks
+      // the genuinely cheapest of alternative titles — nothing here assumes
+      // which title, track or company a faction wants.
+      const work = view.companyWork;
+      const path = work
+        ? bestTitlePath(
+            [requirement.jobTitle],
+            Object.keys(COMPANIES).map((name) => ({
+                name,
+                rep: view.companyRep[name] ?? 0,
+                favor: work.favor[name] ?? 0,
+                measuredRepPerSec: work.measuredRepPerSec?.[name],
+                backdoored: work.backdooredCompanies?.has(name) ?? false,
+              })),
+            work.person,
+            work.ctx,
+          )
+        : undefined;
+      return [blocker("jobTitle", 1, 0, `needs the job title ${requirement.jobTitle}`, {
+        subject: requirement.jobTitle,
+        ...(path ? { etaSec: path.etaSec } : {}),
+      })];
+    }
 
     case "city":
       return view.city === requirement.city
@@ -289,11 +371,16 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
       const skillGap = Math.max(0, access.requiredHackingSkill - (view.skills.hacking ?? 0));
       const usableOpeners = Math.max(access.openPortCount, view.portOpeners ?? 0);
       const portGap = Math.max(0, access.numOpenPortsRequired - usableOpeners);
+      // Prefer the driver's priced estimate (hackTime/4 at the acting skill,
+      // measured exp rate for the wait); degrade per COMPONENT to the coarse
+      // constants, so a partially-priced view is never worse than unpriced.
+      const installSec = access.installSec ?? NOMINAL_SEC_PER_UNIT.backdoor;
+      const skillWaitSec = access.skillWaitSec ?? skillGap * NOMINAL_SEC_PER_UNIT.skill;
       return [blocker("backdoor", 1, 0, `needs a backdoor on ${requirement.server}`, {
         subject: requirement.server,
-        // Coarse ranking economics: skill and program acquisition precede the
-        // fixed terminal/backdoor action. The live hacking planner owns both.
-        etaSec: 300 + skillGap * NOMINAL_SEC_PER_UNIT.skill + portGap * NOMINAL_SEC_PER_UNIT.file,
+        // Ranking economics: skill and program acquisition precede the
+        // terminal/backdoor action. The live hacking planner owns both.
+        etaSec: installSec + skillWaitSec + portGap * NOMINAL_SEC_PER_UNIT.file,
       })];
     }
 
@@ -398,12 +485,24 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
   }
 }
 
-/** Rank OR branches: fewer blockers first, then furthest-along. Deliberately
- * crude — a real ETA needs each owner's delivery rate, which lives in the
- * driver, so this is only the structural tie-break. */
+/** Per-company work context: the shared fields plus this company's backdoor
+ * discount. */
+function companyCtx(work: NonNullable<RequirementView["companyWork"]>, company: string): CompanyWorkContext {
+  return { ...work.ctx, backdoored: work.backdooredCompanies?.has(company) ?? false };
+}
+
+/** Rank OR branches: fewer blockers first, then furthest-along, then — only
+ * as the tie-break between structurally identical branches — total attached
+ * ETA. That last term is what picks the cheapest of Silhouette's alternative
+ * executive titles once jobTitle blockers carry real ladder estimates. A
+ * blocker WITHOUT an estimate counts as more expensive than any estimated
+ * one (no ladder was reachable, or nobody priced it), and the whole term is
+ * scaled below BOTH structural terms — a 0.9-magnitude term would have
+ * outranked almost any furthest-along difference, which is not a tie-break. */
 function cheapness(blockers: Blocker[]): number {
   const remaining = blockers.reduce((sum, entry) => sum + (1 - entry.progress), 0);
-  return blockers.length * 10 + remaining;
+  const etaSec = blockers.reduce((sum, entry) => sum + (entry.etaSec ?? 1e9), 0);
+  return blockers.length * 10 + remaining + Math.min(etaSec / 1e9, 0.9) * 1e-3;
 }
 
 /** A negated leaf. Only three things are REVOCABLE — employment, city and

@@ -1281,6 +1281,36 @@ describe("faction breakpoint package planner", () => {
     expect(estimateBlockerSec(run4, 0)).toBe(11_850);
   });
 
+  test("backdoor ranking prefers driver-priced install and skill-wait estimates", () => {
+    const priced = evaluate(
+      { type: "backdoorInstalled", server: "CSEC" },
+      view({
+        skills: { hacking: 200 },
+        portOpeners: 1,
+        backdoorAccess: {
+          // hackTime/4 at the acting skill, and a measured exp-rate wait —
+          // both precomputed by the driver; the interpreter only adds gates.
+          CSEC: { requiredHackingSkill: 1, numOpenPortsRequired: 1, openPortCount: 0, installSec: 12.5, skillWaitSec: 0 },
+        },
+      }),
+    )[0]!;
+    expect(estimateBlockerSec(priced, 0)).toBe(12.5);
+
+    // Partially priced: a measured install with an unmeasured wait falls back
+    // to the nominal per-level constant for the wait component only.
+    const partial = evaluate(
+      { type: "backdoorInstalled", server: "run4theh111z" },
+      view({
+        skills: { hacking: 200 },
+        portOpeners: 1,
+        backdoorAccess: {
+          run4theh111z: { requiredHackingSkill: 505, numOpenPortsRequired: 5, openPortCount: 0, installSec: 900 },
+        },
+      }),
+    )[0]!;
+    expect(estimateBlockerSec(partial, 0)).toBe(900 + 305 * 30 + 4 * 600);
+  });
+
   test("does not horizon-filter the terminal package out of its own route", () => {
     const daedalus = packageStanding("Daedalus");
     const catalog = new Map([
@@ -1304,6 +1334,48 @@ describe("faction breakpoint package planner", () => {
     );
     expect(selection.intent?.augmentations).toContain("The Red Pill");
     expect(selection.horizonStarved).toBeUndefined();
+  });
+
+  test("horizonStarved means DROPPED, not merely discounted", () => {
+    const catalog = new Map([
+      ["Neurotrainer I", aug("Neurotrainer I", {
+        factions: ["CyberSec"],
+        baseCost: 0,
+        baseRepRequirement: 1_000,
+      })],
+    ]);
+    // The package repays well outside the horizon but keeps over half its
+    // value realizable, so it is discounted and still selectable. A selectable
+    // package is not starvation — the install verdict must not be told the
+    // frontier was filtered empty.
+    const discounted = selectFactionPackage(
+      factionsView({
+        factions: [packageStanding("CyberSec")],
+        catalog,
+        horizonSec: 300,
+        moneyAvailable: 1e15,
+      }),
+      new Map([["CyberSec", []]]),
+    );
+    expect(discounted.intent?.augmentations).toContain("Neurotrainer I");
+    // Genuinely inside the discount band: past the horizon, but under twice it.
+    expect(discounted.intent!.etaSec).toBeGreaterThan(300);
+    expect(discounted.intent!.etaSec).toBeLessThanOrEqual(600);
+    expect(discounted.horizonStarved).toBeUndefined();
+
+    // Far enough out that under half the value is realizable: dropped as
+    // noise, nothing left to select, and THAT is starvation.
+    const dropped = selectFactionPackage(
+      factionsView({
+        factions: [packageStanding("CyberSec")],
+        catalog,
+        horizonSec: 1,
+        moneyAvailable: 1e15,
+      }),
+      new Map([["CyberSec", []]]),
+    );
+    expect(dropped.intent).toBeUndefined();
+    expect(dropped.horizonStarved).toBe(true);
   });
 
   test("builds Daedalus invite prerequisites before making Red Pill mandatory", () => {

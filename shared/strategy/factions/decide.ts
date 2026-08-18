@@ -1138,8 +1138,14 @@ function nextPurchase(
       .filter((source) => source.verdict.ok)
       .sort(
         (a, b) =>
+          // Donation rep does NOT scale with favor (rep.ts repFromDonation) —
+          // favor only gates eligibility — so the cheapest source is the one
+          // needing the smallest donation, i.e. the highest rep. Favor is a
+          // deterministic tie-break that also happens to leave the top-favor
+          // faction's rep intact for the NeuroFlux ladder.
           a.verdict.needDonation - b.verdict.needDonation ||
           b.standing.rep - a.standing.rep ||
+          b.standing.favor - a.standing.favor ||
           (a.standing.name < b.standing.name ? -1 : 1),
       );
     const source = sources[0];
@@ -1332,7 +1338,13 @@ function finalSweepWanted(
     const sellers = view.factions.filter(
       (standing) => standing.joined && neuroflux.factions.includes(standing.name),
     );
-    const source = sellers[0]?.name;
+    // The ladder's nominal seller is the one whose donation gap per level is
+    // smallest: highest reputation first (donation rep does not scale with
+    // favor — favor only gates), favor then name as deterministic tie-breaks.
+    // sellers[0] was whatever order view.factions arrived in, which could
+    // price the whole ladder against a rep-1 faction and underfill it.
+    const source = [...sellers]
+      .sort((a, b) => b.rep - a.rep || b.favor - a.favor || (a.name < b.name ? -1 : 1))[0]?.name;
     if (source) {
       const nfgCandidate: PurchaseCandidate = { name: NEUROFLUX, aug: neuroflux, faction: source };
       let bestOrder = order;
@@ -1417,7 +1429,10 @@ function nextSweepAction(view: FactionsView, wanted: readonly string[]): Faction
         ),
       }))
       .filter(({ donation }) => view.moneyAvailable >= donation + moneyCost)
-      .sort((a, b) => a.donation - b.donation || (a.standing.name < b.standing.name ? -1 : 1))[0];
+      .sort((a, b) =>
+        a.donation - b.donation
+        || b.standing.favor - a.standing.favor
+        || (a.standing.name < b.standing.name ? -1 : 1))[0];
     if (!source) continue;
     return {
       type: "donate",

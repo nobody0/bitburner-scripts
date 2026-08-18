@@ -4,6 +4,7 @@ import {
   needDirection,
   needKey,
   needProgress,
+  needValueSeconds,
   needWeights,
   openFor,
   postNeeds,
@@ -129,5 +130,32 @@ describe("needWeights", () => {
     // career can do crime but cannot buy hacknet RAM.
     expect(needWeights(board, ["karma", "kills"])).toEqual({ karma: 3 });
     expect(openFor(board, ["karma"]).map((n) => n.kind)).toEqual(["karma"]);
+  });
+});
+
+describe("needValueSeconds", () => {
+  test("sums measured values per key, unsatisfied needs only, and omits unmeasured keys", () => {
+    const board = postNeeds([
+      need({ kind: "backdoor", subject: "CSEC", target: 1, have: 0, weight: 5, valueSec: 3_600, by: "factions" }),
+      need({ kind: "backdoor", subject: "CSEC", target: 1, have: 0, weight: 1, valueSec: 400, by: "career" }),
+      // Unmeasured poster: contributes nothing — absence is not zero.
+      need({ kind: "backdoor", subject: "avmnite-02h", target: 1, have: 0, weight: 2 }),
+      // Satisfied: its value has been delivered and must vanish.
+      need({ kind: "backdoor", subject: "run4theh111z", target: 1, have: 1, weight: 2, valueSec: 9_999 }),
+      // Kind filtered out.
+      need({ kind: "root", subject: "CSEC", target: 1, have: 0, weight: 1, valueSec: 50 }),
+    ]);
+    expect(needValueSeconds(board, ["backdoor"])).toEqual({ "backdoor:CSEC": 4_000 });
+  });
+
+  test("valueSec passes through postNeeds untouched and does not perturb weight ordering", () => {
+    const board = postNeeds([
+      need({ kind: "backdoor", subject: "a", target: 1, have: 0, weight: 1, valueSec: 100_000 }),
+      need({ kind: "backdoor", subject: "b", target: 1, have: 0, weight: 5 }),
+    ]);
+    // The huge BN-second value must NOT outrank the higher weight: ordering
+    // stays on (urgency, weight, ...) so existing consumers are unaffected.
+    expect(board.open[0]!.subject).toBe("b");
+    expect(board.open[1]!.valueSec).toBe(100_000);
   });
 });

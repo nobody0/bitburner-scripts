@@ -10,6 +10,7 @@ import {
 import { WORKER_RAM } from "../world.ts";
 import { scoreUpperBound } from "./bounds.ts";
 import {
+  chooseJitSchedule,
   cycleJitRoles,
   cycleWorstDifficulty,
   HGW_MIN_INTERVAL_MS,
@@ -76,6 +77,11 @@ export const FLEET_DELTA = 0.1;
 /** Smallest sensible batch cap: one hack thread plus its support. */
 export const WORKER_RAM_FLOOR = 16;
 const JIT_ECONOMICS_GUARD_MS = JIT_LAUNCH_GUARD_MS + MINIMUM_WORKER_PRECISION_MS;
+/** Farm envelope multiplier held back from secondary prep. Covers the
+ * oversized bootstrap first batch (dispatch caps roles at
+ * `max(quota, requested)`) and contiguous-block fragmentation, so a prep
+ * reservation can never shave the farm to exactly its steady-state quota. */
+export const SECONDARY_PREP_FARM_HEADROOM = 1.25;
 
 /** Runtime reduction bought by one point of experience at the next cached
  * skill milestone. With no synthetic money goal (the live game), value the
@@ -134,11 +140,11 @@ export function skillGateRuntimeSecondsPerExp(
  * once per solved target/generation, not in the dispatcher hot loop. Dispatch
  * separately proves that today's atomic host topology can sustain a cadence;
  * this cap prices how much RAM the fastest legal grid can ultimately use. */
-function withJitEconomics(
+function economicsJitRoles(
   solution: CycleSolution,
   statics: TargetStatics,
   ctx: HackContext,
-): CycleSolution {
+): { roles: ReturnType<typeof cycleJitRoles>; intervalMs: number } {
   const worstDifficulty = cycleWorstDifficulty(
     solution.kind,
     statics.minDifficulty,
@@ -162,6 +168,15 @@ function withJitEconomics(
     JIT_ECONOMICS_GUARD_MS,
   );
   const intervalMs = solution.kind === "hgw" ? HGW_MIN_INTERVAL_MS : HWGW_MIN_INTERVAL_MS;
+  return { roles, intervalMs };
+}
+
+function withJitEconomics(
+  solution: CycleSolution,
+  statics: TargetStatics,
+  ctx: HackContext,
+): CycleSolution {
+  const { roles, intervalMs } = economicsJitRoles(solution, statics, ctx);
   // Saturation prices the FUTURE fleet size which can sustain the fastest
   // legal landing grid. Using today's slower affordable schedule as the cap is
   // self-defeating: it declares the RAM that would unlock the next cadence
@@ -176,6 +191,39 @@ function withJitEconomics(
     maximumIncomePerSec,
     maximumExperiencePerSec,
   };
+}
+
+/** The smallest role envelope that keeps the farm's JIT pipeline alive: one
+ * slot per role, i.e. the grid at the slowest legal cadence (one batch per
+ * longest hold). This — not `jitSaturationGb` — is what the secondary-prep
+ * feasibility gate must protect. Saturation prices the FUTURE fleet at the
+ * minimum interval and can exceed a small fleet by orders of magnitude, so
+ * subtracting it blocked any second prep until the fleet reached TB; and the
+ * fastest TODAY-affordable schedule is no better a subtrahend, because it
+ * expands to fill whatever fleet exists. How much farm RAM above this floor
+ * is worth selling to a prep is an economics question, and `evaluatePrep`
+ * already prices it through `retainedFarmRate` at `fleetGb − prepGb`.
+ * No feasible schedule at all means the farm runs batch-atomic; returning
+ * the depth cap keeps the prep gate closed, which is the safe answer there. */
+export function minimumFarmEnvelopeGb(
+  solution: CycleSolution,
+  statics: TargetStatics,
+  ctx: HackContext,
+  fleetGb: number,
+  hostBlocksGb?: number[],
+): number {
+  const { roles, intervalMs } = economicsJitRoles(solution, statics, ctx);
+  const schedule = chooseJitSchedule(
+    roles,
+    fleetGb,
+    intervalMs,
+    hostBlocksGb ? { hostBlocksGb, divisibleBlockGb: WORKER_RAM.weaken } : undefined,
+  );
+  // No roles means no envelope to protect and `Math.max()` of nothing is
+  // -Infinity, which would silently hand the whole fleet to prep.
+  if (!schedule || roles.length === 0) return depthCapGb(solution);
+  const longestHoldMs = Math.max(...roles.map((role) => role.holdMs));
+  return jitCapacity(roles, longestHoldMs).totalGb;
 }
 
 /** Turn an economic yes/no prep decision into executable RAM budgets.
@@ -769,11 +817,23 @@ export function stepEvaluator(
   // 5%-margin rate·(T−prepTime) pick, 10/10 seeds.
   const farmModel = farmEntry?.solution;
   const currentRateNow = farmIncomeRate(farmModel, fleetGb);
-  // A secondary prep is affordable only from RAM above the farm's complete
-  // JIT pipeline. Every batch slot across one weaken-time has future launch
-  // windows backed by this envelope; RAM that happens to be idle now is not
-  // surplus until the whole depth cap is covered.
-  const secondaryPrepGbLimit = Math.max(0, fleetGb - (farmModel ? depthCapGb(farmModel) : 0));
+  // A secondary prep may only take RAM the farm's pipeline can survive
+  // losing: the fleet above the farm's minimum sustaining envelope (one slot
+  // per role), plus headroom. This is a FEASIBILITY floor, not the income
+  // trade — `evaluatePrep` below prices the farm income actually lost to a
+  // candidate reservation. The old subtrahend was `depthCapGb` (the
+  // minimum-interval saturation envelope, which prices the future fleet for
+  // infrastructure); on any early fleet it exceeded `fleetGb` by orders of
+  // magnitude and made a second prep mathematically impossible. The `min`
+  // keeps the gate at least as open as the old one on fleets past saturation.
+  const farmEnvelopeGb = farmModel && farmEntry
+    ? Math.min(
+        depthCapGb(farmModel),
+        SECONDARY_PREP_FARM_HEADROOM *
+          minimumFarmEnvelopeGb(farmModel, farmEntry.statics, ctx, fleetGb, capacity.hostBlocksGb),
+      )
+    : 0;
+  const secondaryPrepGbLimit = Math.max(0, fleetGb - farmEnvelopeGb);
   let prepEntry: TargetEntry | undefined;
   let prepPlan: PrepPlan | undefined;
   let chosenPrepGb: number | undefined;

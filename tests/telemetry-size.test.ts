@@ -66,6 +66,8 @@ describe("telemetry record size", () => {
       opponent,
       boardSize,
       observedBoardSize: boardSize,
+      aligned: false,
+      waitSec: 0,
       winProbability: 0.8 - index * 0.05,
       expectedBlackScore: 15 + index,
       expectedGameSec: 70 + index * 20,

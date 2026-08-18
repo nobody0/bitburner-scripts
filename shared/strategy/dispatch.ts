@@ -108,6 +108,10 @@ export const POOL_REUSE_WINDOW_MS = 5_000;
  * count is actually pressuring the browser, just before HGW does. */
 export const POOL_PRESSURE_OPS = 1_000;
 const JIT_ROLE_PRIORITY: Record<JitRole["role"], number> = { w1: 0, w2: 1, g: 2, h: 3 };
+/** Consecutive arrival-money hack zeroings treated as a pipeline desync (see
+ * DispatchMemory.hackZeroStreak). One is routine safety-brake noise; a run
+ * means the predicted ledger has drifted from the observable server. */
+export const HACK_ZERO_DESYNC_STREAK = 3;
 
 export interface Tracked {
   /** SOURCE host the op's RAM is reserved on. */
@@ -249,6 +253,13 @@ export interface DispatchMemory {
   nextOpId: number;
   nextServerIndex: number;
   lastAnchor: number;
+  /** Consecutive hacks zeroed by the arrival-money validation. Support ops
+   * keep landing while every hack is spliced out, and later grows are sized
+   * from the same depressed predicted ledger, so one lost grow can otherwise
+   * become a permanent zero-hack steady state. A short streak proves the
+   * ledger no longer matches reality; the pipeline is then rebuilt from the
+   * OBSERVED server state (prep path included). */
+  hackZeroStreak: number;
   /** Target/mode pipeline decision whose repeated scheduler retries must not
    * inflate cumulative missed-window counters. */
   jitDecisionId: number;
@@ -337,6 +348,7 @@ export function initDispatch(): DispatchMemory {
     nextOpId: 1,
     nextServerIndex: 0,
     lastAnchor: -Infinity,
+    hackZeroStreak: 0,
     jitDecisionId: 0,
     countedJitDecisionMisses: new Set(),
     lastDispatchAt: 0,
@@ -1145,6 +1157,7 @@ function abandonJitPending(memory: DispatchMemory, now: number): void {
     for (const op of batch.ops) releasePendingReservation(memory, op, now);
   }
   memory.jitPending = [];
+  memory.hackZeroStreak = 0;
 }
 
 /** Highest security an invocation can observe in a correctly interleaved
@@ -1664,9 +1677,21 @@ function launchDueJit(
           batch.ops.splice(batch.ops.indexOf(op), 1);
           memory.stats.batchesSkipped++;
           noteBatchMissedWindow(memory, batch, "arrival-money");
+          // A run of money-zeroed hacks is a desync, not bad luck: every
+          // later grow was sized from the same short predicted ledger, so
+          // the money deficit is self-perpetuating. Rebuild from depth 0 —
+          // planning re-predicts from the OBSERVED server state, and a
+          // genuinely under-money target falls to the prep path exactly as
+          // the shrunken-envelope recovery below does.
+          if (++memory.hackZeroStreak >= HACK_ZERO_DESYNC_STREAK) {
+            abandonJitPending(memory, now);
+            memory.lastAnchor = -Infinity;
+            return false;
+          }
           commitFolded(undefined);
           continue;
         }
+        memory.hackZeroStreak = 0;
         commitFolded(op.threads);
       }
 

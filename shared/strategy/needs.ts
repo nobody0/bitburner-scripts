@@ -118,6 +118,14 @@ export interface Need {
    *  the run it would unblock. Comparable across features only via this field —
    *  which is the whole point of normalising to "per second of unblocked run". */
   weight: number;
+  /** Optional MEASURED economics: BN-seconds of completion time satisfying
+   *  this need is estimated to save. Deliberately separate from `weight` —
+   *  weight stays on the small cross-kind scale every existing consumer
+   *  calibrates against (Go demand clamps `weight / 10` into [0.1, 1]), while
+   *  valueSec carries the raw estimate for consumers that rank actions
+   *  economically (hacking's server-access selection, RAM escalation).
+   *  Absent = unmeasured, never zero. Same-key values ADD, like weights. */
+  valueSec?: number;
   urgency: NeedUrgency;
   /** Human-readable provenance: the reason this need exists at all. Rendered,
    *  so the UI can say "career is doing crime BECAUSE The Syndicate needs
@@ -204,6 +212,21 @@ export function needWeights(board: NeedBoard, kinds: readonly NeedKind[]): Recor
     weights[key] = (weights[key] ?? 0) + need.weight;
   }
   return weights;
+}
+
+/** Total measured BN-seconds each outcome would save, keyed by `needKey`.
+ * Same rules as `needWeights`: unsatisfied needs only, same-key values add.
+ * Keys with no measured `valueSec` on any poster are ABSENT, not zero — a
+ * consumer chooses its own fallback (see access/value.ts `rankingValueSec`). */
+export function needValueSeconds(board: NeedBoard, kinds: readonly NeedKind[]): Record<string, number> {
+  const wanted = new Set(kinds);
+  const values: Record<string, number> = {};
+  for (const need of board.open) {
+    if (!wanted.has(need.kind) || need.valueSec === undefined) continue;
+    const key = needKey(need);
+    values[key] = (values[key] ?? 0) + need.valueSec;
+  }
+  return values;
 }
 
 /** Look one outcome's total worth up, honouring the subject convention. */

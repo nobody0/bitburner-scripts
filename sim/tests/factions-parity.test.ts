@@ -29,7 +29,7 @@ import {
 } from "../vendor/bitburner/src/PersonObjects/formulas/Reputation.ts";
 import { currentNodeMults, replaceCurrentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { getBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
-import { mockPerson } from "../core/mocks.ts";
+import { mockPerson, mockServer } from "../core/mocks.ts";
 import { FactionSystem } from "../features/factions.ts";
 import { SimWorld } from "../world.ts";
 
@@ -298,4 +298,40 @@ describe("simulated faction work experience", () => {
       expect((world.person.skills as unknown as Record<string, number>).hacking).toBeGreaterThanOrEqual(beforeSkills.hacking!);
     });
   }
+});
+
+describe("company backdoor invite-requirement discount", () => {
+  const companyRep = (requirements: import("@ns").PlayerRequirement[], company: string): number | undefined => {
+    for (const requirement of requirements) {
+      if (requirement.type === "companyReputation" && requirement.company === company) return requirement.reputation;
+    }
+    return undefined;
+  };
+
+  test("serialized companyReputation is the effective 0.75x value once the company's server is backdoored", () => {
+    const world = new SimWorld({ seed: 1 });
+    const factions = new FactionSystem(world, world.player);
+    world.servers.set("ecorp", mockServer({ hostname: "ecorp", organizationName: "ECorp" }) as never);
+    // getFactionInviteRequirements parity: the live game serializes the base
+    // requirement while no server of the company is backdoored...
+    expect(companyRep(factions.requirements("ECorp"), "ECorp")).toBe(400_000);
+    // ...and the effective (0.75x) value afterwards.
+    world.servers.get("ecorp")!.backdoorInstalled = true;
+    expect(companyRep(factions.requirements("ECorp"), "ECorp")).toBe(300_000);
+    // Other companies' gates are untouched.
+    expect(companyRep(factions.requirements("MegaCorp"), "MegaCorp")).toBe(400_000);
+  });
+
+  test("the invitation checker tests the discounted requirement — once, with no double discount", () => {
+    const world = new SimWorld({ seed: 1 });
+    const factions = new FactionSystem(world, world.player);
+    world.servers.set("ecorp", mockServer({ hostname: "ecorp", organizationName: "ECorp", backdoorInstalled: true }) as never);
+    let seen: number | undefined;
+    factions.checkInvitations((requirements) => {
+      const rep = companyRep(requirements, "ECorp");
+      if (rep !== undefined) seen = rep;
+      return false;
+    });
+    expect(seen).toBe(300_000);
+  });
 });

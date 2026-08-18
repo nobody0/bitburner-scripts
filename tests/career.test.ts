@@ -345,8 +345,34 @@ describe("program creation economics", () => {
 
   test("compares player-slot opportunity cost with TOR plus purchase price", () => {
     const brute = PORT_OPENER_PROGRAMS[0]!;
-    expect(preferProgramCreation(brute, 50, 0, 1_000, false)).toBe(true);
-    expect(preferProgramCreation(brute, 50, 0, 2_000, true)).toBe(false);
+    // 600s write. Unpriced money keeps the historical money-only comparison:
+    // 600 * 1000 = $600k < $700k (TOR included) writes; 600 * 2000 = $1.2m
+    // against the $500k program alone does not.
+    expect(preferProgramCreation(brute, 50, 0, { moneyPerSec: 1_000, valueSec: 0 }, false)).toBe(true);
+    expect(preferProgramCreation(brute, 50, 0, { moneyPerSec: 2_000, valueSec: 0 }, true)).toBe(false);
+  });
+
+  test("charges the write the career slot's need progress, not only its income", () => {
+    const brute = PORT_OPENER_PROGRAMS[0]!;
+    // $0.01 of BN-value per dollar: buying is worth 700_000 * 0.01 = 7_000
+    // BN-seconds, and the forgone income is 600 * 200 * 0.01 = 1_200.
+    const lambda = 0.01;
+    const alternative = (valueSec: number) => ({ moneyPerSec: 200, valueSec });
+    // Nothing else for the slot to do — writing is still much cheaper.
+    expect(preferProgramCreation(brute, 50, 0, alternative(0), false, lambda)).toBe(true);
+    // A blocking need worth 6_000 BN-seconds sits in the same window: the
+    // money-only comparison could never see it, and it flips the decision.
+    expect(preferProgramCreation(brute, 50, 0, alternative(6_000), false, lambda)).toBe(false);
+    // The same board with money priced cheaply (income is abundant) leaves
+    // buying expensive in BN-seconds, so the write wins again.
+    expect(preferProgramCreation(brute, 50, 0, alternative(6_000), false, 0.02)).toBe(true);
+  });
+
+  test("a non-positive money price degrades to the money-only comparison", () => {
+    const brute = PORT_OPENER_PROGRAMS[0]!;
+    const alternative = { moneyPerSec: 1_000, valueSec: 1e9 };
+    expect(preferProgramCreation(brute, 50, 0, alternative, false, 0)).toBe(true);
+    expect(preferProgramCreation(brute, 50, 0, alternative, false)).toBe(true);
   });
 });
 
@@ -383,5 +409,60 @@ describe("exhaustive oracle — the action set is small enough to prove", () => 
     const seconds = secondsToKarma(homicide, person(), CTX, 0, -54_000);
     // 3 karma per 3 s = 1 karma/s, so -54000 takes 54000 s.
     expect(seconds).toBeCloseTo(54_000, 6);
+  });
+});
+
+// --- the megacorp unlock chain ----------------------------------------------
+
+describe("career serves the company chain", () => {
+  const heist = crime({ type: "Heist", timeMs: 600_000, money: 6.878e8, karma: 15, chance: 1 });
+
+  test("a companyRep need at a company we do not work for hires on first", () => {
+    const decision = stepCareer(
+      view({ crimes: [heist] }),
+      postNeeds([need({ kind: "companyRep", subject: "NWO", target: 400_000, have: 0, weight: 6 })]),
+    );
+    expect(decision.action).toMatchObject({ type: "apply", subject: "NWO" });
+  });
+
+  test("a blocking companyRep need at the employer outranks the best crime income", () => {
+    const decision = stepCareer(
+      view({
+        crimes: [heist],
+        jobs: { NWO: "Software Engineering Intern" },
+        companies: [{ name: "NWO", rep: 1.589e6, estimatedRepPerSec: 40, moneyPerSec: 1_000 }],
+      }),
+      postNeeds([need({ kind: "companyRep", subject: "NWO", target: 4_000_000, have: 1.589e6, weight: 6 })]),
+    );
+    expect(decision.action).toMatchObject({ type: "company", subject: "NWO" });
+    expect(decision.incomeFallback).toBe(false);
+    expect(decision.why).not.toContain("Heist");
+  });
+
+  test("the formula prior prices an unmeasured company instead of the neutral 1 rep/sec", () => {
+    const decision = stepCareer(
+      view({
+        jobs: { NWO: "Software Engineering Intern" },
+        companies: [{ name: "NWO", rep: 0, estimatedRepPerSec: 40 }],
+      }),
+      postNeeds([need({ kind: "companyRep", subject: "NWO", target: 400_000, have: 0, weight: 6 })]),
+    );
+    const company = decision.ranked.find((entry) => entry.action.type === "company");
+    expect(company!.action.why).toContain("estimated company rep/sec");
+    expect(company!.contributions[0]!.perSec).toBe(40);
+  });
+
+  test("a jobTitle need routes through the position table, never a dead-end track", () => {
+    // The old string heuristic sent Chief Executive Officer to the Software
+    // track, which terminates at CTO. The table lookup must pick the title's
+    // real track (Business) at an employer whose ladder contains it.
+    const decision = stepCareer(
+      view({
+        jobs: { NWO: "Business Manager" },
+        companies: [{ name: "NWO", rep: 1e6 }],
+      }),
+      postNeeds([need({ kind: "jobTitle", subject: "Chief Executive Officer", target: 1, have: 0, weight: 6 })]),
+    );
+    expect(decision.action).toMatchObject({ type: "promote", subject: "NWO", field: "Business" });
   });
 });

@@ -15,8 +15,19 @@ import {
 import { coarseHorizonSec } from "../../../shared/strategy/investment.ts";
 import { solveCycle } from "../../../shared/strategy/targeting.ts";
 import { currentShareBonus } from "../../../shared/strategy/dispatch.ts";
-import { PORT_OPENER_PROGRAMS, preferProgramCreation, type ProgramOption } from "../../../shared/strategy/career/programs.ts";
-import type { Need } from "../../../shared/strategy/needs.ts";
+import {
+  PORT_OPENER_PROGRAMS,
+  preferProgramCreation,
+  programCreateTimeMs,
+  type ProgramAlternative,
+  type ProgramOption,
+} from "../../../shared/strategy/career/programs.ts";
+import { needValueSeconds, type Need } from "../../../shared/strategy/needs.ts";
+import {
+  backdoorCostSeconds,
+  NOMINAL_VALUE_SEC_PER_WEIGHT,
+  rankingValueSec,
+} from "../../../shared/strategy/access/value.ts";
 import {
   passiveRepPerSec,
   passiveRepPerSecPerShareBonus,
@@ -107,7 +118,7 @@ export function resetHackingState(): void {
   routeHackingSkillGoal = undefined;
   latestShareValue = undefined;
   switched = undefined;
-  backdoorAttempted.clear();
+  backdoorBackoff.clear();
   backdoorInFlight = false;
   lastServerAccessAt = 0;
   infrastructureInFlight = false;
@@ -147,6 +158,13 @@ type ShareValue = NonNullable<Parameters<typeof pump>[4]>["shareValue"];
 let latestShareValue: ShareValue | undefined;
 
 function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | undefined {
+  // Share buys faction-rep rate, and every point of faction rep (and the
+  // favor it becomes) is erased when the node ends by destroy. Near that
+  // ending the surplus RAM's alternative uses (farm ops, dodges, Go) are the
+  // only ones that still exist — measured failure: 99.9% of a 9.13PB fleet
+  // soaked into share for an objective nobody was even working, starving the
+  // exp climb that WAS the node's critical path.
+  if (game.topics.progression?.plan?.endingByDestroy === true) return undefined;
   const marginals = game.topics.progression?.plan?.marginals;
   if (!marginals) return undefined;
   const player = game.topics.player;
@@ -348,9 +366,25 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   });
 }
 
-/** Hosts we have already backdoored (or tried and failed), so a need that
- * cannot be satisfied does not relaunch a stub every pass. Cleared on reset. */
-const backdoorAttempted = new Set<string>();
+/** Per-host retry backoff for failed backdoor attempts. The predecessor was a
+ * permanent one-attempt latch, and a transient failure (a connect chain broken
+ * by a concurrent terminal user, a stub killed mid-flight) silently cost the
+ * whole faction join for the rest of the BitNode. Exponential 30s -> 10min:
+ * cheap enough to recover from a transient, slow enough that a structurally
+ * impossible host does not relaunch a stub every pass. Cleared on reset. */
+const backdoorBackoff = new Map<string, { attempts: number; nextAt: number }>();
+const BACKDOOR_BACKOFF_BASE_MS = 30_000;
+const BACKDOOR_BACKOFF_CAP_MS = 600_000;
+
+function backdoorRetryBlocked(host: string, now: number): boolean {
+  return (backdoorBackoff.get(host)?.nextAt ?? 0) > now;
+}
+
+function recordBackdoorFailure(host: string, now: number): void {
+  const attempts = (backdoorBackoff.get(host)?.attempts ?? 0) + 1;
+  const delay = Math.min(BACKDOOR_BACKOFF_CAP_MS, BACKDOOR_BACKOFF_BASE_MS * 2 ** (attempts - 1));
+  backdoorBackoff.set(host, { attempts, nextAt: now + delay });
+}
 /** ns functions each dodged closure calls. PRICED at runtime rather than
  * guessed: a constant budget has to be at least the sum of the call costs, and
  * getting that wrong kills the stub outright (see dodge.ts#priceCalls). */
@@ -738,36 +772,39 @@ async function executeInfrastructure(ctx: DriverContext, investment: RamInvestme
  * knowing or caring how a backdoor is installed; `hacking` owns servers, so it
  * delivers. Neither feature references the other.
  *
- * Deliberately conservative — one backdoor attempt per host and all access
- * actions throttled: a backdoor takes hackingTime/4 and would otherwise be
- * reconsidered on every 200 ms tick.
+ * Failure handling is a per-host exponential backoff (never a permanent
+ * latch), and only OPENER PURCHASES keep the flat 10-second gate: a backdoor
+ * takes hackingTime/4 and is already single-flight, so gating successes too
+ * merely delayed the next cheap install by ten idle seconds each.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L518-L533 */
 async function serveServerAccessNeeds(ctx: DriverContext): Promise<void> {
   const now = Date.now();
-  if (now - lastServerAccessAt < 10_000) return;
 
-  const pending = nextServerAccessAction(ctx);
-  if (!pending) return;
-  const { host, server, action } = pending;
+  const plan = serverAccessPlan(ctx);
+  if (!plan) return;
+  requestedProgram = plan.writeProgram;
 
   // Not rooted yet: the blocker is usually a missing port opener, and
   // nothing else in the loop will ever buy one. Rooting servers is
   // hacking's job, so acquiring the means to root them is too. This is
   // load-bearing rather than incidental — CSEC needs one open port, so
   // without a cracker the entire faction ladder is unreachable.
-  if (action === "port-opener") {
-    const program = programForPortNeed(ctx.state, server.numOpenPortsRequired ?? 0);
-    requestedProgram = program && ctx.activeFeatures.has("career") && shouldWriteProgram(ctx.state, program)
-      ? program
-      : undefined;
-    if (requestedProgram) return;
-    if (await buyPortOpener(ctx, server.numOpenPortsRequired ?? 0)) lastServerAccessAt = now;
+  if (plan.primary.action === "port-opener" && !plan.writeProgram) {
+    if (now - lastServerAccessAt < 10_000) return;
+    if (await buyPortOpener(ctx, plan.primary.server.numOpenPortsRequired ?? 0)) lastServerAccessAt = now;
     return;
   }
 
-  if (backdoorInFlight) return;
+  // Either the primary action IS the backdoor, or the career slot is writing
+  // an opener and this is the backdoor that runs ALONGSIDE it. A write costs
+  // player time — not RAM and not money — so returning here froze the whole
+  // access pipeline for the ten to thirty minutes of a create-program job.
+  const pending = plan.primary.action === "backdoor" ? plan.primary : plan.concurrentBackdoor;
+  if (!pending) return;
+  const { host, server } = pending;
+
+  if (backdoorInFlight || backdoorRetryBlocked(host, now)) return;
   backdoorInFlight = true;
-  lastServerAccessAt = now;
   try {
     const outcome = await featureDodge(ctx, "hacking", "action:backdoor", BACKDOOR_CALLS, async (stubNs: NS) => {
       const parents = new Map<string, string | undefined>([["home", undefined]]);
@@ -797,23 +834,51 @@ async function serveServerAccessNeeds(ctx: DriverContext): Promise<void> {
       await stubNs["singularity"]["installBackdoor"]();
     });
     if (outcome.ok) {
-      backdoorAttempted.add(host);
+      backdoorBackoff.delete(host);
       server.backdoorInstalled = true;
+    } else if (!outcome.queued) {
+      // The stub launched and failed (broken connect chain, thrown install).
+      // Backed off per host so it does not relaunch every pass — and REPORTED
+      // through the probe-failure channel: a silent latch here cost a whole
+      // join (the error was invisible for two hours of run). A QUEUED dodge is
+      // not an attempt: the broker will admit it when RAM frees up.
+      recordBackdoorFailure(host, now);
+      recordProbeFailure(ctx.state, `backdoor:${host}`, new Error(outcome.reason));
     }
   } catch (error) {
     if (isScriptDeath(error)) throw error;
-    backdoorAttempted.add(host);
-    // No singularity access, or the connection failed. Recorded by the
-    // attempt set so we do not retry forever — and REPORTED through the
-    // probe-failure channel: a silent latch here cost a whole join (the
-    // error was invisible for two hours of run).
+    recordBackdoorFailure(host, now);
     recordProbeFailure(ctx.state, `backdoor:${host}`, error);
   } finally {
     backdoorInFlight = false;
   }
 }
 
-type ServerAccessAction = {
+/** RAM priority for the pending backdoor dodge. Baseline probe:detail; the
+ * `hacking:critical-access` band (111, above the broker's farm-preemption
+ * threshold) is granted only when BOTH hold:
+ *  - some poster marked the need BLOCKING (it is the last thing between a
+ *    faction and an invite), and
+ *  - the need's MEASURED value rate (BN-seconds saved per second of install)
+ *    strictly beats the farm value of the RAM the dodge would displace.
+ * Unmeasured value never escalates: evicting a worker desyncs a real batch,
+ * and a fallback-ranked guess is not evidence that trade is right. */
+function backdoorClaimPriority(ctx: ClaimContext, pending: ServerAccessAction): number {
+  const base = PRIORITY["probe:detail"];
+  const blocking = ctx.board.open.some(
+    (need) => need.kind === "backdoor" && need.subject === pending.host && need.urgency === "blocking",
+  );
+  if (!blocking) return base;
+  const valueSec = needValueSeconds(ctx.board, ["backdoor"])[`backdoor:${pending.host}`];
+  if (valueSec === undefined) return base;
+  const costSec = Math.max(1, backdoorActionSec(ctx.state, pending.server));
+  const displaced = productiveRamMarginal(ctx);
+  if (displaced.state !== "measured") return base;
+  const displacedRate = displaced.value * ctx.ramPrice(BACKDOOR_CALLS);
+  return valueSec / costSec > displacedRate ? PRIORITY["hacking:critical-access"] : base;
+}
+
+export type ServerAccessAction = {
   action: "backdoor" | "port-opener";
   host: string;
   server: NonNullable<GameState["topics"]["servers"]>[string];
@@ -830,61 +895,185 @@ const OPENER_SKILL_ANTICIPATION = 4;
  * target must not outbid compounding investment hours ahead of use. */
 const OPENER_ANTICIPATION_COST_CAP = 10e6;
 
-/** Select the exact board action both claim collection and execution use. */
-function nextServerAccessAction(ctx: Pick<ClaimContext, "board" | "state">): ServerAccessAction | undefined {
+/** Wall-clock cost of installing one backdoor: hackTime/4 at the acting
+ * skill, from the evaluator's precomputed hack context. Nominal fallback
+ * before the first planner pass, matching the requirement interpreter. */
+function backdoorActionSec(state: GameState, server: ServerAccessAction["server"]): number {
+  const hackCtx = hackingState().memory.dispatch.evaluator.ctx;
+  const player = state.topics.player;
+  if (!hackCtx || !player) return NOMINAL_VALUE_SEC_PER_WEIGHT;
+  return backdoorCostSeconds({
+    requiredHackingSkill: server.requiredHackingSkill ?? 1,
+    hackDifficulty: server.hackDifficulty ?? server.minDifficulty ?? 1,
+    ctx: hackCtx,
+    hackingExp: player.exp?.hacking ?? 0,
+    hackingSkillMult: player.mults?.hacking ?? 1,
+    ...(state.topics.farm?.expRate !== undefined ? { expPerSec: state.topics.farm.expRate } : {}),
+  }).actionSec;
+}
+
+/** Highest hacking-skill requirement among open backdoor needs worth training
+ * toward: the need carries a measured `valueSec` and that value exceeds the
+ * measured wait to reach the requirement. Feeds `routeHackingSkillGoal`, so
+ * `skillGateRuntimeSecondsPerExp` prices fleet exp toward the gate. */
+function backdoorSkillGoal(ctx: Pick<DriverContext, "board" | "state">): number | undefined {
   const servers = ctx.state.topics.servers ?? {};
   const player = ctx.state.topics.player;
-  if (!player) return undefined;
-  // Terminal roots form the first tier and cannot be delayed by starting a
-  // faction backdoor. Within the backdoor tier, an action ready RIGHT NOW
-  // beats buying another opener. Among opener purchases the lowest-port host
-  // wins (its next program is cheapest); returning the first board entry used
-  // to let a $250m future SQLInject block CSEC's ready backdoor for 30 minutes.
-  let opener: ServerAccessAction | undefined;
-  for (const tier of [ctx.board.byKind.root, ctx.board.byKind.backdoor]) {
-    for (const need of tier) {
-      if (need.have >= need.target) continue;
-      const host = need.subject;
-      const wantsBackdoor = need.kind === "backdoor";
-      if (!host || (wantsBackdoor && backdoorAttempted.has(host))) continue;
-      const server = servers[host];
-      if (!server || (wantsBackdoor ? server.backdoorInstalled : server.hasAdminRights)) continue;
-      // Port openers are MONEY, not skill: buy them the moment the need exists
-      // so the root is ready when the skill arrives. Gating the purchase behind
-      // the skill check closed the buying window on factions-join — by the time
-      // hacking crossed CSEC's requirement, the bankroll had been spent on
-      // fleet and BruteSSH stayed unaffordable for the rest of the run. But the
-      // anticipation is BOUNDED: the opener claim runs at blocking priority,
-      // and a target whose skill requirement is many multiples away (505-skill
-      // run4theh111z early in a run) would divert a $250m opener spend from
-      // compounding investment hours before the backdoor is actionable.
-      if (!server.hasAdminRights) {
-        if ((server.numOpenPortsRequired ?? 0) === 0) continue;
-        // Do not turn a wanted future backdoor into a higher-priority savings
-        // target while another subsystem is waiting on cash right now. Ready
-        // backdoors remain free to execute, and a genuinely blocking opener is
-        // still allowed through.
-        if (deferPrerequisitePurchase(need.urgency, ctx.board.open)) continue;
-        const program = programForPortNeed(ctx.state, server.numOpenPortsRequired ?? 0);
-        const dear = (program?.purchaseCost ?? 0) > OPENER_ANTICIPATION_COST_CAP;
-        if (dear && (server.requiredHackingSkill ?? Infinity) > player.skills.hacking * OPENER_SKILL_ANTICIPATION) {
-          continue;
-        }
-        if (!opener || (server.numOpenPortsRequired ?? 0) < (opener.server.numOpenPortsRequired ?? 0)) {
-          opener = { action: "port-opener", host, server };
-        }
+  const hackCtx = hackingState().memory.dispatch.evaluator.ctx;
+  if (!player || !hackCtx) return undefined;
+  let goal: number | undefined;
+  for (const need of ctx.board.open) {
+    if (need.kind !== "backdoor" || need.valueSec === undefined || !need.subject) continue;
+    const server = servers[need.subject];
+    const required = server?.requiredHackingSkill;
+    if (!server || required === undefined || required <= player.skills.hacking) continue;
+    const cost = backdoorCostSeconds({
+      requiredHackingSkill: required,
+      hackDifficulty: server.hackDifficulty ?? server.minDifficulty ?? 1,
+      ctx: hackCtx,
+      hackingExp: player.exp?.hacking ?? 0,
+      hackingSkillMult: player.mults?.hacking ?? 1,
+      ...(ctx.state.topics.farm?.expRate !== undefined ? { expPerSec: ctx.state.topics.farm.expRate } : {}),
+    });
+    if (need.valueSec <= cost.skillWaitSec) continue;
+    goal = goal === undefined ? required : Math.max(goal, required);
+  }
+  return goal;
+}
+
+/** Select the exact board action both claim collection and execution use.
+ *
+ * Candidates are ranked by VALUE DENSITY — the total BN-seconds the board says
+ * the outcome saves (measured `valueSec` where posted, the nominal
+ * weight-based fallback otherwise) per wall-clock second the action costs —
+ * instead of the old strict [root, backdoor] tiers. An opener purchase is
+ * effectively instant, so prerequisite buying still naturally precedes a long
+ * install; a ready CSEC backdoor at high skill (seconds) floats over a
+ * half-hour megacorp install; and a high-value backdoor no longer waits for
+ * every root on the board. The guard rails from the tiered version are kept
+ * verbatim: bounded opener anticipation, prerequisite deferral, and the rule
+ * that a root-only need never escalates into an unrequested backdoor. */
+function rankServerAccessActions(
+  ctx: Pick<ClaimContext, "board" | "state" | "activeFeatures">,
+): ServerAccessAction[] {
+  const servers = ctx.state.topics.servers ?? {};
+  const player = ctx.state.topics.player;
+  if (!player) return [];
+  const now = Date.now();
+  const measured = needValueSeconds(ctx.board, ["root", "backdoor"]);
+  // Per (action, host) candidate value: same-key needs already summed into
+  // `measured`; unmeasured posters contribute the ranking fallback.
+  const candidates = new Map<string, { entry: ServerAccessAction; costSec: number }>();
+  const fallback = new Map<string, number>();
+  for (const need of ctx.board.open) {
+    if (need.kind !== "root" && need.kind !== "backdoor") continue;
+    const host = need.subject;
+    const wantsBackdoor = need.kind === "backdoor";
+    if (!host || (wantsBackdoor && backdoorRetryBlocked(host, now))) continue;
+    const server = servers[host];
+    if (!server || (wantsBackdoor ? server.backdoorInstalled : server.hasAdminRights)) continue;
+    const key = `${need.kind}:${host}`;
+    if (need.valueSec === undefined) fallback.set(key, (fallback.get(key) ?? 0) + rankingValueSec(need));
+    if (candidates.has(key)) continue;
+    // Port openers are MONEY, not skill: buy them the moment the need exists
+    // so the root is ready when the skill arrives. Gating the purchase behind
+    // the skill check closed the buying window on factions-join — by the time
+    // hacking crossed CSEC's requirement, the bankroll had been spent on
+    // fleet and BruteSSH stayed unaffordable for the rest of the run. But the
+    // anticipation is BOUNDED: the opener claim runs at blocking priority,
+    // and a target whose skill requirement is many multiples away (505-skill
+    // run4theh111z early in a run) would divert a $250m opener spend from
+    // compounding investment hours before the backdoor is actionable.
+    if (!server.hasAdminRights) {
+      if ((server.numOpenPortsRequired ?? 0) === 0) continue;
+      // Do not turn a wanted future backdoor into a higher-priority savings
+      // target while another subsystem is waiting on cash right now. Ready
+      // backdoors remain free to execute, and a genuinely blocking opener is
+      // still allowed through.
+      if (deferPrerequisitePurchase(need.urgency, ctx.board.open)) continue;
+      const program = programForPortNeed(ctx.state, server.numOpenPortsRequired ?? 0);
+      const dear = (program?.purchaseCost ?? 0) > OPENER_ANTICIPATION_COST_CAP;
+      if (dear && (server.requiredHackingSkill ?? Infinity) > player.skills.hacking * OPENER_SKILL_ANTICIPATION) {
         continue;
       }
-      // A root-only need is satisfied by the fleet sweep once the opener exists;
-      // it must never escalate into installing an unrequested backdoor.
-      if (!wantsBackdoor) continue;
-      // The backdoor itself DOES need the skill (and the connect chain).
-      if (player.skills.hacking < (server.requiredHackingSkill ?? Infinity)) continue;
-      return { action: "backdoor", host, server };
+      candidates.set(key, {
+        entry: { action: "port-opener", host, server },
+        costSec: openerAcquireSec(ctx, program),
+      });
+      continue;
     }
-    if (opener) return opener;
+    // A root-only need is satisfied by the fleet sweep once the opener exists;
+    // it must never escalate into installing an unrequested backdoor.
+    if (!wantsBackdoor) continue;
+    // The backdoor itself DOES need the skill (and the connect chain).
+    if (player.skills.hacking < (server.requiredHackingSkill ?? Infinity)) continue;
+    candidates.set(key, {
+      entry: { action: "backdoor", host, server },
+      costSec: Math.max(1, backdoorActionSec(ctx.state, server)),
+    });
   }
-  return opener;
+  const ranked: { entry: ServerAccessAction; score: number; ports: number }[] = [];
+  for (const [key, candidate] of candidates) {
+    const valueSec = (measured[key] ?? 0) + (fallback.get(key) ?? 0);
+    ranked.push({
+      entry: candidate.entry,
+      score: valueSec / candidate.costSec,
+      ports: candidate.entry.server.numOpenPortsRequired ?? 0,
+    });
+  }
+  // Lowest-port opener breaks a score tie: its next program is cheapest.
+  ranked.sort((a, b) => b.score - a.score || a.ports - b.ports);
+  return ranked.map((entry) => entry.entry);
+}
+
+/** Wall-clock cost of ACQUIRING an opener, which is NOT the cost of the
+ * darkweb call. Buying is effectively instant; writing occupies the career
+ * slot for the whole create-program time. Pricing a write at one second gave
+ * every opener candidate its raw `valueSec` as a score, so a ten-minute
+ * BruteSSH write outranked every ready backdoor on the board. */
+function openerAcquireSec(
+  ctx: Pick<ClaimContext, "state" | "activeFeatures">,
+  program: ProgramOption | undefined,
+): number {
+  if (!program || !writeInsteadOfBuy(ctx, program)) return 1;
+  const skills = ctx.state.topics.player?.skills;
+  const timeMs = skills ? programCreateTimeMs(program, skills.hacking, skills.intelligence) : Infinity;
+  return Number.isFinite(timeMs) ? Math.max(1, timeMs / 1_000) : 1;
+}
+
+function writeInsteadOfBuy(
+  ctx: Pick<ClaimContext, "state" | "activeFeatures">,
+  program: ProgramOption,
+): boolean {
+  return ctx.activeFeatures.has("career") && shouldWriteProgram(ctx.state, program);
+}
+
+export interface ServerAccessPlan {
+  /** Best candidate by value density — what this feature acts on. */
+  primary: ServerAccessAction;
+  /** Program the career slot should write instead of buying `primary`. */
+  writeProgram?: ProgramOption;
+  /** Best backdoor to install WHILE that write occupies the career slot. The
+   * write spends player time only, so the backdoor pipeline must keep
+   * running rather than idling behind it. */
+  concurrentBackdoor?: ServerAccessAction;
+}
+
+export function serverAccessPlan(
+  ctx: Pick<ClaimContext, "board" | "state" | "activeFeatures">,
+): ServerAccessPlan | undefined {
+  const ranked = rankServerAccessActions(ctx);
+  const primary = ranked[0];
+  if (!primary) return undefined;
+  if (primary.action !== "port-opener") return { primary };
+  const program = programForPortNeed(ctx.state, primary.server.numOpenPortsRequired ?? 0);
+  if (!program || !writeInsteadOfBuy(ctx, program)) return { primary };
+  const concurrentBackdoor = ranked.find((entry) => entry.action === "backdoor");
+  return {
+    primary,
+    writeProgram: program,
+    ...(concurrentBackdoor ? { concurrentBackdoor } : {}),
+  };
 }
 
 /** Darkweb port openers, cheapest first — the order the game unlocks ports in.
@@ -913,14 +1102,54 @@ function portOpenerPurchaseCost(game: GameState, portsRequired: number): number 
 function shouldWriteProgram(game: GameState, program: ProgramOption): boolean {
   const skills = game.topics.player?.skills;
   if (!skills) return false;
-  const playerWorkIncome = Math.max(0, ...(game.topics.career?.plan?.ranked ?? []).map((entry) => entry.moneyPerSec));
+  const timeMs = programCreateTimeMs(program, skills.hacking, skills.intelligence);
+  if (!Number.isFinite(timeMs)) return false;
   return preferProgramCreation(
     program,
     skills.hacking,
     skills.intelligence,
-    playerWorkIncome,
+    careerAlternative(game, timeMs / 1_000),
     (game.topics.fleet?.portOpeners ?? 0) > 0,
+    moneyValueSecPerDollar(game),
   );
+}
+
+/** What the career slot would do over a `writeSec` window if it were not
+ * writing this program — the write's real opportunity cost.
+ *
+ * MONEY is the maximum rate on the ranked board, which is the income the slot
+ * reverts to once the top need saturates (and preserves the historical
+ * money-only comparison exactly when no need is posted). VALUE is the top
+ * NON-program option's own need progress: career ranks by urgency and then by
+ * score, so `ranked[0]` is the option the slot actually runs, and the program
+ * entry itself is excluded because it is the alternative being priced. */
+function careerAlternative(game: GameState, writeSec: number): ProgramAlternative {
+  const ranked = (game.topics.career?.plan?.ranked ?? [])
+    .filter((entry) => !entry.label.startsWith("program:"));
+  const moneyPerSec = Math.max(0, ...ranked.map((entry) => entry.moneyPerSec));
+  const valueSec = (ranked[0]?.contributions ?? []).reduce((total, contribution) => {
+    if (contribution.weight <= 0 || contribution.score <= 0) return total;
+    // career's score is (perSec / remaining) * weight, so score/weight is the
+    // FRACTION of the need completed per second. Capped at one: a need that
+    // finishes inside the window is forgone once, not once per window-second.
+    const completed = Math.min(1, (contribution.score / contribution.weight) * writeSec);
+    return total + completed * contribution.weight * NOMINAL_VALUE_SEC_PER_WEIGHT;
+  }, 0);
+  return { moneyPerSec, valueSec };
+}
+
+/** The arbiter's own shadow price of a dollar, in BN-seconds. Taken as the
+ * highest money waterline: that is what the next dollar is worth to the
+ * best-priced claim the auction could not fully fund, which is exactly the
+ * cost of spending it on a port opener instead. Absent until some money band
+ * carries a priced claim, and the caller then falls back to money-only. */
+function moneyValueSecPerDollar(game: GameState): number | undefined {
+  const waterlines = game.topics.progression?.arbitration?.waterlines ?? [];
+  let best = 0;
+  for (const waterline of waterlines) {
+    if (waterline.resource === "money" && waterline.lambda > best) best = waterline.lambda;
+  }
+  return best > 0 ? best : undefined;
 }
 
 /** Buy every port opener needed for the selected server in one atomic grant.
@@ -1085,6 +1314,14 @@ export const hacking: FeatureDriver = {
         (highest, need) => highest === undefined ? need.target : Math.max(highest, need.target),
         undefined,
       );
+    // Open backdoor needs whose skill requirement is not met yet are ALSO
+    // skill gates: exp shrinks the wait (and the install itself). Admitted
+    // only when the need's measured value exceeds the measured wait, so an
+    // early 505-skill run4theh111z cannot hijack the farm's exp valuation.
+    const accessSkillGoal = backdoorSkillGoal(ctx);
+    if (accessSkillGoal !== undefined) {
+      routeHackingSkillGoal = Math.max(routeHackingSkillGoal ?? 0, accessSkillGoal);
+    }
 
     // The reserve is computed per pass, not constant: it grows to cover the
     // largest dodge step any unlocked feature declares, so an expensive
@@ -1226,18 +1463,26 @@ export const hackingModule: FeatureModule = {
   },
   claims: (ctx) => {
     const claims: FeatureClaim[] = [];
-    const pending = nextServerAccessAction(ctx);
-    const action = pending?.action;
-    if (action === "backdoor") {
-      claims.push(actionRamClaim(ctx, "hacking", "action:backdoor", BACKDOOR_CALLS, "install requested backdoor"));
+    const plan = serverAccessPlan(ctx);
+    requestedProgram = plan?.writeProgram;
+    // The concurrent backdoor needs its RAM claim too, or falling through to
+    // it in the driver would only ever find the dodge unfunded.
+    const backdoorTarget = plan?.primary.action === "backdoor" ? plan.primary : plan?.concurrentBackdoor;
+    if (backdoorTarget) {
+      claims.push(actionRamClaim(
+        ctx,
+        "hacking",
+        "action:backdoor",
+        BACKDOOR_CALLS,
+        "install requested backdoor",
+        backdoorClaimPriority(ctx, backdoorTarget),
+      ));
     }
-    if (action === "port-opener") {
-      const program = pending ? programForPortNeed(ctx.state, pending.server.numOpenPortsRequired ?? 0) : undefined;
-      requestedProgram = program && ctx.activeFeatures.has("career") && shouldWriteProgram(ctx.state, program)
-        ? program
-        : undefined;
-      if (!requestedProgram && program) {
-        const purchaseCost = portOpenerPurchaseCost(ctx.state, pending!.server.numOpenPortsRequired ?? 0);
+    if (plan?.primary.action === "port-opener" && !plan.writeProgram) {
+      const pending = plan.primary;
+      const program = programForPortNeed(ctx.state, pending.server.numOpenPortsRequired ?? 0);
+      if (program) {
+        const purchaseCost = portOpenerPurchaseCost(ctx.state, pending.server.numOpenPortsRequired ?? 0);
         claims.push(
           actionRamClaim(ctx, "hacking", "action:port-opener", PORT_OPENER_CALLS, "acquire required port opener"),
           {
@@ -1254,12 +1499,10 @@ export const hackingModule: FeatureModule = {
             // before BruteSSH can ever become affordable.
             mode: "reserve",
             shape: "continuous",
-            why: `buy TOR and the port openers needed to root ${pending!.host}`,
+            why: `buy TOR and the port openers needed to root ${pending.host}`,
           },
         );
       }
-    } else {
-      requestedProgram = undefined;
     }
     const investment = ramInvestment(ctx, ctx.now);
     if (investment) {

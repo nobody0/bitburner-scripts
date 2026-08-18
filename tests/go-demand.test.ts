@@ -27,6 +27,18 @@ describe("Go target demands", () => {
     expect(goGamePaysForRam(0, 400)).toBe(false);
   });
 
+  test("idle arena RAM displaces nothing, so any positive utility plays", () => {
+    // The same marginal 0.00185 refused above is free money once the free
+    // arena covers the whole 4 GB dodge…
+    expect(goGamePaysForRam(0.00185, 400, 4)).toBe(true);
+    expect(goGamePaysForRam(0.00185, 400, 100)).toBe(true);
+    // …half-covered halves the bar…
+    expect(goGamePaysForRam(0.00185, 400, 2)).toBe(false);
+    expect(goGamePaysForRam(0.0051, 400, 2)).toBe(true);
+    // …and zero utility still never plays.
+    expect(goGamePaysForRam(0, 400, 400)).toBe(false);
+  });
+
   test("uses typed critical-path resources and ignores noncritical parallel work", () => {
     const install = estimatedForecast(0, "install", [
       { what: "renamed primary work", resource: "reputation", sec: 600, measured: true, mode: "parallel" },

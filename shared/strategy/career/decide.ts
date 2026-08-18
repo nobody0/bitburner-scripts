@@ -2,6 +2,8 @@ import { formatMoney, formatScientific } from "../../format.ts";
 import { expForSkill } from "../../formulas.ts";
 import type { Need, NeedBoard, NeedKind, NeedUrgency } from "../needs.ts";
 import { needKey, needProgress, URGENCY_ORDER } from "../needs.ts";
+import { COMPANIES } from "../../features/companies.ts";
+import { bestTitlePath, trackFieldFor, type CompanyPerson, type CompanyWorkContext } from "./company.ts";
 import { careerWorkMode } from "./schedule.ts";
 import {
   expPerSec,
@@ -81,7 +83,18 @@ export interface CareerView {
   externalSkillExpPerSec?: Record<string, number>;
   city: string;
   jobs?: Record<string, string>;
-  companies?: { name: string; rep: number; repPerSec?: number; moneyPerSec?: number }[];
+  companies?: {
+    name: string;
+    rep: number;
+    favor?: number;
+    repPerSec?: number;
+    moneyPerSec?: number;
+    /** Formula prior for an unmeasured company (see career/company.ts). */
+    estimatedRepPerSec?: number;
+  }[];
+  /** Person + node context for the company work-line model. Enables
+   * table-driven title paths; without it the title fallback uses held jobs. */
+  companyWork?: { person: CompanyPerson; ctx: CompanyWorkContext };
   /** Whether this feature holds Player.currentWork this tick. */
   holdsWorkSlot: boolean;
   currentWork?: { kind: string; subject?: string };
@@ -364,7 +377,11 @@ function scoreCompany(
   values: ReturnType<typeof needValues>,
 ): ScoredAction {
   const value = values.get(needKey({ kind: "companyRep", subject: company.name }));
-  const rate = company.repPerSec !== undefined && company.repPerSec > 0 ? company.repPerSec : 1;
+  const rate = company.repPerSec !== undefined && company.repPerSec > 0
+    ? company.repPerSec
+    : company.estimatedRepPerSec !== undefined && company.estimatedRepPerSec > 0
+      ? company.estimatedRepPerSec
+      : 1;
   const score = value ? (rate / value.remaining) * value.weight : 0;
   const contributions: ScoredAction["contributions"] = value
     ? [{ kind: "companyRep", subject: company.name, perSec: rate, weight: value.weight, score }]
@@ -376,7 +393,9 @@ function scoreCompany(
       focus: true,
       why: company.repPerSec !== undefined
         ? `${company.repPerSec.toFixed(2)} measured company rep/sec`
-        : "company reputation requested; measuring its rate",
+        : company.estimatedRepPerSec !== undefined
+          ? `${company.estimatedRepPerSec.toFixed(2)} estimated company rep/sec from the position formula`
+          : "company reputation requested; measuring its rate",
     },
     score,
     moneyPerSec: company.moneyPerSec ?? 0,
@@ -461,22 +480,59 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   for (const value of values.values()) {
     if (value.kind === "employment" && value.subject && !Object.hasOwn(jobs, value.subject)) {
       ranked.push(scoreInstant({ type: "apply", subject: value.subject, why: `apply for the best eligible job at ${value.subject}` }, value));
+    } else if (
+      value.kind === "companyRep" && value.subject && !Object.hasOwn(jobs, value.subject)
+      // An `employment` request at the same company already produced the
+      // identical apply action above; two copies would only crowd the ranked
+      // list (and `careerAlternative` reads ranked[0]).
+      && !values.has(needKey({ kind: "employment", subject: value.subject }))
+    ) {
+      // A reputation request at a company we do not work for is served by
+      // hiring on first — the chain is self-sequencing even when both the
+      // employment and rep blockers are on the board at once.
+      ranked.push(scoreInstant({ type: "apply", subject: value.subject, why: `hire on at ${value.subject} to serve its reputation request` }, value));
     } else if (value.kind === "quitCompany" && value.subject && Object.hasOwn(jobs, value.subject)) {
       ranked.push(scoreInstant({ type: "quit", subject: value.subject, why: `leave ${value.subject} to clear the request` }, value));
     } else if (value.kind === "city" && value.subject && view.city !== value.subject) {
       ranked.push(scoreInstant({ type: "travel", subject: value.subject, why: `travel to requested city ${value.subject}` }, value));
     } else if (value.kind === "jobTitle" && value.subject) {
-      const company = [...(view.companies ?? [])]
-        .filter((entry) => Object.hasOwn(jobs, entry.name))
-        .sort((a, b) => b.rep - a.rep || (a.name < b.name ? -1 : 1))[0];
-      if (company) {
-        const field = jobFieldForTitle(value.subject);
-        ranked.push(scoreInstant({
-          type: "promote",
-          subject: company.name,
-          field,
-          why: `seek ${value.subject} through the ${field} track at highest-reputation employer ${company.name}`,
-        }, value));
+      const title = value.subject;
+      // The title's track comes from the position table, never from string
+      // matching — the old heuristic routed "Chief Executive Officer" onto
+      // the Software track, which terminates at CTO and can never satisfy it.
+      const field = trackFieldFor(title);
+      if (field !== undefined) {
+        const held = [...(view.companies ?? [])].filter((entry) => Object.hasOwn(jobs, entry.name));
+        const path = view.companyWork
+          ? bestTitlePath(
+              [title],
+              [
+                ...held.map((entry) => ({
+                  name: entry.name,
+                  rep: entry.rep,
+                  favor: entry.favor ?? 0,
+                  ...(entry.repPerSec !== undefined ? { measuredRepPerSec: entry.repPerSec } : {}),
+                })),
+                ...Object.keys(COMPANIES)
+                  .filter((name) => !Object.hasOwn(jobs, name))
+                  .map((name) => ({ name, rep: 0, favor: 0 })),
+              ],
+              view.companyWork.person,
+              view.companyWork.ctx,
+            )
+          : undefined;
+        const company = path?.company
+          ?? held
+            .filter((entry) => titleOffered(entry.name, title))
+            .sort((a, b) => b.rep - a.rep || (a.name < b.name ? -1 : 1))[0]?.name;
+        if (company !== undefined) {
+          ranked.push(scoreInstant(
+            Object.hasOwn(jobs, company)
+              ? { type: "promote", subject: company, field, why: `seek ${title} through the ${field} track at ${company}` }
+              : { type: "apply", subject: company, field, why: `${company} is the cheapest reachable path to ${title} (${field} track)` },
+            value,
+          ));
+        }
       }
     }
   }
@@ -616,13 +672,11 @@ export function actionUsesWorkSlot(action: Pick<CareerAction, "type">): boolean 
   return action.type === "crime" || action.type === "class" || action.type === "gym" || action.type === "company" || action.type === "program";
 }
 
-function jobFieldForTitle(title: string): string {
-  const lower = title.toLowerCase();
-  if (lower.includes("technology") || lower.includes("software") || lower.includes("cto")) return "Software";
-  if (lower.includes("financial") || lower.includes("business") || lower.includes("cfo")) return "Business";
-  // CEO is reachable from the two executive tracks; software is preferred for
-  // an automation player whose hacking skill is normally its strongest stat.
-  return "Software";
+
+/** Whether a company's ladder contains the title at all (offering the rung is
+ * necessary, not sufficient — requirements are the walker's job). */
+function titleOffered(company: string, title: string): boolean {
+  return COMPANIES[company]?.positions.includes(title) ?? false;
 }
 
 function sameWork(current: CareerView["currentWork"], action: CareerAction): boolean {

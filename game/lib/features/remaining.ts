@@ -1,6 +1,12 @@
 import type { NS } from "@ns";
-import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
+import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
+import { effectiveBitNodeMultipliers, WORLD_DAEMON_BASE_SKILL } from "../../../shared/features/bitnode.ts";
+import { sfLevel } from "../../../shared/features/unlock.ts";
 import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
+import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
+import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
+import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
+import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
 import {
   isSoA,
   NEUROFLUX,
@@ -8,71 +14,77 @@ import {
   scoreAugMults,
   weightsForRoute,
 } from "../../../shared/strategy/factions/augs.ts";
+import { workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
+import { stepGang } from "../../../shared/strategy/gang/decide.ts";
+import { goDemands } from "../../../shared/strategy/go/demand.ts";
+import {
+  goNeuralPositionIdentity,
+} from "../../../shared/strategy/go/neural/worker-protocol.ts";
+import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
+import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand, type GoRewardView } from "../../../shared/strategy/go/rewards.ts";
+import { planGoSchedule } from "../../../shared/strategy/go/schedule.ts";
+import { GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
+import {
+  applyGoCheat,
+  GO_OPPONENTS,
+  GO_REWARD_OPPONENTS,
+  territory as goTerritory,
+  isGoCheatAction,
+  isGoRewardOpponent,
+  playMove,
+  scoreBoard,
+  type GoAction,
+  type GoDecision,
+  type GoFactionOpponent,
+  type GoObservedBoardSize,
+  type GoPlayingAction,
+  type GoRewardOpponent,
+  type GoView,
+} from "../../../shared/strategy/go/rules.ts";
+import {
+  GO_DISPATCH_GUARD_MS,
+  goChooseSeedTarget,
+  goPhaseAgrees,
+  goPredictedPlaytime,
+  type GoSeedTarget,
+  type GoTickPhase,
+} from "../../../shared/strategy/go/tick.ts";
+import type { Need } from "../../../shared/strategy/needs.ts";
 import {
   countClosureAffordable,
   countSlotValueFor,
   fundedActivationBatch,
   routeCountVerdict,
 } from "../../../shared/strategy/progression/activation.ts";
-import { liquidatableValue } from "./factions.ts";
-import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
-import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
-import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
-import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
-import { stepGang } from "../../../shared/strategy/gang/decide.ts";
-import {
-  GO_OPPONENTS,
-  GO_REWARD_OPPONENTS,
-  applyGoCheat,
-  isGoCheatAction,
-  isGoRewardOpponent,
-  playMove,
-  scoreBoard,
-  territory as goTerritory,
-  type GoAction,
-  type GoDecision,
-  type GoObservedBoardSize,
-  type GoPlayingAction,
-  type GoFactionOpponent,
-  type GoRewardOpponent,
-  type GoView,
-} from "../../../shared/strategy/go/rules.ts";
-import {
-  goChooseSeedTarget,
-  GO_DISPATCH_GUARD_MS,
-  goPhaseAgrees,
-  goPredictedPlaytime,
-  type GoSeedTarget,
-  type GoTickPhase,
-} from "../../../shared/strategy/go/tick.ts";
-import { runGoNeuralSeedDispatch } from "../go-neural.ts";
-import { goNeuralWorkerRuntime, resetGoNeuralWorkerRuntime, type GoNeuralRuntime } from "../go-neural-worker.ts";
-import {
-  goNeuralPositionIdentity,
-} from "../../../shared/strategy/go/neural/worker-protocol.ts";
-import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand } from "../../../shared/strategy/go/rewards.ts";
-import { goDemands } from "../../../shared/strategy/go/demand.ts";
-import { sfLevel } from "../../../shared/features/unlock.ts";
-import { GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
-import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
-import type { Need } from "../../../shared/strategy/needs.ts";
 import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installCadenceRemainingSec, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
 import {
   DAEDALUS_COMBAT,
+  daedalusAugsRequired,
   GANG_FACTIONS,
   GANG_KARMA,
   RED_PILL,
-  daedalusAugsRequired,
   stepEndgame,
   type EndgameView,
   type RouteId,
 } from "../../../shared/strategy/progression/endgame.ts";
 import {
   chooseRoute,
+  regrowInstallOverrideWhy,
   routeEtas,
   type RouteChoice,
   type RouteRates,
 } from "../../../shared/strategy/progression/eta.ts";
+import {
+  forecastAt,
+  IMMINENT_INSTALL_SEC,
+  installForecast,
+  installHorizonSec,
+  nodeForecast,
+  shouldReforecast,
+  usableForecastSec,
+  type PlanningHorizons,
+} from "../../../shared/strategy/progression/forecast.ts";
+import { progressionMarginals } from "../../../shared/strategy/progression/marginal.ts";
 import {
   augmentationAcquisitionRate,
   cycleProgressExponent,
@@ -80,18 +92,8 @@ import {
   type AugmentationCycle,
   type CyclePoint,
 } from "../../../shared/strategy/progression/regrowth.ts";
-import {
-  forecastAt,
-  IMMINENT_INSTALL_SEC,
-  installHorizonSec,
-  installForecast,
-  nodeForecast,
-  shouldReforecast,
-  type PlanningHorizons,
-  usableForecastSec,
-} from "../../../shared/strategy/progression/forecast.ts";
-import { progressionMarginals } from "../../../shared/strategy/progression/marginal.ts";
-import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/topics/progression.ts";
+import { stepSleeves, type SleevesView, type SleeveTask } from "../../../shared/strategy/sleeves/decide.ts";
+import { packFragments } from "../../../shared/strategy/stanek/pack.ts";
 import type {
   GoActionDigest,
   GoEtaDemandDigest,
@@ -101,17 +103,17 @@ import type {
   GoResponse,
   GoTurnResult,
 } from "../../../shared/telemetry/topics/go.ts";
-import { packFragments } from "../../../shared/strategy/stanek/pack.ts";
-import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
-import { workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
-import { stepSleeves, type SleevesView, type SleeveTask } from "../../../shared/strategy/sleeves/decide.ts";
+import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/topics/progression.ts";
 import { isScriptDeath } from "../errors.ts";
+import { goNeuralWorkerRuntime, resetGoNeuralWorkerRuntime, type GoNeuralRuntime } from "../go-neural-worker.ts";
+import { runGoNeuralSeedDispatch } from "../go-neural.ts";
 import { resetInstallSignal, takeInstallSignal } from "../install-signal.ts";
-import { merge, set, type GameState } from "../state.ts";
 import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions, resetSleeveCompletions } from "../sleeve-completion.ts";
+import { merge, set, type GameState } from "../state.ts";
 import type { WorkTaskLike } from "../work-completion.ts";
-import { actionRamClaim, featureDodge, featureGoDodge } from "./dodge.ts";
 import type { FeatureClaim } from "./claims.ts";
+import { actionRamClaim, featureDodge, featureGoDodge } from "./dodge.ts";
+import { liquidatableValue } from "./factions.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
 /** Drivers for the features whose game-side work is a thin execution layer
@@ -132,6 +134,12 @@ const GO_CHEAT_DOUBLE_MOVE_LIMIT = 2;
 // and keeps the worker independent of Netscript throughout practical games.
 const GO_CHEAT_CHANCE_SAMPLES = 1_024;
 const GO_MAX_FLEET_SHARE = 0.01;
+/** A filler game must finish this comfortably inside the preferred entry
+ * window — overrunning forfeits the aligned start and re-plans onto the next
+ * recurrence of the route. */
+const GO_FILLER_MARGIN = 1.25;
+/** Reset dispatch plus first-turn planning allowance for a filler game. */
+const GO_FILLER_OVERHEAD_SEC = 10;
 const BLADES_SIMULACRUM = "The Blade's Simulacrum";
 
 type Result = { action: string; ok: boolean; detail: string; at: number } | undefined;
@@ -726,20 +734,36 @@ function goGameCandidateDigest(candidate: ReturnType<typeof rankGoGames>[number]
   };
 }
 
-function goFactionFavor(ctx: DriverContext): Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>> {
-  const result: Partial<Record<GoFactionOpponent, { favor: number; remainingWorkSec: number }>> = {};
+export function goFactionFavor(ctx: DriverContext): GoRewardView["factionFavor"] {
+  const result: GoRewardView["factionFavor"] = {};
   const joined = new Set(ctx.state.topics.factions?.joined ?? []);
-  // Only the committed intent is actionable; alternatives are not concurrent
-  // faction farms.
+  // The committed intent is the only concurrent faction farm, but favor
+  // persists through installs, so its value is ALSO the reachable ladder
+  // work over the remaining node (favorValue model) — including the
+  // donation-gate crossing. Without the node-scoped term, an imminent
+  // install priced every favor event at zero and Go idled on a finished
+  // board (screenshot 2026-08-18).
   const intent = ctx.state.topics.factions?.plan?.objective?.intent;
+  // READ, do not recompute. Deriving this here meant rebuilding the whole
+  // augmentation catalogue and re-walking every joined faction's rep ladder
+  // on each five-second Go tick; the factions driver publishes the same
+  // numbers as a by-product of the view it already builds.
+  const pointValues = ctx.state.topics.factions?.favorPointValues;
   const standings = new Map((ctx.state.topics.factions?.standings ?? []).map((standing) => [standing.name, standing]));
   for (const opponent of GO_OPPONENTS) {
     if (!joined.has(opponent)) continue;
     const standing = standings.get(opponent);
     if (!standing) continue;
+    const pointValue = pointValues?.[opponent];
     result[opponent] = {
       favor: standing.favor,
-      remainingWorkSec: intent?.faction === opponent ? Math.max(0, intent.repSec) : 0,
+      remainingWorkSec: Math.max(
+        intent?.faction === opponent ? Math.max(0, intent.repSec) : 0,
+        pointValue?.remainingWorkSec ?? 0,
+      ),
+      ...(pointValue
+        ? { pointValue: { donationUnlockSec: pointValue.donationUnlockSec, donateThreshold: pointValue.donateThreshold } }
+        : {}),
     };
   }
   return result;
@@ -955,17 +979,25 @@ function goActionAdmitted(state: GameState, caps: DriverContext["caps"]): boolea
     state.topics.progression?.multipliers,
   );
   const rewardScale = (nodeMults?.GoPower ?? 1) * (sfLevel(caps.sourceFiles, 14) > 0 ? 2 : 1);
-  return usableGb > 0 && GO_ESTIMATED_GB / usableGb <= GO_MAX_FLEET_SHARE * rewardScale;
+  // Same displacement pricing as goGamePaysForRam: a dodge the free arena can
+  // absorb outright costs the fleet nothing, so admission never blocks it.
+  const displacedGb = Math.max(0, GO_ESTIMATED_GB - pie.free);
+  return usableGb > 0 && displacedGb / usableGb <= GO_MAX_FLEET_SHARE * rewardScale;
 }
 
 /** A Go candidate reports route-seconds saved per second spent playing. Its
- * opportunity cost is the fraction of productive fleet RAM occupied by the
- * fixed Go dodge. This is deliberately a marginal test: active games finish,
- * but an asymptotically positive bonus does not justify playing forever after
- * its next increment is smaller than the hacking throughput it displaces. */
-export function goGamePaysForRam(utilityPerSec: number, usableGb: number): boolean {
+ * opportunity cost is the fraction of productive fleet RAM the fixed Go dodge
+ * actually DISPLACES: RAM the farm was going to use. Free arena RAM displaces
+ * nothing, so with idle capacity any positive utility plays — pricing idle
+ * gigabytes at full farm throughput zeroed Go out in exactly the windows
+ * (node tail, saturated farm) where a marginal 0.5s was still free money.
+ * This stays a marginal test: an asymptotically positive bonus does not
+ * justify playing forever once its next increment is smaller than the
+ * throughput it genuinely displaces. */
+export function goGamePaysForRam(utilityPerSec: number, usableGb: number, freeGb = 0): boolean {
   if (!(utilityPerSec > 0) || !(usableGb > 0)) return false;
-  return utilityPerSec > GO_ESTIMATED_GB / usableGb;
+  const displacedGb = Math.max(0, GO_ESTIMATED_GB - Math.max(0, freeGb));
+  return utilityPerSec > displacedGb / usableGb;
 }
 
 const go: FeatureDriver = {
@@ -1062,6 +1094,36 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     );
     const installRemainingSec = installHorizonSec(ctx.horizons);
     const rewardOpponents: readonly GoRewardOpponent[] = allowWorldDaemon ? GO_REWARD_OPPONENTS : GO_OPPONENTS;
+    // Certified entry windows for the wait-aware ranker. Measured only when a
+    // new game could start, the phase clock is anchored, and cheats are
+    // locked (certified lines are unreachable in cheat games, remaining.ts
+    // playbookEnabled). Each lookup is a cheap worker table read; opponents
+    // beyond their per-opponent wait cap are simply not offered aligned.
+    let playbookEntries: Partial<Record<GoRewardOpponent, { waitSec: number; entryPlaytime: number }>> | undefined;
+    if (claimedAction === "newGame" && goTickPhase && !cheatUnlocked) {
+      const runtime = goNeuralRuntime();
+      const routePlaytime = goPredictedPlaytime(goTickPhase, Date.now());
+      // One round trip per routed opponent, ISSUED TOGETHER: they are
+      // independent table reads against the same tick, and awaiting them in
+      // series added a worker latency per opponent to every new-game pass.
+      const routes = await Promise.all(
+        Object.entries(GO_PLAYBOOK_OPPONENTS)
+          .filter(([, config]) => config.maxWaitPhases > 0)
+          .map(async ([opponent, config]) => ({
+            opponent,
+            config,
+            route: await runtime.playbookRoute(routePlaytime, opponent).catch(() => undefined),
+          })),
+      );
+      if (generation !== goGeneration) return;
+      for (const { opponent, config, route } of routes) {
+        if (!route || route.waits > config.maxWaitPhases) continue;
+        (playbookEntries ??= {})[opponent as GoRewardOpponent] = {
+          waitSec: route.waits * GO_ENGINE_CYCLE_MS / 1_000,
+          entryPlaytime: route.entryPlaytime,
+        };
+      }
+    }
     const rewardView = {
       opponents: rewardOpponents,
       stats,
@@ -1078,10 +1140,20 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       hasSourceFile14: sfLevel(ctx.caps.sourceFiles, 14) > 0,
       favorRepCap: goFavorRepCap(sfLevel(ctx.caps.sourceFiles, 14)),
       installRemainingSec,
+      ...(playbookEntries ? { playbookEntries } : {}),
     } as const;
     const candidates = rankGoGames(rewardView);
-    const preferred = candidates[0];
-    if (!preferred) return;
+    const schedule = planGoSchedule({
+      candidates,
+      cadenceSec: 5,
+      fillerMarginFactor: GO_FILLER_MARGIN,
+      fillerOverheadSec: GO_FILLER_OVERHEAD_SEC,
+    });
+    if (!schedule) return;
+    // The game to start next: the filler when one fits the preferred entry
+    // window, otherwise the preferred candidate itself. A hold starts nothing
+    // this pass but the engine still plans toward the preferred target.
+    const preferred = schedule.kind === "hold" ? schedule.preferred : schedule.game;
     const view: GoView = {
       board: { rows: topic.board, size: topic.boardSize },
       currentPlayer: topic.currentPlayer,
@@ -1266,6 +1338,12 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       selection: {
         preferred: goGameCandidateDigest(preferred),
         candidates: candidates.map(goGameCandidateDigest),
+        schedule: {
+          kind: schedule.kind,
+          ...(schedule.kind === "filler" ? { fillerOpponent: schedule.game.opponent } : {}),
+          ...(schedule.kind === "hold" ? { holdSec: schedule.resumeInSec } : {}),
+          why: schedule.why,
+        },
         context: {
           goPower: rewardView.goPower,
           hasSourceFile14: rewardView.hasSourceFile14,
@@ -1284,31 +1362,45 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
 
     let action = decision.action;
     if (action.type === "newGame") {
+      // The scheduler decided nothing fits before the preferred certified
+      // entry: hold on the ordinary 5 s cadence (the plan digest above
+      // records why) without consuming the makeMove-sized grant.
+      if (schedule.kind === "hold") return;
       // Positive but vanishing Go power is not free: the dodge occupies RAM
       // the income engine could use. Compare both in the same route-seconds
-      // per elapsed-second unit and stop once the marginal game loses.
+      // per elapsed-second unit and stop once the marginal game loses. A
+      // filler must pay for the RAM on its own utility.
       const pie = ctx.state.topics.farm?.ramPie;
       const usableGb = pie ? pie.farm + pie.prep + pie.share + pie.free + pie.reserve : 0;
-      if (!goGamePaysForRam(preferred.utilityPerSec, usableGb)) return;
+      if (!goGamePaysForRam(preferred.utilityPerSec, usableGb, pie?.free ?? 0)) return;
       const newGameAction = action;
       // Certified playbook lines are only reachable from a phase-aligned game
       // start. The opening board itself — obstacles and the Illuminati
       // handicap stone — is generated from the engine tick the game is created
       // in, so the reset, not merely the first move, has to land on the
-      // route's entry phase. Hold the reset while an affordable window
-      // approaches, then dispatch it tick-exactly.
+      // route's entry phase. Only a candidate the scheduler selected AS
+      // aligned confirms its route here — an unaligned or filler start must
+      // never be captured by a nearby window the ranker already priced and
+      // declined.
       goPlaybookEntry = undefined;
       const playbookStart = GO_PLAYBOOK_OPPONENTS[newGameAction.opponent];
-      if (playbookStart && newGameAction.boardSize === 5 && goTickPhase) {
+      if (
+        preferred.aligned
+        && preferred.opponent === newGameAction.opponent
+        && playbookStart
+        && newGameAction.boardSize === 5
+        && goTickPhase
+      ) {
+        // Confirm just before dispatch: waits computed at plan time drift
+        // down one phase per 200 ms, and a slipped pass re-plans.
         const routeAt = Date.now();
         const route = await neuralRuntime
           .playbookRoute(goPredictedPlaytime(goTickPhase, routeAt), newGameAction.opponent)
           .catch(() => undefined);
         if (generation !== goGeneration) return;
         if (route && playbookStart.maxWaitPhases > 0 && route.waits <= playbookStart.maxWaitPhases) {
-          // Too far out: hold on the driver's ordinary 5 s cadence. The slack
-          // window is wider than that cadence, so the approach cannot be
-          // skipped between passes.
+          // The schedule said play (wait within one cadence), so exceeding
+          // the start slack here is a one-pass race at most: hold and re-plan.
           if (route.waits > GO_PLAYBOOK_START_SLACK_PHASES) return;
           goPlaybookEntry = { opponent: newGameAction.opponent, entryPlaytime: route.entryPlaytime };
         }
@@ -2037,12 +2129,25 @@ export function takeRouteChange(): typeof routeChange {
  * INCLUDING queued (getOwnedAugmentations(true)); `progression.ownedAugs` is
  * installed only (ResetInfo). Owning the pill and having installed it are
  * exactly that distinction, and Daedalus's aug count checks installed. */
+/** The daemon's real destroy gate. The server observation wins; live node
+ * multipliers (which the game itself reports) come second. Returns undefined
+ * when neither exists, keeping the static-table fallback in stepEndgame. */
+function worldDaemonRequiredSkillOf(ctx: NeedContext): number | undefined {
+  const observed = ctx.state.topics.servers?.["w0r1d_d43m0n"]?.requiredHackingSkill;
+  if (observed !== undefined && observed > 0) return observed;
+  const live = ctx.state.topics.progression?.multipliers;
+  if (!live) return undefined;
+  const difficulty = (live as Record<string, number>)["WorldDaemonDifficulty"];
+  return difficulty !== undefined ? WORLD_DAEMON_BASE_SKILL * difficulty : undefined;
+}
+
 function endgameView(ctx: NeedContext): EndgameView | undefined {
   const player = ctx.state.topics.player;
   if (!player) return undefined;
   const prog = ctx.state.topics.progression;
   const factions = ctx.state.topics.factions;
   const blade = ctx.state.topics.bladeburner;
+  const observedWorldDaemonSkill = worldDaemonRequiredSkillOf(ctx);
 
   const installed = prog?.ownedAugs ?? {};
   const ownedAll = factions?.ownedAugs ?? Object.keys(installed);
@@ -2094,6 +2199,12 @@ function endgameView(ctx: NeedContext): EndgameView | undefined {
     ownsRedPill: ownedAll.includes(RED_PILL),
     redPillInstalled: RED_PILL in installed,
     worldDaemonRooted: ctx.state.topics.servers?.["w0r1d_d43m0n"]?.hasAdminRights === true,
+    // The observed server is authoritative; live node multipliers are the
+    // next-best source (the static table is one recursion level low inside
+    // BN12). Absent both, stepEndgame falls back to the static formula.
+    ...(observedWorldDaemonSkill !== undefined
+      ? { worldDaemonRequiredSkill: observedWorldDaemonSkill }
+      : {}),
     money: player.money,
     hackingSkill: skills.hacking,
     lowestCombatSkill: Math.min(skills.strength, skills.defense, skills.dexterity, skills.agility),
@@ -2383,6 +2494,15 @@ function progressionRefresh(ctx: NeedContext): void {
   const selectedEta = choice ? etas.find((eta) => eta.id === choice.route) : undefined;
   const selectedStatus = choice ? endgame.routes.find((route) => route.id === choice.route) : undefined;
   let routeRequiresInstall = selectedStatus?.mandatoryInstall?.ready === true;
+  const regrowInstallWhy = regrowInstallOverrideWhy({
+    ...(selectedStatus?.stage !== undefined ? { stage: selectedStatus.stage } : {}),
+    ...(selectedStatus?.optionalInstall.allowed !== undefined
+      ? { optionalInstallAllowed: selectedStatus.optionalInstall.allowed }
+      : {}),
+    ...(endgame.worldDaemonSkill !== undefined ? { worldDaemonSkill: endgame.worldDaemonSkill } : {}),
+    hackingSkill: view.hackingSkill,
+    rates,
+  });
   const nodeBasis = JSON.stringify({
     route: choice?.route,
     complete: selectedEta?.complete,
@@ -2713,7 +2833,7 @@ function progressionRefresh(ctx: NeedContext): void {
     runSec,
     ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
     routeRequiresInstall,
-    optionalInstallAllowed: selectedStatus?.optionalInstall.allowed ?? true,
+    optionalInstallAllowed: regrowInstallWhy !== undefined || (selectedStatus?.optionalInstall.allowed ?? true),
     resetValueMult,
     // Banked favor may only OPEN the gate when the sweep can actually convert
     // something — any joined offer with rep met (NeuroFlux included), or a
@@ -2768,7 +2888,10 @@ function progressionRefresh(ctx: NeedContext): void {
     liquidate: decision.liquidationWanted,
     ready: decision.installReady,
     blockers: decision.installBlockers.map((blocker) => blocker.kind),
-    optionalAllowed: selectedStatus?.optionalInstall.allowed,
+    // The OVERRIDDEN value, matching what installForecast is handed below: a
+    // basis recording the raw guard cannot invalidate the cached forecast when
+    // the regrow comparison flips the permission.
+    optionalAllowed: regrowInstallWhy !== undefined || (selectedStatus?.optionalInstall.allowed ?? true),
     countCadenceReady,
     mandatory: selectedEta?.nextMandatoryInstall,
     queue: pending,
@@ -2799,7 +2922,7 @@ function progressionRefresh(ctx: NeedContext): void {
             : {}),
         ...(cadenceRemainingSec !== undefined ? { cadenceSec: cadenceRemainingSec } : {}),
         countCadenceReady,
-        optionalInstallAllowed: selectedStatus?.optionalInstall.allowed ?? true,
+        optionalInstallAllowed: regrowInstallWhy !== undefined || (selectedStatus?.optionalInstall.allowed ?? true),
         ...(selectedEta?.nextMandatoryInstall ? { mandatory: selectedEta.nextMandatoryInstall } : {}),
       }, installBasis)
     : forecastAt(previousInstallForecast!, ctx.now);
@@ -2832,12 +2955,29 @@ function progressionRefresh(ctx: NeedContext): void {
           }
         : undefined;
   if (!selectedEta?.complete) progressionMemory.nodeCompletionArmedAt = undefined;
+  // "About to install" and "about to destroy the BitNode" are DIFFERENT
+  // terminal modes with opposite money policies. An install preserves augs,
+  // favor, and cash, so hoarding for the final sweep is right. A destroy
+  // erases all three — the only surviving use of money is speeding up the
+  // remaining minutes, so install-shaped reserves (aug-fund, donations) must
+  // release and let infrastructure spending through. Conflating them held a
+  // ~$9e14 sweep reserve while a RAM purchase that would have finished the
+  // node sat outbid. Fail-open by design: if the forecast is wrong and the
+  // node does NOT end, the released money bought productive RAM, not waste.
+  const endingByDestroy =
+    selectedEta !== undefined
+    && selectedEta.etaSec < IMMINENT_INSTALL_SEC
+    && selectedStatus?.mandatoryInstall === undefined
+    && !routeRequiresInstall
+    && decision.installWanted !== true;
   merge(ctx.state, "progression", {
     plan: {
       phase: decision.phase,
+      ...(endingByDestroy ? { endingByDestroy: true } : {}),
       installWanted: decision.installWanted,
       liquidationWanted: decision.liquidationWanted,
       installBlockers: decision.installBlockers.map((blocker) => ({ kind: blocker.kind })),
+      ...(regrowInstallWhy !== undefined ? { installOverrideWhy: regrowInstallWhy } : {}),
       installReady: decision.installReady,
       ...(armedAt !== undefined ? { installArmedAt: armedAt } : {}),
       queuedAugmentations: pending,
