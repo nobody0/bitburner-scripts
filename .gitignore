@@ -4,13 +4,30 @@ coverage/
 runs/
 .DS_Store
 
-# Certificate generation and its 28 GB corpus live outside this repository;
-# the merged playbook the game embeds is committed under game/lib/generated.
-ipvgobruteforce/
-ipvgo-playbook-web/
+# The rule for the Go pipeline is: commit what regenerates the data (source)
+# and what the game actually runs (playbook and models). Everything between the
+# two is reproducible from those and stays out.
+#
+#   source          ipvgobruteforce/{arena,src,include,tests}, go-ai/{gpu,teacher,src}
+#   final result    game/lib/generated/go-playbook.phase.js,
+#                   shared/strategy/go/neural/models/*.ts,
+#                   go-ai/*-champion.model and go-ai/derivatives/*.model (LFS)
+#   out of band     the 28 GB seeded-phase search, the training corpora
+#   ignored         every intermediate produced from those
+#
+# ipvgobruteforce/ and ipvgo-playbook-web/ used to be ignored wholesale, which
+# left six tracked files importing sources that were never pushed. Their own
+# nested .gitignore now scopes the exclusion to generated output.
+
+# Training corpora. Composed from the certified exports, hundreds of MB, and
+# transferred with go-ai/remote/worker.sh rather than git — see
+# go-ai/MAC_TO_WINDOWS_HANDOFF.md.
 go-ai/corpora/
-# Regenerable deployment artifacts: rebuild with go:playbook:residual,
-# go:playbook:pack, and go:combined:standalone.
+
+# Intermediates between the packed certificates and the installed playbook.
+# Rebuild with go:playbook:residual, go:playbook:pack and go:combined:standalone
+# on a checkout that has ipvgobruteforce/data/seeded-phases/; a clone without it
+# consumes the installed result under game/lib/generated/ instead.
 go-ai/derivatives/playbook-combined/
 go-ai/derivatives/playbook-residual/
 go-ai/derivatives/combined-standalone.js

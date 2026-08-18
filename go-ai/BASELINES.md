@@ -53,7 +53,6 @@ The latest corrected certified-data candidate scored 11,433/12,288 versus the
 champion's 11,425/12,288, but its 161/153 paired flips gave `p=0.346442`.
 It was not promoted and is not retained as a candidate.
 
-<<<<<<< HEAD
 ### V9 route-prior refit (2026-08-14)
 
 The simulator economics table was refitted through the promoted Chromium/WGSL
@@ -78,7 +77,7 @@ repeated RPC cache hit, and a 0.2 ms consumed pushed prediction. The unsolicited
 next decision arrived 79 ms before its modeled Black-turn deadline. The same
 test confirms compact clock/response synchronization, deliberate desync
 detection, and reset/reinstall recovery.
-=======
+
 ### daemon19 post-training compression: rejected
 
 `go:compress:v9 --profile daemon19` (policy lane, 2026-08-18, seed 2026081801)
@@ -164,7 +163,6 @@ worker's push-ahead window, computed for likely successor positions while the
 opponent is thinking, so a turn spends only the remainder of its own cycle.
 
 ## Promotion gate
->>>>>>> e2a40c1b (Finalize the 5x5 Go pipeline and embed the certified playbook)
 
 `bun run go:promote` is the sole champion installer. Apply gates require:
 

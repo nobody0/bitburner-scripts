@@ -2,6 +2,17 @@
 # possible and completely meaningless, so store them in LFS.
 *.model filter=lfs diff=lfs merge=lfs -text
 
+# Corpora and packed search output are transferred out of band and .gitignored,
+# so these patterns should never match a tracked file. They are here because a
+# 288 MB v9-daemon19 corpus and a 2.1 GB replay cache did once reach history
+# before the ignores existed: if an ignore is ever loosened by accident, the
+# blob lands in LFS instead of permanently in the pack.
+*.jsonl.gz filter=lfs diff=lfs merge=lfs -text
+*.pt filter=lfs diff=lfs merge=lfs -text
+
+# Binary asset; no diff, no CRLF rewriting.
+*.woff2 binary
+
 # The playbook inline transform is anchored to the packer's exact LF output;
 # autocrlf checkout on Windows must not rewrite it.
 game/lib/generated/*.js text eol=lf

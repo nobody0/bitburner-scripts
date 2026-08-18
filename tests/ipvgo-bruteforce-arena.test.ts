@@ -24,7 +24,10 @@ const COLLISION_REPORT_PATH = join(
   "../ipvgobruteforce/data/seeded-phases/netburners-5x5-epoch2697-v16-sweep/merged/phase-collisions.tsv",
 );
 
-describe("IPvGO brute-force phase playbook", () => {
+// The generated corpus under ipvgobruteforce/data/ is transferred out of band,
+// so a clone has the sources but not this fixture. Skip rather than fail, the
+// same way the merged multi-opponent suite does.
+describe.skipIf(!existsSync(PLAYBOOK_PATH))("IPvGO brute-force phase playbook", () => {
   test("all root routes commit to valid entry phases with legal openings", async () => {
     const playbook = await loadPhasePlaybook(PLAYBOOK_PATH);
     const routes = auditPlaybookRoutes(playbook);

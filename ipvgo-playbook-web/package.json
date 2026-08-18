@@ -1,0 +1,16 @@
+{
+  "name": "ipvgo-playbook-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "prepare:data": "bun run scripts/build-data.ts",
+    "verify:data": "bun run scripts/verify-data.ts"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "vite": "^7.1.2"
+  }
+}
