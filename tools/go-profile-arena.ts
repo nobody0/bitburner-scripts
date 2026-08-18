@@ -82,6 +82,11 @@ export async function runGoProfileArena(config: GoProfileArenaConfig): Promise<G
     { __goArenaConfig: config },
   );
   const result = run.result as GoProfileArenaResult;
+  // A harness failure returns an error envelope, not a result; surfacing it
+  // here beats a downstream TypeError on a missing metric.
+  if (!result?.ok) {
+    throw new Error(`arena run failed: ${result?.error ?? "no result returned"}`);
+  }
   if (!result || result.ok !== true || result.backend !== "webgpu") {
     throw new Error(`WebGPU profile arena failed: ${JSON.stringify(result)}`);
   }

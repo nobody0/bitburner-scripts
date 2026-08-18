@@ -460,7 +460,7 @@ def main() -> int:
     parser.add_argument("--target-mode", choices=("exact", "good-set", "blended"), default="exact",
                         help="imitate one KataGo root move or its full authority-valid shortlist")
     parser.add_argument("--exact-actor-source",
-                        choices=("katago", "handcrafted", CERTIFIED_ACTOR_SOURCE),
+                        choices=("katago", "handcrafted", "self", CERTIFIED_ACTOR_SOURCE),
                         default="katago",
                         help="authority whose executed actor action is cloned")
     parser.add_argument("--ranking-as-actor-source",

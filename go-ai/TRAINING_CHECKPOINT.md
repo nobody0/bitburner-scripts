@@ -90,16 +90,44 @@ and the deployed player still does one argmax. `--exact-actor-source self` was
 added to `train_v9.py` for this. Do not relabel these as `katago`: they are by
 construction the moves KataGo does not choose.
 
-**Status: unproven and currently under-powered.** A 280-label pilot (252 train,
-28 held out) moved held-out exploit recall from the champion's 78.57% to 75.00%
-and 71.43% — differences of one and two positions, i.e. noise. The useful signal
-from it is that the champion *already* holds the exploit action in its shortlist
-on ~79% of these roots, so the deficit is argmax ranking, not shortlist
-coverage, which is exactly what K>1 would have fixed and K=1 cannot.
+**Status: tested at scale and rejected.** A 1,200-route run produced 942
+entries and 747 policy labels (672 train / 75 held out, zero validation
+findings). Two seeds trained the full trunk with `--exact-actor-source self`
+against 75% KataGo *authority* retention from the R1+R2 corpus:
 
-The open question is whether ~1,000 entries can move the argmax. A 800-route
-generation is running toward that. Judge it only on a 512-game K=1 gate; the
-held-out sets here are far too small to select on.
+| | exploit top-1 (n=75) | KataGo retention |
+|---|---:|---:|
+| champion `219f83c7` | **21.33%** | **35.89%** |
+| trained, seed 05 | 16.00% | 32.15% |
+| trained, seed 06 | 18.67% | 30.77% |
+
+Both seeds ended **below the champion on the exploit metric itself** and 3--5
+points down on KataGo agreement, with no learning trend across twelve
+checkpoints (oscillation between 14.67% and 22.67%). No arena was spent; the
+reserved gate seeds `73000007/08/09` remain unburned.
+
+The reason is arithmetic, and it matches the Small5 failure from the other
+direction. The champion already holds the exploit action **inside its shortlist
+on about 79% of these roots**, so the deficit is argmax *ranking*, not coverage.
+672 exploit labels cannot outvote 39,959 KataGo actors for the top slot, and
+raising their weight damages general Go (already visible at 75% retention).
+Moving the argmax would need exploit labels at KataGo-corpus scale -- tens of
+thousands, roughly 40x this run -- which is a generation-throughput problem, not
+a training one.
+
+The generator itself is sound and its signal replicated five times (34--39%
+exploit rate, median win margin +0.10 to +0.12). Two defects were fixed along
+the way and matter for any future run:
+
+- entries originally omitted `rootElapsed`, so the converter defaulted it and
+  stamped `elapsed=1` on midgame boards, silently fabricating an input plane.
+  The converter now **rejects** entries without it and reports `missingElapsed`.
+  An earlier 280-label pilot ran on those bad inputs and is void;
+- leaf serialisation materialises every row before writing and OOMs at roughly
+  120k+ leaves, destroying the leaf file after multi-hour runs. Entries are
+  written first and always survive. Leaves have no K=1 consumer, so this was
+  left unfixed; add incremental streaming or a `--skip-leaves` flag before
+  relying on that output.
 
 ## Current champions
 
@@ -200,8 +228,8 @@ Retained daemon19 inputs:
 | current training corpus (R1+R2) | `corpora/v9-daemon19-component-split-dagger-r1r2-20260901-g256-c32-d128-d256-d256b.jsonl.gz` |
 | champion provenance corpus | `corpora/v9-daemon19-component-split-tactical-dagger-scaled-v1-20260823-g256-c32-d128-d256.jsonl.gz` |
 | DAgger shards (round 1, round 2) | `...-katago-dagger-scaled-v1-aaaefd-...`, `...-katago-dagger-round2-219f83c7-...` |
-| lookahead playbook entries (v1-v3) | `...-lookahead-playbook-v1/v2/v3-219f83c7-...jsonl.gz` |
-| lookahead K=1 policy labels | `corpora/v9-daemon19-lookahead-actors-v1-219f83c7-20260906.jsonl.gz` (280 actors, 252/28) |
+| lookahead playbook entries (usable, has `rootElapsed`) | `corpora/v9-daemon19-lookahead-playbook-v5-219f83c7-20260908-g1200.jsonl.gz` (942 entries) |
+| lookahead K=1 policy labels | `corpora/v9-daemon19-lookahead-actors-v3-c73teacher-20260908.jsonl.gz` (747 actors, 672/75) |
 | lookahead leaf values (no consumer at K=1) | `...-lookahead-leafvalues-v2-219f83c7-20260904.jsonl.gz` |
 
 Generate DAgger rounds with `teacher/export-katago-dagger.ts` and playbook
