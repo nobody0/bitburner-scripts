@@ -18,27 +18,49 @@ export const GO_PLANNING_GAMES_MAX = 2;
 export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
   bonusPower: number;
   komi: number;
+  /** What the deployed runtime wins, which is what a value estimate needs.
+   * For the three opponents the controller routes to a certified start
+   * (GO_PLAYBOOK_OPPONENTS) that is the certified line's rate, because a route
+   * exists from every phase and every wait fits the cap; for the rest it is
+   * the network's own rate with mid-game playbook lookups. */
   priorWinProbability: number;
+  /** The same measurement with the playbook disabled. Not used for value: it
+   * exists so a regression in the network alone stays visible behind a
+   * playbook that would otherwise mask it. */
+  neuralBaselineWinProbability: number;
   scoreFraction: number;
   aiSecondsPerPlayableNode: number;
 }>> = {
-  // Win/score priors are fitted by sim/tests/go-selection.test.ts against
-  // upstream obstacles and faction AI. Runtime records never tune the policy:
-  // they are outcomes, not an excuse to learn around an incomplete predictor.
-  // Promoted V9 WebGPU refit, 2026-08-14, tie roll 0.5 and seed start
-  // 123456: 128 fixed-corpus games per ordinary opponent and 512 for
-  // Illuminati. scoreFraction and aiSecondsPerPlayableNode divide the corpus
-  // mean by the 5x5 arena's 23 expected playable intersections.
-  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 1, scoreFraction: 0.673573, aiSecondsPerPlayableNode: 0.200815 },
-  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 0.992188, scoreFraction: 0.688179, aiSecondsPerPlayableNode: 0.296807 },
-  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.976563, scoreFraction: 0.649796, aiSecondsPerPlayableNode: 0.394022 },
-  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 0.828125, scoreFraction: 0.582201, aiSecondsPerPlayableNode: 0.507405 },
-  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 0.875, scoreFraction: 0.598166, aiSecondsPerPlayableNode: 0.407065 },
-  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.509766, scoreFraction: 0.389946, aiSecondsPerPlayableNode: 0.588043 },
+  // Runtime records never tune the policy: they are outcomes, not an excuse to
+  // learn around an incomplete predictor.
+  //
+  // Win probabilities refit 2026-08-18 from one 3,072-game combined arena
+  // (512 per opponent, start phase 118301, stride 41213, defense seed
+  // 20260819) against the deployed runtime. The previous values predated the
+  // playbook entirely and priced Illuminati at a coin flip while the shipped
+  // runtime wins 98.6% of its games, so the controller was systematically
+  // avoiding the opponent its certified lines had made safest.
+  //
+  // scoreFraction and aiSecondsPerPlayableNode remain the 2026-08-14 fit (tie
+  // roll 0.5, seed start 123456, 128 games per opponent and 512 for
+  // Illuminati), divided by the 5x5 arena's 23 expected playable
+  // intersections. They are conservative for a stronger policy, and refitting
+  // them needs per-game scores and durations the combined arena does not yet
+  // record.
+  Netburners: { bonusPower: 1.3, komi: 1.5, priorWinProbability: 1.0, neuralBaselineWinProbability: 0.998047, scoreFraction: 0.673573, aiSecondsPerPlayableNode: 0.200815 },
+  "Slum Snakes": { bonusPower: 1.2, komi: 3.5, priorWinProbability: 1.0, neuralBaselineWinProbability: 0.998047, scoreFraction: 0.688179, aiSecondsPerPlayableNode: 0.296807 },
+  "The Black Hand": { bonusPower: 0.9, komi: 3.5, priorWinProbability: 0.990234, neuralBaselineWinProbability: 0.990234, scoreFraction: 0.649796, aiSecondsPerPlayableNode: 0.394022 },
+  Tetrads: { bonusPower: 0.7, komi: 5.5, priorWinProbability: 1.0, neuralBaselineWinProbability: 0.951172, scoreFraction: 0.582201, aiSecondsPerPlayableNode: 0.507405 },
+  Daedalus: { bonusPower: 1.1, komi: 5.5, priorWinProbability: 1.0, neuralBaselineWinProbability: 0.957031, scoreFraction: 0.598166, aiSecondsPerPlayableNode: 0.407065 },
+  Illuminati: { bonusPower: 0.7, komi: 7.5, priorWinProbability: 0.986328, neuralBaselineWinProbability: 0.710938, scoreFraction: 0.389946, aiSecondsPerPlayableNode: 0.588043 },
   // The daemon win prior pools the promoted checkpoint's two independent
   // 128-game gates (12 + 21 wins). Score and duration come from the much more
   // expensive four-game deployed TypeScript arena sample.
-  "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.129, scoreFraction: 0.408, aiSecondsPerPlayableNode: 0.596 },
+  // The daemon has no playbook, so both numbers are the same measurement:
+  // 264/304 pooled over the strip-derivative install arena and two seed-wait
+  // control arms, 2026-08-17/18. The old 0.129 came from two 128-game gates of
+  // a superseded checkpoint.
+  "????????????": { bonusPower: 2, komi: 9.5, priorWinProbability: 0.868421, neuralBaselineWinProbability: 0.868421, scoreFraction: 0.408, aiSecondsPerPlayableNode: 0.596 },
 };
 
 export interface GoEtaDemand {

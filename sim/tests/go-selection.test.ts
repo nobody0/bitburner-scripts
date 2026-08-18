@@ -37,7 +37,11 @@ describe("Go reward strategy tuning", () => {
         // This guard samples 128 games (512 for Illuminati), so assert
         // statistical alignment rather than overfitting the constants to one
         // deterministic prefix of the calibration corpus.
-        expect(Math.abs(wins / seeds.length - rules.priorWinProbability), opponent.ours).toBeLessThan(0.06);
+        // This harness plays the network alone, so it validates the neural
+        // baseline rather than priorWinProbability, which describes the
+        // deployed runtime including certified routing.
+        expect(Math.abs(wins / seeds.length - rules.neuralBaselineWinProbability), opponent.ours)
+          .toBeLessThan(0.06);
         expect(Math.abs(blackScore / seeds.length / 23 - rules.scoreFraction), opponent.ours).toBeLessThan(0.05);
         // The neural policy is still converging on the handcrafted baseline;
         // keep this tight enough to catch a stale prior without rejecting the
