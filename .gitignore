@@ -15,9 +15,10 @@ runs/
 #   out of band     the 28 GB seeded-phase search, the training corpora
 #   ignored         every intermediate produced from those
 #
-# ipvgobruteforce/ and ipvgo-playbook-web/ used to be ignored wholesale, which
-# left six tracked files importing sources that were never pushed. Their own
-# nested .gitignore now scopes the exclusion to generated output.
+# ipvgobruteforce/ used to be ignored wholesale, which left tracked files
+# importing sources that were never pushed. Its own nested .gitignore now
+# scopes the exclusion to generated output. The Vercel playbook explorer that
+# shared that history now lives in its own ../ipvgo-playbook-web checkout.
 
 # Training corpora. Composed from the certified exports, hundreds of MB, and
 # transferred with go-ai/remote/worker.sh rather than git — see
