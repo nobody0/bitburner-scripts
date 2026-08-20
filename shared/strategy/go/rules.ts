@@ -34,6 +34,24 @@ export const GO_OPPONENTS = [
 
 export const GO_REWARD_OPPONENTS = [...GO_OPPONENTS, "????????????"] as const satisfies readonly GoRewardOpponent[];
 
+/** The player multiplier fields each opponent's Node Power bonus actually
+ * lifts. v3.0.1 game data, and the ONLY description of what a Go reward does
+ * that anything is allowed to price against: the API's `bonusDescription`
+ * string is for humans, and a bespoke reward-to-bottleneck map is how the
+ * selector came to value hacknet production as if it were the whole economy.
+ * Fields resolve through `shared/strategy/multipliers.ts`, the same table the
+ * augmentation scorer prices with. */
+// Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/effects/effect.ts
+export const GO_EFFECT_FIELDS: Readonly<Record<GoRewardOpponent, readonly string[]>> = {
+  Netburners: ["hacknet_node_money"],
+  "Slum Snakes": ["crime_success"],
+  "The Black Hand": ["hacking_money"],
+  Tetrads: ["strength", "defense", "dexterity", "agility"],
+  Daedalus: ["company_rep", "faction_rep"],
+  Illuminati: ["hacking_speed"],
+  "????????????": ["hacking"],
+};
+
 export function isGoRewardOpponent(value: GoOpponent): value is GoRewardOpponent {
   return value !== "No AI";
 }

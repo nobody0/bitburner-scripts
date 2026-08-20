@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { rankGoGames, type GoGameCandidate, type GoRewardView } from "../shared/strategy/go/rewards.ts";
-import { planGoSchedule } from "../shared/strategy/go/schedule.ts";
+import { goRamPricingCandidate, planGoSchedule } from "../shared/strategy/go/schedule.ts";
 
 const OPPONENTS = ["Netburners", "Slum Snakes", "The Black Hand", "Tetrads", "Daedalus", "Illuminati"] as const;
 
@@ -212,5 +212,85 @@ describe("planGoSchedule", () => {
 
   test("undefined on an empty candidate list", () => {
     expect(planGoSchedule({ candidates: [], ...SCHEDULE_DEFAULTS })).toBeUndefined();
+  });
+
+  test("a barely-valued short game is still the filler for a long window", () => {
+    // Netburners against a live farm is worth a rounding error, and the ranker
+    // now says so — but the filler slot is free wall-clock inside someone
+    // else's entry wait, and the shortest game on the board still fills it.
+    // Scheduling reads the ranked list; it does not re-judge the reward.
+    const netburners = rankGoGames(rewardView({
+      opponents: ["Netburners"],
+      demands: { Netburners: { seconds: 10_000, share: 0.03, why: "a three-percent Hacknet share" } },
+    }))[0]!;
+    // Worth a small fraction of the preferred opponent, by the honest
+    // valuation rather than by any rule about who Netburners is…
+    expect(netburners.utilityPerSec).toBeLessThan(1);
+    const schedule = planGoSchedule({
+      candidates: [
+        candidate({ opponent: "Illuminati", aligned: true, waitSec: 300, utilityPerSec: 5 }),
+        netburners,
+      ],
+      ...SCHEDULE_DEFAULTS,
+    });
+    expect(schedule).toMatchObject({ kind: "filler", game: { opponent: "Netburners" } });
+  });
+});
+
+describe("who pays for the dodge", () => {
+  test("a filler is priced by the window it fills, not by its own thin value", () => {
+    // The wall-clock is already committed to waiting for Illuminati. Charging
+    // the five-second Netburners game the whole 4 GB dodge on its own merit is
+    // what idled Go through entire certified-entry waits.
+    const schedule = planGoSchedule({
+      candidates: [
+        candidate({ opponent: "Illuminati", aligned: true, waitSec: 300, utilityPerSec: 5 }),
+        candidate({ opponent: "Netburners", waitSec: 0, expectedGameSec: 20, utilityPerSec: 0.01 }),
+      ],
+      ...SCHEDULE_DEFAULTS,
+    })!;
+    expect(schedule.kind).toBe("filler");
+    expect(goRamPricingCandidate(schedule)).toMatchObject({ opponent: "Illuminati", utilityPerSec: 5 });
+  });
+
+  test("an ordinary start and a hold are priced by the game they are about", () => {
+    const play = planGoSchedule({
+      candidates: [candidate({ opponent: "Daedalus", waitSec: 0, utilityPerSec: 3 })],
+      ...SCHEDULE_DEFAULTS,
+    })!;
+    expect(goRamPricingCandidate(play)).toMatchObject({ opponent: "Daedalus" });
+
+    const hold = planGoSchedule({
+      candidates: [
+        candidate({ opponent: "Illuminati", aligned: true, waitSec: 30, utilityPerSec: 5 }),
+        candidate({ opponent: "????????????", waitSec: 0, expectedGameSec: 160, utilityPerSec: 1 }),
+      ],
+      ...SCHEDULE_DEFAULTS,
+    })!;
+    expect(hold.kind).toBe("hold");
+    expect(goRamPricingCandidate(hold)).toMatchObject({ opponent: "Illuminati" });
+  });
+});
+
+describe("capped reward elasticity", () => {
+  test("a gain cap limits what a large multiplier can deliver", () => {
+    const demand = { seconds: 10_000, share: 1, why: "crime money" } as const;
+    const stats = [{ opponent: "Slum Snakes" as const, wins: 0, losses: 0, winStreak: 0, rep: 0, bonusPercent: 0 }];
+    const uncapped = rankGoGames(rewardView({ stats, demands: { "Slum Snakes": demand } }))
+      .find((candidate) => candidate.opponent === "Slum Snakes")!;
+    const capped = rankGoGames(rewardView({ stats, demands: { "Slum Snakes": { ...demand, gainCap: 0.01 } } }))
+      .find((candidate) => candidate.opponent === "Slum Snakes")!;
+
+    expect(capped.transientSecSaved).toBeLessThan(uncapped.transientSecSaved);
+    // Exactly the ceiling, not an approximation of it: a 99%-success crime
+    // cannot gain more than the remaining one percent however far Node Power
+    // pushes the multiplier.
+    expect(capped.transientSecSaved).toBeCloseTo(10_000 * 1 * 0.01, 9);
+    expect(capped.horizonTransientSecSaved).toBeCloseTo(10_000 * 1 * 0.01, 9);
+
+    // At the cap the reward is worth nothing at all.
+    const atCap = rankGoGames(rewardView({ stats, demands: { "Slum Snakes": { ...demand, gainCap: 0 } } }))
+      .find((candidate) => candidate.opponent === "Slum Snakes")!;
+    expect(atCap.transientSecSaved).toBe(0);
   });
 });

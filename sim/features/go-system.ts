@@ -22,7 +22,7 @@ import {
   goFavorReward,
   goStreakMultiplier,
 } from "../../shared/strategy/go/rewards.ts";
-import type { GoRewardOpponent } from "../../shared/strategy/go/rules.ts";
+import { GO_EFFECT_FIELDS, type GoRewardOpponent } from "../../shared/strategy/go/rules.ts";
 
 type RewardOpponent = Exclude<GoOpponent, GoOpponent.none>;
 export type GoSystemMode = "exact" | "aggregate";
@@ -46,16 +46,6 @@ const BONUS_DESCRIPTION: Readonly<Record<RewardOpponent, string>> = {
   [GoOpponent.Daedalus]: "reputation gain",
   [GoOpponent.Illuminati]: "faster hack(), grow(), and weaken()",
   [GoOpponent.w0r1d_d43m0n]: "hacking level",
-};
-
-const EFFECT_FIELDS: Readonly<Record<RewardOpponent, readonly string[]>> = {
-  [GoOpponent.Netburners]: ["hacknet_node_money"],
-  [GoOpponent.SlumSnakes]: ["crime_success"],
-  [GoOpponent.TheBlackHand]: ["hacking_money"],
-  [GoOpponent.Tetrads]: ["strength", "defense", "dexterity", "agility"],
-  [GoOpponent.Daedalus]: ["company_rep", "faction_rep"],
-  [GoOpponent.Illuminati]: ["hacking_speed"],
-  [GoOpponent.w0r1d_d43m0n]: ["hacking"],
 };
 
 const REWARD_OPPONENTS = Object.values(GoOpponent)
@@ -543,7 +533,7 @@ export class GoSystem {
     for (const opponent of REWARD_OPPONENTS) {
       const previous = this.#appliedEffects.get(opponent) ?? 1;
       const next = this.#effect(opponent, this.stats.get(opponent)?.nodePower ?? 0);
-      for (const field of EFFECT_FIELDS[opponent]) {
+      for (const field of GO_EFFECT_FIELDS[opponent as GoRewardOpponent]) {
         mults[field] = (mults[field] ?? 1) / previous * next;
       }
       this.#appliedEffects.set(opponent, next);

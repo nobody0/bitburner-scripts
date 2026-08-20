@@ -898,8 +898,17 @@ describe("progression", () => {
     const weights = weightsFromMarginals(WORTH);
     expect(weights.faction_rep).toBe(49_505);
     expect(weights.hacking).toBe(19_174);
-    // hacking_speed shortens the whole batch, so it lifts money AND experience.
-    expect(weights.hacking_speed).toBe(19_174 + 1_000);
+    // hacking_speed shortens the whole batch, so it lifts money AND experience
+    // — but the money half earns the FARM's dollars, not everyone's, so it is
+    // priced at the hacking income share like any other single-source income
+    // multiplier. Unmeasured means unpriceable, so with no shares only the
+    // experience half survives.
+    expect(weights.hacking_speed).toBe(19_174);
+    const measured = weightsFromMarginals(WORTH, { incomeShares: { hacking: 0.8, hacknet: 0.2 } });
+    expect(measured.hacking_speed).toBeCloseTo(19_174 + 1_000 * 0.8, 9);
+    // The correction that matters: before it, a cycle-speed multiplier claimed
+    // every dollar the run earned, including the Hacknet ones it cannot touch.
+    expect(measured.hacking_speed!).toBeLessThan(19_174 + 1_000);
   });
 
   test("a channel the route does not depend on prices its augmentations at nothing", () => {

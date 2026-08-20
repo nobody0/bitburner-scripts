@@ -64,11 +64,30 @@ export const GO_REWARD_RULES: Readonly<Record<GoRewardOpponent, {
 };
 
 export interface GoEtaDemand {
-  /** Remaining ETA component affected by this multiplier. */
+  /** Remaining ETA component affected by this multiplier. UNSHARED: the
+   * consumer clips this against the install horizon and only THEN applies
+   * `share`, which is what stops accumulated evidence from crediting a small
+   * producer with the whole runway. */
   seconds: number;
   /** Fraction of that component actually supplied by the affected subsystem. */
   share: number;
+  /** Ceiling on the relative saving this reward can deliver however large the
+   * multiplier grows, in the same units as `1 - before/after`. Exact rather
+   * than an approximation where it is set: crime money is proportional to
+   * `min(1, chance * multiplier)`, so at chance c the saving can never exceed
+   * `1 - c` — a +5% success multiplier on a 99%-success crime buys +1.01%
+   * money, not +5%, and buys exactly nothing at chance 1. Absent = the reward
+   * lifts something with no ceiling in reach. */
+  gainCap?: number;
   why: string;
+}
+
+/** The relative saving one game's multiplier growth actually delivers.
+ * ONE implementation for the immediate game and the horizon tree: they priced
+ * the identical quantity, and a cap applied to only one of them would rank
+ * candidates on a saving the continuation then contradicts. */
+function demandGain(demand: GoEtaDemand, before: number, after: number): number {
+  return Math.min(Math.max(0, 1 - before / after), Math.max(0, demand.gainCap ?? 1));
 }
 
 export interface GoRewardView {
@@ -340,7 +359,7 @@ function goHorizon(
   // rankGoGames: the deadline is a recalibrating estimate, not a wall.
   const runway = Math.min(Math.max(0, demand?.seconds ?? 0), Math.max(0, horizonSec - waitSec));
   const transientSecSaved = demand
-    ? runway * clamp01(demand.share) * Math.max(0, 1 - multiplierBefore / expectedMultiplier)
+    ? runway * clamp01(demand.share) * demandGain(demand, multiplierBefore, expectedMultiplier)
     : 0;
   const baselineFavorWork = Math.max(0, (faction?.remainingWorkSec ?? 0) - waitSec - games * performance.expectedGameSec);
   const expectedFavorWork = states.reduce((sum, state) => {
@@ -446,7 +465,7 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
         Math.max(0, view.installRemainingSec - variant.waitSec),
       );
       const transientSecSaved = demand
-        ? runway * clamp01(demand.share) * Math.max(0, 1 - multiplierBefore / multiplierAfter)
+        ? runway * clamp01(demand.share) * demandGain(demand, multiplierBefore, multiplierAfter)
         : 0;
       const faction = isFactionOpponent(opponent) ? view.factionFavor[opponent] : undefined;
       const favorEligible = isFactionOpponent(opponent)

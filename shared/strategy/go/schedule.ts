@@ -66,3 +66,16 @@ export function planGoSchedule(view: GoScheduleView): GoSchedule | undefined {
     why: `no game fits the ${Math.round(preferred.waitSec)}s window before ${preferred.opponent}'s certified entry`,
   };
 }
+
+/** The candidate whose value prices the RAM the next start will displace.
+ *
+ * The dodge is charged to the WINDOW, not to whatever game occupies it. A
+ * filler exists only because the wall-clock is already committed to waiting
+ * for the preferred game, so once that game justifies the dodge, filling its
+ * window beats idling it — and the filler's own utility is the wrong test.
+ * Charging a filler the whole dodge idles Go across entire multi-minute
+ * certified-entry waits while a five-second game sits available, which is
+ * never the better trade. */
+export function goRamPricingCandidate(schedule: GoSchedule): GoGameCandidate {
+  return schedule.kind === "play" ? schedule.game : schedule.preferred;
+}

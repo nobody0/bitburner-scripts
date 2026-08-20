@@ -1,6 +1,6 @@
 import type { ChannelWorth } from "../income.ts";
 import { BASE_FOCUS_BONUS } from "./rep.ts";
-import type { MarginalResource } from "../progression/marginal.ts";
+import { fieldChannelResponse, VALUED_FIELDS } from "../multipliers.ts";
 
 /** Augmentation valuation, prerequisite closure and purchase ordering.
  *
@@ -199,50 +199,6 @@ export function augCost(
  * `weightsFromMarginals`. */
 export type ObjectiveWeights = Record<string, number>;
 
-/** Which priced channel each multiplier field accelerates, and by how much of
- * a relative rate increase one relative multiplier buys.
- *
- * MECHANICS, not policy: `hacking_speed` halves batch time, so it lifts both
- * money and experience one-for-one; `hacking_grow` only shortens one leg of the
- * batch. What each channel is WORTH is measured elsewhere and multiplied in.
- * Fields absent here accelerate nothing the route model prices — charisma
- * reaches the run only through company reputation, which `company_rep` already
- * carries — and contribute zero rather than a guess. */
-const FIELD_SENSITIVITY: Readonly<Record<string, Readonly<Partial<Record<MarginalResource, number>>>>> = {
-  hacking: { hacking: 1 },
-  hacking_exp: { hacking: 1 },
-  hacking_speed: { money: 1, hacking: 1 },
-  hacking_money: { money: 1 },
-  hacking_chance: { money: 1 },
-  hacking_grow: { money: 0.5 },
-  faction_rep: { reputation: 1 },
-  company_rep: { reputation: 1 },
-  strength: { combat: 1 },
-  defense: { combat: 1 },
-  dexterity: { combat: 1 },
-  agility: { combat: 1 },
-  strength_exp: { combat: 1 },
-  defense_exp: { combat: 1 },
-  dexterity_exp: { combat: 1 },
-  agility_exp: { combat: 1 },
-  bladeburner_success_chance: { bladeburnerRank: 1 },
-  bladeburner_analysis: { bladeburnerRank: 0.5 },
-  bladeburner_max_stamina: { bladeburnerRank: 0.5 },
-  bladeburner_stamina_gain: { bladeburnerRank: 0.5 },
-};
-
-/** Income multipliers that lift ONE source rather than the whole money rate.
- * Doubling crime money is worth double crime's share of what we earn, which on
- * a live farm is a rounding error — the same comparison the work slot makes. */
-const INCOME_SOURCE_FIELDS: Readonly<Record<string, string>> = {
-  hacking_money: "hacking",
-  hacknet_node_money: "hacknet",
-  work_money: "career",
-  crime_money: "career",
-  crime_success: "career",
-  dnet_money: "dnet",
-};
-
 export interface RouteWeightContext {
   /** Route skill levels that installed augmentations must make reachable. */
   hackingTarget?: number;
@@ -372,8 +328,9 @@ export function scoreAugMults(aug: AugInfo, weights: ObjectiveWeights): number {
  * `worth(channel)` is BN-seconds saved by a 100% relative increase in that
  * channel's rate — progression's own measurement, the same table the work-slot
  * auction prices claims with. A field's weight is that worth times how much of
- * a relative rate increase the multiplier actually buys, times (for a
- * single-source income multiplier) that source's share of what we earn.
+ * a relative rate increase the multiplier actually buys, with a single-source
+ * income multiplier's MONEY channel scaled by that source's share of what we
+ * earn — see `fieldChannelResponse`.
  *
  * THE HAND-TUNED TABLE THIS REPLACES said `faction_rep: 2` and
  * `crime_money: 0.2` in every node, forever. Both are wrong in the same run:
@@ -383,19 +340,11 @@ export function scoreAugMults(aug: AugInfo, weights: ObjectiveWeights): number {
  * both fall out of the measurement. */
 export function weightsFromMarginals(worth: ChannelWorth, context?: RouteWeightContext): ObjectiveWeights {
   const weights: ObjectiveWeights = {};
-  for (const [field, sensitivity] of Object.entries(FIELD_SENSITIVITY)) {
-    const source = INCOME_SOURCE_FIELDS[field];
-    const share = source === undefined ? 1 : Math.max(0, Math.min(1, context?.incomeShares?.[source] ?? 0));
+  for (const field of VALUED_FIELDS) {
     let value = 0;
-    for (const [channel, response] of Object.entries(sensitivity) as [MarginalResource, number][]) {
-      value += (worth.get(channel) ?? 0) * response * share;
+    for (const [channel, response] of Object.entries(fieldChannelResponse(field, context?.incomeShares))) {
+      value += (worth.get(channel) ?? 0) * response;
     }
-    if (value > 0) weights[field] = value;
-  }
-  for (const [field, source] of Object.entries(INCOME_SOURCE_FIELDS)) {
-    if (FIELD_SENSITIVITY[field] !== undefined) continue;
-    const share = Math.max(0, Math.min(1, context?.incomeShares?.[source] ?? 0));
-    const value = (worth.get("money") ?? 0) * share;
     if (value > 0) weights[field] = value;
   }
 

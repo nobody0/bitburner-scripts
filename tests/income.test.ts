@@ -4,6 +4,7 @@ import {
   announcedRates,
   bestIncomePerSec,
   bestReinvestmentReturnPerDollarSec,
+  incomeShares,
 } from "../game/lib/income.ts";
 import { NOMINAL_VALUE_SEC_PER_WEIGHT } from "../shared/strategy/access/value.ts";
 import {
@@ -77,6 +78,31 @@ describe("income announcements", () => {
     // gang 400/cycle = 2000/sec beats the farm's 1000.
     expect(bestIncomePerSec(s)).toEqual({ state: "measured", value: 2_000 });
     expect(announcedIncome(s).filter((a) => a.state === "measured").map((a) => a.by).sort()).toEqual(["career", "gang", "hacking"]);
+  });
+});
+
+describe("income shares", () => {
+  test("shares are GROSS live rates, normalised over measured announcers only", () => {
+    const s = state({
+      farm: { moneyRate: 99 },
+      hacknet: { productionPerSec: 1 },
+      // Expenses cannot enter: this reads announced RATES, never the
+      // since-install ledger. `MoneySource.total` is net of hacknet, server and
+      // augmentation spending, so dividing by it once reported a hacknet share
+      // ABOVE ONE and pinned the Go selector on Netburners for hours.
+      progression: { moneySources: { sinceInstall: { total: 1, hacking: 1e9, hacknet: 1e9, hacknet_expenses: -1e9 } } },
+    });
+    expect(incomeShares(s).hacknet).toBeCloseTo(0.01, 9);
+    expect(incomeShares(s).hacking).toBeCloseTo(0.99, 9);
+  });
+
+  test("an unmeasured source is absent, not a measured zero", () => {
+    const shares = incomeShares(state({ farm: { moneyRate: 100 } }));
+    expect(shares.hacking).toBe(1);
+    expect("hacknet" in shares).toBe(false);
+    expect("career" in shares).toBe(false);
+    // Nothing measured at all yields an empty map rather than fabricated zeros.
+    expect(incomeShares(state())).toEqual({});
   });
 });
 

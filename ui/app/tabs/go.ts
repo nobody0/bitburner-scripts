@@ -302,6 +302,24 @@ function rankingMarkup(g: GoState): string {
   );
 }
 
+/** The demand a candidate is priced against: the bottleneck seconds its reward
+ * touches, and the fraction of them the lifted subsystem actually supplies.
+ * Both halves matter — a full runway at three percent is a rounding error, and
+ * reading only the seconds is how the ranking used to be misread. */
+function demandCell(demand: { seconds: number; share: number; gainCap?: number } | undefined): string {
+  if (!demand) return `<span class="dim">none</span>`;
+  const cap = demand.gainCap === undefined ? "" : ` cap ${fmtPct(demand.gainCap)}`;
+  return `${fmtNum(demand.seconds, 0)}s x ${fmtPct(demand.share)}${esc(cap)}`;
+}
+
+function incomeShareSummary(shares: Record<string, number> | undefined): string | undefined {
+  const ranked = Object.entries(shares ?? {})
+    .filter(([, share]) => share > 0)
+    .sort((a, b) => b[1] - a[1]);
+  if (ranked.length === 0) return undefined;
+  return esc(ranked.map(([source, share]) => `${source} ${fmtPct(share)}`).join(" · "));
+}
+
 function opponentMarkup(g: GoState): string {
   const candidates = g.plan?.selection.candidates ?? [];
   const context = g.plan?.selection.context;
@@ -315,14 +333,26 @@ function opponentMarkup(g: GoState): string {
           value: String(Object.keys(context.demands).length),
           sub: `of ${candidates.length} candidates`,
         },
+        {
+          label: "income shares",
+          value: incomeShareSummary(context.incomeShares) ?? "unmeasured",
+          sub: "what each producer earns, and so how much of a money bottleneck its reward may claim",
+        },
       ])
     : "";
   const schedule = g.plan?.selection.schedule;
   const scheduleNote = schedule && schedule.kind !== "play"
     ? note(`schedule: ${schedule.kind}${schedule.kind === "filler" && schedule.fillerOpponent ? ` (${schedule.fillerOpponent})` : ""}${schedule.kind === "hold" && schedule.holdSec !== undefined ? ` ${fmtNum(schedule.holdSec, 0)}s` : ""} — ${schedule.why}`)
     : "";
-  return evidence + scheduleNote + table(
-    ["opponent", "board", "wait", "win", "streak", "horizon", "node power", "transient saved", "favor event", "favor gain", "favor saved", "saved/min"],
+  // Only worth the line when it REFUSES: a passing gate is the ordinary case
+  // and says nothing a reader needs, while a refusal is the whole explanation
+  // for a Go that has stopped starting games.
+  const ramGate = g.plan?.selection.ramGate;
+  const ramNote = ramGate && !ramGate.pays
+    ? note(`no new game: ${ramGate.why} — ${esc(ramGate.opponent)} at ${fmtNum(ramGate.utilityPerSec * 60, 2)}s saved/min against ${fmtNum(ramGate.displacedGb, 1)} GB displaced of ${fmtNum(ramGate.usableGb, 0)} GB usable`)
+    : "";
+  return evidence + scheduleNote + ramNote + table(
+    ["opponent", "board", "wait", "win", "streak", "horizon", "node power", "demand", "transient saved", "favor event", "favor gain", "favor saved", "saved/min"],
     candidates.map((candidate) => [
       esc(candidate.opponent),
       `${candidate.observedBoardSize}x${candidate.observedBoardSize}`,
@@ -331,6 +361,7 @@ function opponentMarkup(g: GoState): string {
       String(candidate.currentWinStreak),
       `${candidate.planningGames} games / ${fmtNum(candidate.planningGames * candidate.expectedGameSec, 0)}s`,
       `${fmtNum(candidate.expectedNodePower, 1)} now / ${fmtNum(candidate.horizonNodePower, 1)} horizon`,
+      demandCell(candidate.transientDemand),
       `${fmtNum(candidate.transientSecSaved, 1)}s now / ${fmtNum(candidate.horizonTransientSecSaved, 1)}s horizon`,
       fmtPct(candidate.favorEventProbability),
       fmtNum(candidate.expectedFavorGain, 2),

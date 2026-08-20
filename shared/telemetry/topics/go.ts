@@ -92,12 +92,28 @@ export interface GoPlan {
     /** New-game scheduling verdict: play the preferred candidate, fit a
      * filler game inside its certified entry window, or hold the cadence. */
     schedule?: { kind: "play" | "filler" | "hold"; fillerOpponent?: GoRewardOpponent; holdSec?: number; why: string };
+    /** Whether the next game would repay the fleet RAM its dodge displaces,
+     * and the numbers behind the answer. Published even when it PASSES: a Go
+     * that has gone quiet must say which of "not worth it" and "broken" it is,
+     * and a silent early return says neither. `opponent` is whose value pays —
+     * a filler is priced by the window it fills, not by itself. */
+    ramGate?: {
+      pays: boolean;
+      opponent: GoRewardOpponent;
+      utilityPerSec: number;
+      displacedGb: number;
+      usableGb: number;
+      why: string;
+    };
     context: {
       goPower: number;
       hasSourceFile14: boolean;
       favorRepCap: number;
       installRemainingSec?: number;
       joinedFactions: string[];
+      /** Each announcer's measured share of live money production, the input
+       * that decides how much of a money bottleneck each reward may claim. */
+      incomeShares?: Record<string, number>;
       demands: Partial<Record<GoRewardOpponent, GoEtaDemandDigest>>;
     };
   };

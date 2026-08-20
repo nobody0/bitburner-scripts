@@ -2,7 +2,7 @@ import type { NS } from "@ns";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { effectiveBitNodeMultipliers, WORLD_DAEMON_BASE_SKILL } from "../../../shared/features/bitnode.ts";
 import { BLADEBURNER_RANK_CHANNEL, currencyWorth } from "../../../shared/strategy/income.ts";
-import { incomeShares } from "../income.ts";
+import { careerBestPerSec, incomeShares } from "../income.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
@@ -24,7 +24,7 @@ import {
 } from "../../../shared/strategy/go/neural/worker-protocol.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
 import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand, type GoRewardView } from "../../../shared/strategy/go/rewards.ts";
-import { planGoSchedule } from "../../../shared/strategy/go/schedule.ts";
+import { goRamPricingCandidate, planGoSchedule } from "../../../shared/strategy/go/schedule.ts";
 import { GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
 import {
   applyGoCheat,
@@ -107,6 +107,7 @@ import type {
   GoResponse,
   GoTurnResult,
 } from "../../../shared/telemetry/topics/go.ts";
+import type { CrimeOption } from "../../../shared/telemetry/topics/career.ts";
 import type { ProgressionPlan, RouteEtaDigest } from "../../../shared/telemetry/topics/progression.ts";
 import { isScriptDeath } from "../errors.ts";
 import { goNeuralWorkerRuntime, resetGoNeuralWorkerRuntime, type GoNeuralRuntime } from "../go-neural-worker.ts";
@@ -727,7 +728,11 @@ function goMoveDigest(move: GoDecision["ranked"][number]): GoMoveDigest {
 }
 
 function goDemandDigest(demand: GoEtaDemand): GoEtaDemandDigest {
-  return { seconds: demand.seconds, share: demand.share };
+  return {
+    seconds: demand.seconds,
+    share: demand.share,
+    ...(demand.gainCap !== undefined ? { gainCap: demand.gainCap } : {}),
+  };
 }
 
 function goGameCandidateDigest(candidate: ReturnType<typeof rankGoGames>[number]): GoGameCandidateDigest {
@@ -1147,6 +1152,19 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         };
       }
     }
+    const goIncomeShares = incomeShares(ctx.state);
+    // The income-maximising crime, for the only reward whose elasticity has a
+    // reachable ceiling. Absent without SF4, and the leg is then omitted rather
+    // than guessed — the missing source file hides the cap as well as the rate.
+    const bestCrime = (ctx.state.topics.career?.crimes ?? [])
+      .reduce<CrimeOption | undefined>((best, crime) => best === undefined || crime.moneyPerSec > best.moneyPerSec ? crime : best, undefined);
+    const crimeIncome = bestCrime
+      ? {
+        successChance: bestCrime.chance,
+        perSec: bestCrime.moneyPerSec,
+        careerBestPerSec: careerBestPerSec(ctx.state),
+      }
+      : undefined;
     const rewardView = {
       opponents: rewardOpponents,
       stats,
@@ -1154,10 +1172,15 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       factionFavor: goFactionFavor(ctx),
       demands: goDemands({
         horizons: ctx.horizons,
-        sinceInstall: ctx.state.topics.progression?.moneySources?.sinceInstall,
+        // LIVE gross shares, not the since-install ledger. `MoneySource.total`
+        // is net of expenses, so a run that had bought Hacknet nodes reported a
+        // hacknet share above one — pinned at the cap by the clamp — for as
+        // long as the ledger stayed skewed.
+        incomeShares: goIncomeShares,
         openNeeds: ctx.board.open,
         canEarnFactionRep: ctx.caps.unlocked.factions === "yes",
         canRunBladeburner: ctx.caps.unlocked.bladeburner === "yes",
+        ...(crimeIncome ? { crimeIncome } : {}),
       }),
       goPower: nodeMults?.GoPower ?? 1,
       hasSourceFile14: sfLevel(ctx.caps.sourceFiles, 14) > 0,
@@ -1177,6 +1200,24 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     // window, otherwise the preferred candidate itself. A hold starts nothing
     // this pass but the engine still plans toward the preferred target.
     const preferred = schedule.kind === "hold" ? schedule.preferred : schedule.game;
+    // Decided BEFORE the plan is published, so a refusal to start is visible
+    // instead of a silent early return: a quiet Go used to look identical
+    // whether it had judged the next game not worth the dodge or had failed
+    // outright, which is miserable to debug from a screenshot.
+    const ramPie = ctx.state.topics.farm?.ramPie;
+    const usableGb = ramPie ? ramPie.farm + ramPie.prep + ramPie.share + ramPie.free + ramPie.reserve : 0;
+    const freeGb = ramPie?.free ?? 0;
+    const ramSubject = goRamPricingCandidate(schedule);
+    const ramGate = {
+      pays: goGamePaysForRam(ramSubject.utilityPerSec, usableGb, freeGb),
+      opponent: ramSubject.opponent,
+      utilityPerSec: ramSubject.utilityPerSec,
+      displacedGb: Math.max(0, GO_ESTIMATED_GB - Math.max(0, freeGb)),
+      usableGb,
+      why: usableGb > 0
+        ? "the dodge is priced against the fleet RAM it displaces"
+        : "no fleet RAM pie has been published, so the displacement cannot be priced",
+    };
     const view: GoView = {
       board: { rows: topic.board, size: topic.boardSize },
       currentPlayer: topic.currentPlayer,
@@ -1371,12 +1412,17 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           ...(schedule.kind === "hold" ? { holdSec: schedule.resumeInSec } : {}),
           why: schedule.why,
         },
+        ramGate,
         context: {
           goPower: rewardView.goPower,
           hasSourceFile14: rewardView.hasSourceFile14,
           favorRepCap: rewardView.favorRepCap,
           installRemainingSec,
           joinedFactions: [...joined].sort(),
+          // The single field that explains any ranking: which producer earns
+          // what fraction of the run's dollars, and therefore how much of a
+          // money bottleneck each reward can honestly claim.
+          incomeShares: goIncomeShares,
           demands: Object.fromEntries(
             Object.entries(rewardView.demands).map(([opponent, demand]) => [opponent, goDemandDigest(demand)]),
           ),
@@ -1393,12 +1439,9 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       // records why) without consuming the makeMove-sized grant.
       if (schedule.kind === "hold") return;
       // Positive but vanishing Go power is not free: the dodge occupies RAM
-      // the income engine could use. Compare both in the same route-seconds
-      // per elapsed-second unit and stop once the marginal game loses. A
-      // filler must pay for the RAM on its own utility.
-      const pie = ctx.state.topics.farm?.ramPie;
-      const usableGb = pie ? pie.farm + pie.prep + pie.share + pie.free + pie.reserve : 0;
-      if (!goGamePaysForRam(preferred.utilityPerSec, usableGb, pie?.free ?? 0)) return;
+      // the income engine could use. Decided above so the refusal is published
+      // rather than a silent return.
+      if (!ramGate.pays) return;
       const newGameAction = action;
       // Certified playbook lines are only reachable from a phase-aligned game
       // start. The opening board itself — obstacles and the Illuminati
