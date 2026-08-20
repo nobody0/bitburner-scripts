@@ -46,6 +46,10 @@ const MIN_10 = 600_000;
  * late-game save has ~1000 augmentations and 33 stock symbols; the panels
  * only ever show a page of them. Totals are reported alongside. */
 const LIST_LIMIT = 60;
+/** Darknet password hints and their extracted data are free text of unknown
+ *  length upstream, and one record carries a page of hosts. Clip at the source
+ *  rather than trusting the field to be short. */
+const HINT_LIMIT = 120;
 
 // --- hacking ---------------------------------------------------------------
 
@@ -1389,16 +1393,20 @@ const dnetCore: DodgedProbe = {
   requires: "dnet",
   everyMs: MIN_1,
   merge: true,
+  // getServerDetails already carries depth, blockedRam and requiredCharismaSkill,
+  // so getDepth / getBlockedRam / getServerRequiredCharismaLevel would be three
+  // extra distinct-function charges for values we already hold. The RAM getters
+  // answer the one question the details object does not: whether a darknet host
+  // has room to run an agent at all.
   methods: [
     "getHostname",
+    "getServerMaxRam",
+    "getServerUsedRam",
     "dnet.probe",
     "dnet.getServerDetails",
-    "dnet.getDepth",
-    "dnet.getBlockedRam",
     "dnet.getStasisLinkLimit",
     "dnet.getStasisLinkedServers",
     "dnet.getDarknetInstability",
-    "dnet.getServerRequiredCharismaLevel",
   ],
   run(stubNs: NS) {
     const observedFrom = stubNs["getHostname"]();
@@ -1407,18 +1415,50 @@ const dnetCore: DodgedProbe = {
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L314-L335
     const hosts = stubNs["dnet"]["probe"]();
     const linked = new Set(stubNs["dnet"]["getStasisLinkedServers"]().map(String));
-    let maxDepth = 0;
+    let maxDepth = -1;
     const servers = [];
     for (const host of hosts.slice(0, LIST_LIMIT)) {
-      const depth = stubNs["dnet"]["getDepth"](host);
-      if (depth > maxDepth) maxDepth = depth;
+      // A host that has gone offline recently answers with a DUMMY details
+      // object carrying isOnline: false. Its other fields describe nothing, so
+      // publish the liveness bit and no more.
+      const details = stubNs["dnet"]["getServerDetails"](host);
+      if (details.isOnline === false) {
+        servers.push({ hostname: host, depth: -1, isOnline: false, stasisLinked: linked.has(host) });
+        continue;
+      }
+      if (details.depth > maxDepth) maxDepth = details.depth;
+      // Ordinary server getters are not darknet-aware and throw on a host that
+      // vanished between probe() and here.
+      let maxRam: number | undefined;
+      let usedRam: number | undefined;
+      try {
+        maxRam = stubNs["getServerMaxRam"](host);
+        usedRam = stubNs["getServerUsedRam"](host);
+      } catch {
+        /* host went away mid-batch; the details above still stand */
+      }
       servers.push({
         hostname: host,
-        depth,
-        blockedRam: stubNs["dnet"]["getBlockedRam"](host),
-        isOnline: stubNs["dnet"]["getServerDetails"](host).isOnline,
-        requiredCharisma: stubNs["dnet"]["getServerRequiredCharismaLevel"](host),
+        depth: details.depth,
+        blockedRam: details.blockedRam,
+        isOnline: true,
+        requiredCharisma: details.requiredCharismaSkill,
         stasisLinked: linked.has(host),
+        // The discovery surface. Every one of these is undocumented upstream and
+        // is what a password attack would have to reason from, so acquire it now
+        // and let the tab show what the darknet actually looks like.
+        modelId: details.modelId,
+        passwordLength: details.passwordLength,
+        passwordFormat: details.passwordFormat,
+        passwordHint: details.passwordHint.slice(0, HINT_LIMIT),
+        data: details.data.slice(0, HINT_LIMIT),
+        logTrafficInterval: details.logTrafficInterval,
+        difficulty: details.difficulty,
+        isStationary: details.isStationary,
+        hasSession: details.hasSession,
+        directlyConnected: details.isConnectedToCurrentServer,
+        ...(maxRam !== undefined ? { maxRam } : {}),
+        ...(usedRam !== undefined ? { usedRam } : {}),
       });
     }
     return [

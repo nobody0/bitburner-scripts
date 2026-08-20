@@ -17,6 +17,11 @@
       "source": "game/worker/worker.ts",
       "target": "worker/worker.js",
       "versioned": true
+    },
+    {
+      "source": "game/dnet/scout.ts",
+      "target": "dnet/scout.js",
+      "versioned": true
     }
   ],
   "restoreEntry": {

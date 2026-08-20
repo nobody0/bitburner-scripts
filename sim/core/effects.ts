@@ -223,6 +223,8 @@ export interface ServerSpec {
   currentDifficulty?: number;
   currentMoney?: number;
   simKind?: SimServer["simKind"];
+  /** Rooted at creation. Only `darkweb` is, upstream. */
+  hasAdminRights?: boolean;
 }
 
 export function serverFromSpec(spec: ServerSpec, base: SimServer): SimServer {
@@ -257,6 +259,7 @@ export function serverFromSpec(spec: ServerSpec, base: SimServer): SimServer {
   base.minDifficulty = statics.minDifficulty;
   base.serverGrowth = statics.serverGrowth;
   base.numOpenPortsRequired = spec.numOpenPortsRequired;
+  if (spec.hasAdminRights !== undefined) base.hasAdminRights = spec.hasAdminRights;
   capDifficulty(base);
   base.moneyAvailable = Math.max(0, Math.min(base.moneyMax, base.moneyAvailable));
   return base;

@@ -81,7 +81,16 @@ describe("seeded vanilla network", () => {
   test("rolls every field inside the pinned upstream ranges", () => {
     for (const server of VANILLA_NETWORK.network) {
       if (server.hostname === "darkweb") {
-        expect(server).toMatchObject({ simKind: "DarknetServer", maxRam: 16, numOpenPortsRequired: 0 });
+        // initDarkwebServer() hands it 16 GB with nothing blocked and roots it,
+        // which is what makes it the one darknet host reachable without a
+        // credential. mockServer defaults hasAdminRights to false, so leaving
+        // this off would make ns.exec("...", "darkweb") return a silent 0.
+        expect(server).toMatchObject({
+          simKind: "DarknetServer",
+          maxRam: 16,
+          numOpenPortsRequired: 0,
+          hasAdminRights: true,
+        });
         continue;
       }
       const metadata = SERVER_METADATA[server.hostname]!;

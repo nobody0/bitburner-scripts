@@ -13,8 +13,18 @@ import { StanekSystem } from "../features/stanek.ts";
 import { Fragments } from "../vendor/bitburner/src/CotMG/Fragment.ts";
 import { resetUnmodeled } from "../realm/unmodeled.ts";
 import { GoOpponent } from "../vendor/bitburner/src/Go/Enums.ts";
+import { darkwebServerSpec } from "../network.ts";
+import {
+  DNET_REPORT_PORT,
+  REPORT_VERSION,
+  decodeReport,
+  encodeReport,
+  observationOf,
+  type DnetReport,
+} from "../../shared/strategy/dnet/courier.ts";
+import { emptyKnowledge, foldObservations, fresh } from "../../shared/strategy/dnet/knowledge.ts";
 
-function harness(programs: string[] = [], withStock = false, bitnode = 1): { ns: NS; host: SimNsHost; world: SimWorld } {
+function harness(programs: string[] = [], withStock = false, bitnode = 1, withDarkweb = false): { ns: NS; host: SimNsHost; world: SimWorld } {
   const world = new SimWorld({
     seed: 1,
     bitnode,
@@ -26,12 +36,13 @@ function harness(programs: string[] = [], withStock = false, bitnode = 1): { ns:
       serverGrowth: 3000,
       numOpenPortsRequired: 1,
       maxRam: 4,
-    }],
+    }, ...(withDarkweb ? [darkwebServerSpec()] : [])],
   });
   const processes = new ProcessTable(world.servers, world.clock);
   const files = new Map([
     ["home", new Set(["main.js", "NUKE.exe", ...programs])],
     ["n00dles", new Set(["child.js"])],
+    ...(withDarkweb ? [["darkweb", new Set(["scout.js"])] as [string, Set<string>]] : []),
   ]);
   const host: SimNsHost = {
     world,
@@ -40,7 +51,11 @@ function harness(programs: string[] = [], withStock = false, bitnode = 1): { ns:
     files,
     contents: new Map(),
     scripts: new Map(),
-    network: new Map([["home", ["n00dles"]], ["n00dles", ["home"]]]),
+    network: new Map(
+      withDarkweb
+        ? [["home", ["n00dles", "darkweb"]], ["n00dles", ["home"]], ["darkweb", ["home"]]]
+        : [["home", ["n00dles"]], ["n00dles", ["home"]]],
+    ),
     ramCtx: { bitNode: bitnode },
     reset: {
       lastAugReset: 0,
@@ -82,6 +97,105 @@ function harness(programs: string[] = [], withStock = false, bitnode = 1): { ns:
   }
   return { ns: makeSimNs(host, process), host, world };
 }
+
+describe("darkweb, the one darknet host reachable without a credential", () => {
+  test("scan hides it, but it is rooted, 16 GB, and can be exec'd onto", () => {
+    const { ns } = harness([], false, 1, true);
+
+    // Upstream scan skips every DarknetServer, which is the whole reason
+    // ns.dnet.probe() exists. If it leaked, darkweb would enter the fleet
+    // snapshot and look like a free 16 GB worker host the game never offers.
+    expect(ns.scan("home")).toEqual(["n00dles"]);
+
+    // ...yet it IS rooted with 16 GB and nothing blocked, so a script placed
+    // there runs. Both halves matter: hiding it without rooting it, or rooting
+    // it without hiding it, is a different bug each way.
+    expect(ns.hasRootAccess("darkweb")).toBe(true);
+    expect(ns.getServerMaxRam("darkweb")).toBe(16);
+
+    // The payoff: an agent can be launched there. Before darkweb was rooted this
+    // returned a silent 0 — no error, no unmodeled() — which is the worst
+    // possible failure for a design that depends on placing scripts remotely.
+    expect(ns.exec("scout.js", "darkweb", 1)).toBeGreaterThan(0);
+
+    // And rooting it did not become a general bypass: an ordinary server we have
+    // not nuked still refuses.
+    expect(ns.hasRootAccess("n00dles")).toBe(false);
+    expect(ns.exec("child.js", "n00dles", 1)).toBe(0);
+  });
+});
+
+describe("the darknet report channel", () => {
+  const report: DnetReport = {
+    v: REPORT_VERSION,
+    missionId: "m-1",
+    generation: "15:0",
+    agentHost: "darkweb",
+    phase: "final",
+    at: 1_000,
+    hosts: [
+      { hostname: "dn-1", present: true, depth: 0, modelId: "TopPass", requiredCharisma: 40 },
+      { hostname: "dn-gone", present: false },
+    ],
+    codes: { "200": 1, "503": 1 },
+    logs: [],
+  };
+
+  test("a report survives the round trip from agent to folded knowledge", () => {
+    const { ns } = harness();
+
+    // The agent's whole delivery mechanism: a port write, 0 GB, no session and
+    // no scp. Ports are shared across every host, so it does not matter that
+    // the writer is standing on a darknet server and the reader is on home.
+    expect(ns.tryWritePort(DNET_REPORT_PORT, encodeReport(report))).toBe(true);
+
+    // The controller drains it directly — readPort is 0 GB, so no dodge.
+    const raw = ns.readPort(DNET_REPORT_PORT);
+    expect(typeof raw).toBe("string");
+    const decoded = decodeReport(String(raw));
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+
+    const { knowledge } = foldObservations(
+      emptyKnowledge("15:0"),
+      [observationOf(decoded.report)],
+      1_000,
+    );
+    expect(fresh<number>(knowledge.hosts["dn-1"], "depth", 1_000)).toBe(0);
+    expect(fresh<string>(knowledge.hosts["dn-1"], "modelId", 1_000)).toBe("TopPass");
+    // Absence travelled too, which is what lets home forget a dead host rather
+    // than keeping a map of a world that no longer contains it.
+    expect(knowledge.hosts["dn-gone"]!.goneAt).toBe(1_000);
+
+    // Drained to exhaustion: the next read is the empty sentinel, not a repeat.
+    expect(ns.readPort(DNET_REPORT_PORT)).toBe("NULL PORT DATA");
+  });
+
+  test("a full port refuses the write instead of dropping an older report", () => {
+    const { ns } = harness();
+    // Upstream capacity is 50. tryWrite refusing (rather than write's shift) is
+    // what lets an agent notice that nobody is draining and say so.
+    for (let i = 0; i < 50; i++) {
+      expect(ns.tryWritePort(DNET_REPORT_PORT, `filler-${i}`)).toBe(true);
+    }
+    expect(ns.tryWritePort(DNET_REPORT_PORT, encodeReport(report))).toBe(false);
+    // The oldest is still there — nothing was silently discarded.
+    expect(ns.readPort(DNET_REPORT_PORT)).toBe("filler-0");
+  });
+
+  test("a report from another generation is refused by the fold, not the port", () => {
+    const { ns } = harness();
+    // The port has no idea which run wrote to it, and agents outlive
+    // controllers — so the generation check has to live in the fold.
+    expect(ns.tryWritePort(DNET_REPORT_PORT, encodeReport({ ...report, generation: "1:999" }))).toBe(true);
+    const decoded = decodeReport(String(ns.readPort(DNET_REPORT_PORT)));
+    expect(decoded.ok).toBe(true);
+    if (!decoded.ok) return;
+    const folded = foldObservations(emptyKnowledge("15:0"), [observationOf(decoded.report)], 1_000);
+    expect(folded.rejectedGenerations).toBe(1);
+    expect(folded.knowledge.hosts["dn-1"]).toBeUndefined();
+  });
+});
 
 describe("Netscript contract fidelity", () => {
   test("share/getSharePower expose the 10 second contribution lifecycle", async () => {

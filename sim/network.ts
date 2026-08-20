@@ -14,7 +14,18 @@ export interface GeneratedNetwork {
 
 /** The v3.0.1 darkweb root is created after the ordinary foreign-server tree.
  * It exists before TOR is bought, but remains isolated until getTorRouter()
- * connects it to home. */
+ * connects it to home.
+ *
+ * `initDarkwebServer()` makes it a special case in every way that matters: 16 GB
+ * with `blockedRam = 0` and `preventBlockedRam`, `hasAdminRights = true`,
+ * `isStationary = true`, `depth: -1`, and `modelId: NoPassword` with an empty
+ * password. Both the session check and the exec/scp gate short-circuit for it
+ * ("We always are authed to ourselves and DarkWeb"), so it is the one darknet
+ * host a script can be placed on with no credential at all.
+ *
+ * Being rooted is inert for the fleet — scan hides darknet servers — but it is
+ * what lets ns.exec target it, so it must not be left at mockServer's default.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/DarkNet/controllers/NetworkGenerator.ts#L52-L89 */
 export function darkwebServerSpec(ip?: string): ServerSpec {
   return {
     hostname: "darkweb",
@@ -26,6 +37,7 @@ export function darkwebServerSpec(ip?: string): ServerSpec {
     serverGrowth: 0,
     numOpenPortsRequired: 0,
     maxRam: 16,
+    hasAdminRights: true,
     simKind: "DarknetServer",
   };
 }

@@ -42,6 +42,7 @@ graph LR
   BN13 -->|SF13| stanek
   BN14 -->|SF14.2| go_cheat["go.cheat"]
   BN15 -->|"SF15.1: dark web everywhere"| dnet
+  DNAV(["DarkscapeNavigator.exe"]) -->|"not SF-gated"| dnet
 
   opts(["BitNodeBooleanOptions"]) -.->|can disable| gang
   opts -.-> corp
@@ -85,7 +86,7 @@ graph TD
   career -->|combat skills| bladeburner
   career -->|charisma → job title| factions
   career -->|company rep 400k| factions
-  career -->|charisma| dnet
+  career -->|"charisma: heartbleed gate + labyrinth ladder"| dnet
   career -->|city / travel| factions
   career -->|salary + crime| MONEY(($ money))
 
@@ -107,9 +108,12 @@ graph TD
   stanek -->|multipliers| ALL[[all features]]
   corp --> MONEY
   stock --> MONEY
-  dnet -->|"$, promoteStock"| MONEY
+  dnet -->|"$: openCache + phishing (x DarknetMoneyMultiplier)"| MONEY
+  dnet -->|"promoteStock: volatility, not income"| stock
+  dnet -->|"phishingAttack builds charisma"| career
   dnet -->|"labyrinth: The Red Pill"| progression
-  dnet -->|memoryReallocation| RAM
+  dnet -->|memoryReallocation| DRAM[["darknet RAM (separate pool)"]]
+  DRAM --> dnet
 
   factions -->|rep → augmentations| progression
   MONEY -->|purchased servers| RAM
@@ -142,7 +146,7 @@ reset. Three levels: *install* (buying augs), *node* (destroying a BitNode),
 | Resource | Produced by | Consumed by | Survives install? | Survives node? |
 |---|---|---|---|---|
 | **Work slot** (`Player.currentWork`) | time; multiplied by `sleeves` | `career`, `factions`, `bladeburner`, grafting, program creation, class/gym | n/a | n/a |
-| **Money** | `hacking`, `career`, `hacknet`, `corp`, `stock`, `gang`, `side`, `dnet` | everything | **No** → $1000 | No |
+| **Money** | `hacking`, `career`, `hacknet`, `corp`, `stock`, `gang`, `side`, `dnet` (node-dependent: `DarknetMoneyMultiplier` is 0 in BN8, 0.05 in BN9) | everything | **No** → $1000 | No |
 | **Karma** | crime only (player, sleeves, gang) | `factions` invites, `gang` (−54 000) | **Yes** | No |
 | **Kills** | Homicide, Assassination | `factions` (Dark Army 5, Speakers 30) | **No** → 0 | No |
 | **Faction reputation** | faction work, donations, `side`, `go`, `gang` | augmentation purchases | **No** → converted to favor | No |
@@ -153,7 +157,8 @@ reset. Three levels: *install* (buying augs), *node* (destroying a BitNode),
 | **Intelligence** | many actions, slowly (BN5/SF5) | production bonuses everywhere | **Yes** | **Yes — the only stat** |
 | **Augmentations owned** | `factions`, grafting, `gang`, `dnet` labyrinth | `progression`; counts toward Daedalus | **Yes** | No |
 | **Home RAM** | money | our scripts, dodges, probes, the farm | **Yes** | No |
-| **Fleet RAM** | purchased + rooted + hacknet servers, `dnet` | dispatch, dodge placement, `stanek` charging | **No** | No |
+| **Fleet RAM** | purchased + rooted + hacknet servers | dispatch, dodge placement, `stanek` charging | **No** | No |
+| **Darknet RAM** | `dnet` `memoryReallocation` on hosts we hold | dnet agents only — never in `ns.scan`, never in the heap, partly owner-blocked, and able to vanish | **No** | No |
 | **Programs** (port openers) | darkweb ($) or creation (work slot + skill) | rooting, therefore the whole fleet | **No** → NUKE plus augmentation/SF-granted programs (and BitFlume) | No → the new node's grants (and BitFlume) |
 | **City** | travel, $200 000 | city factions, Tetrads, Dark Army, Syndicate, Tian Di Hui | **No** → Sector-12 | No |
 | **Source-File levels** | destroying BitNodes | everything on graph 1 | Yes | **Yes** |

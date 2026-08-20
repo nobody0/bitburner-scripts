@@ -41,6 +41,7 @@ allowed to read both sides:
 | `shared/strategy/side/contracts.ts` | handcrafted solvers ship inside the game bundle | `sim/tests/contracts-parity.test.ts` |
 | `shared/strategy/stanek/pack.ts` | ships inside the game bundle | `sim/tests/stanek-parity.test.ts` |
 | `shared/strategy/ram-supply.ts` | ships inside the game bundle | `sim/tests/drift-pins.test.ts` |
+| `sim/features/dnet.ts` timing | `DarkNet/` cannot be vendored — see below | **required before `"full"`; needs the checkout** |
 
 The stock pair is worth a note, because three of its constants are inline
 literals upstream rather than named exports — the 0.45 cycle-flip chance, the
@@ -48,6 +49,35 @@ literals upstream rather than named exports — the 0.45 cycle-flip chance, the
 suite pins those by matching the vendored SOURCE TEXT. That is uglier than
 importing a constant and it is the only way to notice upstream changing 0.45 to
 0.4, which would silently halve the value of every regime-aware decision.
+
+### The darknet is transcribed from the checkout, not vendored
+
+`tools/vendor.ts` strips `DarknetServer` — "its import graph detonates into the
+whole game UI" — so `sim/vendor/bitburner/src/` has no `DarkNet/` directory. The
+darknet is therefore the one subsystem whose numbers come from the **checkout**
+rather than the vendor extract, and its citations are `src/DarkNet/...` paths at
+the pinned commit.
+
+Everything the simulator needs is exact and transcribable, so nothing here is
+guessed: `calculateAuthenticationTime` and `getBackdoorAuthTimeDebuff`
+(`DarkNet/effects/effects.ts`), `getHeartbleedTime` as `× 1.5` of it
+(`NetscriptFunctions/Formulas.ts`), `getRamBlockRemoved`
+(`DarkNet/effects/ramblock.ts`), `getStasisLinkLimit` and
+`getSetStasisLinkDuration`, the network constants and mutation cadence
+(`DarkNet/Enums.ts`), and the 24-entry model list. They are written up in
+[`spec/strategy/bitnodes/bn15.md`](strategy/bitnodes/bn15.md).
+
+Two rules follow, and they are the reason to prefer transcription over shape:
+
+- **Do not model a darknet formula by its shape.** A shape with invented
+  constants, exposed through `ns.formulas.dnet.*`, would let in-game code
+  calibrate against the simulator's own guess and read the agreement as
+  evidence — the same trap the market section below describes. Transcribe, and
+  pin the transcription.
+- **A parity suite is required before `dnet` may become `"full"`** in
+  `sim/fidelity.ts`. Since `DarkNet/` cannot be vendored, that suite has to
+  match the checkout's source text the way the stock pair matches inline
+  literals, and it can only run where the checkout is present.
 
 ## The market, and the three things it cannot bring with it
 

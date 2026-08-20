@@ -29,7 +29,9 @@ and will eventually own a simulator model; the composed "beat this BitNode"
 problem is what they add up to. See [spec/features.md](spec/features.md) for
 the machinery and [spec/strategy/](spec/strategy/README.md) for the play: a
 note per BitNode, a feature catalog (unlock / needs / yields), and the
-dependency graph of shared resources.
+dependency graph of shared resources. One feature has its own page because its
+work runs off `home`: [spec/dnet.md](spec/dnet.md), the darknet's
+remote-execution model.
 
 ## Reference repositories
 

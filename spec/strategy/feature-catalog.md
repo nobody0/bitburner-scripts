@@ -171,7 +171,7 @@ a *precondition* others wait on, not an objective of its own.
 | Karma | Crime (player, sleeves, gang) | `factions` invites, `gang` (−54 000) |
 | Kills | Homicide and Assassination only | `factions` (Speakers 30, Dark Army 5) |
 | Combat skills | Crime exp, gym, faction field work | `factions`, `bladeburner` |
-| Charisma | Company work, university | Promotions → `factions` (Silhouette), `dnet` |
+| Charisma | Company work, university, `dnet` phishing | Promotions → `factions` (Silhouette), `dnet` heartbleed gate + labyrinth ladder |
 | Hacking skill | University, and `hacking`'s own exp | `hacking`, `factions` |
 | Company rep | Company work | `factions` — ten megacorps at 400k |
 | Money | Salary, crime | Everything |
@@ -411,18 +411,32 @@ irreversible. **In BN13 there is no ban.**
 
 ## `dnet` — the darknet
 
-**Unlock** BN15 or SF15. **SF15.1 unlocks the full dark web in every BitNode**
-and permanently grants the TOR router and DarkScape.
+**Unlock** BN15, an active SF15, **or** `DarkscapeNavigator.exe` on home — the
+last is not source-file gated. **SF15.1 unlocks the full dark web in every
+BitNode** and permanently grants the TOR router and DarkScape.
 
-**Needs** **Charisma** — `getServerRequiredCharismaLevel` gates targets, and
-SF15.2/15.3 scale job and faction rep off it. BN15 is the only node that buffs
-`CharismaLevelMultiplier`. This is the only charisma edge outside promotions.
+**Needs** **Charisma**, for the **labyrinth ladder** (`LABYRINTH_CHARISMA =
+[300, 600, 1500, 2500, 3000, 3500, 4000]`) and as a hard gate on `heartbleed`.
+For `authenticate` charisma is only a duration scalar, not a requirement.
+SF15.2/15.3 scale job and faction rep off it, and BN15 is the only node that
+buffs `CharismaLevelMultiplier`. Also needs **a credential per host** and **a
+directly-connected host we already run scripts on** — those are the real gates.
 
-**Gives** Money; fleet RAM via `memoryReallocation()`; a `stock` interaction via
-`promoteStock()`; and **The Red Pill** from the labyrinth — in every BitNode
-except BN8, not just BN15.
+**Gives** Money, where the node allows it — `DarknetMoneyMultiplier` is 1 in
+BN15 but 0 in BN8 and as low as 0.05 elsewhere. Charisma back to `career`, via
+`phishingAttack()` and the labyrinth augmentations. A `stock` interaction via
+`promoteStock()`, which raises volatility rather than earning directly. And
+**The Red Pill** from the labyrinth — in every BitNode except BN8, not just
+BN15.
 
-**Contends** Fleet RAM, and the work slot for labyrinth actions.
+**Contends** **Dodge RAM on home**, for the report sweep and the launch stub.
+Not fleet RAM: darknet hosts never appear in `ns.scan`, so they are never in the
+server snapshot or the heap, part of their RAM is owner-blocked, and they can
+vanish. `memoryReallocation()` grows that separate pool. Also the work slot for
+labyrinth actions.
+
+**Remote execution** See [`spec/dnet.md`](../dnet.md) — `probe()` is host-local,
+sessions are per-PID, and only `exec` is distance-gated.
 
 ---
 

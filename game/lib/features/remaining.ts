@@ -9,6 +9,14 @@ import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts"
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
+import { DNET_REPORT_PORT, decodeReport, observationOf } from "../../../shared/strategy/dnet/courier.ts";
+import {
+  coverage,
+  emptyKnowledge,
+  foldObservations,
+  type DarknetKnowledge,
+  type Observation,
+} from "../../../shared/strategy/dnet/knowledge.ts";
 import {
   isSoA,
   NEUROFLUX,
@@ -2020,6 +2028,50 @@ const stanek: FeatureDriver = {
 
 // --- dnet -------------------------------------------------------------------
 
+/** What agents have told us, as opposed to what home can see for itself.
+ *
+ * Module-scope rather than on the store because it is the driver's working
+ * memory: the store carries the published digest, this carries the full fact
+ * set with provenance. `dnetModule.reset` clears it. */
+let dnetKnowledge: DarknetKnowledge | undefined;
+/** Cumulative response codes reported by agents. Kept next to the knowledge so
+ * one reset clears both. */
+let dnetCodes: Record<string, number> = {};
+
+/** Drain the report port and fold what arrived.
+ *
+ * readPort is 0 GB, so the controller reads it DIRECTLY — no dodge, no stub, no
+ * exec. That is the whole reason the report travels by port instead of as a file
+ * needing ls/read/rm inside a 1.3 GB dodge.
+ *
+ * Reports are drained to exhaustion each tick: a port is a bounded queue (50
+ * entries upstream), and a writer that finds it full gives up rather than
+ * silently dropping the oldest observation. */
+function drainDnetReports(ctx: DriverContext): {
+  observations: Observation[];
+  drained: number;
+  rejected: number;
+} {
+  const observations: Observation[] = [];
+  let drained = 0;
+  let rejected = 0;
+  for (;;) {
+    const raw = ctx.ns.readPort(DNET_REPORT_PORT);
+    if (typeof raw !== "string" || raw === "NULL PORT DATA") break;
+    drained++;
+    const decoded = decodeReport(raw);
+    if (!decoded.ok) {
+      rejected++;
+      continue;
+    }
+    observations.push(observationOf(decoded.report));
+    for (const [code, count] of Object.entries(decoded.report.codes ?? {})) {
+      dnetCodes[code] = (dnetCodes[code] ?? 0) + count;
+    }
+  }
+  return { observations, drained, rejected };
+}
+
 const dnet: FeatureDriver = {
   id: "dnet",
   everyMs: 30_000,
@@ -2027,12 +2079,41 @@ const dnet: FeatureDriver = {
   async tick(ctx: DriverContext) {
     const topic = ctx.state.topics.dnet;
     if (!topic) return;
+
+    // The far net is learned ONLY from delivered reports. home's own probe can
+    // see darkweb and nothing else, so without this the map stops at the first
+    // hop. See spec/dnet.md.
+    const now = Date.now();
+    // The generation is the install epoch: agents survive a controller cold
+    // boot and a build handoff, so a report has to be tied to the world it was
+    // gathered in, not to this process.
+    const progression = ctx.state.topics.progression;
+    const generation = `${progression?.bitNode ?? 0}:${progression?.lastAugReset ?? 0}`;
+    if (!dnetKnowledge || dnetKnowledge.generation !== generation) {
+      dnetKnowledge = emptyKnowledge(generation);
+      dnetCodes = {};
+    }
+    const { observations, drained, rejected } = drainDnetReports(ctx);
+    const folded = foldObservations(dnetKnowledge, observations, now);
+    dnetKnowledge = folded.knowledge;
+    merge(ctx.state, "dnet", {
+      channel: {
+        drained,
+        rejected,
+        fromDeadRuns: folded.rejectedGenerations,
+        forgotten: folded.hostsForgotten.length,
+      },
+      coverage: coverage(dnetKnowledge, now),
+      codes: { ...dnetCodes },
+    });
     const decision = stepDarknet({
       topologyComplete: topic.topologyComplete === true,
       servers: (topic.servers ?? []).map((server) => ({
         hostname: server.hostname,
         depth: server.depth,
-        blockedRam: server.blockedRam,
+        // Absent means "not known" (an offline host's details are a dummy), and
+        // the strategy only ever compares it as a capacity, so treat it as none.
+        blockedRam: server.blockedRam ?? 0,
         isOnline: server.isOnline ?? true,
         requiredCharisma: server.requiredCharisma ?? 0,
         stasisLinked: server.stasisLinked ?? false,
@@ -3383,7 +3464,15 @@ export const stanekModule: FeatureModule = {
 
 export const dnetModule: FeatureModule = {
   driver: dnet,
-  reset: resetWithTopic("dnet"),
+  reset: (state) => {
+    // Module state as well as the topic: an agent's knowledge describes the
+    // world we just left, and a BitNode reset destroys the darknet outright.
+    // A stale fold surviving a prestige would hand the new node the old net's
+    // map, which is the same class of bug as a stale topic.
+    dnetKnowledge = undefined;
+    dnetCodes = {};
+    resetWithTopic("dnet")(state);
+  },
   claims: (ctx) => {
     const action = ctx.state.topics.dnet?.plan?.action.type;
     return maybeActionClaim("dnet", ctx, action === "idle" ? undefined : action, dnetMethods(action));

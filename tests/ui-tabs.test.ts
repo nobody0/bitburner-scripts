@@ -357,7 +357,18 @@ describe("tab rendering", () => {
     state.topics.dnet = {
       reachable: 2, maxDepth: 1, stasisLinkLimit: 2, stasisLinked: [], topologyComplete: true,
       instability: { authenticationDurationMultiplier: 1, authenticationTimeoutChance: 0.1 },
-      servers: [{ hostname: "dn-1", depth: 1, blockedRam: 8, isOnline: true, requiredCharisma: 50 }],
+      servers: [
+        {
+          hostname: "dn-1", depth: 1, blockedRam: 11, isOnline: true, requiredCharisma: 50,
+          maxRam: 16, usedRam: 0, modelId: "2G_cellular", passwordLength: 6,
+          passwordFormat: "numeric", passwordHint: "the dog, obviously", data: "rex",
+          logTrafficInterval: 45, difficulty: 3, isStationary: true, hasSession: false,
+          directlyConnected: true,
+        },
+        // A host that went offline answers with a dummy details object, so
+        // everything except its liveness is absent and depth is the -1 sentinel.
+        { hostname: "dn-gone", depth: -1, blockedRam: 0, isOnline: false },
+      ],
       plan: {
         action: { type: "stasis", hostname: "dn-1" },
         ranked: [{ hostname: "dn-1", depth: 1, unlocks: 3 }],
@@ -401,6 +412,16 @@ describe("tab rendering", () => {
     expect(rendered).toContain("total score");
     expect(rendered).toContain("objective value");
     expect(rendered).not.toContain("invented");
+    // The darknet's discovery surface is rendered, because the whole point of
+    // acquiring it is to be able to look at it.
+    expect(rendered).toContain("2G_cellular");
+    expect(rendered).toContain("6 × numeric");
+    expect(rendered).toContain("the dog, obviously");
+    // Usable RAM is maxRam minus the owner's block, and it is what decides
+    // whether an agent fits: 16 - 11 - 0.
+    expect(rendered).toContain("5.00GB");
+    // getDepth's -1 sentinel is "unknown", never a depth to render or sort on.
+    expect(rendered).not.toContain(">-1<");
   });
 
   test("the raw event view drops planner prose but keeps observed codes", () => {

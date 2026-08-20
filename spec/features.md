@@ -35,7 +35,7 @@ enforces that the five stay in sync.
 | `sleeves` | Sleeves | BN10 Digital Carbon | BN10 or SF10 |
 | `go` | Go | BN14 IPvGO Subnet Takeover | `go.getGameState()` — **0 GB** |
 | `stanek` | Stanek | BN13 They're lunatics | BN13 or SF13 |
-| `dnet` | Darknet | BN15 The Secrets of the Dark Net | BN15 or SF15 |
+| `dnet` | Darknet | BN15 The Secrets of the Dark Net | BN15, SF15, or `DarkscapeNavigator.exe` |
 | `side` | Side | — | always |
 
 Notes on the boundaries, since several are judgement calls:
@@ -185,6 +185,11 @@ and then hands every driver `{route, horizons: {install, node}}` in its context
 today; a feature adopts it the moment its evaluation needs to be visible to
 others before anyone acts.
 
+`dnet` is the one feature whose work runs somewhere other than `home`: sessions
+are per-PID and several of its calls only work from the target host, so it owns
+agent entrypoints under `game/dnet/`. Its remote-execution model and the
+provenance/expiry rule that follows are in [`spec/dnet.md`](dnet.md).
+
 ### Cross-feature coordination
 
 Two mechanisms, deliberately distinct, both pure and both rendered:
@@ -245,7 +250,9 @@ Everything else is slower by orders of magnitude, which is the reason the
 frame schedules by cadence at all rather
 than running every driver every pass.
 
-All fourteen are implemented; there is no `inert()` helper any more. Four have
+All fourteen are implemented; there is no `inert()` helper any more. Two are
+implemented to the *strategy* level only and refuse to issue their calls —
+`corp` and `dnet` (`spec/progress.md`, and for dnet's reasons `spec/dnet.md`). Four have
 their own file (`factions`, `career`, `hacknet`, `stock`) because they needed
 more than the common shape; the rest share `features/remaining.ts`, which is a
 statement about their SHAPE — build a view, call one pure `step*`, execute at

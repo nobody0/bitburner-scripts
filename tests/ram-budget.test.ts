@@ -50,6 +50,7 @@ const config: BitburnerConfig = {
   entries: [
     { source: "game/start.ts", target: "start.js" },
     { source: "game/worker/worker.ts", target: "worker/worker.js" },
+    { source: "game/dnet/scout.ts", target: "dnet/scout.js" },
   ],
   restoreEntry: { source: "game/restore.ts", target: "restore.js" },
 };
@@ -190,6 +191,44 @@ describe("in-game static RAM budget", () => {
     expect(analysis.overridden).toBe(false);
     expect(analysis.entries.map((entry) => entry.name).sort()).toEqual(["grow", "hack", "share", "weaken"]);
     expect(analysis.cost).toBeCloseTo(BASE_GB + 0.1 + 0.15 + 0.15 + 2.4, 10);
+  });
+
+  test("the darknet scout stays small enough to run on a darknet host", async () => {
+    const artifacts = await buildScripts(config, { telemetry: true });
+    const scout = artifacts.find((a) => a.filename === "dnet/scout.js")!;
+    // A darknet host's usable RAM is maxRam minus whatever its owner blocks, and
+    // only `darkweb` is guaranteed a clear 16 GB. Every call here is one the
+    // scout genuinely makes, and the absences are the point: no authenticate and
+    // no connectToSession (it needs no session), no scp and no exec (it reports
+    // through a port), and no setStasisLink, which alone would cost 12 GB.
+    const analysis = analyzeScriptRam(scout.content);
+    expect(analysis.overridden).toBe(false);
+    expect(analysis.entries.map((entry) => entry.name).sort())
+      .toEqual(["getHostname", "getServerDetails", "heartbleed", "probe"]);
+    expect(analysis.cost).toBeCloseTo(BASE_GB + 0.1 + 0.6 + 0.2 + 0.05, 10);
+  });
+
+  test("a --perf scout is silent but behaviourally identical", async () => {
+    const telemetryBuild = (await buildScripts(config, { telemetry: true }))
+      .find((a) => a.filename === "dnet/scout.js")!;
+    const perfBuild = (await buildScripts(config, { telemetry: false }))
+      .find((a) => a.filename === "dnet/scout.js")!;
+    // The socket is gone, so the observed-vs-known gap disappears from the UI...
+    expect(telemetryBuild.content).toContain("WebSocket");
+    expect(perfBuild.content).not.toContain("WebSocket");
+    // ...but the scout still probes the same hosts, still charges the same RAM,
+    // and still writes the same report to the same port. That is the proof the
+    // agent's own telemetry is never load-bearing.
+    //
+    // The two builds do NOT have identical name surfaces, and should not:
+    // getScriptName and the atExit that initTelemetry registers exist only to
+    // label and flush the send, so a perf build is right to drop them. Both are
+    // 0 GB, so the charge is unchanged.
+    const charged = (source: string) => analyzeScriptRam(source).entries.map((e) => e.name).sort();
+    expect(charged(perfBuild.content)).toEqual(charged(telemetryBuild.content));
+    expect(analyzeScriptRam(perfBuild.content).cost).toBe(analyzeScriptRam(telemetryBuild.content).cost);
+    expect(perfBuild.content).toContain("tryWritePort");
+    expect(perfBuild.content).not.toContain("getScriptName");
   });
 
   test("every worker ramOverride covers the base plus the call it makes", () => {

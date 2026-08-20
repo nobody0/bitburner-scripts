@@ -31,16 +31,21 @@ The acceptance bar for a feature is the full vertical slice:
 | 3 | hacknet | **done** |
 | 4 | stock | **done** — rebuilt in phase 15; the first version could not place a trade |
 | 5 | gang | **done** |
-| 6 | corp | **done** |
+| 6 | corp | **strategy only †** — the stage machine is complete; the calls are not issued |
 | 7 | bladeburner | **done** |
 | 8 | sleeves | **done** |
 | 9 | go | **done** |
 | 10 | stanek | **done** |
-| 11 | dnet | **done** |
+| 11 | dnet | **strategy only †** — no darknet action is executed |
 | 12 | side | **done** |
 | 13 | progression | **done** — endgame route, install barrier, two-pass arm/execute, and post-install restart are live |
 | 14 | endgame route + refresh/act split | **done** — see below |
 | 15 | stock rebuild + hack/grow manipulation tie-in | **done** — see below |
+
+
+**† strategy only** — pure strategy, driver, telemetry, tab and unit tests all
+exist, but the driver refuses to issue the calls rather than acting against an
+unmodelled world. See *Known gaps* below; the roster and that section must agree.
 
 ## Completed work
 
@@ -464,7 +469,7 @@ Every feature now has a real driver module; `inert()` is gone from
 | 8 | sleeves | Allocate N sleeves across the task menu | Exact per-sleeve argmax (sleeves do not interfere). Shock scales output down linearly, so recovery dominates. |
 | 9 | go | Wins, territory, streaks | Upstream-oracle arena; trained value network over legal candidates and their seeded faction replies, executed as a WebGPU compute shader. See `spec/go-ai.md`. |
 | 10 | stanek | Pack the grid, then charge | **Exhaustive packing is PROVABLY optimal** — the strongest evidence in the roster. Correctly leaves out a large fragment to fit two smaller ones. |
-| 11 | dnet | Traverse under a stasis-link budget | Exact max-reachable search; links spent where they unlock the most. |
+| 11 | dnet | Traverse under a stasis-link budget | **None yet.** The max-reachable search is exact over an assumed complete graph, which the API cannot produce — `probe()` is host-local, `dnetCore` hard-codes `topologyComplete: false`, and `stepDarknet` idles on that. It has never run. |
 | 12 | side | Solve every coding contract | **All 30 v3.0.1 contract types implemented** with exact registry coverage and known-answer tests. Discovery is ls-only; staged batches peak at `attempt` RAM, and a first rejection is logged and quarantined rather than retried. Infiltration stays manual. |
 | 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); directly tested live milestone selector, with a small-set ordering oracle retained for offline comparisons. |
 
@@ -1227,9 +1232,15 @@ the *strategy* level without full end-to-end execution:
 - **Corporation actions are not executed.** The stage machine, its
   preconditions and its digest are complete and tested; issuing the calls
   against an unmodelled world is the one thing this project refuses to do.
-- **Darknet authentication is refused, not faked.** `authenticate(host,
-  password)` needs a password behind the darknet's own discovery mechanic; the
-  driver reports that rather than calling with an invented credential.
+- **Every darknet action is refused, not faked.** Three separate reasons, and
+  only the first was previously recorded. `authenticate(host, password)` needs a
+  password behind the darknet's own discovery mechanic, so the driver reports
+  that rather than calling with an invented credential. `setStasisLink()` takes
+  **no host** — it pins the calling script's own server — so it cannot be issued
+  from `home` at all. And the topology is host-local by API design: `probe()`
+  returns only the calling host's darknet neighbours and `ns.scan` excludes the
+  darknet, so `topologyComplete` can never become true and the strategy's
+  reachability search never runs. See `spec/dnet.md`.
 - **Sim models exist for factions, crime, hacknet, stock and Go.** Gang, corp,
   bladeburner, sleeves, stanek and dnet have pure strategy + driver + tests,
   but no complete system model — so their ns calls report `unmodeled()` rather
@@ -1278,7 +1289,9 @@ the *strategy* level without full end-to-end execution:
 - **Limit and stop orders are not used** (BN8 or SF8.3). The solver places none,
   so the simulator's `processOrders` is a no-op and `ns.stock.placeOrder` reports
   `unmodeled()` rather than filling an order that would never trigger.
-- **BN15's darknet volatility boost is a neutral 1x.** `getDarknetVolatilityMult`
+- **BN15's darknet volatility boost is a neutral 1x.** `ns.dnet.promoteStock`
+  raises a symbol's volatility only — it does not change forecasts and earns
+  nothing directly. `getDarknetVolatilityMult`
   genuinely raises a symbol's volatility upstream, decaying at each market cycle,
   but `dnet` has no simulation model to drive it. The vendored price engine calls
   through an adapter, so the day darknet lands the mechanic connects with no

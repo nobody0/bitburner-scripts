@@ -71,6 +71,11 @@ export interface SimNsHost {
   scripts: Map<string, ScriptMain>;
   /** host -> directly connected hosts. */
   network: Map<string, string[]>;
+  /** Netscript ports: shared across every host, and the reason a darknet agent
+   *  needs neither a session nor an scp to report home. Lazily created, since a
+   *  run that never uses one should not carry an empty map.
+   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptPort.ts#L48-L100 */
+  ports?: Map<number, unknown[]>;
   ramCtx: RamCostContext;
   /** ns.getResetInfo's answer. */
   reset: ResetInfo;
@@ -239,6 +244,24 @@ function launch(host: SimNsHost, process: SimProcess): void {
       },
     );
   });
+}
+
+/** Settings.MaxPortCapacity's default. A user can raise it in game, so this is
+ * the floor a script may rely on rather than a hard truth. */
+const MAX_PORT_CAPACITY = 50;
+const EMPTY_PORT_DATA = "NULL PORT DATA";
+
+function portQueue(host: SimNsHost, portNumber: unknown): unknown[] {
+  if (typeof portNumber !== "number" || !Number.isInteger(portNumber) || portNumber < 1) {
+    throw new Error(`invalid port number: ${String(portNumber)}`);
+  }
+  host.ports ??= new Map();
+  let queue = host.ports.get(portNumber);
+  if (!queue) {
+    queue = [];
+    host.ports.set(portNumber, queue);
+  }
+  return queue;
 }
 
 export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
@@ -465,10 +488,31 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       } else if (server.purchasedByPlayer) {
         known.add("home");
       }
-      return [...known].map((entry) => {
-        const neighbour = requireServer(host, entry);
-        return returnByIP ? neighbour.ip : neighbour.hostname;
-      });
+      // Darknet servers are deliberately invisible to scan upstream —
+      // `if (s === null || s instanceof DarknetServer) continue;` — which is why
+      // ns.dnet.probe() exists at all. Without this, `darkweb` would appear in
+      // the fleet snapshot and, once correctly rooted, be treated as a 16 GB
+      // worker host the real game never offers.
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L185-L191
+      return [...known]
+        .map((entry) => requireServer(host, entry))
+        .filter((neighbour) => neighbour.simKind !== "DarknetServer")
+        .map((neighbour) => (returnByIP ? neighbour.ip : neighbour.hostname));
+    },
+    // Only the two port calls anything actually makes. writePort, peek,
+    // clearPort, getPortHandle and nextPortWrite deliberately stay unimplemented
+    // so they report themselves rather than being modelled on speculation.
+    tryWritePort: (portNumber: unknown, data: unknown): boolean => {
+      const queue = portQueue(host, portNumber);
+      // Refusing a full port rather than dropping the oldest entry is upstream's
+      // behaviour, and it is what lets a writer notice nobody is draining.
+      if (queue.length >= MAX_PORT_CAPACITY) return false;
+      queue.push(typeof data === "object" && data !== null ? structuredClone(data) : data);
+      return true;
+    },
+    readPort: (portNumber: unknown): unknown => {
+      const queue = portQueue(host, portNumber);
+      return queue.length === 0 ? EMPTY_PORT_DATA : queue.shift();
     },
     hasRootAccess: (hostname: unknown): boolean => requireServer(host, hostname, process.host).hasAdminRights,
     getServerMoneyAvailable: (hostname: unknown): number => {
