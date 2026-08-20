@@ -599,3 +599,183 @@ describe("career serves the company chain", () => {
     expect(decision.action).toMatchObject({ type: "promote", subject: "NWO", field: "Business" });
   });
 });
+
+// --- the unrequested write ---------------------------------------------------
+
+/** THE LIVE FAILURE. A BN12 save spent 2h14m writing relaySMTP.exe, re-affirmed
+ *  it every five seconds, and resumed it after every reload.
+ *
+ *  Nothing chose it for a reason. Career offered every creatable opener whether
+ *  or not anything had asked for one; with no `file:` need posted, each scored
+ *  `unpriced/0`, and ranking fell through to the money tie-break — where a
+ *  program's `moneyPerSec` is `-purchaseCost / seconds`, so the longest and
+ *  most expensive write ranks FIRST. Every existing case in this file posts the
+ *  need, which is exactly why none of them caught it. */
+describe("a program nobody asked for", () => {
+  const HORIZON = 3_600;
+  // The live numbers: intelligence 355 halves relaySMTP's level requirement to
+  // 72.5, so hacking 78 makes a 2h14m write eligible; FTPCrack is 28.8 minutes.
+  const ftpCrack = { name: "FTPCrack.exe", timeMs: 1_728_000, purchaseCost: 1_500_000 };
+  const relaySmtp = { name: "relaySMTP.exe", timeMs: 8_030_000, purchaseCost: 5_000_000 };
+
+  test("is not offered at all", () => {
+    const decision = stepCareer(
+      view({ programs: [ftpCrack, relaySmtp], planningHorizonSec: HORIZON }),
+      postNeeds([]),
+    );
+    expect(decision.ranked.filter((entry) => entry.action.type === "program")).toEqual([]);
+    expect(decision.action.type).not.toBe("program");
+  });
+
+  test("does not win the slot by being the most expensive thing on an empty board", () => {
+    // The regression itself: before the gate, both wrote as unpriced zeros and
+    // -5e6/8030 beat -1.5e6/1728, so the 2h14m option won.
+    const decision = stepCareer(
+      view({ programs: [ftpCrack, relaySmtp], planningHorizonSec: HORIZON }),
+      postNeeds([]),
+    );
+    expect(decision.action).not.toMatchObject({ subject: "relaySMTP.exe" });
+  });
+
+  test("a requested opener is still offered, and is still priced on its duration", () => {
+    // The gate must not break the case the mechanism exists for.
+    const decision = stepCareer(
+      view({ programs: [ftpCrack], planningHorizonSec: HORIZON, rates: {
+        best: new Map(),
+        worth: new Map([["file:FTPCrack.exe", 2_400]]),
+      } }),
+      postNeeds([need({ kind: "file", subject: "FTPCrack.exe", target: 1, have: 0, weight: 8 })]),
+    );
+    expect(decision.action).toMatchObject({ type: "program", subject: "FTPCrack.exe" });
+  });
+
+  test("between two equally worthless writes, the shorter one ranks first", () => {
+    // Defence in depth for the tie-break itself: with both requested but
+    // nothing pricing the channel, occupancy decides — never amortised cost,
+    // which rewards length.
+    const decision = stepCareer(
+      view({ programs: [ftpCrack, relaySmtp], planningHorizonSec: HORIZON }),
+      postNeeds([
+        need({ kind: "file", subject: "FTPCrack.exe", target: 1, have: 0, weight: 8 }),
+        need({ kind: "file", subject: "relaySMTP.exe", target: 1, have: 0, weight: 8 }),
+      ]),
+    );
+    const programs = decision.ranked.filter((entry) => entry.action.type === "program");
+    expect(programs.map((entry) => entry.action.subject)).toEqual(["FTPCrack.exe", "relaySMTP.exe"]);
+  });
+});
+
+// --- giving the slot back ----------------------------------------------------
+
+/** `idle` means "leave the current work alone" — three separate branches emit
+ *  it to say exactly that, and career had no other path, so work the planner
+ *  had stopped choosing kept running until the game ended it. Across a reload
+ *  the game restores `Player.currentWork`, so "never choosing it again" left a
+ *  two-hour write running forever. */
+describe("work the planner has abandoned", () => {
+  const shoplift = crime({ type: "Shoplift", timeMs: 2_000, money: 15_000, karma: 0.1, chance: 1, kills: 0 });
+
+  test("is stopped when nothing on the menu matches it", () => {
+    const decision = stepCareer(
+      view({
+        programs: [{ name: "relaySMTP.exe", timeMs: 8_030_000, purchaseCost: 5_000_000 }],
+        currentWork: { kind: "create_program", subject: "relaySMTP.exe" },
+      }),
+      postNeeds([]),
+    );
+    expect(decision.action).toMatchObject({ type: "stop", subject: "relaySMTP.exe" });
+  });
+
+  test("is stopped even when the menu is empty entirely", () => {
+    // The cold-start shape: no crime table yet, no funded course, nothing
+    // requested. Previously this returned idle and inherited the work.
+    const decision = stepCareer(
+      view({ currentWork: { kind: "create_program", subject: "relaySMTP.exe" } }),
+      postNeeds([]),
+    );
+    expect(decision.action.type).toBe("stop");
+  });
+
+  test("is not stopped when a slot-using option will replace it anyway", () => {
+    // Issuing any work cancels and replaces whatever is running, so stopping
+    // first would spend a whole pass achieving nothing.
+    const decision = stepCareer(
+      view({ crimes: [shoplift], currentWork: { kind: "create_program", subject: "relaySMTP.exe" } }),
+      postNeeds([need({ kind: "karma", target: -45, have: 0, weight: 10 })]),
+    );
+    expect(decision.action).toMatchObject({ type: "crime", subject: "Shoplift" });
+  });
+
+  test("is left alone when it is still the best option", () => {
+    const decision = stepCareer(
+      view({ crimes: [shoplift], currentWork: { kind: "crime", subject: "Shoplift" } }),
+      postNeeds([need({ kind: "karma", target: -45, have: 0, weight: 10 })]),
+    );
+    expect(decision.action.type).not.toBe("stop");
+  });
+
+  test("never stops another feature's work", () => {
+    // factions holds the slot; cancelling its faction work from here would be
+    // the same bug pointed the other way.
+    const decision = stepCareer(
+      view({ holdsWorkSlot: false, currentWork: { kind: "faction", subject: "CyberSec" } }),
+      postNeeds([]),
+    );
+    expect(decision.action.type).not.toBe("stop");
+  });
+});
+
+// --- committing before the menu exists ---------------------------------------
+
+/** The crime table arrives from a five-minute dodged probe, and the runner
+ *  admits one dodged probe per pass — so the first decisions of a run are made
+ *  before any crime is known. An empty menu then reads as "nothing else is
+ *  worth doing", which is not what it means. */
+describe("a menu that is still filling", () => {
+  const opener = need({ kind: "file", subject: "FTPCrack.exe", target: 1, have: 0, weight: 8 });
+  const ftpCrack = { name: "FTPCrack.exe", timeMs: 1_728_000, purchaseCost: 1_500_000 };
+  const rates = { best: new Map(), worth: new Map([["file:FTPCrack.exe", 2_400]]) };
+
+  test("does not start work that occupies the slot", () => {
+    const decision = stepCareer(
+      view({ programs: [ftpCrack], planningHorizonSec: 3_600, rates, menuComplete: false }),
+      postNeeds([opener]),
+    );
+    expect(decision.action.type).toBe("idle");
+    expect(decision.why).toBe("menu incomplete");
+  });
+
+  test("starts the same work once the menu is complete", () => {
+    const decision = stepCareer(
+      view({ programs: [ftpCrack], planningHorizonSec: 3_600, rates, menuComplete: true }),
+      postNeeds([opener]),
+    );
+    expect(decision.action).toMatchObject({ type: "program", subject: "FTPCrack.exe" });
+  });
+
+  test("never interrupts a write already in progress", () => {
+    // Holding off is about STARTING a commitment; abandoning one half-written
+    // because a probe was late would be the more expensive mistake.
+    const decision = stepCareer(
+      view({
+        programs: [ftpCrack],
+        planningHorizonSec: 3_600,
+        rates,
+        menuComplete: false,
+        currentWork: { kind: "create_program", subject: "FTPCrack.exe" },
+      }),
+      postNeeds([opener]),
+    );
+    expect(decision.action.type).not.toBe("stop");
+    expect(decision.why).not.toBe("menu incomplete");
+  });
+
+  test("continuous work is unaffected — it can be swapped the moment something better lands", () => {
+    const shoplift = crime({ type: "Shoplift", timeMs: 2_000, money: 15_000, karma: 0.1, chance: 1, kills: 0 });
+    const decision = stepCareer(
+      view({ crimes: [shoplift], menuComplete: false }),
+      postNeeds([need({ kind: "karma", target: -45, have: 0, weight: 10 })]),
+    );
+    expect(decision.action).toMatchObject({ type: "crime", subject: "Shoplift" });
+  });
+});

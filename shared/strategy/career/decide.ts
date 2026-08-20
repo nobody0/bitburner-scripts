@@ -58,7 +58,7 @@ import {
  * a fixed view. The score itself remains the policy: exhaustive enumeration
  * prevents search shortcuts from obscuring which option won. */
 
-export type CareerActionType = "crime" | "class" | "gym" | "company" | "program" | "apply" | "promote" | "quit" | "travel" | "continue" | "idle";
+export type CareerActionType = "crime" | "class" | "gym" | "company" | "program" | "apply" | "promote" | "quit" | "travel" | "continue" | "idle" | "stop";
 export type CareerPriorityBand = NeedUrgency | "income";
 
 export interface CareerAction {
@@ -156,6 +156,15 @@ export interface CareerView {
   planningHorizonSec?: number;
   /** Whether this feature holds Player.currentWork this tick. */
   holdsWorkSlot: boolean;
+  /** False while an input the menu depends on has not arrived yet.
+   *
+   * The crime table comes from a dodged probe on a five-minute cadence, and the
+   * runner admits ONE dodged probe per pass, so at a cold start every crime is
+   * missing for the first passes — which is exactly when career makes its first
+   * commitment. An option that must OCCUPY the slot cannot be judged against a
+   * menu that is still filling: "nothing else is worth anything" and "nothing
+   * else has been measured yet" are not the same statement. */
+  menuComplete?: boolean;
   /** `elapsedSec` is how long the current work has already run. A part-finished
    *  write is charged only the time it has LEFT: the elapsed part is sunk, and
    *  charging it again would mean a write that cannot start can never accumulate
@@ -507,7 +516,21 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     if (course.costPerSec > 0 && view.moneyGranted < course.costPerSec * TRAINING_FUND_WINDOW_SEC) continue;
     options.push(planCourse(course, view));
   }
-  for (const program of view.programs ?? []) options.push(planProgram(program, values, view));
+  for (const program of view.programs ?? []) {
+    // Only what was ASKED for. `CareerView.programs` is documented as
+    // "requested by another feature", but the driver offered every creatable
+    // opener, and an unrequested one produces nothing the board prices: its
+    // `file:` rate is zero, `collectRates` drops it, and it arrives at the
+    // ranking as `unpriced/0`. Two such options then decided the slot on the
+    // money tie-break — where a program's `moneyPerSec` is
+    // `-purchaseCost / seconds`, so the LONGEST, most expensive write looks
+    // cheapest. Measured: a save with hacking 78 and intelligence 355 (which
+    // halves relaySMTP's level requirement to 72.5, making a 2h14m write
+    // eligible) chose it over a 29-minute FTPCrack, re-affirmed it every five
+    // seconds, and resumed it after every reload.
+    if (!values.has(needKey({ kind: "file", subject: program.name }))) continue;
+    options.push(planProgram(program, values, view));
+  }
 
   const jobs = view.jobs ?? {};
   for (const company of view.companies ?? []) {
@@ -595,17 +618,6 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   const horizonSec = view.planningHorizonSec ?? DEFAULT_PLANNING_HORIZON_SEC;
   const ranked: ScoredAction[] = menu.map((entry) => priceAction(entry, field, worth, values, horizonSec));
 
-  if (ranked.length === 0) {
-    return {
-      action: { type: "idle", why: "no actions available (needs BN4 or SF4 for crime stats)" },
-      ranked,
-      serving,
-      workPriority: "income",
-      incomeFallback: false,
-      why: "nothing to rank",
-    };
-  }
-
   // WHAT WINS THE SLOT is `slotValue`: BN-seconds saved, summed over everything
   // the option produces, each channel scored as our rate over the best rate
   // anyone can manage. Urgency bands no longer sort this list — an option that
@@ -627,6 +639,15 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     // rather than a term in the score, because how much a need is worth is the
     // POSTER's statement (`Need.valueSec`), not something to re-derive here.
     if (a.progress !== b.progress) return b.progress - a.progress;
+    // ...then prefer the option that ties the slot up for less of the run.
+    // `deliveryFraction` is 1 for anything continuous and below 1 exactly in
+    // proportion to the occupancy an option demands, so this is the same
+    // statement the value already makes — it just has to be made again where
+    // the values are equal. Without it the money tie-break below ranks two
+    // unpriced programs by amortised purchase cost, which REWARDS the longest
+    // write, and a 2h14m commitment beats a 29-minute one on the strength of
+    // being more expensive.
+    if (a.deliveryFraction !== b.deliveryFraction) return b.deliveryFraction - a.deliveryFraction;
     // ...then earn. A priced-at-ZERO money channel is a real answer — mid-run
     // the farm clears every money gate, so no crime saves the route a second —
     // and it makes every crime tie. Without this the list fell through to the
@@ -639,6 +660,51 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     return a.action.subject! < b.action.subject! ? -1 : 1;
   });
 
+  // ABANDONED WORK. Everything below assumes the slot's occupant is one of the
+  // options being ranked; when it is not, no branch below ever touches it, and
+  // career has no other stop path — so the game keeps running it forever. That
+  // is how a program the planner would no longer choose survived both the
+  // decision that dropped it and every subsequent restart: the game persists
+  // `Player.currentWork` across a script reload, and "not choosing it again" is
+  // not the same as stopping it.
+  //
+  // Only ever fired while career holds the slot, so another feature's work is
+  // never cancelled from here — and only when nothing is about to replace it:
+  // issuing any slot-using action already cancels and replaces the current
+  // work, so stopping first would spend a whole pass doing nothing.
+  const current = view.currentWork;
+  if (
+    current
+    && view.holdsWorkSlot
+    && careerWorkMode(current.kind) !== "progress"
+    && !ranked.some((entry) => sameWork(current, entry.action))
+    && !(ranked[0] && actionUsesWorkSlot(ranked[0].action))
+  ) {
+    return {
+      action: {
+        type: "stop",
+        ...(current.subject !== undefined ? { subject: current.subject } : {}),
+        why: `${current.subject ?? current.kind} is no longer worth the slot`,
+      },
+      ranked,
+      serving,
+      workPriority: ranked[0]?.priority ?? "income",
+      incomeFallback: false,
+      why: "the slot's occupant is not on the menu",
+    };
+  }
+
+  if (ranked.length === 0) {
+    return {
+      action: { type: "idle", why: "no actions available (needs BN4 or SF4 for crime stats)" },
+      ranked,
+      serving,
+      workPriority: "income",
+      incomeFallback: false,
+      why: "nothing to rank",
+    };
+  }
+
   const best = ranked[0]!;
   const needsSlot = actionUsesWorkSlot(best.action);
   if (needsSlot && !view.holdsWorkSlot) {
@@ -649,6 +715,27 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       workPriority: best.priority,
       incomeFallback: !servesNeed(best),
       why: "no work slot this tick",
+    };
+  }
+  // Do not START a commitment against a menu that is still filling. Only
+  // options that OCCUPY the slot before delivering anything are held back —
+  // `deliveryFraction < 1` is exactly that set — and only when they are not
+  // already running, so a write in progress is never interrupted by a late
+  // probe. Continuous work is unaffected: it can be swapped the moment
+  // something better arrives, so starting it costs nothing to be wrong about.
+  if (
+    needsSlot
+    && view.menuComplete === false
+    && best.deliveryFraction < 1
+    && !sameWork(view.currentWork, best.action)
+  ) {
+    return {
+      action: { type: "idle", why: `waiting for the rest of the menu before committing ${Math.round((1 - best.deliveryFraction) * 100)}% of the run` },
+      ranked,
+      serving,
+      workPriority: best.priority,
+      incomeFallback: !servesNeed(best),
+      why: "menu incomplete",
     };
   }
 

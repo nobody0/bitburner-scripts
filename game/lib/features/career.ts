@@ -247,6 +247,12 @@ function buildCareerView(
         : {}),
     })),
     holdsWorkSlot,
+    // The crime table is the menu's other half and arrives from a five-minute
+    // dodged probe, one dodged probe per pass — so the first commitments of a
+    // run are made before it exists. Reporting its absence lets the planner
+    // hold off on anything that would occupy the slot, rather than concluding
+    // from an empty menu that nothing else was worth doing.
+    menuComplete: career?.crimes !== undefined,
     ...(career?.currentWork
       ? {
           currentWork: {
@@ -420,6 +426,19 @@ async function execute(_ns: NS, ctx: DriverContext, decision: CareerDecision): P
   switch (decision.action.type) {
     case "idle":
       return false;
+    case "stop": {
+      // The only path that gives the slot back. `idle` deliberately does not:
+      // it means "leave the current work alone", and three separate branches
+      // emit it to mean exactly that. Stopping is a different statement, and
+      // it needs its own action or work the planner has abandoned runs until
+      // the game itself ends it.
+      const result = await replaceWork(["singularity.stopAction"], (stubNs: NS) =>
+        stubNs["singularity"]["stopAction"](),
+      );
+      if (result === refused) return false;
+      record(Boolean(result.value), result.value ? `stopped ${decision.action.subject ?? "work"}` : "nothing was running");
+      return true;
+    }
     case "continue": {
       const result = await run(["singularity.getCurrentWork"], (stubNs: NS) => {
         const task = stubNs["singularity"]["getCurrentWork"]() as (Record<string, unknown> & WorkTaskLike) | null;
@@ -851,6 +870,11 @@ function careerMethods(type: string | undefined): readonly string[] {
     case "quit": return ["singularity.quitJob", "singularity.getCurrentWork"];
     case "travel": return ["singularity.travelToCity", "singularity.getCurrentWork"];
     case "continue": return ["singularity.getCurrentWork"];
+    // Giving the slot back is an action like any other and needs its RAM
+    // claimed the same way: without an entry here no claim is posted, the
+    // dodge is refused for want of a lease, and the work it was meant to end
+    // keeps running — the exact failure this action exists to fix.
+    case "stop": return ["singularity.stopAction", "singularity.getCurrentWork"];
     case "program": return ["singularity.createProgram", "singularity.getCurrentWork", "ls"];
     default: return [];
   }
