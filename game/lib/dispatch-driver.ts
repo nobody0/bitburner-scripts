@@ -51,6 +51,10 @@ export function drainCompletions(state: DriverState): CompletionEvent[] {
           opId: entry.opId,
           target: entry.target,
           threads: entry.threads,
+          // Stamped by the worker in its own atExit, not here: a pump may run
+          // many milliseconds after the effect landed, and the whole point of
+          // the measurement is the difference between planned and actual.
+          ...(entry.at === undefined ? {} : { at: entry.at }),
           // Undefined is the worker protocol's failure marker (kill, reset or
           // exception). Preserve it so a failed weaken cannot masquerade as a
           // proven min-security landing window.
@@ -257,6 +261,15 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
   // Pooled job to an already-running serve worker: no exec at all — push the
   // job and poke the worker's parked resolver. A missing mailbox means the
   // worker died (reload, kill); failing the op makes the pure layer respawn.
+  // Last line of defence for the fractional strength. The engine throws when
+  // `opts.threads` exceeds the process's thread count, and a throw mid-batch
+  // loses the whole op — so clamp here rather than trusting the pure layer's
+  // arithmetic to land on the right side of a float comparison.
+  // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L434-L474
+  const strengthThreads = action.strengthThreads === undefined
+    ? undefined
+    : Math.min(action.strengthThreads, action.threads);
+
   if (action.worker && !action.worker.spawn) {
     const queue = globals.worker_jobs?.get(action.worker.id);
     if (!queue || !globals.worker_info?.has(action.worker.id)) return false;
@@ -265,6 +278,7 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
       target: action.target,
       ...(action.additionalMsec !== undefined ? { delayUntil: plannedAt + action.additionalMsec } : {}),
       ...(action.stock ? { stock: true } : {}),
+      ...(strengthThreads !== undefined ? { threads: strengthThreads } : {}),
     });
     globals.worker_wake?.get(action.worker.id)?.();
     return true;
@@ -283,6 +297,7 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
       ? { delayUntil: plannedAt + action.additionalMsec }
       : {}),
     ...(!action.worker && action.stock ? { stock: true } : {}),
+    ...(!action.worker && strengthThreads !== undefined ? { strengthThreads } : {}),
   });
   if (action.worker) {
     globals.worker_jobs!.set(action.worker.id, [
@@ -291,6 +306,7 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
         target: action.target,
         ...(action.additionalMsec !== undefined ? { delayUntil: plannedAt + action.additionalMsec } : {}),
         ...(action.stock ? { stock: true } : {}),
+        ...(strengthThreads !== undefined ? { threads: strengthThreads } : {}),
       },
     ]);
   }
@@ -362,9 +378,29 @@ export function reclaimForDodge(
 
 function preemptibleWorkers(state: DriverState): PreemptibleFarmWorker[] {
   const dispatch = state.memory.dispatch;
+  // One pass over the ledger, not two: pooled ops index their resident worker,
+  // non-pooled ops are candidates in their own right. The candidate list is
+  // inherently one entry per preemptible op — that is the broker's contract,
+  // not an accident of this loop.
   const activeByWorker = new Map<number, { opId: number; tracked: Tracked }>();
+  const oneShot: PreemptibleFarmWorker[] = [];
   for (const [opId, tracked] of dispatch.tracked) {
-    if (tracked.workerId !== undefined) activeByWorker.set(tracked.workerId, { opId, tracked });
+    if (tracked.workerId !== undefined) {
+      activeByWorker.set(tracked.workerId, { opId, tracked });
+      continue;
+    }
+    if (tracked.segment === 'share') continue;
+    if (state.globals.worker_info?.get(opId)?.pid === undefined) continue;
+    oneShot.push({
+      workerId: opId,
+      opId,
+      hostname: tracked.hostname,
+      kind: tracked.kind,
+      segment: tracked.segment,
+      gb: tracked.gb,
+      ...(tracked.landing !== undefined ? { landing: tracked.landing } : {}),
+      active: true,
+    });
   }
 
   const workers: PreemptibleFarmWorker[] = [];
@@ -382,20 +418,9 @@ function preemptibleWorkers(state: DriverState): PreemptibleFarmWorker[] {
       active: active !== undefined,
     });
   }
-  for (const [opId, tracked] of dispatch.tracked) {
-    if (tracked.workerId !== undefined || tracked.segment === 'share') continue;
-    if (state.globals.worker_info?.get(opId)?.pid === undefined) continue;
-    workers.push({
-      workerId: opId,
-      opId,
-      hostname: tracked.hostname,
-      kind: tracked.kind,
-      segment: tracked.segment,
-      gb: tracked.gb,
-      ...(tracked.landing !== undefined ? { landing: tracked.landing } : {}),
-      active: true,
-    });
-  }
+  // Appended one by one, never spread: this list is one entry per in-flight op
+  // and a spread of tens of thousands would exceed the argument limit.
+  for (const worker of oneShot) workers.push(worker);
   return workers;
 }
 
@@ -420,43 +445,52 @@ export function settleBrokerShareExits(state: DriverState): number[] {
 /** Reconcile the heap against the game's real usage (30s sweep). Returns the
  * hosts that had drifted. */
 export function resyncHeap(state: DriverState, servers: Record<string, Server>): string[] {
+  const dispatch = state.memory.dispatch;
+  const info = state.globals.worker_info;
+
+  // A worker's process releases real RAM before the controller can drain its
+  // atExit completion. A fleet scan in that interval therefore observes less
+  // RAM than the heap still (correctly) owns; replacing the heap with that
+  // observation and then draining the completion subtracts the same worker
+  // twice. JIT makes this ordinary because many landings can queue during a
+  // sweep. Separate our accounted reservations from observed live workers:
+  // keep every reservation until dispatch consumes its completion, while
+  // still reconciling genuinely foreign RAM whenever no exit is pending.
+  //
+  // Bucketed in ONE pass over the three ledgers rather than re-walking all of
+  // them per host: liveness is a per-op `worker_info` lookup, so it cannot come
+  // from a maintained index, but it also does not need re-deriving for every
+  // host in the fleet.
+  const accounted = new Map<string, number>();
+  const live = new Map<string, number>();
+  const add = (hostname: string, gb: number, alive: boolean): void => {
+    accounted.set(hostname, (accounted.get(hostname) ?? 0) + gb);
+    if (alive) live.set(hostname, (live.get(hostname) ?? 0) + gb);
+  };
+  for (const [opId, tracked] of dispatch.tracked) {
+    if (tracked.workerId !== undefined) continue;
+    add(tracked.hostname, tracked.gb, info?.has(opId) ?? false);
+  }
+  for (const worker of dispatch.pool.workers.values()) {
+    add(worker.hostname, worker.gb, info?.has(worker.workerId) ?? false);
+  }
+  for (const worker of dispatch.shareWorkers.values()) {
+    add(worker.hostname, worker.gb, info?.has(worker.workerId) ?? false);
+  }
+
   const drifted: string[] = [];
   for (const server of Object.values(servers)) {
-    const heapHost = state.memory.dispatch.heap.host(server.hostname);
+    const heapHost = dispatch.heap.host(server.hostname);
     if (!heapHost) continue;
-
-    // A worker's process releases real RAM before the controller can drain its
-    // atExit completion. A fleet scan in that interval therefore observes less
-    // RAM than the heap still (correctly) owns; replacing the heap with that
-    // observation and then draining the completion subtracts the same worker
-    // twice. JIT makes this ordinary because many landings can queue during a
-    // sweep. Separate our accounted reservations from observed live workers:
-    // keep every reservation until dispatch consumes its completion, while
-    // still reconciling genuinely foreign RAM whenever no exit is pending.
-    let accountedGb = 0;
-    let liveGb = 0;
-    for (const [opId, tracked] of state.memory.dispatch.tracked) {
-      if (tracked.hostname !== server.hostname || tracked.workerId !== undefined) continue;
-      accountedGb += tracked.gb;
-      if (state.globals.worker_info?.has(opId)) liveGb += tracked.gb;
-    }
-    for (const worker of state.memory.dispatch.pool.workers.values()) {
-      if (worker.hostname !== server.hostname) continue;
-      accountedGb += worker.gb;
-      if (state.globals.worker_info?.has(worker.workerId)) liveGb += worker.gb;
-    }
-    for (const worker of state.memory.dispatch.shareWorkers.values()) {
-      if (worker.hostname !== server.hostname) continue;
-      accountedGb += worker.gb;
-      if (state.globals.worker_info?.has(worker.workerId)) liveGb += worker.gb;
-    }
+    const accountedGb = accounted.get(server.hostname) ?? 0;
+    const liveGb = live.get(server.hostname) ?? 0;
     const priorForeignGb = Math.max(0, heapHost.used - accountedGb);
     const observedForeignGb = Math.max(0, server.ramUsed - liveGb);
     const pendingExit = accountedGb > liveGb + 0.01;
     const reconciledUsed = accountedGb + (pendingExit
       ? Math.max(priorForeignGb, observedForeignGb)
       : observedForeignGb);
-    const drift = state.memory.dispatch.heap.resync(server.hostname, reconciledUsed);
+    const drift = dispatch.heap.resync(server.hostname, reconciledUsed);
     if (Math.abs(drift) > 0.05) drifted.push(server.hostname);
   }
   return drifted;

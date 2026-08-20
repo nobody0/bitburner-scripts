@@ -48,6 +48,10 @@ export class RunStore {
   #emitters = new Set<string>();
   #metaFile: string;
   #createdAt = Date.now();
+  /** Run-length collapse of unchanged state, keyed by state key: the last
+   * payload actually written, and the newest record repeating it that has not
+   * been written yet. See `#writeState`. */
+  #spans = new Map<string, { written: string; held?: LogRecord }>();
 
   constructor(dir: string, hello: HelloBody, resume?: ArtifactMetadata) {
     this.hello = hello;
@@ -91,12 +95,10 @@ export class RunStore {
       if (previousSeq !== undefined && record.seq <= previousSeq) continue;
       this.#lastSeq.set(record.run, record.seq);
       accepted.push(record);
-      const line = JSON.stringify(record);
-      this.#writer.write(line + "\n");
-      this.recordCount++;
       if (this.#firstT === null || record.t < this.#firstT) this.#firstT = record.t;
       if (record.t > this.lastT) this.lastT = record.t;
       if (record.kind === "state") this.state.set(record.key, record);
+      const line = JSON.stringify(record);
       this.ring.push(record);
       this.#ringBytes.push(line.length);
       if (this.ring.length > RING_SIZE) {
@@ -104,9 +106,65 @@ export class RunStore {
         this.ring.splice(0, drop);
         this.#ringBytes.splice(0, drop);
       }
+      // Live viewers get everything (`accepted` is what gets broadcast); only
+      // the FILE collapses unchanged spans.
+      if (record.kind === "state") this.#writeState(record, line);
+      else this.#write(line);
     }
     this.#writeMetadata();
     return accepted;
+  }
+
+  /** Persist one state record, collapsing a run of identical payloads to its
+   * FIRST and LAST occurrence.
+   *
+   * The emitter deliberately does not deduplicate: proving a topic has not
+   * moved costs a second serialization of it, and game-script clock time is
+   * the one resource the whole telemetry design exists to protect. The hub has
+   * CPU to spare, so the sifting happens here.
+   *
+   * First AND last, not just first, because the span itself is information: a
+   * topic that held one value for four hours is a different observation from
+   * one sampled once, and keeping only the opening record would make the two
+   * indistinguishable. Two records bound the interval exactly.
+   *
+   * Measured on a live 2.58 GB run: `progression` was 50% of the file, sent
+   * every 200 ms, and its 13.8 KB of plan/needs/multipliers changed on 12 of
+   * 1259 consecutive pairs. */
+  #writeState(record: StateRecord, line: string): void {
+    const payload = JSON.stringify(record.data);
+    const span = this.#spans.get(record.key);
+    // `span !== undefined` explicitly: `JSON.stringify(undefined)` IS
+    // `undefined`, so on the FIRST record of a key with no `data` the optional
+    // chain compares undefined to undefined, takes this branch, and then throws
+    // writing `span.held` on a span that does not exist.
+    if (span !== undefined && span.written === payload) {
+      // Same value again: remember it as the span's current end instead of
+      // writing it. Each repeat replaces the previous placeholder, so a span
+      // of any length costs exactly one deferred record.
+      span.held = record;
+      return;
+    }
+    // The value moved, so the previous span is over and its closing record can
+    // be written now.
+    if (span?.held) this.#write(JSON.stringify(span.held));
+    this.#spans.set(record.key, { written: payload });
+    this.#write(line);
+  }
+
+  /** Close every open span, so the last observation of each topic is on disk.
+   * Without this a run that ends mid-span loses the end of it entirely. */
+  #flushSpans(): void {
+    for (const [key, span] of this.#spans) {
+      if (!span.held) continue;
+      this.#write(JSON.stringify(span.held));
+      this.#spans.set(key, { written: span.written });
+    }
+  }
+
+  #write(line: string): void {
+    this.#writer.write(line + "\n");
+    this.recordCount++;
   }
 
   /** Newest records that fit in `maxBytes`, oldest first. Always yields at
@@ -126,6 +184,7 @@ export class RunStore {
   detach(): Promise<void> | undefined {
     this.#attachments = Math.max(0, this.#attachments - 1);
     if (this.#attachments > 0) return;
+    this.#flushSpans();
     this.live = false;
     this.closedAt = Date.now();
     const closed = new Promise<void>((resolve, reject) => {

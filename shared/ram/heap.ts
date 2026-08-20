@@ -297,7 +297,9 @@ export class Heap {
     // best-fit. Home remains the fallback so a remote block that can do the
     // job does not consume controller headroom.
     const choose = (hosts: Iterable<HeapHost>): { host: HeapHost; realThreads: number } | undefined => {
-      let best: { host: HeapHost; realThreads: number; gb: number; free: number } | undefined;
+      let best:
+        | { host: HeapHost; realThreads: number; gb: number; free: number; cores: number }
+        | undefined;
       for (const host of hosts) {
         const free = this.#free(host, tentative);
         const realThreads = coreAware
@@ -305,13 +307,29 @@ export class Heap {
           : threads;
         const gb = realThreads * blockSize;
         if (free < gb) continue;
+        // Cores multiply grow and weaken and do NOTHING for hack, so a hack
+        // sitting on a cored host is pure waste: it pays the same RAM as it
+        // would anywhere while denying the bonus to the only operations that
+        // can spend it. A core-aware request already prefers cores implicitly
+        // (more cores means fewer real threads means less gb), so this only
+        // needs to push the other way for the requests that cannot use them.
+        //
+        // A PREFERENCE, never a constraint: `cores` is ranked below capacity
+        // and above the fit tie-break, so hack still places on a cored host
+        // when nothing else fits rather than failing. The reference reaches
+        // the same arrangement by sorting clients core-ascending and scanning
+        // hack from the front while grow and weaken scan from the back, so the
+        // two meet in the middle (imports/batchPlanner.ts:327-345, :420-429).
+        const cores = coreAware ? 0 : host.cores;
         if (
           !best ||
           gb < best.gb ||
-          (gb === best.gb && free < best.free) ||
-          (gb === best.gb && free === best.free && host.hostname < best.host.hostname)
+          (gb === best.gb && cores < best.cores) ||
+          (gb === best.gb && cores === best.cores && free < best.free) ||
+          (gb === best.gb && cores === best.cores && free === best.free &&
+            host.hostname < best.host.hostname)
         ) {
-          best = { host, realThreads, gb, free };
+          best = { host, realThreads, gb, free, cores };
         }
       }
       return best ? { host: best.host, realThreads: best.realThreads } : undefined;

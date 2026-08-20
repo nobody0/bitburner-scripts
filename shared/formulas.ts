@@ -30,6 +30,12 @@
 /** BitNode multiplier subset the hacking formulas read. All default 1 (BN1). */
 export interface HackNodeMults {
   HackingSpeedMultiplier?: number;
+  /** Scales the SKILL derived from hacking experience, not the experience
+   *  itself. Needed wherever a future hacking level is projected: it is 0.35 in
+   *  BN4 and 0.25 in BN9, so omitting it over-projects the level roughly
+   *  threefold and makes every projected hack percentage wrong.
+   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Person.ts */
+  HackingLevelMultiplier?: number;
   HackExpGain?: number;
   ScriptHackMoney?: number;
   /** The fraction of DRAINED money the player actually receives.
@@ -157,6 +163,19 @@ export function coreBonus(cores = 1): number {
   return 1 + (cores - 1) / 16;
 }
 
+/** Security added per thread by a successful hack. The game charges this once
+ * per hacking thread and TWICE per grow cycle actually used, so a grow thread
+ * fortifies by `GROW_FORTIFY`. Both are the same game constant, and they live
+ * here rather than inlined at each weaken-sizing site because every consumer
+ * (targeting, jit, bounds, prediction) has to agree with the engine exactly or
+ * the weakens under- or over-cover and the farm drifts off min security.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/data/Constants.ts#L10 */
+export const HACK_FORTIFY = 0.002;
+
+/** = 2 x HACK_FORTIFY. The factor is `processSingleServerGrowth` fortifying by
+ * `2 * ServerFortifyAmount * usedCycles`, not a coincidence. */
+export const GROW_FORTIFY = 2 * HACK_FORTIFY;
+
 /** = vendored getWeakenEffect.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/ServerHelpers.ts#L287-L295 */
 export function weakenEffect(ctx: HackContext, threads: number, cores = 1): number {
@@ -233,10 +252,32 @@ export function skillFromExp(exp: number, mult = 1): number {
   return Math.max(Math.min(value, Number.MAX_VALUE), 1);
 }
 
-/** Experience needed to reach a skill level — the inverse of skillFromExp. */
+/** Experience needed to reach a skill level — the inverse of skillFromExp.
+ *
+ * The closed form alone is NOT a reliable inverse: at many levels it lands one
+ * or two ULPs below the threshold, so skillFromExp(expForSkill(n)) returns
+ * n - 1. The game hits the same wall and corrects for it by walking upward in
+ * doubling ULP-scaled steps until the round trip holds; this reproduces that
+ * loop exactly, because callers here use the result to decide when a skill
+ * gate is reached (evaluator's exp valuation, server-access planning, career
+ * targets) and being one level short there is a real mis-plan.
+ * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/formulas/skill.ts#L17-L34 */
 export function expForSkill(skill: number, mult = 1): number {
   if (mult === 0) return 0;
-  return Math.max(Math.min(Math.exp((skill / mult + 200) / 32) - 534.6, Number.MAX_VALUE), 0);
+  let value = Math.exp((skill / mult + 200) / 32) - 534.6;
+  const floorSkill = Math.floor(skill);
+  if (skill === floorSkill && Number.isFinite(skill) && Number.isFinite(value)) {
+    let calcSkill = skillFromExp(value, mult);
+    let diff = Math.abs(value * Number.EPSILON);
+    let newValue = value;
+    while (calcSkill < skill) {
+      newValue = value + diff;
+      diff *= 2;
+      calcSkill = skillFromExp(newValue, mult);
+    }
+    value = newValue;
+  }
+  return Math.max(Math.min(value, Number.MAX_VALUE), 0);
 }
 
 export interface SkillProgress {

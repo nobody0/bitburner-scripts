@@ -25,6 +25,15 @@ branch's unwired `src/_lib/batchers/jit.ts`.
 Enforced by `tests/heap.test.ts`, `sim/tests/targeting.test.ts` (bench),
 `sim/tests/dispatch.test.ts` (bench), and `dispatch.slow` telemetry at runtime.
 
+The dispatcher figure is **not yet a claim about a loaded fleet**: its bench
+drives ~20 in-flight ops, while a live 32k-op fleet once produced a 63-second
+pass. Two reasons the number cannot simply be re-measured in the simulator:
+`sim/realm/timers.ts` virtualises `performance.now`, so `pumpMaxMs` under a
+scenario is virtual time and blind to real CPU, and the bench is the one place
+that escapes it by building `SimWorld` without installing the realm. Scaling
+that bench, and gating on a deterministic work-unit counter rather than wall
+clock, is outstanding.
+
 ## Per-target solve (`shared/strategy/targeting.ts`)
 
 At the prepped state (minSec, moneyMax M), for steal fraction s:
@@ -183,9 +192,15 @@ but the dispatcher's per-pass prep op cap means prep cannot actually use it.
 
 ## HWGW dispatcher (`shared/strategy/dispatch.ts`)
 
-Four ops land H → W1 → G → W2, `SPACER = 200 ms` apart; each batch is anchored
-at least `4·SPACER` after the previous one (collision guard, pure bookkeeping —
-no ns reads). `additionalMsec = landing − now − duration`.
+Four ops land H → W1 → G → W2, `SPACER_MS = 5 ms` apart; each batch is anchored
+at least `INTERVAL_MS = 4·SPACER_MS = 20 ms` after the previous one (collision
+guard, pure bookkeeping — no ns reads). `additionalMsec = landing − now −
+duration`.
+
+`SPACER_MS` is a LANDING separation, not a launch budget; the launch slack is
+`JIT_LAUNCH_GUARD_MS = 230 ms` and is absorbed entirely by `additionalMsec`.
+Conflating the two previously cost a factor of forty in pipeline depth — see
+`spec/jit-reference.md` §2 before changing either.
 
 **Farm modes** (`shared/strategy/mode.ts`) are a separate axis from target
 choice: the evaluator answers WHICH target, `decideMode` answers HOW to farm
@@ -239,6 +254,16 @@ predicted post-hack money, so a target admitted at 90 % money no longer
 under-grows into a downward drift. Fold parity with the vendored effects is
 pinned in `sim/tests/prediction.test.ts`.
 
+**A pass costs pool count, not process count.** The in-flight ledger holds one
+entry per op — tens of thousands at depth — so `DispatchMemory` carries four
+indices over it (`byTarget`, `ourGbByHost`, `weakenPending`, `heldGbByRole`)
+written only by `trackOp`/`untrackOp`. A `Tracked` is immutable once
+registered, which is what makes them safe; `tests/dispatch-index.test.ts` holds
+each against a full recompute after every mutation. They replaced eight full
+ledger walks per pass — one of them inside the per-batch loop, so
+O(batches x ops) — which is what pegged a core and starved the game engine's
+timers for 63 s at a stretch on a live 32k-worker fleet.
+
 Prep fires in **non-overlapping waves per host** (a new wave only when the host
 has no WAVE ops in flight — the counter is kept symmetric on the tracked
 ledger, so farm-batch completions on a desynced farm host can never unlock an
@@ -289,14 +314,31 @@ its process ends — the moment its heap reservation frees (the WORKER owns the
 RAM; job completions merely flip it idle). Ops compose from idle workers
 (exact-match for hack — one call — greedy largest-first for the divisible
 kinds) plus a batch-atomically allocated remainder that spawns new workers.
-Pooling is a BROWSER-RAM relief valve, not a throughput win: idle workers
-strand game RAM between jobs (measured −20 % time-to-goal with it always on),
-so it self-gates on live-op pressure (`POOL_PRESSURE_OPS`, just before HGW's
-threshold) AND on the batch launch period fitting the idle window
+Idle workers are indexed by `(kind, role)` then exact thread count, so a take
+costs the size of the take rather than the size of the pool; the index
+reproduces the selection order of the scan it replaced (descending threads,
+then ascending `workerId`), which is what keeps the emitted action stream
+unchanged. Resident RAM is summed per host and per role at spawn and exit
+(`gbByHost`, `gbByRole`) — a worker owns its block for its whole process life,
+so nothing moves on a job boundary. Pooling self-gates on live-op pressure (`POOL_PRESSURE_OPS`, just
+before HGW's threshold) AND on the batch launch period fitting the idle window
 (`POOL_REUSE_WINDOW_MS` — early-game depth-1 pipelines would strand every
 worker). `stats.execs` (fresh processes) against `launched` (ops) is the churn
-figure. Pinned by the pool-ledger test in `sim/tests/dispatch.test.ts` and the
-real serve-loop tests in `sim/tests/worker-serve.test.ts`.
+figure. Pinned by `tests/worker-pool.test.ts` (index against the old scan), the
+pool-ledger test in `sim/tests/dispatch.test.ts`, and the real serve-loop tests
+in `sim/tests/worker-serve.test.ts`.
+
+The gates above were set by a measurement — −20 % time-to-goal with pooling
+always on, attributed to idle workers stranding game RAM between jobs — that
+**needs re-taking before it is trusted again**. It was made while `planTake`
+scanned and sorted every resident worker on every call, a cost that existed
+only on the pooled path, so "always on" was also "always quadratic"; the
+attribution to stranding was never isolated from it. Two further changes have
+since moved the same ground: the landing gap fell 200 ms → 5 ms, raising
+pipeline depth and with it the fraction of idle windows that see a next job,
+and role-envelope reservation now holds role RAM across the interval anyway.
+Re-running the always-on arm is cheap and settles whether the gates still earn
+their keep.
 
 The `dispatch_wake` poke is the trigger for the **weaken-landing wake**
 (`game/lib/wake.ts`): the controller races its tick sleep against a promise
@@ -408,10 +450,11 @@ money bands held during farming.
 
 ## Known gaps
 
-- Share/exp segment is declared but not yet dispatched. Its RAM (and an idle
-  prep segment's) now SPILLS to the farm instead of idling — measured −13%
-  median on hacking-early (18.5m → 16.1m, no seed worse) — but share work
-  itself still never runs.
+- An idle share/exp or prep segment's RAM SPILLS to the farm instead of idling —
+  measured −13% median on hacking-early (18.5m → 16.1m, no seed worse). Share
+  work itself IS now dispatched (`launchShare`, `shared/strategy/dispatch.ts`,
+  with the marginal-value cutover in `shared/strategy/share.ts`); the earlier
+  "never runs" note here was stale.
 - The evaluator never invests in a target upgrade whose prep exceeds the
   horizon, which on a small early fleet is every better target: joesguns
   scores 6× n00dles at skill 30 but preps in hours on 92 GB, so the farm sits

@@ -1,5 +1,7 @@
 import {
+  GROW_FORTIFY,
   growthLogPerThread,
+  HACK_FORTIFY,
   growThreads,
   hackChance,
   hackExpGain,
@@ -267,15 +269,15 @@ export function solveCycle(
     // HGW: no weaken lands between the hack and the grow, so the grow fires
     // at min + 0.002·H — weaker growth per thread, hence the OVERSCALE. The
     // single weaken covers both fortifies.
-    const growK = kind === "hgw" ? growthLogPerThread(ctx, minDifficulty + 0.002 * hackThreads, serverGrowth, cores) : k;
+    const growK = kind === "hgw" ? growthLogPerThread(ctx, minDifficulty + HACK_FORTIFY * hackThreads, serverGrowth, cores) : k;
     if (growK === -Infinity) return undefined;
     const growThreadCount = growThreads(growK, moneyMax, postHack, moneyMax);
     if (!Number.isFinite(growThreadCount)) return undefined;
-    const weaken1 = kind === "hgw" ? 0 : weakenThreadsFor((0.002 * hackThreads) / weakenPerThread);
+    const weaken1 = kind === "hgw" ? 0 : weakenThreadsFor((HACK_FORTIFY * hackThreads) / weakenPerThread);
     const weaken2 =
       kind === "hgw"
-        ? weakenThreadsFor((0.002 * hackThreads + 0.004 * growThreadCount) / weakenPerThread)
-        : weakenThreadsFor((0.004 * growThreadCount) / weakenPerThread);
+        ? weakenThreadsFor((HACK_FORTIFY * hackThreads + GROW_FORTIFY * growThreadCount) / weakenPerThread)
+        : weakenThreadsFor((GROW_FORTIFY * growThreadCount) / weakenPerThread);
     // ScriptHackMoneyGain, NOT ScriptHackMoney: the latter is already folded
     // into `percent` (and therefore `steal`, which sizes the grow). This is the
     // player's cut of what was drained, and it is 0 in BN8 — where the farm
@@ -536,7 +538,7 @@ export function solvePrep(
   // Same ordering insurance as the cycle solve: this weaken is paired with a
   // grow and must still cover it if the two land out of order. W1 needs no
   // upscale — it is sized from an exact observed security excess.
-  const weaken2Threads = weakenThreadsFor((0.004 * growCount) / weakenPerThread);
+  const weaken2Threads = weakenThreadsFor((GROW_FORTIFY * growCount) / weakenPerThread);
 
   const hackTimeAtMin = hackTimeSeconds(ctx, statics.minDifficulty, statics.requiredHackingSkill);
   const weaken1RamSec = weakenTimeS * WORKER_RAM.weaken * weaken1Threads;

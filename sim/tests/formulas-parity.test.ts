@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
+  expForSkill,
+  GROW_FORTIFY,
   growthLogPerThread,
   growThreads,
+  HACK_FORTIFY,
   hackChance,
   hackExpGain,
   hackPercent,
@@ -29,7 +32,8 @@ import {
 import { numCycleForGrowthCorrected } from "../vendor/bitburner/src/Server/GrowthCycles.ts";
 import { calculateServerGrowthLog } from "../vendor/bitburner/src/Server/formulas/grow.ts";
 import { getWeakenEffect } from "../core/effects.ts";
-import { calculateSkill } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
+import { calculateExp, calculateSkill } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
+import { ServerConstants } from "../vendor/bitburner/src/Server/data/Constants.ts";
 
 /** THE CONTRACT (spec/targeting.md, Formula access): shared/formulas.ts must produce
  * bit-for-bit identical results to the vendored game formulas. Exact `toBe`,
@@ -196,5 +200,75 @@ describe("the skill curve is bit-identical to the vendored one", () => {
       // Spending exactly `remaining` more experience buys exactly one level.
       expect(calculateSkill(exp + progress.remaining)).toBe(progress.level + 1);
     }
+  });
+});
+
+describe("the transcribed engine constants match the vendored ones", () => {
+  /** These are game facts every weaken-sizing site has to agree with EXACTLY.
+   * They used to be bare 0.002/0.004 literals scattered across bounds, jit,
+   * targeting, prediction and dispatch; a single wrong copy under-covers a
+   * weaken and the farm drifts off min security a fraction at a time. Now they
+   * have one home and this pins that home to the engine. */
+  test("hack and grow fortify amounts", () => {
+    expect(HACK_FORTIFY).toBe(ServerConstants.ServerFortifyAmount);
+    // processSingleServerGrowth fortifies by 2 * ServerFortifyAmount * cycles.
+    expect(GROW_FORTIFY).toBe(2 * ServerConstants.ServerFortifyAmount);
+  });
+
+  test("the weaken amount behind weakenEffect", () => {
+    const ctx = makeHackContext({
+      skill: 1,
+      intelligence: 0,
+      mults: {
+        hacking_chance: 1, hacking_money: 1, hacking_speed: 1, hacking_exp: 1, hacking_grow: 1,
+      },
+    }, {});
+    // weakenEffect is 0.05/thread at one core in a neutral node; that 0.05 is
+    // the same constant the engine subtracts.
+    expect(weakenEffect(ctx, 1, 1)).toBe(ServerConstants.ServerWeakenAmount);
+  });
+
+  test("grow and weaken run 3.2x and 4x the hack time", () => {
+    // Inlined as bare 3.2 / 4 in targeting's RAM-second coefficients and in
+    // bounds' upper-bound arithmetic. The engine derives them by multiplying
+    // the hack time, so the ratio is exact at every input.
+    const rng = mulberry32(4242);
+    replaceCurrentNodeMults(getBitNodeMultipliers(1, 1));
+    for (let i = 0; i < 200; i++) {
+      const { person, server, ctx } = makeCase(rng);
+      const difficulty = server.hackDifficulty!;
+      const required = server.requiredHackingSkill!;
+      const hack = hackTimeSeconds(ctx, difficulty, required);
+      expect(growTimeSeconds(ctx, difficulty, required)).toBe(hack * 3.2);
+      expect(weakenTimeSeconds(ctx, difficulty, required)).toBe(hack * 4);
+      // And the vendored side agrees, so the ratio is the engine's, not ours.
+      expect(calculateGrowTime(server, person)).toBe(calculateHackingTime(server, person) * 3.2);
+      expect(calculateWeakenTime(server, person)).toBe(calculateHackingTime(server, person) * 4);
+    }
+  });
+
+  test("expForSkill is bit-identical to the vendored calculateExp", () => {
+    // skillProgress round-tripped it, but the inverse itself was never pinned
+    // against the engine -- and it had drifted. The closed form alone lands one
+    // or two ULPs low at many levels, so skillFromExp(expForSkill(n)) returned
+    // n - 1; the game corrects for that with a doubling-ULP walk that this
+    // transcription had dropped. Callers decide skill gates from the result.
+    for (const mult of [0.5, 1, 1.2, 2.75]) {
+      for (let skill = 1; skill < 400; skill++) {
+        expect(expForSkill(skill, mult), `skill=${skill} mult=${mult}`)
+          .toBe(calculateExp(skill, mult));
+        // The property that matters to callers: the round trip actually holds.
+        // Skill 1 is exempt because a high mult puts level 2 at zero
+        // experience, so there is no exp that inverts to 1 -- the game clamps
+        // rather than inverting there, and so do we.
+        if (skill > 1) {
+          expect(skillFromExp(expForSkill(skill, mult), mult), `skill=${skill} mult=${mult}`)
+            .toBe(skill);
+        }
+      }
+    }
+    // The clamps both sides guard.
+    expect(expForSkill(1, 0)).toBe(0);
+    expect(expForSkill(Infinity)).toBe(calculateExp(Infinity));
   });
 });

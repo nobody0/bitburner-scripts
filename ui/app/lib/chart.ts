@@ -17,6 +17,12 @@ export interface ChartSeries {
   label?: string;
 }
 
+/** Per-draw geometry choices. A small multiple has ~200px of width, where the
+ * full chart's 56px y-axis gutter and five gridlines are most of the panel. */
+export interface ChartOptions {
+  compact?: boolean;
+}
+
 export interface ChartGeom {
   series: ChartSeries[];
   sx(t: number): number;
@@ -26,6 +32,7 @@ export interface ChartGeom {
   w: number;
   h: number;
   fmtY(v: number): string;
+  options: ChartOptions;
 }
 
 const geoms = new WeakMap<HTMLCanvasElement, ChartGeom>();
@@ -39,6 +46,7 @@ export function drawSeries(
   series: ChartSeries[],
   t0: number | null,
   fmtY: (v: number) => string = fmtMoney,
+  options: ChartOptions = {},
 ): void {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -55,7 +63,8 @@ export function drawSeries(
     return;
   }
 
-  const pad = { l: 56, r: 10, t: 8, b: 22 };
+  const pad = options.compact ? { l: 34, r: 4, t: 4, b: 14 } : { l: 56, r: 10, t: 8, b: 22 };
+  const lines = options.compact ? 2 : 4;
   let x0 = Infinity;
   let x1 = -Infinity;
   let y1 = 0;
@@ -68,11 +77,11 @@ export function drawSeries(
   const base = t0 ?? x0;
   const sx = (t: number) => pad.l + ((t - x0) / Math.max(1, x1 - x0)) * (w - pad.l - pad.r);
   const sy = (v: number) => h - pad.b - (v / y1) * (h - pad.t - pad.b);
-  geoms.set(canvas, { series: drawn, sx, sy, t0: base, pad, w, h, fmtY });
+  geoms.set(canvas, { series: drawn, sx, sy, t0: base, pad, w, h, fmtY, options });
 
-  ctx.font = `11px ${color("--font-mono") || 'JetBrainsMono, "Courier New", monospace'}`;
-  for (let i = 0; i <= 4; i++) {
-    const v = (y1 / 4) * i;
+  ctx.font = `${options.compact ? 9 : 11}px ${color("--font-mono") || 'JetBrainsMono, "Courier New", monospace'}`;
+  for (let i = 0; i <= lines; i++) {
+    const v = (y1 / lines) * i;
     const y = sy(v);
     ctx.strokeStyle = i === 0 ? color("--baseline") : color("--grid");
     ctx.lineWidth = 1;
@@ -86,10 +95,12 @@ export function drawSeries(
     ctx.fillText(fmtY(v), pad.l - 6, y);
   }
   ctx.textBaseline = "top";
-  ctx.textAlign = "center";
-  for (const f of [0, 0.5, 1]) {
+  // A compact chart labels only its ends, and anchors them INWARD: a centred
+  // label at f=0 would hang into the y-axis gutter it no longer has room for.
+  for (const f of options.compact ? [0, 1] : [0, 0.5, 1]) {
     const t = x0 + (x1 - x0) * f;
-    ctx.fillText(fmtTime(t - base), sx(t), h - pad.b + 4);
+    ctx.textAlign = options.compact ? (f === 0 ? "left" : "right") : "center";
+    ctx.fillText(fmtTime(t - base), sx(t), h - pad.b + 2);
   }
   for (const s of drawn) {
     ctx.strokeStyle = color(s.color);
@@ -107,8 +118,18 @@ export function drawChart(canvas: HTMLCanvasElement, pts: [number, number][], t0
   drawSeries(canvas, [{ pts, color: "--series-1" }], t0);
 }
 
+/** Canvases that already carry their listeners.
+ *
+ * `mount` runs after every render, and the canvas node now SURVIVES a render
+ * (the panel is patched, not rebuilt), so an unguarded attach would add a
+ * fresh pair of listeners twice a second and redraw the chart once per
+ * accumulated listener on every mouse move. */
+const wired = new WeakSet<HTMLCanvasElement>();
+
 /** Wire crosshair + tooltip once; the chart itself is redrawn on every frame. */
 export function attachChartHover(canvas: HTMLCanvasElement, tooltip: HTMLElement): void {
+  if (wired.has(canvas)) return;
+  wired.add(canvas);
   canvas.addEventListener("mousemove", (ev) => {
     const geom = geoms.get(canvas);
     if (!geom) return;
@@ -129,7 +150,7 @@ export function attachChartHover(canvas: HTMLCanvasElement, tooltip: HTMLElement
       }
     }
     if (!best) return;
-    drawSeries(canvas, geom.series, geom.t0, geom.fmtY);
+    drawSeries(canvas, geom.series, geom.t0, geom.fmtY, geom.options);
     const redrawn = geoms.get(canvas);
     if (!redrawn) return;
     ctx.strokeStyle = color("--baseline");
@@ -166,6 +187,6 @@ export function attachChartHover(canvas: HTMLCanvasElement, tooltip: HTMLElement
   canvas.addEventListener("mouseleave", () => {
     tooltip.style.display = "none";
     const geom = geoms.get(canvas);
-    if (geom) drawSeries(canvas, geom.series, geom.t0, geom.fmtY);
+    if (geom) drawSeries(canvas, geom.series, geom.t0, geom.fmtY, geom.options);
   });
 }

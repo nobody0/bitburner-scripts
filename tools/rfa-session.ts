@@ -43,6 +43,36 @@ export class RfaSession {
     if (result !== "OK") throw new Error(`Unexpected pushFile result for ${filename}: ${String(result)}`);
   }
 
+  /** Scripts and text files only: the game answers this from `server.scripts`
+   * and `server.textFiles`, so .msg/.lit/.exe/.cct are not even enumerable. */
+  async getFileNames(server: string): Promise<string[]> {
+    const result = await this.request("getFileNames", { server });
+    if (!Array.isArray(result) || result.some((name) => typeof name !== "string")) {
+      throw new Error(`Unexpected getFileNames result for ${server}: ${String(result)}`);
+    }
+    return result as string[];
+  }
+
+  /** undefined when the file does not exist — an absent build stamp is an
+   * ordinary state (fresh save), not an error. */
+  async getFile(server: string, filename: string): Promise<string | undefined> {
+    const result = await this.request("getFile", { server, filename }).catch(() => undefined);
+    return typeof result === "string" ? result : undefined;
+  }
+
+  /** false when the game refuses — deleting a script that is still running is
+   * the expected refusal, and it must be a skip rather than a failed sync. */
+  async deleteFile(server: string, filename: string): Promise<boolean> {
+    const result = await this.request("deleteFile", { server, filename }).catch(() => undefined);
+    return result === "OK";
+  }
+
+  async getAllServers(): Promise<{ hostname: string; hasAdminRights: boolean; purchasedByPlayer: boolean }[]> {
+    const result = await this.request("getAllServers");
+    if (!Array.isArray(result)) throw new Error(`Unexpected getAllServers result: ${String(result)}`);
+    return result as { hostname: string; hasAdminRights: boolean; purchasedByPlayer: boolean }[];
+  }
+
   dispose(reason = new Error("Remote File API session closed")): void {
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timeout);

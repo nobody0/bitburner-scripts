@@ -25,6 +25,12 @@ export interface WorkerInfo {
    *  short, never both — see shared/strategy/dispatch.ts#launchBatches.
    * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/PlayerInfluencing.ts#L17-L60 */
   stock?: boolean;
+  /** Fractional thread strength for a ONE-SHOT worker's single op. Named apart
+   * from `threads` (which the exec'd descriptor carries as the spawned count,
+   * and which `WorkerDone` reports) so the two can never be confused: RAM is
+   * billed on the spawn count, effects land on this one. Serve-mode workers
+   * carry the equivalent per job, on `WorkerJob.threads`. */
+  strengthThreads?: number;
   /** "serve": a POOLED worker. Fixed kind and threads for the process's life;
    *  jobs arrive through `worker_jobs` (target may vary), the loop parks on a
    *  `worker_wake` resolver raced against an idle timeout, and exit reports a
@@ -40,13 +46,28 @@ export interface WorkerJob {
   additionalMsec?: number;
   delayUntil?: number;
   stock?: boolean;
+  /** Fractional REAL thread strength for this job, passed straight through as
+   * `opts.threads`. Absent = act at the process's full spawned count. The
+   * dispatcher has already divided by the host's core bonus, so the worker
+   * never needs to know its own core count. Must be <= the spawned count: the
+   * engine throws otherwise, which would lose the op. */
+  threads?: number;
 }
 
 export interface WorkerDone {
   opId: number;
   kind: "hack" | "grow" | "weaken" | "workerExit";
   target: string;
+  /** Thread strength the op actually RAN at, not the process's spawned count.
+   * The game awards experience and applies security fortify on the fractional
+   * value, so reporting the spawn size here would over-report both — and
+   * `expEarned` feeds the exp-rate EMA which the landing-skill projection
+   * reads, closing a feedback loop. `workerExit` reports the spawned count,
+   * which is what the RAM reservation was sized on. */
   threads: number;
+  /** performance.now() when the op settled — the same clock the dispatcher
+   * plans landings on, so planned-minus-observed is a real landing error. */
+  at?: number;
   result?: number;
 }
 

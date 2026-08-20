@@ -719,6 +719,11 @@ export class SimWorld {
       },
       nodeMults: {
         HackingSpeedMultiplier: currentNodeMults.HackingSpeedMultiplier,
+        // Scales SKILL derived from experience, so it belongs to every forward
+        // projection of the hacking level (prep-time discount, exp valuation,
+        // landing-time hack percentage). 0.35 in BN4 and 0.25 in BN9 — while it
+        // was missing, those projections ran about threefold hot.
+        HackingLevelMultiplier: currentNodeMults.HackingLevelMultiplier,
         HackExpGain: currentNodeMults.HackExpGain,
         ScriptHackMoney: currentNodeMults.ScriptHackMoney,
         // The player's CUT of what was drained, distinct from the drain rate
@@ -862,6 +867,15 @@ export class SimWorld {
     }
     const ram = WORKER_RAM[type] * threads;
     if (source.ramUsed + ram > source.maxRam) return this.#fail(action, "not enough RAM on source");
+    // Effects land on the requested STRENGTH; RAM, the `threads < 1` guard and
+    // the reservation above all stay on the spawned count. The engine rejects a
+    // strength above the process's thread count, and the planner path reaches
+    // this without passing through the driver's clamp, so enforce it here too.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L434-L474
+    const strength = action.strengthThreads === undefined
+      ? threads
+      : Math.min(action.strengthThreads, threads);
+    if (strength <= 0) return this.#fail(action, "strengthThreads <= 0");
 
     // Duration computed at action start with CURRENT state (game: NetscriptFunctions
     // hack/grow/weaken compute *Time before netscriptDelay); seconds -> ms.
@@ -875,8 +889,15 @@ export class SimWorld {
     this.clock.in(durationMs, () => {
       source.ramUsed -= ram;
       this.#inFlight--;
-      const { result } = this.land(type, targetName, threads, source.cpuCores, action.stock === true);
-      this.onSettled?.({ kind: type, opId: action.opId, target: targetName, threads, result });
+      const { result } = this.land(type, targetName, strength, source.cpuCores, action.stock === true);
+      this.onSettled?.({
+        kind: type,
+        opId: action.opId,
+        target: targetName,
+        threads: strength,
+        at: this.clock.now(),
+        result,
+      });
     });
     return true;
   }

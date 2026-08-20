@@ -3,7 +3,6 @@ import { versionedScript } from "../../shared/deployment.ts";
 import { STUB_BASE_GB } from '../../shared/ram/broker.ts';
 import { gameBuildId } from "./build-id.ts";
 import type { DodgeGlobalThis } from "./dodge-shared.ts";
-import type { GoDodgeGlobalThis } from "./go-dodge-shared.ts";
 
 /** RAM dodger — TypeScript port of the stubCall design from the predecessor
  * scripts (bitburner-legacy/src/_lib/stub-call.ts,
@@ -18,13 +17,10 @@ import type { GoDodgeGlobalThis } from "./go-dodge-shared.ts";
  * static parser charges the calling bundle and the saving evaporates.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L405-L440 */
 
-const g = globalThis as DodgeGlobalThis & GoDodgeGlobalThis;
+const g = globalThis as DodgeGlobalThis;
 
 export function dodgeStubScript(): string {
   return versionedScript("lib/dodge-stub.js", gameBuildId());
-}
-export function goDodgeStubScript(): string {
-  return versionedScript("lib/go-dodge-stub.js", gameBuildId());
 }
 const DODGE_TIMEOUT_MS = 10_000;
 /** How many times to retry `ns.exec` of the stub before giving up.
@@ -109,7 +105,8 @@ interface DodgeSlots {
 
 interface DodgeLaneDescriptor {
   slots: DodgeSlots;
-  stubScript: () => string;
+  /** Passed to the stub as ns.args[0] so one deployed file serves both lanes. */
+  laneArg: string;
   busy: "wait" | "reject";
   watchdogMs?: number;
   cleanup: "unconditional" | "owner";
@@ -140,14 +137,14 @@ const LONG_SLOTS: DodgeSlots = {
 const LANES: Record<DodgeLane, DodgeLaneDescriptor> = {
   default: {
     slots: DEFAULT_SLOTS,
-    stubScript: dodgeStubScript,
+    laneArg: "default",
     busy: "wait",
     watchdogMs: DODGE_TIMEOUT_MS,
     cleanup: "unconditional",
   },
   long: {
     slots: LONG_SLOTS,
-    stubScript: goDodgeStubScript,
+    laneArg: "long",
     busy: "reject",
     // Go's makeMove/passTurn await opponentNextTurn inside the same call. The
     // turn duration therefore belongs to the game AI, not to controller
@@ -219,10 +216,10 @@ export async function dodge<T>(
     : setTimeout(() => fail(new Error("dodge timed out")), lane.watchdogMs);
 
   try {
-    const stubScript = lane.stubScript();
+    const stubScript = dodgeStubScript();
     let pid = 0;
     for (let attempt = 0; attempt < EXEC_RETRIES && pid === 0; attempt++) {
-      pid = ns.exec(stubScript, host, { ramOverride: STUB_BASE_GB + budgetGb, temporary: true });
+      pid = ns.exec(stubScript, host, { ramOverride: STUB_BASE_GB + budgetGb, temporary: true }, lane.laneArg);
       // Yield to the game's scheduler so a pending reap can free the RAM.
       if (pid === 0) await ns.asleep(0);
     }

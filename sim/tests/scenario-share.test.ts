@@ -62,13 +62,21 @@ scenarioDescribe("scenario: share allocation", () => {
     expect(run.result.validity).not.toBe("invalid-for-goal");
     expect(run.maxShareGb).toBeGreaterThan(0);
     expect(run.maxShareGb).toBeLessThan(run.maxFleetGb);
-  }, 120_000);
+    // 240s, not 120s: a working JIT pipeline executes ~100x more ops per
+    // virtual second than the one that abandoned its pending batches on every
+    // missed window, so the same five virtual minutes cost proportionally more
+    // wall clock. The control below measured 134s doing 5,040 hacks and
+    // compounding a 107 TB fleet, against a trickle before.
+  }, 240_000);
 
   test("without reputation demand share remains zero", async () => {
     // Share is a RAM taker: absent demand is not permission to consume spare
     // capacity. This control catches a stale objective leaking across runs.
     const run = await shareRun(false);
     expect(run.result.validity).not.toBe("invalid-for-goal");
+    // Still exactly 0 under the free-tail rule: that rule needs ACTIVE
+    // rep-earning work, and this control runs neither the career nor the
+    // factions feature, so there is no work to multiply.
     expect(run.maxShareGb).toBe(0);
-  }, 120_000);
+  }, 240_000);
 });

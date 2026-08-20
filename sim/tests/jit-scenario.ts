@@ -1,4 +1,5 @@
 import { runGame, type GameRunOptions, type GameRunResult } from "../game-run.ts";
+import { AGGREGATE_GO_MODEL } from "../fidelity.ts";
 
 export interface JitSample {
   atMs: number;
@@ -13,6 +14,8 @@ export interface JitSample {
   allocFailsByPhase: { jit: number; prep: number; eager: number };
   batchesSkipped: number;
   missedWindow: { deadline: number; "arrival-security": number; "arrival-money": number; placement: number };
+  /** Observed minus planned landing, ms. Absent until an op has landed. */
+  landingError?: { meanMs: number; minMs: number; maxMs: number; maxAbsMs: number };
   inFlightHack: number;
   inFlightGrow: number;
   inFlightWeaken: number;
@@ -89,6 +92,22 @@ export async function runJitScenario(options: JitRunOptions): Promise<JitRun> {
   let last: JitSample | undefined;
 
   const result = await runGame({
+    // Collapse Go to its seeded aggregate outcome unless a scenario asks
+    // otherwise. `action-exact` (the runGame default) drives the real V9
+    // policy through a browser Worker doing WebGPU inference, which does not
+    // exist under Bun: the worker never answers, `neuralRuntime.install`
+    // never settles, and the Go feature retries every five seconds for the
+    // whole run without ever making a move. A fixture whose premise is a Go
+    // reward then fails on a premise that never fired, and every other
+    // fixture pays the stalled turn as wall-clock.
+    //
+    // This is the documented division of labour, not a workaround:
+    // sim/fidelity.ts states that full-route simulations collapse the
+    // trained policy's per-move interior to a seeded outcome calibrated by
+    // GO_REWARD_RULES, while exact action parity and WebGPU strength belong
+    // to the arena lane. `sim/run.ts` already passes this for every profile
+    // run; the scenario harness simply never did.
+    goFidelity: AGGREGATE_GO_MODEL,
     ...options,
     telemetry: true,
     onRecord: (line: string) => {
@@ -170,6 +189,7 @@ export async function runJitScenario(options: JitRunOptions): Promise<JitRun> {
         allocFailsByPhase?: { jit?: number; prep?: number; eager?: number };
         batchesSkipped?: number;
         missedWindow?: { deadline?: number; "arrival-security"?: number; "arrival-money"?: number; placement?: number };
+        landingError?: { meanMs?: number; minMs?: number; maxMs?: number; maxAbsMs?: number };
         inFlight?: { hack?: number; grow?: number; weaken?: number };
         launched?: { hack?: number };
         landed?: { hack?: number };
@@ -203,6 +223,14 @@ export async function runJitScenario(options: JitRunOptions): Promise<JitRun> {
           "arrival-money": data.missedWindow?.["arrival-money"] ?? last?.missedWindow["arrival-money"] ?? 0,
           placement: data.missedWindow?.placement ?? last?.missedWindow.placement ?? 0,
         },
+        ...(data.landingError
+          ? { landingError: {
+              meanMs: data.landingError.meanMs ?? 0,
+              minMs: data.landingError.minMs ?? 0,
+              maxMs: data.landingError.maxMs ?? 0,
+              maxAbsMs: data.landingError.maxAbsMs ?? 0,
+            } }
+          : last?.landingError !== undefined ? { landingError: last.landingError } : {}),
         inFlightHack: data.inFlight?.hack ?? last?.inFlightHack ?? 0,
         inFlightGrow: data.inFlight?.grow ?? last?.inFlightGrow ?? 0,
         inFlightWeaken: data.inFlight?.weaken ?? last?.inFlightWeaken ?? 0,
@@ -300,4 +328,166 @@ export function formatJitMetrics(name: string, metrics: JitMetrics): string {
     `money/sec=$${metrics.moneyPerSec.toExponential(6)}`,
     `samples=${metrics.steadySamples}`,
   ].join(" ");
+}
+
+/* ------------------------------------------------------------------------ *
+ * THE BASELINE RATCHET
+ *
+ * The recorded numbers in sim/tests/baselines/jit.json are the proof that each
+ * step along the way actually moved the needle. This is the machinery that
+ * makes them behave like a ratchet instead of like six hand-maintained magic
+ * constants: a regression fails and says which metric moved and by how much,
+ * an improvement passes and prints exactly what to record.
+ * ------------------------------------------------------------------------ */
+
+export interface JitBaseline {
+  medianIdleShare: number;
+  windowCompletion: number;
+  moneyPerSec: number;
+  /** Only the target-switch fixture measures this. */
+  switchIncomeRetention?: number;
+  /** Per-scenario slack, overriding the file default metric by metric. A
+   * fixture whose horizon truncates in-flight hacks legitimately needs a
+   * different window tolerance than one that runs to steady state. */
+  tolerances?: Partial<JitTolerances> & { switchIncomeRetention?: number };
+  note?: string;
+}
+
+export interface JitTolerances {
+  /** Absolute slack on the two share metrics. */
+  idleShare: number;
+  windowCompletion: number;
+  /** Fractional slack on money: 0.05 allows landing 5% under the record. */
+  moneyFraction: number;
+  /** Absolute slack on the target-switch retention metric. */
+  switchIncomeRetention?: number;
+  /** Fractional slack on skipped batches, for fixtures that ratchet it. */
+  batchesSkippedFraction?: number;
+}
+
+export interface JitBaselineFile {
+  provenance: {
+    simulatorModelVersion: number;
+    vendorCommit: string;
+    recordedAt: string;
+  };
+  tolerances: JitTolerances;
+  scenarios: Record<string, JitBaseline>;
+}
+
+/** Whether a metric is better when it rises or when it falls. Idle RAM is the
+ * odd one out and getting its direction wrong would silently invert the whole
+ * ratchet, so the direction is data rather than a sign convention. */
+const DIRECTION = {
+  medianIdleShare: "lower",
+  windowCompletion: "higher",
+  moneyPerSec: "higher",
+  switchIncomeRetention: "higher",
+  // Only meaningful where a fixture is deliberately over-subscribed. There,
+  // refusing to launch a batch that will not fit is CORRECT back-pressure
+  // (`allocFails` stays the atomicity invariant), so the count belongs on the
+  // ratchet — it must never grow — rather than pinned to a constant that only
+  // ever held for an uncontended world.
+  batchesSkipped: "lower",
+} as const;
+
+export interface BaselineVerdict {
+  /** Metrics that fell outside tolerance. Empty means the run held the line. */
+  regressions: string[];
+  /** Metrics that beat the record outright, with the values to record. */
+  improvements: { metric: string; from: number; to: number }[];
+}
+
+/** Compare a run against its recorded best. Pure: it decides nothing about
+ * failing, so a caller can report every metric at once rather than aborting on
+ * the first bad one. */
+export function compareToBaseline(
+  observed: Record<string, number | undefined>,
+  baseline: JitBaseline,
+  tolerances: JitTolerances,
+): BaselineVerdict {
+  const regressions: string[] = [];
+  const improvements: { metric: string; from: number; to: number }[] = [];
+
+  for (const [metric, direction] of Object.entries(DIRECTION)) {
+    const record = (baseline as unknown as Record<string, number | undefined>)[metric];
+    const value = observed[metric];
+    if (record === undefined || value === undefined) continue;
+
+    // A scenario's own tolerance wins over the file default, metric by metric.
+    const limits: JitTolerances = { ...tolerances, ...baseline.tolerances };
+    const slack = metric === "moneyPerSec"
+      ? Math.abs(record) * limits.moneyFraction
+      : metric === "medianIdleShare"
+        ? limits.idleShare
+        : metric === "switchIncomeRetention"
+          ? limits.switchIncomeRetention ?? limits.windowCompletion
+          : metric === "batchesSkipped"
+            ? Math.abs(record) * (limits.batchesSkippedFraction ?? limits.moneyFraction)
+            : limits.windowCompletion;
+
+    if (direction === "lower") {
+      if (value > record + slack) {
+        regressions.push(
+          `${metric}: ${value.toPrecision(6)} is worse than the recorded ${record.toPrecision(6)}`
+          + ` by ${(value - record).toPrecision(3)} (tolerance ${slack.toPrecision(3)})`,
+        );
+      } else if (value < record) {
+        improvements.push({ metric, from: record, to: value });
+      }
+    } else {
+      if (value < record - slack) {
+        regressions.push(
+          `${metric}: ${value.toPrecision(6)} is worse than the recorded ${record.toPrecision(6)}`
+          + ` by ${(record - value).toPrecision(3)} (tolerance ${slack.toPrecision(3)})`,
+        );
+      } else if (value > record) {
+        improvements.push({ metric, from: record, to: value });
+      }
+    }
+  }
+  return { regressions, improvements };
+}
+
+/** Refuse to compare numbers measured under different simulator semantics. A
+ * model-version or vendor bump changes what the simulator DOES, so the old
+ * records stop meaning anything; saying so is far better than reporting a
+ * regression that is really a change of measuring instrument. */
+export function assertBaselineProvenance(
+  file: JitBaselineFile,
+  modelVersion: number,
+  vendorCommit: string,
+): void {
+  const drift: string[] = [];
+  if (file.provenance.simulatorModelVersion !== modelVersion) {
+    drift.push(
+      `simulator model version ${file.provenance.simulatorModelVersion} -> ${modelVersion}`,
+    );
+  }
+  if (file.provenance.vendorCommit !== vendorCommit) {
+    drift.push(`vendor commit ${file.provenance.vendorCommit} -> ${vendorCommit}`);
+  }
+  if (drift.length === 0) return;
+  throw new Error(
+    `sim/tests/baselines/jit.json was recorded under different simulator semantics (${drift.join("; ")}).\n`
+    + "Those numbers are no longer comparable. Re-measure every JIT scenario and "
+    + "update both the scenario rows and `provenance` in the same commit.",
+  );
+}
+
+/** What to change in the ledger after a genuine improvement. Only the metrics
+ * that actually moved: the prose around them (`what`, `history`, `note`) is
+ * hand-written context that a machine has no business regenerating. */
+export function formatBaselineUpdate(
+  scenario: string,
+  improvements: BaselineVerdict["improvements"],
+): string {
+  const lines = improvements.map(
+    ({ metric, from, to }) => `    ${metric}: ${from} -> ${to}`,
+  );
+  return [
+    `[${scenario}] IMPROVED -- update these in sim/tests/baselines/jit.json:`,
+    ...lines,
+    "    ...and add a history line saying what earned it.",
+  ].join("\n");
 }

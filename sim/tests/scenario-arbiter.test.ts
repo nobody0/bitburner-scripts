@@ -61,8 +61,11 @@ async function arbiterRun(options: {
     onRecord: (line) => {
       let record: { kind?: string; key?: string; name?: string; data?: Record<string, unknown> };
       try { record = JSON.parse(line) as typeof record; } catch { return; }
-      if (record.kind === "state" && record.key === "progression" && record.data?.arbitration) {
-        trace.arbitrations.push(record.data.arbitration as unknown as ArbitrationDigest);
+      // `arbitration` is a topic of its own: it moves on nearly every tick and
+      // was split out of `progression` so a state record does not republish the
+      // whole plan behind it.
+      if (record.kind === "state" && record.key === "arbitration" && record.data) {
+        trace.arbitrations.push(record.data as unknown as ArbitrationDigest);
       }
       if (record.kind === "event") {
         if (record.name === "buyServer" || record.name === "upgradeServer") trace.purchases.push(record.name);

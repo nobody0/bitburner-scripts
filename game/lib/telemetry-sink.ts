@@ -48,17 +48,23 @@ export function makeSink(tel: Telemetry): TelemetrySink {
       }
       state.dirty.clear();
 
-      // Topic state remains the complete, high-frequency audit trail. These
+      // Topic state remains the complete, high-frequency audit trail. The
+      // sender deliberately does NOT deduplicate: game-script clock time is
+      // the scarce resource here, and serializing every topic a second time
+      // just to discover it has not moved would spend it to save bytes on a
+      // local socket. Collapsing unchanged spans is the hub's job
+      // (ui/server.ts), where the CPU is free. These
       // transition events are its compact index: replays and the live UI can
       // answer "what changed?" without diffing thousands of snapshots. The
       // signatures intentionally ignore continuously moving inputs such as
       // cash and the horizon; a new winner, eligibility or funding outcome is
       // a decision transition, another second passing is not.
-      const moneyArbitration = state.topics.progression?.arbitration
+      const arbitration = state.topics.arbitration;
+      const moneyArbitration = arbitration
         ? {
-            grants: state.topics.progression.arbitration.grants.filter((grant) => grant.resource === "money"),
-            denied: state.topics.progression.arbitration.denied.filter((denial) => denial.resource === "money"),
-            remaining: state.topics.progression.arbitration.remaining.money,
+            grants: arbitration.grants.filter((grant) => grant.resource === "money"),
+            denied: arbitration.denied.filter((denial) => denial.resource === "money"),
+            remaining: arbitration.remaining.money,
           }
         : undefined;
       const moneyArbitrationDecision = moneyArbitration

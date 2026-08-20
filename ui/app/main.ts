@@ -2,6 +2,7 @@ import { FEATURES } from "../../shared/features/registry.ts";
 import type { LogRecord } from "../../shared/telemetry/schema.ts";
 import { esc, fmtTime } from "./lib/format.ts";
 import { note } from "./lib/dom.ts";
+import { morph } from "./lib/morph.ts";
 import { NO_SORT, setView, toggleSort } from "./lib/viewstate.ts";
 import { appendRecords, emptyState, project, type ProjectedState } from "./project.ts";
 import { TABS, type TabId } from "./tabs/index.ts";
@@ -58,7 +59,7 @@ function readHash(): TabId {
 }
 
 function renderTabs(): void {
-  $("tabs").innerHTML = TAB_ORDER.map((tab) => {
+  morph($("tabs"), TAB_ORDER.map((tab) => {
     const feature = FEATURES.find((f) => f.id === tab.id);
     const unlocked = feature ? state.caps.unlocked[feature.id] : "yes";
     const cls = [tab.id === active ? "on" : "", unlocked === "no" ? "locked" : unlocked === "unknown" ? "unknown" : ""]
@@ -67,7 +68,7 @@ function renderTabs(): void {
     const title = feature ? feature.problem : "Cross-feature view";
     const mark = unlocked === "no" ? "✕ " : unlocked === "unknown" ? "? " : "";
     return `<a class="tab ${cls}" href="#/${tab.id}" title="${esc(title)}">${mark}${esc(tab.label)}</a>`;
-  }).join("");
+  }).join(""));
 }
 
 /** Locked and unknown panels explain themselves rather than showing nothing. */
@@ -88,68 +89,49 @@ function lockedPanel(id: TabId): string | null {
   );
 }
 
-/** The tab the DOM currently holds, so scroll is only restored across a
- * re-render of the SAME tab. Switching tabs should start at the top. */
+/** The tab the DOM currently holds, so a patch is only attempted against the
+ * SAME tab's markup. A different tab is a different tree; patching one into
+ * the other would be a full rebuild done the slow way. */
 let renderedTab: string | undefined;
 
-/** Re-render the active tab, preserving scroll position.
+/** Re-render the active tab by PATCHING the live DOM.
  *
- * Panels are fully re-rendered from an HTML string on every frame, which is
- * what keeps each tab readable as a description of its layout — but replacing
- * `innerHTML` destroys every scroll offset in the subtree. On a live run that
- * fires every flush, so the page yanks back to the top while you are reading
- * it, and any horizontally-scrolled card snaps back to the left.
+ * Panels are produced as an HTML string on every frame, which is what keeps
+ * each tab readable as a description of its layout. What the string is then
+ * used for is the difference between a stable page and one that fights the
+ * reader: assigning it to `innerHTML` destroys every node in the panel, and
+ * with them the selection, the caret, hover, an open disclosure and every
+ * scroll offset. On a live run that happened twice a second.
  *
- * Capturing and restoring is enough because the DOM shape is stable between
- * frames: the same tab renders the same cards in the same order. */
+ * `morph` instead edits the live tree until it matches, leaving untouched any
+ * subtree that already agrees — which is nearly all of it, since a frame
+ * typically moves a few numbers. Nothing has to be captured and restored
+ * afterwards because nothing was thrown away. */
 function renderView(): void {
   const el = $("view");
   const tab = TABS[active];
   if (!run.id) {
-    el.innerHTML = `<section class="card">${note("no run selected")}</section>`;
+    morph(el, `<section class="card">${note("no run selected")}</section>`);
     renderedTab = undefined;
     return;
   }
   const locked = lockedPanel(active);
   if (locked) {
-    el.innerHTML = locked;
+    morph(el, locked);
     renderedTab = undefined;
     return;
   }
 
-  const sameTab = renderedTab === active;
-  const pageScroll = window.scrollY;
-  const cardScroll = sameTab
-    ? [...el.querySelectorAll<HTMLElement>("section.card")].map((card) => [card.scrollLeft, card.scrollTop] as const)
-    : [];
-  // Scroll is not the only thing worth carrying across the rebuild: a search
-  // box is a focused element inside the subtree we are about to destroy, and
-  // losing the caret mid-word makes it unusable on a live run.
-  const focused = document.activeElement as HTMLInputElement | null;
-  const focusId = sameTab && focused && el.contains(focused) ? focused.id : "";
-  const selection = focusId ? [focused!.selectionStart, focused!.selectionEnd] : null;
-
-  el.innerHTML = tab.render(state);
+  // Switching tabs starts from an empty panel: the trees have nothing in
+  // common, and it also puts the reader at the top of the new tab rather than
+  // at whatever offset the previous one was scrolled to.
+  if (renderedTab !== active) {
+    el.replaceChildren();
+    window.scrollTo(window.scrollX, 0);
+  }
+  morph(el, tab.render(state));
   tab.mount?.(state, el);
   renderedTab = active;
-
-  if (!sameTab) return;
-  const cards = el.querySelectorAll<HTMLElement>("section.card");
-  cardScroll.forEach(([left, top], index) => {
-    const card = cards[index];
-    if (!card) return;
-    card.scrollLeft = left;
-    card.scrollTop = top;
-  });
-  if (focusId) {
-    const restored = el.querySelector<HTMLInputElement>(`#${CSS.escape(focusId)}`);
-    if (restored) {
-      restored.focus();
-      if (selection) restored.setSelectionRange(selection[0] ?? null, selection[1] ?? null);
-    }
-  }
-  // Restored synchronously, before paint, so there is no visible jump.
-  window.scrollTo(window.scrollX, pageScroll);
 }
 
 /** Rebuild `state` from the retained records. Only a scrubbable run has any,
@@ -226,6 +208,33 @@ $("view").addEventListener("click", (ev) => {
   }
 });
 
+/** A disclosure's open state lives in viewstate, not in the DOM.
+ *
+ * `collapsible()` renders `open` from viewstate on every frame, so a section
+ * opened by hand snaps shut on the next render unless the toggle is recorded.
+ * Nothing recorded it, which is why every expandable section closed itself
+ * within half a second of being opened.
+ *
+ * Listened for in the CAPTURE phase because `toggle` does not bubble: it is
+ * dispatched at the `<details>` element and would never reach `#view`
+ * otherwise. No re-render is needed — the browser has already opened the
+ * section, and this only makes that outlive the next frame. */
+$("view").addEventListener(
+  "toggle",
+  (ev) => {
+    const details = ev.target as HTMLDetailsElement | null;
+    const key = details?.dataset?.["openKey"];
+    if (key === undefined || !details) return;
+    setView(`open.${key}`, details.open ? "1" : "0");
+    // A canvas inside a closed disclosure measures 0x0, so anything drawn
+    // while it was shut is a blank bitmap. A stored run never re-renders on
+    // its own (only `resize` and live records queue one), so opening a section
+    // has to redraw it or the chart stays empty until the pointer wanders in.
+    if (details.open) render();
+  },
+  true,
+);
+
 $("view").addEventListener("input", (ev) => {
   const target = ev.target as HTMLInputElement | null;
   const key = target?.dataset["viewKey"];
@@ -263,7 +272,11 @@ function refreshPicker(): void {
   const groups = [...grouped.entries()].sort(([, a], [, b]) =>
     Math.max(...b.map((x) => x.metadata?.updatedAt ?? 0)) - Math.max(...a.map((x) => x.metadata?.updatedAt ?? 0))
   );
-  pick.innerHTML = groups.map(([lineageId, entries]) => {
+  // Patched rather than rebuilt: replacing the options of an open `<select>`
+  // closes the dropdown under the operator, and the hub re-sends the catalogue
+  // whenever any run starts, ends or is pinned. `data-key` lets a lineage that
+  // moved up the recency order be MOVED rather than rewritten.
+  morph(pick, groups.map(([lineageId, entries]) => {
     entries.sort((a, b) =>
       (a.metadata?.identity?.bitNode?.startedAt ?? 0) - (b.metadata?.identity?.bitNode?.startedAt ?? 0) ||
       (a.metadata?.identity?.install.startedAt ?? 0) - (b.metadata?.identity?.install.startedAt ?? 0)
@@ -271,9 +284,11 @@ function refreshPicker(): void {
     const lineage = entries[0]?.metadata?.identity?.lineage;
     const label = lineage?.label ?? (lineageId === "legacy" ? "Legacy / ungrouped" : lineageId);
     const nodeOrdinals = new Map<string, number>();
-    return `<optgroup label="${esc(label)}">${entries.map((entry) => {
+    return `<optgroup data-key="${esc(lineageId)}" label="${esc(label)}">${entries.map((entry) => {
       const metadata = entry.metadata;
-      if (!metadata?.identity) return `<option value="${esc(entry.key)}">${esc(entry.fallback)}</option>`;
+      if (!metadata?.identity) {
+        return `<option data-key="${esc(entry.key)}" value="${esc(entry.key)}">${esc(entry.fallback)}</option>`;
+      }
       const node = metadata.identity.bitNode;
       const nodeInfo = node ? BITNODES.find((known) => known.n === node.bitNode) : undefined;
       const nodeKey = node?.id ?? "none";
@@ -287,9 +302,12 @@ function refreshPicker(): void {
       const onlyOneSimInstall = metadata.identity.lineage.kind === "sim" && entries.length === 1;
       const bn = node && !onlyOneSimInstall ? `BN${node.bitNode}${nodeInfo ? ` ${nodeInfo.name}` : ""} › ` : "";
       const flags = `${entry.live ? "● " : ""}${metadata.pinned ? "📌 " : ""}`;
-      return `<option value="${esc(entry.key)}">${esc(`${flags}${bn}Install ${install} · ${date} · ${duration}`)}</option>`;
+      return (
+        `<option data-key="${esc(entry.key)}" value="${esc(entry.key)}">` +
+        `${esc(`${flags}${bn}Install ${install} · ${date} · ${duration}`)}</option>`
+      );
     }).join("")}</optgroup>`;
-  }).join("");
+  }).join(""));
   if ([...pick.options].some((o) => o.value === current)) pick.value = current;
   // Only an unpinned stored run can be pinned.
   const selected = pick.value;
@@ -350,7 +368,11 @@ async function loadStored(file: string): Promise<void> {
   const scrub = $<HTMLInputElement>("scrub");
   $("scrubrow").style.display = compact ? "none" : "flex";
   scrub.min = String(run.t0 ?? 0);
-  scrub.max = String(records[records.length - 1]?.t ?? run.t0 ?? 0);
+  // NOT the last record's `t`: the store defers a span's closing record and
+  // flushes every open one at detach, so a closed run ends with a run of span
+  // closers whose timestamps are older than the run's real end. Taking the
+  // maximum keeps the slider able to reach the last thing that happened.
+  scrub.max = String(records.reduce((latest, record) => Math.max(latest, record.t), run.t0 ?? 0));
   scrub.value = scrub.max;
 
   state = emptyState();

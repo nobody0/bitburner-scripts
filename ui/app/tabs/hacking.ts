@@ -7,10 +7,14 @@ import {
   serverRanges,
   type RootState,
 } from "../../../shared/features/servers.ts";
-import { bar, card, dataTable, dot, filters, hint, meter, outcome, rankedTable, search, table, tiles, waiting, type Column } from "../lib/dom.ts";
+import { bar, card, collapsible, dataTable, dot, filters, hint, meter, note, outcome, rankedTable, search, shownOf, table, tiles, waiting, type Column } from "../lib/dom.ts";
+import { inline, raw } from "../lib/html.ts";
+import { attachChartHover, drawSeries, type ChartSeries } from "../lib/chart.ts";
 import { decisionHistory } from "../lib/history.ts";
-import { esc, fmtMoney, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
+import { esc, fmtMoney, fmtMs, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
+import { hackTimeSeconds, makeHackContext, type HackContext } from "../../../shared/formulas.ts";
 import { view } from "../lib/viewstate.ts";
+import type { BatchAggregateReport, FarmRollup } from "../../../shared/telemetry/topics/hacking.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
@@ -29,6 +33,16 @@ import type { Tab } from "./index.ts";
 interface Row {
   server: Server;
   root: RootState;
+  /** Time one hack call takes against this host AT ITS CURRENT SECURITY, in
+   * ms. Undefined only when the player record has not arrived yet. Computed
+   * here rather than telemetered: the formula is pure and both inputs are
+   * already in the projection, so telemetering it would be a per-server field
+   * that goes stale the moment the skill ticks. */
+  hackTimeMs?: number;
+  /** The same call once the host is at MINIMUM security — what the farm will
+   * actually see in steady state, and often less than half the current
+   * figure on an unprepped host. */
+  hackTimeMinMs?: number;
   /** Global number of port-opening programs currently available. */
   portOpeners: number;
   /** Fraction of max money currently on the host. */
@@ -51,12 +65,43 @@ const ROOT_DOT: Record<RootState, { status: "good" | "ready" | "bad"; label: str
   blocked: { status: "bad", label: "not enough skill or port openers yet" },
 };
 
+/** The hack-time context, when the projection knows enough to build one.
+ *
+ * Both halves are needed: the player's own multipliers and the BitNode's. A
+ * missing player record means no context at all rather than a default one —
+ * hack times computed against skill 0 would be wrong by orders of magnitude
+ * and there is no way to mark a number in a table as "computed from nothing". */
+function hackContext(state: ProjectedState): HackContext | undefined {
+  const player = state.player;
+  if (!player?.mults || player.skills?.hacking === undefined) return undefined;
+  const node = state.topics.progression?.multipliers;
+  return makeHackContext(
+    {
+      skill: player.skills.hacking,
+      intelligence: player.skills.intelligence ?? 0,
+      mults: {
+        hacking_chance: player.mults.hacking_chance ?? 1,
+        hacking_money: player.mults.hacking_money ?? 1,
+        hacking_speed: player.mults.hacking_speed ?? 1,
+        hacking_exp: player.mults.hacking_exp ?? 1,
+        hacking_grow: player.mults.hacking_grow ?? 1,
+      },
+    },
+    {
+      ...(node?.["HackingSpeedMultiplier"] !== undefined
+        ? { HackingSpeedMultiplier: node["HackingSpeedMultiplier"] }
+        : {}),
+    },
+  );
+}
+
 function buildRows(state: ProjectedState): Row[] {
   const skill = state.player?.skills?.hacking ?? 0;
   const openers = state.topics.fleet?.portOpeners ?? 0;
   const mults = state.topics.progression?.multipliers;
   const maxMoneyMult = mults?.["ServerMaxMoney"] ?? 1;
   const startSecMult = mults?.["ServerStartingSecurity"] ?? 1;
+  const ctx = hackContext(state);
 
   return [...state.servers.values()].map((server) => {
     const ranges = serverRanges(server.hostname);
@@ -68,10 +113,21 @@ function buildRows(state: ProjectedState): Row[] {
     const rolled = rolledMoney(server.moneyMax, maxMoneyMult);
     const rolledSec = rolledSecurity(server.baseDifficulty, startSecMult);
 
+    // A host we cannot hack has no meaningful hack time: the formula would
+    // still produce a number, but it describes a call the game would refuse.
+    const hackable = server.requiredHackingSkill !== undefined && server.requiredHackingSkill <= skill;
+    const times = ctx && hackable && server.requiredHackingSkill !== undefined
+      ? {
+          hackTimeMs: hackTimeSeconds(ctx, current, server.requiredHackingSkill) * 1_000,
+          hackTimeMinMs: hackTimeSeconds(ctx, min, server.requiredHackingSkill) * 1_000,
+        }
+      : {};
+
     return {
       server,
       root: rootState(server, skill, openers),
       portOpeners: openers,
+      ...times,
       moneyFrac: max > 0 ? money / max : 0,
       atMaxMoney: max > 0 && money >= max * 0.999,
       // 100 is the game's hard cap, so the bar spans min..100 and empty means
@@ -175,6 +231,27 @@ const COLUMNS: Column<Row>[] = [
     },
   },
   {
+    id: "hacktime",
+    label: "hack time",
+    sort: (r) => r.hackTimeMs ?? Infinity,
+    cell: (r) => {
+      if (r.hackTimeMs === undefined) {
+        return `<span class="muted" title="${esc("needs root-level skill and a player record to compute")}">–</span>`;
+      }
+      // The prepped figure is the one the farm's cycle is built on, so it is
+      // the one shown when the two differ; the current figure explains a
+      // long-looking batch on a host that has not been weakened yet.
+      const prepped = r.atMinSec || r.hackTimeMinMs === undefined;
+      const shown = prepped ? r.hackTimeMs : r.hackTimeMinMs!;
+      const detail = prepped
+        ? `one hack call; grow is 3.2x and weaken 4x this (${fmtTime(shown * 4)} per batch cycle)`
+        : `at MINIMUM security, which is what the farm will see once prepped.
+` +
+          `right now, at ${(r.server.hackDifficulty ?? 0).toFixed(1)} security, it is ${fmtTime(r.hackTimeMs)}`;
+      return `<span class="${prepped ? "" : "hint"}" title="${esc(detail)}">${fmtTime(shown)}</span>`;
+    },
+  },
+  {
     id: "ram",
     label: "ram · cores",
     sort: (r) => r.server.maxRam ?? 0,
@@ -189,21 +266,493 @@ const COLUMNS: Column<Row>[] = [
   },
 ];
 
+const KINDS = ["hack", "grow", "weaken"] as const;
+type Kind = (typeof KINDS)[number];
+/** One colour per kind, held together so the bar, the legend and the chart
+ * cannot drift apart. */
+const KIND_SEG: Record<Kind, string> = { hack: "s1", grow: "s2", weaken: "s3" };
+const KIND_SERIES: Record<Kind, string> = { hack: "--series-1", grow: "--series-2", weaken: "--series-3" };
+
+type Pipeline = NonNullable<FarmRollup["pipelines"]>[number];
+
+/** One panel per ACTIVE pipeline, built from what the dispatcher reports it is
+ * running rather than from a fixed farm/prep pair.
+ *
+ * The panel used to hardcode "farm target" and "prepping" as two tiles, which
+ * silently assumed there is exactly one of each and that a farm is always a
+ * batch cycle. Neither holds: the mode can be hwgw, hgw or shotgun, and a
+ * second prep is a pipeline the dispatcher can already fund. Reading the list
+ * means a new pipeline kind shows up here without this file changing. */
+function pipelinePanels(state: ProjectedState): string {
+  const farm = state.topics.farm;
+  const pipelines = farm?.pipelines;
+  if (!pipelines || pipelines.length === 0) {
+    // A run recorded before the pipeline list existed still has the scalars.
+    if (!farm?.target && !farm?.prepTarget) return "";
+    const legacy = [farm.target ? `farming ${farm.target}` : "", farm.prepTarget ? `prepping ${farm.prepTarget}` : ""];
+    return note(legacy.filter(Boolean).join(" · "));
+  }
+  return `<div class="pipelines">${pipelines.map(pipelinePanel).join("")}</div>`;
+}
+
+function pipelinePanel(pipeline: Pipeline): string {
+  const inFlight = KINDS.map((kind) => `${kind[0]!.toUpperCase()}${pipeline.inFlight[kind]}`).join(" ");
+  const moneyFrac = pipeline.moneyMax ? (pipeline.money ?? 0) / pipeline.moneyMax : undefined;
+  const secOver = pipeline.security !== undefined && pipeline.minSecurity !== undefined
+    ? pipeline.security - pipeline.minSecurity
+    : undefined;
+
+  const head =
+    `<div class="pipehead">` +
+    `<span class="pipename">${esc(pipeline.host)}</span>` +
+    `<span class="pipetag">${esc(pipeline.role)}${pipeline.mode ? ` · ${esc(pipeline.mode)}` : ""}</span>` +
+    `<span class="muted">${fmtRam(pipeline.gb)} · ${esc(inFlight)} in flight</span>` +
+    `</div>`;
+
+  const vitals =
+    (moneyFrac !== undefined
+      ? `<div class="piperow"><span class="l">money</span>${meter(
+          moneyFrac,
+          `${fmtMoney(pipeline.money)} / ${fmtMoney(pipeline.moneyMax)}`,
+          moneyFrac >= 0.999,
+          `${fmtPct(moneyFrac)} of maximum`,
+        )}</div>`
+      : "") +
+    (secOver !== undefined && pipeline.minSecurity !== undefined
+      ? `<div class="piperow"><span class="l">security</span>${meter(
+          1 - Math.min(1, secOver / Math.max(1, 100 - pipeline.minSecurity)),
+          `${(pipeline.security ?? 0).toFixed(1)} / ${pipeline.minSecurity.toFixed(1)}`,
+          secOver <= 0.01,
+          `${secOver.toFixed(2)} above minimum`,
+        )}</div>`
+      : "");
+
+  // A prep's ETA and a farm's cycle answer the same question — "when does this
+  // pipeline pay off" — so they occupy the same slot.
+  const eta = pipeline.eta;
+  const progress = eta
+    ? eta.prepped
+      ? `<p class="good">prepped — ready to farm</p>`
+      : `<p>ready in <b>${fmtTime(eta.seconds * 1_000)}</b> ` +
+        `${inline(hint(
+          eta.bound === "ram" ? "RAM-bound" : "latency-bound",
+          eta.bound === "ram"
+            ? "the prep's GB·seconds divided by the GB its segment holds; more RAM finishes it sooner"
+            : "one weaken plus the grow/weaken phase — the game's own op durations, which no amount of RAM shortens",
+        ))}</p>`
+    : pipeline.hackTimeMs !== undefined
+      ? `<p class="muted">hack ${fmtMs(pipeline.hackTimeMs)} · weaken ${fmtMs(pipeline.weakenTimeMs)}` +
+        `${pipeline.moneyPerSecPerGb !== undefined ? ` · ${fmtMoney(pipeline.moneyPerSecPerGb)}/s/GB` : ""}</p>`
+      : "";
+
+  const plan = pipeline.planThreads
+    ? `<p class="muted" title="${esc("thread counts the cycle solve chose for one batch")}">plan ` +
+      KINDS.map((kind) => `${kind[0]}${fmtNum(pipeline.planThreads![kind])}`).join(" : ") +
+      `</p>`
+    : "";
+
+  return `<section class="pipe">${head}${vitals}${progress}${plan}</section>`;
+}
+
+/** Did the batches land in the order the cycle planned?
+ *
+ * This is the aggregate that stands in for per-op landing events, which are
+ * impossible here — landings run at roughly one per 20 ms. Each batch collapses
+ * to one signature, so a healthy farm is a single row at ~100% and a reorder is
+ * a second row, with recent examples underneath it. */
+function landingOrderCard(state: ProjectedState): string {
+  const farm = state.topics.farm;
+  const order = farm?.landingOrder;
+  if (!order) {
+    return waiting(
+      "a batch to complete with a verifiable landing order",
+      "only a JIT batch lands on a grid; a shotgun wave has no intra-batch order to verify",
+    );
+  }
+  const rows = Object.entries(order.observed).sort(([, a], [, b]) => b - a);
+  const inOrder = order.observed[order.planned] ?? 0;
+  const breakdown = table(
+    ["landed as", "batches", "share", ""],
+    [
+      ...rows.map(([observed, count]) => [
+        `<span class="${observed === order.planned ? "good" : "bad"}">${esc(observed)}</span>`,
+        fmtNum(count),
+        fmtPct(count / order.batches, 2),
+        observed === order.planned ? "as planned" : esc(describeReorder(observed, order.planned)),
+      ]),
+      ...(order.otherBatches
+        ? [[
+            `<span class="muted">other</span>`,
+            fmtNum(order.otherBatches),
+            fmtPct(order.otherBatches / order.batches, 2),
+            "rarer orders, not itemised",
+          ]]
+        : []),
+    ],
+    { left: [0, 3] },
+  );
+  const headline = tiles([
+    // A tile value is a TEXT slot: it escapes for us, so the signature goes in
+    // as prose and the coloured count goes in as deliberate markup.
+    { label: "planned order", value: order.planned, sub: "the order the cycle solve intends" },
+    {
+      label: "landed as planned",
+      value: fmtPct(inOrder / order.batches, 2),
+      sub: `${fmtNum(order.batches)} complete batches verified`,
+    },
+    ...(order.incomplete
+      ? [{
+          label: "no hack launched",
+          value: raw(`<span class="bad">${fmtNum(order.incomplete)}</span>`),
+          sub: "support landed, nothing stolen",
+        }]
+      : []),
+  ]);
+  const anomalies = order.anomalies.length
+    ? collapsible(
+        "hacking.landingAnomalies",
+        `${order.anomalies.length} recent mis-ordered batch(es)`,
+        table(
+          ["at", "target", "landed as", "planned"],
+          [...order.anomalies].reverse().map((entry) => [
+            fmtTime(entry.at - (state.t0 ?? 0)),
+            esc(entry.target),
+            `<span class="bad">${esc(entry.observed)}</span>`,
+            esc(entry.planned),
+          ]),
+          { left: [1, 2, 3] },
+        ),
+      )
+    : "";
+  return headline + breakdown + anomalies;
+}
+
+/** Name the failure a signature represents, so the row does not ask the reader
+ * to diff two strings in their head. */
+function describeReorder(observed: string, planned: string): string {
+  const seen = observed.split("-");
+  const want = planned.split("-");
+  if (seen.length < want.length) return `${want.length - seen.length} effect(s) never landed`;
+  if (seen.length > want.length) return `${seen.length - want.length} extra effect(s)`;
+  const first = seen.findIndex((role, index) => role !== want[index]);
+  if (first < 0) return "same order";
+  return `${seen[first]} landed where ${want[first]} was due`;
+}
+
+/** The farm SEGMENT's thread split and what its cores bought.
+ *
+ * Deliberately not in a batch column: this is keyed by RAM segment, so it folds
+ * every kind funded out of `farm` together and answers a placement question
+ * rather than a per-batch one. Two independent readings. The RATIO is a
+ * scheduling property: the cycle solve picks it, and it should sit near the
+ * plan. The core LEVERAGE is a placement property: the same grow thread does
+ * more work on a high-core host, so leverage rising while the grow share falls
+ * is the cores paying off, and leverage falling means fragmentation is pushing
+ * the placer onto 1-core hosts. */
+function allocationDetail(state: ProjectedState): string {
+  const farm = state.topics.farm;
+  const threads = farm?.allocation?.threads?.["farm"];
+  if (!threads) return "";
+  const total = KINDS.reduce((sum, kind) => sum + threads[kind], 0);
+  if (total <= 0) return "";
+
+  const plan = farm?.pipelines?.find((entry) => entry.role === "farm")?.planThreads;
+  const split = bar(KINDS.map((kind) => ({ label: kind, value: threads[kind], className: KIND_SEG[kind] })));
+
+  // Normalised against hack, so the row reads as the shape the cycle is
+  // designed around rather than as three unrelated running totals.
+  const perHack = (values: { hack: number; grow: number; weaken: number }): string =>
+    values.hack > 0 ? KINDS.map((kind) => fmtNum(values[kind] / values.hack, 2)).join(" : ") : "–";
+
+  const effect = farm?.allocation?.effectThreads?.["farm"];
+  const rows: string[][] = [
+    ["observed (run total)", ...KINDS.map((kind) => fmtNum(threads[kind])), perHack(threads)],
+    ...(plan ? [["planned (one batch)", ...KINDS.map((kind) => fmtNum(plan[kind])), perHack(plan)]] : []),
+    ...(effect
+      ? [[
+          "core leverage",
+          ...KINDS.map((kind) =>
+            threads[kind] > 0
+              ? `<span title="${esc(
+                  kind === "hack"
+                    ? "hack is unaffected by cores; this stays at 1.00 and is the control"
+                    : "one-core-equivalent effect divided by the threads launched — what the placer's core choices actually bought",
+                )}">${fmtNum(effect[kind] / threads[kind], 3)}x</span>`
+              : "–",
+          ),
+          "",
+        ]]
+      : []),
+  ];
+
+  const ratios = table(["", "hack", "grow", "weaken", "per hack"], rows, { left: [0, 4] });
+  const chart = state.allocShare.hack.length >= 2
+    ? `<div class="chartwrap"><canvas id="allocchart" class="minichart"></canvas><div class="charttip" id="alloctip"></div></div>`
+    : "";
+  return collapsible("hacking.allocDetail", "farm segment: planned vs observed, core leverage", split + ratios + chart);
+}
+
+/** Batch kinds this run has actually settled, busiest first.
+ *
+ * Read from the rollup rather than from `BATCH_KINDS`, so a kind the
+ * dispatcher grows later needs no change here — and a kind that has settled
+ * nothing does not take a column to say zero. */
+function activeBatchKinds(state: ProjectedState): [string, BatchAggregateReport][] {
+  return Object.entries(state.topics.farm?.batches ?? {})
+    .filter(([, entry]) => entry.batches > 0)
+    .sort(([, a], [, b]) => b.batches - a.batches);
+}
+
+/** A batch kind's canvas id. The kind is a string off the wire, so it is
+ * slugged rather than trusted: `morph` keys nodes on `id`, and an id with a
+ * space in it would silently stop matching across renders. */
+function kindSlug(kind: string): string {
+  return kind.replace(/[^a-zA-Z0-9]/g, "-");
+}
+
+/** What one batch costs and earns, one column per class of batch.
+ *
+ * The farm's unit of work is the batch, not the op: a prep wave is a hundred
+ * grow threads that steal nothing and a farm cycle is four ops that do, so a
+ * global op counter describes neither, and a single blended row describes
+ * neither either. Every launch group carries an id and every completion is
+ * attributed back through the `opId` it already echoes, which is what makes
+ * these per-kind sums possible without sending a record per batch — as
+ * impossible as a record per op.
+ *
+ * A column reads top to bottom as: how many ran, what one costs, the band
+ * between what it launched and what landed, how its threads split, and how
+ * often it lands in order. */
+function batchesCard(state: ProjectedState): string {
+  const kinds = activeBatchKinds(state);
+  if (kinds.length === 0) return waiting("a batch to settle", "a batch counts once every one of its ops has landed");
+  return (
+    `<div class="batchgrid">${kinds.map(([kind, entry]) => batchColumn(state, kind, entry)).join("")}</div>` +
+    batchHistoryDetail(state) +
+    allocationDetail(state)
+  );
+}
+
+function batchColumn(state: ProjectedState, kind: string, entry: BatchAggregateReport): string {
+  const per = (value: number): number => value / entry.batches;
+  const slug = kindSlug(kind);
+
+  const head =
+    `<div class="pipehead">` +
+    `<span class="pipetag">${esc(kind)}</span>` +
+    `<span class="pipename">${fmtNum(entry.batches)}</span>` +
+    `<span class="muted">batches</span>` +
+    `</div>`;
+
+  const series = state.batchSeries[kind];
+  // The run mean answers "what does a batch cost"; the windowed figure answers
+  // "what does one cost NOW", and the two drifting apart is the finding a
+  // cumulative mean is structurally incapable of showing — a target drying out
+  // moves the recent number long before it moves the average.
+  const recentMoney = series?.moneyPerBatch.at(-1)?.[1];
+  const recentRate = series?.perSec.at(-1)?.[1];
+  const summary = tiles([
+    { label: "ops", value: fmtNum(per(entry.ops), 1), sub: "per batch" },
+    { label: "RAM", value: fmtRam(per(entry.gb)), sub: "per batch" },
+    { label: "span", value: fmtMs(per(entry.spanMs)), sub: "start to settle" },
+    {
+      label: "earns",
+      value: fmtMoney(per(entry.moneyEarned)),
+      sub: recentMoney === undefined ? "per batch, run mean" : `run mean · now ${fmtMoney(recentMoney)}`,
+    },
+    {
+      label: "settling",
+      value: recentRate === undefined ? "–" : `${fmtNum(recentRate, 2)}/s`,
+      sub: `over ${fmtTime(state.farmWindowMs)}`,
+    },
+  ]);
+
+  // Totals, not rates: the finding is the BAND between the two curves, and a
+  // rate of each would compress it to nothing. See BatchKindSeries.
+  const chart = (series?.launched.length ?? 0) >= 2
+    ? `<div class="chartwrap"><canvas id="batch-${slug}" class="microchart"></canvas>` +
+      `<div class="charttip" id="batchtip-${slug}"></div></div>`
+    : note("waiting for a second rollup");
+
+  const lost = entry.ops - entry.landed;
+  // Colour-keyed to the two curves. The chart carries no legend at this size,
+  // and when nothing is being lost the curves coincide exactly — so without
+  // the key there is no way to tell which line you are looking at, or that
+  // there are two.
+  const band =
+    `<p class="muted" title="${esc(
+      "ops this kind launched against the ops that arrived. The two curves separating is the finding: " +
+        "an op that never lands is a batch dying between dispatch and arrival, visible here long before it becomes a fall in income.",
+    )}"><span class="k1">${fmtNum(entry.ops)} launched</span> → ` +
+    `<span class="k2">${fmtNum(entry.landed)} landed</span>` +
+    (lost > 0 ? ` · <span class="bad">${fmtNum(lost)} lost</span>` : "") +
+    (entry.noHack
+      ? ` · <span class="bad" title="${esc("support landed with no steal to protect")}">${fmtNum(entry.noHack)} no-hack</span>`
+      : "") +
+    `</p>`;
+
+  const split = bar(KINDS.map((each) => ({ label: each, value: entry.threads[each], className: KIND_SEG[each] })));
+  const threads = `<p class="muted">${KINDS.map((each) => fmtNum(per(entry.threads[each]))).join(" : ")} threads/batch</p>`;
+
+  // A batch with no landing grid has no order to be right about. Which kinds
+  // those are is not this panel's business to know — a prep wave has none, a
+  // shotgun cycle has none, and the next mode will decide for itself — so the
+  // test is whether this kind has ever produced a verdict, not what it is
+  // called.
+  //
+  // Shown as a FRACTION rather than a percentage, because the denominator is
+  // every batch of the kind including the ungradeable ones: a bare red "0.0%"
+  // asserts that every batch mis-landed, where "0 / 265" invites the reader to
+  // notice what is being divided by.
+  // Whether this kind lands on a grid at all, reported by the dispatcher
+  // rather than inferred from the verdicts: inferring it from
+  // `inOrder + noHack > 0` hid the one case worth surfacing, a kind that has
+  // a grid and mis-ordered every batch of it.
+  // Runs recorded before the dispatcher published it fall back to the old
+  // inference, which is right whenever it fires at all.
+  const graded = entry.graded !== undefined ? entry.graded > 0 : entry.inOrder + entry.noHack > 0;
+  const order = graded
+    ? `<p class="${entry.inOrder >= entry.batches ? "good" : "bad"}" title="${esc(
+        "batches whose effects landed in the order the cycle planned, out of every batch of this kind. " +
+          "A batch launched without a landing grid can never contribute, so this reads low on a kind that only sometimes lands on a grid.",
+      )}">${fmtNum(entry.inOrder)} / ${fmtNum(entry.batches)} in order</p>`
+    : `<p class="muted" title="${esc(
+        "this kind has never produced a landing-order verdict — its batches land as a group with no intended internal sequence",
+      )}">no landing grid</p>`;
+
+  return `<section class="batchcol">${head}${summary}${chart}${band}${split}${threads}${order}</section>`;
+}
+
+/** Individual settled batches, accumulated far past the eight the rollup carries.
+ *
+ * The aggregates above say whether the farm is healthy; these say which batch
+ * was not, and the accumulated history (ui/app/project.ts) is what makes "which
+ * one" answerable more than eight seconds after the fact.
+ *
+ * SAMPLED, and the summary says so. The rollup's ring holds eight entries and
+ * is read once a second, so a farm settling more than eight batches per second
+ * overflows it between reads — measured on a real run, 96 of ~965 batches came
+ * through. That is a perfectly good sample of what a batch looks like, and a
+ * useless denominator; the aggregates above are the denominator. */
+function batchHistoryDetail(state: ProjectedState): string {
+  const history = state.batchHistory;
+  if (history.length === 0) return "";
+  const LIMIT = 60;
+  // Tail first, THEN reverse: this runs twice a second, and reversing a copy
+  // of the whole history to keep sixty rows would copy the other 1,940.
+  const shown = history.slice(-LIMIT).reverse();
+  return collapsible(
+    "hacking.batchHistory",
+    hint(
+      `${fmtNum(history.length)} batch(es) sampled, newest first`,
+      "individual batches caught from the dispatcher's eight-deep ring, read once a second. " +
+        "A farm settling faster than that overflows it between reads, so this is a sample of batches, not a count of them — " +
+        "the per-kind totals above are the count.",
+    ),
+    table(
+      ["at", "kind", "target", "ops", "span", "earned", "landed as"],
+      shown.map((batch) => [
+        fmtTime(batch.at - (state.t0 ?? 0)),
+        esc(batch.kind),
+        esc(batch.target),
+        batch.landed === batch.ops
+          ? fmtNum(batch.ops)
+          : `<span class="bad" title="${esc("an op never landed")}">${fmtNum(batch.landed)}/${fmtNum(batch.ops)}</span>`,
+        fmtMs(batch.spanMs),
+        fmtMoney(batch.moneyEarned),
+        batch.order === undefined
+          ? `<span class="muted">no grid</span>`
+          : batch.order === batch.planned
+            ? `<span class="good">${esc(batch.order)}</span>`
+            : `<span class="bad">${esc(batch.order)}</span>`,
+      ]),
+      { left: [1, 2, 6] },
+    ) + (history.length > LIMIT ? shownOf(LIMIT, history.length, "older batches") : ""),
+  );
+}
+
+/** RAM segments now, and how each segment has spent its share across the ops. */
+function ramSegmentsCard(farm: FarmRollup | undefined): string {
+  if (!farm?.ramPie) return "";
+  const pie = bar([
+    { label: "farm", value: farm.ramPie.farm, className: "s1" },
+    { label: "prep", value: farm.ramPie.prep, className: "s2" },
+    { label: "share", value: farm.ramPie.share, className: "s3" },
+    { label: "free", value: farm.ramPie.free, className: "s4" },
+    { label: "reserve", value: farm.ramPie.reserve, className: "s5" },
+  ]);
+
+  const cross = farm.ramWork?.nativeGbMsBySegmentKind;
+  if (!cross) return pie;
+  // GB·s is cumulative WORK, not the live segment sizes above: the bar says
+  // where the RAM is right now, this says where it has been spent. The two
+  // disagree whenever a segment was recently resized, and that disagreement is
+  // worth being able to see rather than being averaged away.
+  const segments = ["farm", "prep", "share"] as const;
+  const rows = segments
+    .filter((segment) => cross[segment])
+    .map((segment) => {
+      const kinds = cross[segment]!;
+      const segTotal = KINDS.reduce((sum, kind) => sum + kinds[kind], 0);
+      return [
+        esc(segment),
+        ...KINDS.map((kind) => (segTotal > 0 ? fmtPct(kinds[kind] / segTotal, 1) : "–")),
+        fmtNum(segTotal / 1000),
+      ];
+    });
+  return (
+    pie +
+    collapsible(
+      "hacking.ramCross",
+      "work spent per segment, by op",
+      table(["segment", "hack", "grow", "weaken", "GB·s"], rows, { left: [0] }),
+      true,
+    )
+  );
+}
+
+/** Draw one of this tab's mini charts, if its canvas is present and it has
+ * something to say. A series with fewer than two points draws nothing (see
+ * drawSeries), so an empty chart is silence rather than a misleading flat
+ * line at zero. */
+function drawMini(
+  el: HTMLElement,
+  canvasId: string,
+  tooltipId: string,
+  series: ChartSeries[],
+  t0: number | null,
+  fmtY: (value: number) => string,
+  compact = false,
+): void {
+  const canvas = el.querySelector<HTMLCanvasElement>(`#${canvasId}`);
+  const tooltip = el.querySelector<HTMLElement>(`#${tooltipId}`);
+  if (!canvas || !tooltip) return;
+  drawSeries(canvas, series, t0, fmtY, { compact });
+  attachChartHover(canvas, tooltip);
+}
+
 export const hackingTab: Tab = {
   id: "hacking",
   render(state: ProjectedState) {
     const farm = state.topics.farm;
     const fleet = state.topics.fleet;
 
+    // Which host is being farmed and which is being prepped now belongs to the
+    // pipeline panels below, which can show any number of either. What is left
+    // here is the run-level total that belongs to no single pipeline.
     const farmTiles = farm
       ? tiles([
-          { label: "farm target", value: farm.target || "–" },
-          { label: "target solve", value: farm.targetSolveExact === undefined ? "–" : farm.targetSolveExact ? "exact" : "heuristic" },
-          { label: "prepping", value: farm.prepTarget || "–" },
           { label: "$/sec", value: farm.moneyRate !== undefined ? `${fmtMoney(farm.moneyRate)}/s` : "–" },
           { label: "exp/sec", value: farm.expRate !== undefined ? fmtNum(farm.expRate, 1) : "–" },
           { label: "earned", value: fmtMoney(farm.totals?.moneyEarned) },
           { label: "hacks", value: String(farm.totals?.hacks ?? 0) },
+          {
+            label: "target solve",
+            value: farm.targetSolveExact === undefined ? "–" : farm.targetSolveExact ? "exact" : "heuristic",
+            sub: farm.targetSolveExact === undefined
+              ? "not reported yet"
+              : farm.targetSolveExact ? "whole integer domain searched" : "search was truncated",
+          },
         ])
       : "";
 
@@ -222,15 +771,7 @@ export const hackingTab: Tab = {
           )
         : "";
 
-    const pie = farm?.ramPie
-      ? bar([
-          { label: "farm", value: farm.ramPie.farm, className: "s1" },
-          { label: "prep", value: farm.ramPie.prep, className: "s2" },
-          { label: "share", value: farm.ramPie.share, className: "s3" },
-          { label: "free", value: farm.ramPie.free, className: "s4" },
-          { label: "reserve", value: farm.ramPie.reserve, className: "s5" },
-        ])
-      : "";
+    const segments = ramSegmentsCard(farm);
 
     const health =
       farm &&
@@ -238,9 +779,52 @@ export const hackingTab: Tab = {
         ? table(
             ["metric", "value"],
             [
+              ...(farm.orphanLandings
+                ? [[
+                    `<span title="${esc(
+                      "completions from workers this controller never launched — processes that outlived an install or a reload. " +
+                        "Their RAM is spent but not steered, and they are excluded from `landed` so it stays comparable with `launched`.",
+                    )}">orphan landings</span>`,
+                    `<span class="bad">${fmtNum(farm.orphanLandings)}</span>`,
+                  ]]
+                : []),
               ["alloc failures", String(farm.allocFails ?? 0)],
               ["exec failures", String(farm.execFails ?? 0)],
-              ["batches skipped", String(farm.batchesSkipped ?? 0)],
+              [
+                `<span title="${esc(
+                  "batches not launched. The by-cause split matters more than the total: arrival-money and " +
+                    "arrival-security are the safety brakes working as designed, while deadline and placement " +
+                    "mean the pipeline could not be fed.",
+                )}">batches skipped</span>`,
+                farm.batchesSkippedBy
+                  ? `${fmtNum(farm.batchesSkipped ?? 0)} <span class="muted">(${Object.entries(farm.batchesSkippedBy)
+                      .filter(([, count]) => count > 0)
+                      .map(([cause, count]) => `${esc(cause)} ${fmtNum(count)}`)
+                      .join(", ") || "–"})</span>`
+                  : String(farm.batchesSkipped ?? 0),
+              ],
+              // The landing grid's only falsifiable measurement, and it was
+              // published but rendered nowhere — so the live reading the two
+              // disabled timing tightenings wait on could not be taken by
+              // looking at the game. The simulator lands ops exactly on plan,
+              // so anything non-trivial here comes from a real run.
+              ...(farm.landingError
+                ? [[
+                    `<span title="${esc(
+                      "observed minus planned landing time. Negative is early. A mean far from zero is a biased " +
+                        "duration model; a maxAbs above one landing gap means batch effects are reordering.",
+                    )}">landing error</span>`,
+                    `${farm.landingError.meanMs.toFixed(2)}ms mean` +
+                      `<span class="muted"> (${farm.landingError.minMs.toFixed(2)} … ` +
+                      `${farm.landingError.maxMs.toFixed(2)}, |max| ` +
+                      `${farm.landingError.maxAbsMs.toFixed(2)})</span>`,
+                  ]]
+                : []),
+              ...Object.entries(farm.landingErrorByKind ?? {}).map(([kind, d]) => [
+                `<span class="muted">&nbsp;&nbsp;${esc(kind)}</span>`,
+                `${d.meanMs.toFixed(2)}ms mean` +
+                  `<span class="muted"> (|max| ${d.maxAbsMs.toFixed(2)})</span>`,
+              ]),
               ["worst pump", farm.pumpMaxMs !== undefined ? `${farm.pumpMaxMs.toFixed(1)}ms` : "–"],
             ],
           )
@@ -361,8 +945,17 @@ export const hackingTab: Tab = {
     });
 
     return (
+      // Batches FIRST. The batch is the unit the farm reasons in, and burying
+      // it under five tile rows meant you could not see one without scrolling.
       `<div class="col wide">` +
-      card("Farm", farm ? farmTiles + ops : waiting("the farm rollup", "the dispatcher publishes one per second")) +
+      card("Batches", batchesCard(state)) +
+      card(
+        "Farm",
+        farm
+          ? farmTiles + pipelinePanels(state) + ops
+          : waiting("the farm rollup", "the dispatcher publishes one per second"),
+      ) +
+      card("Landing order", landingOrderCard(state)) +
       card("Servers", servers, serverControls) +
       `</div>` +
       `<div class="col">` +
@@ -370,9 +963,49 @@ export const hackingTab: Tab = {
       (infrastructurePlan ? card("Infrastructure ROI", infrastructurePlan) :
         homeRamPlan ? card("Home RAM investment", homeRamPlan) : "") +
       (infrastructureHistory ? card("Decision history", infrastructureHistory) : "") +
-      (pie ? card("RAM segments", pie) : "") +
+      (segments ? card("RAM segments", segments) : "") +
       (health ? card("Dispatcher health", health) : "") +
       `</div>`
+    );
+  },
+
+  /** Charts are drawn imperatively after the panel is in the DOM. The canvases
+   * survive a re-render now (the viewer patches rather than rebuilds), so
+   * `attachChartHover` must be — and is — idempotent. A canvas that is not
+   * present (a kind with no series yet) is skipped by drawMini rather than
+   * guarded for here.
+   *
+   * A COLLAPSED disclosure is a different case and is NOT skipped: `<details>`
+   * keeps its children, so the canvas is found and measures 0x0, which draws a
+   * zero-sized bitmap. Opening one therefore has to re-render (main.ts's
+   * `toggle` handler does), or a stored run — which never re-renders on its
+   * own — shows the section blank. */
+  mount(state, el) {
+    for (const [kind] of activeBatchKinds(state)) {
+      const series = state.batchSeries[kind];
+      if (!series) continue;
+      const slug = kindSlug(kind);
+      drawMini(
+        el,
+        `batch-${slug}`,
+        `batchtip-${slug}`,
+        [
+          { pts: series.launched, color: "--series-1", label: "launched" },
+          { pts: series.landed, color: "--series-5", label: "landed" },
+        ],
+        state.t0,
+        // A COUNT, not a rate. The band between the two totals is the point.
+        (v) => fmtNum(v),
+        true,
+      );
+    }
+    drawMini(
+      el,
+      "allocchart",
+      "alloctip",
+      KINDS.map((each) => ({ pts: state.allocShare[each], color: KIND_SERIES[each], label: each })),
+      state.t0,
+      (v) => `${(v * 100).toFixed(0)}%`,
     );
   },
 };

@@ -13,8 +13,9 @@ import {
   type ScoredInfrastructure,
 } from "../../../shared/strategy/infrastructure.ts";
 import { coarseHorizonSec } from "../../../shared/strategy/investment.ts";
-import { solveCycle } from "../../../shared/strategy/targeting.ts";
-import { currentShareBonus } from "../../../shared/strategy/dispatch.ts";
+import { solveCycle, type PrepPlan } from "../../../shared/strategy/targeting.ts";
+import { BATCH_KINDS, currentShareBonus, type DispatchStats } from "../../../shared/strategy/dispatch.ts";
+import { poolCounts } from "../../../shared/strategy/worker-pool.ts";
 import {
   PORT_OPENER_PROGRAMS,
   preferProgramCreation,
@@ -40,6 +41,7 @@ import { DEFAULT_PLANNING_HORIZON_SEC, installHorizonSec, usableForecastSec, typ
 import { growingProgressSecondsPerRelativeRate, linearSecondsPerRelativeRate } from "../../../shared/strategy/progression/marginal.ts";
 import type { MeasuredMarginal } from "../../../shared/strategy/progression/marginal.ts";
 import { hackMarginalValue } from "../../../shared/strategy/share.ts";
+import type { FarmPipeline, FarmRollup } from "../../../shared/telemetry/topics/hacking.ts";
 import {
   marginalCostPerGb,
   roundedRamPurchase,
@@ -171,6 +173,15 @@ function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | 
   const intent = game.topics.factions?.plan?.objective?.intent;
   const standing = intent ? game.topics.factions?.standings?.find((entry) => entry.name === intent.faction) : undefined;
   const bonus = game.topics.fleet?.sharePower ?? 1;
+  const currentWork = game.topics.career?.currentWork;
+  // Share may consume the residual free tail whenever the ACTIVE work already
+  // earns faction rep: the bonus multiplies a rate being produced anyway, and
+  // share workers stop on demand. This is deliberately a statement about the
+  // present, not a forecast — the work planners keep pricing rep with the
+  // MEASURED live sharePower, and seeing it rise once share runs is exactly
+  // how "rep is cheap right now" reaches them.
+  const currentWorkEarnsRep = currentWork?.type === "FACTION"
+    && (currentWork.workType === "hacking" || currentWork.workType === "field" || currentWork.workType === "security");
   let reputationSecondsPerBonus = 0;
   let reputationHackingSecondsPerRelativeRate = 0;
   let reputationHackingMarginalKnown = true;
@@ -184,10 +195,9 @@ function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | 
       hasFocusAug: (game.topics.factions?.ownedAugs ?? []).includes("Neuroreceptor Management Implant"),
     };
     const person = { skills: player.skills, mults: { faction_rep: player.mults.faction_rep } };
-    const work = game.topics.career?.currentWork;
-    const activeType = work?.type === "FACTION" && work.detail === intent.faction
-      && (work.workType === "hacking" || work.workType === "field" || work.workType === "security")
-      ? work.workType as WorkType
+    const activeType = currentWork?.type === "FACTION" && currentWork.detail === intent.faction
+      && (currentWork.workType === "hacking" || currentWork.workType === "field" || currentWork.workType === "security")
+      ? currentWork.workType as WorkType
       : undefined;
     const rate = activeType
       ? workRepPerSec(activeType, person, standing.favor, repCtx, true)
@@ -202,7 +212,10 @@ function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | 
     // packages.ts prices this exact work as repGap / repPerSec. Its local
     // seconds-per-relative-rate is therefore closed-form; share contributes
     // `slope` rep/sec per bonus unit.
-    if (rate > 0 && intent.purpose === "augmentations") {
+    // Favor-purpose intents are rep work too: repSec is the same rep-earning
+    // clock either way, and gating on "augmentations" left share (and its rep
+    // pricing) dark through every favor-building stretch of the route.
+    if (rate > 0) {
       reputationSecondsPerBonus = linearSecondsPerRelativeRate(intent.repSec) * slope / rate;
       const totalExpPerSec = game.topics.fleet?.scriptExpGain;
       const value = growingProgressSecondsPerRelativeRate({
@@ -236,6 +249,7 @@ function shareValue(game: GameState, caps: DriverContext["caps"]): ShareValue | 
       ? { totalHackingExpPerSec: game.topics.fleet.scriptExpGain }
       : {}),
     reputationSecondsPerBonus,
+    ...(currentWorkEarnsRep ? { currentWorkEarnsRep: true } : {}),
   };
 }
 
@@ -276,6 +290,118 @@ export function takeTargetSwitch(): { from: string; to: string } | undefined {
   return value;
 }
 
+/** Observed landing-order signatures, bounded for publication.
+ *
+ * The dispatcher's map is unbounded in principle — every distinct reorder is a
+ * new key — but the distribution is extremely top-heavy: one signature per
+ * healthy mode plus a short tail. Publishing the top few and totalling the
+ * rest keeps the record flat regardless of how creatively a bad run reorders. */
+const LANDING_SIGNATURES_PUBLISHED = 6;
+
+function landingOrderDigest(stats: DispatchStats): FarmRollup["landingOrder"] {
+  if (stats.landingOrderBatches === 0 || stats.landingOrderPlanned === undefined) return undefined;
+  const ranked = [...stats.landingOrder.entries()].sort(([, a], [, b]) => b - a);
+  const published = ranked.slice(0, LANDING_SIGNATURES_PUBLISHED);
+  const other = ranked.slice(LANDING_SIGNATURES_PUBLISHED).reduce((sum, [, count]) => sum + count, 0);
+  return {
+    planned: stats.landingOrderPlanned,
+    batches: stats.landingOrderBatches,
+    ...(stats.landingOrderIncomplete > 0 ? { incomplete: stats.landingOrderIncomplete } : {}),
+    observed: Object.fromEntries(published),
+    ...(other > 0 ? { otherBatches: other } : {}),
+    anomalies: stats.landingOrderAnomalies.map((entry) => ({ ...entry })),
+  };
+}
+
+/** Estimated seconds until a prep target becomes farmable, and WHICH
+ * constraint set that estimate.
+ *
+ * Two independent floors. The latency floor is one weaken (plus the G+W2 phase
+ * when the plan has one): even infinite RAM cannot beat the game's own op
+ * durations. The RAM floor is the plan's GB·seconds divided by the GB the prep
+ * segment actually holds. Reporting which one binds is the whole point —
+ * buying RAM does nothing for a latency-bound prep. */
+function prepEta(plan: PrepPlan, segmentGb: number): NonNullable<FarmPipeline["eta"]> {
+  if (plan.prepped) return { seconds: 0, bound: "latency", prepped: true };
+  const latencySec = plan.weakenTimeS + (plan.growWeakenTimeS ?? 0);
+  const ramSec = segmentGb > 0 ? plan.ramSec / segmentGb : Infinity;
+  const bound = ramSec > latencySec ? "ram" : "latency";
+  const seconds = Math.max(latencySec, Number.isFinite(ramSec) ? ramSec : latencySec);
+  return { seconds, bound, prepped: false };
+}
+
+/** Build the pipeline list from the directive the dispatcher is executing.
+ *
+ * Everything here is read from state the dispatcher already holds — no ns
+ * calls — because this runs inside the 1 Hz rollup. In-flight counts are
+ * derived by walking the tracked-op table rather than kept as per-target
+ * counters in the hot path: the table has a few thousand entries at most and
+ * this walk happens once a second, whereas a counter would cost work on every
+ * launch and every landing. */
+function pipelines(game: GameState, driver: DriverState): FarmPipeline[] {
+  const dispatch = driver.memory.dispatch;
+  const directive = dispatch.evaluator.directive;
+  const inFlightByHost = new Map<string, { hack: number; grow: number; weaken: number }>();
+  for (const tracked of dispatch.tracked.values()) {
+    let counts = inFlightByHost.get(tracked.target);
+    if (!counts) {
+      counts = { hack: 0, grow: 0, weaken: 0 };
+      inFlightByHost.set(tracked.target, counts);
+    }
+    counts[tracked.kind]++;
+  }
+  const gbOf = (kind: "farm" | "prep"): number => dispatch.segmentGb[kind];
+  const vitals = (host: string): Partial<FarmPipeline> => {
+    const server = game.topics.servers?.[host];
+    return {
+      ...(server?.moneyAvailable !== undefined ? { money: server.moneyAvailable } : {}),
+      ...(server?.moneyMax !== undefined ? { moneyMax: server.moneyMax } : {}),
+      ...(server?.hackDifficulty !== undefined ? { security: server.hackDifficulty } : {}),
+      ...(server?.minDifficulty !== undefined ? { minSecurity: server.minDifficulty } : {}),
+    };
+  };
+
+  const out: FarmPipeline[] = [];
+  const farm = directive.farm;
+  if (farm) {
+    const solution = farm.solution;
+    out.push({
+      host: farm.host,
+      role: "farm",
+      mode: dispatch.mode,
+      segment: "farm",
+      gb: roundSigFigs(gbOf("farm"), 3),
+      inFlight: inFlightByHost.get(farm.host) ?? { hack: 0, grow: 0, weaken: 0 },
+      ...vitals(farm.host),
+      planThreads: {
+        hack: solution.hackThreads,
+        grow: solution.growThreads,
+        weaken: solution.weaken1Threads + solution.weaken2Threads,
+      },
+      moneyPerSecPerGb: roundSigFigs(solution.score, 3),
+      hackTimeMs: Math.round(solution.hackTimeS * 1_000),
+      weakenTimeMs: Math.round(solution.weakenTimeS * 1_000),
+    });
+  }
+  const prepEtaOf = (plan: PrepPlan, segmentGb: number): NonNullable<FarmPipeline["eta"]> => {
+    const eta = prepEta(plan, segmentGb);
+    return { ...eta, seconds: roundSigFigs(eta.seconds, 3) };
+  };
+  const prep = directive.prep;
+  if (prep) {
+    out.push({
+      host: prep.host,
+      role: "prep",
+      segment: "prep",
+      gb: roundSigFigs(gbOf("prep"), 3),
+      inFlight: inFlightByHost.get(prep.host) ?? { hack: 0, grow: 0, weaken: 0 },
+      ...vitals(prep.host),
+      eta: prepEtaOf(prep.plan, gbOf("prep")),
+    });
+  }
+  return out;
+}
+
 function rollup(game: GameState, driver: DriverState, target: string, prepTarget?: string, segOrder?: string[]): void {
   const stats = driver.memory.dispatch.stats;
   const targetSolveExact = driver.memory.dispatch.evaluator.directive.farm?.solution.exact;
@@ -296,10 +422,11 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   // dispatcher — this is display/telemetry, 30 s staleness is fine.
   const targetServer = target ? game.topics.servers?.[target] : undefined;
   const heap = driver.memory.dispatch.heap;
-  const poolWorkers = [...driver.memory.dispatch.pool.workers.values()];
+  const pool = poolCounts(driver.memory.dispatch.pool);
   const segmentGb = driver.memory.dispatch.segmentGb;
   const prepBudgetGb = driver.memory.dispatch.evaluator.directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
   const share = driver.memory.dispatch.evaluator.directive.share;
+  const landingOrder = landingOrderDigest(stats);
 
   set(game, "farm", {
     target,
@@ -310,6 +437,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     ...(prepTarget !== undefined ? { prepTarget } : {}),
     prepBudgetGb,
     ...(segOrder !== undefined ? { segOrder } : {}),
+    pipelines: pipelines(game, driver),
     mode: driver.memory.dispatch.mode,
     inFlight: { ...driver.memory.dispatch.inFlight },
     launched: { ...stats.launched },
@@ -330,8 +458,8 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     allocFails: stats.allocFails,
     allocFailsByPhase: stats.allocFailsByPhase,
     execs: stats.execs,
-    ...(poolWorkers.length > 0
-      ? { pool: { workers: poolWorkers.length, busy: poolWorkers.filter((worker) => worker.busy).length } }
+    ...(pool.workers > 0
+      ? { pool }
       : {}),
     pooling: driver.memory.dispatch.pooling,
     ...(stats.stockOps > 0 ? { stockOps: stats.stockOps } : {}),
@@ -343,14 +471,59 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
       allotmentGb: roundSigFigs(share.allotmentGb, 3),
       hackMarginal: roundSigFigs(share.hackMarginal.state === "measured" ? share.hackMarginal.value : 0, 3),
       shareMarginal: roundSigFigs(share.shareMarginal, 3),
+      ...(latestShareValue?.currentWorkEarnsRep && !(share.reputationSecondsPerBonus > 0)
+        ? { freeTail: true }
+        : {}),
     } } : {}),
+    ...(stats.padding.count > 0 ? { padding: {
+      meanMs: roundSigFigs(stats.padding.sumMs / stats.padding.count, 3),
+      maxMs: roundSigFigs(stats.padding.maxMs, 3),
+    } } : {}),
+    ...(stats.landingError.count > 0 ? { landingError: {
+      meanMs: roundSigFigs(stats.landingError.sumMs / stats.landingError.count, 3),
+      minMs: roundSigFigs(stats.landingError.minMs, 3),
+      maxMs: roundSigFigs(stats.landingError.maxMs, 3),
+      maxAbsMs: roundSigFigs(stats.landingError.maxAbsMs, 3),
+    } } : {}),
+    ...(stats.landingError.count > 0 ? { landingErrorByKind: Object.fromEntries(
+      (["hack", "grow", "weaken"] as const)
+        .filter((kind) => stats.landingErrorByKind[kind].count > 0)
+        .map((kind) => {
+          const d = stats.landingErrorByKind[kind];
+          return [kind, {
+            meanMs: roundSigFigs(d.sumMs / d.count, 3),
+            minMs: roundSigFigs(d.minMs, 3),
+            maxMs: roundSigFigs(d.maxMs, 3),
+            maxAbsMs: roundSigFigs(d.maxAbsMs, 3),
+          }];
+        }),
+    ) } : {}),
     execFails: driver.execFails,
     batchesSkipped: stats.batchesSkipped,
+    ...(stats.batchesSkipped > 0 ? { batchesSkippedBy: {
+      deadline: roundSigFigs(stats.batchesSkippedBy.deadline, 3),
+      "arrival-security": roundSigFigs(stats.batchesSkippedBy["arrival-security"], 3),
+      "arrival-money": roundSigFigs(stats.batchesSkippedBy["arrival-money"], 3),
+      placement: roundSigFigs(stats.batchesSkippedBy.placement, 3),
+    } } : {}),
+    ...(stats.orphanLandings > 0 ? { orphanLandings: stats.orphanLandings } : {}),
     missedWindow: {
       deadline: roundSigFigs(stats.missedWindow.deadline, 3),
       "arrival-security": roundSigFigs(stats.missedWindow["arrival-security"], 3),
       "arrival-money": roundSigFigs(stats.missedWindow["arrival-money"], 3),
       placement: roundSigFigs(stats.missedWindow.placement, 3),
+    },
+    ...(landingOrder ? { landingOrder } : {}),
+    // Only kinds that have actually run: an all-zero row for a mode this save
+    // has never used is noise in both the record and the panel.
+    batches: Object.fromEntries(
+      BATCH_KINDS.filter((kind) => stats.batchesByKind[kind].batches > 0)
+        .map((kind) => [kind, stats.batchesByKind[kind]]),
+    ),
+    ...(stats.recentBatches.length > 0 ? { recentBatches: stats.recentBatches.map((batch) => ({ ...batch })) } : {}),
+    allocation: {
+      threads: stats.threadsBySegmentKind,
+      effectThreads: stats.effectThreadsBySegmentKind,
     },
     ramWork: {
       nativeGbMs: stats.nativeRamMs,
@@ -359,6 +532,8 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
       paddingGbMsByKind: stats.paddingRamMsByKind,
       nativeGbMsBySegment: stats.nativeRamMsBySegment,
       paddingGbMsBySegment: stats.paddingRamMsBySegment,
+      nativeGbMsBySegmentKind: stats.nativeRamMsBySegmentKind,
+      paddingGbMsBySegmentKind: stats.paddingRamMsBySegmentKind,
     },
     pumpMaxMs: takePumpMaxMs(),
     wakePumps,
@@ -449,7 +624,7 @@ function marginalRamIncome(
   const depthCap = ctx.state.topics.farm?.depthCapGb;
   const fleetGb = Math.max(
     0,
-    (fleet.maxRam ?? 0) - (ctx.state.topics.progression?.ramArena?.arenaGb ?? 0) + Math.max(0, priorAddedRam),
+    (fleet.maxRam ?? 0) - (ctx.state.topics.ramArena?.arenaGb ?? 0) + Math.max(0, priorAddedRam),
   );
   const demandCeiling = depthCap !== undefined
     ? depthCap + (ctx.state.topics.farm?.prepBudgetGb ?? 0)
@@ -574,7 +749,7 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
   const marginal = productiveRamMarginal(ctx);
   const fleetGb = Math.max(
     0,
-    (fleet.maxRam ?? 0) - (ctx.state.topics.progression?.ramArena?.arenaGb ?? 0),
+    (fleet.maxRam ?? 0) - (ctx.state.topics.ramArena?.arenaGb ?? 0),
   );
   const depthCap = ctx.state.topics.farm?.depthCapGb;
   const demandCeiling = depthCap === undefined
@@ -1144,7 +1319,7 @@ function careerAlternative(game: GameState, writeSec: number): ProgramAlternativ
  * cost of spending it on a port opener instead. Absent until some money band
  * carries a priced claim, and the caller then falls back to money-only. */
 function moneyValueSecPerDollar(game: GameState): number | undefined {
-  const waterlines = game.topics.progression?.arbitration?.waterlines ?? [];
+  const waterlines = game.topics.arbitration?.waterlines ?? [];
   let best = 0;
   for (const waterline of waterlines) {
     if (waterline.resource === "money" && waterline.lambda > best) best = waterline.lambda;

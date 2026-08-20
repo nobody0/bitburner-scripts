@@ -68,7 +68,7 @@ function ctx(options: {
           },
         },
         ...(options.lambda !== undefined
-          ? { progression: { arbitration: { waterlines: [{ resource: "money", priority: 100, lambda: options.lambda, claimCount: 1, pricedClaimCount: 1 }] } } }
+          ? { arbitration: { waterlines: [{ resource: "money", priority: 100, lambda: options.lambda, claimCount: 1, pricedClaimCount: 1 }] } }
           : {}),
       },
     },

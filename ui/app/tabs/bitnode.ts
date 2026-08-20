@@ -116,7 +116,11 @@ function forecastCard(forecast: TimeForecast, now: number): string {
 
 type Plan = NonNullable<NonNullable<ProjectedState["topics"]["progression"]>["plan"]>;
 type Progression = NonNullable<ProjectedState["topics"]["progression"]>;
-type RamArena = NonNullable<Progression["ramArena"]>;
+// Both were split out of `progression` (shared/telemetry/topics/progression.ts):
+// they move far faster than the plan they used to ride on, and a state record
+// republishes its whole topic.
+type RamArena = NonNullable<ProjectedState["topics"]["ramArena"]>;
+type Arbitration = NonNullable<ProjectedState["topics"]["arbitration"]>;
 
 /** The chosen ending and every route's estimate, with per-part attribution so
  * a wrong total points at the sub-heuristic that produced it. */
@@ -183,7 +187,7 @@ function routeCard(plan: Plan, now: number): string {
  * growth that only a genuinely starved request can summon. Anything waiting
  * past five seconds is the signal that the arena is too small for what the
  * run is actually asking for. */
-function arenaBody(arena: Progression["ramArena"]): string {
+function arenaBody(arena: RamArena | undefined): string {
   if (!arena) return note("the RAM broker has not reported yet");
   const starved = new Set(arena.starvation.map((request) => `${request.by}\0${request.id}`));
   const summary = definitions([
@@ -411,10 +415,11 @@ export const bitnodeTab: Tab = {
         : note("default BitNode options");
 
     const needs = (p.needs ?? []).filter((need) => !need.satisfied);
+    const arbitration: Arbitration | undefined = state.topics.arbitration;
     const waterline = (resource: string, priority: number | undefined): number | undefined =>
-      p.arbitration?.waterlines?.find((entry) => entry.resource === resource && entry.priority === priority)?.lambda;
+      arbitration?.waterlines?.find((entry) => entry.resource === resource && entry.priority === priority)?.lambda;
     const arbitrationRows = [
-      ...(p.arbitration?.grants ?? []).map((grant) => [
+      ...(arbitration?.grants ?? []).map((grant) => [
         "granted",
         esc(grant.by),
         esc(grant.id),
@@ -425,7 +430,7 @@ export const bitnodeTab: Tab = {
         waterline(grant.resource, grant.priority) !== undefined ? fmtNum(waterline(grant.resource, grant.priority), 5) : "–",
         grant.marginalValue !== undefined ? fmtNum(grant.marginalValue, 5) : "–",
       ]),
-      ...(p.arbitration?.denied ?? []).map((denial) => [
+      ...(arbitration?.denied ?? []).map((denial) => [
         `denied: ${esc(denial.reason)}`,
         esc(denial.by),
         esc(denial.id),
@@ -483,7 +488,7 @@ export const bitnodeTab: Tab = {
       ) +
       card("BitNode options", optionsBody) +
       card("Needs & investment arbiter", coordination) +
-      card("RAM arena", arenaBody(p.ramArena)) +
+      card("RAM arena", arenaBody(state.topics.ramArena)) +
       `</div>`
     );
   },
@@ -500,8 +505,8 @@ export const bitnodeTab: Tab = {
       state.t0,
       (v) => fmtNum(v, 2),
     );
-    // The canvas node is recreated by each render, so its listeners go with
-    // it; attaching per mount keeps exactly one set on the live node.
+    // The canvas node now survives a render, so this must stay idempotent:
+    // attachChartHover wires a given canvas exactly once.
     attachChartHover(canvas, tooltip);
   },
 };

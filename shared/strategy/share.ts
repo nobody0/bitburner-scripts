@@ -41,6 +41,12 @@ export interface HackMarginalInput {
 
 export interface SharePricingInput extends Omit<HackMarginalInput, "moneyPerSecPerGb" | "hackingExpPerSecPerGb"> {
   reputationSecondsPerBonus: number;
+  /** The player's ACTIVE work already earns faction reputation. Share then
+   * multiplies a rate that is being produced anyway, and its workers are
+   * freely stoppable, so the dispatcher lets share consume the residual free
+   * tail even when the route has not priced reputation as critical. This is a
+   * fact about the present ("work.type is FACTION"), never a forecast. */
+  currentWorkEarnsRep?: boolean;
 }
 
 function channelMarginal(seconds: number, total: number | undefined, perGb: number): MeasuredMarginal {

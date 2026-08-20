@@ -2,17 +2,22 @@ import { describe, expect, test } from "bun:test";
 import {
   HACK_ZERO_DESYNC_STREAK,
   JIT_LAUNCH_GUARD_MS,
+  MAX_LAUNCH_ACTIONS_PER_PASS,
   PREP_ORDER_MS,
   SPACER_MS,
+  trackOp,
   WORKER_STARTUP_GUARD_MS,
   type DispatchOptions,
 } from "../../shared/strategy/dispatch.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
-import { planTake } from "../../shared/strategy/worker-pool.ts";
+import { SHOTGUN_HACK_MS } from "../../shared/strategy/mode.ts";
+import { planTake, type PoolRole } from "../../shared/strategy/worker-pool.ts";
+import { expForSkill } from "../../shared/formulas.ts";
 import { PREPPED_MONEY_FRACTION, PREPPED_SEC_TOLERANCE, solvePrep } from "../../shared/strategy/targeting.ts";
 import type { Action, CompletionEvent, HgwAction } from "../../shared/world.ts";
 import { WORKER_RAM } from "../../shared/world.ts";
 import type { ServerSpec } from "../core/effects.ts";
+import { calculateExp } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { DEFAULT_NETWORK } from "../network.ts";
 import { SimWorld } from "../world.ts";
 import { lane } from "../../tests/support/lanes.ts";
@@ -34,7 +39,10 @@ interface Harness {
   world: SimWorld;
   memory: FarmMemory;
   run(untilMs: number): void;
-  launches: { action: Action; at: number; landing?: number }[];
+  /** `duration` is the op's NATIVE duration at the instant it launched.
+   * Recomputing it later reads a different security and skill, so any check
+   * of the landing arithmetic has to use the value that was actually used. */
+  launches: { action: Action; at: number; landing?: number; duration?: number }[];
   completions: { kind: string; at: number; batched: boolean }[];
   samples: { host: string; sec: number; minSec: number; money: number; maxMoney: number }[];
 }
@@ -68,7 +76,7 @@ function harness(options: { seed?: number; homeRam?: number; network?: ServerSpe
   });
   options.setup?.(world);
   let memory = initFarm();
-  const launches: { action: Action; at: number; landing?: number }[] = [];
+  const launches: { action: Action; at: number; landing?: number; duration?: number }[] = [];
   const completions: { kind: string; at: number; batched: boolean }[] = [];
   const samples: Harness["samples"] = [];
   const batchedOps = new Set<number>();
@@ -93,14 +101,21 @@ function harness(options: { seed?: number; homeRam?: number; network?: ServerSpe
     let executed = 0;
     for (const action of result.actions) {
       const at = world.clock.now();
-      const landing = (
-        action.type === "hack" || action.type === "grow" || action.type === "weaken"
-      )
-        ? at + world.hgwDurationMs(action.type, world.servers.get(action.target)!) + (action.additionalMsec ?? 0)
+      const hgw = action.type === "hack" || action.type === "grow" || action.type === "weaken"
+        ? action
+        : undefined;
+      const duration = hgw ? world.hgwDurationMs(hgw.type, world.servers.get(hgw.target)!) : undefined;
+      const landing = hgw && duration !== undefined
+        ? at + duration + (hgw.additionalMsec ?? 0)
         : undefined;
       if (world.execute(action)) {
         executed++;
-        launches.push({ action, at, ...(landing !== undefined ? { landing } : {}) });
+        launches.push({
+          action,
+          at,
+          ...(landing !== undefined ? { landing } : {}),
+          ...(duration !== undefined ? { duration } : {}),
+        });
         if (
           "additionalMsec" in action &&
           action.additionalMsec !== undefined &&
@@ -313,11 +328,112 @@ describe("HWGW dispatcher", () => {
     expect(memory.dispatch.stats.missedWindow["arrival-money"]).toBeGreaterThanOrEqual(before + 1);
     expect(memory.dispatch.stats.batchesSkipped).toBeLessThanOrEqual(HACK_ZERO_DESYNC_STREAK);
     expect(memory.dispatch.hackZeroStreak).toBe(0);
+    // The skips are ATTRIBUTED, and the parts sum to the whole: a single
+    // pooled counter reads as one phenomenon when it is really several, and
+    // here the cause is the arrival-money brake rather than a starved
+    // pipeline. Every increment goes through `noteBatchSkipped`, so the two
+    // cannot drift apart.
+    const skippedBy = memory.dispatch.stats.batchesSkippedBy;
+    expect(Object.values(skippedBy).reduce((a, b) => a + b, 0)).toBe(
+      memory.dispatch.stats.batchesSkipped,
+    );
+    expect(skippedBy["arrival-money"]).toBe(memory.dispatch.stats.batchesSkipped);
+    expect(skippedBy.deadline + skippedBy.placement).toBe(0);
     // With the pending set gone and the target genuinely under the prepped
     // band, the farm branch's existing `isPrepped` gate routes the next
     // passes through the prep path (dispatch.ts farm-segment else-branch),
     // re-seeding money from the OBSERVED state — the old behavior instead
     // kept the doomed pipeline, replanning and zeroing batches indefinitely.
+  });
+
+  test("a rising hacking level shrinks only the hack's STRENGTH, never the cadence", () => {
+    // The whole safety argument for the landing-level projection in one test.
+    // Hack percentage is read when the hack lands, so a level rising between
+    // plan and landing must reduce what the hack takes — but every GB figure
+    // has to stay bit-identical, because role RAM reaches chooseJitSchedule
+    // through ceil(holdMs/interval) and a size that moves can move the whole
+    // batch interval.
+    const build = (expRate: number) => {
+      const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+      prepareJitTestWorld(world);
+      const view = world.view();
+      // `prepareJitTestWorld` sets the skill directly, so the world's exp total
+      // does not correspond to it. State the matching exp explicitly: without
+      // it `projectedSkill` correctly refuses to project BELOW the live skill
+      // and the whole lookahead is inert.
+      const withRate = {
+        ...view,
+        player: {
+          ...view.player,
+          hackingExp: expForSkill(view.player.hackingSkill),
+          hackingExpRate: expRate,
+        },
+      };
+      return planFarm(withRate, initFarm(), [], { jit: true });
+    };
+
+    // The exp curve is exponential, so a rate has to be quoted RELATIVE to the
+    // level in play: at skill 1000 the total is ~1e16 and a "large" absolute
+    // rate moves nothing. This is two levels per second.
+    const flat = build(0);
+    const rising = build(expForSkill(1_002) - expForSkill(1_000));
+
+    const hackOf = (result: ReturnType<typeof build>) =>
+      result.memory.dispatch.jitPending[0]!.ops.find((op) => op.kind === "hack")!;
+    const flatHack = hackOf(flat);
+    const risingHack = hackOf(rising);
+
+    // The reduction happened...
+    expect(risingHack.strengthThreads).toBeDefined();
+    expect(risingHack.strengthThreads!).toBeLessThan(risingHack.threads);
+    expect(flatHack.strengthThreads).toBeUndefined();
+    // ...and cost nothing structural: same block, same support, same cadence.
+    expect(risingHack.threads).toBe(flatHack.threads);
+    expect(rising.memory.dispatch.depthCapGb).toBe(flat.memory.dispatch.depthCapGb);
+    const roles = (result: ReturnType<typeof build>) =>
+      result.memory.dispatch.jitPending[0]!.ops
+        .map((op) => `${op.role}:${op.threads}`)
+        .sort();
+    expect(roles(rising)).toEqual(roles(flat));
+  });
+
+  test("the EAGER path projects the landing level too, and shotgun stays exempt", () => {
+    // The JIT path has always done this; the eager path was passing the
+    // identity context factory, justified by a comment that only holds for
+    // shotgun. An eager HWGW batch lands a full weaken-time after it launches,
+    // which is ample room for a level to move, so it needs the same cap.
+    const build = (expRate: number, plan: DispatchOptions) => {
+      const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+      prepareJitTestWorld(world);
+      const view = world.view();
+      const withRate = {
+        ...view,
+        player: {
+          ...view.player,
+          hackingExp: expForSkill(view.player.hackingSkill),
+          hackingExpRate: expRate,
+        },
+      };
+      return planFarm(withRate, initFarm(), [], plan);
+    };
+    const twoLevelsPerSec = expForSkill(1_002) - expForSkill(1_000);
+    const hackAction = (result: ReturnType<typeof build>) =>
+      result.actions.find(
+        (action): action is HgwAction => action.type === "hack",
+      )!;
+
+    const flat = hackAction(build(0, { jit: false }));
+    const rising = hackAction(build(twoLevelsPerSec, { jit: false }));
+    expect(flat.strengthThreads).toBeUndefined();
+    expect(rising.strengthThreads).toBeDefined();
+    expect(rising.strengthThreads!).toBeLessThan(rising.threads);
+    // Structural figures unmoved: the cap is on strength, never on the block.
+    expect(rising.threads).toBe(flat.threads);
+
+    // Shotgun lands its whole batch in one engine tick, so there is no
+    // launch-to-landing gap and no level to project across.
+    const shotgun = hackAction(build(twoLevelsPerSec, { modeOverride: "shotgun" }));
+    expect(shotgun.strengthThreads).toBeUndefined();
   });
 
   test("re-validates arrival security immediately before dispatching a pending hack", () => {
@@ -334,7 +450,7 @@ describe("HWGW dispatcher", () => {
     expect(guarded.memory.dispatch.stats.missedWindow["arrival-security"]).toBe(before + 1);
   });
 
-  test("shrinks a pending hack when money falls after planning but before dispatch", () => {
+  test("down-strengths a pending hack when money falls after planning, without re-placing it", () => {
     const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
     prepareJitTestWorld(world);
     const initial = planFarm(world.view(), initFarm(), [], { jit: true });
@@ -343,6 +459,7 @@ describe("HWGW dispatcher", () => {
     const target = world.servers.get("jit-target")!;
     target.moneyAvailable = target.moneyMax * (1 - stealFraction / 10);
     const before = ready.memory.dispatch.stats.missedWindow["arrival-money"];
+    const allocFailsBefore = ready.memory.dispatch.stats.allocFailsByPhase.jit;
 
     const guarded = planFarm(world.view(), ready.memory, [], { jit: true });
     const hacks = guarded.actions.filter(
@@ -350,9 +467,69 @@ describe("HWGW dispatcher", () => {
         action.type === "hack" && action.target === target.hostname,
     );
     expect(hacks).toHaveLength(1);
-    expect(hacks[0]!.threads).toBeGreaterThan(0);
-    expect(hacks[0]!.threads).toBeLessThan(ready.plannedThreads);
+    // The BLOCK is untouched: `threads` is what RAM, the role quota and the
+    // JIT cadence are sized on, so an arrival-money shrink must not move it.
+    // The reduction rides on `strengthThreads`, which Netscript accepts as a
+    // fractional `opts.threads`, so the already-committed worker simply does
+    // less instead of the reservation being released and re-taken.
+    expect(hacks[0]!.threads).toBe(ready.plannedThreads);
+    expect(hacks[0]!.strengthThreads).toBeGreaterThan(0);
+    expect(hacks[0]!.strengthThreads).toBeLessThan(ready.plannedThreads);
     expect(guarded.memory.dispatch.stats.missedWindow["arrival-money"]).toBe(before + 1);
+    expect(guarded.memory.dispatch.stats.allocFailsByPhase.jit).toBe(allocFailsBefore);
+  });
+
+  test("weaken always runs at full spawned strength; only hack and grow are late-bound", () => {
+    // Weaken is deliberately exempt from late binding. Its RAM is already
+    // committed by the time it launches, over-weakening clamps harmlessly at
+    // minDifficulty, and the surplus IS the ordering insurance the 5 ms
+    // landing grid depends on. Hack and grow are the only operations where
+    // "too much" costs anything: an oversized hack steals money the batch
+    // cannot restore, an oversized grow fortifies past what W2 covers.
+    const world = new SimWorld({ seed: 2, network: JIT_TEST_NETWORK, homeRam: 4_096, startingMoney: 1e9 });
+    prepareJitTestWorld(world);
+    let memory = planFarm(world.view(), initFarm(), [], { jit: true }).memory;
+    let inbox: CompletionEvent[] = [];
+    world.onSettled = (event) => inbox.push(event);
+
+    const weakens: HgwAction[] = [];
+    const grows: HgwAction[] = [];
+    for (let pass = 0; pass < 400; pass++) {
+      const result = planFarm(world.view(), memory, inbox, { jit: true });
+      inbox = [];
+      memory = result.memory;
+      for (const action of result.actions) {
+        if (action.type === "weaken") weakens.push(action);
+        if (action.type === "grow") grows.push(action);
+        expect(world.execute(action)).toBe(true);
+      }
+      const nextStart = memory.dispatch.jitPending
+        .flatMap((batch) => batch.ops)
+        .reduce((earliest, op) => {
+          const due = op.reservation
+            ? op.startAt
+            : op.reserveAt ?? op.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
+          return due > world.clock.now() ? Math.min(earliest, due) : earliest;
+        }, Infinity);
+      world.clock.run(() => inbox.length > 0, nextStart);
+    }
+
+    expect(weakens.length).toBeGreaterThan(0);
+    for (const weaken of weakens) expect(weaken.strengthThreads).toBeUndefined();
+    // In a clean steady state NO grow should be reduced: the launch-time
+    // re-derivation and sizeBatchAtLanding's plan-time sizing read the same
+    // predicted ledger, so they agree unless something moved in between (a
+    // hack shrunk on the arrival-money brake, a hack cancelled, an
+    // out-of-band money change). Measured on this fixture: 14 grows, 0
+    // reduced. That agreement is the useful assertion — a reduction here
+    // would mean the two sizings disagree, which is a bug, not a correction.
+    // The clamp's own behaviour is pinned as a unit in prediction.test.ts.
+    for (const grow of grows) {
+      if (grow.strengthThreads !== undefined) {
+        expect(grow.strengthThreads).toBeGreaterThan(0);
+        expect(grow.strengthThreads).toBeLessThanOrEqual(grow.threads + 1e-9);
+      }
+    }
   });
 
   test("a mode-shape switch discards the old pending JIT suffix", () => {
@@ -456,6 +633,44 @@ describe("HWGW dispatcher", () => {
     }
   });
 
+  test("never asks ns.exec for a fractional thread count", () => {
+    // The eager path used to pass `hackThreadsAtLanding`'s unrounded result
+    // straight to `ns.exec({threads})`; the fraction belongs on
+    // `strengthThreads`, where the JIT path already puts it.
+    //
+    // The fixture has to produce a shortfall or the assertion is vacuous:
+    // money just under moneyMax but inside PREPPED_MONEY_FRACTION, so the farm
+    // runs rather than preps and the arrival money is genuinely short.
+    const shortOfMax = (world: SimWorld): void => {
+      prepareJitTestWorld(world);
+      const target = world.servers.get("jit-target")!;
+      target.moneyAvailable = 0.995 * target.moneyMax;
+    };
+    let sawShrunkHack = false;
+    for (const plan of [{ jit: false }, { modeOverride: "shotgun" as const }]) {
+      const h = harness({ homeRam: 128, network: JIT_TEST_NETWORK, setup: shortOfMax, plan });
+      h.run(600_000);
+      expect(h.launches.length).toBeGreaterThan(0);
+      const ops = h.launches
+        .map(({ action }) => action)
+        .filter((action): action is HgwAction =>
+          action.type === "hack" || action.type === "grow" || action.type === "weaken");
+      expect(ops.length).toBeGreaterThan(0);
+      for (const action of ops) {
+        expect(Number.isInteger(action.threads)).toBe(true);
+        expect(action.threads).toBeGreaterThanOrEqual(1);
+        if (action.strengthThreads !== undefined) {
+          expect(action.strengthThreads).toBeLessThanOrEqual(action.threads + 1e-9);
+          expect(action.strengthThreads).toBeGreaterThan(0);
+          if (action.type === "hack" && action.strengthThreads < action.threads) sawShrunkHack = true;
+        }
+      }
+    }
+    // Guards the guard: without a shrunk hack the loop above proves nothing
+    // about where the fraction went.
+    expect(sawShrunkHack).toBe(true);
+  }, 60_000);
+
   soak.test("keeps the farm target inside its security and money bands", () => {
     const h = harness({ seed: 2, homeRam: 256 });
     h.run(1_800_000);
@@ -500,7 +715,7 @@ describe("HWGW dispatcher", () => {
     const target = memory.dispatch.evaluator.directive.farm?.host ?? "n00dles";
     const landing = 12_345;
     for (const opId of [9_000_001, 9_000_002]) {
-      memory.dispatch.tracked.set(opId, {
+      trackOp(memory.dispatch, opId, {
         hostname: "home",
         target,
         kind: "weaken",
@@ -844,6 +1059,37 @@ describe("shotgun mode", () => {
     expect(h.memory.dispatch.stats.hacks).toBeGreaterThan(0);
   });
 
+  test("one pass never emits more launch actions than the per-pass bound", () => {
+    // Every launch action becomes a synchronous ns.exec in the driver, whose
+    // loop has no await and no cap of its own, so an unbounded pass blocks the
+    // engine's timers for the length of the whole wave. Shotgun is where that
+    // bites: it deliberately fires a full wave per pass and, unlike the JIT
+    // path, had no emission ceiling at all. Work not emitted this pass is not
+    // lost — the next tick continues from the same pending state.
+    const world = new SimWorld({ seed: 5, network: DEFAULT_NETWORK, homeRam: 1_048_576, startingMoney: 1e15 });
+    world.person.skills.hacking = 5_000;
+    for (const server of world.servers.values()) {
+      if (server.hostname === "home") continue;
+      server.hasAdminRights = true;
+      server.hackDifficulty = server.minDifficulty;
+      server.moneyAvailable = server.moneyMax;
+    }
+    let memory = initFarm();
+    for (let pass = 0; pass < 12; pass++) {
+      const result = planFarm(world.view(), memory, [], { modeOverride: "shotgun", jit: true });
+      memory = result.memory;
+      // Farm launches only: prep waves carry their own independent bound.
+      const launches = result.actions.filter(
+        (action): action is HgwAction =>
+          (action.type === "hack" || action.type === "grow" || action.type === "weaken") &&
+          action.phase !== "prep",
+      );
+      expect(launches.length).toBeLessThanOrEqual(MAX_LAUNCH_ACTIONS_PER_PASS);
+      for (const action of result.actions) world.execute(action);
+      world.clock.run(() => false, world.clock.now() + 25);
+    }
+  });
+
   test("falls back to a same-deadline four-op shotgun when no HGW solution fits", () => {
     const world = new SimWorld({ seed: 7, network: DEFAULT_NETWORK, homeRam: 512, startingMoney: 1e9 });
     world.person.skills.hacking = 500;
@@ -884,6 +1130,203 @@ describe("shotgun mode", () => {
     expect(phases).toEqual(["hack", "weaken", "grow", "weaken"]);
     expect(new Set(tracked.map((op) => op.landing))).toEqual(new Set([firstHack.landing]));
   });
+
+  /* --- entering and leaving shotgun for real ------------------------------
+   *
+   * The two cases above FORCE the mode with `modeOverride`, which proves the
+   * shotgun shape is executed correctly but says nothing about whether we ever
+   * notice we should be in it. These drive the mode decision from world state
+   * instead: a target whose native hack time has collapsed, and then a move
+   * back to a target where JIT still pays.
+   *
+   * `quick` is deliberately both easy AND rich, because a cheap little server
+   * would never win the farm on score and the mode would never be exercised.
+   * `deep` starts behind closed ports, which is how a richer target actually
+   * arrives mid-run. */
+  const QUICK: ServerSpec = {
+    hostname: "shotgun-quick",
+    hackDifficulty: 3,
+    moneyAvailable: 1e10,
+    requiredHackingSkill: 1,
+    serverGrowth: 100,
+    numOpenPortsRequired: 0,
+    maxRam: 0,
+    currentDifficulty: 1,
+    currentMoney: 2.5e11,
+  };
+  const DEEP: ServerSpec = {
+    hostname: "shotgun-deep",
+    hackDifficulty: 30,
+    moneyAvailable: 1e12,
+    requiredHackingSkill: 500,
+    serverGrowth: 100,
+    numOpenPortsRequired: 5,
+    maxRam: 0,
+    currentDifficulty: 10,
+    currentMoney: 2.5e13,
+  };
+
+  /** The late-game regime shotgun exists for, and it takes BOTH levers to
+   * reach honestly.
+   *
+   * Skill alone cannot get there. The experience required for a level grows
+   * exponentially, so `calculateExp` overflows a double at about level 22,500
+   * -- that is the hard ceiling on hacking skill, and at it `quick` still
+   * hacks in 111 ms, just above the boundary. What actually crosses it is the
+   * hacking-speed multiplier a late-game player has stacked from augmentations
+   * (and, in this repository, from the Go Illuminati reward). A 2x speed
+   * multiplier at skill 20,000 puts `quick` at ~63 ms and `deep` at ~1.6 s,
+   * which is exactly the split this suite needs. */
+  const LATE_GAME_SKILL = 20_000;
+  const LATE_GAME_HACK_SPEED = 2;
+
+  function shotgunHarness(): Harness {
+    return harness({
+      homeRam: 512,
+      network: [QUICK, DEEP],
+      setup: (world) => {
+        world.person.skills.hacking = LATE_GAME_SKILL;
+        // Skill and experience MUST agree. The world recomputes skills from
+        // experience on the first landed op, so setting the level alone does
+        // not survive contact with farming: it snaps to whatever the (zero)
+        // experience says and takes the short hack time with it.
+        world.person.exp.hacking = calculateExp(LATE_GAME_SKILL, world.person.mults.hacking);
+        world.person.mults.hacking_speed = LATE_GAME_HACK_SPEED;
+        const quick = world.servers.get(QUICK.hostname)!;
+        quick.hasAdminRights = true;
+        quick.hackDifficulty = quick.minDifficulty;
+        quick.moneyAvailable = quick.moneyMax;
+        // Not cracked yet: the farm cannot see it at all.
+        world.servers.get(DEEP.hostname)!.hasAdminRights = false;
+      },
+    });
+  }
+
+  test("enters shotgun on its own once the target's hack time collapses", () => {
+    const h = shotgunHarness();
+    h.run(60_000);
+
+    // The DECISION, from world state alone - no modeOverride anywhere here.
+    expect(h.memory.dispatch.evaluator.directive.farm?.host).toBe(QUICK.hostname);
+    expect(h.memory.dispatch.mode).toBe("shotgun");
+    expect(h.memory.dispatch.modeWhy).toContain(`< ${SHOTGUN_HACK_MS}ms`);
+
+    // And the EXECUTION: batches were actually opened as shotgun batches and
+    // landed hacks, rather than the mode being a label on an idle dispatcher.
+    const shotgun = h.memory.dispatch.stats.batchesByKind.shotgun;
+    expect(shotgun.batches).toBeGreaterThan(0);
+    expect(shotgun.hacks).toBeGreaterThan(0);
+    expect(h.memory.dispatch.stats.batchesByKind.hwgw.batches).toBe(0);
+
+    // The target stays inside its bands throughout, which is the whole reason
+    // same-tick FIFO is an acceptable substitute for ordered deadlines.
+    const farmed = h.samples.filter((sample) => sample.maxMoney > 0);
+    expect(farmed.length).toBeGreaterThan(0);
+    for (const sample of farmed) {
+      expect(sample.sec).toBeLessThanOrEqual(sample.minSec + PREPPED_SEC_TOLERANCE);
+    }
+  });
+
+  test("every op of a wave is padded onto the one shared tick", () => {
+    const h = shotgunHarness();
+    h.run(30_000);
+    expect(h.memory.dispatch.mode).toBe("shotgun");
+
+    const ops = h.launches.filter(({ action }) =>
+      (action.type === "hack" || action.type === "grow" || action.type === "weaken")
+      && action.phase !== "prep"
+    );
+    expect(ops.length).toBeGreaterThan(8);
+
+    // THE PROPERTY. additionalMsec is a per-op DELAY the engine adds to that
+    // op's own duration, so putting three ops of different lengths on ONE
+    // instant means each carries a different padding: exactly the shortfall
+    // between its native duration and the wave's window. Everything launched
+    // in a single pass is one wave and must converge on a single landing.
+    // Getting this wrong does not fail loudly -- the ops simply land spread
+    // out, and the same-tick FIFO ordering the whole mode depends on is gone.
+    // A wave is a BATCH, not a launch instant: two replans can share a clock
+    // instant with different security between them, so grouping by time would
+    // mix two waves and prove nothing.
+    const waves = new Map<number, typeof ops>();
+    for (const op of ops) {
+      const opId = (op.action as HgwAction).opId;
+      const batchId = opId === undefined ? undefined : h.memory.dispatch.tracked.get(opId)?.batchId;
+      if (batchId === undefined) continue;
+      waves.set(batchId, [...(waves.get(batchId) ?? []), op]);
+    }
+    const multiOpWaves = [...waves.values()].filter((wave) => wave.length > 1);
+    expect(multiOpWaves.length).toBeGreaterThan(2);
+
+    for (const wave of multiOpWaves) {
+      // Every op of the batch converges on ONE instant, however long its own
+      // work takes. This is the property the mode is built on.
+      const landings = new Set(wave.map((op) => Math.round(op.landing! * 1e6)));
+      expect(landings.size, `batch spread over ${landings.size} landings`).toBe(1);
+
+      // And the padding is what put them there: an op's delay exceeds the
+      // longest op's delay by exactly the work it does NOT have to do.
+      const longest = maxOf(wave.map((op) => op.duration!));
+      const anchorPadding = maxOf(
+        wave.filter((op) => op.duration === longest)
+          .map((op) => (op.action as HgwAction).additionalMsec ?? 0),
+      );
+      for (const op of wave) {
+        const padding = (op.action as HgwAction).additionalMsec ?? 0;
+        expect(padding).toBeCloseTo(anchorPadding + (longest - op.duration!), 6);
+        // Never negative: the engine rejects a negative additionalMsec.
+        expect(padding).toBeGreaterThanOrEqual(0);
+      }
+    }
+
+    // Weaken is the longest op and anchors the wave, so it needs the LEAST
+    // padding; hack is the shortest and therefore waits the longest. If that
+    // ordering inverts, the anchor is not being taken from the weaken.
+    const paddingOf = (kind: string): number[] =>
+      ops.filter(({ action }) => action.type === kind)
+        .map(({ action }) => (action as HgwAction).additionalMsec ?? 0);
+    const hackPadding = paddingOf("hack");
+    const weakenPadding = paddingOf("weaken");
+    expect(hackPadding.length).toBeGreaterThan(0);
+    expect(weakenPadding.length).toBeGreaterThan(0);
+    expect(minOf(hackPadding)).toBeGreaterThan(maxOf(weakenPadding));
+
+    // Even the anchoring weaken is padded, because its worker starts
+    // asynchronously: `now + weakenMs` would land it after the shared deadline.
+    expect(minOf(weakenPadding)).toBeGreaterThanOrEqual(JIT_LAUNCH_GUARD_MS - 1e-6);
+  });
+
+  test("returns to JIT when a richer target with a long hack time is cracked", () => {
+    const h = shotgunHarness();
+    h.run(20_000);
+    expect(h.memory.dispatch.mode).toBe("shotgun");
+    const shotgunBatches = h.memory.dispatch.stats.batchesByKind.shotgun.batches;
+    expect(shotgunBatches).toBeGreaterThan(0);
+
+    // The situation changes: the port openers arrive and the deep target - a
+    // hundred times richer, and 26x slower to hack - becomes farmable.
+    const deep = h.world.servers.get(DEEP.hostname)!;
+    deep.hasAdminRights = true;
+    deep.hackDifficulty = deep.minDifficulty;
+    deep.moneyAvailable = deep.moneyMax;
+
+    // Long enough to clear the evaluator's 60 s switch dwell and the 30 s mode
+    // dwell that follows it.
+    h.run(140_000);
+
+    expect(h.memory.dispatch.evaluator.directive.farm?.host).toBe(DEEP.hostname);
+    expect(h.memory.dispatch.mode).toBe("hwgw");
+    expect(h.memory.dispatch.modeWhy).not.toContain(`< ${SHOTGUN_HACK_MS}ms`);
+
+    // Both regimes really ran: shotgun batches from the first leg, interleaved
+    // HWGW batches from the second. A round trip, not a one-way trip.
+    expect(h.memory.dispatch.stats.batchesByKind.shotgun.batches).toBeGreaterThanOrEqual(shotgunBatches);
+    expect(h.memory.dispatch.stats.batchesByKind.hwgw.batches).toBeGreaterThan(0);
+    expect(h.memory.dispatch.stats.batchesByKind.hwgw.hacks).toBeGreaterThan(0);
+    // Explicit budget: this is the one case here that drives two full farming
+    // regimes plus the switch between them, so it costs seconds rather than
+    // milliseconds and must not ride on the runner's default.
+  }, 30_000);
 });
 
 // --- pooled workers ------------------------------------------------------------
@@ -900,7 +1343,7 @@ describe("worker pooling", () => {
     // The harness's initial pump is intentionally below the pressure gate;
     // turn pooling on for the live pipeline that follows.
     for (let i = 0; i < 1_100; i++) {
-      h.memory.dispatch.tracked.set(900_000 + i, {
+      trackOp(h.memory.dispatch, 900_000 + i, {
         hostname: "ghost",
         target: "",
         kind: "weaken",
@@ -920,9 +1363,12 @@ describe("worker pooling", () => {
     expect([...h.memory.dispatch.pool.workers.values()].every((worker) => worker.role !== undefined)).toBe(true);
     const idle = [...h.memory.dispatch.pool.workers.values()].find((worker) => !worker.busy && worker.role)!;
     expect(idle).toBeDefined();
-    expect(planTake(h.memory.dispatch.pool, idle.kind, idle.threads, new Set(), idle.role).take).toContain(idle);
+    const takenBy = (role: PoolRole) =>
+      planTake(h.memory.dispatch.pool, idle.kind, idle.threads, new Set(), role).take
+        .map((entry) => entry.worker);
+    expect(takenBy(idle.role!)).toContain(idle);
     const otherRole = idle.role === "w1" ? "w2" : "w1";
-    expect(planTake(h.memory.dispatch.pool, idle.kind, idle.threads, new Set(), otherRole).take).not.toContain(idle);
+    expect(takenBy(otherRole)).not.toContain(idle);
   });
 
   test("repeat batches reuse workers; workerExit frees the reservation", () => {
@@ -943,7 +1389,7 @@ describe("worker pooling", () => {
     // valve, not a throughput win): seed the ledger past the threshold with
     // inert entries on a host the heap does not know.
     for (let i = 0; i < 1_100; i++) {
-      memory.dispatch.tracked.set(1_000_000 + i, {
+      trackOp(memory.dispatch, 1_000_000 + i, {
         hostname: "ghost",
         target: "",
         kind: "weaken",
@@ -1030,7 +1476,7 @@ describe("worker pooling", () => {
     }
     let memory = initFarm();
     for (let i = 0; i < 1_100; i++) {
-      memory.dispatch.tracked.set(2_000_000 + i, {
+      trackOp(memory.dispatch, 2_000_000 + i, {
         hostname: "ghost",
         target: "",
         kind: "weaken",
@@ -1085,7 +1531,7 @@ describe("worker pooling", () => {
     memory.dispatch.evaluator.forceGate = false;
     memory.dispatch.evaluator.lastGateAt = world.clock.now();
     const waveId = 9_000_000;
-    memory.dispatch.tracked.set(waveId, {
+    trackOp(memory.dispatch, waveId, {
       hostname: "home",
       target: prepServer.hostname,
       kind: "weaken",

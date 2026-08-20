@@ -1,5 +1,7 @@
 import {
+  GROW_FORTIFY,
   growthLogPerThread,
+  HACK_FORTIFY,
   hackChance,
   hackPercent,
   hackTimeSeconds,
@@ -61,8 +63,6 @@ import { MAX_STEAL, type TargetStatics } from "./targeting.ts";
  * that floor while gaining arbitrarily little chance. Static removal therefore
  * never rests on dominance; everything reduces to UB-vs-achieved-score. */
 
-const HACK_FORTIFY = 0.002;
-const GROW_FORTIFY = 0.004;
 /** Op-RAM seconds per hack time: hack runs 1×, grow 3.2×, weaken 4×. */
 const HACK_COEF = WORKER_RAM.hack;
 const GROW_COEF = WORKER_RAM.grow * 3.2;

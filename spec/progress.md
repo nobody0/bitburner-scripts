@@ -470,9 +470,10 @@ Every feature now has a real driver module; `inert()` is gone from
 
 ### The hacking audit
 
-Four questions from the legacy review, answered rather than assumed
-(`sim/tests/hacking-audit.test.ts`). Two are closed; Q3 produced and fixed a
-real loss:
+Five questions from the legacy review, answered rather than assumed
+(`tests/hacking-audit.test.ts`). All are closed; Q3 produced and fixed a real
+loss, and Q5 (added in the 2024-batcher gap analysis) closed a standing open
+question in `spec/jit-reference.md` without a code change:
 
 - **Q2 — is their duration-weighted `moneyPerThread` a better score than our
   `$/GB/sec`?** **CLOSED, no change.** They are not constant-factor
@@ -507,6 +508,20 @@ real loss:
   empty hack-size guard and with the landing-state fold reproducing the
   sequencing pure-side. Tie-break and band proofs pinned in
   `sim/tests/dispatch.test.ts`.
+- **Q5 — is a second batch parameterization worth building above
+  `EXACT_THREAD_LIMIT`?** **CLOSED, no change.** The 2024 batcher brute-forces
+  three anchors (`HxGW`/`HGxW`/`HGWx`) because its thread counts are
+  fractional; ours are `ceil`ed, so below the exact limit the H-scan provably
+  subsumes all three. `spec/jit-reference.md` left the question open ABOVE it,
+  where we fall back to a grid plus golden-section refinement. Measured against
+  the same independent exhaustive oracle Q3 used, extended past the limit: the
+  H-only heuristic gives up **0.010-0.144%** across five large-domain cases, an
+  order of magnitude below the 0.89% that justified Q3's fix, and **0%** under
+  a binding RAM cap (the domain collapses into the exact regime). The reason is
+  visible in the results — the heuristic picks 12,600 threads where the oracle
+  picks 4,575 and still scores within 0.04%, because the score surface is FLAT
+  across that region, so a second anchor lands on the same plateau. Pinned at
+  `gap < 0.15%`.
 
 ### Found by running in the REAL GAME
 
@@ -1103,19 +1118,106 @@ automation optimises toward. The fast JIT scenarios are the diagnostic tier:
 they isolate why a profile moved and keep the best-known local measurement in
 the same file as its regression guard.
 
-- `sim/tests/scenario-jit-target-switch.test.ts` isolates old-target work still
+- `sim/tests/scenario-jit.test.ts` (jit-target-switch) isolates old-target work still
   in flight when the evaluator retargets.
-- `sim/tests/scenario-jit-share-churn.test.ts` isolates cooperative 10-second
+- `sim/tests/scenario-jit.test.ts` (jit-share-churn) isolates cooperative 10-second
   share slices yielding pipeline RAM and reclaiming it afterward.
-- `sim/tests/scenario-jit-fragmentation.test.ts` isolates contiguous hack
+- `sim/tests/scenario-jit.test.ts` (jit-fragmentation) isolates contiguous hack
   placement while cloud and home slabs change under a live pipeline.
-- `sim/tests/scenario-jit-stress.test.ts` remains the all-at-once integration
+- `sim/tests/scenario-jit.test.ts` (jit-stress) remains the all-at-once integration
   case after the three focused scenarios pass.
 
 Each focused file records median idle share, landed/launched hacks, and steady
 money/sec with an explicit tolerance. When tuning beats a number, update the
 recorded optimum and its assertion in the same change; never move the ledger
 downward to bless a regression.
+
+A third tier sits below these: **pure-solver optima with an exhaustive oracle**,
+which need no run at all and so can be asserted in `bun test`.
+
+- `tests/hacking-audit.test.ts` (Q3) — exact integer thread search below
+  `EXACT_THREAD_LIMIT`, oracle-matched to 12 decimal places.
+- `tests/hacking-audit.test.ts` (Q5) — heuristic thread search ABOVE that limit.
+  Recorded optimum: **worst-case 0.144% below exhaustive** (0.010-0.144% over
+  five cases; 0% under a binding RAM cap, where the domain collapses into the
+  exact regime). Asserted at `gap < 0.15%`.
+
+Two tuning knobs are deliberately NOT tuned, each because the measurement that
+would justify moving them has been taken and says no, or cannot yet be taken:
+
+- **Deferred admission / padding bound.** Measured twice: -18% income, then
+  launched hacks 2,497 -> 729 and income $9.39e7 -> $1.55e7/s. The constant
+  stays; the prerequisite is the live landing-error distribution, now split per
+  op kind and rendered in the hacking tab.
+- **`POOL_PRESSURE_OPS = 1_000`.** Its own comment declares the -20% figure
+  behind it invalid. Re-measuring is blocked on a fixture that reaches the
+  pooled regime; the deepest available reaches ~395 concurrent ops (see the
+  sixth ledger pass below).
+
+## Profile ledger, sixth pass (2024-batcher gap analysis, 2026-08-19)
+
+Four gaps closed, three questions answered without code, one blocked. Write-up
+in the subsection below.
+
+| profile | before | after | note |
+|---|---|---|---|
+| hacking-early (`--goal earn:5e6 --seeds 1..3`) | 16.1 m median | **29.9 / 30.3 / 29.9 m** | New recorded number. A REGRESSION from an earlier pass's polish, not from this one: byte-identical output including record counts with this pass's changes reverted and re-applied (it never enters the eager path, where both fixes live). Recovery outstanding. |
+| jit-process-pressure | — | **produces nothing** | 12 virtual minutes, 128 TB home, 6.2 TB in use, `landed` zero for all three kinds. Retired from the default tier, and broken — it is the fixture the pooling gate needs. |
+
+Two new optima, both measurements rather than tunings:
+
+- **Thread search above `EXACT_THREAD_LIMIT`: within 0.010-0.144% of
+  exhaustive** (audit Q5), 0% under a binding RAM cap. Pinned at `gap < 0.15%`.
+- **Pooling engagement depth: ~395 concurrent ops after 180 s** on a 16 TB JIT
+  fixture, against a `POOL_PRESSURE_OPS` gate of 1,000. This is why the gate
+  cannot be re-measured yet: the obstacle is pipeline DEPTH, not fleet size.
+
+### Gap analysis against the 2024 single-target batcher
+
+`bitburner-2024` (`imports/batchPlanner.ts`, `batchRunner.ts`,
+`scripts/worker.ts`) was near-optimal at batching one target. Reviewed end to
+end.
+
+**Closed.**
+
+- **Fractional hack threads reached `ns.exec` on the eager/shotgun path.**
+  `hackThreadsAtLanding` is unrounded by design so the arrival-money correction
+  rides on strength; hack is not core-aware, so `allocFor` passed `threads`
+  through to `ns.exec({threads})` verbatim. Now spawns `ceil` and carries the
+  remainder as `strengthThreads` — what the JIT path always did, and what
+  2024's worker does (`scripts/worker.ts:23-46`).
+- **The eager path had no landing-level lookahead.** `ctxAt` was threaded into
+  `launchBatches` and used only by the JIT branch, on a comment that justifies
+  the exemption for SHOTGUN alone. An eager HWGW batch lands a full weaken-time
+  after launch. Same strength cap now applies; shotgun stays exempt. 2024
+  projects to landing on every shape (`batchRunner.ts:321-327`).
+- **`batchesSkipped` pooled every cause.** `batchesSkippedBy` added, every
+  increment through one `noteBatchSkipped` so the two cannot drift.
+- **The landing-error instrument was invisible** — published to telemetry,
+  rendered nowhere, so the live reading two disabled timing tightenings wait on
+  could not be taken by looking at the game. Now split per op kind and shown in
+  the hacking tab.
+
+**Answered, no code.**
+
+- **Deferred admission** is 2024's `diffToTarget > POSSIBLE_LAGS` branch, and
+  is the experiment already measured twice here: -18% income, then launched
+  hacks 2,497 -> 729 and income $9.39e7 -> $1.55e7/s. Its prerequisite is the
+  live landing-error distribution, which the item above unblocks.
+- **RAM reinvestment in target selection already exists**, and beats 2024's
+  discrete `prepareGrowthTable` ladder: `incomePresentValue`
+  (`shared/strategy/economics.ts`) discounts at a measured marginal return from
+  `infrastructure.ts`, and `evaluatePrep` compounds fleet RAM *during* prep via
+  `growingRamWorkSeconds`. (`prepScaleOf` in `evaluator.ts` is the SKILL
+  discount — a different correction, easy to mistake for this one.)
+- **A second batch parameterization is not worth building** — audit Q5 above.
+
+**Blocked.** `POOL_PRESSURE_OPS` cannot be re-measured without a fixture that
+reaches the pooled regime; see Known gaps. Changing it without the measurement
+would repeat the mistake its own comment documents.
+
+*Evidence:* 1,498 pass / 0 fail, typecheck clean. Both correctness fixes have
+regression tests verified to FAIL against the pre-fix code.
 
 ## Known gaps in the current implementation
 
@@ -1202,6 +1304,22 @@ the *strategy* level without full end-to-end execution:
 - **The labyrinth walk is a pure guess** (`LABYRINTH_WALK_SEC`): the darknet
   labyrinth mechanic is unmodelled, so the route's estimate carries an
   explicit unmeasured constant until a walk is implemented and measured.
+- **`POOL_PRESSURE_OPS` is unmeasured, and blocked on a fixture.** Its own
+  comment states that the -20% result behind it was taken while `planTake` was
+  quadratic, so "always on" was also "always quadratic" and stranding was never
+  isolated. Re-measuring needs a fixture that reaches the pooled regime; the
+  deepest one available reaches ~395 concurrent ops against a gate of 1,000,
+  and `jit-process-pressure` — the profile written for exactly this — produces
+  no landings at all (below). The constant is therefore left alone rather than
+  guessed at.
+- **`jit-process-pressure` produces nothing.** 12 virtual minutes on a 128 TB
+  home, 6.2 TB of RAM in use, and `landed` zero for hack, grow and weaken. It
+  is retired from the default tier, which is why this went unnoticed; it is
+  also the fixture the pooling question needs, so its repair is a prerequisite
+  rather than housekeeping.
+- **`hacking-early` regressed 16.1 m -> 29.9 m** during an earlier pass's
+  polish. Recorded in the sixth ledger pass; the cause is known, the recovery
+  is not yet done.
 
 ## Deferred, tracked, not hidden
 

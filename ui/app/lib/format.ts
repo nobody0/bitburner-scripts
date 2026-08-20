@@ -29,6 +29,16 @@ export function fmtTime(ms: number | undefined | null): string {
   return `${(s / 86400).toFixed(1)}d`;
 }
 
+/** Short durations, where `fmtTime`'s whole-second floor is the wrong
+ * resolution: a hack call is single-digit seconds and a landing gap is
+ * milliseconds, and both round to "0s" or lose the digit that matters. */
+export function fmtMs(ms: number | undefined | null): string {
+  if (ms === undefined || ms === null || Number.isNaN(ms)) return "–";
+  if (ms < 1_000) return `${ms.toFixed(ms < 10 ? 1 : 0)}ms`;
+  if (ms < 60_000) return `${(ms / 1_000).toFixed(ms < 10_000 ? 2 : 1)}s`;
+  return fmtTime(ms);
+}
+
 export function fmtPct(fraction: number | undefined | null, digits = 1): string {
   if (fraction === undefined || fraction === null || Number.isNaN(fraction)) return "–";
   return `${(fraction * 100).toFixed(digits)}%`;

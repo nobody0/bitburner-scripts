@@ -48,13 +48,122 @@ describe("tab rendering", () => {
     expect(html).toContain("0/32 · 8c</span>");
   });
 
+  test("the Hacking panel reads its pipelines, landing order and allocation from the rollup", () => {
+    const state = emptyState();
+    state.topics.farm = {
+      totals: { moneyEarned: 0, hacks: 0 },
+      pipelines: [
+        {
+          host: "phantasy", role: "farm", mode: "hgw", segment: "farm", gb: 1_024,
+          inFlight: { hack: 3, grow: 4, weaken: 8 },
+          planThreads: { hack: 16, grow: 5, weaken: 4 },
+        },
+        {
+          host: "n00dles", role: "prep", segment: "prep", gb: 64,
+          inFlight: { hack: 0, grow: 2, weaken: 4 },
+          eta: { seconds: 252, bound: "ram", prepped: false },
+        },
+      ],
+      landingOrder: {
+        planned: "h-w1-g-w2",
+        batches: 1_000,
+        observed: { "h-w1-g-w2": 990, "h-h-g-w2": 10 },
+        incomplete: 7,
+        anomalies: [{ at: 5_000, observed: "h-h-g-w2", planned: "h-w1-g-w2", target: "phantasy" }],
+      },
+      allocation: {
+        threads: { farm: { hack: 1_600, grow: 500, weaken: 400 } },
+        effectThreads: { farm: { hack: 1_600, grow: 625, weaken: 500 } },
+      },
+      batches: {
+        hgw: {
+          batches: 100, ops: 300, landed: 298, threads: { hack: 1_700, grow: 4_000, weaken: 600 },
+          gb: 100_000, moneyEarned: 5e9, hacks: 99, spanMs: 2_000_000, inOrder: 98, noHack: 1, lostOps: 2,
+        },
+        prep: {
+          batches: 4, ops: 40, landed: 40, threads: { hack: 0, grow: 800, weaken: 400 },
+          gb: 20_000, moneyEarned: 0, hacks: 0, spanMs: 800_000, inOrder: 0, noHack: 0, lostOps: 0,
+        },
+      },
+      recentBatches: [
+        {
+          id: 41, kind: "hgw", target: "phantasy", at: 9_000, spanMs: 20_000, ops: 3, landed: 3,
+          threads: { hack: 17, grow: 40, weaken: 6 }, gb: 1_000, moneyEarned: 5e7,
+          order: "h-g-w2", planned: "h-g-w2",
+        },
+        {
+          id: 42, kind: "hgw", target: "phantasy", at: 9_500, spanMs: 21_000, ops: 3, landed: 2,
+          threads: { hack: 17, grow: 40, weaken: 6 }, gb: 1_000, moneyEarned: 0,
+          order: "g-h", planned: "h-g-w2",
+        },
+      ],
+    } as StateMap["farm"];
+
+    const html = TABS.hacking.render(state);
+    // Per-batch analytics: a prep wave and a farm cycle are different units of
+    // work, so they get a column each rather than one blended op count.
+    expect(html).toContain(">hgw<");
+    expect(html).toContain(">prep<");
+    expect(html).toContain(`class="batchgrid"`);
+    // 300 ops over 100 batches, 100_000 GB over 100 batches, $5e9 over 100.
+    expect(html).toContain("3.0");
+    expect(html).toContain("1.00TB");
+    // Batches that lost an op, and those that landed support with no steal.
+    expect(html).toContain("2 lost");
+    expect(html).toContain("1 no-hack");
+    // The launched/landed band is stated as TOTALS. The gap between them is
+    // the finding, and a per-second reading of both would compress it away.
+    // Colour-keyed to the two curves: the microchart has no room for a legend,
+    // and the curves coincide exactly whenever nothing is being lost.
+    expect(html).toContain(`<span class="k1">300 launched</span> → <span class="k2">298 landed</span>`);
+    expect(html).toContain(`<span class="k1">40 launched</span> → <span class="k2">40 landed</span>`);
+    // In-order is a FRACTION, so the denominator is visible: it counts every
+    // batch of the kind, including ones that never had a grid to be right about.
+    expect(html).toContain("98 / 100 in order");
+    // And a kind that has never produced a verdict says so instead of showing
+    // a red 0%. Which kinds those are is not hardcoded — prep qualifies here
+    // because it has graded nothing, not because it is called "prep".
+    expect(html).toContain("no landing grid");
+
+    // Throughput and allocation are per batch kind now, so the run-wide
+    // op-rate card and its kind selector are gone.
+    expect(html).not.toContain("ratechart");
+    expect(html).not.toContain(`data-view-key="hacking.rate"`);
+    // Batches lead the tab: you must be able to see one without scrolling.
+    expect(html.indexOf("Batches")).toBeLessThan(html.indexOf("Landing order"));
+
+    // A pipeline names itself rather than being labelled "farm target" by the
+    // panel, so a mode or a role the viewer has never heard of still reads.
+    expect(html).toContain("phantasy");
+    expect(html).toContain("hgw");
+    expect(html).toContain("n00dles");
+    // The prep's ETA, and WHICH constraint set it — buying RAM does nothing
+    // for a latency-bound prep, so the panel must not blur the two.
+    expect(html).toContain("RAM-bound");
+
+    // Landing order: the share that landed as planned, and the reorder named
+    // rather than left as two strings to diff by eye.
+    expect(html).toContain("h-w1-g-w2");
+    expect(html).toContain("99.00%");
+    expect(html).toContain("h landed where w1 was due");
+    // Batches that never launched a hack are counted apart from the reorders.
+    expect(html).toContain("no hack launched");
+
+    // Allocation: the ratio normalised against hack, and the measured core
+    // multiplier — 625/500 grow effect per thread.
+    expect(html).toContain("1.00 : 0.31 : 0.25");
+    expect(html).toContain("1.250x");
+    // Hack is the control: cores do nothing for it.
+    expect(html).toContain("1.000x");
+  });
+
   test("every feature's populated panel renders", () => {
     // One synthetic record per topic, so no panel's data branch is untested
     // just because the local save cannot reach that feature.
     // Keep the former prose-bearing shapes here as legacy replay coverage:
     // feature panels must render old JSONL without displaying those fields.
     const topics = {
-      farm: { target: "n00dles", totals: { moneyEarned: 1e6, hacks: 12 }, inFlight: { hack: 1, grow: 2, weaken: 3 }, ramPie: { farm: 10, prep: 5, share: 0, free: 2, reserve: 4 } },
+      farm: { target: "n00dles", totals: { moneyEarned: 1e6, hacks: 12 }, inFlight: { hack: 1, grow: 2, weaken: 3 }, ramPie: { farm: 10, prep: 5, share: 0, free: 2, reserve: 4 }, pipelines: [{ host: "n00dles", role: "farm", mode: "hwgw", segment: "farm", gb: 10, inFlight: { hack: 1, grow: 2, weaken: 3 }, money: 9e5, moneyMax: 1e6, security: 1.2, minSecurity: 1, planThreads: { hack: 16, grow: 5, weaken: 4 }, moneyPerSecPerGb: 3.5, hackTimeMs: 2400, weakenTimeMs: 9600 }, { host: "joesguns", role: "prep", segment: "prep", gb: 5, inFlight: { hack: 0, grow: 4, weaken: 8 }, money: 3e5, moneyMax: 1e6, security: 12, minSecurity: 5, eta: { seconds: 252, bound: "ram", prepped: false } }], landingOrder: { planned: "h-w1-g-w2", batches: 400, observed: { "h-w1-g-w2": 396, "h-g-w1-w2": 4 }, incomplete: 2, anomalies: [{ at: 5000, observed: "h-g-w1-w2", planned: "h-w1-g-w2", target: "n00dles" }] }, allocation: { threads: { farm: { hack: 1600, grow: 500, weaken: 400 } }, effectThreads: { farm: { hack: 1600, grow: 625, weaken: 500 } } }, ramWork: { nativeGbMs: 100, paddingGbMs: 10, nativeGbMsByKind: { hack: 50, grow: 30, weaken: 20 }, paddingGbMsByKind: { hack: 5, grow: 3, weaken: 2 }, nativeGbMsBySegment: { farm: 80, prep: 20, share: 0 }, paddingGbMsBySegment: { farm: 8, prep: 2, share: 0 }, nativeGbMsBySegmentKind: { farm: { hack: 50, grow: 20, weaken: 10 }, prep: { hack: 0, grow: 10, weaken: 10 }, share: { hack: 0, grow: 0, weaken: 0 } }, paddingGbMsBySegmentKind: { farm: { hack: 5, grow: 2, weaken: 1 }, prep: { hack: 0, grow: 1, weaken: 1 }, share: { hack: 0, grow: 0, weaken: 0 } } } },
       fleet: { rootedHosts: 3, totalHosts: 9, maxRam: 64, usedRam: 32, purchased: { count: 1, totalRam: 8, limit: 25 }, home: { maxRam: 32, usedRam: 8, cores: 2 }, portOpeners: 2 },
       progression: { bitNode: 12, sourceFiles: { "4": 3 }, ownedAugs: { NeuroFlux: 5 }, augCount: 1, lastAugReset: 1, lastNodeReset: 1, multipliers: { ScriptHackMoney: 0.2 } },
       factions: { joined: ["CyberSec"], standings: [{ name: "CyberSec", rep: 100, favor: 1 }], invites: ["NiteSec"], favorToDonate: 150, workTypes: { CyberSec: ["hacking"] }, enemies: { CyberSec: [] }, requirements: { NiteSec: [{ type: "skills", skills: { hacking: 200 } }] }, gates: { CyberSec: { joined: true, invited: false, progress: 1, reachable: true, missing: [] }, NiteSec: { joined: false, invited: true, progress: 1, reachable: true, missing: [] }, "The Covenant": { joined: false, invited: false, progress: 0.4, reachable: true, missing: [{ kind: "skill", subject: "agility", target: 850, have: 340, progress: 0.4, owner: "career", reachable: true, why: "needs agility 850" }] }, Illuminati: { joined: false, invited: false, progress: 0, reachable: false, missing: [{ kind: "bitNode", target: 0, have: 0, progress: 0, owner: "progression", reachable: false, why: "wrong BitNode" }] } }, augMeta: { Rootkit: { prereqs: [], mults: { hacking: 1.1 } } }, ownedAugs: ["BitWire"], offers: [{ name: "Rootkit", faction: "CyberSec", price: 1.9e6, basePrice: 1e6, repReq: 100, affordableRep: true, repGap: 0, owned: false }], augTotal: 1, graftable: [{ name: "Rootkit", price: 1e6, timeMs: 6e4 }], plan: { context: { evaluatedAt: 0, horizonSec: 3600, ownedAugCount: 1, queuedAugCount: 0, incomePerSec: 1000, moneyAvailable: 1e6, moneyGranted: 1e6, holdsWorkSlot: true, favorToDonate: 150, priceQueue: { nonSoA: 0, ownedSoA: 0, neurofluxLevel: 0 } }, objective: { factions: ["CyberSec"], augmentations: ["Rootkit"], value: 1.5, foreclosed: [{ name: "Volhaven", bannedBy: "Sector-12" }], why: "exact MWIS" }, action: { type: "workForFaction", faction: "CyberSec", workType: "hacking", why: "0.5 rep/sec toward 100" }, alternatives: [{ label: "work NiteSec", value: 0.2, why: "lower rate" }], blockers: [{ faction: "NiteSec", kind: "skill", subject: "hacking", target: 200, have: 50, progress: 0.25, owner: "hacking", reachable: true, why: "needs hacking 200" }], until: { kind: "rep", faction: "CyberSec", target: 100, have: 40, etaSec: 120 }, lastResult: { action: "workForFaction", ok: true, detail: "started", at: 1 }, recommendInstall: { why: "objective owned", augmentations: ["Rootkit"] } } },

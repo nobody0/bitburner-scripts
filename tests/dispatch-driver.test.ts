@@ -3,6 +3,7 @@ import type { Server } from "@ns";
 import { drainCompletions, initDriver, resyncHeap, type DriverState } from "../game/lib/dispatch-driver.ts";
 import type { WorkerGlobalThis } from "../game/lib/worker-shared.ts";
 import { reportFailed } from "../shared/strategy/farm-planner.ts";
+import { trackOp } from "../shared/strategy/dispatch.ts";
 
 import { settleBrokerShareExits } from '../game/lib/dispatch-driver.ts';
 
@@ -46,7 +47,7 @@ describe("dispatcher heap reconciliation", () => {
     memory.heap.upsert("foodnstuff", 16, 2);
     const allocation = memory.heap.allocate({ blockSize: 1.75, threads: 1, policy: "contiguous" });
     expect(allocation.ok).toBe(true);
-    memory.tracked.set(1, {
+    trackOp(memory, 1, {
       hostname: "foodnstuff",
       target: "n00dles",
       kind: "grow",
@@ -120,7 +121,7 @@ describe('broker farm preemption adapter', () => {
       workerId: 9, hostname: 'foodnstuff', kind: 'grow', threads: 4,
       effectThreads: 4, gb: 7, busy: true, idleSince: 0,
     });
-    memory.tracked.set(10, {
+    trackOp(memory, 10, {
       hostname: 'foodnstuff', target: 'n00dles', kind: 'grow',
       segment: 'farm', gb: 7, wave: false, workerId: 9, landing: 2_000,
     });

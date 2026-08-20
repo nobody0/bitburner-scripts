@@ -1,3 +1,6 @@
+import { GROW_FORTIFY, HACK_FORTIFY } from "../formulas.ts";
+import { MINIMUM_WORKER_PRECISION_MS } from "./timing.ts";
+
 /** One independently reusable steady-state pipeline role. W1 and W2 are
  * separate roles even though both call weaken: their thread counts differ and
  * each needs enough resident capacity for its own cadence. */
@@ -13,10 +16,9 @@ export interface JitRole {
   atomic?: boolean;
 }
 
-/** Measured worker handoff uncertainty. A process which lands at t cannot be
- * budgeted for another invocation at exactly t: promise continuation, exec
- * and timer jitter consume a few milliseconds even when the math is exact. */
-export const MINIMUM_WORKER_PRECISION_MS = 5;
+/** Re-exported from its own leaf module so game/worker/worker.ts can import the
+ * constant without bundling this one. See shared/strategy/timing.ts. */
+export { MINIMUM_WORKER_PRECISION_MS };
 
 /* Landing separation and launch slack are independent quantities. The engine
  * fixes an operation's end time at the moment the Netscript call is made, so
@@ -102,8 +104,8 @@ export function cycleWorstDifficulty(
   hackThreads: number,
   growThreads: number,
 ): number {
-  const hackFortify = 0.002 * hackThreads;
-  const growFortify = 0.004 * growThreads;
+  const hackFortify = HACK_FORTIFY * hackThreads;
+  const growFortify = GROW_FORTIFY * growThreads;
   const excess = kind === "hgw" ? hackFortify + growFortify : Math.max(hackFortify, growFortify);
   return Math.min(100, minDifficulty + excess);
 }

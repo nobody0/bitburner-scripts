@@ -1,6 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { hackPercent, makeHackContext, type HackContext } from "../../shared/formulas.ts";
-import { hackThreadsAtLanding, predictAtLanding, sizeBatchAtLanding, type LedgerOp } from "../../shared/strategy/prediction.ts";
+import { growThreadsAtLanding, hackThreadsAtLanding, predictAtLanding, projectedSkill, sizeBatchAtLanding, type LedgerOp } from "../../shared/strategy/prediction.ts";
+import { calculateSkill } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { solveCycle, type TargetStatics } from "../../shared/strategy/targeting.ts";
 import { applyGrow, applyHack, applyWeaken, serverFromSpec, type SimServer } from "../core/effects.ts";
 import { mockPerson, mockServer } from "../core/mocks.ts";
@@ -157,6 +158,48 @@ describe("sizeBatchAtLanding", () => {
     );
   });
 
+  test("grow is clamped by the weaken cover, never by what the money asks for", () => {
+    // The asymmetry is the point. Under-growing costs money for one batch and
+    // the next hack's arrival-money brake absorbs it; over-growing adds
+    // security the already-committed W2 was not sized for, which is the error
+    // that outruns its own cover. So the cover wins even when a larger grow
+    // would pay.
+    const { ctx } = scenario(300);
+    const cover = 3;
+    const drained = { hackDifficulty: JOESGUNS.minDifficulty, moneyAvailable: 1 };
+    const sized = growThreadsAtLanding(ctx, JOESGUNS, drained, 1_000_000, cover);
+    expect(sized).toBeDefined();
+    expect(sized!).toBeCloseTo(cover, 9);
+
+    // ...and by the spawned block, which `opts.threads` may never exceed.
+    const spawnBound = growThreadsAtLanding(ctx, JOESGUNS, drained, 2, 1_000_000);
+    expect(spawnBound!).toBeCloseTo(2, 9);
+  });
+
+  test("a fully-grown arrival needs no grow at all", () => {
+    const { ctx } = scenario(300);
+    expect(growThreadsAtLanding(
+      ctx,
+      JOESGUNS,
+      { hackDifficulty: JOESGUNS.minDifficulty, moneyAvailable: JOESGUNS.moneyMax },
+      50,
+      1_000,
+    )).toBe(0);
+  });
+
+  test("grow refuses to launch above the prepped security tolerance", () => {
+    // Same contract as hackThreadsAtLanding: undefined means do not launch,
+    // because the whole solve assumed minimum security.
+    const { ctx } = scenario(300);
+    expect(growThreadsAtLanding(
+      ctx,
+      JOESGUNS,
+      { hackDifficulty: JOESGUNS.minDifficulty + 5, moneyAvailable: 1 },
+      50,
+      1_000,
+    )).toBeUndefined();
+  });
+
   test("money too low for one safe thread cancels only the hack", () => {
     const { ctx } = scenario(300);
     const base = solveCycle(ctx, JOESGUNS)!;
@@ -221,5 +264,50 @@ describe("sizeBatchAtLanding", () => {
     )!;
     expect(sized.growThreads).toBe(base.growThreads);
     expect(sized.weaken2Threads).toBe(base.weaken2Threads);
+  });
+});
+
+describe("projectedSkill", () => {
+  const base = { hackingExp: 1_000_000, expPerSec: 0, hackingMult: 1, currentSkill: 0 };
+
+  test("is the identity when no experience rate is known", () => {
+    const current = calculateSkill(base.hackingExp, 1);
+    const input = { ...base, currentSkill: current };
+    expect(projectedSkill(input, 60_000)).toBe(current);
+    expect(projectedSkill({ ...input, expPerSec: 500 }, 0)).toBe(current);
+    expect(projectedSkill({ ...input, expPerSec: 500 }, Infinity)).toBe(current);
+  });
+
+  test("matches the vendored skill curve at the horizon", () => {
+    const expPerSec = 25_000;
+    const horizonMs = 90_000;
+    const input = {
+      ...base,
+      expPerSec,
+      currentSkill: calculateSkill(base.hackingExp, 1),
+    };
+    expect(projectedSkill(input, horizonMs)).toBe(
+      calculateSkill(base.hackingExp + expPerSec * (horizonMs / 1_000), 1),
+    );
+  });
+
+  test("honours the multiplier, and never projects BELOW the current skill", () => {
+    const expPerSec = 25_000;
+    const horizonMs = 90_000;
+    // BN9's HackingLevelMultiplier, folded into the mult by the caller. It has
+    // to reach the curve: at 0.25 the projected level is a quarter of what the
+    // unmultiplied curve would claim.
+    const mult = 0.25;
+    const projected = calculateSkill(base.hackingExp + expPerSec * (horizonMs / 1_000), mult);
+    const unmultiplied = calculateSkill(base.hackingExp + expPerSec * (horizonMs / 1_000), 1);
+    expect(projected).toBeLessThan(unmultiplied);
+    expect(projectedSkill({ ...base, expPerSec, hackingMult: mult, currentSkill: 1 }, horizonMs))
+      .toBe(projected);
+    // A stale/high current skill wins: the projection may only ever shrink a
+    // hack, so over-estimating the level is the recoverable direction.
+    expect(projectedSkill(
+      { ...base, expPerSec, hackingMult: mult, currentSkill: projected + 50 },
+      horizonMs,
+    )).toBe(projected + 50);
   });
 });

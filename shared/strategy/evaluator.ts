@@ -41,6 +41,15 @@ import {
   type TargetStatics,
 } from "./targeting.ts";
 import { hackMarginalValue, shareCutover, type ShareCutover, type SharePricingInput } from "./share.ts";
+import { projectedSkill } from "./prediction.ts";
+
+/** The multiplier the skill curve actually uses: the player's own hacking mult
+ * TIMES the BitNode's. Both apply, and the node's is 0.35 in BN4 and 0.25 in
+ * BN9 — using `mults.hacking` alone over-states a projected level roughly
+ * threefold there, and every projection built on it inherits the error. */
+export function hackingLevelMult(view: WorldView): number {
+  return (view.player.mults.hacking ?? 1) * (view.nodeMults?.HackingLevelMultiplier ?? 1);
+}
 
 /** Incremental target evaluation. Steady-state scores depend only on static
  * fields + HackContext, so the round-robin can work off a stale snapshot: a
@@ -598,7 +607,7 @@ export function stepEvaluator(
     const targetSkill = Math.min(normalStep, nextUnlock);
     const expNeeded = Math.max(
       0,
-      expForSkill(targetSkill, view.player.mults.hacking ?? 1) - view.player.hackingExp,
+      expForSkill(targetSkill, hackingLevelMult(view)) - view.player.hackingExp,
     );
     const futureCtx = makeHackContext(
       { skill: targetSkill, intelligence: view.player.intelligence, mults: view.player.mults },
@@ -693,9 +702,14 @@ export function stepEvaluator(
   const expRate = view.player.hackingExpRate ?? 0;
   const prepScaleOf = (entry: TargetEntry, prepSeconds: number): number => {
     if (expRate <= 0 || !Number.isFinite(prepSeconds) || prepSeconds <= 0) return 1;
-    const futureSkill = skillFromExp(
-      view.player.hackingExp + expRate * prepSeconds,
-      view.player.mults.hacking ?? 1,
+    const futureSkill = projectedSkill(
+      {
+        hackingExp: view.player.hackingExp,
+        expPerSec: expRate,
+        hackingMult: hackingLevelMult(view),
+        currentSkill: view.player.hackingSkill,
+      },
+      prepSeconds * 1_000,
     );
     if (futureSkill <= view.player.hackingSkill) return 1;
     const futureCtx = makeHackContext(

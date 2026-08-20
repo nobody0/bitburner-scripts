@@ -292,7 +292,7 @@ export interface Column<T> {
   left?: boolean;
 }
 
-export interface DataTableOptions<T> {
+export interface DataTableOptions {
   empty?: Markup;
   /** Applied when no sort has been chosen. */
   defaultSort: Sort;
@@ -303,7 +303,7 @@ export interface DataTableOptions<T> {
 /** A sortable table. Header cells carry `data-sort-table`/`data-sort-key`; the
  * delegated click handler in main.ts writes the choice to viewstate, so the
  * sort survives the re-render it triggers. */
-export function dataTable<T>(id: string, rows: readonly T[], columns: Column<T>[], options: DataTableOptions<T>): string {
+export function dataTable<T>(id: string, rows: readonly T[], columns: Column<T>[], options: DataTableOptions): string {
   if (rows.length === 0) return note(options.empty ?? "no data");
   const active = sortOf(id, options.defaultSort);
   // A persisted key can outlive its column (mode-dependent columns, renames);

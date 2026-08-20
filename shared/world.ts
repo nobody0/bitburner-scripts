@@ -88,7 +88,21 @@ export interface HgwAction {
   type: "hack" | "grow" | "weaken";
   target: string;
   source: string;
+  /** INTEGER threads the process is spawned with. This is what RAM is billed
+   * for, and the only thread figure the allocator and the JIT capacity math
+   * may read. */
   threads: number;
+  /** Fractional REAL thread strength for THIS invocation, passed as
+   * `opts.threads`. Absent = act at the full spawned count. Always <=
+   * `threads` — the engine throws when it is not.
+   *
+   * Separating size from strength is what lets a resident worker be re-tasked
+   * below its spawn size without moving any GB figure: `chooseJitSchedule`
+   * quantizes role RAM through `ceil(holdMs / interval)`, so a thread count
+   * that reaches it is never a rounding detail (see targeting.ts
+   * weakenThreadsFor). Strength never reaches it.
+   * Source (opts.threads accepts positive non-integer values): types/NetscriptDefinitions.d.ts BasicHGWOptions */
+  strengthThreads?: number;
   /** Dispatcher-assigned id, echoed back in the CompletionEvent. */
   opId?: number;
   /** Extra landing delay for HWGW alignment: the op completes at
@@ -117,7 +131,15 @@ export interface ShareAction {
   opId: number;
 }
 
-/** Cooperative cancellation of one share worker. */
+/** Cancellation of one share worker.
+ *
+ * The worker parks on a stop promise raced against its current `ns.share()`
+ * slice (game/worker/worker.ts), so resolving it returns from `main` and the
+ * game reclaims the RAM on the next turn of the event loop. No `ns.kill` is
+ * involved: killing would cost the controller static RAM it does not have,
+ * and would need a process to kill a process. Share is the one tenant this
+ * works for — it loses no progress, unlike a prep wave or an in-flight
+ * batch — which is what makes it safe to evict on demand. */
 export interface StopShareAction {
   type: "stopShare";
   opId: number;
@@ -142,6 +164,13 @@ export interface CompletionEvent {
   opId?: number;
   target?: string;
   threads?: number;
+  /** When the effect actually landed, on the same clock as `view.time`.
+   *
+   * Without it, landing ERROR — planned landing minus observed — is
+   * unmeasurable in the live game, and the batcher's two documented timing
+   * tightenings stay unfalsifiable outside the simulator. Landing ORDER is
+   * already checked per batch; this is the magnitude that order cannot show. */
+  at?: number;
   result?: {
     success?: boolean;
     moneyGained?: number;

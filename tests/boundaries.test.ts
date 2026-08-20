@@ -83,4 +83,21 @@ describe("sub-project boundaries", () => {
     );
     expect(violations).toEqual([]);
   });
+
+  // A raw control character in a source file is invisible in review, makes git
+  // and grep treat the file as binary, and silently redefines any string
+  // literal it lands in. Separators that need one (the weaken-group key, the
+  // missed-window key) must be written as an escape, never as the byte.
+  test("source files carry no raw control characters", () => {
+    // Tab is the only control character that legitimately appears in source.
+    const control = (line: string): boolean =>
+      [...line].some((character) => character.charCodeAt(0) < 32 && character.charCodeAt(0) !== 9);
+    const violations = ["game", "shared", "sim", "tests", "tools", "ui"].flatMap((directory) =>
+      sourceFiles(directory).flatMap((path) => {
+        const at = readFileSync(path, "utf8").split(/\r?\n/).findIndex((line) => control(line));
+        return at === -1 ? [] : [`${display(path)}:${at + 1}`];
+      }),
+    );
+    expect(violations).toEqual([]);
+  });
 });

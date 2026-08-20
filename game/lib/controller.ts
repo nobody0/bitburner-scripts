@@ -99,8 +99,11 @@ export async function runController(
   // better bidder has to live out here.
   let workSlot: SlotState | undefined;
   // Last coordination digest written to the store, so an unchanged board is
-  // not rewritten every pass. `undefined` means "nothing posted".
-  let publishedCoordination: string | undefined;
+  // not rewritten every pass. Tracked per HALF — the needs board and the
+  // arbiter's verdict are separate topics now and move at very different
+  // rates, so one signature over both would republish the slow topic at the
+  // fast one's rate. An empty record means "nothing posted".
+  let publishedCoordination: CoordinationMarks = {};
   let publishedArena: string | undefined;
   // Broker arena publication is change-filtered; queue and demand state remain
   // unconditional game state even in a --perf build.
@@ -209,9 +212,14 @@ export async function runController(
           }
         }
         onWorldReset(state, resetKind);
-        merge(state, "progression", emptyDigest());
+        // Through publishDigest, so the ARBITRATION topic is cleared too. It
+        // is its own record now; merging the empty digest into `progression`
+        // only stamped a dead field there and left the previous node's grants,
+        // denials and waterlines live for income.ts and hacking.ts to price
+        // the new node's spending against.
+        publishDigest(state, emptyDigest(), {});
         workSlot = undefined;
-        publishedCoordination = undefined;
+        publishedCoordination = {};
         contributions.clear();
         // Rescan and reclaim NOW, not on the next sweep. Waiting would leave
         // the dispatcher with no world to farm for 30 s, and would leave the
@@ -630,8 +638,14 @@ function publishArena(
     farmCostPerSec: sig3(arena.farmCostPerSec),
   };
   const encoded = JSON.stringify(digest);
-  if (encoded !== published) merge(state, 'progression', { ramArena: digest });
+  if (encoded !== published) set(state, 'ramArena', digest);
   return encoded;
+}
+
+/** Last-published signature of each half of the coordination digest. */
+interface CoordinationMarks {
+  needs?: string;
+  arbitration?: string;
 }
 
 /** Write the coordination digest into the store, but only when it changed.
@@ -647,19 +661,40 @@ function publishArena(
 function publishCoordination(
   state: GameState,
   digest: Coordination["digest"],
-  published: string | undefined,
-): string | undefined {
+  published: CoordinationMarks,
+): CoordinationMarks {
   if (digest === undefined) {
     // Nothing posted. Clear once — a stale board left on screen after the
     // feature that posted it went quiet reads as "still blocked" when the
-    // truth is "nobody asked".
-    if (published !== undefined) merge(state, "progression", emptyDigest());
-    return undefined;
+    // truth is "nobody asked". Returning empty marks is what makes it once:
+    // every later pass takes the line above and does no work at all.
+    if (published.needs === undefined && published.arbitration === undefined) return published;
+    publishDigest(state, emptyDigest(), {});
+    return {};
   }
-  const encoded = JSON.stringify(digest);
-  if (encoded === published) return published;
-  merge(state, "progression", digest);
-  return encoded;
+  return publishDigest(state, digest, published);
+}
+
+/** The needs board rides on `progression`; the arbiter's verdict is its own
+ * topic. They are computed together but move at very different rates — the
+ * board is stable for minutes, the verdict changes as the money does — and a
+ * state record republishes its whole topic, so keeping them together made the
+ * board pay the verdict's rate. */
+function publishDigest(
+  state: GameState,
+  digest: NonNullable<Coordination["digest"]>,
+  published: CoordinationMarks,
+): CoordinationMarks {
+  const needs = JSON.stringify(digest.needs);
+  const arbitration = JSON.stringify(digest.arbitration);
+  // Filtered per half, not over the pair. `merge` marks its topic dirty
+  // unconditionally, so a combined signature republished the WHOLE of
+  // `progression` — plan, multipliers, moneySources and all — every time the
+  // verdict moved, which is nearly every pass. That is exactly the cost the
+  // split was made to remove, and a single signature does not remove it.
+  if (needs !== published.needs) merge(state, "progression", { needs: digest.needs });
+  if (arbitration !== published.arbitration) set(state, "arbitration", digest.arbitration);
+  return { needs, arbitration };
 }
 
 /** Prestige under a live realm: everything derived from the world we left

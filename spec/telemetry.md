@@ -53,6 +53,59 @@ come from the `farm` rollup when present, fall back to `hack.done` events, and
 are shown as unavailable when neither exists — the test for "do we have
 totals" is the presence of a source, never the `src` of the run.
 
+**Deduplication is the HUB's job, never the game's.** The emitter republishes
+every dirty topic in full: `set`/`merge` cannot know whether a value moved, and
+proving it has not would cost a second serialization of every topic on every
+tick. Game-script clock time is the resource this whole design exists to
+protect, so that trade is refused — bytes on a localhost socket are cheap and
+the game's tick is not. The hub (`ui/store.ts`) collapses a run of identical
+state to its FIRST and LAST record instead. Both ends, because the span is
+itself an observation: a topic that held one value for four hours differs from
+one sampled once, and keeping only the opening record makes the two
+indistinguishable. Live viewers still receive every record — the collapse is a
+storage decision, and a viewer's liveness reading comes off the stream. One
+consequence for readers: the file is no longer strictly ordered by `t`, since a
+span's closing record is written when the span ends, so a projection must SKIP
+records past its cutoff rather than stop at the first one.
+
+A topic is split when its parts move at different rates, because a state record
+is whole-topic last-write-wins and so republishes everything the moving part
+rides on. `arbitration` and `ramArena` were split out of `progression` for
+exactly this reason: measured on a live 2.58 GB run, `progression` was 50% of
+the file at one record per 200 ms, while the 13.8 KB of
+plan/needs/multipliers/moneySources it dragged along changed on 12 of 1259
+consecutive pairs. The split plus the span collapse cut a sampled 39.9 MB of
+that run to 15.5 MB.
+
+Counters are kept per BATCH, not globally. A batch — a HWGW cycle, an HGW
+cycle, a shotgun cycle, a prep wave — is the unit the farm reasons in, and the
+kinds are not interchangeable: a prep wave is a hundred grow threads that steal
+nothing while a farm cycle is four ops that do, so a single op counter spanning
+both describes neither. Every launch group opens a batch id
+(`shared/strategy/dispatch.ts`), every op carries it on `Tracked`, and every
+completion is attributed back through the `opId` it already echoes — so
+**nothing was added to the worker protocol**: `opId` already resolves to the
+batch. `farm.batches` publishes the sums per kind (ops, RAM, threads, span,
+money, in-order and lost-op counts) plus a small ring of recently settled
+batches as examples, because a record per batch is no more sendable than a
+record per op.
+
+The rollup is also where a question that *looks* per-op gets answered without
+per-op records. Farm landings run at roughly one per 20 ms at scale, so "did
+this batch's effects land in the planned H -> W1 -> G -> W2 order?" can never be
+a record per landing. It survives aggregation because each batch reduces to ONE
+signature: the order its roles actually landed in. `farm.landingOrder` counts
+batches per observed signature, so a healthy run is a single key at ~100% and a
+reorder is a second key — with a bounded ring of recent examples, which stays
+cheap precisely because an anomaly rate high enough to fill it is itself the
+finding. Batches that landed having never launched a hack are counted
+separately (`incomplete`): support paid for with nothing stolen is a different
+failure from support arriving out of order, and folding the two together would
+hide the more expensive one. The same reasoning covers rates: the rollup
+publishes CUMULATIVE `launched`/`landed`/`allocation` counters and the viewer
+differentiates them (`ui/app/project.ts`), which costs no bytes and makes a
+replay scrub recompute the identical curve.
+
 Feature probes add `probe.failed {id, error}` when a body throws; silence would
 read as "this feature has no data". A probe that cannot be PLACED is no longer a
 probe-level event at all — it stays queued in the broker, and

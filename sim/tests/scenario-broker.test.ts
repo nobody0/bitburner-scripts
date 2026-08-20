@@ -64,8 +64,9 @@ scenarioDescribe("scenario: dodge broker", () => {
         let record: { kind?: string; key?: string; name?: string; data?: Record<string, unknown> };
         try { record = JSON.parse(line) as typeof record; } catch { return; }
         if (record.kind === "event" && record.name === "ram.preempt") preemptions += 1;
-        if (record.kind === "state" && record.key === "progression" && record.data?.ramArena) {
-          const arena = record.data.ramArena as {
+        // `ramArena` is its own topic now, split out of `progression`.
+        if (record.kind === "state" && record.key === "ramArena" && record.data) {
+          const arena = record.data as {
             waits?: Array<{ by?: string; id?: string; class?: string; gb?: number }>;
             guaranteedDynamicGb?: number;
           };

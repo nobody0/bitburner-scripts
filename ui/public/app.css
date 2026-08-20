@@ -96,10 +96,13 @@ section.card h2 .acts { margin-left: auto; display: flex; gap: 6px; align-items:
 .tile .v { color: var(--bb-primary-light); font-size: var(--fs-lg); font-weight: 500; }
 .tile .l { color: var(--bb-secondary); font-size: var(--fs-xs); }
 
-#chartwrap, #cadencewrap { position: relative; }
+/* The two original wrappers are ids because there was one chart each; the
+   class is what any further chart uses. Kept together so a tooltip can never
+   be positioned against the page instead of its own chart. */
+#chartwrap, #cadencewrap, .chartwrap { position: relative; }
 canvas { width: 100%; height: 240px; display: block; }
 canvas.minichart { height: 140px; }
-#tooltip, #cadencetip {
+#tooltip, #cadencetip, .charttip {
   position: absolute;
   pointer-events: none;
   background: var(--bb-well);
@@ -110,6 +113,49 @@ canvas.minichart { height: 140px; }
   display: none;
   white-space: nowrap;
 }
+
+/* --- one panel per active dispatcher pipeline ---
+   A pipeline describes itself (farm/prep, its mode, its progress), so this
+   lays out an unknown number of them rather than a fixed farm/prep pair. */
+.pipelines { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 9px; }
+.pipe {
+  flex: 1 1 260px;
+  min-width: 0;
+  border: 1px solid var(--bb-well);
+  padding: 7px 9px;
+}
+.pipe p { margin: 3px 0; }
+.pipehead { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; margin-bottom: 5px; }
+.pipename { color: var(--bb-primary-light); font-weight: 500; }
+.pipetag {
+  font-size: var(--fs-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--bb-background);
+  background: var(--bb-secondary);
+  padding: 0 5px;
+}
+.piperow { display: flex; gap: 8px; align-items: center; margin: 2px 0; }
+.piperow .l { color: var(--bb-secondary); font-size: var(--fs-xs); min-width: 56px; }
+.piperow .meter { flex: 1; }
+
+/* --- batches: one column per batch kind ---
+   The farm's unit of work is the batch, so the kinds sit side by side and are
+   read together rather than stacked into a scroll. Everything inside a column
+   is sized down: at ~210px a full-height chart and an 18px tile value are most
+   of the panel. */
+.batchgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 10px; margin-bottom: 8px; }
+.batchcol { border: 1px solid var(--bb-well); padding: 6px 8px; min-width: 0; }
+.batchcol .tiles { gap: 3px 12px; margin-bottom: 5px; }
+.batchcol .tile .v { font-size: var(--fs-md); }
+.batchcol p { margin: 3px 0; font-size: var(--fs-sm); }
+.batchcol .barkey { font-size: var(--fs-xs); gap: var(--sp-2); margin-top: 2px; }
+canvas.microchart { height: 88px; }
+/* Keys the launched/landed readout to the two curves above it. A microchart
+   has no room for a legend, and the curves coincide exactly whenever nothing
+   is being lost — which is most of the time, and is the good case. */
+.batchcol .k1 { color: var(--series-1); }
+.batchcol .k2 { color: var(--series-5); }
 
 /* --- a missing requirement, with the feature that owes it --- */
 .need {

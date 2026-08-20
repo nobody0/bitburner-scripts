@@ -32,3 +32,6 @@ go-ai/corpora/
 go-ai/derivatives/playbook-combined/
 go-ai/derivatives/playbook-residual/
 go-ai/derivatives/combined-standalone.js
+
+# Per-process scratch build directories from the build/deployment tests.
+build-test-*/

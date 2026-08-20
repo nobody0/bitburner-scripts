@@ -41,9 +41,22 @@ out after 30 seconds without a game connection. The destructive `restore.js`
 maintenance entrypoint is excluded from normal builds and is built and pushed
 only by `save:restore`.
 
-It does not call `deleteFile`. Adding deletion later requires an explicit
-managed-file manifest and tests proving that only files previously owned by this
-repository can be removed.
+`sync` calls `deleteFile`, gated by a derived ownership rule rather than a
+manifest: `ownedDirectories()` (`shared/deployment.ts`) reads the directories
+the build's own targets write into, and `isSweepableFile()` admits only a `.js`
+file inside one of them that this build and the previous one did not push. A
+renamed or retired artifact is therefore collected the moment it leaves
+`bitburner.config.json`, with nothing to keep up to date — a hand-maintained
+list of former names is wrong the first time someone forgets it.
+
+Three further layers stand behind that rule. `getFileNames` returns only
+`server.scripts` and `server.textFiles`, so `.msg`/`.lit`/`.exe`/`.cct` are not
+even enumerable; `BaseServer.removeFile` refuses to delete a running script,
+which is what protects the outgoing worker generation during a handoff; and the
+`.js` restriction spares a player's own text files inside our directories.
+`tests/rfa-sweep.test.ts` drives the rule over a transcribed in-game listing
+containing every one of those categories and asserts the delete set is exactly
+this project's stale artifacts.
 
 ## Testing boundary
 

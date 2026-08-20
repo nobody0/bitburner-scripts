@@ -126,6 +126,50 @@ describe("audit Q3 — honest exhaustive oracle", () => {
     expect(solved.exact).toBe(true);
   });
 
+  /* --- Q5: is a second batch parameterization worth building? -------------
+   *
+   * The 2024 reference brute-forces three anchors (HxGW / HGxW / HGWx) and
+   * takes the best by moneyPerMs (imports/batchPlanner.ts:984-1004). We anchor
+   * on hack threads only. Below EXACT_THREAD_LIMIT the H-scan provably
+   * subsumes all three — our counts are ceil'ed, so the anchor cannot change
+   * what is reachable. Above it the search falls back to a grid plus golden
+   * section, and spec/jit-reference.md carried that as an open question until
+   * these cases answered it. The oracle is the one above, which is not limited
+   * to the exact domain: it enumerates every integer candidate.
+   *
+   * ANSWER: not worth building. The heuristic scores within 0.15% of
+   * exhaustive across the large domain, an order of magnitude below the 0.89%
+   * loss that justified the exact search in Q3, and 0% under a binding RAM cap
+   * (the domain collapses into the exact regime). The reason is in the
+   * numbers: it picks 12,600 threads where the oracle picks 4,575 and still
+   * scores within 0.04%, because the surface is FLAT across that region, so a
+   * second anchor lands on the same plateau. */
+  const largeDomain = [
+    { name: "skill 200, money x0.001", ctx: () => context(200, 1, 0.001), target: () => statics(), caps: UNLIMITED_RAM },
+    { name: "skill 500, money x0.0005", ctx: () => context(500, 1, 0.0005), target: () => statics({ serverGrowth: 60 }), caps: UNLIMITED_RAM },
+    { name: "skill 1000, money x0.0002", ctx: () => context(1_000, 1, 0.0002), target: () => statics({ serverGrowth: 99, moneyMax: 1e10 }), caps: UNLIMITED_RAM },
+    { name: "skill 300, growth 5", ctx: () => context(300, 1, 0.002), target: () => statics({ serverGrowth: 5 }), caps: UNLIMITED_RAM },
+    { name: "skill 500 under an 8 TB cap", ctx: () => context(500, 1, 0.0005), target: () => statics({ serverGrowth: 60 }), caps: { batchGb: 8_000_000, hackBlockGb: 1_000_000 } },
+  ];
+
+  test.each(largeDomain)(
+    "Q5 — the heuristic stays within 0.15% of exhaustive above the boundary: $name",
+    ({ ctx: makeCtx, target: makeTarget, caps }) => {
+      const ctx = makeCtx();
+      const target = makeTarget();
+      const oracle = exhaustiveOracle(ctx, target, 1, caps);
+      expect(oracle.maxHack).toBeGreaterThan(EXACT_THREAD_LIMIT);
+      const solved = solveCycle(ctx, target, 1, caps)!;
+      expect(solved.exact).toBe(false);
+      const gap = (oracle.best!.score - solved.score) / oracle.best!.score;
+      // Never BETTER than exhaustive: that would mean the two disagree about
+      // the objective rather than about the search.
+      expect(gap).toBeGreaterThanOrEqual(-1e-12);
+      expect(gap).toBeLessThan(0.0015);
+    },
+    30_000,
+  );
+
   test("domains above the boundary are explicitly labelled heuristic", () => {
     const ctx = context(200, 1, 0.001);
     const target = statics();

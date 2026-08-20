@@ -69,7 +69,6 @@ import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 
 const WORKER_SCRIPT = versionedScript("worker/worker.js", "sim");
 const DODGE_STUB = versionedScript("lib/dodge-stub.js", "sim");
-const GO_DODGE_STUB = versionedScript("lib/go-dodge-stub.js", "sim");
 const START_SCRIPT = "start.js";
 
 export interface GameRunOptions {
@@ -388,8 +387,8 @@ async function runGameInstalled(
   const terminal = { host: save?.currentServer ?? "home" };
   const initialHomeFiles = new Set(
     save
-      ? [START_SCRIPT, DODGE_STUB, GO_DODGE_STUB, WORKER_SCRIPT, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
-      : [START_SCRIPT, DODGE_STUB, GO_DODGE_STUB, WORKER_SCRIPT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
+      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
+      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
   );
   const permanentDarknetAccess = (): boolean => bitnode === 15 || (world.player.sourceFiles["15"] ?? 0) > 0;
   if (permanentDarknetAccess()) {
@@ -675,12 +674,11 @@ async function runGameInstalled(
 
   // Imported AFTER the flags are on globalThis, and dynamically so module
   // evaluation cannot outrun them.
-  const [{ main: startMain }, { resetAllFeatures }, { initState }, dodgeStub, goDodgeStub, worker] = await Promise.all([
+  const [{ main: startMain }, { resetAllFeatures }, { initState }, dodgeStub, worker] = await Promise.all([
     import("../game/start.ts"),
     import("../game/lib/features/index.ts"),
     import("../game/lib/state.ts"),
     import("../game/lib/dodge-stub.ts"),
-    import("../game/lib/go-dodge-stub.ts"),
     import("../game/worker/worker.ts"),
   ]);
 
@@ -832,7 +830,6 @@ async function runGameInstalled(
   }
 
   host.scripts.set(DODGE_STUB, dodgeStub.main as ScriptMain);
-  host.scripts.set(GO_DODGE_STUB, goDodgeStub.main as ScriptMain);
   host.scripts.set(WORKER_SCRIPT, worker.main as ScriptMain);
   host.scripts.set(START_SCRIPT, ((ns: NS) => startMain(ns, options.features)) as ScriptMain);
 
@@ -1075,10 +1072,10 @@ async function runGameInstalled(
         target: need.target,
       })),
       factionArbitration: [
-        ...(terminalState?.progression?.arbitration?.grants ?? [])
+        ...(terminalState?.arbitration?.grants ?? [])
           .filter((grant) => grant.by === "factions")
           .map((grant) => `grant:${grant.id}:${grant.amount}:p${grant.priority ?? "?"}`),
-        ...(terminalState?.progression?.arbitration?.denied ?? [])
+        ...(terminalState?.arbitration?.denied ?? [])
           .filter((denial) => denial.by === "factions")
           .map((denial) => `deny:${denial.id}:${denial.reason}:${denial.available}/${denial.wanted}:p${denial.priority ?? "?"}`),
       ],

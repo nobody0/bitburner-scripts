@@ -111,16 +111,24 @@ filename:
 ```
 
 esbuild bundles the entrypoint and its imports into that single `.js` file.
-Files that are not listed as entries are never pushed independently. The
-pipeline is intentionally one-way and never calls the Remote File API's
-`deleteFile` method, so it cannot remove unrelated in-game scripts.
+Files that are not listed as entries are never pushed independently.
+
+`sync` also sweeps its own leavings. Ownership is derived from the config, not
+listed by hand: the build's targets name the directories it writes into
+(`worker/`, `lib/`), and a `.js` file inside one of them that the current or
+previous build did not push is stale and gets deleted. Nothing at the server
+root is ever touched — that is where every game-generated file lives (`.msg`,
+`.lit`, `.exe`, `.cct`) and where `start.js` and `build-id.txt` are simply
+overwritten — and neither is `data/`, which the running controller writes to.
+`--no-sweep` disables it; `--sweep-dry-run` prints the delete set instead.
 
 The worker and RAM-dodge helper are immutable per build: their filenames carry
 the same build id baked into `start.js`. Helpers are pushed first, then the
 stable controller, with `build-id.txt` last as the commit point. The ids use a
 timestamp plus a random suffix rather than a mutable counter, so concurrent
-builds and branches cannot claim the same version. Old helper files remain in
-the game under the no-delete policy.
+builds and branches cannot claim the same version. The previous generation is
+kept for one sync — the outgoing controller's in-flight workers still reference
+it — and collected by the one after.
 
 `game/restore.ts` is a maintenance entrypoint, not part of that normal allowlist.
 Only `bun run save:restore` builds and pushes `restore.js`.

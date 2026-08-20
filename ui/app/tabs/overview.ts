@@ -220,8 +220,8 @@ export const overviewTab: Tab = {
     const tooltip = el.querySelector<HTMLElement>("#tooltip");
     if (!canvas || !tooltip) return;
     drawChart(canvas, state.moneySeries, state.t0);
-    // The canvas node is recreated by each render, so its listeners go with
-    // it; attaching per mount keeps exactly one set on the live node.
+    // The canvas node now survives a render, so this must stay idempotent:
+    // attachChartHover wires a given canvas exactly once.
     attachChartHover(canvas, tooltip);
   },
 };

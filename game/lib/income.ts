@@ -179,7 +179,7 @@ export function bestReinvestmentReturnPerDollarSec(state: GameState): number {
   };
 
   consider(state.topics.fleet?.infrastructurePlan?.reinvestmentReturnPerDollarSec);
-  const arbitration = state.topics.progression?.arbitration;
+  const arbitration = state.topics.arbitration;
   for (const claim of [...(arbitration?.grants ?? []), ...(arbitration?.denied ?? [])]) {
     if (claim.resource === "money") consider(claim.returnPerDollarSec);
   }

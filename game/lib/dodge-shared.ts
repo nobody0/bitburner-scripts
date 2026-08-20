@@ -13,4 +13,14 @@ export interface DodgeGlobals {
   dodge_running?: Promise<unknown>;
 }
 
-export type DodgeGlobalThis = typeof globalThis & DodgeGlobals;
+/** Rendezvous state for the long (Go) lane. A separate slot set, not a separate
+ * stub: one stub file serves both lanes and picks its slots from ns.args. */
+export interface GoDodgeGlobals {
+  go_dodge_func?: (ns: NS) => unknown;
+  go_dodge_cb?: (result: unknown) => void;
+  go_dodge_reject?: (err: unknown) => void;
+  go_dodge_running?: Promise<unknown>;
+}
+
+export type DodgeGlobalThis = typeof globalThis & DodgeGlobals & GoDodgeGlobals;
+export type GoDodgeGlobalThis = DodgeGlobalThis;

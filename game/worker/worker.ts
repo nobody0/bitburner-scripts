@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { workerGlobals, type WorkerJob } from "../lib/worker-shared.ts";
 import { signalWake } from "../lib/wake.ts";
-import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/jit.ts";
+import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/timing.ts";
 
 /** Puppet worker: one script file for all modes, launched with
  * `{ threads, temporary: true, ramOverride: perThreadCost }` so its RAM bill
@@ -53,7 +53,12 @@ export async function main(ns: NS): Promise<void> {
   // controller will rebuild its ledger.
   if (!info) return;
 
-  const options = (job: { additionalMsec?: number; delayUntil?: number; stock?: boolean }) => {
+  const options = (job: {
+    additionalMsec?: number;
+    delayUntil?: number;
+    stock?: boolean;
+    threads?: number;
+  }) => {
     // additionalMsec is added to the duration from the instant hack/grow/weaken
     // is actually invoked. Exec and module startup are asynchronous, so the
     // driver sends an absolute padding deadline and we remove launch skew here.
@@ -63,14 +68,24 @@ export async function main(ns: NS): Promise<void> {
     const additionalMsec = job.delayUntil === undefined
       ? job.additionalMsec
       : Math.max(0, job.delayUntil - performance.now());
-    return additionalMsec || job.stock
+    // `threads` is the FRACTIONAL strength this invocation acts at, already
+    // divided by this host's core bonus by the dispatcher. Omitting it means
+    // "act at the full spawned count", so it must join the emptiness test
+    // below rather than riding on padding or stock being present.
+    // Source (accepts positive non-integer values, must be <= the script's
+    // thread count): types/NetscriptDefinitions.d.ts BasicHGWOptions
+    return additionalMsec || job.stock || job.threads !== undefined
       ? {
           ...(additionalMsec ? { additionalMsec } : {}),
           ...(job.stock ? { stock: true } : {}),
+          ...(job.threads !== undefined ? { threads: job.threads } : {}),
         }
       : undefined;
   };
-  const run = (target: string, opts?: { additionalMsec?: number; stock?: boolean }): Promise<number> => {
+  const run = (
+    target: string,
+    opts?: { additionalMsec?: number; stock?: boolean; threads?: number },
+  ): Promise<number> => {
     if (info.kind === "hack") return ns.hack(target, opts);
     if (info.kind === "grow") return ns.grow(target, opts);
     return ns.weaken(target, opts);
@@ -100,14 +115,26 @@ export async function main(ns: NS): Promise<void> {
   if (info.kind === "share") return;
   const hgwKind = info.kind;
 
+  // The strength an op RAN at, which is what the game awarded experience and
+  // applied fortify on. Falls back to the spawned count when no strength was
+  // requested, so an unpopulated descriptor reports exactly what it used to.
+  const strengthOf = (job: { threads?: number }): number => job.threads ?? info.threads;
+
   if (info.mode !== "serve") {
     let result: number | undefined;
     ns.atExit(() => {
       g.worker_info?.delete(id);
-      g.dispatch_done?.push({ opId: id, kind: hgwKind, target: info.target, threads: info.threads, result });
+      g.dispatch_done?.push({
+        opId: id,
+        kind: hgwKind,
+        target: info.target,
+        threads: strengthOf({ threads: info.strengthThreads }),
+        at: performance.now(),
+        result,
+      });
       wakeDispatcher(hgwKind);
     }, `op${id}`);
-    result = await run(info.target, options(info));
+    result = await run(info.target, options({ ...info, threads: info.strengthThreads }));
     return;
   }
 
@@ -119,8 +146,16 @@ export async function main(ns: NS): Promise<void> {
     g.worker_jobs?.delete(id);
     g.worker_wake?.delete(id);
     if (current) {
-      g.dispatch_done?.push({ opId: current.opId, kind: hgwKind, target: current.target, threads: info.threads });
+      g.dispatch_done?.push({
+        opId: current.opId,
+        kind: hgwKind,
+        target: current.target,
+        threads: strengthOf(current),
+        at: performance.now(),
+      });
     }
+    // workerExit deliberately reports the SPAWNED count: it frees the RAM
+    // reservation, which was sized on that, never on a job's strength.
     g.dispatch_done?.push({ opId: id, kind: "workerExit", target: "", threads: info.threads });
     wakeDispatcher(hgwKind);
   }, `worker${id}`);
@@ -152,7 +187,14 @@ export async function main(ns: NS): Promise<void> {
     // reported this job — re-check liveness before reporting it again.
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/killWorkerScript.ts#L63-L91
     if (!g.worker_info?.has(id)) return;
-    g.dispatch_done?.push({ opId: job.opId, kind: hgwKind, target: job.target, threads: info.threads, result });
+    g.dispatch_done?.push({
+      opId: job.opId,
+      kind: hgwKind,
+      target: job.target,
+      threads: strengthOf(job),
+      at: performance.now(),
+      result,
+    });
     wakeDispatcher(hgwKind);
   }
 }

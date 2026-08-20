@@ -1,8 +1,11 @@
 import {
+  GROW_FORTIFY,
   growthLogPerThread,
   growThreads,
   growTimeSeconds,
+  HACK_FORTIFY,
   hackExpGain,
+  hackPercent,
   hackTimeSeconds,
   makeHackContext,
   weakenEffect,
@@ -20,6 +23,7 @@ import {
   WORKER_RAM_FLOOR,
   adaptSegmentsToFleet,
   initEvaluator,
+  hackingLevelMult,
   staticsOf,
   stepEvaluator,
   type EvaluatorMemory,
@@ -27,9 +31,10 @@ import {
 } from "./evaluator.ts";
 import { isPrepped, solveCycle, solvePrep, type CycleSolution, type RamCaps } from "./targeting.ts";
 import { coreEffect } from "../ram/heap.ts";
+import { addGb, bump, drainGb, subGb } from "../tally.ts";
 import { decideMode, type FarmMode } from "./mode.ts";
 import { cheapestCloudQuote } from "./ram-supply.ts";
-import { applyLedgerOp, compareLedgerOps, hackThreadsAtLanding, predictAtLanding, sizeBatchAtLanding, type LedgerOp, type PredictedState } from "./prediction.ts";
+import { applyLedgerOp, compareLedgerOps, growThreadsAtLanding, hackThreadsAtLanding, predictAtLanding, projectedSkill, sizeBatchAtLanding, type LedgerOp, type PredictedState } from "./prediction.ts";
 import {
   initPool,
   noteExit,
@@ -37,6 +42,7 @@ import {
   noteJobStart,
   noteSpawn,
   planTake,
+  poolCounts,
   type WorkerPoolMemory,
 } from "./worker-pool.ts";
 import {
@@ -102,17 +108,128 @@ export const MAX_PREP_OPS_PER_PASS = 2 * MAX_PREP_SLABS_PER_PASS;
  * inside it, so a worker's next job arrives before its process exits. */
 export const POOL_REUSE_WINDOW_MS = 5_000;
 /** Live in-flight ops below which pooling stays OFF even when reuse would
- * work. Pooling trades in-game throughput (idle workers strand RAM between
- * jobs — measured −20 % time-to-goal on a 4 TB profile with it always on)
- * for browser-side relief (exec churn), so it engages only when the process
- * count is actually pressuring the browser, just before HGW does. */
+ * work. The gate exists because pooling measured −20 % time-to-goal on a 4 TB
+ * profile with it always on, attributed to idle workers stranding RAM between
+ * jobs, against browser-side relief (exec churn) — so it engages only when the
+ * process count is actually pressuring the browser, just before HGW does.
+ *
+ * That attribution is UNVERIFIED and the number needs re-taking. It was
+ * measured while `planTake` scanned and sorted every resident worker per call,
+ * a cost carried only by the pooled path, so "always on" was also "always
+ * quadratic"; stranding was never isolated from it. The scan is gone
+ * (shared/strategy/worker-pool.ts idle index) and two other changes moved the
+ * same ground since — the landing gap fell 200 ms → 5 ms, raising depth and so
+ * the share of idle windows that see a next job, and role-envelope reservation
+ * holds role RAM across the interval regardless.
+ *
+ * Re-taking it is blocked on a fixture, and the obstacle is DEPTH rather than
+ * fleet size: a 16 TB JIT fixture reaches only ~395 concurrent tracked ops
+ * after 180 s of virtual time, well under this gate. `jit-process-pressure`
+ * was written for exactly this and produces no landings at all (see the Known
+ * gaps in spec/progress.md), so repairing it is step zero. */
 export const POOL_PRESSURE_OPS = 1_000;
 const JIT_ROLE_PRIORITY: Record<JitRole["role"], number> = { w1: 0, w2: 1, g: 2, h: 3 };
 /** Consecutive arrival-money hack zeroings treated as a pipeline desync (see
  * DispatchMemory.hackZeroStreak). One is routine safety-brake noise; a run
  * means the predicted ledger has drifted from the observable server. */
 export const HACK_ZERO_DESYNC_STREAK = 3;
+/** Smallest hack strength still worth dispatching.
+ *
+ * Fractional `opts.threads` means an arrival-money shrink no longer bottoms out
+ * at a whole thread, so the cancel threshold has to be stated rather than
+ * inherited from integer arithmetic. A tenth of a thread steals a tenth of one
+ * thread's percentage — far below the landing-gap's worth of income, and it
+ * still costs a process, a landing slot and a fold entry. Cancelling frees the
+ * block for the next batch instead. */
+export const MIN_HACK_STRENGTH_THREADS = 0.1;
+/** Hard ceiling on concurrently live worker PROCESSES.
+ *
+ * The engine keeps every running script in memory; past this many the browser's
+ * JavaScript heap is the binding constraint, not RAM, and the failure mode is
+ * an out-of-memory tab rather than a refused exec. Nothing in the RAM
+ * accounting bounds process COUNT: a fleet with plenty of free GB and a very
+ * short hack time will happily plan more batches than the engine can hold, and
+ * shotgun has no depth cap at all.
+ *
+ * 400k is the observed V8 ceiling, and it is a count of WORKERS, so it is
+ * applied here directly. The reference expressed the same limit indirectly,
+ * dividing it by its per-batch pool weights to get a parallel-BATCH number
+ * (imports/batchPlanner.ts:16-19); that division belongs to its accounting,
+ * not to ours, because we count processes as processes.
+ *
+ * Treat it as a safety rail, not a target: reaching it means the cadence wants
+ * more depth than the browser can carry, and the clamp is reported through
+ * `stats.capped.processes` so that shows up in telemetry instead of as a
+ * crash. */
+export const MAX_LIVE_WORKERS = 400_000;
+/** Ceiling on launch actions emitted in ONE pass.
+ *
+ * Every action becomes a synchronous `ns.exec` in the driver — the loop at
+ * game/lib/dispatch-driver.ts has no await and no cap of its own — so an
+ * unbounded pass blocks the engine's timers for as long as it takes to spawn
+ * the whole wave, which is exactly the freeze this bounds. The JIT path
+ * already self-limits through MAX_PREP_OPS_PER_PASS; shotgun and the eager
+ * path did not.
+ *
+ * The reference solved the same problem twice over: it serialized every spawn
+ * behind an await (imports/batchRunner.ts:65) and capped work per scheduler
+ * call at 5 job-starts (:346). We cannot copy the await — the pump is invoked
+ * without one, so making it async would let two passes interleave — so the
+ * bound has to live here, in the pure layer, where the simulator sees it too.
+ *
+ * Checked at BATCH granularity, never per action: cutting a batch in half
+ * could emit a hack whose weaken cover is still unlaunched. The check counts
+ * the batch about to be emitted, so this is a true ceiling rather than a
+ * threshold that the last batch may overshoot. Work not emitted this pass is
+ * not lost; the next tick or wake continues from the same pending state.
+ *
+ * Farm launches only. Prep waves are bounded separately and independently by
+ * MAX_PREP_OPS_PER_PASS. */
+export const MAX_LAUNCH_ACTIONS_PER_PASS = 256;
 
+/** Real fractional threads for a requested one-core EFFECT.
+ *
+ * The solver works in one-core effect units; Netscript's `opts.threads` wants
+ * REAL threads on the host the block actually landed on. Inverting the block's
+ * own effect-per-real-thread converts between them — the same conversion the
+ * reference did with its per-host coreBonus (imports/batchRunner.ts:162-166).
+ *
+ * Never above the spawned count: the engine throws when `opts.threads` exceeds
+ * the process's own thread count, and a throw mid-batch loses the whole op. */
+function resolveStrength(
+  threads: number,
+  effectThreads: number,
+  /** Effect this call should perform, when that is less than the block is
+   * worth. Absent = use the whole block. */
+  strengthEffect?: number,
+): { strengthThreads: number; usedEffect: number } {
+  const coreRatio = threads > 0 ? effectThreads / threads : 1;
+  const usedEffect = strengthEffect === undefined
+    ? effectThreads
+    : Math.min(effectThreads, strengthEffect);
+  // `usedEffect` is what the in-flight ledger must fold: security fortify and
+  // growth both scale with the effect actually performed, not with the block.
+  return { strengthThreads: Math.min(threads, usedEffect / coreRatio), usedEffect };
+}
+
+/** Worst-case worker processes one batch of this shape occupies: HWGW lands
+ * four ops, HGW three. Pooling may serve some without a fresh process, so this
+ * over-counts, which is the safe direction for a capacity rail. */
+function opsPerBatchFor(kind: CycleSolution["kind"]): number {
+  return kind === "hgw" ? 3 : 4;
+}
+
+/** Live worker processes: resident pooled workers, plus the one-shot ops that
+ * own a process of their own.
+ *
+ * `tracked` holds both pooled and one-shot ops, and a BUSY pooled worker is
+ * counted by both, so the busy count is subtracted to avoid double counting.
+ * Idle pooled workers hold a process without a tracked op and are counted by
+ * `workers`. O(1) — this is consulted per batch on the hot path. */
+export function liveProcessCount(memory: DispatchMemory): number {
+  const { workers, busy } = poolCounts(memory.pool);
+  return workers + Math.max(0, memory.tracked.size - busy);
+}
 export interface Tracked {
   /** SOURCE host the op's RAM is reserved on. */
   hostname: string;
@@ -131,6 +248,13 @@ export interface Tracked {
   landing?: number;
   /** Core-adjusted one-core-equivalent threads (grow/weaken strength). */
   effectThreads?: number;
+  /** REAL fractional threads the op was dispatched at, when that is less than
+   * the block it occupies. Security fortify scales with this, not with the
+   * block, so the in-flight ledger must fold it — `jitSecurityEvents` turns it
+   * into `HACK_FORTIFY * threads` for `latestJitStart`, and deriving it from
+   * `gb / WORKER_RAM[kind]` instead would over-state every downstream
+   * operation's difficulty and launch it early into needless padding. */
+  strengthThreads?: number;
   /** Pooled op: the serve worker running it. The WORKER owns the heap
    * reservation (freed on its workerExit), not the op. */
   workerId?: number;
@@ -140,13 +264,44 @@ export interface Tracked {
   /** Steady-state JIT pipeline role. Capacity is reserved per role so a long
    * weaken can never consume the RAM a later grow or hack is counting on. */
   jitRole?: JitRole["role"];
+  /** The batch this op belongs to. Every launch group has one — a JIT cycle,
+   * a shotgun cycle, a prep wave — so completions can be attributed back to
+   * the unit of work that is actually meaningful to reason about. Ids are
+   * globally unique, which is also what lets a failed exec drop exactly the
+   * unlaunched remainder of the JIT batch it belonged to. */
+  batchId?: number;
 }
 
 interface PendingJitOp {
   role: JitRole["role"];
   kind: "hack" | "grow" | "weaken";
-  /** One-core effect units. Core-aware placement may use fewer real threads. */
+  /** One-core effect units, and the SIZE of the operation: RAM, the per-role
+   * quota, the reservation and the JIT cadence are all derived from it. It must
+   * therefore never shrink in response to a transient landing-state change —
+   * role RAM reaches `chooseJitSchedule` through `ceil(holdMs / interval)`, so
+   * a thread count that moves can move the whole batch interval. Reduce
+   * `strengthThreads` instead. */
   threads: number;
+  /** One-core effect units this op should actually PERFORM, when the landing
+   * state no longer supports the full planned size. Absent = perform all of
+   * `threads`. Costs nothing to reduce: `opts.threads` is fractional, so the
+   * already-committed block simply does less. */
+  strengthThreads?: number;
+  /** Hack only: the PLAN-TIME strength ceiling from the level lookahead, in
+   * effect units. Kept apart from `strengthThreads` because that field carries
+   * the per-pass arrival-money result: folding the two together turned a
+   * transient shrink into a permanent one, since the next pass then read its
+   * own previous output back as the plan ceiling and could only ratchet down. */
+  planStrengthThreads?: number;
+  /** Grow only: the largest grow, in effect units, that this batch's committed
+   * weaken cover can neutralise.
+   *
+   * Captured at PLAN time and never re-read from the batch, because by the
+   * time the grow launches its W2 has usually already launched and been
+   * spliced out of `batch.ops` — W2 lands last but starts first, weaken being
+   * the longest operation. Reading the cover live would therefore find nothing
+   * and silently disable the clamp exactly when it matters. */
+  coverThreads?: number;
   /** Conservative launch deadline. `latestJitStart` derives it from the
    * operation's landing, native duration, and security-boundary timeline. */
   startAt: number;
@@ -169,6 +324,10 @@ interface PendingJitOp {
 interface PendingJitBatch {
   target: string;
   ops: PendingJitOp[];
+  /** Identifies THIS batch (decisionId is shared by every batch of a planning
+   * decision). A failed exec can then drop the one batch it belonged to
+   * instead of the whole pipeline. */
+  batchId: number;
   decisionId: number;
   /** Cause counters describe a batch decision, not scheduler attempts. */
   countedMisses?: Partial<Record<MissedWindowReason, true>>;
@@ -181,10 +340,18 @@ type JitReservationMode = "protected" | "launch";
 interface PendingPrepGrow {
   target: string;
   segment: SegmentKind;
+  /** The prep wave this grow belongs to. A wave is a batch: its W1 cover and
+   * its atomic grow are launched a pass apart but settle as one unit of work,
+   * and only the whole wave answers "did this prep land". */
+  batchId: number;
   kind: "grow";
   threads: number;
   /** One-core placement ceiling. W2 covers this, so moving an atomic grow off
-   * the provisional high-core host cannot leave residual security. */
+   * the provisional high-core host cannot leave residual security.
+   *
+   * This hedges the PENDING case only. Once the grow is placed it is dispatched
+   * at its exact strength (`strengthThreads`), so its fortify is known rather
+   * than bounded, and the ledger folds `Tracked.strengthThreads` instead. */
   maxThreads: number;
   effectThreads: number;
   startAt: number;
@@ -195,6 +362,13 @@ interface PendingPrepGrow {
 
 export type MissedWindowReason = "deadline" | "arrival-security" | "arrival-money" | "placement";
 export type MissedWindowCounts = Record<MissedWindowReason, number>;
+export interface LandingErrorStats {
+  count: number;
+  sumMs: number;
+  minMs: number;
+  maxMs: number;
+  maxAbsMs: number;
+}
 
 export interface DispatchStats {
   launched: { hack: number; grow: number; weaken: number };
@@ -206,8 +380,22 @@ export interface DispatchStats {
   allocFails: number;
   allocFailsByPhase: { jit: number; prep: number; eager: number };
   batchesSkipped: number;
-  /** Cumulative, cause-labelled safety/window outcomes. Unlike
-   * batchesSkipped this distinguishes a real miss from the brake working. */
+  /** `batchesSkipped` split by cause, so the scalar can be read as the several
+   * distinct phenomena it pools: an arrival-money brake working as designed and
+   * a placement failure starving the pipeline are otherwise the same number.
+   * Raw counts — the parts sum to the whole. */
+  batchesSkippedBy: MissedWindowCounts;
+  /** Batches not planned or launched because a safety rail was hit rather than
+   * because the economics said no: `processes` is the live-worker ceiling
+   * (MAX_LIVE_WORKERS), `passActions` the per-pass emission bound
+   * (MAX_LAUNCH_ACTIONS_PER_PASS). Both are clamps, not errors — but a
+   * persistently non-zero `processes` means the cadence wants more depth than
+   * the browser can hold, which is worth seeing rather than crashing on. */
+  capped: { processes: number; passActions: number };
+  /** Cumulative safety/window outcomes under the same labels, deduped per batch
+   * (or per JIT decision) — it answers "did this batch miss", where
+   * `batchesSkippedBy` counts the skips. The two therefore do not have to
+   * agree, and one exceeding the other is not a bug. */
   missedWindow: MissedWindowCounts;
   /** Ops that needed a fresh process (one-shots + pool spawns). The pooling
    * win is this staying flat while `launched` keeps climbing. */
@@ -216,6 +404,36 @@ export interface DispatchStats {
    * link between "manipulation intended" and "nudges actually rolled" — a
    * manipulation run where this stays 0 has an open influence loop. */
   stockOps: number;
+  /** Completions from ops this dispatcher never launched — workers that
+   * outlived an install or a reload. Kept out of `landed` so that counter
+   * stays comparable with `launched`, and reported rather than dropped
+   * because a run with a large number here is still paying for those
+   * processes' RAM without controlling them. */
+  orphanLandings: number;
+  /** Distribution of the additionalMsec each launched op actually carried.
+   * Padding is RAM held while doing no native work, so the tuning target is
+   * the SMALLEST launch guard that still keeps missedWindow at zero: watch
+   * `maxMs` approach the guard while `deadline` stays 0, and shrink the guard
+   * until misses appear. Counted per op, so `sumMs / count` is the mean. */
+  padding: { count: number; sumMs: number; maxMs: number };
+  /** Distribution of OBSERVED minus PLANNED landing time, in ms, over ops this
+   * dispatcher launched. Signed: negative is early, positive is late.
+   *
+   * This is the instrument the landing grid was previously missing. Two timing
+   * tightenings are documented in this file as measured-better but disabled
+   * (pricing durations at minimum security, and deferring admission to the live
+   * deadline); both trade padding against missed windows, and neither can be
+   * judged in the live game without knowing how far landings actually slip.
+   * `sumMs / count` is the mean; `maxAbsMs` is the tail that matters, since a
+   * single landing more than one gap late is a reordering. */
+  landingError: LandingErrorStats;
+  /** The same distribution split by op kind, which is the granularity a
+   * correction would have to act at: a late HACK reorders a batch against its
+   * own cover, while a late weaken only over-covers. The aggregate cannot
+   * distinguish "one role is systematically late" from "everything jitters",
+   * and those call for opposite responses. The simulator lands ops exactly on
+   * plan (mean -6e-12 ms), so this is readable only from a live run. */
+  landingErrorByKind: { hack: LandingErrorStats; grow: LandingErrorStats; weaken: LandingErrorStats };
   /** GB·ms scheduled inside native hack/grow/weaken durations. */
   nativeRamMs: number;
   /** GB·ms held only by additionalMsec. This is scheduler waste, not work. */
@@ -224,6 +442,172 @@ export interface DispatchStats {
   paddingRamMsByKind: { hack: number; grow: number; weaken: number };
   nativeRamMsBySegment: Record<SegmentKind, number>;
   paddingRamMsBySegment: Record<SegmentKind, number>;
+  /** The cross product of the two breakdowns above. Neither one alone can
+   * answer "how is the FARM's RAM split across hack/grow/weaken": the by-kind
+   * totals fold a prep wave's grows in with the farm's, and a prep wave is
+   * exactly when the split is least representative. */
+  nativeRamMsBySegmentKind: Record<SegmentKind, ByKind>;
+  paddingRamMsBySegmentKind: Record<SegmentKind, ByKind>;
+  /** Threads launched, per segment and kind. The RAM figures above are the
+   * right denominator for capacity questions, but the thread counts are what
+   * the cycle solve actually chose, and cores move the two apart: a
+   * high-core host needs fewer grow/weaken THREADS for the same effect while
+   * occupying proportionally the same RAM per thread. */
+  threadsBySegmentKind: Record<SegmentKind, ByKind>;
+  /** One-core-equivalent effect the same launches actually bought. Divided by
+   * `threadsBySegmentKind` this is the REALIZED core multiplier per kind —
+   * the measured answer to "what are the cores doing for the farm", which no
+   * static core count can give: it depends on which hosts the placer chose.
+   * Hack is unaffected by cores, so its ratio stays at 1 and is the control. */
+  effectThreadsBySegmentKind: Record<SegmentKind, ByKind>;
+  /** Observed intra-batch landing order, counted by signature.
+   *
+   * Per-op telemetry is impossible here — landings run at ~1 per 20 ms at
+   * scale — but the QUESTION per-op telemetry would answer is small: did this
+   * batch's effects land in the order the cycle planned? That collapses to a
+   * counter per distinct observed order, so a healthy run publishes one key
+   * with a large count and a reorder shows up as a second key. */
+  landingOrder: Map<string, number>;
+  /** The intended order, as the roles sort by landing time. Recorded from the
+   * batches themselves rather than assumed, so a mode switch is visible. */
+  landingOrderPlanned?: string;
+  /** COMPLETE batches whose landing order was verified (the denominator). */
+  landingOrderBatches: number;
+  /** Batches that landed having never launched a hack.
+   *
+   * Counted apart from the order histogram rather than folded into it, because
+   * it is a different failure: not "the effects arrived in the wrong order" but
+   * "support was paid for and nothing was stolen". A dropped batch suffix
+   * (see the failed-exec handling) produces exactly this, and averaging it in
+   * with the reorders would hide the more expensive of the two. */
+  landingOrderIncomplete: number;
+  /** Bounded ring of the most recent MIS-ordered batches. Anomalies are rare
+   * by construction — that is what makes keeping examples affordable, and a
+   * count alone does not say which two effects swapped. */
+  landingOrderAnomalies: { at: number; observed: string; planned: string; target: string }[];
+  /** Per-batch work, summed by batch kind. This is the counter set the viewer
+   * shows: a farm cycle and a prep wave are different units of work, and
+   * adding their ops together produces a number that describes neither. */
+  batchesByKind: Record<BatchKind, BatchAggregate>;
+  /** The most recently settled batches, newest last. Bounded. */
+  recentBatches: SettledBatch[];
+}
+
+export type ByKind = { hack: number; grow: number; weaken: number };
+
+/** What a batch IS.
+ *
+ * The unit the farm actually reasons in. A per-op counter cannot answer "is a
+ * batch cheap", "does a prep wave land whole" or "how much did one cycle
+ * earn", because those are properties of the group, not of an op; and per-op
+ * telemetry is impossible here anyway (landings run at ~1 per 20 ms). Naming
+ * the group is what makes the aggregate meaningful. */
+export type BatchKind = "hwgw" | "hgw" | "shotgun" | "prep";
+
+export const BATCH_KINDS: readonly BatchKind[] = ["hwgw", "hgw", "shotgun", "prep"];
+
+/** A batch still collecting its landings. */
+interface OpenBatch {
+  id: number;
+  kind: BatchKind;
+  target: string;
+  segment: SegmentKind;
+  startedAt: number;
+  /** Roles in the order they were LAUNCHED; sorted by landing rank to form
+   * the intended order. Empty for a batch with no landing grid. */
+  planned: JitRole["role"][];
+  observed: JitRole["role"][];
+  ops: number;
+  landed: number;
+  threads: ByKind;
+  gb: number;
+  moneyEarned: number;
+  hacks: number;
+}
+
+/** Everything one settled batch contributed, summed per kind. Cumulative, so
+ * the viewer differentiates for a rate the same way it does the op counters. */
+export interface BatchAggregate {
+  batches: number;
+  ops: number;
+  landed: number;
+  threads: ByKind;
+  gb: number;
+  moneyEarned: number;
+  hacks: number;
+  /** Summed start-to-settle spans, for a mean batch duration. */
+  spanMs: number;
+  /** Batches that HAD a landing grid, and so could be graded on order at
+   * all. The denominator `inOrder` is a fraction of; without it a kind that
+   * mis-ordered every single batch is indistinguishable from a kind that never
+   * lands on a grid, and that is exactly the failure worth seeing. */
+  graded: number;
+  /** Batches whose effects landed in the planned order. */
+  inOrder: number;
+  /** Batches that settled having never launched a hack. */
+  noHack: number;
+  /** Batches that settled with fewer landings than launches — an op was lost
+   * between dispatch and arrival. */
+  lostOps: number;
+}
+
+/** One settled batch, retained for display. Deliberately small and bounded:
+ * an aggregate says the farm is healthy, an example says which batch was not. */
+export interface SettledBatch {
+  id: number;
+  kind: BatchKind;
+  target: string;
+  at: number;
+  spanMs: number;
+  ops: number;
+  landed: number;
+  threads: ByKind;
+  gb: number;
+  moneyEarned: number;
+  order?: string;
+  planned?: string;
+}
+
+/** Intended landing order of the JIT roles, which is the order `cycleJitRoles`
+ * emits them in (shared/strategy/jit.ts): hack steals first, its cover weaken
+ * lands next, grow restores the money, and W2 removes grow's security. Launch
+ * order is the reverse-ish (longest op first, JIT_ROLE_PRIORITY); only the
+ * LANDING order is the batch's correctness condition. */
+const LANDING_RANK: Record<JitRole["role"], number> = { h: 0, w1: 1, g: 2, w2: 3 };
+
+/** Mis-ordered batches retained for inspection. */
+const LANDING_ANOMALY_RING = 12;
+/** Batches whose landings are being accumulated. Bounded because an op that
+ * never lands (a failed exec whose batch was dropped) would otherwise leave
+ * its entry behind forever. */
+const LANDING_TRACK_LIMIT = 512;
+/** Settled batches retained as examples. Small: the aggregates carry the
+ * steady state, and this exists to name an individual bad batch. */
+const RECENT_BATCH_RING = 8;
+
+function emptyByKind(): ByKind {
+  return { hack: 0, grow: 0, weaken: 0 };
+}
+
+function emptyBySegmentKind(): Record<SegmentKind, ByKind> {
+  return { farm: emptyByKind(), prep: emptyByKind(), share: emptyByKind() };
+}
+
+function emptyBatchAggregate(): BatchAggregate {
+  return {
+    batches: 0,
+    ops: 0,
+    landed: 0,
+    threads: emptyByKind(),
+    gb: 0,
+    moneyEarned: 0,
+    hacks: 0,
+    spanMs: 0,
+    graded: 0,
+    inOrder: 0,
+    noHack: 0,
+    lostOps: 0,
+  };
 }
 
 export interface ShareWorker {
@@ -239,6 +623,24 @@ export interface DispatchMemory {
   heap: Heap;
   evaluator: EvaluatorMemory;
   tracked: Map<number, Tracked>;
+  /** Derived indices over `tracked`, maintained by `trackOp`/`untrackOp` —
+   * which are the ONLY writers of `tracked`, and every `Tracked` field is fixed
+   * for the entry's life, so an index can never silently go stale.
+   *
+   * They exist because a dispatcher pass used to walk the whole ledger eight
+   * times, and the ledger is one entry per in-flight op: 32k observed live,
+   * ~400k targeted. That made a pass O(ops), and with the per-batch `ledger()`
+   * closure O(batches x ops), which is what pegged a core and starved the game
+   * engine's timers for 63 s at a stretch. `tests/dispatch-index.test.ts` holds
+   * each index against a full recompute after every mutation. */
+  byTarget: Map<string, Map<number, Tracked>>;
+  /** SOURCE host -> GB held by non-pooled tracked ops. A pooled op's RAM
+   * belongs to its worker, which the pool ledger counts instead. */
+  ourGbByHost: Map<string, number>;
+  /** `weakenGroupKey` -> unsettled fragments of that logical weaken landing. */
+  weakenPending: Map<string, number>;
+  /** JIT role -> GB held by non-pooled farm ops carrying that role. */
+  heldGbByRole: Record<JitRole["role"], number>;
   inFlight: { hack: number; grow: number; weaken: number };
   segmentGb: Record<SegmentKind, number>;
   /** Long-lived, cooperatively stoppable fragment consumers. */
@@ -251,6 +653,8 @@ export interface DispatchMemory {
    * min-security observation. */
   failedWeakenGroups: Set<string>;
   nextOpId: number;
+  /** Monotonic id issued by `openBatch` for every batch it registers. */
+  nextBatchId: number;
   nextServerIndex: number;
   lastAnchor: number;
   /** Consecutive hacks zeroed by the arrival-money validation. Support ops
@@ -270,6 +674,10 @@ export interface DispatchMemory {
   /** Batches whose slow support has been planned but whose shorter operations
    * have not reached their just-in-time launch windows yet. */
   jitPending: PendingJitBatch[];
+  /** Batches still collecting their landings, keyed by batch id. An entry is
+   * created when the batch's first op launches and settled when its last one
+   * lands; see `stats.batchesByKind`. */
+  batches: Map<number, OpenBatch>;
   /** Atomic prep grows waiting for their invocation windows. Their covering
    * W2 calls are already resident, so W2 always starts before G. */
   prepPending: PendingPrepGrow[];
@@ -295,6 +703,21 @@ export interface DispatchMemory {
   depthCapGb?: number;
   /** Which host depthCapGb was computed for, so a retarget invalidates it. */
   depthCapHost?: string;
+  /** The farm's STABLE parallel footprint on the current target: the executable
+   * JIT role envelope (`chooseJitSchedule().totalGb`), i.e. one reusable slot
+   * per role at the cadence this fleet can actually sustain. Unlike
+   * `depthCapGb` (the minimum-interval saturation figure used to price future
+   * infrastructure) this is what the pipeline will really be holding a moment
+   * from now, so it is the correct amount to withhold from freely-preemptible
+   * tenants. Cleared with the farm/target, like depthCapGb. */
+  farmEnvelopeGb?: number;
+  /** What the farm can launch in one dispatch pass on the current target: the
+   * amount a freely-preemptible tenant must stay clear of. Sizing it is a
+   * measured tradeoff, since free RAM is not idle RAM — a growing pipeline
+   * claims it next pass and farm income compounds into fleet size. On the
+   * share-churn lane: whole envelope 0.007 idle / $1.89e7/s, one pass (this)
+   * 0.058 / $2.65e7/s, one batch 0.049 / $1.45e7/s. */
+  farmPassDemandGb?: number;
   stats: DispatchStats;
 }
 
@@ -340,12 +763,17 @@ export function initDispatch(): DispatchMemory {
     heap: new Heap(),
     evaluator: initEvaluator(),
     tracked: new Map(),
+    byTarget: new Map(),
+    ourGbByHost: new Map(),
+    weakenPending: new Map(),
+    heldGbByRole: { h: 0, w1: 0, g: 0, w2: 0 },
     inFlight: { hack: 0, grow: 0, weaken: 0 },
     segmentGb: { farm: 0, prep: 0, share: 0 },
     shareWorkers: new Map(),
     prepInFlight: new Map(),
     failedWeakenGroups: new Set(),
     nextOpId: 1,
+    nextBatchId: 1,
     nextServerIndex: 0,
     lastAnchor: -Infinity,
     hackZeroStreak: 0,
@@ -353,6 +781,7 @@ export function initDispatch(): DispatchMemory {
     countedJitDecisionMisses: new Set(),
     lastDispatchAt: 0,
     jitPending: [],
+    batches: new Map(),
     prepPending: [],
     mode: "hwgw",
     modeSince: -Infinity,
@@ -368,15 +797,40 @@ export function initDispatch(): DispatchMemory {
       allocFails: 0,
       allocFailsByPhase: { jit: 0, prep: 0, eager: 0 },
       batchesSkipped: 0,
+      batchesSkippedBy: { deadline: 0, "arrival-security": 0, "arrival-money": 0, placement: 0 },
+      capped: { processes: 0, passActions: 0 },
       missedWindow: { deadline: 0, "arrival-security": 0, "arrival-money": 0, placement: 0 },
       execs: 0,
       stockOps: 0,
+      orphanLandings: 0,
+      padding: { count: 0, sumMs: 0, maxMs: 0 },
+      landingError: { count: 0, sumMs: 0, minMs: 0, maxMs: 0, maxAbsMs: 0 },
+      landingErrorByKind: {
+        hack: { count: 0, sumMs: 0, minMs: 0, maxMs: 0, maxAbsMs: 0 },
+        grow: { count: 0, sumMs: 0, minMs: 0, maxMs: 0, maxAbsMs: 0 },
+        weaken: { count: 0, sumMs: 0, minMs: 0, maxMs: 0, maxAbsMs: 0 },
+      },
       nativeRamMs: 0,
       paddingRamMs: 0,
       nativeRamMsByKind: { hack: 0, grow: 0, weaken: 0 },
       paddingRamMsByKind: { hack: 0, grow: 0, weaken: 0 },
       nativeRamMsBySegment: { farm: 0, prep: 0, share: 0 },
       paddingRamMsBySegment: { farm: 0, prep: 0, share: 0 },
+      nativeRamMsBySegmentKind: emptyBySegmentKind(),
+      paddingRamMsBySegmentKind: emptyBySegmentKind(),
+      threadsBySegmentKind: emptyBySegmentKind(),
+      effectThreadsBySegmentKind: emptyBySegmentKind(),
+      landingOrder: new Map(),
+      landingOrderBatches: 0,
+      landingOrderIncomplete: 0,
+      landingOrderAnomalies: [],
+      batchesByKind: {
+        hwgw: emptyBatchAggregate(),
+        hgw: emptyBatchAggregate(),
+        shotgun: emptyBatchAggregate(),
+        prep: emptyBatchAggregate(),
+      },
+      recentBatches: [],
     },
   };
 }
@@ -397,13 +851,9 @@ function syncTopology(
   // and must: sizing a hack block to `maxRam − reserved` on a home that also
   // hosts the controller produced blocks that could NEVER be placed, which is
   // how a 32 GB home stalled the dispatcher outright.
-  const ours = new Map<string, number>();
-  for (const tracked of memory.tracked.values()) {
-    if (tracked.workerId !== undefined) continue;
-    ours.set(tracked.hostname, (ours.get(tracked.hostname) ?? 0) + tracked.gb);
-  }
-  for (const worker of memory.pool.workers.values()) {
-    ours.set(worker.hostname, (ours.get(worker.hostname) ?? 0) + worker.gb);
+  const ours = new Map<string, number>(memory.ourGbByHost);
+  for (const [hostname, gb] of memory.pool.gbByHost) {
+    ours.set(hostname, (ours.get(hostname) ?? 0) + gb);
   }
   for (const worker of memory.shareWorkers.values()) {
     ours.set(worker.hostname, (ours.get(worker.hostname) ?? 0) + worker.gb);
@@ -479,6 +929,59 @@ function syncTopology(
   return { fleetGb, largestBlockGb, hostBlocksGb, prepWaveGb, prepFreeGb, prepWaveInFlight, effectiveShareThreadsPerGb };
 }
 
+/** The logical weaken landing a fragment belongs to. A spread weaken lands as
+ * several calls at one instant and only its last fragment proves min security,
+ * so the group — not the op — is the unit that settles. */
+function weakenGroupKey(target: string, landing: number): string {
+  return `${target}\u0000${landing}`;
+}
+
+/** Register an in-flight op, and every index derived from it.
+ *
+ * With `untrackOp` this is the ONLY writer of `memory.tracked`. Keeping that
+ * true is what lets the indices be trusted: a `Tracked` is immutable once
+ * registered, so no index can drift except through these two functions.
+ * Exported so tests seed the ledger through the same door rather than
+ * writing `tracked` directly and leaving every index empty behind them. */
+export function trackOp(memory: DispatchMemory, opId: number, tracked: Tracked): void {
+  memory.tracked.set(opId, tracked);
+  let onTarget = memory.byTarget.get(tracked.target);
+  if (!onTarget) {
+    onTarget = new Map();
+    memory.byTarget.set(tracked.target, onTarget);
+  }
+  // Per-target insertion order matches global insertion order, which the
+  // ledger folds depend on: opId order decides which of two same-instant ops
+  // folds first, and that is observable.
+  onTarget.set(opId, tracked);
+  if (tracked.workerId === undefined) {
+    addGb(memory.ourGbByHost, tracked.hostname, tracked.gb);
+    if (tracked.segment === "farm" && tracked.jitRole) memory.heldGbByRole[tracked.jitRole] += tracked.gb;
+  }
+  if (tracked.kind === "weaken" && tracked.landing !== undefined) {
+    bump(memory.weakenPending, weakenGroupKey(tracked.target, tracked.landing), 1);
+  }
+}
+
+/** Drop an op from `tracked` and unwind its indices. */
+function untrackOp(memory: DispatchMemory, opId: number, tracked: Tracked): void {
+  memory.tracked.delete(opId);
+  const onTarget = memory.byTarget.get(tracked.target);
+  if (onTarget) {
+    onTarget.delete(opId);
+    if (onTarget.size === 0) memory.byTarget.delete(tracked.target);
+  }
+  if (tracked.workerId === undefined) {
+    subGb(memory.ourGbByHost, tracked.hostname, tracked.gb);
+    if (tracked.segment === "farm" && tracked.jitRole) {
+      memory.heldGbByRole[tracked.jitRole] = drainGb(memory.heldGbByRole[tracked.jitRole], tracked.gb);
+    }
+  }
+  if (tracked.kind === "weaken" && tracked.landing !== undefined) {
+    bump(memory.weakenPending, weakenGroupKey(tracked.target, tracked.landing), -1);
+  }
+}
+
 function release(memory: DispatchMemory, opId: number): void {
   const tracked = memory.tracked.get(opId);
   if (!tracked) return;
@@ -489,17 +992,13 @@ function release(memory: DispatchMemory, opId: number): void {
     memory.heap.free(tracked.hostname, tracked.gb);
     memory.segmentGb[tracked.segment] -= tracked.gb;
   }
-  memory.tracked.delete(opId);
+  untrackOp(memory, opId, tracked);
   memory.inFlight[tracked.kind]--;
   // prepInFlight is symmetric with the launch-time increment: exactly the ops
   // launchPrepWave marked `wave` decrement it, keyed by TARGET. (It used to be
   // guessed from completion targets, which let farm-batch completions drain a
   // desynced farm host's counter and unlock overlapping prep waves.)
-  if (tracked.wave) {
-    const remaining = (memory.prepInFlight.get(tracked.target) ?? 0) - 1;
-    if (remaining > 0) memory.prepInFlight.set(tracked.target, remaining);
-    else memory.prepInFlight.delete(tracked.target);
-  }
+  if (tracked.wave) bump(memory.prepInFlight, tracked.target, -1);
 }
 
 /** Tear down a pool worker's reservation exactly once: noteExit is the
@@ -558,8 +1057,21 @@ export function releaseWorkerExits(memory: DispatchMemory, workerIds: Iterable<n
   }
 }
 
-function launchShare(memory: DispatchMemory, actions: Action[], intelligence: number): void {
-  const threads = memory.heap.capacity(WORKER_RAM.share);
+function launchShare(
+  memory: DispatchMemory,
+  actions: Action[],
+  intelligence: number,
+  /** Upper bound on NEW share RAM this pass. The caller withholds the farm's
+   * stable pipeline footprint; without it share takes every momentarily-free
+   * block and the farm has to evict it again a pass later — which on a small
+   * fleet is not merely churn but starvation, because one 4 GB share thread is
+   * most of an 8 GB bootstrap home. */
+  maxGb = Infinity,
+): void {
+  const threads = Math.min(
+    memory.heap.capacity(WORKER_RAM.share),
+    Math.floor(Math.max(0, maxGb) / WORKER_RAM.share),
+  );
   if (threads < 1) return;
   const allocation = memory.heap.allocate({
     blockSize: WORKER_RAM.share,
@@ -591,7 +1103,7 @@ function launchShare(memory: DispatchMemory, actions: Action[], intelligence: nu
  * worker is gone (spawn failed) or dead (job post found no mailbox), so the
  * worker's reservation goes with it. */
 export function releaseFailed(memory: DispatchMemory, opIds: Iterable<number>): void {
-  let jitFailed = false;
+  const failedBatchIds = new Set<number>();
   for (const opId of opIds) {
     if (memory.shareWorkers.has(opId)) {
       releaseShareWorker(memory, opId);
@@ -599,19 +1111,27 @@ export function releaseFailed(memory: DispatchMemory, opIds: Iterable<number>): 
     }
     const tracked = memory.tracked.get(opId);
     if (!tracked) continue;
-    if (tracked.jitRole !== undefined) jitFailed = true;
+    if (tracked.batchId !== undefined) failedBatchIds.add(tracked.batchId);
     if (tracked.wave) {
       memory.prepPending = memory.prepPending.filter((op) => op.target !== tracked.target);
     }
     if (tracked.workerId !== undefined) releaseWorker(memory, tracked.workerId);
     release(memory, opId);
   }
-  // Every later pending batch was sized against the failed effect. None has
-  // launched its hack yet (hack is the last native start), so abandoning the
-  // suffix preserves correctness; already-started support is harmless.
-  if (jitFailed) {
-    abandonJitPending(memory, memory.lastDispatchAt);
-    memory.lastAnchor = -Infinity;
+  // Drop only the batches that actually lost an op, not the whole pipeline.
+  // An exec failure is a RAM-accounting disagreement with the game, not
+  // evidence the other batches are unsound, and it is common: 576 in one live
+  // install, each of which used to discard every pending batch after their
+  // weakens had already launched. Safe for the same reason the deadline path
+  // is: hack starts last, so a dropped remainder only leaves support
+  // over-covered, and the arrival-security brake re-validates each batch.
+  if (failedBatchIds.size > 0) {
+    for (const batch of memory.jitPending) {
+      if (!failedBatchIds.has(batch.batchId)) continue;
+      for (const op of batch.ops) releasePendingReservation(memory, op, memory.lastDispatchAt);
+      batch.ops.length = 0;
+    }
+    memory.jitPending = memory.jitPending.filter((batch) => batch.ops.length > 0);
   }
 }
 
@@ -624,12 +1144,15 @@ export function dispatch(
 ): { actions: Action[]; directive: TargetDirective; switched?: { from?: string; to: string } } {
   const arenaReserves = options.arenaReserves ?? {};
   memory.lastDispatchAt = view.time;
+  /** Allocation failures BEFORE this pass planned, so the share-eviction gate
+   * below reacts to contention that happened in this pass, not history. */
+  const allocFailsAtPassStart = memory.stats.allocFails;
 
   const byHost = new Map(view.servers.map((s) => [s.hostname, s]));
   const weakenWakeTargets = new Set<string>();
   const successfulWeakenGroups = new Set<string>();
-  const touchedWeakenGroups = new Set<string>();
-  const weakenGroup = (target: string, landing: number): string => `${target}\u0000${landing}`;
+  // group key -> that group's target, so settling never parses the key back
+  const touchedWeakenGroups = new Map<string, string>();
   for (const completion of completions) {
     if (completion.kind === "sleep") continue;
     if (completion.kind === "workerExit") {
@@ -640,7 +1163,28 @@ export function dispatch(
       }
       continue;
     }
-    memory.stats.landed[completion.kind]++;
+    // Counted only for an op this memory actually launched. A completion can
+    // arrive from a worker THIS dispatcher never dispatched — processes that
+    // outlived an install, or a reload — and folding those in made `landed`
+    // exceed `launched` by two orders of magnitude on a fresh install (846
+    // orphan hack landings against 76 real launches), which silently broke
+    // every launched-vs-landed comparison built on the pair. Money and exp
+    // below are deliberately still counted: that income is real regardless of
+    // who launched the op.
+    if (completion.opId !== undefined && memory.tracked.has(completion.opId)) {
+      memory.stats.landed[completion.kind]++;
+      // Landing ERROR: observed minus planned, signed, on one clock. Landing
+      // ORDER is verified per batch already, but order cannot say by HOW MUCH
+      // an effect slipped, and that magnitude is what decides whether the
+      // landing gap and the launch guards are the right size. Only ops we
+      // launched are measured — an orphan has no planned landing to compare to.
+      const planned = memory.tracked.get(completion.opId)?.landing;
+      if (completion.at !== undefined && planned !== undefined) {
+        noteLandingError(memory.stats, completion.at - planned, completion.kind);
+      }
+    } else {
+      memory.stats.orphanLandings++;
+    }
     if (completion.kind === "hack" && completion.result?.success) {
       memory.stats.moneyEarned += completion.result.moneyGained ?? 0;
       memory.stats.hacks++;
@@ -662,10 +1206,28 @@ export function dispatch(
     if (completion.opId !== undefined) {
       const tracked = memory.tracked.get(completion.opId);
       if (tracked?.kind === "weaken" && tracked.landing !== undefined) {
-        const group = weakenGroup(tracked.target, tracked.landing);
-        touchedWeakenGroups.add(group);
+        const group = weakenGroupKey(tracked.target, tracked.landing);
+        touchedWeakenGroups.set(group, tracked.target);
         if (completion.result === undefined) memory.failedWeakenGroups.add(group);
         else successfulWeakenGroups.add(group);
+      }
+      if (tracked?.batchId !== undefined) {
+        // Attribution goes through the tracked table, not the wire: the op
+        // already echoes its `opId`, and that resolves to the batch it was
+        // launched for. Nothing has to be added to the worker protocol.
+        //
+        // The completions array is the order the workers reported their
+        // landings in, which is the only ordering evidence that exists: a
+        // CompletionEvent carries no timestamp of its own, and effects
+        // separated by MINIMUM_LANDING_GAP_MS can share a millisecond.
+        noteBatchLanding(
+          memory,
+          tracked.batchId,
+          view.time,
+          tracked.jitRole,
+          completion.kind === "hack" && completion.result?.success ? completion.result.moneyGained ?? 0 : 0,
+          completion.kind === "hack" && Boolean(completion.result?.success),
+        );
       }
       if (tracked?.workerId !== undefined) noteJobDone(memory.pool, tracked.workerId, view.time);
       release(memory, completion.opId);
@@ -677,14 +1239,10 @@ export function dispatch(
   // boundary. The worker-side debounce merely coalesces wakeups; this ledger
   // check is the correctness barrier and also rejects a group with any failed
   // fragment in this completion drain.
-  for (const group of touchedWeakenGroups) {
-    const separator = group.indexOf("\u0000");
-    const target = group.slice(0, separator);
-    const landing = Number(group.slice(separator + 1));
-    const pendingFragment = [...memory.tracked.values()].some(
-      (tracked) => tracked.kind === "weaken" && tracked.target === target && tracked.landing === landing,
-    );
-    if (pendingFragment) continue;
+  for (const [group, target] of touchedWeakenGroups) {
+    // `weakenPending` counts exactly the unsettled fragments of this group, so
+    // its presence IS "a fragment of this landing is still in flight".
+    if (memory.weakenPending.has(group)) continue;
     if (successfulWeakenGroups.has(group) && !memory.failedWeakenGroups.has(group)) {
       weakenWakeTargets.add(target);
     }
@@ -735,6 +1293,9 @@ export function dispatch(
     { skill: view.player.hackingSkill, intelligence: view.player.intelligence, mults: view.player.mults },
     view.nodeMults ?? {},
   );
+  // Same context projected forward to a landing instant, for the one quantity
+  // that is read at landing rather than at call time: the hack percentage.
+  const landingCtxAt = landingCtxFactory(view, launchCtx);
 
   // Rooting is fleet upkeep. Infrastructure purchases are opt-in: in the live
   // game the shared investment arbiter owns home/cloud/Hacknet spending, but
@@ -768,6 +1329,8 @@ export function dispatch(
   if (!directive.farm || memory.depthCapHost !== directive.farm.host) {
     memory.depthCapGb = undefined;
     memory.depthCapHost = undefined;
+    memory.farmEnvelopeGb = undefined;
+    memory.farmPassDemandGb = undefined;
   }
   let spillGb = 0;
   memory.pooling = false;
@@ -810,8 +1373,8 @@ export function dispatch(
     let borrow: { gb: number; landingDeadline: number } | undefined;
     if (segment.kind === "farm" && prepActive && directive.prep) {
       let landingDeadline = -Infinity;
-      for (const tracked of memory.tracked.values()) {
-        if (tracked.wave && tracked.target === directive.prep.host && tracked.landing !== undefined) {
+      for (const tracked of memory.byTarget.get(directive.prep.host)?.values() ?? []) {
+        if (tracked.wave && tracked.landing !== undefined) {
           landingDeadline = Math.max(landingDeadline, tracked.landing);
         }
       }
@@ -918,6 +1481,7 @@ export function dispatch(
           borrow,
           capacity.hostBlocksGb,
           farmReservationMode,
+          landingCtxAt,
         );
       } else {
         launchDuePrep(memory, actions, server, now, launchCtx, segmentCap, weakenWakeTargets.has(server.hostname));
@@ -939,40 +1503,68 @@ export function dispatch(
     .filter((segment) => segment.kind !== "share")
     .reduce((sum, segment) => sum + Math.max(0, segment.gb - memory.segmentGb[segment.kind]), 0);
   const hadShareWorkers = memory.shareWorkers.size > 0;
-  // The reputation gate — not `share.allotmentGb` — is the correct predicate
-  // here. `allotmentGb` is the RESERVATION the crossing carves out of the farm
-  // segment before hack plans; share's actual slice is the residual left after
-  // hack has planned within its allotment, and that residual costs hacking
-  // nothing by construction. Gating this on the allotment would make share
-  // refuse genuinely idle RAM.
-  //
-  // TODO (measured, unfixed): `nonShareDeficitGb` below is UNUSED ALLOTMENT,
-  // not unmet demand. The JIT farm is designed not to consume its whole
-  // segment, so on the scenario-share reputation lane the deficit is > 0 on
-  // 2338 of 2338 passes (mean 210.6 GB against a mean farm segment of 408.1
-  // and mean farm usage of 197.5) while allocFails stays 0 and
-  // missedWindow.placement stays 1 for the entire run — the farm never
-  // actually failed to place anything. Combined with the `Math.max(
-  // WORKER_RAM.share, ...)` floor below, which stops a whole block even when
-  // free RAM already covers the deficit, share is stopped every pass and can
-  // only relaunch once fully drained (`!hadShareWorkers`): 908 stop-all cycles
-  // and 2443 execs against 180 with share disabled.
-  //
-  // Share itself is NOT stealing from the farm. A/B on that lane: farm work is
-  // bit-identical with and without share (nativeGbMs 3.933e7, same moneyRate,
-  // same missedWindow) while reputation goes 198.84 -> 269.48 (+35.5%). Only
-  // the churn is waste. Gating the stop on an actual blocked placement
-  // (`op.placementBlocked` on a pending jit/prep op) instead of the phantom
-  // deficit measured 1141 execs (-53%) with farm work still bit-identical, at
-  // a cost of 4.3% reputation (269.48 -> 257.96) on this single seed — worth a
-  // benchmark pass before adopting.
-  const shareEnabled = (directive.share?.reputationSecondsPerBonus ?? 0) > 0;
+  // Share runs when reputation is on the chosen route (the crossing priced a
+  // positive rep value — favor targets included) OR the CURRENT work already
+  // earns reputation. The second arm costs hacking nothing by construction:
+  // share only ever consumes the residual the farm/prep planners left behind
+  // this pass, and the planners already treat share-held RAM as placeable
+  // (syncTopology counts share workers as transient "ours"), so share never
+  // shrinks what hacking may plan with. The live bonus it produces is also the
+  // signal back to the work planner — career/factions price rep work with the
+  // MEASURED sharePower, so turning share on when rep work is active is what
+  // makes rep-producing work win future comparisons. No forecast "achievable
+  // bonus" is ever announced; that value fluctuates with fleet load and would
+  // let a speculative number steer work selection.
+  const shareEnabled =
+    (directive.share?.reputationSecondsPerBonus ?? 0) > 0 ||
+    options.shareValue?.currentWorkEarnsRep === true;
+  // Hacking has first refusal, triggered by REAL contention only: a pending
+  // jit/prep op whose placement actually failed. The previous trigger —
+  // unused-allotment deficit — was phantom demand: the JIT farm is designed
+  // not to consume its whole segment, so share was stopped on 2338 of 2338
+  // passes of the scenario-share rep lane (908 stop-all cycles, 2443 execs vs
+  // 180 with share off) while the farm never failed to place anything.
+  // Placement-gated stops measured 1141 execs (-53%) with farm work
+  // bit-identical, at -4.3% reputation on that single seed. Freeing at least
+  // one whole block matters because a failed atomic hack/grow placement can be
+  // a contiguity deficit rather than a total-capacity deficit.
+  const farmPlacementBlocked =
+    memory.jitPending.some((batch) => batch.ops.some((op) => !op.reservation && op.placementBlocked)) ||
+    memory.prepPending.some((op) => op.placementBlocked) ||
+    memory.stats.allocFails > allocFailsAtPassStart;
+  // Deliberately NOT a predictive stop keyed on pending launch deadlines.
+  // In a deep pipeline there is always work due inside any yield window, so it
+  // degenerates into stopping share every pass: measured share-churn
+  // $2.65e7 -> $6.83e6/s, batchesSkipped 47 -> 129. Reacting to a real blocked
+  // placement, with the reserve keeping those rare, beat it decisively.
+  // Share must never SQUAT inside a host's reserved arena. launchShare cannot
+  // allocate into a reserve, but reserves GROW after share is resident (the
+  // arena covers the largest dodge step any unlocked feature has declared so
+  // far), and a dodge stub's exec retries are milliseconds apart — far faster
+  // than a cooperative share stop. A share worker left inside a grown reserve
+  // therefore crashes the un-brokered sweep dodges outright (measured: the
+  // small-fleet scenario controller died execing its 4.1GB stub on home).
+  // Evict per host, sized to the shortfall.
+  let reserveShortfall = false;
+  if (memory.shareWorkers.size > 0) {
+    const hostnames = new Set([...memory.shareWorkers.values()].map((worker) => worker.hostname));
+    for (const hostname of hostnames) {
+      const host = memory.heap.host(hostname);
+      if (!host) continue;
+      const shortfallGb = host.reserved - (host.maxRam - host.used);
+      if (shortfallGb <= 1e-9) continue;
+      reserveShortfall = true;
+      const onHost = new Set(
+        [...memory.shareWorkers.values()]
+          .filter((worker) => worker.hostname === hostname)
+          .map((worker) => worker.workerId),
+      );
+      requestShareStops(memory, actions, shortfallGb, onHost);
+    }
+  }
   if (!shareEnabled) {
     requestShareStops(memory, actions, Infinity);
-  } else if (nonShareDeficitGb > 1e-9 && memory.shareWorkers.size > 0) {
-    // Hacking has first refusal. Free at least one whole share block even when
-    // aggregate free GB looks sufficient: a failed atomic hack/grow placement
-    // can be a contiguity deficit rather than a total-capacity deficit.
+  } else if (farmPlacementBlocked && memory.shareWorkers.size > 0) {
     requestShareStops(
       memory,
       actions,
@@ -981,11 +1573,24 @@ export function dispatch(
   }
 
   const shareStopping = [...memory.shareWorkers.values()].some((worker) => worker.stopping);
-  if (shareEnabled && !shareStopping && (nonShareDeficitGb <= 1e-9 || !hadShareWorkers)) {
+  if (shareEnabled && !shareStopping && !reserveShortfall && (!farmPlacementBlocked || !hadShareWorkers)) {
+    // Reserve what the farm can launch in one pass; share takes the rest.
+    //
+    // Share is evictable, so the reserve only needs to cover what the farm can
+    // claim before share could answer: one pass of launches, because
+    // planJitBatches runs earlier in this same pass and its weakens go
+    // immediately. Two variants measured worse — scaling the reserve down by
+    // envelope headroom collapsed it to zero exactly when the farm was busiest
+    // (live: hack in-flight hit 0 while share held most of a 24 TB fleet), and
+    // capping it at a fraction of free RAM cost 10x income on share-churn
+    // ($7.74e7 -> $7.24e6/s), because idle RAM is the farm's growth headroom.
+    const reserveGb = memory.farmPassDemandGb
+      ?? Math.max(0, (memory.farmEnvelopeGb ?? 0) - memory.segmentGb.farm);
+    const surplusGb = memory.heap.freeTotal() - reserveGb;
     // Stanek is deliberately absent: charge strength favors one occasional
     // LARGE contiguous call (highestCharge under a log, repetitions^0.07), the
     // opposite of a freely preemptible fragment consumer.
-    launchShare(memory, actions, view.player.intelligence);
+    launchShare(memory, actions, view.player.intelligence, surplusGb);
   }
 
 
@@ -1089,16 +1694,189 @@ function accountRamWork(
 ): void {
   const nativeRamMs = gb * Math.max(0, nativeMs);
   const paddingRamMs = gb * Math.max(0, paddingMs);
+  memory.stats.padding.count++;
+  memory.stats.padding.sumMs += Math.max(0, paddingMs);
+  memory.stats.padding.maxMs = Math.max(memory.stats.padding.maxMs, paddingMs);
   memory.stats.nativeRamMs += nativeRamMs;
   memory.stats.paddingRamMs += paddingRamMs;
   memory.stats.nativeRamMsByKind[kind] += nativeRamMs;
   memory.stats.paddingRamMsByKind[kind] += paddingRamMs;
   memory.stats.nativeRamMsBySegment[segment] += nativeRamMs;
   memory.stats.paddingRamMsBySegment[segment] += paddingRamMs;
+  memory.stats.nativeRamMsBySegmentKind[segment][kind] += nativeRamMs;
+  memory.stats.paddingRamMsBySegmentKind[segment][kind] += paddingRamMs;
+}
+
+/** Threads are counted separately from RAM because they answer a different
+ * question: RAM is what the fleet spent, threads are what the solve asked for.
+ * Cores move them apart — a grow thread on an 8-core host does the work of
+ * more than one, so a core upgrade should show as the grow share of THREADS
+ * falling while its share of RAM per thread stays fixed. */
+function accountThreads(
+  memory: DispatchMemory,
+  segment: SegmentKind,
+  kind: "hack" | "grow" | "weaken",
+  threads: number,
+  effectThreads = threads,
+): void {
+  memory.stats.threadsBySegmentKind[segment][kind] += threads;
+  memory.stats.effectThreadsBySegmentKind[segment][kind] += effectThreads;
+}
+
+/** Start a batch and return its id.
+ *
+ * Every launch group calls this — a JIT cycle, a shotgun cycle, a prep wave —
+ * so that a completion can be attributed back to the unit of work it belonged
+ * to. The id is what the whole per-batch accounting hangs off; ops carry it on
+ * `Tracked` and hand it back through the `opId` they echo in their completion,
+ * so nothing has to be added to the worker protocol to make this work. */
+function openBatch(
+  memory: DispatchMemory,
+  kind: BatchKind,
+  target: string,
+  segment: SegmentKind,
+  at: number,
+): number {
+  const id = memory.nextBatchId++;
+  memory.batches.set(id, {
+    id,
+    kind,
+    target,
+    segment,
+    startedAt: at,
+    planned: [],
+    observed: [],
+    ops: 0,
+    landed: 0,
+    threads: emptyByKind(),
+    gb: 0,
+    moneyEarned: 0,
+    hacks: 0,
+  });
+  // Oldest-first eviction. A batch that loses an op to a failed exec never
+  // settles, so without this the map would only grow. Evicting the oldest is
+  // right because a batch settles within roughly one batch interval; anything
+  // still open after this many is abandoned, not slow.
+  while (memory.batches.size > LANDING_TRACK_LIMIT) {
+    const oldest = memory.batches.keys().next();
+    if (oldest.done) break;
+    memory.batches.delete(oldest.value);
+  }
+  return id;
+}
+
+/** Register one launched op against its batch. */
+function noteBatchOp(
+  memory: DispatchMemory,
+  batchId: number,
+  kind: "hack" | "grow" | "weaken",
+  threads: number,
+  gb: number,
+  role?: JitRole["role"],
+): void {
+  const batch = memory.batches.get(batchId);
+  if (!batch) return;
+  batch.ops++;
+  batch.threads[kind] += threads;
+  batch.gb += gb;
+  if (role !== undefined) batch.planned.push(role);
+}
+
+function signature(roles: readonly JitRole["role"][]): string {
+  return roles.join("-");
+}
+
+/** Record one landing against its batch, settling the batch once its last op
+ * has arrived. */
+function noteBatchLanding(
+  memory: DispatchMemory,
+  batchId: number,
+  at: number,
+  role: JitRole["role"] | undefined,
+  earned: number,
+  hacked: boolean,
+): void {
+  const batch = memory.batches.get(batchId);
+  if (!batch) return;
+  batch.landed++;
+  batch.moneyEarned += earned;
+  if (hacked) batch.hacks++;
+  if (role !== undefined) batch.observed.push(role);
+  if (batch.landed < batch.ops) return;
+  memory.batches.delete(batchId);
+  settleBatch(memory, batch, at);
+}
+
+/** Fold a finished batch into the per-kind aggregate, and check its ordering.
+ *
+ * The order check is only meaningful for a batch with a landing grid — the
+ * JIT roles. A prep wave and a shotgun cycle land as a group with no intended
+ * internal sequence, so they contribute work and money but no verdict. */
+function settleBatch(memory: DispatchMemory, batch: OpenBatch, at: number): void {
+  const aggregate = memory.stats.batchesByKind[batch.kind];
+  aggregate.batches++;
+  aggregate.ops += batch.ops;
+  aggregate.landed += batch.landed;
+  aggregate.gb += batch.gb;
+  aggregate.moneyEarned += batch.moneyEarned;
+  aggregate.hacks += batch.hacks;
+  aggregate.spanMs += Math.max(0, at - batch.startedAt);
+  for (const kind of ["hack", "grow", "weaken"] as const) aggregate.threads[kind] += batch.threads[kind];
+  if (batch.landed < batch.ops) aggregate.lostOps++;
+  if (batch.planned.length > 0) aggregate.graded++;
+
+  let observed: string | undefined;
+  let planned: string | undefined;
+  if (batch.planned.length > 0) {
+    if (!batch.planned.includes("h")) {
+      // Support that lands with no steal to protect is a different failure
+      // from support arriving out of order, and the costlier of the two: it is
+      // paid for in full and earns nothing.
+      aggregate.noHack++;
+      memory.stats.landingOrderIncomplete++;
+    } else {
+      planned = signature([...batch.planned].sort((a, b) => LANDING_RANK[a] - LANDING_RANK[b]));
+      observed = signature(batch.observed);
+      memory.stats.landingOrderPlanned = planned;
+      memory.stats.landingOrderBatches++;
+      memory.stats.landingOrder.set(observed, (memory.stats.landingOrder.get(observed) ?? 0) + 1);
+      if (observed === planned) {
+        aggregate.inOrder++;
+      } else {
+        memory.stats.landingOrderAnomalies.push({ at, observed, planned, target: batch.target });
+        if (memory.stats.landingOrderAnomalies.length > LANDING_ANOMALY_RING) {
+          memory.stats.landingOrderAnomalies.shift();
+        }
+      }
+    }
+  }
+
+  memory.stats.recentBatches.push({
+    id: batch.id,
+    kind: batch.kind,
+    target: batch.target,
+    at,
+    spanMs: Math.max(0, at - batch.startedAt),
+    ops: batch.ops,
+    landed: batch.landed,
+    threads: { ...batch.threads },
+    gb: batch.gb,
+    moneyEarned: batch.moneyEarned,
+    ...(observed !== undefined ? { order: observed } : {}),
+    ...(planned !== undefined ? { planned } : {}),
+  });
+  if (memory.stats.recentBatches.length > RECENT_BATCH_RING) memory.stats.recentBatches.shift();
 }
 
 function noteMissedWindow(memory: DispatchMemory, reason: MissedWindowReason): void {
   memory.stats.missedWindow[reason]++;
+}
+
+/** One skipped batch, attributed. Every `batchesSkipped` increment goes
+ * through here so the scalar and the per-cause split cannot drift apart. */
+function noteBatchSkipped(memory: DispatchMemory, reason: MissedWindowReason): void {
+  memory.stats.batchesSkipped++;
+  memory.stats.batchesSkippedBy[reason]++;
 }
 
 function noteJitDecisionMissedWindow(
@@ -1118,9 +1896,13 @@ function noteBatchMissedWindow(
   batch: PendingJitBatch,
   reason: MissedWindowReason,
 ): boolean {
-  if (reason === "deadline" || reason === "placement") {
-    return noteJitDecisionMissedWindow(memory, batch.decisionId, reason);
-  }
+  // Counted once per BATCH for every reason. Deadline/placement used to be
+  // deduped per DECISION on the theory that scheduler retries of one decision
+  // should not inflate the counter — but a miss now costs exactly the batch it
+  // happened to (the drop below), so per-batch IS per-occurrence, and the old
+  // dedupe hid a steady-state failure loop as a single count: a live run that
+  // dropped its whole pipeline every weakenTime for 4.7 hours telemetered as
+  // `deadline: 1` while earning $0.
   batch.countedMisses ??= {};
   if (batch.countedMisses[reason]) return false;
   batch.countedMisses[reason] = true;
@@ -1187,13 +1969,32 @@ function jitWorstDifficultyFor(
   );
 }
 
+/* Timing is priced at the CONSERVATIVE difficulty (`max(live, min + 0.002H +
+ * 0.004G)`), not at min security, even though a farm cycle's invariant is
+ * (min security, max money). Pricing at min is only sound if every launch is
+ * GUARANTEED to happen at min, which is what gating on a weaken completion
+ * would buy; without it a launch lands anywhere in the cycle, where HGW sits
+ * above min between the hack and its weaken, so the real duration exceeds the
+ * plan. Measured: pricing at min cut mean padding 704.6 -> 458.6 ms but took
+ * deadline misses 0 -> 5887 and income $1.484e12 -> $1.233e12. Tighten the
+ * timing only together with weaken-gated admission. */
 function jitRoles(
   solution: CycleSolution,
   server: ServerView,
   ctx: HackContext,
+  pooling = false,
 ): JitRole[] {
   const difficulty = jitWorstDifficulty(solution, server);
   const required = server.requiredHackingSkill;
+  // A role slot is not reusable at its landing: the one-shot serve worker
+  // idles POOL_REUSE_WINDOW_MS before exiting, and only its workerExit frees
+  // the heap block. Sizing quotas from the bare duration booked slots the
+  // fleet cannot actually recycle in time — the op that needed slot N+1 was
+  // then ALWAYS blocked past its launch deadline, which is what fed the
+  // pipeline-wipe loop (see the deadline-miss handler). Under pooling an idle
+  // worker IS the next slot (planTake reuses it), so only the exit/handoff
+  // guard applies there.
+  const slotLingerMs = pooling ? 0 : POOL_REUSE_WINDOW_MS;
   return cycleJitRoles(
     {
       kind: solution.kind,
@@ -1203,7 +2004,7 @@ function jitRoles(
       weaken2Gb: solution.weaken2Threads * WORKER_RAM.weaken,
     },
     (kind) => opDurationMs(kind, ctx, difficulty, required),
-    JIT_LAUNCH_GUARD_MS + MINIMUM_WORKER_PRECISION_MS,
+    JIT_LAUNCH_GUARD_MS + MINIMUM_WORKER_PRECISION_MS + slotLingerMs,
   );
 }
 
@@ -1218,11 +2019,88 @@ interface LedgerEntry {
 /** The ledger with back-references, in construction order. Callers that fold
  * it sort by `compareLedgerOps`; `jitSecurityEvents` relies on construction
  * order, so sorting here would change which security boundary wins a tie. */
+/** Fold one observed landing error into the running distribution. */
+function noteLandingError(
+  stats: DispatchStats,
+  errorMs: number,
+  kind?: CompletionEvent["kind"],
+): void {
+  if (kind === "hack" || kind === "grow" || kind === "weaken") {
+    accumulateLandingError(stats.landingErrorByKind[kind], errorMs);
+  }
+  accumulateLandingError(stats.landingError, errorMs);
+}
+
+function accumulateLandingError(d: LandingErrorStats, errorMs: number): void {
+  if (d.count === 0) {
+    d.minMs = errorMs;
+    d.maxMs = errorMs;
+  } else {
+    if (errorMs < d.minMs) d.minMs = errorMs;
+    if (errorMs > d.maxMs) d.maxMs = errorMs;
+  }
+  d.count++;
+  d.sumMs += errorMs;
+  d.maxAbsMs = Math.max(d.maxAbsMs, Math.abs(errorMs));
+}
+
+/** Hack context at a future instant, given the measured experience rate.
+ *
+ * Hack DURATION is fixed when the Netscript call is made, and is already priced
+ * from live state each pass. Hack PERCENTAGE is evaluated when the hack LANDS,
+ * so a batch solved at level L over-steals if it lands at L+n — and its grow,
+ * sized for the smaller steal, then fails to restore the server. The reference
+ * projects the level and re-solves (imports/batchRunner.ts:317-327).
+ *
+ * Returns the SAME context object when the projected level is unchanged, which
+ * is the overwhelmingly common case, so callers can compare by identity and a
+ * pass planning eight batches builds at most one or two contexts. Keyed on the
+ * integer level alone — no timestamps, so there is nothing to invalidate. */
+function landingCtxFactory(
+  view: WorldView,
+  ctx: HackContext,
+): (horizonMs: number) => HackContext {
+  const expPerSec = view.player.hackingExpRate ?? 0;
+  const currentSkill = view.player.hackingSkill;
+  if (!(expPerSec > 0)) return () => ctx;
+  const projection = {
+    hackingExp: view.player.hackingExp,
+    expPerSec,
+    hackingMult: hackingLevelMult(view),
+    currentSkill,
+  };
+  const cache = new Map<number, HackContext>();
+  return (horizonMs: number): HackContext => {
+    const skill = projectedSkill(projection, horizonMs);
+    if (skill === currentSkill) return ctx;
+    let projected = cache.get(skill);
+    if (!projected) {
+      projected = makeHackContext(
+        { skill, intelligence: view.player.intelligence, mults: view.player.mults },
+        view.nodeMults ?? {},
+      );
+      cache.set(skill, projected);
+    }
+    return projected;
+  };
+}
+
+/** REAL threads a tracked op's effects will apply with.
+ *
+ * `gb / WORKER_RAM[kind]` recovers the block it occupies, which is what RAM was
+ * billed for. When the op was dispatched at a reduced fractional strength that
+ * block is an OVER-estimate, and the whole point of the ledger is fortify —
+ * over-stating it makes every downstream operation look slower than it is and
+ * launch early into padding it did not need. */
+function trackedStrength(tracked: Tracked): number {
+  return tracked.strengthThreads ?? tracked.gb / WORKER_RAM[tracked.kind];
+}
+
 function jitLedgerEntries(memory: DispatchMemory, host: string): LedgerEntry[] {
   const entries: LedgerEntry[] = [];
-  for (const [opId, tracked] of memory.tracked) {
-    if (tracked.target !== host || tracked.landing === undefined) continue;
-    const threads = tracked.gb / WORKER_RAM[tracked.kind];
+  for (const [opId, tracked] of memory.byTarget.get(host) ?? []) {
+    if (tracked.landing === undefined) continue;
+    const threads = trackedStrength(tracked);
     entries.push({
       op: {
         kind: tracked.kind,
@@ -1276,9 +2154,9 @@ function jitLedgerEntries(memory: DispatchMemory, host: string): LedgerEntry[] {
  * cheaper of the two costs. */
 function jitLedger(memory: DispatchMemory, host: string, omit?: PendingJitOp): LedgerOp[] {
   const ops: LedgerOp[] = [];
-  for (const [opId, tracked] of memory.tracked) {
-    if (tracked.target !== host || tracked.landing === undefined) continue;
-    const threads = tracked.gb / WORKER_RAM[tracked.kind];
+  for (const [opId, tracked] of memory.byTarget.get(host) ?? []) {
+    if (tracked.landing === undefined) continue;
+    const threads = trackedStrength(tracked);
     ops.push({
       kind: tracked.kind,
       threads,
@@ -1345,9 +2223,9 @@ function jitSecurityEvents(ledger: readonly LedgerOp[], ctx: HackContext): JitSe
     at: event.landing,
     order: event.opId,
     deltaDifficulty: event.kind === "hack"
-      ? 0.002 * event.threads
+      ? HACK_FORTIFY * event.threads
       : event.kind === "grow"
-        ? 0.004 * (event.fortifyThreads ?? event.threads)
+        ? GROW_FORTIFY * (event.fortifyThreads ?? event.threads)
         : -weakenPerThread * event.effectThreads,
   })).sort((a, b) => a.at - b.at || a.order - b.order);
 }
@@ -1381,8 +2259,9 @@ function launchDuePrep(
     const padding = op.landing - now - liveDuration;
     if (padding < WORKER_STARTUP_GUARD_MS - 1e-9) {
       memory.prepPending.splice(memory.prepPending.indexOf(op), 1);
-      memory.stats.batchesSkipped++;
-      noteMissedWindow(memory, op.placementBlocked ? "placement" : "deadline");
+      const prepReason = op.placementBlocked ? "placement" : "deadline";
+      noteBatchSkipped(memory, prepReason);
+      noteMissedWindow(memory, prepReason);
       continue;
     }
     // Re-place the atomic effect at launch time. Holding its provisional host
@@ -1405,18 +2284,26 @@ function launchDuePrep(
     const block = reservation.blocks[0]!;
     const opId = memory.nextOpId++;
     const gb = block.threads * WORKER_RAM.grow;
-    const effectThreads = block.threads * coreEffect(block.cores);
+    // `allocFor` rounds effect units UP into whole real threads, so the block
+    // is worth at least what was asked for and usually a little more. Asking
+    // for the exact strength spends that residue instead of over-growing and
+    // over-fortifying: fortify scales with the REAL threads the call runs at,
+    // and W2 was sized for `op.effectThreads`, not for the rounded-up block.
+    const blockEffect = block.threads * coreEffect(block.cores);
+    const effectThreads = Math.min(op.effectThreads, blockEffect);
+    const strengthThreads = effectThreads / coreEffect(block.cores);
     actions.push({
       type: "grow",
       target: server.hostname,
       source: block.hostname,
       threads: block.threads,
+      ...(strengthThreads < block.threads ? { strengthThreads } : {}),
       opId,
       phase: "prep",
       ...(padding > 0 ? { additionalMsec: padding } : {}),
       ...(op.stock ? { stock: true } : {}),
     });
-    memory.tracked.set(opId, {
+    trackOp(memory, opId, {
       hostname: block.hostname,
       target: server.hostname,
       kind: "grow",
@@ -1425,14 +2312,18 @@ function launchDuePrep(
       wave: true,
       landing: op.landing,
       effectThreads,
+      strengthThreads,
+      batchId: op.batchId,
     });
     memory.inFlight.grow++;
     memory.segmentGb[op.segment] += gb;
-    memory.prepInFlight.set(server.hostname, (memory.prepInFlight.get(server.hostname) ?? 0) + 1);
+    bump(memory.prepInFlight, server.hostname, 1);
     memory.stats.launched.grow++;
     memory.stats.execs++;
     if (op.stock) memory.stats.stockOps++;
     accountRamWork(memory, op.segment, "grow", gb, liveDuration, padding);
+    accountThreads(memory, op.segment, "grow", block.threads, effectThreads);
+    noteBatchOp(memory, op.batchId, "grow", block.threads, gb);
     memory.prepPending.splice(memory.prepPending.indexOf(op), 1);
     emitted++;
   }
@@ -1477,6 +2368,8 @@ function launchDueJit(
   segmentCapGb: number,
   pooling: boolean,
   reservationMode: JitReservationMode,
+  /** Hack context projected to a future instant — see landingCtxFactory. */
+  ctxAt: (horizonMs: number) => HackContext = () => ctx,
 ): boolean {
   const required = server.requiredHackingSkill;
   const ledger = jitLedger(memory, server.hostname);
@@ -1500,17 +2393,14 @@ function launchDueJit(
     }
     orderJitStarts(batch.ops);
   }
-  const heldByRole: Record<JitRole["role"], number> = { h: 0, w1: 0, g: 0, w2: 0 };
-  for (const tracked of memory.tracked.values()) {
-    // A pooled job does not own RAM; its resident worker is counted exactly
-    // once below, whether the worker is busy or idle.
-    if (tracked.segment === "farm" && tracked.jitRole && tracked.workerId === undefined) {
-      heldByRole[tracked.jitRole] += tracked.gb;
-    }
-  }
-  for (const worker of memory.pool.workers.values()) {
-    if (worker.role) heldByRole[worker.role] += worker.gb;
-  }
+  // A pooled job does not own RAM; its resident worker is counted exactly once
+  // by the pool ledger, whether the worker is busy or idle.
+  const heldByRole: Record<JitRole["role"], number> = {
+    h: memory.heldGbByRole.h + memory.pool.gbByRole.h,
+    w1: memory.heldGbByRole.w1 + memory.pool.gbByRole.w1,
+    g: memory.heldGbByRole.g + memory.pool.gbByRole.g,
+    w2: memory.heldGbByRole.w2 + memory.pool.gbByRole.w2,
+  };
   for (const batch of memory.jitPending) {
     for (const op of batch.ops) heldByRole[op.role] += op.reservation?.gb ?? 0;
   }
@@ -1533,9 +2423,25 @@ function launchDueJit(
         if (
           heldByRole[op.role] + requestedGb > roleCapGb + 1e-9 ||
           memory.segmentGb.farm + requestedGb > segmentCapGb + 1e-9
-        ) break reservePending;
+        ) {
+          // Skip THIS batch, not every remaining one. Within a batch the
+          // dependency rule holds — stop once a required op cannot be
+          // committed — but batches are independent, and a labeled break meant
+          // one saturated role stopped reservations pipeline-wide. Measured on
+          // the tolerance-bootstrap soak: the hack role capped on 1.6M of 1.6M
+          // passes, so hacks were never reserved and therefore never launched,
+          // while the pending set grew unboundedly and nothing registered as a
+          // miss (an unreserved op is skipped before the deadline check).
+          continue reservePending;
+        }
         const allocation = memory.heap.allocate(allocFor(op.kind, op.threads));
         if (!allocation.ok) {
+          // Ask share to yield the moment the RESERVE fails rather than at the
+          // end of the pass: this is one launch guard before the deadline, so
+          // the cooperative exit still frees the block for next pass's retry.
+          // The block is not released here — the game owns it until the
+          // worker's exit — so this pass must not try to place into it.
+          requestShareStops(memory, actions, requestedGb);
           op.placementBlocked = true;
           break reservePending;
         }
@@ -1571,47 +2477,71 @@ function launchDueJit(
   const foldStatics = staticsOf(server);
   const ledgerEntries = jitLedgerEntries(memory, server.hostname)
     .sort((a, b) => compareLedgerOps(a.op, b.op));
-  let ledgerIndex = 0;
-  let foldedAt = -Infinity;
-  let foldState: PredictedState = {
-    hackDifficulty: server.hackDifficulty,
-    moneyAvailable: server.moneyAvailable,
+
+  /** One forward cursor over the shared, already-sorted ledger.
+   *
+   * A cursor is only valid for a sequence of NON-DECREASING landings; the
+   * fallback below keeps it correct otherwise, but at O(ledger) per call. That
+   * matters because hack and grow are validated in the same loop and their
+   * landings interleave: within a batch the grow lands after the hack, yet it
+   * launches well before it (grow runs ~3.2x longer), so the loop reaches them
+   * in the opposite order to their landings. Sharing one cursor would take the
+   * slow path on essentially every hack and restore exactly the O(depth^2)
+   * pass this cursor was introduced to remove.
+   *
+   * Each KIND is monotonic in isolation — batches are reached in order and a
+   * given role lands once per batch — so each kind gets its own cursor and
+   * both stay O(ledger) for the whole pass. */
+  const makeFold = () => {
+    let ledgerIndex = 0;
+    let foldedAt = -Infinity;
+    let foldState: PredictedState = {
+      hackDifficulty: server.hackDifficulty,
+      moneyAvailable: server.moneyAvailable,
+    };
+    let withheld: LedgerEntry | undefined;
+    return {
+      /** State at `at` with `skip` withheld. */
+      predicted: (at: number, skip: PendingJitOp): PredictedState => {
+        // Landings should be non-decreasing; if that ever fails, fall back to
+        // the exact whole-ledger fold rather than silently reusing a cursor
+        // that has already advanced past `at`.
+        if (at < foldedAt) {
+          return predictAtLanding(
+            ctx,
+            foldStatics,
+            { hackDifficulty: server.hackDifficulty, moneyAvailable: server.moneyAvailable },
+            jitLedger(memory, server.hostname, skip),
+            at,
+          );
+        }
+        foldedAt = at;
+        while (ledgerIndex < ledgerEntries.length && ledgerEntries[ledgerIndex]!.op.landing <= at) {
+          const entry = ledgerEntries[ledgerIndex]!;
+          ledgerIndex++;
+          if (entry.source === skip) withheld = entry;
+          else foldState = applyLedgerOp(ctx, foldStatics, foldState, entry.op);
+        }
+        return foldState;
+      },
+      /** Fold the withheld op at the size it was actually dispatched at, or
+       * drop it when the loop removed it. */
+      commit: (threads: number | undefined): void => {
+        const entry = withheld;
+        withheld = undefined;
+        if (!entry || threads === undefined || threads <= 0) return;
+        foldState = applyLedgerOp(ctx, foldStatics, foldState, {
+          ...entry.op,
+          threads,
+          effectThreads: threads,
+        });
+      },
+    };
   };
-  let withheld: LedgerEntry | undefined;
-  const foldPredicted = (at: number, skip: PendingJitOp): PredictedState => {
-    // Landings should be non-decreasing; if that ever fails, fall back to the
-    // exact whole-ledger fold rather than silently reusing a cursor that has
-    // already advanced past `at`.
-    if (at < foldedAt) {
-      return predictAtLanding(
-        ctx,
-        foldStatics,
-        { hackDifficulty: server.hackDifficulty, moneyAvailable: server.moneyAvailable },
-        jitLedger(memory, server.hostname, skip),
-        at,
-      );
-    }
-    foldedAt = at;
-    while (ledgerIndex < ledgerEntries.length && ledgerEntries[ledgerIndex]!.op.landing <= at) {
-      const entry = ledgerEntries[ledgerIndex]!;
-      ledgerIndex++;
-      if (entry.source === skip) withheld = entry;
-      else foldState = applyLedgerOp(ctx, foldStatics, foldState, entry.op);
-    }
-    return foldState;
-  };
-  /** Fold the withheld op at the size it was actually dispatched at, or drop
-   * it when the loop removed it. */
-  const commitFolded = (threads: number | undefined): void => {
-    const entry = withheld;
-    withheld = undefined;
-    if (!entry || threads === undefined || threads <= 0) return;
-    foldState = applyLedgerOp(ctx, foldStatics, foldState, {
-      ...entry.op,
-      threads,
-      effectThreads: threads,
-    });
-  };
+  const hackFold = makeFold();
+  const growFold = makeFold();
+  const foldPredicted = hackFold.predicted;
+  const commitFolded = hackFold.commit;
 
   // How far past `now` this pass may reach forward for work.
   //
@@ -1635,6 +2565,7 @@ function launchDueJit(
   const launchHorizon = Math.min(now + JIT_LAUNCH_WINDOW_MS, nextWeakenLanding);
 
   let emitted = 0;
+  batches:
   for (const batch of memory.jitPending) {
     if (batch.target !== server.hostname) continue;
     const ordered = [...batch.ops].sort(
@@ -1653,29 +2584,49 @@ function launchDueJit(
         const statics = foldStatics;
         const predicted = foldPredicted(op.landing, op);
         const baseHackThreads = op.baseHackThreads ?? op.threads;
-        const safeHackThreads = hackThreadsAtLanding(ctx, statics, predicted, baseHackThreads);
+        // The percentage this hack will steal is read at its LANDING, so the
+        // re-check has to use the level projected to then. Closest site to the
+        // landing, therefore the shortest horizon and the smallest projection
+        // error — and it composes with the plan-time cap below rather than
+        // replacing it.
+        const landingCtx = ctxAt(op.landing - now + JIT_LAUNCH_GUARD_MS);
+        const safeHackThreads = hackThreadsAtLanding(landingCtx, statics, predicted, baseHackThreads);
         if (safeHackThreads === undefined) {
           heldByRole[op.role] -= op.reservation?.gb ?? 0;
           releasePendingReservation(memory, op, now);
           batch.ops.splice(batch.ops.indexOf(op), 1);
-          memory.stats.batchesSkipped++;
+          noteBatchSkipped(memory, "arrival-security");
           noteBatchMissedWindow(memory, batch, "arrival-security");
           commitFolded(undefined);
           continue;
         }
-        const shrunkThreads = Math.min(op.threads, safeHackThreads);
-        if (shrunkThreads < op.threads) {
-          // A committed atomic block may be larger than the newly-safe hack.
-          // Release and synchronously re-place the smaller call before any
-          // lower-priority allocator can observe the gap.
+        // Never above the plan-time strength: that one already accounts for the
+        // level lookahead against the steal this batch's grow was built for.
+        const shrunkThreads = Math.min(op.threads, op.planStrengthThreads ?? Infinity, safeHackThreads);
+        if (shrunkThreads < op.threads - 1e-9) {
+          // Ask the committed block for LESS rather than re-placing a smaller
+          // one. `opts.threads` is fractional, so the same worker performs the
+          // reduced hack directly; releasing and re-allocating would return the
+          // block to the heap where a lower-priority tenant could take it, and
+          // would break pooled reuse by changing the size the cached solution
+          // sized its workers for. `op.threads` therefore stays put — it is
+          // what RAM, the role quota and the JIT cadence are all sized on.
+          op.strengthThreads = shrunkThreads;
+          noteBatchMissedWindow(memory, batch, "arrival-money");
+        } else {
+          delete op.strengthThreads;
+        }
+        // The cancel threshold is on STRENGTH now, not on the block: a hack
+        // worth a fraction of a thread is not worth an op, and the block it
+        // would have run on is better released to the next batch.
+        if (shrunkThreads < MIN_HACK_STRENGTH_THREADS) {
+          // The shrink path above no longer releases, so cancelling has to:
+          // this op is leaving the batch and its block would otherwise stay
+          // charged to the role until the reservation aged out.
           heldByRole[op.role] -= op.reservation?.gb ?? 0;
           releasePendingReservation(memory, op, now);
-          noteBatchMissedWindow(memory, batch, "arrival-money");
-        }
-        op.threads = shrunkThreads;
-        if (op.threads < 1) {
           batch.ops.splice(batch.ops.indexOf(op), 1);
-          memory.stats.batchesSkipped++;
+          noteBatchSkipped(memory, "arrival-money");
           noteBatchMissedWindow(memory, batch, "arrival-money");
           // A run of money-zeroed hacks is a desync, not bad luck: every
           // later grow was sized from the same short predicted ledger, so
@@ -1692,21 +2643,92 @@ function launchDueJit(
           continue;
         }
         memory.hackZeroStreak = 0;
-        commitFolded(op.threads);
+        commitFolded(op.strengthThreads ?? op.threads);
+      }
+
+      // Grow is the other dynamic operation, and the last chance to size it
+      // against what the hack ahead of it actually took rather than what the
+      // plan assumed it would take. The brake above may have shrunk that hack
+      // moments ago, in which case the planned grow is now too large — and an
+      // over-grow costs security the committed W2 was never sized to cover.
+      //
+      // Weaken is deliberately absent from this branch. It always runs at its
+      // full spawned strength: the RAM is already paid for, the surplus clamps
+      // harmlessly at minDifficulty, and it is the ordering insurance that lets
+      // the 5 ms landing grid survive a misordering at all.
+      if (op.kind === "grow") {
+        const predicted = growFold.predicted(op.landing, op);
+        // Captured when the batch was planned — see PendingJitOp.coverThreads
+        // for why this cannot be read off the batch at launch time.
+        const coverThreads = op.coverThreads ?? op.threads;
+        const sizedGrow = growThreadsAtLanding(
+          ctx,
+          foldStatics,
+          predicted,
+          op.threads,
+          coverThreads,
+        );
+        if (sizedGrow !== undefined && sizedGrow > 0 && sizedGrow < op.threads - 1e-9) {
+          // Same reasoning as the hack shrink: ask the committed block for
+          // less rather than re-placing a smaller one. `op.threads` stays put
+          // because RAM, the role quota and the cadence are all sized on it.
+          op.strengthThreads = sizedGrow;
+        } else {
+          delete op.strengthThreads;
+        }
+        growFold.commit(op.strengthThreads ?? op.threads);
       }
 
       // This is deliberately live: Netscript fixes duration when the HGW call
       // is invoked, not when the batch was planned.
       const liveDuration = opDurationMs(op.kind, ctx, server.hackDifficulty, required);
       const padding = op.landing - now - liveDuration;
+      // Deferring to the LIVE deadline would bound padding, and works in
+      // isolation: replacing this admission with `if (padding >
+      // JIT_LAUNCH_GUARD_MS) continue;` measured mean 162.8 ms / max 230 ms
+      // against ~704 ms today. It is not enabled because that window is only
+      // ~200 ms wide and nothing guarantees this loop reaches an op inside it:
+      // 316,883 deferrals produced 6,619 ops that overshot below the startup
+      // allowance between passes, costing 18% of income.
+      //
+      // RE-MEASURED after the weaken-landing wake landed (it now bypasses both
+      // WAKE_MIN_MS and WAKE_MAX_PER_FRAME, game/lib/features/hacking.ts, and
+      // spread weakens coalesce on a trailing timer in game/worker/worker.ts).
+      // That was the prerequisite this comment used to name, and it is NOT
+      // sufficient: on scenario-jit share-churn the deferral still cut launched
+      // hacks 2,497 -> 729 and income $9.39e7 -> $1.55e7/s, with the fleet
+      // failing to compound past 5.7 TB instead of 62 TB. Whatever reaches the
+      // op late, a weaken wake does not fix it. The next step is the landing
+      // error distribution (stats.landingError) measured in the LIVE game,
+      // where jitter is real — the simulator lands ops exactly on plan
+      // (measured mean -6e-12 ms), so it cannot price this trade at all.
       // The worker converts our absolute padding deadline immediately before
       // invoking Netscript. Less than the measured startup allowance is no
       // longer a safe launch even if the pure duration still fits on paper.
       if (padding < WORKER_STARTUP_GUARD_MS - 1e-9) {
         const reason = op.placementBlocked ? "placement" : "deadline";
-        if (noteBatchMissedWindow(memory, batch, reason)) memory.stats.batchesSkipped++;
-        abandonJitPending(memory, now);
-        return false;
+        if (noteBatchMissedWindow(memory, batch, reason)) noteBatchSkipped(memory, reason);
+        // A miss costs exactly THIS batch: its unlaunched suffix is dropped
+        // and every other batch keeps its own schedule. Dropping the suffix is
+        // always security-safe — ops launch in W → G → H order, so whatever is
+        // still pending can only leave already-flying support over-covered
+        // (extra weaken, or a clamped over-grow), never a hack uncovered. The
+        // previous behaviour abandoned the ENTIRE pending pipeline for one
+        // late op; combined with a systematically late op (role quota
+        // saturation) that turned into a plan → launch-weakens → wipe loop
+        // that farmed $0/s at 1% RAM for hours while the deduped counter
+        // reported a single miss. Later batches were sized with this batch's
+        // effects in the predicted ledger, but every divergence is on the safe
+        // side: a dropped hack leaves MORE money than predicted (validation
+        // only ever shrinks, so later hacks under-steal), a dropped grow
+        // leaves less (the arrival-money brake shrinks the affected hacks),
+        // and a wholesale desync still trips the hackZeroStreak rebuild.
+        for (const pending of batch.ops) {
+          if (pending.reservation) heldByRole[pending.role] -= pending.reservation.gb;
+          releasePendingReservation(memory, pending, now);
+        }
+        batch.ops.length = 0;
+        continue batches;
       }
 
       const requestedGb = op.threads * WORKER_RAM[op.kind];
@@ -1725,18 +2747,42 @@ function launchDueJit(
       // deadlocks a perfectly usable target forever (no RAM is allocated, so
       // nothing can change the state that made the role larger).
       const roleCapGb = Math.max(schedule.quotaGb[op.role], requestedGb);
+      // Quotas gate NEW commitments, never RAM this op already holds.
+      //
+      // An op with a reservation contributes `missRequestedGb === 0`, so the
+      // test below degenerates to `held > cap` — and `held` counts that very
+      // reservation. A role even marginally over quota (measured: w2 held 40
+      // against a 39 GB quota) could therefore never launch what it had
+      // already committed, so it never released it either: reservations piled
+      // up until the role was permanently full, no hack ever launched, and
+      // nothing registered as a miss because an unlaunched op is skipped
+      // before the deadline check.
       if (
-        heldByRole[op.role] + missRequestedGb > roleCapGb + 1e-9 ||
-        memory.segmentGb.farm + missRequestedGb > segmentCapGb + 1e-9
+        missRequestedGb > 1e-9 && (
+          heldByRole[op.role] + missRequestedGb > roleCapGb + 1e-9 ||
+          memory.segmentGb.farm + missRequestedGb > segmentCapGb + 1e-9
+        )
       ) {
-        // Later operations and batches were sized against this effect. Never
-        // expose a dependent hack while a required support launch is blocked.
-        return true;
+        // Skip THIS batch, not the whole pass.
+        //
+        // Within a batch the rule stands: never emit a dependent hack once a
+        // required support launch is blocked, so the rest of this batch is
+        // abandoned for now (it stays pending and retries next pass). But
+        // other batches are independent, and aborting the entire loop meant a
+        // saturated role blocked every unrelated op that was due. Measured on
+        // a 970 TB fleet: the hack quota filled 110 times, and each time the
+        // grows and weakens of other batches lost their launch windows —
+        // 274 grow and 43 w2 deadline misses, with 0 alloc failures and
+        // hundreds of TB free. Landing order is carried by each op's own
+        // `landing` plus additionalMsec, not by launch order, so letting a
+        // later batch launch first is safe.
+        continue batches;
       }
       let reservation: Reservation | undefined = op.reservation;
       if (!reservation && poolPlan.missThreads >= 1) {
         const allocation = memory.heap.allocate(allocFor(op.kind, poolPlan.missThreads));
         if (!allocation.ok) {
+          requestShareStops(memory, actions, missRequestedGb);
           if (!op.placementBlocked) {
             memory.stats.allocFails++;
             memory.stats.allocFailsByPhase.jit++;
@@ -1762,19 +2808,25 @@ function launchDueJit(
         effectThreads: number,
         gb: number,
         worker?: { id: number; spawn: boolean },
+        /** One-core effect units this call should actually perform, when that
+         * is less than the block is worth. Absent = use the whole block. */
+        strengthEffect?: number,
       ): void => {
         const opId = memory.nextOpId++;
+        const { strengthThreads, usedEffect } = resolveStrength(threads, effectThreads, strengthEffect);
+        const reduced = strengthThreads < threads - 1e-9;
         actions.push({
           type: op.kind,
           target: server.hostname,
           source: hostname,
           threads,
+          ...(reduced ? { strengthThreads } : {}),
           opId,
           ...(padding > 0 ? { additionalMsec: padding } : {}),
           ...(op.stock ? { stock: true } : {}),
           ...(worker ? { worker } : {}),
         });
-        memory.tracked.set(opId, {
+        trackOp(memory, opId, {
           hostname,
           target: server.hostname,
           kind: op.kind,
@@ -1782,8 +2834,10 @@ function launchDueJit(
           gb,
           wave: false,
           landing: op.landing,
-          effectThreads,
+          effectThreads: usedEffect,
+          ...(reduced ? { strengthThreads } : {}),
           jitRole: op.role,
+          batchId: batch.batchId,
           ...(worker ? { workerId: worker.id, spawned: worker.spawn } : {}),
         });
         memory.inFlight[op.kind]++;
@@ -1791,19 +2845,43 @@ function launchDueJit(
         if (!worker || worker.spawn) memory.stats.execs++;
         if (op.stock) memory.stats.stockOps++;
         accountRamWork(memory, "farm", op.kind, gb, liveDuration, padding);
+        // Deliberately the SPAWNED figures: this pair answers "what are the
+        // cores returning for the RAM I paid for", and hack's 1.0 ratio is its
+        // control. Charging it the reduced strength would move that control.
+        accountThreads(memory, "farm", op.kind, threads, effectThreads);
+        noteBatchOp(memory, batch.batchId, op.kind, threads, gb, op.role);
       };
 
-      for (const worker of poolPlan.take) {
+      // The op's reduced strength has to reach the CALLS, or the whole
+      // arrival-time clamp is inert. A hack is one call, so its strength maps
+      // straight onto it; a pooled grow may be composed from several idle
+      // workers, so the reduction is spread across them in proportion to what
+      // each was going to perform. Scaling rather than draining a running
+      // remainder is what keeps every call at a positive strength — a call
+      // asked for zero threads is rejected outright by the engine.
+      const blockEffectOf = (blockThreads: number, cores: number): number =>
+        op.kind === "hack" ? blockThreads : blockThreads * coreEffect(cores);
+      let plannedEffect = 0;
+      for (const take of poolPlan.take) plannedEffect += take.strengthEffect;
+      for (const block of reservation?.blocks ?? []) {
+        plannedEffect += blockEffectOf(block.threads, block.cores);
+      }
+      const strengthScale =
+        op.strengthThreads !== undefined && op.strengthThreads > 0 && plannedEffect > 0
+          ? Math.min(1, op.strengthThreads / plannedEffect)
+          : 1;
+
+      for (const { worker, strengthEffect } of poolPlan.take) {
         noteJobStart(memory.pool, worker.workerId);
         track(worker.hostname, worker.threads, worker.effectThreads, worker.gb, {
           id: worker.workerId,
           spawn: false,
-        });
+        }, strengthEffect * strengthScale);
       }
       for (const block of reservation?.blocks ?? []) {
         const workerId = memory.nextOpId++;
         const gb = block.threads * WORKER_RAM[op.kind];
-        const effectThreads = op.kind === "hack" ? block.threads : block.threads * coreEffect(block.cores);
+        const effectThreads = blockEffectOf(block.threads, block.cores);
         noteSpawn(
           memory.pool,
           {
@@ -1817,7 +2895,14 @@ function launchDueJit(
           },
           now,
         );
-        track(block.hostname, block.threads, effectThreads, gb, { id: workerId, spawn: true });
+        track(
+          block.hostname,
+          block.threads,
+          effectThreads,
+          gb,
+          { id: workerId, spawn: true },
+          strengthScale < 1 ? effectThreads * strengthScale : undefined,
+        );
       }
       if (op.reservation) {
         accountReservedPadding(memory, op, now);
@@ -1842,6 +2927,8 @@ function planJitBatches(
   now: number,
   ctx: HackContext,
   schedule: JitSchedule,
+  /** Hack context projected to a future instant — see landingCtxFactory. */
+  ctxAt: (horizonMs: number) => HackContext,
   influence?: StockInfluence,
 ): void {
   const required = server.requiredHackingSkill;
@@ -1849,6 +2936,9 @@ function planJitBatches(
   const worstWeakenMs = opDurationMs("weaken", ctx, jitWorstDifficulty(solution, server), required);
   const maxDepth = Math.max(1, 1 + Math.ceil(worstWeakenMs / schedule.intervalMs));
   const statics = staticsOf(server);
+  // Farm ops only ever launch at min security (enforced in launchDueJit), so
+  // that is the security their durations are priced at. Anything higher would
+  // make every start time earlier than needed and be paid as additionalMsec.
   const worstDifficulty = jitWorstDifficulty(solution, server);
   // Fold the existing pipeline once. Each pass may append eight batches; a
   // fresh walk of every tracked and pending operation for every append made
@@ -1870,8 +2960,20 @@ function planJitBatches(
     stock,
   });
 
+  // Pending ops are not processes yet, but every one of them is a process the
+  // moment its deadline arrives, so the ceiling has to be applied where depth
+  // is COMMITTED rather than only where it is launched. Planning past it would
+  // just build a queue that launchDueJit then refuses.
+  const opsPerBatch = opsPerBatchFor(solution.kind);
   for (let planned = 0; planned < MAX_BATCHES_PER_PASS; planned++) {
     if (memory.jitPending.length + memory.inFlight.hack >= maxDepth) return;
+    if (
+      liveProcessCount(memory) + memory.jitPending.length * opsPerBatch + opsPerBatch >
+        MAX_LIVE_WORKERS
+    ) {
+      memory.stats.capped.processes++;
+      return;
+    }
     // A cheap floor only: the exact one depends on batchWorstDifficulty, which
     // is not known until the batch is sized, so any startAt still left in the
     // past is corrected by the shift below.
@@ -1889,7 +2991,7 @@ function planJitBatches(
     const sized = sizeBatchAtLanding(ctx, statics, predicted, solution);
     if (!sized) {
       if (noteJitDecisionMissedWindow(memory, memory.jitDecisionId, "arrival-security")) {
-        memory.stats.batchesSkipped++;
+        noteBatchSkipped(memory, "arrival-security");
       }
       return;
     }
@@ -1905,9 +3007,44 @@ function planJitBatches(
           pending("g", "grow", sized.growThreads, anchor + 2 * SPACER_MS, influence?.side === "long"),
           pending("h", "hack", sized.hackThreads, anchor, influence?.side === "short"),
         ];
+    const pendingGrow = ops.find((op) => op.kind === "grow");
+    if (pendingGrow) {
+      // W2 always runs at its full spawned strength, so its planned effect
+      // units are exactly the security budget available. How much of that
+      // budget belongs to the GROW depends on the shape: HWGW puts W1 between
+      // the hack and the grow, so W2 covers the grow alone, while HGW has no
+      // W1 and its single W2 must also absorb the hack's fortify and whatever
+      // security the batch was admitted above minimum.
+      const coverAmount = sized.weaken2Threads * weakenEffect(ctx, 1, 1);
+      const growShare = solution.kind === "hgw"
+        ? coverAmount -
+          Math.max(0, predicted.hackDifficulty - statics.minDifficulty) -
+          HACK_FORTIFY * sized.hackThreads
+        : coverAmount;
+      pendingGrow.coverThreads = Math.max(0, growShare) / GROW_FORTIFY;
+    }
     const pendingHack = ops.find((op) => op.kind === "hack");
     if (pendingHack) {
       pendingHack.baseHackThreads = solution.hackThreads;
+      // Level lookahead. The hack's PERCENTAGE is read when it lands, so at a
+      // higher level the same thread count steals more than the grow beside it
+      // was sized to restore. Deliberately NOT re-solved: changing the thread
+      // count would move ramPerBatch, the role envelope and therefore the
+      // cadence. Hold the size and ask for the strength that yields the steal
+      // this batch was actually built around. Skewing the horizon late (plus
+      // one launch guard) over-estimates the level, which under-steals — the
+      // recoverable direction.
+      const landingCtx = ctxAt(pendingHack.landing - now + JIT_LAUNCH_GUARD_MS);
+      if (landingCtx !== ctx) {
+        const percentAtLanding = hackPercent(landingCtx, statics.minDifficulty, required);
+        if (percentAtLanding > 0) {
+          const forSteal = solution.stealFraction / percentAtLanding;
+          if (forSteal < pendingHack.threads) {
+            pendingHack.planStrengthThreads = forSteal;
+            pendingHack.strengthThreads = forSteal;
+          }
+        }
+      }
     }
     const batchWorstDifficulty = jitWorstDifficultyFor(
       solution.kind,
@@ -1939,6 +3076,7 @@ function planJitBatches(
     memory.jitPending.push({
       target: server.hostname,
       ops: retained,
+      batchId: openBatch(memory, solution.kind === "hgw" ? "hgw" : "hwgw", server.hostname, "farm", now),
       decisionId: memory.jitDecisionId,
     });
     for (const op of retained) {
@@ -1977,6 +3115,11 @@ function launchBatches(
   borrow?: { gb: number; landingDeadline: number },
   hostBlocksGb?: readonly number[],
   reservationMode: JitReservationMode = "protected",
+  /** Hack context projected to a future instant, used by the JIT and eager
+   * paths alike. Shotgun ignores it: it lands a whole batch in one tick, so
+   * there is no launch-to-landing gap for a level to move in. The default is
+   * "no projection", for callers that have no exp-rate estimate yet. */
+  ctxAt: (horizonMs: number) => HackContext = () => ctx,
 ): void {
   const host = server.hostname;
   const difficulty = server.hackDifficulty;
@@ -1994,7 +3137,7 @@ function launchBatches(
   // shotgun deliberately relies on same-tick FIFO, so both retain the eager
   // batch-atomic implementation below.
   if (jit && memory.mode !== "shotgun" && !shotgun && borrow === undefined) {
-    const roles = jitRoles(solution, server, ctx);
+    const roles = jitRoles(solution, server, ctx, pooling);
     const schedule = chooseJitSchedule(
       roles,
       segmentCapGb,
@@ -2009,9 +3152,20 @@ function launchBatches(
       // absolute cap creates a self-fulfilling RAM-growth stall.
       memory.depthCapGb = solution.jitSaturationGb ?? jitCapacity(roles, intervalMs).totalGb;
       memory.depthCapHost = host;
-      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, reservationMode)) return;
-      planJitBatches(memory, solution, server, now, ctx, schedule, influence);
-      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, reservationMode);
+      // The executable envelope: what a sustained pipeline on this target
+      // actually holds. Share reserves against it (see the share block in
+      // `dispatch`) so a freely-preemptible tenant can never occupy RAM the
+      // farm is about to reclaim for its next batch.
+      memory.farmEnvelopeGb = schedule.totalGb;
+      // How much the farm can newly claim before a share stop could land.
+      // `planJitBatches` runs earlier in this same pass and its weakens launch
+      // immediately, so that RAM cannot be recovered by asking share for it
+      // afterwards — which is precisely why a reserve is needed even though
+      // share is preemptible and prep/other batches are not.
+      memory.farmPassDemandGb = MAX_BATCHES_PER_PASS * solution.ramPerBatch;
+      if (!launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, reservationMode, ctxAt)) return;
+      planJitBatches(memory, solution, server, now, ctx, schedule, ctxAt, influence);
+      launchDueJit(memory, actions, server, now, ctx, schedule, segmentCapGb, pooling, reservationMode, ctxAt);
       return;
     }
     // Pending batches have not launched their hack yet. If the farm segment
@@ -2035,9 +3189,9 @@ function launchBatches(
   // batches launch, so batch N+1's prediction sees batch N's ops).
   const ledger = (): LedgerOp[] => {
     const ops: LedgerOp[] = [];
-    for (const [opId, t] of memory.tracked) {
-      if (t.target !== host || t.landing === undefined) continue;
-      const threads = t.gb / WORKER_RAM[t.kind];
+    for (const [opId, t] of memory.byTarget.get(host) ?? []) {
+      if (t.landing === undefined) continue;
+      const threads = trackedStrength(t);
       ops.push({ kind: t.kind, threads, effectThreads: t.effectThreads ?? threads, landing: t.landing, opId });
     }
     return ops;
@@ -2045,10 +3199,26 @@ function launchBatches(
   const statics = staticsOf(server);
 
   const perPass = shotgun ? SHOTGUN_BATCHES_PER_PASS : MAX_BATCHES_PER_PASS;
+  // Both rails are read at BATCH granularity. Emitting a partial batch would
+  // put a hack in flight whose weaken cover was never launched, so a rail that
+  // trips has to stop the whole batch before its first action, never between.
+  const actionsAtPassStart = actions.length;
+  const opsPerBatch = opsPerBatchFor(solution.kind);
   for (let launched = 0; launched < perPass; launched++) {
     const batchesInFlight = memory.inFlight.hack;
-    // Shotgun has no interleave to protect — depth is bounded by RAM alone.
+    // Shotgun has no interleave to protect — depth is bounded by RAM, by the
+    // live-process ceiling, and by the per-pass emission bound below.
     if (!shotgun && batchesInFlight >= maxDepth) return;
+    // A batch is at most one process per op; requiring the whole batch to fit
+    // keeps the check batch-atomic like the two above it.
+    if (liveProcessCount(memory) + opsPerBatch > MAX_LIVE_WORKERS) {
+      memory.stats.capped.processes++;
+      return;
+    }
+    if (actions.length - actionsAtPassStart + opsPerBatch > MAX_LAUNCH_ACTIONS_PER_PASS) {
+      memory.stats.capped.passActions++;
+      return;
+    }
     // Under pooling the budget check moves after the pool plan — a batch
     // composed entirely of idle workers needs no new RAM at all.
     if (!pooling && remaining < solution.ramPerBatch) return;
@@ -2090,7 +3260,7 @@ function launchBatches(
     );
     const sized = sizeBatchAtLanding(ctx, statics, predicted, solution);
     if (!sized) {
-      memory.stats.batchesSkipped++;
+      noteBatchSkipped(memory, "arrival-security");
       noteMissedWindow(memory, "arrival-security");
       return;
     }
@@ -2098,32 +3268,53 @@ function launchBatches(
     if (safeHackThreads < solution.hackThreads) {
       noteMissedWindow(memory, "arrival-money");
       if (safeHackThreads < 1) {
-        memory.stats.batchesSkipped++;
+        noteBatchSkipped(memory, "arrival-money");
       }
     }
+    // `hackThreadsAtLanding` is UNROUNDED by design, so the correction rides on
+    // the call's strength instead of costing a whole thread. A process count is
+    // an integer though, and hack is not core-aware, so `allocFor` passes
+    // `threads` through verbatim and a fraction would reach `ns.exec`. Spawn
+    // the ceiling, carry the remainder as strength — what the JIT path does,
+    // and what the reference's worker does (scripts/worker.ts:23-46).
+    const hackThreads = Math.min(solution.hackThreads, Math.ceil(safeHackThreads));
+    // Level lookahead, same rule and rationale as the JIT path above. Only the
+    // exemption differs: SHOTGUN lands its whole batch in one engine tick, so
+    // no level can move between launch and landing, while an eager HWGW batch
+    // still lands a full weaken-time out and needs the cap.
+    let levelStrength = Infinity;
+    if (!shotgun) {
+      const landingCtx = ctxAt(anchor - now + JIT_LAUNCH_GUARD_MS);
+      if (landingCtx !== ctx) {
+        const percentAtLanding = hackPercent(landingCtx, statics.minDifficulty, required);
+        if (percentAtLanding > 0) levelStrength = solution.stealFraction / percentAtLanding;
+      }
+    }
+    const cappedStrength = Math.min(safeHackThreads, levelStrength);
+    const hackStrength = cappedStrength < hackThreads - 1e-9 ? cappedStrength : undefined;
 
     const ops = (
       shotgun
         ? solution.kind === "hgw"
           ? [
-              { kind: "hack" as const, threads: safeHackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
+              { kind: "hack" as const, threads: hackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
               { kind: "grow" as const, threads: sized.growThreads, duration: growMs, landing: anchor, stock: influence?.side === "long" },
               { kind: "weaken" as const, threads: sized.weaken2Threads, duration: weakenMs, landing: anchor, stock: false },
             ]
           : [
-              { kind: "hack" as const, threads: safeHackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
+              { kind: "hack" as const, threads: hackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
               { kind: "weaken" as const, threads: sized.weaken1Threads, duration: weakenMs, landing: anchor, stock: false },
               { kind: "grow" as const, threads: sized.growThreads, duration: growMs, landing: anchor, stock: influence?.side === "long" },
               { kind: "weaken" as const, threads: sized.weaken2Threads, duration: weakenMs, landing: anchor, stock: false },
             ]
         : solution.kind === "hgw"
         ? [
-            { kind: "hack" as const, threads: safeHackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
+            { kind: "hack" as const, threads: hackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
             { kind: "grow" as const, threads: sized.growThreads, duration: growMs, landing: anchor + SPACER_MS, stock: influence?.side === "long" },
             { kind: "weaken" as const, threads: sized.weaken2Threads, duration: weakenMs, landing: anchor + 2 * SPACER_MS, stock: false },
           ]
         : [
-            { kind: "hack" as const, threads: safeHackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
+            { kind: "hack" as const, threads: hackThreads, duration: hackMs, landing: anchor, stock: influence?.side === "short" },
             { kind: "weaken" as const, threads: sized.weaken1Threads, duration: weakenMs, landing: anchor + SPACER_MS, stock: false },
             { kind: "grow" as const, threads: sized.growThreads, duration: growMs, landing: anchor + 2 * SPACER_MS, stock: influence?.side === "long" },
             { kind: "weaken" as const, threads: sized.weaken2Threads, duration: weakenMs, landing: anchor + 3 * SPACER_MS, stock: false },
@@ -2137,31 +3328,59 @@ function launchBatches(
     }
 
     if (ops.some((op) => op.landing - now - op.duration < 0)) {
-      memory.stats.batchesSkipped++;
+      noteBatchSkipped(memory, "deadline");
       noteMissedWindow(memory, "deadline");
       return;
     }
 
-    const trackOp = (
+    // Registered LAZILY, on the first op actually emitted. Opening it here
+    // instead leaves a record behind on every path that still returns without
+    // launching (both allocations below can fail), and a zero-op batch never
+    // settles: it sits in `memory.batches` until the bound evicts it, pushing
+    // out live batches whose landings are still being counted.
+    let openedBatchId = 0;
+    const batchOf = (): number =>
+      (openedBatchId ||= openBatch(
+        memory,
+        shotgun ? "shotgun" : solution.kind === "hgw" ? "hgw" : "hwgw",
+        host,
+        "farm",
+        now,
+      ));
+
+    const emitOp = (
       op: (typeof ops)[number],
       hostname: string,
       threads: number,
       effectThreads: number,
       gb: number,
       worker?: { id: number; spawn: boolean },
+      /** One-core effect this call should perform, when a reused worker is
+       * larger than the op needs. Absent = use the whole block. */
+      strengthEffect?: number,
     ): void => {
       const opId = memory.nextOpId++;
+      // Two independent ceilings on the same call: the batch-level hack
+      // strength (arrival money, and the landing-level cap) and the pool's
+      // block-level one when a reused worker is larger than the op needs.
+      // The binding constraint is whichever is smaller.
+      const effectCap = op.kind === "hack" && hackStrength !== undefined
+        ? Math.min(strengthEffect ?? Infinity, hackStrength)
+        : strengthEffect;
+      const { strengthThreads, usedEffect } = resolveStrength(threads, effectThreads, effectCap);
+      const reduced = strengthThreads < threads - 1e-9;
       actions.push({
         type: op.kind,
         target: host,
         source: hostname,
         threads,
+        ...(reduced ? { strengthThreads } : {}),
         opId,
         additionalMsec: op.landing - now - op.duration,
         ...(op.stock ? { stock: true } : {}),
         ...(worker ? { worker } : {}),
       });
-      memory.tracked.set(opId, {
+      trackOp(memory, opId, {
         hostname,
         target: host,
         kind: op.kind,
@@ -2169,7 +3388,9 @@ function launchBatches(
         gb,
         wave: false,
         landing: op.landing,
-        effectThreads,
+        effectThreads: usedEffect,
+        ...(reduced ? { strengthThreads } : {}),
+        batchId: batchOf(),
         ...(worker ? { workerId: worker.id, spawned: worker.spawn } : {}),
       });
       memory.inFlight[op.kind]++;
@@ -2177,6 +3398,11 @@ function launchBatches(
       if (op.stock) memory.stats.stockOps++;
       if (!worker || worker.spawn) memory.stats.execs++;
       accountRamWork(memory, "farm", op.kind, gb, op.duration, op.landing - now - op.duration);
+      // No jitRole: this path emits a whole batch at once rather than onto a
+      // landing grid, so it has no intra-batch order to verify. It is still a
+      // batch, and still worth measuring as one.
+      accountThreads(memory, "farm", op.kind, threads, effectThreads);
+      noteBatchOp(memory, batchOf(), op.kind, threads, gb);
     };
 
     if (!pooling) {
@@ -2193,7 +3419,7 @@ function launchBatches(
           // One action per block; the reservation is shared, so it is released
           // when the LAST block of the op completes (release is idempotent and
           // guarded by tracked-map membership).
-          trackOp(
+          emitOp(
             op,
             block.hostname,
             block.threads,
@@ -2219,7 +3445,7 @@ function launchBatches(
     const reservedWorkers = new Set<number>();
     const plans = ops.map((op) => {
       const plan = planTake(memory.pool, op.kind, op.threads, reservedWorkers);
-      for (const worker of plan.take) reservedWorkers.add(worker.workerId);
+      for (const { worker } of plan.take) reservedWorkers.add(worker.workerId);
       return plan;
     });
     const missGb = plans.reduce((sum, plan, i) => sum + plan.missThreads * WORKER_RAM[ops[i]!.kind], 0);
@@ -2243,12 +3469,12 @@ function launchBatches(
     let reservationIndex = 0;
     ops.forEach((op, index) => {
       const plan = plans[index]!;
-      for (const worker of plan.take) {
+      for (const { worker, strengthEffect } of plan.take) {
         noteJobStart(memory.pool, worker.workerId);
-        trackOp(op, worker.hostname, worker.threads, worker.effectThreads, worker.gb, {
+        emitOp(op, worker.hostname, worker.threads, worker.effectThreads, worker.gb, {
           id: worker.workerId,
           spawn: false,
-        });
+        }, strengthEffect);
       }
       if (plan.missThreads >= 1) {
         const reservation = reservations[reservationIndex++]!;
@@ -2262,7 +3488,7 @@ function launchBatches(
             { workerId, hostname: block.hostname, kind: op.kind, threads: block.threads, effectThreads, gb },
             now,
           );
-          trackOp(op, block.hostname, block.threads, effectThreads, gb, { id: workerId, spawn: true });
+          emitOp(op, block.hostname, block.threads, effectThreads, gb, { id: workerId, spawn: true });
         }
         consumeAllocation(reservation.gb);
         memory.segmentGb.farm += reservation.gb;
@@ -2285,8 +3511,8 @@ function launchPrepWave(
   // between H, W1, G, and W2. Completion wakes can schedule this function at
   // any of those landings, so never interpret that midpoint as a prep need.
   // Once the final tracked batch op lands, a genuine desync may prep normally.
-  for (const tracked of memory.tracked.values()) {
-    if (tracked.target === server.hostname && tracked.segment === "farm" && !tracked.wave) return;
+  for (const tracked of memory.byTarget.get(server.hostname)?.values() ?? []) {
+    if (tracked.segment === "farm" && !tracked.wave) return;
   }
   if (memory.prepPending.some((op) => op.target === server.hostname)) return;
   if ((memory.prepInFlight.get(server.hostname) ?? 0) > 0) return;
@@ -2319,6 +3545,18 @@ function launchPrepWave(
     grow: view.time + growTimeSeconds(ctx, server.hackDifficulty, server.requiredHackingSkill) * 1_000,
   };
 
+  // One wave is one batch. Its W1 cover and its atomic grows are launched a
+  // pass or more apart, but they settle as a single unit of work — "did this
+  // prep land whole" is a question about the wave, never about one grow.
+  //
+  // Registered LAZILY, on the first op actually emitted: several paths below
+  // return having launched nothing (no placeable W1, no grow/weaken pair), and
+  // a zero-op batch never settles — it would sit in `memory.batches` until the
+  // bound evicted a live batch to make room for it.
+  let openedBatchId = 0;
+  const batchOf = (): number =>
+    (openedBatchId ||= openBatch(memory, "prep", server.hostname, segment, view.time));
+
   let ops = 0;
   let budgetRemainingGb = budgetGb;
   const emitReservation = (
@@ -2345,7 +3583,7 @@ function launchPrepWave(
         ...(landing > nativeLanding[kind] ? { additionalMsec: landing - nativeLanding[kind] } : {}),
         ...(kind === "grow" && growInfluences ? { stock: true } : {}),
       });
-      memory.tracked.set(opId, {
+      trackOp(memory, opId, {
         hostname: block.hostname,
         target: server.hostname,
         kind,
@@ -2354,6 +3592,7 @@ function launchPrepWave(
         wave: true,
         landing,
         effectThreads: block.threads * coreEffect(memory.heap.host(block.hostname)?.cores ?? 1),
+        batchId: batchOf(),
       });
       memory.inFlight[kind]++;
       memory.stats.launched[kind]++;
@@ -2367,8 +3606,10 @@ function launchPrepWave(
         nativeLanding[kind] - view.time,
         landing - nativeLanding[kind],
       );
+      accountThreads(memory, segment, kind, block.threads, block.threads * coreEffect(memory.heap.host(block.hostname)?.cores ?? 1));
+      noteBatchOp(memory, batchOf(), kind, block.threads, block.threads * WORKER_RAM[kind]);
       memory.segmentGb[segment] += block.threads * WORKER_RAM[kind];
-      memory.prepInFlight.set(server.hostname, (memory.prepInFlight.get(server.hostname) ?? 0) + 1);
+      bump(memory.prepInFlight, server.hostname, 1);
       effectThreads += block.threads * coreEffect(block.cores);
       budgetRemainingGb -= block.threads * WORKER_RAM[kind];
       ops++;
@@ -2383,15 +3624,31 @@ function launchPrepWave(
   ): number => {
     if (wantedThreads < 1 || ops >= opCap) return 0;
     const affordable = Math.floor(budgetRemainingGb / WORKER_RAM[kind]);
-    const threads = Math.min(wantedThreads, affordable, memory.heap.capacity(WORKER_RAM[kind]));
+    // Share is not capacity the prep wave has to work around: count it as
+    // available and take it below if the placement actually needs it. Prep is
+    // the tenant that CANNOT be cancelled without losing progress, so it
+    // outranks share unconditionally.
+    const shareGb = [...memory.shareWorkers.values()].reduce((sum, worker) => sum + worker.gb, 0);
+    const placeable = Math.min(wantedThreads, affordable, memory.heap.capacity(WORKER_RAM[kind]));
+    const threads = Math.min(
+      wantedThreads,
+      affordable,
+      memory.heap.capacity(WORKER_RAM[kind]) + Math.floor(shareGb / WORKER_RAM[kind]),
+    );
     if (threads < 1) return 0;
-    const allocation = memory.heap.allocate({
-      blockSize: WORKER_RAM[kind],
-      threads,
-      policy: "spread",
-      coreAware: true,
-    });
+    const request = { blockSize: WORKER_RAM[kind], threads, policy: "spread" as const, coreAware: true };
+    const allocation = memory.heap.allocate(request);
     if (!allocation.ok) {
+      requestShareStops(memory, actions, threads * WORKER_RAM[kind]);
+      // Share's RAM is not free until its workers actually exit, so counting it
+      // above only states the DEMAND. Fall back to what is placeable right now
+      // rather than losing the pass: a partial W1 is progress the wave keeps,
+      // and refusing it stalled prep for as long as any share worker was
+      // resident — the tenant this ordering exists to outrank.
+      if (placeable >= 1 && placeable < threads) {
+        const partial = memory.heap.allocate({ ...request, threads: placeable });
+        if (partial.ok) return emitReservation(kind, partial.reservation, opCap, landing);
+      }
       memory.stats.allocFails++;
       memory.stats.allocFailsByPhase.prep++;
       return 0;
@@ -2453,7 +3710,7 @@ function launchPrepWave(
     const realGrowThreads = growBlock?.threads ?? 0;
     const effectGrowThreads = realGrowThreads * coreEffect(growBlock?.cores ?? 1);
     const maxGrowThreads = Math.ceil(effectGrowThreads - 1e-12);
-    const coverEffectThreads = Math.ceil((0.004 * maxGrowThreads) / weakenEffect(ctx, 1, 1));
+    const coverEffectThreads = Math.ceil((GROW_FORTIFY * maxGrowThreads) / weakenEffect(ctx, 1, 1));
     const weakenResult = memory.heap.allocate({
       blockSize: WORKER_RAM.weaken,
       threads: coverEffectThreads,
@@ -2533,6 +3790,7 @@ function launchPrepWave(
     memory.prepPending.push({
       target: server.hostname,
       segment,
+      batchId: batchOf(),
       kind: "grow",
       threads: pair.realGrowThreads,
       maxThreads: pair.maxGrowThreads,

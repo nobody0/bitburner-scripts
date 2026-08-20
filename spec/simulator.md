@@ -124,6 +124,20 @@ arena aggregate model used by the full-route CLI. `sim:compare`
 refuses different fingerprints, drivers, scenarios, goals or gap sets, and
 refuses invalid runs unless `--allow-invalid` is supplied for diagnostics.
 
+**Any full-route run must select the aggregate model.** `runGame` defaults to
+`action-exact`, which drives the real trained policy through a browser Worker
+performing WebGPU inference. That worker does not exist under Bun: the request
+never answers, `neuralRuntime.install` never settles, and the Go feature simply
+retries every five seconds for the entire run without ever making a move. It
+fails silently — Go reports as unlocked, the board reads as live, admission and
+scheduling both succeed, and only `moveCount` staying at zero reveals it. A
+fixture whose premise is a Go reward then fails on a premise that never fired,
+and every other fixture pays the stalled turns as wall-clock. `sim/run.ts`
+passes `goFidelity: AGGREGATE_GO_MODEL` for every profile run and
+`sim/tests/jit-scenario.ts` does the same for the scenario ladder; a new
+full-route harness must too. Exact action parity and WebGPU strength belong to
+the arena lane, which is the division of labour `sim/fidelity.ts` states.
+
 Long controller benchmarks can use `--compact`. Goal reduction and validity
 still consume every record, but the JSONL retains only experimental identity,
 route changes, install milestones, fidelity events and the terminal result.

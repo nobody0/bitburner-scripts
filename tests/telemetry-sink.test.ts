@@ -69,6 +69,10 @@ describe("contract failure telemetry", () => {
     state.dirty.add("side");
     sink.flush(state);
 
+    // Both flushes emit. The sender never deduplicates: proving a value has
+    // not moved costs a second serialization of every topic, and game-script
+    // clock time is the one resource the telemetry rule exists to protect.
+    // Unchanged spans are collapsed by the hub instead (ui/server.ts).
     expect(states).toHaveLength(2);
     expect(JSON.stringify(states[0])).not.toContain('"data":"[0]"');
     expect(events).toEqual([{ name: "contract.quarantined", data: first }]);

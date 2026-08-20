@@ -9,7 +9,7 @@ import type { GangState } from "./topics/gang.ts";
 import type { GoState } from "./topics/go.ts";
 import type { FarmRollup, FleetRollup } from "./topics/hacking.ts";
 import type { HacknetState } from "./topics/hacknet.ts";
-import type { Progression } from "./topics/progression.ts";
+import type { ArbitrationTopic, Progression, RamArenaDigest } from "./topics/progression.ts";
 import type { SideState } from "./topics/side.ts";
 import type { SleevesState } from "./topics/sleeves.ts";
 import type { StanekState } from "./topics/stanek.ts";
@@ -39,6 +39,10 @@ export interface StateMap {
   capabilities: Capabilities;
 
   progression: Progression;
+  /** Split out of `progression`: both move far faster than the plan they used
+   * to ride on, and a state record republishes its whole topic. */
+  arbitration: ArbitrationTopic;
+  ramArena: RamArenaDigest;
   fleet: FleetRollup;
   factions: FactionsState;
   career: CareerState;

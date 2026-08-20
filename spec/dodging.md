@@ -23,10 +23,11 @@ caller pays only `ns.exec` (1.3 GB).
   still owns. Go's `makeMove`, `passTurn`, and recovery
   `opponentNextTurn` calls await the opponent; they must not hold up ordinary
   probes or be timed out while their worker remains alive.
-- Two tiny slot-specific stubs are retained: `lib/dodge-stub.<build-id>.js`
-  and `lib/go-dodge-stub.<build-id>.js`. They differ only in the slots they
-  read; keeping both avoids a lane argument and preserves the deployed and
-  simulator protocols. Each references no ns members;
+- **One** tiny stub serves both lanes: `lib/dodge-stub.<build-id>.js`, which
+  reads its lane from `ns.args[0]` and selects the matching slot set. `ns.args`
+  is a property rather than an API call, so the lane argument is free and the
+  base stays 1.6 GB; a second file differing only in four slot names was pure
+  duplication scp'd to every rooted host. It references no ns members;
   its RAM budget is declared at launch via `ns.exec(..., { ramOverride })` —
   `dodge(ns, fn, budgetGb)` sizes each call (default 2.5 GB dynamic; pass more
   for e.g. contract batches). Each stub file serves every budget. The reference

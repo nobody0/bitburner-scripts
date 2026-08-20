@@ -17,7 +17,7 @@ const config: BitburnerConfig = {
   host: "127.0.0.1",
   port: 12525,
   server: "home",
-  buildDir: "build-test-perf",
+  buildDir: `build-test-perf-${process.pid}`,
   entries: [{ source: "game/start.ts", target: "start.js" }],
 };
 

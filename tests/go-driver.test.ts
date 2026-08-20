@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import type { GoDodgeGlobals } from "../game/lib/go-dodge-shared.ts";
+import type { GoDodgeGlobals } from "../game/lib/dodge-shared.ts";
 import { emptyBoard, type DriverContext } from "../game/lib/features/index.ts";
 import { GO_ANCHOR_POLL_MS, goModule, setGoCheatSuccessTableForTest, setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 import { GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";

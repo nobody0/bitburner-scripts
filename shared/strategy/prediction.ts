@@ -1,8 +1,11 @@
 import {
+  GROW_FORTIFY,
   growthLogPerThread,
+  HACK_FORTIFY,
   growThreads,
   hackPercent,
   weakenEffect,
+  skillFromExp,
   type HackContext,
 } from "../formulas.ts";
 import { PREPPED_SEC_TOLERANCE, type CycleSolution, type TargetStatics } from "./targeting.ts";
@@ -94,16 +97,49 @@ export function applyLedgerOp(
     const percent = hackPercent(ctx, sec, statics.requiredHackingSkill);
     const steal = Math.min(1, op.threads * percent);
     money = Math.max(0, money * (1 - steal));
-    sec = Math.min(maxSec, sec + 0.002 * (op.fortifyThreads ?? op.threads));
+    sec = Math.min(maxSec, sec + HACK_FORTIFY * (op.fortifyThreads ?? op.threads));
   } else if (op.kind === "grow") {
     const k = growthLogPerThread(ctx, sec, statics.serverGrowth, 1);
     const grown = (money + op.threads) * (k === -Infinity ? 1 : Math.exp(k * op.effectThreads));
     money = Math.min(statics.moneyMax, grown);
-    sec = Math.min(maxSec, sec + 0.004 * (op.fortifyThreads ?? op.threads));
+    sec = Math.min(maxSec, sec + GROW_FORTIFY * (op.fortifyThreads ?? op.threads));
   } else {
     sec = Math.max(statics.minDifficulty, sec - weakenEffect(ctx, 1, 1) * op.effectThreads);
   }
   return { hackDifficulty: sec, moneyAvailable: money };
+}
+
+export interface SkillProjectionInput {
+  hackingExp: number;
+  /** Measured hacking exp per SECOND (EMA). Zero/absent = no projection. */
+  expPerSec: number;
+  /** `mults.hacking` times the BitNode's HackingLevelMultiplier. Folding the
+   * node mult in is not optional: it is 0.35 in BN4 and 0.25 in BN9, so
+   * omitting it over-projects the level roughly threefold. */
+  hackingMult: number;
+  currentSkill: number;
+}
+
+/** Hacking level `horizonMs` from now, at the measured experience rate.
+ *
+ * Hack DURATION is fixed when the Netscript call is made, and the dispatcher
+ * already recomputes durations live per pass. Hack PERCENTAGE is different: it
+ * is evaluated when the hack LANDS. A batch solved at level L therefore
+ * over-steals if it lands at L+n, and its grow cover — sized for the smaller
+ * steal — no longer restores the server.
+ *
+ * Never returns less than the current skill: the projection exists to shrink a
+ * hack, and skewing it late (over-estimating the level) under-steals, which is
+ * the recoverable direction. Reference: batchRunner.ts:317-327. */
+export function projectedSkill(input: SkillProjectionInput, horizonMs: number): number {
+  if (!(input.expPerSec > 0) || !(horizonMs > 0) || !Number.isFinite(horizonMs)) {
+    return input.currentSkill;
+  }
+  const projected = skillFromExp(
+    input.hackingExp + input.expPerSec * (horizonMs / 1_000),
+    input.hackingMult,
+  );
+  return Math.max(input.currentSkill, projected);
 }
 
 export interface SizedBatch {
@@ -130,7 +166,66 @@ export function hackThreadsAtLanding(
   if (missingFraction <= 0) return plannedThreads;
   const percentPerThread = hackPercent(ctx, predicted.hackDifficulty, statics.requiredHackingSkill);
   if (percentPerThread <= 0) return 0;
-  return Math.max(0, plannedThreads - Math.ceil(missingFraction / percentPerThread));
+  // Unrounded. The result is a thread STRENGTH, passed to Netscript as a
+  // fractional `opts.threads`, so rounding the correction up would over-shrink
+  // by as much as a whole thread — on a small hack that is a large fraction of
+  // the steal, given up for nothing.
+  return Math.max(0, plannedThreads - missingFraction / percentPerThread);
+}
+
+/** Re-derive a grow's strength against the state it will actually land on.
+ *
+ * Grow is the second dynamic operation. Its planned size was solved against a
+ * predicted post-hack money that any number of things can move before it
+ * launches: the hack ahead of it shrank on the arrival-money brake, a level-up
+ * changed what that hack stole, an earlier batch landed out of order, or an
+ * out-of-band reward topped the server up.
+ *
+ * Both directions matter, and they are not symmetric:
+ *
+ * - **Too much grow** is not free. Growth clamps at `moneyMax`, so the surplus
+ *   buys nothing, but the security it adds is real — `GROW_FORTIFY` per thread,
+ *   charged whether or not the money had anywhere to go. The already-committed
+ *   W2 was sized for the PLANNED grow, so an over-grow is the one error that
+ *   can outrun its own cover and leave the target above minimum for the next
+ *   batch to trip over.
+ * - **Too little grow** only costs money, and only until the next batch: the
+ *   server comes back short, and the following hack's own arrival-money brake
+ *   sizes itself down to match.
+ *
+ * So the clamp is asymmetric by construction. `coverThreads` is what the
+ * committed weaken can actually neutralise; the result never exceeds it, even
+ * when the money says a larger grow would pay. Under-growing is recoverable,
+ * over-fortifying is what starts a spiral.
+ *
+ * Weaken has no equivalent of this function on purpose: it always runs at its
+ * full spawned strength. Once its RAM is committed the threads are paid for,
+ * over-weakening clamps harmlessly at `minDifficulty`, and the surplus IS the
+ * ordering insurance described in spec/jit-reference.md section 2.
+ *
+ * Returns undefined when arrival security is above tolerance — same contract as
+ * `hackThreadsAtLanding`, and the same meaning: do not launch. */
+export function growThreadsAtLanding(
+  ctx: HackContext,
+  statics: TargetStatics,
+  predicted: PredictedState,
+  /** Effect units this grow was spawned with — the hard upper bound, since
+   * `opts.threads` may never exceed the process's own thread count. */
+  plannedThreads: number,
+  /** Largest grow the committed weaken cover can neutralise, in effect units. */
+  coverThreads: number,
+): number | undefined {
+  if (predicted.hackDifficulty > statics.minDifficulty + PREPPED_SEC_TOLERANCE) return undefined;
+  if (statics.moneyMax <= 0 || plannedThreads <= 0) return 0;
+  if (predicted.moneyAvailable >= statics.moneyMax) return 0;
+  const k = growthLogPerThread(ctx, predicted.hackDifficulty, statics.serverGrowth, 1);
+  if (k === -Infinity) return plannedThreads;
+  const required = growThreads(k, statics.moneyMax, predicted.moneyAvailable, statics.moneyMax);
+  if (!Number.isFinite(required)) return plannedThreads;
+  // Unrounded, for the same reason hackThreadsAtLanding is: this is a
+  // fractional strength, and rounding it up would spend a whole thread of
+  // fortify the cover was not sized for.
+  return Math.max(0, Math.min(required, plannedThreads, coverThreads));
 }
 
 /** Resize the cached solution for the state the batch will actually land on.
@@ -149,7 +244,7 @@ export function sizeBatchAtLanding(
   if (predicted.hackDifficulty > statics.minDifficulty + PREPPED_SEC_TOLERANCE) return undefined;
   const postHack = Math.max(0, predicted.moneyAvailable * (1 - base.stealFraction));
   const securityExcess = Math.max(0, predicted.hackDifficulty - statics.minDifficulty);
-  const hackFortify = 0.002 * base.hackThreads;
+  const hackFortify = HACK_FORTIFY * base.hackThreads;
   const weakenPerThread = weakenEffect(ctx, 1, 1);
   // W1 makes an HWGW grow execute at minimum security, including when the
   // admitted landing state begins above minimum. HGW has no W1, so its grow
@@ -165,8 +260,8 @@ export function sizeBatchAtLanding(
     statics.moneyMax > 0 && k !== -Infinity ? growThreads(k, statics.moneyMax, postHack, statics.moneyMax) : 0;
   const growCount = Number.isFinite(grow) ? grow : base.growThreads;
   const weaken2Cover = base.kind === "hgw"
-    ? securityExcess + hackFortify + 0.004 * growCount
-    : 0.004 * growCount;
+    ? securityExcess + hackFortify + GROW_FORTIFY * growCount
+    : GROW_FORTIFY * growCount;
   const weaken2 = Math.ceil(weaken2Cover / weakenPerThread);
   return {
     hackThreads: base.hackThreads,

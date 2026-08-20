@@ -20,6 +20,15 @@ function event(run: string, seq: number, t: number): LogRecord {
   return { run, seq, t, src: "game", kind: "event", name: "tick" };
 }
 
+function stateRecord(seq: number, t: number, value: unknown): LogRecord {
+  return { run: "r", seq, t, src: "game", kind: "state", key: "progression", data: value } as LogRecord;
+}
+
+/** Read the persisted JSONL back, oldest line first. */
+function lines(file: string): LogRecord[] {
+  return readFileSync(file, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line) as LogRecord);
+}
+
 describe("install artifact store", () => {
   test("accepts handoff emitters with independent sequence spaces", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "bb-store-"));
@@ -41,5 +50,113 @@ describe("install artifact store", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  /** The emitter republishes a dirty topic in full every tick and deliberately
+   * does not check whether it moved — proving that costs a second
+   * serialization of every topic, and game-script clock time is the resource
+   * the telemetry design exists to protect. So the hub sifts instead. */
+  describe("unchanged state spans", () => {
+    test("collapses a run of identical state to its first and last record", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "bb-store-"));
+      try {
+        const store = new RunStore(dir, hello("r"));
+        store.append([
+          stateRecord(0, 100, { a: 1 }),
+          stateRecord(1, 200, { a: 1 }),
+          stateRecord(2, 300, { a: 1 }),
+          stateRecord(3, 400, { a: 1 }),
+          stateRecord(4, 500, { a: 2 }),
+        ]);
+        await store.detach();
+
+        const written = lines(store.file);
+        // First (100) opens the span, last (400) closes it, and 500 is the new
+        // value. The two middle repeats are dropped.
+        expect(written.map((record) => record.t)).toEqual([100, 400, 500]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("keeps the span's END, so the interval it held is recoverable", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "bb-store-"));
+      try {
+        const store = new RunStore(dir, hello("r"));
+        store.append([stateRecord(0, 100, { a: 1 }), stateRecord(1, 9_000, { a: 1 })]);
+        await store.detach();
+
+        // Keeping only the opening record would make "held this value for
+        // nearly nine seconds" indistinguishable from "sampled once at 100".
+        // That span is an observation, so both ends are kept.
+        expect(lines(store.file).map((record) => record.t)).toEqual([100, 9_000]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("a live viewer still receives every record", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "bb-store-"));
+      try {
+        const store = new RunStore(dir, hello("r"));
+        const records = [
+          stateRecord(0, 100, { a: 1 }),
+          stateRecord(1, 200, { a: 1 }),
+          stateRecord(2, 300, { a: 1 }),
+        ];
+        // The collapse is a STORAGE decision. What the socket broadcasts is
+        // unchanged: a viewer's own liveness reading comes off the stream.
+        expect(store.append(records)).toEqual(records);
+        await store.detach();
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("independent keys keep independent spans", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "bb-store-"));
+      try {
+        const store = new RunStore(dir, hello("r"));
+        const other = (seq: number, t: number, value: unknown): LogRecord =>
+          ({ run: "r", seq, t, src: "game", kind: "state", key: "fleet", data: value }) as LogRecord;
+        store.append([
+          stateRecord(0, 100, { a: 1 }),
+          other(1, 110, { b: 1 }),
+          stateRecord(2, 200, { a: 1 }),
+          other(3, 210, { b: 2 }),
+          stateRecord(4, 300, { a: 1 }),
+        ]);
+        await store.detach();
+
+        const written = lines(store.file);
+        // `fleet` changed and so was written twice; `progression` held one
+        // value and contributes its first and last only.
+        const forKey = (key: string): number[] =>
+          written.filter((record) => record.kind === "state" && record.key === key).map((record) => record.t);
+        expect(forKey("fleet")).toEqual([110, 210]);
+        expect(forKey("progression")).toEqual([100, 300]);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    test("the record count reflects what was actually written", async () => {
+      const dir = mkdtempSync(path.join(tmpdir(), "bb-store-"));
+      try {
+        const store = new RunStore(dir, hello("r"));
+        store.append([
+          stateRecord(0, 100, { a: 1 }),
+          stateRecord(1, 200, { a: 1 }),
+          stateRecord(2, 300, { a: 1 }),
+        ]);
+        await store.detach();
+        // The sidecar drives the catalogue and the compact loader's bounds, so
+        // it has to count lines on disk, not records offered.
+        const sidecar = JSON.parse(readFileSync(`${store.file}.meta.json`, "utf8")) as { records: number };
+        expect(sidecar.records).toBe(lines(store.file).length);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
   });
 });

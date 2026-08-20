@@ -51,28 +51,40 @@ export interface Progression {
    * probe and a driver to satisfy tests/features.test.ts). Both are digests of
    * the pure results in shared/strategy/{needs,arbiter}.ts. */
   needs?: NeedDigest[];
-  arbitration?: ArbitrationDigest;
-  /** How much home RAM the dispatcher is being told to leave free.
-   *  `capped: true` is a real blocker — a feature's probe cannot be afforded
-   *  on this home no matter how long we wait, and the answer is more home RAM
-   *  (or a bigger rooted host to place the dodge on). */
-  /** Change-filtered digest of the pure RAM broker. */
-  ramArena?: {
-    hosts: string[];
-    arenaGb: number;
-    targetGb: number;
-    guaranteedDynamicGb: number;
-    measuredDynamicGb: number;
-    queueDepth: number;
-    largestWaitingGb: number;
-    neededForLargestWaitingGb: number;
-    waits: { by: string; id: string; gb: number; waitMs: number; class: 'instant' | 'deferrable'; lane: 'default' | 'long' }[];
-    starvation: { by: string; id: string; gb: number; waitMs: number }[];
-    demand: Record<string, number>;
-    promoted: boolean;
-    farmCostPerSec: number;
-  };
   plan?: ProgressionPlan;
+}
+
+/* `arbitration` and `ramArena` used to live on `Progression` above. They were
+ * moved out because a state record is whole-topic last-write-wins, so touching
+ * either one republished ALL of it: measured on a live run, `progression` was
+ * 50% of a 2.58 GB log, sent every 200 ms, while the 13.8 KB of
+ * plan/needs/multipliers/moneySources it dragged along changed on 12 of 1259
+ * consecutive pairs. Splitting them lets each publish at the rate it actually
+ * moves — and lets the hub collapse the slow one into spans. */
+
+/** The arbiter's per-pass verdict: who was funded, who was refused, what is
+ * left. Moves on nearly every tick, because the money it divides does. */
+export interface ArbitrationTopic extends ArbitrationDigest {}
+
+/** Change-filtered digest of the pure RAM broker.
+ *
+ * `capped: true` on a wait is a real blocker — a feature's probe cannot be
+ * afforded on this home no matter how long we wait, and the answer is more
+ * home RAM (or a bigger rooted host to place the dodge on). */
+export interface RamArenaDigest {
+  hosts: string[];
+  arenaGb: number;
+  targetGb: number;
+  guaranteedDynamicGb: number;
+  measuredDynamicGb: number;
+  queueDepth: number;
+  largestWaitingGb: number;
+  neededForLargestWaitingGb: number;
+  waits: { by: string; id: string; gb: number; waitMs: number; class: 'instant' | 'deferrable'; lane: 'default' | 'long' }[];
+  starvation: { by: string; id: string; gb: number; waitMs: number }[];
+  demand: Record<string, number>;
+  promoted: boolean;
+  farmCostPerSec: number;
 }
 
 /** One posted need, flattened for the wire. `progress` is precomputed because
