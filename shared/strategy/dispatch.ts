@@ -2217,6 +2217,23 @@ function jitStartAt(
   });
 }
 
+/** The future security timeline for a target, built at most once per caller and
+ * only if something actually asks for it.
+ *
+ * Both callers need it only for an op whose reserve window has already opened,
+ * which in steady state is a handful out of a pipeline of thousands — while
+ * building it costs a full ledger materialisation plus a sort of that. Paying
+ * O(ledger log ledger) per pass to discover that nothing needed it is the shape
+ * of cost that made a deep pipeline unschedulable. */
+function lazySecurityEvents(
+  memory: DispatchMemory,
+  host: string,
+  ctx: HackContext,
+): () => JitSecurityEvent[] {
+  let events: JitSecurityEvent[] | undefined;
+  return () => events ??= jitSecurityEvents(jitLedger(memory, host), ctx);
+}
+
 function jitSecurityEvents(ledger: readonly LedgerOp[], ctx: HackContext): JitSecurityEvent[] {
   const weakenPerThread = weakenEffect(ctx, 1, 1);
   return ledger.map((event) => ({
@@ -2245,10 +2262,9 @@ function launchDuePrep(
 ): void {
   const ops = memory.prepPending.filter((op) => op.target === server.hostname);
   if (ops.length === 0) return;
-  const ledger = jitLedger(memory, server.hostname);
-  const securityEvents = jitSecurityEvents(ledger, ctx);
+  const events = lazySecurityEvents(memory, server.hostname, ctx);
   for (const op of ops) {
-    if (weakenWake || op.startAt <= now) op.startAt = jitStartAt(op, securityEvents, server, now, ctx);
+    if (weakenWake || op.startAt <= now) op.startAt = jitStartAt(op, events(), server, now, ctx);
   }
   ops.sort((a, b) => a.startAt - b.startAt || a.landing - b.landing);
 
@@ -2372,8 +2388,9 @@ function launchDueJit(
   ctxAt: (horizonMs: number) => HackContext = () => ctx,
 ): boolean {
   const required = server.requiredHackingSkill;
-  const ledger = jitLedger(memory, server.hostname);
-  const securityEvents = jitSecurityEvents(ledger, ctx);
+  // The hottest instance of the lazy build: this function runs twice per pass,
+  // before and after planning.
+  const events = lazySecurityEvents(memory, server.hostname, ctx);
   for (const batch of memory.jitPending) {
     if (batch.target !== server.hostname) continue;
     // The initial worst-security deadline is a lower bound. Refine only when
@@ -2387,7 +2404,7 @@ function launchDueJit(
       // weaken landing is O(pending × ledger) and dominated long simulations
       // without changing which not-yet-due operation could launch.
       if (!op.reservation && jitReserveAt(op) <= now) {
-        op.startAt = jitStartAt(op, securityEvents, server, now, ctx);
+        op.startAt = jitStartAt(op, events(), server, now, ctx);
         op.reserveAt = op.startAt - (JIT_LAUNCH_GUARD_MS - WORKER_STARTUP_GUARD_MS);
       }
     }
