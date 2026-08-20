@@ -1,0 +1,65 @@
+{
+  "note": [
+    "THE PROOF-OF-PROGRESS LEDGER for the BN1 route.",
+    "",
+    "Each entry is the BEST result we have actually observed on that profile, not",
+    "a target and not a guess. Some of these numbers are FAILURES; they are here",
+    "because a failure you have measured is the starting point of the next",
+    "improvement, and because 'does not reach' is itself the fact to beat.",
+    "",
+    "RULES.",
+    "  1. Only ever move a number in the improving direction, and only from a run",
+    "     you actually observed. Never relax one to make a red run green -- that",
+    "     converts the ledger from evidence into decoration.",
+    "  2. `timeToGoalHours` and `firstInstallHours` improve DOWNWARD.",
+    "     `augmentationsAt`, `installs` and `reached` improve UPWARD.",
+    "  3. `provenance` pins the simulator semantics these numbers were measured",
+    "     under. Bumping SIMULATOR_MODEL_VERSION or the vendored commit changes",
+    "     what the simulator DOES, so old numbers stop being comparable.",
+    "     Re-measure every profile, then update provenance in the same commit.",
+    "",
+    "HOW TO RE-MEASURE. These are minutes-to-hours of wall clock, so they are run",
+    "by hand rather than in a lane:",
+    "  bun run tools/bn1-screen.ts --hours 4        # screen one configuration",
+    "  bun run sim --profile bn1-full --compact     # the benchmark, seeds 1-3",
+    "  bun run sim --profile bn1-speedrun --compact # the cheap regression guard",
+    "Screen on seed 1; confirm anything promising on all three before recording."
+  ],
+  "provenance": {
+    "simulatorModelVersion": 5,
+    "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
+    "recordedAt": "2026-08-20",
+    "recordedFrom": "first measurement of bn1-full after the hacking/Go/harness rewrites and the BN-second re-denomination"
+  },
+  "target": {
+    "note": "An optimal BN1 completes in under eight hours. bn1-full runs a 24h horizon; not reaching inside it is a defect to diagnose, not a score to optimise."
+  },
+  "profiles": {
+    "bn1-full": {
+      "goal": "bn:1 + installs:2",
+      "horizonHours": 24,
+      "reached": false,
+      "firstInstallHours": 3.26,
+      "secondInstallHours": 4.5,
+      "augmentationsAt5_6Hours": 11,
+      "routeEtaHoursAt4Hours": 38.8,
+      "what": "Cold BN1 start, 8 GB home, the full vanilla network, every playable feature. The headline route benchmark.",
+      "note": "NOT REACHED, and the honest starting point. Before the cold-start install fixes this profile installed NOTHING in 24 hours and reported a 1,138-hour route estimate; it now installs on cadence and estimates ~40h. Reaching at all is the next milestone, then eight hours.",
+      "history": [
+        "Before 2026-08-20: zero installs, zero augmentations, route ETA 1,137.7h at four hours. Three chained defects -- an early count tranche demanding a quarter of the whole gate, an unanchored power-law extrapolation, and faction work never announcing the augmentations it produces. See spec/progress.md, BN1 route ledger seventh pass."
+      ]
+    },
+    "bn1-speedrun": {
+      "goal": "earn:1e9",
+      "horizonHours": 8,
+      "seed1Hours": 6.23,
+      "seed3Hours": 5.01,
+      "seed2Reached": false,
+      "what": "The cheap regression guard: $1b on the small deterministic early-game fixture.",
+      "note": "ALSO A REGRESSION, and not caused by the route work. spec/progress.md tracked 2.43-2.46h for an older generation; measured on this branch WITHOUT the route changes seed 1 takes 7.44h, and with them 6.23h. The 3x loss against the tracked number predates this pass and is outstanding; the 16% recovery is what the route changes contributed. Runs report `invalid-for-goal` because coding-contract generation is unmodeled -- a known simulator gap, not a run failure.",
+      "history": [
+        "2026-08-20: seed 1 7.44h without the cold-start install fixes, 6.23h with them."
+      ]
+    }
+  }
+}

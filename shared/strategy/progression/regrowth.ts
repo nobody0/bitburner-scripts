@@ -137,7 +137,22 @@ export function cycleProgressEta(
   const last = usable.at(-1)!;
   const exponent = cycleProgressExponent(points, resource) ?? 1;
   const totalSec = last.t * Math.pow(wanted / last.y, 1 / exponent);
-  return { sec: Math.max(last.t, totalSec), measured: true, exponent };
+  // EXTRAPOLATION MAY NOT BE WORSE THAN THE RECENT RATE. `fallbackSec` is the
+  // caller's linear estimate at the rate measured over its recent window; this
+  // fit is cumulative since cycle start, so far outside the observed span it is
+  // reading the slow bootstrap as the future regime and compounding it.
+  //
+  // MEASURED on a cold `bn1-full` start, which is exactly where the prior-cycle
+  // guard below cannot help because there is no prior: twenty minutes in, with
+  // income at a healthy $28.7k/s and a $100b gap — forty days linear — the fit
+  // returned 8.78e13 s, 2.8 million years, on 30.6% of samples. That became a
+  // 1.7e14 BN-second money marginal, which bought `career` the work slot on 90%
+  // of passes, which starved faction reputation, which meant no augmentation was
+  // ever installed, which kept the curve flat and confirmed the fit. The
+  // acceleration this fit exists to capture can only SHORTEN an estimate; when
+  // it lengthens one it is extrapolating noise.
+  const bounded = fallbackSec > 0 ? Math.min(totalSec, fallbackSec) : totalSec;
+  return { sec: Math.max(last.t, bounded), measured: true, exponent };
 }
 
 /** Estimate a fresh cycle with the preceding completed cycle as a shape prior.

@@ -215,7 +215,8 @@ describe("reset-activated bankroll value", () => {
     const earlyThin = routeCountVerdict({
       required: 30,
       installed: 3,
-      affordableDistinct: 2,
+      // One augmentation is the reset the early tranche exists to reject.
+      affordableDistinct: 1,
       consolidationAllowed: true,
     });
     expect(earlyThin.ready).toBe(false);

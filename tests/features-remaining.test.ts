@@ -1135,16 +1135,24 @@ describe("progression", () => {
     expect(mandatory.installWanted).toBe(true);
   });
 
-  test("a consolidation-sized count tranche has route value without reopening tiny resets", () => {
-    expect(earlyCountBatchAllowed(30, 1, 7)).toBe(false);
-    expect(earlyCountBatchAllowed(30, 1, 8)).toBe(true);
-    expect(earlyCountBatchAllowed(30, 6, 6)).toBe(true);
-    // The same fractional rule scales with other live route requirements; it
-    // does not encode BN1's 30-slot gate or a particular observed package.
-    expect(earlyCountBatchAllowed(20, 0, 4)).toBe(false);
-    expect(earlyCountBatchAllowed(20, 0, 5)).toBe(true);
-    expect(earlyCountBatchAllowed(35, 5, 7)).toBe(false);
-    expect(earlyCountBatchAllowed(35, 5, 8)).toBe(true);
+  test("the early tranche stops a one-augmentation reset, not the first install", () => {
+    // It used to demand a QUARTER of the whole gate before the first install —
+    // `ceil(30 / 4)` = eight distinct funded augmentations. A cold BN1 start has
+    // one faction joined at that point, offering five in total, so the gate
+    // could not open from where the planner had reached and seed 1 ran four
+    // hours with zero installs. Consolidation guards the expensive half of the
+    // gate; this only has to reject a reset that buys a single augmentation.
+    expect(earlyCountBatchAllowed(30, 0, 1)).toBe(false);
+    expect(earlyCountBatchAllowed(30, 0, 2)).toBe(true);
+    expect(earlyCountBatchAllowed(30, 6, 1)).toBe(false);
+    expect(earlyCountBatchAllowed(30, 6, 2)).toBe(true);
+    // Still a fraction of the live requirement rather than a flat two, so a
+    // larger gate asks for a proportionally larger opening batch. It does not
+    // encode BN1's 30-slot gate or a particular observed package.
+    expect(earlyCountBatchAllowed(20, 0, 1)).toBe(false);
+    expect(earlyCountBatchAllowed(20, 0, 2)).toBe(true);
+    expect(earlyCountBatchAllowed(35, 0, 2)).toBe(false);
+    expect(earlyCountBatchAllowed(35, 0, 3)).toBe(true);
     expect(routeCountInstallValue({
       required: 30,
       installed: 13,

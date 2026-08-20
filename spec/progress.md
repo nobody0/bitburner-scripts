@@ -1224,6 +1224,73 @@ would repeat the mistake its own comment documents.
 *Evidence:* 1,498 pass / 0 fail, typecheck clean. Both correctness fixes have
 regression tests verified to FAIL against the pre-fix code.
 
+## BN1 route ledger, seventh pass (cold-start install cadence, 2026-08-20)
+
+`bn1-full` had never been measured. Screening it (seed 1, four-hour slices,
+`bun run tools/bn1-screen.ts`) found a cold BN1 that **never installed a single
+augmentation** and reported a route estimate of 1,138 hours. Three defects in a
+chain, each found by measuring the next one down:
+
+| what | before | after |
+|---|---|---|
+| first install | **never** | **1.47 h** |
+| augmentations at 4 h | 0 | 4 (6 on the full benchmark) |
+| route ETA at 4 h | 1,137.7 h | **53.5 h** |
+| regrow leg | 654.3 h | 2.5 h |
+| work slot held by `factions` | 11% | **80%** |
+| `career` mean slot bid | 4.66e12 BN-s | 7.1e5 BN-s |
+
+**1. The early count tranche demanded a quarter of the whole gate.**
+`earlyCountBatchAllowed` required `ceil(30 × 1/4)` = eight distinct funded
+augmentations before the FIRST install was permitted. A cold BN1 start has one
+faction joined at that point — CyberSec, which offers five in total — so the
+gate could not open from where the planner had reached. Its demand scales with
+what REMAINS, making it strictest at the start of the gate and loosest at the
+end, which is the opposite of the reset cost it exists to protect against.
+Consolidation already guards the expensive half, so the early tranche only has
+to reject a one-augmentation reset: `DAEDALUS_EARLY_BATCH_PROGRESS_FRACTION`
+1/4 → 1/15.
+
+**2. The cumulative-progress fit extrapolated without a prior to anchor it.**
+`cycleProgressEtaWithPrior` guards the power fit with a completed cycle's shape,
+but the first cycle of a fresh node has no prior, so the raw fit ran. Twenty
+minutes in, with income at a healthy $28.7k/s against a $100b gap — forty days
+linear — it returned **8.78e13 s, 2.8 million years**, on 30.6% of samples.
+`fallbackSec` is the caller's linear estimate at the recently measured rate, and
+acceleration (the only thing the fit exists to capture) can only shorten an
+estimate; an extrapolation is now bounded by it. Interpolation inside the
+observed span is exact and untouched.
+
+**3. Faction work never announced that it produces augmentations.** That 2.8e13-second
+money leg became a 1.7e14 BN-second money marginal, and `career` — which
+produces money — bid 4.66e12 BN-seconds and held `Player.currentWork` on 90% of
+passes. Bounding the fit fixed the magnitude but not the ordering: `career` still
+outbid faction work about 120:1 on money alone, which is self-defeating, because
+the $100b gate is reached through multipliers that only an install grants and only
+reputation unlocks the augmentations an install activates. Faction work now
+announces the route's count leg at `package size / package ETA`, and the slot
+auction sees both sides of what reputation buys.
+
+The chain was self-confirming: no install meant no multipliers, so the hacking
+curve stayed flat, so the fit read the plateau as the future regime, so the
+estimate grew the longer the run went on.
+
+On the full benchmark (`bn1-full`, seed 1, 24 h horizon) the run now installs on
+cadence — **3.26 h and 4.50 h, 11 of 30 augmentations by 5.64 h** — with the
+route estimate at ~40 h. It does **not** reach `bn:1` inside the horizon, which
+by the standing target (an optimal BN1 is under eight hours) is the next defect
+to diagnose rather than a number to accept. Recorded in
+`sim/tests/baselines/bn1.json`, failures included: a measured failure is the
+starting point of the next improvement.
+
+**`bn1-speedrun` is separately regressed, and not by this pass.** The ledger
+tracks 2.43–2.46 h from an older generation. Measured on this branch by stashing
+only this pass's changes, seed 1 takes **7.44 h without them and 6.23 h with
+them** — so the route work recovered 16%, and the ~3× loss against the tracked
+number predates it and is outstanding. Both runs report `invalid-for-goal`
+because coding-contract generation is unmodeled; that is the known simulator gap,
+not a run failure.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to

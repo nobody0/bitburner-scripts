@@ -39,6 +39,7 @@ import {
   type WorkType,
 } from "./rep.ts";
 import {
+  AUGMENTATIONS_CHANNEL,
   channelForNeed,
   compareSlotValues,
   raiseBest,
@@ -960,7 +961,30 @@ function decideFactions(
 
   // Published on every decision from here on, including the ones that idle —
   // see `FactionDecision.workRate` for why the idle case is the important one.
-  const workRate = { faction: target.faction, repPerSec: target.repPerSec, produces: target.produces };
+  //
+  // Reputation work also produces AUGMENTATIONS, and saying so is what stops the
+  // work slot being a money-only auction: reaching this package's reputation
+  // target is the only way its augmentations become buyable, so the work
+  // advances the route's count leg at `package size / package ETA`. That is a
+  // property of the PACKAGE, identical for all three work types, so it is added
+  // here rather than in `workProduces` — it cannot change which type wins.
+  //
+  // MEASURED on a cold `bn1-full` start: without it `career` outbid faction work
+  // roughly 120:1 on money alone and held `Player.currentWork` on 89% of passes.
+  // That is self-defeating — the money gate it bids for is reached through the
+  // multipliers only an install grants, and only reputation unlocks the
+  // augmentations an install activates.
+  const packageIntent = objective.intent?.faction === target.faction ? objective.intent : undefined;
+  const packageAugsPerSec = packageIntent && packageIntent.augmentations.length > 0
+    ? packageIntent.augmentations.length / Math.max(1, packageIntent.etaSec)
+    : 0;
+  const workRate = {
+    faction: target.faction,
+    repPerSec: target.repPerSec,
+    produces: packageAugsPerSec > 0
+      ? { ...target.produces, [AUGMENTATIONS_CHANNEL]: packageAugsPerSec }
+      : target.produces,
+  };
 
   // Donation beats working once income exceeds the crossover — and only once
   // favor actually allows it. Favor cannot grow within a run, so a locked

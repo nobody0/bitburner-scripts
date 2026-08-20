@@ -88,8 +88,29 @@ describe("fresh-cycle regrowth curves", () => {
       { sec: 60, money: 1, hacking: 2, combat: 1 },
       { sec: 120, money: 2, hacking: 3, combat: 1 },
     ];
-    expect(cycleProgressEta(sparse, "money", 6_400, 999).sec).toBeGreaterThan(100_000);
-    expect(cycleProgressEtaWithPrior(sparse, prior, "money", 6_400, 999).sec).toBeLessThan(2_000);
+    // Given room to run away it still would — the shape of the sparse fit is
+    // unchanged, and this is what the prior-cycle anchor exists to correct.
+    expect(cycleProgressEta(sparse, "money", 6_400, 1e9).sec).toBeGreaterThan(100_000);
+    expect(cycleProgressEtaWithPrior(sparse, prior, "money", 6_400, 1e9).sec).toBeLessThan(2_000);
+  });
+
+  test("an extrapolation may not be worse than the caller's recent-rate estimate", () => {
+    // The fit is cumulative since cycle start; far outside the observed span it
+    // reads the slow bootstrap as the future regime. `fallbackSec` is the
+    // caller's linear estimate at the RECENTLY measured rate, and acceleration —
+    // the only thing this fit exists to capture — can only shorten an estimate.
+    //
+    // MEASURED on a cold `bn1-full` start, where there is no prior cycle to
+    // anchor to: twenty minutes in, income $28.7k/s against a $100b gap (forty
+    // days linear), the unbounded fit returned 2.8 million years on 30.6% of
+    // samples, and that became a 1.7e14 BN-second money marginal.
+    const sparse = [
+      { sec: 60, money: 1, hacking: 2, combat: 1 },
+      { sec: 120, money: 2, hacking: 3, combat: 1 },
+    ];
+    expect(cycleProgressEta(sparse, "money", 6_400, 5_000).sec).toBe(5_000);
+    // Interpolation inside the observed span is exact and untouched by the bound.
+    expect(cycleProgressEta(sparse, "money", 1.5, 0.001).sec).toBeCloseTo(90, 6);
   });
 
   test("same-time drift scales the prior when the new cycle is faster", () => {
