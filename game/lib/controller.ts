@@ -11,7 +11,7 @@ import { FEATURE_IDS } from "../../shared/features/ids.ts";
 import type { ArenaPlan, BrokerRequest } from '../../shared/ram/broker.ts';
 import { priceCalls } from "./dodge.ts";
 import { isScriptDeath } from "./errors.ts";
-import { bestIncomePerSec, bestReinvestmentReturnPerDollarSec } from "./income.ts";
+import { bestIncomePerSec, bestReinvestmentReturnPerDollarSec, slotRates } from "./income.ts";
 import { ContributionCache } from "./features/contributions.ts";
 import { hackingState, plannerPassId, pumpOnWake, takeTargetSwitch } from "./features/hacking.ts";
 import { armWake, sleepOrWake } from "./wake.ts";
@@ -381,6 +381,7 @@ export async function runController(
       board,
       claims,
       expectedIncomePerSec: bestIncomePerSec(state),
+      rates: slotRates(state, board),
       reinvestmentReturnPerDollarSec: bestReinvestmentReturnPerDollarSec(state),
       // The remaining pool is deliberately not forwarded: a FeatureModule's
       // next rung is a pure function of its own ladder, and the arbiter

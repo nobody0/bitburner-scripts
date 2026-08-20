@@ -1,5 +1,9 @@
 import {
   FALLBACK_MONEY_PER_SEC,
+  FALLBACK_RANK_PER_SEC,
+  FALLBACK_SEC_PER_AUG,
+  FALLBACK_SEC_PER_BLACK_OP,
+  FALLBACK_SEC_PER_COMBAT_LEVEL,
   FALLBACK_SEC_PER_HACK_LEVEL,
   routeEtas,
   type ProgressResource,
@@ -9,7 +13,26 @@ import {
 import type { EndgameDecision, EndgameView, RouteId } from "./endgame.ts";
 import type { ForecastComponent, TimeForecast } from "./forecast.ts";
 
-export type MarginalResource = "money" | "hacking" | "reputation";
+/** The currencies a route's ETA actually depends on, and therefore the ones a
+ * rate can be priced in. Every one of these already has a rate in `RouteRates`
+ * and a part in the route estimates — this list is what has been WIRED to a
+ * marginal, not a separate model. */
+export type MarginalResource =
+  | "money"
+  | "hacking"
+  | "reputation"
+  | "combat"
+  | "bladeburnerRank"
+  | "augmentations";
+
+export const MARGINAL_RESOURCES: readonly MarginalResource[] = [
+  "money",
+  "hacking",
+  "reputation",
+  "combat",
+  "bladeburnerRank",
+  "augmentations",
+];
 
 /** An observed zero is economic evidence; an absent observation is not. */
 export type MeasuredMarginal =
@@ -95,6 +118,20 @@ function forecastTotal(components: readonly Pick<ForecastComponent, "mode" | "se
   return parallel + sequential;
 }
 
+/** Which ETA part label a marginal resource may claim seconds from — for the
+ * LAST-RESORT slope only. The real answer comes from re-running the estimate
+ * with the rate perturbed, which reads no labels at all.
+ *
+ * Bladeburner rank has none. Its parts share the `combat` label with the
+ * black-op sequence they overlap, and claiming those seconds would price a
+ * Bladeburner rate on any route that merely has a combat branch — Daedalus
+ * accepts combat 1500, so that is most of them. The perturbation already
+ * separates the two correctly, and where it reports no movement, a measured
+ * zero is the honest answer rather than a borrowed one. */
+function partResourcesFor(resource: MarginalResource): readonly ProgressResource[] {
+  return resource === "bladeburnerRank" ? [] : [resource as ProgressResource];
+}
+
 /** Linear forecast parts are gap/rate, so their finite perturbation is closed
  * form. Recompose the forecast afterward: shortening a nonbinding parallel
  * part correctly saves zero on the immediate horizon. */
@@ -102,7 +139,8 @@ function forecastSaved(forecast: TimeForecast, resource: MarginalResource, relat
   if (forecast.state === "unknown") return undefined;
   const delta = Math.max(0, relativeDelta);
   const before = forecastTotal(forecast.components);
-  const after = forecastTotal(forecast.components.map((component) => component.resource === resource
+  const labels = partResourcesFor(resource);
+  const after = forecastTotal(forecast.components.map((component) => labels.includes(component.resource)
     ? { ...component, sec: component.sec / (1 + delta) }
     : component));
   return Math.max(0, before - after);
@@ -130,6 +168,22 @@ function perturbedRates(rates: RouteRates, resource: MarginalResource, relativeD
     next.hackingSkillPerSec = (
       rates.hackingSkillPerSec > 0 ? rates.hackingSkillPerSec : 1 / FALLBACK_SEC_PER_HACK_LEVEL
     ) * scale;
+  } else if (resource === "combat") {
+    next.combatSkillPerSec = (
+      rates.combatSkillPerSec > 0 ? rates.combatSkillPerSec : 1 / FALLBACK_SEC_PER_COMBAT_LEVEL
+    ) * scale;
+  } else if (resource === "augmentations") {
+    next.augsPerSec = (rates.augsPerSec > 0 ? rates.augsPerSec : 1 / FALLBACK_SEC_PER_AUG) * scale;
+  } else if (resource === "bladeburnerRank") {
+    // Rank and the black-op sequence overlap in the route estimate (the slower
+    // of the two binds), so a rank rate that moved without the ops moving would
+    // report a saving the route cannot actually realise. Scale both.
+    next.bladeburnerRankPerSec = (
+      rates.bladeburnerRankPerSec > 0 ? rates.bladeburnerRankPerSec : FALLBACK_RANK_PER_SEC
+    ) * scale;
+    next.blackOpsPerSec = (
+      rates.blackOpsPerSec > 0 ? rates.blackOpsPerSec : 1 / FALLBACK_SEC_PER_BLACK_OP
+    ) * scale;
   } else {
     // The selected route can use either reputation stream. Scaling both is the
     // resource-level question; only the route's actual part contributes.
@@ -153,8 +207,9 @@ function selected(etas: readonly RouteEta[], route: RouteId | undefined): RouteE
 }
 
 function resourceSeconds(parts: readonly { resource: ProgressResource; sec: number }[], resource: MarginalResource): number {
+  const labels = partResourcesFor(resource);
   return parts
-    .filter((part) => part.resource === resource)
+    .filter((part) => labels.includes(part.resource))
     .reduce((sum, part) => sum + Math.max(0, part.sec), 0);
 }
 
@@ -220,5 +275,7 @@ export function progressionMarginals(
     return { state: "estimated", secondsPerRelativeRate: 0, reason: "the selected plan has no dependency on this resource" };
   };
 
-  return { money: one("money"), hacking: one("hacking"), reputation: one("reputation") };
+  const out = {} as ProgressionMarginals;
+  for (const resource of MARGINAL_RESOURCES) out[resource] = one(resource);
+  return out;
 }

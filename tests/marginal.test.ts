@@ -67,6 +67,38 @@ describe("progression marginal value", () => {
     expect(marginals.money.secondsPerRelativeRate).toBeGreaterThan(0);
   });
 
+  test("a combat-gated route prices its combat rate, and an unrelated one does not", () => {
+    // Daedalus accepts hacking 2500 OR all four combat skills at 1500. With the
+    // hacking climb far away and combat progressing, the combat branch binds and
+    // a faster combat rate genuinely shortens the node — so an augmentation that
+    // multiplies combat stats has a measured price instead of a guessed weight.
+    const combatBound = view({ augCount: 30, hackingSkill: 1, lowestCombatSkill: 1_400, money: 1e12 });
+    const marginals = progressionMarginals({
+      view: combatBound,
+      decision: stepEndgame(combatBound),
+      rates: { ...noRates(), moneyPerSec: 1e9, combatSkillPerSec: 1, hackingSkillPerSec: 1e-6, daedalusRepPerSec: 50 },
+      selectedRoute: "daedalus",
+      install: unknownForecast(0, "none", "no package"),
+    });
+    expect(marginals.combat.state).toBe("estimated");
+    expect(marginals.combat.secondsPerRelativeRate).toBeGreaterThan(0);
+    // Bladeburner is not on this route at all. A measured zero is the answer —
+    // never `unknown`, which would put its claims back on the bootstrap rule.
+    expect(marginals.bladeburnerRank).toMatchObject({ state: "estimated", secondsPerRelativeRate: 0 });
+  });
+
+  test("every resource is reported, so an unpriced channel is never an absent one", () => {
+    const current = view();
+    const marginals = progressionMarginals({
+      view: current,
+      decision: stepEndgame(current),
+      rates: noRates(),
+      install: unknownForecast(0, "none", "no package"),
+    });
+    expect(Object.keys(marginals).sort())
+      .toEqual(["augmentations", "bladeburnerRank", "combat", "hacking", "money", "reputation"]);
+  });
+
   test("linear reputation work uses the closed-form gap/rate slope", () => {
     expect(linearSecondsPerRelativeRate(500, 0.01)).toBeCloseTo(500 / 1.01, 10);
     expect(growingProgressSecondsPerRelativeRate({

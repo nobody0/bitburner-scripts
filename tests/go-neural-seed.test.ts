@@ -34,6 +34,35 @@ describe("seed-assured Go neural dispatch", () => {
     expect(dispatched).toEqual([10_000]);
     expect(sleeps).toEqual([]);
     expect(result.boundaryRetries).toBe(0);
+    // Nothing was slept, so none of this turn's latency was deliberate.
+    expect(result.waitedMs).toBe(0);
+  });
+
+  test("reports deliberate waiting separately from the rest of the turn", async () => {
+    // 1,199 leaves one millisecond of the cycle: inside the guard band, so the
+    // dispatch targets the next tick and must wait for it.
+    let wall = 1_199;
+    const sleeps: number[] = [];
+    const result = await runGoNeuralSeedDispatch({
+      phase,
+      clock: {
+        now: () => wall,
+        player: () => player(wall < 1_200 ? 10_000 : 10_200),
+        sleep: async (ms) => { sleeps.push(ms); wall += ms; },
+      },
+      infer: async (_player, target) => {
+        expect(target?.targetPlaytime).toBe(10_200);
+        // Inference itself is not waiting, and must not be counted as such.
+        wall += 0.5;
+        return "decision";
+      },
+      dispatch: async () => "ok",
+    });
+
+    expect(result.attempt.dispatchPlaytime).toBe(10_200);
+    expect(result.waitedMs).toBeGreaterThan(0);
+    // Every millisecond reported as deliberate is a millisecond actually slept.
+    expect(result.waitedMs).toBe(sleeps.reduce((total, ms) => total + ms, 0));
   });
 
   test("guards only the final read-to-call boundary", async () => {

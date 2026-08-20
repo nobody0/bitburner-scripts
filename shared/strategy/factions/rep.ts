@@ -46,8 +46,11 @@ export type WorkType = "hacking" | "field" | "security";
 
 export interface RepPerson {
   skills: { hacking: number; strength: number; defense: number; dexterity: number; agility: number; charisma: number; intelligence: number };
-  mults: { faction_rep: number };
+  mults: { faction_rep: number } & Partial<Record<`${SkillName}_exp`, number>>;
 }
+
+/** The skills faction work awards experience in. */
+export type SkillName = "hacking" | "strength" | "defense" | "dexterity" | "agility" | "charisma";
 
 export interface RepContext {
   /** currentNodeMults.FactionWorkRepGain. */
@@ -60,6 +63,8 @@ export interface RepContext {
   sf15Level: number;
   /** Owning Neuroreceptor Management Implant removes the unfocused penalty. */
   hasFocusAug: boolean;
+  /** currentNodeMults.FactionWorkExpGain. Defaults to 1. */
+  factionWorkExpGain?: number;
 }
 
 function clamp(value: number, min: number, max = Infinity): number {
@@ -142,6 +147,42 @@ export function workRepPerSec(
   return workRepGain(type, person, favor, ctx) * penalty * 5;
 }
 
+/** Experience per SECOND awarded by each faction work type, before the
+ * player's own `*_exp` multipliers, the node multiplier and the focus penalty.
+ *
+ * THIS IS THE HALF THE PLANNER USED TO IGNORE. Field and security work pay
+ * combat experience while earning reputation, so a posted combat gate can be
+ * served by the same second that advances a faction — but the chooser picked on
+ * reputation alone and the claim announced reputation alone, so career won the
+ * slot with crime and the reputation was simply never earned. `chooseWorkType`
+ * in `./decide.ts` prices all three types with these rates; `bestWorkType`
+ * below stays reputation-only because its callers are asking a reputation ETA
+ * question, not choosing what to run.
+ *
+ * `FactionWorkStats` -> `calculateFactionExp` -> `applyWorkStats` @ v3.0.1; the
+ * game's per-cycle amounts divided by its five-cycles-per-second divisor.
+ * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Formulas.ts */
+export const FACTION_WORK_EXP: Readonly<Record<WorkType, Readonly<Partial<Record<SkillName, number>>>>> = {
+  hacking: { hacking: 2 },
+  field: { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 },
+  security: { hacking: 0.5, strength: 1.5, defense: 1.5, dexterity: 1.5, agility: 1.5 },
+};
+
+export function factionWorkExpPerSec(
+  type: WorkType,
+  person: RepPerson,
+  ctx: RepContext,
+  focused: boolean,
+): Partial<Record<SkillName, number>> {
+  const penalty = focused || ctx.hasFocusAug ? 1 : BASE_FOCUS_BONUS;
+  const node = ctx.factionWorkExpGain ?? 1;
+  const out: Partial<Record<SkillName, number>> = {};
+  for (const [skill, base] of Object.entries(FACTION_WORK_EXP[type]) as [SkillName, number][]) {
+    out[skill] = base * (person.mults[`${skill}_exp`] ?? 1) * node * penalty;
+  }
+  return out;
+}
+
 /** Exact local work-rate slope with respect to the share bonus. All three
  * formulas are affine in the bonus; this preserves their distinct dilution. */
 export function workRepPerSecPerShareBonus(
@@ -155,8 +196,12 @@ export function workRepPerSecPerShareBonus(
   return Math.max(0, at(ctx.shareBonus + 1) - at(ctx.shareBonus));
 }
 
-/** Best work type available at a faction, and its rate. `undefined` when the
- * faction offers no work at all (Shadows of Anarchy). */
+/** Highest-REPUTATION work type available at a faction, and its rate.
+ * `undefined` when the faction offers no work at all (Shadows of Anarchy).
+ *
+ * For reputation ETA questions only — how long until this faction's next
+ * breakpoint. Choosing what to actually RUN is `chooseWorkType` in
+ * `./decide.ts`, which weighs the experience each type also pays. */
 export function bestWorkType(
   offers: { hacking: boolean; field: boolean; security: boolean },
   person: RepPerson,

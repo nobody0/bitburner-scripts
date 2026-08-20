@@ -198,23 +198,9 @@ describe("tab rendering", () => {
           why: "neural value over 4 candidates",
           input: {
             at: 1_000, board: ["X....", ".....", ".....", ".....", "....."], previousBoards: [],
-            status: "inProgress", currentPlayer: "Black", opponent: "Netburners", blackScore: 1, whiteScore: 1.5, komi: 1.5,
+            status: "inProgress", currentPlayer: "Black", komi: 1.5,
           },
           planning: { finalistCount: 4, positionValue: 0.25 },
-          prediction: {
-            model: "clean-room-v3.0.1",
-            sampledTotalPlaytime: 100_000,
-            sampledAt: 900,
-            decisionAt: 1_000,
-            preparationMs: 1.2,
-            finalizationMs: 0.8,
-            totalPlanningMs: 2,
-            engineCycleMs: 200,
-            aiWaitMs: 200,
-            seedCandidates: [100_200],
-            dispatchPlaytime: 100_000,
-            boundaryRetries: 0,
-          },
           selection: {
           preferred: {
             opponent: "Netburners", boardSize: 5, observedBoardSize: 5, aligned: false, waitSec: 0, winProbability: 0.8,
@@ -236,7 +222,7 @@ describe("tab rendering", () => {
           }],
           context: {
             goPower: 1, hasSourceFile14: false, favorRepCap: 100_000, installRemainingSec: 3_600,
-            joinedFactions: [], demands: {}, factionFavor: {},
+            joinedFactions: [], demands: {},
           },
         },
         },
@@ -246,6 +232,20 @@ describe("tab rendering", () => {
           action: { type: "move", x: 1, y: 1, why: "neural value 0.840 win" },
           opponentResponse: { type: "move", x: 2, y: 2 },
           predictionSupport: { matching: 5, total: 6 },
+          prediction: {
+            model: "clean-room-v3.0.1",
+            sampledTotalPlaytime: 100_000,
+            sampledAt: 900,
+            decisionAt: 1_000,
+            preparationMs: 1.2,
+            finalizationMs: 0.8,
+            totalPlanningMs: 2,
+            engineCycleMs: 200,
+            aiWaitMs: 200,
+            seedCandidates: [100_200],
+            dispatchPlaytime: 100_000,
+            boundaryRetries: 0,
+          },
           ok: true,
           detail: "move; opponent move",
         },
@@ -387,23 +387,8 @@ describe("tab rendering", () => {
           x: 1, y: 1, score: 0.84, powerPerRound: 5.5, captures: 1,
           predictedReplies: [{ x: 2, y: 2, count: 5 }, { x: null, y: null, count: 1 }],
         }],
-        input: { at: 1_000, board: [".....", ".....", ".....", ".....", "....."], previousBoards: [], status: "inProgress", currentPlayer: "Black", opponent: "Netburners" },
+        input: { at: 1_000, board: [".....", ".....", ".....", ".....", "....."], previousBoards: [], status: "inProgress", currentPlayer: "Black" },
         planning: { finalistCount: 4, positionValue: 0.25 },
-        prediction: {
-          model: "clean-room-v3.0.1",
-          sampledTotalPlaytime: 100_000,
-          sampledAt: 900,
-          decisionAt: 1_000,
-          preparationMs: 1.2,
-          finalizationMs: 0.8,
-          totalPlanningMs: 2,
-          readyToDispatchMs: 0.4,
-          engineCycleMs: 200,
-          aiWaitMs: 200,
-          seedCandidates: [100_200],
-          dispatchPlaytime: 100_000,
-          boundaryRetries: 0,
-        },
         selection: {
           preferred: {
             opponent: "Netburners", boardSize: 5, observedBoardSize: 5, aligned: false, waitSec: 0, winProbability: 0.8,
@@ -425,7 +410,7 @@ describe("tab rendering", () => {
           }],
           context: {
             goPower: 1, hasSourceFile14: false, favorRepCap: 100_000, installRemainingSec: 3_600,
-            joinedFactions: [], demands: {}, factionFavor: {},
+            joinedFactions: [], demands: {},
           },
         },
       },
@@ -435,22 +420,55 @@ describe("tab rendering", () => {
         action: { type: "move", x: 1, y: 1 },
         opponentResponse: { type: "move", x: 2, y: 2 },
         predictionSupport: { matching: 5, total: 6 },
+        prediction: {
+          model: "clean-room-v3.0.1",
+          sampledTotalPlaytime: 100_000,
+          sampledAt: 900,
+          decisionAt: 1_000,
+          preparationMs: 1.2,
+          finalizationMs: 0.8,
+          totalPlanningMs: 2,
+          dispatchBreakdown: {
+            totalMs: 320,
+            admitMs: 18, prepareMs: 242, leaseMs: 12, finalizeMs: 8, alignMs: 38, dispatchMs: 1, residualMs: 1,
+          },
+          engineCycleMs: 200,
+          aiWaitMs: 200,
+          seedCandidates: [100_200],
+          dispatchPlaytime: 100_000,
+          boundaryRetries: 0,
+        },
         ok: true,
         detail: "move; opponent move",
       },
     };
     const html = TABS.go.render(state);
     expect(html).toContain("Candidate analysis");
-    expect(html).toContain("5.00/6 expected seed support");
+    expect(html).toContain("5.00/6");
+    expect(html).toContain("forecast weight on the reply that arrived");
     expect(html).toContain("clean-room-v3.0.1");
     expect(html).toContain("exact seed");
-    expect(html).toContain("200 ms cycles");
-    expect(html).toContain("dispatch tick 100.000 s");
-    expect(html).toContain("ready-to-play 0.4 ms");
-    expect(html).toContain("AI cycle 200 ms");
+    // Fixed game parameters sit apart from what this turn measured, so
+    // neither can be read as the other.
+    expect(html).toContain("engine constants — 200 ms cycle, 200 ms AI wait");
+    expect(html).toContain("worker — 1.2ms preparation; 0.8ms evaluation");
+    // Alignment is read off the prediction; nothing mirrors it separately.
+    expect(html).toContain("same-slot; full turn 205ms");
+    expect(html).toContain("dispatch tick 100.000s");
+    // The total alone cannot separate a slow worker from a deliberate wait for
+    // the next engine cycle, which is the reason the segments exist.
+    expect(html).toContain("ready to play");
+    expect(html).toContain("admit 18ms");
+    expect(html).toContain("plan 242ms");
+    expect(html).toContain("align 38ms (deliberate)");
+    expect(html).toContain("slowest plan");
+    // One board, not two: the pre-move grid said nothing the markers do not.
+    expect(html.split("class=\"goboard\"").length - 1).toBe(1);
+    // The ranking table changes height every turn; the stable tables sit above.
+    expect(html.indexOf("Opponent reward choice")).toBeLessThan(html.indexOf(">Record<"));
+    expect(html.indexOf(">Record<")).toBeLessThan(html.indexOf("Candidate analysis"));
     expect(html).toContain("class=\"go-point black chosen\"");
     expect(html).toContain("class=\"go-point white reply\"");
-    expect(html).toContain("class=\"go-point empty chosen\"");
     expect(html).toContain("class=\"go-marker chosen\"");
     expect(html).toContain("class=\"go-marker reply\"");
     expect(html).toContain("class=\"go-link north black\"");
@@ -480,6 +498,27 @@ describe("tab rendering", () => {
     expect(html).toContain("go-point dead");
     expect(html).toContain("go-link north black");
     expect(html).toContain("C3 (2,2) — no signal");
+  });
+
+  test("Go shades exactly the space the territory count awards", () => {
+    const state = emptyState();
+    state.topics.go = {
+      status: "inProgress",
+      currentPlayer: "Black",
+      opponent: "Netburners",
+      boardSize: 5,
+      // One opening stone borders all 24 remaining nodes. IPvGO deliberately
+      // awards no such almost-board-sized region, so the picture must not
+      // claim territory the count beside it does not include.
+      board: ["X....", ".....", ".....", ".....", "....."],
+      previousBoards: [],
+      territory: { black: 0, white: 0 },
+      stats: [],
+    };
+
+    const html = TABS.go.render(state);
+    expect(html).not.toContain("territory-black");
+    expect(html).toContain("controlled empty nodes — black 0, white 0");
   });
 
   test("Side shows compact status plus the latest report-once replay", () => {

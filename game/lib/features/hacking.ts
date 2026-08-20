@@ -37,7 +37,8 @@ import {
   type RepContext,
   type WorkType,
 } from "../../../shared/strategy/factions/rep.ts";
-import { DEFAULT_PLANNING_HORIZON_SEC, installHorizonSec, usableForecastSec, type PlanningHorizons } from "../../../shared/strategy/progression/forecast.ts";
+import { farmExperienceRate, farmIncomeRate } from "../../../shared/strategy/economics.ts";
+import { installHorizonSec, nodeHorizonSec, usableForecastSec, type PlanningHorizons } from "../../../shared/strategy/progression/forecast.ts";
 import { growingProgressSecondsPerRelativeRate, linearSecondsPerRelativeRate } from "../../../shared/strategy/progression/marginal.ts";
 import type { MeasuredMarginal } from "../../../shared/strategy/progression/marginal.ts";
 import { hackMarginalValue } from "../../../shared/strategy/share.ts";
@@ -424,6 +425,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   const heap = driver.memory.dispatch.heap;
   const pool = poolCounts(driver.memory.dispatch.pool);
   const segmentGb = driver.memory.dispatch.segmentGb;
+  const farmSolution = driver.memory.dispatch.evaluator.directive.farm?.solution;
   const prepBudgetGb = driver.memory.dispatch.evaluator.directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
   const share = driver.memory.dispatch.evaluator.directive.share;
   const landingOrder = landingOrderDigest(stats);
@@ -431,9 +433,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   set(game, "farm", {
     target,
     ...(targetSolveExact !== undefined ? { targetSolveExact } : {}),
-    ...(driver.memory.dispatch.evaluator.directive.farm?.solution.score !== undefined
-      ? { moneyPerSecPerGb: driver.memory.dispatch.evaluator.directive.farm.solution.score }
-      : {}),
+    ...(farmSolution?.score !== undefined ? { moneyPerSecPerGb: farmSolution.score } : {}),
     ...(prepTarget !== undefined ? { prepTarget } : {}),
     prepBudgetGb,
     ...(segOrder !== undefined ? { segOrder } : {}),
@@ -444,6 +444,16 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     landed: { ...stats.landed },
     moneyRate: moneyRateEma,
     expRate: expRateEma,
+    // The FORWARD rates, from the solution already committed to the fleet. The
+    // EMAs above only ever describe work that has landed, so during a warm-up
+    // they say the farm produces nothing — and a course or a crime then wins
+    // the work slot against a farm that is minutes from being the best
+    // producer of both currencies. Same numbers the RAM valuation already
+    // prices infrastructure with; they were simply never announced.
+    predicted: {
+      moneyPerSec: farmIncomeRate(farmSolution, segmentGb.farm),
+      expPerSec: farmExperienceRate(farmSolution, segmentGb.farm),
+    },
     ...(targetServer?.hackDifficulty !== undefined ? { security: targetServer.hackDifficulty } : {}),
     ...(targetServer?.minDifficulty !== undefined ? { minSecurity: targetServer.minDifficulty } : {}),
     ...(targetServer?.moneyAvailable !== undefined ? { money: targetServer.moneyAvailable } : {}),
@@ -568,6 +578,10 @@ const PORT_OPENER_CALLS = ["ls", "singularity.purchaseTor", "singularity.purchas
 let backdoorInFlight = false;
 let lastServerAccessAt = 0;
 let requestedProgram: ProgramOption | undefined;
+/** BN-seconds the requested write is worth — see `ServerAccessPlan`. Carried
+ * beside the program because `needs()` posts the need and only the access plan
+ * knows what the file unlocks. */
+let requestedProgramValueSec: number | undefined;
 const HOME_RAM_METHODS = ["singularity.upgradeHomeRam"] as const;
 const HOME_CORE_METHODS = ["singularity.upgradeHomeCores"] as const;
 const CLOUD_BUY_METHODS = ["cloud.purchaseServer"] as const;
@@ -722,7 +736,7 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
   const fleet = ctx.state.topics.fleet;
   if (!fleet) return undefined;
 
-  const nodeHorizon = usableForecastSec(ctx.horizons.node) ?? DEFAULT_PLANNING_HORIZON_SEC;
+  const nodeHorizon = nodeHorizonSec(ctx.horizons.node);
   const candidates: RamInvestment[] = [];
 
   // Cores remain on the same infrastructure frontier. They are not RAM
@@ -958,6 +972,7 @@ async function serveServerAccessNeeds(ctx: DriverContext): Promise<void> {
   const plan = serverAccessPlan(ctx);
   if (!plan) return;
   requestedProgram = plan.writeProgram;
+  requestedProgramValueSec = plan.writeProgramValueSec;
 
   // Not rooted yet: the blocker is usually a missing port opener, and
   // nothing else in the loop will ever buy one. Rooting servers is
@@ -1116,6 +1131,17 @@ function backdoorSkillGoal(ctx: Pick<DriverContext, "board" | "state">): number 
   return goal;
 }
 
+/** One access candidate with what the board says its outcome is worth. */
+interface RankedAccessCandidate {
+  entry: ServerAccessAction;
+  /** BN-seconds the board says this outcome saves — measured where a poster
+   * priced it, the nominal weight fallback otherwise. */
+  valueSec: number;
+  /** Value per wall-clock second the action costs, which is what ranks it. */
+  score: number;
+  ports: number;
+}
+
 /** Select the exact board action both claim collection and execution use.
  *
  * Candidates are ranked by VALUE DENSITY — the total BN-seconds the board says
@@ -1128,9 +1154,9 @@ function backdoorSkillGoal(ctx: Pick<DriverContext, "board" | "state">): number 
  * every root on the board. The guard rails from the tiered version are kept
  * verbatim: bounded opener anticipation, prerequisite deferral, and the rule
  * that a root-only need never escalates into an unrequested backdoor. */
-function rankServerAccessActions(
+function rankServerAccessCandidates(
   ctx: Pick<ClaimContext, "board" | "state" | "activeFeatures">,
-): ServerAccessAction[] {
+): RankedAccessCandidate[] {
   const servers = ctx.state.topics.servers ?? {};
   const player = ctx.state.topics.player;
   if (!player) return [];
@@ -1187,18 +1213,19 @@ function rankServerAccessActions(
       costSec: Math.max(1, backdoorActionSec(ctx.state, server)),
     });
   }
-  const ranked: { entry: ServerAccessAction; score: number; ports: number }[] = [];
+  const ranked: RankedAccessCandidate[] = [];
   for (const [key, candidate] of candidates) {
     const valueSec = (measured[key] ?? 0) + (fallback.get(key) ?? 0);
     ranked.push({
       entry: candidate.entry,
+      valueSec,
       score: valueSec / candidate.costSec,
       ports: candidate.entry.server.numOpenPortsRequired ?? 0,
     });
   }
   // Lowest-port opener breaks a score tie: its next program is cheapest.
   ranked.sort((a, b) => b.score - a.score || a.ports - b.ports);
-  return ranked.map((entry) => entry.entry);
+  return ranked;
 }
 
 /** Wall-clock cost of ACQUIRING an opener, which is NOT the cost of the
@@ -1228,6 +1255,16 @@ export interface ServerAccessPlan {
   primary: ServerAccessAction;
   /** Program the career slot should write instead of buying `primary`. */
   writeProgram?: ProgramOption;
+  /** BN-seconds that writing it is worth: the board's own value for EVERY
+   * server the new opener unblocks, not just `primary`. One opener typically
+   * roots several hosts, and the file is worth all of them.
+   *
+   * Career prices the write against crime and faction work in BN-seconds, so
+   * this number has to be one too. Posting the need on the nominal weight
+   * instead gave every opener the same invented 2,400 — BruteSSH for a starter
+   * box and SQLInject for a megacorp — which is not comparable to a rate priced
+   * from a measured marginal. */
+  writeProgramValueSec?: number;
   /** Best backdoor to install WHILE that write occupies the career slot. The
    * write spends player time only, so the backdoor pipeline must keep
    * running rather than idling behind it. */
@@ -1235,20 +1272,45 @@ export interface ServerAccessPlan {
 }
 
 export function serverAccessPlan(
-  ctx: Pick<ClaimContext, "board" | "state" | "activeFeatures">,
+  ctx: Pick<ClaimContext, "board" | "state" | "activeFeatures"> & Partial<Pick<ClaimContext, "horizons">>,
 ): ServerAccessPlan | undefined {
-  const ranked = rankServerAccessActions(ctx);
-  const primary = ranked[0];
+  const candidates = rankServerAccessCandidates(ctx);
+  const primary = candidates[0]?.entry;
   if (!primary) return undefined;
   if (primary.action !== "port-opener") return { primary };
   const program = programForPortNeed(ctx.state, primary.server.numOpenPortsRequired ?? 0);
   if (!program || !writeInsteadOfBuy(ctx, program)) return { primary };
-  const concurrentBackdoor = ranked.find((entry) => entry.action === "backdoor");
+  const concurrentBackdoor = candidates.find((entry) => entry.entry.action === "backdoor")?.entry;
   return {
     primary,
     writeProgram: program,
+    writeProgramValueSec: openerUnlockValueSec(ctx, candidates),
     ...(concurrentBackdoor ? { concurrentBackdoor } : {}),
   };
+}
+
+/** What the NEXT opener unlocks, in BN-seconds.
+ *
+ * Writing one program takes the port count from `owned` to `owned + 1`, so every
+ * pending candidate needing at most that many ports stops being blocked by a
+ * missing cracker. Summing them is the honest value of the file; taking only the
+ * primary would under-price an opener that roots half the board at once.
+ *
+ * Clamped to the node horizon because an unlock cannot save more run than there
+ * is run left — the same bound `factionGateSavedSeconds` puts on an access
+ * blocker, and the same horizon the write's occupancy is charged against. */
+function openerUnlockValueSec(
+  ctx: Pick<ClaimContext, "state"> & Partial<Pick<ClaimContext, "horizons">>,
+  candidates: readonly RankedAccessCandidate[],
+): number {
+  const unlockedPorts = (ctx.state.topics.fleet?.portOpeners ?? 0) + 1;
+  let total = 0;
+  for (const candidate of candidates) {
+    if (candidate.entry.action !== "port-opener") continue;
+    if ((candidate.entry.server.numOpenPortsRequired ?? 0) > unlockedPorts) continue;
+    total += candidate.valueSec;
+  }
+  return Math.min(total, nodeHorizonSec(ctx.horizons?.node));
 }
 
 /** Darkweb port openers, cheapest first — the order the game unlocks ports in.
@@ -1289,28 +1351,37 @@ function shouldWriteProgram(game: GameState, program: ProgramOption): boolean {
   );
 }
 
-/** What the career slot would do over a `writeSec` window if it were not
+/** What the player-work slot would do over a `writeSec` window if it were not
  * writing this program — the write's real opportunity cost.
  *
- * MONEY is the maximum rate on the ranked board, which is the income the slot
- * reverts to once the top need saturates (and preserves the historical
- * money-only comparison exactly when no need is posted). VALUE is the top
- * NON-program option's own need progress: career ranks by urgency and then by
- * score, so `ranked[0]` is the option the slot actually runs, and the program
- * entry itself is excluded because it is the alternative being priced. */
+ * READ FROM THE AUCTION, not from career's own menu. The predecessor priced the
+ * write against `career.plan.ranked[0]`, so the only alternatives it could see
+ * were career's: reputation work — the thing that actually loses twenty minutes
+ * to a write — was invisible, and so was any other feature bidding for the same
+ * slot. `arbitration.slotValues` is every bid and what it is worth, which is
+ * exactly the question being asked here.
+ *
+ * The scaling is the part that is easy to get wrong. A bid's `valueSec` is the
+ * BN-seconds a SUSTAINED rate is worth over the rest of the route; occupying the
+ * slot for `writeSec` of that route forfeits the corresponding fraction of it,
+ * never the whole thing. */
 function careerAlternative(game: GameState, writeSec: number): ProgramAlternative {
   const ranked = (game.topics.career?.plan?.ranked ?? [])
     .filter((entry) => !entry.label.startsWith("program:"));
   const moneyPerSec = Math.max(0, ...ranked.map((entry) => entry.moneyPerSec));
-  const valueSec = (ranked[0]?.contributions ?? []).reduce((total, contribution) => {
-    if (contribution.weight <= 0 || contribution.score <= 0) return total;
-    // career's score is (perSec / remaining) * weight, so score/weight is the
-    // FRACTION of the need completed per second. Capped at one: a need that
-    // finishes inside the window is forgone once, not once per window-second.
-    const completed = Math.min(1, (contribution.score / contribution.weight) * writeSec);
-    return total + completed * contribution.weight * NOMINAL_VALUE_SEC_PER_WEIGHT;
-  }, 0);
-  return { moneyPerSec, valueSec };
+
+  let bestSlotValueSec = Math.max(0, ranked[0]?.score ?? 0);
+  for (const bid of game.topics.arbitration?.slotValues ?? []) {
+    // Career's own bid is either this write or the option already counted
+    // above; every other bidder is a use of the slot career cannot see.
+    if (bid.by === "career" || bid.valueSec === undefined) continue;
+    bestSlotValueSec = Math.max(bestSlotValueSec, bid.valueSec);
+  }
+
+  const node = game.topics.progression?.plan?.forecasts?.node;
+  const horizonSec = nodeHorizonSec(node);
+  const occupied = horizonSec > 0 ? Math.min(1, Math.max(0, writeSec) / horizonSec) : 1;
+  return { moneyPerSec, valueSec: bestSlotValueSec * occupied };
 }
 
 /** The arbiter's own shadow price of a dollar, in BN-seconds. Taken as the
@@ -1534,7 +1605,7 @@ export const hacking: FeatureDriver = {
         currentRam: game.topics.fleet!.home.maxRam,
         upgradeCost: homeRamCost,
         incomePerSecPerGb: game.topics.farm?.moneyPerSecPerGb ?? 0,
-        horizonSec: usableForecastSec(ctx.horizons.node) ?? DEFAULT_PLANNING_HORIZON_SEC,
+        horizonSec: nodeHorizonSec(ctx.horizons.node),
       });
       if (game.topics.fleet) {
         merge(game, "fleet", {
@@ -1551,7 +1622,7 @@ export const hacking: FeatureDriver = {
             evaluatedAt: now,
             // Coarse for the DIGEST: the raw forecast ticks down every second
             // and re-published one store record per second all run.
-            horizonSec: coarseHorizonSec(usableForecastSec(ctx.horizons.node) ?? DEFAULT_PLANNING_HORIZON_SEC),
+            horizonSec: coarseHorizonSec(nodeHorizonSec(ctx.horizons.node)),
             moneyAvailable: game.topics.player?.money ?? 0,
             moneyGranted: ctx.grants.money,
             incomePerSecPerGb: game.topics.farm?.moneyPerSecPerGb ?? 0,
@@ -1628,6 +1699,7 @@ export const hackingModule: FeatureModule = {
   reset: (state) => {
     resetHackingState();
     requestedProgram = undefined;
+    requestedProgramValueSec = undefined;
     // The rollups this feature publishes. Cumulative totals live in the
     // dispatcher stats resetHackingState just cleared; dropping the last
     // rollups stops the UI showing the old node's earnings until the next
@@ -1640,6 +1712,7 @@ export const hackingModule: FeatureModule = {
     const claims: FeatureClaim[] = [];
     const plan = serverAccessPlan(ctx);
     requestedProgram = plan?.writeProgram;
+    requestedProgramValueSec = plan?.writeProgramValueSec;
     // The concurrent backdoor needs its RAM claim too, or falling through to
     // it in the driver would only ever find the dodge unfunded.
     const backdoorTarget = plan?.primary.action === "backdoor" ? plan.primary : plan?.concurrentBackdoor;
@@ -1762,6 +1835,16 @@ export const hackingModule: FeatureModule = {
         target: 1,
         have: 0,
         weight: 8,
+        // What the file is actually worth: the board's own value for every
+        // server this opener unblocks (`ServerAccessPlan.writeProgramValueSec`).
+        // `weight` stays for the urgency ordering the board does with it, but
+        // `rankingValueSec` prefers a measured `valueSec`, so the nominal
+        // 8 x 300 stops being consulted the moment we can price the unlock —
+        // and career stops comparing an invented constant against a crime rate
+        // priced from a measured marginal.
+        ...(requestedProgramValueSec !== undefined && requestedProgramValueSec > 0
+          ? { valueSec: requestedProgramValueSec }
+          : {}),
         urgency: "blocking",
         why: `writing ${requestedProgram.name} is cheaper than buying it at current player-work income`,
       }]

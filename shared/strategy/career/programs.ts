@@ -44,9 +44,9 @@ export interface ProgramAlternative {
   /** Money per second the slot reverts to earning once the top need is
    * saturated — its income fallback, not the top option's own rate. */
   moneyPerSec: number;
-  /** BN-seconds of posted-need value the slot would deliver DURING the write
-   * window, already saturation-capped: a need that completes in fifteen
-   * seconds is forgone once, not forty times over a ten-minute window. */
+  /** BN-seconds the slot would deliver to the best OTHER bidder during the
+   * write window — the winning bid's sustained worth, scaled by the fraction of
+   * the remaining route the write occupies. */
   valueSec: number;
 }
 
@@ -73,6 +73,9 @@ export function preferProgramCreation(
   const buyCost = program.purchaseCost + (hasTor ? 0 : 200_000);
   const forgoneMoney = timeSec * Math.max(0, alternative.moneyPerSec);
   if (valueSecPerDollar === undefined || !(valueSecPerDollar > 0)) return forgoneMoney < buyCost;
-  const writeValueSec = forgoneMoney * valueSecPerDollar + Math.max(0, alternative.valueSec);
+  // The larger of two estimates of ONE cost, not their sum: the money the slot
+  // would have earned is itself a priced channel inside `valueSec` now, so
+  // adding them counted the same forgone dollars twice.
+  const writeValueSec = Math.max(forgoneMoney * valueSecPerDollar, Math.max(0, alternative.valueSec));
   return writeValueSec < buyCost * valueSecPerDollar;
 }

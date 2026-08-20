@@ -264,6 +264,29 @@ describe("probe table", () => {
     expect(missing).toEqual([]);
   });
 
+  test("the Go score has exactly one producer", () => {
+    // The score is an exact function of the board. When the 2 s core probe
+    // also read it from the game, its clock and the board's clock disagreed,
+    // so a probe firing between our move landing and White replying published
+    // a score one stone ahead of the position shown beside it.
+    const core = DIRECT_PROBES.find((probe) => probe.id === "go.core");
+    expect(core).toBeDefined();
+    expect(core!.methods).toContain("go.getGameState");
+    const emitted = core!.run({
+      go: {
+        getGameState: () => ({ currentPlayer: "Black", whiteScore: 99, blackScore: 99, komi: 5.5, bonusCycles: 0 }),
+        getOpponent: () => "Netburners",
+        analysis: { getStats: () => ({}) },
+      },
+    } as never, probeContext);
+    const data = emitted[0]?.data as Record<string, unknown>;
+    expect(data).toBeDefined();
+    expect(data).not.toHaveProperty("blackScore");
+    expect(data).not.toHaveProperty("whiteScore");
+    // Komi is immutable opponent metadata, not board-derived, so it stays.
+    expect(data["komi"]).toBe(5.5);
+  });
+
   test("every feature with a topic is reachable by some probe", () => {
     const probed = new Set(allProbes.map((p) => p.feature));
     // Every feature except those with no ns surface must have a probe.

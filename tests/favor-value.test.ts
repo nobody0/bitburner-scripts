@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { defaultWeights, NEUROFLUX, type AugInfo } from "../shared/strategy/factions/augs.ts";
+import { NEUROFLUX, weightsFromMarginals, type AugInfo } from "../shared/strategy/factions/augs.ts";
 import { factionFavorPointValues } from "../shared/strategy/factions/favorValue.ts";
 import { favorPointValuesFrom } from "../game/lib/features/factions.ts";
 import { goFactionFavor } from "../game/lib/features/remaining.ts";
 import type { FactionsView } from "../shared/strategy/factions/state.ts";
 import type { FactionStanding } from "../shared/strategy/factions/state.ts";
+
+/** A measured route: reputation binds, hacking is the climb behind it. */
+const WORTH = new Map([["money", 1_000], ["hacking", 19_174], ["reputation", 49_505]]);
 
 function aug(name: string, factions: string[], overrides: Partial<AugInfo> = {}): AugInfo {
   return {
@@ -52,7 +55,7 @@ function view(overrides: Partial<FactionsView> = {}): FactionsView {
     catalog: new Map(),
     owned: new Set(),
     queued: new Set(),
-    weights: defaultWeights(),
+    weights: weightsFromMarginals(WORTH),
     horizonSec: 40_000,
     targetAugCount: Infinity,
     favorToDonate: 150,

@@ -199,10 +199,10 @@ export const careerTab: Tab = {
         `<div class="row"><span class="muted">chose</span> ` +
           `<strong>${esc(plan.action.type)}${plan.action.subject ? `: ${esc(plan.action.subject)}` : ""}</strong>` +
           `${plan.action.field ? ` <span class="muted">${esc(plan.action.field)}</span>` : ""}` +
-          `${plan.priority ? ` <span class="muted">(${esc(plan.priority.band)} ${fmtNum(plan.priority.value, 2)})</span>` : ""}</div>`,
+          `${plan.priority ? ` <span class="muted">(${esc(plan.priority.band)}, worth ${fmtNum(plan.priority.value, 2)}s)</span>` : ""}</div>`,
       );
       if (plan.incomeFallback) {
-        nowParts.push(note("no posted need could be served — this is the income fallback"));
+        nowParts.push(note("the chosen option serves no posted need — it won on the rates it produces"));
       }
       if (plan.lastResult) {
         nowParts.push(
@@ -281,7 +281,19 @@ export const careerTab: Tab = {
               sort: (o) => URGENCY_ORDER[o.priority ?? "income"] ?? 9,
               cell: (o) => `<span class="muted">${esc(o.priority ?? "income")}</span>`,
             },
-            { id: "score", label: "score", sort: (o) => o.score, cell: (o) => fmtNum(o.score, 4) },
+            { id: "score", label: "BN-sec", sort: (o) => o.score, cell: (o) => `${fmtNum(o.score, 4)}s` },
+            {
+              // Why a score is below what its channels are worth: an option that
+              // must OCCUPY the slot before it delivers only gets the part of the
+              // run that is left once it has finished. Blank for ordinary work,
+              // which produces for as long as it holds the slot.
+              id: "delivers",
+              label: "delivers",
+              sort: (o) => o.deliveryFraction ?? 1,
+              cell: (o) => o.deliveryFraction !== undefined && o.deliveryFraction < 1
+                ? `<span class="muted">${fmtNum(o.deliveryFraction * 100, 3)}% of horizon</span>`
+                : "",
+            },
             {
               id: "money",
               label: "$/sec",
@@ -290,16 +302,16 @@ export const careerTab: Tab = {
             },
             {
               id: "contributions",
-              label: "scored inputs",
+              label: "priced inputs",
               left: true,
               wrap: true,
               sort: (o) => o.contributions?.length ?? 0,
               cell: (o) => o.contributions?.length
                 ? o.contributions.map((part) =>
                     `${esc(part.kind)}${part.subject ? `:${esc(part.subject)}` : ""} ` +
-                    `${fmtNum(part.perSec, 4)}/s × ${fmtNum(part.weight, 2)} = ${fmtNum(part.score, 4)}`,
+                    `${fmtNum(part.perSec, 4)}/s of a channel worth ${fmtNum(part.worthSec, 3)}s → ${fmtNum(part.valueSec, 4)}s`,
                   ).join("<br>")
-                : `<span class="muted">income only</span>`,
+                : `<span class="muted">nothing priced</span>`,
             },
           ],
           { defaultSort: { key: "score", dir: -1 }, limit: 12, empty: "no viable career options" },

@@ -27,8 +27,10 @@ export interface CrimeOption {
 export interface CareerPlan {
   action: { type: string; subject?: string; field?: string };
   /** True when no posted need could be served and career fell back to income. */
+  /** The CHOSEN option serves no posted need — it won on what it produces. */
   incomeFallback: boolean;
-  /** Queue band and the arbiter value assigned to the chosen option. */
+  /** Reported urgency band, and the BN-seconds the chosen option is worth —
+   *  the number the work-slot auction actually ranks it by. */
   priority?: { band: "blocking" | "wanted" | "nice" | "income"; value: number };
   /** Why this review ran, and when the next clock-driven one is due. */
   schedule?: {
@@ -43,7 +45,13 @@ export interface CareerPlan {
     score: number;
     moneyPerSec: number;
     priority?: "blocking" | "wanted" | "nice" | "income";
-    contributions?: { kind: string; subject?: string; perSec: number; weight: number; score: number }[];
+    /** Share of this option's worth that lands inside the planning horizon.
+     *  Below 1 only for an option that must OCCUPY the slot before it delivers
+     *  — a program write — and already applied to `score`. */
+    deliveryFraction?: number;
+    /** Per-channel valuation: our rate, what a relative increase in that
+     *  channel is worth in BN-seconds, and the product. */
+    contributions?: { kind: string; subject?: string; perSec: number; worthSec: number; valueSec: number }[];
   }[];
   /** Needs from the board this feature is currently working toward. */
   serving: {

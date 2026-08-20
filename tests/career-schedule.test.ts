@@ -5,15 +5,16 @@ import {
   peekWorkCompletion,
   resetWorkCompletion,
 } from "../game/lib/work-completion.ts";
-import { careerModule, priorityForDecision, resetCareerState } from "../game/lib/features/career.ts";
+import { careerModule, resetCareerState } from "../game/lib/features/career.ts";
 import { factionsModule } from "../game/lib/features/factions.ts";
 import type { ClaimContext } from "../game/lib/features/index.ts";
 import type { GameState } from "../game/lib/state.ts";
 import { stepCareer, type CareerView } from "../shared/strategy/career/decide.ts";
 import type { CrimeContext, CrimePerson, CrimeStats } from "../shared/strategy/career/crimes.ts";
 import { careerSchedule, CONTINUOUS_REVIEW_MS, progressLockUntil, updateActivityRate } from "../shared/strategy/career/schedule.ts";
-import { PREEMPT_MARGIN, PRIORITY, type Claim } from "../shared/strategy/arbiter.ts";
-import { rateFraction, slotPriority } from "../shared/strategy/income.ts";
+import { PREEMPT_MARGIN, PRIORITY, resolveClaims, type Claim } from "../shared/strategy/arbiter.ts";
+import { workRepPerSec } from "../shared/strategy/factions/rep.ts";
+import { rateFraction } from "../shared/strategy/income.ts";
 import { postNeeds, type Need, type NeedUrgency } from "../shared/strategy/needs.ts";
 
 const person: CrimePerson = {
@@ -334,29 +335,22 @@ describe("the slot lock is bounded by the progress it protects", () => {
   });
 });
 
-describe("Algorithms versus route reputation", () => {
-  function routeState(repSec: number): GameState {
-    return {
-      topics: {
-        progression: { plan: { route: "daedalus" } },
-        factions: {
-          plan: {
-            objective: {
-              intent: { purpose: "augmentations", repSec },
-            },
-          },
-        },
-      },
-    } as unknown as GameState;
-  }
+describe("training versus route reputation", () => {
+  // This used to be a named special case: `priorityForDecision` recognised the
+  // string "Algorithms", looked up the fleet's experience rate, and scaled the
+  // blocking band by the share of the XP that would actually be lost. That is
+  // the general rule — our rate over the best rate, times what the channel is
+  // worth — applied to one hardcoded course, so the rule replaced it.
+  const HACKING_WORTH = 19_000;
 
-  function algorithms(externalExpPerSec: number): { decision: ReturnType<typeof stepCareer>; careerView: CareerView } {
+  function algorithms(externalExpPerSec: number): ReturnType<typeof stepCareer> {
     const careerView = view({
       crimes: [],
       courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 10, costPerSec: 0, location: "Rothman University" }],
-      exp: { hacking: 0 },
-      skillMultipliers: { hacking: 1 },
-      externalSkillExpPerSec: { hacking: externalExpPerSec },
+      rates: {
+        best: new Map(externalExpPerSec > 0 ? [["hacking", { state: "measured", value: externalExpPerSec }]] : []),
+        worth: new Map([["hacking", HACKING_WORTH]]),
+      },
     });
     const board = postNeeds([{
       by: "progression",
@@ -368,58 +362,36 @@ describe("Algorithms versus route reputation", () => {
       urgency: "blocking",
       why: "Daedalus invite",
     }]);
-    return { decision: stepCareer(careerView, board), careerView };
+    return stepCareer(careerView, board);
   }
 
-  test("background XP that closes the skill gate during faction work removes the Algorithms bid", () => {
-    const { decision, careerView } = algorithms(1_000_000);
-    expect(priorityForDecision(decision, careerView, routeState(1_000))).toBe(0);
+  test("a course the fleet out-produces a hundred-thousandfold is worth that fraction", () => {
+    const decision = algorithms(1_000_000);
+    expect(decision.ranked[0]!.score).toBeCloseTo((10 / 1_000_000) * HACKING_WORTH, 9);
   });
 
-  test("without background XP Algorithms retains its blocking priority", () => {
-    const { decision, careerView } = algorithms(0);
-    const priority = priorityForDecision(decision, careerView, routeState(1_000));
-    expect(priority).toBe(PRIORITY["career:blocking-need"]);
-    expect(priority).toBeGreaterThan(PRIORITY["factions:route-work"] + PREEMPT_MARGIN);
+  test("with no background experience the course is the best hacking rate there is", () => {
+    // Sole producer: the whole worth of the channel, and the claim says so.
+    expect(algorithms(0).ranked[0]!.score).toBeCloseTo(HACKING_WORTH, 9);
   });
 
-  test("pre-gate Algorithms bootstrap decays as the hacking fleet replaces its XP", () => {
-    const careerView = view({
-      crimes: [],
-      courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 10, costPerSec: 0, location: "Rothman University" }],
-      externalIncomePerSec: 1,
-      externalSkillExpPerSec: { hacking: 0 },
-    });
-    const decision = stepCareer(careerView, postNeeds([]));
-    expect(decision).toMatchObject({ action: { subject: "Algorithms" }, incomeFallback: true });
-    expect(priorityForDecision(decision, careerView, routeState(1_000)))
-      .toBe(PRIORITY["career:blocking-need"]);
-
-    const farmDominates = { ...careerView, externalSkillExpPerSec: { hacking: 90 } };
-    expect(priorityForDecision(decision, farmDominates, routeState(1_000)))
-      .toBeCloseTo(PRIORITY["career:blocking-need"] * 0.1, 12);
+  test("the bid decays continuously as the fleet takes over", () => {
+    // The fraction is the RELATIVE increase the course buys: ten more
+    // experience per second on top of ninety is an eleven percent improvement,
+    // and worth eleven percent of what the channel is worth. Matching the fleet
+    // exactly is a doubling, which is the full worth and also the cap.
+    const alone = algorithms(0).ranked[0]!.score;
+    expect(algorithms(10).ranked[0]!.score).toBeCloseTo(alone, 6);
+    expect(algorithms(90).ranked[0]!.score).toBeCloseTo(alone * (10 / 90), 6);
+    expect(algorithms(1_000_000).ranked[0]!.score).toBeLessThan(alone / 1_000);
   });
 
-  test("an optional Algorithms need keeps its declared priority", () => {
-    const careerView = view({
-      crimes: [],
-      courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 10, costPerSec: 0, location: "Rothman University" }],
-      externalSkillExpPerSec: { hacking: 0 },
-    });
-    const decision = stepCareer(careerView, postNeeds([{
-      by: "progression",
-      kind: "skill",
-      subject: "hacking",
-      target: 100,
-      have: 1,
-      weight: 1,
-      urgency: "wanted",
-      why: "optional acceleration",
-    }]));
-
-    expect(decision).toMatchObject({ incomeFallback: false, workPriority: "wanted" });
-    expect(priorityForDecision(decision, careerView, routeState(1_000)))
-      .toBe(PRIORITY["career:wanted-request"]);
+  test("a hacking need is priced by the route marginal, never by its posted weight", () => {
+    // `skill:hacking` IS a progression currency. Pricing it from the weight as
+    // well would count the same progress twice, and the weight is the estimate
+    // nobody measured.
+    const decision = algorithms(0);
+    expect(decision.ranked[0]!.contributions.map((entry) => entry.worthSec)).toEqual([HACKING_WORTH]);
   });
 });
 
@@ -432,7 +404,7 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
   // 10-minute Heist, and faction work waited out the lock. The trace showed 91 s of
   // reputation per 650 s cycle: a 14% duty cycle, turning a 14 h Daedalus grind
   // into ~100 h.
-  function slotClaim(over: {
+  function factionClaims(over: {
     rep?: number;
     repTarget?: number;
     offers?: { faction: string; repReq: number; owned?: boolean }[];
@@ -440,18 +412,24 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
     route?: "daedalus" | "gang";
     installWanted?: boolean;
     routeInstallRequired?: boolean;
+    blockers?: { faction: string; kind: string; subject?: string }[];
+    action?: { type: string; city?: string; why: string };
+    workTypes?: string[];
+    skills?: Record<string, number>;
   } = {}) {
     const rep = over.rep ?? 7_400;
     const state = {
       topics: {
-        player: { money: 0, skills: {}, mults: {}, jobs: {}, city: "Sector-12" },
+        player: { money: 0, skills: over.skills ?? {}, mults: {}, jobs: {}, city: "Sector-12" },
         factions: {
           joined: over.joined ?? ["The Covenant"],
           standings: [{ name: "The Covenant", rep, favor: 13, joined: true }],
+          ...(over.workTypes ? { workTypes: { "The Covenant": over.workTypes } } : {}),
           offers: over.offers ?? [{ faction: "The Covenant", repReq: 50_000, owned: false }],
           plan: {
             context: { route: over.route },
-            action: { type: "idle", why: "breakpoint met" },
+            action: over.action ?? { type: "idle", why: "breakpoint met" },
+            ...(over.blockers ? { blockers: over.blockers } : {}),
             objective: {
               factions: ["The Covenant"],
               augmentations: [],
@@ -485,8 +463,14 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
       },
       ramPrice: (methods) => methods.length,
     });
-    return claims.find((claim) => claim.resource === "time" && claim.id.startsWith("work:"));
+    return claims;
   }
+
+  const slotClaim = (over: Parameters<typeof factionClaims>[0] = {}): Claim | undefined =>
+    factionClaims(over).find((claim) => claim.resource === "time" && claim.id.startsWith("work:")) as Claim | undefined;
+
+  const travelFund = (over: Parameters<typeof factionClaims>[0] = {}): Claim | undefined =>
+    factionClaims(over).find((claim) => claim.id === "travel-fund") as Claim | undefined;
 
   test("the breakpoint being MET does not release the slot", () => {
     // rep 7,400 past a 7,340 target: the objective gap is closed, but 50,000 rep of
@@ -501,23 +485,74 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
     expect(slotClaim({ rep: 100 })!.id).toBe("work:The Covenant");
   });
 
-  test("a selected faction-acquisition route outranks ordinary income after a task boundary", () => {
+  test("ordinary route work bids the reputation it would earn, rather than a band", () => {
+    // `factions:route-work` (91) existed to clear career income's scored
+    // ceiling of 80. With both sides priced in BN-seconds there is nothing to
+    // clear: reputation work wins exactly when reputation is what the route is
+    // short of, and loses when it is not.
     const claim = slotClaim({ rep: 100, route: "daedalus" })!;
-    expect(claim.priority).toBe(PRIORITY["factions:route-work"]);
-    expect(claim.priority).toBeGreaterThan(80 + PREEMPT_MARGIN);
-    expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(claim.priority + PREEMPT_MARGIN);
+    expect(claim.produces).toBeDefined();
+    expect(claim.priority).toBe(PRIORITY["factions:work"]);
+  });
+
+  test("the claim PREDICTS its reputation instead of remembering a measured one", () => {
+    // The claim has to price itself on the passes the planner exits early —
+    // joining, travelling, no target yet — and those are exactly the passes on
+    // which no rate has ever been measured. The predecessor bid the EWMA there,
+    // which is zero at a faction never worked, and `{ reputation: 0 }` prices as
+    // unpriced and hands the slot to any crime holding cash. Reputation is
+    // exactly predictable, so there is no reason to bid a memory.
+    const skills = { hacking: 300, strength: 200, defense: 200, dexterity: 200, agility: 200, charisma: 200 };
+    const claim = slotClaim({ rep: 100, workTypes: ["hacking", "field", "security"], skills })!;
+    const person = {
+      skills: { ...skills, intelligence: 0 },
+      mults: {
+        faction_rep: 1, hacking_exp: 1, strength_exp: 1, defense_exp: 1,
+        dexterity_exp: 1, agility_exp: 1, charisma_exp: 1,
+      },
+    } as never;
+    const ctx = {
+      factionWorkRepGain: 1, factionWorkExpGain: 1, factionPassiveRepGain: 1,
+      shareBonus: 1, sf15Level: 0, hasFocusAug: false,
+    };
+    const expected = Math.max(...(["hacking", "field", "security"] as const)
+      .map((type) => workRepPerSec(type, person, 13, ctx, true)));
+    expect(claim.produces!["reputation"]).toBeGreaterThan(0);
+    expect(claim.produces!["reputation"]).toBeCloseTo(expected, 9);
+  });
+
+  test("the predicted bid announces the experience the work also pays", () => {
+    // Field and security work pay combat and charisma experience alongside
+    // reputation. Announcing reputation alone sent a posted combat gate to crime
+    // while the reputation that same second could have earned did not happen.
+    const skills = { hacking: 10, strength: 400, defense: 400, dexterity: 400, agility: 400, charisma: 400 };
+    const claim = slotClaim({ rep: 100, workTypes: ["field"], skills })!;
+    expect(claim.produces!["combat"]).toBeGreaterThan(0);
+    expect(claim.produces!["charisma"]).toBeGreaterThan(0);
+  });
+
+  test("a faction whose work types have not been probed yet bids nothing it cannot do", () => {
+    // Working a type a faction does not offer fails silently forever, so an
+    // unreported probe offers NOTHING rather than all three.
+    expect(slotClaim({ rep: 100 })!.produces!["reputation"]).toBe(0);
   });
 
   test("only a mechanically mandatory route install gets hard preemption", () => {
     const economic = slotClaim({ rep: 100, route: "daedalus", installWanted: true })!;
-    expect(economic.priority).toBe(PRIORITY["factions:route-work"]);
+    expect(economic.priority).toBe(PRIORITY["factions:work"]);
+    expect(economic.produces, "priced, so it competes on what it earns").toBeDefined();
 
     // The band is for the window BEFORE the transaction opens: the route
     // mandates this install and the reputation for its package is still being
-    // earned. That is the only state in which the claim buys anything.
+    // earned. That is the only state in which the claim buys anything — and it
+    // is HARD, because "the run cannot end without this" is not a rate.
     const claim = slotClaim({ rep: 100, route: "daedalus", routeInstallRequired: true })!;
     expect(claim.priority).toBe(PRIORITY["factions:install-work"]);
-    expect(claim.priority).toBeGreaterThan(PRIORITY["career:blocking-need"] + PREEMPT_MARGIN);
+    expect(claim.produces, "mandatory work is not bid for").toBeUndefined();
+    // Above the progress lock, so it takes an idle slot ahead of anything —
+    // but not by the pre-emption margin, so an unbanked crime still finishes
+    // its unit first. Cancelling banked-at-completion work is never free.
+    expect(claim.priority).toBeGreaterThan(PRIORITY["career:progress-lock"]);
   });
 
   test("the pre-install drain releases the slot instead of parking it at the top band", () => {
@@ -530,6 +565,33 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
     expect(
       slotClaim({ rep: 100, route: "daedalus", installWanted: true, routeInstallRequired: true }),
     ).toBeUndefined();
+  });
+
+  test("the travel fare is claimed from the BLOCKER, not from an already-published travel", () => {
+    // MEASURED: 85 executions logging "waiting for $200,000 travel grant" with
+    // $57.7m free. The claim phase sees the PREVIOUS plan, the driver decides
+    // travel at tick time and refuses to move without the grant already in
+    // hand — so a fare claimed off the published action is always one pass
+    // late, and by the next pass the objective has rotated and the action is
+    // gone. Same anticipation contract as the purchase and work RAM claims.
+    const cityBlocker = [{ faction: "Tetrads", kind: "city", subject: "Chongqing" }];
+    expect(travelFund({ blockers: cityBlocker }), "claimed before the action exists").toBeDefined();
+    expect(travelFund({ blockers: cityBlocker })!.amount).toBe(200_000);
+
+    // Still claimed once the action IS published — the two must overlap, or the
+    // grant lapses on the very pass that would spend it.
+    expect(travelFund({ blockers: cityBlocker, action: { type: "travelTo", city: "Chongqing", why: "t" } }))
+      .toBeDefined();
+
+    // A city requirement that is NOT the faction's only remaining blocker is
+    // not travel-imminent: travelling would break something else first.
+    expect(travelFund({
+      blockers: [
+        { faction: "Tetrads", kind: "city", subject: "Chongqing" },
+        { faction: "Tetrads", kind: "combatSkills" },
+      ],
+    })).toBeUndefined();
+    expect(travelFund(), "nothing blocked on a city at all").toBeUndefined();
   });
 
   test("nothing left to work toward DOES release the slot", () => {
@@ -551,23 +613,13 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
   });
 });
 
-describe("the work slot is scored on what it yields", () => {
+describe("the work slot is priced in BN-seconds, not banded", () => {
   // A fixed `career:income` said the same thing whether crime out-earned the hacking
-  // farm tenfold or was a rounding error beside it, so the exclusive slot could not
-  // be allocated on merit. Priority is now `repFraction * 60 + moneyFraction * 80`,
-  // each fraction measured against the best rate anyone announced.
-  test("the spans reproduce the worked examples", () => {
-    // Best reputation, no salary — what `factions:work` was as a constant.
-    expect(slotPriority({ repFraction: 1 })).toBe(60);
-    // Best money, no reputation. ABOVE reputation work on purpose: our best earner
-    // takes the slot from rep work, which is a decision about what the run is for.
-    expect(slotPriority({ moneyFraction: 1 })).toBe(80);
-    // Best for reputation and half the best money — they ADD, because a job paying
-    // in both is worth both.
-    expect(slotPriority({ repFraction: 1, moneyFraction: 0.5 })).toBe(100);
-    expect(slotPriority({ moneyFraction: 1 })).toBeGreaterThan(slotPriority({ repFraction: 1 }));
-  });
-
+  // farm tenfold or was a rounding error beside it. So did the spans that replaced
+  // it: `repFraction * 60 + moneyFraction * 80` ranked money above reputation as a
+  // matter of policy, in every node, forever. A claim now announces the RATES it
+  // produces and the arbiter prices them against the field, using what progression
+  // measured each channel to be worth in BN-seconds off the route.
   test("fractions are clamped, and nothing announced is not a fraction of nothing", () => {
     expect(rateFraction(500, 1_000)).toBe(0.5);
     expect(rateFraction(2_000, 1_000), "cannot exceed the best").toBe(1);
@@ -576,55 +628,155 @@ describe("the work slot is scored on what it yields", () => {
     expect(rateFraction(100, 0)).toBe(0);
     expect(rateFraction(0, 1_000)).toBe(0);
     expect(rateFraction(-5, 1_000)).toBe(0);
-    // Being the only announcer correctly yields the full span.
+    // Being the only announcer correctly yields the whole worth.
     expect(rateFraction(1_000, 1_000)).toBe(1);
   });
 
-  test("career's income claim rises and falls with its share of the best rate", () => {
-    function incomeClaim(over: { crimePerSec: number; farmPerSec?: number }) {
-      const state = {
-        topics: {
-          player: { money: 0, skills: {}, mults: {}, jobs: {}, city: "Sector-12" },
-          ...(over.farmPerSec !== undefined ? { fleet: { scriptIncome: [over.farmPerSec, 0] } } : {}),
-          career: {
-            karma: 0, numPeopleKilled: 0, skills: {}, exp: {}, city: "Sector-12",
-            location: "home", entropy: 0, totalPlaytime: 0, jobs: {}, companies: {},
-            currentWork: null,
-            crimes: [],
-            plan: { ranked: [{ label: "crime: Heist", score: 1, moneyPerSec: over.crimePerSec, priority: "income", contributions: [], why: "" }] },
-          },
+  function careerState(over: {
+    crimePerSec: number;
+    farmPerSec?: number;
+    marginals?: Record<string, { state: string; secondsPerRelativeRate: number }>;
+  }): GameState {
+    return {
+      topics: {
+        player: { money: 0, skills: {}, mults: {}, jobs: {}, city: "Sector-12" },
+        ...(over.farmPerSec !== undefined ? { fleet: { scriptIncome: [over.farmPerSec, 0] } } : {}),
+        progression: { sourceFiles: {}, ...(over.marginals ? { plan: { marginals: over.marginals } } : {}) },
+        career: {
+          karma: 0, numPeopleKilled: 0, skills: {}, exp: {}, city: "Sector-12",
+          location: "home", entropy: 0, totalPlaytime: 0, jobs: {}, companies: {},
+          currentWork: null,
+          crimes: [{
+            name: "Heist", timeMs: 1_000, money: over.crimePerSec, difficulty: 1,
+            karma: 0, kills: 0, weights: {}, exp: {}, chance: 1, gainsAreEffective: true,
+          }],
+          plan: { ranked: [{ label: "crime: Heist", score: 1, moneyPerSec: over.crimePerSec, priority: "income", contributions: [] }] },
         },
-        dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
-        probeFailures: {}, featureLastRun: {},
-      } as unknown as GameState;
-      const claims = careerModule.claims!({
-        state,
-        board: postNeeds([]),
-        now: 0,
-        caps: {} as ClaimContext["caps"],
-        activeFeatures: new Set(),
-        horizons: {
-          node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
-          install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
-        },
-        ramPrice: (methods) => methods.length,
-      });
-      resetCareerState();
-      return claims.find((claim) => claim.id === "work" && claim.resource === "time")!;
-    }
+      },
+      dirty: new Set(), mirrors: {}, mirrorDirty: new Set(),
+      probeFailures: {}, featureLastRun: {},
+    } as unknown as GameState;
+  }
 
-    // Sole earner: full span, and it outranks faction work.
-    expect(incomeClaim({ crimePerSec: 1_000 }).priority).toBe(80);
-    expect(incomeClaim({ crimePerSec: 1_000 }).priority).toBeGreaterThan(slotPriority({ repFraction: 1 }));
+  function slotClaimFor(state: GameState, needs: Need[] = []): Claim {
+    const claims = careerModule.claims!({
+      state,
+      board: postNeeds(needs),
+      now: 0,
+      caps: {} as ClaimContext["caps"],
+      activeFeatures: new Set(),
+      horizons: {
+        node: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
+        install: { state: "unknown", evaluatedAt: 1, nextRecalibrationAt: 2, basis: "t", reason: "t" },
+      },
+      ramPrice: (methods) => methods.length,
+    });
+    resetCareerState();
+    return claims.find((claim) => claim.id === "work" && claim.resource === "time")! as Claim;
+  }
 
-    // Out-earned four to one by the farm: a quarter of the span, and now it loses to
-    // faction work — which is the behaviour a flat 30 could never express.
-    const outclassed = incomeClaim({ crimePerSec: 1_000, farmPerSec: 4_000 });
-    expect(outclassed.priority).toBeCloseTo(20, 10);
-    expect(outclassed.priority).toBeLessThan(slotPriority({ repFraction: 1 }));
+  const MONEY_WORTH = 1_000;
+  const REP_WORTH = 4_000;
+  const factionWork: Claim = {
+    by: "factions", id: "work:Daedalus", resource: "time", amount: 1, shape: "step",
+    pricing: "hard", value: { state: "unknown", reason: "slot" },
+    priority: PRIORITY["factions:work"], mode: "spend",
+    produces: { reputation: 40 }, why: "reputation",
+  };
 
-    // Matching the farm splits it evenly.
-    expect(incomeClaim({ crimePerSec: 4_000, farmPerSec: 4_000 }).priority).toBe(80);
-    expect(incomeClaim({ crimePerSec: 2_000, farmPerSec: 4_000 }).priority).toBeCloseTo(40, 10);
+  function slotWinner(career: Claim, worth: Map<string, number>): string | undefined {
+    return resolveClaims({
+      now: 1_000,
+      pools: { money: 0 },
+      claims: [career, factionWork],
+      rates: { best: new Map(), worth },
+    }).slot?.by;
+  }
+
+  test("career announces the rates its chosen option would produce", () => {
+    const claim = slotClaimFor(careerState({ crimePerSec: 1_000 }));
+    expect(claim.produces).toMatchObject({ money: 1_000 });
+    // Not a band. The old claim carried `career:income` / `career:blocking-need`
+    // and nothing else, which is what made it incomparable with faction work.
+    expect(claim.holdUntil).toBeUndefined();
+  });
+
+  test("crime takes the slot when money is what the route is short of", () => {
+    const state = careerState({
+      crimePerSec: 1_000,
+      marginals: { money: { state: "estimated", secondsPerRelativeRate: MONEY_WORTH } },
+    });
+    // Sole earner, and money is worth more than reputation here.
+    expect(slotWinner(slotClaimFor(state), new Map([["money", MONEY_WORTH], ["reputation", 100]])))
+      .toBe("career");
+  });
+
+  test("out-earned by the farm, the same crime loses the slot to reputation work", () => {
+    // THE MEASURED FAILURE, from a live BN12 run: crime at $1.8e4/s held
+    // Player.currentWork for 5.8 hours while the farm earned $3.25e8/s and the
+    // only source of reputation in the run was denied `slot-held` every pass.
+    const state = careerState({ crimePerSec: 1_000, farmPerSec: 4_000_000 });
+    const worth = new Map([["money", MONEY_WORTH], ["reputation", REP_WORTH]]);
+    expect(slotWinner(slotClaimFor(state), worth)).toBe("factions");
+  });
+
+  test("a blocking need career barely serves no longer buys it the slot", () => {
+    // Progression posts the Daedalus money gate at weight 5, urgency blocking.
+    // Every crime pays SOME money, so every crime used to be banded blocking —
+    // and `career:blocking-need` (109) outranks route reputation work (91)
+    // whatever the contribution is actually worth. Here it is worth nothing:
+    // the same route's own marginal prices a relative income increase at zero,
+    // because the farm clears that gate long before anything else on the route.
+    const state = careerState({
+      crimePerSec: 1_000,
+      farmPerSec: 4_000_000,
+      marginals: {
+        money: { state: "estimated", secondsPerRelativeRate: 0 },
+        reputation: { state: "estimated", secondsPerRelativeRate: REP_WORTH },
+      },
+    });
+    const moneyGate: Need = {
+      by: "progression", kind: "money", target: 1e11, have: 1.8e10,
+      weight: 5, urgency: "blocking", why: "Daedalus invitation requirement",
+    };
+    const claim = slotClaimFor(state, [moneyGate]);
+    const worth = new Map([["money", 0], ["reputation", REP_WORTH]]);
+    expect(slotWinner(claim, worth)).toBe("factions");
+  });
+
+  test("a bid that cannot price itself loses, and is never promoted to a lock", () => {
+    // Factions re-issues its claim across a pass where the planner took an
+    // early exit and computed no work rate. Dropping the claim would release
+    // the slot outright (arbiter rule 4); silently becoming a hard claim at
+    // band 60 would be worse still — it would outrank every priced bid on the
+    // strength of having no number at all.
+    const mute: Claim = { ...factionWork, produces: { reputation: 0 } };
+    const earner = slotClaimFor(careerState({ crimePerSec: 1_000 }));
+    expect(resolveClaims({
+      now: 1_000,
+      pools: { money: 0 },
+      claims: [mute, earner],
+      rates: { best: new Map(), worth: new Map() },
+    }).slot?.by).toBe("career");
+  });
+
+  test("an in-flight crime still cannot be cancelled, whatever reputation is worth", () => {
+    // The lock is not an assertion that crime is more valuable; it is that
+    // throwing away an unbanked ten-minute unit costs more than the remaining
+    // seconds are worth to anyone. It is HARD, so no priced bid outranks it.
+    const locked: Claim = {
+      by: "career", id: "work", resource: "time", amount: 1, shape: "step",
+      pricing: "hard", value: { state: "unknown", reason: "slot" },
+      priority: PRIORITY["career:progress-lock"], mode: "spend",
+      holdUntil: 600_000, why: "unbanked progress",
+    };
+    expect(slotWinner(locked, new Map([["reputation", 1e9]]))).toBe("career");
+  });
+
+  test("before any marginal exists, the slot falls back to money per second", () => {
+    // A fresh install has no forecast and therefore no worth for any channel.
+    // Dollars and BN-seconds are never mixed; the bootstrap rule is money.
+    const state = careerState({ crimePerSec: 1_000 });
+    expect(slotWinner(slotClaimFor(state), new Map())).toBe("career");
   });
 });

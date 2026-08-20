@@ -29,6 +29,9 @@ export interface CoordinationInput {
   board: NeedBoard;
   claims: readonly Claim[];
   expectedIncomePerSec?: ArbiterInput["expectedIncomePerSec"];
+  /** Best rate per channel and what each channel is worth, for the work-slot
+   *  auction. See `shared/strategy/income.ts`. */
+  rates?: ArbiterInput["rates"];
   reinvestmentReturnPerDollarSec?: number;
   nextStep?: ArbiterInput["nextStep"];
   /** Work-slot holder carried from the previous pass. */
@@ -52,6 +55,7 @@ export function coordinate(input: CoordinationInput): Coordination {
     pools: { money: input.money },
     claims: input.claims,
     ...(input.expectedIncomePerSec ? { expectedIncomePerSec: input.expectedIncomePerSec } : {}),
+    ...(input.rates ? { rates: input.rates } : {}),
     ...(input.reinvestmentReturnPerDollarSec !== undefined ? { reinvestmentReturnPerDollarSec: input.reinvestmentReturnPerDollarSec } : {}),
     ...(input.nextStep ? { nextStep: input.nextStep } : {}),
     ...(input.slot ? { slot: input.slot } : {}),
@@ -164,6 +168,30 @@ export function arbitrationDigest(result: ArbiterResult, now: number, claims: re
     ...(result.warnings.length > 0 ? { warnings: result.warnings } : {}),
     ...(result.slot
       ? { slot: { by: result.slot.by, id: result.slot.claimId, priority: result.slot.priority, heldMs: heldBucketMs(now - result.slot.since) } }
+      : {}),
+    ...(result.slotValues.length > 0
+      ? {
+        slotValues: result.slotValues.map((bid) => ({
+          by: bid.by,
+          id: bid.claimId,
+          pricing: bid.pricing,
+          priority: bid.priority,
+          ...(bid.value?.state === "priced" ? { valueSec: sig3(bid.value.valueSec) } : {}),
+          ...(bid.value !== undefined ? { moneyPerSec: sig3(bid.value.moneyPerSec) } : {}),
+          ...(bid.value !== undefined && bid.value.channels.length > 0
+            ? {
+              channels: bid.value.channels.map((channel) => ({
+                channel: channel.channel,
+                ourRate: sig3(channel.ourRate),
+                ...(channel.bestRate !== undefined ? { bestRate: sig3(channel.bestRate) } : {}),
+                worthSec: sig3(channel.worthSec),
+                valueSec: sig3(channel.valueSec),
+              })),
+            }
+            : {}),
+          why: bid.why,
+        })),
+      }
       : {}),
     ...(result.preempted
       ? { preempted: { by: result.preempted.by, id: result.preempted.claimId, heldMs: heldBucketMs(result.preempted.heldMs) } }

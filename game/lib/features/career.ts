@@ -2,11 +2,10 @@ import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { formatMoney } from "../../../shared/format.ts";
 import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
-import { marginalTrainingShare, skillRepTradeoff, stepCareer, TRAINING_FUND_WINDOW_SEC, type CareerDecision, type CareerPriorityBand, type CareerView } from "../../../shared/strategy/career/decide.ts";
-import { expForSkill } from "../../../shared/formulas.ts";
+import { stepCareer, TRAINING_FUND_WINDOW_SEC, type CareerDecision, type CareerPriorityBand, type CareerView } from "../../../shared/strategy/career/decide.ts";
 import type { CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { trainingBackdoorSavedRate } from "../../../shared/strategy/access/value.ts";
-import type { Need } from "../../../shared/strategy/needs.ts";
+import type { Need, NeedBoard } from "../../../shared/strategy/needs.ts";
 import { COMPANY_POSITIONS } from "../../../shared/features/companies.ts";
 import { applyOutcomes, companyRepPerSec, trackFieldFor } from "../../../shared/strategy/career/company.ts";
 import {
@@ -18,10 +17,10 @@ import {
   type CareerWorkMode,
 } from "../../../shared/strategy/career/schedule.ts";
 import { PORT_OPENER_PROGRAMS, programCreateTimeMs } from "../../../shared/strategy/career/programs.ts";
+import { nodeHorizonSec } from "../../../shared/strategy/progression/forecast.ts";
 import { CAREER_TRAINING_OPTIONS } from "../../../shared/strategy/career/training.ts";
-import { rateFraction, slotPriority } from "../../../shared/strategy/income.ts";
 import { isScriptDeath } from "../errors.ts";
-import { bestIncomePerSec, careerBestPerSec, moneyRateValue } from "../income.ts";
+import { moneyRateValue, slotRates } from "../income.ts";
 import { merge, type GameState } from "../state.ts";
 import {
   armWorkCompletion,
@@ -123,8 +122,10 @@ export function resetCareerState(): void {
 
 function buildCareerView(
   state: GameState,
+  board: NeedBoard,
   holdsWorkSlot: boolean,
   moneyGranted: number,
+  horizonSec: number,
   allowProgressSwitch = false,
 ): CareerView | undefined {
   const player = state.topics.player;
@@ -175,17 +176,6 @@ function buildCareerView(
     .map((program) => ({ ...program, timeMs: programCreateTimeMs(program, skills["hacking"] ?? 0, intelligence) }))
     .filter((program) => Number.isFinite(program.timeMs));
   const companyWork = companyModelInputs(state)!;
-  const factionWorkType = state.topics.factions?.plan?.action.workType;
-  const fallbackCandidates = factionWorkType === "security"
-    ? ["hacking", "strength", "defense", "dexterity", "agility"]
-    : factionWorkType === "field"
-      ? ["hacking", "strength", "defense", "dexterity", "agility", "charisma"]
-      : ["hacking"];
-  const defaultSkill = [...fallbackCandidates].sort((a, b) =>
-    (skills[a] ?? 0) - (skills[b] ?? 0)
-    || (a < b ? -1 : 1)
-  )[0] ?? "hacking";
-
   // Crime stats come from the game, never a hardcoded table — and the game's
   // own success chance comes with them, so the strategy never has to recompute
   // a number it can simply be told.
@@ -230,14 +220,8 @@ function buildCareerView(
     karma: player.karma ?? 0,
     numPeopleKilled: player.numPeopleKilled ?? 0,
     skills: { ...(player.skills ?? {}) } as unknown as Record<string, number>,
-    exp: { ...(career?.exp ?? {}) } as unknown as Record<string, number>,
-    skillMultipliers: Object.fromEntries(
-      ["hacking", "strength", "defense", "dexterity", "agility", "charisma"].map((skill) => [
-        skill,
-        (mults[skill] ?? 1) * (skill === "hacking" ? (nodeMults["HackingLevelMultiplier"] ?? 1) : 1),
-      ]),
-    ),
-    externalSkillExpPerSec: { hacking: Math.max(0, state.topics.farm?.expRate ?? 0) },
+    rates: slotRates(state, board),
+    planningHorizonSec: horizonSec,
     city: String(player.city ?? "Sector-12"),
     jobs: Object.fromEntries(Object.entries(player.jobs ?? {}).map(([company, job]) => [String(company), String(job)])),
     companies: Object.entries(career?.companies ?? {}).map(([name, company]) => ({
@@ -268,13 +252,20 @@ function buildCareerView(
           currentWork: {
             kind: String(career.currentWork.type).toLowerCase(),
             subject: career.currentWork.detail,
+            // Cycles are 200 ms, plus the drift since the observation, the same
+            // reconstruction `progressLockUntil` does. A part-finished program
+            // write is charged only the time it has LEFT, so a write that starts
+            // can finish instead of being re-judged against its full cost every
+            // pass. The game recomputes the write rate as hacking rises, so wall
+            // clock slightly UNDER-states progress on a levelling player — that
+            // over-charges the write, which is the safe direction.
+            elapsedSec: ((career.currentWork.cyclesWorked ?? 0) * 200
+              + Math.max(0, Date.now() - (career.currentWork.observedAt ?? Date.now()))) / 1_000,
           },
         }
       : {}),
     ...(allowProgressSwitch ? { allowProgressSwitch: true } : {}),
     moneyGranted,
-    externalIncomePerSec: state.topics.farm?.moneyRate ?? 0,
-    defaultSkill,
     companyWork,
   };
 }
@@ -610,7 +601,7 @@ const driver: FeatureDriver = {
     }
 
     sampleCompanyRates(ctx.state, now);
-    const view = buildCareerView(ctx.state, ctx.grants.slot, ctx.grants.money, completionBoundary);
+    const view = buildCareerView(ctx.state, ctx.board, ctx.grants.slot, ctx.grants.money, nodeHorizonSec(ctx.horizons.node), completionBoundary);
     if (!view) return;
     const decision = stepCareer(view, ctx.board);
     lastDecision = decision;
@@ -634,7 +625,7 @@ const driver: FeatureDriver = {
           ...(decision.action.field !== undefined ? { field: decision.action.field } : {}),
         },
         incomeFallback: decision.incomeFallback,
-        priority: { band: decision.workPriority, value: priorityForDecision(decision, view, ctx.state) },
+        priority: { band: decision.workPriority, value: decision.ranked[0]?.score ?? 0 },
         schedule: {
           mode: schedule.mode,
           reason: schedule.reason ?? "initial",
@@ -647,6 +638,7 @@ const driver: FeatureDriver = {
           score: entry.score,
           moneyPerSec: entry.moneyPerSec,
           priority: entry.priority,
+          deliveryFraction: entry.deliveryFraction,
           contributions: entry.contributions,
         })),
         serving: decision.serving.map((need) => ({
@@ -703,19 +695,25 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   let candidate = lastDecision;
   let candidateView = lastView;
   if (schedule.due) {
-    candidateView = buildCareerView(ctx.state, true, ctx.state.topics.player?.money ?? 0, completion !== undefined);
+    candidateView = buildCareerView(ctx.state, ctx.board, true, ctx.state.topics.player?.money ?? 0, nodeHorizonSec(ctx.horizons.node), completion !== undefined);
     if (candidateView) candidate = stepCareer(candidateView, ctx.board);
   }
-  const candidatePriority = candidate && candidateView
-    ? priorityForDecision(candidate, candidateView, ctx.state)
-    : priorityForBand(candidate?.workPriority ?? "income", ctx.state);
-  // The scored value above is a bid for the WORK SLOT against route reputation
-  // — the only resource that tradeoff is denominated in. Career's money claims
-  // stay on the plain band: an income-fallback course scored into the blocking
-  // band would otherwise reserve tuition above `factions:aug-fund`, and an
-  // in-flight course whose marginal share has decayed would price its own
-  // standing reserve down to near zero.
-  const moneyPriority = priorityForBand(candidate?.workPriority ?? "income", ctx.state);
+  // What the slot claim ANNOUNCES: the rates the selected option would produce.
+  // `ranked[0]` is the option the slot would actually run — the emitted action
+  // can be idle or continue because work is already in flight or the slot is
+  // held elsewhere, and neither of those changes what career is bidding to do.
+  const candidateProduces = candidate?.ranked[0]?.produces ?? {};
+  // ...and how much of that the slot actually DELIVERS. Career ranks its own
+  // options against each other before bidding the winner here, so a discount
+  // applied only inside that ranking would be re-inflated the moment the bid met
+  // another feature's claim — an eight-hour write would still outbid faction
+  // reputation at full worth. Absent means 1; only a bounded option sets it.
+  const candidateDelivery = candidate?.ranked[0]?.deliveryFraction;
+  // Money and dodge RAM are still banded — neither is auctioned on rates — and
+  // both take the urgency of the request career is serving. An income-fallback
+  // course scored into the blocking band would reserve tuition above
+  // `factions:aug-fund`, which is why this is the plain band and not the bid.
+  const bandPriority = priorityForBand(candidate?.workPriority ?? "income");
 
   const actionType = schedule.due ? candidate?.action.type : undefined;
   const methods = careerMethods(actionType);
@@ -725,7 +723,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
     // career could win the slot at `career:blocking-need` and then lose the RAM
     // to factions' route work at 91, holding `Player.currentWork` without ever
     // being able to call commitCrime/universityCourse.
-    out.push(actionRamClaim(ctx, "career", actionClaimId(actionType), methods, `career ${actionType}`, candidatePriority));
+    out.push(actionRamClaim(ctx, "career", actionClaimId(actionType), methods, `career ${actionType}`, bandPriority));
   }
   if (actionType === "travel") {
     out.push({
@@ -733,7 +731,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       id: "travel-fund",
       resource: "money",
       amount: TRAVEL_COST,
-      priority: moneyPriority,
+      priority: bandPriority,
       mode: "spend",
       shape: "step",
       pricing: "hard",
@@ -752,7 +750,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
         id: "training-fund",
         resource: "money",
         amount: costPerSec * TRAINING_FUND_WINDOW_SEC,
-        priority: moneyPriority,
+        priority: bandPriority,
         mode: "reserve",
         shape: "step",
         pricing: "hard",
@@ -770,7 +768,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       id: "training-fund",
       resource: "money",
       amount: trainingCostPerSec * TRAINING_FUND_WINDOW_SEC,
-      priority: moneyPriority,
+      priority: bandPriority,
       mode: "reserve",
       shape: "step",
       pricing: "hard",
@@ -789,17 +787,15 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
     out.push(actionRamClaim(ctx, "career", "watch:completion", ["singularity.getCurrentWork"], "arm exact work completion wakeup"));
   }
 
-  // Queue bands are deliberately spaced around faction work: blocking can
-  // preempt it, wanted/nice cannot, and income is the floor.
   const band = candidate?.workPriority ?? "income";
 
   // A task with unbanked progress gets an administrative lock, bounded by the
   // moment that progress banks — see `progressLockUntil` for why an unbounded one
   // wedged the whole run. Before the boundary the lock is absolute: cancelling a
-  // crime at 99% throws the entire thing away. At the boundary career drops back to
-  // its ordinary band, so the end of a crime is a fair re-evaluation of what to work
-  // rather than an automatic renewal — which is what let a 10-minute Heist hold the
-  // slot against faction work indefinitely.
+  // crime at 99% throws the entire thing away. At the boundary the claim drops back
+  // to its PRICED form, so the end of a crime is a fair re-evaluation of what to
+  // work rather than an automatic renewal — which is what let a 10-minute Heist
+  // hold the slot against faction work indefinitely.
   const lockUntil = progressLockUntil({
     mode: careerWorkMode(ctx.state.topics.career?.currentWork?.type),
     totalMs: progressTotalMs(ctx.state),
@@ -816,15 +812,25 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
     amount: 1,
     shape: "step",
     pricing: "hard",
-    value: { state: "unknown", reason: "the player-time slot is ordered by hard priority" },
-    priority: lockUntil !== undefined ? PRIORITY["career:progress-lock"] : candidatePriority,
+    value: { state: "unknown", reason: "a time claim is priced by `produces`, not by this field" },
+    // The lock is a HARD claim (no `produces`): it is not asserting that crime
+    // is worth more than reputation, only that throwing away an unbanked unit
+    // costs more than the few remaining seconds are worth to anyone else. Off
+    // the lock the band is reported but not consulted — the bid is `produces`.
+    priority: lockUntil !== undefined ? PRIORITY["career:progress-lock"] : PRIORITY["career:income"],
     mode: "spend",
-    ...(lockUntil !== undefined ? { holdUntil: lockUntil } : {}),
+    ...(lockUntil !== undefined
+      ? { holdUntil: lockUntil }
+      : {
+          produces: candidateProduces,
+          ...(candidateDelivery !== undefined && candidateDelivery < 1
+            ? { deliveryFraction: candidateDelivery }
+            : {}),
+        }),
     why: lockUntil !== undefined
       ? `unbanked progress banks in ${Math.max(0, Math.round((lockUntil - ctx.now) / 1_000))}s`
-      : band === "income"
-        ? "early-game income"
-        : `${band} career request selected from the queue`,
+      : `${candidate?.ranked[0]?.action.type ?? "work"}: ${candidate?.ranked[0]?.action.subject ?? "career"}`
+        + ` (${band === "income" ? "income" : `${band} request`})`,
   });
   return out;
 }
@@ -870,83 +876,25 @@ function progressTotalMs(state: GameState): number | undefined {
   }
 }
 
-/** What career's claim on the work slot is worth.
+/** What career's MONEY claims are banded at.
  *
- * The three REQUEST bands keep their fixed priorities: they are about unblocking
- * another feature, and their worth is the urgency of that need rather than anything
- * earned per second.
+ * Money claims — tuition, a travel fare — are still ordered by the lattice:
+ * they are one-off spends whose worth is the urgency of the need they unblock,
+ * and the money pool has its own economic layer for everything continuous.
  *
- * The INCOME band is scored instead of fixed. A flat `career:income` said the same
- * thing whether crime out-earned the hacking farm ten times over or was a rounding
- * error beside it, so the slot could not be allocated on merit. It is now career's
- * best money rate as a fraction of the best rate anyone announced, times
- * `MONEY_SPAN` — the top earner is worth the full span, half as good is worth half.
- * See `shared/strategy/income.ts`, including why that span exceeds reputation's. */
-function priorityForBand(band: CareerPriorityBand, state: GameState): number {
+ * The WORK SLOT is no longer banded here at all. It carries what it produces
+ * and is priced against the field (`shared/strategy/income.ts`); the whole
+ * `priorityForDecision` special case for Algorithms went with it, because that
+ * function was a hand-rolled instance of exactly this arithmetic — course
+ * experience as a fraction of the fleet's, times what hacking time is worth —
+ * applied to one hardcoded course name. */
+function priorityForBand(band: CareerPriorityBand): number {
   switch (band) {
     case "blocking": return PRIORITY["career:blocking-need"];
     case "wanted": return PRIORITY["career:wanted-request"];
     case "nice": return PRIORITY["career:nice-request"];
-    case "income": {
-      const best = bestIncomePerSec(state);
-      return slotPriority({
-        moneyFraction: rateFraction(careerBestPerSec(state), best.state === "measured" ? best.value : 0),
-      });
-    }
+    case "income": return PRIORITY["career:income"];
   }
-}
-
-/** Price an Algorithms claim by the wall-clock it actually removes from the
- * route. A route augmentation package is the competing use of the same work
- * slot, while normal fleet hacking keeps producing XP in the background. */
-export function priorityForDecision(decision: CareerDecision, view: CareerView, state: GameState): number {
-  const base = priorityForBand(decision.workPriority, state);
-
-  const route = state.topics.progression?.plan?.route;
-  const factionPlan = state.topics.factions?.plan;
-  const intent = factionPlan?.objective?.intent;
-  const competingRoutePackage =
-    (route === "daedalus" || route === "gang")
-    && intent?.purpose === "augmentations"
-    && intent.repSec > 0;
-  if (!competingRoutePackage) return base;
-
-  // The emitted action may be idle/continue because the course is already in
-  // flight or the slot is held. ranked[0] remains the strategy's selected
-  // work, which is what this claim is bidding to continue or start.
-  const selected = decision.ranked[0];
-  if (selected?.action.subject !== "Algorithms") return base;
-  const trainingExpPerSec = view.courses.find((course) => course.name === "Algorithms")?.expPerSec ?? 0;
-  if (!(trainingExpPerSec > 0)) return base;
-  const backgroundExpPerSec = view.externalSkillExpPerSec?.["hacking"] ?? 0;
-
-  // Before the skill gate becomes the route's immediate published need,
-  // Algorithms is still the bootstrap for the hacking/money engine. Give it
-  // the blocking band only in proportion to the XP that would actually be
-  // lost by spending the slot on reputation. As the fleet takes over, this
-  // decays continuously and faction work wins without a phase-specific rule.
-  if (decision.workPriority !== "blocking") {
-    if (!decision.incomeFallback) return base;
-    return PRIORITY["career:blocking-need"]
-      * marginalTrainingShare(trainingExpPerSec, backgroundExpPerSec);
-  }
-
-  const hacking = selected.contributions.find((entry) => entry.kind === "skill" && entry.subject === "hacking");
-  if (!hacking) return base;
-  const target = decision.serving
-    .filter((need) => need.kind === "skill" && need.subject === "hacking" && need.progress < 1)
-    .reduce<number | undefined>((lowest, need) => lowest === undefined ? need.target : Math.min(lowest, need.target), undefined);
-  const currentExp = view.exp?.["hacking"];
-  const skillMult = view.skillMultipliers?.["hacking"];
-  if (target === undefined || currentExp === undefined || skillMult === undefined || !(skillMult > 0)) return base;
-
-  const tradeoff = skillRepTradeoff(
-    Math.max(0, expForSkill(target, skillMult) - currentExp),
-    backgroundExpPerSec,
-    trainingExpPerSec,
-    intent.repSec,
-  );
-  return base * tradeoff.relativeTimeSaved;
 }
 
 function needsCompletionWatcher(state: GameState): boolean {

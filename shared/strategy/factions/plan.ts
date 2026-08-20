@@ -112,6 +112,15 @@ export interface FactionDecision {
   /** Outcomes to post on the needs board. Derived from `blockers`. */
   needOwners: FeatureId[];
   until?: Until;
+  /** What the work slot would EARN if this feature had it, and where.
+   *  Published even when the action is idle: the arbiter needs to know what the
+   *  claim produces to price it, and "another feature holds the slot" is
+   *  exactly the state in which that price has to be argued.
+   *
+   *  `produces` is every channel, not just reputation — field and security work
+   *  pay combat and charisma experience too, and a combat gate served by the
+   *  same second that earns reputation is the whole reason to know. */
+  workRate?: { faction: string; repPerSec: number; produces: Record<string, number> };
   invalidation: InvalidationKey[];
   /** Set when the run should end: nothing further is buyable and banked
    *  reputation is worth more as favor than as more of this run. */

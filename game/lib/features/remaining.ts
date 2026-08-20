@@ -1,6 +1,8 @@
 import type { NS } from "@ns";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { effectiveBitNodeMultipliers, WORLD_DAEMON_BASE_SKILL } from "../../../shared/features/bitnode.ts";
+import { BLADEBURNER_RANK_CHANNEL, currencyWorth } from "../../../shared/strategy/income.ts";
+import { incomeShares } from "../income.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
@@ -12,7 +14,7 @@ import {
   NEUROFLUX,
   nextPurchasableAugmentation,
   scoreAugMults,
-  weightsForRoute,
+  weightsFromMarginals,
 } from "../../../shared/strategy/factions/augs.ts";
 import { workRepPerSec, type WorkType } from "../../../shared/strategy/factions/rep.ts";
 import { stepGang } from "../../../shared/strategy/gang/decide.ts";
@@ -44,6 +46,7 @@ import {
 import {
   GO_DISPATCH_GUARD_MS,
   goChooseSeedTarget,
+  goDispatchLatency,
   goPhaseAgrees,
   goPredictedPlaytime,
   type GoSeedTarget,
@@ -100,6 +103,7 @@ import type {
   GoGameCandidateDigest,
   GoMoveDigest,
   GoPlan,
+  GoTurnPrediction,
   GoResponse,
   GoTurnResult,
 } from "../../../shared/telemetry/topics/go.ts";
@@ -781,13 +785,11 @@ function observedGoBoardSize(board: readonly string[]): GoObservedBoardSize {
 type RawGoResponse = Awaited<ReturnType<NS["go"]["makeMove"]>>;
 type GoActionOutcome = {
   response?: RawGoResponse;
-  alignment: "none" | "same-slot" | "boundary-replan";
-  dispatchPlaytime?: number;
   player?: ReturnType<NS["getPlayer"]>;
   playerObservedAt?: number;
   action?: GoPlayingAction;
   decision?: GoDecision;
-  prediction?: NonNullable<GoPlan["prediction"]>;
+  prediction?: GoTurnPrediction;
   predictionParentId?: string;
   responsePlayer?: ReturnType<NS["getPlayer"]>;
   responseObservedAt?: number;
@@ -1062,13 +1064,27 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       if (hydrated) {
         if (hydrated.cheat) goCheatSuccessByCount = hydrated.cheat.successByCount;
         const boardSize = observedGoBoardSize(hydrated.board);
-        const controlled = goTerritory({ rows: hydrated.board, size: boardSize });
+        const hydratedBoard = { rows: hydrated.board, size: boardSize };
+        const controlled = goTerritory(hydratedBoard);
+        // Komi is immutable opponent data; the pinned constant covers the gap
+        // before the core probe has reported it, exactly as the planner view
+        // does, so the score always lands with the board it describes.
+        const hydratedKomi = topic.komi
+          ?? (topic.opponent && isGoRewardOpponent(topic.opponent)
+            ? GO_REWARD_RULES[topic.opponent].komi
+            : undefined);
+        const hydratedScore = hydratedKomi === undefined
+          ? undefined
+          : scoreBoard(hydratedBoard, hydratedKomi);
         merge(ctx.state, "go", {
           board: hydrated.board,
           boardSize,
           previousBoards: hydrated.history,
           moveCount: hydrated.history.length,
           territory: { black: controlled.X, white: controlled.O },
+          ...(hydratedScore
+            ? { blackScore: hydratedScore.X, whiteScore: hydratedScore.O, komi: hydratedKomi }
+            : {}),
           ...(hydrated.cheat ? { cheat: {
             unlocked: true,
             count: hydrated.cheat.count,
@@ -1079,9 +1095,16 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       }
       return;
     }
-    if ((claimedAction === "move" || claimedAction === "pass") && goTurnReadyAt === undefined) {
+    if (
+      goTurnReadyAt === undefined
+      && claimedAction !== undefined
+      && claimedAction !== "hydrate"
+      && claimedAction !== "newGame"
+    ) {
       // Cold start has no preceding Go promise to timestamp. The first pass
       // with a complete actionable Black position is its truthful boundary.
+      // Every dispatching action kind is stamped, cheat turns included, so the
+      // latency breakdown never has to invent a boundary it does not hold.
       goTurnReadyAt = Date.now();
     }
     const joined = new Set(ctx.state.topics.factions?.joined ?? []);
@@ -1165,7 +1188,12 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       // public constant during that one-pass gap and keep live and arena
       // scoring identical.
       komi: topic.komi ?? GO_REWARD_RULES[topic.opponent].komi,
-      consecutivePasses: topic.lastTurn?.opponentResponse?.type === "pass" ? 1 : 0,
+      // Mirrors the exact count the confirm path derives after a turn, so the
+      // planner sees the same pass state either way. Our own pass followed by
+      // theirs is two, which a response-only test cannot express.
+      consecutivePasses: topic.lastTurn?.opponentResponse?.type === "pass"
+        ? topic.lastTurn.action.type === "pass" ? 2 : 1
+        : 0,
       bonusCycles: topic.bonusCycles ?? 0,
       // candidateLimit is deliberately absent: the engine resolves the
       // production finalist budget from GO_PROFILE_CANDIDATE_LIMITS (strict
@@ -1318,6 +1346,10 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       decision = { ...decision, action: { type: "pass", why: "certified playbook line" } };
     }
     const decisionAt = Date.now();
+    // Provisional planning ended here. The breakdown assembled at dispatch
+    // uses this as the boundary between page-side preparation and the RAM
+    // lease that follows.
+    const preparedAt = decisionAt;
     const plan: GoPlan = {
       action: goActionDigest(decision.action),
       ranked: decision.ranked.map(goMoveDigest),
@@ -1327,12 +1359,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         previousBoards: view.previousBoards.map((position) => [...position]),
         status: view.status,
         currentPlayer: view.currentPlayer,
-        opponent: view.opponent,
-        ...(topic.blackScore !== undefined ? { blackScore: topic.blackScore } : {}),
-        ...(topic.whiteScore !== undefined ? { whiteScore: topic.whiteScore } : {}),
         komi: view.komi,
-        ...(topic.bonusCycles !== undefined ? { bonusCycles: topic.bonusCycles } : {}),
-        ...(topic.cheat ? { cheatCount: topic.cheat.count } : {}),
       },
       planning: { finalistCount: decision.finalists, positionValue: decision.positionValue },
       selection: {
@@ -1353,7 +1380,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           demands: Object.fromEntries(
             Object.entries(rewardView.demands).map(([opponent, demand]) => [opponent, goDemandDigest(demand)]),
           ),
-          factionFavor: rewardView.factionFavor,
         },
       },
     };
@@ -1499,12 +1525,16 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         action.type,
         goMethods(action.type, cheatUnlocked),
         async (stubNs: NS): Promise<GoActionOutcome> => {
+          // The RAM broker admitted us and the dodge stub is running. Anything
+          // before this instant is lease cost, not planning or alignment.
+          const stubEnteredAt = Date.now();
+          let finalizeMs = 0;
           let dispatchPlayer: ReturnType<NS["getPlayer"]> | undefined;
           let dispatchPlayerObservedAt: number | undefined;
           let dispatchedAction: GoPlayingAction | undefined = action.type === "resume" || action.type === "newGame"
             ? undefined : action;
           let dispatchedDecision: GoDecision | undefined;
-          let dispatchPrediction: NonNullable<GoPlan["prediction"]> | undefined;
+          let dispatchPrediction: GoTurnPrediction | undefined;
           let predictionParentId: string | undefined;
           let boundaryRetries = 0;
           let response: RawGoResponse | undefined;
@@ -1550,6 +1580,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                   ? { type: "pass" as const, why: "certified playbook line" }
                   : undefined;
               const decisionAt = Date.now();
+              finalizeMs += decisionAt - sampledAt;
               const exactAction = playbookAction ?? exactDecision.action;
               if (exactAction.type === "resume" || exactAction.type === "newGame") {
                 throw new Error(`V9 returned ${exactAction.type} for an active Black turn`);
@@ -1580,7 +1611,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                   sampledTotalPlaytime: player.totalPlaytime,
                   sampledAt,
                   decisionAt,
-                  preparationMs,
+                  ...(preparationMs === undefined ? {} : { preparationMs }),
                   finalizationMs: evaluated.finalizationMs,
                   totalPlanningMs: decisionAt - planStartedAt,
                   engineCycleMs: GO_ENGINE_CYCLE_MS,
@@ -1588,11 +1619,13 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                   seedCandidates: evaluated.opponentSeeds,
                   dispatchPlaytime,
                   ...(target ? { rolloverMarginMs: target.marginMs, waitedForRollover: target.waitsForRollover } : {}),
-                  boundaryRetries,
                   positionCacheHit: installed.cached,
                   pushedPredictionHit: evaluated.pushed,
                   seedCacheHit: evaluated.cached,
-                } satisfies NonNullable<GoPlan["prediction"]>,
+                  // boundaryRetries is deliberately absent: this closure runs
+                  // before the retry count is known. The dispatch site below
+                  // supplies the settled value.
+                } satisfies Omit<GoTurnPrediction, "boundaryRetries">,
               };
             };
 
@@ -1648,11 +1681,27 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             dispatchPlayerObservedAt = seeded.attempt.observedAt;
             dispatchedAction = seeded.attempt.value.action;
             dispatchedDecision = seeded.attempt.value.decision;
+            // Without a preceding boundary there is no honest span to report.
+            // Substituting planStartedAt would publish a flattering few
+            // milliseconds in exactly the cold-start case worth seeing.
+            const latency = goTurnReadyAt !== undefined && moveDispatchedAt !== undefined
+              ? goDispatchLatency({
+                turnReadyAt: goTurnReadyAt,
+                planStartedAt,
+                preparedAt,
+                actionStartedAt,
+                stubEnteredAt,
+                finalizeMs,
+                alignMs: seeded.waitedMs,
+                verifiedAt: seeded.attempt.observedAt,
+                dispatchedAt: moveDispatchedAt,
+              })
+              : undefined;
             dispatchPrediction = {
               ...seeded.attempt.value.prediction,
               dispatchPlaytime: seeded.attempt.dispatchPlaytime,
               boundaryRetries,
-              readyToDispatchMs: Math.max(0, (moveDispatchedAt ?? Date.now()) - (goTurnReadyAt ?? planStartedAt)),
+              ...(latency ? { dispatchBreakdown: latency } : {}),
             };
             response = seeded.response;
             if (playbookEnabled) {
@@ -1699,8 +1748,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           const responseObservedAt = responsePlayer ? Date.now() : undefined;
           return {
             response,
-            alignment: dispatchPlayer ? boundaryRetries ? "boundary-replan" : "same-slot" : "none",
-            ...(dispatchPlayer ? { dispatchPlaytime: dispatchPlayer.totalPlaytime, player: dispatchPlayer } : {}),
+            ...(dispatchPlayer ? { player: dispatchPlayer } : {}),
             ...(dispatchPlayerObservedAt !== undefined ? { playerObservedAt: dispatchPlayerObservedAt } : {}),
             ...(dispatchedAction ? { action: dispatchedAction } : {}),
             ...(dispatchedDecision ? { decision: dispatchedDecision } : {}),
@@ -1726,8 +1774,8 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         plan.action = goActionDigest(decision.action);
         plan.ranked = decision.ranked.map(goMoveDigest);
         plan.planning = { finalistCount: decision.finalists, positionValue: decision.positionValue };
-        if (rawOutcome.prediction) plan.prediction = rawOutcome.prediction;
       }
+      const dispatched = rawOutcome?.prediction;
       if (rawOutcome?.player) {
         set(ctx.state, "player", rawOutcome.player);
         ctx.state.playerObservedAt = rawOutcome.playerObservedAt ?? Date.now();
@@ -1739,11 +1787,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             at: result.at,
             durationMs: Date.now() - actionStartedAt,
             action: goActionDigest(action),
-            timing: {
-              alignment: rawOutcome?.alignment ?? "none",
-              ...(rawOutcome?.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
-              ...(plan.prediction ? { seed: plan.prediction.seedCandidates[0] } : {}),
-            },
+            ...(dispatched ? { prediction: dispatched } : {}),
             ok: result.ok,
             detail: result.detail,
           },
@@ -1811,7 +1855,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         return sum + (matches ? candidate.count : 0);
       }, 0);
       const controlled = goTerritory(board);
-      const score = topic.komi === undefined ? undefined : scoreBoard(board, topic.komi);
+      const score = scoreBoard(board, view.komi);
       merge(ctx.state, "go", {
         board: board.rows,
         previousBoards,
@@ -1825,7 +1869,9 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           ] ?? 0,
         } } : {}),
         territory: { black: controlled.X, white: controlled.O },
-        ...(score ? { blackScore: score.X, whiteScore: score.O } : {}),
+        blackScore: score.X,
+        whiteScore: score.O,
+        komi: view.komi,
         currentPlayer: response.type === "gameOver" ? "None" : "Black",
         status: response.type === "gameOver" ? "gameOver" : "inProgress",
         plan,
@@ -1834,14 +1880,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           durationMs: Date.now() - actionStartedAt,
           action: goActionDigest(action),
           opponentResponse: response,
-          timing: {
-            alignment: rawOutcome.alignment,
-            ...(rawOutcome.dispatchPlaytime !== undefined ? { dispatchPlaytime: rawOutcome.dispatchPlaytime } : {}),
-            ...(plan.prediction ? { seed: plan.prediction.seedCandidates[0] } : {}),
-            ...(plan.prediction?.readyToDispatchMs !== undefined
-              ? { readyToDispatchMs: plan.prediction.readyToDispatchMs }
-              : {}),
-          },
+          ...(dispatched ? { prediction: dispatched } : {}),
           ...(predictionTotal > 0 ? { predictionSupport: { matching, total: predictionTotal } } : {}),
           ok: result.ok,
           detail: result.detail,
@@ -2566,14 +2605,21 @@ function progressionRefresh(ctx: NeedContext): void {
   // whose reputation is met and price is within the bankroll. Purchases are
   // end-loaded, so mid-cycle the queue is empty by design; without the
   // realizable set the reset side reads zero and the verdict pushes forever.
-  const routeAugmentationFocus = choice?.route === "daedalus"
-    && selectedEta?.parts.some((part) => part.resource === "combat")
-      ? "combat" as const
-      : "hacking" as const;
-  const verdictWeights = weightsForRoute(choice?.route, routeAugmentationFocus, {
+  // Priced by the route's OWN marginals — the same measurement this feature
+  // publishes — so the accrued side of the cadence comes out in BN-seconds and
+  // can be compared with the push rate without either being a made-up unit.
+  // Which branch of Daedalus binds is no longer a switch to set: a combat gate
+  // that is not on the critical path measures zero and prices its
+  // augmentations accordingly.
+  // The PUBLISHED marginals: this pass computes its own further down, but the
+  // valuation is wanted before then and a one-pass-old measurement of a slowly
+  // moving route estimate is not a different answer.
+  const publishedWorth = currencyWorth(ctx.state.topics.progression?.plan?.marginals);
+  const verdictWeights = weightsFromMarginals(publishedWorth, {
     hackingTarget: endgame.worldDaemonSkill,
     combatTarget: DAEDALUS_COMBAT,
     multipliers: (player.mults ?? {}) as unknown as Record<string, number>,
+    incomeShares: incomeShares(ctx.state),
   });
   // Clamped at zero per augmentation: cost-reduction multipliers sit BELOW 1,
   // so a beneficial aug can carry a negative log-score — the accrued signal
@@ -2657,7 +2703,7 @@ function progressionRefresh(ctx: NeedContext): void {
     joined: joinedSet,
     owned: activationOwned,
     weights: verdictWeights,
-    countSlotValue: countSlotValueFor(daedalusRequired ?? Infinity, view.augCount),
+    countSlotValue: countSlotValueFor(publishedWorth, daedalusRequired ?? Infinity, view.augCount),
     neurofluxCountable: daedalusRequired !== undefined && !activationOwned.has(NEUROFLUX),
     ctx: activationPriceContext,
     money: sweepBudget,
@@ -2689,6 +2735,7 @@ function progressionRefresh(ctx: NeedContext): void {
     standings: (factions?.standings ?? []).filter((standing) => joinedSet.has(standing.name)),
     offers: factions?.offers ?? [],
     favorToDonate: favorDonateAt,
+    reputationWorthSec: publishedWorth.get("reputation") ?? 0,
   });
   // Unit-consistent with packageValue (count + quality + favor terms): the
   // push rate is denominated in package value, where every augmentation
@@ -2716,6 +2763,7 @@ function progressionRefresh(ctx: NeedContext): void {
           .filter((name) => !installedNames.has(name)),
       ).size,
       consolidationAllowed: selectedStatus?.optionalInstall.allowed === true,
+      worth: publishedWorth,
     });
     countCadenceReady = verdict.ready;
     routeCountValue = verdict.value;
@@ -3183,6 +3231,13 @@ export const bladeburnerModule: FeatureModule = {
     const claims = maybeActionClaim("bladeburner", ctx, action, bladeMethods(action));
     const hasSimulacrum = (ctx.state.topics.progression?.ownedAugs?.[BLADES_SIMULACRUM] ?? 0) > 0;
     if (action === "act" && !hasSimulacrum) {
+      // ANNOUNCE THE RATE. A time claim with no `produces` is a HARD claim, and
+      // hard claims outrank every priced one outright — so leaving this silent
+      // would hand Bladeburner the exclusive work slot ahead of faction
+      // reputation on nothing but the absence of a number. Rank is a priced
+      // channel (`bladeburnerRank`), and the planner already publishes the rate
+      // it would earn.
+      const rankPerSec = ctx.state.topics.bladeburner?.plan?.ranked?.[0]?.rankPerSec;
       claims.push({
         by: "bladeburner",
         id: "work",
@@ -3190,9 +3245,12 @@ export const bladeburnerModule: FeatureModule = {
         amount: 1,
         shape: "step",
         pricing: "hard",
-        value: { state: "unknown", reason: "the player-time slot is ordered by hard priority" },
+        value: { state: "unknown", reason: "a time claim is priced by `produces`, not by this field" },
         priority: PRIORITY["factions:work"],
         mode: "spend",
+        ...(rankPerSec !== undefined && rankPerSec > 0
+          ? { produces: { [BLADEBURNER_RANK_CHANNEL]: rankPerSec } }
+          : {}),
         why: "Bladeburner action occupies Player.currentWork without The Blade's Simulacrum",
       });
     }

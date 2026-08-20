@@ -16,6 +16,7 @@ import {
   scoreAug,
   selectAffordableBatch,
   totalCost,
+  weightsFromMarginals,
   type AugInfo,
   type PriceContext,
   type PurchaseCandidate,
@@ -624,11 +625,19 @@ describe("affordability", () => {
 });
 
 describe("augmentation scoring", () => {
-  test("finite route-count pressure declines toward closure but never vanishes", () => {
-    expect(countSlotWeight(30, 29)).toBeCloseTo(29 / 30, 12);
-    expect(countSlotWeight(30, 17)).toBeCloseTo(17 / 30, 12);
-    expect(countSlotWeight(30, 1)).toBe(1 / 5);
-    expect(countSlotWeight(Infinity, 10)).toBe(0);
+  test("a count slot is worth the seconds it removes from the count leg", () => {
+    // The leg finishes in `remaining / augsPerSec`, so one slot removes
+    // `1 / augsPerSec` of it — `worth / remaining`. Slots therefore get MORE
+    // valuable as the gate closes, because the last one unblocks the gate.
+    // The predecessor ramped the other way, from 1 down to a 1/5 floor, to keep
+    // cheap filler from dominating a high-impact augmentation; filler and
+    // multipliers are quoted in the same seconds now and compete on merit.
+    const worth = new Map([["augmentations", 30_000]]);
+    expect(countSlotWeight(worth, 30)).toBeCloseTo(1_000, 9);
+    expect(countSlotWeight(worth, 1)).toBeCloseTo(30_000, 9);
+    // No finite gate, or no measured acquisition rate: no slot value at all.
+    expect(countSlotWeight(worth, Infinity)).toBe(0);
+    expect(countSlotWeight(new Map(), 10)).toBe(0);
   });
 
   test("multiplicative bonuses become an additive set problem in log space", () => {
@@ -650,17 +659,40 @@ describe("augmentation scoring", () => {
     expect(scoreAug(ucm, { hacking: 1 })).toBe(0);
   });
 
-  test("The Red Pill is valued for ending the BitNode, which no multiplier expresses", () => {
-    expect(scoreAug(aug("The Red Pill"), {})).toBeGreaterThan(5);
+  test("The Red Pill is a route GATE, and a gate is not a rate", () => {
+    // It carries no multipliers at all, so as a RATE it is worth nothing —
+    // which is what the install cadence must see, since the cadence compares
+    // value streams and a flat 9 in stream units made any package containing
+    // it look infinitely worth pushing for. Its real worth is "the run cannot
+    // end without this", and that belongs to the route requiring it: see
+    // `packages.ts#routeAwareScore`, tested below at the horizon it unblocks.
+    expect(scoreAug(aug("The Red Pill"), {})).toBe(0);
+  });
+
+  test("an effect no multiplier field expresses is priced in the channel it acts on", () => {
+    // Neuroreceptor Management Implant removes the unfocused work penalty, so
+    // every second the slot spends unfocused earns full rate instead of 80% —
+    // a multiplier on whatever the slot is earning, which is reputation.
+    const implant = aug("Neuroreceptor Management Implant");
+    expect(scoreAug(implant, {})).toBe(0);
+    const worth = new Map([["reputation", 50_000]]);
+    expect(scoreAug(implant, {}, worth)).toBeCloseTo(Math.log(1 / 0.8) * 50_000, 6);
+    // ...and nothing at all when reputation is not what the route is short of.
+    expect(scoreAug(implant, {}, new Map([["reputation", 0]]))).toBe(0);
   });
 });
 
 // --- never attempt work a faction does not offer ------------------------------
 
-import { blockersFor, stepFactions } from "../shared/strategy/factions/decide.ts";
+import { blockersFor, chooseWorkType, stepFactions } from "../shared/strategy/factions/decide.ts";
+import { workRepPerSec } from "../shared/strategy/factions/rep.ts";
 import { factionPackageFrontier, selectFactionPackage } from "../shared/strategy/factions/packages.ts";
 import { initFactionMemory } from "../shared/strategy/factions/plan.ts";
 import type { FactionStanding, FactionsView } from "../shared/strategy/factions/state.ts";
+
+const FIXTURE_WORTH = new Map([
+  ["augmentations", 30], ["hacking", 10], ["reputation", 10], ["money", 10],
+]);
 
 function factionsView(over: Partial<FactionsView> = {}): FactionsView {
   return {
@@ -676,8 +708,13 @@ function factionsView(over: Partial<FactionsView> = {}): FactionsView {
     catalog: new Map(),
     owned: new Set(),
     queued: new Set(),
-    weights: { hacking: 1 },
+    // A measured route, so count slots, multipliers and favor are all priced in
+    // the same BN-seconds. `weights` is DERIVED from it exactly as the driver
+    // derives it — a fixture where the two disagree exercises a state the game
+    // cannot reach, and silently changes which half of a package dominates.
+    weights: weightsFromMarginals(FIXTURE_WORTH),
     horizonSec: 3_600,
+    rates: { best: new Map(), worth: FIXTURE_WORTH },
     targetAugCount: 30,
     favorToDonate: 150,
     moneyGranted: 0,
@@ -705,6 +742,55 @@ function standing(name: string, offers: { hacking: boolean; field: boolean; secu
     special: false,
   };
 }
+
+describe("work type selection weighs everything the work produces", () => {
+  // MEASURED on a live BN12 install: progression posted `combatSkills 219 /
+  // 1500` at weight 5, career took the work slot with Mug, and The Black Hand
+  // sat at "idle" — while its FIELD work would have paid combat experience AND
+  // reputation from the same second. The chooser picked on reputation alone and
+  // the claim announced reputation alone, so nothing in the auction could see
+  // the second half of what faction work does.
+  const tetrads = standing("Tetrads", { hacking: true, field: true, security: true });
+
+  const choose = (over: Partial<FactionsView> = {}) =>
+    chooseWorkType("Tetrads", tetrads, factionsView({ factions: [tetrads], ...over }), initFactionMemory());
+
+  test("reputation still decides when nothing else is priced", () => {
+    // The rule this replaces, preserved exactly: with no worth table every
+    // option is unpriced and the ordering degenerates to reputation per second.
+    const person = factionsView().person;
+    const ctx = factionsView().repContext;
+    const best = (["hacking", "field", "security"] as const)
+      .map((type) => ({ type, rep: workRepPerSec(type, person, 0, ctx, true) }))
+      .sort((a, b) => b.rep - a.rep)[0]!;
+    expect(choose()).toMatchObject({ type: best.type });
+    expect(choose()?.repPerSec).toBeCloseTo(best.rep, 9);
+  });
+
+  test("the work announces the combat and charisma experience it also pays", () => {
+    const produces = choose({
+      rates: { best: new Map(), worth: new Map([["combat", 5e6], ["reputation", 1]]) },
+    })?.produces ?? {};
+    // Field and security pay all four combat stats, so the WEAKEST of them —
+    // which is what a combat gate is actually met by — advances at that rate.
+    expect(produces["combat"]).toBeGreaterThan(0);
+    expect(produces["reputation"]).toBeGreaterThan(0);
+    // ...and the individual stats stay visible for a single-stat requirement.
+    expect(produces["skill:strength"]).toBeGreaterThan(0);
+  });
+
+  test("a valued combat gate moves the choice off the best reputation rate", () => {
+    // Hacking work pays the most reputation for this person and no combat
+    // experience at all. Once combat is worth something, the type that earns
+    // BOTH wins — which is the decision crime was winning by default.
+    expect(choose()?.produces["combat"] ?? 0).toBe(0);
+    const withCombat = choose({
+      rates: { best: new Map(), worth: new Map([["combat", 1e9], ["reputation", 1]]) },
+    });
+    expect(withCombat?.produces["combat"]).toBeGreaterThan(0);
+    expect(withCombat?.type).not.toBe("hacking");
+  });
+});
 
 describe("work type selection — found in the real game", () => {
   // THE BUG: `workTypes` was never populated by any probe, and the view
@@ -1535,7 +1621,30 @@ describe("faction breakpoint package planner", () => {
     expect(openEnded.intent?.augmentations).toEqual([NEUROFLUX]);
   });
 
-  test("values CashRoot as bootstrap infrastructure without overriding a faster multiplier package", () => {
+  test("The Red Pill is valued at the horizon its route cannot finish without", () => {
+    const factions = [packageStanding("Daedalus")];
+    const catalog = new Map([["The Red Pill", aug("The Red Pill", {
+      factions: ["Daedalus"], baseCost: 0, baseRepRequirement: 100,
+    })]]);
+    const frontier = (route: FactionsView["route"], horizonSec: number) =>
+      selectFactionPackage(
+        factionsView({ factions, catalog, route, horizonSec, moneyAvailable: 1e15, targetAugCount: Infinity }),
+        new Map(factions.map((faction) => [faction.name, []])),
+      ).frontiers.get("Daedalus")?.[0];
+
+    // Priced in the same BN-seconds as every multiplier beside it, so a longer
+    // remaining run makes the thing that ends it worth proportionally more.
+    expect(frontier("daedalus", 100_000)?.value).toBeGreaterThan(frontier("daedalus", 10_000)!.value);
+    // ...and it is worth that to the routes that REQUIRE it, not to a
+    // Bladeburner run that would be dragged through an unrelated faction.
+    expect(frontier("bladeburner", 100_000)?.value ?? 0).toBe(0);
+  });
+
+  test("an augmentation with no multipliers is worth its count slot and nothing more", () => {
+    // CashRoot carried a hand-set `0.5` "bootstrap value" for its one-off $1m
+    // and free port opener. Both effects are real and neither had a unit; the
+    // opener is priced where it lands (the server-access needs the board posts
+    // for it) rather than restated as another number nobody derived.
     const factions = [packageStanding("Sector-12"), packageStanding("CyberSec")];
     const catalog = new Map([
       ["CashRoot Starter Kit", aug("CashRoot Starter Kit", {
@@ -1551,15 +1660,18 @@ describe("faction breakpoint package planner", () => {
       })],
     ]);
     const blockers = new Map(factions.map((faction) => [faction.name, []]));
+    // Only the count gate is priced here, so the frontier isolates slot value
+    // from the favor breakpoints that would otherwise dominate it.
+    const countOnly = { best: new Map(), worth: new Map([["augmentations", 30], ["hacking", 10]]) };
     const bootstrap = selectFactionPackage(
-      factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15, rates: countOnly }),
       blockers,
     );
     expect(bootstrap.intent?.faction).toBe("CyberSec");
     const cashRoot = bootstrap.frontiers.get("Sector-12")?.find((pkg) =>
       pkg.augmentations.includes("CashRoot Starter Kit"));
-    // The finite Daedalus gate makes this one real slot plus bootstrap value.
-    expect(cashRoot?.value).toBeGreaterThan(1.5);
+    // A finite Daedalus gate makes it one real slot.
+    expect(cashRoot?.value).toBeGreaterThan(0);
     const noCount = selectFactionPackage(
       factionsView({
         factions,
@@ -1568,13 +1680,14 @@ describe("faction breakpoint package planner", () => {
         targetAugCount: Infinity,
         horizonSec: 100_000,
         moneyAvailable: 1e15,
+        rates: countOnly,
       }),
       blockers,
     );
     const noCountCashRoot = noCount.frontiers.get("Sector-12")?.find((pkg) =>
       pkg.augmentations.includes("CashRoot Starter Kit"));
-    expect(noCountCashRoot?.value).toBeGreaterThan(0.5);
-    expect(noCountCashRoot?.value).toBeLessThan(1);
+    // With no count gate there is no slot either, and no multipliers to value.
+    expect(noCountCashRoot?.value ?? 0).toBe(0);
 
     const established = selectFactionPackage(
       factionsView({
@@ -1602,7 +1715,13 @@ describe("faction breakpoint package planner", () => {
     expect(installed.intent?.faction).toBe("CyberSec");
   });
 
-  test("uses strong count pressure early and multiplier quality for the closing slots", () => {
+  test("count pressure versus multiplier quality is decided by measurement, not a ramp", () => {
+    // The predecessor RAMPED this: count worth 1 unit per slot early, decaying
+    // to a 1/5 floor near closure so quality would break the closing ties.
+    // Both halves were a policy nobody measured. Which of the two matters is
+    // now whatever the route says it is — and on a route that is genuinely
+    // gated on augmentation COUNT, filling a slot sooner really is worth more
+    // than a 30% hacking multiplier.
     const factions = [packageStanding("cheap"), packageStanding("quality")];
     const catalog = new Map([
       ["cheap-slot", aug("cheap-slot", { factions: ["cheap"], baseCost: 0, baseRepRequirement: 100 })],
@@ -1611,18 +1730,22 @@ describe("faction breakpoint package planner", () => {
       })],
     ]);
     const blockers = new Map(factions.map((faction) => [faction.name, []]));
-    const early = selectFactionPackage(
-      factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+    const pick = (worth: [string, number][], owned = new Set<string>()) => selectFactionPackage(
+      factionsView({
+        factions, catalog, owned, horizonSec: 100_000, moneyAvailable: 1e15,
+        rates: { best: new Map(), worth: new Map(worth) },
+      }),
       blockers,
-    );
-    expect(early.intent?.faction).toBe("cheap");
+    ).intent?.faction;
 
-    const installed = new Set(Array.from({ length: 26 }, (_, index) => `installed-${index}`));
-    const closing = selectFactionPackage(
-      factionsView({ factions, catalog, owned: installed, horizonSec: 100_000, moneyAvailable: 1e15 }),
-      blockers,
-    );
-    expect(closing.intent?.faction).toBe("quality");
+    const nearlyClosed = new Set(Array.from({ length: 26 }, (_, index) => `installed-${index}`));
+    // Count-gated: the cheaper slot is reachable sooner and closes the gate.
+    expect(pick([["augmentations", 30_000], ["hacking", 10]])).toBe("cheap");
+    expect(pick([["augmentations", 30_000], ["hacking", 10]], nearlyClosed)).toBe("cheap");
+    // Multiplier-gated — a route with no finite count gate to close, or one
+    // whose remaining climb dwarfs it: quality wins at either end.
+    expect(pick([["hacking", 30_000]])).toBe("quality");
+    expect(pick([["hacking", 30_000]], nearlyClosed)).toBe("quality");
   });
 
   test("enemy membership blocks only this install cycle", () => {

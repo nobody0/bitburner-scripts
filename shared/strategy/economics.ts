@@ -27,6 +27,9 @@ export interface FarmRateModel {
   jitSaturationGb?: number;
   /** Maximum cadence of the fastest legal reusable-role envelope. */
   maximumIncomePerSec?: number;
+  /** Hacking experience/GB/sec for the same solution. Optional for the money-
+   *  only callers and older fixtures. */
+  experienceScore?: number;
 }
 
 /** GB beyond which more farm RAM earns nothing: the pipeline holds at most
@@ -43,6 +46,21 @@ export function farmIncomeRate(model: FarmRateModel | undefined, farmGb: number)
     return model.maximumIncomePerSec * Math.min(1, farmGb / model.jitSaturationGb);
   }
   return model.score * Math.min(farmGb, depthCapGb(model));
+}
+
+/** Hacking experience per second from `farmGb`, saturating at the same depth
+ * cap the income does.
+ *
+ * The experience side of `farmIncomeRate`, and it exists for the same reason:
+ * both are what the COMMITTED batch will produce once it lands, which is a
+ * different question from what has landed so far. A warming-up farm has
+ * measured zero of both and is still about to be the best producer of each.
+ * Deliberately without the `maximumIncomePerSec` shortcut, which is a money
+ * cadence refinement with no experience analogue. */
+export function farmExperienceRate(model: FarmRateModel | undefined, farmGb: number): number {
+  const score = model?.experienceScore ?? 0;
+  if (!model || farmGb <= 0 || !(score > 0)) return 0;
+  return score * Math.min(farmGb, depthCapGb(model));
 }
 
 /** How much of a prep's clock the player's OWN growth gives back.

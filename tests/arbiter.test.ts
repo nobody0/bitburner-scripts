@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { MONEY_SPAN, REP_SPAN } from "../shared/strategy/income.ts";
 import {
   advanceInfrastructureFrontier,
   capInfrastructureByObservedFleet,
@@ -541,6 +540,93 @@ describe("the player-time slot", () => {
     expect(holdsSlot(resolveClaims(input({ ...base, now: 5_000 })), "career")).toBe(true);
   });
 
+  const RATES = {
+    best: new Map([
+      ["money", { state: "measured" as const, value: 4_000 }],
+      ["reputation", { state: "measured" as const, value: 40 }],
+    ]),
+    worth: new Map([["money", 100], ["reputation", 4_000]]),
+  };
+
+  test("priced bids are ranked by BN-seconds saved, not by their band", () => {
+    // Crime at a quarter of the best money rate, on a channel worth 100s, is
+    // worth 25s. Reputation work is the only source of reputation and takes the
+    // whole 4,000s. The bands say the opposite — career:income is a claim's
+    // `priority` here, and it is simply not consulted.
+    const result = resolveClaims(input({
+      rates: RATES,
+      claims: [
+        work("crime", "career", PRIORITY["career:progress-lock"], { produces: { money: 1_000 } }),
+        work("faction", "factions", PRIORITY["career:income"], { produces: { reputation: 40 } }),
+      ],
+    }));
+    expect(holdsSlot(result, "factions")).toBe(true);
+    expect(result.slotValues.map((bid) => [bid.by, bid.value?.valueSec]))
+      .toEqual([["factions", 4_000], ["career", 25]]);
+  });
+
+  test("a bidder alone on a channel is the best rate for it, not a fraction of nothing", () => {
+    const result = resolveClaims(input({
+      rates: { best: new Map(), worth: new Map([["karma", 300]]) },
+      claims: [work("crime", "career", 0, { produces: { karma: 0.25 } })],
+    }));
+    expect(result.slotValues[0]!.value).toMatchObject({ state: "priced", valueSec: 300 });
+  });
+
+  test("a bid that must occupy the slot before delivering is priced at the fraction that lands", () => {
+    // Career ranks its own options and then bids the winner here. A write
+    // discounted only inside that ranking would be re-inflated the moment its
+    // bid met another feature's, so an eight-hour program would still outbid
+    // faction reputation at the file's full worth.
+    const result = resolveClaims(input({
+      rates: { best: new Map(), worth: new Map([["file:SQLInject.exe", 2_400], ["reputation", 1_000]]) },
+      claims: [
+        work("write", "career", PRIORITY["career:income"], {
+          produces: { "file:SQLInject.exe": 1 },
+          deliveryFraction: 0.25,
+        }),
+        work("faction", "factions", PRIORITY["factions:work"], { produces: { reputation: 40 } }),
+      ],
+    }));
+    expect(result.slotValues.find((bid) => bid.claimId === "write")!.value!.valueSec).toBe(600);
+    expect(holdsSlot(result, "factions")).toBe(true);
+  });
+
+  test("a claim without a delivery fraction is priced exactly as before", () => {
+    const bid = (extra: Partial<Claim>) => resolveClaims(input({
+      rates: { best: new Map(), worth: new Map([["karma", 300]]) },
+      claims: [work("crime", "career", 0, { produces: { karma: 0.25 }, ...extra })],
+    })).slotValues[0]!.value;
+    expect(bid({})).toEqual(bid({ deliveryFraction: 1 })!);
+  });
+
+  test("a lock outranks every priced bid, however valuable", () => {
+    const result = resolveClaims(input({
+      rates: RATES,
+      claims: [
+        work("crime", "career", PRIORITY["career:progress-lock"], { holdUntil: 9_999 }),
+        work("faction", "factions", PRIORITY["factions:work"], { produces: { reputation: 40 } }),
+      ],
+    }));
+    expect(holdsSlot(result, "career")).toBe(true);
+    expect(result.slotValues.map((bid) => bid.pricing)).toEqual(["hard", "economic"]);
+  });
+
+  test("a priced incumbent yields only to a decisively better bid", () => {
+    const contest = (challengerRep: number) => resolveClaims(input({
+      rates: RATES,
+      slot: { claimId: "faction", by: "factions", priority: PRIORITY["factions:work"], since: 0 },
+      claims: [
+        work("faction", "factions", PRIORITY["factions:work"], { produces: { reputation: 10 } }),
+        work("crime", "career", PRIORITY["career:income"], { by: "career", produces: { reputation: challengerRep } }),
+      ],
+    }));
+    // Within the hysteresis the incumbent keeps it: two estimates crossing back
+    // and forth must not trade the slot every pass and finish neither.
+    expect(holdsSlot(contest(10.4), "factions")).toBe(true);
+    expect(holdsSlot(contest(12), "career")).toBe(true);
+  });
+
   test("an incumbent that stops re-issuing has released the slot", () => {
     // This is the release protocol: no separate message, just silence.
     const result = resolveClaims(
@@ -599,28 +685,23 @@ describe("arbiter shape", () => {
     expect(PRIORITY["factions:aug-fund"]).toBeGreaterThan(PRIORITY["income:investment"]);
   });
 
-  test("a blocking need can actually PREEMPT faction work, not merely outbid it", () => {
-    // Without this the priority gap is decorative: a blocking need arising
-    // while faction work is already running could never interrupt it, and the
-    // feature that posted it would wait for the incumbent to give up.
-    expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(PRIORITY["factions:work"] + PREEMPT_MARGIN);
-    // ...while ordinary career income must NOT be able to.
-    expect(PRIORITY["career:income"]).toBeLessThan(PRIORITY["factions:work"]);
-    // A blocking need must clear BOTH rates the slot can be scored on, not just
-    // reputation. It is usually the gate on a faction UNLOCK, and at 75 it sat below
-    // a best-in-game earner's 80 — so crime could outrank the unlock it was funding.
-    expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(MONEY_SPAN + PREEMPT_MARGIN);
-    expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(REP_SPAN + PREEMPT_MARGIN);
-    // ...and still below the lock that protects unbanked progress.
-    expect(PRIORITY["career:blocking-need"]).toBeLessThan(PRIORITY["career:progress-lock"]);
-    // Wanted/nice requests stay queued behind faction reputation. The margin
-    // is large enough that faction work can also take the slot back when one
-    // of those requests was the incumbent.
-    expect(PRIORITY["factions:work"]).toBeGreaterThan(PRIORITY["career:wanted-request"] + PREEMPT_MARGIN);
+  test("the money lattice keeps its ordering around the augmentation fund", () => {
+    // These are MONEY bands now — tuition and fares against the aug fund. The
+    // work slot left the lattice entirely: it is priced in BN-seconds, so a
+    // band could not express "a ten-thousandth of a need nobody is short of".
+    expect(PRIORITY["career:blocking-need"]).toBeGreaterThan(PRIORITY["career:wanted-request"]);
     expect(PRIORITY["career:wanted-request"]).toBeGreaterThan(PRIORITY["career:nice-request"]);
+    expect(PRIORITY["career:nice-request"]).toBeGreaterThan(PRIORITY["career:income"]);
+    // Strictly below the post-sweep freeze, or career's funds come out of the
+    // very bankroll the freeze exists to protect.
+    expect(PRIORITY["career:blocking-need"]).toBeLessThan(PRIORITY["progression:install-freeze"]);
     // Progress protection is a transaction lock, independent of objective
-    // value, and must beat every ordinary time bid until completion fires.
-    expect(PRIORITY["career:progress-lock"]).toBeGreaterThan(PRIORITY["career:blocking-need"]);
+    // value, and must beat every ordinary time bid until completion fires —
+    // including a route package that merely wants the slot back.
+    expect(PRIORITY["career:progress-lock"]).toBeGreaterThan(PRIORITY["factions:route-work"] + PREEMPT_MARGIN);
+    // A route-MANDATORY install may still interrupt unbanked work: the run
+    // cannot end without it.
+    expect(PRIORITY["factions:install-work"]).toBeGreaterThan(PRIORITY["career:progress-lock"]);
   });
 });
 

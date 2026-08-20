@@ -31,14 +31,24 @@ import {
 } from "./plan.ts";
 import { selectFactionPackage } from "./packages.ts";
 import {
-  bestWorkType,
   donationCrossoverIncome,
   donationForRep,
+  factionWorkExpPerSec,
   passiveRepPerSec,
+  workRepPerSec,
   type WorkType,
 } from "./rep.ts";
+import {
+  channelForNeed,
+  compareSlotValues,
+  raiseBest,
+  REPUTATION_CHANNEL,
+  slotValue,
+  type RateChannel,
+  type SlotValue,
+} from "../income.ts";
 import { evaluateAll, type Blocker } from "./requirements.ts";
-import { settlingMoney, type FactionStanding, type FactionsView } from "./state.ts";
+import { settlingMoney, type FactionStanding, type FactionsView, type RepProfileView } from "./state.ts";
 
 /** Once the planned package is banked, opportunistic work may extend this
  * cycle by at most one percent. Purchases themselves remain end-loaded and do
@@ -178,18 +188,75 @@ export function updateMeasuredRates(view: FactionsView, memory: FactionMemory): 
   return { ...memory, measuredRepPerSec: measured, lastRep, lastRepAt: view.time };
 }
 
-function repRate(faction: string, standing: FactionStanding, view: FactionsView, memory: FactionMemory): {
+/** Everything one work type at one faction produces, in board vocabulary.
+ *
+ * A combat requirement is met by the WEAKEST of the four stats, so that is what
+ * field and security work produce toward it — the same rule crime scoring uses.
+ * The individual `skill:*` rates are kept beside it because a faction can
+ * require one specific stat. */
+function workProduces(
+  type: WorkType,
+  repPerSec: number,
+  view: RepProfileView,
+): Record<RateChannel, number> {
+  const exp = factionWorkExpPerSec(type, view.person, view.repContext, true);
+  const produces: Record<RateChannel, number> = { [REPUTATION_CHANNEL]: Math.max(0, repPerSec) };
+  const add = (channel: RateChannel, rate: number): void => {
+    if (rate > 0) produces[channel] = (produces[channel] ?? 0) + rate;
+  };
+  for (const [skill, rate] of Object.entries(exp)) {
+    add(channelForNeed({ kind: "skill", subject: skill }), rate);
+    if (skill === "charisma") add(channelForNeed({ kind: "charisma" }), rate);
+  }
+  const combat = Math.min(exp.strength ?? 0, exp.defense ?? 0, exp.dexterity ?? 0, exp.agility ?? 0);
+  add(channelForNeed({ kind: "combatSkills" }), combat);
+  return produces;
+}
+
+/** Which work type to run at a faction, and everything it earns.
+ *
+ * NOT "whichever pays the most reputation". Field and security work pay combat
+ * and charisma experience while they earn, so the type is chosen by what the
+ * whole package is worth — the same `slotValue` the arbiter prices the claim
+ * with. Reputation still breaks ties, and with nothing priced yet the ordering
+ * degenerates to reputation per second, which is the rule this replaces. */
+export function chooseWorkType(faction: string, standing: FactionStanding, view: RepProfileView, memory: FactionMemory): {
   type: WorkType;
   repPerSec: number;
+  produces: Record<RateChannel, number>;
 } | undefined {
-  const formula = bestWorkType(standing.offers, view.person, standing.favor, view.repContext, true);
-  if (!formula) return undefined;
   const measured = memory.measuredRepPerSec[faction];
   // Only trust a measured rate while we were actually working that faction.
-  if (measured !== undefined && measured > 0 && view.currentWork?.faction === faction) {
-    return { type: formula.type, repPerSec: measured };
+  const trustMeasured = measured !== undefined && measured > 0 && view.currentWork?.faction === faction;
+  const candidates = (["hacking", "field", "security"] as const)
+    .filter((type) => standing.offers[type])
+    .map((type) => {
+      // The measurement describes the type we were ACTUALLY running; applying
+      // it to a different one would attribute the wrong observation to it.
+      const repPerSec = trustMeasured && view.currentWork?.workType === type
+        ? measured
+        : workRepPerSec(type, view.person, standing.favor, view.repContext, true);
+      return { type, repPerSec, produces: workProduces(type, repPerSec, view) };
+    });
+  if (candidates.length === 0) return undefined;
+
+  // The candidates are each other's field. Without raising the best-known rate
+  // by what they offer, every channel would score as a fraction of an unknown
+  // and all three would tie at zero — the same reason the arbiter folds its own
+  // claims into the alternatives table.
+  const field = raiseBest(view.rates?.best ?? new Map(), candidates.map((entry) => entry.produces));
+  const worth = view.rates?.worth ?? new Map();
+  let best: (typeof candidates)[number] & { value: SlotValue } | undefined;
+  for (const entry of candidates) {
+    const value = slotValue({ produces: entry.produces, best: field, worth });
+    const better = best === undefined
+      || compareSlotValues(value, best.value) < 0
+      || (compareSlotValues(value, best.value) === 0 && entry.repPerSec > best.repPerSec);
+    if (better) best = { ...entry, value };
   }
-  return formula;
+  return best === undefined
+    ? undefined
+    : { type: best.type, repPerSec: best.repPerSec, produces: best.produces };
 }
 
 /** Reputation still needed at a faction to buy everything we want from it. */
@@ -891,6 +958,10 @@ function decideFactions(
     };
   }
 
+  // Published on every decision from here on, including the ones that idle —
+  // see `FactionDecision.workRate` for why the idle case is the important one.
+  const workRate = { faction: target.faction, repPerSec: target.repPerSec, produces: target.produces };
+
   // Donation beats working once income exceeds the crossover — and only once
   // favor actually allows it. Favor cannot grow within a run, so a locked
   // route is a message to `progression`, not something to wait for.
@@ -934,6 +1005,7 @@ function decideFactions(
         blockers: allBlockers,
         needOwners,
         invalidation,
+        workRate,
         until: untilRep(target.faction, target.needed, target.standing.rep, target.repPerSec),
       },
     };
@@ -952,6 +1024,7 @@ function decideFactions(
         blockers: allBlockers,
         needOwners,
         invalidation,
+        workRate,
         until: untilRep(target.faction, target.needed, target.standing.rep, target.repPerSec),
       },
     };
@@ -971,7 +1044,15 @@ function decideFactions(
     };
     return {
       memory: { ...next, lastAction: action },
-      decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
+      decision: {
+        objective,
+        action,
+        alternatives,
+        blockers: allBlockers,
+        needOwners,
+        invalidation,
+        workRate,
+      },
     };
   }
 
@@ -995,7 +1076,15 @@ function decideFactions(
     });
     return {
       memory: { ...next, lastAction: action },
-      decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
+      decision: {
+        objective,
+        action,
+        alternatives,
+        blockers: allBlockers,
+        needOwners,
+        invalidation,
+        workRate,
+      },
     };
   }
 
@@ -1015,6 +1104,7 @@ function decideFactions(
       blockers: allBlockers,
       needOwners,
       invalidation,
+      workRate,
       until: untilRep(target.faction, target.needed, target.standing.rep, target.repPerSec),
     },
   };
@@ -1030,9 +1120,18 @@ function untilRep(faction: string, target: number, have: number, ratePerSec: num
   };
 }
 
-/** Travel is issued ONLY when it is the sole remaining blocker. */
-function soleTravelBlocker(blockers: readonly (Blocker & { faction: string })[]): (Blocker & { faction: string }) | undefined {
-  const byFaction = new Map<string, (Blocker & { faction: string })[]>();
+/** Travel is issued ONLY when it is the sole remaining blocker.
+ *
+ * Structurally typed on the fields it actually reads, so the claim phase can
+ * ask the SAME question of the published digest. That matters: the fare is
+ * claimed one pass before the decision that spends it, and a claim derived from
+ * the previously-published action cannot anticipate an action the planner has
+ * not taken yet. On a live BN12 run the two never coincided — 85 executions
+ * recorded "waiting for $200,000 travel grant" while $57.7m sat unclaimed. */
+export function soleTravelBlocker<T extends { faction: string; kind: string; subject?: string; negated?: boolean }>(
+  blockers: readonly T[],
+): T | undefined {
+  const byFaction = new Map<string, T[]>();
   for (const entry of blockers) {
     const list = byFaction.get(entry.faction) ?? [];
     list.push(entry);
@@ -1055,7 +1154,7 @@ function nextGraft(view: FactionsView, wanted: readonly string[]): { name: strin
     const aug = view.catalog.get(name);
     if (!offer || !aug || offer.timeMs / 1_000 >= view.horizonSec) continue;
     if (aug.prereqs.some((prereq) => !view.owned.has(prereq))) continue;
-    const benefit = scoreAug(aug, view.weights);
+    const benefit = scoreAug(aug, view.weights, view.rates?.worth);
     if (benefit <= entropyPenalty || (view.graftGranted ?? view.moneyGranted) < offer.price) continue;
     return {
       name,
@@ -1204,7 +1303,7 @@ function finalSweepWanted(
   const countSlotsRemaining = Number.isFinite(view.targetAugCount)
     ? Math.max(0, view.targetAugCount - view.owned.size)
     : 0;
-  const countValue = countSlotWeight(view.targetAugCount, countSlotsRemaining);
+  const countValue = countSlotWeight(view.rates?.worth ?? new Map(), countSlotsRemaining);
   const byValue = [...view.catalog.values()]
     .filter(
       (aug) =>
@@ -1214,14 +1313,14 @@ function finalSweepWanted(
     )
     .sort(
       (a, b) => {
-        const aValue = Math.max(1e-9, scoreAug(a, view.weights) + countValue);
-        const bValue = Math.max(1e-9, scoreAug(b, view.weights) + countValue);
+        const aValue = Math.max(1e-9, scoreAug(a, view.weights, view.rates?.worth) + countValue);
+        const bValue = Math.max(1e-9, scoreAug(b, view.weights, view.rates?.worth) + countValue);
         // Before a route's installed-augmentation gate is full, every unique
         // one-shot also advances that gate by one. Select the affordable SET
         // by route-value per base dollar; the exact payment solver below still
         // buys the chosen set dearest-first to minimise 1.9x escalation.
         const efficiency = a.baseCost / aValue - b.baseCost / bValue;
-        return efficiency || scoreAug(b, view.weights) - scoreAug(a, view.weights) || (a.name < b.name ? -1 : 1);
+        return efficiency || scoreAug(b, view.weights, view.rates?.worth) - scoreAug(a, view.weights, view.rates?.worth) || (a.name < b.name ? -1 : 1);
       },
     )
     .map((aug) => aug.name);
@@ -1278,7 +1377,7 @@ function finalSweepWanted(
           faction: sellerOf.get(candidate)!,
         }));
         const cost = estimatedCost(trialCandidates, view.priceContext);
-        const quality = [...adding].reduce((sum, candidate) => sum + scoreAug(view.catalog.get(candidate)!, view.weights), 0);
+        const quality = [...adding].reduce((sum, candidate) => sum + scoreAug(view.catalog.get(candidate)!, view.weights, view.rates?.worth), 0);
         if (cost < bestCost || (cost === bestCost && quality > bestQuality)) {
           best = adding;
           bestCost = cost;
@@ -1445,21 +1544,29 @@ function nextSweepAction(view: FactionsView, wanted: readonly string[]): Faction
   return undefined;
 }
 
+/** The faction the slot would work, and everything that work produces. */
+interface WorkTarget {
+  faction: string;
+  standing: FactionStanding;
+  workType: WorkType;
+  repPerSec: number;
+  produces: Record<RateChannel, number>;
+  needed: number;
+}
+
 /** Which joined faction to work, and how fast. */
 function pickWorkFaction(
   view: FactionsView,
   memory: FactionMemory,
   objective: FactionObjective,
   alternatives: ScoredAlternative[],
-): { faction: string; standing: FactionStanding; workType: WorkType; repPerSec: number; needed: number } | undefined {
-  let best:
-    | { faction: string; standing: FactionStanding; workType: WorkType; repPerSec: number; needed: number }
-    | undefined;
+): WorkTarget | undefined {
+  let best: WorkTarget | undefined;
 
   for (const name of objective.factions) {
     const standing = view.factions.find((entry) => entry.name === name);
     if (!standing || !standing.joined) continue;
-    // Defensive: `bestWorkType` already filters on `offers`, but a faction
+    // Defensive: `chooseWorkType` already filters on `offers`, but a faction
     // that offers NOTHING (Shadows of Anarchy gains reputation only by
     // infiltrating) must never be selected for work at all.
     if (!standing.offers.hacking && !standing.offers.field && !standing.offers.security) continue;
@@ -1467,13 +1574,13 @@ function pickWorkFaction(
       ? objective.intent.repTarget
       : repNeeded(name, view, objective.augmentations);
     if (needed <= standing.rep) continue; // nothing left to earn here
-    const rate = repRate(name, standing, view, memory);
+    const rate = chooseWorkType(name, standing, view, memory);
     if (!rate) continue;
     // Rank by how much of the remaining gap this closes per second.
     const value = rate.repPerSec;
     alternatives.push({ label: `work ${name} (${rate.type})`, value, why: `${formatNumber(needed - standing.rep)} rep short` });
     if (!best || value > best.repPerSec) {
-      best = { faction: name, standing, workType: rate.type, repPerSec: value, needed };
+      best = { faction: name, standing, workType: rate.type, repPerSec: value, produces: rate.produces, needed };
     }
   }
 
@@ -1483,7 +1590,7 @@ function pickWorkFaction(
     const incumbent = view.factions.find((entry) => entry.name === memory.focusFaction);
     const withinDwell = view.time - memory.focusSince < FOCUS_DWELL_MS;
     if (incumbent && incumbent.joined && withinDwell) {
-      const incumbentRate = repRate(incumbent.name, incumbent, view, memory);
+      const incumbentRate = chooseWorkType(incumbent.name, incumbent, view, memory);
       const incumbentNeeded = objective.intent?.faction === incumbent.name
         ? objective.intent.repTarget
         : repNeeded(incumbent.name, view, objective.augmentations);
@@ -1493,6 +1600,7 @@ function pickWorkFaction(
           standing: incumbent,
           workType: incumbentRate.type,
           repPerSec: incumbentRate.repPerSec,
+          produces: incumbentRate.produces,
           needed: incumbentNeeded,
         };
       }

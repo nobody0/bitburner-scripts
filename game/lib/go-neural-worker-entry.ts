@@ -422,7 +422,9 @@ port.onmessage = (event) => {
         type: "installed",
         requestId: request.requestId,
         positionId: installed.id,
-        preparationMs: installed.cached ? 0 : installed.position.preparationMs,
+        // A cache hit did no preparation work this turn. Reporting 0 would
+        // read as "instantly prepared"; absence reads as "not measured here".
+        ...(installed.cached ? {} : { preparationMs: installed.position.preparationMs }),
         cached: installed.cached,
       });
       return;

@@ -37,7 +37,12 @@ import {
   phaseOf,
   stepProgression,
 } from "../shared/strategy/progression/decide.ts";
-import { scoreAugMults, weightsForRoute } from "../shared/strategy/factions/augs.ts";
+import { scoreAugMults, weightsFromMarginals } from "../shared/strategy/factions/augs.ts";
+
+/** The live BN12 measurement: money clears its own gate long before anything
+ * else binds, reputation is the only binding part of the route, hacking is the
+ * climb behind it. */
+const WORTH = new Map([["money", 1_000], ["hacking", 19_174], ["reputation", 49_505]]);
 import { canSolve, solve } from "../shared/strategy/side/contracts.ts";
 import { shockMultiplier, stepSleeves } from "../shared/strategy/sleeves/decide.ts";
 import { chargeOrder, distinctRotations, packFragments } from "../shared/strategy/stanek/pack.ts";
@@ -882,35 +887,58 @@ describe("progression", () => {
       prereqs: [],
       mults: {},
     };
-    expect(scoreAugMults(redPill, weightsForRoute("daedalus"))).toBe(0);
+    expect(scoreAugMults(redPill, weightsFromMarginals(WORTH))).toBe(0);
   });
 
-  test("Daedalus augmentation weights follow the ETA-selected invitation branch", () => {
-    const hacking = weightsForRoute("daedalus", "hacking");
-    const combat = weightsForRoute("daedalus", "combat");
-    expect(combat.strength).toBeGreaterThan(hacking.strength!);
-    expect(combat.agility_exp).toBeGreaterThan(hacking.agility_exp!);
-    // Combat clears the invitation, but the installed Red Pill still leaves a
-    // hacking-only world-daemon tail, so hacking value must remain intact.
-    expect(combat.hacking).toBe(hacking.hacking);
-    expect(combat.hacking_exp).toBe(hacking.hacking_exp);
+  test("augmentation weights come out in BN-seconds, from the route's own marginals", () => {
+    // The hand-tuned table this replaces said `faction_rep: 2` in every node
+    // forever. A weight is now what progression MEASURED a relative rate
+    // increase in that channel to save, so a reputation multiplier is worth
+    // reputation's seconds and nothing else has to be believed.
+    const weights = weightsFromMarginals(WORTH);
+    expect(weights.faction_rep).toBe(49_505);
+    expect(weights.hacking).toBe(19_174);
+    // hacking_speed shortens the whole batch, so it lifts money AND experience.
+    expect(weights.hacking_speed).toBe(19_174 + 1_000);
+  });
+
+  test("a channel the route does not depend on prices its augmentations at nothing", () => {
+    // Measured zero, not absent: mid-BN12 the farm clears the Daedalus money
+    // gate long before anything else binds, so a money multiplier genuinely
+    // saves no seconds. No constant could say that, and no constant should.
+    const noMoney = weightsFromMarginals(new Map([["money", 0], ["reputation", 49_505]]));
+    expect(noMoney.hacking_money).toBeUndefined();
+    expect(noMoney.faction_rep).toBe(49_505);
+  });
+
+  test("a single-source income multiplier is worth that source's share of income", () => {
+    // Doubling crime money beside a live farm is a rounding error, and the
+    // valuation now says so instead of carrying a flat 0.2.
+    const weights = weightsFromMarginals(new Map([["money", 10_000]]), {
+      incomeShares: { career: 0.0001, hacking: 0.9999 },
+    });
+    expect(weights.crime_money).toBeCloseTo(10_000 * 0.0001, 9);
+    expect(weights.hacking_money).toBeCloseTo(10_000 * 0.9999, 9);
+    // With nothing measured, an unmeasured source is worth nothing rather than
+    // a guess.
+    expect(weightsFromMarginals(new Map([["money", 10_000]])).crime_money).toBeUndefined();
   });
 
   test("direct skill multiplier value follows the nonlinear route target and SF12 base", () => {
-    const baseline = weightsForRoute("daedalus", "hacking");
-    const weak = weightsForRoute("daedalus", "hacking", {
-      hackingTarget: 3_000,
-      multipliers: { hacking: 1.5 },
-    });
-    const strong = weightsForRoute("daedalus", "hacking", {
-      hackingTarget: 3_000,
-      multipliers: { hacking: 15 },
-    });
-    expect(weak.hacking).toBeGreaterThan(strong.hacking);
-    expect(strong.hacking).toBeGreaterThan(baseline.hacking);
-    const total = (weights: Record<string, number>) => Object.values(weights).reduce((sum, weight) => sum + weight, 0);
-    expect(total(weak)).toBeCloseTo(total(baseline), 12);
-    expect(total(strong)).toBeCloseTo(total(baseline), 12);
+    // skill = m·(32·ln(exp + 534.6) − 200), so near a high gate a direct
+    // multiplier buys far more than an ordinary output multiplier — and the
+    // effect decays by itself as the installed base grows. A derivation, kept.
+    const baseline = weightsFromMarginals(WORTH);
+    const weak = weightsFromMarginals(WORTH, { hackingTarget: 3_000, multipliers: { hacking: 1.5 } });
+    const strong = weightsFromMarginals(WORTH, { hackingTarget: 3_000, multipliers: { hacking: 15 } });
+    expect(weak.hacking).toBeGreaterThan(strong.hacking!);
+    expect(strong.hacking).toBeGreaterThan(baseline.hacking!);
+    // NO RENORMALISATION back to the baseline total. The predecessor rescaled
+    // the whole objective so an override could not move the install cadence;
+    // these are seconds, and a package that really is worth more is entitled
+    // to say so.
+    const total = (weights: Record<string, number>) => Object.values(weights).reduce((sum, w) => sum + w, 0);
+    expect(total(weak)).toBeGreaterThan(total(baseline));
   });
 
   test("a realizable sweep set opens the install gate despite the empty queue", () => {
@@ -1114,18 +1142,31 @@ describe("progression", () => {
       affordableDistinct: 8,
       batchAllowed: false,
     })).toBe(0);
+    // In BN-seconds, from the route's measured acquisition rate: nine of the
+    // seventeen remaining slots, each worth `worth / remaining`.
+    const worth = new Map([["augmentations", 17_000]]);
     expect(routeCountInstallValue({
       required: 30,
       installed: 13,
       affordableDistinct: 9,
       batchAllowed: true,
-    })).toBeCloseTo(9 * 17 / 30, 12);
+      worth,
+    })).toBeCloseTo(9 * (17_000 / 17), 9);
+    // The last slot unblocks the whole gate, so it is worth the whole leg —
+    // and an unmeasured route prices none of it rather than guessing.
     expect(routeCountInstallValue({
       required: 30,
       installed: 29,
       affordableDistinct: 20,
       batchAllowed: true,
-    })).toBeCloseTo(1 / 5, 12);
+      worth,
+    })).toBeCloseTo(17_000, 9);
+    expect(routeCountInstallValue({
+      required: 30,
+      installed: 13,
+      affordableDistinct: 9,
+      batchAllowed: true,
+    })).toBe(0);
   });
 
   test("empty-queue liquidation is requested without making an install possible", () => {

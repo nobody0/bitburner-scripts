@@ -1,5 +1,14 @@
 import type { FeatureId } from "../features/ids.ts";
 import { incomePresentValue } from "./economics.ts";
+import {
+  compareSlotValues,
+  raiseBest,
+  scaleSlotValue,
+  slotValue,
+  type ChannelWorth,
+  type RateChannel,
+  type SlotValue,
+} from "./income.ts";
 import type { MeasuredMarginal } from "./progression/marginal.ts";
 
 /** The arbiter: allocation of the two genuinely contended resources.
@@ -69,6 +78,24 @@ interface ClaimBase {
    *  already sunk cost into a partial reputation tick should not be thrown
    *  away by a marginally higher bidder. */
   holdUntil?: number;
+  /** TIME CLAIMS: the rates holding the slot would produce, by channel. This is
+   *  what a claim is scored on — see `./income.ts`. ABSENT makes the claim
+   *  `hard`, ordered by `priority` alone, which is correct for the things that
+   *  are not a rate at all: an in-flight crime's progress lock, a mandatory
+   *  route install, a terminal action. Present-but-zero is a different
+   *  statement — "I want the slot and cannot say what it is worth" — and loses
+   *  to every bid that can put a number on it. */
+  produces?: Readonly<Record<RateChannel, number>>;
+  /** TIME CLAIMS: the fraction of this bid's worth that lands inside the
+   *  planning horizon, for a claimant that must OCCUPY the slot before it
+   *  delivers anything — a program write, not a wage. Absent means 1, which is
+   *  every claim that produces for as long as it holds the slot.
+   *
+   *  It belongs on the claim, not just inside the owning feature's own ranking:
+   *  a feature ranks its options against each other and then bids the winner
+   *  here, so a discount applied only internally would be re-inflated the moment
+   *  the bid met another feature's. See `deliveryFraction` in `./income.ts`. */
+  deliveryFraction?: number;
   why: string;
 }
 
@@ -136,6 +163,14 @@ export interface ArbiterInput {
   expectedIncomePerSec?: MeasuredMarginal;
   /** Best marginal productive return from the previous arbitration digest. */
   reinvestmentReturnPerDollarSec?: number;
+  /** THE ALTERNATIVES TABLE for the player-time slot: the best rate anyone
+   * announced per channel, and what a relative increase in that channel is
+   * worth in BN-seconds. Absent leaves every time claim unpriced, which falls
+   * back to raw money per second — see `compareSlotValues`. */
+  rates?: {
+    best: ReadonlyMap<RateChannel, MeasuredMarginal>;
+    worth: ChannelWorth;
+  };
   /** Pure feature callback for the rung exposed after an exact step grant. */
   nextStep?: (granted: StepClaim, remainingPool: number) => StepClaim | undefined;
   /** The slot holder as of the previous resolve. Omit on the first tick. */
@@ -152,6 +187,19 @@ export interface ArbiterResult {
   slot?: SlotState;
   /** Set when this resolve took the slot away from a live incumbent. */
   preempted?: { claimId: string; by: FeatureId; heldMs: number };
+  /** EVERY time claim considered and what it was worth, best first — the
+   * alternatives, kept rather than discarded. The UI renders it to answer "why
+   * is the player doing this", and `hacking` prices a program write against the
+   * best thing the slot would otherwise be doing. */
+  slotValues: {
+    claimId: string;
+    by: FeatureId;
+    /** Hard claims are ordered by the lattice and carry no rate valuation. */
+    pricing: "hard" | "economic";
+    priority: number;
+    value?: SlotValue;
+    why: string;
+  }[];
   /** One marginal-value threshold for every priority band that was
    * water-filled. Several can exist because hard bands never compete. */
   waterlines: {
@@ -191,12 +239,23 @@ export function linearValueCurve(marginalValue: number, amount: number): ClaimVa
   return { demandAt: (lambda) => Math.max(0, lambda) <= value ? limit : 0 };
 }
 
-/** A challenger must beat the incumbent by this much to take the work slot.
+/** A challenger must beat a HARD incumbent by this much to take the work slot.
  *
  * Non-zero on purpose: switching player work throws away the current activity
  * outright, and a slot that changes hands on a 1-point difference would
  * oscillate between two near-equal bidders and complete neither. */
 export const PREEMPT_MARGIN = 10;
+
+/** The same anti-oscillation rule for PRICED claims, where an absolute margin
+ * is meaningless: BN-seconds have no fixed scale, so the incumbent keeps the
+ * slot unless a challenger is worth this much MORE, relatively.
+ *
+ * Hysteresis, NOT policy. The real cost of switching — the partial crime or
+ * grafting unit that is destroyed by starting something else — is modelled
+ * exactly, by `holdUntil` (see `career/schedule.ts#progressLockUntil`), and
+ * that is absolute while it lasts. This only stops two claims whose estimates
+ * cross back and forth from trading the slot every pass and finishing neither. */
+export const SLOT_HYSTERESIS = 0.05;
 
 /** Named priorities, so two features' claims are comparable by construction
  * rather than by whatever number each happened to pick. Higher wins.
@@ -219,19 +278,16 @@ export const PRIORITY = {
   "factions:aug-fund": 90,
   /** Donating for reputation, once favor allows it. */
   "factions:donate": 70,
-  /** The player-time slot, working for a faction.
-   *
-   *  DERIVED, not chosen: `factions` posts `slotPriority({ repFraction: 1 })`, which
-   *  is `REP_SPAN` — it is the only source of faction reputation, so whenever it wants
-   *  the slot it is the best reputation option available. The constant is kept for the
-   *  graft claim, which occupies the same slot to install an augmentation rather than
-   *  to earn a rate, and as the named point the ordering tests compare against. */
+  /** The player-time slot held to GRAFT — an augmentation being installed
+   *  rather than a rate being earned, so it is priced by the lattice like any
+   *  other non-rate claim. Ordinary faction reputation work is no longer a
+   *  band at all: it announces `produces: { reputation }` and is scored on
+   *  what that rate is worth (see `./income.ts`). */
   "factions:work": 60,
-  /** Reputation work on the selected faction-acquisition route. It must beat
-   * ordinary career income (whose scored ceiling is 80), otherwise the
-   * faction package ETA assumes continuous work while the arbiter gives that
-   * work only occasional boundary ticks. Genuine career blockers still win:
-   * they are what unlock the faction this work needs. */
+  /** RAM for reputation work on the selected faction-acquisition route.
+   * Player time and the dodge that STARTS that work are one atomic action, so
+   * the RAM half is banded to match the policy weight of the time half. The
+   * time half itself is priced, not banded. */
   "factions:route-work": 91,
   /** Route mechanics require the current install and the route-weighted
    * augmentation package is the remaining pre-reset work. This is deliberately
@@ -240,19 +296,17 @@ export const PRIORITY = {
    * career and its pre-emption margin; ordinary route work competes with skill
    * training through the measured marginal-XP model. */
   "factions:install-work": 121,
-  /** Career satisfying a BLOCKING need from the board (karma, stats).
+  /** Career's MONEY claims (tuition, travel fare) while it is serving a
+   *  BLOCKING need from the board.
    *
-   *  Deliberately more than PREEMPT_MARGIN above BOTH rates the slot can be scored
-   *  on, and the test suite pins that. Anything less and the number would be
-   *  decorative: a blocking need arising WHILE the slot is already busy could never
-   *  interrupt it, so the feature that posted the need would wait for the incumbent
-   *  to give up on its own.
-   *
-   *  It has to clear `MONEY_SPAN`, not just reputation. A blocking need is usually
-   *  the gate on something far more valuable than either rate — the karma, stats or
-   *  backdoor that UNLOCKS a faction, without which no amount of reputation or
-   *  income moves the run forward. At 75 it sat below a best-in-game earner's 80, so
-   *  crime could outrank the very unlock it was funding.
+   *  NO LONGER A TIME BAND. It was, and that is precisely what stalled a live
+   *  BN12 run for six hours: `priorityFor` bands a career option by the urgency
+   *  of any need it TOUCHES, with no magnitude test, so a crime paying $1.8e4/s
+   *  against progression's $1e11 route need — a contribution scored at 1e-6,
+   *  toward a resource the same route priced at zero BN-seconds — outranked the
+   *  reputation work that was the only thing the slot could actually advance.
+   *  Career's time claim now announces the rates it produces and is scored
+   *  against the field like every other claimant.
    *
    *  Strictly BELOW `progression:install-freeze`. An exact tie there would not be
    *  a tie in practice: `compareClaims` falls through to the feature id, so
@@ -260,9 +314,7 @@ export const PRIORITY = {
    *  and travel funds would be allocated out of the very bankroll the post-sweep
    *  freeze exists to protect. */
   "career:blocking-need": 109,
-  /** Career's request queue. Blocking work may interrupt ordinary faction
-   * reputation; wanted/nice work may not. The gaps exceed PREEMPT_MARGIN so a
-   * priority change has the same result regardless of which side is incumbent. */
+  /** The same, for career money claims backing a wanted/nice request. */
   "career:wanted-request": 45,
   "career:nice-request": 35,
   /** Atomic Hacknet purchases that directly clear another feature's posted
@@ -271,23 +323,22 @@ export const PRIORITY = {
   "hacknet:wanted-need": 45,
   "hacknet:nice-need": 35,
   /** Temporary ownership while a completable task has unbanked progress. This
-   * is a lock, not an assertion that its objective is more valuable.
+   * is a lock, not an assertion that its objective is more valuable — and it is
+   * a HARD claim, because the thing it protects is not a rate. Cancelling a
+   * ten-minute Heist at 99% destroys the whole unit, so no priced bid may take
+   * the slot before `holdUntil`.
    *
-   * Above the combined spans (`REP_SPAN + MONEY_SPAN` = 140) minus the pre-emption
-   * margin, so an ordinary claim cannot cancel a crime at 99% and throw the unit
-   * away. It is deliberately NOT out of reach: a claim that scores past 130 is
-   * simultaneously the best reputation AND very nearly the best money option
-   * available, and cancelling the partial task for that genuinely is the right
-   * trade. As more currencies get scored, the ceiling rises toward this and the lock
-   * becomes breakable on merit rather than by exception. */
+   * The lock is bounded by the moment that progress BANKS (see
+   * `career/schedule.ts#progressLockUntil`). At the boundary career drops back
+   * to a priced claim and the slot is re-decided on merit — which is the half
+   * that was broken: the lock was correct, the automatic renewal at an unearned
+   * band was not.
+   *
+   * Above every other hard time band except the mandatory route/terminal ones,
+   * which must be able to interrupt even unbanked work. */
   "career:progress-lock": 120,
-  /** Career earning money with no need outstanding.
-   *
-   *  RETAINED AS A REFERENCE POINT, not as the live value: `career` now scores this
-   *  band from its earning rate against the best rate anyone announced (see
-   *  `shared/strategy/income.ts`), because a constant says the same thing whether
-   *  crime out-earns the farm tenfold or is a rounding error beside it. Kept so the
-   *  ordering tests have a named number to compare against. */
+  /** Career MONEY claims with no need outstanding. Career's time claim carries
+   *  no band at all — it is priced from the rates it produces. */
   "career:income": 30,
   /** Corp seed money — huge, rare, and gates the whole feature. */
   "corp:seed": 85,
@@ -838,6 +889,7 @@ export function resolveClaims(input: ArbiterInput): ArbiterResult {
     waterlines,
     stepLoop: { iterations: stepIterations, cap: STEP_LOOP_CAP, capHit },
     warnings,
+    slotValues: slotOutcome.slotValues,
     ...(slotOutcome.slot ? { slot: slotOutcome.slot } : {}),
     ...(slotOutcome.preempted ? { preempted: slotOutcome.preempted } : {}),
     remaining: pools,
@@ -856,13 +908,67 @@ function denial(claim: Claim, available: number, reason: DenyReason): Denial {
   };
 }
 
+/** A time claim, with what it is worth if it can be priced at all. */
+interface SlotBid {
+  claim: Claim;
+  pricing: "hard" | "economic";
+  value?: SlotValue;
+}
+
+/** A claim that names what it produces is PRICED; one that names nothing is a
+ * lock, a mandatory action or an install — not a rate, and the lattice is still
+ * the right tool for those.
+ *
+ * PRESENCE decides, not magnitude. A claimant that names its channels and
+ * reports zero on all of them is saying "I want the slot but cannot price what
+ * for": it must lose to anything that can, and must not be promoted to a lock
+ * by the absence of a number. */
+function slotBid(
+  claim: Claim,
+  best: ReadonlyMap<RateChannel, MeasuredMarginal>,
+  worth: ChannelWorth,
+): SlotBid {
+  if (claim.produces === undefined) return { claim, pricing: "hard" };
+  return {
+    claim,
+    pricing: "economic",
+    value: scaleSlotValue(
+      slotValue({ produces: claim.produces, best, worth }),
+      claim.deliveryFraction ?? 1,
+    ),
+  };
+}
+
+/** Does the challenger take the slot from the incumbent?
+ *
+ * Hard outranks priced outright: a lock protecting unbanked work, or an
+ * irreversible route action, is not something an earning rate may interrupt.
+ * Between two hard claims the absolute lattice margin applies; between two
+ * priced ones the relative hysteresis does. */
+function outbidsIncumbent(challenger: SlotBid, incumbent: SlotBid): boolean {
+  if (challenger.pricing !== incumbent.pricing) return challenger.pricing === "hard";
+  if (challenger.pricing === "hard") return challenger.claim.priority > incumbent.claim.priority + PREEMPT_MARGIN;
+  const ours = challenger.value!;
+  const theirs = incumbent.value!;
+  if (ours.state !== theirs.state) return ours.state === "priced";
+  const margin = 1 + SLOT_HYSTERESIS;
+  return ours.state === "priced"
+    ? ours.valueSec > theirs.valueSec * margin
+    : ours.moneyPerSec > theirs.moneyPerSec * margin;
+}
+
 /** The single player-time slot.
  *
- * Three rules, and the third is the one that is easy to miss:
- *  1. A challenger takes the slot only if it beats the incumbent by more than
- *     PREEMPT_MARGIN.
- *  2. ...and only once the incumbent's `holdUntil` has passed.
- *  3. An incumbent that stops RE-ISSUING its claim has released the slot. That
+ * Four rules, and the last is the one that is easy to miss:
+ *  1. Hard claims — locks and mandatory actions — are ordered by the priority
+ *     lattice, and always outrank priced ones.
+ *  2. Priced claims are ordered by BN-seconds saved, which is `(our rate / the
+ *     best announced rate) × what that rate is worth`, summed over everything
+ *     the work produces. See `./income.ts`.
+ *  3. A challenger takes the slot only by beating the incumbent (absolute
+ *     margin between hard claims, relative hysteresis between priced ones) and
+ *     only once the incumbent's `holdUntil` has passed.
+ *  4. An incumbent that stops RE-ISSUING its claim has released the slot. That
  *     is how a feature ends its own work without a separate "release" message:
  *     it simply stops asking, and the next tick hands the slot on. */
 function resolveSlot(input: ArbiterInput): {
@@ -870,27 +976,41 @@ function resolveSlot(input: ArbiterInput): {
   denied: Denial[];
   slot?: SlotState;
   preempted?: { claimId: string; by: FeatureId; heldMs: number };
+  slotValues: ArbiterResult["slotValues"];
 } {
   const claims = input.claims.filter((claim) => claim.resource === "time");
+  if (claims.length === 0) return { grants: [], denied: [], slotValues: [] };
+
   const tiers = returnTiers(claims);
-  claims.sort((a, b) => compareClaims(a, b, tiers));
-  if (claims.length === 0) return { grants: [], denied: [] };
+  const best = raiseBest(input.rates?.best ?? new Map(), claims.map((claim) => claim.produces ?? {}));
+  const worth = input.rates?.worth ?? new Map();
+  const bids = claims.map((claim) => slotBid(claim, best, worth));
+  bids.sort((a, b) => {
+    if (a.pricing !== b.pricing) return a.pricing === "hard" ? -1 : 1;
+    if (a.pricing === "hard") return compareClaims(a.claim, b.claim, tiers);
+    const value = compareSlotValues(a.value!, b.value!);
+    if (value !== 0) return value;
+    // Deterministic to the end: two equally valuable bids must not depend on
+    // the order features were collected in.
+    return a.claim.by !== b.claim.by
+      ? (a.claim.by < b.claim.by ? -1 : 1)
+      : a.claim.id < b.claim.id ? -1 : a.claim.id > b.claim.id ? 1 : 0;
+  });
 
   const previous = input.slot;
   const incumbent = previous
-    ? claims.find((claim) => claim.id === previous.claimId && claim.by === previous.by)
+    ? bids.find((bid) => bid.claim.id === previous.claimId && bid.claim.by === previous.by)
     : undefined;
 
-  let winner = claims[0]!;
+  let winner = bids[0]!;
   let preempted: { claimId: string; by: FeatureId; heldMs: number } | undefined;
 
   if (incumbent) {
-    const challenger = claims.find((claim) => claim !== incumbent);
-    const held = input.now >= (incumbent.holdUntil ?? 0);
-    const outclassed = challenger !== undefined && challenger.priority > incumbent.priority + PREEMPT_MARGIN;
-    if (held && outclassed) {
-      winner = challenger!;
-      preempted = { claimId: incumbent.id, by: incumbent.by, heldMs: input.now - previous!.since };
+    const challenger = bids.find((bid) => bid !== incumbent);
+    const held = input.now >= (incumbent.claim.holdUntil ?? 0);
+    if (held && challenger !== undefined && outbidsIncumbent(challenger, incumbent)) {
+      winner = challenger;
+      preempted = { claimId: incumbent.claim.id, by: incumbent.claim.by, heldMs: input.now - previous!.since };
     } else {
       winner = incumbent;
     }
@@ -898,17 +1018,33 @@ function resolveSlot(input: ArbiterInput): {
 
   const keepsSince = incumbent && winner === incumbent ? previous!.since : input.now;
   const grants: Grant[] = [
-    { claimId: winner.id, by: winner.by, resource: "time", amount: 1, mode: winner.mode, partial: false },
+    {
+      claimId: winner.claim.id,
+      by: winner.claim.by,
+      resource: "time",
+      amount: 1,
+      mode: winner.claim.mode,
+      partial: false,
+      ...(winner.value?.state === "priced" ? { marginalValue: winner.value.valueSec } : {}),
+    },
   ];
-  const denied: Denial[] = claims
-    .filter((claim) => claim !== winner)
-    .map((claim) => denial(claim, 0, "slot-held"));
+  const denied: Denial[] = bids
+    .filter((bid) => bid !== winner)
+    .map((bid) => denial(bid.claim, 0, "slot-held"));
 
   return {
     grants,
     denied,
-    slot: { claimId: winner.id, by: winner.by, priority: winner.priority, since: keepsSince },
+    slot: { claimId: winner.claim.id, by: winner.claim.by, priority: winner.claim.priority, since: keepsSince },
     ...(preempted ? { preempted } : {}),
+    slotValues: bids.map((bid) => ({
+      claimId: bid.claim.id,
+      by: bid.claim.by,
+      pricing: bid.pricing,
+      priority: bid.claim.priority,
+      ...(bid.value ? { value: bid.value } : {}),
+      why: bid.claim.why,
+    })),
   };
 }
 
@@ -933,5 +1069,8 @@ export function holdsSlot(result: ArbiterResult, by: FeatureId): boolean {
 }
 
 export function emptyArbitration(): ArbiterResult {
-  return { grants: [], reserved: [], denied: [], waterlines: [], stepLoop: { iterations: 0, cap: STEP_LOOP_CAP, capHit: false }, warnings: [], remaining: { money: 0 } };
+  return {
+    grants: [], reserved: [], denied: [], waterlines: [], slotValues: [],
+    stepLoop: { iterations: 0, cap: STEP_LOOP_CAP, capHit: false }, warnings: [], remaining: { money: 0 },
+  };
 }

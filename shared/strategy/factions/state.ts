@@ -1,5 +1,7 @@
 import type { PlayerRequirement } from "@ns";
 import type { AugInfo, ObjectiveWeights, PriceContext } from "./augs.ts";
+import type { ChannelWorth, RateChannel } from "../income.ts";
+import type { MeasuredMarginal } from "../progression/marginal.ts";
 import type { RepContext, RepPerson, WorkType } from "./rep.ts";
 import type { RequirementView } from "./requirements.ts";
 import type { RouteId } from "../progression/endgame.ts";
@@ -29,16 +31,41 @@ export interface FactionStanding {
   special: boolean;
 }
 
-export interface FactionsView {
+/** The slice of the view the reputation formulas actually read.
+ *
+ * `FactionsView` satisfies it, and so does the much smaller profile the work
+ * CLAIM assembles from telemetry. That is the point: the claim has to price
+ * itself on every pass, including the ones where the planner exited early and
+ * published no work rate at all, and it cannot build a whole `FactionsView`
+ * without a driver context. Predicting reputation needs a person, the node
+ * context and the alternatives table — nothing else. */
+export interface RepProfileView {
+  person: RepPerson & { skills: Record<string, number> };
+  repContext: RepContext;
+  /** The alternatives table and what each channel is worth, so the WORK TYPE is
+   *  chosen with the same arithmetic the arbiter prices the claim with. Field
+   *  and security work pay combat experience alongside reputation; picking on
+   *  reputation alone throws that away, and a posted combat gate then goes to
+   *  crime while the reputation it could have earned at the same time does not
+   *  happen. Absent falls back to reputation per second — the previous rule. */
+  rates?: {
+    best: ReadonlyMap<RateChannel, MeasuredMarginal>;
+    worth: ChannelWorth;
+  };
+  /** What the player is doing right now, so the continuation guard can tell
+   *  "our work is still running" from "something else took the slot" — and so a
+   *  measured rate is attributed only to the work actually being run. */
+  currentWork?: { kind: string; faction?: string; detail?: string; workType?: WorkType; focused: boolean };
+}
+
+export interface FactionsView extends RepProfileView {
   /** Virtual or wall-clock ms. Passed in; never read from a clock here. */
   time: number;
 
-  person: RepPerson & { skills: Record<string, number> };
   requirementView: RequirementView;
   /** Requirement owners that can still act in this run. Absent preserves the
    * ordinary all-features assumption used by pure callers. */
   availableOwners?: ReadonlySet<FeatureId>;
-  repContext: RepContext;
   priceContext: PriceContext;
 
   factions: FactionStanding[];
@@ -53,7 +80,8 @@ export interface FactionsView {
   graftable?: { name: string; price: number; timeMs: number }[];
   entropy?: number;
 
-  /** What the run is optimising for. */
+  /** What the run is optimising for: BN-seconds per unit of `ln(mult)` on each
+   *  multiplier field, derived from `rates.worth` by `weightsFromMarginals`. */
   weights: ObjectiveWeights;
   /** The chosen way to end the node. Route-specific augmentations only receive
    * their terminal value when they belong to this route. */
@@ -113,10 +141,6 @@ export interface FactionsView {
   proceedsSettling: boolean;
   /** Whether this feature holds Player.currentWork. */
   holdsWorkSlot: boolean;
-
-  /** What the player is doing right now, so the continuation guard can tell
-   *  "our work is still running" from "something else took the slot". */
-  currentWork?: { kind: string; faction?: string; detail?: string; workType?: WorkType; focused: boolean };
 
   /** Measured income per second, for the donate-vs-work crossover. */
   incomePerSec: number;

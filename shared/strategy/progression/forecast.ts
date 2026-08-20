@@ -122,6 +122,21 @@ export function usableForecastSec(forecast: TimeForecast): number | undefined {
   return forecast.state === "estimated" ? forecast.remainingSec : undefined;
 }
 
+/** Seconds of run left to plan against, with the documented fallback applied.
+ *
+ * The one expression every "how much of the remaining run does this buy" answer
+ * has to share. The buy-vs-write gate, the value of an access unlock and the
+ * occupancy discount on a bounded work-slot bid all divide by this; if any two of
+ * them picked a different horizon, one would post a need the other permanently
+ * outranks and the work would never happen.
+ *
+ * Pass an already-refreshed forecast (`forecastAt(node, now)`) — `usableForecastSec`
+ * deliberately reports nothing for a stale or unknown one, and `undefined` here
+ * means the conservative window, not a claim about the run's length. */
+export function nodeHorizonSec(node: TimeForecast | undefined): number {
+  return (node ? usableForecastSec(node) : undefined) ?? DEFAULT_PLANNING_HORIZON_SEC;
+}
+
 /** Below this many forecast seconds to the install, investment spending is
  * braked (the `progression:imminent-install` reserve). */
 export const IMMINENT_INSTALL_SEC = 300;

@@ -22,11 +22,11 @@ export class AggregateGoNeuralRuntime implements GoNeuralRuntime {
   readonly positions = new Map<string, GoNeuralPrepared>();
   #nextTurn = 1;
 
-  async install(view: GoView): Promise<{ positionId: string; preparationMs: number; cached: boolean }> {
+  async install(view: GoView): Promise<{ positionId: string; preparationMs?: number; cached: boolean }> {
     const positionId = goNeuralPositionIdentity(view).id;
     const cached = this.positions.has(positionId);
     if (!cached) this.positions.set(positionId, prepareNeuralGoDecision(view));
-    return { positionId, preparationMs: 0, cached };
+    return { positionId, cached };
   }
 
   async evaluate(positionId: string, dispatchPlaytime: number): Promise<GoWorkerEvaluation> {

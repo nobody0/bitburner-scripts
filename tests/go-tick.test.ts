@@ -3,6 +3,7 @@ import {
   GO_DISPATCH_GUARD_MS,
   goChooseSeedTarget,
   goDispatchDelayMs,
+  goDispatchLatency,
   goNextRolloverAt,
   goPhaseAgrees,
   goPredictedPlaytime,
@@ -90,6 +91,73 @@ describe("go engine-tick alignment", () => {
       const dispatchAt = nowWall + goDispatchDelayMs(target, nowWall);
       // The tick in force at dispatch must be the tick we forecast for.
       expect(goPredictedPlaytime(phase, dispatchAt)).toBe(target.targetPlaytime);
+    }
+  });
+});
+
+describe("ready-to-play latency split", () => {
+  /** A turn that spent most of its time in the worker, plus a short deliberate
+   * wait for the target tick. */
+  const slowWorker = {
+    turnReadyAt: 1_000,
+    planStartedAt: 1_018,
+    preparedAt: 1_260,
+    actionStartedAt: 1_261,
+    stubEnteredAt: 1_273,
+    finalizeMs: 8,
+    alignMs: 38,
+    verifiedAt: 1_319,
+    dispatchedAt: 1_320,
+  };
+
+  test("partitions the total into disjoint segments", () => {
+    const breakdown = goDispatchLatency(slowWorker);
+    expect(breakdown.totalMs).toBe(320);
+    expect(breakdown.admitMs).toBe(18);
+    expect(breakdown.prepareMs).toBe(242);
+    expect(breakdown.leaseMs).toBe(12);
+    expect(breakdown.finalizeMs).toBe(8);
+    expect(breakdown.alignMs).toBe(38);
+    expect(breakdown.dispatchMs).toBe(1);
+    const named = breakdown.admitMs + breakdown.prepareMs + breakdown.leaseMs
+      + breakdown.finalizeMs + breakdown.alignMs + breakdown.dispatchMs;
+    expect(breakdown.residualMs).toBe(breakdown.totalMs - named);
+  });
+
+  test("keeps deliberate waiting out of the segments that mean lag", () => {
+    // Same total, but nearly all of it is the wait for the next engine cycle.
+    // Reading the total alone, the two turns are indistinguishable; that is
+    // precisely what the split exists to separate.
+    const breakdown = goDispatchLatency({
+      ...slowWorker,
+      preparedAt: 1_030,
+      actionStartedAt: 1_031,
+      stubEnteredAt: 1_037,
+      alignMs: 274,
+      verifiedAt: 1_319,
+    });
+    expect(breakdown.prepareMs).toBe(12);
+    expect(breakdown.alignMs).toBe(274);
+  });
+
+  test("never reports a negative or overlong segment", () => {
+    // Clocks can step backwards across a dodge boundary; a negative segment
+    // would publish a latency that never happened.
+    const breakdown = goDispatchLatency({
+      turnReadyAt: 2_000,
+      planStartedAt: 1_900,
+      preparedAt: 1_950,
+      actionStartedAt: 2_100,
+      stubEnteredAt: 2_050,
+      finalizeMs: -5,
+      alignMs: 10_000,
+      verifiedAt: 2_400,
+      dispatchedAt: 2_010,
+    });
+    expect(breakdown.totalMs).toBe(10);
+    for (const value of Object.values(breakdown)) {
+      expect(value).toBeGreaterThanOrEqual(0);
+      expect(value).toBeLessThanOrEqual(breakdown.totalMs);
     }
   });
 });

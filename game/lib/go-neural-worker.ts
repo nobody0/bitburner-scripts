@@ -41,7 +41,7 @@ type GoWorkerRpcRequest =
   | { type: "reset" };
 
 export interface GoNeuralRuntime {
-  install(view: GoView, parentTurnId?: string): Promise<{ positionId: string; preparationMs: number; cached: boolean }>;
+  install(view: GoView, parentTurnId?: string): Promise<{ positionId: string; preparationMs?: number; cached: boolean }>;
   evaluate(positionId: string, dispatchPlaytime: number, parentTurnId?: string): Promise<GoWorkerEvaluation>;
   /** Certified merged-playbook action for an installed position at an exact
    * dispatch tick, or undefined off the certified line (or with no playbook
@@ -110,16 +110,16 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
     this.#worker.onerror = (event) => this.#fail(new Error(event.message ?? "V9 Go worker crashed"));
   }
 
-  async install(view: GoView, parentTurnId?: string): Promise<{ positionId: string; preparationMs: number; cached: boolean }> {
+  async install(view: GoView, parentTurnId?: string): Promise<{ positionId: string; preparationMs?: number; cached: boolean }> {
     const identity = goNeuralPositionIdentity(view);
     if (this.#knownPositions.get(identity.id) === identity.canonical) {
       if (parentTurnId) this.#acceptParent(parentTurnId, identity.id);
-      return { positionId: identity.id, preparationMs: 0, cached: true };
+      return { positionId: identity.id, cached: true };
     }
     if (parentTurnId && this.#pushedPositions.get(identity.id)?.has(parentTurnId)) {
       this.#knownPositions.set(identity.id, identity.canonical);
       this.#acceptParent(parentTurnId, identity.id);
-      return { positionId: identity.id, preparationMs: 0, cached: true };
+      return { positionId: identity.id, cached: true };
     }
     const response = await this.#request({
       type: "install",
@@ -130,7 +130,11 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
     if (response.type !== "installed") throw new Error(`unexpected Go worker response ${response.type}`);
     this.#knownPositions.set(identity.id, identity.canonical);
     if (parentTurnId) this.#finishParent(parentTurnId);
-    return { positionId: response.positionId, preparationMs: response.preparationMs, cached: response.cached };
+    return {
+      positionId: response.positionId,
+      ...(response.preparationMs === undefined ? {} : { preparationMs: response.preparationMs }),
+      cached: response.cached,
+    };
   }
 
   async evaluate(positionId: string, dispatchPlaytime: number, parentTurnId?: string): Promise<GoWorkerEvaluation> {

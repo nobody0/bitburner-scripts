@@ -411,8 +411,11 @@ export function legalMoves(
   ]);
 }
 
-export function territory(board: GoBoard): { X: number; O: number } {
-  const score = { X: 0, O: 0 };
+/** Owner of every controlled empty node, keyed `x,y`. `territory` counts this
+ * map, so any presentation that shades controlled space agrees by construction
+ * with the counts telemetry publishes. */
+export function territoryOwners(board: GoBoard): Map<string, Stone> {
+  const owners = new Map<string, Stone>();
   const seen = new Set<string>();
   for (let x = 0; x < board.size; x++) {
     for (let y = 0; y < board.size; y++) {
@@ -435,10 +438,17 @@ export function territory(board: GoBoard): { X: number; O: number } {
       // Upstream deliberately does not award an almost-board-sized empty
       // chain. Without this rule, one opening stone owns nearly the board.
       if (region.length <= board.size ** 2 - 3 && borders.size === 1) {
-        score[[...borders][0] as Stone] += region.length;
+        const owner = [...borders][0] as Stone;
+        for (const [rx, ry] of region) owners.set(`${rx},${ry}`, owner);
       }
     }
   }
+  return owners;
+}
+
+export function territory(board: GoBoard): { X: number; O: number } {
+  const score = { X: 0, O: 0 };
+  for (const owner of territoryOwners(board).values()) score[owner] += 1;
   return score;
 }
 

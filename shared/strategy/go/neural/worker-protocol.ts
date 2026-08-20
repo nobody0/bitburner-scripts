@@ -107,7 +107,7 @@ export type GoWorkerResponse =
   | { type: "predicted"; prediction: GoWorkerPrediction }
   | { type: "confirmed"; turnId: string; positionId: string; clockDrifted: boolean; terminal: boolean }
   | { type: "desynced"; turnId: string; message: string }
-  | { type: "installed"; requestId: number; positionId: string; preparationMs: number; cached: boolean }
+  | { type: "installed"; requestId: number; positionId: string; preparationMs?: number; cached: boolean }
   | { type: "evaluated"; requestId: number; positionId: string; dispatchPlaytime: number; value: GoWorkerEvaluation }
   | { type: "playbook"; requestId: number; certified?: GoWorkerCertified }
   | { type: "playbookRoute"; requestId: number; route?: GoWorkerPlaybookRoute }

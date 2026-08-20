@@ -1,9 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import {
   announcedIncome,
+  announcedRates,
   bestIncomePerSec,
   bestReinvestmentReturnPerDollarSec,
 } from "../game/lib/income.ts";
+import { NOMINAL_VALUE_SEC_PER_WEIGHT } from "../shared/strategy/access/value.ts";
+import {
+  bestByChannel,
+  channelWorth,
+  compareSlotValues,
+  deliveryFraction,
+  scaleSlotValue,
+  slotValue,
+} from "../shared/strategy/income.ts";
+import { postNeeds } from "../shared/strategy/needs.ts";
 import { MS_PER_TICK } from "../shared/strategy/stock/market.ts";
 import type { GameState } from "../game/lib/state.ts";
 
@@ -108,5 +119,183 @@ describe("reinvestment return", () => {
       },
     });
     expect(bestReinvestmentReturnPerDollarSec(s)).toBe(0);
+  });
+});
+
+describe("the alternatives-and-worth table", () => {
+  test("channels are announced separately, and an unknown one is not a zero", () => {
+    const best = bestByChannel(announcedRates(state({
+      fleet: { scriptIncome: [1_000, 0] },
+      farm: { expRate: 250 },
+    })));
+    expect(best.get("money")).toEqual({ state: "measured", value: 1_000 });
+    expect(best.get("hacking")).toEqual({ state: "measured", value: 250 });
+    // Only the work slot produces reputation, so the background field is empty
+    // — stated explicitly, never as a measured zero, or a claim would be scored
+    // as a fraction of nothing.
+    expect(best.get("reputation")?.state).toBe("unknown");
+  });
+
+  test("a route marginal prices its currency, INCLUDING a measured zero", () => {
+    // The live BN12 number: the farm clears the Daedalus money gate long before
+    // anything else on the route binds, so a relative income increase saves no
+    // seconds at all. That is an answer, and career's crime is scored by it.
+    const worth = channelWorth(postNeeds([]), {
+      money: { state: "estimated", secondsPerRelativeRate: 0 },
+      hacking: { state: "estimated", secondsPerRelativeRate: 19_174 },
+      reputation: { state: "unknown", secondsPerRelativeRate: 0, reason: "no forecast" },
+    });
+    expect(worth.get("money")).toBe(0);
+    expect(worth.get("hacking")).toBe(19_174);
+    // Unknown leaves the channel ABSENT, which is what puts its claims on the
+    // bootstrap money rule rather than pricing them at zero.
+    expect(worth.has("reputation")).toBe(false);
+  });
+
+  test("the marginal overrides a posted weight for the same outcome", () => {
+    const moneyGate = {
+      by: "progression" as const, kind: "money" as const, target: 1e11, have: 1.8e10,
+      weight: 5, urgency: "blocking" as const, why: "Daedalus invitation requirement",
+    };
+    // Posting both would count the same progress twice, and only one of them
+    // was measured.
+    const priced = channelWorth(postNeeds([moneyGate]), {
+      money: { state: "estimated", secondsPerRelativeRate: 0 },
+      hacking: { state: "unknown", secondsPerRelativeRate: 0, reason: "no forecast" },
+      reputation: { state: "unknown", secondsPerRelativeRate: 0, reason: "no forecast" },
+    });
+    expect(priced.get("money")).toBe(0);
+
+    // With no marginal the poster's estimate is still better than silence.
+    expect(channelWorth(postNeeds([moneyGate])).get("money")).toBe(5 * NOMINAL_VALUE_SEC_PER_WEIGHT);
+  });
+
+  test("same-key needs add, exactly as their weights do", () => {
+    const karma = (by: "factions" | "progression", weight: number) => ({
+      by, kind: "karma" as const, target: -54_000, have: -3_000,
+      weight, urgency: "wanted" as const, why: "gang",
+    });
+    expect(channelWorth(postNeeds([karma("factions", 1), karma("progression", 2)])).get("karma"))
+      .toBe(3 * NOMINAL_VALUE_SEC_PER_WEIGHT);
+  });
+
+  test("a measured valueSec is preferred to the nominal weight fallback", () => {
+    expect(channelWorth(postNeeds([{
+      by: "factions", kind: "backdoor", subject: "CSEC", target: 1, have: 0,
+      weight: 2, valueSec: 4_000, urgency: "blocking", why: "CyberSec invite",
+    }])).get("backdoor:CSEC")).toBe(4_000);
+  });
+});
+
+describe("pricing a bid for the work slot", () => {
+  const worth = new Map([["money", 100], ["reputation", 4_000]]);
+
+  test("a bid is worth its share of the best rate, times what that rate is worth", () => {
+    const value = slotValue({
+      produces: { money: 1_000 },
+      best: new Map([["money", { state: "measured", value: 4_000 }]]),
+      worth,
+    });
+    expect(value.state).toBe("priced");
+    expect(value.valueSec).toBeCloseTo(0.25 * 100, 12);
+  });
+
+  test("channels ADD, because work paying in two currencies is worth both", () => {
+    const value = slotValue({
+      produces: { money: 2_000, reputation: 40 },
+      best: new Map<string, { state: "measured"; value: number }>([
+        ["money", { state: "measured", value: 4_000 }],
+        ["reputation", { state: "measured", value: 40 }],
+      ]),
+      worth,
+    });
+    expect(value.valueSec).toBeCloseTo(0.5 * 100 + 1 * 4_000, 12);
+  });
+
+  test("a channel nobody priced contributes nothing and leaves the bid unpriced", () => {
+    const value = slotValue({ produces: { karma: 3 }, best: new Map(), worth });
+    expect(value).toMatchObject({ state: "unpriced", valueSec: 0, moneyPerSec: 0 });
+  });
+
+  test("unpriced bids compare by money, and never against a priced one", () => {
+    const priced = slotValue({
+      produces: { money: 1 },
+      best: new Map([["money", { state: "measured" as const, value: 1 }]]),
+      worth: new Map([["money", 1]]),
+    });
+    const richer = slotValue({ produces: { money: 1e9 }, best: new Map(), worth: new Map() });
+    const poorer = slotValue({ produces: { money: 1 }, best: new Map(), worth: new Map() });
+    expect(compareSlotValues(richer, poorer)).toBeLessThan(0);
+    // Dollars are never compared against BN-seconds: priced sorts first.
+    expect(compareSlotValues(priced, richer)).toBeLessThan(0);
+  });
+});
+
+/** `slotValue` prices a SUSTAINED rate. A claimant that must occupy the slot
+ *  before it delivers anything — a program write, not a wage — only gets the
+ *  part of the run that is left once it has finished paying. */
+describe("a bounded bid delivers only the horizon it leaves behind", () => {
+  const value = (): ReturnType<typeof slotValue> => slotValue({
+    produces: { money: 1_000, reputation: 40 },
+    best: new Map<string, { state: "measured"; value: number }>([
+      ["money", { state: "measured", value: 4_000 }],
+      ["reputation", { state: "measured", value: 40 }],
+    ]),
+    worth: new Map([["money", 100], ["reputation", 4_000]]),
+  });
+
+  test("the delivery fraction is the share of the horizon left after the occupancy", () => {
+    expect(deliveryFraction(600, 3_600)).toBeCloseTo(5 / 6, 12);
+    expect(deliveryFraction(1_800, 3_600)).toBeCloseTo(0.5, 12);
+    // Nothing to occupy: continuous work delivers for the whole horizon.
+    expect(deliveryFraction(0, 3_600)).toBe(1);
+    // Finishing exactly when the node ends, or after it, delivers nothing.
+    expect(deliveryFraction(3_600, 3_600)).toBe(0);
+    expect(deliveryFraction(7_200, 3_600)).toBe(0);
+  });
+
+  test("a scale can only ever discount", () => {
+    // The invariant the whole table rests on: a score never exceeds what the
+    // channels it produces are worth, so no caller can inflate a bid.
+    expect(scaleSlotValue(value(), 2).valueSec).toBe(value().valueSec);
+    expect(scaleSlotValue(value(), -1).valueSec).toBe(0);
+    expect(scaleSlotValue(value(), Number.NaN).valueSec).toBe(0);
+  });
+
+  test("scaling a value scales every channel contribution with it", () => {
+    const scaled = scaleSlotValue(value(), 0.5);
+    expect(scaled.valueSec).toBeCloseTo(value().valueSec * 0.5, 12);
+    for (const [index, channel] of scaled.channels.entries()) {
+      const original = value().channels[index]!;
+      expect(channel.valueSec).toBeCloseTo(original.valueSec * 0.5, 12);
+      // What the channel is worth and how fast we produce it are both unchanged
+      // — only the share of it that lands is discounted.
+      expect(channel.worthSec).toBe(original.worthSec);
+      expect(channel.ourRate).toBe(original.ourRate);
+    }
+    expect(scaled.moneyPerSec).toBe(value().moneyPerSec);
+  });
+
+  test("a bid that delivers nothing inside the horizon is unpriced, not priced at zero", () => {
+    // Load-bearing: `compareSlotValues` puts every priced claim ahead of every
+    // unpriced one, so a priced ZERO would still beat every crime on a board
+    // where only its own need carries a worth, and would hold the slot forever
+    // producing nothing.
+    const write = slotValue({
+      produces: { "file:SQLInject.exe": 1 },
+      best: new Map([["file:SQLInject.exe", { state: "measured" as const, value: 1 }]]),
+      worth: new Map([["file:SQLInject.exe", 2_400]]),
+    });
+    expect(write).toMatchObject({ state: "priced" });
+    const nothing = scaleSlotValue(write, 0);
+    expect(nothing).toMatchObject({ state: "unpriced", valueSec: 0 });
+    const crime = slotValue({
+      produces: { money: 1_000 },
+      best: new Map([["money", { state: "measured" as const, value: 1_000 }]]),
+      worth: new Map([["money", 1]]),
+    });
+    // Worth a single BN-second, and it still takes the slot from a write that
+    // will not land before the node ends.
+    expect(compareSlotValues(crime, nothing)).toBeLessThan(0);
   });
 });

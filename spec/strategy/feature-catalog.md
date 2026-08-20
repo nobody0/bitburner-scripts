@@ -146,7 +146,9 @@ queue to be triggered at all.
 
 **Contends** The work slot, hard. `ns.singularity.workForFaction` **cancels**
 whatever is running; the loser's progress is destroyed, not delayed. That is why
-the arbiter needs pre-emption rules, not fairness rules.
+the arbiter needs pre-emption rules, not fairness rules. It bids the reputation
+per second it would earn and is priced against the field like anything else —
+only a route-MANDATORY install takes the slot by band instead.
 
 **Source of truth** `sim/vendor/.../Faction/FactionTable.ts` — flat
 `PlayerRequirement[]` exactly as `getFactionInviteRequirements` returns, so
@@ -175,7 +177,19 @@ a *precondition* others wait on, not an objective of its own.
 | Money | Salary, crime | Everything |
 | City | Travel, $200 000 | `factions` city requirements |
 
-**Contends** The work slot — the primary claimant.
+**Contends** The work slot — the primary claimant. It bids what the option it
+would run PRODUCES (money, experience, karma, company reputation), never an
+urgency band: touching a blocking need is not the same as delivering it, and
+scoring the two the same way once held `Player.currentWork` for six hours on a
+crime worth a millionth of the farm's income.
+
+A **program write** is the one option that is not a rate held for the rest of the
+run: it blocks the slot for its whole duration and delivers the file at the end.
+It is therefore scored on the share of the planning horizon left once it
+finishes, and on what the file is actually worth — the board's own value for
+every server the new opener unblocks (`ServerAccessPlan.writeProgramValueSec`),
+not a nominal weight identical for BruteSSH and SQLInject. Both sides estimated,
+and the auction decides.
 
 **Crime table** (`sim/vendor/.../Crime/CrimeTable.ts`):
 

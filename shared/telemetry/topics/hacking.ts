@@ -131,8 +131,15 @@ export interface FarmRollup {
   inFlight?: { hack: number; grow: number; weaken: number };
   launched?: { hack: number; grow: number; weaken: number };
   landed?: { hack: number; grow: number; weaken: number };
+  /** EMAs of what the farm has REALIZED. Lagging by construction: a farm whose
+   *  first batch has not landed has earned nothing and is still about to be the
+   *  best producer in the run. */
   moneyRate?: number;
   expRate?: number;
+  /** What the COMMITTED solution will produce once it lands, at the RAM the
+   *  farm segment actually holds. This is what other features are priced
+   *  against — see `game/lib/income.ts#announcedRates`. */
+  predicted?: { moneyPerSec: number; expPerSec: number };
   security?: number;
   minSecurity?: number;
   money?: number;

@@ -1,7 +1,9 @@
 import { NONE, card, note, table, tiles, waiting } from "../lib/dom.ts";
-import { esc, fmtNum, fmtPct } from "../lib/format.ts";
+import { esc, fmtMs, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
-import type { GoMoveDigest, GoResponse, GoState } from "../../../shared/telemetry/topics/go.ts";
+import { territoryOwners } from "../../../shared/strategy/go/rules.ts";
+import type { GoDispatchBreakdown } from "../../../shared/strategy/go/tick.ts";
+import type { GoActionDigest, GoMoveDigest, GoResponse, GoState } from "../../../shared/telemetry/topics/go.ts";
 import type { Tab } from "./index.ts";
 
 /** Go (IPvGO). Game coordinates are column-major, with y increasing upward. */
@@ -35,50 +37,13 @@ function pointAt(board: readonly string[], x: number, y: number): string {
   return board[x]?.[y] ?? "#";
 }
 
-/** Assign empty regions only when every bordering stone has one colour. This
- * mirrors the useful part of IPvGO's controlled-space presentation without
- * asking telemetry for another probe: it is derived from the exact board the
- * viewer already holds. */
-function territoryOwners(board: readonly string[]): Map<string, PointColor> {
+/** Controlled empty space, from the same routine that produces the territory
+ * counts telemetry publishes. Shading and caption cannot disagree. */
+function ownersOf(board: readonly string[]): ReadonlyMap<string, PointColor> {
   const owners = new Map<string, PointColor>();
-  const visited = new Set<string>();
-  const size = board.length;
-
-  for (let x = 0; x < size; x++) {
-    for (let y = 0; y < size; y++) {
-      const startKey = `${x}:${y}`;
-      if (visited.has(startKey) || pointAt(board, x, y) !== ".") continue;
-
-      const region: [number, number][] = [];
-      const border = new Set<PointColor>();
-      const queue: [number, number][] = [[x, y]];
-      visited.add(startKey);
-
-      for (let cursor = 0; cursor < queue.length; cursor++) {
-        const [qx, qy] = queue[cursor]!;
-        region.push([qx, qy]);
-        for (const direction of DIRECTIONS) {
-          const nx = qx + direction.dx;
-          const ny = qy + direction.dy;
-          if (nx < 0 || ny < 0 || nx >= size || ny >= size) continue;
-          const neighbor = pointAt(board, nx, ny);
-          const stone = STONE_COLOR[neighbor];
-          if (stone) {
-            border.add(stone);
-            continue;
-          }
-          if (neighbor !== ".") continue;
-          const key = `${nx}:${ny}`;
-          if (visited.has(key)) continue;
-          visited.add(key);
-          queue.push([nx, ny]);
-        }
-      }
-
-      if (border.size !== 1) continue;
-      const owner = border.values().next().value;
-      if (owner) for (const [rx, ry] of region) owners.set(`${rx}:${ry}`, owner);
-    }
+  for (const [key, stone] of territoryOwners({ rows: [...board], size: board.length })) {
+    const colour = STONE_COLOR[stone];
+    if (colour) owners.set(key, colour);
   }
   return owners;
 }
@@ -104,9 +69,9 @@ function linkColor(
   // a contested empty node may use the other colour, as it does in the game.
   if (stone && (neighbor === point || neighbor === ".")) return stone;
 
-  const owner = point === "." ? owners.get(`${x}:${y}`) : undefined;
+  const owner = point === "." ? owners.get(`${x},${y}`) : undefined;
   if (!owner) return undefined;
-  const neighborOwner = STONE_COLOR[neighbor] ?? (neighbor === "." ? owners.get(`${nx}:${ny}`) : undefined);
+  const neighborOwner = STONE_COLOR[neighbor] ?? (neighbor === "." ? owners.get(`${nx},${ny}`) : undefined);
   return neighborOwner === owner ? owner : undefined;
 }
 
@@ -115,7 +80,7 @@ function gridMarkup(
   chosen: { x: number; y: number } | undefined,
   actual: Extract<GoResponse, { type: "move" }> | undefined,
 ): string {
-  const owners = territoryOwners(board);
+  const owners = ownersOf(board);
   const cells = Array.from({ length: board.length }, (_, row) => board.length - 1 - row)
     .map((y) => board.map((column, x) => {
       const cell = column[y] ?? "#";
@@ -128,7 +93,7 @@ function gridMarkup(
       const title = [coordinateLabel, pointLabel, flags.includes("chosen") ? "our selected move" : "", flags.includes("reply") ? "observed reply" : ""]
         .filter(Boolean)
         .join(" — ");
-      const owner = cell === "." ? owners.get(`${x}:${y}`) : undefined;
+      const owner = cell === "." ? owners.get(`${x},${y}`) : undefined;
       const links = DIRECTIONS.map((direction) => {
         const color = linkColor(board, owners, x, y, direction.dx, direction.dy);
         return color ? `<span class="go-link ${direction.name} ${color}" aria-hidden="true"></span>` : "";
@@ -145,68 +110,178 @@ function gridMarkup(
   return `<div class="goboard" role="group" aria-label="${board.length} by ${board.length} IPvGO board" style="grid-template-columns:repeat(${board.length},1fr)">${cells}</div>`;
 }
 
+/** One board: the live position, with our selected move and the observed
+ * reply marked on it. A second grid of the pre-move position would differ by
+ * exactly those two stones, so it reads as an accidental duplicate. */
 function boardMarkup(g: GoState): string {
   if (!g.board?.length) return waiting("the board probe");
   const chosen = g.plan?.action.type === "move" ? g.plan.action : undefined;
   const response = g.lastTurn?.opponentResponse;
   const actual = response?.type === "move" ? response : undefined;
-  const input = g.plan?.input.board;
-  const comparison = input
-    ? `<div class="gocompare"><div class="go-snapshot input"><h3>decision input</h3>${gridMarkup(input, chosen, undefined)}</div>` +
-      `<div class="go-snapshot current"><h3>after turn</h3>${gridMarkup(g.board, chosen, actual)}</div></div>`
-    : `<div class="go-snapshot current">${gridMarkup(g.board, chosen, actual)}</div>`;
   const legend = `<div class="barkey"><span class="go-mark chosen"></span>selected move` +
     `<span class="go-mark reply"></span>observed reply</div>`;
   const territory = g.territory
     ? note(`controlled empty nodes — black ${g.territory.black}, white ${g.territory.white}`)
     : "";
-  return `${comparison}${legend}${territory}`;
+  return `<div class="go-snapshot">${gridMarkup(g.board, chosen, actual)}</div>${legend}${territory}`;
 }
 
-function decisionMarkup(g: GoState): string {
+function describeAction(action: GoActionDigest): string {
+  switch (action.type) {
+    case "move":
+      return `move ${coordinate(action.x, action.y)}`;
+    case "cheatTwoMoves":
+      return `cheat two moves ${action.x1},${action.y1} + ${action.x2},${action.y2}`;
+    case "cheatRemoveRouter":
+      return `cheat remove router ${coordinate(action.x, action.y)}`;
+    case "cheatDestroyNode":
+      return `cheat destroy node ${coordinate(action.x, action.y)}`;
+    case "cheatRepairNode":
+      return `cheat repair node ${coordinate(action.x, action.y)}`;
+    case "newGame":
+      return `new game ${action.opponent} ${action.boardSize}x${action.boardSize}`;
+    default:
+      return action.type;
+  }
+}
+
+/** Disjoint, ordered segments, so reading them in order shows where the turn
+ * went. `align` is time we chose to spend landing on the intended engine tick;
+ * every other segment is cost we would rather not pay, which is the whole
+ * reason the total alone is not enough — and why the slowest call-out skips
+ * it rather than blaming the one segment working as intended. */
+function breakdownMarkup(breakdown: GoDispatchBreakdown): string {
+  const segments: [label: string, ms: number][] = [
+    ["admit", breakdown.admitMs],
+    ["plan", breakdown.prepareMs],
+    ["lease", breakdown.leaseMs],
+    ["exact", breakdown.finalizeMs],
+    ["align", breakdown.alignMs],
+    ["dispatch", breakdown.dispatchMs],
+    ["other", breakdown.residualMs],
+  ];
+  const [worstLabel, worstMs] = segments
+    .filter(([label]) => label !== "align")
+    .reduce((slowest, segment) => (segment[1] > slowest[1] ? segment : slowest));
+  const rendered = segments
+    .map(([label, ms]) => `${label} ${fmtMs(ms)}${label === "align" ? " (deliberate)" : ""}`)
+    .join(" · ");
+  return `${rendered}${worstMs > 0 ? ` — slowest ${worstLabel}` : ""}`;
+}
+
+function decisionMarkup(g: GoState, reference: number): string {
   const plan = g.plan;
   if (!plan) return waiting("a Go decision");
-  const action = plan.action.type === "move"
-    ? `${plan.action.type} ${coordinate(plan.action.x, plan.action.y)}`
-    : plan.action.type;
-  const prediction = plan.prediction;
+  const result = g.lastTurn;
+  // The digest belongs to the completed turn. Go replaces the plan object on
+  // the microtask that starts the next one, so a copy parked there would
+  // rarely survive long enough to be read.
+  const prediction = result?.prediction;
+  // Ages earn their space only once something has stalled; at roughly a turn a
+  // second they would otherwise read "0s ago" forever.
+  const staleAge = (at: number): string | undefined =>
+    reference - at >= 5_000 ? fmtTime(reference - at) : undefined;
+  const planAge = staleAge(plan.input.at);
+  const turnAge = result ? staleAge(result.at) : undefined;
   const firstSeed = prediction?.seedCandidates[0];
   const lastSeed = prediction?.seedCandidates.at(-1);
   const seedRange = prediction && firstSeed !== undefined
     ? prediction.seedCandidates.length === 1
-      ? `exact seed ${(firstSeed / 1_000).toFixed(3)}`
-      : `${prediction.seedCandidates.length} reachable seeds ${(firstSeed / 1_000).toFixed(3)}-${((lastSeed ?? firstSeed) / 1_000).toFixed(3)}`
+      ? `exact seed ${(firstSeed / 1_000).toFixed(3)}s`
+      : `${prediction.seedCandidates.length} reachable seeds ${(firstSeed / 1_000).toFixed(3)}-${((lastSeed ?? firstSeed) / 1_000).toFixed(3)}s`
     : undefined;
-  const dispatchLatency = prediction?.readyToDispatchMs === undefined
-    ? "ready-to-play pending"
-    : `ready-to-play ${prediction.readyToDispatchMs.toFixed(1)} ms (${prediction.pushedPredictionHit ? "pushed hit" : "foreground miss"})`;
-  const seedDetail = prediction && firstSeed !== undefined
-    ? `${prediction.model}; ${seedRange} s on ${prediction.engineCycleMs} ms cycles; dispatch tick ${(prediction.dispatchPlaytime / 1_000).toFixed(3)} s; ${dispatchLatency}; plan ${prediction.totalPlanningMs.toFixed(1)} ms (${prediction.preparationMs.toFixed(1)} prepare + ${prediction.finalizationMs.toFixed(1)} exact); ${prediction.boundaryRetries} boundary retries; AI cycle ${prediction.aiWaitMs} ms`
-    : "no playtime sample available";
-  const result = g.lastTurn;
   const response = result?.opponentResponse
     ? `${result.opponentResponse.type}${result.opponentResponse.type === "move" ? ` ${coordinate(result.opponentResponse.x, result.opponentResponse.y)}` : ""}`
-    : "none";
+    : result
+      ? "no reply"
+      : "none";
   const support = result?.predictionSupport
-    ? `${fmtNum(result.predictionSupport.matching, 2)}/${fmtNum(result.predictionSupport.total, 0)} expected seed support`
+    ? `${fmtNum(result.predictionSupport.matching, 2)}/${fmtNum(result.predictionSupport.total, 0)}`
     : "not applicable";
-  const timing = result?.timing;
   const selectedAction = plan.action.type === "move" ? plan.action : undefined;
   const selectedMove = selectedAction
     ? plan.ranked.find((move) => move.x === selectedAction.x && move.y === selectedAction.y)
     : undefined;
-  const timingDetail = timing
-    ? `${timing.alignment}; dispatch ${timing.dispatchPlaytime === undefined ? NONE : (timing.dispatchPlaytime / 1_000).toFixed(3) + "s"}; seed ${timing.seed === undefined ? NONE : (timing.seed / 1_000).toFixed(3) + "s"}; full turn ${result!.durationMs.toFixed(0)} ms`
-    : result ? `${result.durationMs.toFixed(0)} ms` : "waiting";
+  // Only a seed-assured turn has an alignment to report. A reset, a resume or
+  // the unseeded fallback has none, and showing its bare duration under
+  // "actual reply" invited reading engine latency into what is neither.
+  const timingDetail = !result
+    ? "waiting"
+    : prediction
+      ? `${prediction.boundaryRetries ? "boundary-replan" : "same-slot"}; full turn ${fmtMs(result.durationMs)}`
+      : `${describeAction(result.action)} took ${fmtMs(result.durationMs)}`;
+  const breakdown = prediction?.dispatchBreakdown;
+  const latencyTile = breakdown
+    ? { label: "ready to play", value: fmtMs(breakdown.totalMs), sub: breakdownMarkup(breakdown) }
+    : { label: "ready to play", value: "pending", sub: "no preceding turn boundary to time from" };
+  const source = prediction?.playbook ? "certified playbook" : "neural";
+  const cacheDetail = prediction
+    ? [
+      prediction.pushedPredictionHit ? "pushed hit" : "foreground",
+      prediction.positionCacheHit ? "position cached" : "position prepared",
+      prediction.seedCacheHit ? "seeds cached" : "seeds evaluated",
+    ].join(" · ")
+    : undefined;
+  const modelNote = prediction
+    ? note(
+      `${source} — ${prediction.model}`
+      + `${prediction.modelProfile ? ` ${prediction.modelProfile}` : ""}`
+      + `${prediction.backend ? ` on ${prediction.backend}` : ""}`
+      + `${seedRange ? `; ${seedRange}` : ""}`
+      + `; dispatch tick ${(prediction.dispatchPlaytime / 1_000).toFixed(3)}s`
+      + `${cacheDetail ? `; ${cacheDetail}` : ""}`
+      + `${prediction.boundaryRetries ? `; ${prediction.boundaryRetries} boundary retries` : ""}`,
+    )
+    : "";
+  // Worker cost, kept apart from the engine constants below it so a fixed
+  // game parameter is never read as something we measured.
+  const workerNote = prediction
+    ? note(
+      `worker — ${prediction.preparationMs === undefined
+        ? "preparation cached"
+        : `${fmtMs(prediction.preparationMs)} preparation`}`
+      + `; ${fmtMs(prediction.finalizationMs)} evaluation`
+      + `${prediction.pushedPredictionHit ? " (measured when pushed, not on this turn)" : ""}`
+      + `${prediction.rolloverMarginMs === undefined ? "" : `; ${fmtMs(prediction.rolloverMarginMs)} cycle headroom`}`
+      + `${prediction.waitedForRollover ? "; waited for the next cycle" : ""}`,
+    )
+    : "";
+  const constantsNote = prediction
+    ? note(`engine constants — ${prediction.engineCycleMs} ms cycle, ${prediction.aiWaitMs} ms AI wait`)
+    : "";
+  const paddedNote = prediction?.paddedToExtent !== undefined
+    ? note(
+      `out of distribution: rated by weights trained at `
+      + `${prediction.paddedToExtent}x${prediction.paddedToExtent}, padded from this board`,
+    )
+    : "";
   return (
     tiles([
-      { label: "selected", value: action, sub: selectedMove ? `win ${fmtPct(selectedMove.score)} · ${selectedMove.captures} capture(s)` : undefined },
-      { label: "planner", value: `${plan.planning.finalistCount} finalists`, sub: `position win ${fmtPct(plan.planning.positionValue)}; history ${plan.input.previousBoards.length}` },
+      {
+        label: "selected",
+        value: describeAction(plan.action),
+        sub: selectedMove ? `win ${fmtPct(selectedMove.score)} · ${selectedMove.captures} capture(s)` : undefined,
+      },
+      {
+        label: "planner",
+        value: `${plan.planning.finalistCount} finalists`,
+        // A plan that keeps refreshing while the turn record does not is the
+        // signature of a dispatch that cannot get admitted, so both ages show.
+        sub: `position win ${fmtPct(plan.planning.positionValue)}; history ${plan.input.previousBoards.length}`
+          + (planAge ? `; computed ${planAge} ago` : ""),
+      },
       { label: "actual reply", value: response, sub: timingDetail },
-      { label: "forecast support", value: support, sub: seedDetail },
+      latencyTile,
+      { label: "forecast support", value: support, sub: "forecast weight on the reply that arrived" },
     ]) +
+    modelNote +
+    workerNote +
+    constantsNote +
+    paddedNote +
     note(`next game ${plan.selection.preferred.opponent} ${plan.selection.preferred.observedBoardSize}x${plan.selection.preferred.observedBoardSize}; ${fmtNum(plan.selection.preferred.utilityPerSec * 60, 2)} seconds saved/minute`) +
-    (result ? note(`${result.ok ? "completed" : "failed"}: ${result.detail}`) : "")
+    (result
+      ? note(`${result.ok ? "completed" : "failed"}${turnAge ? ` ${turnAge} ago` : ""}: ${result.detail}`)
+      : "")
   );
 }
 
@@ -235,12 +310,16 @@ function opponentMarkup(g: GoState): string {
         { label: "GoPower", value: `${fmtNum(context.goPower, 2)}x`, sub: context.hasSourceFile14 ? "SF14 effect doubled" : "base effect" },
         { label: "install runway", value: context.installRemainingSec === undefined ? "unknown" : `${fmtNum(context.installRemainingSec, 0)}s` },
         { label: "favor cap", value: fmtNum(context.favorRepCap, 0), sub: `${context.joinedFactions.length} joined factions` },
-        { label: "ETA demands", value: String(Object.keys(context.demands).length) },
+        {
+          label: "opponents with ETA demand",
+          value: String(Object.keys(context.demands).length),
+          sub: `of ${candidates.length} candidates`,
+        },
       ])
     : "";
   const schedule = g.plan?.selection.schedule;
   const scheduleNote = schedule && schedule.kind !== "play"
-    ? note(esc(`schedule: ${schedule.kind}${schedule.kind === "filler" && schedule.fillerOpponent ? ` (${schedule.fillerOpponent})` : ""}${schedule.kind === "hold" && schedule.holdSec !== undefined ? ` ${fmtNum(schedule.holdSec, 0)}s` : ""} — ${schedule.why}`))
+    ? note(`schedule: ${schedule.kind}${schedule.kind === "filler" && schedule.fillerOpponent ? ` (${schedule.fillerOpponent})` : ""}${schedule.kind === "hold" && schedule.holdSec !== undefined ? ` ${fmtNum(schedule.holdSec, 0)}s` : ""} — ${schedule.why}`)
     : "";
   return evidence + scheduleNote + table(
     ["opponent", "board", "wait", "win", "streak", "horizon", "node power", "transient saved", "favor event", "favor gain", "favor saved", "saved/min"],
@@ -277,6 +356,13 @@ export const goTab: Tab = {
       ...(g.boardSize ? [{ label: "board", value: `${g.boardSize}x${g.boardSize}` }] : []),
       ...(g.moveCount !== undefined ? [{ label: "positions", value: String(g.moveCount) }] : []),
       ...(g.bonusCycles !== undefined ? [{ label: "bonus cycles", value: fmtNum(g.bonusCycles, 0) }] : []),
+      ...(g.cheat?.unlocked
+        ? [{
+          label: "cheats used",
+          value: String(g.cheat.count),
+          sub: `next succeeds ${fmtPct(g.cheat.successChance)}`,
+        }]
+        : []),
     ]);
 
     const opponentStats = g.stats ?? [];
@@ -297,13 +383,13 @@ export const goTab: Tab = {
 
     return (
       `<div class="col wide">` +
-      card("Candidate analysis", rankingMarkup(g)) +
       card("Opponent reward choice", opponentMarkup(g)) +
       card("Record", stats) +
+      card("Candidate analysis", rankingMarkup(g)) +
       `</div>` +
       `<div class="col">` +
       card("Subnet", summary + boardMarkup(g)) +
-      card("Latest turn", decisionMarkup(g)) +
+      card("Latest turn", decisionMarkup(g, state.lastT || Date.now())) +
       `</div>`
     );
   },

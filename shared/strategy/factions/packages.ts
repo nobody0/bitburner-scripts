@@ -18,6 +18,7 @@ import {
   repFromDonation,
 } from "./rep.ts";
 import { combinedEtaSec, estimateBlockerSec, isReachable, type Blocker } from "./requirements.ts";
+import { DEFAULT_PLANNING_HORIZON_SEC } from "../progression/forecast.ts";
 import { settlingMoney, type FactionStanding, type FactionsView } from "./state.ts";
 
 /** A breakpoint package is the smallest useful planning unit. Reputation is
@@ -41,10 +42,7 @@ export interface PackageSelection {
   horizonStarved?: boolean;
 }
 
-const ROUTE_MANDATORY_VALUE = 100;
-/** CashRoot persists across installs and replaces the first $1m plus BruteSSH
- * bootstrap, but remains comparable to an augmentation slot. */
-const CASHROOT_BOOTSTRAP_VALUE = 0.5;
+
 /** Favor is a smooth rate multiplier except at the donation crossing. Sampling
  * every integer up to a horizon-derived maximum made one strategy pass grow
  * from milliseconds to seconds when a noisy long-node ETA appeared. Keep the
@@ -76,9 +74,14 @@ function routeAwareScore(aug: AugInfo, view: FactionsView): number {
   // The Red Pill's terminal bonus belongs to a faction acquisition route. It
   // must not drag a labyrinth/Bladeburner run through an unrelated faction.
   if (aug.name === "The Red Pill" && view.route && view.route !== "daedalus" && view.route !== "gang") return 0;
-  let value = Math.max(0, scoreAug(aug, view.weights));
-  if (aug.name === "The Red Pill" && (view.route === "daedalus" || view.route === "gang")) value += ROUTE_MANDATORY_VALUE;
-  if (aug.name === "CashRoot Starter Kit" && !view.owned.has(aug.name)) value += CASHROOT_BOOTSTRAP_VALUE;
+  let value = Math.max(0, scoreAug(aug, view.weights, view.rates?.worth));
+  // The Red Pill is a GATE: the daedalus and gang routes cannot end without
+  // it, so what it is worth is the run that cannot otherwise finish. Priced at
+  // the planning horizon — in the same BN-seconds as every multiplier beside
+  // it, instead of a flat 100 that meant nothing next to them.
+  if (aug.name === "The Red Pill" && (view.route === "daedalus" || view.route === "gang")) {
+    value += Number.isFinite(view.horizonSec) ? view.horizonSec : DEFAULT_PLANNING_HORIZON_SEC;
+  }
   cache.set(aug.name, value);
   return value;
 }
@@ -165,15 +168,12 @@ function packageValues(
   const countable = augs.filter(
     (aug) => aug.name !== NEUROFLUX || (Number.isFinite(view.targetAugCount) && !view.owned.has(NEUROFLUX)),
   ).length;
-  // Count is ROUTE progress, not one universal value unit per object. Early
-  // in a finite gate it competes at nearly one unit per unique slot; as the
-  // gate fills, scarce closing slots should favor multiplier quality. The
-  // route's batch policy independently guarantees closure, so selection need
-  // not fill the last slots with the cheapest low-value objects. A 1/5 floor
-  // keeps count material beside a normal log-multiplier score. Count stays out
-  // of activationValue/install cadence. Routes with no finite gate get no flat
-  // count bonus at all—the augmentation's real effects are its value there.
-  const countWeight = countSlotWeight(view.targetAugCount, countGoal);
+  // Count is ROUTE progress, priced like everything else: the seconds one slot
+  // removes from the count leg. Count stays out of activationValue and so out
+  // of the install cadence, which compares rates. Routes with no finite gate,
+  // or an unpriced acquisition rate, get nothing — there the augmentation's
+  // real effects are its whole value.
+  const countWeight = countSlotWeight(view.rates?.worth ?? new Map(), countGoal);
   const count = Number.isFinite(countGoal) && countGoal > 0
     ? Math.min(countable, countGoal) * countWeight
     : 0;
@@ -189,11 +189,18 @@ function packageValues(
   const beforeRate = 1 + standing.favor / 100;
   const afterRate = 1 + favorAfterInstall / 100;
   const favorUseful = favorCanActivateBeforeGoal(view);
-  const futureRateGain = favorUseful ? future * Math.max(0, afterRate / beforeRate - 1) : 0;
+  // Favor IS a reputation rate multiplier, so the term is quoted in what a
+  // relative reputation-rate increase is worth — the same BN-seconds `quality`
+  // is in. Scaled, not reshaped: the `future` weighting and the crossing
+  // constant are relative preferences within this term and are unchanged.
+  const reputationWorth = view.rates?.worth.get("reputation") ?? 1;
+  const futureRateGain = favorUseful
+    ? future * Math.max(0, afterRate / beforeRate - 1) * reputationWorth
+    : 0;
   const crossesDonation = favorUseful
     && standing.favor < view.favorToDonate
     && favorAfterInstall >= view.favorToDonate
-      ? future * 0.5
+      ? future * 0.5 * reputationWorth
       : 0;
   const activation = quality + futureRateGain + crossesDonation;
   return { total: count + activation, activation };

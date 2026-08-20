@@ -1,3 +1,4 @@
+import type { ChannelWorth } from "../income.ts";
 import { formatScientific } from "../../format.ts";
 import { countSlotWeight } from "../factions/augs.ts";
 import { addRepToFavor } from "../factions/rep.ts";
@@ -44,12 +45,13 @@ export function routeCountInstallValue(input: {
   installed: number;
   affordableDistinct: number;
   batchAllowed: boolean;
+  /** What the route measured an acquisition-rate increase to save. */
+  worth?: ChannelWorth;
 }): number {
   if (!input.batchAllowed || input.required <= 0 || input.installed >= input.required) return 0;
   const remaining = input.required - input.installed;
   const progress = Math.min(remaining, Math.max(0, Math.floor(input.affordableDistinct)));
-  const countWeight = countSlotWeight(input.required, remaining);
-  return progress * countWeight;
+  return progress * countSlotWeight(input.worth ?? new Map(), remaining);
 }
 
 export interface ProgressionView {
@@ -456,6 +458,12 @@ export function bankedFavorActivationValue(input: {
   standings: readonly { name: string; rep: number; favor: number }[];
   offers: readonly { name: string; faction: string; owned: boolean }[];
   favorToDonate: number;
+  /** BN-seconds a relative reputation-rate increase saves. Favor IS a
+   *  reputation rate multiplier, so this is what converts the term into the
+   *  same seconds the multiplier value beside it is quoted in — without it the
+   *  favor half of the accrued value is a rounding error next to the other
+   *  half, and on a live BN12 run favor was 97% of it. */
+  reputationWorthSec?: number;
 }): number {
   const joined = new Set(input.standings.map((standing) => standing.name));
   const offersByFaction = new Map<string, Set<string>>();
@@ -495,7 +503,11 @@ export function bankedFavorActivationValue(input: {
     }
     value += residual * faction.value;
   }
-  return value;
+  // Scaled, not reshaped. The `residual` weighting and the crossing constant
+  // are relative preferences WITHIN this term and are left exactly as they
+  // were; what changes is that the term as a whole is now comparable with the
+  // multiplier value it is summed with.
+  return value * (input.reputationWorthSec ?? 1);
 }
 
 export interface InstallVerdictDwell {

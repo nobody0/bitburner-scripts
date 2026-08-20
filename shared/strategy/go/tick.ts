@@ -103,3 +103,74 @@ export function goDispatchDelayMs(target: GoSeedTarget, nowWall: number): number
   if (!target.waitsForRollover) return 0;
   return Math.max(0, target.rolloverAt + 1 - nowWall);
 }
+
+/** How the wall time between "Black owns the turn" and the irreversible Go
+ * call was spent. The named segments are disjoint and ordered; `residualMs`
+ * carries whatever they do not cover rather than being folded into a
+ * neighbour, so the seven always sum to `totalMs`. */
+export interface GoDispatchBreakdown {
+  totalMs: number;
+  /** Opponent promise resolved until planning started: controller wake, turn
+   * claim admission, and the probe/hydrate work ahead of the plan. */
+  admitMs: number;
+  /** Provisional planning on the page: worker install, evaluate, playbook. */
+  prepareMs: number;
+  /** RAM broker admission and dodge stub launch. */
+  leaseMs: number;
+  /** Seed-exact evaluation inside the stub, summed across boundary retries. */
+  finalizeMs: number;
+  /** Deliberate sleep waiting for the target engine tick. Intended latency. */
+  alignMs: number;
+  /** Verified public read until the Go call. Should be near zero. */
+  dispatchMs: number;
+  residualMs: number;
+}
+
+export interface GoDispatchLatencyInput {
+  /** Wall time the previous opponent promise resolved, or the cold-start
+   * boundary where a complete actionable Black position first appeared. */
+  turnReadyAt: number;
+  planStartedAt: number;
+  /** End of provisional planning on the page. */
+  preparedAt: number;
+  /** Wall time the RAM-leased action was requested. */
+  actionStartedAt: number;
+  /** Wall time the dodge stub body began running. */
+  stubEnteredAt: number;
+  /** Seed-exact evaluation cost inside the stub, summed over retries. */
+  finalizeMs: number;
+  /** Deliberate sleep waiting for the target tick, summed over retries. */
+  alignMs: number;
+  /** The verified public read that authorised the dispatch. */
+  verifiedAt: number;
+  dispatchedAt: number;
+}
+
+/** Split the wall time between "Black owns the turn" and the irreversible Go
+ * call into disjoint, ordered segments.
+ *
+ * The point of the split is that one of these segments — `alignMs` — is time
+ * we chose to spend to land on the intended engine tick. Reading the total
+ * alone cannot distinguish that from a worker that took too long, which is the
+ * failure the breakdown exists to expose. */
+export function goDispatchLatency(input: GoDispatchLatencyInput): GoDispatchBreakdown {
+  const totalMs = Math.max(0, input.dispatchedAt - input.turnReadyAt);
+  const span = (from: number, to: number) => Math.min(totalMs, Math.max(0, to - from));
+  const admitMs = span(input.turnReadyAt, input.planStartedAt);
+  const prepareMs = span(input.planStartedAt, input.preparedAt);
+  const leaseMs = span(input.actionStartedAt, input.stubEnteredAt);
+  const finalizeMs = Math.min(totalMs, Math.max(0, input.finalizeMs));
+  const alignMs = Math.min(totalMs, Math.max(0, input.alignMs));
+  const dispatchMs = span(input.verifiedAt, input.dispatchedAt);
+  const named = admitMs + prepareMs + leaseMs + finalizeMs + alignMs + dispatchMs;
+  return {
+    totalMs,
+    admitMs,
+    prepareMs,
+    leaseMs,
+    finalizeMs,
+    alignMs,
+    dispatchMs,
+    residualMs: Math.max(0, totalMs - named),
+  };
+}

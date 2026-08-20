@@ -158,6 +158,9 @@ export interface FactionPlan {
   invalidation?: { label: string; value: string | number | boolean }[];
   /** Expected next milestone. */
   until?: { kind: string; faction?: string; target: number; have: number; etaSec: number };
+  /** What the work slot would earn, and where — every channel, not just
+   *  reputation. See `FactionDecision.workRate`. */
+  workRate?: { faction: string; repPerSec: number; produces: Record<string, number> };
   /** What the last executed action actually returned. A boolean mutation's
    * `false` is a modelled outcome, not an error. */
   lastResult?: { action: string; ok: boolean; detail: string; at: number };

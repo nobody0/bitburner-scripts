@@ -1,4 +1,5 @@
 import type { PlayerRequirement } from "@ns";
+import { factionWorkExpPerSec, type RepPerson } from "../../shared/strategy/factions/rep.ts";
 import type { SimPlayer } from "../core/player.ts";
 import type { SimWorld } from "../world.ts";
 import { AUGMENTATION_TABLE } from "../vendor/bitburner/src/Augmentation/AugmentationTable.ts";
@@ -253,32 +254,27 @@ export class FactionSystem {
     faction.rep += this.workRepGain(type, faction.favor) * focusPenalty * cycles;
     work.cyclesWorked += cycles;
 
-    // FactionWorkStats -> calculateFactionExp -> applyWorkStats, including the
-    // 5-cycle-per-second divisor, stat-specific exp multipliers, node
-    // multiplier, focus penalty, and immediate skill recalculation.
+    // FactionWorkStats -> calculateFactionExp -> applyWorkStats. The rate table
+    // and every multiplier on it live in `shared/strategy/factions/rep.ts`, so
+    // the experience the planner PRICES faction work by is the experience this
+    // simulator awards — one transcription, not two that can drift.
     const person = this.#world.person;
-    const base = type === "hacking"
-      ? { hacking: 2 }
-      : type === "field"
-        ? { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 }
-        : { hacking: 0.5, strength: 1.5, defense: 1.5, dexterity: 1.5, agility: 1.5 };
-    const expMults: Record<string, string> = {
-      hacking: "hacking_exp",
-      strength: "strength_exp",
-      defense: "defense_exp",
-      dexterity: "dexterity_exp",
-      agility: "agility_exp",
-      charisma: "charisma_exp",
-    };
+    const perSec = factionWorkExpPerSec(
+      type,
+      person as unknown as RepPerson,
+      {
+        factionWorkRepGain: currentNodeMults.FactionWorkRepGain,
+        factionWorkExpGain: currentNodeMults.FactionWorkExpGain,
+        shareBonus: 1,
+        sf15Level: 0,
+        hasFocusAug: this.#player.hasAugmentation("Neuroreceptor Management Implant"),
+      },
+      work.focused === true,
+    );
     const exp = person.exp as unknown as Record<string, number>;
-    const mults = person.mults as unknown as Record<string, number>;
-    for (const [skill, amount] of Object.entries(base)) {
-      exp[skill] = (exp[skill] ?? 0) + amount
-        * (mults[expMults[skill]!] ?? 1)
-        * currentNodeMults.FactionWorkExpGain
-        / 5
-        * focusPenalty
-        * cycles;
+    // `cycles` are 200 ms engine cycles; the rates are per second.
+    for (const [skill, amount] of Object.entries(perSec)) {
+      exp[skill] = (exp[skill] ?? 0) + amount * cycles / 5;
     }
     this.#world.recalculateSkills();
   }

@@ -459,7 +459,32 @@ export const bitnodeTab: Tab = {
         : note("no open cross-feature needs")) +
       (arbitrationRows.length
         ? table(["outcome", "feature", "claim", "resource", "amount", "priority", "return/$", "λ", "marginal"], arbitrationRows, { left: [0, 1, 2, 3] })
-        : note("no contended resource claims"));
+        : note("no contended resource claims")) +
+      // Every bid for Player.currentWork and what it was worth. The slot is the
+      // one resource where the losers matter as much as the winner: the loser
+      // is not delayed, it is cancelled.
+      ((arbitration?.slotValues ?? []).length
+        ? table(
+            ["bid", "feature", "worth (s)", "priced on"],
+            (arbitration?.slotValues ?? []).map((bid) => [
+              esc(bid.why),
+              esc(bid.by),
+              bid.pricing === "hard"
+                ? `<span class="muted">lock @ ${fmtNum(bid.priority)}</span>`
+                : bid.valueSec !== undefined
+                  ? fmtNum(bid.valueSec, 2)
+                  : `<span class="muted">${fmtMoney(bid.moneyPerSec ?? 0)}/s unpriced</span>`,
+              (bid.channels ?? []).length
+                ? (bid.channels ?? []).map((channel) =>
+                    `${esc(channel.channel)} ${fmtNum(channel.ourRate, 3)}` +
+                    `${channel.bestRate !== undefined ? `/${fmtNum(channel.bestRate, 3)}` : ""}` +
+                    ` × ${fmtNum(channel.worthSec, 0)}s`,
+                  ).join("<br>")
+                : `<span class="muted">not a rate</span>`,
+            ]),
+            { left: [0, 1, 3] },
+          )
+        : "");
 
     return (
       `<div class="col wide">` +

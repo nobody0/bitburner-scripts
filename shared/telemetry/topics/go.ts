@@ -5,7 +5,6 @@
 
 import type {
   GoCurrentPlayer,
-  GoFactionOpponent,
   GoMove,
   GoOpponent,
   GoObservedBoardSize,
@@ -13,6 +12,7 @@ import type {
   GoStatus,
 } from "../../strategy/go/rules.ts";
 import type { GoEtaDemand, GoGameCandidate } from "../../strategy/go/rewards.ts";
+import type { GoDispatchBreakdown } from "../../strategy/go/tick.ts";
 import type { GO_OPPONENT_MODEL } from "../../strategy/go/opponent.ts";
 
 export interface GoOpponentStats {
@@ -78,58 +78,13 @@ export interface GoPlan {
     at: number;
     board: string[];
     previousBoards: string[][];
+    /** Read back by `sameGoPosition` to decide whether a stored plan still
+     * describes the live position. */
     status: GoStatus;
     currentPlayer: GoCurrentPlayer;
-    opponent: GoRewardOpponent;
-    blackScore?: number;
-    whiteScore?: number;
     komi?: number;
-    bonusCycles?: number;
-    cheatCount?: number;
   };
   planning: { finalistCount: number; positionValue: number };
-  prediction?: {
-    model: typeof GO_OPPONENT_MODEL;
-    /** Value-network execution path actually used for this decision. */
-    backend?: "webgpu" | "aggregate";
-    /** Weight profile that rated the candidates. */
-    modelProfile?: "small5" | "daemon19";
-    /** Set when the board is smaller than the profile's feature extent, i.e.
-     * an inherited 7x7-13x13 game rated by padded World Daemon weights. Those
-     * weights never saw such a position in training. */
-    paddedToExtent?: number;
-    /** Milliseconds of engine-cycle headroom the dispatch expected. */
-    rolloverMarginMs?: number;
-    /** True when the turn deliberately waited for the next engine cycle. */
-    waitedForRollover?: boolean;
-    sampledTotalPlaytime: number;
-    sampledAt: number;
-    decisionAt: number;
-    preparationMs: number;
-    finalizationMs: number;
-    totalPlanningMs: number;
-    /** Time from the controller learning that Black owns the turn until the
-     * irreversible makeMove/passTurn call. */
-    readyToDispatchMs?: number;
-    engineCycleMs: number;
-    aiWaitMs: number;
-    seedCandidates: number[];
-    /** Public engine tick read immediately before the Go call. */
-    dispatchPlaytime: number;
-    /** Number of warm replans after finalization crossed a tick boundary. */
-    boundaryRetries: number;
-    /** Whether the position-wide preparation already existed when foreground
-     * planning began. */
-    positionCacheHit?: boolean;
-    /** Whether the worker had pushed the matching next-turn decision before
-     * foreground planning began. */
-    pushedPredictionHit?: boolean;
-    /** Whether dispatch-time assurance found its exact seed set complete. */
-    seedCacheHit?: boolean;
-    /** True when the dispatched action came from the certified merged
-     * playbook rather than the neural decision. */
-    playbook?: true;
-  };
   /** Full opponent/board comparison in the same ETA units used to decide. */
   selection: {
     preferred: GoGameCandidateDigest;
@@ -144,13 +99,64 @@ export interface GoPlan {
       installRemainingSec?: number;
       joinedFactions: string[];
       demands: Partial<Record<GoRewardOpponent, GoEtaDemandDigest>>;
-      factionFavor: Partial<Record<GoFactionOpponent, {
-        favor: number;
-        remainingWorkSec: number;
-        pointValue?: { donationUnlockSec: number; donateThreshold: number };
-      }>>;
     };
   };
+}
+
+/** How the dispatched action was computed and timed.
+ *
+ * This belongs to the completed turn, not to the forward-looking plan: Go
+ * re-enters planning on a microtask after each turn, so a digest parked on
+ * `plan` is replaced by the next provisional plan before most viewers ever
+ * see it. */
+export interface GoTurnPrediction {
+  model: typeof GO_OPPONENT_MODEL;
+  /** Value-network execution path actually used for this decision. */
+  backend?: "webgpu" | "aggregate";
+  /** Weight profile that rated the candidates. */
+  modelProfile?: "small5" | "daemon19";
+  /** Set when the board is smaller than the profile's feature extent, i.e.
+   * an inherited 7x7-13x13 game rated by padded World Daemon weights. Those
+   * weights never saw such a position in training. */
+  paddedToExtent?: number;
+  /** Milliseconds of engine-cycle headroom the dispatch expected. */
+  rolloverMarginMs?: number;
+  /** True when the turn deliberately waited for the next engine cycle. */
+  waitedForRollover?: boolean;
+  sampledTotalPlaytime: number;
+  sampledAt: number;
+  decisionAt: number;
+  /** Absent when the worker already held the prepared position: no
+   * preparation ran this turn, so there is nothing to report. Zero would
+   * read as instantaneous work rather than as work that did not happen. */
+  preparationMs?: number;
+  /** Worker-clock cost of the seed-exact evaluation. On a pushed prediction
+   * hit this was measured speculatively during the previous White response,
+   * not on this turn's critical path; `pushedPredictionHit` says which. */
+  finalizationMs: number;
+  totalPlanningMs: number;
+  /** Time from the controller learning that Black owns the turn until the
+   * irreversible makeMove/passTurn call, split into disjoint segments.
+   * Absent when no such boundary was held, rather than approximated. */
+  dispatchBreakdown?: GoDispatchBreakdown;
+  engineCycleMs: number;
+  aiWaitMs: number;
+  seedCandidates: number[];
+  /** Public engine tick read immediately before the Go call. */
+  dispatchPlaytime: number;
+  /** Number of warm replans after finalization crossed a tick boundary. */
+  boundaryRetries: number;
+  /** Whether the position-wide preparation already existed when foreground
+   * planning began. */
+  positionCacheHit?: boolean;
+  /** Whether the worker had pushed the matching next-turn decision before
+   * foreground planning began. */
+  pushedPredictionHit?: boolean;
+  /** Whether dispatch-time assurance found its exact seed set complete. */
+  seedCacheHit?: boolean;
+  /** True when the dispatched action came from the certified merged
+   * playbook rather than the neural decision. */
+  playbook?: true;
 }
 
 export type GoResponse =
@@ -162,14 +168,13 @@ export interface GoTurnResult {
   durationMs: number;
   action: GoActionDigest;
   opponentResponse?: GoResponse;
-  /** Expected seed support; an unseeded defense tie splits one seed's weight. */
+  /** Forecast weight the model placed on the reply that actually arrived.
+   * `matching / total` is a per-turn predictive hit rate, not a self-check. */
   predictionSupport?: { matching: number; total: number };
-  timing?: {
-    alignment: "none" | "same-slot" | "boundary-replan";
-    dispatchPlaytime?: number;
-    seed?: number;
-    readyToDispatchMs?: number;
-  };
+  /** Absent on turns that dispatched without seed assurance: a reset, a
+   * resume, or the unseeded fallback. Its presence is what distinguishes
+   * those from an aligned turn, so nothing else needs to record alignment. */
+  prediction?: GoTurnPrediction;
   ok: boolean;
   detail: string;
 }

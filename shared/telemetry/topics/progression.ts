@@ -147,6 +147,20 @@ export interface ArbitrationDigest {
   warnings?: string[];
   /** Who holds Player.currentWork, and for how long. */
   slot?: { by: FeatureId; id: string; priority: number; heldMs: number };
+  /** Every bid for the work slot and what it was worth, best first — the
+   *  alternatives, kept so a choice can be argued with. `valueSec` is BN-seconds
+   *  saved; a hard bid is a lock or a mandatory action and carries none. */
+  slotValues?: {
+    by: FeatureId;
+    id: string;
+    pricing: "hard" | "economic";
+    priority: number;
+    valueSec?: number;
+    moneyPerSec?: number;
+    /** Per-channel breakdown: our rate, the best anyone announced, the worth. */
+    channels?: { channel: string; ourRate: number; bestRate?: number; worthSec: number; valueSec: number }[];
+    why: string;
+  }[];
   preempted?: { by: FeatureId; id: string; heldMs: number };
   remaining: { money: number };
 }

@@ -80,7 +80,7 @@ export function factionFavorPointValues(view: FactionsView): Map<string, FavorPo
     for (const aug of view.catalog.values()) {
       if (aug.name === NEUROFLUX || view.owned.has(aug.name)) continue;
       if (!aug.factions.includes(standing.name)) continue;
-      if (scoreAug(aug, view.weights) <= 0) continue;
+      if (scoreAug(aug, view.weights, view.rates?.worth) <= 0) continue;
       const { repCost } = augCost(aug, view.priceContext);
       if (repCost > repTarget) repTarget = repCost;
     }

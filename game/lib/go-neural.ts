@@ -41,6 +41,9 @@ export interface GoNeuralSeedDispatch<T, R> {
   /** Number of completed inferences discarded because their target tick was
    * missed or no longer had a safe dispatch margin. */
   boundaryRetries: number;
+  /** Milliseconds deliberately slept waiting for the dispatch tick, summed
+   * across every attempt. This is intended latency, not lag. */
+  waitedMs: number;
   /** The anchor is returned because a contradictory public read invalidates
    * it. The caller retains the still-valid anchor across turns. */
   phase?: GoTickPhase;
@@ -66,6 +69,7 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
   const maxReplans = options.maxReplans ?? GO_MAX_SEED_REPLANS;
   let phase = options.phase;
   let boundaryRetries = 0;
+  let waitedMs = 0;
   let player = options.clock.player();
 
   for (;;) {
@@ -79,7 +83,11 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
     const value = await options.infer(player, target);
 
     const delay = target ? goDispatchDelayMs(target, options.clock.now()) : 0;
-    if (delay > 0) await options.clock.sleep(delay);
+    if (delay > 0) {
+      const sleepStartedAt = options.clock.now();
+      await options.clock.sleep(delay);
+      waitedMs += options.clock.now() - sleepStartedAt;
+    }
 
     let verified = options.clock.player();
     let verifiedAt = options.clock.now();
@@ -92,9 +100,11 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
         verified.totalPlaytime < dispatchPlaytime && poll < GO_TARGET_POLL_LIMIT;
         poll++
       ) {
+        const pollStartedAt = options.clock.now();
         await options.clock.sleep(GO_TARGET_POLL_MS);
         verified = options.clock.player();
         verifiedAt = options.clock.now();
+        waitedMs += verifiedAt - pollStartedAt;
       }
     }
 
@@ -115,7 +125,7 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
       // invoking dispatch. The returned Go promise may then take as long as the
       // opponent needs without affecting seed alignment.
       const response = await options.dispatch(value);
-      return { attempt, response, boundaryRetries, ...(phase ? { phase } : {}) };
+      return { attempt, response, boundaryRetries, waitedMs, ...(phase ? { phase } : {}) };
     }
 
     if (boundaryRetries >= maxReplans) {

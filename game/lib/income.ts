@@ -1,7 +1,15 @@
 import { ENGINE_CYCLE_MS } from "../../shared/strategy/career/schedule.ts";
-import type { IncomeAnnouncement } from "../../shared/strategy/income.ts";
+import type { ChannelWorth, IncomeAnnouncement, RateAnnouncement, RateChannel } from "../../shared/strategy/income.ts";
 import type { MeasuredMarginal } from "../../shared/strategy/progression/marginal.ts";
-import { bestAnnounced } from "../../shared/strategy/income.ts";
+import {
+  bestAnnounced,
+  bestByChannel,
+  channelWorth,
+  HACKING_CHANNEL,
+  MONEY_CHANNEL,
+  REPUTATION_CHANNEL,
+} from "../../shared/strategy/income.ts";
+import type { NeedBoard } from "../../shared/strategy/needs.ts";
 import { MS_PER_TICK } from "../../shared/strategy/stock/market.ts";
 import type { GameState } from "./state.ts";
 
@@ -39,17 +47,27 @@ const CYCLES_PER_SEC = 1_000 / ENGINE_CYCLE_MS;
 export function announcedIncome(state: GameState): IncomeAnnouncement[] {
   const out: IncomeAnnouncement[] = [];
 
-  // The hacking farm, measured: ns.getTotalScriptIncome() reports [$/sec from
-  // currently running scripts, $/sec since the last augmentation].
+  // The hacking farm. `ns.getTotalScriptIncome()` reports [$/sec from currently
+  // running scripts, $/sec since the last augmentation]; the rollup EMA smooths
+  // it across the gaps between batch workers.
+  //
+  // The COMMITTED solution's forward rate is preferred over both. All three are
+  // honest, but only one answers the question being asked: "if this feature
+  // keeps the slot, what will be produced?" A farm mid warm-up has realized
+  // nothing and is minutes from out-earning everything else in the run, and
+  // announcing its realized zero hands the slot to a course.
   const scriptIncome = state.topics.fleet?.scriptIncome;
   const farmed = Array.isArray(scriptIncome) ? scriptIncome[0] : undefined;
   const farmEma = state.topics.farm?.moneyRate;
-  if (farmed !== undefined || farmEma !== undefined) {
+  const predictedMoney = state.topics.farm?.predicted?.moneyPerSec;
+  if (farmed !== undefined || farmEma !== undefined || predictedMoney !== undefined) {
     out.push({
       by: "hacking",
       state: "measured",
-      perSec: Math.max(0, farmed ?? 0, farmEma ?? 0),
-      why: "measured current or rollup-smoothed script income",
+      perSec: Math.max(0, farmed ?? 0, farmEma ?? 0, predictedMoney ?? 0),
+      why: predictedMoney !== undefined
+        ? "committed farm solution, floored by measured script income"
+        : "measured current or rollup-smoothed script income",
     });
   } else {
     out.push({ by: "hacking", state: "unknown", reason: "script income has not been observed", why: "current script income" });
@@ -184,4 +202,82 @@ export function bestReinvestmentReturnPerDollarSec(state: GameState): number {
     if (claim.resource === "money") consider(claim.returnPerDollarSec);
   }
   return best;
+}
+
+/** Rates on every channel, not just cash — the input to the work-slot auction.
+ *
+ * Money is the same set `announcedIncome` reports. The other two currencies are
+ * announced only by producers that do NOT compete for the slot: the farm's
+ * experience is what makes taking the slot for a class worth less than it looks,
+ * exactly as its income is what makes taking it for crime worth less than it
+ * looks. Whatever a slot CLAIM produces is folded in by the arbiter itself
+ * (`raiseBest`), so no feature announces its own bid twice. */
+export function announcedRates(state: GameState): RateAnnouncement[] {
+  const out: RateAnnouncement[] = announcedIncome(state).map((entry) => ({ ...entry, channel: MONEY_CHANNEL }));
+
+  // Fleet hacking experience: the farm keeps earning it whoever holds the slot,
+  // which is the whole reason a study session is usually not worth the slot.
+  // Forward-looking for the same reason the money channel is — measured during
+  // a warm-up, Algorithms is briefly the best hacking-experience source in the
+  // run, and takes the slot on the strength of it.
+  const expRate = state.topics.farm?.expRate;
+  const predictedExp = state.topics.farm?.predicted?.expPerSec;
+  const bestExp = Math.max(0, expRate ?? 0, predictedExp ?? 0);
+  out.push(expRate !== undefined || predictedExp !== undefined
+    ? {
+      by: "hacking",
+      channel: HACKING_CHANNEL,
+      state: "measured",
+      perSec: bestExp,
+      why: predictedExp !== undefined
+        ? "committed farm solution, floored by measured fleet experience"
+        : "measured fleet hacking experience",
+    }
+    : { by: "hacking", channel: HACKING_CHANNEL, state: "unknown", reason: "fleet experience has not been observed", why: "fleet hacking experience" });
+
+  // Reputation has no background producer: only player work earns it, so the
+  // bidders themselves are the whole field. Announced explicitly as unknown so
+  // an empty channel can never be read as a measured zero.
+  out.push({
+    by: "factions",
+    channel: REPUTATION_CHANNEL,
+    state: "unknown",
+    reason: "faction reputation is produced only by the work slot itself",
+    why: "background reputation",
+  });
+
+  return out;
+}
+
+/** Each announcer's share of total money production.
+ *
+ * What a multiplier on ONE income source is worth: doubling crime money is
+ * worth double crime's share of what we earn, which beside a live farm is a
+ * rounding error. The same comparison the work slot makes, applied to
+ * augmentation valuation — see `weightsFromMarginals`.
+ *
+ * An unmeasured source is absent, not zero: absent means "we cannot price a
+ * multiplier on this", which the consumer treats as no value rather than as a
+ * measured nothing. */
+export function incomeShares(state: GameState): Record<string, number> {
+  const measured = announcedIncome(state).filter((entry) => entry.state === "measured");
+  const total = measured.reduce((sum, entry) => sum + Math.max(0, entry.perSec), 0);
+  if (!(total > 0)) return {};
+  const out: Record<string, number> = {};
+  for (const entry of measured) {
+    if (entry.state !== "measured" || !(entry.perSec > 0)) continue;
+    out[entry.by] = (out[entry.by] ?? 0) + entry.perSec / total;
+  }
+  return out;
+}
+
+/** The whole alternatives-and-worth table the arbiter prices the slot with. */
+export function slotRates(state: GameState, board: NeedBoard): {
+  best: Map<RateChannel, MeasuredMarginal>;
+  worth: ChannelWorth;
+} {
+  return {
+    best: bestByChannel(announcedRates(state)),
+    worth: channelWorth(board, state.topics.progression?.plan?.marginals),
+  };
 }

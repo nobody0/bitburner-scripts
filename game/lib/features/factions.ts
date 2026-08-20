@@ -5,18 +5,20 @@ import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { FEATURE_IDS } from "../../../shared/features/ids.ts";
 import { grantFor, PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
+import { REPUTATION_CHANNEL } from "../../../shared/strategy/income.ts";
+import { incomeShares, slotRates } from "../income.ts";
 import {
   NEUROFLUX,
   augCost,
   isSoA,
-  weightsForRoute,
+  weightsFromMarginals,
   type AugInfo,
   type PriceContext,
 } from "../../../shared/strategy/factions/augs.ts";
-import { blockersFor, stepFactions } from "../../../shared/strategy/factions/decide.ts";
+import { blockersFor, chooseWorkType, soleTravelBlocker, stepFactions } from "../../../shared/strategy/factions/decide.ts";
 import { initFactionMemory, type FactionAction, type FactionDecision, type FactionMemory } from "../../../shared/strategy/factions/plan.ts";
 import { donationForRep, repFromDonation } from "../../../shared/strategy/factions/rep.ts";
-import type { FactionStanding, FactionsView } from "../../../shared/strategy/factions/state.ts";
+import type { FactionStanding, FactionsView, RepProfileView } from "../../../shared/strategy/factions/state.ts";
 import { estimateBlockerSec, isReachable, type RequirementView } from "../../../shared/strategy/factions/requirements.ts";
 import {
   backdoorCostSeconds,
@@ -25,7 +27,6 @@ import {
 } from "../../../shared/strategy/access/value.ts";
 import { makeHackContext } from "../../../shared/formulas.ts";
 import type { Need } from "../../../shared/strategy/needs.ts";
-import { slotPriority } from "../../../shared/strategy/income.ts";
 import { COMMISSION } from "../../../shared/strategy/stock/market.ts";
 import { daedalusAugsRequired } from "../../../shared/strategy/progression/endgame.ts";
 import { DEFAULT_PLANNING_HORIZON_SEC, forecastAt, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
@@ -278,6 +279,86 @@ export function liquidatableValue(ctx: Pick<DriverContext, "state" | "caps">): n
 }
 
 /** Assemble everything the pure strategy decides from. */
+/** The person and node context the reputation formulas read, from telemetry alone.
+ *
+ * Extracted so `buildFactionsView` and the work CLAIM derive them the same way.
+ * The claim has to price itself on passes where the planner exited early and
+ * published no work rate, and it runs on a `NeedContext` with no driver context
+ * to build a whole view from — but predicting reputation never needed one. */
+/** Which work types a faction offers, from the probe.
+ *
+ * An unreported probe offers NOTHING rather than all three: a wrong guess makes
+ * the driver call `workForFaction(Tetrads, "hacking")` — which Tetrads does not
+ * offer — and the call fails silently every tick while reputation never accrues.
+ * Not working for one minute until the probe lands is cheap; working the wrong
+ * type forever is not. */
+function workOffers(state: GameState, faction: string): FactionStanding["offers"] {
+  const types = state.topics.factions?.workTypes?.[faction] ?? [];
+  return {
+    hacking: types.includes("hacking"),
+    field: types.includes("field"),
+    security: types.includes("security"),
+  };
+}
+
+/** What the player is doing right now, in view vocabulary. Shared by the view
+ * and the work claim so a measured rate is attributed the same way in both. */
+function currentWorkView(state: GameState): RepProfileView["currentWork"] {
+  const work = state.topics.career?.currentWork;
+  if (!work) return undefined;
+  return {
+    kind: work.type === "FACTION" ? "faction" : String(work.type).toLowerCase(),
+    faction: work.detail,
+    detail: work.detail,
+    ...(work.workType ? { workType: work.workType as "hacking" | "field" | "security" } : {}),
+    focused: true,
+  };
+}
+
+function repProfile(
+  state: GameState,
+  caps: Pick<NeedContext["caps"], "bitNode" | "sourceFiles">,
+  owned: ReadonlySet<string>,
+): Pick<RepProfileView, "person" | "repContext"> {
+  const player = state.topics.player;
+  const mults = (player?.mults ?? {}) as unknown as Record<string, number>;
+  const nodeMults = effectiveBitNodeMultipliers(
+    caps.bitNode,
+    sfLevel(caps.sourceFiles, 12),
+    state.topics.progression?.multipliers,
+  ) ?? {};
+  return {
+    person: {
+      // `intelligence` is a term in every reputation formula and is absent from
+      // a snapshot taken before the stat exists. Defaulting it to 0 keeps the
+      // bid a number: a NaN rate compares false against everything and would
+      // silently drop the claim out of the auction.
+      skills: { intelligence: 0, ...(player?.skills ?? {}) } as never,
+      // The `*_exp` multipliers are what `factionWorkExpPerSec` scales the work
+      // type's experience by. Omitting them left every one defaulting to 1, so
+      // the combat and hacking a field/security shift actually pays was scored
+      // below what crime pays for the same second.
+      mults: {
+        faction_rep: mults["faction_rep"] ?? 1,
+        hacking_exp: mults["hacking_exp"] ?? 1,
+        strength_exp: mults["strength_exp"] ?? 1,
+        defense_exp: mults["defense_exp"] ?? 1,
+        dexterity_exp: mults["dexterity_exp"] ?? 1,
+        agility_exp: mults["agility_exp"] ?? 1,
+        charisma_exp: mults["charisma_exp"] ?? 1,
+      },
+    } as RepProfileView["person"],
+    repContext: {
+      factionWorkRepGain: nodeMults["FactionWorkRepGain"] ?? 1,
+      factionWorkExpGain: nodeMults["FactionWorkExpGain"] ?? 1,
+      factionPassiveRepGain: nodeMults["FactionPassiveRepGain"] ?? 1,
+      shareBonus: state.topics.fleet?.sharePower ?? 1,
+      sf15Level: sfLevel(caps.sourceFiles, 15),
+      hasFocusAug: owned.has("Neuroreceptor Management Implant"),
+    },
+  };
+}
+
 export function buildFactionsView(ctx: DriverContext, now: number): FactionsView | undefined {
   const { state, caps } = ctx;
   const player = state.topics.player;
@@ -355,18 +436,7 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
       favor: standing?.favor ?? 0,
       requirements: (topic.requirements?.[name] ?? []) as PlayerRequirement[],
       enemies: topic.enemies?.[name] ?? [],
-      // Work types come from `ns.singularity.getFactionWorkTypes`. When the
-      // probe has not reported yet, offer NOTHING rather than assuming all
-      // three: a wrong guess makes the driver call
-      // `workForFaction(Tetrads, "hacking")` — which Tetrads does not offer —
-      // and the call fails silently every tick while reputation never accrues.
-      // Not working for one minute until the probe lands is cheap; working
-      // the wrong type forever is not.
-      offers: {
-        hacking: topic.workTypes?.[name]?.includes("hacking") ?? false,
-        field: topic.workTypes?.[name]?.includes("field") ?? false,
-        security: topic.workTypes?.[name]?.includes("security") ?? false,
-      },
+      offers: workOffers(state, name),
       special: SPECIAL_FACTIONS.has(name),
     };
   });
@@ -381,12 +451,9 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     sfLevel(ctx.caps.sourceFiles, 12),
     state.topics.progression?.multipliers,
   ) ?? {};
-  const career = state.topics.career;
-  const selectedRouteEta = state.topics.progression?.plan?.routes?.find((route) => route.id === ctx.route);
-  const routeAugmentationFocus = ctx.route === "daedalus"
-    && selectedRouteEta?.parts.some((part) => part.resource === "combat")
-      ? "combat" as const
-      : "hacking" as const;
+  const rates = slotRates(state, ctx.board);
+  const profile = repProfile(state, ctx.caps, owned);
+  const currentWork = currentWorkView(state);
 
   const installed = state.topics.progression?.ownedAugs ?? {};
   const occurrences = new Map<string, number>();
@@ -417,10 +484,7 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
 
   return {
     time: now,
-    person: {
-      skills: { ...(player.skills ?? {}) } as never,
-      mults: { faction_rep: mults["faction_rep"] ?? 1 },
-    } as FactionsView["person"],
+    ...profile,
     // Company blockers (employment / companyRep / jobTitle) are priced with
     // the real work-line model. Company reputation at never-held employers is
     // invisible to telemetry, so those walks start from 0 — an underestimate
@@ -452,13 +516,6 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
       backdooredCompanies: backdooredCompanies(state),
     }),
     availableOwners: new Set(FEATURE_IDS.filter((id) => caps.unlocked[id] !== "no")),
-    repContext: {
-      factionWorkRepGain: nodeMults["FactionWorkRepGain"] ?? 1,
-      factionPassiveRepGain: nodeMults["FactionPassiveRepGain"] ?? 1,
-      shareBonus: state.topics.fleet?.sharePower ?? 1,
-      sf15Level: sfLevel(caps.sourceFiles, 15),
-      hasFocusAug: owned.has("Neuroreceptor Management Implant"),
-    },
     priceContext,
     factions,
     catalog,
@@ -466,10 +523,15 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     queued: queuedAugs,
     graftable: topic.graftable ?? [],
     entropy: player.entropy ?? 0,
-    weights: weightsForRoute(ctx.route, routeAugmentationFocus, {
+    // The route no longer selects a weight table; the route's own MARGINALS
+    // price every channel, and a branch that is not binding is simply worth
+    // nothing. `routeAugmentationFocus` went with it — "is combat the critical
+    // alternative" is a measurement, not a switch to set.
+    weights: weightsFromMarginals(rates.worth, {
       hackingTarget: worldDaemonSkill(ctx.caps.bitNode, sfLevel(ctx.caps.sourceFiles, 12)),
       combatTarget: 1_500,
       multipliers: mults,
+      incomeShares: incomeShares(state),
     }),
     ...(ctx.route ? { route: ctx.route } : {}),
     // Factions creates the package that will eventually trigger the install,
@@ -510,19 +572,8 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
     pendingProceeds: liquidatableValue(ctx),
     proceedsSettling: state.topics.stock?.plan?.liquidate === true,
     holdsWorkSlot: ctx.grants.slot,
-    ...(career?.currentWork
-      ? {
-          currentWork: {
-            kind: career.currentWork.type === "FACTION" ? "faction" : String(career.currentWork.type).toLowerCase(),
-            faction: career.currentWork.detail,
-            detail: career.currentWork.detail,
-            ...(career.currentWork.workType
-              ? { workType: career.currentWork.workType as "hacking" | "field" | "security" }
-              : {}),
-            focused: true,
-          },
-        }
-      : {}),
+    rates,
+    ...(currentWork ? { currentWork } : {}),
     // ns.getTotalScriptIncome returns [current live-script rate,
     // since-last-install hacking rate]. The crossover needs the first one.
     incomePerSec: incomeRate(state.topics.fleet?.scriptIncome),
@@ -808,6 +859,7 @@ function planDigest(decision: FactionDecision, view: FactionsView, bankedAugment
       ...(blocker.etaSec !== undefined ? { etaSec: blocker.etaSec } : {}),
     })),
     ...(decision.until ? { until: decision.until } : {}),
+    ...(decision.workRate ? { workRate: decision.workRate } : {}),
     ...(lastResult ? { lastResult } : {}),
     ...(decision.blocked ? { blocked: { kind: "singularityRam", bitNode: view.bitNode, sf4Level: view.sf4Level, callRamGb: 80 } } : {}),
     ...(decision.recommendInstall ? { recommendInstall: { augmentations: decision.recommendInstall.augmentations } } : {}),
@@ -1248,6 +1300,34 @@ function nextWorkFaction(state: GameState): string | undefined {
   return intent?.faction !== undefined && joined.has(intent.faction) ? intent.faction : undefined;
 }
 
+/** What working `faction` would earn right now, from the reputation formulas.
+ *
+ * The same `chooseWorkType` the planner uses, so the claim and the decision
+ * cannot disagree about what the work is worth — including the measured
+ * override, which still wins at the faction we are actually working. */
+function predictedWorkProduces(ctx: ClaimContext, faction: string | undefined): Record<string, number> {
+  const standing = ctx.state.topics.factions?.standings?.find((entry) => entry.name === faction);
+  if (faction === undefined || !standing) return { [REPUTATION_CHANNEL]: 0 };
+  const work = currentWorkView(ctx.state);
+  const profile: RepProfileView = {
+    ...repProfile(ctx.state, ctx.caps, new Set(ctx.state.topics.factions?.ownedAugs ?? [])),
+    rates: slotRates(ctx.state, ctx.board),
+    // Carried so the MEASUREMENT still overrides the formula at the faction we
+    // are actually working, exactly as it does in the planner. Reality beats the
+    // prediction — a share bonus or a mis-read node multiplier shows up here and
+    // nowhere else — and the claim must not disagree with the decision about
+    // what the same work is worth.
+    ...(work ? { currentWork: work } : {}),
+  };
+  const chosen = chooseWorkType(
+    faction,
+    { ...standing, offers: workOffers(ctx.state, faction) } as FactionStanding,
+    profile,
+    memory,
+  );
+  return chosen?.produces ?? { [REPUTATION_CHANNEL]: 0 };
+}
+
 /** What this feature is bidding for. */
 function claims(ctx: ClaimContext): FeatureClaim[] {
   const topic = ctx.state.topics.factions;
@@ -1405,14 +1485,25 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
         amount: 1,
         shape: "step",
         pricing: "hard",
-        value: { state: "unknown", reason: "the player-time slot is ordered by hard priority" },
+        value: { state: "unknown", reason: "a time claim is priced by `produces`, not by this field" },
         priority: PRIORITY["factions:work"],
         mode: "spend",
         why: `grafting ${graft.name} occupies Player.currentWork`,
       },
     );
   }
-  if (plan.action.type === "travelTo") {
+  // ANTICIPATED, not derived from the published action. `travelTo` is decided
+  // at tick time from a plan this claim phase has not seen yet, and the driver
+  // refuses to travel without the grant already in hand — so a fare claimed only
+  // once the action is published is always one pass late, and the plan has moved
+  // on by the next one. Same contract as the purchase and work RAM claims above:
+  // when travel is plausible, the $200,000 is on the table.
+  // The anticipation carries the planner's OWN guard with it: `decideFactions`
+  // never issues travel once an install is requested, so anticipating one then
+  // would hold $200,000 at the aug-fund band away from the package the drain
+  // exists to buy, every pass, for a trip that will not be taken.
+  const anticipatedTravel = !installDrain && soleTravelBlocker(plan.blockers ?? []) !== undefined;
+  if (plan.action.type === "travelTo" || anticipatedTravel) {
     out.push({
       by: "factions",
       id: "travel-fund",
@@ -1455,6 +1546,27 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   // ...and during that drain the slot is released outright, for the same reason
   // "nothing left to work toward" releases it: a feature that will not work must
   // not hold the one resource only one feature can hold.
+  //
+  // Everything the work would EARN, which is what the claim is priced on.
+  //
+  // The planner's rate is preferred when it names the faction we want, because
+  // that pass had route context this one does not. When it does not — the early
+  // exits for joining, travelling and "no target yet" return before a work
+  // target is ever computed — the claim PREDICTS the rate rather than
+  // remembering one. Reputation is exactly predictable, so there is no reason
+  // to bid a memory.
+  //
+  // The predecessor fell back to the measured EWMA, and the passes that fallback
+  // existed for are precisely the passes on which the EWMA is zero or unset: a
+  // faction just joined has never been worked. `{ reputation: 0 }` prices as
+  // UNPRICED and loses the slot to any crime holding cash — the exact outcome
+  // the fallback was written to prevent. It also announced reputation alone,
+  // dropping the combat and charisma experience field and security work pay
+  // alongside it, so a posted combat gate went to crime while the reputation
+  // that same second could have earned did not happen.
+  const workProduces = plan.workRate !== undefined && plan.workRate.faction === wanted
+    ? plan.workRate.produces
+    : predictedWorkProduces(ctx, wanted);
   if (wanted && !(installDrain && working === undefined)) {
     out.push({
       by: "factions",
@@ -1465,18 +1577,18 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       amount: 1,
       shape: "step",
       pricing: "hard",
-      value: { state: "unknown", reason: "the player-time slot is ordered by hard priority" },
+      value: { state: "unknown", reason: "a time claim is priced by `produces`, not by this field" },
       // Scored on what the slot yields, like every other claimant — see
       // `shared/strategy/income.ts`. Faction work is the only source of faction
-      // reputation, so whenever it wants the slot it IS the best reputation option
-      // and takes the full `REP_SPAN`; it pays no salary, so its money fraction is
-      // zero. That arithmetic reproduces the constant this used to be, which is the
-      // point: the number stops being a magic 60 and becomes a consequence.
-      priority: installPackage
-        ? PRIORITY["factions:install-work"]
-        : routePackage
-        ? PRIORITY["factions:route-work"]
-        : slotPriority({ repFraction: 1 }),
+      // reputation, so whenever it wants the slot it IS the best reputation
+      // option and takes the whole of what reputation is worth; it pays no
+      // salary, so it announces no money at all.
+      //
+      // A route-MANDATORY package is the one case that is not a rate: the run
+      // cannot end without this install, so the slot is taken by the lattice
+      // rather than bid for.
+      priority: installPackage ? PRIORITY["factions:install-work"] : PRIORITY["factions:work"],
+      ...(installPackage ? {} : { produces: workProduces }),
       mode: "spend",
       ratePerSec: plan.until?.etaSec ? 1 / plan.until.etaSec : 0,
       why: working

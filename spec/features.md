@@ -201,6 +201,29 @@ Two mechanisms, deliberately distinct, both pure and both rendered:
   `ns.singularity.workForFaction` silently *cancels* whatever is running — the
   loser is not delayed, its progress is destroyed.
 
+  It also keeps the **alternatives**. A time claim announces the RATES holding
+  the slot would produce — dollars, reputation, experience — and the arbiter
+  scores it as `Σ (our rate / the best rate anyone can manage) × what a relative
+  increase in that channel is worth`, in BN-seconds off the route
+  (`shared/strategy/income.ts`, priced by `ProgressionMarginals`). The band
+  lattice survives only for claims that are not a rate at all: the lock on an
+  in-flight crime, a mandatory route install, a terminal action. Those always
+  outrank a priced bid, and everything else is decided by measurement rather
+  than by a constant — which is the point, because "money outranks reputation"
+  is true in one node and false in the next.
+
+  That valuation prices a rate held for the rest of the route, so a claimant
+  that must **occupy** the slot before it delivers anything is scored on the
+  part of the run it leaves behind: `1 - occupied/horizon`, from
+  `deliveryFraction` in `shared/strategy/income.ts`. A twenty-minute program
+  write is twenty minutes reputation does not accrue, and a write that would
+  still be running when the node ends is worth nothing. The discount is applied
+  to the resulting value and never to the announced rate — `raiseBest` lifts the
+  alternatives table to our own rate, so a multiplier on the rate divides
+  straight back out. Only the time still LEFT is charged: the elapsed part is
+  sunk, and charging it every pass would mean a write that cannot start can
+  never accumulate the progress that would let it start.
+
 Both hang off the `progression` telemetry topic. That is not a feature id, and
 deliberately so: they describe the relationships *between* features, so giving
 them one would be a category error.

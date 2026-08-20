@@ -7,8 +7,11 @@ import {
   routeCountVerdict,
   type ActivationOffer,
 } from "../shared/strategy/progression/activation.ts";
-import { defaultWeights, NEUROFLUX, scoreAug, totalCost, type PriceContext } from "../shared/strategy/factions/augs.ts";
+import { NEUROFLUX, scoreAug, totalCost, weightsFromMarginals, type PriceContext } from "../shared/strategy/factions/augs.ts";
 import { AUGMENTATIONS } from "../shared/features/augmentations.ts";
+
+/** A measured route: reputation binds, hacking is the climb behind it. */
+const WORTH = new Map([["money", 1_000], ["hacking", 19_174], ["reputation", 49_505]]);
 
 const CTX: PriceContext = {
   queuedNonSoA: 0,
@@ -32,7 +35,7 @@ function offersFor(names: readonly string[], faction = "CyberSec"): ActivationOf
 describe("reset-activated bankroll value", () => {
   test("the funded set starts with the highest augmentation value per dollar", () => {
     const names = [BITWIRE, SYNAPTIC, CSP1];
-    const weights = defaultWeights();
+    const weights = weightsFromMarginals(WORTH);
     const ranked = [...activationCatalog(names).values()].sort((a, b) =>
       a.baseCost / Math.max(1e-9, scoreAug(a, weights))
       - b.baseCost / Math.max(1e-9, scoreAug(b, weights)),
@@ -63,7 +66,7 @@ describe("reset-activated bankroll value", () => {
       offers: offersFor(names),
       joined: new Set(["CyberSec"]),
       owned: new Set(),
-      weights: defaultWeights(),
+      weights: weightsFromMarginals(WORTH),
       countSlotValue: 0,
       ctx: CTX,
       money,
@@ -83,7 +86,7 @@ describe("reset-activated bankroll value", () => {
       realizable: names,
       joined: new Set(["CyberSec"]),
       owned: new Set<string>(),
-      weights: defaultWeights(),
+      weights: weightsFromMarginals(WORTH),
       countSlotValue: 0,
       ctx: CTX,
       money: plenty,
@@ -106,7 +109,7 @@ describe("reset-activated bankroll value", () => {
       offers: offersFor([NEUROFLUX]),
       joined: new Set(["CyberSec"]),
       owned: new Set<string>(),
-      weights: defaultWeights(),
+      weights: weightsFromMarginals(WORTH),
       countSlotValue: 1,
       ctx: CTX,
       money: 1e12,
@@ -204,6 +207,7 @@ describe("reset-activated bankroll value", () => {
       installed: 3,
       affordableDistinct: 9,
       consolidationAllowed: false,
+      worth: new Map([["augmentations", 30_000]]),
     });
     expect(early.ready).toBe(true);
     expect(early.value).toBeGreaterThan(0);
@@ -240,8 +244,11 @@ describe("reset-activated bankroll value", () => {
     }).ready).toBe(true);
   });
 
-  test("count slot value is flat off a finite-count route", () => {
-    expect(countSlotValueFor(Infinity, 12)).toBe(countSlotValueFor(Infinity, 0));
-    expect(countSlotValueFor(30, 29)).toBeGreaterThan(0);
+  test("count slot value exists only on a finite-count route", () => {
+    const worth = new Map([["augmentations", 30_000]]);
+    expect(countSlotValueFor(worth, Infinity, 12)).toBe(0);
+    expect(countSlotValueFor(worth, 30, 29)).toBeGreaterThan(0);
+    // ...and rises toward closure: the last slot unblocks the whole gate.
+    expect(countSlotValueFor(worth, 30, 29)).toBeGreaterThan(countSlotValueFor(worth, 30, 0));
   });
 });

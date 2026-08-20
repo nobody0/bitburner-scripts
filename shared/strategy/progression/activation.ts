@@ -1,3 +1,4 @@
+import type { ChannelWorth } from "../income.ts";
 /** Reset-activated value of the current bankroll.
  *
  * Cadence has to answer two questions about a pile of cash that has NOT been
@@ -212,6 +213,8 @@ export function routeCountVerdict(input: {
   /** The route's own optional-install policy, consulted once consolidation
    * has begun; before that the target-relative tranche rule applies. */
   consolidationAllowed: boolean;
+  /** What the route measured an acquisition-rate increase to save. */
+  worth?: ChannelWorth;
 }): { ready: boolean; value: number } {
   const beforeConsolidation =
     input.installed < Math.ceil(input.required * DAEDALUS_FINAL_BATCH_FRACTION);
@@ -225,12 +228,13 @@ export function routeCountVerdict(input: {
       installed: input.installed,
       affordableDistinct: input.affordableDistinct,
       batchAllowed,
+      ...(input.worth ? { worth: input.worth } : {}),
     }),
   };
 }
 
-/** Flat route value of one distinct count slot for {@link fundedActivationBatch}. */
-export function countSlotValueFor(target: number, installed: number): number {
-  if (!Number.isFinite(target)) return countSlotWeight(Infinity, 0);
-  return countSlotWeight(target, Math.max(0, target - installed));
+/** BN-seconds one distinct count slot is worth, for {@link fundedActivationBatch}. */
+export function countSlotValueFor(worth: ChannelWorth, target: number, installed: number): number {
+  if (!Number.isFinite(target)) return 0;
+  return countSlotWeight(worth, Math.max(0, target - installed));
 }

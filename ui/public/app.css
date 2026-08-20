@@ -234,23 +234,8 @@ canvas.microchart { height: 88px; }
 .f5, .gift .cell.f5 { background: var(--critical); }
 
 /* --- Go: cyber-style nodes on a network, closely following the v3.0.1
-   visual language while keeping our decision/reply comparison. --- */
-.gocompare {
-  display: grid;
-  grid-template-columns: minmax(150px, 0.72fr) minmax(210px, 1fr);
-  gap: 18px;
-  align-items: start;
-}
-.gocompare h3 {
-  margin: 8px 0 0;
-  color: var(--bb-secondary);
-  font-size: var(--fs-xs);
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.gocompare .goboard { margin-top: 5px; }
-.go-snapshot.current h3 { color: var(--bb-primary); }
+   visual language. One board: the live position, with our move and the
+   observed reply marked on it. --- */
 .goboard {
   position: relative;
   isolation: isolate;
@@ -266,7 +251,6 @@ canvas.microchart { height: 88px; }
     repeating-linear-gradient(0deg, rgba(255, 255, 255, 0.018) 0 1px, transparent 1px 4px),
     var(--bb-background);
 }
-.go-snapshot.input .goboard { max-width: 400px; opacity: 0.78; }
 .goboard .go-point {
   position: relative;
   display: block;
@@ -360,7 +344,5 @@ canvas.microchart { height: 88px; }
   .group.launch { margin-left: 0; padding-left: 0; border-left: 0; }
   nav#tabs { padding-inline: 4px; }
   main#view { padding-inline: 8px; }
-  .gocompare { grid-template-columns: minmax(0, 1fr); }
-  .go-snapshot.input .goboard,
-  .go-snapshot.current .goboard { max-width: min(100%, 520px); }
+  .go-snapshot .goboard { max-width: min(100%, 520px); }
 }

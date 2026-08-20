@@ -10,9 +10,10 @@ import {
   type CrimeStats,
 } from "../shared/strategy/career/crimes.ts";
 import { expForSkill } from "../shared/formulas.ts";
-import { CAREER_KINDS, needValues, skillRepTradeoff, stepCareer, type CareerView } from "../shared/strategy/career/decide.ts";
+import { CAREER_KINDS, needValues, stepCareer, type CareerView } from "../shared/strategy/career/decide.ts";
 import { PORT_OPENER_PROGRAMS, programCreateTimeMs, preferProgramCreation } from "../shared/strategy/career/programs.ts";
 import { postNeeds, type Need } from "../shared/strategy/needs.ts";
+import { DEFAULT_PLANNING_HORIZON_SEC } from "../shared/strategy/progression/forecast.ts";
 
 const CTX: CrimeContext = { crimeSuccessRate: 1, crimeMoney: 1 };
 
@@ -147,18 +148,17 @@ describe("career as the needs-board consumer", () => {
     const decision = stepCareer(view({ crimes: [shoplift, homicide, rich] }), postNeeds([]));
     expect(decision.incomeFallback).toBe(true);
     expect(decision.action.subject).toBe("Heist");
-    expect(decision.why).toContain("no posted need");
+    expect(decision.why).toContain("maximising income");
   });
 
-  test("two features wanting the same outcome ADD their weight", () => {
-    const board = postNeeds([
+  test("the NEARER of two thresholds on one outcome sets the distance left", () => {
+    // Clearing the near one unblocks a feature; the far one behind it does not
+    // change what career should do. (Their WORTH adds instead — that happens in
+    // `channelWorth`, and tests/income.test.ts pins it.)
+    const values = needValues(postNeeds([
       need({ by: "factions", kind: "karma", target: -45, have: 0, weight: 1 }),
       need({ by: "gang", kind: "karma", target: -54_000, have: 0, weight: 20 }),
-    ]);
-    const values = needValues(board);
-    expect(values.get("karma")!.weight).toBe(21);
-    // ...and the nearer threshold sets the remaining distance, because
-    // clearing it unblocks a feature.
+    ]));
     expect(values.get("karma")!.remaining).toBe(45);
   });
 
@@ -226,47 +226,52 @@ describe("career as the needs-board consumer", () => {
     expect(decision.action).toMatchObject({ type: "travel", subject: "Aevum" });
   });
 
-  test("jobs provide the fresh-install income floor until background hacking catches up", () => {
+  test("with nothing priced the slot earns; once a channel is priced it stops earning", () => {
     const early = stepCareer(
       view({
         crimes: [shoplift],
         jobs: { FoodNStuff: "Employee" },
         companies: [{ name: "FoodNStuff", rep: 0, moneyPerSec: 20_000 }],
-        externalIncomePerSec: 0,
       }),
       postNeeds([]),
     );
     expect(early.action).toMatchObject({ type: "company", subject: "FoodNStuff" });
 
+    // ...and once the route prices hacking experience, the SAME menu picks the
+    // course instead — not because of a phase rule about fresh installs, but
+    // because a channel worth 19,000 BN-seconds beats $7,500/sec of crime
+    // against a money channel worth 100.
     const later = stepCareer(
       view({
         crimes: [shoplift],
         courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 960, location: "Rothman University" }],
         // A course must be funded for a full training window (30s), not any positive grant.
         moneyGranted: 30_000,
-        externalIncomePerSec: 25_000,
+        rates: { best: new Map(), worth: new Map([["hacking", 19_000], ["money", 100]]) },
       }),
       postNeeds([]),
     );
     expect(later.action).toMatchObject({ type: "class", subject: "Algorithms" });
   });
 
-  test("the progression route can replace hacking as the training fallback", () => {
+  test("which skill to train follows the route's own marginals, not a named fallback", () => {
+    // `defaultSkill` used to name the course a phase rule would study. Whichever
+    // channel the route actually values now selects it, and a node where
+    // charisma is what binds reaches that answer by itself.
+    const courses = [
+      { name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 960, location: "Rothman University" },
+      { name: "Leadership", skill: "charisma", expPerSec: 8, costPerSec: 960, location: "Rothman University" },
+    ];
     const decision = stepCareer(
       view({
         crimes: [shoplift],
-        courses: [
-          { name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 960, location: "Rothman University" },
-          { name: "Leadership", skill: "charisma", expPerSec: 8, costPerSec: 960, location: "Rothman University" },
-        ],
+        courses,
         moneyGranted: 30_000,
-        externalIncomePerSec: 25_000,
-        defaultSkill: "charisma",
+        rates: { best: new Map(), worth: new Map([["hacking", 100], ["skill:charisma", 19_000]]) },
       }),
       postNeeds([]),
     );
     expect(decision.action).toMatchObject({ type: "class", subject: "Leadership" });
-    expect(decision.why).toContain("training charisma");
   });
 
   test("gym courses execute as gym work, not university classes", () => {
@@ -288,7 +293,12 @@ describe("career as the needs-board consumer", () => {
     expect(decision.action).toMatchObject({ type: "program", subject: "BruteSSH.exe" });
   });
 
-  test("urgency is lexicographic: blocking work beats a larger nice score", () => {
+  test("what a need is WORTH decides, not how fast the rate happens to be", () => {
+    // A million charisma experience per second is still only ever the best
+    // charisma rate — one channel's full worth, no more. The urgency bands used
+    // to sort this list lexicographically ahead of the score, which said a
+    // blocking need was infinitely more important than a nice one however
+    // little of it an option delivered. Worth is a number; urgency is not.
     const decision = stepCareer(
       view({
         courses: [
@@ -298,39 +308,160 @@ describe("career as the needs-board consumer", () => {
         moneyGranted: 100,
       }),
       postNeeds([
-        need({ kind: "skill", subject: "hacking", target: 100, have: 0, weight: 1, urgency: "blocking" }),
+        need({ kind: "skill", subject: "hacking", target: 100, have: 0, weight: 5, urgency: "blocking" }),
         need({ kind: "skill", subject: "charisma", target: 1, have: 0, weight: 1, urgency: "nice" }),
       ]),
     );
     expect(decision.action.subject).toBe("Algorithms");
+    expect(decision.ranked[0]!.score).toBe(decision.ranked[1]!.score * 5);
   });
 
-  test("skill gates score raw experience remaining, not levels as if they were linear", () => {
-    const currentExp = expForSkill(50, 1);
+  test("a skill gate is priced on the experience rate, against whoever else produces it", () => {
+    // NOT on remaining experience. That normalisation divided by a clamped
+    // `Math.max(1e-9, …)`, so a multiplier that made a need look already
+    // overshot returned a score of 6.3e8 and silently decided every ranking.
     const decision = stepCareer(
       view({
         courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 0, location: "Rothman University" }],
-        exp: { hacking: currentExp },
-        skillMultipliers: { hacking: 1 },
+        rates: {
+          best: new Map([["hacking", { state: "measured", value: 32 }]]),
+          worth: new Map([["hacking", 1_000]]),
+        },
       }),
       postNeeds([need({ kind: "skill", subject: "hacking", target: 100, have: 50, weight: 2 })]),
     );
     const contribution = decision.ranked[0]!.contributions[0]!;
-    expect(contribution.score).toBeCloseTo(8 / (expForSkill(100, 1) - currentExp) * 2, 12);
+    expect(contribution.valueSec).toBeCloseTo((8 / 32) * 1_000, 12);
   });
 
-  test("Algorithms only gets credit for route time the background hacking fleet cannot cover during rep work", () => {
-    const hiddenByRep = skillRepTradeoff(10_000, 10, 10, 1_000);
-    expect(hiddenByRep.backgroundExpDuringRep).toBe(10_000);
-    expect(hiddenByRep.trainingWorkSec).toBe(0);
-    expect(hiddenByRep.timeSavedSec).toBe(0);
-    expect(hiddenByRep.relativeTimeSaved).toBe(0);
+  test("a satisfied-looking skill gate cannot explode the score", () => {
+    // The clamped remainder was the failure: any state where the remaining
+    // experience read as zero returned rate/1e-9. There is no remainder in the
+    // arithmetic any more, and a rate is bounded by the best rate for the same
+    // channel, so a score cannot exceed what the channel is worth.
+    const decision = stepCareer(
+      view({
+        courses: [{ name: "Algorithms", skill: "hacking", expPerSec: 8, costPerSec: 0, location: "Rothman University" }],
+        rates: { best: new Map(), worth: new Map([["hacking", 1_000]]) },
+      }),
+      postNeeds([need({ kind: "skill", subject: "hacking", target: 100, have: 99.999, weight: 2 })]),
+    );
+    for (const entry of decision.ranked) expect(entry.score).toBeLessThanOrEqual(1_000);
+  });
 
-    const stillUseful = skillRepTradeoff(20_000, 10, 10, 1_000);
-    expect(stillUseful.trainingWorkSec).toBe(500);
-    expect(stillUseful.etaWithoutTrainingSec).toBe(2_000);
-    expect(stillUseful.etaWithTrainingSec).toBe(1_500);
-    expect(stillUseful.relativeTimeSaved).toBe(0.25);
+});
+
+/** A write blocks the one work slot for its whole duration and delivers the
+ *  file only at the end. What it is worth therefore has to be weighed against
+ *  what the slot would otherwise have earned over the same minutes — the
+ *  comparison the ranker could not make while a program's own rate was also the
+ *  best rate for its own channel, so every write scored the channel in full. */
+describe("a program contests the slot on the time it blocks it", () => {
+  const opener = need({ kind: "file", subject: "BruteSSH.exe", target: 1, have: 0, weight: 8 });
+  const HORIZON = 3_600;
+  // 2,400 BN-seconds for the file; a crime worth 2,000 of them per second held.
+  const worth = new Map([["file:BruteSSH.exe", 2_400], ["money", 2_000]]);
+  const earner = crime({ type: "Heist", timeMs: 1_000, money: 10_000, karma: 0, chance: 1, kills: 0 });
+  const rates = { best: new Map([["money", { state: "measured" as const, value: 10_000 }]]), worth };
+
+  function ranked(timeMs: number, over: Partial<CareerView> = {}) {
+    return stepCareer(
+      view({
+        crimes: [earner],
+        programs: [{ name: "BruteSSH.exe", timeMs, purchaseCost: 500_000 }],
+        planningHorizonSec: HORIZON,
+        rates,
+        ...over,
+      }),
+      postNeeds([opener]),
+    );
+  }
+
+  const scoreOf = (decision: ReturnType<typeof stepCareer>): number =>
+    decision.ranked.find((entry) => entry.action.type === "program")!.score;
+
+  test("a slow write loses the slot to a better-paying alternative", () => {
+    // Half the remaining run spent writing delivers half the file's worth:
+    // 1,200 against a crime that is worth 2,000 for every second it holds.
+    const decision = ranked(1_800_000);
+    expect(scoreOf(decision)).toBeCloseTo(2_400 * 0.5, 9);
+    expect(decision.action.type).not.toBe("program");
+  });
+
+  test("a fast write for a genuinely bottlenecking file still wins", () => {
+    // Same board, same crime — only the duration changed.
+    const decision = ranked(60_000);
+    expect(scoreOf(decision)).toBeCloseTo(2_400 * (1 - 60 / HORIZON), 9);
+    expect(decision.action).toMatchObject({ type: "program", subject: "BruteSSH.exe" });
+  });
+
+  test("a write's score falls linearly with the fraction of the horizon it occupies", () => {
+    expect(scoreOf(ranked(600_000)) / scoreOf(ranked(1_200_000)))
+      .toBeCloseTo((1 - 600 / HORIZON) / (1 - 1_200 / HORIZON), 9);
+  });
+
+  test("a write longer than the planning horizon holds no value and does not take the slot", () => {
+    const decision = ranked(14_400_000);
+    const program = decision.ranked.find((entry) => entry.action.type === "program")!;
+    expect(program.score).toBe(0);
+    // Unpriced, not priced-at-zero: a priced zero sorts ahead of every unpriced
+    // bid and would hold the slot forever delivering nothing.
+    expect(program.value.state).toBe("unpriced");
+    expect(decision.action.type).not.toBe("program");
+  });
+
+  test("the duration discount survives the self-raise", () => {
+    // THE REGRESSION PIN. A program is the only producer of its own `file:`
+    // channel and `raiseBest` lifts the field to our own announced rate, so the
+    // rate fraction is — correctly — 1. Any attempt to price duration by scaling
+    // that rate divides straight back out and this test fails.
+    const program = ranked(1_800_000).ranked.find((entry) => entry.action.type === "program")!;
+    const channel = program.value.channels.find((entry) => entry.channel === "file:BruteSSH.exe")!;
+    expect(channel.bestRate).toBe(channel.ourRate);
+    expect(program.score).toBeLessThan(channel.worthSec);
+    expect(program.deliveryFraction).toBeCloseTo(0.5, 9);
+  });
+
+  test("with no forecast the write is discounted against the default planning horizon", () => {
+    const decision = stepCareer(
+      view({
+        programs: [{ name: "BruteSSH.exe", timeMs: 600_000, purchaseCost: 500_000 }],
+        rates,
+      }),
+      postNeeds([opener]),
+    );
+    expect(scoreOf(decision)).toBeCloseTo(2_400 * (1 - 600 / DEFAULT_PLANNING_HORIZON_SEC), 9);
+  });
+
+  test("a write already half done is charged only the time that is left", () => {
+    // The elapsed part is sunk. Charging the full write every pass is not merely
+    // pessimistic, it is self-fulfilling: a write that can never start can never
+    // accumulate the progress that would let it.
+    const half = ranked(1_800_000, {
+      currentWork: { kind: "create_program", subject: "BruteSSH.exe", elapsedSec: 900 },
+    });
+    expect(scoreOf(half)).toBeCloseTo(2_400 * (1 - 900 / HORIZON), 9);
+    expect(scoreOf(half)).toBeGreaterThan(scoreOf(ranked(1_800_000)));
+  });
+
+  test("a write far enough along beats the crime that outranked it at the start", () => {
+    // The same write, the same crime, the same board — only the time already
+    // sunk differs. This is what stops a discount from being self-fulfilling.
+    const nearlyDone = ranked(1_800_000, {
+      currentWork: { kind: "create_program", subject: "BruteSSH.exe", elapsedSec: 1_500 },
+    });
+    expect(scoreOf(nearlyDone)).toBeCloseTo(2_400 * (1 - 300 / HORIZON), 9);
+    // `ranked[0]` is what the slot would run; the emitted action is the
+    // in-flight write's own continuation.
+    expect(nearlyDone.ranked[0]!.action).toMatchObject({ type: "program", subject: "BruteSSH.exe" });
+    expect(nearlyDone.action).toMatchObject({ type: "idle", why: "already committing BruteSSH.exe" });
+  });
+
+  test("progress on a DIFFERENT program does not discount this one", () => {
+    const other = ranked(1_800_000, {
+      currentWork: { kind: "create_program", subject: "FTPCrack.exe", elapsedSec: 900 },
+    });
+    expect(scoreOf(other)).toBeCloseTo(2_400 * 0.5, 9);
   });
 });
 
@@ -360,12 +491,14 @@ describe("program creation economics", () => {
     const alternative = (valueSec: number) => ({ moneyPerSec: 200, valueSec });
     // Nothing else for the slot to do — writing is still much cheaper.
     expect(preferProgramCreation(brute, 50, 0, alternative(0), false, lambda)).toBe(true);
-    // A blocking need worth 6_000 BN-seconds sits in the same window: the
+    // Another bidder would deliver 8_000 BN-seconds over the same window: the
     // money-only comparison could never see it, and it flips the decision.
-    expect(preferProgramCreation(brute, 50, 0, alternative(6_000), false, lambda)).toBe(false);
+    // The two estimates of the cost do not ADD — the forgone income is itself
+    // a priced channel inside `valueSec` now — so the larger one stands.
+    expect(preferProgramCreation(brute, 50, 0, alternative(8_000), false, lambda)).toBe(false);
     // The same board with money priced cheaply (income is abundant) leaves
     // buying expensive in BN-seconds, so the write wins again.
-    expect(preferProgramCreation(brute, 50, 0, alternative(6_000), false, 0.02)).toBe(true);
+    expect(preferProgramCreation(brute, 50, 0, alternative(8_000), false, 0.02)).toBe(true);
   });
 
   test("a non-positive money price degrades to the money-only comparison", () => {

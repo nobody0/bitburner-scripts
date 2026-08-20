@@ -10,6 +10,7 @@ import { TestGoNeuralRuntime } from "./support/go-neural-runtime.ts";
 import type { GameState } from "../game/lib/state.ts";
 import { emptyArbitration } from "../shared/strategy/arbiter.ts";
 import { unknownForecast } from "../shared/strategy/progression/forecast.ts";
+import { scoreBoard, territory } from "../shared/strategy/go/rules.ts";
 import type { GoDecision } from "../shared/strategy/go/rules.ts";
 import type { GoWorkerEvaluation } from "../shared/strategy/go/neural/worker-protocol.ts";
 
@@ -139,7 +140,7 @@ describe("Go live seed observation", () => {
       go: { makeMove: async () => ({ type: "gameOver", x: null, y: null }) },
     } as unknown as NS, clock);
     expect(dispatchSleeps(clock.sleeps)).toEqual([]);
-    expect(state.topics.go?.plan?.prediction).toMatchObject({
+    expect(state.topics.go?.lastTurn?.prediction).toMatchObject({
       sampledTotalPlaytime: 10_000,
       engineCycleMs: 200,
       aiWaitMs: 200,
@@ -151,15 +152,36 @@ describe("Go live seed observation", () => {
     // Real planning time has elapsed since the anchor, so the remaining margin
     // is whatever is left of the cycle — but never inside the guard band, or
     // the turn would have targeted the next cycle instead.
-    expect(state.topics.go?.plan?.prediction?.rolloverMarginMs).toBeGreaterThanOrEqual(GO_DISPATCH_GUARD_MS);
-    expect(state.topics.go?.plan?.prediction?.readyToDispatchMs).toBeGreaterThanOrEqual(0);
-    expect(state.topics.go?.lastTurn?.timing).toMatchObject({
-      alignment: "same-slot",
-      dispatchPlaytime: 10_000,
-      seed: 10_200,
-      readyToDispatchMs: state.topics.go?.plan?.prediction?.readyToDispatchMs,
-    });
+    expect(state.topics.go?.lastTurn?.prediction?.rolloverMarginMs).toBeGreaterThanOrEqual(GO_DISPATCH_GUARD_MS);
+    // The segments partition the total, so a slow worker is separable from the
+    // deliberate wait for the next engine cycle. This turn waited for neither.
+    const breakdown = state.topics.go?.lastTurn?.prediction?.dispatchBreakdown;
+    expect(breakdown).toBeDefined();
+    expect(breakdown!.alignMs).toBe(0);
+    const named = breakdown!.admitMs + breakdown!.prepareMs + breakdown!.leaseMs
+      + breakdown!.finalizeMs + breakdown!.alignMs + breakdown!.dispatchMs + breakdown!.residualMs;
+    expect(named).toBe(breakdown!.totalMs);
     expect(state.topics.go?.plan?.input.komi).toBe(1.5);
+  });
+
+  test("publishes a score and territory that match the board beside them", async () => {
+    // The fixture has no komi: the core probe has not run yet, which is the
+    // state every new game starts in. The score used to be withheld in that
+    // window, leaving the PREVIOUS game's numbers next to a fresh board.
+    const state = goState();
+    expect(state.topics.go?.komi).toBeUndefined();
+    const clock = { playtimes: [...ANCHOR_READS, 10_000], sleeps: [] as number[] };
+    await runGrantedTurn(state, {
+      go: { makeMove: async () => ({ type: "move", x: 4, y: 4 }) },
+    } as unknown as NS, clock);
+
+    const go = state.topics.go!;
+    expect(go.komi).toBe(1.5);
+    const board = { rows: go.board!, size: go.boardSize! };
+    expect(go.blackScore).toBe(scoreBoard(board, go.komi!).X);
+    expect(go.whiteScore).toBe(scoreBoard(board, go.komi!).O);
+    const owned = territory(board);
+    expect(go.territory).toEqual({ black: owned.X, white: owned.O });
   });
 
   test("records chained Black-turn-to-dispatch latency", async () => {
@@ -195,10 +217,13 @@ describe("Go live seed observation", () => {
       await new Promise<void>((resolve) => setImmediate(resolve));
     }
     expect(calls).toBe(2);
-    const readyToDispatchMs = state.topics.go?.plan?.prediction?.readyToDispatchMs;
-    expect(readyToDispatchMs).toBeDefined();
-    expect(readyToDispatchMs!).toBeLessThan(50);
-    expect(state.topics.go?.lastTurn?.timing?.readyToDispatchMs).toBe(readyToDispatchMs);
+    // The next turn's provisional plan has already been published by now, so a
+    // digest parked on `plan` would have been replaced before any viewer saw
+    // it. Reading it back here proves it rides the turn record instead.
+    const breakdown = state.topics.go?.lastTurn?.prediction?.dispatchBreakdown;
+    expect(breakdown).toBeDefined();
+    expect(breakdown!.totalMs).toBeLessThan(50);
+    expect(state.topics.go?.plan).toBeDefined();
   });
 
   test("claims the current lifecycle action before a prior plan exists", () => {
@@ -251,12 +276,11 @@ describe("Go live seed observation", () => {
     // No fixed 10 ms penalty any more: the replan is immediate, and it is
     // bounded to one because the retry dispatches against a freshly read tick.
     expect(dispatchSleeps(clock.sleeps)).toEqual([]);
-    expect(state.topics.go?.plan?.prediction).toMatchObject({
+    expect(state.topics.go?.lastTurn?.prediction).toMatchObject({
       dispatchPlaytime: 10_200,
       seedCandidates: [10_400],
       boundaryRetries: 1,
     });
-    expect(state.topics.go?.lastTurn?.timing?.alignment).toBe("boundary-replan");
   });
 
   test("a boundary replan executes the exact V9 action even when move flips to pass", async () => {
@@ -303,7 +327,7 @@ describe("Go live seed observation", () => {
     expect(moves).toBe(0);
     expect(passes).toBe(1);
     expect(state.topics.go?.plan?.action).toEqual({ type: "pass" });
-    expect(state.topics.go?.plan?.prediction?.boundaryRetries).toBe(1);
+    expect(state.topics.go?.lastTurn?.prediction?.boundaryRetries).toBe(1);
   });
 
   test("dispatches a predicted successful cheat and advances the local count", async () => {
@@ -427,7 +451,7 @@ describe("Go live seed observation", () => {
       go: { makeMove: async () => ({ type: "gameOver", x: null, y: null }) },
     } as unknown as NS, clock);
 
-    expect(state.topics.go?.plan?.prediction).toMatchObject({
+    expect(state.topics.go?.lastTurn?.prediction).toMatchObject({
       dispatchPlaytime: 10_000,
       seedCandidates: [10_000, 10_200],
       boundaryRetries: 0,
@@ -445,7 +469,7 @@ describe("Go live seed observation", () => {
     } as unknown as NS, clock);
 
     expect(dispatchSleeps(clock.sleeps)).toEqual([]);
-    expect(state.topics.go?.plan?.prediction?.boundaryRetries).toBe(3);
+    expect(state.topics.go?.lastTurn?.prediction?.boundaryRetries).toBe(3);
     expect(state.topics.go?.lastTurn?.opponentResponse?.type).toBe("gameOver");
   });
 
@@ -578,7 +602,7 @@ describe("Go certified playbook integration", () => {
 
     expect(moves).toEqual([[4, 4], [4, 3]]);
     expect(credits).toEqual([0, 4]);
-    expect(state.topics.go?.plan?.prediction?.playbook).toBe(true);
+    expect(state.topics.go?.lastTurn?.prediction?.playbook).toBe(true);
     expect(state.topics.go?.plan?.action.type).toBe("move");
     goModule.reset?.(state, "bitnode");
   });
@@ -631,7 +655,7 @@ describe("Go certified playbook integration", () => {
     expect(moves[0]).toEqual([4, 4]);
     expect(moves[1]?.[0]).toBe(2);
     expect(moves[2]?.[0]).toBe(2);
-    expect(state.topics.go?.plan?.prediction?.playbook).toBeUndefined();
+    expect(state.topics.go?.lastTurn?.prediction?.playbook).toBeUndefined();
     goModule.reset?.(state, "bitnode");
   });
 

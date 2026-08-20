@@ -141,9 +141,28 @@ one-hour guess. The progression tab renders the same fields.
 
 Go decisions retain the exact public board/history input, bounded search
 ranking, sampled playtime and WHRNG seed window, observed-response support, and
-the full opponent/board reward comparison. `readyToDispatchMs` measures from
-the opponent promise making Black actionable to the irreversible Go call, so
-cold-start cost and rare prediction misses remain visible. Each candidate records simulator-
+the full opponent/board reward comparison. The dispatch digest rides
+`lastTurn.prediction`, not the plan: Go re-enters planning on a microtask after
+each turn, so a digest parked on `plan` is replaced by the next provisional plan
+before a viewer sees it — it survived on 4% of live turns. Its presence is also
+what marks a seed-assured turn, so alignment needs no separate record. Board,
+territory, score and komi are published together from one position and by one
+producer; the core probe deliberately does not read the score, because its
+clock and the board's differ and a probe firing between our stone landing and
+White's reply published a score one stone ahead of the position beside it.
+`dispatchBreakdown` measures from the opponent promise making Black actionable
+to the irreversible Go call, split into disjoint, ordered segments (`admit`,
+`prepare`, `lease`, `finalize`, `align`, `dispatch`, `residual`) that sum to
+`totalMs`. The total alone cannot distinguish a slow worker from time
+deliberately spent waiting to land on the intended engine tick — only `align`
+is intended. The whole breakdown is absent rather than approximated when no
+boundary is held: a substituted one would publish a flattering few milliseconds
+in exactly the cold-start case worth seeing. Values not measured this turn are
+likewise omitted rather than zeroed: `preparationMs` is absent on a position
+cache hit, and `finalizationMs` on a pushed prediction was measured during the
+previous White response, which `pushedPredictionHit` records. `engineCycleMs`
+and `aiWaitMs` are game constants, not observations.
+Each candidate records simulator-
 fitted win/score priors, heuristic duration, exact expected node power and
 multiplier change, transient install-ETA savings, expected nonlinear faction-
 favor gain, persistent faction-work savings and saved-seconds-per-game-second. This is enough to

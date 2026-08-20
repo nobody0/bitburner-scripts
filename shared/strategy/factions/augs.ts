@@ -1,3 +1,7 @@
+import type { ChannelWorth } from "../income.ts";
+import { BASE_FOCUS_BONUS } from "./rep.ts";
+import type { MarginalResource } from "../progression/marginal.ts";
+
 /** Augmentation valuation, prerequisite closure and purchase ordering.
  *
  * Three facts from v3.0.1 shape everything here, and all three are easy to get
@@ -182,12 +186,62 @@ export function augCost(
 
 // --- valuation -------------------------------------------------------------
 
-/** What the run is trying to maximise, per multiplier field. Defaults below
- * reproduce the predecessor scripts' per-domain valuation
- * (src/_lib/augmentations.ts:6-102), whose multiplicative product is the
- * unlogged form of our `Σ ln(mult)` — the same objective, reached
- * independently, which is reassuring. */
+/** What one unit of `ln(mult)` on each multiplier field is worth, in BN-seconds
+ * off the route. `scoreAug` sums `weight · ln(mult)`, so an augmentation's score
+ * comes out in the same seconds the work slot, the needs board and the install
+ * cadence are all denominated in.
+ *
+ * These used to be a hand-tuned table — `hacking: 1`, `faction_rep: 2`,
+ * `crime_money: 0.2` — with a per-route override pile on top and a final
+ * renormalisation to stop the overrides from moving the install cadence. The
+ * renormalisation is the tell: the numbers had no unit, so any change to them
+ * had to be neutralised before it reached a decision. See
+ * `weightsFromMarginals`. */
 export type ObjectiveWeights = Record<string, number>;
+
+/** Which priced channel each multiplier field accelerates, and by how much of
+ * a relative rate increase one relative multiplier buys.
+ *
+ * MECHANICS, not policy: `hacking_speed` halves batch time, so it lifts both
+ * money and experience one-for-one; `hacking_grow` only shortens one leg of the
+ * batch. What each channel is WORTH is measured elsewhere and multiplied in.
+ * Fields absent here accelerate nothing the route model prices — charisma
+ * reaches the run only through company reputation, which `company_rep` already
+ * carries — and contribute zero rather than a guess. */
+const FIELD_SENSITIVITY: Readonly<Record<string, Readonly<Partial<Record<MarginalResource, number>>>>> = {
+  hacking: { hacking: 1 },
+  hacking_exp: { hacking: 1 },
+  hacking_speed: { money: 1, hacking: 1 },
+  hacking_money: { money: 1 },
+  hacking_chance: { money: 1 },
+  hacking_grow: { money: 0.5 },
+  faction_rep: { reputation: 1 },
+  company_rep: { reputation: 1 },
+  strength: { combat: 1 },
+  defense: { combat: 1 },
+  dexterity: { combat: 1 },
+  agility: { combat: 1 },
+  strength_exp: { combat: 1 },
+  defense_exp: { combat: 1 },
+  dexterity_exp: { combat: 1 },
+  agility_exp: { combat: 1 },
+  bladeburner_success_chance: { bladeburnerRank: 1 },
+  bladeburner_analysis: { bladeburnerRank: 0.5 },
+  bladeburner_max_stamina: { bladeburnerRank: 0.5 },
+  bladeburner_stamina_gain: { bladeburnerRank: 0.5 },
+};
+
+/** Income multipliers that lift ONE source rather than the whole money rate.
+ * Doubling crime money is worth double crime's share of what we earn, which on
+ * a live farm is a rounding error — the same comparison the work slot makes. */
+const INCOME_SOURCE_FIELDS: Readonly<Record<string, string>> = {
+  hacking_money: "hacking",
+  hacknet_node_money: "hacknet",
+  work_money: "career",
+  crime_money: "career",
+  crime_success: "career",
+  dnet_money: "dnet",
+};
 
 export interface RouteWeightContext {
   /** Route skill levels that installed augmentations must make reachable. */
@@ -196,21 +250,34 @@ export interface RouteWeightContext {
   /** Already-active stat multipliers. The marginal value of another direct
    * multiplier falls as this base grows (notably across SF12 stress levels). */
   multipliers?: Readonly<Record<string, number>>;
+  /** Each income source's measured share of total money production, so a
+   * multiplier on one source is valued at what that source actually earns. */
+  incomeShares?: Readonly<Record<string, number>>;
 }
 
-/** Named special cases, in log space. These are effects the multiplier fields
- * do not express at all, so without them the planner cannot see why anyone
- * would buy The Red Pill. */
-export const AUG_BONUS: Record<string, number> = {
-  // Route marker for the faction paths that require The Red Pill.
-  "The Red Pill": 9,
-  // A one-off $1m and a free port opener on a fresh run.
-  "CashRoot Starter Kit": 0.05,
-  // Doubles the effective work rate by removing the unfocused penalty.
-  "Neuroreceptor Management Implant": Math.log(1.1),
-  // BitRunners' Neurolink grants a free port opener and +hacking.
-  "BitRunners Neurolink": 0.1,
-};
+/** Effects the multiplier table does not express at all, in BN-seconds.
+ *
+ * Only what can be stated as a RATE on a priced channel survives here. The
+ * predecessor also carried `CashRoot Starter Kit: 0.05` and `BitRunners
+ * Neurolink: 0.1` for their free port opener and one-off cash. Both are real
+ * and neither had a unit; re-denominating a number nobody derived just moves
+ * the guess, and the effects are already priced where they land — the opener
+ * through the server-access needs the board posts for it, and Neurolink's
+ * hacking multipliers through its own `mults`. They are gone rather than
+ * restated.
+ *
+ * THE RED PILL is not here either, and deliberately: it is a route GATE, not a
+ * rate. Its worth is "the run cannot end without it", which belongs to the
+ * route that requires it — see `packages.ts#routeAwareScore`, where it is
+ * valued at the horizon it unblocks. Keeping it here would also leak it into
+ * `scoreAugMults`, which the install cadence compares against a rate. */
+export function augBonusSec(name: string, worth: ChannelWorth): number {
+  if (name !== "Neuroreceptor Management Implant") return 0;
+  // Removes the unfocused work penalty, so every second the work slot spends
+  // unfocused earns full rate instead of 80% of it. That is a multiplier on
+  // whatever the slot is earning, which is reputation.
+  return Math.log(1 / BASE_FOCUS_BONUS) * (worth.get("reputation") ?? 0);
+}
 
 /** A multiplier on EXPERIENCE is worth less than the same multiplier on the
  * stat, because a stat grows as a fractional power of its experience. The
@@ -218,14 +285,23 @@ export const AUG_BONUS: Record<string, number> = {
  * exactly a factor of 0.5 on the contribution, which is how it lands here. */
 const EXP_DISCOUNT = 0.5;
 
-/** Route value of one distinct slot in a finite installed-augmentation gate.
- * Early slots are nearly the whole objective; near closure, multiplier quality
- * must break ties between the scarce remaining candidates. The floor keeps a
- * mechanically required slot material without letting cheap filler dominate
- * a high-impact augmentation. Infinite/no-count routes receive no flat bonus. */
-export function countSlotWeight(target: number, remaining: number): number {
-  if (!Number.isFinite(target) || target <= 0 || remaining <= 0) return 0;
-  return Math.max(1 / 5, Math.min(1, remaining / target));
+/** BN-seconds one distinct slot in a finite installed-augmentation gate is
+ * worth.
+ *
+ * DERIVED, not shaped. The count leg finishes in `remaining / augsPerSec`
+ * seconds, so acquiring one slot now removes `1 / augsPerSec` of them —
+ * `worth / remaining`, where `worth` is what progression measured a relative
+ * increase in the acquisition rate to save. Slots therefore get MORE valuable
+ * as the gate closes, because the last one really does unblock the whole gate.
+ *
+ * The predecessor ramped the other way, from 1 down to a 1/5 floor, to stop
+ * cheap filler dominating a high-impact augmentation. That floor is no longer
+ * needed: filler and multipliers are now quoted in the same seconds and
+ * compete on merit. Infinite or unpriced count routes get nothing. */
+export function countSlotWeight(worth: ChannelWorth, remaining: number): number {
+  const total = worth.get("augmentations") ?? 0;
+  if (!(total > 0) || !Number.isFinite(remaining) || remaining <= 0) return 0;
+  return total / remaining;
 }
 
 /** Fields multiplied by CONSTANTS.EntropyEffect for each completed graft in
@@ -258,24 +334,29 @@ function contributionOf(field: string, multiplier: number, weights: ObjectiveWei
   return weight * discount * Math.log(multiplier);
 }
 
-/** Score one augmentation.
+/** Score one augmentation, in BN-seconds off the route.
  *
  * `Σ w_k · ln(mult_k)`, because the multipliers COMPOSE MULTIPLICATIVELY: in
  * log space "which set of augmentations is best" becomes an additive set
- * problem, which is what makes the purchase planning tractable at all.
+ * problem, which is what makes the purchase planning tractable at all. With
+ * `w` measured (`weightsFromMarginals`) the sum comes out in the same seconds
+ * the work slot, the needs board and the install cadence all use.
+ *
+ * `worth` is only needed for the named effects the multiplier table cannot
+ * express — see `augBonusSec`. Omitting it scores the multipliers alone, which
+ * is what a caller comparing pure rates wants.
  *
  * An augmentation whose multipliers upstream randomises scores 0 rather than
  * being guessed at — see AUGMENTATION_TABLE.multsUnknown.
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/CircadianModulator.ts#L9-L117 */
-export function scoreAug(aug: AugInfo, weights: ObjectiveWeights): number {
-  return (AUG_BONUS[aug.name] ?? 0) + scoreAugMults(aug, weights);
+export function scoreAug(aug: AugInfo, weights: ObjectiveWeights, worth?: ChannelWorth): number {
+  return augBonusSec(aug.name, worth ?? new Map()) + scoreAugMults(aug, weights);
 }
 
-/** Multiplier-only score: the log-mult contributions WITHOUT the AUG_BONUS
- * flats. The install-vs-push rule compares value STREAMS, and the flats are
- * ranking devices (The Red Pill's 9 marks route necessity, not a 8000x rate
- * gain) — leaking them into a rate comparison makes any package containing
- * one look infinitely worth pushing for. */
+/** Multiplier-only score: the log-mult contributions WITHOUT the flat bonuses.
+ * The install-vs-push rule compares value STREAMS, and a gate is not a rate —
+ * leaking route necessity into a rate comparison makes any package containing
+ * The Red Pill look infinitely worth pushing for. */
 export function scoreAugMults(aug: AugInfo, weights: ObjectiveWeights): number {
   if (aug.multsUnknown) return 0;
   let score = 0;
@@ -286,109 +367,66 @@ export function scoreAugMults(aug: AugInfo, weights: ObjectiveWeights): number {
   return score;
 }
 
-/** Default weights: a balanced hacking-first run. */
-export function defaultWeights(): ObjectiveWeights {
-  return {
-    hacking: 1,
-    hacking_exp: 1,
-    hacking_chance: 0.5,
-    hacking_speed: 1,
-    hacking_money: 0.5,
-    hacking_grow: 0.5,
-    faction_rep: 2,
-    company_rep: 2,
-    crime_money: 0.2,
-    crime_success: 0.2,
-    charisma: 0.1,
-    charisma_exp: 0.1,
-    strength: 0.1,
-    defense: 0.1,
-    dexterity: 0.1,
-    agility: 0.1,
-    strength_exp: 0.1,
-    defense_exp: 0.1,
-    dexterity_exp: 0.1,
-    agility_exp: 0.1,
-    hacknet_node_money: 0.2,
-    work_money: 0.2,
-  };
-}
+/** What each multiplier field is worth, derived from the measured route.
+ *
+ * `worth(channel)` is BN-seconds saved by a 100% relative increase in that
+ * channel's rate — progression's own measurement, the same table the work-slot
+ * auction prices claims with. A field's weight is that worth times how much of
+ * a relative rate increase the multiplier actually buys, times (for a
+ * single-source income multiplier) that source's share of what we earn.
+ *
+ * THE HAND-TUNED TABLE THIS REPLACES said `faction_rep: 2` and
+ * `crime_money: 0.2` in every node, forever. Both are wrong in the same run:
+ * mid-BN12 with the farm earning four orders of magnitude more than crime, a
+ * crime-money multiplier is worth nothing at all, while reputation is the only
+ * binding part of the route. Neither fact is expressible as a constant, and
+ * both fall out of the measurement. */
+export function weightsFromMarginals(worth: ChannelWorth, context?: RouteWeightContext): ObjectiveWeights {
+  const weights: ObjectiveWeights = {};
+  for (const [field, sensitivity] of Object.entries(FIELD_SENSITIVITY)) {
+    const source = INCOME_SOURCE_FIELDS[field];
+    const share = source === undefined ? 1 : Math.max(0, Math.min(1, context?.incomeShares?.[source] ?? 0));
+    let value = 0;
+    for (const [channel, response] of Object.entries(sensitivity) as [MarginalResource, number][]) {
+      value += (worth.get(channel) ?? 0) * response * share;
+    }
+    if (value > 0) weights[field] = value;
+  }
+  for (const [field, source] of Object.entries(INCOME_SOURCE_FIELDS)) {
+    if (FIELD_SENSITIVITY[field] !== undefined) continue;
+    const share = Math.max(0, Math.min(1, context?.incomeShares?.[source] ?? 0));
+    const value = (worth.get("money") ?? 0) * share;
+    if (value > 0) weights[field] = value;
+  }
 
-/** Bias multiplier utility toward the route that will actually end this node.
- * The count objective remains route-independent; this only breaks ties toward
- * augmentations that accelerate the chosen finish. */
-export function weightsForRoute(
-  route: "daedalus" | "gang" | "labyrinth" | "bladeburner" | undefined,
-  /** Critical alternative selected by the measured route ETA. Daedalus can
-   * invite through hacking OR combat; feeding the selected branch back into
-   * augmentation scoring keeps the feature plan aligned with the forecast. */
-  focus?: "hacking" | "combat",
-  context?: RouteWeightContext,
-): ObjectiveWeights {
-  const weights = defaultWeights();
-  if (route === "bladeburner") {
-    weights.bladeburner_success_chance = 2;
-    weights.bladeburner_stamina_gain = 1;
-    weights.bladeburner_max_stamina = 1;
-    weights.bladeburner_analysis = 0.8;
-    weights.strength = 0.5;
-    weights.defense = 0.5;
-    weights.dexterity = 0.5;
-    weights.agility = 0.5;
-  } else if (route === "daedalus" || route === "gang") {
-    weights.hacking = 1.2;
-    weights.hacking_exp = 1.2;
-    weights.faction_rep = 2.5;
-    if (context?.hackingTarget !== undefined) {
-      // skill = m * (32 ln(exp + 534.6) - 200). Around a high target,
-      // -d ln(requiredExp) / d ln(m) = target / (32m): direct skill
-      // multipliers are exponentially more valuable than an ordinary output
-      // multiplier. This is the local time-to-gate sensitivity, not a BN1
-      // bonus, and naturally declines when SF12 or prior augs make m large.
-      const active = Math.max(1e-9, context.multipliers?.["hacking"] ?? 1);
-      weights.hacking = Math.max(weights.hacking, context.hackingTarget / (32 * active));
-    }
-    if (route === "daedalus" && focus === "combat") {
-      // Combat only clears the invitation; hacking is still mandatory after
-      // The Red Pill install. Raise the four balanced combat dimensions
-      // without erasing the terminal hacking objective.
-      weights.strength = 0.5;
-      weights.defense = 0.5;
-      weights.dexterity = 0.5;
-      weights.agility = 0.5;
-      weights.strength_exp = 0.5;
-      weights.defense_exp = 0.5;
-      weights.dexterity_exp = 0.5;
-      weights.agility_exp = 0.5;
-      if (context?.combatTarget !== undefined) {
-        // Gym work trains the four required stats sequentially. Attribute an
-        // equal quarter of the gate-time sensitivity to each dimension; augs
-        // covering several stats then receive the corresponding combined
-        // value, while one-stat augs cannot masquerade as clearing the gate.
-        for (const skill of ["strength", "defense", "dexterity", "agility"] as const) {
-          const active = Math.max(1e-9, context.multipliers?.[skill] ?? 1);
-          weights[skill] = Math.max(weights[skill] ?? 0, context.combatTarget / (128 * active));
-        }
-      }
-    }
-  } else if (route === "labyrinth") {
-    weights.hacking = 1.1;
-    weights.hacking_speed = 1.1;
-    weights.dnet_money = 0.8;
+  // The two NONLINEAR sensitivities, which are derivations rather than
+  // preferences and survive the table they used to live in.
+  //
+  // skill = m · (32·ln(exp + 534.6) − 200), so around a high target
+  // −d ln(requiredExp) / d ln(m) = target / (32m): a direct skill multiplier
+  // buys exponentially more than an ordinary output multiplier near the gate,
+  // and the effect declines by itself as m grows.
+  if (context?.hackingTarget !== undefined && (worth.get("hacking") ?? 0) > 0) {
+    const active = Math.max(1e-9, context.multipliers?.["hacking"] ?? 1);
+    const response = context.hackingTarget / (32 * active);
+    weights["hacking"] = Math.max(weights["hacking"] ?? 0, (worth.get("hacking") ?? 0) * response);
   }
-  // Sensitivities are relative preferences, not a new value currency. The
-  // renewal cadence compares accrued value with a value/sec frontier and the
-  // count heuristic contributes in these same units; multiplying the whole
-  // objective made tiny packages trigger premature resets. Preserve the
-  // route's original positive-weight budget while redistributing it toward
-  // the nonlinear critical skill.
-  if (context?.hackingTarget !== undefined || context?.combatTarget !== undefined) {
-    const baseline = weightsForRoute(route, focus);
-    const total = (source: ObjectiveWeights) => Object.values(source)
-      .reduce((sum, weight) => sum + Math.max(0, weight), 0);
-    const scale = total(weights) > 0 ? total(baseline) / total(weights) : 1;
-    for (const field of Object.keys(weights)) weights[field] = weights[field]! * scale;
+  if (context?.combatTarget !== undefined && (worth.get("combat") ?? 0) > 0) {
+    // The four stats are trained sequentially to one gate, so each carries a
+    // quarter of the same sensitivity: an augmentation covering several stats
+    // earns the combined value, and a one-stat augmentation cannot masquerade
+    // as clearing the gate.
+    for (const skill of ["strength", "defense", "dexterity", "agility"] as const) {
+      const active = Math.max(1e-9, context.multipliers?.[skill] ?? 1);
+      const response = context.combatTarget / (128 * active);
+      weights[skill] = Math.max(weights[skill] ?? 0, (worth.get("combat") ?? 0) * response);
+    }
   }
+  // NO RENORMALISATION. The predecessor rescaled the whole objective back to
+  // its pre-override total, because the numbers had no unit and any change to
+  // them moved the install cadence for no measured reason. These are seconds:
+  // a larger total means the package really is worth more, and the cadence is
+  // entitled to see it.
   return weights;
 }
 

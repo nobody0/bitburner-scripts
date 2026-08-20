@@ -1,5 +1,18 @@
 import { formatMoney, formatScientific } from "../../format.ts";
-import { expForSkill } from "../../formulas.ts";
+import {
+  channelForNeed,
+  channelWorth,
+  compareSlotValues,
+  deliveryFraction,
+  raiseBest,
+  scaleSlotValue,
+  slotValue,
+  type ChannelWorth,
+  type RateChannel,
+  type SlotValue,
+} from "../income.ts";
+import { DEFAULT_PLANNING_HORIZON_SEC } from "../progression/forecast.ts";
+import type { MeasuredMarginal } from "../progression/marginal.ts";
 import type { Need, NeedBoard, NeedKind, NeedUrgency } from "../needs.ts";
 import { needKey, needProgress, URGENCY_ORDER } from "../needs.ts";
 import { COMPANIES } from "../../features/companies.ts";
@@ -24,10 +37,22 @@ import {
  * weights, and decides for itself whether that is Mug or Homicide, or whether
  * a gym session serves more posted needs per second.
  *
- * The objective is literally `Σ needWeight_k · progress_k/sec`: every action is
- * scored by how fast it moves the outcomes somebody is actually blocked on.
- * A need nobody posted is worth zero, so career does not grind karma nobody
- * wants — it falls back to income.
+ * The objective is `Σ_channel (our rate / the best rate) × what that channel is
+ * worth`, in BN-seconds off the route — the same arithmetic the arbiter prices
+ * career's claim on the work slot with (`../income.ts`). An option is worth
+ * what it DELIVERS, measured against whoever else could deliver the same thing.
+ *
+ * It used to be `Σ needWeight_k · progress_k/sec`, and the difference is the
+ * denominator. That form scored a rate against a need's remaining gap while
+ * ignoring who else was closing it, so a crime paying $1.8e4/s against a $1e11
+ * gate the farm was closing at $3.25e8/s scored as though it were the only
+ * thing moving — and, because the band came from the need's urgency rather
+ * than the size of the contribution, took the exclusive work slot for six
+ * hours to deliver four ten-thousandths of the progress.
+ *
+ * A need nobody posted is worth nothing, so career does not grind karma nobody
+ * wants; a channel nobody has priced yet leaves the option unpriced, and those
+ * fall back to money, which is what matters before a route exists.
  *
  * The action set is tiny, so every available option is ranked explicitly for
  * a fixed view. The score itself remains the policy: exhaustive enumeration
@@ -48,17 +73,44 @@ export interface CareerAction {
   why: string;
 }
 
+/** One rate an option produces, in the board's own vocabulary. Kept alongside
+ *  the priced channels because a consumer wants "companyRep at MegaCorp", not
+ *  the flattened channel key. */
+export interface ProducedRate {
+  kind: NeedKind;
+  subject?: string;
+  perSec: number;
+}
+
 export interface ScoredAction {
   action: CareerAction;
-  /** Σ needWeight · progress/sec — the objective. */
+  /** BN-seconds saved by giving this option the slot — `value.valueSec`. THE
+   *  objective, and the same number the arbiter scores the claim with. */
   score: number;
-  /** Money per second, reported separately: it is the fallback objective when
-   *  no need is outstanding, and always worth showing. */
+  /** The full valuation, including the `unpriced` state that puts the option
+   *  back on the bootstrap money rule. */
+  value: SlotValue;
+  /** Everything this option produces, by channel — what the claim announces. */
+  produces: Record<RateChannel, number>;
+  rates: ProducedRate[];
+  /** Money per second, reported separately: it is the bootstrap objective
+   *  before the route is priced, and always worth showing. */
   moneyPerSec: number;
   /** Per-outcome contributions, for the UI's "why this action" column. */
-  contributions: { kind: NeedKind; subject?: string; perSec: number; weight: number; score: number }[];
-  /** Queue band assigned from the highest-urgency request this option serves. */
+  contributions: { kind: NeedKind; subject?: string; perSec: number; worthSec: number; valueSec: number }[];
+  /** Queue band assigned from the highest-urgency request this option serves.
+   *  REPORTING ONLY: career's money claims still use it, but the work slot is
+   *  allocated on `score`, never on the band. */
   priority: CareerPriorityBand;
+  /** Best progress among the needs this option serves, as a tie-break. */
+  progress: number;
+  /** How much of this option's worth lands inside the planning horizon. 1 for
+   *  continuous work, which produces for as long as it holds the slot; below 1
+   *  for an option that must OCCUPY the slot before it delivers anything, and
+   *  0 for one that would still be occupying it when the node is expected to
+   *  end. `score` already has it applied — this is reported so the claim can
+   *  carry the same discount into the arbiter's auction. */
+  deliveryFraction: number;
 }
 
 export interface CareerView {
@@ -75,12 +127,6 @@ export interface CareerView {
   karma: number;
   numPeopleKilled: number;
   skills: Record<string, number>;
-  /** Current raw experience and effective direct skill multipliers. Needed to
-   * translate a level gate through the game's nonlinear exp curve. */
-  exp?: Record<string, number>;
-  skillMultipliers?: Record<string, number>;
-  /** Experience that continues while player work is spent elsewhere. */
-  externalSkillExpPerSec?: Record<string, number>;
   city: string;
   jobs?: Record<string, string>;
   companies?: {
@@ -95,17 +141,30 @@ export interface CareerView {
   /** Person + node context for the company work-line model. Enables
    * table-driven title paths; without it the title fallback uses held jobs. */
   companyWork?: { person: CompanyPerson; ctx: CompanyWorkContext };
+  /** The alternatives table and what each channel is worth, so career ranks
+   *  its own options with the SAME arithmetic the arbiter prices its claim
+   *  with. Absent leaves every option unpriced, which ranks by money — the
+   *  deliberate bootstrap rule (see `../income.ts`). */
+  rates?: {
+    best: ReadonlyMap<RateChannel, MeasuredMarginal>;
+    worth: ChannelWorth;
+  };
+  /** Seconds of run left to plan against, from the node forecast. Divides the
+   *  occupancy of any option that blocks the slot before it delivers. Absent
+   *  falls back to `DEFAULT_PLANNING_HORIZON_SEC`, the same conservative window
+   *  the investment gate uses when no forecast is usable. */
+  planningHorizonSec?: number;
   /** Whether this feature holds Player.currentWork this tick. */
   holdsWorkSlot: boolean;
-  currentWork?: { kind: string; subject?: string };
+  /** `elapsedSec` is how long the current work has already run. A part-finished
+   *  write is charged only the time it has LEFT: the elapsed part is sunk, and
+   *  charging it again would mean a write that cannot start can never accumulate
+   *  the progress that would let it start. */
+  currentWork?: { kind: string; subject?: string; elapsedSec?: number };
   /** True only on the engine tick reported by Task.nextCompletion. */
   allowProgressSwitch?: boolean;
   /** Money the arbiter granted, for paid courses. */
   moneyGranted: number;
-  /** Income that continues while player work runs (primarily the script farm). */
-  externalIncomePerSec?: number;
-  /** Best long-run training fallback for the current faction route. */
-  defaultSkill?: string;
 }
 
 export interface CareerDecision {
@@ -114,9 +173,11 @@ export interface CareerDecision {
   ranked: ScoredAction[];
   /** Needs this feature is currently serving. */
   serving: (Pick<Need, "by" | "kind" | "subject" | "target" | "have" | "weight" | "urgency" | "why"> & { progress: number })[];
-  /** Arbiter band for the selected option. Numeric policy lives in arbiter.ts. */
+  /** Band for career's MONEY and dodge-RAM claims — the urgency of the request
+   *  the selected option serves. The work slot itself is priced, not banded. */
   workPriority: CareerPriorityBand;
-  /** True when the chosen action is income rather than a posted need. */
+  /** True when the CHOSEN option serves no posted need. Reported, not acted
+   *  on: the option won on the rates it produces either way. */
   incomeFallback: boolean;
   why: string;
 }
@@ -139,20 +200,23 @@ export const CAREER_KINDS: readonly NeedKind[] = [
   "file",
 ];
 
-/** How much a unit of progress on each outstanding need is worth.
+/** The outstanding needs career can serve, merged per outcome.
  *
- * Only UNSATISFIED needs contribute — that is what stops career grinding karma
- * it has already delivered. The weight is normalised by what remains, so a
- * need that is 1% short is worth far more per unit than one that is 99% short:
- * finishing something unblocks a whole feature, while inching toward a distant
- * threshold does not. */
+ * Only UNSATISFIED needs are here — that is what stops career grinding karma it
+ * has already delivered. What each outcome is WORTH is not: that comes from
+ * `channelWorth`, which prices the same board once for career and for the
+ * arbiter. This carries only what career needs on top of the price — the
+ * distance left (an instant action clears it whatever the rate), the urgency it
+ * reports, and how close it already is, as a tie-break. */
 interface NeedValue {
   kind: NeedKind;
   subject?: string;
-  weight: number;
+  /** Distance to the NEAREST posted threshold: clearing that one unblocks a
+   *  feature, and a further threshold behind it does not change the action. */
   remaining: number;
-  target: number;
   urgency: NeedUrgency;
+  /** How close the need already is, in [0, 1]. A tie-break only. */
+  progress: number;
 }
 
 export function needValues(board: NeedBoard): Map<string, NeedValue> {
@@ -163,142 +227,116 @@ export function needValues(board: NeedBoard): Map<string, NeedValue> {
     const remaining = Math.abs(need.target - need.have);
     const existing = out.get(key);
     if (existing) {
-      existing.weight += need.weight;
       existing.remaining = Math.min(existing.remaining, remaining);
-      existing.target = Math.min(existing.target, need.target);
+      existing.progress = Math.max(existing.progress, needProgress(need));
       if (URGENCY_ORDER[need.urgency] > URGENCY_ORDER[existing.urgency]) existing.urgency = need.urgency;
       continue;
     }
     out.set(key, {
       kind: need.kind,
       ...(need.subject !== undefined ? { subject: need.subject } : {}),
-      weight: need.weight,
       remaining: Math.max(1e-9, remaining),
-      target: need.target,
       urgency: need.urgency,
+      progress: needProgress(need),
     });
   }
   return out;
 }
 
-/** Fraction of hacking progress that disappears when Algorithms gives up the
- * player-work slot. The fleet's background XP is common to both choices. */
-export function marginalTrainingShare(trainingExpPerSec: number, externalExpPerSec: number): number {
-  const training = Math.max(0, trainingExpPerSec);
-  const external = Math.max(0, externalExpPerSec);
-  return training + external > 0 ? training / (training + external) : 0;
-}
-
-/** Compare spending the player-work slot on a skill course with spending it on
- * a reputation gate. Hacking XP from the fleet continues in BOTH cases. The
- * reputation work is therefore also useful time for the skill gate: only the
- * raw XP left after that interval can justify taking the slot for Algorithms.
+/** Collect the raw rates an option produces, keyed by the channel each is
+ * priced in. No board filtering and no normalisation: an option produces what
+ * it produces, and what that is WORTH is decided once, by `slotValue`, against
+ * the same table the arbiter uses.
  *
- * `relativeTimeSaved` is deliberately wall-clock, not an XP share. For
- * example, if normal hacking finishes the level gate while faction work runs,
- * Algorithms saves zero seconds even when its displayed XP/sec is large. */
-interface SkillRepTradeoff {
-  remainingExp: number;
-  backgroundExpDuringRep: number;
-  trainingWorkSec: number;
-  etaWithoutTrainingSec: number;
-  etaWithTrainingSec: number;
-  timeSavedSec: number;
-  relativeTimeSaved: number;
-}
-
-export function skillRepTradeoff(
-  remainingExp: number,
-  backgroundExpPerSec: number,
-  trainingExpPerSec: number,
-  repWorkSec: number,
-): SkillRepTradeoff {
-  const remaining = Math.max(0, remainingExp);
-  const background = Math.max(0, backgroundExpPerSec);
-  const training = Math.max(0, trainingExpPerSec);
-  const rep = Math.max(0, repWorkSec);
-  const backgroundExpDuringRep = background * rep;
-  const residual = Math.max(0, remaining - backgroundExpDuringRep);
-  const combined = background + training;
-  const trainingWorkSec = residual <= 0 ? 0 : combined > 0 ? residual / combined : Infinity;
-  const etaWithTrainingSec = rep + trainingWorkSec;
-  const backgroundOnlySec = remaining <= 0 ? 0 : background > 0 ? remaining / background : Infinity;
-  const etaWithoutTrainingSec = Math.max(rep, backgroundOnlySec);
-  const timeSavedSec = Number.isFinite(etaWithoutTrainingSec)
-    ? Math.max(0, etaWithoutTrainingSec - etaWithTrainingSec)
-    : Number.isFinite(etaWithTrainingSec) ? Infinity : 0;
-  const relativeTimeSaved = etaWithoutTrainingSec === 0
-    ? 0
-    : Number.isFinite(etaWithoutTrainingSec)
-      ? Math.min(1, timeSavedSec / etaWithoutTrainingSec)
-      : Number.isFinite(etaWithTrainingSec) ? 1 : 0;
-  return {
-    remainingExp: remaining,
-    backgroundExpDuringRep,
-    trainingWorkSec,
-    etaWithoutTrainingSec,
-    etaWithTrainingSec,
-    timeSavedSec,
-    relativeTimeSaved,
-  };
-}
-
-function skillNeedContribution(
-  value: NeedValue,
-  skill: string,
-  expPerSec: number,
-  view: CareerView,
-): number {
-  const currentExp = view.exp?.[skill];
-  const mult = view.skillMultipliers?.[skill];
-  if (currentExp === undefined || mult === undefined || !(mult > 0)) {
-    return (expPerSec / value.remaining) * value.weight;
+ * The predecessor folded the board in here, as `(perSec / remaining) * weight`.
+ * Two things were wrong with it and both bit. It scored a rate against a need's
+ * remaining gap while ignoring who else was closing that gap — so career scored
+ * its $1.8e4/s crime against a $1e11 target the farm was closing at $3.25e8/s,
+ * and took the work slot for four ten-thousandths of the progress. And the
+ * skill variant divided by remaining EXPERIENCE, clamped at 1e-9, so one
+ * mis-derived multiplier turned a routine strength need into a score of 6.3e8
+ * and silently decided every career ranking in the run. */
+function collectRates(entries: readonly ProducedRate[]): {
+  rates: ProducedRate[];
+  produces: Record<RateChannel, number>;
+} {
+  const rates: ProducedRate[] = [];
+  const produces: Record<RateChannel, number> = {};
+  for (const entry of entries) {
+    if (!(entry.perSec > 0)) continue;
+    rates.push(entry);
+    const channel = channelForNeed(entry);
+    produces[channel] = (produces[channel] ?? 0) + entry.perSec;
   }
-  const remainingExp = Math.max(1e-9, expForSkill(value.target, mult) - currentExp);
-  return (expPerSec / remainingExp) * value.weight;
+  return { rates, produces };
 }
 
-function addContribution(
-  contributions: ScoredAction["contributions"],
-  kind: NeedKind,
-  perSec: number,
-  subject: string | undefined,
-  view: CareerView,
-  values: ReturnType<typeof needValues>,
-): number {
-  if (perSec <= 0) return 0;
-  const value = values.get(needKey({ kind, subject }));
-  if (!value) return 0;
-  const score = kind === "skill" && subject
-    ? skillNeedContribution(value, subject, perSec, view)
-    : (perSec / value.remaining) * value.weight;
-  contributions.push({
-    kind,
-    ...(subject !== undefined ? { subject } : {}),
-    perSec,
-    weight: value.weight,
-    score,
-  });
-  return score;
+/** An option before it is priced: what it is, and what it would produce. */
+interface PendingAction {
+  action: CareerAction;
+  rates: readonly ProducedRate[];
+  moneyPerSec: number;
+  /** Seconds of exclusive slot time this option must burn BEFORE it delivers
+   *  anything. Absent means continuous production — it delivers for as long as
+   *  it holds the slot, which is every option but a program write.
+   *
+   *  A planner states the duration and nothing else; `priceAction` owns the
+   *  arithmetic that turns it into a discount, so no planner can invent its own. */
+  occupiesSec?: number;
 }
 
-function scoreCrime(
-  crime: CrimeStats,
-  view: CareerView,
+/** Price one option: what it produces, against the field, in BN-seconds. */
+function priceAction(
+  entry: { option: PendingAction; rates: ProducedRate[]; produces: Record<RateChannel, number> },
+  best: ReadonlyMap<RateChannel, MeasuredMarginal>,
+  worth: ChannelWorth,
   values: ReturnType<typeof needValues>,
+  horizonSec: number,
 ): ScoredAction {
+  const { rates, produces } = entry;
+  // Rate share first, occupancy second. They are different questions — "how much
+  // of this channel's output is ours" and "how much of the run is left once we
+  // have paid for it" — and the second CANNOT be folded into the rates: the field
+  // is raised to our own announced rate, so a multiplier there divides back out.
+  // See `deliveryFraction` in `../income.ts`.
+  const fraction = entry.option.occupiesSec === undefined
+    ? 1
+    : deliveryFraction(entry.option.occupiesSec, horizonSec);
+  const value = scaleSlotValue(slotValue({ produces, best, worth }), fraction);
+  // Built from the SCALED channels so the reported contributions add up to the
+  // reported score.
+  const byChannel = new Map(value.channels.map((channel) => [channel.channel, channel]));
   const contributions: ScoredAction["contributions"] = [];
-  let score = 0;
-
-  const add = (kind: NeedKind, perSec: number, subject?: string): void => {
-    score += addContribution(contributions, kind, perSec, subject, view, values);
+  let progress = 0;
+  for (const rate of rates) {
+    const need = values.get(needKey({ kind: rate.kind, subject: rate.subject }));
+    if (need) progress = Math.max(progress, need.progress);
+    const channel = byChannel.get(channelForNeed(rate));
+    if (!channel) continue;
+    contributions.push({
+      kind: rate.kind,
+      ...(rate.subject !== undefined ? { subject: rate.subject } : {}),
+      perSec: rate.perSec,
+      worthSec: channel.worthSec,
+      valueSec: channel.valueSec,
+    });
+  }
+  return {
+    action: entry.option.action,
+    score: value.valueSec,
+    value,
+    produces,
+    rates,
+    moneyPerSec: entry.option.moneyPerSec,
+    contributions,
+    priority: priorityFor(rates, values),
+    progress,
+    deliveryFraction: fraction,
   };
+}
 
-  add("karma", karmaPerSec(crime, view.person, view.crimeContext));
-  add("kills", killsPerSec(crime, view.person, view.crimeContext));
+function planCrime(crime: CrimeStats, view: CareerView): PendingAction {
   const money = moneyPerSec(crime, view.person, view.crimeContext);
-  add("money", money);
-
   const exp = expPerSec(crime, view.person, view.crimeContext);
   // Combat needs are satisfied by the WEAKEST of the four, so a crime that
   // trains only one of them barely helps — scoring by the minimum is what
@@ -309,10 +347,6 @@ function scoreCrime(
     exp["dexterity"] ?? 0,
     exp["agility"] ?? 0,
   );
-  add("combatSkills", combat);
-  add("charisma", exp["charisma"] ?? 0);
-  for (const [skill, rate] of Object.entries(exp)) add("skill", rate, skill);
-
   return {
     action: {
       type: "crime",
@@ -320,25 +354,21 @@ function scoreCrime(
       focus: true,
       why: `${(successChance(crime, view.person, view.crimeContext) * 100).toFixed(0)}% success, ${formatMoney(money)}/sec`,
     },
-    score,
+    rates: [
+      { kind: "karma", perSec: karmaPerSec(crime, view.person, view.crimeContext) },
+      { kind: "kills", perSec: killsPerSec(crime, view.person, view.crimeContext) },
+      { kind: "money", perSec: money },
+      { kind: "combatSkills", perSec: combat },
+      { kind: "charisma", perSec: exp["charisma"] ?? 0 },
+      ...Object.entries(exp).map(([skill, rate]): ProducedRate => ({ kind: "skill", subject: skill, perSec: rate })),
+    ],
     moneyPerSec: money,
-    contributions,
-    priority: priorityFor(contributions, values),
   };
 }
 
-function scoreCourse(
-  course: CareerView["courses"][number],
-  view: CareerView,
-  values: ReturnType<typeof needValues>,
-): ScoredAction {
-  const contributions: ScoredAction["contributions"] = [];
-  let score = 0;
-  const add = (kind: NeedKind, perSec: number, subject?: string): void => {
-    score += addContribution(contributions, kind, perSec, subject, view, values);
-  };
-  add("skill", course.expPerSec, course.skill);
-  if (course.skill === "charisma") add("charisma", course.expPerSec);
+function planCourse(course: CareerView["courses"][number], view: CareerView): PendingAction {
+  const rates: ProducedRate[] = [{ kind: "skill", subject: course.skill, perSec: course.expPerSec }];
+  if (course.skill === "charisma") rates.push({ kind: "charisma", perSec: course.expPerSec });
   if (["strength", "defense", "dexterity", "agility"].includes(course.skill)) {
     // A gym trains ONE stat, and a combat need is gated by the weakest — so
     // training the strongest stat contributes nothing to it.
@@ -348,7 +378,7 @@ function scoreCourse(
       view.skills["dexterity"] ?? 0,
       view.skills["agility"] ?? 0,
     );
-    if ((view.skills[course.skill] ?? 0) <= weakest) add("combatSkills", course.expPerSec);
+    if ((view.skills[course.skill] ?? 0) <= weakest) rates.push({ kind: "combatSkills", perSec: course.expPerSec });
   }
   return {
     action: {
@@ -358,11 +388,9 @@ function scoreCourse(
       focus: true,
       why: `${course.expPerSec.toFixed(1)} ${course.skill} exp/sec at ${formatMoney(course.costPerSec)}/sec`,
     },
-    // Courses COST money, so a course competes with the income it forgoes.
-    score,
-    moneyPerSec: -course.costPerSec,
-    contributions,
-    priority: priorityFor(contributions, values),
+    rates: rates,
+    moneyPerSec: // Courses COST money, so a course competes with the income it forgoes.
+    -course.costPerSec,
   };
 }
 
@@ -372,20 +400,12 @@ function scoreCourse(
  * replaces it. This affects ordering only and is called out in the option's
  * explanation rather than presented as a measured prediction.
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Formulas.ts#L449-L461 */
-function scoreCompany(
-  company: NonNullable<CareerView["companies"]>[number],
-  values: ReturnType<typeof needValues>,
-): ScoredAction {
-  const value = values.get(needKey({ kind: "companyRep", subject: company.name }));
+function planCompany(company: NonNullable<CareerView["companies"]>[number]): PendingAction {
   const rate = company.repPerSec !== undefined && company.repPerSec > 0
     ? company.repPerSec
     : company.estimatedRepPerSec !== undefined && company.estimatedRepPerSec > 0
       ? company.estimatedRepPerSec
       : 1;
-  const score = value ? (rate / value.remaining) * value.weight : 0;
-  const contributions: ScoredAction["contributions"] = value
-    ? [{ kind: "companyRep", subject: company.name, perSec: rate, weight: value.weight, score }]
-    : [];
   return {
     action: {
       type: "company",
@@ -397,18 +417,36 @@ function scoreCompany(
           ? `${company.estimatedRepPerSec.toFixed(2)} estimated company rep/sec from the position formula`
           : "company reputation requested; measuring its rate",
     },
-    score,
+    rates: [
+      { kind: "companyRep", subject: company.name, perSec: rate },
+      { kind: "money", perSec: company.moneyPerSec ?? 0 },
+    ],
     moneyPerSec: company.moneyPerSec ?? 0,
-    contributions,
-    priority: priorityFor(contributions, values),
   };
 }
 
-function scoreProgram(program: NonNullable<CareerView["programs"]>[number], values: ReturnType<typeof needValues>): ScoredAction {
+function planProgram(
+  program: NonNullable<CareerView["programs"]>[number],
+  values: ReturnType<typeof needValues>,
+  view: CareerView,
+): PendingAction {
   const value = values.get(needKey({ kind: "file", subject: program.name }));
   const seconds = Math.max(0.001, program.timeMs / 1_000);
+  // "One file per however long it takes" — the honest production rate, and what
+  // the arbiter's alternatives table consumes. It is NOT where duration is
+  // priced: a program is the only producer of its own `file:` channel, so this
+  // rate is also the best rate and the fraction is always 1. The duration is
+  // charged as `occupiesSec` below, outside the rate, for exactly that reason.
   const perSec = value ? value.remaining / seconds : 0;
-  const score = value ? (perSec / value.remaining) * value.weight : 0;
+  // The elapsed part of a write in progress is SUNK. Charging the full write
+  // every pass is not merely pessimistic, it is self-fulfilling: a program whose
+  // best alternative ever beats its discounted value would never start, and
+  // because it never starts it never accumulates the progress that would let it.
+  // Bitburner banks partial progress across a stop, so the marginal cost of
+  // continuing really is only the time left.
+  const elapsedSec = view.currentWork?.kind === "create_program" && view.currentWork.subject === program.name
+    ? Math.max(0, view.currentWork.elapsedSec ?? 0)
+    : 0;
   return {
     action: {
       type: "program",
@@ -416,39 +454,37 @@ function scoreProgram(program: NonNullable<CareerView["programs"]>[number], valu
       focus: true,
       why: `write in ${Math.ceil(seconds)}s instead of spending ${formatMoney(program.purchaseCost)}`,
     },
-    score,
+    rates: [{ kind: "file", subject: program.name, perSec }],
     moneyPerSec: -program.purchaseCost / seconds,
-    contributions: value ? [{ kind: "file", subject: program.name, perSec, weight: value.weight, score }] : [],
-    priority: value?.urgency ?? "income",
+    occupiesSec: Math.max(0, seconds - elapsedSec),
   };
 }
 
-function scoreInstant(
-  action: CareerAction,
-  value: NeedValue,
-): ScoredAction {
+function planInstant(action: CareerAction, value: NeedValue): PendingAction {
   // Instant calls land within one 200 ms controller/engine cycle. Expressing
   // that as five completed gaps/sec makes an immediately-cleared blocker rank
   // ahead of a slow grind without inventing an in-game production rate.
-  const perSec = 5 * value.remaining;
-  const score = (perSec / value.remaining) * value.weight;
-  const contributions: ScoredAction["contributions"] = [{
-    kind: value.kind,
-    ...(value.subject !== undefined ? { subject: value.subject } : {}),
-    perSec,
-    weight: value.weight,
-    score,
-  }];
-  return { action, score, moneyPerSec: 0, contributions, priority: value.urgency };
+  return {
+    action,
+    rates: [{ kind: value.kind, ...(value.subject !== undefined ? { subject: value.subject } : {}), perSec: 5 * value.remaining }],
+    moneyPerSec: 0,
+  };
 }
 
+/** The highest urgency among the needs an option touches.
+ *
+ * REPORTING, and career's own MONEY claims. It is deliberately no longer the
+ * work-slot priority: urgency says how badly somebody wants an outcome, not how
+ * much of it this option delivers, and treating the two as the same thing is
+ * what let a crime contributing 1e-6 of a money need outrank the only source of
+ * reputation in the run. */
 function priorityFor(
-  contributions: ScoredAction["contributions"],
+  rates: readonly ProducedRate[],
   values: ReturnType<typeof needValues>,
 ): CareerPriorityBand {
   let best: NeedUrgency | undefined;
-  for (const contribution of contributions) {
-    const urgency = values.get(needKey(contribution))?.urgency;
+  for (const rate of rates) {
+    const urgency = values.get(needKey({ kind: rate.kind, subject: rate.subject }))?.urgency;
     if (urgency && (best === undefined || URGENCY_ORDER[urgency] > URGENCY_ORDER[best])) best = urgency;
   }
   return best ?? "income";
@@ -461,25 +497,25 @@ export const TRAINING_FUND_WINDOW_SEC = 30;
 
 export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   const values = needValues(board);
-  const ranked: ScoredAction[] = [];
+  const options: PendingAction[] = [];
 
-  for (const crime of view.crimes) ranked.push(scoreCrime(crime, view, values));
+  for (const crime of view.crimes) options.push(planCrime(crime, view));
   for (const course of view.courses) {
     // Never start a course we cannot pay for — a full funding window, not
     // merely "any positive grant": the course drains continuously, and a $1
     // grant used to admit a $2,400/s class.
     if (course.costPerSec > 0 && view.moneyGranted < course.costPerSec * TRAINING_FUND_WINDOW_SEC) continue;
-    ranked.push(scoreCourse(course, view, values));
+    options.push(planCourse(course, view));
   }
-  for (const program of view.programs ?? []) ranked.push(scoreProgram(program, values));
+  for (const program of view.programs ?? []) options.push(planProgram(program, values, view));
 
   const jobs = view.jobs ?? {};
   for (const company of view.companies ?? []) {
-    if (Object.hasOwn(jobs, company.name)) ranked.push(scoreCompany(company, values));
+    if (Object.hasOwn(jobs, company.name)) options.push(planCompany(company));
   }
   for (const value of values.values()) {
     if (value.kind === "employment" && value.subject && !Object.hasOwn(jobs, value.subject)) {
-      ranked.push(scoreInstant({ type: "apply", subject: value.subject, why: `apply for the best eligible job at ${value.subject}` }, value));
+      options.push(planInstant({ type: "apply", subject: value.subject, why: `apply for the best eligible job at ${value.subject}` }, value));
     } else if (
       value.kind === "companyRep" && value.subject && !Object.hasOwn(jobs, value.subject)
       // An `employment` request at the same company already produced the
@@ -490,11 +526,11 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       // A reputation request at a company we do not work for is served by
       // hiring on first — the chain is self-sequencing even when both the
       // employment and rep blockers are on the board at once.
-      ranked.push(scoreInstant({ type: "apply", subject: value.subject, why: `hire on at ${value.subject} to serve its reputation request` }, value));
+      options.push(planInstant({ type: "apply", subject: value.subject, why: `hire on at ${value.subject} to serve its reputation request` }, value));
     } else if (value.kind === "quitCompany" && value.subject && Object.hasOwn(jobs, value.subject)) {
-      ranked.push(scoreInstant({ type: "quit", subject: value.subject, why: `leave ${value.subject} to clear the request` }, value));
+      options.push(planInstant({ type: "quit", subject: value.subject, why: `leave ${value.subject} to clear the request` }, value));
     } else if (value.kind === "city" && value.subject && view.city !== value.subject) {
-      ranked.push(scoreInstant({ type: "travel", subject: value.subject, why: `travel to requested city ${value.subject}` }, value));
+      options.push(planInstant({ type: "travel", subject: value.subject, why: `travel to requested city ${value.subject}` }, value));
     } else if (value.kind === "jobTitle" && value.subject) {
       const title = value.subject;
       // The title's track comes from the position table, never from string
@@ -526,7 +562,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
             .filter((entry) => titleOffered(entry.name, title))
             .sort((a, b) => b.rep - a.rep || (a.name < b.name ? -1 : 1))[0]?.name;
         if (company !== undefined) {
-          ranked.push(scoreInstant(
+          options.push(planInstant(
             Object.hasOwn(jobs, company)
               ? { type: "promote", subject: company, field, why: `seek ${title} through the ${field} track at ${company}` }
               : { type: "apply", subject: company, field, why: `${company} is the cheapest reachable path to ${title} (${field} track)` },
@@ -549,6 +585,16 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     progress: needProgress(need),
   }));
 
+  // PRICE THE WHOLE MENU AT ONCE. The alternatives table has to include career's
+  // own options before any of them can be scored as a fraction of the best.
+  const worth = view.rates?.worth ?? channelWorth(board);
+  const menu = options.map((option) => ({ option, ...collectRates(option.rates) }));
+  const field = raiseBest(view.rates?.best ?? new Map(), menu.map((entry) => entry.produces));
+  // The fallback lives here rather than at the game boundary so a pure test with
+  // no forecast still gets the documented conservative window.
+  const horizonSec = view.planningHorizonSec ?? DEFAULT_PLANNING_HORIZON_SEC;
+  const ranked: ScoredAction[] = menu.map((entry) => priceAction(entry, field, worth, values, horizonSec));
+
   if (ranked.length === 0) {
     return {
       action: { type: "idle", why: "no actions available (needs BN4 or SF4 for crime stats)" },
@@ -560,35 +606,35 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     };
   }
 
-  // No outstanding need career can serve: fall back to INCOME. This is the
-  // early-game income floor the feature is also responsible for, and it is a
-  // genuine objective rather than a filler — crime is how a fresh run pays for
-  // its first port opener.
-  const anyNeed = ranked.some((entry) => entry.score > 0);
-  const defaultSkill = view.defaultSkill ?? "hacking";
-  const trainingSubject = defaultSkill === "hacking" ? "Algorithms" : defaultSkill === "charisma" ? "Leadership" : defaultSkill;
-  const trainingCourse = ranked
-    .filter((entry) => (entry.action.type === "class" || entry.action.type === "gym") && entry.action.subject === trainingSubject)
-    .sort((a, b) => b.score - a.score)[0];
-  const bestCareerIncome = Math.max(0, ...ranked.map((entry) => entry.moneyPerSec));
-  const trainByDefault = !anyNeed && trainingCourse !== undefined && (view.externalIncomePerSec ?? 0) >= bestCareerIncome;
+  // WHAT WINS THE SLOT is `slotValue`: BN-seconds saved, summed over everything
+  // the option produces, each channel scored as our rate over the best rate
+  // anyone can manage. Urgency bands no longer sort this list — an option that
+  // touches a blocking need but delivers a ten-thousandth of its closure rate
+  // is worth a ten-thousandth, and says so.
+  const servesNeed = (entry: ScoredAction): boolean =>
+    entry.rates.some((rate) => values.has(needKey({ kind: rate.kind, subject: rate.subject })));
+  // NO PHASE RULE. There used to be one here: "if nothing is posted and the
+  // background out-earns crime, study the route's skill instead" — a hand-made
+  // approximation of a comparison the valuation now makes properly, since a
+  // course's experience is priced against the fleet's on the same channel. Its
+  // one remaining job was covering the window where nothing had a price at all,
+  // and that window closed when the board became a source of channel worth: a
+  // posted skill gate prices the course whether or not a forecast exists yet.
   ranked.sort((a, b) => {
-    // Compare dimensions lexicographically. Packing urgency and score into a
-    // single `urgency * 1e12 + score` number erased ordinary scores (~1e-5)
-    // below IEEE-754 precision, so same-band crimes tied and alphabetical
-    // order repeatedly selected Assassination over a 10x better earner.
-    if (anyNeed) {
-      const urgencyA = URGENCY_ORDER[a.priority === "income" ? "nice" : a.priority];
-      const urgencyB = URGENCY_ORDER[b.priority === "income" ? "nice" : b.priority];
-      if (urgencyA !== urgencyB) return urgencyB - urgencyA;
-      if (a.score !== b.score) return b.score - a.score;
-    } else if (trainByDefault) {
-      const preferredA = a === trainingCourse ? 1 : 0;
-      const preferredB = b === trainingCourse ? 1 : 0;
-      if (preferredA !== preferredB) return preferredB - preferredA;
-    } else if (a.moneyPerSec !== b.moneyPerSec) {
-      return b.moneyPerSec - a.moneyPerSec;
-    }
+    const value = compareSlotValues(a.value, b.value);
+    if (value !== 0) return value;
+    // Equal worth: finish what is nearly finished. Proximity is a tie-break
+    // rather than a term in the score, because how much a need is worth is the
+    // POSTER's statement (`Need.valueSec`), not something to re-derive here.
+    if (a.progress !== b.progress) return b.progress - a.progress;
+    // ...then earn. A priced-at-ZERO money channel is a real answer — mid-run
+    // the farm clears every money gate, so no crime saves the route a second —
+    // and it makes every crime tie. Without this the list fell through to the
+    // alphabetical guard and picked Assassination over an earner ten times
+    // better, which is the exact failure the packed-score comparator was
+    // rewritten to stop. Dollars only ever break a tie between equal seconds,
+    // so they never outrank the objective.
+    if (a.moneyPerSec !== b.moneyPerSec) return b.moneyPerSec - a.moneyPerSec;
     // Deterministic: never depend on the order the crime table arrived in.
     return a.action.subject! < b.action.subject! ? -1 : 1;
   });
@@ -601,7 +647,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       ranked,
       serving,
       workPriority: best.priority,
-      incomeFallback: !anyNeed,
+      incomeFallback: !servesNeed(best),
       why: "no work slot this tick",
     };
   }
@@ -615,7 +661,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       ranked,
       serving,
       workPriority: best.priority,
-      incomeFallback: !anyNeed,
+      incomeFallback: !servesNeed(best),
       why: "same option remains best at the completion boundary",
     };
   }
@@ -629,7 +675,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       ranked,
       serving,
       workPriority: best.priority,
-      incomeFallback: !anyNeed,
+      incomeFallback: !servesNeed(best),
       why: "continuing",
     };
   }
@@ -645,7 +691,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       ranked,
       serving,
       workPriority: best.priority,
-      incomeFallback: !anyNeed,
+      incomeFallback: !servesNeed(best),
       why: "progress is protected until Task.nextCompletion",
     };
   }
@@ -655,12 +701,10 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     ranked,
     serving,
     workPriority: best.priority,
-    incomeFallback: !anyNeed,
-    why: anyNeed
-      ? `best Σ needWeight·progress/sec (${formatScientific(best.score)})`
-      : trainByDefault
-        ? `background income covers player work; training ${defaultSkill} for the current progression route`
-        : `no posted need career can serve — maximising income at ${formatMoney(best.moneyPerSec)}/sec`,
+    incomeFallback: !servesNeed(best),
+    why: best.value.state === "priced"
+      ? `best Σ (rate/best) × BN-seconds saved (${formatScientific(best.score)}s)`
+      : `no channel career produces is priced yet — maximising income at ${formatMoney(best.moneyPerSec)}/sec`,
   };
 }
 

@@ -33,8 +33,10 @@ const goCore: DirectProbe = {
       status: state.currentPlayer === "None" ? "gameOver" : state.currentPlayer === "White" ? "waitingOnAI" : "inProgress",
       currentPlayer: state.currentPlayer,
       opponent: ns["go"]["getOpponent"](),
-      whiteScore: state.whiteScore,
-      blackScore: state.blackScore,
+      // whiteScore/blackScore are deliberately not read here. They are exact
+      // functions of the board, and this probe's clock differs from the one
+      // that publishes the board, so reading them would reintroduce a score
+      // that disagrees with the position it is displayed against.
       komi: state.komi,
       bonusCycles: state.bonusCycles,
       stats,
