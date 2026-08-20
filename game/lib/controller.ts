@@ -14,6 +14,7 @@ import { isScriptDeath } from "./errors.ts";
 import { bestIncomePerSec, bestReinvestmentReturnPerDollarSec, slotRates } from "./income.ts";
 import { ContributionCache } from "./features/contributions.ts";
 import { hackingState, plannerPassId, pumpOnWake, takeTargetSwitch } from "./features/hacking.ts";
+import { noteTickLateness, resetTickHealth } from "./tick-health.ts";
 import { armWake, sleepOrWake } from "./wake.ts";
 import { workerGlobals } from "./worker-shared.ts";
 import { takeRouteChange } from "./features/remaining.ts";
@@ -527,6 +528,12 @@ export async function runController(
         }
       }
     }
+    // How late this iteration actually reached its own deadline — the timer
+    // fired late, or the pass before it overran. Both exits of the loop above
+    // land here, and the quantity was already being computed for the catch-up
+    // clamp at the top and discarded. It is the ground truth for main-thread
+    // starvation: the engine's own cycle is driven by the same timer queue.
+    noteTickLateness(Date.now() - nextTick);
   }
 }
 
@@ -721,6 +728,9 @@ function onWorldReset(state: GameState, kind: PrestigeKind): void {
   state.probeFailures = {};
   delete state.probeBatch;
   gameGlobal.farmTarget = undefined;
+  // Tick lateness measures this loop, not a feature, so it is reset here with
+  // the rest of the controller's own state.
+  resetTickHealth();
   // The server snapshot is the fleet substrate's, owned by no feature; the
   // caller rescans immediately rather than keeping it.
   delete state.topics.servers;

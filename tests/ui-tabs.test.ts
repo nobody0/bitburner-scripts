@@ -157,6 +157,52 @@ describe("tab rendering", () => {
     expect(html).toContain("1.000x");
   });
 
+  test("the Hacking panel states what planning costs the main thread", () => {
+    // The failure this exists for: a planner at ~100% main-thread occupancy
+    // looked healthy because the only cost row was a peak duration, and the
+    // consequence (landing error) lags the cause by a whole weaken time.
+    const state = emptyState();
+    state.topics.farm = {
+      totals: { moneyEarned: 0, hacks: 0 },
+      pumpMaxMs: 92,
+      pumpOccupancy: 0.63,
+      pumpMs: { meanMs: 58.2, maxMs: 92, count: 11 },
+      wakePumps: 5823,
+      wakePumpRate: 10.8,
+      wakePumpsSkipped: { gap: 812, frame: 41 },
+      weakenWindow: { pumps: 1204 },
+      engineLatenessMs: { meanMs: 4210, maxMs: 28900 },
+      ledger: { tracked: 21438, pendingBatches: 5102, pendingOps: 20408, onTarget: 21100 },
+    } as StateMap["farm"];
+
+    const html = TABS.hacking.render(state);
+    // Occupancy, not just the peak: 63% of wall time is the finding.
+    expect(html).toContain(">planner<");
+    expect(html).toContain("63.0%");
+    expect(html).toContain("58.2ms mean");
+    // Past the critical threshold it is called out rather than merely shown.
+    expect(html).toContain('class="bad">63.0%');
+    expect(html).toContain('class="bad">4210.0ms mean');
+    // The refusals are what say whether the planner is asked too often or is
+    // simply too expensive, and the weaken window bypasses both throttles.
+    expect(html).toContain("10.8/s");
+    expect(html).toContain("refused 812 gap / 41 frame");
+    expect(html).toContain("1.204e3 weaken window");
+    // Depth is the independent variable of the cost above it.
+    expect(html).toContain("2.144e4 ops");
+    expect(html).toContain("5.102e3 pending batches");
+  });
+
+  test("the Hacking panel falls back to the peak pump before occupancy exists", () => {
+    // Replay coverage: records written before the occupancy fields existed
+    // must still render their one cost number rather than a dash.
+    const state = emptyState();
+    state.topics.farm = { totals: { moneyEarned: 0, hacks: 0 }, pumpMaxMs: 4.6 } as StateMap["farm"];
+    const html = TABS.hacking.render(state);
+    expect(html).toContain("4.6ms worst");
+    expect(html).not.toContain("</span> of wall");
+  });
+
   test("every feature's populated panel renders", () => {
     // One synthetic record per topic, so no panel's data branch is untested
     // just because the local save cannot reach that feature.

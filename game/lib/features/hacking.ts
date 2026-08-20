@@ -54,6 +54,7 @@ import { gameGlobal } from "../globals.ts";
 import { bestReinvestmentReturnPerDollarSec, moneyRateValue } from "../income.ts";
 import { buildView, drainCompletions, initDriver, pump, type DriverState } from "../dispatch-driver.ts";
 import { merge, recordProbeFailure, set, type GameState } from "../state.ts";
+import { takeTickLateness } from "../tick-health.ts";
 import { signalWake } from "../wake.ts";
 import { workerGlobals } from "../worker-shared.ts";
 import { isScriptDeath } from "../errors.ts";
@@ -110,6 +111,13 @@ export function resetHackingState(): void {
   globals.dispatch_jit_at = undefined;
   state = initDriver();
   pumpMaxMs = 0;
+  pumpMsSum = 0;
+  pumpCount = 0;
+  pumpWindowAt = 0;
+  wakeSkipGap = 0;
+  wakeSkipFrame = 0;
+  weakenWindowPumps = 0;
+  lastWakePumps = 0;
   lastRollup = 0;
   lastTotals = undefined;
   moneyRateEma = 0;
@@ -132,6 +140,14 @@ export function resetHackingState(): void {
  * that starts eating the tick budget is visible before it starts missing
  * slots. */
 let pumpMaxMs = 0;
+/** The same cost as a SHARE of wall time, which is the reading peak duration
+ * cannot give: a live run held `pumpMaxMs` at a plausible ~92 ms while running
+ * ~11 pumps a second, i.e. the planner owned the whole thread and nothing in
+ * the panel said so. Summed here, divided at the drain. */
+let pumpMsSum = 0;
+let pumpCount = 0;
+/** `performance.now()` when the current occupancy window opened. */
+let pumpWindowAt = 0;
 let lastRollup = 0;
 /** EMA-smoothed income rates over rollup deltas (~30 s time constant), so
  * career's income comparison sees a stable figure instead of batch spikes. */
@@ -147,6 +163,18 @@ const WAKE_MAX_PER_FRAME = 4;
 let lastPumpAt = 0;
 let wakesThisFrame = 0;
 let wakePumps = 0;
+/** Wake pumps the two throttles above refused, split by which one refused it,
+ * and how often the minimum-security weaken window bypassed both. Published
+ * because a throttle whose refusals are invisible cannot be tuned: the ratio
+ * of `gap` to `frame` to bypass is exactly what says whether the planner is
+ * being asked too often or is simply too expensive. */
+let wakeSkipGap = 0;
+let wakeSkipFrame = 0;
+let weakenWindowPumps = 0;
+/** `wakePumps` at the last drain, so the panel can show a RATE. The cumulative
+ * counter has been published since the wake path was added and rendered
+ * nowhere; a per-second figure is the form that is actually readable. */
+let lastWakePumps = 0;
 /** Monotonic count of pumps that actually ran a `planFarm`. `dispatch.pooling`
  * is recomputed exactly once per pump, so this identifies the pass a pooling
  * reading belongs to — letting the broker ignore the several arena builds that
@@ -275,10 +303,44 @@ function scheduleJitWake(at: number | undefined): void {
   }, Math.max(0, at - performance.now()));
 }
 
-export function takePumpMaxMs(): number {
-  const value = pumpMaxMs;
+interface PumpCostReport {
+  /** Planner ms per ms of wall clock over the window. Undefined until a window
+   * has actually elapsed. */
+  occupancy?: number;
+  meanMs: number;
+  maxMs: number;
+  count: number;
+  /** Wake pumps per second over the window. */
+  wakeRate?: number;
+  skipped: { gap: number; frame: number };
+  weakenWindowPumps: number;
+}
+
+/** Drain the planner cost window. Called once per rollup; the window is the
+ * span between two drains, so occupancy is measured against real wall time
+ * rather than against an assumed cadence. */
+function takePumpCost(): PumpCostReport {
+  const at = performance.now();
+  const wallMs = pumpWindowAt === 0 ? 0 : at - pumpWindowAt;
+  const wakeDelta = wakePumps - lastWakePumps;
+  const report: PumpCostReport = {
+    ...(wallMs > 0 ? { occupancy: pumpMsSum / wallMs } : {}),
+    meanMs: pumpCount === 0 ? 0 : pumpMsSum / pumpCount,
+    maxMs: pumpMaxMs,
+    count: pumpCount,
+    ...(wallMs > 0 ? { wakeRate: (wakeDelta * 1_000) / wallMs } : {}),
+    skipped: { gap: wakeSkipGap, frame: wakeSkipFrame },
+    weakenWindowPumps,
+  };
+  pumpWindowAt = at;
   pumpMaxMs = 0;
-  return value;
+  pumpMsSum = 0;
+  pumpCount = 0;
+  wakeSkipGap = 0;
+  wakeSkipFrame = 0;
+  weakenWindowPumps = 0;
+  lastWakePumps = wakePumps;
+  return report;
 }
 
 /** Whether the farm target changed on the last tick, for the controller's
@@ -429,6 +491,8 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
   const prepBudgetGb = driver.memory.dispatch.evaluator.directive.segments.find((segment) => segment.kind === "prep")?.gb ?? 0;
   const share = driver.memory.dispatch.evaluator.directive.share;
   const landingOrder = landingOrderDigest(stats);
+  const pumpCost = takePumpCost();
+  const lateness = takeTickLateness();
 
   set(game, "farm", {
     target,
@@ -545,8 +609,30 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
       nativeGbMsBySegmentKind: stats.nativeRamMsBySegmentKind,
       paddingGbMsBySegmentKind: stats.paddingRamMsBySegmentKind,
     },
-    pumpMaxMs: takePumpMaxMs(),
+    pumpMaxMs: pumpCost.maxMs,
+    ...(pumpCost.occupancy !== undefined ? { pumpOccupancy: pumpCost.occupancy } : {}),
+    ...(pumpCost.count > 0 ? { pumpMs: {
+      meanMs: roundSigFigs(pumpCost.meanMs, 3),
+      maxMs: roundSigFigs(pumpCost.maxMs, 3),
+      count: pumpCost.count,
+    } } : {}),
     wakePumps,
+    ...(pumpCost.wakeRate !== undefined ? { wakePumpRate: roundSigFigs(pumpCost.wakeRate, 3) } : {}),
+    wakePumpsSkipped: pumpCost.skipped,
+    weakenWindow: { pumps: pumpCost.weakenWindowPumps },
+    ...(lateness ? { engineLatenessMs: {
+      meanMs: roundSigFigs(lateness.meanMs, 3),
+      maxMs: roundSigFigs(lateness.maxMs, 3),
+    } } : {}),
+    // The independent variable of the whole cost curve. Every rebuild-and-sort
+    // in the dispatcher pass is priced in this number, so publishing the two
+    // together is what makes "cost grows with depth" readable off the panel.
+    ledger: {
+      tracked: driver.memory.dispatch.tracked.size,
+      pendingBatches: driver.memory.dispatch.jitPending.length,
+      pendingOps: driver.memory.dispatch.jitPending.reduce((sum, batch) => sum + batch.ops.length, 0),
+      onTarget: driver.memory.dispatch.byTarget.get(target)?.size ?? 0,
+    },
     totals: { moneyEarned: stats.moneyEarned, hacks: stats.hacks },
   });
 }
@@ -1502,6 +1588,9 @@ function runPump(
   scheduleJitWake(result.nextWakeMs === undefined ? undefined : view.time + result.nextWakeMs);
   const elapsed = performance.now() - started;
   if (elapsed > pumpMaxMs) pumpMaxMs = elapsed;
+  if (pumpWindowAt === 0) pumpWindowAt = started;
+  pumpMsSum += elapsed;
+  pumpCount++;
   lastPumpAt = performance.now();
   plannerPasses++;
 
@@ -1541,8 +1630,15 @@ export function pumpOnWake(
   // the only guaranteed observation point at minimum security. Never discard
   // that launch window merely because another op woke us a few ms earlier.
   const weakenWindow = hackingState().globals.dispatch_done?.some((done) => done.kind === "weaken") ?? false;
-  if (!weakenWindow && now - lastPumpAt < WAKE_MIN_MS) return;
-  if (!weakenWindow && wakesThisFrame >= WAKE_MAX_PER_FRAME) return;
+  if (!weakenWindow && now - lastPumpAt < WAKE_MIN_MS) {
+    wakeSkipGap++;
+    return;
+  }
+  if (!weakenWindow && wakesThisFrame >= WAKE_MAX_PER_FRAME) {
+    wakeSkipFrame++;
+    return;
+  }
+  if (weakenWindow) weakenWindowPumps++;
   wakesThisFrame++;
   wakePumps++;
   runPump(ns, game, caps, arenaReserves, installSec, latestShareValue);

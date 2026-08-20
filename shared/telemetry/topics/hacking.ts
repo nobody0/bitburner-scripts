@@ -276,9 +276,33 @@ export interface FarmRollup {
     paddingGbMsBySegmentKind?: Record<string, FarmByKind>;
   };
   pumpMaxMs?: number;
+  /** Planner ms per ms of wall clock over the rollup window.
+   *
+   * The reading whose absence let a planner at ~100% occupancy pass for
+   * healthy: `pumpMaxMs` alone cannot distinguish one expensive pass from a
+   * thread that has been taken over. Past a fifth of wall time the game's own
+   * setTimeout engine and every in-flight `netscriptDelay` start missing their
+   * deadlines; a healthy run sits near 5%. */
+  pumpOccupancy?: number;
+  /** Per-pass cost over the same window. `maxMs` repeats `pumpMaxMs`, which
+   * stays where it is so records written before this field still compare. */
+  pumpMs?: { meanMs: number; maxMs: number; count: number };
   /** Cumulative early pumps triggered by worker completions (the
    * weaken-landing wake) rather than the 200 ms tick. */
   wakePumps?: number;
+  /** `wakePumps` as a per-second rate over the window — the cumulative counter
+   * has been published since the wake path existed and rendered nowhere. */
+  wakePumpRate?: number;
+  /** Wake pumps refused, by which throttle refused them. */
+  wakePumpsSkipped?: { gap: number; frame: number };
+  /** Minimum-security weaken windows that bypassed both throttles. */
+  weakenWindow?: { pumps: number };
+  /** How late the controller's own timer reached its absolute deadline. The
+   * engine cycle rides the same timer queue, so this is the ground truth for
+   * main-thread starvation — and it leads `landingError` by a weaken-time. */
+  engineLatenessMs?: { meanMs: number; maxMs: number };
+  /** In-flight depth: the independent variable of the planner's cost curve. */
+  ledger?: { tracked: number; pendingBatches: number; pendingOps: number; onTarget: number };
   /** Cumulative — goal evaluation reads these (replaces per-op hack.done). */
   totals: { moneyEarned: number; hacks: number };
 }

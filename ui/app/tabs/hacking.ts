@@ -273,6 +273,28 @@ type Kind = (typeof KINDS)[number];
 const KIND_SEG: Record<Kind, string> = { hack: "s1", grow: "s2", weaken: "s3" };
 const KIND_SERIES: Record<Kind, string> = { hack: "--series-1", grow: "--series-2", weaken: "--series-3" };
 
+/** Where planner occupancy stops being healthy. The measured baseline of a
+ * well-behaved run is ~5% of wall time; the run that produced a 107s mean
+ * landing error sat at 60-100%. These are the panel's own thresholds — the
+ * driver does not yet enforce a budget, so nothing here can be derived from
+ * one. */
+const OCCUPANCY_TARGET = 0.2;
+const OCCUPANCY_CRITICAL = 0.4;
+/** Tick lateness in ms: one engine cycle is 200ms, so a quarter of it is a
+ * warning and a full cycle is a cycle the game did not get. */
+const LATENESS_WARN_MS = 50;
+const LATENESS_CRITICAL_MS = 200;
+
+function occupancyClass(occupancy: number): string {
+  if (occupancy >= OCCUPANCY_CRITICAL) return "bad";
+  return occupancy > OCCUPANCY_TARGET ? "warn" : "";
+}
+
+function latenessClass(meanMs: number): string {
+  if (meanMs >= LATENESS_CRITICAL_MS) return "bad";
+  return meanMs >= LATENESS_WARN_MS ? "warn" : "";
+}
+
 type Pipeline = NonNullable<FarmRollup["pipelines"]>[number];
 
 /** One panel per ACTIVE pipeline, built from what the dispatcher reports it is
@@ -775,7 +797,11 @@ export const hackingTab: Tab = {
 
     const health =
       farm &&
-      (farm.allocFails !== undefined || farm.execFails !== undefined || farm.batchesSkipped !== undefined)
+      (farm.allocFails !== undefined || farm.execFails !== undefined || farm.batchesSkipped !== undefined ||
+        // Planner cost belongs here whether or not anything has failed yet:
+        // occupancy is the leading indicator, and the failures below it are
+        // what occupancy turns into if it is left unread.
+        farm.pumpMaxMs !== undefined)
         ? table(
             ["metric", "value"],
             [
@@ -825,7 +851,60 @@ export const hackingTab: Tab = {
                 `${d.meanMs.toFixed(2)}ms mean` +
                   `<span class="muted"> (|max| ${d.maxAbsMs.toFixed(2)})</span>`,
               ]),
-              ["worst pump", farm.pumpMaxMs !== undefined ? `${farm.pumpMaxMs.toFixed(1)}ms` : "–"],
+              // Cost and consequence, adjacent on purpose: the landing error
+              // above is what the planner occupancy below produces, one
+              // weaken-time later. A live run showed a 107-SECOND mean landing
+              // error with nothing here but "worst pump 92ms".
+              [
+                `<span title="${esc(
+                  "main-thread time spent planning, as a share of wall time. The game engine, netscriptDelay and " +
+                    "this controller share one timer queue, so past a fifth of it the game itself starts missing " +
+                    "deadlines. A healthy run sits near 5%.",
+                )}">planner</span>`,
+                farm.pumpOccupancy === undefined
+                  ? (farm.pumpMaxMs !== undefined ? `${farm.pumpMaxMs.toFixed(1)}ms worst` : "–")
+                  : `<span class="${occupancyClass(farm.pumpOccupancy)}">${fmtPct(farm.pumpOccupancy)}</span> of wall` +
+                    (farm.pumpMs
+                      ? `<span class="muted"> · ${farm.pumpMs.meanMs.toFixed(1)}ms mean · ` +
+                        `${farm.pumpMs.maxMs.toFixed(1)}ms worst · ${fmtNum(farm.pumpMs.count)} passes</span>`
+                      : ""),
+              ],
+              ...(farm.wakePumpRate !== undefined
+                ? [[
+                    "wake pumps",
+                    `${farm.wakePumpRate.toFixed(1)}/s` +
+                      (farm.wakePumpsSkipped
+                        ? `<span class="muted"> · refused ${fmtNum(farm.wakePumpsSkipped.gap)} gap / ` +
+                          `${fmtNum(farm.wakePumpsSkipped.frame)} frame</span>`
+                        : "") +
+                      (farm.weakenWindow
+                        ? `<span class="muted" title="${esc(
+                            "minimum-security weaken windows, which bypass both throttles",
+                          )}"> · ${fmtNum(farm.weakenWindow.pumps)} weaken window</span>`
+                        : ""),
+                  ]]
+                : []),
+              ...(farm.engineLatenessMs
+                ? [[
+                    `<span title="${esc(
+                      "how late the controller's own timer reached its deadline. The engine cycle rides the same " +
+                        "queue, so this is the ground truth for main-thread starvation.",
+                    )}">engine late</span>`,
+                    `<span class="${latenessClass(farm.engineLatenessMs.meanMs)}">` +
+                      `${farm.engineLatenessMs.meanMs.toFixed(1)}ms mean</span>` +
+                      `<span class="muted"> (max ${farm.engineLatenessMs.maxMs.toFixed(0)})</span>`,
+                  ]]
+                : []),
+              ...(farm.ledger
+                ? [[
+                    `<span title="${esc(
+                      "in-flight depth — the independent variable of the planner's cost above",
+                    )}">in flight</span>`,
+                    `${fmtNum(farm.ledger.tracked)} ops` +
+                      `<span class="muted"> · ${fmtNum(farm.ledger.onTarget)} on target · ` +
+                      `${fmtNum(farm.ledger.pendingBatches)} pending batches</span>`,
+                  ]]
+                : []),
             ],
           )
         : "";
