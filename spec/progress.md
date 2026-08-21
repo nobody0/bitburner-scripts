@@ -1291,6 +1291,54 @@ number predates it and is outstanding. Both runs report `invalid-for-goal`
 because coding-contract generation is unmodeled; that is the known simulator gap,
 not a run failure.
 
+## Dispatcher pass cost at depth (2026-08-21)
+
+A live BN run froze: the planner owned the main thread (`pumpOccupancy` 0.99,
+`pumpMs` ~150 ms at 7–8 pumps/sec) with 10,770 pending batches and 36,600
+tracked ops. Depth is by design — `MAX_LIVE_WORKERS` is 400,000 and the
+pipeline is meant to reach it — so every fix here is cost-side.
+
+A Chrome performance profile of the running game found it, after a sim-only
+profile had pointed at the wrong path entirely: the `jit-lategame` fixture
+exercises the JIT launcher, while the frozen game was in the classic
+`launchBatches` path. Recording the real game needs `bun run sync --readable`,
+or every frame reads `start.js:1:<column>`.
+
+| what | before | after |
+|---|---|---|
+| `jitTopologyFits`, 10x finer grid | 7x the cost | flat (~1x) |
+| `jitTopologyFits`, 20 ms grid | 0.737 ms | **0.0034 ms** |
+| dispatcher pass, ~3,300 batches | 18.0 ms | **5.7 ms** |
+| pass at 1k / 20k in-flight | 0.56 / 6.58 ms | **0.19 / 5.26 ms** |
+
+- **Slot packing built one array entry per slot.** `slotsFor` is
+  `holdMs / intervalMs`, so a three-minute weaken on a 20 ms grid is ~9,000
+  identical blocks, materialised and sorted and then best-fitted one at a time
+  — and `chooseJitSchedule` binary searches, so it ran a dozen times a pass.
+  Best-fit over equal sizes collapses (the smallest free block that still holds
+  one keeps winning until it cannot), so runs of `{gb, count}` place the same
+  packing. Verified against the previous implementation on 200,000 randomized
+  role/topology/interval combinations, zero divergences; guarded by a ratio in
+  `tests/jit.test.ts` that fails on the old code.
+- **The classic launcher rebuilt its whole ledger per batch.** `launchBatches`
+  walked every tracked op on the target for each batch it planned. It now
+  materialises once and tops up, keeping landing order so `predictAtLanding`
+  skips a filtered copy and a re-sort as well.
+- **The JIT launcher built ledgers nothing read.** `nextWeakenLanding` was a
+  `.find()` over the fully sorted ledger, which forced that build every pass;
+  it is a min-query and is now scanned directly. The fold ledger and the
+  planning ledger are built on first use — a settled pass consumed none of the
+  former and tripped the depth guard before reading the latter.
+- **Folds allocated a state object per op.** `applyLedgerOpInto` writes through
+  one; at depth the pure form was hundreds of thousands of short-lived objects
+  per pass, visible as major GC in the profile.
+
+**Open.** `sim/tests/dispatch-scaling.test.ts` now reads ratio ~27 against a
+bound of 25 — not a slowdown (both depths got faster) but a smaller constant
+exposing the `O(n log n)` sorting still left in `launchDueJit`. The bound is a
+ratchet and must not be loosened; closing it means maintaining the ledger in
+landing order across `trackOp`/`untrackOp` instead of rebuilding it.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to

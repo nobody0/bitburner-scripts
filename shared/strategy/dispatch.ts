@@ -2092,6 +2092,29 @@ function trackedStrength(tracked: Tracked): number {
   return tracked.strengthThreads ?? tracked.gb / WORKER_RAM[tracked.kind];
 }
 
+/** Earliest weaken landing strictly after `now`, or Infinity.
+ *
+ * A min-query, not a sort. It used to be `.find()` over the sorted ledger,
+ * which forced that whole ledger to be built and sorted on EVERY pass even
+ * though the fold that also reads it usually touches nothing. Scanning the two
+ * sources directly answers the same question without materialising ~11,500
+ * entries. `prepPending` cannot contribute — its ops are all grows. */
+function nextWeakenLandingAfter(memory: DispatchMemory, host: string, now: number): number {
+  let earliest = Infinity;
+  for (const tracked of memory.byTarget.get(host)?.values() ?? []) {
+    if (tracked.kind !== "weaken" || tracked.landing === undefined) continue;
+    if (tracked.landing > now && tracked.landing < earliest) earliest = tracked.landing;
+  }
+  for (const batch of memory.jitPending) {
+    if (batch.target !== host) continue;
+    for (const op of batch.ops) {
+      if (op.kind !== "weaken") continue;
+      if (op.landing > now && op.landing < earliest) earliest = op.landing;
+    }
+  }
+  return earliest;
+}
+
 function jitLedgerEntries(memory: DispatchMemory, host: string): LedgerEntry[] {
   const entries: LedgerEntry[] = [];
   for (const [opId, tracked] of memory.byTarget.get(host) ?? []) {
@@ -2488,8 +2511,22 @@ function launchDueJit(
   // last rather than in opId order. Equal landings are already a modelled
   // tie-break rather than a Netscript guarantee (see prediction.ts).
   const foldStatics = staticsOf(server);
-  const ledgerEntries = jitLedgerEntries(memory, server.hostname)
+  /** Built on first use, like `lazySecurityEvents` and for the same reason.
+   *
+   * A settled pipeline validates nothing on most passes: measured at depth, a
+   * steady-state pass built and sorted the whole ledger TWICE (once per
+   * `launchDueJit` call) and the fold below consumed NONE of it. Even when it
+   * does fold it drains well under 1% before the pass hits its launch cap.
+   * See sim/tests/dispatch-scaling.test.ts. */
+  let builtLedger: LedgerEntry[] | undefined;
+  const ledgerEntriesOf = (): LedgerEntry[] => builtLedger ??= jitLedgerEntries(memory, server.hostname)
     .sort((a, b) => compareLedgerOps(a.op, b.op));
+
+  // Read HERE, not at the launch loop below that consumes it. This used to be
+  // a `.find()` over the eagerly built ledger above, so it saw the pipeline as
+  // it stood BEFORE the reservation pass; taking the reading at the point of
+  // use instead would silently retime the launch horizon.
+  const nextWeakenLanding = nextWeakenLandingAfter(memory, server.hostname, now);
 
   /** One forward cursor over the shared, already-sorted ledger.
    *
@@ -2529,6 +2566,7 @@ function launchDueJit(
           );
         }
         foldedAt = at;
+        const ledgerEntries = ledgerEntriesOf();
         while (ledgerIndex < ledgerEntries.length && ledgerEntries[ledgerIndex]!.op.landing <= at) {
           const entry = ledgerEntries[ledgerIndex]!;
           ledgerIndex++;
@@ -2572,15 +2610,28 @@ function launchDueJit(
   // generalisation `latestJitStart` already applies when choosing startAt
   // (spec/jit-reference.md section 2). The periodic pass gets things rolling
   // and recovers; the weaken wake remains the guarantee.
-  const nextWeakenLanding = ledgerEntries.find(
-    (entry) => entry.op.kind === "weaken" && entry.op.landing > now,
-  )?.op.landing ?? Infinity;
   const launchHorizon = Math.min(now + JIT_LAUNCH_WINDOW_MS, nextWeakenLanding);
 
   let emitted = 0;
   batches:
   for (const batch of memory.jitPending) {
     if (batch.target !== server.hostname) continue;
+    // A batch with nothing inside the launch horizon has nothing to launch, and
+    // copy-sorting its ops to discover that is pure allocation. At depth this
+    // loop reaches thousands of pending batches twice per pass and all but a
+    // handful are far-future.
+    //
+    // Deliberately a `continue` and not a `break`: batch anchors are USUALLY
+    // increasing, but a re-plan can re-anchor, and a break on that assumption
+    // stalled the pipeline outright (`tracked` 20 -> 5 in the dispatcher's own
+    // load test). The cap check is repeated here so skipping a batch cannot
+    // change when the pass reports itself full.
+    let earliest = Infinity;
+    for (const op of batch.ops) earliest = Math.min(earliest, jitLaunchAt(op));
+    if (earliest > launchHorizon) {
+      if (emitted >= MAX_PREP_OPS_PER_PASS) return true;
+      continue;
+    }
     const ordered = [...batch.ops].sort(
       (a, b) => a.startAt - b.startAt || JIT_ROLE_PRIORITY[a.role] - JIT_ROLE_PRIORITY[b.role],
     );
@@ -2953,11 +3004,23 @@ function planJitBatches(
   // that is the security their durations are priced at. Anything higher would
   // make every start time earlier than needed and be paid as additionalMsec.
   const worstDifficulty = jitWorstDifficulty(solution, server);
-  // Fold the existing pipeline once. Each pass may append eight batches; a
-  // fresh walk of every tracked and pending operation for every append made
-  // planning quadratic at the deep pipelines unlocked by late-game RAM.
-  const planningLedger = jitLedger(memory, server.hostname);
-  let planningOpId = -planningLedger.length - 1;
+  // Fold the existing pipeline once, and not until something asks. Each pass
+  // may append eight batches, and a fresh walk of every tracked and pending
+  // operation for every append made planning quadratic at the deep pipelines
+  // unlocked by late-game RAM. Building it up front instead was still wasted
+  // whenever the loop's first act — a depth guard a settled pipeline trips
+  // immediately — returned before reading a single op.
+  let builtPlanningLedger: LedgerOp[] | undefined;
+  let planningOpId = 0;
+  const planningLedgerOf = (): LedgerOp[] => {
+    if (!builtPlanningLedger) {
+      builtPlanningLedger = jitLedger(memory, server.hostname);
+      // Pending ids continue below the ops already in the ledger; see
+      // `jitLedgerEntries` on why the descending sequence must not have gaps.
+      planningOpId = -builtPlanningLedger.length - 1;
+    }
+    return builtPlanningLedger;
+  };
   const pending = (
     role: JitRole["role"],
     kind: PendingJitOp["kind"],
@@ -2998,7 +3061,7 @@ function planJitBatches(
       ctx,
       statics,
       { hackDifficulty: server.hackDifficulty, moneyAvailable: server.moneyAvailable },
-      planningLedger,
+      planningLedgerOf(),
       anchor,
     );
     const sized = sizeBatchAtLanding(ctx, statics, predicted, solution);
@@ -3093,7 +3156,7 @@ function planJitBatches(
       decisionId: memory.jitDecisionId,
     });
     for (const op of retained) {
-      planningLedger.push({
+      planningLedgerOf().push({
         kind: op.kind,
         threads: op.threads,
         effectThreads: op.threads,
@@ -3198,16 +3261,47 @@ function launchBatches(
     nominalRemaining = Math.max(0, nominalRemaining - gb);
   };
 
-  // The in-flight ledger for THIS target, rebuilt per batch (tracked grows as
-  // batches launch, so batch N+1's prediction sees batch N's ops).
+  // The in-flight ledger for THIS target, materialised once and then topped up
+  // so batch N+1's prediction still sees batch N's ops.
+  //
+  // Rebuilding it per batch walked every op in flight each time; at late-game
+  // depth that was the largest single entry in a profile of the running game.
+  // `trackOp`/`untrackOp` are the only writers of `byTarget` and this loop only
+  // ever adds, so entries already consumed cannot change underneath us — and
+  // reading them back gives the real opIds and core-adjusted `effectThreads`
+  // that synthesising entries from the planned batch would have got wrong.
+  const ledgerOps: LedgerOp[] = [];
+  let consumed = 0;
   const ledger = (): LedgerOp[] => {
-    const ops: LedgerOp[] = [];
-    for (const [opId, t] of memory.byTarget.get(host) ?? []) {
+    const onTarget = memory.byTarget.get(host);
+    if (!onTarget || onTarget.size === consumed) return ledgerOps;
+    // Walk the map but build only what is new. A Map iterator held across
+    // calls does NOT work here: it visits entries appended mid-iteration, but
+    // once it has reported `done` it is finished for good, so it silently
+    // stopped yielding the ops this loop had just tracked. The skip is a bare
+    // counter loop; the allocation, `trackedStrength`, and the ordered insert
+    // are what cost, and those still happen once per op.
+    let index = 0;
+    for (const [opId, t] of onTarget) {
+      if (index++ < consumed) continue;
       if (t.landing === undefined) continue;
       const threads = trackedStrength(t);
-      ops.push({ kind: t.kind, threads, effectThreads: t.effectThreads ?? threads, landing: t.landing, opId });
+      const op = { kind: t.kind, threads, effectThreads: t.effectThreads ?? threads, landing: t.landing, opId };
+      // Insert in `compareLedgerOps` order rather than appending and letting
+      // every consumer re-sort. Insertion order is opId order, which is NOT
+      // landing order, so the position has to be searched for — but only for
+      // the handful of ops added since the last call.
+      let lo = 0;
+      let hi = ledgerOps.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (compareLedgerOps(ledgerOps[mid]!, op) <= 0) lo = mid + 1;
+        else hi = mid;
+      }
+      ledgerOps.splice(lo, 0, op);
     }
-    return ops;
+    consumed = onTarget.size;
+    return ledgerOps;
   };
   const statics = staticsOf(server);
 
@@ -3268,8 +3362,11 @@ function launchBatches(
       ctx,
       statics,
       { hackDifficulty: server.hackDifficulty, moneyAvailable: server.moneyAvailable },
+      // `ledger()` maintains landing order, so the fold skips the filtered
+      // copy and the re-sort it would otherwise pay on every batch.
       ledger(),
       anchor,
+      true,
     );
     const sized = sizeBatchAtLanding(ctx, statics, predicted, solution);
     if (!sized) {

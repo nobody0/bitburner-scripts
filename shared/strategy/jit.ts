@@ -226,43 +226,55 @@ export function jitTopologyFits(
     .filter((role) => !role.atomic)
     .reduce((sum, role) => sum + schedule.quotaGb[role.role], 0);
   const slotsFor = (role: JitRole): number => Math.ceil(role.holdMs / schedule.intervalMs);
-  const slots = atomicRoles.flatMap((role) => Array.from({ length: slotsFor(role) }, () => role.gb));
-  if (slots.length === 0) {
-    const block = Math.max(1e-9, topology.divisibleBlockGb);
-    return hosts.reduce((sum, gb) => sum + Math.floor((gb + 1e-9) / block) * block, 0) + 1e-9 >= divisibleGb;
-  }
+  const runOf = (role: JitRole): { gb: number; count: number } => ({ gb: role.gb, count: slotsFor(role) });
+  const block = Math.max(1e-9, topology.divisibleBlockGb);
+  const divisibleFits = (free: readonly number[]): boolean =>
+    free.reduce((sum, gb) => sum + Math.floor((gb + 1e-9) / block) * block, 0) + 1e-9 >= divisibleGb;
+  if (atomicRoles.every((role) => slotsFor(role) === 0)) return divisibleFits(hosts);
 
-  const pack = (ordered: readonly number[]): boolean => {
-    const free = [...hosts];
-    for (const gb of ordered) {
-      let best = -1;
-      let bestRemainder = Infinity;
-      for (let i = 0; i < free.length; i++) {
-        const remainder = free[i]! - gb;
-        if (remainder >= -1e-9 && remainder < bestRemainder) {
-          best = i;
-          bestRemainder = remainder;
+  // Slots are placed as RUNS of one size, never one array entry per slot.
+  //
+  // `slotsFor` is holdMs/intervalMs, so a three-minute weaken on a 20 ms grid
+  // is ~9,000 identical blocks; materialising and sorting that list, then
+  // best-fitting each entry against every host, made this the most expensive
+  // function in a profile of the running game — and `chooseJitSchedule` binary
+  // searches, so it runs a dozen times a pass.
+  //
+  // Best-fit over equal sizes collapses: the chosen host is the SMALLEST free
+  // block that still holds one, and subtracting leaves it still the smallest
+  // that holds one, so it keeps winning until it cannot. Placing
+  // floor(free/gb) at once is therefore the same packing, not an approximation.
+  const free = hosts.slice();
+  const pack = (runs: readonly { gb: number; count: number }[]): boolean => {
+    for (let i = 0; i < hosts.length; i++) free[i] = hosts[i]!;
+    for (const run of runs) {
+      let remaining = run.count;
+      while (remaining > 0) {
+        let best = -1;
+        let bestFree = Infinity;
+        for (let i = 0; i < free.length; i++) {
+          const candidate = free[i]!;
+          if (candidate - run.gb >= -1e-9 && candidate < bestFree) {
+            best = i;
+            bestFree = candidate;
+          }
         }
+        if (best < 0) return false;
+        const placed = Math.min(remaining, Math.max(1, Math.floor((bestFree + 1e-9) / run.gb)));
+        free[best] = Math.max(0, bestFree - placed * run.gb);
+        remaining -= placed;
       }
-      if (best < 0) return false;
-      free[best] = Math.max(0, bestRemainder);
     }
-    const block = Math.max(1e-9, topology.divisibleBlockGb);
-    const divisibleCapacity = free.reduce(
-      (sum, gb) => sum + Math.floor((gb + 1e-9) / block) * block,
-      0,
-    );
-    return divisibleCapacity + 1e-9 >= divisibleGb;
+    return divisibleFits(free);
   };
 
-  const descending = [...slots].sort((a, b) => b - a);
-  if (pack(descending)) return true;
+  const byLargest = atomicRoles.map(runOf).sort((a, b) => b.gb - a.gb);
+  if (pack(byLargest)) return true;
+  // Largest-first alone hits the classic two-size greedy pathology, so also try
+  // leading with each role in turn.
   for (const first of atomicRoles) {
-    const grouped = atomicRoles
-      .flatMap((role) => Array.from({ length: slotsFor(role) }, () => ({ role, gb: role.gb })))
-      .sort((a, b) => Number(b.role === first) - Number(a.role === first) || b.gb - a.gb)
-      .map((entry) => entry.gb);
-    if (pack(grouped)) return true;
+    const led = atomicRoles.filter((role) => role !== first).map(runOf).sort((a, b) => b.gb - a.gb);
+    if (pack([runOf(first), ...led])) return true;
   }
   return false;
 }

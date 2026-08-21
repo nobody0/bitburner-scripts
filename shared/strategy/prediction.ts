@@ -22,9 +22,14 @@ import { PREPPED_SEC_TOLERANCE, type CycleSolution, type TargetStatics } from ".
  *
  * The legacy scripts kept a cached timeline of the same fold
  * (bitburner-2023 src/_lib/simulation.ts) and inverted its cache invalidation
- * in three places, leaving the guards blind. There is deliberately NO cache
- * here: the ledger is small (hundreds of ops) and a fresh fold per launch is
- * microseconds — that is what kills the whole invalidation bug class.
+ * in three places, leaving the guards blind. There is deliberately NO cache of
+ * the FOLD here — that is what kills the whole invalidation bug class.
+ *
+ * The ledger itself is no longer small, though: a late-game pipeline tracks
+ * tens of thousands of ops on one target, and a profile of the running game
+ * showed re-filtering and re-sorting that list on every launch dominating the
+ * dispatcher. Callers that already hold it in landing order say so with
+ * `presorted` and pay for the fold alone.
  *
  * Skill is held constant across the fold (percent/effects at completion use
  * the player's then-current skill; predicting exp-driven skill growth is a
@@ -65,12 +70,24 @@ export function predictAtLanding(
   current: PredictedState,
   ops: readonly LedgerOp[],
   at: number,
+  /** `ops` is already in `compareLedgerOps` order, so the fold can walk it
+   * directly and stop at the first op landing past `at`. */
+  presorted = false,
 ): PredictedState {
+  // One result object for the whole fold. `current` belongs to the caller and
+  // is never written to.
+  const state = { hackDifficulty: current.hackDifficulty, moneyAvailable: current.moneyAvailable };
+  if (presorted) {
+    for (const op of ops) {
+      if (op.landing > at) break;
+      applyLedgerOpInto(ctx, statics, state, op);
+    }
+    return state;
+  }
   const relevant = ops
     .filter((op) => op.landing <= at)
     .sort(compareLedgerOps);
-  let state = current;
-  for (const op of relevant) state = applyLedgerOp(ctx, statics, state, op);
+  for (const op of relevant) applyLedgerOpInto(ctx, statics, state, op);
   return state;
 }
 
@@ -90,6 +107,24 @@ export function applyLedgerOp(
   state: PredictedState,
   op: LedgerOp,
 ): PredictedState {
+  const next = { hackDifficulty: state.hackDifficulty, moneyAvailable: state.moneyAvailable };
+  applyLedgerOpInto(ctx, statics, next, op);
+  return next;
+}
+
+/** `applyLedgerOp` writing THROUGH `state` instead of returning a new one.
+ *
+ * A fold over a deep pipeline calls this once per op, and the pure form's
+ * result object is garbage the moment the next op is applied. At late-game
+ * depth that is hundreds of thousands of short-lived objects per dispatcher
+ * pass, which shows up as major GC pauses in a profile of the running game.
+ * Callers own `state` and must not hand in an object anyone else can see. */
+export function applyLedgerOpInto(
+  ctx: HackContext,
+  statics: TargetStatics,
+  state: PredictedState,
+  op: LedgerOp,
+): void {
   const maxSec = 100;
   let sec = state.hackDifficulty;
   let money = state.moneyAvailable;
@@ -106,7 +141,8 @@ export function applyLedgerOp(
   } else {
     sec = Math.max(statics.minDifficulty, sec - weakenEffect(ctx, 1, 1) * op.effectThreads);
   }
-  return { hackDifficulty: sec, moneyAvailable: money };
+  state.hackDifficulty = sec;
+  state.moneyAvailable = money;
 }
 
 export interface SkillProjectionInput {
