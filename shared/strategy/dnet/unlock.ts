@@ -48,7 +48,6 @@ export interface DarkscapeDecision {
   buy: boolean;
   /** What to reserve. Always includes TOR — see `cost` below. */
   cost: number;
-  why: string;
 }
 
 /** TOR is a precondition of `purchaseProgram` and is itself wiped by every
@@ -63,25 +62,21 @@ export const DARKSCAPE_TOTAL_COST = DARKSCAPE_COST + TOR_COST;
 export function stepDarkscape(view: DarkscapeView): DarkscapeDecision {
   const cost = DARKSCAPE_TOTAL_COST;
 
-  if (view.dnetDisabled) return { buy: false, cost, why: "dnet is switched off for this run" };
+  if (view.dnetDisabled) return { buy: false, cost };
 
   // Free in BN15 and with any active SF15: `Prestige.ts` re-grants it, and TOR,
   // at every install under `canAccessBitNodeFeature(15)`. Buying would be a
   // straight $50m loss.
   if (view.bitNode === 15 || view.sf15 > 0) {
-    return { buy: false, cost, why: "BN15/SF15 grants the program free at every install" };
+    return { buy: false, cost };
   }
   if (view.hasProgram === undefined) {
-    return { buy: false, cost, why: "the gate probe has not reported whether the program is on home" };
+    return { buy: false, cost };
   }
-  if (view.hasProgram) return { buy: false, cost, why: "already owned" };
+  if (view.hasProgram) return { buy: false, cost };
 
   if (!(view.money * DARKSCAPE_AFFORDABLE_SHARE >= cost)) {
-    return {
-      buy: false,
-      cost,
-      why: `costs more than ${Math.round(DARKSCAPE_AFFORDABLE_SHARE * 100)}% of liquid cash`,
-    };
+    return { buy: false, cost };
   }
-  return { buy: true, cost, why: "darknet access, and it is small against the bankroll" };
+  return { buy: true, cost };
 }

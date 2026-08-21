@@ -3,8 +3,7 @@ import type { Blocker } from "./requirements.ts";
 import type { WorkType } from "./rep.ts";
 
 /** The vocabulary of a faction decision: what we are trying to do, what we do
- * next, and — the part that makes it reviewable — why, what else we considered,
- * and what would make us reconsider. */
+ * next, what else we considered, and what would make us reconsider. */
 
 export interface FactionObjective {
   /** Factions committed to, best first. */
@@ -15,7 +14,6 @@ export interface FactionObjective {
   value: number;
   /** Factions foreclosed for this install cycle, and by which membership. */
   foreclosed: { name: string; bannedBy: string }[];
-  why: string;
   /** The one package being pursued now. The compatible faction set is not an
    * actionable intent; this is what other features should prepare. */
   intent?: FactionIntent;
@@ -62,22 +60,21 @@ export interface FactionIntent {
    * faster. Kept separate so the arbiter can reserve both obligations. */
   donationCost: number;
   purpose: "augmentations" | "favor";
-  why: string;
 }
 
 export type FactionAction =
-  | { type: "idle"; reason: "blocked" | "waiting" | "continue" | "slot"; why: string }
-  | { type: "joinFaction"; faction: string; why: string }
-  | { type: "workForFaction"; faction: string; workType: WorkType; focus: boolean; why: string }
-  | { type: "stopWork"; why: string }
-  | { type: "donate"; faction: string; amount: number; purchaseCost?: number; why: string }
-  | { type: "purchaseAugmentation"; faction: string; augmentation: string; why: string }
-  | { type: "graft"; augmentation: string; why: string }
-  | { type: "travelTo"; city: string; why: string }
+  | { type: "idle"; reason: "blocked" | "waiting" | "continue" | "slot" }
+  | { type: "joinFaction"; faction: string }
+  | { type: "workForFaction"; faction: string; workType: WorkType; focus: boolean }
+  | { type: "stopWork" }
+  | { type: "donate"; faction: string; amount: number; purchaseCost?: number }
+  | { type: "purchaseAugmentation"; faction: string; augmentation: string }
+  | { type: "graft"; augmentation: string }
+  | { type: "travelTo"; city: string }
   /** In the union so the sim and driver can execute it, but `decide` NEVER
    *  selects it: spec/features.md gives the reset cadence to `progression`,
    *  and factions emits `recommendInstall` instead. */
-  | { type: "installAugmentations"; why: string };
+  | { type: "installAugmentations" };
 
 /** A condition that, when it changes, invalidates the current plan. Compared
  * shallowly against the previous tick's values. */
@@ -99,7 +96,6 @@ export interface Until {
 export interface ScoredAlternative {
   label: string;
   value: number;
-  why: string;
 }
 
 export interface FactionDecision {
@@ -124,7 +120,7 @@ export interface FactionDecision {
   invalidation: InvalidationKey[];
   /** Set when the run should end: nothing further is buyable and banked
    *  reputation is worth more as favor than as more of this run. */
-  recommendInstall?: { why: string; augmentations: string[] };
+  recommendInstall?: { augmentations: string[] };
   /** The final sweep cannot make its first purchase from cash alone, but the
    *  stock book can close the gap. Published separately from recommendInstall
    *  so progression may ask stock to liquidate without treating an empty
@@ -134,7 +130,6 @@ export interface FactionDecision {
     price: number;
     cash: number;
     pendingProceeds: number;
-    why: string;
   };
   /** The next augmentation this plan intends to buy, priced at ITS SLOT in the
    *  purchase order rather than at today's queue depth. Published so the driver has
@@ -149,7 +144,7 @@ export interface FactionDecision {
    *  income the drain has already declined to spend. */
   drainCeiling?: number;
   /** Set when the feature genuinely cannot act — reported, never spun on. */
-  blocked?: { why: string };
+  blocked?: Record<string, never>;
 }
 
 /** Memory carried between ticks. Pure data, owned by the driver. */

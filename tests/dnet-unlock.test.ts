@@ -26,35 +26,27 @@ describe("buying DarkscapeNavigator.exe", () => {
   });
 
   test("bought when affordable and absent", () => {
-    const decision = stepDarkscape(view());
-    expect(decision.buy).toBe(true);
-    expect(decision.why).toContain("darknet access");
+    expect(stepDarkscape(view()).buy).toBe(true);
   });
 
   test("never bought in BN15 or with an active SF15", () => {
     // Prestige.ts re-grants the program, and TOR, at every install under
     // canAccessBitNodeFeature(15). Buying would be a straight loss.
     for (const redundant of [{ bitNode: 15 }, { sf15: 1 }, { bitNode: 15, sf15: 3 }]) {
-      const decision = stepDarkscape(view(redundant));
-      expect(decision.buy).toBe(false);
-      expect(decision.why).toContain("free");
+      expect(stepDarkscape(view(redundant)).buy).toBe(false);
     }
   });
 
-  test("BN15 wins over an unprobed gate, since the answer cannot change", () => {
-    // Ordering matters: the redundancy guard must fire before the probe check,
-    // or a BN15 run would report "not probed yet" for ever.
-    expect(stepDarkscape(view({ bitNode: 15, hasProgram: undefined })).why).toContain("free");
+  test("BN15 with an unprobed gate still refuses without waiting on the probe", () => {
+    expect(stepDarkscape(view({ bitNode: 15, hasProgram: undefined })).buy).toBe(false);
   });
 
   test("not bought before the gate probe has reported", () => {
-    const decision = stepDarkscape(view({ hasProgram: undefined }));
-    expect(decision.buy).toBe(false);
-    expect(decision.why).toContain("gate probe");
+    expect(stepDarkscape(view({ hasProgram: undefined })).buy).toBe(false);
   });
 
   test("not bought when already owned", () => {
-    expect(stepDarkscape(view({ hasProgram: true }))).toMatchObject({ buy: false, why: "already owned" });
+    expect(stepDarkscape(view({ hasProgram: true })).buy).toBe(false);
   });
 
   test("the affordability guard is what stops an unpriced claim starving the farm", () => {
@@ -64,7 +56,7 @@ describe("buying DarkscapeNavigator.exe", () => {
     expect(stepDarkscape(view({ money: DARKSCAPE_TOTAL_COST })).buy).toBe(false);
     expect(stepDarkscape(view({ money: RICH - 1 })).buy).toBe(false);
     expect(stepDarkscape(view({ money: RICH })).buy).toBe(true);
-    expect(stepDarkscape(view({ money: 0 })).why).toContain("liquid cash");
+    expect(stepDarkscape(view({ money: 0 })).buy).toBe(false);
   });
 
   test("not bought for a run that has dnet switched off", () => {
@@ -73,9 +65,7 @@ describe("buying DarkscapeNavigator.exe", () => {
     // The signal is the profile override, NOT activeFeatures — that set is
     // derived from driverEnabled, so dnet is absent from it while still locked
     // and gating on it would deadlock the purchase.
-    const decision = stepDarkscape(view({ dnetDisabled: true }));
-    expect(decision.buy).toBe(false);
-    expect(decision.why).toContain("switched off");
+    expect(stepDarkscape(view({ dnetDisabled: true })).buy).toBe(false);
   });
 
   test("locked is not the same as switched off, which is what makes the purchase possible", () => {

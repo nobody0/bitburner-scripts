@@ -24,21 +24,15 @@ export interface GoScheduleView {
 }
 
 export type GoSchedule =
-  | { kind: "play"; game: GoGameCandidate; why: string }
-  | { kind: "filler"; game: GoGameCandidate; preferred: GoGameCandidate; why: string }
-  | { kind: "hold"; preferred: GoGameCandidate; resumeInSec: number; why: string };
+  | { kind: "play"; game: GoGameCandidate }
+  | { kind: "filler"; game: GoGameCandidate; preferred: GoGameCandidate }
+  | { kind: "hold"; preferred: GoGameCandidate; resumeInSec: number };
 
 export function planGoSchedule(view: GoScheduleView): GoSchedule | undefined {
   const preferred = view.candidates[0];
   if (!preferred) return undefined;
   if (preferred.waitSec <= view.cadenceSec) {
-    return {
-      kind: "play",
-      game: preferred,
-      why: preferred.aligned
-        ? `certified entry within the ${view.cadenceSec}s cadence`
-        : "best candidate is available now",
-    };
+    return { kind: "play", game: preferred };
   }
   // The window is real. A candidate that starts now and completes — with
   // margin — before the preferred entry tick costs nothing: pick the most
@@ -52,19 +46,9 @@ export function planGoSchedule(view: GoScheduleView): GoSchedule | undefined {
     && candidate.expectedGameSec * view.fillerMarginFactor + view.fillerOverheadSec <= preferred.waitSec,
   );
   if (filler) {
-    return {
-      kind: "filler",
-      game: filler,
-      preferred,
-      why: `${filler.opponent} (~${Math.round(filler.expectedGameSec)}s) fits inside the ${Math.round(preferred.waitSec)}s ${preferred.opponent} entry window`,
-    };
+    return { kind: "filler", game: filler, preferred };
   }
-  return {
-    kind: "hold",
-    preferred,
-    resumeInSec: preferred.waitSec,
-    why: `no game fits the ${Math.round(preferred.waitSec)}s window before ${preferred.opponent}'s certified entry`,
-  };
+  return { kind: "hold", preferred, resumeInSec: preferred.waitSec };
 }
 
 /** The candidate whose value prices the RAM the next start will displace.

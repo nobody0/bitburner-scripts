@@ -23,8 +23,8 @@ describe("wait-aware ranking", () => {
   test("an aligned candidate with a long wait ranks below a slightly weaker zero-wait opponent, and a short wait flips it back", () => {
     const base = {
       demands: {
-        Illuminati: { seconds: 10_000, share: 1, why: "hacking speed" },
-        "The Black Hand": { seconds: 9_000, share: 1, why: "hacking income" },
+        Illuminati: { seconds: 10_000, share: 1 },
+        "The Black Hand": { seconds: 9_000, share: 1 },
       },
     } as const;
     const longWait = rankGoGames(rewardView({
@@ -47,7 +47,7 @@ describe("wait-aware ranking", () => {
   test("both variants of a playbook opponent are offered, and the aligned one carries its entry tick", () => {
     const ranked = rankGoGames(rewardView({
       opponents: ["Illuminati"],
-      demands: { Illuminati: { seconds: 10_000, share: 1, why: "hacking speed" } },
+      demands: { Illuminati: { seconds: 10_000, share: 1 } },
       playbookEntries: { Illuminati: { waitSec: 60, entryPlaytime: 424_242 } },
     }));
     const aligned = ranked.filter((candidate) => candidate.aligned);
@@ -59,7 +59,7 @@ describe("wait-aware ranking", () => {
   });
 
   test("without playbook entries every candidate is unaligned with zero wait (legacy behavior)", () => {
-    const ranked = rankGoGames(rewardView({ demands: { Netburners: { seconds: 5_000, share: 1, why: "hacknet" } } }));
+    const ranked = rankGoGames(rewardView({ demands: { Netburners: { seconds: 5_000, share: 1 } } }));
     expect(ranked.every((candidate) => !candidate.aligned && candidate.waitSec === 0)).toBe(true);
   });
 });
@@ -108,8 +108,8 @@ describe("favor value near an install", () => {
       opponents: ["Illuminati", "????????????"],
       installRemainingSec: 139,
       demands: {
-        Illuminati: { seconds: 139, share: 1, why: "hacking speed for the climb" },
-        "????????????": { seconds: 139, share: 1, why: "hacking level for the climb" },
+        Illuminati: { seconds: 139, share: 1 },
+        "????????????": { seconds: 139, share: 1 },
       },
     }));
     expect(ranked[0]!.opponent).toBe("Illuminati");
@@ -160,7 +160,6 @@ function candidate(overrides: Partial<GoGameCandidate>): GoGameCandidate {
     horizonNodePower: 10,
     horizonTransientSecSaved: 10,
     horizonFavorSecSaved: 0,
-    why: "test",
     ...overrides,
   };
 }
@@ -221,7 +220,7 @@ describe("planGoSchedule", () => {
     // Scheduling reads the ranked list; it does not re-judge the reward.
     const netburners = rankGoGames(rewardView({
       opponents: ["Netburners"],
-      demands: { Netburners: { seconds: 10_000, share: 0.03, why: "a three-percent Hacknet share" } },
+      demands: { Netburners: { seconds: 10_000, share: 0.03 } },
     }))[0]!;
     // Worth a small fraction of the preferred opponent, by the honest
     // valuation rather than by any rule about who Netburners is…
@@ -274,7 +273,7 @@ describe("who pays for the dodge", () => {
 
 describe("capped reward elasticity", () => {
   test("a gain cap limits what a large multiplier can deliver", () => {
-    const demand = { seconds: 10_000, share: 1, why: "crime money" } as const;
+    const demand = { seconds: 10_000, share: 1 } as const;
     const stats = [{ opponent: "Slum Snakes" as const, wins: 0, losses: 0, winStreak: 0, rep: 0, bonusPercent: 0 }];
     const uncapped = rankGoGames(rewardView({ stats, demands: { "Slum Snakes": demand } }))
       .find((candidate) => candidate.opponent === "Slum Snakes")!;

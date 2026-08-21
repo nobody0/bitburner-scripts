@@ -54,13 +54,11 @@ export type IncomeAnnouncement =
       state: "measured";
       /** Money per second this feature expects to earn if left alone. */
       perSec: number;
-      why: string;
     }
   | {
       by: string;
       state: "unknown";
       reason: string;
-      why: string;
     };
 
 /** An announcement about any channel — the money-only form plus what it is in. */

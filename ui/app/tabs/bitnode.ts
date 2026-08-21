@@ -338,10 +338,7 @@ export const bitnodeTab: Tab = {
               )
             : note(lifecycle.installWanted
                 ? "all destructive-reset barriers acknowledged"
-                : "install is not economically due yet"))
-          // An install that runs THROUGH a guard is the one decision a reader
-          // will not be able to reconstruct from the barriers above.
-          + (lifecycle.installOverrideWhy ? note(`guard overridden: ${esc(lifecycle.installOverrideWhy)}`) : ""),
+                : "install is not economically due yet")),
         )
       : "";
     // Both cards read only optional plan fields (they postdate recorded runs).
@@ -465,9 +462,9 @@ export const bitnodeTab: Tab = {
       // is not delayed, it is cancelled.
       ((arbitration?.slotValues ?? []).length
         ? table(
-            ["bid", "feature", "worth (s)", "priced on"],
+            ["claim", "feature", "worth (s)", "priced on"],
             (arbitration?.slotValues ?? []).map((bid) => [
-              esc(bid.why),
+              esc(bid.id),
               esc(bid.by),
               bid.pricing === "hard"
                 ? `<span class="muted">lock @ ${fmtNum(bid.priority)}</span>`

@@ -112,7 +112,7 @@ function view(over: Partial<CareerView> = {}): CareerView {
 }
 
 function need(over: Partial<Need> & Pick<Need, "kind" | "target" | "have">): Need {
-  return { by: "factions", weight: 1, urgency: "blocking", why: "test", ...over };
+  return { by: "factions", weight: 1, urgency: "blocking", ...over };
 }
 
 describe("career as the needs-board consumer", () => {
@@ -148,7 +148,6 @@ describe("career as the needs-board consumer", () => {
     const decision = stepCareer(view({ crimes: [shoplift, homicide, rich] }), postNeeds([]));
     expect(decision.incomeFallback).toBe(true);
     expect(decision.action.subject).toBe("Heist");
-    expect(decision.why).toContain("maximising income");
   });
 
   test("the NEARER of two thresholds on one outcome sets the distance left", () => {
@@ -196,7 +195,6 @@ describe("career as the needs-board consumer", () => {
       postNeeds([need({ kind: "karma", target: -45, have: 0, weight: 10 })]),
     );
     expect(decision.action.type).toBe("idle");
-    expect(decision.action.why).toContain("holds Player.currentWork");
   });
 
   test("the continuation guard stops re-issuing the same crime", () => {
@@ -207,7 +205,6 @@ describe("career as the needs-board consumer", () => {
       postNeeds([need({ kind: "karma", target: -45, have: 0, weight: 10 })]),
     );
     expect(decision.action.type).toBe("idle");
-    expect(decision.action.why).toContain("already committing");
   });
 
   test("ranking is deterministic under ties", () => {
@@ -454,7 +451,7 @@ describe("a program contests the slot on the time it blocks it", () => {
     // `ranked[0]` is what the slot would run; the emitted action is the
     // in-flight write's own continuation.
     expect(nearlyDone.ranked[0]!.action).toMatchObject({ type: "program", subject: "BruteSSH.exe" });
-    expect(nearlyDone.action).toMatchObject({ type: "idle", why: "already committing BruteSSH.exe" });
+    expect(nearlyDone.action).toMatchObject({ type: "idle" });
   });
 
   test("progress on a DIFFERENT program does not discount this one", () => {
@@ -569,7 +566,6 @@ describe("career serves the company chain", () => {
     );
     expect(decision.action).toMatchObject({ type: "company", subject: "NWO" });
     expect(decision.incomeFallback).toBe(false);
-    expect(decision.why).not.toContain("Heist");
   });
 
   test("the formula prior prices an unmeasured company instead of the neutral 1 rep/sec", () => {
@@ -581,7 +577,6 @@ describe("career serves the company chain", () => {
       postNeeds([need({ kind: "companyRep", subject: "NWO", target: 400_000, have: 0, weight: 6 })]),
     );
     const company = decision.ranked.find((entry) => entry.action.type === "company");
-    expect(company!.action.why).toContain("estimated company rep/sec");
     expect(company!.contributions[0]!.perSec).toBe(40);
   });
 
@@ -742,7 +737,6 @@ describe("a menu that is still filling", () => {
       postNeeds([opener]),
     );
     expect(decision.action.type).toBe("idle");
-    expect(decision.why).toBe("menu incomplete");
   });
 
   test("starts the same work once the menu is complete", () => {
@@ -767,7 +761,6 @@ describe("a menu that is still filling", () => {
       postNeeds([opener]),
     );
     expect(decision.action.type).not.toBe("stop");
-    expect(decision.why).not.toBe("menu incomplete");
   });
 
   test("continuous work is unaffected — it can be swapped the moment something better lands", () => {

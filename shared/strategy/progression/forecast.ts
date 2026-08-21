@@ -180,7 +180,7 @@ export interface InstallForecastView {
   installWanted?: boolean;
   queuedCount: number;
   phase: "start" | "finishUp" | "ending";
-  intent?: Omit<FactionIntent, "why">;
+  intent?: FactionIntent;
   workMeasured: boolean;
   moneyMeasured: boolean;
   finalSweepReady: boolean;
@@ -198,7 +198,7 @@ export interface InstallForecastView {
   /** Whether the selected route can survive an economic reset right now. */
   optionalInstallAllowed?: boolean;
   /** Earliest reset imposed by the selected route. */
-  mandatory?: { sec: number; measured: boolean; why: string };
+  mandatory?: { sec: number; measured: boolean };
 }
 
 /** Estimate the current committed install cycle. The faction intent already
@@ -232,7 +232,7 @@ export function installForecast(now: number, view: InstallForecastView, basis: s
   const mandatoryComponents = view.mandatory
     ? [
         {
-          what: view.mandatory.why,
+          what: "mandatory install",
           resource: "install" as const,
           sec: Math.max(0, view.mandatory.sec),
           measured: view.mandatory.measured,

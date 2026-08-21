@@ -1,4 +1,3 @@
-import { formatNumber, formatScientific } from "../../format.ts";
 import {
   NEUROFLUX,
   augCost,
@@ -391,7 +390,6 @@ export function factionPackageFrontier(
       purchaseCost,
       donationCost,
       rate: value * horizonFraction / etaSec,
-      why: "",
     });
   }
 
@@ -410,9 +408,6 @@ export function factionPackageFrontier(
     const marginalSec = Math.max(1, pkg.etaSec - (previous?.etaSec ?? 0));
     pkg.marginalRate = marginalValue / marginalSec;
     pkg.marginalActivationRate = marginalActivationValue / marginalSec;
-    pkg.why = previous
-      ? `${pkg.augmentations.length} augmentation(s) by ${formatNumber(pkg.repTarget)} rep; marginal ${formatScientific(pkg.marginalRate)} value/sec`
-      : `${pkg.augmentations.length} augmentation(s) in ${Math.round(pkg.etaSec)}s; ${formatScientific(pkg.rate)} value/sec`;
     frontier.push(pkg);
     bestValue = pkg.value;
   }
@@ -587,15 +582,6 @@ export function selectFactionPackage(
     intentIndex = bestExtension.index;
   }
   const runner = bestRunner(winner.faction, intent, frontiers, view, residualCache);
-  const runnerRate = runner?.rate ?? 0;
-  intent = {
-    ...intent,
-    why: terminalPill
-      ? `${intent.why}; The Red Pill is mandatory for the selected ${view.route} route`
-      : runner
-        ? `${intent.why}; stop before the next extension falls below ${runner.faction} at ${formatScientific(runnerRate)} value/sec`
-        : `${intent.why}; no competing faction package fits the horizon`,
-  };
 
   const winnerStanding = view.factions.find((standing) => standing.name === winner.faction)!;
   const enemies = new Set(winnerStanding.enemies);

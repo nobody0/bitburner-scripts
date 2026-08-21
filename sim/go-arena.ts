@@ -412,9 +412,8 @@ export async function playGoArenaGame(
       let decision: GoDecision;
       if (turns === 0 && forcedOpening) {
         decision = {
-          action: { type: "move", x: forcedOpening[0], y: forcedOpening[1], why: "forced opening" },
+          action: { type: "move", x: forcedOpening[0], y: forcedOpening[1] },
           ranked: [],
-          why: "forced opening",
           finalists: 0,
           positionValue: 0.5,
         };
@@ -509,14 +508,13 @@ export async function playGoArenaGame(
         consecutivePasses++;
       }
       if (includeTrace) {
-        const { why: _why, ...black } = decision.action;
         trace.push({
           turn: turns - 1,
           dispatchPlaytime: inputDispatchPlaytime,
           board: inputBoard,
           previousBoards: inputHistory,
           consecutivePasses: inputConsecutivePasses,
-          black,
+          black: decision.action,
           predicted: decision.forecast ?? [],
           white: white.type === GoPlayType.move
             ? { type: "move", x: white.x, y: white.y }

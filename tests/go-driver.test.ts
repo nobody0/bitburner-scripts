@@ -105,7 +105,7 @@ async function runGrantedTurn(
     grants: {
       money: 0,
       ramClaims: new Map([["action:turn", {
-        by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50, why: "test",
+        by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50,
       }]]),
       slot: false,
       result,
@@ -285,12 +285,12 @@ describe("Go live seed observation", () => {
 
   test("a boundary replan executes the exact V9 action even when move flips to pass", async () => {
     const move: GoDecision = {
-      action: { type: "move", x: 0, y: 0, why: "first seed" },
-      ranked: [], why: "test", finalists: 1, positionValue: 0.5, forecast: [],
+      action: { type: "move", x: 0, y: 0 },
+      ranked: [], finalists: 1, positionValue: 0.5, forecast: [],
     };
     const pass: GoDecision = {
-      action: { type: "pass", why: "second seed" },
-      ranked: [], why: "test", finalists: 1, positionValue: 0.5, forecast: [],
+      action: { type: "pass" },
+      ranked: [], finalists: 1, positionValue: 0.5, forecast: [],
     };
     const evaluation = (decision: GoDecision): GoWorkerEvaluation => ({
       decision,
@@ -425,7 +425,7 @@ describe("Go live seed observation", () => {
       grants: {
         money: 0,
         ramClaims: new Map([["action:turn", {
-          by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50, why: "test",
+          by: "go", id: "action:turn", resource: "ram", amount: 10, priority: 50,
         }]]),
         slot: false,
         result,
@@ -543,8 +543,8 @@ describe("Go live seed observation", () => {
 
 describe("Go certified playbook integration", () => {
   const neuralMove: GoDecision = {
-    action: { type: "move", x: 2, y: 2, why: "neural" },
-    ranked: [], why: "test", finalists: 1, positionValue: 0.5, forecast: [],
+    action: { type: "move", x: 2, y: 2 },
+    ranked: [], finalists: 1, positionValue: 0.5, forecast: [],
   };
   const evaluation = (decision: GoDecision): GoWorkerEvaluation => ({
     decision,
@@ -615,7 +615,7 @@ describe("Go certified playbook integration", () => {
       install: async () => ({ positionId: "miss", preparationMs: 0, cached: true }),
       evaluate: async () => evaluation({
         ...neuralMove,
-        action: { type: "move", x: 2, y: ++neuralCalls, why: "neural" },
+        action: { type: "move", x: 2, y: ++neuralCalls },
       }),
       playbook: async (_positionId, _dispatchPlaytime, credit) => {
         credits.push(credit);

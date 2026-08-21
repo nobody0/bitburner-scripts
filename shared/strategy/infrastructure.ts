@@ -1,5 +1,4 @@
-import { formatMoney, formatNumber } from "../format.ts";
-import { coarseHorizonSec, scoreInvestment, type ScoredInvestment } from "./investment.ts";
+import { scoreInvestment, type ScoredInvestment } from "./investment.ts";
 import type { Need } from "./needs.ts";
 
 /** A lower-urgency prerequisite may be useful later, but it must not drain the
@@ -91,7 +90,6 @@ export interface HomeRamDecision extends ScoredInvestment {
   addedRam: number;
   incomePerSec: number;
   worthBuying: boolean;
-  why: string;
 }
 
 export type InfrastructureKind = "homeRam" | "homeCore" | "buyServer" | "upgradeServer";
@@ -113,7 +111,6 @@ export interface InfrastructureOption {
 
 export interface ScoredInfrastructure extends InfrastructureOption, ScoredInvestment {
   worthBuying: boolean;
-  why: string;
 }
 
 export interface InfrastructureDecision {
@@ -122,8 +119,6 @@ export interface InfrastructureDecision {
   /** Best productive income/sec per dollar, including temporarily
    * unaffordable quotes. Used to value the compounding option of money now. */
   reinvestmentReturnPerDollarSec: number;
-  why: string;
-  hold?: string;
 }
 
 /** The purchased-server aggregate carried by the fleet topic. Kept structural
@@ -173,9 +168,6 @@ export function scoreHomeRam(view: HomeRamView): HomeRamDecision {
     addedRam,
     incomePerSec,
     worthBuying,
-    why: worthBuying
-      ? `${formatNumber(addedRam)} GB adds about ${formatMoney(incomePerSec)}/sec and pays back in ${Math.round(scored.paybackSec)}s`
-      : `home RAM does not repay ${formatMoney(view.upgradeCost)} within ${coarseHorizonSec(view.horizonSec)}s`,
   };
 }
 
@@ -184,17 +176,10 @@ export function scoreInfrastructure(option: InfrastructureOption, horizonSec: nu
   const horizon = option.horizonSec ?? horizonSec;
   const scored = scoreInvestment({ cost: option.cost, incomePerSec: option.incomePerSec }, horizon);
   const worthBuying = Number.isFinite(option.cost) && option.cost > 0 && scored.netOverHorizon > 0;
-  const label = option.kind === "homeRam" ? "home RAM"
-    : option.kind === "homeCore" ? "a home core"
-    : option.kind === "buyServer" ? `${formatNumber(option.targetRam ?? option.addedRam)} GB cloud server`
-    : `${option.host ?? "cloud server"} to ${formatNumber(option.targetRam ?? 0)} GB`;
   return {
     ...option,
     ...scored,
     worthBuying,
-    why: worthBuying
-      ? `${label} adds about ${formatMoney(option.incomePerSec)}/sec and pays back in ${Math.round(scored.paybackSec)}s`
-      : `${label} does not repay ${formatMoney(option.cost)} within ${coarseHorizonSec(horizon)}s`,
   };
 }
 
@@ -231,9 +216,9 @@ export function stepInfrastructure(
       return ak < bk ? -1 : ak > bk ? 1 : 0;
     });
   const best = ranked[0];
-  if (!best) return { ranked, reinvestmentReturnPerDollarSec, why: "no infrastructure quotes available", hold: "nothing to buy" };
+  if (!best) return { ranked, reinvestmentReturnPerDollarSec };
   if (!best.worthBuying) {
-    return { ranked, reinvestmentReturnPerDollarSec, why: "every infrastructure purchase loses money before the horizon", hold: best.why };
+    return { ranked, reinvestmentReturnPerDollarSec };
   }
-  return { buy: best, ranked, reinvestmentReturnPerDollarSec, why: best.why };
+  return { buy: best, ranked, reinvestmentReturnPerDollarSec };
 }

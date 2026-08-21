@@ -199,7 +199,6 @@ export function buildView(ctx: DriverContext): StockView | undefined {
   const liquidate = plan?.liquidationWanted === true
     && blockers !== undefined
     && blockers.every((blocker) => blocker.kind === "stock" || blocker.kind === "augmentations");
-  const liquidateWhy = "progression requested liquidation and no unrelated safety barrier remains";
 
   const nodeMults = effectiveBitNodeMultipliers(
     ctx.caps.bitNode,
@@ -238,7 +237,6 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     positionHorizonSec,
     unlockHorizonSec: nodeHorizonSec,
     liquidate,
-    ...(liquidate ? { liquidateWhy } : {}),
   };
 }
 
@@ -463,7 +461,7 @@ function wantedActions(plan: StockPlan): StockAction[] {
     ...plan.exits,
     ...(plan.unlock ? [plan.unlock.action] : []),
     ...(plan.entry
-      ? [{ type: "buy" as const, sym: plan.entry.sym, shares: plan.entry.shares, short: plan.entry.side === "short", why: plan.entry.why }]
+      ? [{ type: "buy" as const, sym: plan.entry.sym, shares: plan.entry.shares, short: plan.entry.side === "short" }]
       : []),
   ];
 }
@@ -476,7 +474,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   const wanted = wantedActions(plan);
   const methods = stockMethods(wanted);
   if (methods.length > 0) {
-    out.push(actionRamClaim(ctx, "stock", stockClaimId(wanted), methods, "stock action batch"));
+    out.push(actionRamClaim(ctx, "stock", stockClaimId(wanted), methods));
   }
 
   if (plan.unlock) {
@@ -494,7 +492,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       value: moneyStepValue(ctx.state, plan.unlock.gainPerSec, ctx.now),
       ratePerSec: plan.unlock.gainPerSec,
       returnPerDollarSec: plan.unlock.gainPerSec / Math.max(1, plan.unlock.investmentCost),
-      why: plan.unlock.why,
     });
   }
 
@@ -515,7 +512,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       ratePerSec: plan.entry.expectedProfit / Math.max(1, plan.entry.holdTicks * 6),
       returnPerDollarSec:
         plan.entry.expectedProfit / Math.max(1, plan.entry.cost * plan.entry.holdTicks * 6),
-      why: plan.entry.why,
     });
   }
   return out;

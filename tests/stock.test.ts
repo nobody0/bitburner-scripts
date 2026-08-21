@@ -400,7 +400,6 @@ describe("stepStock", () => {
   test("it refuses to trade a coin flip", () => {
     const { decision } = run(view({ symbols: [symbol({ forecast: 0.5, volatility: 0.0045 })] }), 20, (t) => t % 2 === 0);
     expect(decision.plan.entry).toBeUndefined();
-    expect(decision.plan.hold).toContain("entry band");
   });
 
   test("it refuses a horizon too short to clear the round trip", () => {
@@ -411,7 +410,6 @@ describe("stepStock", () => {
       () => true,
     );
     expect(decision.plan.entry).toBeUndefined();
-    expect(decision.plan.hold).toContain("round trip");
   });
 
   test("it sells everything and buys nothing when an install is imminent", () => {
@@ -422,7 +420,6 @@ describe("stepStock", () => {
     expect(decision.plan.exits).toHaveLength(1);
     expect(decision.plan.exits[0]).toMatchObject({ type: "sell", sym: "ECP", short: false });
     expect(decision.plan.entry).toBeUndefined();
-    expect(decision.plan.hold).toContain("install");
     // Liquidation raises money, so it is never gated on a grant.
     expect(fundedActions(decision.plan, granted(0))).toHaveLength(1);
   });
@@ -507,7 +504,7 @@ describe("stepStock", () => {
     memory.history.tick = MIN_HOLD_TICKS + 1;
     const later = stepStock(view({ symbols: [held] }), memory);
     expect(later.plan.exits).toHaveLength(1);
-    expect(later.plan.exits[0]!.why).toContain("turned against the long");
+    expect(later.plan.exits[0]).toMatchObject({ type: "sell", sym: "ECP", short: false });
   });
 
   test("it publishes manipulation intent for a held symbol, on the right op — FARMABLE hosts only", () => {
@@ -520,7 +517,6 @@ describe("stepStock", () => {
     expect(byHost["ecorp"]).toBeDefined();
     // grow pushes the second-order forecast UP, so a long is driven by grows.
     expect(byHost["ecorp"]!.side).toBe("long");
-    expect(byHost["ecorp"]!.why).toContain("grow ecorp");
     expect(byHost["ecorp"]!.valuePerOp).toBeGreaterThan(0);
 
     // A host the farm cannot work gets NO intent: publishing the metadata host
@@ -619,7 +615,6 @@ describe("the unlock ladder", () => {
     expect(decision.plan.unlock?.netOverHorizon).toBe(
       decision.plan.unlock!.gainPerSec * 86_400 - decision.plan.unlock!.investmentCost,
     );
-    expect(decision.plan.unlock?.why).toContain("both are priced together");
   });
 
   test("the ladder stops when the money would leave nothing to trade with", () => {
@@ -768,7 +763,7 @@ describe("when to liquidate — the signal, not the solver", () => {
     // there is time to trade however long the phase has been latched.
     const view = buildView(ctxWith({
       ...ending,
-      installBlockers: [{ kind: "factions", why: "waiting for the final sweep" }],
+      installBlockers: [{ kind: "factions" }],
     }));
     expect(view?.liquidate).toBe(false);
   });
@@ -776,7 +771,7 @@ describe("when to liquidate — the signal, not the solver", () => {
   test("a graft in flight does not liquidate either", () => {
     const view = buildView(ctxWith({
       ...ending,
-      installBlockers: [{ kind: "graft", why: "grafting in progress" }],
+      installBlockers: [{ kind: "graft" }],
     }));
     expect(view?.liquidate).toBe(false);
   });
@@ -784,7 +779,7 @@ describe("when to liquidate — the signal, not the solver", () => {
   test("the book being the last barrier DOES liquidate", () => {
     const view = buildView(ctxWith({
       ...ending,
-      installBlockers: [{ kind: "stock", why: "the book is not flat" }],
+      installBlockers: [{ kind: "stock" }],
     }));
     expect(view?.liquidate).toBe(true);
   });
@@ -795,8 +790,8 @@ describe("when to liquidate — the signal, not the solver", () => {
     const view = buildView(ctxWith({
       ...ending,
       installBlockers: [
-        { kind: "stock", why: "the book is not flat" },
-        { kind: "augmentations", why: "NeuroFlux Governor is still affordable" },
+        { kind: "stock" },
+        { kind: "augmentations" },
       ],
     }));
     expect(view?.liquidate).toBe(true);

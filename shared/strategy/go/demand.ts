@@ -59,7 +59,6 @@ export interface GoDemandView {
 
 interface ChannelDemand {
   sec: number;
-  why: string[];
 }
 
 function clamp01(value: number): number {
@@ -108,7 +107,7 @@ export function goDemands(view: GoDemandView): Partial<Record<GoRewardOpponent, 
   const runway = installHorizonSec(view.horizons);
   const channels: Partial<Record<ValuedResource, ChannelDemand>> = {};
 
-  const addChannel = (channel: ValuedResource, seconds: number, why: string): void => {
+  const addChannel = (channel: ValuedResource, seconds: number): void => {
     if (!(seconds > 0)) return;
     // With no faction API a reputation multiplier accelerates nothing, whether
     // the evidence came from a forecast or the board.
@@ -119,15 +118,14 @@ export function goDemands(view: GoDemandView): Partial<Record<GoRewardOpponent, 
     // horizon that bounds the reward itself.
     if (previous) {
       previous.sec = Math.min(runway, previous.sec + seconds);
-      previous.why.push(why);
     } else {
-      channels[channel] = { sec: Math.min(runway, seconds), why: [why] };
+      channels[channel] = { sec: Math.min(runway, seconds) };
     }
   };
 
-  const addComponent = (part: ForecastComponent, label: string): void => {
+  const addComponent = (part: ForecastComponent): void => {
     if (part.resource === "money" || part.resource === "hacking" || part.resource === "reputation") {
-      addChannel(part.resource, part.sec, label);
+      addChannel(part.resource, part.sec);
     } else if (part.resource === "augmentations") {
       // Aug acquisition is not a producer of its own. Before the count package
       // install it is paid for by the live income engine and often by faction
@@ -135,19 +133,19 @@ export function goDemands(view: GoDemandView): Partial<Record<GoRewardOpponent, 
       // a fresh Daedalus plan publish only `augCount`, so every Go candidate
       // appeared to save exactly zero seconds and play stopped for the entire
       // early node.
-      addChannel("money", part.sec, `${label}; augmentation funding`);
-      addChannel("reputation", part.sec * 0.5, `${label}; augmentation reputation`);
+      addChannel("money", part.sec);
+      addChannel("reputation", part.sec * 0.5);
     } else if (part.resource === "combat" && view.canRunBladeburner) {
       // Combat NEEDS are not gated the same way: gang and crime want the same
       // stats without Bladeburner. Only a forecast can name a route phase whose
       // producing subsystem this save does not have.
-      addChannel("combat", part.sec, label);
+      addChannel("combat", part.sec);
     }
   };
 
   if (view.horizons.install.state === "estimated") {
     for (const part of view.horizons.install.components) {
-      if (part.critical) addComponent(part, `install component: ${part.what}`);
+      if (part.critical) addComponent(part);
     }
   }
   if (view.horizons.node.state === "estimated") {
@@ -156,7 +154,7 @@ export function goDemands(view: GoDemandView): Partial<Record<GoRewardOpponent, 
       // real ETA, but this game's transient reward cannot survive to affect
       // them (notably BN1's post-Red Pill hacking regrow).
       if (part.resource === "install") break;
-      if (part.critical) addComponent(part, `node route component: ${part.what}`);
+      if (part.critical) addComponent(part);
     }
   }
   for (const need of view.openNeeds) {
@@ -164,7 +162,7 @@ export function goDemands(view: GoDemandView): Partial<Record<GoRewardOpponent, 
     // The board's own measured economics when it has them, and the shared
     // nominal window when it does not. The predecessor charged a weight-10 need
     // the ENTIRE runway, which is how the horizon saturated in the first place.
-    if (channel !== undefined) addChannel(channel, rankingValueSec(need), need.why);
+    if (channel !== undefined) addChannel(channel, rankingValueSec(need));
   }
 
   const shares = Object.keys(view.incomeShares).length > 0 ? view.incomeShares : COLD_START_SHARES;
@@ -198,20 +196,17 @@ export function goDemands(view: GoDemandView): Partial<Record<GoRewardOpponent, 
     }
     let baseSec = 0;
     let weightedSec = 0;
-    const why: string[] = [];
     for (const [channel, sensitivity] of Object.entries(response) as [ValuedResource, number][]) {
       const demand = channels[channel];
       if (!demand) continue;
       baseSec += demand.sec;
       weightedSec += demand.sec * sensitivity;
-      why.push(...demand.why);
     }
     if (!(baseSec > 0) || !(weightedSec > 0)) continue;
     demands[opponent] = {
       seconds: Math.min(baseSec, runway),
       share: clamp01(weightedSec / baseSec),
       ...(gainCap !== undefined ? { gainCap } : {}),
-      why: [...new Set(why)].join("; "),
     };
   }
   return demands;

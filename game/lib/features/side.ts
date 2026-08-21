@@ -289,6 +289,6 @@ export const sideModule: FeatureModule = {
     pipelineData = undefined;
   },
   claims: (ctx) => (ctx.state.contractQueue?.length ?? ctx.state.topics.side?.contracts?.length)
-    ? [actionRamClaim(ctx, "side", CLAIM_ID, ["codingcontract.attempt"], "side contract")]
+    ? [actionRamClaim(ctx, "side", CLAIM_ID, ["codingcontract.attempt"])]
     : [],
 };

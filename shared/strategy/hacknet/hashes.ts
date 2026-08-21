@@ -1,6 +1,5 @@
 import type { Need, NeedUrgency } from "../needs.ts";
 import type { HackContext } from "../../formulas.ts";
-import { formatNumber } from "../../format.ts";
 import { solveCycle, type RamCaps, type TargetStatics } from "../targeting.ts";
 
 /** Pinned v3.0.1 registry for hash upgrade names, costs, targets, and effects:
@@ -32,7 +31,6 @@ export interface HashGoalCandidate {
   target?: string;
   /** Goal band. The baseline money conversion is zero. */
   priority: number;
-  why: string;
   /** Economic value over the remaining run, when it can be estimated. */
   valueDollars?: number;
   urgency?: NeedUrgency;
@@ -59,13 +57,12 @@ export interface RankedHashAction extends HashGoalCandidate {
 }
 
 export interface HashDecision {
-  spend?: { name: string; target?: string; count: number; cost: number; why: string };
+  spend?: { name: string; target?: string; count: number; cost: number };
   /** A goal worth saving for. Hashes must not be sold while this is set. */
-  reserve?: { name: string; target?: string; cost: number; missing: number; why: string };
+  reserve?: { name: string; target?: string; cost: number; missing: number };
   /** Required total capacity when the selected goal cannot fit in the bank. */
   capacityTarget?: number;
   ranked: RankedHashAction[];
-  why: string;
 }
 
 const urgencyValue: Record<NeedUrgency, number> = { blocking: 90, wanted: 65, nice: 40 };
@@ -148,22 +145,19 @@ export function stepHashes(view: HashView): HashDecision {
     if (!goal.fitsCapacity) {
       return {
         ranked,
-        reserve: { name: goal.name, target: goal.target, cost: goal.cost, missing: Math.max(0, goal.cost - view.current), why: goal.why },
+        reserve: { name: goal.name, target: goal.target, cost: goal.cost, missing: Math.max(0, goal.cost - view.current) },
         capacityTarget: goal.cost,
-        why: `${goal.name} serves the highest-value goal but needs ${formatNumber(Math.ceil(goal.cost))} hash capacity`,
       };
     }
     if (!goal.affordable) {
       return {
         ranked,
-        reserve: { name: goal.name, target: goal.target, cost: goal.cost, missing: goal.cost - view.current, why: goal.why },
-        why: `saving ${formatNumber(Math.ceil(goal.cost - view.current))} more hashes for ${goal.name}`,
+        reserve: { name: goal.name, target: goal.target, cost: goal.cost, missing: goal.cost - view.current },
       };
     }
     return {
       ranked,
-      spend: { name: goal.name, target: goal.target, count: 1, cost: goal.cost, why: goal.why },
-      why: goal.why,
+      spend: { name: goal.name, target: goal.target, count: 1, cost: goal.cost },
     };
   }
 
@@ -172,10 +166,9 @@ export function stepHashes(view: HashView): HashDecision {
     if (count > 0) {
       return {
         ranked,
-        spend: { name: sell.name, count, cost: sell.cost * count, why: "no higher-value hash goal; realize cash" },
-        why: "no higher-value hash goal; selling hashes for money",
+        spend: { name: sell.name, count, cost: sell.cost * count },
       };
     }
   }
-  return { ranked, why: view.productionPerSec > 0 ? "accumulating hashes" : "hash production is unavailable" };
+  return { ranked };
 }

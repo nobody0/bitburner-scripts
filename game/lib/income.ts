@@ -65,35 +65,32 @@ export function announcedIncome(state: GameState): IncomeAnnouncement[] {
       by: "hacking",
       state: "measured",
       perSec: Math.max(0, farmed ?? 0, farmEma ?? 0, predictedMoney ?? 0),
-      why: predictedMoney !== undefined
-        ? "committed farm solution, floored by measured script income"
-        : "measured current or rollup-smoothed script income",
     });
   } else {
-    out.push({ by: "hacking", state: "unknown", reason: "script income has not been observed", why: "current script income" });
+    out.push({ by: "hacking", state: "unknown", reason: "script income has not been observed" });
   }
 
   // Hacknet production is dollars only for nodes. Hash production is a
   // different currency until a spend decision converts it.
   const hacknet = state.topics.hacknet;
   if (hacknet?.hashes !== undefined) {
-    out.push({ by: "hacknet", state: "unknown", reason: "hash production has no measured dollar conversion rate", why: "node production" });
+    out.push({ by: "hacknet", state: "unknown", reason: "hash production has no measured dollar conversion rate" });
   } else if (hacknet?.productionPerSec !== undefined) {
-    out.push({ by: "hacknet", state: "measured", perSec: Math.max(0, hacknet.productionPerSec), why: "measured node production" });
+    out.push({ by: "hacknet", state: "measured", perSec: Math.max(0, hacknet.productionPerSec) });
   } else {
-    out.push({ by: "hacknet", state: "unknown", reason: "node production has not been observed", why: "node production" });
+    out.push({ by: "hacknet", state: "unknown", reason: "node production has not been observed" });
   }
 
   // GangGenInfo.moneyGainRate is money per 200ms engine cycle.
   const gangRate = state.topics.gang?.moneyGainRate;
   if (gangRate !== undefined) {
-    out.push({ by: "gang", state: "measured", perSec: Math.max(0, gangRate) * CYCLES_PER_SEC, why: "measured gang money gain" });
+    out.push({ by: "gang", state: "measured", perSec: Math.max(0, gangRate) * CYCLES_PER_SEC });
   }
 
   // Corporation revenue belongs to the corporation; dividends reach the player.
   const dividends = state.topics.corp?.dividendEarnings;
   if (dividends !== undefined) {
-    out.push({ by: "corp", state: "measured", perSec: Math.max(0, dividends), why: "measured shareholder dividends" });
+    out.push({ by: "corp", state: "measured", perSec: Math.max(0, dividends) });
   }
 
   // The market announces its expected profit over its expected hold.
@@ -104,27 +101,26 @@ export function announcedIncome(state: GameState): IncomeAnnouncement[] {
       by: "stock",
       state: "measured",
       perSec: entry.expectedProfit / (entry.holdTicks * (MS_PER_TICK / 1_000)),
-      why: "expected profit over the planned hold",
     });
   } else if (stock) {
-    out.push({ by: "stock", state: "unknown", reason: "no priced position hold is published", why: "expected market profit" });
+    out.push({ by: "stock", state: "unknown", reason: "no priced position hold is published" });
   }
 
   // Career publishes the menu it would actually select from. A published empty
   // or zero-paying menu is a measured zero; no plan is unknown.
   const careerPlan = state.topics.career?.plan;
   if (careerPlan) {
-    out.push({ by: "career", state: "measured", perSec: careerBestPerSec(state), why: "best ranked career option" });
+    out.push({ by: "career", state: "measured", perSec: careerBestPerSec(state) });
   } else {
-    out.push({ by: "career", state: "unknown", reason: "career has not published a ranked option", why: "best ranked career option" });
+    out.push({ by: "career", state: "unknown", reason: "career has not published a ranked option" });
   }
 
   // These features genuinely cannot turn their current topics into an income
   // rate. Announce that explicitly so absence can never be read as zero.
   out.push(
-    { by: "sleeves", state: "unknown", reason: "task options do not report assigned-sleeve earnings", why: "parallel sleeve income" },
-    { by: "bladeburner", state: "unknown", reason: "action ranking does not publish contract payouts", why: "contract income" },
-    { by: "side", state: "unknown", reason: "one-off contract rewards have no measured solve cadence", why: "coding-contract income" },
+    { by: "sleeves", state: "unknown", reason: "task options do not report assigned-sleeve earnings" },
+    { by: "bladeburner", state: "unknown", reason: "action ranking does not publish contract payouts" },
+    { by: "side", state: "unknown", reason: "one-off contract rewards have no measured solve cadence" },
   );
 
   return out;
@@ -229,11 +225,8 @@ export function announcedRates(state: GameState): RateAnnouncement[] {
       channel: HACKING_CHANNEL,
       state: "measured",
       perSec: bestExp,
-      why: predictedExp !== undefined
-        ? "committed farm solution, floored by measured fleet experience"
-        : "measured fleet hacking experience",
     }
-    : { by: "hacking", channel: HACKING_CHANNEL, state: "unknown", reason: "fleet experience has not been observed", why: "fleet hacking experience" });
+    : { by: "hacking", channel: HACKING_CHANNEL, state: "unknown", reason: "fleet experience has not been observed" });
 
   // Reputation has no background producer: only player work earns it, so the
   // bidders themselves are the whole field. Announced explicitly as unknown so
@@ -243,7 +236,6 @@ export function announcedRates(state: GameState): RateAnnouncement[] {
     channel: REPUTATION_CHANNEL,
     state: "unknown",
     reason: "faction reputation is produced only by the work slot itself",
-    why: "background reputation",
   });
 
   return out;

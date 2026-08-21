@@ -1,5 +1,3 @@
-import { formatMoney } from "../../format.ts";
-
 /** The stock market solver.
  *
  * Objective: maximise money at the end of the RUN, not at the end of the
@@ -151,8 +149,6 @@ export interface StockView {
   unlockHorizonSec: number;
   /** progression wants the book flat: reset imminent. Overrides everything. */
   liquidate: boolean;
-  /** Why, for the digest. */
-  liquidateWhy?: string;
 
   // No `incomePerSec` here, deliberately. An unlock's opportunity cost — what the
   // cash would earn elsewhere — is not this feature's judgement to make: the
@@ -187,11 +183,11 @@ export function positionBudget(view: Pick<StockView, "totalMoney">): number {
 // --- plan -------------------------------------------------------------------
 
 export type StockAction =
-  | { type: "buyWse"; cost: number; why: string }
-  | { type: "buyTix"; cost: number; why: string }
-  | { type: "buy4SApi"; cost: number; why: string }
-  | { type: "buy"; sym: string; shares: number; short: boolean; why: string }
-  | { type: "sell"; sym: string; shares: number; short: boolean; why: string };
+  | { type: "buyWse"; cost: number }
+  | { type: "buyTix"; cost: number }
+  | { type: "buy4SApi"; cost: number }
+  | { type: "buy"; sym: string; shares: number; short: boolean }
+  | { type: "sell"; sym: string; shares: number; short: boolean };
 
 export interface RankedSymbol {
   sym: string;
@@ -211,7 +207,6 @@ export interface RankedSymbol {
   expectedProfit: number;
   /** Notional we would deploy. */
   notional: number;
-  why: string;
 }
 
 export interface PositionTarget {
@@ -238,7 +233,6 @@ export interface PositionTarget {
   bid: number;
   forecast: number;
   volatility: number;
-  why: string;
 }
 
 export interface UnlockPurchase {
@@ -253,7 +247,6 @@ export interface UnlockPurchase {
   gainPerSec: number;
   paybackSec: number;
   netOverHorizon: number;
-  why: string;
 }
 
 /** What we want the farm to do to a symbol's price, and what that is worth.
@@ -273,7 +266,6 @@ export interface ManipulationIntent {
   valuePerOp: number;
   /** Notional the value is measured against. */
   notional: number;
-  why: string;
 }
 
 export interface StockPlan {
@@ -308,10 +300,6 @@ export interface StockPlan {
    *    "flat" while still intending to buy would let an install land on a
    *    position opened one pass later. */
   flat: boolean;
-  why: string;
-  /** Set when the feature is deliberately doing nothing. A stock feature that
-   *  holds because no edge clears the spread is WORKING. */
-  hold?: string;
   /** Set when something outside our control stops us: no WSE account, 4S
    *  disabled by the node's options, shorts unavailable. */
   blocker?: string;
@@ -408,8 +396,6 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
         ...(cycleTicks !== undefined ? { ticksUntilCycle: cycleTicks } : {}),
         observedTicks,
         flat: held.length === 0 && exits.length === 0,
-        why: exits.length > 0 ? `liquidating ${exits.length} position(s)` : "flat",
-        hold: view.liquidateWhy ?? "an install is imminent; the portfolio must be cash before it lands",
       },
     };
   }
@@ -431,7 +417,6 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   const unlock = unlockLadder(view, costs, ranked, holdTicks);
   const manipulation = planManipulation({ view, perSymbol, holdTicks, exiting });
 
-  const actions = exits.length + (entry ? 1 : 0) + (unlock ? 1 : 0);
   const best = ranked[0];
   return {
     memory,
@@ -444,8 +429,6 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
       ...(cycleTicks !== undefined ? { ticksUntilCycle: cycleTicks } : {}),
       observedTicks,
       flat: held.length === 0 && exits.length === 0 && entry === undefined,
-      why: actions > 0 ? `${actions} action(s)` : "holding",
-      ...(actions === 0 ? { hold: holdReason(view, best, guaranteedTicks, observedTicks) } : {}),
       ...(!view.canShort && best && best.side === "short"
         ? { blocker: "the best edge is a short, and shorts need BN8 or SF8.2" }
         : {}),
@@ -479,7 +462,6 @@ function blocked(memory: StockMemory, unlock: UnlockPurchase | undefined, blocke
       manipulation: [],
       observedTicks: memory.history.tick,
       flat: true,
-      why: unlock ? unlock.why : "locked",
       blocker,
     },
   };
@@ -494,7 +476,7 @@ function forgetIntent(memory: StockMemory, symbols: readonly string[]): StockMem
 
 function rankSymbol(params: {
   symbol: StockSymbolView;
-  signal: { forecast: number; volatility: number; exact: boolean; samples: number };
+  signal: { forecast: number; volatility: number; exact: boolean };
   side: PositionSide;
   holdTicks: number;
   cashBudget: number;
@@ -542,9 +524,6 @@ function rankSymbol(params: {
     breakEvenTicks: be,
     expectedProfit: profit,
     notional: shares * price,
-    why: signal.exact
-      ? `4S forecast ${signal.forecast.toFixed(3)}, volatility ${signal.volatility.toFixed(4)}`
-      : `estimated ${signal.forecast.toFixed(3)} from ${signal.samples} ticks, volatility ${signal.volatility.toFixed(4)}`,
   };
 }
 
@@ -567,8 +546,8 @@ function planExits(
     const heldTicks = committed ? memory.history.tick - committed.sinceTick : Infinity;
 
     if (view.liquidate) {
-      if (long > 0) exits.push(sell(symbol.sym, long, false, "liquidating before the install"));
-      if (short > 0) exits.push(sell(symbol.sym, short, true, "liquidating before the install"));
+      if (long > 0) exits.push(sell(symbol.sym, long, false));
+      if (short > 0) exits.push(sell(symbol.sym, short, true));
       continue;
     }
 
@@ -577,8 +556,8 @@ function planExits(
     // held is risk taken for a payoff that can no longer arrive.
     const stranded = holdTicks <= 0;
     if (stranded) {
-      if (long > 0) exits.push(sell(symbol.sym, long, false, "no hold left to clear the round trip"));
-      if (short > 0) exits.push(sell(symbol.sym, short, true, "no hold left to clear the round trip"));
+      if (long > 0) exits.push(sell(symbol.sym, long, false));
+      if (short > 0) exits.push(sell(symbol.sym, short, true));
       continue;
     }
 
@@ -587,17 +566,17 @@ function planExits(
     // symbol sitting near 0.5 from churning a round trip every tick.
     if (heldTicks < MIN_HOLD_TICKS) continue;
     if (long > 0 && forecast < 0.5 - EXIT_BAND) {
-      exits.push(sell(symbol.sym, long, false, `forecast ${forecast.toFixed(3)} turned against the long`));
+      exits.push(sell(symbol.sym, long, false));
     }
     if (short > 0 && forecast > 0.5 + EXIT_BAND) {
-      exits.push(sell(symbol.sym, short, true, `forecast ${forecast.toFixed(3)} turned against the short`));
+      exits.push(sell(symbol.sym, short, true));
     }
   }
   return exits;
 }
 
-function sell(sym: string, shares: number, short: boolean, why: string): StockAction {
-  return { type: "sell", sym, shares, short, why };
+function sell(sym: string, shares: number, short: boolean): StockAction {
+  return { type: "sell", sym, shares, short };
 }
 
 // --- entry ------------------------------------------------------------------
@@ -678,10 +657,6 @@ function planEntry(params: {
       bid: symbol.bid,
       forecast,
       volatility: candidate.volatility,
-      why:
-        `${candidate.side} ${candidate.sym} at forecast ${candidate.forecast.toFixed(3)}: ` +
-        `breaks even in ${be.toFixed(1)} ticks of ${guaranteedTicks} guaranteed (${Math.round(holdTicks)} expected), ` +
-        `expected ${formatMoney(profit)}`,
     };
   }
   return undefined;
@@ -729,26 +704,24 @@ function unlockLadder(
     const pair = costs.wseAccount + costs.tixApi;
     const gain = blindRatePerSec(view);
     return propose(
-      { type: "buyWse", cost: costs.wseAccount, why: "WSE account, the first half of TIX API access" },
+      { type: "buyWse", cost: costs.wseAccount },
       costs.wseAccount,
       gain,
       horizon,
       pair,
       view,
-      "a WSE account is useless without the TIX API, so both are priced together",
     );
   }
 
   if (!view.hasTixApi) {
     const gain = blindRatePerSec(view);
     return propose(
-      { type: "buyTix", cost: costs.tixApi, why: "TIX API — no positions without it" },
+      { type: "buyTix", cost: costs.tixApi },
       costs.tixApi,
       gain,
       horizon,
       costs.tixApi,
       view,
-      "positions are impossible without the TIX API",
     );
   }
 
@@ -760,13 +733,12 @@ function unlockLadder(
     // bankroll and the market's current state instead of asserting a rate.
     const gain = fourSigmaGainPerSec(view, ranked ?? [], holdTicks ?? TICKS_PER_CYCLE);
     return propose(
-      { type: "buy4SApi", cost: costs.fourSigmaApi, why: "4S Market Data TIX API — exact forecasts" },
+      { type: "buy4SApi", cost: costs.fourSigmaApi },
       costs.fourSigmaApi,
       gain,
       horizon,
       costs.fourSigmaApi,
       view,
-      "4S turns an estimate shrunk toward the coin flip into the exact forecast",
     );
   }
   return undefined;
@@ -779,7 +751,6 @@ function propose(
   horizonSec: number,
   investmentCost: number,
   view: StockView,
-  rationale: string,
 ): UnlockPurchase | undefined {
   if (!(gainPerSec > 0)) return undefined;
   // Spending the whole bankroll on the unlock leaves nothing to trade with,
@@ -797,9 +768,6 @@ function propose(
     gainPerSec,
     paybackSec,
     netOverHorizon,
-    why:
-      `${rationale}; ${formatMoney(gainPerSec)}/sec pays back ` +
-      `${formatMoney(investmentCost)} in ${Math.round(paybackSec)}s of ${Math.round(horizonSec)}s left`,
   };
 }
 
@@ -919,9 +887,6 @@ function planManipulation(params: {
         side,
         valuePerOp,
         notional,
-        why:
-          `${side === "long" ? "grow" : "hack"} ${hostname} to push ${sym} ` +
-          `${side === "long" ? "up" : "down"} for a ${formatMoney(notional)} position`,
       });
     }
   };
@@ -1013,29 +978,9 @@ export function fundedActions(plan: StockPlan, grants: StockGrants): StockAction
           sym: entry.sym,
           shares,
           short: entry.side === "short",
-          why: shares === entry.shares ? entry.why : `${entry.why} (funded ${shares} of ${entry.shares} shares)`,
         });
       }
     }
   }
   return actions;
-}
-
-// --- reporting --------------------------------------------------------------
-
-function holdReason(view: StockView, best: RankedSymbol | undefined, holdTicks: number, observedTicks: number): string {
-  if (holdTicks <= 0) {
-    return `${Math.round(view.positionHorizonSec)}s left before the install — too short for any round trip to clear`;
-  }
-  if (!best) return "no symbols visible yet";
-  if (!best.exact && observedTicks < 25) {
-    return `watching the market: ${observedTicks} ticks observed, no forecast worth trading on yet`;
-  }
-  if (Math.abs(best.forecast - 0.5) < ENTER_BAND) {
-    return `best forecast ${best.forecast.toFixed(3)} is inside the ${ENTER_BAND} entry band — no edge to pay the spread with`;
-  }
-  if (best.breakEvenTicks * BREAK_EVEN_MARGIN > holdTicks) {
-    return `${best.sym} needs ${best.breakEvenTicks.toFixed(1)} ticks to clear its round trip, ${holdTicks} available`;
-  }
-  return `best expected profit ${formatMoney(best.expectedProfit)} does not clear the round trip`;
 }

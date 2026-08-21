@@ -83,7 +83,6 @@ export interface GoMove {
   predictedReplies?: GoPredictedReply[];
   /** Why more than one reply may remain after modeling the AI. */
   forecastCertainty?: "exact" | "seed-window" | "unseeded-defense-tie";
-  why: string;
   captures: number;
 }
 
@@ -124,7 +123,7 @@ export interface GoView {
    * and hydrated the current game's attempt count. Chance entries are read
    * from the API up front so the Web Worker never needs Netscript access. */
   cheat?: GoCheatState;
-  nextGame?: { opponent: GoRewardOpponent; boardSize: GoSelectableBoardSize; why: string };
+  nextGame?: { opponent: GoRewardOpponent; boardSize: GoSelectableBoardSize };
 }
 
 export interface GoCheatState {
@@ -145,16 +144,16 @@ export type GoCheatAction =
   | { type: "cheatRepairNode"; x: number; y: number };
 
 export type GoPlayingAction =
-  | { type: "move"; x: number; y: number; why: string }
-  | { type: "pass"; why: string }
-  | (GoCheatAction & { why: string });
+  | { type: "move"; x: number; y: number }
+  | { type: "pass" }
+  | GoCheatAction;
 
 export type GoAction =
   | GoPlayingAction
-  | { type: "resume"; why: string }
-  | { type: "newGame"; opponent: GoRewardOpponent; boardSize: GoSelectableBoardSize; why: string };
+  | { type: "resume" }
+  | { type: "newGame"; opponent: GoRewardOpponent; boardSize: GoSelectableBoardSize };
 
-export function isGoCheatAction(action: GoAction): action is GoCheatAction & { why: string } {
+export function isGoCheatAction(action: GoAction): action is GoCheatAction {
   return action.type === "cheatTwoMoves"
     || action.type === "cheatRemoveRouter"
     || action.type === "cheatDestroyNode"
@@ -164,7 +163,6 @@ export function isGoCheatAction(action: GoAction): action is GoCheatAction & { w
 export interface GoDecision {
   action: GoAction;
   ranked: GoMove[];
-  why: string;
   /** Number of fully evaluated candidates, including the pass option. */
   finalists: number;
   /** Predicted win probability of the exact input position as it stands. */

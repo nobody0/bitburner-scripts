@@ -76,10 +76,6 @@ describe("where the shotgun boundary sits, and why", () => {
   test("the boundary is exact and strictly below the threshold", () => {
     expect(decideMode({ ...base, hackMs: SHOTGUN_HACK_MS - 0.001 }).mode).toBe("shotgun");
     expect(decideMode({ ...base, hackMs: SHOTGUN_HACK_MS }).mode).toBe("hwgw");
-    // The reason is reported, not just the verdict: a mode nobody can explain
-    // is a mode nobody can debug from a telemetry rollup.
-    expect(decideMode({ ...base, hackMs: 40 }).why).toContain("hackTime");
-    expect(decideMode({ ...base, hackMs: 40 }).why).toContain(String(SHOTGUN_HACK_MS));
   });
 });
 
@@ -95,7 +91,6 @@ describe("entering shotgun", () => {
         lastModeSince: base.now - 1, // dwell has barely started
       });
       expect(decision.mode, `from ${lastMode}`).toBe("shotgun");
-      expect(decision.why).not.toContain("dwell");
     }
   });
 
@@ -123,8 +118,6 @@ describe("leaving shotgun", () => {
     };
     const held = decideMode(justLeft);
     expect(held.mode).toBe("shotgun");
-    expect(held.why).toContain("dwell");
-    expect(held.why).toContain("hwgw");
 
     // One millisecond later the dwell has elapsed and JIT resumes.
     expect(decideMode({ ...justLeft, lastModeSince: base.now - MODE_DWELL_MS }).mode).toBe("hwgw");
@@ -148,10 +141,10 @@ describe("the jit -> shotgun -> jit round trip", () => {
    * and the instant it last changed. */
   function driveModes(
     steps: readonly { atMs: number; hackMs: number; liveOps?: number }[],
-  ): { atMs: number; mode: FarmMode; why: string }[] {
+  ): { atMs: number; mode: FarmMode }[] {
     let mode: FarmMode = "hwgw";
     let since = 0;
-    const timeline: { atMs: number; mode: FarmMode; why: string }[] = [];
+    const timeline: { atMs: number; mode: FarmMode }[] = [];
     for (const step of steps) {
       const decision = decideMode({
         hackMs: step.hackMs,
@@ -164,7 +157,7 @@ describe("the jit -> shotgun -> jit round trip", () => {
         mode = decision.mode;
         since = step.atMs;
       }
-      timeline.push({ atMs: step.atMs, mode, why: decision.why });
+      timeline.push({ atMs: step.atMs, mode });
     }
     return timeline;
   }

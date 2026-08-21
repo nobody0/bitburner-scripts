@@ -12,7 +12,6 @@ function blocker(overrides: Partial<Blocker> & Pick<Blocker, "kind" | "target" |
     progress: 0,
     owner: "career",
     reachable: true,
-    why: "test",
     subject: undefined,
     ...overrides,
   } as Blocker;
@@ -30,7 +29,7 @@ function ctx(options: {
         factions: {
           plan: {
             objective: undefined,
-            action: { type: "idle", reason: "test", why: "test" },
+            action: { type: "idle", reason: "test" },
             alternatives: [],
             blockers: options.blockers ?? [],
             needOwners: [],
@@ -117,12 +116,12 @@ describe("non-objective gates", () => {
               // purchaseAugmentation keeps the endgame path active without
               // entering the anticipation RAM claim (which needs a fuller
               // driver context than this fixture builds).
-              action: { type: "purchaseAugmentation", faction: "Ishima", augmentation: "NeuroFlux Governor", why: "test" },
+              action: { type: "purchaseAugmentation", faction: "Ishima", augmentation: "NeuroFlux Governor" },
               alternatives: [],
               blockers: [],
               needOwners: [],
               invalidation: [],
-              recommendInstall: { why: "test", augmentations: [] },
+              recommendInstall: { augmentations: [] },
               nextBuy: { name: "NeuroFlux Governor", price: 9e14 },
             },
           },

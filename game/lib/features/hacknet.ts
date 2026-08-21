@@ -74,7 +74,6 @@ function factionMilestones(ctx: HacknetViewContext, topic: NonNullable<HacknetVi
       target: need.target,
       have: totals[need.kind as keyof typeof totals],
       priority: milestonePriority(need.urgency),
-      why: need.why,
     }));
 }
 
@@ -117,40 +116,36 @@ function hashGoals(ctx: HacknetViewContext): HashGoalCandidate[] {
       baseDifficulty: target.baseDifficulty ?? 1,
     }, { batchGb: fleetGb, hackBlockGb: largest, growBlockGb: largest }, fleetGb, installHorizonSec(ctx.horizons));
     goals.push(
-      { name: HASH_UPGRADE.maxMoney, target: targetName, priority: 30, valueDollars: values.maxMoney, why: `increase ${targetName}'s farm value over the remaining horizon` },
-      { name: HASH_UPGRADE.minSecurity, target: targetName, priority: 30, valueDollars: values.minSecurity, why: `reduce ${targetName}'s minimum security over the remaining horizon` },
+      { name: HASH_UPGRADE.maxMoney, target: targetName, priority: 30, valueDollars: values.maxMoney },
+      { name: HASH_UPGRADE.minSecurity, target: targetName, priority: 30, valueDollars: values.minSecurity },
     );
   }
 
   for (const need of ctx.board.open) {
     if (need.kind === "bladeburnerRank" && state.bladeburner) {
-      goals.push({ name: HASH_UPGRADE.bladeRank, priority: hashNeedPriority(need), urgency: need.urgency, why: need.why });
+      goals.push({ name: HASH_UPGRADE.bladeRank, priority: hashNeedPriority(need), urgency: need.urgency });
     } else if (need.kind === "companyRep" && need.subject) {
-      goals.push({ name: HASH_UPGRADE.companyFavor, target: need.subject, priority: hashNeedPriority(need), urgency: need.urgency, why: `company favor accelerates ${need.why}` });
+      goals.push({ name: HASH_UPGRADE.companyFavor, target: need.subject, priority: hashNeedPriority(need), urgency: need.urgency });
     } else if ((need.kind === "combatSkills" || need.kind === "skill") && state.career?.currentWork?.type === "CLASS") {
       const combat = need.kind === "combatSkills" || ["strength", "defense", "dexterity", "agility"].includes(need.subject ?? "");
-      goals.push({ name: combat ? HASH_UPGRADE.gym : HASH_UPGRADE.study, priority: hashNeedPriority(need), urgency: need.urgency, why: need.why });
+      goals.push({ name: combat ? HASH_UPGRADE.gym : HASH_UPGRADE.study, priority: hashNeedPriority(need), urgency: need.urgency });
     }
   }
 
   const route = state.progression?.plan?.route;
   if (route === "bladeburner" && state.bladeburner) {
     if (state.bladeburner.nextBlackOp && state.bladeburner.rank < state.bladeburner.nextBlackOp.rank) {
-      goals.push({
-        name: HASH_UPGRADE.bladeRank,
-        priority: 58,
-        why: `${state.bladeburner.nextBlackOp.name} still needs ${formatNumber(Math.ceil(state.bladeburner.nextBlackOp.rank - state.bladeburner.rank))} rank`,
-      });
+      goals.push({ name: HASH_UPGRADE.bladeRank, priority: 58 });
     }
     if (state.bladeburner.plan?.action.type === "upgradeSkill") {
-      goals.push({ name: HASH_UPGRADE.bladeSp, priority: 60, why: "the Bladeburner route is waiting on a skill upgrade" });
+      goals.push({ name: HASH_UPGRADE.bladeSp, priority: 60 });
     }
   }
   if (state.corp?.plan && state.corp.plan.action.type !== "idle") {
-    goals.push({ name: HASH_UPGRADE.corpFunds, priority: 55, why: `corporation stage ${state.corp.plan.stage} is active` });
+    goals.push({ name: HASH_UPGRADE.corpFunds, priority: 55 });
   }
   if (state.corp?.plan?.stage.toLowerCase().includes("research")) {
-    goals.push({ name: HASH_UPGRADE.corpResearch, priority: 55, why: `corporation stage ${state.corp.plan.stage} needs research` });
+    goals.push({ name: HASH_UPGRADE.corpResearch, priority: 55 });
   }
   return goals;
 }
@@ -242,7 +237,6 @@ function buildView(ctx: HacknetViewContext, moneyGranted: number): HacknetView |
       priority: selectedHashGoal?.urgency
         ? milestonePriority(selectedHashGoal.urgency)
         : PRIORITY["hacknet:wanted-need"],
-      why: hashes.why,
     });
   }
 
@@ -455,7 +449,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   const best = decision?.buy;
   const out: FeatureClaim[] = [];
   if (best) {
-    out.push(actionRamClaim(ctx, "hacknet", hacknetClaimId(best.kind), hacknetMethods(best.kind), `hacknet ${best.kind}`));
+    out.push(actionRamClaim(ctx, "hacknet", hacknetClaimId(best.kind), hacknetMethods(best.kind)));
   }
   if (best) {
     const scored = scoreInvestment(
@@ -477,12 +471,11 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       shape: "continuous",
       ratePerSec: best.deltaProduction,
       returnPerDollarSec: scored.returnPerDollarSec,
-      why: best.milestone?.why ?? `${best.kind}${best.node !== undefined ? ` #${best.node}` : ""} pays back in ${Math.round(scored.paybackSec)}s`,
     });
   }
   const hashes = decideHashes(ctx);
   if (hashes?.spend) {
-    out.push(actionRamClaim(ctx, "hacknet", "action:spend-hashes", HASH_SPEND_METHODS, hashes.spend.why));
+    out.push(actionRamClaim(ctx, "hacknet", "action:spend-hashes", HASH_SPEND_METHODS));
   }
   return out;
 }

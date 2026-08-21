@@ -189,7 +189,6 @@ export function arbitrationDigest(result: ArbiterResult, now: number, claims: re
               })),
             }
             : {}),
-          why: bid.why,
         })),
       }
       : {}),

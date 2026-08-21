@@ -23,7 +23,6 @@ function need(overrides: Partial<Need> & Pick<Need, "kind" | "subject" | "valueS
     have: 0,
     weight: 8,
     urgency: "blocking",
-    why: "test",
     ...overrides,
   } as Need;
 }
@@ -88,7 +87,7 @@ function ctx(options: {
             ? {
               slotValues: [{
                 by: "factions", id: "work:CyberSec", pricing: "economic",
-                priority: 60, valueSec: options.rivalSlotValueSec, why: "reputation",
+                priority: 60, valueSec: options.rivalSlotValueSec,
               }],
             }
             : {}),

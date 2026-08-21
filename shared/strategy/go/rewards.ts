@@ -79,7 +79,6 @@ export interface GoEtaDemand {
    * money, not +5%, and buys exactly nothing at chance 1. Absent = the reward
    * lifts something with no ceiling in reach. */
   gainCap?: number;
-  why: string;
 }
 
 /** The relative saving one game's multiplier growth actually delivers.
@@ -163,7 +162,6 @@ export interface GoGameCandidate {
   horizonNodePower: number;
   horizonTransientSecSaved: number;
   horizonFavorSecSaved: number;
-  why: string;
 }
 
 export function goDifficultyMultiplier(opponent: GoRewardOpponent, boardSize: number): number {
@@ -552,7 +550,6 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
         horizonNodePower: horizon.nodePower,
         horizonTransientSecSaved: horizon.transientSecSaved,
         horizonFavorSecSaved: horizon.favorSecSaved,
-        why: `${demand?.why ?? "no transient ETA component"}; ${favorEligible ? `${favorReward.repGranted} rep converted to favor on each even winning streak` : "no favor event value"}; exact ${horizon.games}-game streak tree${variant.aligned ? `; certified entry in ${Math.round(variant.waitSec)}s` : ""}`,
       });
       }
     }

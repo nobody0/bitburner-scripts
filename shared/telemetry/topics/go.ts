@@ -32,9 +32,9 @@ export type GoActionDigest =
   | { type: "cheatRemoveRouter" | "cheatDestroyNode" | "cheatRepairNode"; x: number; y: number }
   | { type: "pass" | "resume" }
   | { type: "newGame"; opponent: GoRewardOpponent; boardSize: 5 | 7 | 9 | 13 };
-export type GoMoveDigest = Omit<GoMove, "why">;
-export type GoEtaDemandDigest = Omit<GoEtaDemand, "why">;
-export type GoGameCandidateDigest = Omit<GoGameCandidate, "why" | "transientDemand"> & {
+export type GoMoveDigest = GoMove;
+export type GoEtaDemandDigest = GoEtaDemand;
+export type GoGameCandidateDigest = Omit<GoGameCandidate, "transientDemand"> & {
   transientDemand?: GoEtaDemandDigest;
 };
 
@@ -91,7 +91,7 @@ export interface GoPlan {
     candidates: GoGameCandidateDigest[];
     /** New-game scheduling verdict: play the preferred candidate, fit a
      * filler game inside its certified entry window, or hold the cadence. */
-    schedule?: { kind: "play" | "filler" | "hold"; fillerOpponent?: GoRewardOpponent; holdSec?: number; why: string };
+    schedule?: { kind: "play" | "filler" | "hold"; fillerOpponent?: GoRewardOpponent; holdSec?: number };
     /** Whether the next game would repay the fleet RAM its dodge displaces,
      * and the numbers behind the answer. Published even when it PASSES: a Go
      * that has gone quiet must say which of "not worth it" and "broken" it is,
@@ -103,7 +103,6 @@ export interface GoPlan {
       utilityPerSec: number;
       displacedGb: number;
       usableGb: number;
-      why: string;
     };
     context: {
       goPower: number;

@@ -36,29 +36,23 @@ export interface ModeInputs {
 
 export interface ModeDecision {
   mode: FarmMode;
-  why: string;
 }
 
 export function decideMode(inputs: ModeInputs): ModeDecision {
   let desired: FarmMode;
-  let why: string;
   if (inputs.hackMs < SHOTGUN_HACK_MS) {
     desired = "shotgun";
-    why = `hackTime ${Math.round(inputs.hackMs)}ms < ${SHOTGUN_HACK_MS}ms`;
   } else if (inputs.liveOps > HGW_LIVE_OPS_PRESSURE) {
     desired = "hgw";
-    why = `${inputs.liveOps} live ops > ${HGW_LIVE_OPS_PRESSURE}`;
   } else if (inputs.lastMode === "hgw" && inputs.liveOps > HGW_LIVE_OPS_RELEASE) {
     desired = "hgw";
-    why = `${inputs.liveOps} live ops holds hgw (release ${HGW_LIVE_OPS_RELEASE})`;
   } else {
     desired = "hwgw";
-    why = `hackTime ${Math.round(inputs.hackMs)}ms, ${inputs.liveOps} live ops`;
   }
   // Enter the correctness-preserving short-timer mode immediately. Dwell only
   // suppresses performance-driven switches and leaving a still-safe shotgun.
   if (desired !== "shotgun" && desired !== inputs.lastMode && inputs.now - inputs.lastModeSince < MODE_DWELL_MS) {
-    return { mode: inputs.lastMode, why: `dwell (${desired} pending)` };
+    return { mode: inputs.lastMode };
   }
-  return { mode: desired, why };
+  return { mode: desired };
 }

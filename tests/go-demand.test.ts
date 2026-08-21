@@ -16,7 +16,6 @@ function need(kind: NeedKind, subject?: string, extra?: Partial<Need>): Need {
     have: 0,
     weight: 10,
     urgency: "blocking",
-    why: `${kind} bottleneck`,
     ...extra,
   };
 }
@@ -62,8 +61,10 @@ describe("Go target demands", () => {
       canEarnFactionRep: true,
       canRunBladeburner: true,
     });
-    expect(demands.Daedalus?.why).toContain("renamed primary work");
-    expect(demands["The Black Hand"]?.why ?? "").not.toContain("misleading reputation words");
+    // Only the 600s reputation part may feed the reputation opponent: if the
+    // misleadingly-labelled money part leaked in by its wording, the demand
+    // would exceed 600s.
+    expect(demands.Daedalus?.seconds).toBe(600);
   });
 
   test("maps open bottlenecks to their actual opponent rewards", () => {
@@ -169,8 +170,8 @@ describe("Go target demands", () => {
       canEarnFactionRep: true,
       canRunBladeburner: false,
     });
-    expect(demands.Daedalus?.why).toContain("factionRep bottleneck");
-    expect(demands.Tetrads?.why).toContain("skill bottleneck");
+    expect(demands.Daedalus).toBeDefined();
+    expect(demands.Tetrads).toBeDefined();
   });
 
   test("a need restating a priced blocker adds its own measured value and stays inside the runway", () => {
@@ -185,11 +186,8 @@ describe("Go target demands", () => {
       canRunBladeburner: false,
     });
     // No bespoke double-charge guard any more: the runway is what bounds
-    // overlapping evidence. 600 + 200 clamps back to the 600s install horizon,
-    // and both provenances survive.
+    // overlapping evidence. 600 + 200 clamps back to the 600s install horizon.
     expect(demands.Daedalus?.seconds).toBe(600);
-    expect(demands.Daedalus?.why).toContain("factionRep bottleneck");
-    expect(demands.Daedalus?.why).toContain("faction package");
   });
 
   test("does not target a forecast resource with no active consumer", () => {
@@ -220,7 +218,9 @@ describe("Go target demands", () => {
       canEarnFactionRep: true,
       canRunBladeburner: true,
     });
-    expect(demands.Illuminati?.why ?? "").not.toContain("post-install regrow");
+    // The 4,500s post-install regrow part must not be valued: whatever demand
+    // survives is bounded by the 300s pre-install runway.
+    expect(demands.Illuminati?.seconds ?? 0).toBeLessThanOrEqual(300);
     expect(demands["????????????"]).toBeUndefined();
   });
 });

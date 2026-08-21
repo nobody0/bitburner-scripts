@@ -1,5 +1,4 @@
 import type { AssignmentResult } from "../assignment.ts";
-import { formatScientific } from "../../format.ts";
 import type { NeedBoard, NeedKind } from "../needs.ts";
 import { needKey } from "../needs.ts";
 
@@ -63,9 +62,8 @@ export interface SleevesView {
 }
 
 export interface SleeveDecision {
-  assignments: { index: number; task: SleeveTask; why: string }[];
+  assignments: { index: number; task: SleeveTask }[];
   assignment: AssignmentResult<SleeveState, SleeveTask>;
-  why: string;
 }
 
 /** Shock scales WorkStats output down linearly: 90 shock leaves 10%.
@@ -183,17 +181,10 @@ export function stepSleeves(view: SleevesView, board: NeedBoard): SleeveDecision
     .map((choice) => ({
       index: choice.agent.index,
       task: choice.task,
-      why:
-        choice.task.type === "recovery"
-          ? `shock ${Math.round(choice.agent.shock)} scales output to ${(shockMultiplier(choice.agent.shock) * 100).toFixed(0)}%`
-          : choice.task.type === "synchro"
-            ? `sync ${Math.round(choice.agent.sync)} is below the ${view.syncFloor} floor`
-            : `best weighted need progress (${formatScientific(choice.score)})`,
     }));
 
   return {
     assignments,
     assignment,
-    why: `exact sleeve assignment over ${view.tasks.length} tasks for ${view.sleeves.length} sleeves with capacity-one work respected`,
   };
 }

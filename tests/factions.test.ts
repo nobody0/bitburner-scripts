@@ -115,7 +115,6 @@ describe("requirement interpreter — regressions from the predecessor scripts",
       target: 1,
       have: 0,
       reachable: false,
-      why: "needs 1 manual infiltration",
     });
     expect(evaluate(requirement, view({ numInfiltrations: 1 }))).toEqual([]);
   });
@@ -856,7 +855,6 @@ describe("work type selection — found in the real game", () => {
       initFactionMemory(),
     );
     expect(decision.action.type).toBe("idle");
-    expect(decision.action.why).toContain("only one activity can run");
   });
 });
 
@@ -1010,14 +1008,13 @@ describe("faction breakpoint package planner", () => {
         augmentations: [wanted.name],
         value: 1,
         foreclosed: [],
-        why: "base package",
         intent: {
           faction: "A", repTarget: 100, augmentations: [wanted.name], value: 1,
           activationValue: 0.1, etaSec: 1, marginalRate: 1,
           marginalActivationRate: 0.1, favorAfterInstall: 0,
           purpose: "augmentations" as const, unlockSec: 0, repSec: 0,
           moneySec: 1, totalCost: 1_000, purchaseCost: 1_000,
-          donationCost: 0, rate: 1, why: "base package",
+          donationCost: 0, rate: 1,
         },
       },
     };
@@ -1782,7 +1779,7 @@ describe("faction breakpoint package planner", () => {
     );
     expect(afterJoin.decision.objective?.intent?.repTarget).toBe(100);
     expect(afterJoin.decision.objective?.intent?.augmentations).not.toContain("A-deep");
-    expect(afterJoin.decision.recommendInstall?.why).toContain("favor");
+    expect(afterJoin.decision.recommendInstall).toBeDefined();
   });
 
   test("does not install when the completed package is already installed", () => {
@@ -2037,7 +2034,6 @@ describe("the last-chance drain", () => {
         progress: 0,
         owner: "hacking",
         reachable: true,
-        why: "deep unlock",
       }],
       factionsView({
         factions: [faction],

@@ -1,5 +1,4 @@
-import { formatMoney } from "../../format.ts";
-import { coarseHorizonSec, scoreInvestment } from "../investment.ts";
+import { scoreInvestment } from "../investment.ts";
 
 /** Hacknet purchase scheduling.
  *
@@ -40,7 +39,6 @@ export interface HacknetMilestone {
   target: number;
   have: number;
   priority: number;
-  why: string;
 }
 
 export interface UpgradeOption {
@@ -87,9 +85,6 @@ export interface HacknetDecision {
   buy?: RankedUpgrade;
   /** Everything considered, best payback first. */
   ranked: RankedUpgrade[];
-  why: string;
-  /** Set when nothing is worth buying and why that is. */
-  hold?: string;
 }
 
 /** Seconds for an upgrade to repay its own cost. `Infinity` when it produces
@@ -167,33 +162,16 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
     });
 
   if (ranked.length === 0) {
-    return { ranked, why: "nothing to buy", hold: "no upgrades available" };
+    return { ranked };
   }
 
   const best = ranked[0]!;
   if (!best.milestone && best.netOverHorizon <= 0) {
-    return {
-      ranked,
-      why: "every upgrade loses money before the horizon ends",
-      hold:
-        `best option (${best.kind}) pays back in ${Number.isFinite(best.paybackSec) ? Math.round(best.paybackSec) : "never"}s ` +
-        `against ${coarseHorizonSec(view.horizonSec)}s left`,
-    };
+    return { ranked };
   }
   if (best.cost > view.moneyGranted) {
-    return {
-      ranked,
-      why: "waiting for funds",
-      hold: `${best.kind} costs ${formatMoney(best.cost)}, granted ${formatMoney(view.moneyGranted)}`,
-    };
+    return { ranked };
   }
 
-  return {
-    buy: best,
-    ranked,
-    why: best.milestone
-      ? `${best.kind}${best.node !== undefined ? ` on node ${best.node}` : ""} advances ${best.milestone.kind}: ${best.milestone.why}`
-      : `${best.kind}${best.node !== undefined ? ` on node ${best.node}` : ""} has the fastest ROI ` +
-        `(${Math.round(best.paybackSec)}s payback; ${formatMoney(best.netOverHorizon)} net over the horizon)`,
-  };
+  return { buy: best, ranked };
 }

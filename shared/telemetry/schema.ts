@@ -56,31 +56,6 @@ export type WireMessage =
   | { v: typeof WIRE_VERSION; hello: HelloBody }
   | { v: typeof WIRE_VERSION; records: LogRecord[] };
 
-/** Remove planner-authored narration before a value reaches the wire or the
- * legacy-record viewer. Decisions should be explainable from their inputs,
- * rankings, constraints, and outcomes; these fields merely restated those
- * facts as prose. Categorical outcomes such as `reason` remain intact. */
-/** `JSON.stringify` replacer with exactly factsOnly's semantics (pinned by
- * tests/telemetry-client.test.ts). The game client serializes each record once
- * at push time, and stripping during that single pass avoids materializing the
- * intermediate cloned tree factsOnly builds — per-record garbage on the game's
- * main thread, several times a second at steady state. */
-export function stripNarration(key: string, value: unknown): unknown {
-  return key === "why" || key.endsWith("Why") || key === "hold" || key === "warning" ? undefined : value;
-}
-
-export function factsOnly(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(factsOnly);
-  if (value === null || typeof value !== "object") return value;
-
-  const facts: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if (key === "why" || key.endsWith("Why") || key === "hold" || key === "warning") continue;
-    facts[key] = factsOnly(entry);
-  }
-  return facts;
-}
-
 export function stateKey(getter: string, ...args: readonly (string | number | boolean)[]): string {
   return args.length === 0 ? getter : `${getter}:${args.join(",")}`;
 }

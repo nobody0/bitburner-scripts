@@ -36,17 +36,17 @@ export interface CorpView {
 }
 
 export type CorpAction =
-  | { type: "createCorporation"; why: string }
-  | { type: "expandIndustry"; industry: string; division: string; why: string }
-  | { type: "expandCity"; division: string; city: string; why: string }
-  | { type: "buyWarehouse"; division: string; city: string; why: string }
-  | { type: "upgradeOffice"; division: string; city: string; size: number; why: string }
-  | { type: "hire"; division: string; city: string; job: string; why: string }
-  | { type: "smartSupply"; division: string; city: string; why: string }
-  | { type: "sellMaterial"; division: string; city: string; material: string; why: string }
-  | { type: "acceptInvestment"; round: number; why: string }
-  | { type: "makeProduct"; division: string; city: string; name: string; why: string }
-  | { type: "idle"; why: string };
+  | { type: "createCorporation" }
+  | { type: "expandIndustry"; industry: string; division: string }
+  | { type: "expandCity"; division: string; city: string }
+  | { type: "buyWarehouse"; division: string; city: string }
+  | { type: "upgradeOffice"; division: string; city: string; size: number }
+  | { type: "hire"; division: string; city: string; job: string }
+  | { type: "smartSupply"; division: string; city: string }
+  | { type: "sellMaterial"; division: string; city: string; material: string }
+  | { type: "acceptInvestment"; round: number }
+  | { type: "makeProduct"; division: string; city: string; name: string }
+  | { type: "idle" };
 
 export interface CorpStage {
   id: string;
@@ -76,20 +76,19 @@ export const CORP_STAGES: CorpStage[] = [
     id: "found",
     ready: (view) => !view.hasCorporation,
     done: (view) => view.hasCorporation,
-    next: () => ({ type: "createCorporation", why: "a corporation is the precondition for everything else" }),
+    next: () => ({ type: "createCorporation" }),
     expect: "hasCorporation",
   },
   {
     id: "agriculture",
     ready: (view) => view.hasCorporation && !division(view, AGRICULTURE),
     done: (view) => Boolean(division(view, AGRICULTURE)),
+    // Agriculture first because it is cheap, profitable early, and its
+    // materials feed the later product division.
     next: () => ({
       type: "expandIndustry",
       industry: AGRICULTURE,
       division: AGRICULTURE,
-      // Agriculture first because it is cheap, profitable early, and its
-      // materials feed the later product division.
-      why: "cheapest profitable industry, and it supplies the product division later",
     }),
     expect: "an Agriculture division exists",
   },
@@ -102,7 +101,7 @@ export const CORP_STAGES: CorpStage[] = [
       if (!agri) return undefined;
       const missing = CITIES.find((city) => !agri.cities.includes(city));
       if (!missing) return undefined;
-      return { type: "expandCity", division: agri.name, city: missing, why: `production scales with cities; ${missing} is next` };
+      return { type: "expandCity", division: agri.name, city: missing };
     },
     expect: "Agriculture operates in all six cities",
   },
@@ -118,7 +117,7 @@ export const CORP_STAGES: CorpStage[] = [
       if (!agri) return undefined;
       const city = agri.cities.find((entry) => !agri.warehouses.some((warehouse) => warehouse.city === entry));
       if (!city) return undefined;
-      return { type: "buyWarehouse", division: agri.name, city, why: "production without storage is discarded" };
+      return { type: "buyWarehouse", division: agri.name, city };
     },
     expect: "every Agriculture city has a warehouse",
   },
@@ -133,13 +132,12 @@ export const CORP_STAGES: CorpStage[] = [
       const agri = division(view, AGRICULTURE);
       const warehouse = agri?.warehouses.find((entry) => !entry.smartSupplyEnabled);
       if (!agri || !warehouse) return undefined;
+      // Without it, input materials are bought at a fixed rate regardless of
+      // production, which wastes funds continuously.
       return {
         type: "smartSupply",
         division: agri.name,
         city: warehouse.city,
-        // Without it, input materials are bought at a fixed rate regardless of
-        // production, which wastes funds continuously.
-        why: "smart supply matches input purchases to actual production",
       };
     },
     expect: "smart supply is on everywhere",
@@ -148,14 +146,13 @@ export const CORP_STAGES: CorpStage[] = [
     id: "investment-1",
     ready: (view) => Boolean(view.investmentOffer && view.investmentOffer.round <= 2 && view.revenue > 0),
     done: (view) => !view.investmentOffer || view.investmentOffer.round > 2,
+    // Early rounds trade shares cheaply for the capital that funds the
+    // product division; later rounds are worth far more per share.
     next: (view) =>
       view.investmentOffer
         ? {
             type: "acceptInvestment",
             round: view.investmentOffer.round,
-            // Early rounds trade shares cheaply for the capital that funds the
-            // product division; later rounds are worth far more per share.
-            why: `round ${view.investmentOffer.round} funds the product division`,
           }
         : undefined,
     expect: "seed capital raised",
@@ -168,7 +165,6 @@ export const CORP_STAGES: CorpStage[] = [
       type: "expandIndustry",
       industry: TOBACCO,
       division: TOBACCO,
-      why: "products scale far beyond materials; Tobacco is the standard product path",
     }),
     expect: "a Tobacco division exists",
   },
@@ -187,7 +183,6 @@ export const CORP_STAGES: CorpStage[] = [
         division: tobacco.name,
         city: START_CITY,
         name: `Product-${tobacco.products.length + 1}`,
-        why: "each product compounds revenue; keep the slate full",
       };
     },
     expect: "the product slate is full",
@@ -200,7 +195,6 @@ export interface CorpDecision {
   stage: string;
   /** Stages already satisfied. */
   completed: string[];
-  why: string;
 }
 
 export function stepCorp(view: CorpView): CorpDecision {
@@ -212,20 +206,18 @@ export function stepCorp(view: CorpView): CorpDecision {
     }
     if (!stage.ready(view)) {
       return {
-        action: { type: "idle", why: `waiting for ${stage.id}'s precondition` },
+        action: { type: "idle" },
         stage: stage.id,
         completed,
-        why: `stage ${stage.id} is not ready — expects: ${stage.expect}`,
       };
     }
     const action = stage.next(view);
     if (!action) continue;
-    return { action, stage: stage.id, completed, why: `stage ${stage.id}: ${stage.expect}` };
+    return { action, stage: stage.id, completed };
   }
   return {
-    action: { type: "idle", why: "every modelled stage is complete" },
+    action: { type: "idle" },
     stage: "done",
     completed,
-    why: "the modelled stage graph is exhausted — beyond this the feature makes no optimality claim",
   };
 }

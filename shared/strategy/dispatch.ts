@@ -684,7 +684,6 @@ export interface DispatchMemory {
   /** Farm scheduling mode (shared/strategy/mode.ts) with its flap guard. */
   mode: FarmMode;
   modeSince: number;
-  modeWhy: string;
   /** Lazily-solved HGW solution for the CURRENT farm target — target
    * selection stays on the HWGW score (the orderings track); only the chosen
    * target pays for a second solve, re-done per context generation. */
@@ -785,7 +784,6 @@ export function initDispatch(): DispatchMemory {
     prepPending: [],
     mode: "hwgw",
     modeSince: -Infinity,
-    modeWhy: "initial",
     pool: initPool(),
     pooling: false,
     stats: {
@@ -1408,7 +1406,7 @@ export function dispatch(
         const hackMs = hackTimeSeconds(launchCtx, server.minDifficulty, server.requiredHackingSkill) * 1_000;
         const weakenMs = weakenTimeSeconds(launchCtx, server.hackDifficulty, server.requiredHackingSkill) * 1_000;
         const decision = options.modeOverride
-          ? { mode: options.modeOverride, why: "override" }
+          ? { mode: options.modeOverride }
           : decideMode({
               hackMs,
               liveOps: memory.tracked.size,
@@ -1426,7 +1424,6 @@ export function dispatch(
           memory.mode = decision.mode;
           memory.modeSince = now;
         }
-        memory.modeWhy = decision.why;
         // Shotgun (Q4) uses the HGW thread math taken to its limit: all three
         // ops of a batch land the same tick, so the shape is HGW's.
         const wantHgw = memory.mode === "hgw" || memory.mode === "shotgun";

@@ -122,7 +122,7 @@ replays into every 30-second state record.
 
 Two records carry the endgame decision loop (`spec/strategy/endgame.md`).
 `endgame.route` fires only when the chosen route CHANGES — decisions, not
-heartbeats — with `{from?, to, etaSec, expectedEndAt, why, routes[]}`, where
+heartbeats — with `{from?, to, etaSec, expectedEndAt, routes[]}`, where
 `routes[]` is every route's per-part estimate breakdown at decision time.
 `bitnode.reset` carries the outcome half: `{to, from?, elapsedMs?, route?,
 guessedEndAt?, decidedAt?}` — the actual elapsed time next to the last guess,

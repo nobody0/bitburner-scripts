@@ -796,12 +796,11 @@ function setFactionRep(state: GameState, faction: string, rep: number): void {
 
 function intentDigest(intent: NonNullable<FactionDecision["objective"]>["intent"]): NonNullable<FactionPlan["objective"]>["intent"] {
   if (!intent) return undefined;
-  const { why: _why, ...facts } = intent;
-  return facts;
+  return intent;
 }
 
 function objectiveDigest(objective: NonNullable<FactionDecision["objective"]>): NonNullable<FactionPlan["objective"]> {
-  const { why: _why, intent, runnerUp, ...facts } = objective;
+  const { intent, runnerUp, ...facts } = objective;
   return {
     ...facts,
     ...(intent ? { intent: intentDigest(intent) } : {}),
@@ -1080,7 +1079,7 @@ function needs(ctx: NeedContext): Need[] {
     ?? DEFAULT_PLANNING_HORIZON_SEC;
   const incomePerSec = plan.context?.incomePerSec ?? 0;
   const blockerSec = (blocker: Omit<PlanBlocker, "faction">): number =>
-    estimateBlockerSec({ ...blocker, why: "" } as Parameters<typeof estimateBlockerSec>[0], incomePerSec);
+    estimateBlockerSec(blocker as Parameters<typeof estimateBlockerSec>[0], incomePerSec);
   const accessValueSec = (
     blocker: Omit<PlanBlocker, "faction"> & { kind: string },
     siblings: readonly Omit<PlanBlocker, "faction">[],
@@ -1117,7 +1116,6 @@ function needs(ctx: NeedContext): Need[] {
       weight: isChainHead ? 6 : 1 + blocker.progress * 4,
       ...(valueSec !== undefined ? { valueSec } : {}),
       urgency: isChainHead || (remaining.get(blocker.faction) ?? 0) <= 1 ? "blocking" : "wanted",
-      why: `${blocker.faction} ${blocker.kind} ${blocker.subject ?? ""} ${blocker.have}/${blocker.target}`,
     });
   }
   // Near-complete NON-OBJECTIVE gates: a faction sitting ONE reachable,
@@ -1158,7 +1156,6 @@ function needs(ctx: NeedContext): Need[] {
       weight: (1 + blocker.progress * 2) / gate.missing.length,
       ...(valueSec !== undefined ? { valueSec } : {}),
       urgency: "wanted",
-      why: `${faction} ${blocker.kind} ${blocker.subject ?? ""} ${blocker.have}/${blocker.target}`,
     });
   }
   // Megacorp company servers: a backdoor multiplies the company's required
@@ -1219,7 +1216,6 @@ function needs(ctx: NeedContext): Need[] {
       // need still ranks through `rankingValueSec`'s weight fallback.
       ...(rate !== undefined ? { valueSec: savedSec } : {}),
       urgency: gate.urgency,
-      why: `${gate.faction} companyRep gate: a backdoor on ${server.hostname} cuts ${gate.company}'s required rep by 25%`,
     });
   }
   if (plan.until?.kind === "rep" && plan.until.faction && plan.until.have < plan.until.target) {
@@ -1231,7 +1227,6 @@ function needs(ctx: NeedContext): Need[] {
       have: plan.until.have,
       weight: 6,
       urgency: "blocking",
-      why: `${plan.until.faction} reputation unlocks the current augmentation package`,
     });
   }
   return out;
@@ -1376,7 +1371,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       "factions",
       factionClaimId(plan.action.type),
       methods,
-      `factions ${plan.action.type}`,
       plan.action.type === "workForFaction" ? workRamPriority : PRIORITY["probe:detail"],
     ));
   }
@@ -1387,7 +1381,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       "factions",
       factionClaimId("workForFaction"),
       factionMethods("workForFaction"),
-      `start faction work at ${wanted} if the work slot is granted`,
       workRamPriority,
     ));
   }
@@ -1437,7 +1430,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       shape: "step",
       pricing: "hard",
       value: { state: "unknown", reason: "hard-priority atomic claim" },
-      why: `buying ${plan.nextBuy.name}`,
     });
     // The decision is made at tick time, AFTER this pass's arbitration — so a
     // purchase decided this pass would find no RAM grant and burn a whole
@@ -1451,19 +1443,18 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
         "factions",
         factionClaimId("purchaseAugmentation"),
         factionMethods("purchaseAugmentation"),
-        `purchase ${plan.nextBuy.name} when the fund grant lands`,
       ));
     }
   }
   if (graft) {
     if (plan.action.type !== "graft") {
-      out.push(actionRamClaim(ctx, "factions", factionClaimId("graft"), factionMethods("graft"), `graft ${graft.name}`));
+      out.push(actionRamClaim(ctx, "factions", factionClaimId("graft"), factionMethods("graft")));
     }
     // Grafting is only started in New Tokyo. Reserve the travel call before
     // the planner emits `travelTo`; otherwise the first travel decision cannot
     // obtain a RAM lease until the following slow faction tick.
     if (ctx.state.topics.player?.city !== "New Tokyo" && plan.action.type !== "travelTo") {
-      out.push(actionRamClaim(ctx, "factions", factionClaimId("travelTo"), factionMethods("travelTo"), "travel to New Tokyo for grafting"));
+      out.push(actionRamClaim(ctx, "factions", factionClaimId("travelTo"), factionMethods("travelTo")));
     }
     out.push(
       {
@@ -1476,7 +1467,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
         shape: "step",
         pricing: "hard",
         value: { state: "unknown", reason: "hard-priority atomic claim" },
-        why: `graft ${graft.name}`,
       },
       {
         by: "factions",
@@ -1488,7 +1478,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
         value: { state: "unknown", reason: "a time claim is priced by `produces`, not by this field" },
         priority: PRIORITY["factions:work"],
         mode: "spend",
-        why: `grafting ${graft.name} occupies Player.currentWork`,
       },
     );
   }
@@ -1514,7 +1503,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       shape: "step",
       pricing: "hard",
       value: { state: "unknown", reason: "hard-priority atomic claim" },
-      why: "travel costs $200,000",
     });
   }
 
@@ -1532,7 +1520,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       shape: "step",
       pricing: "hard",
       value: { state: "unknown", reason: "hard-priority atomic claim" },
-      why: `donating exactly enough for ${plan.action.faction}'s reputation breakpoint and preserving its purchase`,
     });
   }
 
@@ -1591,9 +1578,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       ...(installPackage ? {} : { produces: workProduces }),
       mode: "spend",
       ratePerSec: plan.until?.etaSec ? 1 / plan.until.etaSec : 0,
-      why: working
-        ? `${wanted} reputation work${routePackage ? " for the selected completion route" : ""}`
-        : `reputation still needed at ${wanted}${routePackage ? " for the selected completion route" : ""}`,
     });
   }
 

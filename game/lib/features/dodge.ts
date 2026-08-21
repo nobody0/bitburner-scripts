@@ -74,7 +74,6 @@ export function actionRamClaim(
   by: FeatureId,
   claimId: string,
   methods: readonly string[],
-  why: string,
   priority: number = PRIORITY['probe:detail'],
 ): RamClaim {
   return {
@@ -83,6 +82,5 @@ export function actionRamClaim(
     resource: 'ram',
     amount: ctx.ramPrice(methods),
     priority,
-    why,
   };
 }

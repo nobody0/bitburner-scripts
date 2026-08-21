@@ -30,7 +30,7 @@ describe("aggregate Go simulation lane", () => {
       ...activeView,
       currentPlayer: "None",
       status: "gameOver",
-      nextGame: { opponent: "Daedalus", boardSize: 5, why: "test" },
+      nextGame: { opponent: "Daedalus", boardSize: 5 },
     };
     const next = await runtime.install(completed);
     expect((await runtime.evaluate(next.positionId, 10_000)).decision.action).toMatchObject({

@@ -342,14 +342,14 @@ function opponentMarkup(g: GoState): string {
     : "";
   const schedule = g.plan?.selection.schedule;
   const scheduleNote = schedule && schedule.kind !== "play"
-    ? note(`schedule: ${schedule.kind}${schedule.kind === "filler" && schedule.fillerOpponent ? ` (${schedule.fillerOpponent})` : ""}${schedule.kind === "hold" && schedule.holdSec !== undefined ? ` ${fmtNum(schedule.holdSec, 0)}s` : ""} — ${schedule.why}`)
+    ? note(`schedule: ${schedule.kind}${schedule.kind === "filler" && schedule.fillerOpponent ? ` (${schedule.fillerOpponent})` : ""}${schedule.kind === "hold" && schedule.holdSec !== undefined ? ` ${fmtNum(schedule.holdSec, 0)}s` : ""}`)
     : "";
   // Only worth the line when it REFUSES: a passing gate is the ordinary case
   // and says nothing a reader needs, while a refusal is the whole explanation
   // for a Go that has stopped starting games.
   const ramGate = g.plan?.selection.ramGate;
   const ramNote = ramGate && !ramGate.pays
-    ? note(`no new game: ${ramGate.why} — ${esc(ramGate.opponent)} at ${fmtNum(ramGate.utilityPerSec * 60, 2)}s saved/min against ${fmtNum(ramGate.displacedGb, 1)} GB displaced of ${fmtNum(ramGate.usableGb, 0)} GB usable`)
+    ? note(`no new game: ${esc(ramGate.opponent)} at ${fmtNum(ramGate.utilityPerSec * 60, 2)}s saved/min against ${fmtNum(ramGate.displacedGb, 1)} GB displaced of ${fmtNum(ramGate.usableGb, 0)} GB usable`)
     : "";
   return evidence + scheduleNote + ramNote + table(
     ["opponent", "board", "wait", "win", "streak", "horizon", "node power", "demand", "transient saved", "favor event", "favor gain", "favor saved", "saved/min"],

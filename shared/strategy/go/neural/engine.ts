@@ -304,16 +304,8 @@ function immediateDecision(view: GoView): GoDecision | undefined {
       || view.board.size !== goObservedBoardSizeFor(preferredOpponent, boardSize));
   if (view.status === "gameOver" || view.currentPlayer === "None" || pristineRetarget) {
     return {
-      action: {
-        type: "newGame",
-        opponent: preferredOpponent,
-        boardSize,
-        why: pristineRetarget
-          ? "untouched subnet has no invested reward; start the highest-value game"
-          : view.nextGame?.why ?? "completed subnet; start the highest-value reward",
-      },
+      action: { type: "newGame", opponent: preferredOpponent, boardSize },
       ranked: [],
-      why: `new ${boardSize}x${boardSize} game against ${preferredOpponent}`,
       finalists: 0,
       // Immediate transitions never run the network; a neutral nominal value
       // keeps the field's win-probability scale.
@@ -322,9 +314,8 @@ function immediateDecision(view: GoView): GoDecision | undefined {
   }
   if (view.currentPlayer !== "Black") {
     return {
-      action: { type: "resume", why: "request the pending white move after an interrupted wait" },
+      action: { type: "resume" },
       ranked: [],
-      why: "resuming opponent turn",
       finalists: 0,
       positionValue: 0.5,
     };
@@ -333,9 +324,8 @@ function immediateDecision(view: GoView): GoDecision | undefined {
     const score = scoreBoard(view.board, view.komi ?? 0);
     if (score.X >= score.O) {
       return {
-        action: { type: "pass", why: `accept white's pass and win ${score.X}-${score.O}` },
+        action: { type: "pass" },
         ranked: [],
-        why: "end a won game",
         finalists: 0,
         positionValue: 1,
       };
@@ -553,11 +543,6 @@ function boundedSinglePointCheats(view: GoView, limit: number): GoNeuralPrepared
     .slice(0, limit));
 }
 
-function playingAction(candidate: GoNeuralPreparedCandidate, winProbability: number): GoPlayingAction {
-  const why = `${candidate.action.type} neural value ${winProbability.toFixed(3)} win`;
-  return { ...candidate.action, why } as GoPlayingAction;
-}
-
 /** Seed-dependent half. V9 proposes on the original board, then resolves each
  * finalist's weighted replies, evaluates every distinct result board in one
  * backend batch, and selects exactly like the trainer's outer loop.
@@ -646,9 +631,8 @@ async function finalizeForSeeds(
       if (cheat.candidateLimit === 0) {
         if (bestProposal.action.type !== "move") {
           return {
-            action: { type: "pass", why: "cheat policy selected pass" },
+            action: { type: "pass" },
             ranked: [],
-            why: "successful cheat opportunity declined by policy pass",
             finalists: 1,
             positionValue: proposalPositionValue,
             forecast: [],
@@ -693,9 +677,8 @@ async function finalizeForSeeds(
         }
         if (secondPoint === area) {
           return {
-            action: { type: "pass", why: "cheat policy selected pass for the second placement" },
+            action: { type: "pass" },
             ranked: [],
-            why: "successful cheat opportunity declined by policy pass",
             finalists: 1,
             positionValue: proposalPositionValue,
             forecast: [],
@@ -710,9 +693,8 @@ async function finalizeForSeeds(
         });
         if (!greedy) throw new Error("sequential double-move proposal produced an invalid cheat");
         return {
-          action: playingAction(greedy, proposalPositionValue),
+          action: greedy.action as GoPlayingAction,
           ranked: [],
-          why: "successful cheat; latency-bounded sequential 19x19 policy",
           finalists: 1,
           positionValue: proposalPositionValue,
           forecast: [],
@@ -1153,10 +1135,6 @@ async function finalizeForSeeds(
   for (const entry of scored) {
     if (entry.candidate.action.type === "move") {
       const action = entry.candidate.action;
-      const modal = entry.predictedReplies[0];
-      const modalText = modal
-        ? `; forecast ${modal.x === null ? "pass" : `${modal.x},${modal.y}`} with ${modal.count.toFixed(2)}/${seeds.length} support`
-        : "";
       ranked.push({
         x: action.x,
         y: action.y,
@@ -1165,23 +1143,15 @@ async function finalizeForSeeds(
         predictedReplies: entry.predictedReplies,
         forecastCertainty,
         captures: entry.candidate.captures,
-        why: `neural value${modalText}`,
       });
     }
   }
   ranked.sort((a, b) => b.score - a.score || b.powerPerRound - a.powerPerRound || b.captures - a.captures || a.x - b.x || a.y - b.y);
 
-  const summary = `${useCheat ? "cheat" : "neural"} value over ${candidates.length} candidates`;
   if (best.candidate.action.type === "pass") {
     return {
-      action: {
-        type: "pass",
-        why: best.candidate.terminal
-          ? "ending the game rates above every continuation"
-          : useCheat ? "passing rates above every successful cheat" : "passing rates above every legal move",
-      },
+      action: { type: "pass" },
       ranked: ranked.slice(0, 8),
-      why: summary,
       finalists: candidates.length,
       positionValue,
       forecast: best.predictedReplies,
@@ -1189,9 +1159,8 @@ async function finalizeForSeeds(
     };
   }
   return {
-    action: playingAction(best.candidate, best.winProbability),
+    action: best.candidate.action as GoPlayingAction,
     ranked: ranked.slice(0, 8),
-    why: summary,
     finalists: candidates.length,
     positionValue,
     forecast: best.predictedReplies,
@@ -1360,22 +1329,13 @@ export async function finalizeNeuralGoDecision(
       prepared.view, waited.action as GoPlayingAction, engine, waitedDispatch, plies)) {
       return decision;
     }
-    return {
-      ...waited,
-      dispatchOffsetMs: GO_ENGINE_CYCLE_MS,
-      why: `${waited.why}; waited one engine cycle (this seed's line rolls out to a loss)`,
-    };
+    return { ...waited, dispatchOffsetMs: GO_ENGINE_CYCLE_MS };
   }
   if (waited.predictedWin === undefined
     || waited.predictedWin < decision.predictedWin! + wait.minimumGain) {
     return decision;
   }
-  return {
-    ...waited,
-    dispatchOffsetMs: GO_ENGINE_CYCLE_MS,
-    why: `${waited.why}; waited one engine cycle `
-      + `(${decision.predictedWin!.toFixed(3)} to ${waited.predictedWin.toFixed(3)} predicted win)`,
-  };
+  return { ...waited, dispatchOffsetMs: GO_ENGINE_CYCLE_MS };
 }
 
 /** Materialize the exact public successor positions for the selected action.
@@ -1408,9 +1368,8 @@ export function neuralGoContinuations(
     })
     : (() => {
       const played = applyGoCheat(prepared.view.board, decisionAction);
-      const { why: _why, ...candidateAction } = decisionAction;
       return played ? {
-        action: candidateAction,
+        action: decisionAction,
         board: played.board,
         captures: played.captures,
         recordsHistory: false,

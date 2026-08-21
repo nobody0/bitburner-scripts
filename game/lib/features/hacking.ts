@@ -1818,7 +1818,6 @@ export const hackingModule: FeatureModule = {
         "hacking",
         "action:backdoor",
         BACKDOOR_CALLS,
-        "install requested backdoor",
         backdoorClaimPriority(ctx, backdoorTarget),
       ));
     }
@@ -1828,7 +1827,7 @@ export const hackingModule: FeatureModule = {
       if (program) {
         const purchaseCost = portOpenerPurchaseCost(ctx.state, pending.server.numOpenPortsRequired ?? 0);
         claims.push(
-          actionRamClaim(ctx, "hacking", "action:port-opener", PORT_OPENER_CALLS, "acquire required port opener"),
+          actionRamClaim(ctx, "hacking", "action:port-opener", PORT_OPENER_CALLS),
           {
             by: "hacking",
             id: `port-opener:${program.name}`,
@@ -1843,7 +1842,6 @@ export const hackingModule: FeatureModule = {
             // before BruteSSH can ever become affordable.
             mode: "reserve",
             shape: "continuous",
-            why: `buy TOR and the port openers needed to root ${pending.host}`,
           },
         );
       }
@@ -1891,7 +1889,6 @@ export const hackingModule: FeatureModule = {
           "hacking",
           claimId,
           infrastructureMethods(investment.option.kind),
-          `buy economically justified ${investment.option.kind}`,
         ),
         {
           by: "hacking",
@@ -1917,7 +1914,6 @@ export const hackingModule: FeatureModule = {
           ...allocation,
           ratePerSec: investment.option.returnPerDollarSec * investment.claimAmount,
           returnPerDollarSec: investment.option.returnPerDollarSec,
-          why: investment.option.why,
         },
       );
     }
@@ -1942,7 +1938,6 @@ export const hackingModule: FeatureModule = {
           ? { valueSec: requestedProgramValueSec }
           : {}),
         urgency: "blocking",
-        why: `writing ${requestedProgram.name} is cheaper than buying it at current player-work income`,
       }]
     : [],
 };

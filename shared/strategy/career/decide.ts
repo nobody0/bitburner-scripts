@@ -1,4 +1,3 @@
-import { formatMoney, formatScientific } from "../../format.ts";
 import {
   channelForNeed,
   channelWorth,
@@ -23,7 +22,6 @@ import {
   karmaPerSec,
   killsPerSec,
   moneyPerSec,
-  successChance,
   type CrimeContext,
   type CrimePerson,
   type CrimeStats,
@@ -70,7 +68,6 @@ export interface CareerAction {
   /** Exact university/gym used for a class action. */
   location?: string;
   focus?: boolean;
-  why: string;
 }
 
 /** One rate an option produces, in the board's own vocabulary. Kept alongside
@@ -96,7 +93,7 @@ export interface ScoredAction {
   /** Money per second, reported separately: it is the bootstrap objective
    *  before the route is priced, and always worth showing. */
   moneyPerSec: number;
-  /** Per-outcome contributions, for the UI's "why this action" column. */
+  /** Per-outcome contributions, rendered per action by the UI. */
   contributions: { kind: NeedKind; subject?: string; perSec: number; worthSec: number; valueSec: number }[];
   /** Queue band assigned from the highest-urgency request this option serves.
    *  REPORTING ONLY: career's money claims still use it, but the work slot is
@@ -181,14 +178,13 @@ export interface CareerDecision {
   /** Everything considered, best first. Rendered so a choice can be argued. */
   ranked: ScoredAction[];
   /** Needs this feature is currently serving. */
-  serving: (Pick<Need, "by" | "kind" | "subject" | "target" | "have" | "weight" | "urgency" | "why"> & { progress: number })[];
+  serving: (Pick<Need, "by" | "kind" | "subject" | "target" | "have" | "weight" | "urgency"> & { progress: number })[];
   /** Band for career's MONEY and dodge-RAM claims — the urgency of the request
    *  the selected option serves. The work slot itself is priced, not banded. */
   workPriority: CareerPriorityBand;
   /** True when the CHOSEN option serves no posted need. Reported, not acted
    *  on: the option won on the rates it produces either way. */
   incomeFallback: boolean;
-  why: string;
 }
 
 /** Kinds career can actually deliver. Anything else on the board belongs to
@@ -361,7 +357,6 @@ function planCrime(crime: CrimeStats, view: CareerView): PendingAction {
       type: "crime",
       subject: crime.type,
       focus: true,
-      why: `${(successChance(crime, view.person, view.crimeContext) * 100).toFixed(0)}% success, ${formatMoney(money)}/sec`,
     },
     rates: [
       { kind: "karma", perSec: karmaPerSec(crime, view.person, view.crimeContext) },
@@ -395,7 +390,6 @@ function planCourse(course: CareerView["courses"][number], view: CareerView): Pe
       subject: course.name,
       location: course.location,
       focus: true,
-      why: `${course.expPerSec.toFixed(1)} ${course.skill} exp/sec at ${formatMoney(course.costPerSec)}/sec`,
     },
     rates: rates,
     moneyPerSec: // Courses COST money, so a course competes with the income it forgoes.
@@ -406,8 +400,7 @@ function planCourse(course: CareerView["courses"][number], view: CareerView): Pe
 /** Company reputation is directly observable but its gain formula is not
  * available before Formulas.exe. An unmeasured company gets a deliberately
  * neutral exploration rate of one rep/sec; after one sample the measured rate
- * replaces it. This affects ordering only and is called out in the option's
- * explanation rather than presented as a measured prediction.
+ * replaces it. This affects ordering only.
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Formulas.ts#L449-L461 */
 function planCompany(company: NonNullable<CareerView["companies"]>[number]): PendingAction {
   const rate = company.repPerSec !== undefined && company.repPerSec > 0
@@ -420,11 +413,6 @@ function planCompany(company: NonNullable<CareerView["companies"]>[number]): Pen
       type: "company",
       subject: company.name,
       focus: true,
-      why: company.repPerSec !== undefined
-        ? `${company.repPerSec.toFixed(2)} measured company rep/sec`
-        : company.estimatedRepPerSec !== undefined
-          ? `${company.estimatedRepPerSec.toFixed(2)} estimated company rep/sec from the position formula`
-          : "company reputation requested; measuring its rate",
     },
     rates: [
       { kind: "companyRep", subject: company.name, perSec: rate },
@@ -461,7 +449,6 @@ function planProgram(
       type: "program",
       subject: program.name,
       focus: true,
-      why: `write in ${Math.ceil(seconds)}s instead of spending ${formatMoney(program.purchaseCost)}`,
     },
     rates: [{ kind: "file", subject: program.name, perSec }],
     moneyPerSec: -program.purchaseCost / seconds,
@@ -538,7 +525,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   }
   for (const value of values.values()) {
     if (value.kind === "employment" && value.subject && !Object.hasOwn(jobs, value.subject)) {
-      options.push(planInstant({ type: "apply", subject: value.subject, why: `apply for the best eligible job at ${value.subject}` }, value));
+      options.push(planInstant({ type: "apply", subject: value.subject }, value));
     } else if (
       value.kind === "companyRep" && value.subject && !Object.hasOwn(jobs, value.subject)
       // An `employment` request at the same company already produced the
@@ -549,11 +536,11 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       // A reputation request at a company we do not work for is served by
       // hiring on first — the chain is self-sequencing even when both the
       // employment and rep blockers are on the board at once.
-      options.push(planInstant({ type: "apply", subject: value.subject, why: `hire on at ${value.subject} to serve its reputation request` }, value));
+      options.push(planInstant({ type: "apply", subject: value.subject }, value));
     } else if (value.kind === "quitCompany" && value.subject && Object.hasOwn(jobs, value.subject)) {
-      options.push(planInstant({ type: "quit", subject: value.subject, why: `leave ${value.subject} to clear the request` }, value));
+      options.push(planInstant({ type: "quit", subject: value.subject }, value));
     } else if (value.kind === "city" && value.subject && view.city !== value.subject) {
-      options.push(planInstant({ type: "travel", subject: value.subject, why: `travel to requested city ${value.subject}` }, value));
+      options.push(planInstant({ type: "travel", subject: value.subject }, value));
     } else if (value.kind === "jobTitle" && value.subject) {
       const title = value.subject;
       // The title's track comes from the position table, never from string
@@ -587,8 +574,8 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
         if (company !== undefined) {
           options.push(planInstant(
             Object.hasOwn(jobs, company)
-              ? { type: "promote", subject: company, field, why: `seek ${title} through the ${field} track at ${company}` }
-              : { type: "apply", subject: company, field, why: `${company} is the cheapest reachable path to ${title} (${field} track)` },
+              ? { type: "promote", subject: company, field }
+              : { type: "apply", subject: company, field },
             value,
           ));
         }
@@ -604,7 +591,6 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     have: need.have,
     weight: need.weight,
     urgency: need.urgency,
-    why: need.why,
     progress: needProgress(need),
   }));
 
@@ -684,24 +670,21 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       action: {
         type: "stop",
         ...(current.subject !== undefined ? { subject: current.subject } : {}),
-        why: `${current.subject ?? current.kind} is no longer worth the slot`,
       },
       ranked,
       serving,
       workPriority: ranked[0]?.priority ?? "income",
       incomeFallback: false,
-      why: "the slot's occupant is not on the menu",
     };
   }
 
   if (ranked.length === 0) {
     return {
-      action: { type: "idle", why: "no actions available (needs BN4 or SF4 for crime stats)" },
+      action: { type: "idle" },
       ranked,
       serving,
       workPriority: "income",
       incomeFallback: false,
-      why: "nothing to rank",
     };
   }
 
@@ -709,12 +692,11 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   const needsSlot = actionUsesWorkSlot(best.action);
   if (needsSlot && !view.holdsWorkSlot) {
     return {
-      action: { type: "idle", why: "another feature holds Player.currentWork" },
+      action: { type: "idle" },
       ranked,
       serving,
       workPriority: best.priority,
       incomeFallback: !servesNeed(best),
-      why: "no work slot this tick",
     };
   }
   // Do not START a commitment against a menu that is still filling. Only
@@ -730,12 +712,11 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     && !sameWork(view.currentWork, best.action)
   ) {
     return {
-      action: { type: "idle", why: `waiting for the rest of the menu before committing ${Math.round((1 - best.deliveryFraction) * 100)}% of the run` },
+      action: { type: "idle" },
       ranked,
       serving,
       workPriority: best.priority,
       incomeFallback: !servesNeed(best),
-      why: "menu incomplete",
     };
   }
 
@@ -744,12 +725,11 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // reissuing commitCrime here could throw away the first new 200 ms cycle.
   if (needsSlot && sameWork(view.currentWork, best.action) && view.allowProgressSwitch) {
     return {
-      action: { type: "continue", subject: best.action.subject, why: `keep ${best.action.subject} and watch its next completion` },
+      action: { type: "continue", subject: best.action.subject },
       ranked,
       serving,
       workPriority: best.priority,
       incomeFallback: !servesNeed(best),
-      why: "same option remains best at the completion boundary",
     };
   }
   // Reissuing the same work cancels and restarts it. At an ordinary review,
@@ -758,12 +738,11 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22
   if (needsSlot && sameWork(view.currentWork, best.action) && !view.allowProgressSwitch) {
     return {
-      action: { type: "idle", why: `already committing ${best.action.subject}` },
+      action: { type: "idle" },
       ranked,
       serving,
       workPriority: best.priority,
       incomeFallback: !servesNeed(best),
-      why: "continuing",
     };
   }
 
@@ -774,12 +753,11 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22
   if (needsSlot && careerWorkMode(view.currentWork?.kind) === "progress" && !view.allowProgressSwitch) {
     return {
-      action: { type: "idle", why: `waiting for ${view.currentWork?.subject ?? view.currentWork?.kind ?? "progress work"} to complete` },
+      action: { type: "idle" },
       ranked,
       serving,
       workPriority: best.priority,
       incomeFallback: !servesNeed(best),
-      why: "progress is protected until Task.nextCompletion",
     };
   }
 
@@ -789,9 +767,6 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     serving,
     workPriority: best.priority,
     incomeFallback: !servesNeed(best),
-    why: best.value.state === "priced"
-      ? `best Σ (rate/best) × BN-seconds saved (${formatScientific(best.score)}s)`
-      : `no channel career produces is priced yet — maximising income at ${formatMoney(best.moneyPerSec)}/sec`,
   };
 }
 

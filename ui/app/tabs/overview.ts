@@ -1,5 +1,4 @@
 import { FEATURES } from "../../../shared/features/registry.ts";
-import { factsOnly } from "../../../shared/telemetry/schema.ts";
 import { attachChartHover, drawChart } from "../lib/chart.ts";
 import { card, filters, hint, meter, note, search, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtTime } from "../lib/format.ts";
@@ -77,13 +76,11 @@ function fidelityRows(state: ProjectedState): string[][] {
     .map((gap) => [esc(gap.kind), esc(gap.name), String(gap.count), esc(gap.detail ?? "")]);
 }
 
-/** Event payloads are a coder-facing fact dump, not a second prose log.
- * Planner annotations are deliberately omitted here; the feature panels show
- * the structured action, candidates, scores, thresholds and outcomes that
- * support the decision. Observed `reason` fields (API failures, arbiter denial
- * codes, scheduler triggers) remain because they are data from the system. */
+/** Event payloads are a coder-facing fact dump: structured actions,
+ * candidates, scores, thresholds and outcomes, plus observed `reason` codes.
+ * Planner prose no longer exists anywhere in the pipeline. */
 function factJson(value: unknown): string {
-  return JSON.stringify(factsOnly(value));
+  return JSON.stringify(value);
 }
 
 export const overviewTab: Tab = {

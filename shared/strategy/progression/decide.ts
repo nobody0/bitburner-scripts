@@ -1,5 +1,4 @@
 import type { ChannelWorth } from "../income.ts";
-import { formatScientific } from "../../format.ts";
 import { countSlotWeight } from "../factions/augs.ts";
 import { addRepToFavor } from "../factions/rep.ts";
 import { BITNODE_SPEEDRUN_PLAN } from "./bitnode-order.ts";
@@ -133,7 +132,6 @@ export type InstallBlockerKind = "factions" | "stock" | "graft" | "augmentations
 
 export interface InstallBlocker {
   kind: InstallBlockerKind;
-  why: string;
 }
 
 export interface ProgressionDecision {
@@ -150,7 +148,6 @@ export interface ProgressionDecision {
   /** Factions whose banked reputation would cross the donation threshold on
    *  install — the strongest single argument for resetting. */
   favorCrossings: { faction: string; favorNow: number; favorAfter: number }[];
-  why: string;
 }
 
 /** Promote to `finishUp` when the affordable set's value product reaches this,
@@ -185,7 +182,6 @@ export interface InstallVerdict {
   pushRate?: number;
   /** The renewal threshold the accrued value must clear: sqrt(2·O·pushRate). */
   threshold?: number;
-  why: string;
 }
 
 /** The install-vs-push cadence, as a renewal problem.
@@ -220,24 +216,21 @@ export function installVerdict(view: {
   frontierIdle?: boolean;
 }): InstallVerdict {
   if (view.routeEtaKnown !== true) {
-    return { verdict: "no-data", why: "no route ETA; the legacy cash gate decides" };
+    return { verdict: "no-data" };
   }
   const accrued = Math.max(0, view.resetValueMult ?? 0);
   const pushRate = view.pushMarginalRate;
   if (pushRate === undefined) {
     if (view.frontierIdle === true) {
-      return { verdict: "install", why: "nothing left worth pushing for" };
+      return { verdict: "install" };
     }
-    return { verdict: "no-data", why: "the frontier has not published a push target yet" };
+    return { verdict: "no-data" };
   }
   if (pushRate <= 0) {
     return {
       verdict: "install",
       pushRate: 0,
       threshold: 0,
-      why: accrued > 0
-        ? "the next package adds route progress but no reset-activated acceleration; bank the accrued multiplier value"
-        : "the next package adds no reset-activated acceleration",
     };
   }
   const overhead = Math.max(INSTALL_VERDICT_OVERHEAD_SEC, view.resetOverheadSec ?? 0);
@@ -247,14 +240,12 @@ export function installVerdict(view: {
       verdict: "install",
       pushRate,
       threshold,
-      why: `accrued value ${formatScientific(accrued)} clears the cadence threshold ${formatScientific(threshold)} at push rate ${formatScientific(pushRate)}/s`,
     };
   }
   return {
     verdict: "push",
     pushRate,
     threshold,
-    why: `accrued value ${formatScientific(accrued)} below the cadence threshold ${formatScientific(threshold)} at push rate ${formatScientific(pushRate)}/s`,
   };
 }
 
@@ -373,39 +364,25 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
     installWanted || ((view.routeRequiresInstall || nodeAllowsOptionalInstall) && view.factionsNeedLiquidation);
   const installBlockers: InstallBlocker[] = [];
   if (installWanted && !view.factionsReadyToInstall) {
-    installBlockers.push({ kind: "factions", why: "factions has not finished its final purchase and donation sweep" });
+    installBlockers.push({ kind: "factions" });
   }
   if (installWanted && !view.stockReadyToInstall) {
-    installBlockers.push({ kind: "stock", why: "stock portfolio is not authoritatively flat" });
+    installBlockers.push({ kind: "stock" });
   }
   if (installWanted && view.purchasableAugmentation !== undefined) {
-    installBlockers.push({
-      kind: "augmentations",
-      why: `${view.purchasableAugmentation} is still affordable; cash does not survive the install`,
-    });
+    installBlockers.push({ kind: "augmentations" });
   }
   if (installWanted && view.graftInProgress) {
-    installBlockers.push({ kind: "graft", why: "an already-paid graft is still in progress" });
+    installBlockers.push({ kind: "graft" });
   }
   if (installWanted && view.queued.length === 0) {
     // The game's installAugmentations is a NO-OP with nothing queued — an
     // armed empty install would sit forever. The realizable signal may open
     // the gate, but the sweep must convert something before the reset can
     // actually execute.
-    installBlockers.push({ kind: "augmentations", why: "nothing queued yet; the sweep must convert something first" });
+    installBlockers.push({ kind: "augmentations" });
   }
   const installReady = installWanted && installBlockers.length === 0;
-  const why = installReady
-    ? routeInstallWanted
-      ? `ready to install ${view.queued.length} augmentation(s); the selected endgame route requires this reset`
-      : crossings.length > 0
-      ? `ready to install ${view.queued.length} augmentation(s); ${crossings.length} faction(s) cross the donation threshold`
-      : `ready to install ${view.queued.length} augmentation(s); cash exceeds half the run's earnings`
-    : installWanted
-      ? `preparing install: ${installBlockers.map((blocker) => blocker.why).join("; ")}`
-    : phase === "finishUp"
-      ? `affordable set is worth x${view.affordableValueProduct.toFixed(2)} — converting reputation to augmentations`
-      : `building: affordable set is only worth x${view.affordableValueProduct.toFixed(2)}`;
 
   return {
     phase,
@@ -414,7 +391,6 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
     installBlockers,
     installReady,
     favorCrossings: crossings,
-    why,
   };
 }
 
@@ -445,7 +421,6 @@ export const DEFAULT_BITNODE_TARGETS: readonly [number, number][] = [
 export interface NextBitNodeDecision {
   bitNode: number;
   targetLevel: number;
-  why: string;
 }
 
 /** Reset-activated value of reputation that will become favor at install.
@@ -594,19 +569,10 @@ export function chooseNextBitNode(
   for (const [bitNode, targetLevel] of targets) {
     const level = projected[String(bitNode)] ?? 0;
     if (level < targetLevel) {
-      return {
-        bitNode,
-        targetLevel,
-        why: `SF${bitNode}.${level + 1} is the next unmet milestone toward level ${targetLevel}`,
-      };
+      return { bitNode, targetLevel };
     }
   }
-  const nextLevel = (projected["12"] ?? 0) + 1;
-  return {
-    bitNode: 12,
-    targetLevel: nextLevel,
-    why: `all finite Source-File targets are met; continue repeatable SF12 at level ${nextLevel}`,
-  };
+  return { bitNode: 12, targetLevel: (projected["12"] ?? 0) + 1 };
 }
 
 /** Total hours for an ordering, given measured per-node times and the

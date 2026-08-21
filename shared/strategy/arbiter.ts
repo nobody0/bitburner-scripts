@@ -96,7 +96,6 @@ interface ClaimBase {
    *  here, so a discount applied only internally would be re-inflated the moment
    *  the bid met another feature's. See `deliveryFraction` in `./income.ts`. */
   deliveryFraction?: number;
-  why: string;
 }
 
 /** A resource request has exactly one allocation shape. Continuous claims are
@@ -142,7 +141,6 @@ export interface Denial {
   wanted: number;
   available: number;
   reason: DenyReason;
-  why: string;
 }
 
 /** Who holds the single player-time slot. Carried across ticks by the caller. */
@@ -198,7 +196,6 @@ export interface ArbiterResult {
     pricing: "hard" | "economic";
     priority: number;
     value?: SlotValue;
-    why: string;
   }[];
   /** One marginal-value threshold for every priority band that was
    * water-filled. Several can exist because hard bands never compete. */
@@ -904,7 +901,6 @@ function denial(claim: Claim, available: number, reason: DenyReason): Denial {
     wanted: claim.amount,
     available,
     reason,
-    why: claim.why,
   };
 }
 
@@ -1043,7 +1039,6 @@ function resolveSlot(input: ArbiterInput): {
       pricing: bid.pricing,
       priority: bid.claim.priority,
       ...(bid.value ? { value: bid.value } : {}),
-      why: bid.claim.why,
     })),
   };
 }

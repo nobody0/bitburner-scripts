@@ -39,7 +39,6 @@ function harness(acquire = true) {
         resource: "ram",
         amount: 1,
         priority: PRIORITY["progression:terminal-action"],
-        why: "test",
       }]]),
     },
     acquireDodge: (_gb: number, request: { by: string; id: string }) => {

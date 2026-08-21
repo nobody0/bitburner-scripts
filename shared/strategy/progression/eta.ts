@@ -140,7 +140,7 @@ export interface RouteEta {
   /** Time until the next reset required by route mechanics. Optional means no
    * route-mandatory reset is currently predictable; economic cadence may
    * still choose an earlier install. */
-  nextMandatoryInstall?: { sec: number; measured: boolean; why: string };
+  nextMandatoryInstall?: { sec: number; measured: boolean };
 }
 
 function curvePart(
@@ -229,10 +229,8 @@ function redPillTail(view: EndgameView, wdSkill: number | undefined, rates: Rout
  * the guard inverts: the reset IS the fastest path to the gate. Both paths are
  * compared in measured seconds rather than either being hardcoded.
  *
- * Returns the REASON when the guard should be overridden, so a deliberately
- * surprising install carries its justification into the run record; undefined
- * when the guard stands. */
-export function regrowInstallOverrideWhy(input: {
+ * Returns true when the guard should be overridden; false when it stands. */
+export function regrowInstallOverride(input: {
   /** Route stage; only "world-daemon-regrow" carries this guard. */
   stage?: string;
   /** The guard's own verdict. Only a REFUSAL can be overridden. */
@@ -241,7 +239,7 @@ export function regrowInstallOverrideWhy(input: {
   worldDaemonSkill?: number;
   hackingSkill: number;
   rates: RouteRates;
-}): string | undefined {
+}): boolean {
   const gate = input.worldDaemonSkill;
   if (
     input.optionalInstallAllowed !== false
@@ -250,13 +248,11 @@ export function regrowInstallOverrideWhy(input: {
     || input.hackingSkill >= gate
     || input.rates.hackingSkillPerSec <= 0
   ) {
-    return undefined;
+    return false;
   }
   const remainNowSec = (gate - input.hackingSkill) / input.rates.hackingSkillPerSec;
   const remainAfterSec = INSTALL_OVERHEAD_SEC + postInstallRegrow(gate, input.rates).sec;
-  if (remainAfterSec >= remainNowSec) return undefined;
-  return `re-climbing after an install (~${Math.round(remainAfterSec)}s with queued multipliers)`
-    + ` beats finishing the current climb (~${Math.round(remainNowSec)}s)`;
+  return remainAfterSec < remainNowSec;
 }
 
 export function postInstallRegrow(skill: number, rates: RouteRates): EtaPart {
@@ -314,11 +310,7 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
             );
             parts.push(acquire);
             parts.push({ what: "install Daedalus count package", resource: "install", sec: INSTALL_OVERHEAD_SEC, measured: false });
-            nextMandatoryInstall = {
-              sec: acquire.sec,
-              measured: acquire.measured,
-              why: route.mandatoryInstall?.why ?? "the installed-augmentation gate requires the final package to be reset in",
-            };
+            nextMandatoryInstall = { sec: acquire.sec, measured: acquire.measured };
 
             // Money and skills reset at that install, so progress made toward
             // those invitation branches before it cannot be credited twice.
@@ -344,28 +336,12 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
 
             const inviteNeeds: RouteNeed[] = [];
             if (view.money < DAEDALUS_MONEY) {
-              inviteNeeds.push({
-                kind: "money",
-                target: DAEDALUS_MONEY,
-                have: view.money,
-                why: "parallel Daedalus invitation money gate",
-              });
+              inviteNeeds.push({ kind: "money", target: DAEDALUS_MONEY, have: view.money });
             }
             if (view.hackingSkill < DAEDALUS_HACKING && view.lowestCombatSkill < DAEDALUS_COMBAT) {
               inviteNeeds.push(skill.resource === "combat"
-                ? {
-                    kind: "combatSkills",
-                    target: DAEDALUS_COMBAT,
-                    have: view.lowestCombatSkill,
-                    why: "measured faster branch of the parallel Daedalus skill gate",
-                  }
-                : {
-                    kind: "skill",
-                    subject: "hacking",
-                    target: DAEDALUS_HACKING,
-                    have: view.hackingSkill,
-                    why: "measured faster branch of the parallel Daedalus skill gate",
-                  });
+                ? { kind: "combatSkills", target: DAEDALUS_COMBAT, have: view.lowestCombatSkill }
+                : { kind: "skill", subject: "hacking", target: DAEDALUS_HACKING, have: view.hackingSkill });
             }
             // Once both invitation gates are satisfied stepEndgame has already
             // advanced to Daedalus reputation, which remains sequential and
@@ -412,11 +388,7 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
             }
             parts.push({ what: `install labyrinth reward ${stage + 1}`, resource: "install", sec: INSTALL_OVERHEAD_SEC, measured: false });
           }
-          nextMandatoryInstall = {
-            sec: firstQueued ? 0 : LABYRINTH_WALK_SEC,
-            measured: firstQueued,
-            why: route.mandatoryInstall?.why ?? "the current labyrinth reward must be installed before the next stage",
-          };
+          nextMandatoryInstall = { sec: firstQueued ? 0 : LABYRINTH_WALK_SEC, measured: firstQueued };
           parts.push(postInstallRegrow(wdSkill ?? 3000, rates));
         }
       } else {
@@ -446,7 +418,7 @@ export function routeEtas(view: EndgameView, decision: EndgameDecision, rates: R
     }
 
     if (route.mandatoryInstall?.ready) {
-      nextMandatoryInstall = { sec: 0, measured: true, why: route.mandatoryInstall.why };
+      nextMandatoryInstall = { sec: 0, measured: true };
     }
 
     out.push({
@@ -495,17 +467,12 @@ export interface RouteChoice {
   route: RouteId;
   etaSec: number;
   decidedAt: number;
-  why: string;
 }
 
 export interface RouteDecision {
   choice: RouteChoice | undefined;
   /** True when the route CHANGED this call — the telemetry event trigger. */
   switched: boolean;
-}
-
-function hours(sec: number): string {
-  return sec >= 3_600 ? `~${(sec / 3_600).toFixed(1)}h` : `~${Math.max(1, Math.round(sec / 60))}m`;
 }
 
 /** Pick the fastest available route, with hysteresis against the incumbent.
@@ -541,7 +508,6 @@ export function chooseRoute(
         route: done.id,
         etaSec: 0,
         decidedAt: previous?.route === done.id ? previous.decidedAt : now,
-        why: `${done.id} route is complete — the node can be ended now`,
       },
       switched: previous?.route !== done.id,
     };
@@ -551,15 +517,11 @@ export function chooseRoute(
   const incumbent = previous ? usable.find((eta) => eta.id === previous.route) : undefined;
 
   if (!incumbent) {
-    const runnerUp = usable.filter((eta) => eta.id !== best.id).sort((a, b) => a.etaSec - b.etaSec)[0];
     return {
       choice: {
         route: best.id,
         etaSec: best.etaSec,
         decidedAt: now,
-        why: runnerUp
-          ? `${best.id} is the fastest route: ${hours(best.etaSec)} (vs ${runnerUp.id} ${hours(runnerUp.etaSec)})`
-          : `${best.id} is the only available route: ${hours(best.etaSec)}`,
       },
       // First decision, or the incumbent stopped being available — either way
       // the published route changes, which is what the event marks.
@@ -578,7 +540,6 @@ export function chooseRoute(
         route: best.id,
         etaSec: best.etaSec,
         decidedAt: now,
-        why: `switching to ${best.id}: ${hours(best.etaSec)} beats ${incumbent.id} ${hours(incumbent.etaSec)} by >${Math.round(margin * 100)}%`,
       },
       switched: true,
     };
@@ -589,10 +550,6 @@ export function chooseRoute(
       route: incumbent.id,
       etaSec: incumbent.etaSec,
       decidedAt: previous!.decidedAt,
-      why:
-        best.id === incumbent.id
-          ? `${incumbent.id} remains the fastest route: ${hours(incumbent.etaSec)}`
-          : `staying on ${incumbent.id} (${hours(incumbent.etaSec)}): ${best.id} at ${hours(best.etaSec)} is within the switch margin or dwell`,
     },
     switched: false,
   };

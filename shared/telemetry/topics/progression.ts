@@ -159,7 +159,6 @@ export interface ArbitrationDigest {
     moneyPerSec?: number;
     /** Per-channel breakdown: our rate, the best anyone announced, the worth. */
     channels?: { channel: string; ourRate: number; bestRate?: number; worthSec: number; valueSec: number }[];
-    why: string;
   }[];
   preempted?: { by: FeatureId; id: string; heldMs: number };
   remaining: { money: number };
@@ -179,12 +178,6 @@ export interface ProgressionPlan {
   liquidationWanted: boolean;
   /** Why the reset cannot execute yet. */
   installBlockers: { kind: "factions" | "stock" | "graft" | "augmentations" }[];
-  /** Why an install ran DESPITE a guard that forbids one — currently only the
-   * post-Red-Pill regrow guard, inverted because re-climbing with the queued
-   * multipliers reaches the daemon's gate sooner than finishing the current
-   * climb. Deliberately surprising decisions must carry their reason into the
-   * run record, or the plan shows an install the guard says cannot happen. */
-  installOverrideWhy?: string;
   /** Every reset-sensitive subsystem has acknowledged readiness. */
   installReady: boolean;
   /** Route mechanics require the current final sweep/reset. This is broader
@@ -222,23 +215,20 @@ export interface ProgressionPlan {
     remainingSec?: number;
     latched: boolean;
   };
-  /** Terminal action once the selected route is mechanically complete. The
-   * source-file policy is explicit so a reset log can explain why that next
-   * node was chosen. */
+  /** Terminal action once the selected route is mechanically complete. */
   completion?: {
     ready: boolean;
     automatic: boolean;
     nextBitNode: number;
     targetLevel: number;
-    why: string;
     armedAt?: number;
     execute: boolean;
   };
   /** Immediate, reversible route bootstrap owned by progression because it is
    * selected by the high-level route rather than by a feature-local optimum. */
   routeAction?:
-    | { type: "joinBladeburner"; why: string }
-    | { type: "createGang"; faction: string; why: string };
+    | { type: "joinBladeburner" }
+    | { type: "createGang"; faction: string };
   /** The chosen way to finish this BitNode, with the estimate it was chosen
    *  on. Everything below is the decision record the calibration loop reads
    *  back out of runs/*.jsonl: which route, guessed for how long, decided
@@ -271,6 +261,6 @@ export interface RouteEtaDigest {
   parts: { what: string; resource: string; sec: number; measured: boolean }[];
   stage?: string;
   needs?: RouteNeed[];
-  nextMandatoryInstall?: { sec: number; measured: boolean; why: string };
+  nextMandatoryInstall?: { sec: number; measured: boolean };
   optionalInstall?: OptionalInstallPolicy;
 }

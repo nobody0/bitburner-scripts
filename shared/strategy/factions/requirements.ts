@@ -1,6 +1,5 @@
 import type { PlayerRequirement } from "@ns";
 import type { FeatureId } from "../../features/ids.ts";
-import { formatMoney } from "../../format.ts";
 import type { NeedKind } from "../needs.ts";
 import { COMPANIES } from "../../features/companies.ts";
 import {
@@ -135,7 +134,6 @@ export interface Blocker {
   /** True when the requirement is that this NOT hold. Only ever set for the
    *  revocable kinds, since those are the only ones De Morgan can act on. */
   negated?: boolean;
-  why: string;
   /** Optional observation-aware ranking estimate. It never substitutes for
    * the requirement predicate and is not presented as a route forecast. */
   etaSec?: number;
@@ -186,10 +184,9 @@ function blocker(
   kind: BlockerKind,
   target: number,
   have: number,
-  why: string,
   extra: Partial<Blocker> = {},
 ): Blocker {
-  return { kind, target, have, progress: ratio(have, target), owner: OWNER[kind], reachable: true, why, ...extra };
+  return { kind, target, have, progress: ratio(have, target), owner: OWNER[kind], reachable: true, ...extra };
 }
 
 /** Push `not` inward by De Morgan until it sits on a leaf.
@@ -217,7 +214,7 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
     case "money":
       return view.money >= requirement.money
         ? []
-        : [blocker("money", requirement.money, view.money, `needs ${formatMoney(requirement.money)}`)];
+        : [blocker("money", requirement.money, view.money)];
 
     case "skills": {
       const out: Blocker[] = [];
@@ -231,14 +228,14 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
       if (isCombatSet) {
         const target = combat[0]![1];
         const have = Math.min(...COMBAT_SKILLS.map((skill) => view.skills[skill] ?? 0));
-        if (have < target) out.push(blocker("combatSkills", target, have, `needs all combat skills at ${target}`));
+        if (have < target) out.push(blocker("combatSkills", target, have));
         return out;
       }
       for (const [skill, target] of entries) {
         const have = view.skills[skill] ?? 0;
         if (have >= target) continue;
         const kind: BlockerKind = skill === "charisma" ? "charisma" : "skill";
-        out.push(blocker(kind, target, have, `needs ${skill} ${target}`, { subject: skill }));
+        out.push(blocker(kind, target, have, { subject: skill }));
       }
       return out;
     }
@@ -247,24 +244,17 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
       // Karma requirements are UPPER bounds on a negative number.
       return view.karma <= requirement.karma
         ? []
-        : [blocker("karma", requirement.karma, view.karma, `needs karma <= ${requirement.karma}`)];
+        : [blocker("karma", requirement.karma, view.karma)];
 
     case "numPeopleKilled":
       return view.numPeopleKilled >= requirement.numPeopleKilled
         ? []
-        : [
-            blocker(
-              "kills",
-              requirement.numPeopleKilled,
-              view.numPeopleKilled,
-              `needs ${requirement.numPeopleKilled} kills`,
-            ),
-          ];
+        : [blocker("kills", requirement.numPeopleKilled, view.numPeopleKilled)];
 
     case "file":
       return view.files.has(requirement.file)
         ? []
-        : [blocker("file", 1, 0, `needs the file ${requirement.file}`, { subject: requirement.file })];
+        : [blocker("file", 1, 0, { subject: requirement.file })];
 
     case "numAugmentations": {
       // Zero is special: installed + queued, excluding NeuroFlux. Positive
@@ -272,13 +262,13 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
       // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts#L119-L132
       const counted = requirement.numAugmentations === 0 ? (view.purchasedAugCount ?? view.augCount) : view.augCount;
       if (requirement.numAugmentations === 0) {
-        return counted === 0 ? [] : [blocker("augCount", 0, counted, "needs no purchased augmentations")];
+        return counted === 0 ? [] : [blocker("augCount", 0, counted)];
       }
       // A goal, never "unachievable": this is exactly how Daedalus is planned
       // toward, and treating "not yet" as impossible removes the endgame.
       return counted >= requirement.numAugmentations
         ? []
-        : [blocker("augCount", requirement.numAugmentations, counted, `needs ${requirement.numAugmentations} augmentations`)];
+        : [blocker("augCount", requirement.numAugmentations, counted)];
     }
 
     case "employedBy": {
@@ -296,7 +286,7 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
             companyCtx(work, requirement.company),
           ).length > 0
         : false;
-      return [blocker("employment", 1, 0, `needs a job at ${requirement.company}`, {
+      return [blocker("employment", 1, 0, {
         subject: requirement.company,
         ...(hirable ? { etaSec: 60 } : {}),
       })];
@@ -318,7 +308,7 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
           )
         : undefined;
       return [
-        blocker("companyRep", requirement.reputation, have, `needs ${requirement.company} reputation`, {
+        blocker("companyRep", requirement.reputation, have, {
           subject: requirement.company,
           ...(walk && Number.isFinite(walk.seconds) ? { etaSec: walk.seconds } : {}),
         }),
@@ -346,7 +336,7 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
             work.ctx,
           )
         : undefined;
-      return [blocker("jobTitle", 1, 0, `needs the job title ${requirement.jobTitle}`, {
+      return [blocker("jobTitle", 1, 0, {
         subject: requirement.jobTitle,
         ...(path ? { etaSec: path.etaSec } : {}),
       })];
@@ -355,18 +345,18 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
     case "city":
       return view.city === requirement.city
         ? []
-        : [blocker("city", 1, 0, `needs to be in ${requirement.city}`, { subject: requirement.city })];
+        : [blocker("city", 1, 0, { subject: requirement.city })];
 
     case "location":
       return view.location === requirement.location
         ? []
-        : [blocker("location", 1, 0, `needs to be at ${requirement.location}`, { subject: requirement.location })];
+        : [blocker("location", 1, 0, { subject: requirement.location })];
 
     case "backdoorInstalled": {
       if (view.backdoored.has(requirement.server)) return [];
       const access = view.backdoorAccess?.[requirement.server];
       if (!access) {
-        return [blocker("backdoor", 1, 0, `needs a backdoor on ${requirement.server}`, { subject: requirement.server })];
+        return [blocker("backdoor", 1, 0, { subject: requirement.server })];
       }
       const skillGap = Math.max(0, access.requiredHackingSkill - (view.skills.hacking ?? 0));
       const usableOpeners = Math.max(access.openPortCount, view.portOpeners ?? 0);
@@ -376,7 +366,7 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
       // constants, so a partially-priced view is never worse than unpriced.
       const installSec = access.installSec ?? NOMINAL_SEC_PER_UNIT.backdoor;
       const skillWaitSec = access.skillWaitSec ?? skillGap * NOMINAL_SEC_PER_UNIT.skill;
-      return [blocker("backdoor", 1, 0, `needs a backdoor on ${requirement.server}`, {
+      return [blocker("backdoor", 1, 0, {
         subject: requirement.server,
         // Ranking economics: skill and program acquisition precede the
         // terminal/backdoor action. The live hacking planner owns both.
@@ -387,75 +377,38 @@ export function evaluate(requirement: PlayerRequirement, view: RequirementView):
     case "hacknetRAM":
       return view.hacknetRam >= requirement.hacknetRAM
         ? []
-        : [blocker("hacknetRam", requirement.hacknetRAM, view.hacknetRam, `needs ${requirement.hacknetRAM}GB hacknet RAM`)];
+        : [blocker("hacknetRam", requirement.hacknetRAM, view.hacknetRam)];
 
     case "hacknetCores":
       return view.hacknetCores >= requirement.hacknetCores
         ? []
-        : [
-            blocker(
-              "hacknetCores",
-              requirement.hacknetCores,
-              view.hacknetCores,
-              `needs ${requirement.hacknetCores} hacknet cores`,
-            ),
-          ];
+        : [blocker("hacknetCores", requirement.hacknetCores, view.hacknetCores)];
 
     case "hacknetLevels":
       return view.hacknetLevels >= requirement.hacknetLevels
         ? []
-        : [
-            blocker(
-              "hacknetLevels",
-              requirement.hacknetLevels,
-              view.hacknetLevels,
-              `needs ${requirement.hacknetLevels} hacknet levels`,
-            ),
-          ];
+        : [blocker("hacknetLevels", requirement.hacknetLevels, view.hacknetLevels)];
 
     case "bladeburnerRank":
       return view.bladeburnerRank >= requirement.bladeburnerRank
         ? []
-        : [
-            blocker(
-              "bladeburnerRank",
-              requirement.bladeburnerRank,
-              view.bladeburnerRank,
-              `needs Bladeburner rank ${requirement.bladeburnerRank}`,
-            ),
-          ];
+        : [blocker("bladeburnerRank", requirement.bladeburnerRank, view.bladeburnerRank)];
 
     case "numInfiltrations":
       return view.numInfiltrations >= requirement.numInfiltrations
         ? []
-        : [
-            blocker(
-              "infiltrations",
-              requirement.numInfiltrations,
-              view.numInfiltrations,
-              `needs ${requirement.numInfiltrations} manual infiltration${requirement.numInfiltrations === 1 ? "" : "s"}`,
-              { reachable: false },
-            ),
-          ];
+        : [blocker("infiltrations", requirement.numInfiltrations, view.numInfiltrations, { reachable: false })];
 
     case "bitNodeN":
       // Nothing inside a run changes the node.
       return view.bitNode === requirement.bitNodeN
         ? []
-        : [
-            blocker("bitNode", requirement.bitNodeN, view.bitNode, `only in BitNode ${requirement.bitNodeN}`, {
-              reachable: false,
-            }),
-          ];
+        : [blocker("bitNode", requirement.bitNodeN, view.bitNode, { reachable: false })];
 
     case "sourceFile":
       return (view.sourceFiles[String(requirement.sourceFile)] ?? 0) > 0
         ? []
-        : [
-            blocker("sourceFile", requirement.sourceFile, 0, `needs Source-File ${requirement.sourceFile}`, {
-              reachable: false,
-            }),
-          ];
+        : [blocker("sourceFile", requirement.sourceFile, 0, { reachable: false })];
 
     case "not":
       return evaluateNot(requirement.condition, view);
@@ -519,22 +472,17 @@ function evaluateNot(condition: PlayerRequirement, view: RequirementView): Block
   switch (leaf.type) {
     case "employedBy":
       return Object.hasOwn(view.jobs, leaf.company)
-        ? [
-            blocker("quitCompany", 0, 1, `must not be employed by ${leaf.company}`, {
-              subject: leaf.company,
-              negated: true,
-            }),
-          ]
+        ? [blocker("quitCompany", 0, 1, { subject: leaf.company, negated: true })]
         : [];
 
     case "city":
       return view.city === leaf.city
-        ? [blocker("city", 0, 1, `must not be in ${leaf.city}`, { subject: leaf.city, negated: true })]
+        ? [blocker("city", 0, 1, { subject: leaf.city, negated: true })]
         : [];
 
     case "location":
       return view.location === leaf.location
-        ? [blocker("location", 0, 1, `must not be at ${leaf.location}`, { subject: leaf.location, negated: true })]
+        ? [blocker("location", 0, 1, { subject: leaf.location, negated: true })]
         : [];
 
     default: {
@@ -551,7 +499,6 @@ function evaluateNot(condition: PlayerRequirement, view: RequirementView): Block
           owner: OWNER[kindOf(leaf)],
           reachable: false,
           negated: true,
-          why: `must NOT satisfy ${leaf.type}, which cannot be undone`,
         },
       ];
     }

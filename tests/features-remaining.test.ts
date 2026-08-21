@@ -122,9 +122,8 @@ describe("gang", () => {
 
   test("the wanted penalty makes assignment COUPLED, not per-member", () => {
     // Wanted level is gang-wide, so one member's task multiplies down
-    // everyone's output. The decision reports an exact search over the pair.
+    // everyone's output. Two members are few enough for the exact pair search.
     const decision = stepGang(view({ members: [member("a"), member("b")] }));
-    expect(decision.why).toContain("exact search");
     expect(decision.assignment.approximated).toBe(false);
   });
 
@@ -222,7 +221,7 @@ describe("bladeburner", () => {
   test("a Bladeburner action claims Player.currentWork only without the installed Simulacrum", () => {
     const module = FEATURE_MODULES.bladeburner;
     const state = initState();
-    state.topics.bladeburner = { plan: { action: { type: "act", why: "test" }, ranked: [], why: "test" } } as never;
+    state.topics.bladeburner = { plan: { action: { type: "act" }, ranked: [] } } as never;
     const progression = { ownedAugs: {} as Record<string, number> };
     state.topics.progression = progression as never;
     const context = {
@@ -284,7 +283,7 @@ describe("sleeves", () => {
 
   test("sleeves serve the board in PARALLEL with the player", () => {
     const board = postNeeds([
-      { by: "gang", kind: "karma", target: -54_000, have: 0, weight: 10, urgency: "blocking", why: "gang" },
+      { by: "gang", kind: "karma", target: -54_000, have: 0, weight: 10, urgency: "blocking" },
     ]);
     const decision = stepSleeves({ sleeves: [sleeve(0), sleeve(1)], tasks, shockCeiling: 50, syncFloor: 50 }, board);
     // Both sleeves take the karma crime — they do not interfere, so the
@@ -300,7 +299,7 @@ describe("sleeves", () => {
 
   test("does not cancel a running crime until its completion promise fires", () => {
     const running = { ...sleeve(0), task: { type: "CRIME", detail: "Heist" } };
-    const board = postNeeds([{ by: "gang", kind: "karma", target: -100, have: 0, weight: 10, urgency: "blocking", why: "test" }]);
+    const board = postNeeds([{ by: "gang", kind: "karma", target: -100, have: 0, weight: 10, urgency: "blocking" }]);
     expect(stepSleeves({ sleeves: [running], tasks, shockCeiling: 50, syncFloor: 50 }, board).assignments).toEqual([]);
     expect(stepSleeves({ sleeves: [{ ...running, allowCrimeSwitch: true }], tasks, shockCeiling: 50, syncFloor: 50 }, board).assignments[0]!.task.detail).toBe("Homicide");
   });
@@ -314,12 +313,12 @@ describe("sleeves", () => {
     const shocked = sleeve(0, 100);
     const karma = stepSleeves(
       { sleeves: [shocked], tasks: special, shockCeiling: 101, syncFloor: 50 },
-      postNeeds([{ by: "gang", kind: "karma", target: -1, have: 0, weight: 1, urgency: "blocking", why: "test" }]),
+      postNeeds([{ by: "gang", kind: "karma", target: -1, have: 0, weight: 1, urgency: "blocking" }]),
     );
     expect(karma.assignment.total).toBeGreaterThan(0);
     const combat = stepSleeves(
       { sleeves: [shocked], tasks: special, shockCeiling: 101, syncFloor: 50 },
-      postNeeds([{ by: "bladeburner", kind: "combatSkills", target: 100, have: 0, weight: 1, urgency: "blocking", why: "test" }]),
+      postNeeds([{ by: "bladeburner", kind: "combatSkills", target: 100, have: 0, weight: 1, urgency: "blocking" }]),
     );
     expect(combat.assignment.total).toBe(0);
   });
@@ -336,7 +335,7 @@ describe("sleeves", () => {
     }];
     const decision = stepSleeves(
       { sleeves: [sleeve(0)], tasks: skillTasks, shockCeiling: 50, syncFloor: 50 },
-      postNeeds([{ by: "factions", kind: "skill", subject: "hacking", target: 100, have: 1, weight: 1, urgency: "blocking", why: "test" }]),
+      postNeeds([{ by: "factions", kind: "skill", subject: "hacking", target: 100, have: 1, weight: 1, urgency: "blocking" }]),
     );
     expect(decision.assignment.total).toBeGreaterThan(0);
     expect(decision.assignments[0]!.task.detail).toBe("Cybercrime");
@@ -359,7 +358,7 @@ describe("sleeves", () => {
     ];
     const decision = stepSleeves(
       { sleeves: [sleeve(0), sleeve(1)], tasks: capacityTasks, shockCeiling: 50, syncFloor: 50 },
-      postNeeds([{ by: "factions", kind: "factionRep", subject: "CyberSec", target: 100, have: 0, weight: 1, urgency: "blocking", why: "test" }]),
+      postNeeds([{ by: "factions", kind: "factionRep", subject: "CyberSec", target: 100, have: 0, weight: 1, urgency: "blocking" }]),
     );
     expect(decision.assignment.choices.filter((choice) => choice.task.type === "faction")).toHaveLength(1);
     expect(decision.assignment.choices.filter((choice) => choice.task.type === "crime")).toHaveLength(1);
@@ -530,7 +529,7 @@ describe("go", () => {
       status: "gameOver",
       opponent: "Netburners",
       previousBoards: [],
-      nextGame: { opponent: "Daedalus", boardSize: 5, why: "largest ETA reduction" },
+      nextGame: { opponent: "Daedalus", boardSize: 5 },
     }, [0], engine);
     expect(decision.action).toMatchObject({ type: "newGame", opponent: "Daedalus", boardSize: 5 });
   });
@@ -541,7 +540,7 @@ describe("go", () => {
       currentPlayer: "Black" as const,
       status: "inProgress" as const,
       opponent: "Netburners" as const,
-      nextGame: { opponent: "Illuminati" as const, boardSize: 5 as const, why: "largest ETA reduction" },
+      nextGame: { opponent: "Illuminati" as const, boardSize: 5 as const },
     };
     const retargeted = await decideGoNeural({ ...view, previousBoards: [] }, [10_200], engine);
     expect(retargeted.action).toMatchObject({
@@ -563,7 +562,7 @@ describe("go", () => {
       status: "waitingOnAI",
       opponent: "????????????",
       previousBoards: [],
-      nextGame: { opponent: "????????????", boardSize: 13, why: "node completion" },
+      nextGame: { opponent: "????????????", boardSize: 13 },
     }, [0], engine);
     expect(decision.action.type).toBe("resume");
   });
@@ -575,8 +574,8 @@ describe("go", () => {
       joinedFactions: new Set(["Daedalus"]),
       factionFavor: { Daedalus: { favor: 10, remainingWorkSec: 3_600 } },
       demands: {
-        Daedalus: { seconds: 3_600, share: 1, why: "faction reputation bottleneck" },
-        "The Black Hand": { seconds: 600, share: 1, why: "small money tail" },
+        Daedalus: { seconds: 3_600, share: 1 },
+        "The Black Hand": { seconds: 600, share: 1 },
       },
       goPower: 1,
       hasSourceFile14: false,
@@ -682,12 +681,9 @@ describe("corp staged script", () => {
       view({ divisions: [{ name: "Ag", industry: "Agriculture", cities: ["Sector-12"], researchPoints: 0, products: [], maxProducts: 0, offices: [], warehouses: [] }] }),
     );
     expect(decision.stage).toBeTruthy();
-    expect(decision.why).toContain(decision.stage);
   });
 
-  test("the optimality boundary is stated, not implied", () => {
-    // This feature makes a narrower claim than the rest of the roster, and it
-    // has to say so rather than letting the reader assume otherwise.
+  test("a finished ladder reports its completed stages", () => {
     const done = stepCorp(
       view({
         divisions: [
@@ -696,7 +692,7 @@ describe("corp staged script", () => {
         ],
       }),
     );
-    expect(done.why).toContain("no optimality claim");
+    expect(done.completed.length).toBeGreaterThan(0);
   });
 
   test("a zero-valued upstream investment offer is unavailable", async () => {
@@ -1200,7 +1196,6 @@ describe("progression", () => {
     expect(decision.installWanted).toBe(true);
     expect(decision.installReady).toBe(false);
     expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["factions"]);
-    expect(decision.why).toContain("final purchase and donation sweep");
   });
 
   test("install waits for stock liquidation and an ongoing graft", () => {
@@ -1219,7 +1214,7 @@ describe("progression", () => {
   test("install waits while an augmentation is still purchasable", () => {
     // Cash does not survive an install, so resetting while something is still
     // affordable destroys money that could have become a permanent multiplier.
-    // The reset always loses that race, and the blocker names what is holding it.
+    // The reset always loses that race.
     const decision = stepProgression(view({
       earnedThisRun: 100,
       money: 60,
@@ -1229,8 +1224,6 @@ describe("progression", () => {
     expect(decision.installWanted).toBe(true);
     expect(decision.installReady).toBe(false);
     expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["augmentations"]);
-    expect(decision.why).toContain("Cranial Signal Processors");
-    expect(decision.why).toContain("cash does not survive");
   });
 
   test("the phase ANNOUNCES the burn; the barriers are what gate the reset", () => {
@@ -1341,7 +1334,6 @@ describe("progression survives its own published plan", () => {
   const stalePlan = {
     phase: "ending",
     install: false,
-    why: "waiting for factions to finish its final purchase and donation sweep",
     favorCrossings: [],
     route: "daedalus",
     routeWhy: "daedalus remains the fastest route",

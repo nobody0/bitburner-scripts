@@ -82,7 +82,7 @@ import {
 } from "../../../shared/strategy/progression/endgame.ts";
 import {
   chooseRoute,
-  regrowInstallOverrideWhy,
+  regrowInstallOverride,
   routeEtas,
   type RouteChoice,
   type RouteRates,
@@ -221,7 +221,7 @@ function maybeActionClaim(
   methods: readonly string[],
 ): FeatureClaim[] {
   if (!action || methods.length === 0) return [];
-  return [actionRamClaim(ctx, by, actionClaimId(action), methods, `${by} ${action}`)];
+  return [actionRamClaim(ctx, by, actionClaimId(action), methods)];
 }
 
 // --- gang -------------------------------------------------------------------
@@ -733,8 +733,7 @@ function goActionDigest(action: GoAction): GoActionDigest {
 }
 
 function goMoveDigest(move: GoDecision["ranked"][number]): GoMoveDigest {
-  const { why: _why, ...facts } = move;
-  return facts;
+  return move;
 }
 
 function goDemandDigest(demand: GoEtaDemand): GoEtaDemandDigest {
@@ -746,7 +745,7 @@ function goDemandDigest(demand: GoEtaDemand): GoEtaDemandDigest {
 }
 
 function goGameCandidateDigest(candidate: ReturnType<typeof rankGoGames>[number]): GoGameCandidateDigest {
-  const { why: _why, transientDemand, ...facts } = candidate;
+  const { transientDemand, ...facts } = candidate;
   return {
     ...facts,
     ...(transientDemand ? { transientDemand: goDemandDigest(transientDemand) } : {}),
@@ -1224,9 +1223,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       utilityPerSec: ramSubject.utilityPerSec,
       displacedGb: Math.max(0, GO_ESTIMATED_GB - Math.max(0, freeGb)),
       usableGb,
-      why: usableGb > 0
-        ? "the dodge is priced against the fleet RAM it displaces"
-        : "no fleet RAM pie has been published, so the displacement cannot be priced",
     };
     const view: GoView = {
       board: { rows: topic.board, size: topic.boardSize },
@@ -1263,7 +1259,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       nextGame: {
         opponent: preferred.opponent,
         boardSize: preferred.boardSize,
-        why: `${preferred.totalSecSaved.toFixed(1)}s immediate and ${(preferred.horizonTransientSecSaved + preferred.horizonFavorSecSaved).toFixed(1)}s over ${preferred.planningGames} games`,
       },
     };
     // Re-anchor the engine-cycle phase before planning when it is unknown or
@@ -1391,10 +1386,9 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         type: "move",
         x: provisionalPlaybookAction.x,
         y: provisionalPlaybookAction.y,
-        why: "certified playbook line",
       } };
     } else if (provisionalPlaybookAction?.kind === "pass") {
-      decision = { ...decision, action: { type: "pass", why: "certified playbook line" } };
+      decision = { ...decision, action: { type: "pass" } };
     }
     const decisionAt = Date.now();
     // Provisional planning ended here. The breakdown assembled at dispatch
@@ -1420,7 +1414,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           kind: schedule.kind,
           ...(schedule.kind === "filler" ? { fillerOpponent: schedule.game.opponent } : {}),
           ...(schedule.kind === "hold" ? { holdSec: schedule.resumeInSec } : {}),
-          why: schedule.why,
         },
         ramGate,
         context: {
@@ -1445,8 +1438,8 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     let action = decision.action;
     if (action.type === "newGame") {
       // The scheduler decided nothing fits before the preferred certified
-      // entry: hold on the ordinary 5 s cadence (the plan digest above
-      // records why) without consuming the makeMove-sized grant.
+      // entry: hold on the ordinary 5 s cadence without consuming the
+      // makeMove-sized grant.
       if (schedule.kind === "hold") return;
       // Positive but vanishing Go power is not free: the dodge occupies RAM
       // the income engine could use. Decided above so the refusal is published
@@ -1628,9 +1621,9 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                     .catch(() => undefined);
               const certifiedAction = certified?.action;
               const playbookAction = certifiedAction?.kind === "move"
-                ? { type: "move" as const, x: certifiedAction.x, y: certifiedAction.y, why: "certified playbook line" }
+                ? { type: "move" as const, x: certifiedAction.x, y: certifiedAction.y }
                 : certifiedAction?.kind === "pass"
-                  ? { type: "pass" as const, why: "certified playbook line" }
+                  ? { type: "pass" as const }
                   : undefined;
               const decisionAt = Date.now();
               finalizeMs += decisionAt - sampledAt;
@@ -2175,7 +2168,6 @@ function dnetNeeds(ctx: NeedContext): Need[] {
       have: ctx.state.topics.player?.skills.charisma ?? 1,
       weight: 3,
       urgency: "blocking",
-      why: "darknet authentication is gated on charisma",
     },
   ];
 }
@@ -2588,7 +2580,6 @@ function previousChoice(ctx: NeedContext): RouteChoice | undefined {
     route: plan.route,
     etaSec: node.state === "unknown" ? 0 : Math.max(0, (node.expectedAt - ctx.now) / 1_000),
     decidedAt: plan.decidedAt,
-    why: "",
   };
 }
 
@@ -2667,7 +2658,7 @@ function progressionRefresh(ctx: NeedContext): void {
   const selectedEta = choice ? etas.find((eta) => eta.id === choice.route) : undefined;
   const selectedStatus = choice ? endgame.routes.find((route) => route.id === choice.route) : undefined;
   let routeRequiresInstall = selectedStatus?.mandatoryInstall?.ready === true;
-  const regrowInstallWhy = regrowInstallOverrideWhy({
+  const regrowOverride = regrowInstallOverride({
     ...(selectedStatus?.stage !== undefined ? { stage: selectedStatus.stage } : {}),
     ...(selectedStatus?.optionalInstall.allowed !== undefined
       ? { optionalInstallAllowed: selectedStatus.optionalInstall.allowed }
@@ -3015,7 +3006,7 @@ function progressionRefresh(ctx: NeedContext): void {
     runSec,
     ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
     routeRequiresInstall,
-    optionalInstallAllowed: regrowInstallWhy !== undefined || (selectedStatus?.optionalInstall.allowed ?? true),
+    optionalInstallAllowed: regrowOverride || (selectedStatus?.optionalInstall.allowed ?? true),
     resetValueMult,
     // Banked favor may only OPEN the gate when the sweep can actually convert
     // something — any joined offer with rep met (NeuroFlux included), or a
@@ -3073,7 +3064,7 @@ function progressionRefresh(ctx: NeedContext): void {
     // The OVERRIDDEN value, matching what installForecast is handed below: a
     // basis recording the raw guard cannot invalidate the cached forecast when
     // the regrow comparison flips the permission.
-    optionalAllowed: regrowInstallWhy !== undefined || (selectedStatus?.optionalInstall.allowed ?? true),
+    optionalAllowed: regrowOverride || (selectedStatus?.optionalInstall.allowed ?? true),
     countCadenceReady,
     mandatory: selectedEta?.nextMandatoryInstall,
     queue: pending,
@@ -3104,7 +3095,7 @@ function progressionRefresh(ctx: NeedContext): void {
             : {}),
         ...(cadenceRemainingSec !== undefined ? { cadenceSec: cadenceRemainingSec } : {}),
         countCadenceReady,
-        optionalInstallAllowed: regrowInstallWhy !== undefined || (selectedStatus?.optionalInstall.allowed ?? true),
+        optionalInstallAllowed: regrowOverride || (selectedStatus?.optionalInstall.allowed ?? true),
         ...(selectedEta?.nextMandatoryInstall ? { mandatory: selectedEta.nextMandatoryInstall } : {}),
       }, installBasis)
     : forecastAt(previousInstallForecast!, ctx.now);
@@ -3125,7 +3116,7 @@ function progressionRefresh(ctx: NeedContext): void {
     choice?.route === "bladeburner"
     && selectedStatus?.stage === "bladeburner-join"
     && view.lowestCombatSkill >= 100
-      ? { type: "joinBladeburner" as const, why: "the selected Bladeburner route has cleared the division's combat gate" }
+      ? { type: "joinBladeburner" as const }
       : choice?.route === "gang"
         && selectedStatus?.stage === "gang-create"
         && (view.karma ?? 0) <= GANG_KARMA
@@ -3133,7 +3124,6 @@ function progressionRefresh(ctx: NeedContext): void {
         ? {
             type: "createGang" as const,
             faction: view.gangCreateFaction,
-            why: `the selected BN2 gang route has cleared karma and membership gates for ${view.gangCreateFaction}`,
           }
         : undefined;
   if (!selectedEta?.complete) progressionMemory.nodeCompletionArmedAt = undefined;
@@ -3159,7 +3149,6 @@ function progressionRefresh(ctx: NeedContext): void {
       installWanted: decision.installWanted,
       liquidationWanted: decision.liquidationWanted,
       installBlockers: decision.installBlockers.map((blocker) => ({ kind: blocker.kind })),
-      ...(regrowInstallWhy !== undefined ? { installOverrideWhy: regrowInstallWhy } : {}),
       installReady: decision.installReady,
       ...(armedAt !== undefined ? { installArmedAt: armedAt } : {}),
       queuedAugmentations: pending,
@@ -3201,9 +3190,6 @@ function progressionRefresh(ctx: NeedContext): void {
               automatic: canAutomateNodeCompletion,
               nextBitNode: nextBitNode.bitNode,
               targetLevel: nextBitNode.targetLevel,
-              why: canAutomateNodeCompletion
-                ? nextBitNode.why
-                : `${nextBitNode.why}; manual completion required until BN4/SF4 unlocks Singularity`,
               ...(progressionMemory.nodeCompletionArmedAt !== undefined
                 ? { armedAt: progressionMemory.nodeCompletionArmedAt }
                 : {}),
@@ -3439,7 +3425,6 @@ export const bladeburnerModule: FeatureModule = {
         ...(rankPerSec !== undefined && rankPerSec > 0
           ? { produces: { [BLADEBURNER_RANK_CHANNEL]: rankPerSec } }
           : {}),
-        why: "Bladeburner action occupies Player.currentWork without The Blade's Simulacrum",
       });
     }
     return claims;
@@ -3459,7 +3444,6 @@ export const bladeburnerModule: FeatureModule = {
         have: weakest,
         weight: 4,
         urgency: "blocking",
-        why: "the Bladeburner division requires 100 in every combat stat",
       },
     ];
   },
@@ -3477,7 +3461,7 @@ export const sleevesModule: FeatureModule = {
     const decision = stepSleeves(view, ctx.board);
     const methods = sleeveBatchMethods(decision.assignments.map((entry) => entry.task.type));
     if (methods.length === 0 && pendingSleeveCompletions().size === 0) return [];
-    return [actionRamClaim(ctx, "sleeves", "action:batch", methods.length > 0 ? methods : ["sleeve.getTask"], "update and arm sleeve work")];
+    return [actionRamClaim(ctx, "sleeves", "action:batch", methods.length > 0 ? methods : ["sleeve.getTask"])];
   },
 };
 
@@ -3511,7 +3495,7 @@ export const goModule: FeatureModule = {
     const action = goClaimAction(ctx.state, ctx.caps);
     const methods = goMethods(action, goCheatUnlocked(ctx.caps));
     if (!action || methods.length === 0) return [];
-    return [actionRamClaim(ctx, "go", goActionClaimId(action), methods, `go ${action}`)];
+    return [actionRamClaim(ctx, "go", goActionClaimId(action), methods)];
   },
 };
 
@@ -3712,7 +3696,6 @@ export const progressionModule: FeatureModule = {
       have: need.have,
       weight: 5,
       urgency: "blocking",
-      why: `${route.id}/${route.stage ?? "route"}: ${need.why}`,
     }));
   },
   claims: (ctx) => {
@@ -3723,7 +3706,6 @@ export const progressionModule: FeatureModule = {
         "progression",
         "action:complete-bitnode",
         ["singularity.destroyW0r1dD43m0n"],
-        `complete the BitNode and enter BN${plan.completion.nextBitNode}`,
         PRIORITY["progression:terminal-action"],
       )];
     }
@@ -3738,7 +3720,6 @@ export const progressionModule: FeatureModule = {
         "progression",
         "action:create-gang",
         ["gang.createGang"],
-        `create the ${plan.routeAction.faction} gang selected by the BN2 route`,
       ));
     }
     if (plan?.routeAction?.type === "joinBladeburner") {
@@ -3747,7 +3728,6 @@ export const progressionModule: FeatureModule = {
         "progression",
         "action:join-bladeburner",
         ["bladeburner.joinBladeburnerDivision"],
-        "join the Bladeburner division selected by the endgame route",
       ));
     }
     // Darknet access. Posted from routeClaims so it survives the imminent-install
@@ -3773,7 +3753,6 @@ export const progressionModule: FeatureModule = {
         shape: "step",
         pricing: "hard",
         value: { state: "unknown", reason: "darknet cache yield is not modelled" },
-        why: `DarkscapeNavigator.exe — ${darkscape.why}`,
       });
     }
 
@@ -3793,7 +3772,6 @@ export const progressionModule: FeatureModule = {
           priority: PRIORITY["progression:imminent-install"],
           mode: "reserve",
           shape: "continuous",
-          why: `install expected in ${Math.round(installSec)}s; investment ROI windows are closed`,
         });
       }
       return routeClaims;
@@ -3806,7 +3784,6 @@ export const progressionModule: FeatureModule = {
       priority: PRIORITY["progression:install-freeze"],
       mode: "reserve",
       shape: "continuous",
-      why: "freeze cash after the final augmentation sweep until the armed install executes",
     }];
     if (plan.install) {
       claims.push(actionRamClaim(
@@ -3814,7 +3791,6 @@ export const progressionModule: FeatureModule = {
         "progression",
         "action:install",
         ["singularity.installAugmentations"],
-        "install queued augmentations and restart /start.js",
         PRIORITY["progression:terminal-action"],
       ));
     }

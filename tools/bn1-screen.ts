@@ -80,7 +80,7 @@ await runGame({
     if (record.key === "factions") {
       const plan = record.data?.plan;
       if (plan) {
-        const action = `${plan.action?.type}${plan.action?.awaitingWorkSlot ? "/slot-held" : ""}: ${String(plan.action?.why ?? "").slice(0, 60)}`;
+        const action = `${plan.action?.type}${plan.action?.awaitingWorkSlot ? "/slot-held" : ""}`;
         factionActions.set(action, (factionActions.get(action) ?? 0) + 1);
         const result = plan.lastResult ? `${plan.lastResult.action}:${plan.lastResult.ok ? "ok" : "no"}:${String(plan.lastResult.detail).slice(0, 44)}` : "-";
         factionResults.set(result, (factionResults.get(result) ?? 0) + 1);

@@ -1,4 +1,3 @@
-import { formatNumber, formatScientific } from "../../format.ts";
 import { assignCoupled, type AssignmentResult } from "../assignment.ts";
 
 /** Gang management.
@@ -54,18 +53,17 @@ export interface GangView {
 }
 
 export type GangAction =
-  | { type: "recruit"; why: string }
-  | { type: "assign"; member: string; task: string; why: string }
-  | { type: "ascend"; member: string; why: string }
-  | { type: "warfare"; engage: boolean; why: string }
-  | { type: "idle"; why: string };
+  | { type: "recruit" }
+  | { type: "assign"; member: string; task: string }
+  | { type: "ascend"; member: string }
+  | { type: "warfare"; engage: boolean }
+  | { type: "idle" };
 
 export interface GangDecision {
   actions: GangAction[];
   assignment: AssignmentResult<GangMemberState, GangTaskOption>;
   /** Whether the wanted penalty is currently costing more than the tasks earn. */
   wantedWarning?: string;
-  why: string;
 }
 
 /** Policy threshold for accepting an ascension reset. Ascension clears member
@@ -86,18 +84,14 @@ export function stepGang(view: GangView): GangDecision {
 
   // Recruiting is free respect-wise and strictly additive — always take it.
   if (view.canRecruit) {
-    actions.push({ type: "recruit", why: `respect ${formatNumber(view.respect)} clears the next recruit` });
+    actions.push({ type: "recruit" });
   }
 
   // Ascension policy threshold, checked per member.
   for (const member of view.members) {
     const gain = view.ascensionGain(member);
     if (gain >= ASCEND_THRESHOLD) {
-      actions.push({
-        type: "ascend",
-        member: member.name,
-        why: `x${gain.toFixed(2)} multiplier clears the x${ASCEND_THRESHOLD} re-training crossover`,
-      });
+      actions.push({ type: "ascend", member: member.name });
     }
   }
 
@@ -142,7 +136,6 @@ export function stepGang(view: GangView): GangDecision {
       type: "assign",
       member: choice.agent.name,
       task: choice.task.name,
-      why: `${choice.task.name} scores ${formatScientific(choice.score)} under the wanted penalty`,
     });
   }
 
@@ -151,13 +144,7 @@ export function stepGang(view: GangView): GangDecision {
   const worst = Math.min(...Object.values(view.clashChances), 1);
   const shouldEngage = Number.isFinite(worst) && worst >= CLASH_CONFIDENCE;
   if (shouldEngage !== view.territoryWarfareEngaged) {
-    actions.push({
-      type: "warfare",
-      engage: shouldEngage,
-      why: shouldEngage
-        ? `worst clash chance ${(worst * 100).toFixed(0)}% clears the ${CLASH_CONFIDENCE * 100}% confidence bar`
-        : `worst clash chance ${(worst * 100).toFixed(0)}% risks losing members`,
-    });
+    actions.push({ type: "warfare", engage: shouldEngage });
   }
 
   const wantedWarning =
@@ -165,14 +152,11 @@ export function stepGang(view: GangView): GangDecision {
       ? `wanted penalty is ${view.wantedPenalty.toFixed(2)} — over half of all output is being lost`
       : undefined;
 
-  if (actions.length === 0) actions.push({ type: "idle", why: "assignment already optimal" });
+  if (actions.length === 0) actions.push({ type: "idle" });
 
   return {
     actions,
     assignment,
     ...(wantedWarning ? { wantedWarning } : {}),
-    why: assignment.approximated
-      ? `greedy search (${view.members.length} members x ${tasksFor.length} fully priced tasks exceeds the search budget)`
-      : `exact search over ${view.members.length} members x ${tasksFor.length} fully priced tasks`,
   };
 }

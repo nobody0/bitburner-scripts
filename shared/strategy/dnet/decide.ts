@@ -35,18 +35,17 @@ export interface DarknetView {
 }
 
 export type DarknetAction =
-  | { type: "authenticate"; hostname: string; why: string }
-  | { type: "stasis"; hostname: string; why: string }
-  | { type: "releaseStasis"; hostname: string; why: string }
-  | { type: "idle"; why: string };
+  | { type: "authenticate"; hostname: string }
+  | { type: "stasis"; hostname: string }
+  | { type: "releaseStasis"; hostname: string }
+  | { type: "idle" };
 
 export interface DarknetDecision {
   action: DarknetAction;
   /** Servers ranked by how much depth they unlock per stasis link spent. */
-  ranked: { hostname: string; depth: number; unlocks: number; why: string }[];
+  ranked: { hostname: string; depth: number; unlocks: number }[];
   /** Charisma the run needs, posted to the board for career to deliver. */
   charismaNeeded?: number;
-  why: string;
 }
 
 /** Servers reachable from the online set, under the current stasis links.
@@ -86,9 +85,8 @@ export function stepDarknet(view: DarknetView): DarknetDecision {
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L314-L335
   if (!view.topologyComplete) {
     return {
-      action: { type: "idle", why: "darknet topology is only partially observed" },
+      action: { type: "idle" },
       ranked: [],
-      why: "waiting for a complete per-host neighbor graph",
     };
   }
 
@@ -98,7 +96,6 @@ export function stepDarknet(view: DarknetView): DarknetDecision {
       hostname: server.hostname,
       depth: server.depth,
       unlocks: unlockValue(view, server.hostname),
-      why: `depth ${server.depth}, keeps ${unlockValue(view, server.hostname)} servers reachable`,
     }))
     .sort((a, b) => b.unlocks - a.unlocks || b.depth - a.depth || (a.hostname < b.hostname ? -1 : 1));
 
@@ -111,13 +108,9 @@ export function stepDarknet(view: DarknetView): DarknetDecision {
   // above the ceiling, more backdooring makes things worse, not better.
   if (view.instability.authenticationTimeoutChance > view.instabilityCeiling) {
     return {
-      action: {
-        type: "idle",
-        why: `authentication timeout chance ${(view.instability.authenticationTimeoutChance * 100).toFixed(0)}% exceeds the ceiling`,
-      },
+      action: { type: "idle" },
       ranked,
       ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-      why: "waiting for instability to fall",
     };
   }
 
@@ -126,10 +119,9 @@ export function stepDarknet(view: DarknetView): DarknetDecision {
     const best = ranked.find((entry) => entry.unlocks > 0);
     if (best) {
       return {
-        action: { type: "stasis", hostname: best.hostname, why: best.why },
+        action: { type: "stasis", hostname: best.hostname },
         ranked,
         ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-        why: `${linked.size}/${view.stasisLinkLimit} links used`,
       };
     }
   }
@@ -140,10 +132,9 @@ export function stepDarknet(view: DarknetView): DarknetDecision {
     const wasted = view.servers.find((server) => server.stasisLinked && server.isOnline && unlockValue(view, server.hostname) === 0);
     if (wasted) {
       return {
-        action: { type: "releaseStasis", hostname: wasted.hostname, why: "server is online again; the link is doing nothing" },
+        action: { type: "releaseStasis", hostname: wasted.hostname },
         ranked,
         ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-        why: "recycling a stasis link",
       };
     }
   }
@@ -153,17 +144,15 @@ export function stepDarknet(view: DarknetView): DarknetDecision {
   );
   if (target) {
     return {
-      action: { type: "authenticate", hostname: target.hostname, why: `charisma ${view.charisma} clears ${target.requiredCharisma}` },
+      action: { type: "authenticate", hostname: target.hostname },
       ranked,
       ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-      why: "extending reach",
     };
   }
 
   return {
-    action: { type: "idle", why: charismaNeeded !== undefined ? `blocked on charisma ${charismaNeeded}` : "nothing reachable" },
+    action: { type: "idle" },
     ranked,
     ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-    why: "blocked",
   };
 }

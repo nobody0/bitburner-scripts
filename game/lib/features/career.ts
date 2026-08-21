@@ -742,7 +742,7 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
     // career could win the slot at `career:blocking-need` and then lose the RAM
     // to factions' route work at 91, holding `Player.currentWork` without ever
     // being able to call commitCrime/universityCourse.
-    out.push(actionRamClaim(ctx, "career", actionClaimId(actionType), methods, `career ${actionType}`, bandPriority));
+    out.push(actionRamClaim(ctx, "career", actionClaimId(actionType), methods, bandPriority));
   }
   if (actionType === "travel") {
     out.push({
@@ -755,7 +755,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       shape: "step",
       pricing: "hard",
       value: { state: "unknown", reason: "hard-priority atomic claim" },
-      why: `travel costs ${formatMoney(TRAVEL_COST)}`,
     });
   }
   if (actionType === "class" || actionType === "gym") {
@@ -774,7 +773,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
         shape: "step",
         pricing: "hard",
         value: { state: "unknown", reason: "hard-priority atomic claim" },
-        why: "fund the next training window",
       });
     }
   } else if (ctx.state.topics.career?.currentWork?.type === "CLASS" && trainingCostPerSec > 0) {
@@ -792,7 +790,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       shape: "step",
       pricing: "hard",
       value: { state: "unknown", reason: "hard-priority atomic claim" },
-      why: "an active course drains continuously; keep its window funded",
     });
   } else if (ctx.state.topics.career?.currentWork?.type !== "CLASS") {
     trainingCostPerSec = 0;
@@ -803,10 +800,8 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   // career also has a candidate action, so it records the replacement work
   // rather than retaining a stale CRIME digest until the 30-second probe.
   if (needsCompletionWatcher(ctx.state) && !workCompletionArmed() && (completion !== undefined || methods.length === 0)) {
-    out.push(actionRamClaim(ctx, "career", "watch:completion", ["singularity.getCurrentWork"], "arm exact work completion wakeup"));
+    out.push(actionRamClaim(ctx, "career", "watch:completion", ["singularity.getCurrentWork"]));
   }
-
-  const band = candidate?.workPriority ?? "income";
 
   // A task with unbanked progress gets an administrative lock, bounded by the
   // moment that progress banks — see `progressLockUntil` for why an unbounded one
@@ -846,10 +841,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
             ? { deliveryFraction: candidateDelivery }
             : {}),
         }),
-    why: lockUntil !== undefined
-      ? `unbanked progress banks in ${Math.max(0, Math.round((lockUntil - ctx.now) / 1_000))}s`
-      : `${candidate?.ranked[0]?.action.type ?? "work"}: ${candidate?.ranked[0]?.action.subject ?? "career"}`
-        + ` (${band === "income" ? "income" : `${band} request`})`,
   });
   return out;
 }
@@ -970,7 +961,6 @@ export const careerModule: FeatureModule = {
       weight: 1,
       ...(value.state === "measured" && value.value > 0 ? { valueSec: value.value } : {}),
       urgency: "nice",
-      why: `training at ${trainingLocation} costs 10% less once ${server.hostname} is backdoored`,
     }];
   },
 };

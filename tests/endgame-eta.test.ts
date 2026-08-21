@@ -12,7 +12,7 @@ import {
   ROUTE_DWELL_MS,
   chooseRoute,
   noRates,
-  regrowInstallOverrideWhy,
+  regrowInstallOverride,
   routeEtas,
   type RouteChoice,
   type RouteRates,
@@ -226,7 +226,7 @@ describe("route choice", () => {
   });
 
   test("a complete route wins immediately, margin and dwell notwithstanding", () => {
-    const previous: RouteChoice = { route: "daedalus", etaSec: 100, decidedAt: 0, why: "" };
+    const previous: RouteChoice = { route: "daedalus", etaSec: 100, decidedAt: 0 };
     const done = [...etas(100, 5_000), { id: "bladeburner" as const, available: true, complete: true, etaSec: 0, parts: [] }];
     const { choice, switched } = chooseRoute(previous, done, 1);
     expect(choice?.route).toBe("bladeburner");
@@ -234,7 +234,7 @@ describe("route choice", () => {
   });
 
   test("hysteresis: a marginally faster challenger does not flap the route", () => {
-    const previous: RouteChoice = { route: "daedalus", etaSec: 1_000, decidedAt: 0, why: "" };
+    const previous: RouteChoice = { route: "daedalus", etaSec: 1_000, decidedAt: 0 };
     // 10% faster is within the 25% margin — stay, even after the dwell.
     const { choice, switched } = chooseRoute(previous, etas(1_000, 900), ROUTE_DWELL_MS + 1);
     expect(switched).toBe(false);
@@ -243,7 +243,7 @@ describe("route choice", () => {
   });
 
   test("dwell: even a decisive challenger waits out the hold", () => {
-    const previous: RouteChoice = { route: "daedalus", etaSec: 1_000, decidedAt: 0, why: "" };
+    const previous: RouteChoice = { route: "daedalus", etaSec: 1_000, decidedAt: 0 };
     const early = chooseRoute(previous, etas(1_000, 100), ROUTE_DWELL_MS - 1);
     expect(early.switched).toBe(false);
     const late = chooseRoute(previous, etas(1_000, 100), ROUTE_DWELL_MS + 1);
@@ -253,7 +253,7 @@ describe("route choice", () => {
   });
 
   test("an incumbent that stops being available is replaced at once", () => {
-    const previous: RouteChoice = { route: "labyrinth", etaSec: 100, decidedAt: 0, why: "" };
+    const previous: RouteChoice = { route: "labyrinth", etaSec: 100, decidedAt: 0 };
     const gone = etas(1_000, 100).map((eta) => (eta.id === "labyrinth" ? { ...eta, available: false } : eta));
     const { choice, switched } = chooseRoute(previous, gone, 1);
     expect(choice?.route).toBe("daedalus");
@@ -261,7 +261,7 @@ describe("route choice", () => {
   });
 
   test("staying refreshes the estimate but keeps the decision time", () => {
-    const previous: RouteChoice = { route: "daedalus", etaSec: 1_000, decidedAt: 42, why: "" };
+    const previous: RouteChoice = { route: "daedalus", etaSec: 1_000, decidedAt: 42 };
     const { choice } = chooseRoute(previous, etas(800, 5_000), ROUTE_DWELL_MS * 2);
     expect(choice).toMatchObject({ route: "daedalus", etaSec: 800, decidedAt: 42 });
   });
@@ -397,7 +397,7 @@ describe("anchored uncapped forecasts", () => {
       moneyMeasured: true,
       finalSweepReady: false,
       optionalInstallAllowed: false,
-      mandatory: { sec: 900, measured: true, why: "finish the route batch" },
+      mandatory: { sec: 900, measured: true },
     }, "held");
     expect(held).toMatchObject({ state: "estimated", remainingSec: 960 });
 
@@ -437,25 +437,24 @@ describe("regrow install override", () => {
   });
 
   test("a long remaining climb inverts the guard and says why", () => {
-    const why = regrowInstallOverrideWhy({
+    const override = regrowInstallOverride({
       stage: "world-daemon-regrow",
       optionalInstallAllowed: false,
       worldDaemonSkill: 3_000,
       hackingSkill: 10,
       rates: rates(),
     });
-    expect(why).toContain("re-climbing after an install");
-    expect(why).toContain("beats finishing the current climb");
+    expect(override).toBe(true);
   });
 
   test("a short tail leaves the guard standing", () => {
-    expect(regrowInstallOverrideWhy({
+    expect(regrowInstallOverride({
       stage: "world-daemon-regrow",
       optionalInstallAllowed: false,
       worldDaemonSkill: 3_000,
       hackingSkill: 2_999,
       rates: rates(),
-    })).toBeUndefined();
+    })).toBe(false);
   });
 
   test("only a REFUSAL on the regrow stage can be overridden", () => {
@@ -465,19 +464,19 @@ describe("regrow install override", () => {
       rates: rates(),
     };
     // The guard already allows it — there is nothing to override.
-    expect(regrowInstallOverrideWhy({
+    expect(regrowInstallOverride({
       ...inverted, stage: "world-daemon-regrow", optionalInstallAllowed: true,
-    })).toBeUndefined();
+    })).toBe(false);
     // A different stage carries a different guard, with its own reasons.
-    expect(regrowInstallOverrideWhy({
+    expect(regrowInstallOverride({
       ...inverted, stage: "red-pill", optionalInstallAllowed: false,
-    })).toBeUndefined();
+    })).toBe(false);
     // Without a measured skill rate neither path can be priced.
-    expect(regrowInstallOverrideWhy({
+    expect(regrowInstallOverride({
       ...inverted,
       stage: "world-daemon-regrow",
       optionalInstallAllowed: false,
       rates: rates({ hackingSkillPerSec: 0 }),
-    })).toBeUndefined();
+    })).toBe(false);
   });
 });

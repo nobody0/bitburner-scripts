@@ -65,11 +65,13 @@ describe("the horizon is a decision input, not a tuning constant", () => {
     expect(decision.buy?.kind).toBe("level");
   });
 
-  test("with no horizon left it holds and says why", () => {
+  test("with no horizon left it holds", () => {
+    // Every upgrade loses money before the horizon: nothing is bought, but the
+    // ranking still reports the candidates and their negative net.
     const decision = stepHacknet(view({ upgrades: [slow, fast], horizonSec: 60 }));
     expect(decision.buy).toBeUndefined();
-    expect(decision.hold).toContain("pays back in");
-    expect(decision.why).toContain("loses money before the horizon");
+    expect(decision.ranked.length).toBeGreaterThan(0);
+    expect(decision.ranked[0]!.netOverHorizon).toBeLessThanOrEqual(0);
   });
 });
 
@@ -99,7 +101,7 @@ describe("purchase selection", () => {
     // augmentation fund by simply ignoring it.
     const decision = stepHacknet(view({ upgrades: [upgrade({ cost: 1e9, deltaProduction: 1e6 })], moneyGranted: 100 }));
     expect(decision.buy).toBeUndefined();
-    expect(decision.hold).toContain("granted $100");
+    expect(decision.ranked[0]!.cost).toBeGreaterThan(100);
   });
 
   test("ranking is deterministic under ties", () => {
@@ -188,12 +190,11 @@ describe("dynamic-programming oracle", () => {
   test("a blocking faction milestone can justify a non-economic upgrade", () => {
     const decision = stepHacknet(view({
       upgrades: [upgrade({ kind: "core", cost: 5_000, deltaProduction: 0, progress: { hacknetCores: 1 } })],
-      milestones: [{ kind: "hacknetCores", target: 4, have: 3, priority: 75, why: "Netburners needs four cores" }],
+      milestones: [{ kind: "hacknetCores", target: 4, have: 3, priority: 75 }],
       horizonSec: 1,
     }));
     expect(decision.buy?.kind).toBe("core");
     expect(decision.buy?.milestone?.kind).toBe("hacknetCores");
-    expect(decision.why).toContain("Netburners");
   });
 
   test("cache is bought only when it advances a selected capacity milestone", () => {
@@ -202,7 +203,7 @@ describe("dynamic-programming oracle", () => {
     const wanted = stepHacknet(view({
       upgrades: [cache],
       hashMode: true,
-      milestones: [{ kind: "hashCapacity", target: 100, have: 64, priority: 45, why: "save for Bladeburner rank" }],
+      milestones: [{ kind: "hashCapacity", target: 100, have: 64, priority: 45 }],
     }));
     expect(wanted.buy?.kind).toBe("cache");
   });
@@ -217,7 +218,7 @@ describe("dynamic-programming oracle", () => {
       newNodeHashCapacity: 64,
       horizonSec: 1,
       hashMode: true,
-      milestones: [{ kind: "hashCapacity", target: 50, have: 0, priority: 45, why: "bank the selected hash action" }],
+      milestones: [{ kind: "hashCapacity", target: 50, have: 0, priority: 45 }],
     }));
     expect(decision.buy?.kind).toBe("node");
     expect(decision.buy?.milestone?.kind).toBe("hashCapacity");
@@ -237,7 +238,7 @@ describe("goal-aware hash spending", () => {
       capacity: 1_000,
       productionPerSec: 1,
       upgrades: quotes,
-      goals: [{ name: HASH_UPGRADE.maxMoney, target: "omega-net", priority: 30, valueDollars: 1_000, why: "farm" }],
+      goals: [{ name: HASH_UPGRADE.maxMoney, target: "omega-net", priority: 30, valueDollars: 1_000 }],
     });
     expect(weak.spend?.name).toBe(HASH_UPGRADE.money);
     expect(weak.ranked[0]).toMatchObject({ name: HASH_UPGRADE.maxMoney, eligible: false, netDollars: -12_499_000 });
@@ -247,7 +248,7 @@ describe("goal-aware hash spending", () => {
       capacity: 1_000,
       productionPerSec: 1,
       upgrades: quotes,
-      goals: [{ name: HASH_UPGRADE.maxMoney, target: "omega-net", priority: 30, valueDollars: 20_000_000, why: "farm" }],
+      goals: [{ name: HASH_UPGRADE.maxMoney, target: "omega-net", priority: 30, valueDollars: 20_000_000 }],
     });
     expect(strong.spend?.name).toBe(HASH_UPGRADE.maxMoney);
   });
@@ -258,7 +259,7 @@ describe("goal-aware hash spending", () => {
       capacity: 1_000,
       productionPerSec: 1,
       upgrades: quotes,
-      goals: [{ name: HASH_UPGRADE.bladeRank, priority: 90, why: "rank blocks the route" }],
+      goals: [{ name: HASH_UPGRADE.bladeRank, priority: 90 }],
     });
     expect(decision.spend).toBeUndefined();
     expect(decision.reserve?.name).toBe(HASH_UPGRADE.bladeRank);
@@ -270,7 +271,7 @@ describe("goal-aware hash spending", () => {
       capacity: 64,
       productionPerSec: 1,
       upgrades: quotes,
-      goals: [{ name: HASH_UPGRADE.bladeRank, priority: 90, why: "rank blocks the route" }],
+      goals: [{ name: HASH_UPGRADE.bladeRank, priority: 90 }],
     });
     expect(decision.capacityTarget).toBe(250);
   });
@@ -281,7 +282,7 @@ describe("goal-aware hash spending", () => {
       capacity: 100,
       productionPerSec: 1,
       upgrades: [{ name: HASH_UPGRADE.money, level: 0, cost: 4 }],
-      goals: [{ name: HASH_UPGRADE.bladeRank, priority: 99, why: "locked action" }],
+      goals: [{ name: HASH_UPGRADE.bladeRank, priority: 99 }],
     });
     expect(decision.spend?.name).toBe(HASH_UPGRADE.money);
   });

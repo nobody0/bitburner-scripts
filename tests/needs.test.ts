@@ -17,7 +17,6 @@ function need(partial: Partial<Need> & Pick<Need, "kind" | "target" | "have">): 
     by: "factions",
     weight: 1,
     urgency: "wanted",
-    why: "test",
     ...partial,
   };
 }

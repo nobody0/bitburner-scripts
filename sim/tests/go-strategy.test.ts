@@ -51,6 +51,5 @@ describe("Go neural policy", () => {
       komi: 7.5,
     }, [1_200], engine);
     expect(decision.action).toMatchObject({ type: "pass" });
-    expect(decision.why).toBe("end a won game");
   });
 });

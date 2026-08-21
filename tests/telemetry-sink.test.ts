@@ -2,7 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { makeSink } from "../game/lib/telemetry-sink.ts";
 import type { GameState } from "../game/lib/state.ts";
 import type { Telemetry } from "../game/lib/telemetry.ts";
-import { factsOnly } from "../shared/telemetry/schema.ts";
 import type { ContractFailure } from "../shared/telemetry/topics/side.ts";
 
 function failure(at: number): ContractFailure {
@@ -17,17 +16,6 @@ function failure(at: number): ContractFailure {
     at,
   };
 }
-
-test("wire payloads recursively omit planner narration and keep outcome codes", () => {
-  expect(factsOnly({
-    why: "authored",
-    modeWhy: "authored",
-    hold: "authored",
-    warning: "authored",
-    reason: "outbid",
-    nested: [{ score: 7, why: "authored" }],
-  })).toEqual({ reason: "outbid", nested: [{ score: 7 }] });
-});
 
 describe("contract failure telemetry", () => {
   test("full replay is emitted once while repeated Side state stays compact", () => {
@@ -117,7 +105,7 @@ describe("faction decision telemetry", () => {
               favorToDonate: 150,
               priceQueue: { nonSoA: 0, ownedSoA: 0, neurofluxLevel: 0 },
             },
-            action: { type: "workForFaction", faction: "CyberSec", why: "earning reputation" },
+            action: { type: "workForFaction", faction: "CyberSec" },
             alternatives: [],
             blockers: [],
           },
@@ -195,8 +183,6 @@ describe("decision telemetry", () => {
             fleetUtilization: 0.9,
             fleetDemanded: true,
             candidate: { kind: "level", node: 0, cost: 1_000 },
-            why: "waiting for funds",
-            hold: "level costs $1,000, granted $0",
             rankedTotal: 0,
             ranked: [],
             hashes: {
@@ -204,7 +190,6 @@ describe("decision telemetry", () => {
               capacity: 64,
               productionPerSec: 1,
               sellForMoneyCost: 4,
-              why: "accumulating hashes",
               rankedTotal: 0,
               ranked: [],
             },

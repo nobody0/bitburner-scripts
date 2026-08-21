@@ -10,7 +10,6 @@ import {
   type DispatchOptions,
 } from "../../shared/strategy/dispatch.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
-import { SHOTGUN_HACK_MS } from "../../shared/strategy/mode.ts";
 import { planTake, type PoolRole } from "../../shared/strategy/worker-pool.ts";
 import { expForSkill } from "../../shared/formulas.ts";
 import { PREPPED_MONEY_FRACTION, PREPPED_SEC_TOLERANCE, solvePrep } from "../../shared/strategy/targeting.ts";
@@ -1209,7 +1208,6 @@ describe("shotgun mode", () => {
     // The DECISION, from world state alone - no modeOverride anywhere here.
     expect(h.memory.dispatch.evaluator.directive.farm?.host).toBe(QUICK.hostname);
     expect(h.memory.dispatch.mode).toBe("shotgun");
-    expect(h.memory.dispatch.modeWhy).toContain(`< ${SHOTGUN_HACK_MS}ms`);
 
     // And the EXECUTION: batches were actually opened as shotgun batches and
     // landed hacks, rather than the mode being a label on an idle dispatcher.
@@ -1316,7 +1314,6 @@ describe("shotgun mode", () => {
 
     expect(h.memory.dispatch.evaluator.directive.farm?.host).toBe(DEEP.hostname);
     expect(h.memory.dispatch.mode).toBe("hwgw");
-    expect(h.memory.dispatch.modeWhy).not.toContain(`< ${SHOTGUN_HACK_MS}ms`);
 
     // Both regimes really ran: shotgun batches from the first leg, interleaved
     // HWGW batches from the second. A round trip, not a one-way trip.

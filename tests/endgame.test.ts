@@ -124,7 +124,6 @@ describe("endgame routes", () => {
     const bb = d.routes.find((r) => r.id === "bladeburner")!;
     expect(bb.complete).toBe(true);
     expect(d.best!.id).toBe("bladeburner");
-    expect(d.why).toContain("complete");
   });
 
   test("the labyrinth route needs dark web access and is dead in BN8", () => {
@@ -195,7 +194,6 @@ describe("endgame routes", () => {
     const route = stepEndgame(view({ bitNode: 6, augCount: 24 })).routes.find((candidate) => candidate.id === "daedalus")!;
     expect(daedalusAugsRequired(6)).toBe(35);
     expect(route.optionalInstall.allowed).toBe(false);
-    expect(route.optionalInstall.why).toContain("at least 6 of the remaining 11");
 
     const before = stepEndgame(view({ bitNode: 1, augCount: 9 })).routes.find(
       (candidate) => candidate.id === "daedalus",
@@ -207,7 +205,6 @@ describe("endgame routes", () => {
       queuedAugs: ["banked-a", "banked-b"],
     })).routes.find((candidate) => candidate.id === "daedalus")!;
     expect(weakMiddleBatch.optionalInstall.allowed).toBe(false);
-    expect(weakMiddleBatch.optionalInstall.why).toContain("at least 8 of the remaining 16");
 
     const substantialMiddleBatch = stepEndgame(view({
       bitNode: 1,
@@ -222,7 +219,6 @@ describe("endgame routes", () => {
       queuedAugs: ["late-a", "late-b", "late-c"],
     })).routes.find((candidate) => candidate.id === "daedalus")!;
     expect(weakLateBatch.optionalInstall.allowed).toBe(false);
-    expect(weakLateBatch.optionalInstall.why).toContain("at least 5 of the remaining 10");
 
     const substantialLateBatch = stepEndgame(view({
       bitNode: 1,
@@ -247,7 +243,6 @@ describe("endgame routes", () => {
       queuedAugs: ["closing-a", "closing-b"],
     })).routes.find((candidate) => candidate.id === "daedalus")!;
     expect(incompleteClosingBatch.optionalInstall.allowed).toBe(false);
-    expect(incompleteClosingBatch.optionalInstall.why).toContain("at least 4 of the remaining 4");
 
     const completeClosingBatch = stepEndgame(view({
       bitNode: 1,
@@ -265,12 +260,11 @@ describe("endgame routes", () => {
       daedalusRep: 1_000_000,
     })).routes.find((route) => route.id === "daedalus")!;
     expect(daedalus).toMatchObject({ stage: "red-pill-reputation", optionalInstall: { allowed: true } });
-    expect(daedalus.optionalInstall.why).toContain("favor");
   });
 
-  test("a finished labyrinth run is not credited to Daedalus", () => {
+  test("a finished run reports a complete route however the pill arrived", () => {
     // All Red Pill routes share a tail, so `complete` is true once
-    // the pill is in. The explanation must not invent an acquisition history.
+    // the pill is in — even when it came from the labyrinth.
     const d = stepEndgame(
       view({
         sourceFiles: { "15": 1 },
@@ -281,8 +275,7 @@ describe("endgame routes", () => {
         augCount: 0,
       }),
     );
-    expect(d.why).toContain("The Red Pill");
-    expect(d.why).not.toContain("daedalus");
+    expect(d.best?.complete).toBe(true);
   });
 
   test("an unknown BitNode reports no route rather than assuming BN1", () => {

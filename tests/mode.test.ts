@@ -32,7 +32,6 @@ describe("decideMode", () => {
     const recent = { ...base, liveOps: HGW_LIVE_OPS_PRESSURE + 1, lastModeSince: base.now - MODE_DWELL_MS + 1 };
     const held = decideMode(recent);
     expect(held.mode).toBe("hwgw");
-    expect(held.why).toContain("dwell");
     expect(decideMode({ ...recent, lastModeSince: base.now - MODE_DWELL_MS }).mode).toBe("hgw");
   });
 

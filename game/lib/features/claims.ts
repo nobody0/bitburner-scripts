@@ -10,7 +10,6 @@ export interface RamClaim {
   /** Exact dynamic API price; the broker adds its executable stub. */
   amount: number;
   priority: number;
-  why: string;
 }
 
 export type FeatureClaim = Claim | RamClaim;

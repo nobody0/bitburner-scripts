@@ -1,5 +1,3 @@
-import { formatNumber, formatScientific } from "../../format.ts";
-
 /** Bladeburner action selection.
  *
  * Objective: climb rank quickly while keeping risky Black Ops behind an
@@ -53,10 +51,10 @@ export interface BladeburnerView {
 }
 
 export type BladeburnerDecision =
-  | { action: { type: "stop"; why: string }; ranked: ScoredBladeburner[]; why: string }
-  | { action: { type: "continue"; why: string }; ranked: ScoredBladeburner[]; why: string }
-  | { action: { type: "act"; actionType: string; name: string; why: string }; ranked: ScoredBladeburner[]; why: string }
-  | { action: { type: "upgrade"; skill: string; why: string }; ranked: ScoredBladeburner[]; why: string };
+  | { action: { type: "stop" }; ranked: ScoredBladeburner[] }
+  | { action: { type: "continue" }; ranked: ScoredBladeburner[] }
+  | { action: { type: "act"; actionType: string; name: string }; ranked: ScoredBladeburner[] }
+  | { action: { type: "upgrade"; skill: string }; ranked: ScoredBladeburner[] };
 
 export interface ScoredBladeburner {
   name: string;
@@ -64,7 +62,6 @@ export interface ScoredBladeburner {
   /** Pessimistic expected net rank per second, including failure loss. */
   rankPerSec: number;
   chanceLow: number;
-  why: string;
 }
 
 /** Below this fraction of max stamina, the game penalises success chance —
@@ -89,7 +86,6 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
           ? (chanceLow * action.rankGain - (1 - chanceLow) * action.rankLoss) / seconds
           : 0,
         chanceLow,
-        why: `${(chanceLow * 100).toFixed(0)}% pessimistic; +${formatNumber(action.rankGain)}/-${formatNumber(action.rankLoss)} rank in ${Math.round(seconds)}s`,
       };
     })
     .sort((a, b) => b.rankPerSec - a.rankPerSec || (a.name < b.name ? -1 : 1));
@@ -98,14 +94,7 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
   // is strictly faster than pushing through.
   const [current, max] = view.stamina;
   if (max > 0 && current / max < STAMINA_FLOOR) {
-    return {
-      action: {
-        type: "stop",
-        why: `stamina ${Math.round(current)}/${Math.round(max)} is below the ${STAMINA_FLOOR * 100}% floor, which penalises every action`,
-      },
-      ranked,
-      why: "resting",
-    };
+    return { action: { type: "stop" }, ranked };
   }
 
   // Chaos suppresses success chance across the city; this policy switches to
@@ -115,14 +104,8 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
     const diplomacy = view.actions.find((action) => action.name === "Diplomacy");
     if (diplomacy) {
       return {
-        action: {
-          type: "act",
-          actionType: "general",
-          name: "Diplomacy",
-          why: `chaos ${Math.round(view.chaos)} is above ${CHAOS_CEILING} and is degrading every action`,
-        },
+        action: { type: "act", actionType: "general", name: "Diplomacy" },
         ranked,
-        why: "reducing chaos",
       };
     }
   }
@@ -133,11 +116,10 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
     .filter(([, skill]) => skill.upgradeCost <= view.skillPoints)
     .sort((a, b) => a[1].upgradeCost - b[1].upgradeCost || (a[0] < b[0] ? -1 : 1));
   if (affordable.length > 0) {
-    const [name, skill] = affordable[0]!;
+    const [name] = affordable[0]!;
     return {
-      action: { type: "upgrade", skill: name, why: `${view.skillPoints} skill points, ${name} costs ${skill.upgradeCost}` },
+      action: { type: "upgrade", skill: name },
       ranked,
-      why: "spending skill points",
     };
   }
 
@@ -148,9 +130,8 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
   if (blackOp) {
     if (blackOp.chance[0] >= BLACKOP_CONFIDENCE) {
       return {
-        action: { type: "act", actionType: "blackop", name: blackOp.name, why: `${(blackOp.chance[0] * 100).toFixed(1)}% pessimistic success` },
+        action: { type: "act", actionType: "blackop", name: blackOp.name },
         ranked,
-        why: "black op",
       };
     }
     // Not confident enough — fall through to ordinary actions rather than
@@ -159,14 +140,13 @@ export function stepBladeburner(view: BladeburnerView): BladeburnerDecision {
 
   const best = ranked.find((entry) => entry.actionType !== "blackop");
   if (!best) {
-    return { action: { type: "stop", why: "no action available" }, ranked, why: "idle" };
+    return { action: { type: "stop" }, ranked };
   }
   if (view.current?.name === best.name) {
-    return { action: { type: "continue", why: `already running ${best.name}` }, ranked, why: "continuing" };
+    return { action: { type: "continue" }, ranked };
   }
   return {
-    action: { type: "act", actionType: best.actionType, name: best.name, why: best.why },
+    action: { type: "act", actionType: best.actionType, name: best.name },
     ranked,
-    why: `${formatScientific(best.rankPerSec)} rank/sec at the pessimistic chance`,
   };
 }

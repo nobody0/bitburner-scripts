@@ -17,7 +17,6 @@ const karmaNeed: Need = {
   have: 0,
   weight: 12,
   urgency: "blocking",
-  why: "Slum Snakes requires karma <= -9 and Tetrads -18",
 };
 
 const workClaim: Claim = {
@@ -28,7 +27,6 @@ const workClaim: Claim = {
   priority: PRIORITY["factions:work"],
   mode: "spend",
   ...unknownStep,
-  why: "hacking contracts for CyberSec",
 };
 
 const crimeClaim: Claim = {
@@ -39,7 +37,6 @@ const crimeClaim: Claim = {
   priority: PRIORITY["career:blocking-need"],
   mode: "spend",
   ...unknownStep,
-  why: "clearing a blocking karma need",
 };
 
 describe("the coordination pass", () => {
@@ -127,7 +124,6 @@ describe("the coordination pass", () => {
       priority: PRIORITY["factions:aug-fund"],
       mode: "reserve",
       ...unknownStep,
-      why: "Cranial Signal Processors G1",
     };
     const upgrade: Claim = {
       by: "hacknet",
@@ -137,7 +133,6 @@ describe("the coordination pass", () => {
       priority: PRIORITY["hacknet:upgrade"],
       mode: "spend",
       ...unknownStep,
-      why: "node 0 level 40->50",
     };
     const result = coordinate({
       now: 0,
@@ -173,7 +168,6 @@ describe("the coordination pass", () => {
       mode: "spend",
       shape: "continuous",
       valueCurve: { marginalValueAt: (granted) => 10 - granted / 10 },
-      why: "linear test position",
     };
     const result = coordinate({
       now: 0,
@@ -204,10 +198,10 @@ describe("the coordination pass", () => {
 });
 
 const timeClaim = (by: Claim["by"], id: string, priority: number, holdUntil?: number): Claim => ({
-  by, id, resource: "time", amount: 1, priority, mode: "reserve", ...unknownStep, why: "test", ...(holdUntil ? { holdUntil } : {}),
+  by, id, resource: "time", amount: 1, priority, mode: "reserve", ...unknownStep, ...(holdUntil ? { holdUntil } : {}),
 });
 const moneyClaim = (by: Claim["by"], id: string, amount: number, mode: Claim["mode"]): Claim => ({
-  by, id, resource: "money", amount, priority: 50, mode, ...unknownStep, why: "test",
+  by, id, resource: "money", amount, priority: 50, mode, ...unknownStep,
 });
 
 describe("standing feature contributions", () => {
@@ -229,7 +223,7 @@ describe("standing feature contributions", () => {
           plan: {
             context: { holdsWorkSlot: false },
             objective: { factions: ["Slum Snakes"], augmentations: [] },
-            action: { type: "idle", reason: "slot", why: "work slot held elsewhere" },
+            action: { type: "idle", reason: "slot" },
             alternatives: [],
             blockers: [],
           },
@@ -303,7 +297,7 @@ describe("standing feature contributions", () => {
   test("dropping a claim releases the slot and locking removes stale claims and needs", () => {
     const cache = new ContributionCache();
     cache.replaceClaims("factions", [timeClaim("factions", "work", 60)]);
-    cache.replaceNeeds("factions", [{ by: "factions", kind: "backdoor", subject: "CSEC", target: 1, have: 0, weight: 1, urgency: "blocking", why: "test" }]);
+    cache.replaceNeeds("factions", [{ by: "factions", kind: "backdoor", subject: "CSEC", target: 1, have: 0, weight: 1, urgency: "blocking" }]);
     const first = resolveClaims({ now: 1, pools: { money: 0 }, claims: cache.claims() as Claim[] });
     cache.replaceClaims("factions", []);
     const released = resolveClaims({ now: 2, pools: { money: 0 }, claims: cache.claims() as Claim[], slot: first.slot });
@@ -318,7 +312,7 @@ describe("standing feature contributions", () => {
     const transient = cache.replaceClaims("factions", [
       moneyClaim("factions", "aug-fund", 70, "reserve"),
       moneyClaim("factions", "buy-now", 10, "spend"),
-      { by: "factions", id: "action", resource: "ram", amount: 2, priority: 50, why: "test" },
+      { by: "factions", id: "action", resource: "ram", amount: 2, priority: 50 },
     ]);
     expect(transient.map((claim) => claim.id)).toEqual(["buy-now", "action"]);
     const dueClaims = cache.claims(transient).filter((claim): claim is Claim => claim.resource !== "ram");

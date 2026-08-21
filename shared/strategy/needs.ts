@@ -127,10 +127,6 @@ export interface Need {
    *  Absent = unmeasured, never zero. Same-key values ADD, like weights. */
   valueSec?: number;
   urgency: NeedUrgency;
-  /** Human-readable provenance: the reason this need exists at all. Rendered,
-   *  so the UI can say "career is doing crime BECAUSE The Syndicate needs
-   *  karma <= -90" rather than just showing a karma bar. */
-  why: string;
 }
 
 /** Stable identity for a need's subject-space. Two features asking for the same

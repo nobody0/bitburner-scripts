@@ -123,7 +123,7 @@ export interface FactionGate {
   missing: GateBlocker[];
 }
 
-export type FactionIntentDigest = Omit<FactionIntent, "why">;
+export type FactionIntentDigest = FactionIntent;
 export type FactionObjectiveDigest = Omit<FactionObjective, "why" | "intent" | "runnerUp"> & {
   intent?: FactionIntentDigest;
   runnerUp?: FactionIntentDigest;

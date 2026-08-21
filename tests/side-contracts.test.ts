@@ -52,7 +52,7 @@ function harness(attempt: (answer: unknown) => string) {
     grants: {
       money: 0,
       ramClaims: new Map([["action:contract", {
-        by: "side", id: "action:contract", resource: "ram", amount: 10.5, priority: 50, why: "test",
+        by: "side", id: "action:contract", resource: "ram", amount: 10.5, priority: 50,
       }]]),
       slot: false,
       result,

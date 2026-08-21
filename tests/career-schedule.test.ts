@@ -60,7 +60,6 @@ function need(kind: Need["kind"], subject: string | undefined, urgency: NeedUrge
     have: 0,
     weight: 10,
     urgency,
-    why: "test request",
   };
 }
 
@@ -176,7 +175,7 @@ describe("career request queue", () => {
     expect(decision.action).toMatchObject({ type: "company", subject: "ECorp" });
     expect(decision.workPriority).toBe("blocking");
     expect(decision.ranked[0]!.contributions[0]).toMatchObject({ kind: "companyRep", subject: "ECorp", perSec: 12 });
-    expect(decision.serving[0]).toMatchObject({ by: "factions", urgency: "blocking", why: "test request" });
+    expect(decision.serving[0]).toMatchObject({ by: "factions", urgency: "blocking" });
   });
 
   test("employment requests queue an application before work", () => {
@@ -360,7 +359,6 @@ describe("training versus route reputation", () => {
       have: 1,
       weight: 5,
       urgency: "blocking",
-      why: "Daedalus invite",
     }]);
     return stepCareer(careerView, board);
   }
@@ -413,7 +411,7 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
     installWanted?: boolean;
     routeInstallRequired?: boolean;
     blockers?: { faction: string; kind: string; subject?: string }[];
-    action?: { type: string; city?: string; why: string };
+    action?: { type: string; city?: string };
     workTypes?: string[];
     skills?: Record<string, number>;
   } = {}) {
@@ -428,7 +426,7 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
           offers: over.offers ?? [{ faction: "The Covenant", repReq: 50_000, owned: false }],
           plan: {
             context: { route: over.route },
-            action: over.action ?? { type: "idle", why: "breakpoint met" },
+            action: over.action ?? { type: "idle" },
             ...(over.blockers ? { blockers: over.blockers } : {}),
             objective: {
               factions: ["The Covenant"],
@@ -580,7 +578,7 @@ describe("factions holds the slot across a breakpoint hand-off", () => {
 
     // Still claimed once the action IS published — the two must overlap, or the
     // grant lapses on the very pass that would spend it.
-    expect(travelFund({ blockers: cityBlocker, action: { type: "travelTo", city: "Chongqing", why: "t" } }))
+    expect(travelFund({ blockers: cityBlocker, action: { type: "travelTo", city: "Chongqing" } }))
       .toBeDefined();
 
     // A city requirement that is NOT the faction's only remaining blocker is
@@ -681,7 +679,7 @@ describe("the work slot is priced in BN-seconds, not banded", () => {
     by: "factions", id: "work:Daedalus", resource: "time", amount: 1, shape: "step",
     pricing: "hard", value: { state: "unknown", reason: "slot" },
     priority: PRIORITY["factions:work"], mode: "spend",
-    produces: { reputation: 40 }, why: "reputation",
+    produces: { reputation: 40 },
   };
 
   function slotWinner(career: Claim, worth: Map<string, number>): string | undefined {
@@ -737,7 +735,7 @@ describe("the work slot is priced in BN-seconds, not banded", () => {
     });
     const moneyGate: Need = {
       by: "progression", kind: "money", target: 1e11, have: 1.8e10,
-      weight: 5, urgency: "blocking", why: "Daedalus invitation requirement",
+      weight: 5, urgency: "blocking",
     };
     const claim = slotClaimFor(state, [moneyGate]);
     const worth = new Map([["money", 0], ["reputation", REP_WORTH]]);
@@ -768,7 +766,7 @@ describe("the work slot is priced in BN-seconds, not banded", () => {
       by: "career", id: "work", resource: "time", amount: 1, shape: "step",
       pricing: "hard", value: { state: "unknown", reason: "slot" },
       priority: PRIORITY["career:progress-lock"], mode: "spend",
-      holdUntil: 600_000, why: "unbanked progress",
+      holdUntil: 600_000,
     };
     expect(slotWinner(locked, new Map([["reputation", 1e9]]))).toBe("career");
   });

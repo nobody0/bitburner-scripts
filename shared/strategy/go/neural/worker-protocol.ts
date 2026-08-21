@@ -144,10 +144,6 @@ export function goNeuralPositionIdentity(view: GoView): { id: string; canonical:
       k: view.cheat.candidateLimit,
       d: view.cheat.doubleMoveLimit,
     } : undefined,
-    // Only the fields the decision reads. `nextGame.why` is regenerated from
-    // live install-remaining seconds on every controller pass, so hashing it
-    // would give the same position a new identity each turn and defeat both
-    // the worker's position cache and every pushed continuation.
     n: view.nextGame ? { o: view.nextGame.opponent, b: view.nextGame.boardSize } : undefined,
   });
   let left = 0x811c9dc5;

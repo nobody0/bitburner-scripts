@@ -1,9 +1,5 @@
 import type { NS } from "@ns";
-import {
-  stripNarration,
-  TELEMETRY_PORT,
-  WIRE_VERSION,
-} from "../../shared/telemetry/schema.ts";
+import { TELEMETRY_PORT, WIRE_VERSION } from "../../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
 import type { ArtifactIdentity } from "../../shared/run-identity.ts";
 
@@ -11,11 +7,11 @@ import type { ArtifactIdentity } from "../../shared/run-identity.ts";
  * `new WebSocket()` (browser global — 0 GB ns RAM).
  * Source (only `window`/`document` trigger DOM RAM): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L180-L193
  *
- * Every record is serialized ONCE, at push time, with the stripNarration
- * replacer: no factsOnly deep clone, no second stringify at flush, and the
- * buffer holds strings rather than references into live game state — so a
- * buffered snapshot can never observe a later mutation, and memory while the
- * hub is down is bounded in bytes, the unit that actually costs something.
+ * Every record is serialized ONCE, at push time: no second stringify at
+ * flush, and the buffer holds strings rather than references into live game
+ * state — so a buffered snapshot can never observe a later mutation, and
+ * memory while the hub is down is bounded in bytes, the unit that actually
+ * costs something.
  *
  * The sink publishes the game-state store; controller lifecycle events use
  * the same client. Acquisition runs in every build, and every reference to
@@ -139,7 +135,7 @@ export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity
   }
 
   function push(record: Record<string, unknown>, debug = false): void {
-    buffer.push(JSON.stringify(record, stripNarration), debug);
+    buffer.push(JSON.stringify(record), debug);
     if (buffer.count() >= FLUSH_AT) flush();
   }
 

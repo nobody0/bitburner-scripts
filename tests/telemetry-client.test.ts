@@ -1,42 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { makeRecordBuffer } from "../game/lib/telemetry.ts";
-import { factsOnly, stripNarration, WIRE_VERSION, type WireMessage } from "../shared/telemetry/schema.ts";
-
-describe("stripNarration", () => {
-  test("serializing with the replacer equals factsOnly-then-serialize", () => {
-    // The replacer is the single-pass form of factsOnly; the two must never
-    // drift, because the sim keeps narration while the game strips it, and
-    // both feed the same hub.
-    const fixture = {
-      why: "authored",
-      modeWhy: "authored",
-      hold: "authored",
-      warning: "authored",
-      reason: "outbid",
-      nested: [{ score: 7, why: "authored", deeper: { installOverrideWhy: "authored", keep: null } }],
-      whyNot: "kept — prefix, not suffix",
-      count: 0,
-    };
-    expect(JSON.parse(JSON.stringify(fixture, stripNarration))).toEqual(factsOnly(fixture));
-  });
-
-  test("record envelope fields survive the replacer", () => {
-    const record = { seq: 1, t: 2, run: "r", src: "game", kind: "state", key: "getPlayer", data: { hp: 1 } };
-    expect(JSON.parse(JSON.stringify(record, stripNarration))).toEqual(record);
-  });
-});
+import { WIRE_VERSION, type WireMessage } from "../shared/telemetry/schema.ts";
 
 test("a hand-assembled frame parses as the same WireMessage JSON.stringify produces", () => {
   const records = [
     { seq: 0, t: 1, run: "r", src: "game", kind: "event", name: "start.boot" },
-    { seq: 1, t: 2, run: "r", src: "game", kind: "state", key: "player", data: { hp: 9, why: "authored" } },
+    { seq: 1, t: 2, run: "r", src: "game", kind: "state", key: "player", data: { hp: 9 } },
   ];
-  const lines = records.map((record) => JSON.stringify(record, stripNarration));
+  const lines = records.map((record) => JSON.stringify(record));
   const frame = `{"v":${WIRE_VERSION},"records":[${lines.join(",")}]}`;
-  const reference: WireMessage = {
-    v: WIRE_VERSION,
-    records: records.map((record) => JSON.parse(JSON.stringify(record, stripNarration))) as never,
-  };
+  const reference: WireMessage = { v: WIRE_VERSION, records: records as never };
   expect(JSON.parse(frame)).toEqual(JSON.parse(JSON.stringify(reference)));
 });
 

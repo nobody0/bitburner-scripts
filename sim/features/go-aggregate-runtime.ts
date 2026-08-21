@@ -91,9 +91,8 @@ export class AggregateGoNeuralRuntime implements GoNeuralRuntime {
     if (!candidate) throw new Error("aggregate Go position has no move or pass candidate");
     if (candidate.action.type === "pass") {
       return {
-        action: { type: "pass", why: "aggregate endpoint has no legal placement" },
+        action: { type: "pass" },
         ranked: [],
-        why: "aggregate arena-calibrated game",
         finalists: 1,
         positionValue: profile.priorWinProbability,
       };
@@ -103,16 +102,14 @@ export class AggregateGoNeuralRuntime implements GoNeuralRuntime {
     }
     const { x, y } = candidate.action;
     return {
-      action: { type: "move", x, y, why: "legal aggregate-endpoint trigger" },
+      action: { type: "move", x, y },
       ranked: [{
         x,
         y,
         score: profile.priorWinProbability,
         powerPerRound: profile.scoreFraction,
         captures: candidate.captures,
-        why: "arena-calibrated aggregate result",
       }],
-      why: "aggregate arena-calibrated game",
       finalists: 1,
       positionValue: profile.priorWinProbability,
       forecast: [],

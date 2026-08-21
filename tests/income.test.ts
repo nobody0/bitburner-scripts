@@ -181,7 +181,7 @@ describe("the alternatives-and-worth table", () => {
   test("the marginal overrides a posted weight for the same outcome", () => {
     const moneyGate = {
       by: "progression" as const, kind: "money" as const, target: 1e11, have: 1.8e10,
-      weight: 5, urgency: "blocking" as const, why: "Daedalus invitation requirement",
+      weight: 5, urgency: "blocking" as const,
     };
     // Posting both would count the same progress twice, and only one of them
     // was measured.
@@ -199,7 +199,7 @@ describe("the alternatives-and-worth table", () => {
   test("same-key needs add, exactly as their weights do", () => {
     const karma = (by: "factions" | "progression", weight: number) => ({
       by, kind: "karma" as const, target: -54_000, have: -3_000,
-      weight, urgency: "wanted" as const, why: "gang",
+      weight, urgency: "wanted" as const,
     });
     expect(channelWorth(postNeeds([karma("factions", 1), karma("progression", 2)])).get("karma"))
       .toBe(3 * NOMINAL_VALUE_SEC_PER_WEIGHT);
@@ -208,7 +208,7 @@ describe("the alternatives-and-worth table", () => {
   test("a measured valueSec is preferred to the nominal weight fallback", () => {
     expect(channelWorth(postNeeds([{
       by: "factions", kind: "backdoor", subject: "CSEC", target: 1, have: 0,
-      weight: 2, valueSec: 4_000, urgency: "blocking", why: "CyberSec invite",
+      weight: 2, valueSec: 4_000, urgency: "blocking",
     }])).get("backdoor:CSEC")).toBe(4_000);
   });
 });

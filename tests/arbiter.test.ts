@@ -25,7 +25,7 @@ import { shareCutover, type ShareValueCurve } from "../shared/strategy/share.ts"
 
 function claim(partial: Partial<Claim> & Pick<Claim, "id" | "resource" | "amount" | "priority">): Claim {
   return { by: "factions", mode: "spend", shape: "step",
-    pricing: "hard", value: { state: "measured", value: Infinity }, why: "test", ...partial } as Claim;
+    pricing: "hard", value: { state: "measured", value: Infinity }, ...partial } as Claim;
 }
 
 function stepClaim(partial: Parameters<typeof claim>[0]): StepClaim {
@@ -825,7 +825,6 @@ describe("cross-feature investments", () => {
       have: 4_000_000,
       weight: 1,
       urgency: "blocking" as const,
-      why: "join Sector-12",
     };
     expect(deferPrerequisitePurchase("wanted", [cash])).toBe(true);
     expect(deferPrerequisitePurchase("nice", [cash])).toBe(true);
@@ -841,7 +840,6 @@ describe("cross-feature investments", () => {
       have: 15_000_000,
       weight: 1,
       urgency: "blocking" as const,
-      why: "Sector-12 invitation",
     };
     const fast = { kind: "buyServer" as const, cost: 1_000_000, addedRam: 8, incomePerSec: 2_000 };
     const slow = { kind: "homeRam" as const, cost: 1_000_000, addedRam: 8, incomePerSec: 1 };
@@ -860,7 +858,6 @@ describe("cross-feature investments", () => {
       have: 5_000_000,
       weight: 1,
       urgency: "blocking" as const,
-      why: "Sector-12 invitation",
     };
     const [eligible] = infrastructureBeforeMoneyNeeds([modelled], 5_000_000, 100, [need], true);
     expect(eligible).toEqual(modelled);

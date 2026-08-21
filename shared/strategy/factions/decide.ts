@@ -1,4 +1,4 @@
-import { formatMoney, formatNumber } from "../../format.ts";
+import { formatNumber } from "../../format.ts";
 import {
   augCost,
   canAfford,
@@ -6,7 +6,6 @@ import {
   countSlotWeight,
   entropyCost,
   estimatedCost,
-  isSoA,
   NEUROFLUX,
   orderPurchases,
   orderPurchasesWithNeurofluxByLevel,
@@ -151,7 +150,6 @@ export function blockersFor(standing: FactionStanding, view: FactionsView): Bloc
         progress: 0,
         owner: "progression",
         reachable: false,
-        why: `${standing.name} is joined through its own mechanic, not an invitation`,
       },
     ];
   }
@@ -159,11 +157,7 @@ export function blockersFor(standing: FactionStanding, view: FactionsView): Bloc
   if (!view.availableOwners) return evaluated;
   return evaluated.map((entry) => view.availableOwners!.has(entry.owner)
     ? entry
-    : {
-        ...entry,
-        reachable: false,
-        why: `${entry.why}; ${entry.owner} is unavailable in this run`,
-      });
+    : { ...entry, reachable: false });
 }
 
 /** Measured reputation rate, EWMA over observed deltas. Reality beats the
@@ -350,17 +344,12 @@ export function stepFactions(
     decision = {
       ...decision,
       nextBuy,
-      action: {
-        type: "idle",
-        reason: "waiting",
-        why: "waiting for stock liquidation before the first queued purchase",
-      },
+      action: { type: "idle", reason: "waiting" },
       liquidationNeeded: {
         augmentation: nextBuy.name,
         price: nextBuy.price,
         cash: view.moneyAvailable,
         pendingProceeds: Math.max(0, view.pendingProceeds),
-        why: nextBuy.name + " needs stock proceeds to bootstrap the first queued purchase",
       },
     };
   }
@@ -383,16 +372,12 @@ function decideFactions(
       memory,
       decision: {
         objective: undefined,
-        action: { type: "idle", reason: "blocked", why: "singularity RAM wall" },
+        action: { type: "idle", reason: "blocked" },
         alternatives,
         blockers: [],
         needOwners: [],
         invalidation,
-        blocked: {
-          why:
-            "SF4 level 1 outside BN4: one singularity call costs 5GB x16 = 80GB and is indivisible. " +
-            "Fully fundable in BN4 or at SF4 level 3.",
-        },
+        blocked: {},
       },
     };
   }
@@ -449,9 +434,6 @@ function decideFactions(
     augmentations: objectiveAugs,
     value: selection.intent?.value ?? 0,
     foreclosed: selection.foreclosed,
-    why: selection.intent
-      ? `finite-horizon package frontier; next target is ${selection.intent.faction} at ${formatNumber(selection.intent.repTarget)} rep`
-      : "no faction package fits the planning horizon",
     ...(selection.intent ? { intent: selection.intent } : {}),
     ...(selection.runnerUp ? { runnerUp: selection.runnerUp } : {}),
     ...(selection.horizonStarved ? { horizonStarved: true } : {}),
@@ -517,9 +499,6 @@ function decideFactions(
           augmentations: closePrereqs(previousRunner.augmentations, view.catalog, view.owned),
           value: previousRunner.value,
           foreclosed: fresh.foreclosed,
-          why:
-            "advanced from completed " + previousIntent!.faction + " package to its recorded frontier runner " +
-            previousRunner.faction + " at " + formatNumber(previousRunner.repTarget) + " rep",
           intent: previousRunner,
         }
       : undefined;
@@ -603,7 +582,6 @@ function decideFactions(
     alternatives.push({
       label: `${objective.runnerUp.faction} to ${formatNumber(objective.runnerUp.repTarget)} rep`,
       value: objective.runnerUp.value / Math.max(1, objective.runnerUp.etaSec),
-      why: objective.runnerUp.why,
     });
   }
 
@@ -641,11 +619,7 @@ function decideFactions(
 
   if (view.currentWork?.kind === "grafting") {
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/GraftingWork.tsx#L26-L98
-    const action: FactionAction = {
-      type: "idle",
-      reason: "continue",
-      why: `grafting ${view.currentWork.detail ?? "augmentation"} is protected until completion`,
-    };
+    const action: FactionAction = { type: "idle", reason: "continue" };
     return {
       memory: { ...next, lastAction: action },
       decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
@@ -667,8 +641,8 @@ function decideFactions(
   if (graft) {
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Grafting.ts#L17-L103
     const action: FactionAction = view.requirementView.city === "New Tokyo"
-      ? { type: "graft", augmentation: graft.name, why: graft.why }
-      : { type: "travelTo", city: "New Tokyo", why: `${graft.name} is worth grafting; VitaLife is in New Tokyo` };
+      ? { type: "graft", augmentation: graft.name }
+      : { type: "travelTo", city: "New Tokyo" };
     return {
       memory: { ...next, lastAction: action },
       decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
@@ -680,15 +654,7 @@ function decideFactions(
     (standing) => standing.invited && !standing.joined && objective.factions.includes(standing.name),
   );
   if (invitation && !drainLatched) {
-    const lost = objective.foreclosed.filter((entry) => entry.bannedBy === invitation.name);
-    const action: FactionAction = {
-      type: "joinFaction",
-      faction: invitation.name,
-      why:
-        lost.length > 0
-          ? `joining ${invitation.name} forecloses ${lost.map((e) => e.name).join(", ")} until the next install`
-          : `${invitation.name} is in the objective and has invited us`,
-    };
+    const action: FactionAction = { type: "joinFaction", faction: invitation.name };
     return {
       memory: { ...next, lastAction: action },
       decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
@@ -714,11 +680,7 @@ function decideFactions(
       !view.factions.some((member) => member.joined && member.enemies.includes(standing.name)),
   );
   if (freeInvite) {
-    const action: FactionAction = {
-      type: "joinFaction",
-      faction: freeInvite.name,
-      why: `${freeInvite.name} invited us and forecloses nothing`,
-    };
+    const action: FactionAction = { type: "joinFaction", faction: freeInvite.name };
     return {
       memory: { ...next, lastAction: action },
       decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
@@ -733,11 +695,7 @@ function decideFactions(
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionJoinCondition.ts#L196-L214
   const travel = view.installRequested || drainLatched ? undefined : soleTravelBlocker(allBlockers);
   if (travel) {
-    const action: FactionAction = {
-      type: "travelTo",
-      city: travel.subject!,
-      why: `${travel.faction} needs us in ${travel.subject}, and it is the only requirement left`,
-    };
+    const action: FactionAction = { type: "travelTo", city: travel.subject! };
     return {
       memory: { ...next, lastAction: action },
       decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
@@ -787,7 +745,6 @@ function decideFactions(
     ? pickWorkFaction(view, next, objective, alternatives)
     : undefined;
   if (!target) {
-    const why = allBlockers.length > 0 ? "every objective faction is blocked" : "nothing left to work toward";
     // Completing one faction breakpoint does not decide the install. Keep the
     // bankroll unqueued while progression's renewal model still says push;
     // otherwise every package boundary starts paying the 1.9x ladder early.
@@ -801,19 +758,11 @@ function decideFactions(
         && !activePackageInFlight
         && bankedAugmentations.size > 0
         && (terminalRequired.length === 0 || bankedFunded)
-        ? {
-            why: terminalRequired.length > 0
-              ? "the end-loaded route-critical package is reputation-complete and funded; freeze the best affordable sweep"
-              : "progression requested the reset; freeze the best jointly affordable subset of the reputation-complete bank",
-            augmentations: [...bankedAugmentations],
-          }
+        ? { augmentations: [...bankedAugmentations] }
         : undefined)
       ?? (mayCloseTransaction ? shouldRecommendInstall(view, objective) : undefined)
       ?? (drainLatched
-      ? {
-          why: "the end-loaded purchase transaction has started; finish its frozen spend-down and install",
-          augmentations: [...view.queued],
-        }
+      ? { augmentations: [...view.queued] }
       : undefined);
     // Last-chance drain. This is intentionally broader than the objective:
     // once progression is about to reset, every augmentation we can still buy
@@ -938,7 +887,6 @@ function decideFactions(
     const action: FactionAction = {
       type: "idle",
       reason: allBlockers.length > 0 ? "blocked" : "waiting",
-      why,
     };
     return {
       memory: {
@@ -1000,7 +948,6 @@ function decideFactions(
     view.repContext.factionWorkRepGain,
   );
   const intent = objective.intent?.faction === target.faction ? objective.intent : undefined;
-  const packageCashNeeded = donationNeeded + (intent?.purchaseCost ?? 0);
   const donationIsFaster = (intent?.donationCost ?? 0) > 0 || view.incomePerSec > crossover;
   if (donateUnlocked && donationIsFaster) {
     const amount = donationNeeded;
@@ -1016,9 +963,6 @@ function decideFactions(
       faction: target.faction,
       amount,
       ...(nextPurchaseCost > 0 ? { purchaseCost: nextPurchaseCost } : {}),
-      why:
-        `reserve ${formatMoney(packageCashNeeded)} for reputation and purchase; ` +
-        `income ${formatMoney(view.incomePerSec)}/sec beats the ${formatMoney(crossover)}/sec crossover`,
     };
     return {
       memory: { ...next, lastAction: action },
@@ -1038,7 +982,7 @@ function decideFactions(
   // The continuation guard comes after cheap actions but before reissuing the
   // same work order.
   if (shouldContinue(view, memory, invalidation, target)) {
-    const action: FactionAction = { type: "idle", reason: "continue", why: "faction work already running" };
+    const action: FactionAction = { type: "idle", reason: "continue" };
     return {
       memory: { ...next, lastAction: memory.lastAction },
       decision: {
@@ -1059,13 +1003,7 @@ function decideFactions(
     // panel previously showed the intended work as if it were running, which
     // read as a contradiction against the game's own display.
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22
-    const action: FactionAction = {
-      type: "idle",
-      reason: "slot",
-      why:
-        `would work ${target.faction} (${target.workType}) but another feature holds ` +
-        `Player.currentWork — only one activity can run at a time`,
-    };
+    const action: FactionAction = { type: "idle", reason: "slot" };
     return {
       memory: { ...next, lastAction: action },
       decision: {
@@ -1086,17 +1024,10 @@ function decideFactions(
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L143-L176
   const passive = passiveRepPerSec(view.person, target.standing.favor, view.repContext);
   if (target.repPerSec <= passive) {
-    const action: FactionAction = {
-      type: "idle",
-      reason: "waiting",
-      why:
-        `working ${target.faction} would earn ${target.repPerSec.toFixed(4)} rep/sec but suppress a ` +
-        `${passive.toFixed(4)} rep/sec passive tick — idling is strictly better`,
-    };
+    const action: FactionAction = { type: "idle", reason: "waiting" };
     alternatives.push({
       label: `work ${target.faction}`,
       value: target.repPerSec,
-      why: "below the passive-rep crossover",
     });
     return {
       memory: { ...next, lastAction: action },
@@ -1117,7 +1048,6 @@ function decideFactions(
     faction: target.faction,
     workType: target.workType,
     focus: true,
-    why: `${target.repPerSec.toFixed(3)} rep/sec toward ${formatNumber(target.needed)} needed`,
   };
   return {
     memory: { ...next, lastAction: action, focusFaction: target.faction, focusSince: view.time },
@@ -1169,7 +1099,7 @@ export function soleTravelBlocker<T extends { faction: string; kind: string; sub
   return undefined;
 }
 
-function nextGraft(view: FactionsView, wanted: readonly string[]): { name: string; why: string } | undefined {
+function nextGraft(view: FactionsView, wanted: readonly string[]): { name: string } | undefined {
   if (!view.holdsWorkSlot) return undefined;
   const entropyPenalty = view.owned.has("violet Congruity Implant") ? 0 : entropyCost(view.weights);
   for (const name of wanted) {
@@ -1180,10 +1110,7 @@ function nextGraft(view: FactionsView, wanted: readonly string[]): { name: strin
     if (aug.prereqs.some((prereq) => !view.owned.has(prereq))) continue;
     const benefit = scoreAug(aug, view.weights, view.rates?.worth);
     if (benefit <= entropyPenalty || (view.graftGranted ?? view.moneyGranted) < offer.price) continue;
-    return {
-      name,
-      why: `graft value ${benefit.toFixed(3)} exceeds one-step entropy cost ${entropyPenalty.toFixed(3)} and completes within the run horizon`,
-    };
+    return { name };
   }
   return undefined;
 }
@@ -1297,9 +1224,6 @@ function nextPurchase(
         type: "purchaseAugmentation",
         faction: source.standing.name,
         augmentation: name,
-        why: `${source.verdict.reason}; ${formatMoney(moneyCost)} at ${
-          isSoA(name) ? "SoA" : name === NEUROFLUX ? "NeuroFlux" : "standard"
-        } pricing`,
       },
     };
   }
@@ -1562,7 +1486,6 @@ function nextSweepAction(view: FactionsView, wanted: readonly string[]): Faction
       faction: source.standing.name,
       amount: source.donation,
       purchaseCost: moneyCost,
-      why: `final install sweep: donate exactly enough to unlock ${name}, while reserving its ${formatMoney(moneyCost)} purchase`,
     };
   }
   return undefined;
@@ -1602,7 +1525,7 @@ function pickWorkFaction(
     if (!rate) continue;
     // Rank by how much of the remaining gap this closes per second.
     const value = rate.repPerSec;
-    alternatives.push({ label: `work ${name} (${rate.type})`, value, why: `${formatNumber(needed - standing.rep)} rep short` });
+    alternatives.push({ label: `work ${name} (${rate.type})`, value });
     if (!best || value > best.repPerSec) {
       best = { faction: name, standing, workType: rate.type, repPerSec: value, produces: rate.produces, needed };
     }
@@ -1641,7 +1564,7 @@ function pickWorkFaction(
 function shouldRecommendInstall(
   view: FactionsView,
   objective: FactionObjective,
-): { why: string; augmentations: string[] } | undefined {
+): { augmentations: string[] } | undefined {
   // Purchases are END-LOADED (the two-loop money rule), so the endgame begins
   // when the objective's WORK is done — every augmentation owned or its
   // reputation requirement met at a joined seller. Ownership is NOT required:
@@ -1675,10 +1598,5 @@ function shouldRecommendInstall(
     && outstanding.every((name) => name === NEUROFLUX)
   ) return undefined;
   if (queued.length === 0 && outstanding.length === 0) return undefined;
-  return {
-    why: view.installRequested
-      ? "progression requested the reset; the sweep converts what is buyable and the rest waits for the next cycle"
-      : "the objective's work is done; the sweep converts cash to augmentations and banked reputation to favor at install",
-    augmentations: [...queued, ...outstanding],
-  };
+  return { augmentations: [...queued, ...outstanding] };
 }

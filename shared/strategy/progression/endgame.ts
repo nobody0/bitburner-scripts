@@ -114,19 +114,16 @@ export interface RouteNeed {
   subject?: string;
   target: number;
   have: number;
-  why: string;
 }
 
 export interface MandatoryInstall {
   augmentation: string;
   /** True once the route reward/gate contribution is already queued. */
   ready: boolean;
-  why: string;
 }
 
 export interface OptionalInstallPolicy {
   allowed: boolean;
-  why: string;
 }
 
 export interface EndgameView {
@@ -232,7 +229,6 @@ export interface EndgameDecision {
    *  put the target out of reach again. Named because a planner that misses it
    *  under-estimates the run by a whole climb. */
   awaitingRegrow: boolean;
-  why: string;
 }
 
 function sf(view: EndgameView, n: number): number {
@@ -296,7 +292,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
         blocker: `install ${RED_PILL} (creates the w0r1d_d43m0n link)`,
         stage: "red-pill-install",
         needs: [],
-        mandatoryInstall: { augmentation: RED_PILL, ready: isQueued(view, RED_PILL) || view.ownsRedPill, why: "installing The Red Pill creates the world-daemon link" },
+        mandatoryInstall: { augmentation: RED_PILL, ready: isQueued(view, RED_PILL) || view.ownsRedPill },
       };
     }
     if (!hasWorldDaemonSkill) {
@@ -304,8 +300,8 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
         complete: false,
         blocker: `hacking ${view.hackingSkill} of ${wdSkill ?? "?"} after the install`,
         stage: "world-daemon-regrow",
-        needs: wdSkill === undefined ? [] : [{ kind: "skill", subject: "hacking", target: wdSkill, have: view.hackingSkill, why: "root the world daemon after the Red Pill install" }],
-        optionalInstall: { allowed: false, why: "another reset would erase the post-Red-Pill hacking regrow" },
+        needs: wdSkill === undefined ? [] : [{ kind: "skill", subject: "hacking", target: wdSkill, have: view.hackingSkill }],
+        optionalInstall: { allowed: false },
       };
     }
     if (!view.worldDaemonRooted) {
@@ -318,9 +314,8 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
           subject: "w0r1d_d43m0n",
           target: 1,
           have: 0,
-          why: "acquire the port openers required to root the world daemon",
         }],
-        optionalInstall: { allowed: false, why: "another reset would erase the post-Red-Pill hacking regrow" },
+        optionalInstall: { allowed: false },
       };
     }
     return { complete: true, blocker: "", stage: "complete", needs: [] };
@@ -344,10 +339,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
     let stage = "invite";
     const needs: RouteNeed[] = [];
     let mandatoryInstall: MandatoryInstall | undefined;
-    let optionalInstall: OptionalInstallPolicy = {
-      allowed: true,
-      why: "augmentation installs can accelerate the invitation gates",
-    };
+    let optionalInstall: OptionalInstallPolicy = { allowed: true };
     if (augsNeeded === undefined) blocker = "BitNode unknown";
     else if (!available) blocker = "Daedalus does not offer The Red Pill in BN15";
     else if (view.ownsRedPill) {
@@ -358,10 +350,10 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
     }
     else if (view.augCount < augsNeeded) {
       blocker = `${view.augCount} of ${augsNeeded} augmentations`;
-      needs.push({ kind: "augCount", target: augsNeeded, have: view.augCount, why: "Daedalus invitation requirement" });
+      needs.push({ kind: "augCount", target: augsNeeded, have: view.augCount });
       const queuedUnique = new Set((view.queuedAugs ?? []).filter((name) => name !== "NeuroFlux Governor" || !hasInstalled(view, name))).size;
       if (view.augCount + queuedUnique >= augsNeeded && queuedUnique > 0) {
-        mandatoryInstall = { augmentation: "augmentation-count package", ready: true, why: "installing the current queue satisfies the route's installed-augmentation gate" };
+        mandatoryInstall = { augmentation: "augmentation-count package", ready: true };
       }
       const remainingAtCycleStart = augsNeeded - view.augCount;
       // Judge consolidation by where the cycle STARTED, not merely where a
@@ -382,32 +374,26 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
         && queuedUnique < minimumBatch
         && !mandatoryInstall?.ready
       ) {
-        optionalInstall = {
-          allowed: false,
-          why: `the installed count is at ${view.augCount} of ${augsNeeded}; bank at least ${minimumBatch} of the remaining ${remainingAtCycleStart} unique augmentations before paying another reset`,
-        };
+        optionalInstall = { allowed: false };
       }
     }
     else if (view.money < DAEDALUS_MONEY) {
       blocker = `${formatMoney(view.money)} of ${formatMoney(DAEDALUS_MONEY)}`;
-      needs.push({ kind: "money", target: DAEDALUS_MONEY, have: view.money, why: "Daedalus invitation requirement" });
+      needs.push({ kind: "money", target: DAEDALUS_MONEY, have: view.money });
     }
     else if (!meetsSkills) {
       blocker = `hacking ${DAEDALUS_HACKING} or combat ${DAEDALUS_COMBAT}`;
       const hackSec = Math.max(0, DAEDALUS_HACKING - view.hackingSkill) * 3;
       const combatSec = Math.max(0, DAEDALUS_COMBAT - view.lowestCombatSkill) * 6;
       needs.push(hackSec <= combatSec
-        ? { kind: "skill", subject: "hacking", target: DAEDALUS_HACKING, have: view.hackingSkill, why: "faster branch of the Daedalus skill requirement" }
-        : { kind: "combatSkills", target: DAEDALUS_COMBAT, have: view.lowestCombatSkill, why: "faster branch of the Daedalus skill requirement" });
+        ? { kind: "skill", subject: "hacking", target: DAEDALUS_HACKING, have: view.hackingSkill }
+        : { kind: "combatSkills", target: DAEDALUS_COMBAT, have: view.lowestCombatSkill });
     }
     else if (view.daedalusRep < RED_PILL_REP) {
       blocker = `Daedalus reputation ${formatScientific(view.daedalusRep)} of ${formatScientific(RED_PILL_REP)}`;
       stage = "red-pill-reputation";
-      needs.push({ kind: "factionRep", subject: "Daedalus", target: RED_PILL_REP, have: view.daedalusRep, why: "buy The Red Pill" });
-      optionalInstall = {
-        allowed: true,
-        why: "the cadence verdict prices erased reputation against banked favor and activated multipliers",
-      };
+      needs.push({ kind: "factionRep", subject: "Daedalus", target: RED_PILL_REP, have: view.daedalusRep });
+      optionalInstall = { allowed: true };
     } else {
       // End-loading means a reputation-complete Red Pill can be committed in
       // the projected queue without being owned yet.  That is not an optional
@@ -421,7 +407,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       stage = pillCommitted ? "red-pill-install" : tail.stage;
       needs.push(...tail.needs);
       mandatoryInstall = pillCommitted
-        ? { augmentation: RED_PILL, ready: true, why: "buying the banked Red Pill and installing it creates the world-daemon link" }
+        ? { augmentation: RED_PILL, ready: true }
         : tail.mandatoryInstall;
     }
     routes.push({
@@ -457,12 +443,12 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
             ? `create a gang with ${view.gangCreateFaction}`
             : "join an eligible gang faction";
         if (view.karma !== undefined && view.karma > GANG_KARMA) {
-          needs.push({ kind: "karma", target: GANG_KARMA, have: view.karma, why: "create the BN2 gang" });
+          needs.push({ kind: "karma", target: GANG_KARMA, have: view.karma });
         }
       } else if (rep < RED_PILL_REP) {
         blocker = `${view.gangFaction ?? "gang faction"} reputation ${formatScientific(rep)} of ${formatScientific(RED_PILL_REP)}`;
         stage = "gang-reputation";
-        needs.push({ kind: "factionRep", subject: view.gangFaction ?? "gang faction", target: RED_PILL_REP, have: rep, why: "buy the BN2 gang's Red Pill" });
+        needs.push({ kind: "factionRep", subject: view.gangFaction ?? "gang faction", target: RED_PILL_REP, have: rep });
       } else {
         const pillCommitted = isQueued(view, RED_PILL);
         blocker = pillCommitted
@@ -470,11 +456,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
           : `acquire ${RED_PILL} from ${view.gangFaction ?? "the gang faction"}`;
         stage = pillCommitted ? "red-pill-install" : "red-pill";
         if (pillCommitted) {
-          mandatoryInstall = {
-            augmentation: RED_PILL,
-            ready: true,
-            why: "buying the banked gang Red Pill and installing it creates the world-daemon link",
-          };
+          mandatoryInstall = { augmentation: RED_PILL, ready: true };
         }
       }
     }
@@ -486,10 +468,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       stage,
       needs,
       ...(mandatoryInstall ? { mandatoryInstall } : {}),
-      optionalInstall: (stage === tail.stage ? tail.optionalInstall : undefined)
-        ?? (stage === "gang-reputation"
-          ? { allowed: true, why: "the gang survives; cadence prices lost faction rep against favor and installed multipliers" }
-          : { allowed: true, why: "no route progress would be erased" }),
+      optionalInstall: (stage === tail.stage ? tail.optionalInstall : undefined) ?? { allowed: true },
     });
   }
 
@@ -507,10 +486,10 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
     const needs: RouteNeed[] = [];
     const requiredCharisma = LABYRINTH_CHARISMA[Math.min(stageIndex, LABYRINTH_CHARISMA.length - 1)]!;
     if (available && !view.ownsRedPill && !queuedReward && (view.charismaSkill ?? 0) < requiredCharisma) {
-      needs.push({ kind: "charisma", target: requiredCharisma, have: view.charismaSkill ?? 0, why: `enter labyrinth stage ${stageIndex + 1}` });
+      needs.push({ kind: "charisma", target: requiredCharisma, have: view.charismaSkill ?? 0 });
     }
     const mandatoryInstall = available && !view.redPillInstalled && queuedReward
-      ? { augmentation: reward, ready: true, why: reward === RED_PILL ? "installing The Red Pill creates the world-daemon link" : "the next labyrinth is selected from installed rewards" }
+      ? { augmentation: reward, ready: true }
       : view.ownsRedPill ? tail.mandatoryInstall : undefined;
     routes.push({
       id: "labyrinth",
@@ -531,10 +510,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       stage: view.ownsRedPill ? tail.stage : queuedReward ? "labyrinth-install" : `labyrinth-${stageIndex + 1}`,
       needs: view.ownsRedPill ? tail.needs : needs,
       ...(mandatoryInstall ? { mandatoryInstall } : {}),
-      optionalInstall: (view.ownsRedPill ? tail.optionalInstall : undefined) ?? {
-        allowed: false,
-        why: "labyrinth progress advances only through its route-mandatory reward installs",
-      },
+      optionalInstall: (view.ownsRedPill ? tail.optionalInstall : undefined) ?? { allowed: false },
     });
   }
 
@@ -547,9 +523,9 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
     const complete = view.inBladeburner && (view.blackOpsComplete ?? 0) >= BLACK_OP_COUNT;
     const needs: RouteNeed[] = [];
     if (available && !view.inBladeburner && view.lowestCombatSkill < 100) {
-      needs.push({ kind: "combatSkills", target: 100, have: view.lowestCombatSkill, why: "join the Bladeburner division" });
+      needs.push({ kind: "combatSkills", target: 100, have: view.lowestCombatSkill });
     } else if (available && view.inBladeburner && !complete) {
-      needs.push({ kind: "bladeburnerRank", target: BLACK_OP_FINAL_RANK, have: view.bladeburnerRank ?? 0, why: "unlock the final Black Op" });
+      needs.push({ kind: "bladeburnerRank", target: BLACK_OP_FINAL_RANK, have: view.bladeburnerRank ?? 0 });
     }
     routes.push({
       id: "bladeburner",
@@ -564,10 +540,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
           : `${view.blackOpsComplete ?? "?"} of ${BLACK_OP_COUNT} black operations`,
       stage: complete ? "complete" : view.inBladeburner ? "black-operations" : "bladeburner-join",
       needs,
-      optionalInstall: {
-        allowed: true,
-        why: "Bladeburner rank and completed Black Ops survive augmentation installs",
-      },
+      optionalInstall: { allowed: true },
     });
   }
 
@@ -575,8 +548,8 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
   // node forbids. Preferring an actionable route is right; publishing no route
   // at all is not — BN15 excludes Daedalus and the labyrinth is its only Red
   // Pill source, so filtering on automation alone would leave that run with no
-  // plan, no gate needs and an "undefined route" why-string. Fall back to the
-  // mechanically available route so the gates still publish.
+  // plan and no gate needs. Fall back to the mechanically available route so
+  // the gates still publish.
   const availableRoutes = routes.filter((route) => route.available);
   const usable = availableRoutes.filter((route) => route.actionable !== false);
   const preferred = usable.length > 0 ? usable : availableRoutes;
@@ -584,18 +557,5 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
 
   const awaitingRegrow = view.ownsRedPill && view.redPillInstalled && !hasWorldDaemonSkill;
 
-  // Once the pill is owned, all three acquisition routes are the same remaining
-  // work and both report the shared tail — so naming one of them would invent
-  // a history. A labyrinth run must not be told it finished "the daedalus
-  // route". Bladeburner is unaffected: it never touches the pill.
-  const redPillRouteChosen = best?.id === "daedalus" || best?.id === "gang" || best?.id === "labyrinth";
-  const subject = redPillRouteChosen && view.ownsRedPill ? `${RED_PILL}` : `${best?.id} route`;
-
-  const why = best
-    ? best.complete
-      ? `${subject} is complete — the node can be ended now`
-      : `${subject}: ${best.blocker}`
-    : "no endgame route is available in this BitNode";
-
-  return { routes, best, worldDaemonSkill: wdSkill, awaitingRegrow, why };
+  return { routes, best, worldDaemonSkill: wdSkill, awaitingRegrow };
 }
