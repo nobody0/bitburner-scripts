@@ -382,7 +382,7 @@ describe("the install barrier", () => {
     });
     return {
       flat: plan.flat,
-      blockers: decision.installBlockers.map((blocker) => blocker.kind),
+      blockers: decision.installBlockers,
       portfolio: market.portfolioValue(),
     };
   }

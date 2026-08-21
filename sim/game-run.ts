@@ -1088,7 +1088,7 @@ async function runGameInstalled(
             progressionInstallReady: progressionPlan.installReady,
           }
         : {}),
-      progressionInstallBlockers: progressionPlan?.installBlockers.map((blocker) => blocker.kind) ?? [],
+      progressionInstallBlockers: progressionPlan?.installBlockers ?? [],
       coordinationNeeds: (terminalState?.progression?.needs ?? []).map((need) => ({
         by: need.by,
         kind: need.kind,

@@ -76,13 +76,6 @@ function fidelityRows(state: ProjectedState): string[][] {
     .map((gap) => [esc(gap.kind), esc(gap.name), String(gap.count), esc(gap.detail ?? "")]);
 }
 
-/** Event payloads are a coder-facing fact dump: structured actions,
- * candidates, scores, thresholds and outcomes, plus observed `reason` codes.
- * Planner prose no longer exists anywhere in the pipeline. */
-function factJson(value: unknown): string {
-  return JSON.stringify(value);
-}
-
 export const overviewTab: Tab = {
   id: "overview",
   render(state) {
@@ -146,7 +139,7 @@ export const overviewTab: Tab = {
         if (mode === "failures" && !isFailure(name)) return false;
         if (mode === "decisions" && !isDecision(name)) return false;
         if (needle) {
-          const data = record.data ? factJson(record.data).toLowerCase() : "";
+          const data = record.data ? JSON.stringify(record.data).toLowerCase() : "";
           if (!name.toLowerCase().includes(needle) && !data.includes(needle)) return false;
         }
         return true;
@@ -169,7 +162,7 @@ export const overviewTab: Tab = {
     const events = feed.length
       ? `<ul id="events">${feed
           .map(({ record, name }) => {
-            const data = record.data ? factJson(record.data) : "";
+            const data = record.data ? JSON.stringify(record.data) : "";
             return `<li><span class="t">${esc(fmtTime(record.t - (state.t0 ?? record.t)))}</span><span class="${
               isFailure(name) ? "fail" : ""
             }">${esc(name)}</span><span class="data" title="${esc(data.slice(0, 600))}">${esc(

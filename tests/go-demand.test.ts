@@ -172,6 +172,9 @@ describe("Go target demands", () => {
     });
     expect(demands.Daedalus).toBeDefined();
     expect(demands.Tetrads).toBeDefined();
+    // Exactness: with no income shares and no other needs, an opponent fed by
+    // neither gate gets no demand at all.
+    expect(demands.Illuminati).toBeUndefined();
   });
 
   test("a need restating a priced blocker adds its own measured value and stays inside the runway", () => {

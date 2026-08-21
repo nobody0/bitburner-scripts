@@ -216,9 +216,6 @@ export function stepInfrastructure(
       return ak < bk ? -1 : ak > bk ? 1 : 0;
     });
   const best = ranked[0];
-  if (!best) return { ranked, reinvestmentReturnPerDollarSec };
-  if (!best.worthBuying) {
-    return { ranked, reinvestmentReturnPerDollarSec };
-  }
+  if (!best || !best.worthBuying) return { ranked, reinvestmentReturnPerDollarSec };
   return { buy: best, ranked, reinvestmentReturnPerDollarSec };
 }

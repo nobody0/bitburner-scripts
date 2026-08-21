@@ -545,17 +545,9 @@ function planExits(
     const committed = memory.intent[symbol.sym];
     const heldTicks = committed ? memory.history.tick - committed.sinceTick : Infinity;
 
-    if (view.liquidate) {
-      if (long > 0) exits.push(sell(symbol.sym, long, false));
-      if (short > 0) exits.push(sell(symbol.sym, short, true));
-      continue;
-    }
-
-    // The horizon closing is a reason to sell that has nothing to do with the
-    // forecast: if what is left cannot clear the round trip, every further tick
-    // held is risk taken for a payoff that can no longer arrive.
-    const stranded = holdTicks <= 0;
-    if (stranded) {
+    // Liquidation, or a horizon too short to clear the round trip: either way
+    // every further tick held is risk taken for a payoff that cannot arrive.
+    if (view.liquidate || holdTicks <= 0) {
       if (long > 0) exits.push(sell(symbol.sym, long, false));
       if (short > 0) exits.push(sell(symbol.sym, short, true));
       continue;

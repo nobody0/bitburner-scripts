@@ -4,6 +4,8 @@ import type { HelloBody, LogRecord, StateRecord } from "../shared/telemetry/sche
 import type { ArtifactMetadata } from "../shared/run-catalog.ts";
 
 const RING_SIZE = 10_000;
+/** How far past RING_SIZE the ring may grow before a chunked drop. */
+const RING_DROP_CHUNK = 1_024;
 /** Bytes of serialized tail a viewer is worth sending on connect.
  *
  * A record count alone is the wrong bound: state payloads vary by three orders
@@ -101,7 +103,10 @@ export class RunStore {
       const line = JSON.stringify(record);
       this.ring.push(record);
       this.#ringBytes.push(line.length);
-      if (this.ring.length > RING_SIZE) {
+      // Dropping one-by-one would shift 10,000 elements per record forever at
+      // steady state; overshooting by a chunk keeps the splice amortized. The
+      // ring is a soft cap — tail() is bounded in bytes anyway.
+      if (this.ring.length >= RING_SIZE + RING_DROP_CHUNK) {
         const drop = this.ring.length - RING_SIZE;
         this.ring.splice(0, drop);
         this.#ringBytes.splice(0, drop);

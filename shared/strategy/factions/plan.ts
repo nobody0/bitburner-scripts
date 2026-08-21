@@ -144,7 +144,7 @@ export interface FactionDecision {
    *  income the drain has already declined to spend. */
   drainCeiling?: number;
   /** Set when the feature genuinely cannot act — reported, never spun on. */
-  blocked?: Record<string, never>;
+  blocked?: true;
 }
 
 /** Memory carried between ticks. Pure data, owned by the driver. */

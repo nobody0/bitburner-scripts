@@ -115,7 +115,6 @@ function forecastCard(forecast: TimeForecast, now: number): string {
 }
 
 type Plan = NonNullable<NonNullable<ProjectedState["topics"]["progression"]>["plan"]>;
-type Progression = NonNullable<ProjectedState["topics"]["progression"]>;
 // Both were split out of `progression` (shared/telemetry/topics/progression.ts):
 // they move far faster than the plan they used to ride on, and a state record
 // republishes its whole topic.
@@ -333,7 +332,7 @@ export const bitnodeTab: Tab = {
           (lifecycle.installBlockers.length
             ? table(
                 ["barrier"],
-                lifecycle.installBlockers.map((blocker) => [esc(blocker.kind)]),
+                lifecycle.installBlockers.map((blocker) => [esc(blocker)]),
                 { left: [0] },
               )
             : note(lifecycle.installWanted

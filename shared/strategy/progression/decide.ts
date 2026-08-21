@@ -130,10 +130,6 @@ export interface ProgressionView {
 
 export type InstallBlockerKind = "factions" | "stock" | "graft" | "augmentations";
 
-export interface InstallBlocker {
-  kind: InstallBlockerKind;
-}
-
 export interface ProgressionDecision {
   phase: RunPhase;
   /** The economic cadence says this run should end, before safety barriers. */
@@ -142,7 +138,7 @@ export interface ProgressionDecision {
    * empty-queue first-purchase bootstrap. */
   liquidationWanted: boolean;
   /** Preconditions that must clear before the irreversible reset. */
-  installBlockers: InstallBlocker[];
+  installBlockers: InstallBlockerKind[];
   /** The reset is economically wanted and every observed barrier is clear. */
   installReady: boolean;
   /** Factions whose banked reputation would cross the donation threshold on
@@ -362,25 +358,26 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   const installWanted = routeInstallWanted || optionalInstallWanted;
   const liquidationWanted =
     installWanted || ((view.routeRequiresInstall || nodeAllowsOptionalInstall) && view.factionsNeedLiquidation);
-  const installBlockers: InstallBlocker[] = [];
+  const installBlockers: InstallBlockerKind[] = [];
   if (installWanted && !view.factionsReadyToInstall) {
-    installBlockers.push({ kind: "factions" });
+    installBlockers.push("factions");
   }
   if (installWanted && !view.stockReadyToInstall) {
-    installBlockers.push({ kind: "stock" });
+    installBlockers.push("stock");
   }
   if (installWanted && view.purchasableAugmentation !== undefined) {
-    installBlockers.push({ kind: "augmentations" });
+    installBlockers.push("augmentations");
   }
   if (installWanted && view.graftInProgress) {
-    installBlockers.push({ kind: "graft" });
+    installBlockers.push("graft");
   }
-  if (installWanted && view.queued.length === 0) {
+  if (installWanted && view.queued.length === 0 && view.purchasableAugmentation === undefined) {
     // The game's installAugmentations is a NO-OP with nothing queued — an
     // armed empty install would sit forever. The realizable signal may open
     // the gate, but the sweep must convert something before the reset can
-    // actually execute.
-    installBlockers.push({ kind: "augmentations" });
+    // actually execute. (When something is still purchasable the augmentations
+    // blocker above already covers this.)
+    installBlockers.push("augmentations");
   }
   const installReady = installWanted && installBlockers.length === 0;
 

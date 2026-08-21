@@ -30,7 +30,6 @@ import {
 import {
   CYCLE_QUORUM,
   estimateSignal,
-  FORECAST_PRIOR_STRENGTH,
   initHistory,
   observeMarket,
   ticksUntilCycle,
@@ -322,7 +321,6 @@ describe("price history", () => {
     expect(thick.confident).toBe(true);
     expect(thick.exact).toBe(false);
     expect(thick.forecast).toBeGreaterThan(0.5 + ENTER_BAND);
-    expect(thick.samples).toBeGreaterThanOrEqual(FORECAST_PRIOR_STRENGTH);
   });
 
   test("4S overrides the estimate outright", () => {
@@ -763,7 +761,7 @@ describe("when to liquidate — the signal, not the solver", () => {
     // there is time to trade however long the phase has been latched.
     const view = buildView(ctxWith({
       ...ending,
-      installBlockers: [{ kind: "factions" }],
+      installBlockers: ["factions"],
     }));
     expect(view?.liquidate).toBe(false);
   });
@@ -771,7 +769,7 @@ describe("when to liquidate — the signal, not the solver", () => {
   test("a graft in flight does not liquidate either", () => {
     const view = buildView(ctxWith({
       ...ending,
-      installBlockers: [{ kind: "graft" }],
+      installBlockers: ["graft"],
     }));
     expect(view?.liquidate).toBe(false);
   });
@@ -779,7 +777,7 @@ describe("when to liquidate — the signal, not the solver", () => {
   test("the book being the last barrier DOES liquidate", () => {
     const view = buildView(ctxWith({
       ...ending,
-      installBlockers: [{ kind: "stock" }],
+      installBlockers: ["stock"],
     }));
     expect(view?.liquidate).toBe(true);
   });
@@ -790,8 +788,8 @@ describe("when to liquidate — the signal, not the solver", () => {
     const view = buildView(ctxWith({
       ...ending,
       installBlockers: [
-        { kind: "stock" },
-        { kind: "augmentations" },
+        "stock",
+        "augmentations",
       ],
     }));
     expect(view?.liquidate).toBe(true);

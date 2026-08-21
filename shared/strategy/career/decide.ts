@@ -690,14 +690,17 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
 
   const best = ranked[0]!;
   const needsSlot = actionUsesWorkSlot(best.action);
+  // Every guard below holds the same way: idle without surrendering the
+  // ranking, the served priority, or the fallback flag.
+  const held = {
+    action: { type: "idle" as const },
+    ranked,
+    serving,
+    workPriority: best.priority,
+    incomeFallback: !servesNeed(best),
+  };
   if (needsSlot && !view.holdsWorkSlot) {
-    return {
-      action: { type: "idle" },
-      ranked,
-      serving,
-      workPriority: best.priority,
-      incomeFallback: !servesNeed(best),
-    };
+    return held;
   }
   // Do not START a commitment against a menu that is still filling. Only
   // options that OCCUPY the slot before delivering anything are held back —
@@ -711,13 +714,7 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
     && best.deliveryFraction < 1
     && !sameWork(view.currentWork, best.action)
   ) {
-    return {
-      action: { type: "idle" },
-      ranked,
-      serving,
-      workPriority: best.priority,
-      incomeFallback: !servesNeed(best),
-    };
+    return held;
   }
 
   // A repeatable task has already restarted itself at the completion boundary.
@@ -732,33 +729,19 @@ export function stepCareer(view: CareerView, board: NeedBoard): CareerDecision {
       incomeFallback: !servesNeed(best),
     };
   }
-  // Reissuing the same work cancels and restarts it. At an ordinary review,
-  // continuation is always the correct no-op; at an exact completion boundary
-  // allowProgressSwitch deliberately bypasses this guard.
-  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22
-  if (needsSlot && sameWork(view.currentWork, best.action) && !view.allowProgressSwitch) {
-    return {
-      action: { type: "idle" },
-      ranked,
-      serving,
-      workPriority: best.priority,
-      incomeFallback: !servesNeed(best),
-    };
-  }
-
-  // Progress work is a transaction: until the completion promise resolves,
-  // changing it destroys the partial unit. The arbiter also protects the slot,
-  // but this strategy-side guard is the final defence against any stale grant.
+  // Reissuing the same work cancels and restarts it — at an ordinary review,
+  // continuation is always the correct no-op. More generally, progress work is
+  // a transaction: until the completion promise resolves, changing it destroys
+  // the partial unit, so any in-progress work holds the slot. At an exact
+  // completion boundary allowProgressSwitch deliberately bypasses both guards.
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/Work.ts#L7-L22
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/PersonObjects/Player/PlayerObjectWorkMethods.ts#L5-L22
-  if (needsSlot && careerWorkMode(view.currentWork?.kind) === "progress" && !view.allowProgressSwitch) {
-    return {
-      action: { type: "idle" },
-      ranked,
-      serving,
-      workPriority: best.priority,
-      incomeFallback: !servesNeed(best),
-    };
+  if (
+    needsSlot
+    && !view.allowProgressSwitch
+    && (sameWork(view.currentWork, best.action) || careerWorkMode(view.currentWork?.kind) === "progress")
+  ) {
+    return held;
   }
 
   return {

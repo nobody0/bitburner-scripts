@@ -377,7 +377,7 @@ function decideFactions(
         blockers: [],
         needOwners: [],
         invalidation,
-        blocked: {},
+        blocked: true,
       },
     };
   }
@@ -641,7 +641,7 @@ function decideFactions(
   if (graft) {
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Grafting.ts#L17-L103
     const action: FactionAction = view.requirementView.city === "New Tokyo"
-      ? { type: "graft", augmentation: graft.name }
+      ? { type: "graft", augmentation: graft }
       : { type: "travelTo", city: "New Tokyo" };
     return {
       memory: { ...next, lastAction: action },
@@ -1099,7 +1099,7 @@ export function soleTravelBlocker<T extends { faction: string; kind: string; sub
   return undefined;
 }
 
-function nextGraft(view: FactionsView, wanted: readonly string[]): { name: string } | undefined {
+function nextGraft(view: FactionsView, wanted: readonly string[]): string | undefined {
   if (!view.holdsWorkSlot) return undefined;
   const entropyPenalty = view.owned.has("violet Congruity Implant") ? 0 : entropyCost(view.weights);
   for (const name of wanted) {
@@ -1110,7 +1110,7 @@ function nextGraft(view: FactionsView, wanted: readonly string[]): { name: strin
     if (aug.prereqs.some((prereq) => !view.owned.has(prereq))) continue;
     const benefit = scoreAug(aug, view.weights, view.rates?.worth);
     if (benefit <= entropyPenalty || (view.graftGranted ?? view.moneyGranted) < offer.price) continue;
-    return { name };
+    return name;
   }
   return undefined;
 }

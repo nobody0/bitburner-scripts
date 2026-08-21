@@ -227,7 +227,7 @@ function clamp01(value: number): number {
   return Math.max(0, Math.min(1, value));
 }
 
-function simulatedWinProbability(opponent: GoRewardOpponent, size: number, prior: number): number {
+function simulatedWinProbability(size: number, prior: number): number {
   // Fixed komi becomes less important as area grows. These deltas are offline
   // simulator policy, never adapted from the live save's W/L record.
   const sizeShift = size <= 5 ? 0 : size <= 7 ? 0.04 : size <= 9 ? 0.07 : 0.1;
@@ -419,7 +419,7 @@ export function rankGoGames(view: GoRewardView): GoGameCandidate[] {
         ? rules.neuralBaselineWinProbability
         : rules.priorWinProbability;
       const variants: { aligned: boolean; waitSec: number; entryPlaytime?: number; winProbability: number }[] = [
-        { aligned: false, waitSec: 0, winProbability: simulatedWinProbability(opponent, boardSize, unroutedPrior) },
+        { aligned: false, waitSec: 0, winProbability: simulatedWinProbability(boardSize, unroutedPrior) },
       ];
       if (entry !== undefined) {
         variants.push({

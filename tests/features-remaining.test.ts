@@ -692,6 +692,7 @@ describe("corp staged script", () => {
         ],
       }),
     );
+    expect(done.stage).toBe("done");
     expect(done.completed.length).toBeGreaterThan(0);
   });
 
@@ -826,7 +827,7 @@ describe("progression", () => {
     }));
     expect(decision.installWanted).toBe(true);
     expect(decision.installReady).toBe(false);
-    expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["factions", "augmentations"]);
+    expect(decision.installBlockers).toEqual(["factions", "augmentations"]);
   });
 
   test("installing is recommended only in `ending` with something queued", () => {
@@ -975,7 +976,7 @@ describe("progression", () => {
     }));
     expect(required.installWanted).toBe(true);
     expect(required.installReady).toBe(false);
-    expect(required.installBlockers.map((blocker) => blocker.kind)).toEqual(["stock"]);
+    expect(required.installBlockers).toEqual(["stock"]);
   });
 
   test("a banked route package opens its mandatory end-loaded sweep before purchase", () => {
@@ -989,7 +990,7 @@ describe("progression", () => {
 
     expect(required.installWanted).toBe(true);
     expect(required.installReady).toBe(false);
-    expect(required.installBlockers.map((blocker) => blocker.kind)).toEqual([
+    expect(required.installBlockers).toEqual([
       "factions",
       "augmentations",
     ]);
@@ -1195,7 +1196,7 @@ describe("progression", () => {
     );
     expect(decision.installWanted).toBe(true);
     expect(decision.installReady).toBe(false);
-    expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["factions"]);
+    expect(decision.installBlockers).toEqual(["factions"]);
   });
 
   test("install waits for stock liquidation and an ongoing graft", () => {
@@ -1208,7 +1209,7 @@ describe("progression", () => {
     }));
     expect(decision.installWanted).toBe(true);
     expect(decision.installReady).toBe(false);
-    expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["stock", "graft"]);
+    expect(decision.installBlockers).toEqual(["stock", "graft"]);
   });
 
   test("install waits while an augmentation is still purchasable", () => {
@@ -1223,7 +1224,7 @@ describe("progression", () => {
     }));
     expect(decision.installWanted).toBe(true);
     expect(decision.installReady).toBe(false);
-    expect(decision.installBlockers.map((blocker) => blocker.kind)).toEqual(["augmentations"]);
+    expect(decision.installBlockers).toEqual(["augmentations"]);
   });
 
   test("the phase ANNOUNCES the burn; the barriers are what gate the reset", () => {
@@ -1238,7 +1239,7 @@ describe("progression", () => {
     expect(burning.phase).toBe("ending");
     expect(burning.installWanted).toBe(true);
     expect(burning.installReady).toBe(false);
-    expect(burning.installBlockers.map((blocker) => blocker.kind)).toEqual(["stock", "augmentations"]);
+    expect(burning.installBlockers).toEqual(["stock", "augmentations"]);
 
     // Everything burned: flat book, nothing left to buy. No further waiting.
     const done = stepProgression({

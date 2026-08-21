@@ -122,10 +122,6 @@ export interface MandatoryInstall {
   ready: boolean;
 }
 
-export interface OptionalInstallPolicy {
-  allowed: boolean;
-}
-
 export interface EndgameView {
   bitNode: number | undefined;
   /** SF12 level, which is the only thing that moves BN12's requirements. */
@@ -215,7 +211,8 @@ export interface RouteStatus {
   mandatoryInstall?: MandatoryInstall;
   /** Whether an economic reset may interrupt this route stage. Mandatory
    * installs always bypass this policy. */
-  optionalInstall: OptionalInstallPolicy;
+  /** Whether the current stage can survive an economic (non-mandatory) reset. */
+  optionalInstall: boolean;
 }
 
 export interface EndgameDecision {
@@ -284,7 +281,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
   // `optionalInstall` is part of the tail's own policy: the post-Red-Pill
   // regrow is erased by any further reset, and that is true on whichever route
   // produced the pill. Owning it here keeps the three call sites from drifting.
-  const redPillTail = (): { complete: boolean; blocker: string; stage: string; needs: RouteNeed[]; mandatoryInstall?: MandatoryInstall; optionalInstall?: OptionalInstallPolicy } => {
+  const redPillTail = (): { complete: boolean; blocker: string; stage: string; needs: RouteNeed[]; mandatoryInstall?: MandatoryInstall; optionalInstall?: boolean } => {
     if (!view.ownsRedPill) return { complete: false, blocker: `acquire ${RED_PILL}`, stage: "red-pill", needs: [] };
     if (!view.redPillInstalled) {
       return {
@@ -301,7 +298,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
         blocker: `hacking ${view.hackingSkill} of ${wdSkill ?? "?"} after the install`,
         stage: "world-daemon-regrow",
         needs: wdSkill === undefined ? [] : [{ kind: "skill", subject: "hacking", target: wdSkill, have: view.hackingSkill }],
-        optionalInstall: { allowed: false },
+        optionalInstall: false,
       };
     }
     if (!view.worldDaemonRooted) {
@@ -315,7 +312,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
           target: 1,
           have: 0,
         }],
-        optionalInstall: { allowed: false },
+        optionalInstall: false,
       };
     }
     return { complete: true, blocker: "", stage: "complete", needs: [] };
@@ -339,7 +336,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
     let stage = "invite";
     const needs: RouteNeed[] = [];
     let mandatoryInstall: MandatoryInstall | undefined;
-    let optionalInstall: OptionalInstallPolicy = { allowed: true };
+    let optionalInstall = true;
     if (augsNeeded === undefined) blocker = "BitNode unknown";
     else if (!available) blocker = "Daedalus does not offer The Red Pill in BN15";
     else if (view.ownsRedPill) {
@@ -374,7 +371,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
         && queuedUnique < minimumBatch
         && !mandatoryInstall?.ready
       ) {
-        optionalInstall = { allowed: false };
+        optionalInstall = false;
       }
     }
     else if (view.money < DAEDALUS_MONEY) {
@@ -393,7 +390,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       blocker = `Daedalus reputation ${formatScientific(view.daedalusRep)} of ${formatScientific(RED_PILL_REP)}`;
       stage = "red-pill-reputation";
       needs.push({ kind: "factionRep", subject: "Daedalus", target: RED_PILL_REP, have: view.daedalusRep });
-      optionalInstall = { allowed: true };
+      optionalInstall = true;
     } else {
       // End-loading means a reputation-complete Red Pill can be committed in
       // the projected queue without being owned yet.  That is not an optional
@@ -468,7 +465,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       stage,
       needs,
       ...(mandatoryInstall ? { mandatoryInstall } : {}),
-      optionalInstall: (stage === tail.stage ? tail.optionalInstall : undefined) ?? { allowed: true },
+      optionalInstall: (stage === tail.stage ? tail.optionalInstall : undefined) ?? true,
     });
   }
 
@@ -510,7 +507,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       stage: view.ownsRedPill ? tail.stage : queuedReward ? "labyrinth-install" : `labyrinth-${stageIndex + 1}`,
       needs: view.ownsRedPill ? tail.needs : needs,
       ...(mandatoryInstall ? { mandatoryInstall } : {}),
-      optionalInstall: (view.ownsRedPill ? tail.optionalInstall : undefined) ?? { allowed: false },
+      optionalInstall: (view.ownsRedPill ? tail.optionalInstall : undefined) ?? false,
     });
   }
 
@@ -540,7 +537,7 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
           : `${view.blackOpsComplete ?? "?"} of ${BLACK_OP_COUNT} black operations`,
       stage: complete ? "complete" : view.inBladeburner ? "black-operations" : "bladeburner-join",
       needs,
-      optionalInstall: { allowed: true },
+      optionalInstall: true,
     });
   }
 

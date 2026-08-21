@@ -4,7 +4,8 @@ import type { DenyReason, ResourceId } from "../../strategy/arbiter.ts";
 import type { NeedKind, NeedUrgency } from "../../strategy/needs.ts";
 import type { PlanningHorizons } from "../../strategy/progression/forecast.ts";
 import type { ProgressionMarginals } from "../../strategy/progression/marginal.ts";
-import type { OptionalInstallPolicy, RouteId, RouteNeed } from "../../strategy/progression/endgame.ts";
+import type { RouteId, RouteNeed } from "../../strategy/progression/endgame.ts";
+import type { InstallBlockerKind } from "../../strategy/progression/decide.ts";
 
 /** Progression feature — the meta layer. Problem: pick the destroy order and
  * the augmentation/reset cadence that minimises total wall-clock to a target
@@ -177,7 +178,7 @@ export interface ProgressionPlan {
    * bootstrap that is not itself permission to install. */
   liquidationWanted: boolean;
   /** Why the reset cannot execute yet. */
-  installBlockers: { kind: "factions" | "stock" | "graft" | "augmentations" }[];
+  installBlockers: InstallBlockerKind[];
   /** Every reset-sensitive subsystem has acknowledged readiness. */
   installReady: boolean;
   /** Route mechanics require the current final sweep/reset. This is broader
@@ -262,5 +263,5 @@ export interface RouteEtaDigest {
   stage?: string;
   needs?: RouteNeed[];
   nextMandatoryInstall?: { sec: number; measured: boolean };
-  optionalInstall?: OptionalInstallPolicy;
+  optionalInstall?: boolean;
 }

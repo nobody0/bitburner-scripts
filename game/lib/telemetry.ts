@@ -1,5 +1,5 @@
 import type { NS } from "@ns";
-import { TELEMETRY_PORT, WIRE_VERSION } from "../../shared/telemetry/schema.ts";
+import { TELEMETRY_PORT, WIRE_VERSION, type LogRecord } from "../../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
 import type { ArtifactIdentity } from "../../shared/run-identity.ts";
 
@@ -32,8 +32,9 @@ export interface RecordBuffer {
   bytes(): number;
   /** Evictions since the last takeDropped(); reading resets the counter. */
   takeDropped(): number;
-  /** All buffered lines, oldest first; empties the buffer. */
-  drain(): string[];
+  /** All buffered lines joined with "," (a JSON array body), oldest first;
+   * empties the buffer. */
+  drain(): string;
   clear(): void;
 }
 
@@ -52,19 +53,16 @@ export function makeRecordBuffer(maxBytes = MAX_BUFFER_BYTES): RecordBuffer {
   function evict(): void {
     const target = (maxBytes * 3) / 4;
     const drop = new Set<number>();
-    let toFree = bytes - target;
-    for (let pass = 0; pass < 2 && toFree > 0; pass++) {
-      for (let i = 0; i < entries.length && toFree > 0; i++) {
+    for (let pass = 0; pass < 2 && bytes > target; pass++) {
+      for (let i = 0; i < entries.length && bytes > target; i++) {
         if (drop.has(i)) continue;
         if (pass === 0 && !entries[i]!.debug) continue;
         drop.add(i);
-        toFree -= entries[i]!.line.length;
+        bytes -= entries[i]!.line.length;
       }
     }
     entries = entries.filter((_, i) => !drop.has(i));
     dropped += drop.size;
-    bytes = 0;
-    for (const entry of entries) bytes += entry.line.length;
   }
 
   return {
@@ -81,10 +79,11 @@ export function makeRecordBuffer(maxBytes = MAX_BUFFER_BYTES): RecordBuffer {
       return count;
     },
     drain() {
-      const lines = entries.map((entry) => entry.line);
+      let joined = "";
+      for (let i = 0; i < entries.length; i++) joined += (i === 0 ? "" : ",") + entries[i]!.line;
       entries = [];
       bytes = 0;
-      return lines;
+      return joined;
     },
     clear() {
       entries = [];
@@ -134,36 +133,37 @@ export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity
     ws.onerror = () => ws?.close();
   }
 
-  function push(record: Record<string, unknown>, debug = false): void {
+  function push(record: LogRecord, debug = false): void {
     buffer.push(JSON.stringify(record), debug);
     if (buffer.count() >= FLUSH_AT) flush();
-  }
-
-  function base() {
-    return { seq: seq++, t: Date.now(), run, src: "game" as const };
   }
 
   function flush(): void {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const dropped = buffer.takeDropped();
     if (dropped > 0) {
-      buffer.push(JSON.stringify({ ...base(), kind: "event", name: "telemetry.dropped", data: { count: dropped } }), false);
+      buffer.push(
+        JSON.stringify({ seq: seq++, t: Date.now(), run, src: "game", kind: "event", name: "telemetry.dropped", data: { count: dropped } }),
+        false,
+      );
     }
     if (buffer.count() === 0) return;
     // The frame is assembled from the already-serialized lines; it must parse
     // as a WireMessage exactly as JSON.stringify of one would (pinned by
     // tests/telemetry-client.test.ts).
-    ws.send(`{"v":${WIRE_VERSION},"records":[${buffer.drain().join(",")}]}`);
+    ws.send(`{"v":${WIRE_VERSION},"records":[${buffer.drain()}]}`);
   }
 
   const flushTimer = setInterval(flush, FLUSH_MS);
   connect();
 
+  // One object literal per record: no intermediate base() + spread copy on
+  // what is the hottest telemetry-build path on the game's main thread.
   const telemetry: Telemetry = {
-    state: (key, data) => push({ ...base(), kind: "state", key, data }),
-    mirror: (key, data) => push({ ...base(), kind: "state", key, data }),
-    event: (name, data) => push({ ...base(), kind: "event", name, data }),
-    debug: (msg, data) => push({ ...base(), kind: "debug", msg, data }, true),
+    state: (key, data) => push({ seq: seq++, t: Date.now(), run, src: "game", kind: "state", key, data }),
+    mirror: (key, data) => push({ seq: seq++, t: Date.now(), run, src: "game", kind: "state", key, data }),
+    event: (name, data) => push({ seq: seq++, t: Date.now(), run, src: "game", kind: "event", name, data }),
+    debug: (msg, data) => push({ seq: seq++, t: Date.now(), run, src: "game", kind: "debug", msg, data }, true),
     flush,
     dispose: () => {
       flush();

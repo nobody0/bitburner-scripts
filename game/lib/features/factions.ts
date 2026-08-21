@@ -4,7 +4,7 @@ import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { FEATURE_IDS } from "../../../shared/features/ids.ts";
-import { grantFor, PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
+import { grantFor, PRIORITY } from "../../../shared/strategy/arbiter.ts";
 import { REPUTATION_CHANNEL } from "../../../shared/strategy/income.ts";
 import { incomeShares, slotRates } from "../income.ts";
 import {
@@ -794,20 +794,6 @@ function setFactionRep(state: GameState, faction: string, rep: number): void {
 
 // --- digest -----------------------------------------------------------------
 
-function intentDigest(intent: NonNullable<FactionDecision["objective"]>["intent"]): NonNullable<FactionPlan["objective"]>["intent"] {
-  if (!intent) return undefined;
-  return intent;
-}
-
-function objectiveDigest(objective: NonNullable<FactionDecision["objective"]>): NonNullable<FactionPlan["objective"]> {
-  const { intent, runnerUp, ...facts } = objective;
-  return {
-    ...facts,
-    ...(intent ? { intent: intentDigest(intent) } : {}),
-    ...(runnerUp ? { runnerUp: intentDigest(runnerUp) } : {}),
-  };
-}
-
 function planDigest(decision: FactionDecision, view: FactionsView, bankedAugmentations: readonly string[]): FactionPlan {
   return {
     context: {
@@ -829,7 +815,7 @@ function planDigest(decision: FactionDecision, view: FactionsView, bankedAugment
       },
     },
     bankedAugmentations: [...bankedAugmentations],
-    ...(decision.objective ? { objective: objectiveDigest(decision.objective) } : {}),
+    ...(decision.objective ? { objective: decision.objective } : {}),
     action: {
       type: decision.action.type,
       ...(decision.action.type === "idle" && decision.action.reason === "slot" ? { awaitingWorkSlot: true } : {}),
@@ -1127,7 +1113,7 @@ function needs(ctx: NeedContext): Need[] {
   // Urgency "wanted", never "blocking": these must not preempt real work.
   const gates = ctx.state.topics.factions?.gates ?? {};
   const posted = new Set(plan.blockers.map((blocker) => `${blocker.kind}\0${blocker.subject ?? ""}`));
-  for (const [faction, gate] of Object.entries(gates)) {
+  for (const gate of Object.values(gates)) {
     if (gate.joined || gate.invited || gate.missing.length === 0) continue;
     // A multi-blocker gate posts only the FIRST ACTIONABLE step of its chain
     // (employment before the rep it enables), and only when the whole chain

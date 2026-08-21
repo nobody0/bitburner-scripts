@@ -198,7 +198,7 @@ export function buildView(ctx: DriverContext): StockView | undefined {
   const blockers = plan?.installBlockers;
   const liquidate = plan?.liquidationWanted === true
     && blockers !== undefined
-    && blockers.every((blocker) => blocker.kind === "stock" || blocker.kind === "augmentations");
+    && blockers.every((blocker) => blocker === "stock" || blocker === "augmentations");
 
   const nodeMults = effectiveBitNodeMultipliers(
     ctx.caps.bitNode,

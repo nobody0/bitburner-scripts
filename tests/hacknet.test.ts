@@ -101,6 +101,9 @@ describe("purchase selection", () => {
     // augmentation fund by simply ignoring it.
     const decision = stepHacknet(view({ upgrades: [upgrade({ cost: 1e9, deltaProduction: 1e6 })], moneyGranted: 100 }));
     expect(decision.buy).toBeUndefined();
+    // The upgrade is profitable (so the economics guard passed) — only the
+    // grant ceiling can be what held the purchase.
+    expect(decision.ranked[0]!.netOverHorizon).toBeGreaterThan(0);
     expect(decision.ranked[0]!.cost).toBeGreaterThan(100);
   });
 

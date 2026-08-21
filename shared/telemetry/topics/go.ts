@@ -32,11 +32,6 @@ export type GoActionDigest =
   | { type: "cheatRemoveRouter" | "cheatDestroyNode" | "cheatRepairNode"; x: number; y: number }
   | { type: "pass" | "resume" }
   | { type: "newGame"; opponent: GoRewardOpponent; boardSize: 5 | 7 | 9 | 13 };
-export type GoMoveDigest = GoMove;
-export type GoEtaDemandDigest = GoEtaDemand;
-export type GoGameCandidateDigest = Omit<GoGameCandidate, "transientDemand"> & {
-  transientDemand?: GoEtaDemandDigest;
-};
 
 export interface GoState {
   /** Core and board probes can land independently, so acquired fields are
@@ -71,7 +66,7 @@ export interface GoState {
 
 export interface GoPlan {
   action: GoActionDigest;
-  ranked: GoMoveDigest[];
+  ranked: GoMove[];
   /** Exact public state consumed by the pure planner. This avoids pairing a
    * pre-move ranking with the post-move board emitted later in the same tick. */
   input: {
@@ -87,8 +82,8 @@ export interface GoPlan {
   planning: { finalistCount: number; positionValue: number };
   /** Full opponent/board comparison in the same ETA units used to decide. */
   selection: {
-    preferred: GoGameCandidateDigest;
-    candidates: GoGameCandidateDigest[];
+    preferred: GoGameCandidate;
+    candidates: GoGameCandidate[];
     /** New-game scheduling verdict: play the preferred candidate, fit a
      * filler game inside its certified entry window, or hold the cadence. */
     schedule?: { kind: "play" | "filler" | "hold"; fillerOpponent?: GoRewardOpponent; holdSec?: number };
@@ -113,7 +108,7 @@ export interface GoPlan {
       /** Each announcer's measured share of live money production, the input
        * that decides how much of a money bottleneck each reward may claim. */
       incomeShares?: Record<string, number>;
-      demands: Partial<Record<GoRewardOpponent, GoEtaDemandDigest>>;
+      demands: Partial<Record<GoRewardOpponent, GoEtaDemand>>;
     };
   };
 }

@@ -38,7 +38,7 @@ import {
   type WorkType,
 } from "../../../shared/strategy/factions/rep.ts";
 import { farmExperienceRate, farmIncomeRate } from "../../../shared/strategy/economics.ts";
-import { installHorizonSec, nodeHorizonSec, usableForecastSec, type PlanningHorizons } from "../../../shared/strategy/progression/forecast.ts";
+import { installHorizonSec, nodeHorizonSec, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { growingProgressSecondsPerRelativeRate, linearSecondsPerRelativeRate } from "../../../shared/strategy/progression/marginal.ts";
 import type { MeasuredMarginal } from "../../../shared/strategy/progression/marginal.ts";
 import { hackMarginalValue } from "../../../shared/strategy/share.ts";

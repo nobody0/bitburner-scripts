@@ -161,15 +161,11 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
       return `${a.kind}${a.node ?? ""}` < `${b.kind}${b.node ?? ""}` ? -1 : 1;
     });
 
-  if (ranked.length === 0) {
-    return { ranked };
-  }
-
-  const best = ranked[0]!;
-  if (!best.milestone && best.netOverHorizon <= 0) {
-    return { ranked };
-  }
-  if (best.cost > view.moneyGranted) {
+  // Hold when there is nothing to buy, the best candidate loses money before
+  // the horizon without a milestone to justify it, or the grant does not
+  // cover it yet.
+  const best = ranked[0];
+  if (!best || (!best.milestone && best.netOverHorizon <= 0) || best.cost > view.moneyGranted) {
     return { ranked };
   }
 

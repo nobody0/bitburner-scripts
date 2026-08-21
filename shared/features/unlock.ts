@@ -96,9 +96,9 @@ function fromFlag(flag: boolean | undefined): UnlockState {
 export function deriveCapabilities(r: GateReadings): Capabilities {
   const unlocked = {} as Record<FeatureId, UnlockState>;
   const reason: Partial<Record<FeatureId, string>> = {};
-  const set = (id: FeatureId, state: UnlockState, text: string) => {
+  const set = (id: FeatureId, state: UnlockState, because: string) => {
     unlocked[id] = state;
-    if (state !== "yes") reason[id] = state === "unknown" ? "not probed yet" : text;
+    if (state !== "yes") reason[id] = state === "unknown" ? "not probed yet" : because;
   };
 
   // Always playable.
@@ -159,8 +159,8 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
   // read, and are deliberately NOT allowed to flip a feature to "no".
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/BitNode/BitNode.tsx
   const options = r.bitNodeOptions ?? {};
-  const veto = (id: FeatureId, disabled: boolean | undefined, text: string) => {
-    if (disabled === true) set(id, "no", text);
+  const veto = (id: FeatureId, disabled: boolean | undefined, because: string) => {
+    if (disabled === true) set(id, "no", because);
   };
   veto("gang", options.disableGang, "gangs are disabled by this BitNode's options");
   veto("corp", options.disableCorporation, "corporations are disabled by this BitNode's options");

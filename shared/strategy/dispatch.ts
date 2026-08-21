@@ -1405,23 +1405,22 @@ export function dispatch(
         // a transient fortify between batch landings.
         const hackMs = hackTimeSeconds(launchCtx, server.minDifficulty, server.requiredHackingSkill) * 1_000;
         const weakenMs = weakenTimeSeconds(launchCtx, server.hackDifficulty, server.requiredHackingSkill) * 1_000;
-        const decision = options.modeOverride
-          ? { mode: options.modeOverride }
-          : decideMode({
-              hackMs,
-              liveOps: memory.tracked.size,
-              lastMode: memory.mode,
-              lastModeSince: memory.modeSince,
-              now,
-            });
-        if (decision.mode !== memory.mode) {
+        const mode = options.modeOverride
+          ?? decideMode({
+            hackMs,
+            liveOps: memory.tracked.size,
+            lastMode: memory.mode,
+            lastModeSince: memory.modeSince,
+            now,
+          });
+        if (mode !== memory.mode) {
           // Pending plans have the old mode's role shape and quotas. Hacks are
           // emitted only after every support op in their batch, so abandoning
           // this unlaunched suffix is safe; already-running support is benign.
           abandonJitPending(memory, now);
           memory.lastAnchor = -Infinity;
           memory.jitDecisionId++;
-          memory.mode = decision.mode;
+          memory.mode = mode;
           memory.modeSince = now;
         }
         // Shotgun (Q4) uses the HGW thread math taken to its limit: all three

@@ -74,8 +74,8 @@ describe("where the shotgun boundary sits, and why", () => {
   });
 
   test("the boundary is exact and strictly below the threshold", () => {
-    expect(decideMode({ ...base, hackMs: SHOTGUN_HACK_MS - 0.001 }).mode).toBe("shotgun");
-    expect(decideMode({ ...base, hackMs: SHOTGUN_HACK_MS }).mode).toBe("hwgw");
+    expect(decideMode({ ...base, hackMs: SHOTGUN_HACK_MS - 0.001 })).toBe("shotgun");
+    expect(decideMode({ ...base, hackMs: SHOTGUN_HACK_MS })).toBe("hwgw");
   });
 });
 
@@ -90,7 +90,7 @@ describe("entering shotgun", () => {
         lastMode,
         lastModeSince: base.now - 1, // dwell has barely started
       });
-      expect(decision.mode, `from ${lastMode}`).toBe("shotgun");
+      expect(decision, `from ${lastMode}`).toBe("shotgun");
     }
   });
 
@@ -101,7 +101,7 @@ describe("entering shotgun", () => {
       ...base,
       hackMs: SHOTGUN_HACK_MS - 1,
       liveOps: HGW_LIVE_OPS_PRESSURE + 500,
-    }).mode).toBe("shotgun");
+    })).toBe("shotgun");
   });
 });
 
@@ -117,10 +117,10 @@ describe("leaving shotgun", () => {
       lastModeSince: base.now - MODE_DWELL_MS + 1,
     };
     const held = decideMode(justLeft);
-    expect(held.mode).toBe("shotgun");
+    expect(held).toBe("shotgun");
 
     // One millisecond later the dwell has elapsed and JIT resumes.
-    expect(decideMode({ ...justLeft, lastModeSince: base.now - MODE_DWELL_MS }).mode).toBe("hwgw");
+    expect(decideMode({ ...justLeft, lastModeSince: base.now - MODE_DWELL_MS })).toBe("hwgw");
   });
 
   test("returns to hgw rather than hwgw when process pressure is still on", () => {
@@ -132,7 +132,7 @@ describe("leaving shotgun", () => {
       liveOps: HGW_LIVE_OPS_PRESSURE + 1,
       lastMode: "shotgun",
       lastModeSince: base.now - MODE_DWELL_MS,
-    }).mode).toBe("hgw");
+    })).toBe("hgw");
   });
 });
 
@@ -153,8 +153,8 @@ describe("the jit -> shotgun -> jit round trip", () => {
         lastModeSince: since,
         now: step.atMs,
       });
-      if (decision.mode !== mode) {
-        mode = decision.mode;
+      if (decision !== mode) {
+        mode = decision;
         since = step.atMs;
       }
       timeline.push({ atMs: step.atMs, mode });

@@ -34,7 +34,7 @@ describe("makeRecordBuffer", () => {
     const buffer = makeRecordBuffer(19 * bytes);
     for (let i = 0; i < 10; i++) buffer.push(line(10 + i, 200), true);
     for (let i = 0; i < 10; i++) buffer.push(line(50 + i, 200), false);
-    const kept = buffer.drain().map((entry) => (JSON.parse(entry) as { id: number }).id);
+    const kept = (JSON.parse(`[${buffer.drain()}]`) as { id: number }[]).map((entry) => entry.id);
     expect(buffer.takeDropped()).toBe(20 - kept.length);
     for (let i = 0; i < 10; i++) expect(kept).toContain(50 + i);
     expect(kept.length).toBeLessThan(20);
@@ -43,16 +43,17 @@ describe("makeRecordBuffer", () => {
   test("falls back to evicting the oldest of anything once debug is gone", () => {
     const buffer = makeRecordBuffer(2_000);
     for (let i = 0; i < 50; i++) buffer.push(line(i, 200), false);
-    const kept = buffer.drain().map((entry) => (JSON.parse(entry) as { id: number }).id);
+    const kept = (JSON.parse(`[${buffer.drain()}]`) as { id: number }[]).map((entry) => entry.id);
     expect(kept.length).toBeGreaterThan(0);
     // FIFO under pressure: whatever survived is the newest contiguous run.
     expect(kept).toEqual(Array.from({ length: kept.length }, (_, i) => 50 - kept.length + i));
   });
 
-  test("drain empties and resets the byte accounting", () => {
+  test("drain joins the lines into a JSON array body and resets the buffer", () => {
     const buffer = makeRecordBuffer(1_000);
     buffer.push(line(1, 10), false);
-    expect(buffer.drain().length).toBe(1);
+    buffer.push(line(2, 10), true);
+    expect(buffer.drain()).toBe(`${line(1, 10)},${line(2, 10)}`);
     expect(buffer.count()).toBe(0);
     expect(buffer.bytes()).toBe(0);
   });

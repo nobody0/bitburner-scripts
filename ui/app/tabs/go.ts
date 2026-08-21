@@ -3,7 +3,8 @@ import { esc, fmtMs, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
 import type { ProjectedState } from "../project.ts";
 import { territoryOwners } from "../../../shared/strategy/go/rules.ts";
 import type { GoDispatchBreakdown } from "../../../shared/strategy/go/tick.ts";
-import type { GoActionDigest, GoMoveDigest, GoResponse, GoState } from "../../../shared/telemetry/topics/go.ts";
+import type { GoActionDigest, GoResponse, GoState } from "../../../shared/telemetry/topics/go.ts";
+import type { GoMove } from "../../../shared/strategy/go/rules.ts";
 import type { Tab } from "./index.ts";
 
 /** Go (IPvGO). Game coordinates are column-major, with y increasing upward. */
@@ -24,7 +25,7 @@ function coordinate(x: number | null, y: number | null): string {
   return x === null || y === null ? "pass" : `${x},${y}`;
 }
 
-function predictions(move: GoMoveDigest): string {
+function predictions(move: GoMove): string {
   const replies = move.predictedReplies ?? [];
   const total = replies.reduce((sum, reply) => sum + reply.count, 0);
   if (!total) return NONE;

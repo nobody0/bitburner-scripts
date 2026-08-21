@@ -34,17 +34,15 @@ export interface ModeInputs {
   now: number;
 }
 
-export interface ModeDecision {
-  mode: FarmMode;
-}
-
-export function decideMode(inputs: ModeInputs): ModeDecision {
+export function decideMode(inputs: ModeInputs): FarmMode {
   let desired: FarmMode;
   if (inputs.hackMs < SHOTGUN_HACK_MS) {
     desired = "shotgun";
-  } else if (inputs.liveOps > HGW_LIVE_OPS_PRESSURE) {
-    desired = "hgw";
-  } else if (inputs.lastMode === "hgw" && inputs.liveOps > HGW_LIVE_OPS_RELEASE) {
+  } else if (
+    inputs.liveOps > HGW_LIVE_OPS_PRESSURE
+    // Hysteresis: once in hgw, stay until pressure falls below the release line.
+    || (inputs.lastMode === "hgw" && inputs.liveOps > HGW_LIVE_OPS_RELEASE)
+  ) {
     desired = "hgw";
   } else {
     desired = "hwgw";
@@ -52,7 +50,7 @@ export function decideMode(inputs: ModeInputs): ModeDecision {
   // Enter the correctness-preserving short-timer mode immediately. Dwell only
   // suppresses performance-driven switches and leaving a still-safe shotgun.
   if (desired !== "shotgun" && desired !== inputs.lastMode && inputs.now - inputs.lastModeSince < MODE_DWELL_MS) {
-    return { mode: inputs.lastMode };
+    return inputs.lastMode;
   }
-  return { mode: desired };
+  return desired;
 }

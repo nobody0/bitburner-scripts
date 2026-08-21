@@ -309,17 +309,16 @@ export interface ForecastEstimate {
   exact: boolean;
   /** Enough evidence to open a position on. */
   confident: boolean;
-  samples: number;
 }
 
 export function estimateSignal(history: MarketHistory, sym: string, exactForecast?: number): ForecastEstimate {
   const entry = history.symbols[sym];
   const volatility = entry?.volatility ?? metadataVolatility(sym);
   if (exactForecast !== undefined) {
-    return { forecast: exactForecast, volatility, exact: true, confident: true, samples: entry?.samples ?? 0 };
+    return { forecast: exactForecast, volatility, exact: true, confident: true };
   }
   if (!entry || entry.samples === 0) {
-    return { forecast: 0.5, volatility, exact: false, confident: false, samples: 0 };
+    return { forecast: 0.5, volatility, exact: false, confident: false };
   }
   // Effective sample size of an EWMA saturates at 1/alpha, so evidence stops
   // accumulating however long we watch — which is correct, because the thing
@@ -331,7 +330,6 @@ export function estimateSignal(history: MarketHistory, sym: string, exactForecas
     volatility,
     exact: false,
     confident: entry.samples >= FORECAST_PRIOR_STRENGTH,
-    samples: entry.samples,
   };
 }
 

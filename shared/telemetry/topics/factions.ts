@@ -1,5 +1,5 @@
 import type { PlayerRequirement } from "@ns";
-import type { FactionIntent, FactionObjective } from "../../strategy/factions/plan.ts";
+import type { FactionObjective } from "../../strategy/factions/plan.ts";
 import type { FeatureId } from "../../features/ids.ts";
 import type { RouteId } from "../../strategy/progression/endgame.ts";
 
@@ -123,11 +123,6 @@ export interface FactionGate {
   missing: GateBlocker[];
 }
 
-export type FactionIntentDigest = FactionIntent;
-export type FactionObjectiveDigest = Omit<FactionObjective, "why" | "intent" | "runnerUp"> & {
-  intent?: FactionIntentDigest;
-  runnerUp?: FactionIntentDigest;
-};
 
 /** The decision digest: what we are doing and what would change it. */
 export interface FactionPlan {
@@ -137,7 +132,7 @@ export interface FactionPlan {
    * projected installed count to avoid crossing into a route's final-batch
    * region with a partial reset. */
   bankedAugmentations?: string[];
-  objective?: FactionObjectiveDigest;
+  objective?: FactionObjective;
   action: {
     type: string;
     /** The action is idle only because its player-work claim has not landed.

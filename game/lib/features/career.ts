@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { formatMoney } from "../../../shared/format.ts";
-import { PRIORITY, type Claim } from "../../../shared/strategy/arbiter.ts";
+import { PRIORITY } from "../../../shared/strategy/arbiter.ts";
 import { stepCareer, TRAINING_FUND_WINDOW_SEC, type CareerDecision, type CareerPriorityBand, type CareerView } from "../../../shared/strategy/career/decide.ts";
 import type { CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { trainingBackdoorSavedRate } from "../../../shared/strategy/access/value.ts";

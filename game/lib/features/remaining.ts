@@ -11,7 +11,7 @@ import { successChance, type CrimeStats } from "../../../shared/strategy/career/
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
 import { DNET_REPORT_PORT, decodeReport, observationOf } from "../../../shared/strategy/dnet/courier.ts";
-import { stepDarkscape, type DarkscapeDecision } from "../../../shared/strategy/dnet/unlock.ts";
+import { DARKSCAPE_TOTAL_COST, stepDarkscape } from "../../../shared/strategy/dnet/unlock.ts";
 import {
   coverage,
   emptyKnowledge,
@@ -47,7 +47,6 @@ import {
   scoreBoard,
   type GoAction,
   type GoDecision,
-  type GoFactionOpponent,
   type GoObservedBoardSize,
   type GoPlayingAction,
   type GoRewardOpponent,
@@ -109,9 +108,6 @@ import { stepSleeves, type SleevesView, type SleeveTask } from "../../../shared/
 import { packFragments } from "../../../shared/strategy/stanek/pack.ts";
 import type {
   GoActionDigest,
-  GoEtaDemandDigest,
-  GoGameCandidateDigest,
-  GoMoveDigest,
   GoPlan,
   GoTurnPrediction,
   GoResponse,
@@ -730,26 +726,6 @@ function goActionDigest(action: GoAction): GoActionDigest {
     case "pass":
     case "resume": return { type: action.type };
   }
-}
-
-function goMoveDigest(move: GoDecision["ranked"][number]): GoMoveDigest {
-  return move;
-}
-
-function goDemandDigest(demand: GoEtaDemand): GoEtaDemandDigest {
-  return {
-    seconds: demand.seconds,
-    share: demand.share,
-    ...(demand.gainCap !== undefined ? { gainCap: demand.gainCap } : {}),
-  };
-}
-
-function goGameCandidateDigest(candidate: ReturnType<typeof rankGoGames>[number]): GoGameCandidateDigest {
-  const { transientDemand, ...facts } = candidate;
-  return {
-    ...facts,
-    ...(transientDemand ? { transientDemand: goDemandDigest(transientDemand) } : {}),
-  };
 }
 
 export function goFactionFavor(ctx: DriverContext): GoRewardView["factionFavor"] {
@@ -1397,7 +1373,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     const preparedAt = decisionAt;
     const plan: GoPlan = {
       action: goActionDigest(decision.action),
-      ranked: decision.ranked.map(goMoveDigest),
+      ranked: decision.ranked,
       input: {
         at: decisionAt,
         board: [...view.board.rows],
@@ -1408,8 +1384,8 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       },
       planning: { finalistCount: decision.finalists, positionValue: decision.positionValue },
       selection: {
-        preferred: goGameCandidateDigest(preferred),
-        candidates: candidates.map(goGameCandidateDigest),
+        preferred,
+        candidates,
         schedule: {
           kind: schedule.kind,
           ...(schedule.kind === "filler" ? { fillerOpponent: schedule.game.opponent } : {}),
@@ -1426,9 +1402,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           // what fraction of the run's dollars, and therefore how much of a
           // money bottleneck each reward can honestly claim.
           incomeShares: goIncomeShares,
-          demands: Object.fromEntries(
-            Object.entries(rewardView.demands).map(([opponent, demand]) => [opponent, goDemandDigest(demand)]),
-          ),
+          demands: rewardView.demands,
         },
       },
     };
@@ -1818,7 +1792,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         action = rawOutcome.action;
         decision = rawOutcome.decision;
         plan.action = goActionDigest(decision.action);
-        plan.ranked = decision.ranked.map(goMoveDigest);
+        plan.ranked = decision.ranked;
         plan.planning = { finalistCount: decision.finalists, positionValue: decision.positionValue };
       }
       const dispatched = rawOutcome?.prediction;
@@ -2651,7 +2625,7 @@ function progressionRefresh(ctx: NeedContext): void {
     ...(eta.nextMandatoryInstall
       ? { nextMandatoryInstall: { ...eta.nextMandatoryInstall, sec: Math.round(eta.nextMandatoryInstall.sec) } }
       : {}),
-    ...(statusOf.get(eta.id)?.optionalInstall
+    ...(statusOf.get(eta.id)?.optionalInstall !== undefined
       ? { optionalInstall: statusOf.get(eta.id)!.optionalInstall }
       : {}),
   }));
@@ -2660,13 +2634,16 @@ function progressionRefresh(ctx: NeedContext): void {
   let routeRequiresInstall = selectedStatus?.mandatoryInstall?.ready === true;
   const regrowOverride = regrowInstallOverride({
     ...(selectedStatus?.stage !== undefined ? { stage: selectedStatus.stage } : {}),
-    ...(selectedStatus?.optionalInstall.allowed !== undefined
-      ? { optionalInstallAllowed: selectedStatus.optionalInstall.allowed }
+    ...(selectedStatus?.optionalInstall !== undefined
+      ? { optionalInstallAllowed: selectedStatus.optionalInstall }
       : {}),
     ...(endgame.worldDaemonSkill !== undefined ? { worldDaemonSkill: endgame.worldDaemonSkill } : {}),
     hackingSkill: view.hackingSkill,
     rates,
   });
+  // The OVERRIDDEN permission, as handed to installForecast and the digests:
+  // the regrow comparison may flip the route's raw optional-install guard.
+  const optionalInstallAllowed = regrowOverride || (selectedStatus?.optionalInstall ?? true);
   const nodeBasis = JSON.stringify({
     route: choice?.route,
     complete: selectedEta?.complete,
@@ -2887,7 +2864,7 @@ function progressionRefresh(ctx: NeedContext): void {
         [...pending, ...fundedActivation.map((candidate) => candidate.name)]
           .filter((name) => !installedNames.has(name)),
       ).size,
-      consolidationAllowed: selectedStatus?.optionalInstall.allowed === true,
+      consolidationAllowed: selectedStatus?.optionalInstall === true,
       worth: publishedWorth,
     });
     countCadenceReady = verdict.ready;
@@ -3006,7 +2983,7 @@ function progressionRefresh(ctx: NeedContext): void {
     runSec,
     ...(selectedEta !== undefined ? { nodeRemainingSec: selectedEta.etaSec } : {}),
     routeRequiresInstall,
-    optionalInstallAllowed: regrowOverride || (selectedStatus?.optionalInstall.allowed ?? true),
+    optionalInstallAllowed,
     resetValueMult,
     // Banked favor may only OPEN the gate when the sweep can actually convert
     // something — any joined offer with rep met (NeuroFlux included), or a
@@ -3060,11 +3037,8 @@ function progressionRefresh(ctx: NeedContext): void {
     wanted: decision.installWanted,
     liquidate: decision.liquidationWanted,
     ready: decision.installReady,
-    blockers: decision.installBlockers.map((blocker) => blocker.kind),
-    // The OVERRIDDEN value, matching what installForecast is handed below: a
-    // basis recording the raw guard cannot invalidate the cached forecast when
-    // the regrow comparison flips the permission.
-    optionalAllowed: regrowOverride || (selectedStatus?.optionalInstall.allowed ?? true),
+    blockers: decision.installBlockers,
+    optionalAllowed: optionalInstallAllowed,
     countCadenceReady,
     mandatory: selectedEta?.nextMandatoryInstall,
     queue: pending,
@@ -3095,7 +3069,7 @@ function progressionRefresh(ctx: NeedContext): void {
             : {}),
         ...(cadenceRemainingSec !== undefined ? { cadenceSec: cadenceRemainingSec } : {}),
         countCadenceReady,
-        optionalInstallAllowed: regrowOverride || (selectedStatus?.optionalInstall.allowed ?? true),
+        optionalInstallAllowed,
         ...(selectedEta?.nextMandatoryInstall ? { mandatory: selectedEta.nextMandatoryInstall } : {}),
       }, installBasis)
     : forecastAt(previousInstallForecast!, ctx.now);
@@ -3148,7 +3122,7 @@ function progressionRefresh(ctx: NeedContext): void {
       ...(endingByDestroy ? { endingByDestroy: true } : {}),
       installWanted: decision.installWanted,
       liquidationWanted: decision.liquidationWanted,
-      installBlockers: decision.installBlockers.map((blocker) => ({ kind: blocker.kind })),
+      installBlockers: decision.installBlockers,
       installReady: decision.installReady,
       ...(armedAt !== undefined ? { installArmedAt: armedAt } : {}),
       queuedAugmentations: pending,
@@ -3211,7 +3185,7 @@ function progressionRefresh(ctx: NeedContext): void {
  * `hasWseAccount` made the account unbuyable. `progression` is always active and
  * already reads darknet availability for the endgame route, so it is the module
  * that can act. Moving this to `dnet` would silently stop it working. */
-function darkscapeDecision(ctx: DriverContext | NeedContext): DarkscapeDecision {
+function shouldBuyDarkscape(ctx: DriverContext | NeedContext): boolean {
   const caps = ctx.caps;
   // The gate probe's raw `hasDarknetProgram` reading is consumed by
   // deriveCapabilities and not retained, but it is recoverable from the two
@@ -3281,8 +3255,7 @@ const progression: FeatureDriver = {
       return;
     }
 
-    const darkscape = darkscapeDecision(ctx);
-    if (darkscape.buy && darkscapeGrantedAt !== progressionMemory.cycleResetAt) {
+    if (shouldBuyDarkscape(ctx) && darkscapeGrantedAt !== progressionMemory.cycleResetAt) {
       const outcome = await featureDodge(
         ctx,
         "progression",
@@ -3302,7 +3275,7 @@ const progression: FeatureDriver = {
         // for an already-owned program — so without this the next few passes
         // would re-attempt a purchase that has already happened.
         darkscapeGrantedAt = progressionMemory.cycleResetAt;
-        record("progression", "unlock:darkscape", outcome.value === true, `bought for ${darkscape.cost}`);
+        record("progression", "unlock:darkscape", outcome.value === true, `bought for ${DARKSCAPE_TOTAL_COST}`);
       }
       return;
     }
@@ -3734,13 +3707,12 @@ export const progressionModule: FeatureModule = {
     // reserve check below only when it should: the program is wiped by the very
     // install that reserve is protecting, so buying it minutes beforehand throws
     // the money away. Falling through to the brake is correct.
-    const darkscape = darkscapeDecision(ctx);
-    if (darkscape.buy) {
+    if (shouldBuyDarkscape(ctx)) {
       routeClaims.push({
         by: "progression",
         id: "unlock:darkscape",
         resource: "money",
-        amount: darkscape.cost,
+        amount: DARKSCAPE_TOTAL_COST,
         priority: PRIORITY["income:investment"],
         mode: "spend",
         // Indivisible: there is no smaller version of a program, and it cannot

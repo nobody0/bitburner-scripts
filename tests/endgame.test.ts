@@ -147,7 +147,7 @@ describe("endgame routes", () => {
     expect(bn2.routes.find((route) => route.id === "gang")).toMatchObject({
       available: true,
       stage: "gang-reputation",
-      optionalInstall: { allowed: true },
+      optionalInstall: true,
     });
 
     const bn15 = stepEndgame(view({ bitNode: 15, darknetFullAccess: true }));
@@ -175,7 +175,7 @@ describe("endgame routes", () => {
   test("labyrinth rewards must be installed in sequence before The Red Pill", () => {
     const first = stepEndgame(view({ darknetFullAccess: true })).routes.find((route) => route.id === "labyrinth")!;
     expect(first.blocker).toContain(LABYRINTH_AUGMENTATIONS[0]);
-    expect(first.optionalInstall.allowed).toBe(false);
+    expect(first.optionalInstall).toBe(false);
 
     const queued = stepEndgame(view({
       darknetFullAccess: true,
@@ -193,32 +193,32 @@ describe("endgame routes", () => {
   test("Daedalus's final batch is node-relative and suppresses another partial install", () => {
     const route = stepEndgame(view({ bitNode: 6, augCount: 24 })).routes.find((candidate) => candidate.id === "daedalus")!;
     expect(daedalusAugsRequired(6)).toBe(35);
-    expect(route.optionalInstall.allowed).toBe(false);
+    expect(route.optionalInstall).toBe(false);
 
     const before = stepEndgame(view({ bitNode: 1, augCount: 9 })).routes.find(
       (candidate) => candidate.id === "daedalus",
     )!;
-    expect(before.optionalInstall.allowed).toBe(true);
+    expect(before.optionalInstall).toBe(true);
     const weakMiddleBatch = stepEndgame(view({
       bitNode: 1,
       augCount: 14,
       queuedAugs: ["banked-a", "banked-b"],
     })).routes.find((candidate) => candidate.id === "daedalus")!;
-    expect(weakMiddleBatch.optionalInstall.allowed).toBe(false);
+    expect(weakMiddleBatch.optionalInstall).toBe(false);
 
     const substantialMiddleBatch = stepEndgame(view({
       bitNode: 1,
       augCount: 14,
       queuedAugs: Array.from({ length: 8 }, (_, index) => `middle-${index}`),
     })).routes.find((candidate) => candidate.id === "daedalus")!;
-    expect(substantialMiddleBatch.optionalInstall.allowed).toBe(true);
+    expect(substantialMiddleBatch.optionalInstall).toBe(true);
 
     const weakLateBatch = stepEndgame(view({
       bitNode: 1,
       augCount: 20,
       queuedAugs: ["late-a", "late-b", "late-c"],
     })).routes.find((candidate) => candidate.id === "daedalus")!;
-    expect(weakLateBatch.optionalInstall.allowed).toBe(false);
+    expect(weakLateBatch.optionalInstall).toBe(false);
 
     const substantialLateBatch = stepEndgame(view({
       bitNode: 1,
@@ -228,28 +228,28 @@ describe("endgame routes", () => {
     // A substantial middle batch remains valid even when it lands inside the
     // closing quarter. The NEXT cycle starts there and must close completely;
     // this distinguishes 16 -> 25 from the bad 20 -> 23 tiny reset.
-    expect(substantialLateBatch.optionalInstall.allowed).toBe(true);
+    expect(substantialLateBatch.optionalInstall).toBe(true);
 
     const gateClosingBatch = stepEndgame(view({
       bitNode: 1,
       augCount: 16,
       queuedAugs: Array.from({ length: 14 }, (_, index) => `closing-${index}`),
     })).routes.find((candidate) => candidate.id === "daedalus")!;
-    expect(gateClosingBatch.optionalInstall.allowed).toBe(true);
+    expect(gateClosingBatch.optionalInstall).toBe(true);
 
     const incompleteClosingBatch = stepEndgame(view({
       bitNode: 1,
       augCount: 26,
       queuedAugs: ["closing-a", "closing-b"],
     })).routes.find((candidate) => candidate.id === "daedalus")!;
-    expect(incompleteClosingBatch.optionalInstall.allowed).toBe(false);
+    expect(incompleteClosingBatch.optionalInstall).toBe(false);
 
     const completeClosingBatch = stepEndgame(view({
       bitNode: 1,
       augCount: 26,
       queuedAugs: ["closing-a", "closing-b", "closing-c", "closing-d"],
     })).routes.find((candidate) => candidate.id === "daedalus")!;
-    expect(completeClosingBatch.optionalInstall.allowed).toBe(true);
+    expect(completeClosingBatch.optionalInstall).toBe(true);
   });
 
   test("faction-reputation routes let the cadence trade current rep for favor", () => {
@@ -259,7 +259,7 @@ describe("endgame routes", () => {
       hackingSkill: 2_500,
       daedalusRep: 1_000_000,
     })).routes.find((route) => route.id === "daedalus")!;
-    expect(daedalus).toMatchObject({ stage: "red-pill-reputation", optionalInstall: { allowed: true } });
+    expect(daedalus).toMatchObject({ stage: "red-pill-reputation", optionalInstall: true });
   });
 
   test("a finished run reports a complete route however the pill arrived", () => {
