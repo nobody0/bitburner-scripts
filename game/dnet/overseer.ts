@@ -5,7 +5,7 @@ import { parseOverseerArgs, residentArgs } from "../../shared/strategy/dnet/miss
 import {
   coverage,
   emptyKnowledge,
-  foldObservations,
+  foldReports,
   freeRam,
   fresh,
   type DarknetKnowledge,
@@ -165,17 +165,7 @@ export async function main(ns: NS): Promise<void> {
   // host exists, with no facts at all, is what makes the first
   // `survey:<selfHost>` job appear: an absent adjacency IS the work, and the
   // resident standing here is the only thing that can learn it.
-  knowledge = foldObservations(
-    knowledge,
-    [{
-      from: selfHost,
-      provenance: "agent",
-      at: bootAt,
-      generation: mission.generation,
-      hosts: [{ hostname: selfHost, present: true, facts: {} }],
-    }],
-    bootAt,
-  ).knowledge;
+  knowledge = foldReports(knowledge, [{ hostname: selfHost, at: bootAt, present: true }], bootAt).knowledge;
 
   realm.dnet_overseer = rendezvous;
 
@@ -187,14 +177,12 @@ export async function main(ns: NS): Promise<void> {
    * already accounts for them. This is the dedup: work a believable fact covers
    * does not exist, so a job that just refreshed one has, by returning, removed
    * the task that asked for it. No acknowledgement protocol, nothing to drift. */
-  const absorb = (from: string, result: DnetJobResult): void => {
+  const absorb = (result: DnetJobResult): void => {
+    // The fold's own clock, not a fact's: each reported host carries the time
+    // the job that saw it looked.
     const at = Date.now();
     if (result.hosts && result.hosts.length > 0) {
-      knowledge = foldObservations(
-        knowledge,
-        [{ from, provenance: "agent", at, generation: mission.generation, hosts: result.hosts.map(toObserved) }],
-        at,
-      ).knowledge;
+      knowledge = foldReports(knowledge, result.hosts, at).knowledge;
       pendingHosts.push(...result.hosts);
     }
     for (const entry of result.credentials ?? []) {
@@ -240,7 +228,7 @@ export async function main(ns: NS): Promise<void> {
     });
     void promise.then(
       (result) => {
-        absorb(queue.host, result);
+        absorb(result);
         recordAttempts(job.state.host, result);
         if (job.kind === "plant" && result.ok) lastPlantAt.set(job.state.host, Date.now());
       },
@@ -256,10 +244,16 @@ export async function main(ns: NS): Promise<void> {
   // so this file pays nothing for calls it only describes.
 
   const describeHost = (jobNs: NS, host: string): ReportHost => {
+    // Stamped HERE, at the getter, not when home eventually drains this. A
+    // resident runs on its own clock and a drain is a batch; a drain-time stamp
+    // would give every host in the batch one age and make the fold's
+    // newest-wins comparison decide nothing.
+    const at = Date.now();
     const details = jobNs["dnet"]["getServerDetails"](host);
-    if (!details.isOnline) return { hostname: host, present: false };
+    if (!details.isOnline) return { hostname: host, at, present: false };
     return {
       hostname: host,
+      at,
       present: true,
       depth: details.depth,
       blockedRam: details.blockedRam,
@@ -286,7 +280,7 @@ export async function main(ns: NS): Promise<void> {
    * host-local, so this fact can only come from a process standing here. */
   const surveyJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
     const around = jobNs["dnet"]["probe"]();
-    const hosts: ReportHost[] = [{ hostname: state.from, present: true, neighbours: [...around] }];
+    const hosts: ReportHost[] = [{ hostname: state.from, at: Date.now(), present: true, neighbours: [...around] }];
     for (const host of around) hosts.push(describeHost(jobNs, host));
     return { ok: true, hosts, detail: `${around.length} neighbours` };
   };
@@ -329,7 +323,9 @@ export async function main(ns: NS): Promise<void> {
   const attemptJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
     const jobCodes: Record<string, number> = {};
     const details = jobNs["dnet"]["getServerDetails"](state.host);
-    if (!details.isOnline) return { ok: false, hosts: [{ hostname: state.host, present: false }], codes: { "503": 1 } };
+    if (!details.isOnline) {
+      return { ok: false, hosts: [{ hostname: state.host, at: Date.now(), present: false }], codes: { "503": 1 } };
+    }
     const entry = modelEntry(details.modelId);
     const ledger = knowledge.hosts[state.host]?.attempts;
     const plan = planAttempt(
@@ -586,13 +582,4 @@ export async function main(ns: NS): Promise<void> {
 
   if (realm.dnet_overseer === rendezvous) delete realm.dnet_overseer;
   TELEMETRY: if (__TELEMETRY__ && tel) tel.flush();
-}
-
-/** `ReportHost` as the fold wants it. Here rather than in `courier.ts` because
- * the controller is the only thing that folds a job result directly. */
-function toObserved(host: ReportHost): { hostname: string; present: boolean; facts: Record<string, unknown> } {
-  const { hostname, present, ...facts } = host;
-  const defined: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(facts)) if (value !== undefined) defined[key] = value;
-  return { hostname, present, facts: present ? defined : {} };
 }

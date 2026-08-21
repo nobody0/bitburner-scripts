@@ -28,9 +28,10 @@ import { DARKSCAPE_TOTAL_COST, stepDarkscape } from "../../../shared/strategy/dn
 import {
   coverage,
   emptyKnowledge,
-  foldObservations,
+  foldReports,
+  fresh,
   type DarknetKnowledge,
-  type Observation,
+  type ExpiryOpts,
 } from "../../../shared/strategy/dnet/knowledge.ts";
 import {
   isSoA,
@@ -2014,7 +2015,7 @@ const stanek: FeatureDriver = {
  *
  * Module-scope rather than on the store because it is the driver's working
  * memory: the store carries the published digest, this carries the full fact
- * set with provenance. `dnetModule.reset` clears it. */
+ * set with each fact's observation time. `dnetModule.reset` clears it. */
 let dnetKnowledge: DarknetKnowledge | undefined;
 /** Cumulative response codes reported by agents. Kept next to the knowledge so
  * one reset clears both. */
@@ -2093,17 +2094,18 @@ let dnetSeedBackoffMs = DNET_SEED_BACKOFF_MS;
  * - Credentials land in `dnetVault`, which is module state that is never merged
  *   into a topic and never sent. */
 function drainDarknet(generation: string): {
-  observations: Observation[];
+  hosts: ReportHost[];
+  residents: string[];
   drained: number;
   rejected: number;
   credentials: number;
 } {
   const rendezvous = dnetRendezvous();
-  if (!rendezvous) return { observations: [], drained: 0, rejected: 0, credentials: 0 };
+  if (!rendezvous) return { hosts: [], residents: [], drained: 0, rejected: 0, credentials: 0 };
   if (rendezvous.generation !== generation) {
     // A controller from a world this run no longer shares. Its facts describe a
     // darknet that was destroyed by the prestige that ended it.
-    return { observations: [], drained: 0, rejected: 1, credentials: 0 };
+    return { hosts: [], residents: [], drained: 0, rejected: 1, credentials: 0 };
   }
   const taken = rendezvous.drain();
   for (const entry of taken.credentials) {
@@ -2122,21 +2124,15 @@ function drainDarknet(generation: string): {
   }
   dnetOverseerBeatAt = Math.max(dnetOverseerBeatAt, rendezvous.lastBeatAt);
   dnetResidentsLost += taken.residentsLost;
-  const observations: Observation[] = taken.hosts.length > 0
-    ? [{
-      from: "darkweb",
-      provenance: "agent",
-      at: rendezvous.lastBeatAt,
-      generation,
-      hosts: taken.hosts.map((host: ReportHost) => {
-        const { hostname, present, ...facts } = host;
-        const defined: Record<string, unknown> = {};
-        for (const [key, value] of Object.entries(facts)) if (value !== undefined) defined[key] = value;
-        return { hostname, present, facts: present ? defined : {} };
-      }),
-    }]
-    : [];
-  return { observations, drained: taken.hosts.length, rejected: 0, credentials: taken.credentials.length };
+  return {
+    // Straight through: a `ReportHost` already carries the timestamp of the job
+    // that saw it, which is the only thing the fold needs.
+    hosts: taken.hosts,
+    residents: taken.residents.map((resident) => resident.host),
+    drained: taken.hosts.length,
+    rejected: 0,
+    credentials: taken.credentials.length,
+  };
 }
 
 /** The darknet controller, if one is running. Typed access to the realm slot the
@@ -2166,9 +2162,17 @@ const dnet: FeatureDriver = {
       dnetKnowledge = emptyKnowledge(generation);
       dnetCodes = {};
     }
-    const { observations, drained, rejected, credentials: vaultDrained } = drainDarknet(generation);
+    const { hosts: reported, residents, drained, rejected, credentials: vaultDrained } = drainDarknet(generation);
     const rendezvous = dnetRendezvous();
-    const folded = foldObservations(dnetKnowledge, observations, now);
+    const bitNode = progression?.bitNode ?? 1;
+    // A stasis-linked host is outside the mutation clock entirely, and WE are the
+    // only thing that links or releases one — so the set comes from here rather
+    // than from an observed fact that could itself go stale.
+    const expiry: ExpiryOpts = { bitNode, stasisLinked: new Set(topic.stasisLinked ?? []) };
+    // Home's own probe is folded as one more vantage rather than kept beside the
+    // map in a second shape. It is the only source for `darkweb` until a resident
+    // is standing out there, and it costs nothing to merge.
+    const folded = foldReports(dnetKnowledge, [...(topic.probed ?? []), ...reported], now, expiry);
     dnetKnowledge = folded.knowledge;
     // A host we hold a credential for is flagged on the knowledge record so the
     // fold can drop the flag when the host disappears — the credential itself
@@ -2184,9 +2188,10 @@ const dnet: FeatureDriver = {
       const host = dnetKnowledge.hosts[hostname];
       if (!host || host.goneAt !== undefined) dnetVault.delete(hostname);
     }
-    for (const observation of observations) dnetAgentsSeen.add(observation.from);
-    const bitNode = progression?.bitNode ?? 1;
-    const cover = coverage(dnetKnowledge, now);
+    // The hosts that actually reported, so `seenEver - live` is agent mortality
+    // rather than a count of the one label a drain used to carry.
+    for (const host of residents) dnetAgentsSeen.add(host);
+    const cover = coverage(dnetKnowledge, now, expiry);
     // Topology completeness is a property of the FOLD, not of home's own probe —
     // which hardcodes false because it can only ever see one hop. Deriving it
     // here is what makes it reachable at all: it becomes true the first time
@@ -2198,17 +2203,15 @@ const dnet: FeatureDriver = {
       channel: {
         drained,
         rejected,
-        fromDeadRuns: folded.rejectedGenerations,
         forgotten: folded.hostsForgotten.length,
         vaultDrained,
       },
       coverage: cover,
       codes: { ...dnetCodes },
-      // THE MAP. The fold has always been computed and then thrown away, which
-      // is why the panel could only ever show darkweb: what it rendered was
-      // home's own one-hop probe, not what the agents had learned.
+      // THE MAP, and the only host representation the topic carries.
       knowledge: publishKnowledge(dnetKnowledge, now, {
         bitNode,
+        stasisLinked: expiry.stasisLinked,
         vault: new Set(dnetVault.keys()),
         unknownModels: dnetUnknownModels,
         // Published by HOST, because that is what the map draws a badge on. The
@@ -2240,19 +2243,26 @@ const dnet: FeatureDriver = {
     });
     const decision = stepDarknet({
       topologyComplete,
-      servers: (topic.servers ?? []).map((server) => ({
-        hostname: server.hostname,
-        depth: server.depth,
-        // Absent means "not known" (an offline host's details are a dummy), and
-        // the strategy only ever compares it as a capacity, so treat it as none.
-        blockedRam: server.blockedRam ?? 0,
-        isOnline: server.isOnline ?? true,
-        requiredCharisma: server.requiredCharisma ?? 0,
-        stasisLinked: server.stasisLinked ?? false,
-        ...((server as { neighbours?: string[] }).neighbours
-          ? { neighbours: (server as { neighbours?: string[] }).neighbours! }
-          : {}),
-      })),
+      // From the FOLD, not from home's one hop: the traversal is a
+      // max-reachable-under-a-budget problem, and it was being handed `darkweb`
+      // and its neighbours as though that were the graph.
+      servers: Object.values(dnetKnowledge.hosts).map((host) => {
+        const neighbours = fresh<string[]>(host, "neighbours", now, expiry);
+        return {
+          hostname: host.hostname,
+          // -1 is darkweb's real depth AND our "no believable position", which is
+          // safe here because the traversal only ever tests `depth === 0` to seed
+          // its walk: a host we cannot place must not seed one either.
+          depth: fresh<number>(host, "depth", now, expiry) ?? -1,
+          // A missing value means "not known", and the strategy only ever
+          // compares it as a capacity, so treat it as none.
+          blockedRam: fresh<number>(host, "blockedRam", now, expiry) ?? 0,
+          isOnline: host.goneAt === undefined,
+          requiredCharisma: fresh<number>(host, "requiredCharisma", now, expiry) ?? 0,
+          stasisLinked: expiry.stasisLinked?.has(host.hostname) === true,
+          ...(neighbours ? { neighbours } : {}),
+        };
+      }),
       reachable: topic.reachable,
       maxDepth: topic.maxDepth,
       stasisLinkLimit: topic.stasisLinkLimit,
@@ -2304,7 +2314,7 @@ const dnet: FeatureDriver = {
     const residentAlive = darkwebResident !== undefined
       && now - darkwebResident.lastBeatAt < OVERSEER_STALE_MS;
     if ((!overseerAlive || !residentAlive) && now >= dnetSeedNextAt
-      && topic.servers.some((server) => server.hostname === "darkweb")) {
+      && (topic.probed ?? []).some((server) => server.hostname === "darkweb")) {
       const buildId = gameBuildId();
       const controllerFile = versionedScript("dnet/overseer.js", buildId);
       const agentFile = versionedScript("dnet/agent.js", buildId);
@@ -2420,7 +2430,7 @@ const dnet: FeatureDriver = {
  * disagree: a claim without an action wastes a reservation, and an action
  * without a claim spends RAM the broker never accounted for. */
 function dnetSeedWanted(state: GameState): boolean {
-  if (!(state.topics.dnet?.servers ?? []).some((server) => server.hostname === "darkweb")) return false;
+  if (!(state.topics.dnet?.probed ?? []).some((server) => server.hostname === "darkweb")) return false;
   const now = Date.now();
   // Either the controller is gone, or darkweb has no resident to run anything.
   if (now - dnetOverseerBeatAt >= OVERSEER_STALE_MS) return true;

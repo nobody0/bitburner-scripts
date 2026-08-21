@@ -3,10 +3,10 @@ import { DEFAULT_SPREAD_LIMITS, planSpread, type SpreadCandidate } from "../shar
 import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
 import {
   emptyKnowledge,
-  foldObservations,
+  foldReports,
   type DarknetKnowledge,
-  type Observation,
 } from "../shared/strategy/dnet/knowledge.ts";
+import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
 import { msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
 
 const GEN = "15:0";
@@ -16,9 +16,21 @@ function candidate(over: Partial<SpreadCandidate> & { host: string }): SpreadCan
   return { from: "darkweb", hasCredential: true, agentAlive: false, freeRam: 16, depth: 0, ...over };
 }
 
-function fold(hosts: Observation["hosts"], at = NOW, from = "darkweb"): DarknetKnowledge {
-  return foldObservations(emptyKnowledge(GEN), [{ from, provenance: "agent", at, generation: GEN, hosts }], at)
-    .knowledge;
+/** The fixtures read better with the facts grouped, so they are flattened into
+ *  the `ReportHost` the fold takes here rather than at every call site. */
+type Seen = { hostname: string; present: boolean; facts?: Record<string, unknown> };
+
+function reports(hosts: Seen[], at = NOW): ReportHost[] {
+  return hosts.map((host) => ({
+    hostname: host.hostname,
+    at,
+    present: host.present,
+    ...(host.present ? host.facts : {}),
+  } as ReportHost));
+}
+
+function fold(hosts: Seen[], at = NOW): DarknetKnowledge {
+  return foldReports(emptyKnowledge(GEN), reports(hosts, at), at).knowledge;
 }
 
 describe("every refusal to spread is named", () => {
@@ -165,11 +177,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
       { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
       { hostname: "dn-1", present: true, facts: { depth: 0, modelId: "TopPass" } },
     ]);
-    knowledge = foldObservations(
-      knowledge,
-      [{ from: "darkweb", provenance: "agent", at: NOW + 1, generation: GEN, hosts: [{ hostname: "dn-1", present: false, facts: {} }] }],
-      NOW + 1,
-    ).knowledge;
+    knowledge = foldReports(knowledge, [{ hostname: "dn-1", at: NOW + 1, present: false }], NOW + 1).knowledge;
     const tasks = deriveTasks(knowledge, NOW + 1, { agents: new Set(["darkweb"]) });
     expect(tasks.some((t) => t.host === "dn-1")).toBe(false);
   });

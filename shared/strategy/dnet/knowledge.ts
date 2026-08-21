@@ -1,24 +1,20 @@
 import { msPerHostEvent, msPerHostEventAny } from "./rates.ts";
+import type { ReportHost } from "./courier.ts";
 
-/** What we know about the darknet, how we learned it, and when it stops being
- * believable.
+/** What we know about the darknet, and when it stops being believable.
  *
  * The darknet is the only subject in this project that rearranges itself while
  * we look at it: a mutation tick lands every few seconds, moving servers,
  * severing every connection a host had, restarting it, or deleting it
  * permanently. So a bare value is not knowledge here — a value without a
- * timestamp and a source is a claim about a world that may already be gone.
+ * timestamp is a claim about a world that may already be gone.
  * See spec/dnet.md. */
-
-export type Provenance = "self" | "agent";
 
 export interface HostFact<T> {
   value: T;
-  /** When it was OBSERVED, not when it arrived. Reports race each other. */
+  /** When it was OBSERVED, not when it arrived. A drain hands over a batch of
+   *  hosts at once and the residents that saw them ran at different times. */
   at: number;
-  from: Provenance;
-  /** The host that observed it, when an agent did. */
-  via?: string;
 }
 
 /** Fact classes, grouped by what can invalidate them.
@@ -53,7 +49,6 @@ export const FACT_CLASS: Readonly<Record<string, FactClass>> = {
   blockedRam: "resource",
   maxRam: "resource",
   usedRam: "resource",
-  stasisLinked: "resource",
   // A session belongs to the PID that won it, so this is worthless the moment
   // its observer dies. Classing it `resource` gives it the shortest expiry we
   // have, which is the honest answer rather than a flattering one.
@@ -96,8 +91,9 @@ export interface DarknetHostKnowledge {
 
 export interface DarknetKnowledge {
   hosts: Record<string, DarknetHostKnowledge>;
-  /** Generation of the run that produced this. A report stamped with anything
-   * else is from a controller that no longer exists — agents outlive us. */
+  /** Generation of the run that produced this. Agents outlive controllers, so a
+   * mismatch means the whole rendezvous belongs to a world this run no longer
+   * shares; it is refused there, by `overseerIsLive`, rather than per fact. */
   generation: string;
   /** Mutation ticks observed, which is the clock staleness is really measured
    * against. */
@@ -108,17 +104,63 @@ export function emptyKnowledge(generation: string): DarknetKnowledge {
   return { hosts: {}, generation, mutationsSeen: 0 };
 }
 
+export interface ExpiryOpts {
+  netDepth?: number;
+  bitNode?: number;
+  backdoored?: number;
+  /** Hosts we hold a stasis link on.
+   *
+   *  Taken from the controller rather than from the observed `stasisLinked`
+   *  fact, because we are the only thing that sets or releases a link: the
+   *  controller knows the set exactly, while an observed copy is a worse source
+   *  that can itself go stale. */
+  stasisLinked?: ReadonlySet<string>;
+  /** Set by a caller that has already resolved it for this host — see
+   *  `isImmune`. Left out, it is worked out per host from the two fields above. */
+  immune?: boolean;
+}
+
+/** Whether the mutation clock can touch this host at all.
+ *
+ * Every branch of `mutateDarknet` picks its victim from
+ * `getAllMovableDarknetServers` (`DarkNet/utils/darknetNetworkUtils.ts:69-78`),
+ * which skips any server that `isStationary` or `hasStasisLink` — so move,
+ * delete, disconnect and restart all miss it alike. (`isImmutable` in
+ * `NetworkMovement.ts:227` is a second, narrower guard covering stasis links but
+ * NOT `isStationary`; the pool exclusion is what does the work for both.)
+ *
+ * So immunity is a property of the HOST, not of a fact class: ageing anything
+ * about such a server would invent churn the engine cannot produce. Upstream
+ * marks `darkweb` and the labyrinth stationary, and raises rather than move
+ * `darkweb` at all. */
+export function isImmune(
+  host: Pick<DarknetHostKnowledge, "hostname" | "facts"> | undefined,
+  opts: ExpiryOpts = {},
+): boolean {
+  if (!host) return false;
+  if (opts.stasisLinked?.has(host.hostname) === true) return true;
+  return host.facts["isStationary"]?.value === true;
+}
+
+/** `opts` narrowed to one host, computed once so the per-fact calls below do
+ * not each redo it. */
+function hostExpiry(
+  host: Pick<DarknetHostKnowledge, "hostname" | "facts"> | undefined,
+  opts: ExpiryOpts,
+): ExpiryOpts {
+  if (opts.immune !== undefined) return opts;
+  return { ...opts, immune: isImmune(host, opts) };
+}
+
 /** How long a fact of this class stays believable.
  *
  * Derived, not chosen: `msPerHostEvent` gives the expected time before a
  * mutation touches one named host in the relevant way, and we distrust a fact
  * at a fraction of that. `identity` never expires with age — only with the
- * host's disappearance. */
-export function expiryMs(
-  factClass: FactClass,
-  opts: { netDepth?: number; bitNode?: number; backdoored?: number } = {},
-): number {
-  const { netDepth, bitNode, backdoored } = opts;
+ * host's disappearance — and on an immune host nothing does. */
+export function expiryMs(factClass: FactClass, opts: ExpiryOpts = {}): number {
+  const { netDepth, bitNode, backdoored, immune } = opts;
+  if (immune === true) return Infinity;
   const anyOf = (kinds: Parameters<typeof msPerHostEventAny>[0]): number =>
     msPerHostEventAny(kinds, netDepth, bitNode, backdoored);
   switch (factClass) {
@@ -151,7 +193,7 @@ export function staleness(
   fact: HostFact<unknown> | undefined,
   key: string,
   now: number,
-  opts: Parameters<typeof expiryMs>[1] = {},
+  opts: ExpiryOpts = {},
 ): Staleness | undefined {
   if (!fact) return undefined;
   const limit = expiryMs(FACT_CLASS[key] ?? "topology", opts);
@@ -170,121 +212,95 @@ export function fresh<T>(
   host: DarknetHostKnowledge | undefined,
   key: string,
   now: number,
-  opts: Parameters<typeof expiryMs>[1] = {},
+  opts: ExpiryOpts = {},
 ): T | undefined {
   const fact = host?.facts[key] as HostFact<T> | undefined;
   if (!fact) return undefined;
   if (host?.goneAt !== undefined) return undefined;
-  return staleness(fact, key, now, opts)?.stale ? undefined : fact.value;
-}
-
-export interface ObservedHost {
-  hostname: string;
-  /** False when the observation found the host gone. */
-  present: boolean;
-  facts: Record<string, unknown>;
-}
-
-export interface Observation {
-  /** Where the observing script was standing. */
-  from: string;
-  provenance: Provenance;
-  /** When the observation was MADE. */
-  at: number;
-  generation: string;
-  hosts: ObservedHost[];
+  return staleness(fact, key, now, hostExpiry(host, opts))?.stale ? undefined : fact.value;
 }
 
 export interface FoldOutcome {
   knowledge: DarknetKnowledge;
-  /** Observations refused because they came from another run. */
-  rejectedGenerations: number;
   /** Facts that lost to a newer observation of the same field. */
   superseded: number;
   hostsForgotten: string[];
 }
 
-/** Merge observations into knowledge.
+/** Merge reported hosts into knowledge.
  *
- * Two rules do the work. Facts merge by OBSERVATION time, never by arrival
- * order, because a slow report can carry an older truth than a fast one. And a
- * report from another generation is dropped rather than merged: agents survive a
- * controller cold boot, a build handoff and a page reload, so a live script from
- * a dead run can still be talking to us. */
-export function foldObservations(
+ * One rule does the work: facts merge by OBSERVATION time, never by arrival
+ * order. A drain hands over a batch whose residents ran at different moments,
+ * and two residents adjacent to the same host will both describe it.
+ *
+ * Generation is deliberately NOT rechecked here. It is enforced once, on the
+ * whole rendezvous, by `overseerIsLive` and by the drain: agents outlive
+ * controllers, so what has to be refused is the channel, not the record. */
+export function foldReports(
   knowledge: DarknetKnowledge,
-  observations: readonly Observation[],
+  reports: readonly ReportHost[],
   now: number,
-  opts: Parameters<typeof expiryMs>[1] = {},
+  opts: ExpiryOpts = {},
 ): FoldOutcome {
   const hosts: Record<string, DarknetHostKnowledge> = {};
   for (const [name, host] of Object.entries(knowledge.hosts)) {
     hosts[name] = { ...host, facts: { ...host.facts } };
   }
-  let rejectedGenerations = 0;
   let superseded = 0;
 
-  for (const observation of observations) {
-    if (observation.generation !== knowledge.generation) {
-      rejectedGenerations++;
+  for (const seen of reports) {
+    const { hostname, present, at, ...rest } = seen;
+    // A clock we do not control can hand us the future; treat it as now.
+    const observedAt = Math.min(at, now);
+    const existing = hosts[hostname];
+    const host: DarknetHostKnowledge = existing ?? {
+      hostname,
+      lastSeenAt: observedAt,
+      facts: {},
+    };
+    if (observedAt >= host.lastSeenAt) host.lastSeenAt = observedAt;
+
+    if (!present) {
+      // Absence is itself an observation, and a newer one wins. A host that
+      // comes back is a different host with a different password, so its
+      // identity facts must not survive the gap.
+      if (host.goneAt === undefined || observedAt > host.goneAt) {
+        host.goneAt = observedAt;
+        host.facts = {};
+        // The cracking progress goes with the identity facts, and for the same
+        // reason: a host that comes back is CLEANED and given a new password
+        // upstream, so a ledger saying "the first 40 candidates are ruled out"
+        // would be ruling out candidates for a password that no longer exists.
+        delete host.attempts;
+        delete host.credentialKnown;
+      }
+      hosts[hostname] = host;
       continue;
     }
-    for (const seen of observation.hosts) {
-      const existing = hosts[seen.hostname];
-      const host: DarknetHostKnowledge = existing ?? {
-        hostname: seen.hostname,
-        lastSeenAt: observation.at,
-        facts: {},
-      };
-      if (observation.at >= host.lastSeenAt) host.lastSeenAt = observation.at;
+    // Seeing it present is newer evidence than the note that it was gone.
+    if (host.goneAt !== undefined && observedAt >= host.goneAt) delete host.goneAt;
 
-      if (!seen.present) {
-        // Absence is itself an observation, and a newer one wins. A host that
-        // comes back is a different host with a different password, so its
-        // identity facts must not survive the gap.
-        if (host.goneAt === undefined || observation.at > host.goneAt) {
-          host.goneAt = observation.at;
-          host.facts = {};
-          // The cracking progress goes with the identity facts, and for the same
-          // reason: a host that comes back is CLEANED and given a new password
-          // upstream, so a ledger saying "the first 40 candidates are ruled out"
-          // would be ruling out candidates for a password that no longer exists.
-          delete host.attempts;
-          delete host.credentialKnown;
-        }
-        hosts[seen.hostname] = host;
+    for (const [key, value] of Object.entries(rest)) {
+      if (value === undefined) continue;
+      const prior = host.facts[key];
+      if (prior && prior.at > observedAt) {
+        superseded++;
         continue;
       }
-      // Seeing it present is newer evidence than the note that it was gone.
-      if (host.goneAt !== undefined && observation.at >= host.goneAt) delete host.goneAt;
-
-      for (const [key, value] of Object.entries(seen.facts)) {
-        if (value === undefined) continue;
-        const prior = host.facts[key];
-        if (prior && prior.at > observation.at) {
-          superseded++;
-          continue;
-        }
-        if (prior) superseded++;
-        host.facts[key] = {
-          value,
-          // A clock we do not control can hand us the future; treat it as now.
-          at: Math.min(observation.at, now),
-          from: observation.provenance,
-          ...(observation.provenance === "agent" ? { via: observation.from } : {}),
-        };
-      }
-      hosts[seen.hostname] = host;
+      if (prior) superseded++;
+      host.facts[key] = { value, at: observedAt };
     }
+    hosts[hostname] = host;
   }
 
   const forgetAfter = forgetMs(opts);
   const hostsForgotten: string[] = [];
   for (const [name, host] of Object.entries(hosts)) {
     // Darknet servers go offline permanently. Remembering one for ever would be
-    // publishing a map of a world that no longer contains it.
+    // publishing a map of a world that no longer contains it — unless it is one
+    // the engine cannot delete, which is never gone and so never forgotten.
     const reference = host.goneAt ?? host.lastSeenAt;
-    if (now - reference > forgetAfter) {
+    if (now - reference > forgetAfter && !isImmune(host, opts)) {
       hostsForgotten.push(name);
       delete hosts[name];
     }
@@ -292,15 +308,16 @@ export function foldObservations(
 
   return {
     knowledge: { ...knowledge, hosts },
-    rejectedGenerations,
     superseded,
     hostsForgotten,
   };
 }
 
 /** A host unseen for this long is dropped. Scaled off deletion rather than
- * movement: the question "is it gone" is answered by the deletion clock. */
-export function forgetMs(opts: Parameters<typeof expiryMs>[1] = {}): number {
+ * movement: the question "is it gone" is answered by the deletion clock — and
+ * an immune host is never deleted, so it is never forgotten either. */
+export function forgetMs(opts: ExpiryOpts = {}): number {
+  if (opts.immune === true) return Infinity;
   return msPerHostEvent("deleted", opts.netDepth, opts.bitNode, opts.backdoored);
 }
 
@@ -322,7 +339,7 @@ export interface KnowledgeCoverage {
 export function coverage(
   knowledge: DarknetKnowledge,
   now: number,
-  opts: Parameters<typeof expiryMs>[1] = {},
+  opts: ExpiryOpts = {},
   /** RAM an agent needs, for the `plantable` count. */
   agentRamGb = 2.6,
 ): KnowledgeCoverage {
@@ -337,14 +354,15 @@ export function coverage(
       gone++;
       continue;
     }
-    if (fresh<string[]>(host, "neighbours", now, opts) !== undefined) adjacencyKnown++;
+    const expiry = hostExpiry(host, opts);
+    if (fresh<string[]>(host, "neighbours", now, expiry) !== undefined) adjacencyKnown++;
     if (host.credentialKnown === true) {
       cracked++;
-      if (freeRam(host, now, opts) >= agentRamGb) plantable++;
+      if (freeRam(host, now, expiry) >= agentRamGb) plantable++;
     }
     for (const [key, fact] of Object.entries(host.facts)) {
       total++;
-      if (staleness(fact, key, now, opts)?.stale) stale++;
+      if (staleness(fact, key, now, expiry)?.stale) stale++;
     }
   }
   return {
@@ -371,12 +389,13 @@ export function coverage(
 export function freeRam(
   host: DarknetHostKnowledge | undefined,
   now: number,
-  opts: Parameters<typeof expiryMs>[1] = {},
+  opts: ExpiryOpts = {},
 ): number {
-  const maxRam = fresh<number>(host, "maxRam", now, opts);
+  const expiry = hostExpiry(host, opts);
+  const maxRam = fresh<number>(host, "maxRam", now, expiry);
   if (maxRam === undefined) return 0;
-  const blocked = fresh<number>(host, "blockedRam", now, opts) ?? 0;
-  const used = fresh<number>(host, "usedRam", now, opts) ?? 0;
+  const blocked = fresh<number>(host, "blockedRam", now, expiry) ?? 0;
+  const used = fresh<number>(host, "usedRam", now, expiry) ?? 0;
   const occupied = used >= blocked ? used : used + blocked;
   return Math.max(0, maxRam - occupied);
 }

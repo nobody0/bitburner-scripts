@@ -1,3 +1,5 @@
+import { staleness, type ExpiryOpts, type Staleness } from "../../../shared/strategy/dnet/knowledge.ts";
+import { modelEntry } from "../../../shared/strategy/dnet/models.ts";
 import { esc, fmtNum, fmtRam } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { DarknetKnownHost } from "../../../shared/telemetry/topics/dnet.ts";
@@ -227,13 +229,36 @@ const AUTH_LABEL: Record<string, string> = {
   offline: "(offline)",
 };
 
+/** How old one published fact is, and what is left of its life.
+ *
+ * Derived here rather than shipped: the digest carries an observation time per
+ * fact and nothing else. It calls the CONTROLLER's own `staleness` rather than
+ * repeating the arithmetic, because a panel that could disagree with the
+ * decision about what is stale would be worse than one that showed nothing.
+ * `staleness` reads only `at`, so the value is a placeholder.
+ *
+ * Immunity is a property of the HOST, not of a fact: a stationary or
+ * stasis-linked server is skipped by every mutation branch upstream, so nothing
+ * about it ages. `darkweb` is the one you meet first. */
+export function factLife(
+  host: DarknetKnownHost,
+  key: string,
+  now: number,
+  expiry: ExpiryOpts,
+): Staleness | undefined {
+  const at = host.facts[key];
+  if (at === undefined) return undefined;
+  const immune = host.isStationary === true || host.stasisLinked === true;
+  return staleness({ value: undefined, at }, key, now, { ...expiry, immune });
+}
+
 /** True when nothing we hold about this host is still believable. Drawn faded,
  * because "we believed this five minutes ago" and "this is true" must not look
  * the same on a net that rewires itself every three seconds. */
-export function isStale(host: DarknetKnownHost): boolean {
-  const facts = Object.values(host.facts);
-  if (facts.length === 0) return false;
-  return facts.every((fact) => fact.stale);
+export function isStale(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): boolean {
+  const keys = Object.keys(host.facts);
+  if (keys.length === 0) return false;
+  return keys.every((key) => factLife(host, key, now, expiry)?.stale === true);
 }
 
 function clip(text: string, max: number): string {
@@ -242,18 +267,19 @@ function clip(text: string, max: number): string {
 
 /** Everything a box says, as a plain-text tooltip. Colour is never the only
  * channel: every state also has a status line and this. */
-function titleOf(host: DarknetKnownHost): string {
+function titleOf(host: DarknetKnownHost, options: MapOptions): string {
   const parts = [host.hostname];
   if (host.ip) parts.push(host.ip);
   parts.push(AUTH_LABEL[host.authState ?? "no-connection"] ?? "");
-  if (host.modelId) parts.push(`model ${host.modelId}${host.modelName ? ` (${host.modelName})` : ""}`);
-  if (host.modelBlocked) parts.push(host.modelBlocked);
+  const entry = modelEntry(host.modelId);
+  if (host.modelId) parts.push(`model ${host.modelId}${entry ? ` (${entry.name})` : ""}`);
+  if (entry?.blocked !== undefined) parts.push(entry.blocked);
   if (host.maxRam !== undefined) {
     parts.push(`RAM ${fmtRam(host.freeRam ?? 0)} free of ${fmtRam(host.maxRam)}, ${fmtRam(host.blockedRam ?? 0)} blocked`);
   }
   if (host.requiredCharisma !== undefined) parts.push(`charisma ${fmtNum(host.requiredCharisma, 0)}`);
   if (host.goneAt !== undefined) parts.push("gone");
-  if (isStale(host)) parts.push("every fact stale — believed, not confirmed");
+  if (isStale(host, options.now, options.expiry)) parts.push("every fact stale — believed, not confirmed");
   return parts.filter(Boolean).join(" · ");
 }
 
@@ -274,16 +300,17 @@ function ramBar(host: DarknetKnownHost, x: number, y: number): string {
   );
 }
 
-function nodeMarkup(entry: Placed, selected: string, query: string): string {
+function nodeMarkup(entry: Placed, options: MapOptions): string {
+  const { selected, query } = options;
   const { host, x, y } = entry;
   const classes = ["node", `auth-${host.authState ?? "no-connection"}`];
   if (host.goneAt !== undefined) classes.push("gone");
-  if (isStale(host)) classes.push("stale");
+  if (isStale(host, options.now, options.expiry)) classes.push("stale");
   if (host.stasisLinked) classes.push("linked");
   if (host.hostname === selected) classes.push("sel");
   if (query) classes.push(matches(host, query) ? "hit" : "dim");
 
-  const glyph = FAMILY_GLYPH[host.modelFamily ?? "oracle"] ?? "?";
+  const glyph = FAMILY_GLYPH[modelEntry(host.modelId)?.family ?? "oracle"] ?? "?";
   const meta = [host.ip ?? "", host.requiredCharisma !== undefined ? `cha:${fmtNum(host.requiredCharisma, 0)}` : ""]
     .filter(Boolean)
     .join(" ");
@@ -298,7 +325,7 @@ function nodeMarkup(entry: Placed, selected: string, query: string): string {
     // `.dataset`, so no listener is needed and main.ts needs no change.
     `<g class="${classes.join(" ")}" data-key="node:${esc(host.hostname)}"`
     + ` data-view-key="dnet.sel" data-view-value="${esc(host.hostname)}" role="button">`
-    + `<title>${esc(titleOf(host))}</title>`
+    + `<title>${esc(titleOf(host, options))}</title>`
     + `<rect class="box" x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="2"></rect>`
     + (host.stasisLinked ? `<rect class="stasis" x="${x}" y="${y}" width="3" height="${BOX_H}"></rect>` : "")
     + (host.isStationary ? `<text class="fixed" x="${x + BOX_W - 6}" y="${y + 14}">#</text>` : "")
@@ -318,7 +345,7 @@ export function matches(host: DarknetKnownHost, query: string): boolean {
     host.hostname.toLowerCase().includes(needle)
     || (host.ip ?? "").toLowerCase().includes(needle)
     || (host.modelId ?? "").toLowerCase().includes(needle)
-    || (host.modelName ?? "").toLowerCase().includes(needle)
+    || (modelEntry(host.modelId)?.name ?? "").toLowerCase().includes(needle)
     || (host.passwordHint ?? "").toLowerCase().includes(needle)
   );
 }
@@ -328,7 +355,8 @@ export function matches(host: DarknetKnownHost, query: string): boolean {
  * Straight diagonals are what the game draws, but the game has a 6000px canvas
  * to draw them on; at panel scale they cross into noise. An orthogonal route
  * through the gutter keeps a dense row readable and needs no curve maths. */
-function edgeMarkup(layout: NetLayout, mode: string): string {
+function edgeMarkup(layout: NetLayout, options: MapOptions): string {
+  const mode = options.edges;
   if (mode === "none") return "";
   const seen = new Set<string>();
   const parts: string[] = [];
@@ -360,7 +388,9 @@ function edgeMarkup(layout: NetLayout, mode: string): string {
         ? `M ${x1} ${y1} V ${mid} H ${x2} V ${y1}`
         : `M ${x1} ${y1} V ${mid} H ${x2} V ${y2}`;
       const classes = ["edge", tree ? "tree" : a.row === b.row ? "lateral" : "back"];
-      if (a.host.facts["neighbours"]?.stale || b.host.facts["neighbours"]?.stale) classes.push("stale");
+      const edgeStale = (host: DarknetKnownHost) =>
+        factLife(host, "neighbours", options.now, options.expiry)?.stale === true;
+      if (edgeStale(a.host) || edgeStale(b.host)) classes.push("stale");
       parts.push(`<path class="${classes.join(" ")}" data-key="edge:${esc(key)}" d="${path}"></path>`);
     }
   }
@@ -393,6 +423,9 @@ export interface MapOptions {
   query: string;
   zoom: number;
   edges: string;
+  /** The digest's own clock, which every age on this page is measured against. */
+  now: number;
+  expiry: ExpiryOpts;
 }
 
 /** The whole map as one SVG string. */
@@ -411,8 +444,8 @@ export function netMap(hosts: readonly DarknetKnownHost[], options: MapOptions):
     + `<svg class="netmap" role="img" aria-label="darknet map, ${hosts.length} hosts"`
     + ` viewBox="0 0 ${MAP_W} ${layout.height}"`
     + ` width="${Math.round(MAP_W * scale)}" height="${Math.round(layout.height * scale)}">`
-    + edgeMarkup(layout, options.edges)
-    + layout.placed.map((entry) => nodeMarkup(entry, options.selected, options.query)).join("")
+    + edgeMarkup(layout, options)
+    + layout.placed.map((entry) => nodeMarkup(entry, options)).join("")
     + labels
     + `</svg></div>`
   );
@@ -420,8 +453,10 @@ export function netMap(hosts: readonly DarknetKnownHost[], options: MapOptions):
 
 /** Read the map's view controls. Kept beside the renderer so the keys are
  * declared once. */
-export function mapOptions(): MapOptions {
+export function mapOptions(now: number, expiry: ExpiryOpts): MapOptions {
   return {
+    now,
+    expiry,
     selected: view("dnet.sel"),
     query: view("dnet.q").trim(),
     zoom: Number(view("dnet.zoom", "100")) || 100,

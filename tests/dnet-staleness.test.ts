@@ -12,26 +12,27 @@ import {
   coverage,
   emptyKnowledge,
   expiryMs,
-  foldObservations,
+  foldReports,
   forgetMs,
   freeRam,
   fresh,
+  isImmune,
   staleness,
-  type Observation,
 } from "../shared/strategy/dnet/knowledge.ts";
+import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
+import { overseerIsLive, RENDEZVOUS_PROTOCOL, type DnetRendezvous } from "../game/dnet/realm.ts";
 import { mutationIntervalMs, msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
 
 const GEN = "run-1";
 
-function observation(over: Partial<Observation> = {}): Observation {
-  return {
-    from: "darkweb",
-    provenance: "agent",
-    at: 1_000,
-    generation: GEN,
-    hosts: [],
-    ...over,
-  };
+/** One host as a job saw it. `at` is the observation time, which is the whole
+ *  reason the fold can order two residents that ran seconds apart. */
+function report(hostname: string, at: number, facts: Record<string, unknown> = {}): ReportHost {
+  return { hostname, at, present: true, ...facts } as ReportHost;
+}
+
+function absent(hostname: string, at: number): ReportHost {
+  return { hostname, at, present: false };
 }
 
 describe("darknet mutation rates, transcribed", () => {
@@ -60,15 +61,15 @@ describe("darknet mutation rates, transcribed", () => {
   });
 });
 
-describe("every fact carries provenance and an expiry", () => {
-  test("the fold stamps source, observer and observation time", () => {
-    const { knowledge } = foldObservations(
+describe("every fact carries an observation time", () => {
+  test("the fold stamps the time the JOB looked, not the time home drained", () => {
+    const { knowledge } = foldReports(
       emptyKnowledge(GEN),
-      [observation({ hosts: [{ hostname: "dn-1", present: true, facts: { depth: 2, modelId: "TopPass" } }] })],
+      [report("dn-1", 1_000, { depth: 2, modelId: "TopPass" })],
       2_000,
     );
     const host = knowledge.hosts["dn-1"]!;
-    expect(host.facts["depth"]).toMatchObject({ value: 2, at: 1_000, from: "agent", via: "darkweb" });
+    expect(host.facts["depth"]).toEqual({ value: 2, at: 1_000 });
     expect(host.lastSeenAt).toBe(1_000);
   });
 
@@ -82,9 +83,9 @@ describe("every fact carries provenance and an expiry", () => {
   });
 
   test("a fact past its expiry is reported stale and refused to callers", () => {
-    const { knowledge } = foldObservations(
+    const { knowledge } = foldReports(
       emptyKnowledge(GEN),
-      [observation({ at: 0, hosts: [{ hostname: "dn-1", present: true, facts: { neighbours: ["dn-2"], modelId: "TopPass" } }] })],
+      [report("dn-1", 0, { neighbours: ["dn-2"], modelId: "TopPass" })],
       0,
     );
     const host = knowledge.hosts["dn-1"]!;
@@ -103,44 +104,97 @@ describe("every fact carries provenance and an expiry", () => {
   });
 
   test("facts merge by observation time, not arrival order", () => {
-    const older = observation({ at: 1_000, hosts: [{ hostname: "dn-1", present: true, facts: { depth: 1 } }] });
-    const newer = observation({ at: 5_000, hosts: [{ hostname: "dn-1", present: true, facts: { depth: 9 } }] });
-    // The newer observation arrives FIRST; a slow report must not overwrite it.
-    const { knowledge, superseded } = foldObservations(emptyKnowledge(GEN), [newer, older], 6_000);
-    expect(knowledge.hosts["dn-1"]!.facts["depth"]).toMatchObject({ value: 9, at: 5_000 });
+    // Two residents adjacent to the same host, seconds apart, arriving in ONE
+    // drain — which is exactly why the stamp has to be per host rather than per
+    // batch. The newer sighting is listed first; the slow one must not win.
+    const newer = report("dn-1", 5_000, { depth: 9 });
+    const older = report("dn-1", 1_000, { depth: 1 });
+    const { knowledge, superseded } = foldReports(emptyKnowledge(GEN), [newer, older], 6_000);
+    expect(knowledge.hosts["dn-1"]!.facts["depth"]).toEqual({ value: 9, at: 5_000 });
     expect(superseded).toBeGreaterThan(0);
   });
 
   test("a future timestamp is clamped rather than trusted", () => {
-    const { knowledge } = foldObservations(
-      emptyKnowledge(GEN),
-      [observation({ at: 999_999, hosts: [{ hostname: "dn-1", present: true, facts: { depth: 1 } }] })],
-      1_000,
-    );
+    const { knowledge } = foldReports(emptyKnowledge(GEN), [report("dn-1", 999_999, { depth: 1 })], 1_000);
     // Otherwise a clock we do not control could make a fact immortal.
     expect(knowledge.hosts["dn-1"]!.facts["depth"]!.at).toBe(1_000);
   });
 });
 
-describe("reports from a dead run are discarded, not merged", () => {
-  test("a mismatched generation is rejected and counted", () => {
-    const { knowledge, rejectedGenerations } = foldObservations(
+describe("a run from a dead world is refused at the channel", () => {
+  // Agents outlive controllers — they survive a cold boot, a build handoff and a
+  // page reload — so a live script from a dead run really can be talking to us.
+  // The refusal belongs to the WHOLE rendezvous rather than to each fact: by the
+  // time a report reaches the fold, the channel it arrived on has already been
+  // accepted, and re-checking a value the caller just compared cannot fail.
+  const rendezvous = (over: Partial<DnetRendezvous> = {}) => ({
+    protocol: RENDEZVOUS_PROTOCOL,
+    generation: GEN,
+    controllerPid: 1,
+    startedAt: 0,
+    lastBeatAt: 1_000,
+    ...over,
+  } as DnetRendezvous);
+
+  test("a foreign generation is not live however recently it beat", () => {
+    expect(overseerIsLive(rendezvous(), GEN, 1_100)).toBe(true);
+    expect(overseerIsLive(rendezvous({ generation: "run-0" }), GEN, 1_100)).toBe(false);
+    // A protocol we do not speak is refused for the same reason.
+    expect(overseerIsLive(rendezvous({ protocol: RENDEZVOUS_PROTOCOL + 1 }), GEN, 1_100)).toBe(false);
+    expect(overseerIsLive(undefined, GEN, 1_100)).toBe(false);
+  });
+});
+
+describe("a host outside the mutation clock never ages", () => {
+  // getAllMovableDarknetServers skips isStationary and hasStasisLink servers,
+  // and EVERY mutation branch draws from that pool — move, delete, disconnect
+  // and restart alike. So immunity is not per fact class.
+  test("darkweb is stationary, so its position never expires", () => {
+    const { knowledge } = foldReports(
       emptyKnowledge(GEN),
-      [observation({ generation: "run-0", hosts: [{ hostname: "ghost", present: true, facts: { depth: 1 } }] })],
-      2_000,
+      [report("darkweb", 0, { depth: -1, isStationary: true })],
+      0,
     );
-    // Agents outlive controllers: they survive a cold boot, a build handoff and
-    // a page reload, so a live script from a dead run can still be reporting.
-    expect(rejectedGenerations).toBe(1);
-    expect(knowledge.hosts["ghost"]).toBeUndefined();
+    const host = knowledge.hosts["darkweb"]!;
+    expect(isImmune(host)).toBe(true);
+    // Upstream raises rather than move darkweb; showing this expiring in a
+    // minute was the bug that made the guard worth writing.
+    const wayLater = expiryMs("position") * 100;
+    expect(staleness(host.facts["depth"], "depth", wayLater, { immune: true })!.stale).toBe(false);
+    expect(fresh<number>(host, "depth", wayLater)).toBe(-1);
+  });
+
+  test("a stasis link freezes a neighbour list, and releasing it thaws again", () => {
+    const { knowledge } = foldReports(emptyKnowledge(GEN), [report("dn-1", 0, { neighbours: ["dn-2"] })], 0);
+    const host = knowledge.hosts["dn-1"]!;
+    const beyond = expiryMs("topology") + 1;
+    const linked = { stasisLinked: new Set(["dn-1"]) };
+
+    expect(isImmune(host, linked)).toBe(true);
+    expect(fresh<string[]>(host, "neighbours", beyond, linked)).toEqual(["dn-2"]);
+    // Released: it is an ordinary host again and the edge is the first thing to
+    // go, exactly as before.
+    expect(isImmune(host, { stasisLinked: new Set<string>() })).toBe(false);
+    expect(fresh<string[]>(host, "neighbours", beyond)).toBeUndefined();
+  });
+
+  test("an immune host is never forgotten, because it is never deleted", () => {
+    const { knowledge } = foldReports(
+      emptyKnowledge(GEN),
+      [report("darkweb", 0, { isStationary: true }), report("dn-1", 0, { depth: 1 })],
+      0,
+    );
+    const later = forgetMs() + 1;
+    const { knowledge: after, hostsForgotten } = foldReports(knowledge, [], later);
+    expect(hostsForgotten).toEqual(["dn-1"]);
+    expect(after.hosts["darkweb"]).toBeDefined();
   });
 });
 
 describe("a host that goes away is forgotten, not remembered for ever", () => {
   test("absence wipes identity, because a returning host is a new host", () => {
-    const seen = observation({ at: 1_000, hosts: [{ hostname: "dn-1", present: true, facts: { modelId: "TopPass", depth: 3 } }] });
-    const gone = observation({ at: 2_000, hosts: [{ hostname: "dn-1", present: false, facts: {} }] });
-    const { knowledge } = foldObservations(emptyKnowledge(GEN), [seen, gone], 2_000);
+    const seen = report("dn-1", 1_000, { modelId: "TopPass", depth: 3 });
+    const { knowledge } = foldReports(emptyKnowledge(GEN), [seen, absent("dn-1", 2_000)], 2_000);
     const host = knowledge.hosts["dn-1"]!;
     expect(host.goneAt).toBe(2_000);
     // Upstream, a server that reappears is cleaned and given a NEW password, so
@@ -150,35 +204,24 @@ describe("a host that goes away is forgotten, not remembered for ever", () => {
   });
 
   test("seeing it again overrides the note that it was gone", () => {
-    const gone = observation({ at: 1_000, hosts: [{ hostname: "dn-1", present: false, facts: {} }] });
-    const back = observation({ at: 2_000, hosts: [{ hostname: "dn-1", present: true, facts: { depth: 4 } }] });
-    const { knowledge } = foldObservations(emptyKnowledge(GEN), [gone, back], 2_000);
+    const back = report("dn-1", 2_000, { depth: 4 });
+    const { knowledge } = foldReports(emptyKnowledge(GEN), [absent("dn-1", 1_000), back], 2_000);
     expect(knowledge.hosts["dn-1"]!.goneAt).toBeUndefined();
     expect(fresh<number>(knowledge.hosts["dn-1"], "depth", 2_000)).toBe(4);
   });
 
   test("a host unseen past the forget window is dropped from the map", () => {
-    const { knowledge: first } = foldObservations(
-      emptyKnowledge(GEN),
-      [observation({ at: 0, hosts: [{ hostname: "dn-1", present: true, facts: { depth: 1 } }] })],
-      0,
-    );
+    const { knowledge: first } = foldReports(emptyKnowledge(GEN), [report("dn-1", 0, { depth: 1 })], 0);
     const later = forgetMs() + 1;
-    const { knowledge, hostsForgotten } = foldObservations(first, [], later);
+    const { knowledge, hostsForgotten } = foldReports(first, [], later);
     expect(hostsForgotten).toEqual(["dn-1"]);
     expect(knowledge.hosts["dn-1"]).toBeUndefined();
   });
 
   test("coverage separates what we hold from what we still believe", () => {
-    const { knowledge } = foldObservations(
+    const { knowledge } = foldReports(
       emptyKnowledge(GEN),
-      [observation({
-        at: 0,
-        hosts: [
-          { hostname: "dn-1", present: true, facts: { neighbours: ["dn-2"], modelId: "TopPass" } },
-          { hostname: "dn-2", present: true, facts: { modelId: "Laika4" } },
-        ],
-      })],
+      [report("dn-1", 0, { neighbours: ["dn-2"], modelId: "TopPass" }), report("dn-2", 0, { modelId: "Laika4" })],
       0,
     );
     expect(coverage(knowledge, 0)).toMatchObject({ known: 2, adjacencyKnown: 1, freshFraction: 1 });
@@ -309,19 +352,11 @@ describe("the facts the spreading agents added", () => {
     // ledger saying "the first 40 candidates are ruled out" would be ruling out
     // candidates for a password that no longer exists.
     let knowledge = emptyKnowledge(GEN);
-    knowledge = foldObservations(
-      knowledge,
-      [observation({ at: 1_000, hosts: [{ hostname: "dn-1", present: true, facts: { modelId: "TopPass" } }] })],
-      1_000,
-    ).knowledge;
+    knowledge = foldReports(knowledge, [report("dn-1", 1_000, { modelId: "TopPass" })], 1_000).knowledge;
     knowledge.hosts["dn-1"]!.attempts = { modelId: "TopPass", tried: 40, probes: 0 };
     knowledge.hosts["dn-1"]!.credentialKnown = true;
 
-    const gone = foldObservations(
-      knowledge,
-      [observation({ at: 2_000, hosts: [{ hostname: "dn-1", present: false, facts: {} }] })],
-      2_000,
-    ).knowledge;
+    const gone = foldReports(knowledge, [absent("dn-1", 2_000)], 2_000).knowledge;
     expect(gone.hosts["dn-1"]!.attempts).toBeUndefined();
     expect(gone.hosts["dn-1"]!.credentialKnown).toBeUndefined();
   });
@@ -336,9 +371,9 @@ describe("the facts the spreading agents added", () => {
       hostname: "dn-1",
       lastSeenAt: at,
       facts: {
-        maxRam: { value: 16, at, from: "agent" as const },
-        blockedRam: { value: 4, at, from: "agent" as const },
-        usedRam: { value: 4, at, from: "agent" as const },
+        maxRam: { value: 16, at },
+        blockedRam: { value: 4, at },
+        usedRam: { value: 4, at },
       },
     };
     expect(freeRam(host, at)).toBe(12);
@@ -347,7 +382,7 @@ describe("the facts the spreading agents added", () => {
     // and there the block really is unaccounted for.
     const early = {
       ...host,
-      facts: { ...host.facts, usedRam: { value: 0, at, from: "agent" as const } },
+      facts: { ...host.facts, usedRam: { value: 0, at } },
     };
     expect(freeRam(early, at)).toBe(12);
 
@@ -359,18 +394,13 @@ describe("the facts the spreading agents added", () => {
   test("coverage separates what we opened from what we can actually stand on", () => {
     const at = 1_000;
     let knowledge = emptyKnowledge(GEN);
-    knowledge = foldObservations(
+    knowledge = foldReports(
       knowledge,
       [
-        observation({
-          at,
-          hosts: [
-            { hostname: "roomy", present: true, facts: { maxRam: 16, blockedRam: 0, usedRam: 0 } },
-            // A big host can arrive with ALL of its RAM blocked, which is a
-            // different problem from not having the password.
-            { hostname: "blocked", present: true, facts: { maxRam: 128, blockedRam: 128, usedRam: 128 } },
-          ],
-        }),
+        report("roomy", at, { maxRam: 16, blockedRam: 0, usedRam: 0 }),
+        // A big host can arrive with ALL of its RAM blocked, which is a
+        // different problem from not having the password.
+        report("blocked", at, { maxRam: 128, blockedRam: 128, usedRam: 128 }),
       ],
       at,
     ).knowledge;

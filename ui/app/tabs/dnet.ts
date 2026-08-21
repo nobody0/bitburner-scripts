@@ -20,18 +20,24 @@ import { esc, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import { codeName } from "../../../shared/strategy/dnet/courier.ts";
+import { modelEntry } from "../../../shared/strategy/dnet/models.ts";
+import { FACT_CLASS, type ExpiryOpts } from "../../../shared/strategy/dnet/knowledge.ts";
 import type { DarknetKnownHost, DarknetState } from "../../../shared/telemetry/topics/dnet.ts";
-import { isStale, matches, mapOptions, netLegend, netMap } from "./dnet-map.ts";
+import { factLife, isStale, matches, mapOptions, netLegend, netMap } from "./dnet-map.ts";
 import type { Tab } from "./index.ts";
 
 /** The Darknet panel.
  *
- * The feature's own rule (spec/dnet.md) is that every fact carries where it came
- * from and when, and that a fact past its expiry is SHOWN but excluded from
- * decisions. This panel is where that stops being an internal discipline and
- * becomes something an operator can act on: the map draws what we believe, the
- * fading says how much, and the detail card shows the age and the source of
+ * The feature's own rule (spec/dnet.md) is that a fact past its expiry is SHOWN
+ * but excluded from decisions. This panel is where that stops being an internal
+ * discipline and becomes something an operator can act on: the map draws what we
+ * believe, the fading says how much, and the detail card shows the age behind
  * every single fact behind a box.
+ *
+ * The digest carries only what cannot be derived — an observation time per fact,
+ * and a `modelId`. Everything else on this page is computed HERE from the same
+ * shared modules the controller uses, which is why `expiryMs` and `modelEntry`
+ * are imported rather than having their answers shipped per host per tick.
  *
  * The second job is the password problem. Nineteen of the twenty-four models are
  * deliberately unsolved, so for those the panel's task is to hand over the raw
@@ -42,26 +48,42 @@ import type { Tab } from "./index.ts";
  * never truncates; a table is where a limit belongs. */
 const TABLE_LIMIT = 60;
 
-function factRows(host: DarknetKnownHost): [Markup, Markup][] {
+/** Why a host has not been attacked, from the registry rather than the wire. */
+function modelReason(modelId: string | undefined): Markup {
+  const entry = modelEntry(modelId);
+  if (!entry) return `<span class="bad">unrecognised model id</span>`;
+  return entry.blocked !== undefined
+    ? `<span class="muted">${esc(entry.blocked)}</span>`
+    : `<span class="good">implemented</span>`;
+}
+
+function factRows(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): [Markup, Markup][] {
   const rows: [Markup, Markup][] = [];
-  for (const [key, fact] of Object.entries(host.facts)) {
-    const source = fact.from === "agent" ? `agent via ${esc(fact.via ?? "?")}` : "home";
-    // `null` is the identity class: it never expires by age, only by the host
-    // disappearing. Rendering it as "0ms left" would be exactly backwards.
-    const life = fact.expiresInMs === null
+  for (const key of Object.keys(host.facts)) {
+    const age = factLife(host, key, now, expiry);
+    if (!age) continue;
+    // Infinity is the identity class, or a host the mutation clock cannot touch.
+    // Rendering either as "0s left" would be exactly backwards.
+    const life = age.expiresInMs === Infinity
       ? `<span class="muted">never expires</span>`
-      : fact.stale
+      : age.stale
         ? `<span class="bad">stale</span>`
-        : `<span class="good">${fmtTime(fact.expiresInMs)} left</span>`;
+        : `<span class="good">${fmtTime(age.expiresInMs)} left</span>`;
     rows.push([
-      hint(key, `${fact.class} fact`),
-      `<span class="${fact.stale ? "muted" : ""}">${fmtTime(fact.ageMs)} ago</span> · ${source} · ${life}`,
+      hint(key, `${FACT_CLASS[key] ?? "topology"} fact`),
+      `<span class="${age.stale ? "muted" : ""}">${fmtTime(age.ageMs)} ago</span> · ${life}`,
     ]);
   }
   return rows;
 }
 
-function detailCard(d: DarknetState, hosts: readonly DarknetKnownHost[], selected: string): string {
+function detailCard(
+  d: DarknetState,
+  hosts: readonly DarknetKnownHost[],
+  selected: string,
+  now: number,
+  expiry: ExpiryOpts,
+): string {
   const host = hosts.find((entry) => entry.hostname === selected)
     ?? hosts.find((entry) => entry.hostname === d.plan?.action.hostname)
     ?? hosts.find((entry) => entry.isDarkweb)
@@ -89,8 +111,11 @@ function detailCard(d: DarknetState, hosts: readonly DarknetKnownHost[], selecte
   // would take".
   const modelRows: [Markup, Markup][] = [];
   if (host.modelId) {
-    modelRows.push(["model", `${esc(host.modelId)}${host.modelName ? ` <span class="muted">(${esc(host.modelName)})</span>` : ""}`]);
-    if (host.modelFeedback) modelRows.push(["feedback", esc(host.modelFeedback)]);
+    // Looked up from the registry rather than shipped: every field below is a
+    // pure function of the model id, and a deep net has 220 hosts.
+    const entry = modelEntry(host.modelId);
+    modelRows.push(["model", `${esc(host.modelId)}${entry ? ` <span class="muted">(${esc(entry.name)})</span>` : ""}`]);
+    if (entry) modelRows.push(["feedback", esc(entry.feedback)]);
     if (host.passwordLength !== undefined) {
       modelRows.push(["password", `${host.passwordLength} × ${esc(host.passwordFormat ?? "?")}`]);
     }
@@ -103,11 +128,17 @@ function detailCard(d: DarknetState, hosts: readonly DarknetKnownHost[], selecte
         fmtTime(host.logTrafficInterval * 1000),
       ]);
     }
-    if (host.modelOracle) {
-      modelRows.push([hint("oracle", "what a wrong guess tells you, and where it appears"), esc(host.modelOracle)]);
+    if (entry) {
+      modelRows.push([hint("oracle", "what a wrong guess tells you, and where it appears"), esc(entry.oracle)]);
+      modelRows.push(["read via", esc(entry.via)]);
+      if (entry.blocked !== undefined) {
+        modelRows.push(["not attacked", `<span class="muted">${esc(entry.blocked)}</span>`]);
+      }
+    } else {
+      // Shown as exactly that. A generic fallback here would hide a game update
+      // behind a shrug — and `unknownModels` is counting it.
+      modelRows.push(["not attacked", `<span class="bad">unrecognised model id</span>`]);
     }
-    if (host.modelVia) modelRows.push(["read via", esc(host.modelVia)]);
-    if (host.modelBlocked) modelRows.push(["not attacked", `<span class="muted">${esc(host.modelBlocked)}</span>`]);
   }
 
   const attempt = host.attempt;
@@ -140,7 +171,7 @@ function detailCard(d: DarknetState, hosts: readonly DarknetKnownHost[], selecte
     + (host.goneAt !== undefined ? `<p class="bad">gone — its identity facts were dropped with it</p>` : "")
     + (modelRows.length > 0 ? definitions(modelRows) : note("no password model observed"))
     + (attemptRows.length > 0 ? collapsible("dnet.attempt", "attempts", definitions(attemptRows), true) : "")
-    + collapsible("dnet.facts", "facts, with provenance", definitions(factRows(host)), true)
+    + collapsible("dnet.facts", "facts, with age", definitions(factRows(host, now, expiry)), true)
     + collapsible("dnet.neigh", "neighbours", neighbours, false),
   );
 }
@@ -149,46 +180,26 @@ export const dnetTab: Tab = {
   id: "dnet",
   render(state: ProjectedState) {
     const d = state.topics.dnet;
-    if (!d) return waiting("the darknet probe");
+    // ONE representation. Home's own one-hop probe folds into the same knowledge
+    // an agent feeds, so there is no second shape to render before the first
+    // report lands — only a map that starts at `darkweb` and grows.
+    if (!d?.knowledge) return waiting("the darknet probe");
 
     const knowledge = d.knowledge;
-    // Until an agent has reported, home's own one-hop probe is genuinely all we
-    // have, so it is shown as such rather than as an empty map.
-    const hosts: DarknetKnownHost[] = knowledge?.hosts ?? d.servers.map((server) => ({
-      hostname: server.hostname,
-      lastSeenAt: 0,
-      ...(server.depth >= 0 || server.hostname === "darkweb" ? { depth: server.depth } : {}),
-      ...(server.hostname === "darkweb" ? { isDarkweb: true } : {}),
-      ...(server.maxRam !== undefined ? { maxRam: server.maxRam } : {}),
-      ...(server.blockedRam !== undefined ? { blockedRam: server.blockedRam } : {}),
-      ...(server.usedRam !== undefined ? { usedRam: server.usedRam } : {}),
-      freeRam: server.maxRam === undefined
-        ? 0
-        : Math.max(0, server.maxRam - Math.max(server.usedRam ?? 0, server.blockedRam ?? 0)),
-      ...(server.requiredCharisma !== undefined ? { requiredCharisma: server.requiredCharisma } : {}),
-      ...(server.modelId !== undefined ? { modelId: server.modelId } : {}),
-      ...(server.passwordLength !== undefined ? { passwordLength: server.passwordLength } : {}),
-      ...(server.passwordFormat !== undefined ? { passwordFormat: server.passwordFormat } : {}),
-      ...(server.passwordHint !== undefined ? { passwordHint: server.passwordHint } : {}),
-      ...(server.data !== undefined ? { data: server.data } : {}),
-      ...(server.difficulty !== undefined ? { difficulty: server.difficulty } : {}),
-      ...(server.isStationary !== undefined ? { isStationary: server.isStationary } : {}),
-      ...(server.stasisLinked !== undefined ? { stasisLinked: server.stasisLinked } : {}),
-      facts: {},
-      authState: server.isOnline === false
-        ? ("offline" as const)
-        : server.hostname === "darkweb"
-          ? ("session" as const)
-          : server.directlyConnected
-            ? ("auth-required" as const)
-            : ("no-connection" as const),
-    }));
+    const hosts: DarknetKnownHost[] = knowledge.hosts;
+    // The clock every age on this page is measured against. `bitNode` matters:
+    // the net churns half as fast outside BN15, and a panel using a different
+    // figure from the controller would call a fact stale that the decision was
+    // still acting on. `stasisLinked` needs no set here — it arrives already
+    // decided, as a per-host boolean.
+    const now = knowledge.at;
+    const expiry: ExpiryOpts = { bitNode: state.topics.progression?.bitNode };
 
-    const options = mapOptions();
+    const options = mapOptions(now, expiry);
     const matched = options.query ? hosts.filter((host) => matches(host, options.query)) : hosts;
 
     const summary = tiles([
-      { label: "hosts known", value: String(knowledge ? knowledge.hosts.length - knowledge.gone : d.reachable) },
+      { label: "hosts known", value: String(knowledge.hosts.length - knowledge.gone) },
       { label: "max depth", value: String(d.maxDepth) },
       {
         label: "cracked",
@@ -197,16 +208,16 @@ export const dnetTab: Tab = {
       },
       {
         label: "agents",
-        value: knowledge ? String(knowledge.agents.live) : NONE,
+        value: String(knowledge.agents.live),
         // The gap between agents seen and agents still reporting IS agent
         // mortality, and out there that is the loss that actually matters.
-        sub: knowledge && knowledge.agents.lostSinceBoot > 0 ? `${knowledge.agents.lostSinceBoot} lost` : undefined,
+        sub: knowledge.agents.lostSinceBoot > 0 ? `${knowledge.agents.lostSinceBoot} lost` : undefined,
       },
       { label: "stasis links", value: `${d.stasisLinked.length} / ${d.stasisLinkLimit}` },
       {
         label: hint("mutation", "how often the net rearranges itself"),
         value: d.mutationIntervalMs === undefined ? NONE : fmtTime(d.mutationIntervalMs),
-        sub: knowledge?.mutationsSeen !== undefined ? `${knowledge.mutationsSeen} seen` : undefined,
+        sub: knowledge.mutationsSeen !== undefined ? `${knowledge.mutationsSeen} seen` : undefined,
       },
       { label: "auth duration", value: `x${fmtNum(d.instability.authenticationDurationMultiplier, 2)}` },
       { label: "timeout chance", value: fmtPct(d.instability.authenticationTimeoutChance) },
@@ -239,7 +250,7 @@ export const dnetTab: Tab = {
         case "cracked": return host.credentialKnown === true;
         case "locked": return host.authState === "auth-required";
         case "roomy": return (host.freeRam ?? 0) >= 2.6;
-        case "stale": return isStale(host);
+        case "stale": return isStale(host, now, expiry);
         case "gone": return host.goneAt !== undefined;
         default: return true;
       }
@@ -284,7 +295,7 @@ export const dnetTab: Tab = {
         {
           id: "seen",
           label: "seen",
-          cell: (h) => (h.lastSeenAt > 0 && knowledge ? fmtTime(knowledge.at - h.lastSeenAt) : NONE),
+          cell: (h) => (h.lastSeenAt > 0 ? fmtTime(now - h.lastSeenAt) : NONE),
           sort: (h) => -h.lastSeenAt,
         },
         {
@@ -299,7 +310,7 @@ export const dnetTab: Tab = {
               h.goneAt !== undefined ? `<span class="bad">gone</span>` : "",
               h.stasisLinked ? `<span class="good">linked</span>` : "",
               h.isStationary ? `<span class="muted">fixed</span>` : "",
-              isStale(h) ? `<span class="muted">stale</span>` : "",
+              isStale(h, now, expiry) ? `<span class="muted">stale</span>` : "",
             ].filter(Boolean).join(" ") || NONE,
         },
       ],
@@ -325,7 +336,7 @@ export const dnetTab: Tab = {
           h.passwordLength === undefined ? NONE : `${h.passwordLength} × ${esc(h.passwordFormat ?? "?")}`,
           h.passwordHint ? esc(h.passwordHint) : NONE,
           h.data ? esc(h.data) : NONE,
-          h.modelBlocked ? `<span class="muted">${esc(h.modelBlocked)}</span>` : `<span class="good">implemented</span>`,
+          modelReason(h.modelId),
         ]),
       { empty: "no host details observed yet", left: [0, 1, 3, 4, 5], wrap: [3, 4, 5] },
     );
@@ -369,14 +380,13 @@ export const dnetTab: Tab = {
     const delivery = channel
       ? definitions([
         ["reports drained", String(channel.drained)],
-        ["unreadable", String(channel.rejected)],
-        [hint("from dead runs", "gathered in a world this run no longer shares"), String(channel.fromDeadRuns)],
+        [hint("refused", "a rendezvous belonging to a run this world no longer shares"), String(channel.rejected)],
         [hint("hosts forgotten", "unseen long enough that keeping them would be a map of a dead world"), String(channel.forgotten)],
         ...(channel.vaultDrained !== undefined
-          ? [[hint("vault messages", "credentials arriving on their own channel; the count travels, they do not"), String(channel.vaultDrained)] as [Markup, Markup]]
+          ? [[hint("credentials taken", "moved into home's vault; the count travels, they do not"), String(channel.vaultDrained)] as [Markup, Markup]]
           : []),
       ])
-      : note("the report port has not been drained yet");
+      : note("the controller has not been drained yet");
 
     // Every darknet call answers with a code, so a refusal is always
     // attributable rather than a blank.
@@ -417,7 +427,7 @@ export const dnetTab: Tab = {
       + card("Decision", decision)
       + `</div>`
       + `<div class="col">`
-      + detailCard(d, hosts, options.selected)
+      + detailCard(d, hosts, options.selected, now, expiry)
       + card("Knowledge", reach)
       + card("Report channel", delivery)
       + card("Response codes", table(["code", "meaning", "n"], codes, { empty: "no darknet call has answered yet", left: [0, 1] }))

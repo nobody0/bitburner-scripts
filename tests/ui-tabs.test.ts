@@ -295,7 +295,7 @@ describe("tab rendering", () => {
         },
       },
       stanek: { width: 3, height: 3, occupied: { "0,0": 1, "1,0": 1 }, fragments: [{ id: 1, type: "Hacking", x: 0, y: 0, rotation: 0, power: 1.5, limit: 1, effect: "+x% hacking", numCharge: 10, highestCharge: 10, chargedEffect: 1.2 }], availableTypes: [{ id: 1, type: "Hacking", power: 1.5, limit: 1 }] },
-      dnet: { reachable: 4, maxDepth: 2, stasisLinkLimit: 2, stasisLinked: ["dn-1"], instability: { authenticationDurationMultiplier: 1.2, authenticationTimeoutChance: 0.05 }, servers: [{ hostname: "dn-1", depth: 1, blockedRam: 16, isOnline: true, requiredCharisma: 50, stasisLinked: true }] },
+      dnet: { reachable: 4, maxDepth: 2, stasisLinkLimit: 2, stasisLinked: ["dn-1"], instability: { authenticationDurationMultiplier: 1.2, authenticationTimeoutChance: 0.05 }, probed: [{ hostname: "dn-1", at: 1_000, present: true, depth: 1, blockedRam: 16, requiredCharisma: 50 }] },
       side: {
         contracts: [{ host: "home", file: "c.cct" }],
         contractTotal: 900,
@@ -355,18 +355,36 @@ describe("tab rendering", () => {
     state.topics.dnet = {
       reachable: 2, maxDepth: 1, stasisLinkLimit: 2, stasisLinked: [], topologyComplete: true,
       instability: { authenticationDurationMultiplier: 1, authenticationTimeoutChance: 0.1 },
-      servers: [
+      // Home's own one-hop reading, in the shape an agent reports. The panel
+      // renders the FOLD below; the driver folds this into it as one more vantage.
+      probed: [
         {
-          hostname: "dn-1", depth: 1, blockedRam: 11, isOnline: true, requiredCharisma: 50,
+          hostname: "dn-1", at: 1_000, present: true, depth: 1, blockedRam: 11, requiredCharisma: 50,
           maxRam: 16, usedRam: 0, modelId: "2G_cellular", passwordLength: 6,
           passwordFormat: "numeric", passwordHint: "the dog, obviously", data: "rex",
           logTrafficInterval: 45, difficulty: 3, isStationary: true, hasSession: false,
-          directlyConnected: true,
         },
         // A host that went offline answers with a dummy details object, so
-        // everything except its liveness is absent and depth is the -1 sentinel.
-        { hostname: "dn-gone", depth: -1, blockedRam: 0, isOnline: false },
+        // everything except its liveness is absent.
+        { hostname: "dn-gone", at: 1_000, present: false },
       ],
+      knowledge: {
+        at: 1_000,
+        generation: "15:0",
+        gone: 1,
+        agents: { live: 1, seenEver: 1, lostSinceBoot: 0 },
+        hosts: [
+          {
+            hostname: "dn-1", depth: 1, lastSeenAt: 1_000, blockedRam: 11, requiredCharisma: 50,
+            maxRam: 16, usedRam: 0, freeRam: 5, modelId: "2G_cellular", passwordLength: 6,
+            passwordFormat: "numeric", passwordHint: "the dog, obviously", data: "rex",
+            logTrafficInterval: 45, difficulty: 3, isStationary: true,
+            authState: "auth-required",
+            facts: { depth: 1_000, modelId: 1_000, maxRam: 1_000 },
+          },
+          { hostname: "dn-gone", lastSeenAt: 1_000, goneAt: 1_000, facts: {}, authState: "offline" },
+        ],
+      },
       plan: {
         action: { type: "stasis", hostname: "dn-1" },
         ranked: [{ hostname: "dn-1", depth: 1, unlocks: 3 }],

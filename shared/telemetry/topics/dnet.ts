@@ -3,56 +3,7 @@
  * authenticated while instability rises. A routing/budget problem with a
  * decaying resource. */
 
-export interface DarknetServerDigest {
-  hostname: string;
-  /** -1 when the host has gone offline: getDepth's own sentinel. */
-  depth: number;
-  /** Absent for an offline host, whose details object is a dummy — a fabricated
-   *  0 would read as "nothing blocked" rather than "not known". */
-  blockedRam?: number;
-  isOnline?: boolean;
-  requiredCharisma?: number;
-  stasisLinked?: boolean;
-  /** Usable RAM is maxRam - blockedRam, and that is what decides whether an
-   *  agent can run here at all. Absent when the host vanished mid-probe. */
-  maxRam?: number;
-  usedRam?: number;
-  /** The discovery surface, straight from getServerDetails. `modelId` selects
-   *  the host's password minigame; the 24 models are transcribed in
-   *  spec/strategy/bitnodes/bn15.md. */
-  modelId?: string;
-  passwordLength?: number;
-  passwordFormat?: string;
-  passwordHint?: string;
-  data?: string;
-  logTrafficInterval?: number;
-  difficulty?: number;
-  isStationary?: boolean;
-  /** Whether THIS process holds a session — per-PID, so it is only ever true
-   *  for the observer that reports it. */
-  hasSession?: boolean;
-  directlyConnected?: boolean;
-}
-
-/** Where one fact came from and how long it stays believable.
- *
- * This is spec/dnet.md's provenance rule made visible. A bare value would be a
- * claim about a world that mutates every three seconds; the panel needs to show
- * the value AND how much to trust it, which means the age travels with it. */
-export interface DarknetFactMeta {
-  /** When it was OBSERVED, not when it arrived. */
-  at: number;
-  from: "self" | "agent";
-  /** The host that observed it, when an agent did. */
-  via?: string;
-  ageMs: number;
-  /** `null` for the identity class, which never expires by age. JSON cannot
-   *  carry the Infinity that `expiryMs` returns, and `null` reads correctly as
-   *  "not by age" where a 0 or a missing field would read as "expired". */
-  expiresInMs: number | null;
-  stale: boolean;
-  class: "identity" | "position" | "topology" | "resource";
-}
+import type { ReportHost } from "../../strategy/dnet/courier.ts";
 
 /** An agent we believe is alive out there. */
 export interface DarknetAgentDigest {
@@ -63,7 +14,12 @@ export interface DarknetAgentDigest {
 }
 
 /** One host as the map and the detail panel need it: the current best value of
- * every fact, the provenance of each, and what we have tried against it. */
+ * every fact, when each was seen, and what we have tried against it.
+ *
+ * Deliberately NOT here: anything the panel can work out for itself. Age, expiry
+ * class and staleness follow from the timestamps below plus the mutation clock;
+ * a model's name, oracle and reason-untouched follow from `modelId`. `ui/`
+ * derives both from the same shared modules the controller uses. */
 export interface DarknetKnownHost {
   hostname: string;
   /** Assigned at construction and shown by the in-game map. Costs a 2 GB
@@ -95,17 +51,14 @@ export interface DarknetKnownHost {
   passwordHint?: string;
   data?: string;
   logTrafficInterval?: number;
-  /** The registry's account of this host's password model: what its oracle is,
-   *  and — when we have not attacked it — exactly why not. Carried here so the
-   *  panel states a reason instead of leaving a blank where one belongs. */
-  modelName?: string;
-  modelFamily?: string;
-  modelFeedback?: string;
-  modelOracle?: string;
-  modelVia?: string;
-  modelBlocked?: string;
-  /** Per-fact provenance and staleness, keyed by fact name. */
-  facts: Record<string, DarknetFactMeta>;
+  /** When each fact was OBSERVED, keyed by fact name — and nothing else.
+   *
+   *  Age, expiry class and staleness are all derivable from this plus the
+   *  mutation clock, and the model's name, oracle and reason-untouched are a
+   *  pure function of `modelId`, so `ui/` derives both rather than being sent
+   *  ~120 fields per host per tick. What cannot be derived travels: this, and
+   *  `freeRam` below. */
+  facts: Record<string, number>;
   agent?: DarknetAgentDigest;
   attempt?: {
     modelId?: string;
@@ -158,17 +111,23 @@ export interface DarknetState {
   stasisLinkLimit: number;
   stasisLinked: string[];
   instability: { authenticationDurationMultiplier: number; authenticationTimeoutChance: number };
-  servers: DarknetServerDigest[];
-  /** Health of the agent report channel. `drained` and `rejected` are per tick;
-   *  `fromDeadRuns` counts reports discarded because they were gathered in a
-   *  world this run no longer shares. */
+  /** Home's own one-hop reading, in the SAME shape an agent reports.
+   *
+   *  Driver input, not a view: the tick folds it into knowledge as one more
+   *  vantage and the panel reads `knowledge` only. It stays on the topic because
+   *  the probe is a dodge stub running on some leased host, and the topic is the
+   *  only way back. `probe()` is host-local, so from home this is `darkweb` and
+   *  its neighbours — which is also exactly what the seed decision needs. */
+  probed?: ReportHost[];
+  /** Health of the agent report channel, per tick. `rejected` is a whole
+   *  rendezvous refused for belonging to a run this world no longer shares —
+   *  refused at the channel, because agents outlive controllers. */
   channel?: {
     drained: number;
     rejected: number;
-    fromDeadRuns: number;
     forgotten: number;
-    /** Credential messages drained off the vault port. The count travels; the
-     *  credentials never do. */
+    /** Credentials the drain moved into home's vault. The COUNT travels; the
+     *  credentials stay in module state and are never published. */
     vaultDrained?: number;
   };
   /** DarknetResponseCode counts, cumulative for the run, keyed by numeric code.
@@ -188,11 +147,11 @@ export interface DarknetState {
      *  is owner-blocked RAM, which is a different problem with a different fix. */
     plantable?: number;
   };
-  /** The whole folded map, with provenance. Absent until an agent has reported;
-   *  the flat `servers` above remains home's own one-hop view. */
+  /** The folded map, and the only host representation there is: home's own
+   *  one-hop probe folds in here as another vantage rather than sitting beside
+   *  it in a second shape. Absent only before the first probe has landed. */
   knowledge?: DarknetKnowledgeDigest;
   /** The net's own clock, so the panel can say how fast the map is rotting. */
-  netDepth?: number;
   mutationIntervalMs?: number;
   /** Charisma, which gates heartbleed per host and slows authentication. */
   charisma?: number;

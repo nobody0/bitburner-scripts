@@ -179,8 +179,8 @@ export interface DnetJobResult {
   ok: boolean;
   hosts?: ReportHost[];
   attempts?: AttemptOutcome[];
-  /** Credentials recovered. These also go home on the vault port; the realm copy
-   *  is what lets the NEXT job use them without a round trip through home. */
+  /** Credentials recovered. The controller keeps them so the NEXT job can use
+   *  them without a round trip, and `drain()` hands them to home's vault. */
   credentials?: VaultEntry[];
   codes?: Record<string, number>;
   detail?: string;
@@ -196,8 +196,8 @@ export interface DnetJobState {
   /** Where the job runs — the resident's own host. */
   from: string;
   /** Credential for `host`, when the controller holds one. The one field that
-   *  must never leave the realm: `encodeReport` strips it and the vault port
-   *  carries it home separately. */
+   *  must never leave the realm: it travels only to home's vault, and
+   *  `stripCredentials` keeps it out of anything that is published. */
   password?: string;
   /** Payload filenames, for a job that plants a resident elsewhere. A job never
    *  builds a filename: they are build-versioned, and a guess would `exec` a

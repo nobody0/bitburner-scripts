@@ -12,6 +12,7 @@ import {
 import { rotate } from "../../../shared/strategy/stanek/pack.ts";
 import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
 import type { ContractDigest } from "../../../shared/telemetry/topics/side.ts";
+import type { ReportHost } from "../../../shared/strategy/dnet/courier.ts";
 import { emit, emitPartial, type DodgedProbe, type Emission, type ProbeContext } from "./index.ts";
 import { fleetFrom } from "./local.ts";
 
@@ -1403,14 +1404,17 @@ const dnetCore: DodgedProbe = {
     const hosts = [...new Set(["darkweb", ...stubNs["dnet"]["probe"]()])];
     const linked = new Set(stubNs["dnet"]["getStasisLinkedServers"]().map(String));
     let maxDepth = -1;
-    const servers = [];
+    // ReportHost, the same shape a resident sends: home's one hop is one more
+    // vantage on the same map rather than a second representation of it.
+    const probed: ReportHost[] = [];
+    const at = Date.now();
     for (const host of hosts.slice(0, LIST_LIMIT)) {
       // A host that has gone offline recently answers with a DUMMY details
       // object carrying isOnline: false. Its other fields describe nothing, so
       // publish the liveness bit and no more.
       const details = stubNs["dnet"]["getServerDetails"](host);
       if (details.isOnline === false) {
-        servers.push({ hostname: host, depth: -1, isOnline: false, stasisLinked: linked.has(host) });
+        probed.push({ hostname: host, at, present: false });
         continue;
       }
       if (details.depth > maxDepth) maxDepth = details.depth;
@@ -1424,13 +1428,13 @@ const dnetCore: DodgedProbe = {
       } catch {
         /* host went away mid-batch; the details above still stand */
       }
-      servers.push({
+      probed.push({
         hostname: host,
+        at,
+        present: true,
         depth: details.depth,
         blockedRam: details.blockedRam,
-        isOnline: true,
         requiredCharisma: details.requiredCharismaSkill,
-        stasisLinked: linked.has(host),
         // The discovery surface. Every one of these is undocumented upstream and
         // is what a password attack would have to reason from, so acquire it now
         // and let the tab show what the darknet actually looks like.
@@ -1443,7 +1447,6 @@ const dnetCore: DodgedProbe = {
         difficulty: details.difficulty,
         isStationary: details.isStationary,
         hasSession: details.hasSession,
-        directlyConnected: details.isConnectedToCurrentServer,
         ...(maxRam !== undefined ? { maxRam } : {}),
         ...(usedRam !== undefined ? { usedRam } : {}),
       });
@@ -1459,7 +1462,7 @@ const dnetCore: DodgedProbe = {
         stasisLinkLimit: stubNs["dnet"]["getStasisLinkLimit"](),
         stasisLinked: [...linked],
         instability: stubNs["dnet"]["getDarknetInstability"](),
-        servers,
+        probed,
       }),
     ];
   },

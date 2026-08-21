@@ -50,6 +50,13 @@ export function codeName(code: number): string {
 /** One host, as an agent standing next to it saw it. */
 export interface ReportHost {
   hostname: string;
+  /** When the observing job looked, stamped where the observation HAPPENED.
+   *
+   *  Not at drain time: residents run on their own clocks and home collects them
+   *  in one batch, so a drain-time stamp would give every host in that batch the
+   *  same age and make the fold's newest-wins comparison meaningless. Two
+   *  residents adjacent to the same host is the case this exists for. */
+  at: number;
   /** False when the observation found it gone. Everything else is then absent. */
   present: boolean;
   depth?: number;

@@ -46,6 +46,13 @@ export interface DeriveOptions {
   netDepth?: number;
   bitNode?: number;
   backdoored?: number;
+  // No `stasisLinked` here, deliberately. Stasis is a HOME decision — the
+  // controller never sees the set — so a stasis-linked host looks perishable to
+  // the queue and gets re-surveyed a little sooner than it needs to be. That
+  // errs toward re-observing, which is the safe direction, and plumbing a
+  // fourth channel to save a few jobs on at most four hosts is not worth it.
+  // `isStationary` needs no plumbing: it is an identity fact, so `fresh` works
+  // immunity out per host on its own.
   /** Hosts with a live agent, so we do not survey what is already being watched
    *  and do not plant where someone is standing. */
   agents?: ReadonlySet<string>;

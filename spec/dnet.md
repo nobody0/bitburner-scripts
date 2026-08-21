@@ -99,11 +99,10 @@ The password mechanic — `modelId`, `passwordHint`, `data`, `passwordLength`,
 `passwordFormat`, the `2G_cellular` timing oracle, and the eleven `.lit` hint
 files that name the model taxonomy — is documented in `bn15.md`.
 
-## The rule: provenance and expiry
+## The rule: expiry
 
-> **Every fact about the darknet carries where it came from and when.** No
-> darknet knowledge may be treated as current without checking its age against
-> the mutation clock.
+> **No darknet fact may be treated as current without checking its age against
+> the mutation clock.**
 
 An unstamped topology map or credential table is a map of a world that may no
 longer exist. Expiry is per fact CLASS, and derived rather than chosen
@@ -114,7 +113,21 @@ longer exist. Expiry is per fact CLASS, and derived rather than chosen
 | `identity` | `modelId`, `passwordFormat`, `passwordLength`, `difficulty` | **never by age** — only by the host disappearing, since a host that returns is cleaned and given a new password |
 | `position` | `depth` | a move |
 | `topology` | `neighbours` | a move, a disconnect, *or* a new connection — three compounding rates, so edges are the shortest-lived thing we hold |
-| `resource` | `blockedRam`, `maxRam` | a restart |
+| `resource` | `blockedRam`, `maxRam`, `hasSession` | a restart |
+
+**Unless the host is outside the clock altogether.** Every branch of
+`mutateDarknet` picks its victim from `getAllMovableDarknetServers`
+(`DarkNet/utils/darknetNetworkUtils.ts:69-78`), which skips any server that
+`isStationary` or `hasStasisLink` — so move, delete, disconnect and restart all
+miss it alike. (`isImmutable`, `NetworkMovement.ts:227`, is a second and narrower
+guard: it covers stasis links but *not* `isStationary`, so the pool exclusion is
+what does the work for both.)
+
+Immunity is therefore a property of the HOST, not of a fact class: nothing about
+such a server ages, and since it cannot be deleted it is never forgotten either.
+Upstream marks `darkweb` and the labyrinth stationary. `darkweb` is the case you
+meet first, and showing its depth expiring in a minute was the bug that made this
+worth writing down.
 
 Rates add, times do not: a fact invalidated by any of several events dies sooner
 than the fastest of them alone. The one number not derived is `TRUST_FRACTION`,
@@ -125,37 +138,30 @@ darknet has the same hazard, just far more often.
 
 In practice:
 
-- Knowledge lives as `HostFact<T> = { value, at, from, via? }`, not as a bare
-  value. Facts merge by last-writer-wins on the observation time, never on
-  arrival order.
+- Knowledge lives as `HostFact<T> = { value, at }`, not as a bare value, and a
+  `ReportHost` is stamped by the job that *looked* rather than by the drain that
+  collected it. Facts merge last-writer-wins on that observation time, never on
+  arrival order — a drain is a batch, and two residents adjacent to the same host
+  will both describe it.
 - A fact older than its expiry is *shown* but excluded from decisions, and the
   decision says which fact it is waiting on.
 - A host unseen for long enough is **forgotten**, not remembered. Darknet hosts
   go offline permanently; keeping one forever is fabricating a map.
-- Reports carry a generation stamp. Agents outlive controllers (see below), so a
-  report from a dead run must be discarded rather than merged.
+- **There is one host representation.** Home's own one-hop probe reports in the
+  same `ReportHost` shape an agent does and folds into the same knowledge; the
+  panel reads that fold and nothing else.
 
-`tests/dnet-staleness.test.ts` pins all four as behaviour.
+There is no per-fact record of *which* agent saw it. That was carried for a
+while, and it was worth deleting rather than fixing: no decision ever read it,
+and what the panel actually displayed was a hardcoded `darkweb` standing in for
+residents scattered across the net — worse than no attribution at all. The
+generation is likewise checked once, on the whole rendezvous (`overseerIsLive`),
+because agents outlive controllers and what has to be refused is the channel
+rather than the record.
 
-### A note on transport, and a rule we did not make
+`tests/dnet-staleness.test.ts` pins these as behaviour.
 
-It is tempting to forbid `dnet` from using the `globalThis` rendezvous that the
-dispatcher, the dodger and the controller cache all use — on the grounds that
-Bitburner runs every script in one page realm, so the realm is a free and
-perfectly reliable channel between `home` and a depth-6 host, which is exactly
-what BN15's fiction denies.
-
-**We did not make that rule, because the game already grants the same thing.**
-`ns.writePort` / `readPort` / `getPortHandle` are documented as *"shared across
-all hosts and contents are reset on game restart"*, cost 0 GB, need no session,
-and come with `nextPortWrite()` as a free wake signal. The realm is only a faster
-version of a sanctioned mechanic. Banning it would have cost us the repository's
-existing idioms — including the dodged `dnet.core` probe — and preserved nothing.
-
-What preserves the challenge is enforced by the engine, not by us: sessions are
-per-PID, `probe()` is host-local, `setStasisLink` and `phishingAttack` only work
-from the target, and the network kills your scripts. None of that is helped by a
-faster message.
+### A note on transport
 
 **One convention, as engineering rather than fair play: the realm carries the
 conversation, and every entry in it is expired rather than trusted.**

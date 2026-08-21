@@ -1,43 +1,43 @@
 import { stripCredentials } from "./courier.ts";
 import { modelEntry } from "./models.ts";
 import {
-  FACT_CLASS,
-  expiryMs,
   freeRam,
   fresh,
-  staleness,
+  isImmune,
   type DarknetHostKnowledge,
   type DarknetKnowledge,
+  type ExpiryOpts,
 } from "./knowledge.ts";
 import type {
   DarknetAgentDigest,
-  DarknetFactMeta,
   DarknetKnowledgeDigest,
   DarknetKnownHost,
 } from "../../telemetry/topics/dnet.ts";
 
 /** Turning what the controller KNOWS into something a person can look at.
  *
- * The driver has always folded agent reports into a provenance-stamped fact set
- * and then thrown it away, publishing only the home probe's one-hop view. That
- * is why the Darknet panel showed `darkweb` and nothing else no matter how much
- * the agents learned. This module is the missing half.
+ * The rule it serves is the one in spec/dnet.md: no darknet fact may be treated
+ * as current without checking its age. A digest of bare values would publish a
+ * map of a world that may no longer exist and give no way to tell — so every
+ * fact's observation time travels with it, and the panel can grey a stale value
+ * out rather than pretending it is current or hiding it entirely.
  *
- * The rule it exists to serve is the one in spec/dnet.md: *every fact about the
- * darknet carries where it came from and when.* A digest that flattened facts
- * back to bare values would publish a map of a world that may no longer exist
- * and give no way to tell. So each fact travels WITH its age, its source and
- * whether we still believe it, and the panel can show a stale value greyed out
- * rather than pretending it is current or hiding it entirely.
+ * **Only what cannot be derived travels.** Age, expiry class and staleness all
+ * follow from that timestamp plus the mutation clock, and a model's name, oracle
+ * and reason-untouched follow from its `modelId`. `ui/` computes both from the
+ * same shared modules this file uses, so sending them would add six fields to
+ * each of the sixteen facts below plus six strings per host — on a net that can
+ * reach `KNOWLEDGE_MAX_HOSTS`, every tick.
  *
- * Two things deliberately do not travel:
+ * What genuinely cannot be derived downstream travels anyway: `freeRam`, whose
+ * blocked-vs-used subtraction is subtle enough to belong in exactly one place,
+ * and `authState`, which is a decision the map and the table must not be able to
+ * disagree about.
  *
- * - **Credentials.** `credentialKnown` is a boolean. The password itself lives
- *   only in the driver's vault, because this digest is mirrored to telemetry and
- *   written to disk as JSONL.
- * - **Infinity.** `expiryMs` returns it for the identity class and JSON cannot
- *   carry it, so `expiresInMs` is `null` there and the panel reads that as
- *   "never expires by age" rather than as a missing number. */
+ * One thing deliberately does not travel at all: **credentials**.
+ * `credentialKnown` is a boolean, because this digest is mirrored to telemetry
+ * and written to disk as JSONL. `stripCredentials` is the second line behind
+ * the allow-list below. */
 
 /** Hosts published per digest. The deepest labyrinth builds a net of roughly 163
  * servers (`spec/strategy/bitnodes/bn15.md`), so this clears the largest real
@@ -64,13 +64,15 @@ const PUBLISHED_FACTS = [
   "data",
   "logTrafficInterval",
   "hasSession",
-  "stasisLinked",
 ] as const;
 
 export interface PublishOptions {
   netDepth?: number;
   bitNode?: number;
   backdoored?: number;
+  /** Hosts we hold a stasis link on. A stasis-linked host is outside the
+   *  mutation clock entirely, so nothing of it ages — see `isImmune`. */
+  stasisLinked?: ReadonlySet<string>;
   /** RAM an agent needs, for the plantable/`freeRam` readouts. */
   agentRamGb?: number;
   /** Live agents, keyed by the host they are standing on. */
@@ -87,46 +89,31 @@ export interface PublishOptions {
   queue?: DarknetKnowledgeDigest["queue"];
 }
 
-function factMeta(
-  host: DarknetHostKnowledge,
-  key: string,
-  now: number,
-  opts: Parameters<typeof expiryMs>[1],
-): DarknetFactMeta | undefined {
-  const fact = host.facts[key];
-  if (!fact) return undefined;
-  const age = staleness(fact, key, now, opts);
-  if (!age) return undefined;
-  return {
-    at: fact.at,
-    from: fact.from,
-    ...(fact.via !== undefined ? { via: fact.via } : {}),
-    ageMs: age.ageMs,
-    // JSON has no Infinity. `null` is the identity class saying "not by age".
-    expiresInMs: Number.isFinite(age.expiresInMs) ? age.expiresInMs : null,
-    stale: age.stale,
-    class: FACT_CLASS[key] ?? "topology",
-  };
-}
-
-/** One host, as the panel needs it: the current best value of every fact, plus
- * the provenance of each, plus what we have tried against it. */
+/** One host, as the panel needs it: the current best value of every fact, when
+ * each was seen, and what we have tried against it. */
 export function publishHost(
   host: DarknetHostKnowledge,
   now: number,
   opts: PublishOptions = {},
 ): DarknetKnownHost {
-  const expiry = { netDepth: opts.netDepth, bitNode: opts.bitNode, backdoored: opts.backdoored };
-  const facts: Record<string, DarknetFactMeta> = {};
+  // Resolved once per host: immunity is a property of the host, not of a fact,
+  // so every fact below shares the answer.
+  const expiry: ExpiryOpts = {
+    netDepth: opts.netDepth,
+    bitNode: opts.bitNode,
+    backdoored: opts.backdoored,
+    immune: isImmune(host, opts),
+  };
+  const facts: Record<string, number> = {};
   const values: Record<string, unknown> = {};
   for (const key of PUBLISHED_FACTS) {
-    const meta = factMeta(host, key, now, expiry);
-    if (!meta) continue;
-    facts[key] = meta;
-    // The VALUE is published even when stale, and the meta says it is stale.
+    const fact = host.facts[key];
+    if (!fact) continue;
+    facts[key] = fact.at;
+    // The VALUE is published even when stale, and the age says it is stale.
     // Hiding a stale value would leave the panel blank exactly when the operator
     // most wants to know what we last believed and how long ago.
-    values[key] = host.facts[key]!.value;
+    values[key] = fact.value;
   }
 
   const gone = host.goneAt !== undefined;
@@ -161,24 +148,10 @@ export function publishHost(
     ...(values["logTrafficInterval"] !== undefined
       ? { logTrafficInterval: values["logTrafficInterval"] as number }
       : {}),
-    ...(values["stasisLinked"] !== undefined ? { stasisLinked: values["stasisLinked"] as boolean } : {}),
+    // Not a fact: we are the only thing that links or releases, so the
+    // controller's set is the truth and an observed copy could only be staler.
+    ...(opts.stasisLinked?.has(host.hostname) === true ? { stasisLinked: true } : {}),
     facts,
-    // The model's own account of itself, so the panel can say WHY a host is
-    // untouched instead of leaving a blank where a reason belongs.
-    ...(entry
-      ? {
-        modelName: entry.name,
-        modelFamily: entry.family,
-        modelFeedback: entry.feedback,
-        modelOracle: entry.oracle,
-        modelVia: entry.via,
-        ...(entry.blocked !== undefined ? { modelBlocked: entry.blocked } : {}),
-      }
-      : values["modelId"] !== undefined
-        // A model id we do not recognise is shown as exactly that. Falling back
-        // to a generic family here would hide a game update behind a shrug.
-        ? { modelFamily: "oracle" as const, modelBlocked: "unrecognised model id" }
-        : {}),
     ...(ledger
       ? {
         attempt: {
@@ -209,7 +182,7 @@ export function publishHost(
 function authStateOf(
   host: DarknetHostKnowledge,
   now: number,
-  expiry: Parameters<typeof expiryMs>[1],
+  expiry: ExpiryOpts,
   gone: boolean,
   isDarkweb: boolean,
   opts: PublishOptions,

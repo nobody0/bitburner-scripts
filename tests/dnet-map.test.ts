@@ -17,7 +17,12 @@ function host(over: Partial<DarknetKnownHost> & { hostname: string }): DarknetKn
   return { lastSeenAt: 0, facts: {}, ...over };
 }
 
-const OPTIONS = { selected: "", query: "", zoom: 60, edges: "tree" };
+// The map derives every age itself now, so it needs the digest's clock. The
+// layout fixtures below carry no facts at all, so staleness never enters these
+// tests — `host()` defaults `facts` to `{}` and `isStale` reads that as "nothing
+// to disbelieve".
+const NOW = 1_000;
+const OPTIONS = { selected: "", query: "", zoom: 60, edges: "tree", now: NOW, expiry: {} };
 
 describe("layout puts the net on the game's grid", () => {
   test("darkweb gets its own row above depth 0, centred", () => {
@@ -121,7 +126,6 @@ describe("the rendered SVG", () => {
       ip: "10.0.0.7",
       requiredCharisma: 120,
       modelId: "2G_cellular",
-      modelFamily: "timing",
       maxRam: 16,
       blockedRam: 4,
       freeRam: 12,
@@ -240,7 +244,6 @@ describe("the panel at the scale the game actually reaches", () => {
       stasisLinkLimit: 1,
       stasisLinked: [],
       instability: { authenticationDurationMultiplier: 1, authenticationTimeoutChance: 0 },
-      servers: [],
       knowledge: {
         at: 1_000,
         generation: "15:0",
@@ -261,18 +264,12 @@ describe("the panel at the scale the game actually reaches", () => {
             lastSeenAt: 900,
             neighbours: ["darkweb"],
             modelId: "DeepGreen",
-            modelName: "MastermindHint",
-            modelFamily: "oracle",
-            modelOracle: "`data` is `<exact>,<misplaced>`",
-            modelBlocked: "mastermind solver not written",
             maxRam: 32,
             blockedRam: 16,
             freeRam: 16,
             authState: "auth-required",
-            facts: {
-              depth: { at: 900, from: "agent", via: "darkweb", ageMs: 100, expiresInMs: 5_000, stale: false, class: "position" },
-              modelId: { at: 900, from: "agent", via: "darkweb", ageMs: 100, expiresInMs: null, stale: false, class: "identity" },
-            },
+            // One timestamp per fact. The panel works out the rest.
+            facts: { depth: 900, modelId: 900 },
           },
         ],
       },
@@ -283,11 +280,10 @@ describe("the panel at the scale the game actually reaches", () => {
     expect(html).toContain("<svg");
     expect(html.split('data-key="node:').length - 1).toBe(2);
     // ...the detail card explains WHY the host is untouched rather than leaving
-    // a blank where a reason belongs...
+    // a blank where a reason belongs — looked up from the model registry by id,
+    // not shipped per host...
     expect(html).toContain("mastermind solver not written");
     expect(html).toContain("MastermindHint");
-    // ...each fact says how old it is and who saw it...
-    expect(html).toContain("agent via darkweb");
     // ...an identity fact says it never expires, rather than showing 0ms left...
     expect(html).toContain("never expires");
     // ...and agent mortality is on screen, which it never has been before.

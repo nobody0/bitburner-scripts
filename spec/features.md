@@ -188,7 +188,7 @@ others before anyone acts.
 `dnet` is the one feature whose work runs somewhere other than `home`: sessions
 are per-PID and several of its calls only work from the target host, so it owns
 agent entrypoints under `game/dnet/`. Its remote-execution model and the
-provenance/expiry rule that follows are in [`spec/dnet.md`](dnet.md).
+expiry rule that follows are in [`spec/dnet.md`](dnet.md).
 
 ### Cross-feature coordination
 
