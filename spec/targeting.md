@@ -453,8 +453,7 @@ money bands held during farming.
 - An idle share/exp or prep segment's RAM SPILLS to the farm instead of idling —
   measured −13% median on hacking-early (18.5m → 16.1m, no seed worse). Share
   work itself IS now dispatched (`launchShare`, `shared/strategy/dispatch.ts`,
-  with the marginal-value cutover in `shared/strategy/share.ts`); the earlier
-  "never runs" note here was stale.
+  with the marginal-value cutover in `shared/strategy/share.ts`).
 - The evaluator never invests in a target upgrade whose prep exceeds the
   horizon, which on a small early fleet is every better target: joesguns
   scores 6× n00dles at skill 30 but preps in hours on 92 GB, so the farm sits

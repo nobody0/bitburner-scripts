@@ -7,9 +7,9 @@ totals, time). The browser keeps a separate UI projection because it retains
 raw server fields and an event feed. "Time to goal" is the `t` of the record
 that first satisfies the predicate.
 
-Detailed `hack.done` records, and therefore `earn:`/hack-count totals, are
-simulator-only today. Live farming deliberately avoids per-operation events;
-its totals will come from the future one-per-second `farm` rollup.
+Detailed `hack.done` records are simulator-only: live farming deliberately
+avoids per-operation events. Live `earn:`/hack-count totals come from the 1 Hz
+`farm` rollup instead (`shared/telemetry/state-map.ts`; see `spec/telemetry.md`).
 
 ## Forms (`shared/goals/goal.ts`)
 

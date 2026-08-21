@@ -16,10 +16,9 @@ batcher citations in this document are all to the later one.
 | `bitburner-master` | `master` @ `dc0720b` (42 commits) | `servers/home/imports/batchPlanner.ts`, `batchRunner.ts` | **The batcher.** Pooled resident workers, `additionalMsec` landing control, fractional thread strength, batch handoff. This is the version that ran well. |
 | `bitburner-2023` | `2023` @ `43e8585` (54 commits) | `src/_lib/batchers/{jit,filler,prepare,shotgun}.ts`, `src/_lib/optimizer.ts` | Factions/augmentations, progression, stock, the `stubCall` RAM dodger. Its production path was `shotgun`+`prepare`+`filler`; **`jit.ts` was unwired work-in-progress and must not be cited as proven.** |
 
-Earlier revisions of this document derived the whole window model from
-`bitburner-2023/src/_lib/batchers/jit.ts`. That was the wrong anchor: it is the
-abandoned branch's unfinished batcher. The most consequential error it
-introduced is described in §2.
+Do not re-anchor to `bitburner-2023`'s `jit.ts`: earlier revisions of this
+document derived the whole window model from it, and §2 describes what that
+cost.
 
 ## 1. Architecture: pooled resident workers
 
@@ -351,10 +350,8 @@ Use a settled measurement window and watch these together:
 
 ## 9. The 2024 re-audit
 
-`spec/jit-reference.md` had drifted: most of its MISSING list was closed without
-the table being updated, and three of its rows were not gaps at all. This
-section records what changed and — more usefully — what was decided NOT to
-port, with the reason.
+What the 2024 single-target batcher had that this project did not — and, more
+usefully, what was deliberately NOT ported, with the reason.
 
 ### Closed: fractional thread strength
 

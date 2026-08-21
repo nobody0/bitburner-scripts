@@ -3,8 +3,8 @@
 The game script contains only a logger; everything visual lives in the external
 `ui/` process. The simulator and game share the wire schema and core state keys,
 so the same hub and viewer accept both. Their event sets deliberately differ:
-the sim currently emits detailed `hack.done` records, while live farming will
-publish one-per-second aggregate `farm` state instead of per-operation events.
+the sim emits detailed `hack.done` records, while live farming publishes
+one-per-second aggregate `farm` state instead of per-operation events.
 
 ## Records
 
@@ -153,21 +153,19 @@ White's reply published a score one stone ahead of the position beside it.
 `dispatchBreakdown` measures from the opponent promise making Black actionable
 to the irreversible Go call, split into disjoint, ordered segments (`admit`,
 `prepare`, `lease`, `finalize`, `align`, `dispatch`, `residual`) that sum to
-`totalMs`. The total alone cannot distinguish a slow worker from time
-deliberately spent waiting to land on the intended engine tick — only `align`
-is intended. The whole breakdown is absent rather than approximated when no
+`totalMs`. Only `align` is intended delay (`spec/go-ai.md` explains the engine
+tick it waits for), so the total alone cannot distinguish it from a slow
+worker. The whole breakdown is absent rather than approximated when no
 boundary is held: a substituted one would publish a flattering few milliseconds
 in exactly the cold-start case worth seeing. Values not measured this turn are
 likewise omitted rather than zeroed: `preparationMs` is absent on a position
 cache hit, and `finalizationMs` on a pushed prediction was measured during the
 previous White response, which `pushedPredictionHit` records. `engineCycleMs`
 and `aiWaitMs` are game constants, not observations.
-Each candidate records simulator-
-fitted win/score priors, heuristic duration, exact expected node power and
-multiplier change, transient install-ETA savings, expected nonlinear faction-
-favor gain, persistent faction-work savings and saved-seconds-per-game-second. This is enough to
-recompute why an opponent was chosen and to detect live-prior drift without
-shipping or importing the game implementation.
+Each candidate records the full input to the opponent choice — the
+simulator-fitted priors and every valuation term `spec/go-ai.md` lists — which
+is enough to recompute why an opponent was chosen and to detect live-prior
+drift without shipping or importing the game implementation.
 
 Investment decisions use the same snapshot-plus-transition pattern. The
 `fleet.infrastructurePlan` and `hacknet.plan` topics capture the horizon,

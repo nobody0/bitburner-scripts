@@ -50,14 +50,16 @@ note in `README.md`.
   `initTelemetry` or the sink sits inside the label, and nothing the controller
   *decides on* (capabilities, BitNode, progression, any probe result) may.
   `tests/build-perf.test.ts` pins both halves.
-- Darknet rule: every fact about the darknet carries where it came from and
-  when, and is checked against the mutation clock before it is acted on. A
-  mutation tick lands every ~6 s at the default net depth of 5 in BN15
-  (30 000/depth ms, twice as slow elsewhere), so unstamped topology or
-  credentials are a map of a dead world. Expiry is per fact CLASS and derived from the
-  transcribed mutation rates (`shared/strategy/dnet/rates.ts`), never guessed.
-  Agents run on darknet hosts because sessions are per-PID and the controller's
-  static RAM is pinned; see `spec/dnet.md`.
+- Darknet rule: every fact about the darknet carries WHEN it was observed, and is
+  checked against the mutation clock before it is acted on. A mutation tick lands
+  every ~6 s at the default net depth of 5 in BN15 (30 000/depth ms, twice as
+  slow elsewhere), so unstamped topology or credentials are a map of a dead
+  world. Expiry is per fact CLASS and derived from the transcribed mutation rates
+  (`shared/strategy/dnet/rates.ts`), never guessed. A fact carries no record of
+  WHICH agent saw it: that was carried once, read by nothing, and deleted — the
+  generation is checked once per rendezvous instead. Agents run on darknet hosts
+  because sessions are per-PID and the controller's static RAM is pinned; see
+  `spec/dnet.md`.
 - The simulator runs the real `game/` controller, so `sim/` may import `game/`
   but never the reverse, and `game/` must stay unaware it is being simulated —
   no clock injection, no sim-only branches. Virtual time is installed under it

@@ -3,11 +3,10 @@
 Keeping one main save with real progress, plus named snapshots that simulation
 runs start from.
 
-The running automation also writes `data/run-lineage.txt` on `home`. It is a
-small UUID/label marker, not game state: home text files persist through
-augmentation installs and BitNode destruction, so telemetry from that save can
-be chained across both. Exported snapshots naturally carry the marker; an older
-snapshot without one receives a fresh lineage the first time it starts.
+The running automation also writes `data/run-lineage.txt` on `home` — a small
+UUID/label marker, not game state (`spec/telemetry.md` owns run identity).
+Exported snapshots naturally carry the marker; an older snapshot without one
+receives a fresh lineage the first time it starts.
 
 ## Where snapshots come from
 

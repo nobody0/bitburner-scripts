@@ -119,11 +119,9 @@ Rules for probe bodies:
   rather than returning empty when unavailable. The runner isolates each probe
   from its batch-mates; a probe must isolate any sub-API gated differently
   from its own `requires`.
-- **Cadences are plain literals.** This was once load-bearing: `everyMs:
-  2 * MINUTE` defeats esbuild's purity analysis, which used to pin the whole
-  probe object into `--perf` bundles. Probes are now compiled into every build
-  by design, so nothing tree-shakes and the rule guards nothing — it survives
-  as house style only. Do not reintroduce a test for it.
+- **Cadences are plain literals** — house style only, since probes are now
+  compiled into every build and nothing tree-shakes. Do not reintroduce a test
+  for it.
 - **`methods` must name real ns functions.** A typo makes
   `getFunctionRamCost` throw, the runner guess a price, and the probe quietly
   never run. The test checks every name against the type definitions.
@@ -237,9 +235,8 @@ them one would be a category error.
 whole scheduling rule, and it is where the capability gate is enforced. Two
 properties matter.
 
-- **`unknown` never ticks.** "We have not looked" is not "you may play it".
-  Acting on an unprobed feature spends a stub launch discovering an API that
-  throws.
+- **`unknown` never ticks** (see [Capabilities](#capabilities)). Acting on an
+  unprobed feature spends a stub launch discovering an API that throws.
 - **An unlock is not a wait.** When the gate batch reports a feature moving to
   `yes`, the controller deletes its `featureLastRun` entry so it ticks on the
   next pass instead of serving out a cadence it was never eligible for.
@@ -250,9 +247,11 @@ Everything else is slower by orders of magnitude, which is the reason the
 frame schedules by cadence at all rather
 than running every driver every pass.
 
-All fourteen are implemented; there is no `inert()` helper any more. Two are
-implemented to the *strategy* level only and refuse to issue their calls —
-`corp` and `dnet` (`spec/progress.md`, and for dnet's reasons `spec/dnet.md`). Four have
+All fourteen are implemented; there is no `inert()` helper any more. `corp` is
+implemented to the *strategy* level only and refuses to issue its calls; `dnet`
+issues its own on live hosts through the overseer/agent pipeline, while
+`stepDarknet` stays a pure ranking with no action for a driver to carry out
+(`spec/progress.md`, and for dnet's reasons `spec/dnet.md`). Four have
 their own file (`factions`, `career`, `hacknet`, `stock`) because they needed
 more than the common shape; the rest share `features/remaining.ts`, which is a
 statement about their SHAPE — build a view, call one pure `step*`, execute at
@@ -305,12 +304,11 @@ Two rules that are easy to get backwards:
 
 ## The simulator
 
-`sim/features/` models `factions`, `crime` (career's engine) and `hacknet`,
-each wired to the real `EngineSubsystems` hook and each driving a deterministic
-isolation profile that runs the **real** controller to a goal. The remaining
-features have pure strategy, a driver and unit tests, but no simulator model —
-so they are unit-proven, not simulator-proven, and their ns calls report
-`unmodeled()` rather than fabricating a value. `spec/progress.md` tracks which
-is which.
+`sim/features/` models are each wired to the real `EngineSubsystems` hook and
+each drive a deterministic isolation profile that runs the **real** controller
+to a goal. Features without one have pure strategy, a driver and unit tests — so
+they are unit-proven, not simulator-proven, and their ns calls report
+`unmodeled()` rather than fabricating a value. `spec/simulator.md` is the
+authoritative list of which is which.
 
 The composed BitNode-level simulation is the point of splitting them this way.

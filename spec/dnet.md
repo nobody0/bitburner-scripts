@@ -35,7 +35,7 @@ and the session dies with it.
 |---|---|
 | `scp` *from* a darknet host | nothing at all |
 | `scp` *to* a darknet host | a session — but **no** direct connection, at any distance |
-| `ns.exec` on a darknet host | a session **and** a direct connection, backdoor, or stasis link |
+| `ns.exec` on a darknet host | a session **and** either a direct connection or a backdoor (a stasis link does *not* help — see [Backdoors and stasis links](#backdoors-and-stasis-links)) |
 
 So getting *data* around is nearly free, and getting a *running process* to
 depth *n* is the hard problem. Everything upstream of that is a credential
@@ -89,7 +89,7 @@ passwords. The clock is quantified under [The mutation clock](#the-mutation-cloc
 | `induceServerMigration(host)` | *Raises the chance* a connected, non-stationary host moves. Scales with threads and charisma. Cannot target its own host |
 | `getDarknetInstability()` | Backdoor-induced **authentication** unreliability: `authenticationDurationMultiplier` and `authenticationTimeoutChance`. Unrelated to the map clock |
 | `nextMutation()` | The map's own clock (0 GB) |
-| `unleashStormSeed()` | Runs `STORM_SEED.exe` if present on the calling host. Documented as catastrophic |
+| `unleashStormSeed()` | Fires `STORM_SEED.exe` if present on the calling host — the mutation clock, all at once. See [The mutation clock](#the-mutation-clock) |
 | `promoteStock(sym)` | Raises a symbol's **volatility**, not its forecast. Earns nothing directly — it is a `stock` input (see [Stock propaganda](#stock-propaganda)) |
 | `phishingAttack()` | **Only from scripts on darknet servers.** Builds charisma, lifts money scaling with threads, occasionally yields a `.cache` file |
 | `labreport()`, `labradar()` | The labyrinth's eyes: 0 GB, read-only, and the only two calls whose docs are riddles. `labreport()` answers `{coords, north, east, south, west}`; `labradar()` answers an ASCII render of radius 3. Both need a direct connection to the lab and both cost a full authentication time — see [The labyrinth](#the-labyrinth) |
@@ -161,18 +161,15 @@ labyrinth is walked (`DarkNet/effects/labyrinth.ts`, `labData`; transcribed as
 
 So roughly 14 servers at depth 5, ~24 at depth 7, and ~163 at depth 36. Depth
 also sets the mutation rate, so a deeper net is both larger and faster-moving.
-**`manual` is a UI permission, not a solver requirement, and it reads the
-opposite way round to what the name suggests.** Every lab is scriptable: the
-engine's movement handler gates on charisma and nothing else
+**`manual` is a UI permission, not a solver requirement.** Every lab is
+scriptable: the movement handler gates on charisma and nothing else
 (`labyrinth.ts:234-332`), and `NetscriptFunctions/Darknet.ts` never reads
-`manual` at all. The flag is referenced in exactly three places, all of them
-UI: a manual lab offers a `"Manual UI"` perspective (pid `-1`) in the viewer
-(`DarkNet/ui/LabyrinthSummary.tsx:60,73,83,147`) and keeps its password box
-(`DarkNet/ui/PasswordPrompt.tsx:29-45`), while a NON-manual lab replaces that
-box with *"It seems this place will challenge you to make your own tools..."*
-and renders *"This lab cannot be completed manually. Select a script PID..."*.
-So the first two labs may be walked by hand OR by script, and the last six are
-**script-only** — the engine asking for a solver by name.
+`manual`. Its only effect is in the viewer — a manual lab keeps its password box
+(`DarkNet/ui/PasswordPrompt.tsx:29-45`, `DarkNet/ui/LabyrinthSummary.tsx:60,73,83,147`),
+a non-manual one replaces it with *"This lab cannot be completed manually.
+Select a script PID..."*. So the first two labs may be walked by hand OR by
+script, and the last six are **script-only** — the engine asking for a solver
+by name.
 
 (`getNetDepth()` reads `getLabyrinthDetails().depth ?? 10`, but the `?? 10` is
 dead code: the no-access branch returns a literal `depth: 5` and
@@ -200,6 +197,26 @@ The two clocks must not be confused: the *net* churns in seconds, while any
 `depth × NET_WIDTH × SERVER_DENSITY` servers. Both figures are transcribed in
 `shared/strategy/dnet/rates.ts`, and the knowledge expiry below is derived from
 them.
+
+A **webstorm** is that clock discharged in one 30-second burst
+(`DarkNet/effects/webstorm.ts:25-79`): ~60% of movable servers deleted, the
+survivors moved and restarted, then 40 fresh ones added and rebalanced. The
+restart spares only the immune hosts below, so **every session and every
+backdoor on every movable host go at once** (`NetworkMovement.ts:301-311`). It
+holds `mutationLock`, which early-returns `mutateDarknet`
+(`NetworkMovement.ts:45-48`), so the ordinary clock is frozen throughout and
+`nextMutation()` resolves on storm phases instead. Nothing in `ns.dnet` exposes
+the lock — a storm is inferred from everything failing together, never detected.
+
+Its seed is a `memoryReallocation` reward gated four ways
+(`DarkNet/effects/ramblock.ts:50-66`): the block cleared, a 15% roll, no seed
+existing net-wide, and **30 minutes since the last storm** — the one real
+cooldown in the feature. `lastStormTime` is module scope and absent from
+`DarkNet/effects/SaveLoad.ts:4-14`, so the clock restarts on every load and no
+seed can spawn in a session's first 30 minutes. `handleStormSeed` consumes the
+file and stamps the clock *before* `launchWebstorm` checks the lock
+(`webstorm.ts:81-85`, `:26-28`), so firing into a storm already running burns
+the seed for nothing.
 
 ## Passwords and the oracle
 
@@ -279,9 +296,8 @@ labCha * 0.85` and `levelVariance = (random * 3 - 1) * depth`.
 ## The 24 server models
 
 `ModelIds` (`DarkNet/Enums.ts:15-41`) is 24 entries, commented "This list is not
-exposed to the player; they find them through discovery". Recorded here rather
-than rediscovered, with the feedback each gives on a wrong attempt
-(`authentication.ts:33-147`):
+exposed to the player; they find them through discovery", with the feedback each
+gives on a wrong attempt (`authentication.ts:33-147`):
 
 | `modelId` | Kind | Feedback on a wrong password |
 |---|---|---|
@@ -377,7 +393,9 @@ freeing meaningful RAM is a many-call grind, scaled hard by charisma and
 difficulty. It awards `charisma_exp * threads * 10 * 1.1^difficulty` charisma
 xp, and when `blockedRam` reaches 0 on a non-labyrinth server it calls
 `addCacheToServer(server, false)` — clearing a server's block yields a `.cache`
-file.
+file. The same handler rolls two more things (`ramblock.ts:50-66`): a 30%
+chance of a clue, and — subject to the storm gates above — the storm seed. The
+grind has a hazard attached, not only a payout.
 
 What that RAM can and cannot run:
 
@@ -399,8 +417,19 @@ What that RAM can and cannot run:
 A backdoor is the only unlimited way to `exec` on a darknet host that is not
 directly connected: `ns.exec` calls the darknet gate with
 `backdoorBypasses: true` (`NetscriptFunctions.ts:641-646`), so
-`backdoorInstalled` satisfies the direct-connection requirement. The only other
-bypass is a stasis link — and there are at most four of those, ever.
+`backdoorInstalled` satisfies the direct-connection requirement. **It is the
+only bypass there is.**
+
+A stasis link does *not* grant remote `exec`, though the engine's own error
+message and upstream's `connectToSession` doc comment both say otherwise. The
+gate tests `options.backdoorBypasses && targetServer.backdoorInstalled` and
+nothing else (`DarkNet/effects/offlineServerHandling.ts:82-97`), while
+`isDirectConnected` is pure adjacency (`:128-129`); `hasStasisLink` never
+touches `serversOnNetwork` at all. What misleads is the failure path's own
+advice, *"You can also use a backdoor or stasis link on the target to allow
+remote access"* (`offlineServerHandling.ts:89`), which is an upstream doc bug.
+
+> **Stasis buys durability. A backdoor buys reach. Neither buys the other.**
 
 Three costs attach to a backdoor:
 
@@ -426,15 +455,26 @@ isConnectedTo || hasStasisLink` (`NetworkMovement.ts:227-228`) is checked by
 `deleteDarknetServer`, `moveDarknetServer` and `restartServer`, each returning
 early on it — a stasis-linked host is not deleted, moved or restarted.
 
+**Stasis and a backdoor together are strictly free.**
+`getBackdooredDarknetServers` filters `!s.hasStasisLink`
+(`darknetNetworkUtils.ts:90`) and the instability surplus counts only that pool
+(`effects.ts:91-97`), so a pinned host contributes nothing to the `1.07 ^
+surplus` slowdown. It is also outside the movable pool the restart and delete
+branches draw from. Pinning a backdoored host therefore removes its instability
+cost *and* its churn risk at once — the one combination in this feature with no
+downside.
+
 | | Count | Grants | Costs |
 |---|---|---|---|
-| Backdoor | unlimited | remote `exec` | auth slowdown past the free allowance; restart/delete targeting; the restart clears the backdoor |
-| Stasis link | 1-4 | remote `exec`, and exemption from delete/move/restart | a limited slot; 12 GB and the apply time on the target |
+| Backdoor | unlimited | remote `exec` — the only bypass | auth slowdown past the free allowance; restart/delete targeting; the restart clears the backdoor |
+| Stasis link | 1-4 | exemption from delete, move and restart. **Not** remote `exec` | a limited slot; 12 GB and the apply time on the target |
 
-So backdoors are the expendable frontier and stasis links pin what we cannot
-afford to lose. The strategic loop the docs never note: labyrinth rewards buy
-stasis capacity, stasis capacity holds more of the graph, and holding the graph
-is what makes the labyrinth walkable.
+So backdoors are the expendable frontier, and a stasis link keeps one HOST
+alive rather than keeping the graph reachable. What most deserves one is the
+process whose progress cannot be rebuilt — the labyrinth walker, whose position
+is keyed by PID, so a restart of its host destroys a maze walk outright with no
+way to resume. The loop closes: labyrinth rewards buy stasis capacity, stasis
+capacity protects the next walk, and the walk is what deepens the net.
 
 ## Verified formulas
 
@@ -469,11 +509,52 @@ Two things worth reading twice:
 **Heartbleed time** is `calculateAuthenticationTime(...) * 1.5`
 (`NetscriptFunctions/Formulas.ts:492-498`).
 
+**A wrong password costs nothing but time.** `handleFailedAuth` does exactly one
+thing — `Player.gainCharismaExp(calculatePasswordAttemptChaGain(server, threads,
+false))` (`DarkNet/effects/effects.ts:48-50`) — so there is no lockout, no
+cooldown and no escalating penalty anywhere in the model switch. Iterating a
+solver is bounded by the mutation clock and by nothing else, and the failures
+pay charisma on the way. A FIRST successful authenticate additionally rolls
+`0.1 * 1.05 ^ difficulty` for a free `.cache` (`effects.ts:42-45`), so cracking
+is itself a reward source rather than only a means to one.
+
 ## Caches
 
 `.cache` files sit on a server in `DarknetServer.caches` and are listed by
-`ns.ls`. They are created by clearing a server's blocked RAM, and by
-`phishingAttack()` — a phishing cache is named `.d.cache`.
+`ns.ls`. Four things create them, and their rates differ far more than their
+rewards do:
+
+| Source | Roll | Rate limit | Name |
+|---|---|---|---|
+| First successful `authenticate` | `0.1 * 1.05^difficulty`, non-lab (`effects.ts:42-45`) | once per server identity | `.cache` |
+| `memoryReallocation` clearing `blockedRam` to 0 | none — guaranteed (`ramblock.ts:71-83`) | renewable: a restart restores the block | `.cache` |
+| `phishingAttack()` | `0.005 * crime_success * threads * ((400 + cha) / 400)`, non-lab | **one per 3 minutes, net-wide** | `.d.cache` |
+| Reaching a labyrinth exit | none — one, or three on BonusLab | once per lab | lab cache |
+
+**The phishing cooldown is global.** `phishingCacheCooldownReached()` compares
+against `DarknetState.lastPhishingCacheTime` (`phishing.ts:70-73`) — engine
+state, not server state — so the whole net yields at most **20 phishing caches
+an hour** however many threads on however many hosts are phishing.
+`prestigeDarknetState` restamps it (`DarknetState.ts:95`), so an install starts
+the window closed. Threads move the roll, not the ceiling; what they buy is the
+rest of the call (`phishing.ts:12-59`):
+
+| | |
+|---|---|
+| Wait | `max(10000 * (400 / (400 + cha)), 200)` ms |
+| Charisma xp | `charisma_exp * threads * 50`, a quarter of that on failure — every call pays |
+| Money chance | `0.05 * crime_success * ((200 + cha) / 200)` |
+| Money | `500 * crime_money * dnet_money * (0.1 + depth * 0.05) * threads * ((400 + cha) / 400) * bonusTime(1.3) * U(0.9, 1.2) * DarknetMoneyMultiplier` |
+
+The cache branch is an `if` and the money branch its `else if`: claiming a cache
+forecloses that call's money roll, and while the cooldown is unexpired every
+call falls straight through to money.
+
+So the volume sources are cracking and the RAM grind — neither is rate-limited —
+while phishing is a trickle whose unique value is that `.d.cache` is the only
+cache that can award a coding contract. One small resident phisher at high
+charisma claims each window; threads above that are a money and charisma
+decision.
 
 `openCache(filename)` lowers karma by `difficulty + 1` (returned as a negative
 `karmaLoss`) and yields one reward drawn at random from:
@@ -484,7 +565,37 @@ Two things worth reading twice:
 - a coding contract — **only** for `.d.cache` files, i.e. from phishing,
 - money — **only** when the node's `DarknetMoneyMultiplier` is non-zero.
 
+`karmaLoss` is worth sizing: `difficulty` tracks a server's original depth, so a
+deep-net cache pays up to −37 karma against a depth-7 net's −8, and karma
+survives an install. A gang wants −54000, so a full sweep of a depth-36 net is
+worth roughly a thousand — caches supplement homicide rather than replace it.
+
 On a labyrinth server, the labyrinth cache instead calls `getLabReward()`.
+
+### A lab cache is not free to open, and the cost is not karma
+
+`getLabReward()` hands over no item: it calls `Player.queueAugmentation(reward)`
+directly (`cacheFiles.ts:173-178`), and a queued augmentation is charged against
+every augmentation bought after it (`AugmentationHelpers.ts:29-36`, applied at
+`:137` and `:157`):
+
+```
+priceMult = (1.9 * [1, 0.96, 0.94, 0.93][SF11 level]) ^ queuedNonSoA
+```
+
+The labyrinth six are not in `soaAugmentationNames`, so they count in full, as
+does the NeuroFlux fallback. Opening a lab cache mid-shopping-trip multiplies
+everything still unbought by 1.9x.
+
+> **Open a lab cache only after the last augmentation purchase of an install
+> cycle, immediately before the install itself.**
+
+Deferring costs nothing. `getLabAugReward()` walks a fixed prereq chain, so the
+same reward waits however long we take, and the file cannot be lost: the lab is
+`isStationary` and therefore outside the pool every mutation branch draws its
+victims from (see [The rule: expiry](#the-rule-expiry)). It does not generalise
+— ordinary caches queue nothing and sit on movable hosts, so those are opened on
+sight.
 
 The program/market branch is the valuable one, and it is an ordered ladder
 (`cacheFiles.ts:130-168`): the first program not already owned, walking
@@ -526,7 +637,7 @@ best way to beat a maze is to find the end, and not to try and skip it."*
 pay a full `calculateAuthenticationTime` per look, so vision is not cheaper than
 a step.
 
-Two constraints follow, and they shape the whole solver:
+One constraint follows, and it shapes the whole solver:
 
 - **Position is keyed by PID** (`DarknetState.labLocations[pid]`,
   `labyrinth.ts:334-338`; the manual UI occupies pid `-1`). One process must walk
@@ -534,30 +645,38 @@ Two constraints follow, and they shape the whole solver:
   at a randomly offset start. That is the one job in this feature that must NOT
   spawn, which puts it at odds with the resident model in
   [the shape that follows](#the-shape-that-follows-an-overseer-residents-and-a-spawn-chain).
-- **Reaching the exit** grants charisma xp at a fixed 32-thread equivalent, sets
-  `hasAdminRights`, and drops the lab cache — **three of them on BonusLab**, one
-  everywhere else (`labyrinth.ts:308-315`).
 
-`DarkNet/effects/labyrinth.ts` awards a fixed augmentation sequence; the
-authoritative order is the prereq chain in `AugmentationTable`:
+### The climb
 
-The W1ngs of Icarus → The B00ts of Perseus → The H4mmer of Daedalus →
-The St4ff of Asclepius → The L4w of Bayes → The B1ade of Solomonoff
+The ladder advances on **installed** augmentations, never queued ones:
+`getCurrentLabName` tests `Player.augmentations` (`labyrinth.ts:434-473`). So
+the loop is walk → open → install, and only the last step moves anything.
 
-The rewards are an engine, not just a gate toll. Each costs `rep: 10000` and
-`$1e6` with no faction, is `special: true`, and carries multipliers: five of the
-six raise `charisma` (The St4ff raises `charisma_exp` instead), and five carry
-**`dnet_money`** — 1.3 / – / 1.1 / 1.1 / 1.15 / 1.1 in the order above, The
-B00ts being the exception. They are not bought: `getLabReward()` calls
-`Player.queueAugmentation(reward)` directly, so they cost no money and no
-reputation and belong to no faction — but being queued, they still require an
-install to take effect. If the next reward is already owned, the cache awards
-**NeuroFlux Governor** instead.
+| Step | What it does |
+|---|---|
+| Reach the exit | charisma xp at a fixed 32-thread equivalent, `hasAdminRights`, and the cache drops — **three on BonusLab**, one elsewhere (`labyrinth.ts:308-315`) |
+| Open the cache | queues the augmentation, and nothing more — the next rung stays shut |
+| Install | the rung opens and `getNetDepth()` jumps, but `prestigeDarknetState` also drops `Network`, `labyrinth`, `labLocations` and every per-server fact (`DarknetState.ts:84-100`) — the net is rebuilt from scratch at the new depth |
 
-Three of them raise the stasis-link limit by 1 each: The W1ngs of Icarus, The
-H4mmer of Daedalus and The St4ff of Asclepius. The B00ts of Perseus multiplies
-authentication time by 0.8. Where the Red Pill sits in the sequence is
-node-dependent — see [`bn15.md`](strategy/bitnodes/bn15.md).
+So the install is both the payout and the reset: the ladder position and the
+augmentations carry, the map does not. Depth, charisma gate and maze size per
+rung are under [Network shape](#network-shape).
+
+The six rewards, in prereq order (`labyrinth.ts:403-430`, `AugmentationTable`):
+
+| Reward | cha | `dnet_money` | Also |
+|---|---|---|---|
+| The W1ngs of Icarus | 1.05 | 1.3 | stasis-link limit +1 |
+| The B00ts of Perseus | 1.06 | — | authentication time ×0.8 (`effects.ts:79`) |
+| The H4mmer of Daedalus | 1.07 | 1.1 | stasis-link limit +1 |
+| The St4ff of Asclepius | `charisma_exp` 1.1 | 1.1 | stasis-link limit +1 (`effects.ts:212-214`) |
+| The L4w of Bayes | 1.09 | 1.15 | |
+| The B1ade of Solomonoff | 1.10 | 1.1 | |
+
+Each is `rep: 10000`, `$1e6`, `special: true` and belongs to no faction — none
+of which is ever paid, because the cache queues it directly. If the next reward
+is already owned the cache awards **NeuroFlux Governor** instead. Where the Red
+Pill sits is node-dependent — see [`bn15.md`](strategy/bitnodes/bn15.md).
 
 ## Stock propaganda
 
@@ -609,14 +728,19 @@ longer exist. Expiry is per fact CLASS, and derived rather than chosen
 `mutateDarknet` picks its victim from `getAllMovableDarknetServers`
 (`DarkNet/utils/darknetNetworkUtils.ts:69-78`), which skips any server that
 `isStationary` or `hasStasisLink` — so move, delete, disconnect and restart all
-miss it alike. (`isImmutable`, `NetworkMovement.ts:227`, is a second and narrower
-guard: it covers stasis links but *not* `isStationary`, so the pool exclusion is
-what does the work for both.)
+miss it alike. (`isImmutable`, `NetworkMovement.ts:227`, is a second and
+narrower guard: it covers stasis links but *not* `isStationary`, so the pool
+exclusion is what does the work for both. See
+[Backdoors and stasis links](#backdoors-and-stasis-links) for what that guard
+buys.)
 
 Immunity is therefore a property of the HOST, not of a fact class: nothing about
 such a server ages, and since it cannot be deleted it is never forgotten either.
-Upstream marks `darkweb` and the labyrinth stationary; showing darkweb's depth
-expiring in a minute was the bug that made this worth writing down.
+Upstream marks `darkweb` and the labyrinth stationary — so showing darkweb's
+depth as expiring is a bug, not a conservative default. A webstorm
+is what makes that immunity decisive rather than merely tidy: it invalidates every
+class in the table above at once, and the hostnames it deletes retire into
+`offlineServers` permanently, so their `identity` facts are not stale but gone.
 
 Rates add, times do not: a fact invalidated by any of several events dies sooner
 than the fastest of them alone. The one number not derived is `TRUST_FRACTION`,
@@ -640,10 +764,9 @@ In practice:
 - **There is one host representation.** Home's own one-hop probe reports in the
   same `ReportHost` shape an agent does and folds into the same knowledge; the
   panel reads that fold and nothing else.
-- There is no per-fact record of *which* agent saw it — that was carried once,
-  read by nothing, and deleted. The generation is likewise checked once, on the
-  whole rendezvous (`overseerIsLive`), because agents outlive controllers and
-  what has to be refused is the channel rather than the record.
+- There is no per-fact record of *which* agent saw it, and the generation is
+  checked once on the whole rendezvous (`overseerIsLive`) rather than per fact —
+  because agents outlive controllers, what has to be refused is the channel.
 
 `tests/dnet-staleness.test.ts` pins these as behaviour.
 
@@ -768,6 +891,9 @@ out there.
   acquisition` and lists The St4ff before The H4mmer, contradicting the prereq
   chain in its own `AugmentationTable`. The prereq data is the mechanic, so our
   code follows it; the comment is unexplained.
+- Cache creation is unmodelled in the simulator (`DNET_ASSUMPTIONS`,
+  `dnet.cacheSources`, `sim/features/dnet.ts:93`), so nothing in the test suite
+  covers a cache farm. The rates above are transcribed, not simulated.
 - The $30m "Shadowed Walkway" Darkscape discount is real but unreachable from a
   script (`shared/strategy/dnet/rates.ts:101-115`) — unmodelled, and probably
   staying that way.

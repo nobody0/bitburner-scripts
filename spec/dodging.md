@@ -35,7 +35,9 @@ caller pays only `ns.exec` (1.3 GB).
   graft 7.5, `codingcontract.attempt` 10,
   `destroyW0r1dD43m0n` 32, and a BN1 target of 3.5 to fit an 8 GB home.
 - Both lanes share the same ten-attempt exec retry loop, with `ns.asleep(0)`
-  between failures. Promise results are forwarded (not awaited) so synchronous
+  between failures (ported from the predecessor's `src/_lib/stub-call.ts:11-39`;
+  ours is `game/lib/dodge.ts`). Promise results are forwarded (not awaited) so
+  synchronous
   closures resolve before another script gets a scheduling slot; two trailing
   microtask ticks let the engine reap the stub.
 - Inside a dodged closure, call ns members with **bracket notation on the

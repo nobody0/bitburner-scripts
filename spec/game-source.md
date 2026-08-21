@@ -107,9 +107,9 @@ runs with the same seed would face different markets.
 The darknet's volatility boost is modelled, through the same seam: the adapter's
 `getDarknetVolatilityMult` / `scaleDarknetVolatilityIncreases` are injected from
 `sim/features/dnet.ts` rather than stubbed, so `ns.dnet.promoteStock` moves the
-real vendored tick. `DarkNet/` cannot be vendored — its import graph reaches the
-whole game UI — so the charge curve, the 0.4x per-cycle decay and the
-wait/charge/charisma formulas are transcribed, with
+real vendored tick. Since `DarkNet/` is not vendored (above), the charge curve,
+the 0.4x per-cycle decay and the wait/charge/charisma formulas are transcribed,
+with
 `src/DarkNet/effects/effects.ts` and `src/NetscriptFunctions/Darknet.ts` pinned
 by hash in `sim/tests/drift-pins.test.ts`.
 

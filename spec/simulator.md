@@ -242,13 +242,15 @@ decoder does not yet retain the live board, history, scores, or stored cycles.
 
 ## Two findings this harness surfaced
 
-1. **The probe runner starves on a fresh 8 GB home** (not fixed). The sweep
-   snapshots the network from inside a 4.1 GB dodge stub, so `home.ramUsed`
-   carries the stub's own footprint. `dodgeBudget()` then reads
-   `8 - 3.6 (controller) - 4.1 (stub) - 1.6 - 0.5 < 0` and every probe —
-   including the capability gate — is skipped on every sweep, forever. The farm
-   runs normally, so nothing looks wrong from the outside. Pinned by
-   `sim/tests/ns.test.ts`.
+1. **The probe runner starved on a fresh 8 GB home** (FIXED by fleet dodging).
+   The home-only arithmetic still reads `8 - 3.6 (controller) - 4.1 (stub) -
+   1.6 - 0.5 < 0`, so every probe — including the capability gate — would be
+   skipped on every sweep, forever, with the farm running normally and nothing
+   looking wrong from the outside. Fleet placement funds it instead: the stub
+   ships to every rooted host, so the gate batch lands on a client rather than
+   competing for a home reserve that can never hold it. `sim/tests/ns.test.ts`
+   pins both halves — the arithmetic, and the inverse assertion that
+   `capabilities` is now emitted.
 2. **A 32 GB home stalls the dispatcher** (FIXED). `earn:1e6` was reached at 8,
    16 and 64 GB but not at 32 (30.2 m vs 20.7 m at 8 GB, planner driver,
    seed 1), with `allocFails` climbing while `inFlight` stayed at zero. Two

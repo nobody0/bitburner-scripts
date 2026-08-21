@@ -1,6 +1,6 @@
 # Feature automation progress
 
-Running record of the thirteen-slice feature build-out: what is done, what
+Running record of the fourteen-slice feature build-out: what is done, what
 evidence supports it, and what is deferred with the reason. Updated after each
 feature.
 
@@ -36,7 +36,7 @@ The acceptance bar for a feature is the full vertical slice:
 | 8 | sleeves | **done** |
 | 9 | go | **done** |
 | 10 | stanek | **done** |
-| 11 | dnet | **exploring** — the overseer/agent pipeline (`game/dnet/`) surveys, bleeds, cracks and plants on live darknet hosts; the arbiter-facing stasis action is still refused (mechanical: `setStasisLink` needs 12 GB on the target itself) |
+| 11 | dnet | **exploring** — the overseer/agent pipeline (`game/dnet/`) surveys, bleeds, cracks and plants on live darknet hosts, and every one of the 24 password models now has a solver (`shared/strategy/dnet/solvers/`); the labyrinth is the one model left unsolved, because it is a maze rather than a password. What the feature still does not do is ACT on the net: memoryReallocation, phishing, caches, propaganda, backdoors and stasis are all documented and priced but unwired |
 | 12 | side | **done** |
 | 13 | progression | **done** — endgame route, install barrier, two-pass arm/execute, and post-install restart are live |
 | 14 | endgame route + refresh/act split | **done** — see below |
@@ -53,59 +53,28 @@ unmodelled world. See *Known gaps* below; the roster and that section must agree
 
 #### Second correction: the batcher reference is `@master`, not `@2023`
 
-The batcher was anchored to the wrong branch. `spec/jit-reference.md` derived
-its entire window model from `bitburner-2023/src/_lib/batchers/jit.ts` — which
-is **unwired work-in-progress** on that branch; its production hacking path was
-`shotgun`+`prepare`+`filler`. The proven batcher is on
-**`nobody01/bitburnerscript@master`** (`dc0720b`, 42 commits):
-`servers/home/imports/batchPlanner.ts` and `batchRunner.ts`.
+The batcher was anchored to the wrong branch — `bitburner-2023`'s `jit.ts` is
+unwired work-in-progress. The proven batcher is
+`nobody01/bitburnerscript@master` (`dc0720b`), and `spec/jit-reference.md` was
+rewritten against it; §0 there carries the branch table and §2 the window model
+this got wrong. `@2023` remains the reference for factions, augmentations,
+progression, stock and the `stubCall` dodger, so citations must now name the
+branch.
 
-The consequential error this introduced: `@2023/jit.ts` exposes a single
-`minimumWorkerPrecision = 3 ms`, which we generalized into
-`MINIMUM_LANDING_GAP_MS = 40 × 5 ms = 200 ms` on the theory that promise and
-timer jitter must be absorbed by landing separation. `@master` shows these are
-two independent constants — `JOB_LATE_FINISH = 3` (landing separation) and
-`POSSIBLE_LAGS = 200` (launch slack, absorbed by `additionalMsec`) — and that
-conflating them costs ~66× of pipeline depth, because
-`depthCapGb = floor(weakenMs / interval) × ramPerBatch`. That is the direct
-cause of the idle-RAM figure in the JIT stress scenario. `spec/jit-reference.md`
-was rewritten against `@master` and the constants split.
+*What shipped:* `MINIMUM_LANDING_GAP_MS` 200ms -> **5ms**, a new
+`LAUNCH_SLACK_MS = 200` carrying the jitter budget separately, and
+`THREAD_WEAKEN_UPSCALE` as ordering insurance (added, not multiplied). HWGW
+batch interval **800ms -> 20ms**. `JIT_LAUNCH_GUARD_MS` is numerically unchanged
+at 230ms, now derived from the launch slack rather than the landing gap.
 
-What shipped: `MINIMUM_LANDING_GAP_MS` 200ms -> **5ms** (the reference's 3ms
-plus headroom for our per-invocation telemetry), a new `LAUNCH_SLACK_MS = 200`
-carrying the jitter budget, and `THREAD_WEAKEN_UPSCALE` as ordering insurance.
-`JIT_LAUNCH_GUARD_MS` is numerically unchanged at 230ms, now derived from the
-launch slack rather than the landing gap. HWGW batch interval: **800ms -> 20ms**.
-
-Three things the split exposed, all fixed. Each was a place where a value that
-had nothing to do with landing separation was nonetheless spelled `SPACER_MS`,
-and worked only because 200ms happened to be large enough:
-
-- **Anchors.** Both the JIT and eager anchors used the spacer as a LAUNCH
-  cushion. Below the launch guard the first weaken's `startAt` fell in the past
-  and whole batches were dropped. The eager path now names
-  `JIT_LAUNCH_GUARD_MS`; the JIT path shifts a batch by its exact deficit once
-  ops are placed at `batchWorstDifficulty`.
-- **Overdue retry.** The backoff for an op that is due but unplaceable was
-  `min(SPACER_MS, exact)`. At 5ms that became a spin: ~1.2M planner passes over
-  900s of simulated time, and one dispatch fixture went from ~1s to 472s of
-  wall-clock. It is now `OVERDUE_RETRY_MS = WORKER_STARTUP_GUARD_MS` — retrying
-  faster than a worker can start cannot succeed, and the RAM it waits on frees
-  on a completion, which wakes the dispatcher anyway.
-- **Weaken insurance.** `ceil(x * 1.001)` is not a 0.1% margin on integer thread
-  counts. Applied naively it cost a **doubled batch interval (7.6s -> 15.1s) on
-  a 256 GB fleet** by pushing the role envelope past a `chooseJitSchedule`
-  quantization boundary. The insurance is added, not multiplied.
-
-An intermediate 20ms gap was tried first, on the theory that a worker landing at
-`t` could be needed again at `t + gap` because our pool is sized by RAM rather
-than by the reference's duration-scaled pool counts. That theory was wrong: once
-the anchors and the retry spin were fixed, 5ms is clean. The RAM envelope is
-already duration-scaled through `jitCapacity`'s `ceil(holdMs / interval)`.
-
-`@2023` remains the reference for factions, augmentations, progression, stock
-and the `stubCall` dodger. Citations must now name the branch: "the predecessor
-scripts on disk" is ambiguous with two checkouts live.
+*Measured, and not recorded elsewhere:* the overdue-retry backoff was
+`min(SPACER_MS, exact)`, which at 5ms became a spin — ~1.2M planner passes over
+900s of simulated time, and one dispatch fixture going from ~1s to 472s of
+wall-clock. It is now `OVERDUE_RETRY_MS = WORKER_STARTUP_GUARD_MS`: retrying
+faster than a worker can start cannot succeed, and the RAM it waits on frees on
+a completion, which wakes the dispatcher anyway. An intermediate 20ms gap was
+tried first and was unnecessary; once the anchors and the spin were fixed, 5ms
+is clean.
 
 #### First correction: `@2023`, not `nobody0/bitburner`
 
@@ -162,34 +131,15 @@ already running could never have interrupted it. Now 75 vs 60, with
 `tests/arbiter.test.ts` pinning `career:blocking-need > factions:work +
 PREEMPT_MARGIN` so it cannot silently regress.
 
-**0.4 RAM funding.** Three mechanisms, in the order of how much they buy:
-
-- **Dodge on fleet hosts.** `dodge(ns, fn, gb, { host })` plus a pure placement
-  policy (`shared/ram/placement.ts`): small budgets prefer home for latency,
-  large ones take the smallest fleet host that fits so large contiguous blocks
-  survive for hack ops. The stub now ships to every rooted host alongside the
-  worker.
-- **Multi-step probes.** `SteppedProbe` runs one dodge per step, so a probe's
-  launch price is the largest **step** rather than the sum of its methods.
-  Partial results are kept and the step that did not fit is reported with its
-  own price.
-- **Feature-aware home reserve.** `shared/ram/reserve.ts`: base plus the largest
-  step any *unlocked* feature declares, clamped to 40% of home and never below
-  base. A capped reserve is reported as a blocker rather than silently starving
-  the feature.
-
-Three correctness details that are easy to get wrong, each pinned by a test:
-
-- `reclaimFleet` now handles **the stub's own host** per-process, not just home.
-  Since dodges can land on the fleet, a blanket `killall` there would kill the
-  stub doing the killing and hang the dodge until its 10 s watchdog fired —
-  every cold boot, non-deterministically, depending only on placement.
-- Placement **allocates through the heap** (`Heap.reserveOn`). Without the
-  lease a stub occupies RAM the heap still believes is free, and the two
-  allocators fight over the same gigabytes, with `ns.exec` returning 0 forever.
-- `ns.exec` of the stub **retries** 10× with `sleep(0)` between, from
-  `src/_lib/stub-call.ts:11-39`. A transient RAM blip was previously a lost
-  probe and a 30 s wait.
+**0.4 RAM funding.** Three mechanisms: dodges may run on fleet hosts under a
+pure placement policy (`shared/ram/placement.ts`); `SteppedProbe` prices a probe
+at its largest **step** rather than the sum of its methods, keeping partial
+results; and the home reserve is feature-aware (`shared/ram/reserve.ts`) — base
+plus the largest step any *unlocked* feature declares, clamped to 40% of home,
+reported as a blocker when capped rather than silently starving the feature.
+`spec/dodging.md` carries the placement policy and the three correctness details
+that go with it (the heap lease, `reclaimFleet` on the stub's own host, and the
+exec retry), each pinned by a test.
 
 *Evidence, and the headline result:* a fresh 8 GB BN1 home previously could not
 afford **any** probe — `capabilities` was never emitted and no gated feature
@@ -220,15 +170,13 @@ reputation formulas (with share-bonus and SF15 level as explicit injections
 rather than silently-wrong constants), and the enum/constant files that are the
 scope.
 
-Four bugs the extractor's own checks caught, each of which would have produced
-plausible-looking wrong data:
-
-| Symptom | Cause |
-|---|---|
-| 34 factions, expected 33 | The plan's premise was wrong. Both `FactionName` and the table have **34** — `ShadowsOfAnarchy` is easy to miss because it is special-cased everywhere. |
-| `keepOnInstall` false for all 34 | The constructor *param* is `keepOnInstall`; the class stores it as `keep`. Reading the param name yields `undefined` everywhere, which `!!` turns into a uniform, entirely plausible `false`. Real count: 12. |
-| `programs` treated as a multiplier | `BigD's Big ... Brain` grants programs; folding a string array — or `startingMoney`'s 1e6 — into `mults` would have dominated a log-sum score. |
-| Unpurchasable augs priced `null` | `JSON.stringify(Infinity)` is `null`, which reads as "no price". The emitter now writes real `Infinity`, keeping it distinct from The Red Pill's genuine `0`. |
+The extractor's own checks caught four bugs, each of which would have produced
+plausible-looking wrong data. Two are traps that recur whenever the tables are
+re-extracted: the faction constructor *param* is `keepOnInstall` but the class
+stores it as `keep`, so reading the param name yields a uniform and entirely
+plausible `false` (real count: 12); and `JSON.stringify(Infinity)` is `null`,
+which reads as "no price", so the emitter writes real `Infinity` to keep
+unpurchasable augs distinct from The Red Pill's genuine `0`.
 
 `UnstableCircadianModulator` randomises its multipliers at load time, so there
 is no correct value to vendor. Its fixed price, rep cost and faction are kept
@@ -253,44 +201,22 @@ aliased the live objects — the controller's stored "snapshot" silently tracked
 the world, and any test comparing them would have passed for the wrong reason.
 Pinned by four new tests in `sim/tests/world.test.ts`.
 
-Also landed: `SimNsHost.engine` (so an ns call can poke a counter as
-`Singularity.checkFactionInvitations` does) and `SimNsHost.onPrestige` (an
-install kills every process, so `game/`'s module-level ledger and the realm
-slots must be dropped — the hook lives in `sim/` because `game/` must stay
-unaware it is simulated); the `Engine` is now constructed **after** the world so
-a subsystem can close over real state; `SimProfile.bitnode`/`startingMoney`;
-`--only` / `--features` on `sim/run.ts` (unknown names are rejected, because a
+Also landed: `SimNsHost.onPrestige` (an install kills every process, so
+`game/`'s module-level ledger and the realm slots must be dropped — the hook
+lives in `sim/` because `game/` must stay unaware it is simulated), the `Engine`
+constructed **after** the world so a subsystem can close over real state, and
+`--only` / `--features` on `sim/run.ts` rejecting unknown names, because a
 typo'd `--only hackign` that quietly ran everything would invalidate the
-measurement silently); `GoalContext.augmentations`; and `SaveSeed.playerState` /
-`SaveSeed.factions` plus `SavePlayer.factionInvitations` and `numPeopleKilled`.
-
-*A bug the typechecker caught:* `playerRecord` initially returned a `bitNodeN`
-field. `Player` has no such field — the active node comes from
-`ns.getResetInfo().currentNode`. That would have been a fabricated value the
-strategy could have read and the real game would never supply.
-
-*A profile bug fixed:* the `factions` profile ran in **BN1**, where
-`deriveCapabilities` reports `factions: "no"` — every faction probe and the
-driver were gated off, so its goal was unreachable no matter how long the run
-lasted. Now `factions-join` with `bitnode: 4`.
+measurement silently.
 
 ### Measured cost of Phase 0
 
-`earn:1e6`, seeds 1–3, game driver:
-
-| | seed 1 | seed 2 | seed 3 |
-|---|---|---|---|
-| before Phase 0 | 20.6m | 18.2m | 18.2m |
-| after 0.1 (modules) | 20.6m | 18.2m | 18.2m |
-| after 0.4 (fleet dodging) | 20.6m | 18.2m | 18.2m |
-| after 0.6 (all groundwork) | 20.8m | 18.4m | 18.4m |
-
-Phase 0.1 was byte-identical. The ~1% slowdown at the end is real and expected:
-probes now place dodges on fleet hosts, which takes RAM the dispatcher was
-previously free to use. That is the price of acquiring state that was
-**previously impossible to acquire at all** on an 8 GB home — the gate batch
-went from never running to running 40+ times per run. Recorded here rather than
-smoothed over.
+`earn:1e6`, seeds 1–3, game driver: **20.6 / 18.2 / 18.2 m** unchanged through
+0.1 (byte-identical) and 0.4, ending at **20.8 / 18.4 / 18.4 m** after 0.6. The
+~1% slowdown is real and expected — probes now place dodges on fleet hosts,
+taking RAM the dispatcher was previously free to use — and it buys state that
+was **previously impossible to acquire at all** on an 8 GB home: the gate batch
+went from never running to running 40+ times per run.
 
 ### Phase 1 — factions
 
@@ -469,7 +395,7 @@ Every feature now has a real driver module; `inert()` is gone from
 | 8 | sleeves | Allocate N sleeves across the task menu | Exact per-sleeve argmax (sleeves do not interfere). Shock scales output down linearly, so recovery dominates. |
 | 9 | go | Wins, territory, streaks | Upstream-oracle arena; trained value network over legal candidates and their seeded faction replies, executed as a WebGPU compute shader. See `spec/go-ai.md`. |
 | 10 | stanek | Pack the grid, then charge | **Exhaustive packing is PROVABLY optimal** — the strongest evidence in the roster. Correctly leaves out a large fragment to fit two smaller ones. |
-| 11 | dnet | Traverse under a stasis-link budget | **Search runs, actions wait.** `topologyComplete` is derived from the agents' folded adjacency (no longer the probe's hard-coded false), so `stepDarknet`'s max-reachable search runs each tick — but its actions are still refused: authentication happens on the agents next door to their targets, and `setStasisLink` needs a 12 GB script on the host being pinned. |
+| 11 | dnet | Traverse under a stasis-link budget | **The search runs; nothing acts on it.** `topologyComplete` is derived from the agents' folded adjacency (no longer the probe's hard-coded false), so `stepDarknet`'s max-reachable search runs each tick — but it proposes no action, because neither of the two it once did was ever the driver's to take: authentication happens on the agents next door to their targets, and `setStasisLink` pins the calling host. |
 | 12 | side | Solve every coding contract | **All 30 v3.0.1 contract types implemented** with exact registry coverage and known-answer tests. Discovery is ls-only; staged batches peak at `attempt` RAM, and a first rejection is logged and quarantined rather than retried. Infiltration stays manual. |
 | 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); directly tested live milestone selector, with a small-set ordering oracle retained for offline comparisons. |
 
@@ -759,10 +685,9 @@ influencing op; `solveCycle` adds it as a second income term to the same
 `$/GB/sec` score, and the dispatcher sets `{stock: true}` on the grow for a long
 and the hack for a short — never both, since their successful steady-state
 influences oppose each other.
-`ScriptHackMoneyGain` entered `HackContext` at the same time: it scales the
-hacking term and NOT the manipulation term, because influence is measured from
-`moneyDrained` before the player's cut, and omitting it reported every BN8 target
-as profitable while it earned nothing. See [spec/targeting.md](targeting.md).
+`ScriptHackMoneyGain` entered `HackContext` at the same time, scaling the hacking
+term but not the manipulation term; [spec/targeting.md](targeting.md) carries the
+reason and the BN1/BN8 magnitudes it produces.
 
 *Evidence:* 129 new tests. `sim/tests/stock-parity.test.ts` pins the two shipped
 transcriptions field-by-field against the vendored source (including three
@@ -813,11 +738,10 @@ from the same transcription the strategy uses:
    the farm can drive (`MANIPULATION_PREFERENCE`), as a documented policy rather
    than an invented dollar value.
 
-And one measured magnitude worth recording, because it bounds what the tie-in can
-ever be worth: an influencing op is worth a few THOUSAND dollars against tens of
-MILLIONS of hacked money per batch. So manipulation does not move target choice
-outside a node that nerfs hacking — and in BN8, where `ScriptHackMoneyGain` is
-exactly 0, it is the entire score. Both directions are pinned in
+The magnitude that bounds what the tie-in can ever be worth — thousands of
+dollars per influencing op against tens of millions per batch, so it is a
+rounding error outside BN8 and the entire score inside it — is measured in
+[spec/targeting.md](targeting.md); both directions are pinned in
 `sim/tests/dispatch.test.ts`.
 
 ### Phase 16 — Go strategy and independent time forecasts
@@ -1147,17 +1071,11 @@ which need no run at all and so can be asserted in `bun test`.
   five cases; 0% under a binding RAM cap, where the domain collapses into the
   exact regime). Asserted at `gap < 0.15%`.
 
-Two tuning knobs are deliberately NOT tuned, each because the measurement that
-would justify moving them has been taken and says no, or cannot yet be taken:
-
-- **Deferred admission / padding bound.** Measured twice: -18% income, then
-  launched hacks 2,497 -> 729 and income $9.39e7 -> $1.55e7/s. The constant
-  stays; the prerequisite is the live landing-error distribution, now split per
-  op kind and rendered in the hacking tab.
-- **`POOL_PRESSURE_OPS = 1_000`.** Its own comment declares the -20% figure
-  behind it invalid. Re-measuring is blocked on a fixture that reaches the
-  pooled regime; the deepest available reaches ~395 concurrent ops (see the
-  sixth ledger pass below).
+Two tuning knobs are deliberately NOT tuned — deferred admission
+(`spec/jit-reference.md` §9, measured twice and both times a loss) and
+`POOL_PRESSURE_OPS` (blocked on a fixture; see Known gaps). Each stays put
+because the measurement that would justify moving it has been taken and says
+no, or cannot yet be taken.
 
 ## Profile ledger, sixth pass (2024-batcher gap analysis, 2026-08-19)
 
@@ -1167,15 +1085,12 @@ in the subsection below.
 | profile | before | after | note |
 |---|---|---|---|
 | hacking-early (`--goal earn:5e6 --seeds 1..3`) | 16.1 m median | **29.9 / 30.3 / 29.9 m** | New recorded number. A REGRESSION from an earlier pass's polish, not from this one: byte-identical output including record counts with this pass's changes reverted and re-applied (it never enters the eager path, where both fixes live). Recovery outstanding. |
-| jit-process-pressure | — | **produces nothing** | 12 virtual minutes, 128 TB home, 6.2 TB in use, `landed` zero for all three kinds. Retired from the default tier, and broken — it is the fixture the pooling gate needs. |
+| jit-process-pressure | — | **produces nothing** | Retired from the default tier, and broken — it is the fixture the pooling gate needs. Numbers in Known gaps. |
 
-Two new optima, both measurements rather than tunings:
-
-- **Thread search above `EXACT_THREAD_LIMIT`: within 0.010-0.144% of
-  exhaustive** (audit Q5), 0% under a binding RAM cap. Pinned at `gap < 0.15%`.
-- **Pooling engagement depth: ~395 concurrent ops after 180 s** on a 16 TB JIT
-  fixture, against a `POOL_PRESSURE_OPS` gate of 1,000. This is why the gate
-  cannot be re-measured yet: the obstacle is pipeline DEPTH, not fleet size.
+One new measurement: **pooling engagement depth is ~395 concurrent ops after
+180 s** on a 16 TB JIT fixture, against a `POOL_PRESSURE_OPS` gate of 1,000 —
+so the obstacle to re-measuring that gate is pipeline DEPTH, not fleet size.
+(Audit Q5, the thread-search optimum, is recorded above.)
 
 ### Gap analysis against the 2024 single-target batcher
 
@@ -1205,10 +1120,10 @@ end.
 
 **Answered, no code.**
 
-- **Deferred admission** is 2024's `diffToTarget > POSSIBLE_LAGS` branch, and
-  is the experiment already measured twice here: -18% income, then launched
-  hacks 2,497 -> 729 and income $9.39e7 -> $1.55e7/s. Its prerequisite is the
-  live landing-error distribution, which the item above unblocks.
+- **Deferred admission** is 2024's `diffToTarget > POSSIBLE_LAGS` branch — the
+  experiment already measured twice here, both times a loss
+  (`spec/jit-reference.md` §9 carries the numbers). Its prerequisite is the live
+  landing-error distribution, which the item above unblocks.
 - **RAM reinvestment in target selection already exists**, and beats 2024's
   discrete `prepareGrowthTable` ladder: `incomePresentValue`
   (`shared/strategy/economics.ts`) discounts at a measured marginal return from
@@ -1426,11 +1341,14 @@ the *strategy* level without full end-to-end execution:
 - **Darknet exploration acts; the traversal strategy still waits.** The
   overseer/agent pipeline (`game/dnet/`) does authenticate, heartbleed, scp and
   exec on live darknet hosts — with discovered credentials, never invented ones.
-  What remains refused is the arbiter-facing `stepDarknet` action, for
-  mechanical reasons the driver records each time: authentication happens on the
-  agents, next door to their targets, and `setStasisLink()` takes **no host** —
-  it pins the calling script's own server, so spending a link means running a
-  12 GB script on the host being pinned. See `spec/dnet.md`.
+  What the arbiter-facing `stepDarknet` contributes is a ranking and a charisma
+  need, not an action: both actions it once proposed were mechanically
+  impossible from home — authentication happens on the agents, next door to
+  their targets, and `setStasisLink()` takes **no host**, pinning the calling
+  script's own server, so spending a link means running a 12 GB script on the
+  host being pinned. The proposals and the standing refusals that recorded them
+  went together, rather than filling the panel with work nobody was going to
+  attempt. See `spec/dnet.md`.
 - **Sim models exist for factions, crime, hacknet, stock, Go and dnet** (the
   darknet grid, mutation clock and session rules live in `sim/features/dnet.ts`,
   with its unmodelled gaps declared in `DNET_ASSUMPTIONS`). Gang, corp,
@@ -1513,19 +1431,17 @@ the *strategy* level without full end-to-end execution:
 - **The labyrinth walk is a pure guess** (`LABYRINTH_WALK_SEC`): the darknet
   labyrinth mechanic is unmodelled, so the route's estimate carries an
   explicit unmeasured constant until a walk is implemented and measured.
-- **`POOL_PRESSURE_OPS` is unmeasured, and blocked on a fixture.** Its own
-  comment states that the -20% result behind it was taken while `planTake` was
-  quadratic, so "always on" was also "always quadratic" and stranding was never
-  isolated. Re-measuring needs a fixture that reaches the pooled regime; the
-  deepest one available reaches ~395 concurrent ops against a gate of 1,000,
-  and `jit-process-pressure` — the profile written for exactly this — produces
-  no landings at all (below). The constant is therefore left alone rather than
+- **`POOL_PRESSURE_OPS` is unmeasured, and blocked on a broken fixture.** Its
+  own comment states that the -20% result behind it was taken while `planTake`
+  was quadratic, so "always on" was also "always quadratic" and stranding was
+  never isolated. Re-measuring needs a fixture that reaches the pooled regime,
+  and none exists: the deepest available reaches ~395 concurrent ops against
+  a gate of 1,000, and `jit-process-pressure` — the profile written for exactly
+  this — produces no landings at all (12 virtual minutes on a 128 TB home,
+  6.2 TB in use, `landed` zero for hack, grow and weaken; retired from the
+  default tier, which is why it went unnoticed). Repairing that profile is a
+  prerequisite, not housekeeping, and the constant is left alone rather than
   guessed at.
-- **`jit-process-pressure` produces nothing.** 12 virtual minutes on a 128 TB
-  home, 6.2 TB of RAM in use, and `landed` zero for hack, grow and weaken. It
-  is retired from the default tier, which is why this went unnoticed; it is
-  also the fixture the pooling question needs, so its repair is a prerequisite
-  rather than housekeeping.
 - **`hacking-early` regressed 16.1 m -> 29.9 m** during an earlier pass's
   polish. Recorded in the sixth ledger pass; the cause is known, the recovery
   is not yet done.
