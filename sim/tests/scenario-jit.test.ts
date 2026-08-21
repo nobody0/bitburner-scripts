@@ -5,6 +5,7 @@ import { parseGoals } from "../../shared/goals/presets.ts";
 import { makeHackContext } from "../../shared/formulas.ts";
 import { staticsFromRolls } from "../../shared/strategy/bounds.ts";
 import { solveCycle } from "../../shared/strategy/targeting.ts";
+import { HWGW_MIN_INTERVAL_MS } from "../../shared/strategy/jit.ts";
 import { calculateExp } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { getBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { SIMULATOR_MODEL_VERSION, SIMULATOR_VENDOR_COMMIT } from "../fidelity.ts";
@@ -152,10 +153,32 @@ interface Scenario {
   skip?: string;
 }
 
+/** SEED SWEEP MODE. The fixtures pin one seed each, which is the right default:
+ * a ratchet needs the same world every run. But a single seed cannot tell a real
+ * regression from compounding chaos -- the ledger says so itself, in
+ * jit-share-churn history -- so this hook re-runs any case on another seed.
+ *
+ * It is inert unless BB_JIT_SEED is set, and it can never move a baseline: on a
+ * swept seed the run prints its metrics and returns BEFORE compareToBaseline,
+ * because a record measured on seed X says nothing about seed Y in either
+ * direction. BB_RECORD_BASELINES remains the only path that emits a ledger
+ * block, and the sweep path never reaches it. Structural assertions DO still
+ * run and still fail -- they are the fixture's premises rather than its
+ * ratchet -- but the sweep line is printed before the failure escapes. */
+const SWEEP_SEED: number | undefined = (() => {
+  const raw = process.env.BB_JIT_SEED;
+  if (raw === undefined || raw === "") return undefined;
+  const seed = Number(raw);
+  if (!Number.isFinite(seed)) throw new Error(`BB_JIT_SEED is not a number: ${raw}`);
+  return seed;
+})();
+
 function runScenario(scenario: Scenario): void {
   scenarioDescribe(scenario.title, () => {
     const body = async (): Promise<void> => {
-      const run = await runJitScenario(scenario.options);
+      const run = await runJitScenario(
+        SWEEP_SEED === undefined ? scenario.options : { ...scenario.options, seed: SWEEP_SEED },
+      );
       const metrics = jitMetrics(run.samples, scenario.steadyFromMs);
       const pressure = jitPressure(run.samples, scenario.pressureFromMs ?? scenario.steadyFromMs);
 
@@ -166,7 +189,28 @@ function runScenario(scenario: Scenario): void {
       // this is checked before any number is believed.
       expect(run.result.validity).not.toBe("invalid-for-goal");
 
-      const extra = scenario.structural(run, metrics, pressure) ?? {};
+      // Reported in a `finally` because several fixtures assert premises that
+      // only hold on their pinned seed (a fleet rung reached, a migration
+      // happening). On a swept seed those throw, and the sweep line is the one
+      // thing the run existed to produce -- so it is printed either way, and
+      // the failure still propagates.
+      let extra: Record<string, number | undefined> = {};
+      try {
+        extra = scenario.structural(run, metrics, pressure) ?? {};
+      } finally {
+        if (SWEEP_SEED !== undefined) {
+          // Off-record seed: report, do not ratchet. See SWEEP_SEED above.
+          console.info(
+            `[${scenario.id}] SEED SWEEP seed=${SWEEP_SEED} `
+            + JSON.stringify({
+              medianIdleShare: metrics.medianIdleShare,
+              windowCompletion: metrics.windowCompletion,
+              moneyPerSec: metrics.moneyPerSec,
+              ...extra,
+            }),
+          );
+        }
+      }
 
       const observed = {
         medianIdleShare: metrics.medianIdleShare,
@@ -174,6 +218,8 @@ function runScenario(scenario: Scenario): void {
         moneyPerSec: metrics.moneyPerSec,
         ...extra,
       };
+
+      if (SWEEP_SEED !== undefined) return;
 
       const baseline = baselines.scenarios[scenario.id];
       const recorded = baseline !== undefined
@@ -396,6 +442,15 @@ runScenario({
       + ` segOrder=${final.segOrder.join(">")} allocFails=${final.allocFails}`
       + ` batchesSkipped=${final.batchesSkipped}`,
     );
+    console.info(
+      `[jit-small-fleet] DIAG target=${final.target} depthCap=${final.depthCapGb.toFixed(1)}GB`
+      + ` missed=${JSON.stringify(final.missedWindow)}`
+      + ` allocFailsByPhase=${JSON.stringify(final.allocFailsByPhase)}`
+      + ` launched=${final.launchedHack} landed=${final.landedHack}`
+      + ` farm=${final.farmGb.toFixed(1)} prep=${final.prepGb.toFixed(1)}`
+      + ` free=${final.freeGb.toFixed(1)} reserve=${final.reserveGb.toFixed(1)}`
+      + ` infra=${run.infrastructure.map((event) => `${event.kind}:${event.ram}`).join(",")}`,
+    );
 
     expect(run.infrastructure.length).toBeGreaterThan(0);
     expect(minFleetGb).toBeLessThanOrEqual(128);
@@ -550,7 +605,15 @@ runScenario({
   title: "scenario: JIT mid-batch skill jump",
   what: "recovers target state, window completion, and income after durations shift",
   steadyFromMs: 2 * 60_000,
-  timeoutMs: 120_000,
+  // Measured 79.6s and 80.4s wall-clock when it passes, but this fixture also
+  // timed out at 120s three times in the same session on IDENTICAL code, and
+  // on a clean 831e2505 worktree with none of the surrounding work applied --
+  // so the flake is the budget, not the scenario. The same machine ran
+  // jit-one-server at 187s and at 341s on identical code, i.e. wall-clock here
+  // varies about 1.8x, which 1.5x of headroom cannot absorb. Budgeted at 3.7x
+  // the observed passing time. A budget, not a threshold: this case FAILS its
+  // assertions when it is wrong, and a timeout reports neither pass nor fail.
+  timeoutMs: 300_000,
   options: {
     goal: parseGoals(["earn:1e30"]),
     seed: 41,
@@ -783,7 +846,9 @@ runScenario({
       `[jit-migrate] switch=${switchAt === undefined ? "none" : `${switchAt / 1_000}s`}`
       + ` farmAndPrep=${farmAndPrep} starved=${starved.length}`
       + ` rate=${beforeRate.toExponential(3)}->${afterRate.toExponential(3)}`
-      + ` earned=25min:${earnedBy(25).toExponential(3)} 40min:${earnedBy(40).toExponential(3)}`,
+      + ` earned=25min:${earnedBy(25).toExponential(3)} 40min:${earnedBy(40).toExponential(3)}`
+      + ` prep-max=${Math.max(...run.samples.map((s2) => s2.prepGb)).toFixed(1)}GB`
+      + ` fleet-max=${Math.max(...run.samples.map((s2) => s2.fleetGb)).toFixed(0)}GB`,
     );
 
     // The farm has to be earning before anything can be said about it stalling.
@@ -819,7 +884,13 @@ runScenario({
   // off mid-run, which reported a timeout instead of the comparison the case
   // exists to make. A budget, not a threshold — raise it if the machine is
   // slower, never to make a red result green.
-  timeoutMs: 360_000,
+  //
+  // Raised 360s -> 900s on 2026-08-21: the same machine ran this case at
+  // 186.0s, 187.1s, 255.5s and 340.8s on identical code in one session. The
+  // last of those left 5% of the budget, so the next slow run would have
+  // reported a timeout instead of the comparison. The measured spread is the
+  // reason for the margin, not pessimism about the code.
+  timeoutMs: 900_000,
   options: {
     goal: parseGoals(["earn:1e30"]),
     seed: 3,
@@ -837,12 +908,55 @@ runScenario({
     const fleetGb = Math.max(...run.samples.map((sample) => sample.fleetGb));
     // Steady-state ceiling: income per batch over the batch period, where the
     // period is whichever binds -- RAM or the depth of the landing pipeline.
-    const predictedPerSec = solution.score * Math.min(fleetGb, solution.jitSaturationGb ?? fleetGb);
+    // The steady-state rate is bounded by BOTH constraints, exactly as
+    // solveCycle bounds it (`period = max(ramSec/farmGb, jointPeriod,
+    // interval)` -- a max of periods is a min of rates). The RAM-seconds term
+    // alone prices a cadence the game forbids: `solved()` deliberately solves
+    // uncapped, so `score` is income per RAM-second with no landing interval
+    // in it, and multiplying by the fleet asserts a batch every 8.7 ms against
+    // a 20 ms minimum landing gap (HWGW_MIN_INTERVAL_MS = 4 * 5 ms). Measured
+    // before this was applied: "predicted" 115.5 batches/sec against a legal
+    // ceiling of 50, which made realizedShare 0.55 and invited the conclusion
+    // that the dispatcher was 2.5x slow when it was in fact running at 91% of
+    // the fastest cadence that exists.
+    const perBatchSolved = solution.incomePerBatch + solution.stockIncomePerBatch;
+    const cadenceCeilingPerSec = (1_000 / HWGW_MIN_INTERVAL_MS) * perBatchSolved;
+    const ramBoundPerSec = solution.score * Math.min(fleetGb, solution.jitSaturationGb ?? fleetGb);
+    const predictedPerSec = Math.min(ramBoundPerSec, cadenceCeilingPerSec);
     const realizedShare = predictedPerSec > 0 ? metrics.moneyPerSec / predictedPerSec : 0;
 
     console.info(
       `[jit-one-server] fleet=${fleetGb}GB predicted=$${predictedPerSec.toExponential(6)}/s`
       + ` realized=$${metrics.moneyPerSec.toExponential(6)}/s share=${realizedShare.toFixed(4)}`,
+    );
+
+    // WHERE THE MISSING THIRD GOES. `realizedShare` says the batch model is
+    // optimistic but not WHY, and the two candidate causes want opposite
+    // fixes: landing fewer batches than the cadence predicts is a dispatcher
+    // problem, while landing the predicted number for less money each is a
+    // model problem. Decompose it rather than guess.
+    const steady = run.samples.filter((sample) => sample.atMs >= 5 * 60_000);
+    // A run that ended before steady state has nothing to decompose, and the
+    // assertions below say so far more usefully than a crash on an empty slice.
+    const firstSteady = steady[0];
+    const lastSteady = steady.at(-1);
+    const elapsedSec = firstSteady === undefined || lastSteady === undefined
+      ? 0
+      : (lastSteady.atMs - firstSteady.atMs) / 1_000;
+    const landedPerSec = elapsedSec > 0
+      ? (lastSteady!.landedHack - firstSteady!.landedHack) / elapsedSec
+      : 0;
+    const perBatch = perBatchSolved;
+    const predictedPerSecBatches = perBatch > 0 ? predictedPerSec / perBatch : 0;
+    const realizedPerBatch = landedPerSec > 0 ? metrics.moneyPerSec / landedPerSec : 0;
+    console.info(
+      `[jit-one-server] DECOMPOSE batches/sec realized=${landedPerSec.toFixed(3)}`
+      + ` predicted=${predictedPerSecBatches.toFixed(3)}`
+      + ` ratio=${predictedPerSecBatches > 0 ? (landedPerSec / predictedPerSecBatches).toFixed(4) : "n/a"}`
+      + ` | $/batch realized=${realizedPerBatch.toExponential(4)}`
+      + ` predicted=${perBatch.toExponential(4)}`
+      + ` ratio=${(perBatch > 0 ? realizedPerBatch / perBatch : 0).toFixed(4)}`
+      + ` | chance=${solution.chance.toFixed(4)} hackThreads=${solution.hackThreads}`,
     );
 
     expect(metrics.launchedHacks).toBeGreaterThan(0);

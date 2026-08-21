@@ -48,29 +48,17 @@ import type { AttemptOutcome, ReportHost, VaultEntry } from "../../shared/strate
  * carries the password and any link that needs the session re-opens it for
  * almost nothing. That is what makes the chain viable at all.
  *
- * ## There are no ports
+ * ## The rendezvous
  *
- * An earlier version of this design pushed observations, credentials and orders
- * over netscript ports, on the reasoning that a serialized queue forces a design
- * to say what it knows and when. The rendezvous replaced them, and it is worth
- * being precise about why that is sound rather than merely convenient:
+ * The job design depends on the controller describing work it cannot afford to
+ * perform and handing the description to a process that can — a live function
+ * reference, which is why the conversation lives in the page realm rather than
+ * in anything written down. That is not a shortcut past a game rule: what
+ * preserves BN15's challenge is enforced by the engine — sessions are per-PID,
+ * `probe()` is host-local, and the network kills your scripts.
  *
- * - **The realm is not a shortcut past a game rule.** Ports are documented as
- *   shared across every host at 0 GB and need no session; the realm is a faster
- *   version of a sanctioned mechanic, not a new capability. What preserves BN15's
- *   challenge is enforced by the engine — sessions are per-PID, `probe()` is
- *   host-local, and the network kills your scripts — and none of that is helped
- *   by a slower message.
- * - **A port cannot carry a closure.** The whole job design depends on the
- *   controller describing work it cannot afford to perform, and handing the
- *   description to a process that can. That is a live function reference.
- * - **One writer, one reader, no serialization step to drift.** The port version
- *   needed an encoder, a decoder, a version marker and a rejection path for each
- *   of three channels, and every one of those was a place for the two ends to
- *   disagree.
- *
- * What the port discipline was protecting against is real, and is kept as rules
- * enforced in this file rather than as a transport:
+ * The hazard is that the realm holds live references that outlive the hosts they
+ * describe, so four rules are enforced in this file:
  *
  * 1. **Entries are expired, never trusted.** A resident that stops beating is
  *    swept and its queue retired (`sweepQueues`); a job that stops settling is

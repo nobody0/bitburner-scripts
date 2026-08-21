@@ -25,7 +25,7 @@ different places.
 **Sessions belong to a PID.** `authenticate(host, password)` grants a session to
 the calling script instance only; the docs are explicit that "other running
 scripts will need to use `connectToSession` with the correct password to also get
-a session". No channel — file, port or page realm — can transfer one. This is
+a session". No channel — a file or the page realm — can transfer one. This is
 why a dodge stub cannot win a session on the controller's behalf: the stub dies,
 and the session dies with it.
 
@@ -35,7 +35,6 @@ and the session dies with it.
 |---|---|
 | `scp` *from* a darknet host | nothing at all |
 | `scp` *to* a darknet host | a session — but **no** direct connection, at any distance |
-| `writePort` / `readPort` | nothing; ports are shared across all hosts, 0 GB |
 | `ns.exec` on a darknet host | a session **and** a direct connection, backdoor, or stasis link |
 
 So getting *data* around is nearly free, and getting a *running process* to
@@ -713,15 +712,13 @@ rendezvous.
 **One convention, as engineering rather than fair play: the page realm carries
 the conversation, and every entry in it is expired rather than trusted.**
 
-An earlier version pushed observations, credentials and orders over three
-netscript ports; the realm replaced them. That is not a shortcut past a game
-rule — ports are themselves documented as shared across all hosts, 0 GB, no
-session, so the realm is a faster version of a sanctioned mechanic, and what
-preserves the challenge is enforced by the engine: per-PID sessions, host-local
-`probe()`, target-only `setStasisLink`/`phishingAttack`, and the network killing
-your scripts. The realm also does what a port cannot: the overseer hands each
-resident a **live function reference** — a closure over calls it cannot afford
-itself — which is the mechanism behind the 1.65 GB figure above.
+The realm is not a shortcut past a game rule: what preserves the challenge is
+enforced by the engine — per-PID sessions, host-local `probe()`, target-only
+`setStasisLink`/`phishingAttack`, and the network killing your scripts — and
+none of that is helped by a slower message. What the realm buys is the thing a
+message cannot carry: the overseer hands each resident a **live function
+reference**, a closure over calls it cannot afford itself, which is the
+mechanism behind the 1.65 GB figure above.
 
 The hazard is real — a realm map holds live references that outlive the servers
 they describe — so the realm is allowed only under four rules, each enforced in

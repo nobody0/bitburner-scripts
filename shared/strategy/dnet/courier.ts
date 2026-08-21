@@ -3,16 +3,12 @@ import type { OracleCapture } from "./oracle.ts";
 /** The shapes the darknet's findings travel in, and the rule that keeps a
  * password out of everything that is written down.
  *
- * This file used to be a WIRE: three netscript ports, each with an encoder, a
- * decoder, a version marker and a rejection path, carrying reports, credentials
- * and orders between the darknet and home. All of it is gone. Every script the
- * game runs shares one JS realm, so the controller's own object is reachable
- * from home directly — see `game/dnet/realm.ts` for why that is sound rather
- * than merely convenient, and what it costs.
- *
- * What survives is what the serialization was carrying: the shapes, the response
- * codes that make a refusal attributable, and `stripCredentials`, which is the
- * one rule that genuinely needed enforcing in a single place. */
+ * Nothing here is serialized: every script the game runs shares one JS realm, so
+ * the controller's own object is reachable from home directly — see
+ * `game/dnet/realm.ts` for why that is sound rather than merely convenient, and
+ * what it costs. What lives here is the shapes, the response codes that make a
+ * refusal attributable, and `stripCredentials`, which is the one rule that
+ * genuinely needed enforcing in a single place. */
 
 /** DarknetResponseCode, transcribed from src/DarkNet/Enums.ts. The UI cannot
  * import game code, so the names live in shared/ where both sides read them. */

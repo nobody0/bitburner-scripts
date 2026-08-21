@@ -2237,21 +2237,12 @@ let dnetSeedBackoffMs = DNET_SEED_BACKOFF_MS;
 
 /** Take what the darknet has learned, and hand it what only home can see.
  *
- * There is no port here any more, and that is worth explaining rather than just
- * noticing. Reports, credentials and orders each used to be a netscript port
- * with its own encoder, decoder, version marker and rejection path — three
- * channels and six places for the two ends to disagree — for a message that
- * never leaves the page realm.
- *
  * Every script the game runs shares one JS realm, so the controller's own object
- * IS reachable from here. That is not a shortcut past a game rule: ports are
- * themselves documented as shared across every host at 0 GB and needing no
- * session, so this is a faster version of a sanctioned mechanic rather than a
- * new capability. What preserves BN15's challenge is enforced by the engine —
- * sessions are per-PID, `probe()` is host-local, and the network kills your
- * scripts — and none of that is helped by a slower message.
+ * IS reachable from here. That is not a shortcut past a game rule: what
+ * preserves BN15's challenge is enforced by the engine — sessions are per-PID,
+ * `probe()` is host-local, and the network kills your scripts.
  *
- * The discipline the port was carrying is kept, as rules rather than transport:
+ * Four rules keep the handover honest:
  *
  * - `drain()` hands each observation over ONCE, so home cannot double-count.
  * - Home folds into knowledge IT owns, so a controller dying loses scheduling
