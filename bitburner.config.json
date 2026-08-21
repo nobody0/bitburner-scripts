@@ -19,8 +19,13 @@
       "versioned": true
     },
     {
-      "source": "game/dnet/scout.ts",
-      "target": "dnet/scout.js",
+      "source": "game/dnet/overseer.ts",
+      "target": "dnet/overseer.js",
+      "versioned": true
+    },
+    {
+      "source": "game/dnet/agent.ts",
+      "target": "dnet/agent.js",
       "versioned": true
     }
   ],

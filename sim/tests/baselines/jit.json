@@ -25,11 +25,11 @@
     "so a baseline can never move as a side effect of a run."
   ],
   "provenance": {
-    "simulatorModelVersion": 7,
+    "simulatorModelVersion": 8,
     "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
-    "recordedAt": "2026-08-19",
+    "recordedAt": "2026-08-21",
     "recordedFrom": "the six scenario-jit-*.test.ts files these rows were merged from",
-    "modelVersionBumps": "5 -> 7 (darknet: population, getters, mutation, the labyrinth ladder and the .cache reward table; DarkscapeNavigator.exe becoming purchasable). Verified behaviour-neutral for these rows rather than re-measured: the same nine cases were run before and after and reported identical metrics (e.g. jit-one-server moneyPerSec 1.30122e+10 in both). None of these profiles has `dnet` active, which is what the purchase is gated on. Four rows were ALREADY failing before this work \u2014 jit-one-server and jit-share-churn say so themselves, having been measured on an uncommitted tree \u2014 and were left alone rather than re-recorded."
+    "modelVersionBumps": "5 -> 7 (darknet: population, getters, mutation, the labyrinth ladder and the .cache reward table; DarkscapeNavigator.exe becoming purchasable). Verified behaviour-neutral for these rows rather than re-measured: the same nine cases were run before and after and reported identical metrics (e.g. jit-one-server moneyPerSec 1.30122e+10 in both). None of these profiles has `dnet` active, which is what the purchase is gated on. Four rows were ALREADY failing before this work - jit-one-server and jit-share-churn say so themselves, having been measured on an uncommitted tree - and were left alone rather than re-recorded. 7 -> 8 (darknet again: passwords, per-PID sessions, authenticate with the transcribed timing formula, heartbleed over a log ring, nextMutation, and session gates on scp/exec). Behaviour-neutral for these rows by CONSTRUCTION, and re-run to confirm: every one of those paths is reached only through a populated darknet, and populate() is gated on dnet access, which none of these profiles has. The scp/exec gate short-circuits to allowed for any server that is not a DarknetServer, before it can consume a draw or touch state; the log-noise stream is a third mulberry32 that never touches the shared gameplay stream; and darknetProcess() still returns before drawing when access is absent. The rows below are unchanged."
   },
   "tolerances": {
     "note": "Default slack below a recorded best before a run counts as a regression. Absolute for the shares, fractional for money. A scenario may override any of these in its own `tolerances`.",

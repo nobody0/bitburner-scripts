@@ -1,26 +1,18 @@
-import type { Observation, ObservedHost, Provenance } from "./knowledge.ts";
+import type { OracleCapture } from "./oracle.ts";
 
-/** The report an agent sends home, and the codes it reports failures with.
+/** The shapes the darknet's findings travel in, and the rule that keeps a
+ * password out of everything that is written down.
  *
- * Pure and ns-free on purpose: the agent encodes, the driver decodes, and one
- * round-trip test covers both so the two cannot drift. Following the marker
- * pattern in game/lib/run-identity.ts, an unrecognised version is a REJECTION
- * with a reason, never a throw and never a partial merge. */
-
-export const REPORT_VERSION = 1;
-
-/** The port darknet agents report on. Ports are shared across every host at
- * 0 GB and need no session, so this is the whole delivery mechanism — no file,
- * no scp, and no dodge to read it. */
-export const DNET_REPORT_PORT = 1;
-
-/** Bounds on what one report may carry. The wire is JSON over a socket and a
- * port, and a darknet host's hint text is free-form, so the caps live here
- * beside the schema rather than at each call site. */
-export const REPORT_MAX_HOSTS = 24;
-const REPORT_MAX_LOG_LINES = 8;
-const REPORT_MAX_LOG_CHARS = 240;
-export const REPORT_MAX_HINT_CHARS = 120;
+ * This file used to be a WIRE: three netscript ports, each with an encoder, a
+ * decoder, a version marker and a rejection path, carrying reports, credentials
+ * and orders between the darknet and home. All of it is gone. Every script the
+ * game runs shares one JS realm, so the controller's own object is reachable
+ * from home directly — see `game/dnet/realm.ts` for why that is sound rather
+ * than merely convenient, and what it costs.
+ *
+ * What survives is what the serialization was carrying: the shapes, the response
+ * codes that make a refusal attributable, and `stripCredentials`, which is the
+ * one rule that genuinely needed enforcing in a single place. */
 
 /** DarknetResponseCode, transcribed from src/DarkNet/Enums.ts. The UI cannot
  * import game code, so the names live in shared/ where both sides read them. */
@@ -38,18 +30,36 @@ export const DARKNET_CODES = {
   503: "ServiceUnavailable",
 } as const;
 
+/** Codes we invent, kept numerically clear of the engine's 2xx-5xx range and
+ * commented as ours so nobody hunts for them in the game source. They exist so
+ * that "nothing happened" is never a blank in the response-code panel — every
+ * one of these is emitted by a real refusal in `game/dnet/overseer.ts`. */
+export const LOCAL_CODES = {
+  900: "UnknownModel",
+  902: "NoCredential",
+  903: "NotEnoughRam",
+  904: "ModelUnattempted",
+} as const;
+
 export function codeName(code: number): string {
-  return (DARKNET_CODES as Record<number, string>)[code] ?? `Unknown(${code})`;
+  return (DARKNET_CODES as Record<number, string>)[code]
+    ?? (LOCAL_CODES as Record<number, string>)[code]
+    ?? `Unknown(${code})`;
 }
 
+/** One host, as an agent standing next to it saw it. */
 export interface ReportHost {
   hostname: string;
   /** False when the observation found it gone. Everything else is then absent. */
   present: boolean;
   depth?: number;
   neighbours?: string[];
+  /** Shown by the in-game map, and NOT on `getServerDetails` — it costs a 2 GB
+   *  `ns.getServer`, so only a job with room to spare reports it. */
+  ip?: string;
   blockedRam?: number;
   maxRam?: number;
+  usedRam?: number;
   requiredCharisma?: number;
   difficulty?: number;
   isStationary?: boolean;
@@ -59,106 +69,85 @@ export interface ReportHost {
   passwordHint?: string;
   data?: string;
   logTrafficInterval?: number;
+  /** Whether the OBSERVING process held a session. Per-PID, so it says nothing
+   *  about anyone else and expires with its observer. */
+  hasSession?: boolean;
 }
 
-export interface DnetReport {
-  v: typeof REPORT_VERSION;
-  /** Ties the report to the mission that asked for it. */
-  missionId: string;
-  /** The run that launched the agent. Agents outlive controllers. */
-  generation: string;
-  /** Where the agent was standing. */
-  agentHost: string;
-  /** "boot" is written before any work, so an agent killed mid-mission still
-   *  leaves evidence that it existed. */
-  phase: "boot" | "final";
+/** One password attempt and what it taught us.
+ *
+ * `attempted` is OUR string and may be recorded; the server's password never
+ * may. `passwordExpected` inside `oracle` is deliberately NOT a credential: it
+ * is the buffer half of a `Pr0verFl0` failure — what our own attempt overwrote —
+ * and losing it would blind the one model whose whole trick is reading it back. */
+export interface AttemptOutcome {
   at: number;
-  hosts: ReportHost[];
-  /** Response codes seen, counted. This is the diagnosis channel. */
-  codes: Record<string, number>;
-  logs: string[];
-  /** Set when the caps above dropped something. */
-  truncated?: boolean;
-  /** The mission file did not arrive with the agent. A measured channel
-   *  failure, not a crash. */
-  missionFileMissing?: boolean;
+  /** Which model we believed we were attacking, so a wrong belief is visible. */
+  modelId?: string;
+  status: "implemented" | "unattempted" | "unknown-model";
+  /** Index into the model's ordered candidate list, for a dictionary attack. */
+  candidateIndex?: number;
+  attempted?: string;
+  code: number;
+  success: boolean;
+  /** Wall time. For `2G_cellular` this IS the oracle: each correct leading
+   *  character adds 50ms, so the duration is the signal, not the response. */
+  elapsedMs?: number;
+  /** The model-specific response, scraped back out of the log ring. */
+  oracle?: OracleCapture;
 }
 
-function clip(text: unknown, max: number): string | undefined {
-  return typeof text === "string" && text.length > 0 ? text.slice(0, max) : undefined;
+/** A resident saying it is alive. Three missed beats and the controller retires
+ * its queue, because a resident dies with its host. */
+export interface AgentBeat {
+  agentId: string;
+  host: string;
+  role: string;
+  at: number;
 }
 
-/** Build a report, applying every cap. Passwords are stripped rather than
- * trusted not to be passed: a credential must never leave home, and the one
- * place to guarantee that is the encoder. */
-export function encodeReport(report: DnetReport): string {
-  const hosts = report.hosts.slice(0, REPORT_MAX_HOSTS).map((host) => {
-    const { passwordHint, data, ...rest } = host as ReportHost & { password?: unknown };
-    delete (rest as { password?: unknown }).password;
-    return {
-      ...rest,
-      ...(clip(passwordHint, REPORT_MAX_HINT_CHARS) !== undefined
-        ? { passwordHint: clip(passwordHint, REPORT_MAX_HINT_CHARS) }
-        : {}),
-      ...(clip(data, REPORT_MAX_HINT_CHARS) !== undefined ? { data: clip(data, REPORT_MAX_HINT_CHARS) } : {}),
-    };
-  });
-  const logs = report.logs.slice(0, REPORT_MAX_LOG_LINES).map((line) => line.slice(0, REPORT_MAX_LOG_CHARS));
-  const truncated =
-    report.truncated === true
-    || report.hosts.length > REPORT_MAX_HOSTS
-    || report.logs.length > REPORT_MAX_LOG_LINES;
-  return JSON.stringify({ ...report, hosts, logs, ...(truncated ? { truncated: true } : {}) });
+/** A password an agent recovered, on its way to the controller's vault.
+ *
+ * The one structure in the feature that carries a secret. It never crosses a
+ * channel that is written down: it lives in the realm between the job that found
+ * it and the controller, and in home's module state after that. */
+export interface VaultEntry {
+  hostname: string;
+  password: string;
+  /** How it was learned. A `leak` credential came out of a log and is worth
+   *  trying anywhere; a `cracked` one is a fact about this host. */
+  via: "cracked" | "leak" | "loose";
+  at: number;
 }
 
-export type DecodeResult =
-  | { ok: true; report: DnetReport }
-  | { ok: false; reason: "unparseable" | "version" | "shape"; detail: string };
+/** Field names that carry a recovered credential and must never be recorded.
+ *
+ * `passwordExpected` is deliberately absent: see `AttemptOutcome`. */
+const CREDENTIAL_KEYS: ReadonlySet<string> = new Set(["password", "credential", "credentials", "vault"]);
 
-/** Never throws, and never returns a half-understood report. A rejection is a
- * counted outcome so the channel's health is visible instead of silent. */
-export function decodeReport(raw: string): DecodeResult {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (error) {
-    return { ok: false, reason: "unparseable", detail: String(error) };
+/** Strip credentials at every depth.
+ *
+ * Recursive and BY NAME, because the things being recorded are nested objects
+ * built from log lines we did not write — an attempt carries an oracle, and an
+ * oracle is parsed out of a line that may itself have contained a password. A
+ * strip that only reached the top level would be reopened by the next field
+ * anyone added.
+ *
+ * Applied by `publishKnowledge` to everything the panel is given. That digest is
+ * mirrored over a socket and written to disk as JSONL, so a password reaching it
+ * would outlive the run in a file nobody remembers.
+ *
+ * It is a second line rather than the first: the digest is built from an
+ * explicit ALLOW-list of fact names, so a credential has no route in to begin
+ * with. This catches the case that allow-list cannot — a field added later to
+ * some nested structure the digest carries along. */
+export function stripCredentials<T>(value: T): T {
+  if (Array.isArray(value)) return value.map(stripCredentials) as unknown as T;
+  if (typeof value !== "object" || value === null) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (CREDENTIAL_KEYS.has(key)) continue;
+    out[key] = stripCredentials(entry);
   }
-  if (typeof parsed !== "object" || parsed === null) {
-    return { ok: false, reason: "shape", detail: "not an object" };
-  }
-  const value = parsed as Partial<DnetReport>;
-  if (value.v !== REPORT_VERSION) {
-    return { ok: false, reason: "version", detail: `expected v${REPORT_VERSION}, got ${String(value.v)}` };
-  }
-  if (
-    typeof value.missionId !== "string"
-    || typeof value.generation !== "string"
-    || typeof value.agentHost !== "string"
-    || typeof value.at !== "number"
-    || !Array.isArray(value.hosts)
-  ) {
-    return { ok: false, reason: "shape", detail: "missing required fields" };
-  }
-  return { ok: true, report: value as DnetReport };
-}
-
-/** Turn a decoded report into the observation the fold consumes. Keeping these
- * separate means the fold never has to know a report existed. */
-export function observationOf(report: DnetReport, provenance: Provenance = "agent"): Observation {
-  const hosts: ObservedHost[] = report.hosts.map((host) => {
-    const { hostname, present, ...facts } = host;
-    const defined: Record<string, unknown> = {};
-    for (const [key, entry] of Object.entries(facts)) {
-      if (entry !== undefined) defined[key] = entry;
-    }
-    return { hostname, present, facts: present ? defined : {} };
-  });
-  return {
-    from: report.agentHost,
-    provenance,
-    at: report.at,
-    generation: report.generation,
-    hosts,
-  };
+  return out as unknown as T;
 }

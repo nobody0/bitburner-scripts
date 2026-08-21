@@ -1,16 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { DARKNET_CODES, LOCAL_CODES, codeName, stripCredentials } from "../shared/strategy/dnet/courier.ts";
 import {
-  DARKNET_CODES,
-  REPORT_MAX_HINT_CHARS,
-  REPORT_MAX_HOSTS,
-  REPORT_VERSION,
-  codeName,
-  decodeReport,
-  encodeReport,
-  observationOf,
-  type DnetReport,
-} from "../shared/strategy/dnet/courier.ts";
-import { parseMissionArgs } from "../shared/strategy/dnet/mission.ts";
+  jobIdFrom,
+  overseerArgs,
+  parseOverseerArgs,
+  parseWorkerArgs,
+  workerArgs,
+} from "../shared/strategy/dnet/mission.ts";
 import {
   FACT_CLASS,
   coverage,
@@ -18,6 +14,7 @@ import {
   expiryMs,
   foldObservations,
   forgetMs,
+  freeRam,
   fresh,
   staleness,
   type Observation,
@@ -194,87 +191,195 @@ describe("a host that goes away is forgotten, not remembered for ever", () => {
   });
 });
 
-describe("the report and mission wire", () => {
-  const report: DnetReport = {
-    v: REPORT_VERSION,
-    missionId: "m-1",
-    generation: GEN,
-    agentHost: "darkweb",
-    phase: "final",
-    at: 1_000,
-    hosts: [{ hostname: "dn-1", present: true, depth: 0, neighbours: ["dn-2"], modelId: "TopPass" }],
-    codes: { "200": 1, "451": 2 },
-    logs: ["login failed"],
-  };
-
-  test("round-trips through encode and decode", () => {
-    const decoded = decodeReport(encodeReport(report));
-    expect(decoded.ok).toBe(true);
-    if (!decoded.ok) return;
-    expect(decoded.report).toMatchObject({ missionId: "m-1", agentHost: "darkweb" });
-    const seen = observationOf(decoded.report);
-    expect(seen).toMatchObject({ from: "darkweb", provenance: "agent", generation: GEN });
-    expect(seen.hosts[0]).toMatchObject({ hostname: "dn-1", present: true });
-    expect(seen.hosts[0]!.facts).toMatchObject({ depth: 0, neighbours: ["dn-2"], modelId: "TopPass" });
-  });
-
-  test("a password can never leave home, even if one is handed to the encoder", () => {
-    const leaky = { ...report, hosts: [{ ...report.hosts[0]!, password: "hunter2" } as never] };
-    expect(encodeReport(leaky as DnetReport)).not.toContain("hunter2");
-  });
-
-  test("caps are applied and announced rather than silently dropping data", () => {
-    const many = {
-      ...report,
-      hosts: Array.from({ length: REPORT_MAX_HOSTS + 5 }, (_, i) => ({ hostname: `dn-${i}`, present: true })),
-      logs: Array.from({ length: 40 }, () => "x".repeat(500)),
-    };
-    const decoded = decodeReport(encodeReport(many));
-    expect(decoded.ok).toBe(true);
-    if (!decoded.ok) return;
-    expect(decoded.report.hosts).toHaveLength(REPORT_MAX_HOSTS);
-    expect(decoded.report.truncated).toBe(true);
-    expect(decoded.report.logs.every((line) => line.length <= 240)).toBe(true);
-  });
-
-  test("hint text is clipped, since it is free-form and unbounded upstream", () => {
-    const long = { ...report, hosts: [{ ...report.hosts[0]!, passwordHint: "y".repeat(400) }] };
-    const decoded = decodeReport(encodeReport(long));
-    expect(decoded.ok).toBe(true);
-    if (!decoded.ok) return;
-    expect(decoded.report.hosts[0]!.passwordHint!.length).toBe(REPORT_MAX_HINT_CHARS);
-  });
-
-  test("an unknown version is a counted rejection, never a throw or a partial merge", () => {
-    for (const raw of ["", "{", "null", JSON.stringify({ v: 99, missionId: "m" }), JSON.stringify({ v: 1 })]) {
-      const decoded = decodeReport(raw);
-      expect(decoded.ok).toBe(false);
-      if (decoded.ok) continue;
-      expect(decoded.reason).toMatch(/unparseable|version|shape/);
-    }
-  });
-
-  test("response codes are named, and instability is not mistaken for a bad password", () => {
-    expect(codeName(451)).toBe("NotEnoughCharisma");
-    expect(codeName(999)).toBe("Unknown(999)");
-    expect(Object.keys(DARKNET_CODES)).toHaveLength(11);
-    // 408 exists as a distinct code from 401 precisely because it is
-    // instability, not a wrong password — "the password may or may not have been
-    // correct". Any retry policy has to keep them apart.
-    expect(codeName(408)).toBe("RequestTimeOut");
-    expect(codeName(401)).toBe("AuthFailure");
-  });
-
-  test("mission args parse positionally, and a wrong shape exits quietly", () => {
-    expect(parseMissionArgs(["m-1", GEN, "identity-json", 7, 120])).toEqual({
+describe("mission arguments", () => {
+  test("mission args round-trip through their encoder, per role", () => {
+    // The encoders exist so the launcher and the parser cannot drift: an agent
+    // launched with the wrong positional order would fail silently at 3am on a
+    // darknet host, which is the worst place to discover a typo.
+    const worker = {
       missionId: "m-1",
       generation: GEN,
       identity: "identity-json",
-      port: 7,
+      role: "resident" as const,
+      agentId: "resident-dn-1",
+    };
+    expect(parseWorkerArgs(workerArgs(worker))).toEqual(worker);
+
+    const overseer = {
+      missionId: "m-1",
+      generation: GEN,
+      identity: "identity-json",
       charisma: 120,
-    });
-    // A wrong shape exits quietly instead of crashing into the game's log.
-    expect(parseMissionArgs(["only-one"])).toBeUndefined();
-    expect(parseMissionArgs(["m", "g", "i", "not-a-number", 1])).toBeUndefined();
+      agentFile: "dnet/agent.abc123.js",
+    };
+    expect(parseOverseerArgs(overseerArgs(overseer))).toEqual(overseer);
   });
+
+  test("a wrong argument shape exits quietly instead of crashing the game log", () => {
+    expect(parseWorkerArgs(["only-one"])).toBeUndefined();
+    // An unrecognised role is refused rather than coerced: an agent that does not
+    // know what it is would take work it cannot perform.
+    expect(parseWorkerArgs(["m", "g", "i", "saboteur", "a"])).toBeUndefined();
+    expect(parseOverseerArgs(["m", "g", "i", "not-a-number", "f"])).toBeUndefined();
+    expect(parseOverseerArgs(["m", "g", "i", 1])).toBeUndefined();
+  });
+
+  test("the job id is what selects an agent's MODE", () => {
+    // One binary, two modes: absent it is the host's resident, present it is the
+    // one job with that id. The same trick dodge-stub uses for its two lanes.
+    const base = workerArgs({
+      missionId: "m",
+      generation: GEN,
+      identity: "i",
+      role: "resident",
+      agentId: "a",
+    });
+    expect(jobIdFrom(base)).toBeUndefined();
+    expect(jobIdFrom([...base, "survey:dn-1"])).toBe("survey:dn-1");
+  });
+});
+
+describe("a credential is never written down", () => {
+  /** Telemetry is mirrored over a socket and written to disk as JSONL, so a
+   * password that gets through here outlives the run in a file nobody
+   * remembers. The wire that used to carry these is gone — the darknet talks
+   * through the page realm now — but the rule it enforced still needs exactly
+   * one home, because the things being recorded are nested objects built from
+   * log lines we did not write. */
+
+  test("a nested password is stripped, not just a top-level one", () => {
+    // An attempt carries an oracle, and an oracle is parsed out of a line that
+    // may itself have contained a password. A strip that only reached the top
+    // level would be reopened by the next field anyone added.
+    const record = {
+      hostname: "dn-1",
+      present: true,
+      attempts: [{ at: 1, status: "implemented", code: 401, password: "hunter2" }],
+      nested: { deeper: { credential: "swordfish" } },
+    };
+    const serialised = JSON.stringify(stripCredentials(record));
+    expect(serialised).not.toContain("hunter2");
+    expect(serialised).not.toContain("swordfish");
+    // ...and it takes nothing else with it.
+    expect(serialised).toContain("dn-1");
+    expect(serialised).toContain("401");
+  });
+
+  test("oracle output that is NOT a credential survives", () => {
+    // `passwordExpected` is the buffer half of a Pr0verFl0 failure — what our
+    // own attempt overwrote, not the server's secret. Stripping it would blind
+    // the one model whose whole trick is reading that value back.
+    const kept = stripCredentials({ passwordAttempted: "aaaa", passwordExpected: "####" });
+    expect(JSON.stringify(kept)).toContain("####");
+    expect(JSON.stringify(kept)).toContain("aaaa");
+  });
+
+  test("our own response codes are named and kept clear of the engine's", () => {
+    expect(codeName(900)).toBe("UnknownModel");
+    expect(codeName(903)).toBe("NotEnoughRam");
+    // They must not collide with the engine's range, or a refusal would be
+    // attributed to the wrong side of the boundary.
+    for (const code of Object.keys(LOCAL_CODES)) {
+      expect(Object.keys(DARKNET_CODES)).not.toContain(code);
+      expect(Number(code)).toBeGreaterThan(599);
+    }
+    expect(codeName(451)).toBe("NotEnoughCharisma");
+    // 408 is instability, not a wrong password — "the password may or may not
+    // have been correct" — so any retry policy has to keep them apart.
+    expect(codeName(408)).toBe("RequestTimeOut");
+    expect(codeName(401)).toBe("AuthFailure");
+    expect(Object.keys(DARKNET_CODES)).toHaveLength(11);
+  });
+});
+
+describe("the facts the spreading agents added", () => {
+  test("the new fact classes expire on the right clock", () => {
+    // An IP is assigned at construction and dies with the host, exactly like the
+    // password model does — so it never expires with age.
+    expect(FACT_CLASS["ip"]).toBe("identity");
+    expect(expiryMs("identity")).toBe(Infinity);
+    // A session belongs to the PID that won it, so it is worthless the moment
+    // its observer dies. The shortest expiry we have is the honest answer.
+    expect(FACT_CLASS["hasSession"]).toBe("resource");
+    expect(FACT_CLASS["usedRam"]).toBe("resource");
+  });
+
+  test("cracking progress is dropped when the host disappears", () => {
+    // A host that comes back is CLEANED and given a new password upstream, so a
+    // ledger saying "the first 40 candidates are ruled out" would be ruling out
+    // candidates for a password that no longer exists.
+    let knowledge = emptyKnowledge(GEN);
+    knowledge = foldObservations(
+      knowledge,
+      [observation({ at: 1_000, hosts: [{ hostname: "dn-1", present: true, facts: { modelId: "TopPass" } }] })],
+      1_000,
+    ).knowledge;
+    knowledge.hosts["dn-1"]!.attempts = { modelId: "TopPass", tried: 40, probes: 0 };
+    knowledge.hosts["dn-1"]!.credentialKnown = true;
+
+    const gone = foldObservations(
+      knowledge,
+      [observation({ at: 2_000, hosts: [{ hostname: "dn-1", present: false, facts: {} }] })],
+      2_000,
+    ).knowledge;
+    expect(gone.hosts["dn-1"]!.attempts).toBeUndefined();
+    expect(gone.hosts["dn-1"]!.credentialKnown).toBeUndefined();
+  });
+
+  test("freeRam does not double-count owner-blocked RAM", () => {
+    // Blocked RAM presents AS used RAM upstream: updateRamUsed(blockedRam) runs
+    // at construction and again on every recalculation. A naive
+    // max - blocked - used therefore subtracts the block twice and can go
+    // negative on a host doing nothing wrong.
+    const at = 1_000;
+    const host = {
+      hostname: "dn-1",
+      lastSeenAt: at,
+      facts: {
+        maxRam: { value: 16, at, from: "agent" as const },
+        blockedRam: { value: 4, at, from: "agent" as const },
+        usedRam: { value: 4, at, from: "agent" as const },
+      },
+    };
+    expect(freeRam(host, at)).toBe(12);
+
+    // ...but a host observed before updateRamUsed ran reports used < blocked,
+    // and there the block really is unaccounted for.
+    const early = {
+      ...host,
+      facts: { ...host.facts, usedRam: { value: 0, at, from: "agent" as const } },
+    };
+    expect(freeRam(early, at)).toBe(12);
+
+    // An unknown capacity must never read as "room for an agent".
+    expect(freeRam(undefined, at)).toBe(0);
+    expect(freeRam({ hostname: "x", lastSeenAt: at, facts: {} }, at)).toBe(0);
+  });
+
+  test("coverage separates what we opened from what we can actually stand on", () => {
+    const at = 1_000;
+    let knowledge = emptyKnowledge(GEN);
+    knowledge = foldObservations(
+      knowledge,
+      [
+        observation({
+          at,
+          hosts: [
+            { hostname: "roomy", present: true, facts: { maxRam: 16, blockedRam: 0, usedRam: 0 } },
+            // A big host can arrive with ALL of its RAM blocked, which is a
+            // different problem from not having the password.
+            { hostname: "blocked", present: true, facts: { maxRam: 128, blockedRam: 128, usedRam: 128 } },
+          ],
+        }),
+      ],
+      at,
+    ).knowledge;
+    knowledge.hosts["roomy"]!.credentialKnown = true;
+    knowledge.hosts["blocked"]!.credentialKnown = true;
+
+    const cover = coverage(knowledge, at, {}, 2.6);
+    expect(cover.cracked).toBe(2);
+    expect(cover.plantable).toBe(1);
+  });
+
 });

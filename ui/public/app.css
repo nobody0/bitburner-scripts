@@ -68,6 +68,10 @@ main#view {
 .col { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 /* A column of dense tables needs the room; the sidebar keeps its ratio. */
 .col.wide { grid-column: 1; }
+/* A full-width row above the two columns. The darknet map is 8 columns of boxes
+   wide by construction — the game's own NET_WIDTH — so it does not fit a
+   half-width column at any useful zoom. */
+.col.span { grid-column: 1 / -1; }
 @media (max-width: 1100px) {
   main#view { grid-template-columns: minmax(0, 1fr); }
 }
@@ -338,6 +342,89 @@ canvas.microchart { height: 88px; }
 .go-mark { width: 10px; height: 10px; border-radius: 50%; display: inline-block; background: transparent; border: 2px solid; }
 .go-mark.chosen { border-color: var(--bb-int); box-shadow: 0 0 4px var(--bb-int); }
 .go-mark.reply { border-color: var(--bb-money); border-style: dashed; box-shadow: 0 0 4px var(--bb-money); }
+
+/* --- darknet net map ------------------------------------------------------
+   An inline SVG built as a string by ui/app/tabs/dnet-map.ts, patched in place
+   by morph like any other markup. The scroller is the pan control: it carries
+   no listener, and morph never replaces it, so the offset survives a re-render.
+
+   Everything here is a theme token. The map has no palette of its own: colour
+   carries the same meaning it does everywhere else in the viewer, and it is
+   never the only channel — every state also has a status line and a <title>. */
+.netcontrols { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-bottom: var(--sp-2); }
+.netcontrols .search { flex: 1 1 200px; min-width: 140px; }
+
+.netmap-scroll {
+  overflow: auto;
+  max-height: 70vh;
+  border: 1px solid var(--bb-well);
+  background: var(--bb-background);
+}
+.netmap { display: block; font-family: var(--font-mono); }
+
+.netmap .rowlabel { fill: var(--muted); font-size: 9px; }
+
+/* Edges. The game draws straight diagonals on a 6000px canvas; at panel scale
+   those cross into noise, so these are routed orthogonally through the gutter. */
+.netmap .edge { fill: none; stroke: var(--bb-well-light); stroke-width: 1; }
+.netmap .edge.tree { stroke: var(--bb-primary-dark); }
+.netmap .edge.lateral { stroke: var(--bb-well-light); }
+.netmap .edge.back { stroke: var(--bb-well-light); stroke-dasharray: 2 3; }
+.netmap .edge.stale { stroke-dasharray: 3 4; opacity: 0.5; }
+
+/* Boxes. Border colour follows the in-game map: green when we are in, grey when
+   we are not, gold for a stasis link. */
+.netmap .node .box { fill: var(--bb-well); stroke: var(--bb-well-light); stroke-width: 1; }
+.netmap .node { cursor: pointer; }
+.netmap .node:hover .box { stroke: var(--bb-primary-light); }
+.netmap .node.auth-session .box { stroke: var(--good); stroke-width: 2; }
+.netmap .node.auth-authenticated .box { stroke: var(--bb-primary-dark); }
+.netmap .node.auth-auth-required .box { stroke: var(--bb-well-light); }
+.netmap .node.auth-no-connection .box { stroke: var(--bb-well-light); stroke-dasharray: 3 3; }
+.netmap .node.gone .box { stroke: var(--critical); stroke-dasharray: 3 3; fill: var(--bb-background); }
+.netmap .node.sel .box { stroke: var(--bb-white); stroke-width: 2; }
+.netmap .node .stasis { fill: var(--series-5); }
+
+.netmap .node text { font-size: 9px; fill: var(--text-secondary); }
+.netmap .node .host { font-size: 10px; fill: var(--text-primary); }
+.netmap .node.gone .host { fill: var(--muted); text-decoration: line-through; }
+.netmap .node .glyph { font-size: 11px; fill: var(--bb-secondary); }
+.netmap .node .fixed { font-size: 9px; fill: var(--bb-secondary-dark); text-anchor: end; }
+.netmap .node .meta { fill: var(--muted); }
+.netmap .node .status { fill: var(--bb-secondary); }
+.netmap .node.auth-session .status { fill: var(--good); }
+.netmap .node.gone .status { fill: var(--critical); }
+.netmap .node .ramtext { fill: var(--muted); }
+
+/* Blocked RAM is not "used" in any sense we control — it is the server owner's,
+   and freeing it is a separate grind — so it gets the critical colour rather
+   than sharing the ordinary in-use one. */
+.netmap .ram.free { fill: var(--good); }
+.netmap .ram.used { fill: var(--series-1); }
+.netmap .ram.blocked { fill: var(--critical); }
+
+/* "Believed, not confirmed". The net rewires itself every few seconds, so a
+   value we hold and a value we trust must not look the same. */
+.netmap .node.stale { opacity: 0.55; }
+/* Search highlights rather than removes: the shape of the net is the thing you
+   came to look at, and filtering it down to seven boxes destroys it. */
+.netmap .node.dim { opacity: 0.18; }
+.netmap .node.hit .box { stroke: var(--bb-white); }
+
+/* Level of detail, by zoom. The hostname is never dropped. */
+.zoom-40 .netmap .ramtext, .zoom-40 .netmap .status, .zoom-40 .netmap .meta { display: none; }
+.zoom-60 .netmap .ramtext { display: none; }
+
+.netlegend { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); margin-top: var(--sp-2); font-size: var(--fs-xs); color: var(--muted); }
+.netkey { display: inline-flex; align-items: center; gap: 4px; }
+.netkey .sw { width: 12px; height: 8px; border: 1px solid var(--bb-well-light); background: var(--bb-well); }
+.netkey .sw.auth-session { border-color: var(--good); border-width: 2px; }
+.netkey .sw.auth-authenticated { border-color: var(--bb-primary-dark); }
+.netkey .sw.auth-no-connection { border-style: dashed; }
+.netkey .sw.gone { border-color: var(--critical); border-style: dashed; background: var(--bb-background); }
+.netkey .sw.linked { background: var(--series-5); border-color: var(--series-5); }
+.netkey .sw.stale { opacity: 0.55; }
+.netkey .gl { font-family: var(--font-mono); color: var(--bb-secondary); }
 
 @media (max-width: 760px) {
   header { padding-inline: 10px; }

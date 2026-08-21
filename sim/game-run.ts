@@ -72,6 +72,13 @@ import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 
 const WORKER_SCRIPT = versionedScript("worker/worker.js", "sim");
 const DODGE_STUB = versionedScript("lib/dodge-stub.js", "sim");
+/** The darknet payloads. Registered like any other artifact so the controller's
+ * seed really places a process and the agents really run — without them the
+ * seed would `exec` a filename the sim has no main() for, the process would
+ * finish immediately, and a BN15 run would report a darknet that never advances
+ * while looking like the deploy worked. */
+const DNET_OVERSEER = versionedScript("dnet/overseer.js", "sim");
+const DNET_AGENT = versionedScript("dnet/agent.js", "sim");
 const START_SCRIPT = "start.js";
 
 export interface GameRunOptions {
@@ -390,8 +397,8 @@ async function runGameInstalled(
   const terminal = { host: save?.currentServer ?? "home" };
   const initialHomeFiles = new Set(
     save
-      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
-      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
+      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_OVERSEER, DNET_AGENT, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
+      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_OVERSEER, DNET_AGENT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
   );
   const permanentDarknetAccess = (): boolean => bitnode === 15 || (world.player.sourceFiles["15"] ?? 0) > 0;
   if (permanentDarknetAccess()) initialHomeFiles.add("DarkscapeNavigator.exe");
@@ -678,6 +685,23 @@ async function runGameInstalled(
     player: world.player,
     homeFiles: () => host.files.get("home")!,
     darknetMoneyMultiplier: () => currentNodeMults.DarknetMoneyMultiplier ?? 1,
+    // A THIRD stream. Log-noise draws vary in number with how long a script
+    // waited before bleeding, so taking them from the gameplay stream would let
+    // log volume perturb stock prices across an A/B — the same hazard the
+    // fixed-width mutation draw already guards against.
+    logNoise: mulberry32(DARKNET_NETWORK_SEED ^ 1),
+    // A deleted darknet host takes its files with it. Without this the file map
+    // keeps them, and an agent that scps itself onto a host would leave its
+    // payload "present" on a server that no longer exists.
+    forgetFiles: (hostname: string) => {
+      host.files.delete(hostname);
+      // The content map is keyed with a NUL separator, not a colon; the wrong
+      // one would match nothing and leak every file on the deleted host.
+      const prefix = `${hostname}\u0000`;
+      for (const key of [...host.contents.keys()]) {
+        if (key.startsWith(prefix)) host.contents.delete(key);
+      }
+    },
   });
   host.dnet = dnet;
   if (dnet.hasAccess()) dnet.populate();
@@ -699,12 +723,22 @@ async function runGameInstalled(
 
   // Imported AFTER the flags are on globalThis, and dynamically so module
   // evaluation cannot outrun them.
-  const [{ main: startMain }, { resetAllFeatures }, { initState }, dodgeStub, worker] = await Promise.all([
+  const [
+    { main: startMain },
+    { resetAllFeatures },
+    { initState },
+    dodgeStub,
+    worker,
+    dnetOverseer,
+    dnetAgent,
+  ] = await Promise.all([
     import("../game/start.ts"),
     import("../game/lib/features/index.ts"),
     import("../game/lib/state.ts"),
     import("../game/lib/dodge-stub.ts"),
     import("../game/worker/worker.ts"),
+    import("../game/dnet/overseer.ts"),
+    import("../game/dnet/agent.ts"),
   ]);
 
   // Bun caches every feature module for the process lifetime, while each
@@ -856,6 +890,8 @@ async function runGameInstalled(
 
   host.scripts.set(DODGE_STUB, dodgeStub.main as ScriptMain);
   host.scripts.set(WORKER_SCRIPT, worker.main as ScriptMain);
+  host.scripts.set(DNET_OVERSEER, dnetOverseer.main as ScriptMain);
+  host.scripts.set(DNET_AGENT, dnetAgent.main as ScriptMain);
   host.scripts.set(START_SCRIPT, ((ns: NS) => startMain(ns, options.features)) as ScriptMain);
 
   const scenarioId = scenarioFingerprint({

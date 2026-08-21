@@ -178,7 +178,11 @@ benchmarks, and the normal telemetry path when inspecting detailed decisions.
 - Controller-facing models currently cover hacking, factions, crimes,
   grafting, Hacknet and the stock lifecycle used by the shipped controller.
   Career and progression are partial; user-created stock order mutation/fills,
-  gang, corporation, Bladeburner, sleeves and Darknet remain unmodeled.
+  gang, corporation, Bladeburner and sleeves remain unmodeled. The Darknet is
+  PARTIAL rather than absent: population, the access gate, the read-only getters,
+  the mutation clock and cache rewards are modeled; sessions, authentication,
+  heartbleed and the password models are not, and `DNET_ASSUMPTIONS` is the
+  authoritative list.
   Stanek's placement, charging, effects, battery and multiplier lifecycle are
   modeled for fresh/controller worlds; gift acceptance, sleeves and
   save-seeded gift state remain explicit gaps. Go has a controller-facing

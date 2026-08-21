@@ -6,7 +6,7 @@ export type FeatureCoverage = "full" | "partial" | "oracle-only" | "unmodeled";
 
 /** Increment whenever handwritten simulator semantics change in a way that can
  * alter an outcome. It is part of every comparison fingerprint. */
-export const SIMULATOR_MODEL_VERSION = 7;
+export const SIMULATOR_MODEL_VERSION = 8;
 /** Pinned upstream revision mirrored by sim/vendor/manifest.json. */
 export const SIMULATOR_VENDOR_COMMIT = "3162fd2590e221eadd0c0fbd46151913f7c4c41c";
 
@@ -47,11 +47,20 @@ export const SIM_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> 
   // Core placement/charge/effect/process lifecycle is modeled. acceptGift,
   // sleeves, and save-seeded gift state remain explicit gaps.
   stanek: "partial",
-  // Population, the probed getters, the access gate, the mutation clock, the
-  // labyrinth ladder (depth, reward order, the lab server) and the .cache
-  // reward table are modelled. The maze itself, the three reward kinds needing
-  // other subsystems, and the actions the driver does not call are not. See
-  // DNET_ASSUMPTIONS.
+  // Population, the probed getters, the access gate, the labyrinth ladder
+  // (depth, reward order, the lab server) and the .cache reward table were
+  // already here. Model version 8 adds the half the controller actually needs to
+  // run: passwords, per-PID SESSIONS with upstream's lazy prune, authenticate
+  // with its transcribed timing formula (including the 2G_cellular per-character
+  // leak), heartbleed over a lazily back-filled log ring, nextMutation as the
+  // agents' clock, and the session gates on scp and exec — which is what makes
+  // "exec onto darkweb works only from home" fall out rather than be asserted.
+  //
+  // Still absent, and still throwing: stasis links, memoryReallocation,
+  // phishing, induced migration, promoteStock, and the maze. Still NOT applied
+  // by the mutation tick: moves, connects and disconnects — the rates every
+  // knowledge expiry is derived from, which is why this stays "partial" and why
+  // DNET_ASSUMPTIONS says a sim run cannot validate the staleness policy.
   dnet: "partial",
   side: "oracle-only",
 };

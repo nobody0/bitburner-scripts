@@ -26,6 +26,17 @@ export interface BrokerRequest {
   priority: number;
   lane: DodgeLane;
   class: RequestClass;
+  /** Place ONLY here, or queue.
+   *
+   * Almost every dodge is happy anywhere with room, which is the point of the
+   * broker. One is not: `ns.exec` onto `darkweb` needs a direct connection, and
+   * only `home` holds the TOR edge — so a stub the broker helpfully placed on a
+   * purchased server would `scp` successfully and then get a silent 0 from
+   * `exec`, which is indistinguishable from a full host.
+   *
+   * Pinned rather than bypassing the broker, so the RAM it spends is still
+   * accounted in the heap. */
+  pinHost?: string;
 }
 
 export interface BrokerHost {
@@ -406,7 +417,7 @@ export class RamBroker {
       existing.request = request;
       return { status: 'queued', request, enqueuedAt: existing.enqueuedAt };
     }
-    const host = chooseHost(hosts, arena, executableGb(request), request.lane);
+    const host = chooseHost(hosts, arena, executableGb(request), request.lane, request.pinHost);
     if (host) return { status: 'placed', host, request };
     return this.enqueue(request, now);
   }
@@ -433,7 +444,7 @@ export class RamBroker {
     const lanes = new Set<DodgeLane>();
     for (const queued of ordered) {
       if (lanes.has(queued.request.lane)) continue;
-      const host = chooseHost(free, arena, executableGb(queued.request), queued.request.lane);
+      const host = chooseHost(free, arena, executableGb(queued.request), queued.request.lane, queued.request.pinHost);
       if (!host) continue;
       const entry = free.find((candidate) => candidate.hostname === host)!;
       entry.freeGb -= executableGb(queued.request);
@@ -492,9 +503,14 @@ function chooseHost(
   arena: ArenaPlan,
   neededGb: number,
   lane: DodgeLane,
+  pinHost?: string,
 ): string | undefined {
   const arenaSet = new Set(arena.hosts);
-  const candidates = hosts.filter((host) => host.rooted && host.deployed && host.freeGb >= neededGb);
+  const candidates = hosts
+    .filter((host) => host.rooted && host.deployed && host.freeGb >= neededGb)
+    // A pinned request places there or waits. Falling back to another host would
+    // defeat the reason it was pinned.
+    .filter((host) => pinHost === undefined || host.hostname === pinHost);
   // The long Go lane may overlap the controller/default lane. Keep it off
   // home unconditionally, so it cannot consume the direct sweep's home floor
   // while that independent lane is entering its stub; it queues when the

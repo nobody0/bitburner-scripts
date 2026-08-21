@@ -41,6 +41,9 @@ export const FACT_CLASS: Readonly<Record<string, FactClass>> = {
   isStationary: "identity",
   logTrafficInterval: "identity",
   requiredCharisma: "identity",
+  // The IP is assigned at construction and dies with the host, exactly like the
+  // password model does.
+  ip: "identity",
   // Changes when the host moves.
   depth: "position",
   // Churned by move, connect and disconnect alike — the most perishable thing
@@ -49,8 +52,34 @@ export const FACT_CLASS: Readonly<Record<string, FactClass>> = {
   // Ours to change, and only changes when we or the owner act.
   blockedRam: "resource",
   maxRam: "resource",
+  usedRam: "resource",
   stasisLinked: "resource",
+  // A session belongs to the PID that won it, so this is worthless the moment
+  // its observer dies. Classing it `resource` gives it the shortest expiry we
+  // have, which is the honest answer rather than a flattering one.
+  hasSession: "resource",
 };
+
+/** How far the cracker got against one host identity.
+ *
+ * Not a fact, because it is about US rather than about the host, and it must not
+ * expire on the mutation clock — a dictionary we have already walked stays
+ * walked. It IS discarded when the host disappears, because a host that returns
+ * is a new host with a new password (see the `goneAt` branch in the fold). */
+export interface AttemptLedger {
+  /** The model the ledger was built against. A different model id means the
+   *  host was replaced and the count below means nothing. */
+  modelId?: string;
+  /** How many ordered candidates have been ruled out. */
+  tried: number;
+  /** Deliberate failures spent to make an unsolved model's oracle appear. */
+  probes: number;
+  lastAt?: number;
+  lastCode?: number;
+  /** The most recent model response, verbatim, for the panel that shows it. */
+  lastOracle?: string;
+  solved?: boolean;
+}
 
 export interface DarknetHostKnowledge {
   hostname: string;
@@ -59,6 +88,10 @@ export interface DarknetHostKnowledge {
   /** Set when an observation reported the host gone. Identity facts die here. */
   goneAt?: number;
   facts: Record<string, HostFact<unknown>>;
+  attempts?: AttemptLedger;
+  /** That we HOLD a credential, never the credential. This record is published
+   *  to telemetry; the password lives only in the driver's vault. */
+  credentialKnown?: boolean;
 }
 
 export interface DarknetKnowledge {
@@ -212,6 +245,12 @@ export function foldObservations(
         if (host.goneAt === undefined || observation.at > host.goneAt) {
           host.goneAt = observation.at;
           host.facts = {};
+          // The cracking progress goes with the identity facts, and for the same
+          // reason: a host that comes back is CLEANED and given a new password
+          // upstream, so a ledger saying "the first 40 candidates are ruled out"
+          // would be ruling out candidates for a password that no longer exists.
+          delete host.attempts;
+          delete host.credentialKnown;
         }
         hosts[seen.hostname] = host;
         continue;
@@ -272,23 +311,37 @@ export interface KnowledgeCoverage {
   /** Share of held facts that are still believable. */
   freshFraction: number;
   gone: number;
+  /** Hosts we hold a credential for. The frontier we have already opened. */
+  cracked: number;
+  /** Hosts we could put an agent on right now: a credential, plus believable
+   *  RAM facts showing room for one. The gap between this and `cracked` is
+   *  usually blocked RAM, which is a different problem with a different fix. */
+  plantable: number;
 }
 
 export function coverage(
   knowledge: DarknetKnowledge,
   now: number,
   opts: Parameters<typeof expiryMs>[1] = {},
+  /** RAM an agent needs, for the `plantable` count. */
+  agentRamGb = 2.6,
 ): KnowledgeCoverage {
   let total = 0;
   let stale = 0;
   let adjacencyKnown = 0;
   let gone = 0;
+  let cracked = 0;
+  let plantable = 0;
   for (const host of Object.values(knowledge.hosts)) {
     if (host.goneAt !== undefined) {
       gone++;
       continue;
     }
     if (fresh<string[]>(host, "neighbours", now, opts) !== undefined) adjacencyKnown++;
+    if (host.credentialKnown === true) {
+      cracked++;
+      if (freeRam(host, now, opts) >= agentRamGb) plantable++;
+    }
     for (const [key, fact] of Object.entries(host.facts)) {
       total++;
       if (staleness(fact, key, now, opts)?.stale) stale++;
@@ -299,5 +352,31 @@ export function coverage(
     adjacencyKnown,
     freshFraction: total === 0 ? 0 : (total - stale) / total,
     gone,
+    cracked,
+    plantable,
   };
+}
+
+/** RAM actually available to a script on a darknet host.
+ *
+ * The subtraction is not obvious. Owner-blocked RAM presents AS used RAM
+ * upstream — `updateRamUsed(server.blockedRam)` runs at construction and again
+ * whenever used RAM is recalculated — so a naive `max - blocked - used`
+ * double-counts the block and can go negative on a host that is doing nothing
+ * wrong. `blockedRam` is therefore only subtracted when `usedRam` has not
+ * already absorbed it.
+ *
+ * Returns 0 rather than a guess when the facts are missing or stale: an unknown
+ * capacity must never read as "room for an agent". */
+export function freeRam(
+  host: DarknetHostKnowledge | undefined,
+  now: number,
+  opts: Parameters<typeof expiryMs>[1] = {},
+): number {
+  const maxRam = fresh<number>(host, "maxRam", now, opts);
+  if (maxRam === undefined) return 0;
+  const blocked = fresh<number>(host, "blockedRam", now, opts) ?? 0;
+  const used = fresh<number>(host, "usedRam", now, opts) ?? 0;
+  const occupied = used >= blocked ? used : used + blocked;
+  return Math.max(0, maxRam - occupied);
 }

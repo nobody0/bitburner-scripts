@@ -1,7 +1,15 @@
 import { describe, expect, test } from "bun:test";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { runGame } from "../game-run.ts";
-import { CACHE_PROGRAMS, DarknetSystem, DNET_ASSUMPTIONS, LAB_STAGES, currentLab, labReward } from "../features/dnet.ts";
+import {
+  CACHE_PROGRAMS,
+  DarknetSystem,
+  DNET_ASSUMPTIONS,
+  LAB_STAGES,
+  MUTATION_DRAWS,
+  currentLab,
+  labReward,
+} from "../features/dnet.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { ProcessTable } from "../ns/process.ts";
 import { SimWorld } from "../world.ts";
@@ -48,6 +56,64 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
     expect(observed.length).toBeGreaterThan(0);
     expect(Math.max(...observed)).toBeGreaterThan(0);
   }, 120_000);
+
+  test("the controller plants an overseer on darkweb and the net gets MAPPED", async () => {
+    // The end-to-end claim, and the one the whole change exists to make good on.
+    // Before this, the Darknet panel showed `darkweb` and nothing else no matter
+    // how long a run went, because home's own probe can only ever see one hop
+    // and nothing ever stood anywhere else.
+    let knownHosts = 0;
+    let adjacency = 0;
+    let seedOutcome = "";
+    const seen = new Set<string>();
+
+    const result = await runGame({
+      goal: parseGoals(["wealth:1e12"]),
+      seed: 3,
+      horizonMs: 8 * 60_000,
+      bitnode: 15,
+      homeRam: 256,
+      features: only("progression", "dnet"),
+      onRecord: (line) => {
+        const record = JSON.parse(line) as {
+          key?: string;
+          name?: string;
+          data?: {
+            knowledge?: { hosts?: { hostname: string; neighbours?: string[] }[] };
+            coverage?: { known?: number; adjacencyKnown?: number };
+            plan?: { lastResult?: { action: string; ok: boolean; detail: string } };
+          };
+        };
+        if (record.key !== "dnet") return;
+        for (const host of record.data?.knowledge?.hosts ?? []) {
+          seen.add(host.hostname);
+          if (host.neighbours) adjacency++;
+        }
+        knownHosts = Math.max(knownHosts, record.data?.coverage?.known ?? 0);
+        // `record()` surfaces as the topic's own lastResult rather than as an
+        // event, so this is where the seed's outcome shows up.
+        const last = record.data?.plan?.lastResult;
+        if (last?.action === "seed") seedOutcome = `${last.ok ? "ok" : "failed"}: ${last.detail}`;
+      },
+    });
+
+    expect(result.crashes).toEqual([]);
+    // Nothing may report itself unmodelled: the seed drives authenticate,
+    // heartbleed, nextMutation and the session gates, and a gap in any of them
+    // would surface here rather than as a quietly stalled net.
+    expect(result.unmodeled).toEqual({});
+
+    // The beachhead went down...
+    expect(seedOutcome, "the seed never ran").not.toBe("");
+    expect(seedOutcome).toContain("ok");
+    // ...and the map is no longer one host wide. This is the number the
+    // screenshot in the original report showed as 0.
+    expect(knownHosts).toBeGreaterThan(1);
+    expect(seen.size).toBeGreaterThan(1);
+    // Adjacency is what `home` structurally cannot learn: probe() is host-local,
+    // so an edge list can only come from an agent standing somewhere else.
+    expect(adjacency).toBeGreaterThan(0);
+  }, 180_000);
 
   test("the same seed generates the same darknet", async () => {
     const run = async () => {
@@ -145,25 +211,80 @@ describe("the darknet model", () => {
     }
   });
 
-  test("the mutation clock only runs with access, and kills what it deletes", () => {
+  test("the mutation clock only runs with access", () => {
     const locked = system();
     locked.darknetProcess(10_000);
     expect(locked.mutations).toBe(0);
 
     const dnet = system({ hasProgram: true });
     dnet.populate();
-    const before = dnet.hosts.size;
     // One tick per 150 cycles at depth 5 -> 30 cycles; 3000 cycles is plenty.
     dnet.darknetProcess(3_000);
     expect(dnet.mutations).toBeGreaterThan(0);
-    // Deletions are permanent, so the population can only shrink.
-    expect([...dnet.hosts.values()].filter((host) => host.online).length).toBeLessThanOrEqual(before);
+  });
+
+  test("the net CHURNS rather than eroding: it adds as well as deletes", () => {
+    // This is the property, and it took a rewrite to get right. An earlier model
+    // applied deletions and restarts only, which looks harmless and is not: with
+    // nothing ever added, a long run ends with an empty darknet and agents that
+    // have nowhere left to go. It measured as a map that grew for ten minutes
+    // and then decayed to a single host — indistinguishable, from the outside,
+    // from a crawler that had stopped working.
+    const dnet = system({ hasProgram: true });
+    dnet.populate();
+    const before = [...dnet.hosts.values()].filter((host) => host.online).length;
+    let addedEver = false;
+    for (let i = 0; i < 40; i++) {
+      dnet.darknetProcess(3_000);
+      if ([...dnet.hosts.values()].filter((host) => host.online).length > before) addedEver = true;
+    }
+    expect(dnet.mutations).toBeGreaterThan(10);
+    expect(addedEver).toBe(true);
+    // ...and it does not run away either: `balanceDarknetServers` and the
+    // density floor hold the population near the generator's own target.
+    const after = [...dnet.hosts.values()].filter((host) => host.online).length;
+    expect(after).toBeGreaterThan(0);
+    expect(after).toBeLessThan(before * 6);
+  });
+
+  test("the shallow rows are restocked, because that is where the net is entered", () => {
+    // `addLowLevelServersIfNeeded` keeps depth 0 populated. Without it the
+    // approaches to the net empty out first, and `darkweb` — the one host we can
+    // always reach — ends up connected to nothing at all.
+    const dnet = system({ hasProgram: true });
+    dnet.populate();
+    for (let i = 0; i < 40; i++) dnet.darknetProcess(3_000);
+    const atDarkweb = [...dnet.hosts.values()].filter((host) => host.online && host.depth === 0);
+    expect(atDarkweb.length).toBeGreaterThan(0);
+  });
+
+  test("a move invalidates position AND every edge, which is why they expire apart", () => {
+    // The two clocks knowledge.ts derives its expiries from. A model that moved
+    // a host without rewiring it would make `topology` look as durable as
+    // `position`, and the staleness policy would measure as far cheaper than it
+    // is in game.
+    const dnet = system({ hasProgram: true });
+    dnet.populate();
+    const before = new Map(
+      [...dnet.hosts.values()].map((host) => [host.hostname, { depth: host.depth }]),
+    );
+    let moved = false;
+    for (let i = 0; i < 60 && !moved; i++) {
+      dnet.darknetProcess(3_000);
+      for (const host of dnet.hosts.values()) {
+        const was = before.get(host.hostname);
+        if (was && host.online && was.depth !== host.depth) moved = true;
+      }
+    }
+    expect(moved).toBe(true);
   });
 
   test("mutation draws a fixed width from the shared stream", () => {
-    // Two draws per mutation whatever it does. A variable width would make two
-    // strategy variants face different stock prices for reasons unrelated to
-    // either strategy.
+    // A FIXED number of draws per mutation whatever the tick does. A width that
+    // varied with what the net happened to look like would make two strategy
+    // variants face different stock prices for reasons unrelated to either
+    // strategy — and the tick now has a dozen branches, so this matters more
+    // than it did when it had two.
     let draws = 0;
     const world = new SimWorld({ seed: 1, bitnode: 1, network: [] });
     const servers = world.servers;
@@ -189,7 +310,7 @@ describe("the darknet model", () => {
     });
     dnet.populate();
     dnet.darknetProcess(3_000);
-    expect(draws).toBe(dnet.mutations * 2);
+    expect(draws).toBe(dnet.mutations * MUTATION_DRAWS);
   });
 });
 
@@ -285,8 +406,35 @@ describe("the darknet model's own claims", () => {
     // The formulas are transcribed; the topology is a shape. A run's metadata
     // has to say which is which, or a later measurement cannot invalidate the
     // right artifacts.
+    const declared = DNET_ASSUMPTIONS.join(" ");
     expect(DNET_ASSUMPTIONS.length).toBeGreaterThan(0);
-    expect(DNET_ASSUMPTIONS.join(" ")).toContain("topology");
-    expect(DNET_ASSUMPTIONS.join(" ")).toContain("caches");
+    expect(declared).toContain("topology");
+    expect(declared).toContain("caches");
+    // Each of these is a place the simulator is narrower than the game. Listing
+    // them individually is deliberate: a future edit that quietly drops one
+    // would leave a run claiming a fidelity it does not have.
+    expect(declared).toContain("mutationPlacement");
+    expect(declared).toContain("probeOrder");
+    expect(declared).toContain("logNoise");
+    expect(declared).toContain("models");
+    expect(declared).toContain("backdoors");
+    expect(declared).toContain("stasis");
+  });
+
+  test("the remaining mutation gap is placement, and says so", () => {
+    // This assumption used to say the tick applied deletes and restarts only,
+    // which quietly invalidated every staleness measurement AND made a long run
+    // end with an empty net. Both are fixed: the tick now rolls every kind
+    // upstream does, at upstream's probabilities. What is left is genuinely a
+    // shape — where a moved host lands — and the text has to say which is which,
+    // because a run's metadata is what decides whether a later measurement can
+    // invalidate an artifact.
+    const gap = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.mutationPlacement"))!;
+    expect(gap).toBeDefined();
+    expect(gap).toContain("Rates are faithful");
+    expect(gap).toContain("shape");
+    // And the claim it no longer makes: nothing may still describe the tick as
+    // delete-only.
+    expect(DNET_ASSUMPTIONS.join(" ")).not.toContain("deletes and restarts only");
   });
 });

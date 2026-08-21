@@ -14,15 +14,7 @@ import { Fragments } from "../vendor/bitburner/src/CotMG/Fragment.ts";
 import { resetUnmodeled } from "../realm/unmodeled.ts";
 import { GoOpponent } from "../vendor/bitburner/src/Go/Enums.ts";
 import { darkwebServerSpec } from "../network.ts";
-import {
-  DNET_REPORT_PORT,
-  REPORT_VERSION,
-  decodeReport,
-  encodeReport,
-  observationOf,
-  type DnetReport,
-} from "../../shared/strategy/dnet/courier.ts";
-import { emptyKnowledge, foldObservations, fresh } from "../../shared/strategy/dnet/knowledge.ts";
+import { DarknetSystem } from "../features/dnet.ts";
 
 function harness(programs: string[] = [], withStock = false, bitnode = 1, withDarkweb = false): { ns: NS; host: SimNsHost; world: SimWorld } {
   const world = new SimWorld({
@@ -95,6 +87,30 @@ function harness(programs: string[] = [], withStock = false, bitnode = 1, withDa
     world.player.money = 1e15;
     host.stock = new StockMarketSystem(world, world.player, mulberry32(11));
   }
+  if (withDarkweb) {
+    // A real darknet system, so the session and connection gates are exercised
+    // rather than bypassed by `host.dnet` being absent.
+    host.dnet = new DarknetSystem({
+      servers: world.servers,
+      network: host.network,
+      processes,
+      generate: mulberry32(5),
+      random: mulberry32(6),
+      logNoise: mulberry32(7),
+      bitNode: bitnode,
+      fullAccess: () => bitnode === 15,
+      hasProgram: () => files.get("home")?.has("DarkscapeNavigator.exe") === true,
+      installedAugmentations: () => new Set(world.player.augmentations.keys()),
+      allowRedPill: () => true,
+      world,
+      player: world.player,
+      homeFiles: () => files.get("home")!,
+      darknetMoneyMultiplier: () => 1,
+      forgetFiles: (hostname: string) => {
+        files.delete(hostname);
+      },
+    });
+  }
   return { ns: makeSimNs(host, process), host, world };
 }
 
@@ -113,87 +129,38 @@ describe("darkweb, the one darknet host reachable without a credential", () => {
     expect(ns.hasRootAccess("darkweb")).toBe(true);
     expect(ns.getServerMaxRam("darkweb")).toBe(16);
 
-    // The payoff: an agent can be launched there. Before darkweb was rooted this
-    // returned a silent 0 — no error, no unmodeled() — which is the worst
-    // possible failure for a design that depends on placing scripts remotely.
-    expect(ns.exec("scout.js", "darkweb", 1)).toBeGreaterThan(0);
+    // ...but being rooted is not the same as being REACHABLE. Every darknet
+    // member runs `expectDarknetAccess` first, and it throws rather than
+    // refusing — so in a node with no SF15 and no DarkscapeNavigator.exe, a
+    // script that reaches for darkweb dies there. Refusing quietly instead would
+    // make a node without access look like one where the host is merely full.
+    expect(() => ns.exec("scout.js", "darkweb", 1)).toThrow(/access to the dnet api/);
 
     // And rooting it did not become a general bypass: an ordinary server we have
     // not nuked still refuses.
     expect(ns.hasRootAccess("n00dles")).toBe(false);
     expect(ns.exec("child.js", "n00dles", 1)).toBe(0);
   });
-});
 
-describe("the darknet report channel", () => {
-  const report: DnetReport = {
-    v: REPORT_VERSION,
-    missionId: "m-1",
-    generation: "15:0",
-    agentHost: "darkweb",
-    phase: "final",
-    at: 1_000,
-    hosts: [
-      { hostname: "dn-1", present: true, depth: 0, modelId: "TopPass", requiredCharisma: 40 },
-      { hostname: "dn-gone", present: false },
-    ],
-    codes: { "200": 1, "503": 1 },
-    logs: [],
-  };
+  test("with access, home can exec onto darkweb — and only home can", () => {
+    // The beachhead the whole feature stands on. `scp` and `exec` both
+    // short-circuit their admin and session checks for darkweb, so no credential
+    // is needed...
+    const { ns, host } = harness([], false, 15, true);
+    expect(ns.exec("scout.js", "darkweb", 1)).toBeGreaterThan(0);
 
-  test("a report survives the round trip from agent to folded knowledge", () => {
-    const { ns } = harness();
+    // ...but the connection check is NOT short-circuited: upstream evaluates
+    // requireDirectConnection BEFORE the darkweb early-out, and only `home`
+    // holds the TOR edge. This is the fact that decides where the seeding dodge
+    // has to be pinned, and getting it wrong looks exactly like a full host.
+    host.network.set("home", ["n00dles"]);
+    host.network.set("darkweb", []);
+    expect(ns.exec("scout.js", "darkweb", 1)).toBe(0);
 
-    // The agent's whole delivery mechanism: a port write, 0 GB, no session and
-    // no scp. Ports are shared across every host, so it does not matter that
-    // the writer is standing on a darknet server and the reader is on home.
-    expect(ns.tryWritePort(DNET_REPORT_PORT, encodeReport(report))).toBe(true);
-
-    // The controller drains it directly — readPort is 0 GB, so no dodge.
-    const raw = ns.readPort(DNET_REPORT_PORT);
-    expect(typeof raw).toBe("string");
-    const decoded = decodeReport(String(raw));
-    expect(decoded.ok).toBe(true);
-    if (!decoded.ok) return;
-
-    const { knowledge } = foldObservations(
-      emptyKnowledge("15:0"),
-      [observationOf(decoded.report)],
-      1_000,
-    );
-    expect(fresh<number>(knowledge.hosts["dn-1"], "depth", 1_000)).toBe(0);
-    expect(fresh<string>(knowledge.hosts["dn-1"], "modelId", 1_000)).toBe("TopPass");
-    // Absence travelled too, which is what lets home forget a dead host rather
-    // than keeping a map of a world that no longer contains it.
-    expect(knowledge.hosts["dn-gone"]!.goneAt).toBe(1_000);
-
-    // Drained to exhaustion: the next read is the empty sentinel, not a repeat.
-    expect(ns.readPort(DNET_REPORT_PORT)).toBe("NULL PORT DATA");
-  });
-
-  test("a full port refuses the write instead of dropping an older report", () => {
-    const { ns } = harness();
-    // Upstream capacity is 50. tryWrite refusing (rather than write's shift) is
-    // what lets an agent notice that nobody is draining and say so.
-    for (let i = 0; i < 50; i++) {
-      expect(ns.tryWritePort(DNET_REPORT_PORT, `filler-${i}`)).toBe(true);
-    }
-    expect(ns.tryWritePort(DNET_REPORT_PORT, encodeReport(report))).toBe(false);
-    // The oldest is still there — nothing was silently discarded.
-    expect(ns.readPort(DNET_REPORT_PORT)).toBe("filler-0");
-  });
-
-  test("a report from another generation is refused by the fold, not the port", () => {
-    const { ns } = harness();
-    // The port has no idea which run wrote to it, and agents outlive
-    // controllers — so the generation check has to live in the fold.
-    expect(ns.tryWritePort(DNET_REPORT_PORT, encodeReport({ ...report, generation: "1:999" }))).toBe(true);
-    const decoded = decodeReport(String(ns.readPort(DNET_REPORT_PORT)));
-    expect(decoded.ok).toBe(true);
-    if (!decoded.ok) return;
-    const folded = foldObservations(emptyKnowledge("15:0"), [observationOf(decoded.report)], 1_000);
-    expect(folded.rejectedGenerations).toBe(1);
-    expect(folded.knowledge.hosts["dn-1"]).toBeUndefined();
+    // scp passes no connection requirement at all, so copying still works from
+    // anywhere. That asymmetry is why data is nearly free to move out there and
+    // a running PROCESS is the hard problem.
+    expect(ns.scp("main.js", "darkweb", "home")).toBe(true);
   });
 });
 

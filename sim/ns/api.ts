@@ -18,7 +18,7 @@ import { getFunctionRamCost, SCRIPT_BASE_RAM_GB, type RamCostContext } from "./r
 import { ProcessTable, ScriptDeath, type SimProcess } from "./process.ts";
 import { publicResetInfo, publicServer, resolveServer } from "./contracts.ts";
 import { makeStanek } from "./stanek.ts";
-import { makeDnet } from "./dnet.ts";
+import { darknetGate, makeDnet } from "./dnet.ts";
 import type { DarknetSystem } from "../features/dnet.ts";
 import { ShareBonusTime } from "../vendor/bitburner/src/NetworkShare/Share.ts";
 
@@ -389,6 +389,14 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       const list = Array.isArray(files) ? files : [files];
       const source = requireServer(host, rawSource, process.host).hostname;
       const destination = requireServer(host, rawDestination, process.host).hostname;
+      // Copying TO a darknet host needs a session — but NO direct connection, at
+      // any distance. Copying FROM one needs nothing at all: upstream checks the
+      // destination and never the source. That asymmetry is why data is nearly
+      // free to move out there and a running PROCESS is the hard problem.
+      if (host.dnet) {
+        const gate = darknetGate(host.dnet, host.world.servers, process, destination, {});
+        if (!gate.allowed) return false;
+      }
       const from = filesOn(host, source);
       for (const file of list) {
         if (!from.has(file)) return false;
@@ -407,6 +415,18 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       ...args: (string | number | boolean)[]
     ): number => {
       const hostname = requireServer(host, rawHostname, process.host).hostname;
+      // exec needs a session AND a direct connection (or a backdoor). The
+      // connection check runs BEFORE the darkweb early-out upstream, which is
+      // why exec onto `darkweb` works only from `home` — the one host holding
+      // the TOR edge. A dodge stub placed anywhere else scps happily and then
+      // gets a silent 0 here.
+      if (host.dnet) {
+        const gate = darknetGate(host.dnet, host.world.servers, process, hostname, {
+          requireDirectConnection: true,
+          backdoorBypasses: true,
+        });
+        if (!gate.allowed) return 0;
+      }
       if (!filesOn(host, hostname).has(script)) return 0;
       const options = typeof threadOrOptions === "object" ? threadOrOptions : undefined;
       const threads = (typeof threadOrOptions === "number" ? threadOrOptions : options?.threads) ?? 1;
@@ -423,6 +443,47 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       if (!started) return 0;
       launch(host, started);
       return started.pid;
+    },
+    /** `ns.spawn`: kill the caller, then start the target on the SAME host.
+     *
+     * With `spawnDelay: 0` upstream kills the worker script and runs the target
+     * immediately and synchronously; any other delay schedules it. Modelled
+     * because the darknet agents are built on it — a resident spawns into a job
+     * so the job gets the RAM the resident was holding, and peak host RAM is one
+     * script rather than two.
+     *
+     * The ORDER is the load-bearing part: kill first, launch second. Launching
+     * first would need both allocations at once, which is exactly the situation
+     * spawning exists to avoid, and a host with room for one would silently
+     * refuse.
+     * Source: src/NetscriptFunctions.ts:653-690 */
+    spawn: (
+      script: string,
+      threadOrOptions?: number | { threads?: number; temporary?: boolean; ramOverride?: number; spawnDelay?: number },
+      ...args: (string | number | boolean)[]
+    ): void => {
+      const options = typeof threadOrOptions === "object" ? threadOrOptions : undefined;
+      const threads = (typeof threadOrOptions === "number" ? threadOrOptions : options?.threads) ?? 1;
+      const delayMs = options?.spawnDelay ?? 10_000;
+      const hostname = process.host;
+      const launchSpawned = (): void => {
+        if (!filesOn(host, hostname).has(script)) return;
+        const started = host.processes.start({
+          filename: script,
+          host: hostname,
+          args,
+          threads,
+          ramPerThreadGb: options?.ramOverride ?? DEFAULT_SCRIPT_RAM_GB,
+          temporary: options?.temporary ?? false,
+        });
+        if (started) launch(host, started);
+      };
+      // Kill the caller FIRST, so its allocation is free for the target.
+      host.processes.kill(process.pid);
+      if (delayMs === 0) launchSpawned();
+      else host.clock.in(delayMs, launchSpawned);
+      // Upstream throws ScriptDeath so the caller's remaining code never runs.
+      throw new ScriptDeath(process.pid);
     },
     kill: (pid: number): boolean => host.processes.kill(pid),
     killall: (hostname: unknown = process.host): boolean =>
@@ -479,6 +540,9 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     getSharePower: (): number =>
       (host.share ?? unmodeled("subsystem", "NetworkShare")).currentBonus(),
     getHostname: (): string => process.host,
+    // 0 GB, and exactly the process's own filename. Telemetry labels itself with
+    // this, so without it any script that reports at all dies on its first line.
+    getScriptName: (): string => process.filename,
     // A copy, like the game: the controller mutates its snapshot (setting
     // hasAdminRights after a root pass) and must not reach into the world.
     getServer: (hostname: unknown = process.host): Server =>
@@ -823,7 +887,27 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
   }
 
   if (host.dnet) {
-    impl["dnet"] = namespace(makeDnet({ system: host.dnet, process }), "dnet", host, process);
+    const dnet = host.dnet;
+    impl["dnet"] = namespace(
+      makeDnet({
+        system: dnet,
+        process,
+        // The same virtual-clock suspension hack/grow/weaken use, so a killed
+        // authentication never grants a session.
+        delay: (ms, fn) => netscriptDelay(host, process, ms, fn),
+        skills: () => ({
+          charisma: host.world.person.skills.charisma,
+          intelligence: host.world.person.skills.intelligence,
+        }),
+        nowMs: () => host.clock.now(),
+        hasBoots: () => host.world.player.augmentations.has("The B00ts of Perseus"),
+        sf15Level: () => host.world.player.sourceFiles["15"] ?? 0,
+        servers: host.world.servers,
+      }),
+      "dnet",
+      host,
+      process,
+    );
   }
 
   if (host.hacknet) {

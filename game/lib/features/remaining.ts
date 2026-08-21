@@ -10,7 +10,20 @@ import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts"
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
-import { DNET_REPORT_PORT, decodeReport, observationOf } from "../../../shared/strategy/dnet/courier.ts";
+import type { ReportHost } from "../../../shared/strategy/dnet/courier.ts";
+import { overseerArgs, residentArgs } from "../../../shared/strategy/dnet/mission.ts";
+import { versionedScript } from "../../../shared/deployment.ts";
+import { gameBuildId } from "../build-id.ts";
+import { gameGlobal } from "../globals.ts";
+import { publishKnowledge } from "../../../shared/strategy/dnet/publish.ts";
+import {
+  CONTROLLER_METHODS,
+  RESIDENT_METHODS,
+  priceAgent,
+  type DnetRendezvous,
+} from "../../dnet/realm.ts";
+import type { DarknetAgentDigest } from "../../../shared/telemetry/topics/dnet.ts";
+import { mutationIntervalMs } from "../../../shared/strategy/dnet/rates.ts";
 import { DARKSCAPE_TOTAL_COST, stepDarkscape } from "../../../shared/strategy/dnet/unlock.ts";
 import {
   coverage,
@@ -123,7 +136,7 @@ import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions,
 import { merge, set, type GameState } from "../state.ts";
 import type { WorkTaskLike } from "../work-completion.ts";
 import type { FeatureClaim } from "./claims.ts";
-import { actionRamClaim, featureDodge, featureGoDodge } from "./dodge.ts";
+import { actionRamClaim, featureDodge, featureDodgeOn, featureGoDodge } from "./dodge.ts";
 import { liquidatableValue } from "./factions.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
@@ -2006,39 +2019,130 @@ let dnetKnowledge: DarknetKnowledge | undefined;
 /** Cumulative response codes reported by agents. Kept next to the knowledge so
  * one reset clears both. */
 let dnetCodes: Record<string, number> = {};
+/** Credentials agents recovered, keyed by host.
+ *
+ * MODULE STATE AND NOTHING ELSE. It is never merged into a topic and never
+ * sent: the telemetry rule permits holding state we do not send, and forbids the
+ * reverse. What the panel gets is the boolean `credentialKnown` per host.
+ *
+ * Held here rather than only out in the darknet because an overseer dies with
+ * its host, and re-cracking a net we already opened would be the most expensive
+ * possible way to recover from a reboot. */
+let dnetVault: Map<string, string> = new Map();
+/** Model ids the game produced that `shared/strategy/dnet/models.ts` does not
+ * know. Counted rather than ignored: a non-empty tally is a game update or a
+ * hole in our transcription, and both are things to hear about. */
+let dnetUnknownModels: Record<string, number> = {};
+/** Agent hosts seen this generation, and how many stopped reporting. The gap
+ * between them is agent mortality — see spec/dnet.md's Observability note. */
+let dnetAgentsSeen: Set<string> = new Set();
+/** Agents the overseer last reported, keyed by AGENT ID rather than by host.
+ *
+ * Several agents legitimately stand on one host — the whole starting crew lives
+ * on `darkweb` — so keying by host would let them overwrite each other and make
+ * the crew look permanently understaffed, which in turn makes home top it up for
+ * ever. */
+let dnetAgents: Map<string, DarknetAgentDigest & { host: string }> = new Map();
+/** Residents the controller has lost since boot. Agent mortality, which out
+ * there is the loss that actually matters: the channel does not drop data, hosts
+ * drop agents. */
+let dnetResidentsLost = 0;
+/** When the overseer last said it was alive. Home cannot see into the darknet,
+ * so this beat is the ONLY evidence the beachhead is still standing. */
+/** How long a silent overseer is given before home re-seeds. Four missed beats
+ * at the overseer's 15 s cadence: `darkweb` does reboot — there is a literature
+ * file about it — and when it does, the coordinator dies with it. */
+const OVERSEER_STALE_MS = 60_000;
+/** First retry after a failed seed, doubling to the cap. A world where the seed
+ * can never work must not re-exec every tick for ever. */
+const DNET_SEED_BACKOFF_MS = 30_000;
+/** Workers home keeps standing on `darkweb`: one observer and one breaker.
+ * Two, not more, because `darkweb` is 16 GB and the deeper crew is planted from
+ * out there rather than from here. */
+const DNET_CREW_SIZE = 2;
+const DNET_SEED_MAX_BACKOFF_MS = 5 * 60_000;
 
-/** Drain the report port and fold what arrived.
+let dnetOverseerBeatAt = 0;
+let dnetSeedAttempts = 0;
+let dnetSeedNextAt = 0;
+let dnetSeedBackoffMs = DNET_SEED_BACKOFF_MS;
+
+/** Take what the darknet has learned, and hand it what only home can see.
  *
- * readPort is 0 GB, so the controller reads it DIRECTLY — no dodge, no stub, no
- * exec. That is the whole reason the report travels by port instead of as a file
- * needing ls/read/rm inside a 1.3 GB dodge.
+ * There is no port here any more, and that is worth explaining rather than just
+ * noticing. Reports, credentials and orders each used to be a netscript port
+ * with its own encoder, decoder, version marker and rejection path — three
+ * channels and six places for the two ends to disagree — for a message that
+ * never leaves the page realm.
  *
- * Reports are drained to exhaustion each tick: a port is a bounded queue (50
- * entries upstream), and a writer that finds it full gives up rather than
- * silently dropping the oldest observation. */
-function drainDnetReports(ctx: DriverContext): {
+ * Every script the game runs shares one JS realm, so the controller's own object
+ * IS reachable from here. That is not a shortcut past a game rule: ports are
+ * themselves documented as shared across every host at 0 GB and needing no
+ * session, so this is a faster version of a sanctioned mechanic rather than a
+ * new capability. What preserves BN15's challenge is enforced by the engine —
+ * sessions are per-PID, `probe()` is host-local, and the network kills your
+ * scripts — and none of that is helped by a slower message.
+ *
+ * The discipline the port was carrying is kept, as rules rather than transport:
+ *
+ * - `drain()` hands each observation over ONCE, so home cannot double-count.
+ * - Home folds into knowledge IT owns, so a controller dying loses scheduling
+ *   rather than the map.
+ * - The generation is checked here, because agents outlive controllers and a
+ *   live script from a dead run describes a world this one no longer shares.
+ * - Credentials land in `dnetVault`, which is module state that is never merged
+ *   into a topic and never sent. */
+function drainDarknet(generation: string): {
   observations: Observation[];
   drained: number;
   rejected: number;
+  credentials: number;
 } {
-  const observations: Observation[] = [];
-  let drained = 0;
-  let rejected = 0;
-  for (;;) {
-    const raw = ctx.ns.readPort(DNET_REPORT_PORT);
-    if (typeof raw !== "string" || raw === "NULL PORT DATA") break;
-    drained++;
-    const decoded = decodeReport(raw);
-    if (!decoded.ok) {
-      rejected++;
-      continue;
-    }
-    observations.push(observationOf(decoded.report));
-    for (const [code, count] of Object.entries(decoded.report.codes ?? {})) {
-      dnetCodes[code] = (dnetCodes[code] ?? 0) + count;
-    }
+  const rendezvous = dnetRendezvous();
+  if (!rendezvous) return { observations: [], drained: 0, rejected: 0, credentials: 0 };
+  if (rendezvous.generation !== generation) {
+    // A controller from a world this run no longer shares. Its facts describe a
+    // darknet that was destroyed by the prestige that ended it.
+    return { observations: [], drained: 0, rejected: 1, credentials: 0 };
   }
-  return { observations, drained, rejected };
+  const taken = rendezvous.drain();
+  for (const entry of taken.credentials) {
+    if (entry.hostname.length > 0) dnetVault.set(entry.hostname, entry.password);
+  }
+  for (const [code, count] of Object.entries(taken.codes)) {
+    dnetCodes[code] = (dnetCodes[code] ?? 0) + Number(count);
+  }
+  for (const resident of taken.residents) {
+    dnetAgents.set(resident.host, {
+      host: resident.host,
+      role: "resident",
+      lastBeatAt: resident.lastBeatAt,
+      alive: true,
+    });
+  }
+  dnetOverseerBeatAt = Math.max(dnetOverseerBeatAt, rendezvous.lastBeatAt);
+  dnetResidentsLost += taken.residentsLost;
+  const observations: Observation[] = taken.hosts.length > 0
+    ? [{
+      from: "darkweb",
+      provenance: "agent",
+      at: rendezvous.lastBeatAt,
+      generation,
+      hosts: taken.hosts.map((host: ReportHost) => {
+        const { hostname, present, ...facts } = host;
+        const defined: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(facts)) if (value !== undefined) defined[key] = value;
+        return { hostname, present, facts: present ? defined : {} };
+      }),
+    }]
+    : [];
+  return { observations, drained: taken.hosts.length, rejected: 0, credentials: taken.credentials.length };
+}
+
+/** The darknet controller, if one is running. Typed access to the realm slot the
+ * agents install, so home never reaches into `globalThis` by hand. */
+function dnetRendezvous(): DnetRendezvous | undefined {
+  return (globalThis as typeof globalThis & { dnet_overseer?: DnetRendezvous }).dnet_overseer;
 }
 
 const dnet: FeatureDriver = {
@@ -2062,21 +2166,80 @@ const dnet: FeatureDriver = {
       dnetKnowledge = emptyKnowledge(generation);
       dnetCodes = {};
     }
-    const { observations, drained, rejected } = drainDnetReports(ctx);
+    const { observations, drained, rejected, credentials: vaultDrained } = drainDarknet(generation);
+    const rendezvous = dnetRendezvous();
     const folded = foldObservations(dnetKnowledge, observations, now);
     dnetKnowledge = folded.knowledge;
+    // A host we hold a credential for is flagged on the knowledge record so the
+    // fold can drop the flag when the host disappears — the credential itself
+    // stays in the vault and out of everything that is published.
+    for (const hostname of dnetVault.keys()) {
+      const host = dnetKnowledge.hosts[hostname];
+      if (host && host.goneAt === undefined) host.credentialKnown = true;
+    }
+    // A vault entry for a host that has gone is dead weight: the host returns
+    // cleaned, with a new password, so keeping it would hand a stale credential
+    // to the next attempt and burn a call proving it wrong.
+    for (const hostname of [...dnetVault.keys()]) {
+      const host = dnetKnowledge.hosts[hostname];
+      if (!host || host.goneAt !== undefined) dnetVault.delete(hostname);
+    }
+    for (const observation of observations) dnetAgentsSeen.add(observation.from);
+    const bitNode = progression?.bitNode ?? 1;
+    const cover = coverage(dnetKnowledge, now);
+    // Topology completeness is a property of the FOLD, not of home's own probe —
+    // which hardcodes false because it can only ever see one hop. Deriving it
+    // here is what makes it reachable at all: it becomes true the first time
+    // every host we know about has a neighbour list we still believe, which is
+    // exactly the condition `reachableFrom` needs to be an exact answer rather
+    // than a partial graph presented as one.
+    const topologyComplete = cover.known > 0 && cover.adjacencyKnown === cover.known;
     merge(ctx.state, "dnet", {
       channel: {
         drained,
         rejected,
         fromDeadRuns: folded.rejectedGenerations,
         forgotten: folded.hostsForgotten.length,
+        vaultDrained,
       },
-      coverage: coverage(dnetKnowledge, now),
+      coverage: cover,
       codes: { ...dnetCodes },
+      // THE MAP. The fold has always been computed and then thrown away, which
+      // is why the panel could only ever show darkweb: what it rendered was
+      // home's own one-hop probe, not what the agents had learned.
+      knowledge: publishKnowledge(dnetKnowledge, now, {
+        bitNode,
+        vault: new Set(dnetVault.keys()),
+        unknownModels: dnetUnknownModels,
+        // Published by HOST, because that is what the map draws a badge on. The
+        // freshest agent on a host wins, so a host with a live worker never
+        // reads as abandoned because a dead one shares it.
+        agents: Object.fromEntries(
+          [...dnetAgents.values()]
+            .sort((a, b) => a.lastBeatAt - b.lastBeatAt)
+            .map((agent) => [
+              agent.host,
+              // Only "alive" while the beat is recent. A roster that never
+              // expired would report a full crew on a net that has lost every
+              // one of them, which is exactly the number worth watching.
+              { role: agent.role, lastBeatAt: agent.lastBeatAt, alive: now - agent.lastBeatAt < OVERSEER_STALE_MS },
+            ]),
+        ),
+        agentsLost: [...dnetAgents.values()].filter((agent) => now - agent.lastBeatAt >= OVERSEER_STALE_MS).length,
+        agentsSeenEver: Math.max(dnetAgentsSeen.size, dnetAgents.size),
+        overseer: {
+          host: "darkweb",
+          lastBeatAt: dnetOverseerBeatAt,
+          alive: now - dnetOverseerBeatAt < OVERSEER_STALE_MS,
+          seedAttempts: dnetSeedAttempts,
+        },
+      }),
+      mutationIntervalMs: mutationIntervalMs(undefined, bitNode),
+      charisma: ctx.state.topics.player?.skills.charisma ?? 1,
+      topologyComplete,
     });
     const decision = stepDarknet({
-      topologyComplete: topic.topologyComplete === true,
+      topologyComplete,
       servers: (topic.servers ?? []).map((server) => ({
         hostname: server.hostname,
         depth: server.depth,
@@ -2115,20 +2278,155 @@ const dnet: FeatureDriver = {
       },
     });
 
+    // --- the beachhead ------------------------------------------------------
+    //
+    // Everything above this point observes. This is the only part that ACTS, and
+    // it does exactly one thing: put an overseer on `darkweb` and let it run the
+    // net from there. home cannot play this feature itself — `probe()` is
+    // host-local, so from here the darknet is one host wide — and it cannot hold
+    // a session either, because a session belongs to the PID that won it and the
+    // controller's own RAM is pinned at 3.6 GB.
+    //
+    // Pinned to `home` for a reason that is easy to get wrong: `ns.exec`
+    // evaluates its direct-connection requirement BEFORE the darkweb early-out,
+    // and only home holds the TOR edge. A stub anywhere else scps happily and
+    // then gets a silent 0.
+    const overseerAlive = now - dnetOverseerBeatAt < OVERSEER_STALE_MS;
+    // A host keeps exactly ONE resident, and it is the only thing that can start
+    // work there. Home plants the first two — the controller and darkweb's own
+    // resident — and after that the net plants itself: a resident that opens a
+    // neighbour scp's the agent across and execs a resident on it.
+    //
+    // Home keeps topping darkweb's resident up because a resident dies with its
+    // host, and `darkweb` does reboot. Nothing else can put one back: planting
+    // needs a session AND adjacency, and home is adjacent to nothing else.
+    const darkwebResident = rendezvous?.queues.get("darkweb");
+    const residentAlive = darkwebResident !== undefined
+      && now - darkwebResident.lastBeatAt < OVERSEER_STALE_MS;
+    if ((!overseerAlive || !residentAlive) && now >= dnetSeedNextAt
+      && topic.servers.some((server) => server.hostname === "darkweb")) {
+      const buildId = gameBuildId();
+      const controllerFile = versionedScript("dnet/overseer.js", buildId);
+      const agentFile = versionedScript("dnet/agent.js", buildId);
+      // The agent carries its identity in ns.args rather than reading the realm,
+      // so a resident planted by a controller that has since died still knows
+      // which run artifact its telemetry belongs to.
+      const identity = JSON.stringify(gameGlobal.artifactIdentity ?? {});
+      const charisma = ctx.state.topics.player?.skills.charisma ?? 1;
+      const missionId = `dnet-${generation}-${Math.floor(now / 1000)}`;
+      const controllerArgs = overseerArgs({ missionId, generation, identity, charisma, agentFile });
+      const residentLaunchArgs = residentArgs({
+        missionId,
+        generation,
+        identity,
+        agentId: "resident-darkweb",
+      });
+      const wantController = !overseerAlive;
+
+      const seeded = await featureDodgeOn(ctx, "dnet", "action:seed", ["scp", "exec"], "home", (stubNs: NS) => {
+        // Both payloads in ONE scp. `exec` of a file that is not there returns 0,
+        // which is indistinguishable from "the host is full" — the same trap
+        // game/lib/net.ts documents for the dodge stub — so the agent must never
+        // arrive without the controller beside it, or the other way round.
+        if (!stubNs["scp"]([controllerFile, agentFile], "darkweb", "home")) {
+          return { controller: 0, resident: 0, reason: "scp refused" };
+        }
+        // The controller is the durable half and holds the accumulated map, so a
+        // live one is left strictly alone: restarting it to fix a missing
+        // resident would throw the map away to solve a smaller problem.
+        const controller = wantController
+          ? stubNs["exec"](
+            controllerFile,
+            "darkweb",
+            { threads: 1, ramOverride: priceAgent(stubNs, CONTROLLER_METHODS) },
+            ...controllerArgs,
+          )
+          : -1;
+        if (controller === 0) {
+          return { controller, resident: 0, reason: "exec refused (darkweb full, or not synced)" };
+        }
+        const resident = stubNs["exec"](
+          agentFile,
+          "darkweb",
+          { threads: 1, ramOverride: priceAgent(stubNs, RESIDENT_METHODS) },
+          ...residentLaunchArgs,
+        );
+        return {
+          controller,
+          resident,
+          reason: resident === 0 ? "no room on darkweb for a resident" : "",
+        };
+      });
+      dnetSeedAttempts++;
+      if (seeded.ok && seeded.value.controller !== 0 && seeded.value.resident !== 0) {
+        record(
+          "dnet",
+          "seed",
+          true,
+          seeded.value.controller === -1
+            ? `replaced darkweb's resident (pid ${seeded.value.resident})`
+            : `controller pid ${seeded.value.controller}, resident pid ${seeded.value.resident}`,
+        );
+        dnetSeedBackoffMs = DNET_SEED_BACKOFF_MS;
+      } else {
+        record("dnet", "seed", false, seeded.ok ? seeded.value.reason : seeded.reason);
+        // Exponential backoff. Without it, a world where the seed can never work
+        // — not synced, no room, a node without access — re-execs on every tick
+        // for ever, and the failure is loud in exactly the way that trains people
+        // to ignore it.
+        dnetSeedBackoffMs = Math.min(dnetSeedBackoffMs * 2, DNET_SEED_MAX_BACKOFF_MS);
+      }
+      dnetSeedNextAt = now + dnetSeedBackoffMs;
+    }
+
+    // Tell the controller what only home can see. It cannot afford `getPlayer`
+    // (0.5 GB out of 1.65), and it needs charisma to know which hosts a job may
+    // heartbleed at all. The vault is replayed with it so a restarted controller
+    // does not re-crack a net we already opened.
+    if (overseerAlive && rendezvous) {
+      rendezvous.order({
+        charisma: ctx.state.topics.player?.skills.charisma ?? 1,
+        ...(dnetVault.size > 0
+          ? {
+            vault: [...dnetVault].map(([hostname, password]) => ({
+              hostname,
+              password,
+              via: "cracked" as const,
+              at: now,
+            })),
+          }
+          : {}),
+      });
+    }
+
     if (decision.action.type === "idle") return;
-    // Authentication needs discovered credentials and a direct connection
-    // from the script host. Stasis is stricter: setStasisLink targets
-    // ctx.workerScript.getServer(), not the host selected by
-    // singularity.connect(), and then waits 30 seconds. Refuse both until the
-    // dispatcher can lease and execute on the intended Darknet host.
-    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L104-L157
+    // Stasis is the one action still refused, and the reason is mechanical
+    // rather than unfinished: `setStasisLink` takes no host — it pins the
+    // CALLING script's own server — so spending a link means running a 12 GB
+    // script on the host being pinned, which is more RAM than most darknet
+    // hosts have free. `authenticate` no longer refuses here because home never
+    // reaches it: a job does, standing next door to its target.
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L337-L374
     const detail = decision.action.type === "authenticate"
-      ? "password discovery and direct-host authentication are not implemented"
-      : "stasis actions require execution on the target Darknet host";
+      ? "authentication happens on the agents, next door to the target; home is never adjacent to anything but darkweb"
+      : "setStasisLink pins the CALLING host, so it needs a 12 GB script running on the target itself";
     record("dnet", decision.action.type, false, detail);
   },
 };
+
+/** Whether home should be holding RAM for a seed this pass.
+ *
+ * Read from the same two facts the tick uses, so the claim and the action cannot
+ * disagree: a claim without an action wastes a reservation, and an action
+ * without a claim spends RAM the broker never accounted for. */
+function dnetSeedWanted(state: GameState): boolean {
+  if (!(state.topics.dnet?.servers ?? []).some((server) => server.hostname === "darkweb")) return false;
+  const now = Date.now();
+  // Either the controller is gone, or darkweb has no resident to run anything.
+  if (now - dnetOverseerBeatAt >= OVERSEER_STALE_MS) return true;
+  const resident = dnetRendezvous()?.queues.get("darkweb");
+  return resident === undefined || now - resident.lastBeatAt >= OVERSEER_STALE_MS;
+}
 
 /** Darknet needs charisma, which career owns. */
 function dnetNeeds(ctx: NeedContext): Need[] {
@@ -3492,9 +3790,28 @@ export const dnetModule: FeatureModule = {
     // map, which is the same class of bug as a stale topic.
     dnetKnowledge = undefined;
     dnetCodes = {};
+    // The vault goes with the knowledge, and for a stronger reason: a BitNode
+    // reset destroys the darknet outright, so every password we hold is for a
+    // host that no longer exists. Carrying them across would be the credential
+    // equivalent of a map of a dead world.
+    dnetVault = new Map();
+    dnetUnknownModels = {};
+    dnetAgentsSeen = new Set();
+    dnetAgents = new Map();
+    dnetResidentsLost = 0;
+    dnetOverseerBeatAt = 0;
+    dnetSeedAttempts = 0;
+    dnetSeedNextAt = 0;
+    dnetSeedBackoffMs = DNET_SEED_BACKOFF_MS;
     resetWithTopic("dnet")(state);
   },
   claims: (ctx) => {
+    // The seed is claimed whenever the beachhead is not known to be standing,
+    // independent of what `stepDarknet` planned: putting the overseer back is
+    // not one of the traversal actions, it is the precondition for all of them.
+    if (dnetSeedWanted(ctx.state)) {
+      return [actionRamClaim(ctx, "dnet", "action:seed", dnetMethods("seed"))];
+    }
     const action = ctx.state.topics.dnet?.plan?.action.type;
     return maybeActionClaim("dnet", ctx, action === "idle" ? undefined : action, dnetMethods(action));
   },
@@ -3573,9 +3890,15 @@ function sleeveBatchMethods(actions: readonly string[]): readonly string[] {
   return [...methods];
 }
 
-function dnetMethods(_action: string | undefined): readonly string[] {
-  // Every planned Darknet action currently refuses locally; none should
-  // reserve RAM or launch a misleading no-op dodge.
+function dnetMethods(action: string | undefined): readonly string[] {
+  // The seed is the one darknet action home performs itself, and it is a real
+  // 1.9 GB of dynamic RAM inside the stub. Pricing it is what makes the claim
+  // honest: an unpriced action would place a stub the broker never reserved for.
+  //
+  // `authenticate` and stasis still refuse locally — the first happens on the
+  // agents, next door to their targets, and the second needs a 12 GB script
+  // running on the host being pinned — so neither reserves anything.
+  if (action === "seed") return ["scp", "exec"];
   return [];
 }
 

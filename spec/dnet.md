@@ -33,7 +33,7 @@ and the session dies with it.
 | `scp` *from* a darknet host | nothing at all |
 | `scp` *to* a darknet host | a session — but **no** direct connection, at any distance |
 | `writePort` / `readPort` | nothing; ports are shared across all hosts, 0 GB |
-| `ns.exec` on a darknet host | a session **and** a direct connection, backdoor, or stasis link |
+| `ns.exec` on a darknet host | a session **and** a direct connection, backdoor, or stasis link — including `darkweb`, whose only direct connection is from `home` (see below) |
 
 So getting *data* around is nearly free, and getting a *running process* to
 depth *n* is the hard problem. Everything upstream of that is a credential
@@ -42,11 +42,26 @@ problem — **except the first hop, which is free.**
 `darkweb` is a deliberate special case (`DarkNet/controllers/NetworkGenerator.ts`
 `initDarkwebServer`): `modelId: NoPassword`, `password: ""`, `blockedRam = 0`,
 `maxRam = 16`, `hasAdminRights = true`, `isStationary = true`, and `depth: -1`.
-Both the session check and the `exec`/`scp` gate short-circuit for it —
+`isAuthenticated` short-circuits true for it, and so does the `exec`/`scp` gate —
 *"We always are authed to ourselves and DarkWeb. Early-out past the last
-checks."* (`DarkNet/effects/offlineServerHandling.ts`). So an agent can be
+checks."* (`DarkNet/effects/offlineServerHandling.ts:98-101`). So an agent can be
 deployed to `darkweb` and run there with no credential, no session and no
 cracking, on a full 16 GB, forever — it never moves.
+
+**But read the check ORDER, because the early-out is narrower than it looks.**
+`checkDarknetServer` evaluates `requireDirectConnection` *before* reaching that
+early-out (`offlineServerHandling.ts:82-100`), and `ns.exec` passes
+`requireDirectConnection: true` (`NetscriptFunctions.ts:641-646`). The early-out
+skips the admin-rights and session checks; it does **not** skip the connection
+check. Only `home` holds the TOR edge to `darkweb`, so:
+
+> **`ns.exec` onto `darkweb` works from `home` and from nowhere else.**
+
+`ns.scp` passes no connection requirement at all (`NetscriptFunctions.ts:769-773`),
+so *copying* to `darkweb` works from any host — which is why the seeding dodge may
+be placed anywhere to `scp`, but must be pinned to `home` to `exec`. A dodge stub
+landing on an arbitrary leased fleet host would `scp` successfully and then get a
+silent `0` from `exec`, which is indistinguishable from "the host is full".
 
 That is the beachhead the whole feature stands on: from `darkweb`, `probe()`
 finally returns the depth-0 servers that `home` cannot see, and cracking starts
@@ -142,11 +157,103 @@ per-PID, `probe()` is host-local, `setStasisLink` and `phishingAttack` only work
 from the target, and the network kills your scripts. None of that is helped by a
 faster message.
 
-**One convention, as engineering rather than fair play:** inside `dnet`, prefer a
-port to the realm. A port is a serialized queue that the engine resets on
-restart; a realm `Map` holds live object references — resolvers, timers — which
-silently outlive the servers they describe. A port forces the design to say what
-it knows and when, which is the same discipline as the rule above.
+**One convention, as engineering rather than fair play: the realm carries the
+conversation, and every entry in it is expired rather than trusted.**
+
+An earlier version of this feature pushed observations, credentials and orders
+over three netscript ports, on the reasoning that a serialized queue forces a
+design to say what it knows and when. The ports are gone. Every script the game
+runs shares one JS realm, so the controller's own object is reachable from home
+directly, and three encoders, three decoders, three version markers and three
+rejection paths were removed with them.
+
+That is not a shortcut past a game rule. Ports are themselves documented as
+*"shared across all hosts"*, cost 0 GB and need no session, so the realm is a
+faster version of a sanctioned mechanic rather than a new capability. What
+preserves the challenge is enforced by the engine, not by the transport:
+sessions are per-PID, `probe()` is host-local, `setStasisLink` and
+`phishingAttack` only work from the target, and the network kills your scripts.
+None of that is helped by a slower message.
+
+There is also something a port cannot do. The controller describes work it
+cannot afford to perform — a closure calling `authenticate`, `scp` and `exec`
+through bracket notation on an ns it does not own — and hands it to a process
+that can. That is a live function reference, and it is the mechanism that keeps
+the controller at 1.65 GB while the work it plans costs several times that.
+
+The hazard the port convention was protecting against is real: a realm map holds
+live references that outlive the servers they describe, and out there servers are
+deleted mid-sentence. So the realm is allowed only under four rules, each
+enforced in code rather than remembered:
+
+1. **Entries are expired by the controller, never trusted.** A resident that
+   stops beating is swept and its queue retired; a job that stops settling is
+   timed out and its promise rejected. A promise that never settles is a process
+   that was killed, and out there that is the common case.
+2. **The rendezvous holds work, never knowledge.** `drain()` hands each
+   observation to home ONCE, and home folds it into knowledge it owns — so a
+   controller dying loses scheduling, not the map.
+3. **A foreign generation is refused**, by the controller's election and by every
+   agent at boot. Agents outlive controllers, so a live script from a dead run
+   really can be talking to us.
+4. **A credential lives only in the realm and in home's vault.** It is never
+   published to a topic and never written to a log; what the panel gets is a
+   boolean. `stripCredentials` enforces that recursively at the one place
+   anything is recorded.
+
+`tests/dnet-staleness.test.ts` pins the fourth, and `sim/tests/dnet-session.test.ts`
+pins the engine rules the first three are compensating for.
+
+## The shape that follows: a controller, residents, and a spawn chain
+
+Three constraints above decide the whole architecture, and it is worth writing
+the chain of reasoning down once.
+
+**Home cannot play the feature.** `probe()` is host-local, so from `home` the
+darknet is one host wide, and a session belongs to the PID that won it, so a
+dodge stub cannot win one on the controller's behalf.
+
+**So something long-lived has to live out there** and hold the accumulated map.
+It must not die, which means it can never `spawn` — `spawn` kills its caller.
+
+**And it should not `exec` either.** `exec` leaves the caller alive, so a
+controller that launched its own work would need both allocations at once. On a
+darknet host, whose owner may have blocked almost all of its RAM, that is
+usually RAM we do not have.
+
+So the controller does not launch anything. It keeps a QUEUE per host, and each
+host keeps exactly one **resident** — the only thing that can start work there.
+When the resident takes a job it `spawn`s into it with `spawnDelay: 0`, which
+kills the resident and starts the job immediately on the same host; the job runs
+and spawns back. A host therefore holds one AGENT process at a time, and its peak
+RAM is the largest single job rather than the sum of the work. (`darkweb` holds
+the controller as well, since that is where it lives.)
+
+`spawn` costs 2.0 GB against `exec`'s 1.3, and every job pays that tax on the way
+back. It is still the cheap option, because the alternative is holding two
+allocations at once — and because a host left with no resident cannot be repaired
+from outside: planting one needs a session AND adjacency.
+
+**The rule that nearly makes this impossible.** A session belongs to the PID, and
+`spawn` ends the PID, so a job that authenticates cannot hand its session to the
+next process. `connectToSession(host, password)` re-opens one at any distance,
+with no delay and no connection requirement, for **0.05 GB**. That single cheap
+call is what makes the whole chain affordable.
+
+It has one precondition that is easy to miss and expensive to assume away:
+`connectToSession` passes `requireAdminRights`, and only a successful
+`authenticate` ever sets that. So it re-opens a session on a host we have already
+opened once — it cannot open a NEW one. That matters because the logs hand us
+passwords for hosts we have never touched, and the first use of one of those has
+to be the 0.4 GB call. `plantJob` tries the cheap path and falls back.
+
+The controller costs 1.65 GB static — the base plus `getHostname`. It describes
+jobs it cannot afford to run by writing them as closures over an ns it does not
+own, so the analyser charges the agent's declared `ramOverride` instead. That is
+the same trick `game/lib/dodge.ts` uses, and `tests/ram-budget.test.ts` checks
+the declared method lists against the calls those closures actually make —
+because the simulator does not model the dynamic-RAM check, so an under-declared
+job passes every sim run and dies in the game.
 
 ## Why the controller cannot play this feature itself
 

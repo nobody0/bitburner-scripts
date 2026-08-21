@@ -1,8 +1,9 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
+import { JOB_METHODS, RESIDENT_METHODS } from "../game/dnet/realm.ts";
 import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
 import { WORKER_RAM } from "../shared/world.ts";
 import type { NS } from "@ns";
@@ -50,7 +51,8 @@ const config: BitburnerConfig = {
   entries: [
     { source: "game/start.ts", target: "start.js" },
     { source: "game/worker/worker.ts", target: "worker/worker.js" },
-    { source: "game/dnet/scout.ts", target: "dnet/scout.js" },
+    { source: "game/dnet/overseer.ts", target: "dnet/overseer.js" },
+    { source: "game/dnet/agent.ts", target: "dnet/agent.js" },
   ],
   restoreEntry: { source: "game/restore.ts", target: "restore.js" },
 };
@@ -214,42 +216,99 @@ describe("in-game static RAM budget", () => {
     expect(analysis.cost).toBeCloseTo(BASE_GB + 0.1 + 0.15 + 0.15 + 2.4, 10);
   });
 
-  test("the darknet scout stays small enough to run on a darknet host", async () => {
+  test("the darknet controller decides and cannot act", async () => {
     const artifacts = await buildScripts(config, { telemetry: true });
-    const scout = artifacts.find((a) => a.filename === "dnet/scout.js")!;
-    // A darknet host's usable RAM is maxRam minus whatever its owner blocks, and
-    // only `darkweb` is guaranteed a clear 16 GB. Every call here is one the
-    // scout genuinely makes, and the absences are the point: no authenticate and
-    // no connectToSession (it needs no session), no scp and no exec (it reports
-    // through a port), and no setStasisLink, which alone would cost 12 GB.
-    const analysis = analyzeScriptRam(scout.content);
+    const overseer = artifacts.find((a) => a.filename === "dnet/overseer.js")!;
+    const analysis = analyzeScriptRam(overseer.content);
     expect(analysis.overridden).toBe(false);
-    expect(analysis.entries.map((entry) => entry.name).sort())
-      .toEqual(["getHostname", "getServerDetails", "heartbleed", "probe"]);
-    expect(analysis.cost).toBeCloseTo(BASE_GB + 0.1 + 0.6 + 0.2 + 0.05, 10);
+
+    // 1.65 GB: the base plus one getter. Everything the controller actually
+    // needs is free — sleep, and the queues, which are live objects in the page
+    // realm — so the durable process is also the cheapest thing this repository
+    // ships.
+    expect(analysis.entries.map((entry) => entry.name).sort()).toEqual(["getHostname"]);
+    expect(analysis.cost).toBeCloseTo(BASE_GB + 0.05, 10);
+
+    // The ABSENCES are the design. It describes the jobs in this very file —
+    // authenticate, scp, exec and the rest — but only through bracket notation
+    // on the ns it HANDS to an agent, so the analyser charges the agent's
+    // declared override instead. A controller that could act would, and then the
+    // process holding the only copy of the map would be the one sitting inside a
+    // multi-second authenticate on a host about to be restarted.
+    const names = new Set(analysis.entries.map((entry) => entry.name));
+    for (const forbidden of ["probe", "getServerDetails", "heartbleed", "authenticate", "scp", "exec", "spawn"]) {
+      expect(names.has(forbidden), `controller must not reference ns.${forbidden}`).toBe(false);
+    }
   });
 
-  test("a --perf scout is silent but behaviourally identical", async () => {
-    const telemetryBuild = (await buildScripts(config, { telemetry: true }))
-      .find((a) => a.filename === "dnet/scout.js")!;
-    const perfBuild = (await buildScripts(config, { telemetry: false }))
-      .find((a) => a.filename === "dnet/scout.js")!;
-    // The socket is gone, so the observed-vs-known gap disappears from the UI...
-    expect(telemetryBuild.content).toContain("WebSocket");
-    expect(perfBuild.content).not.toContain("WebSocket");
-    // ...but the scout still probes the same hosts, still charges the same RAM,
-    // and still writes the same report to the same port. That is the proof the
-    // agent's own telemetry is never load-bearing.
+  test("the darknet agent buys its RAM at launch, not in its source", async () => {
+    const artifacts = await buildScripts(config, { telemetry: true });
+    const agent = artifacts.find((a) => a.filename === "dnet/agent.js")!;
+    const analysis = analyzeScriptRam(agent.content);
+
+    // Same discipline as lib/dodge-stub.js: the file references only what it
+    // needs to be a RESIDENT, and every job's cost arrives as a ramOverride at
+    // spawn time. If a job's calls appeared here, every resident on every host
+    // would pay for the most expensive thing any of them might ever do.
+    expect(analysis.entries.map((entry) => entry.name).sort())
+      .toEqual(["getHostname", "getServerMaxRam", "getServerUsedRam", "spawn"]);
+    // getScriptName is 0 GB, so it never appears in a BILLABLE list — the agent
+    // uses it to spawn itself rather than carrying its own filename.
+    expect(agent.content).toContain("getScriptName");
+    const names = new Set(analysis.entries.map((entry) => entry.name));
+    for (const forbidden of ["probe", "getServerDetails", "heartbleed", "authenticate", "connectToSession", "scp"]) {
+      expect(names.has(forbidden), `agent must not reference ns.${forbidden} in source`).toBe(false);
+    }
+  });
+
+  test("the declared method lists cover every call the job bodies make", async () => {
+    // THE test that keeps this design honest. A job's allocation is declared by
+    // the controller from `JOB_METHODS`, but the calls are made by closures in
+    // overseer.ts, and the two are connected only by these lists. Get one wrong
+    // and the engine kills the process on its first unlisted call.
     //
-    // The two builds do NOT have identical name surfaces, and should not:
-    // getScriptName and the atExit that initTelemetry registers exist only to
-    // label and flush the send, so a perf build is right to drop them. Both are
-    // 0 GB, so the charge is unchanged.
-    const charged = (source: string) => analyzeScriptRam(source).entries.map((e) => e.name).sort();
-    expect(charged(perfBuild.content)).toEqual(charged(telemetryBuild.content));
-    expect(analyzeScriptRam(perfBuild.content).cost).toBe(analyzeScriptRam(telemetryBuild.content).cost);
-    expect(perfBuild.content).toContain("tryWritePort");
-    expect(perfBuild.content).not.toContain("getScriptName");
+    // The simulator cannot catch that — it does not model the dynamic-RAM check
+    // — so an under-declared job runs perfectly in a sim run and dies in the
+    // game. Reading the source is the only place the drift is visible.
+    const source = await readFile("game/dnet/overseer.ts", "utf8");
+    const declared = new Set(Object.values(JOB_METHODS).flat());
+
+    // The closures reach ns only through bracket notation on the ns they are
+    // HANDED, which is what keeps them free to the controller and also what
+    // makes them greppable.
+    const referenced = new Set<string>();
+    for (const match of source.matchAll(/jobNs\["(\w+)"\](?:\["(\w+)"\])?/g)) {
+      referenced.add(match[2] ? `${match[1]}.${match[2]}` : match[1]!);
+    }
+    expect(referenced.size).toBeGreaterThan(4);
+    for (const method of referenced) {
+      expect(declared.has(method), `JOB_METHODS is missing ns.${method}, which a job body calls`).toBe(true);
+    }
+  });
+
+  test("a resident and the heaviest job both fit a darknet host", () => {
+    // `darkweb` is the one darknet host guaranteed a clear 16 GB, and it has to
+    // hold the controller AND a resident at once. After that a host holds one
+    // agent at a time, because a job SPAWNS from the resident rather than
+    // running beside it.
+    const cost = (methods: readonly string[]): number => {
+      let total = BASE_GB;
+      for (const method of new Set(methods)) total += RAM_COSTS[`ns.${method}`] ?? 0;
+      return total + 0.5;
+    };
+    const controllerGb = cost(["getHostname"]);
+    const residentGb = cost(RESIDENT_METHODS);
+    const plantGb = cost(JOB_METHODS["plant"]!);
+
+    expect(controllerGb + residentGb).toBeLessThanOrEqual(16);
+    expect(controllerGb + plantGb).toBeLessThanOrEqual(16);
+
+    // And the whole reason for spawning rather than exec'ing: a resident that
+    // exec'd its jobs would need BOTH at once. Spawn costs 2.0 against exec's
+    // 1.3 but frees the caller first, so a host's peak is a max, not a sum.
+    const execPeak = cost(["getHostname", "exec"])
+      + cost(JOB_METHODS["plant"]!.filter((method) => method !== "spawn"));
+    expect(plantGb).toBeLessThan(execPeak);
   });
 
   test("every worker ramOverride covers the base plus the call it makes", () => {
