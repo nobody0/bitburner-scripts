@@ -1,5 +1,6 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
+import * as acorn from "acorn";
 import { build } from "esbuild";
 import { versionedScript } from "../shared/deployment.ts";
 import { loadConfig, safeBuildDir, type BitburnerConfig, type BuildEntry } from "./config.ts";
@@ -13,10 +14,11 @@ export interface BuildOptions {
   /** When false, esbuild defines __TELEMETRY__ = false and drops every
    * labelled telemetry branch, including payload construction. */
   telemetry: boolean;
-  /** When false, local identifiers keep their source names. Deployment always
-   * minifies; tests that inspect the bundle's ns-call surface disable it —
-   * identifier renaming never touches property names or string literals, so
-   * the surface is provably identical (see ram-budget.test.ts). */
+  /** When false, local identifiers keep their source names. Deployment
+   * minifies by default; `sync --readable` and tests that inspect the bundle's
+   * ns-call surface disable it — identifier renaming never touches property
+   * names or string literals, so the surface is provably identical (see
+   * ram-budget.test.ts). */
   minifyNames?: boolean;
 }
 
@@ -35,15 +37,58 @@ function artifactName(entry: BuildEntry, buildId: string): string {
 
 /** Bitburner's static analyzer honours `ns.ramOverride(<literal>)` only as
  * the first statement of a top-level function declaration literally named
- * `main`. Identifier minification renames that declaration (the export alias
- * survives, the name does not), so the override must be re-attached as a
- * decoy declaration appended after minification. The decoy is never executed
- * — the exported (renamed) main still runs and applies the dynamic override
- * itself. */
-function ramOverrideFooter(entrySource: string): string | undefined {
+ * `main`. Whether the bundle still has one depends on the build flavour, so
+ * the decoy below is appended conditionally — see mainOverrideStatus. */
+function ramOverrideDirective(entrySource: string): { gb: number; decoy: string } | undefined {
   const match = /ns\.ramOverride\((\d+(?:\.\d+)?)\)/.exec(entrySource);
   if (!match) return undefined;
-  return `async function main(ns){ns.ramOverride(${match[1]})}`;
+  return { gb: Number(match[1]), decoy: `async function main(ns){ns.ramOverride(${match[1]})}` };
+}
+
+/** Whether the bundle already carries the syntactic override the game's
+ * analyzer looks for. The two build flavours end in different places:
+ *
+ *  - minified: identifier renaming strips the source `main` (the export alias
+ *    survives, the declaration name does not), no top-level `main` exists, and
+ *    the decoy must be appended. It is dead code — the exported renamed main
+ *    is what runs.
+ *  - names-preserved: the source `main` survives and already satisfies the
+ *    analyzer. Appending the decoy here would be worse than redundant: a later
+ *    duplicate `function main` re-binds the module's bare `export { main }`,
+ *    so the game would import and run the no-op decoy instead of the
+ *    controller.
+ *
+ * A top-level `main` that does NOT begin with the expected override is a build
+ * error either way: the analyzer would misprice it, and appending the decoy
+ * beside it would shadow whichever the game resolves. */
+export function mainOverrideStatus(moduleSource: string, expectedGb: number): "satisfied" | "absent" {
+  const program = acorn.parse(moduleSource, { ecmaVersion: "latest", sourceType: "module" });
+  let status: "satisfied" | "absent" = "absent";
+  for (const node of program.body) {
+    const declaration =
+      node.type === "FunctionDeclaration"
+        ? node
+        : node.type === "ExportNamedDeclaration" && node.declaration?.type === "FunctionDeclaration"
+          ? node.declaration
+          : undefined;
+    if (declaration?.id?.name !== "main") continue;
+    const first = declaration.body.body[0];
+    const call = first?.type === "ExpressionStatement" && first.expression.type === "CallExpression" ? first.expression : undefined;
+    const callee = call?.callee;
+    const argument = call?.arguments.length === 1 ? call.arguments[0] : undefined;
+    const overrides =
+      callee?.type === "MemberExpression" &&
+      callee.property.type === "Identifier" &&
+      callee.property.name === "ramOverride" &&
+      argument?.type === "Literal" &&
+      typeof argument.value === "number" &&
+      Math.round(argument.value * 100) === Math.round(expectedGb * 100);
+    if (!overrides) {
+      throw new Error(`a top-level \`main\` declaration does not begin with ns.ramOverride(${expectedGb})`);
+    }
+    status = "satisfied";
+  }
+  return status;
 }
 
 async function bundleEntry(
@@ -56,7 +101,7 @@ async function bundleEntry(
 ): Promise<BuiltArtifact> {
   const outfile = path.join(config.buildDir, filename);
   await mkdir(path.dirname(outfile), { recursive: true });
-  const footer = ramOverrideFooter(await readFile(entry.source, "utf8"));
+  const directive = ramOverrideDirective(await readFile(entry.source, "utf8"));
   await build({
     entryPoints: [entry.source],
     outfile,
@@ -83,18 +128,21 @@ async function bundleEntry(
     // them and breaks dodge RAM accounting), while still removing guarded
     // telemetry payloads completely from performance bundles.
     dropLabels: options.telemetry ? [] : ["TELEMETRY"],
-    ...(footer ? { footer: { js: footer } } : {}),
   });
-  const content = await readFile(outfile, "utf8");
-  if (footer) {
-    // The decoy must close the module (esbuild appends only the sourcemap
-    // comment after it). Scanning the whole text for duplicate `main`
-    // bindings is impossible here — the embedded worker string legitimately
-    // contains that character sequence — but mangled identifiers are at most
-    // three characters, so a top-level collision cannot occur.
-    const tail = content.replace(/\/\/# sourceMappingURL=\S*\s*$/, "").trimEnd();
-    if (!tail.endsWith(footer)) {
-      throw new Error(`RAM override footer did not survive in ${filename}`);
+  let content = await readFile(outfile, "utf8");
+  if (directive) {
+    // The sourcemap comment must stay the last line, so the decoy is inserted
+    // in front of it rather than appended.
+    const mapComment = /\/\/# sourceMappingURL=\S*\s*$/.exec(content);
+    const body = mapComment ? content.slice(0, mapComment.index) : content;
+    try {
+      if (mainOverrideStatus(body, directive.gb) === "absent") {
+        content = `${body.trimEnd()}\n${directive.decoy}\n${mapComment ? content.slice(mapComment.index) : ""}`;
+        // The on-disk artifact must stay byte-identical to the pushed one.
+        await writeFile(outfile, content, "utf8");
+      }
+    } catch (error) {
+      throw new Error(`${filename}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
   return { filename, content };

@@ -12,8 +12,14 @@ The repository has three deliberately separate layers:
    directory or a runtime package (`@ns` is permitted for erased types only).
 2. `tools/build.ts` reads the explicit entrypoint allowlist and bundles each
    entry to `build/` with esbuild.
-3. `tools/rfa-server.ts` pushes only those built artifacts to the configured
-   Bitburner server through the Remote File API.
+3. A sync pushes only those built artifacts to the configured Bitburner server
+   through the Remote File API. The implementation is `tools/sync.ts`
+   (`runSync` + `SyncOptions`), reached through either transport: the ui/ hub
+   runs it in-process over its persistent game connection (POST `/sync`, JSON
+   body of options), and the `bun run sync` CLI (`tools/rfa-server.ts`) parses
+   the same options from flags — `--perf`, `--readable`, `--no-sweep`,
+   `--sweep-dry-run`, `--types-only` — and forwards them to the hub when one
+   is running, falling back to a one-shot listener when none is.
 
 Runtime helpers are named with the build id already baked into the controller
 (`worker/worker.<build>.js`, `lib/dodge-stub.<build>.js`). A sync pushes those
@@ -36,8 +42,17 @@ tools use:
 - `getDefinitionFile` to retrieve the exact Netscript TypeScript definitions.
 
 Those operations are intentionally separate: `sync` only builds and pushes,
-while `types` only refreshes the tracked definition file. Both listeners time
-out after 30 seconds without a game connection. The destructive `restore.js`
+while `types` only refreshes the tracked definition file.
+
+The ui/ hub owns the Remote File API port for its whole lifetime and the game
+stays connected to it. That permanence is the point: a port that is open only
+during a sync forces the game's auto-reconnect (a nonzero
+`RemoteFileApiReconnectionDelay`) to fail every interval in between — console
+spam on each attempt, plus an error-toast cycle after every disconnect. A
+held-open connection costs nothing (the game only answers requests) and makes
+syncs immediate. Only the CLI fallback — used when no hub is running — listens
+one-shot, timing out after 30 seconds without a game connection so a stray
+invocation cannot hold the port forever. The destructive `restore.js`
 maintenance entrypoint is excluded from normal builds and is built and pushed
 only by `save:restore`.
 

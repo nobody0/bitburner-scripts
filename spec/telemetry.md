@@ -279,7 +279,11 @@ virtual time alike. Files without sidecars remain loadable under
 `ui/server.ts` (Bun.serve, port 12526): ws `/ingest` for emitters, ws `/live`
 for browser viewers (snapshot then fan-out), HTTP `/` viewer shell, `/app.js`
 (the viewer bundle, built on demand from `ui/app/`), `/runs` +
-`/runs/:file` for stored JSONL replays. `ui/store.ts` handles persistence,
+`/runs/:file` for stored JSONL replays. The hub also permanently owns the
+Remote File API port (12525 from `bitburner.config.json`) so the game stays
+connected instead of failing auto-reconnects while no sync is listening;
+POST `/sync` builds and pushes over that live connection (see
+`spec/architecture.md`). `ui/store.ts` handles persistence,
 metadata, the tail ring, and state reduction per install artifact. The picker
 groups artifacts by lineage and labels leaves with the in-game BitNode name,
 install ordinal, short date, and duration.

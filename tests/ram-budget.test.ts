@@ -138,7 +138,28 @@ describe("in-game static RAM budget", () => {
     // `rm`, `ps`), the counts diverge and this fails before the game does.
     const [shipped] = await buildScripts(config, { telemetry: true });
     const [readable] = await buildScripts(config, { telemetry: true, minifyNames: false });
-    expect(billableSurface(shipped!.content)).toEqual(billableSurface(readable!.content));
+    // Only the shipped flavour carries the appended RAM-override decoy — the
+    // names-preserved flavour provably must not (see the next test) — so it
+    // is removed before comparing what the renaming itself produced.
+    const decoy = "async function main(ns){ns.ramOverride(3.6)}";
+    expect(shipped!.content).toContain(decoy);
+    expect(billableSurface(shipped!.content.replace(decoy, ""))).toEqual(billableSurface(readable!.content));
+  });
+
+  test("a names-preserved deployment still runs the real controller", async () => {
+    // Appending the RAM-override decoy to a bundle whose source `main`
+    // survived minification would re-bind the bare `export { main }` to the
+    // decoy: the game would import a controller that sets its override and
+    // exits. The build must skip the decoy exactly when the surviving
+    // declaration already satisfies the analyzer (`sync --readable` deploys
+    // such bundles), and keep it when identifier minification renamed `main`.
+    const decoy = "async function main(ns){ns.ramOverride(3.6)}";
+    const [readable] = await buildScripts(config, { telemetry: true, minifyNames: false });
+    expect(readable!.content).not.toContain(decoy);
+    expect(analyzeScriptRam(readable!.content).overridden).toBe(true);
+    const [shipped] = await buildScripts(config, { telemetry: true });
+    expect(shipped!.content).toContain(decoy);
+    expect(analyzeScriptRam(shipped!.content).overridden).toBe(true);
   });
 
   test("start.js stays within its fresh-game budget", async () => {

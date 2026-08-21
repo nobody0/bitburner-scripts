@@ -13,7 +13,11 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
+import { WebSocketServer, type WebSocket as RfaSocket } from "ws";
 import { TELEMETRY_PORT, type WireMessage } from "../shared/telemetry/schema.ts";
+import { loadConfig } from "../tools/config.ts";
+import { RfaSession } from "../tools/rfa-session.ts";
+import { runSync, syncOptionsFrom, type SyncOptions } from "../tools/sync.ts";
 import { RunStore } from "./store.ts";
 import type { ArtifactMetadata, RunCatalogEntry } from "../shared/run-catalog.ts";
 
@@ -23,7 +27,14 @@ import type { ArtifactMetadata, RunCatalogEntry } from "../shared/run-catalog.ts
  *  - HTTP /     — the viewer app; /app.js — its bundle; /runs, /runs/:file —
  *                 stored JSONL replays
  *  - POST /sim  — launch a simulation (bun sim/run.ts) from the dashboard
- *  - POST /sync — deliberately build and push the game scripts */
+ *  - POST /sync — build and push the game scripts (JSON body: SyncOptions)
+ *
+ * plus a second WebSocket listener on the Remote File API port. The hub owns
+ * that port for its whole lifetime and the game stays connected to it: a
+ * port that is only open during a sync forces the game's auto-reconnect to
+ * fail every interval in between, spamming its console and toasting an error
+ * cycle after every push. A held-open RFA connection costs nothing — the game
+ * only ever answers requests — and makes syncs immediate. */
 
 const modulePath = (relativePath: string): string => fileURLToPath(new URL(relativePath, import.meta.url));
 const RUNS_DIR = modulePath("../runs");
@@ -356,6 +367,7 @@ function snapshotFor(): unknown {
     compactOverBytes: COMPACT_OVER_BYTES,
     simBusy,
     syncBusy,
+    rfaConnected: rfa !== undefined,
   };
 }
 
@@ -426,50 +438,75 @@ async function launchSim(body: SimRequest): Promise<Response> {
   return Response.json({ started: true, args });
 }
 
-/** Run the exact same one-shot command exposed as `bun run sync`. Keeping it
- * in a child process means the UI never owns the Remote File API port while
- * idle: clicking the button opens it only long enough for Bitburner to connect,
- * receive a complete build, and disconnect. */
-function launchSync(): Response {
+/** Build and push over the hub's persistent Remote File API connection — the
+ * same runSync the `bun run sync` CLI uses (the CLI in fact routes through
+ * this endpoint while the hub is up, carrying its flags in the POST body).
+ * The response resolves when the sync is done and carries {code, output};
+ * progress and completion are also broadcast to /live viewers. */
+async function launchSync(options: SyncOptions): Promise<Response> {
   if (syncBusy) return Response.json({ error: "a sync is already running" }, { status: 409 });
+  const session = rfa?.session;
+  if (!session) {
+    return Response.json(
+      { error: `Bitburner is not connected — enable the Remote API (port ${RFA_PORT}) in the game options` },
+      { status: 503 },
+    );
+  }
 
   syncBusy = true;
   broadcast({ type: "sync-status", busy: true });
+  const lines: string[] = [];
+  let code = 0;
   try {
-    const proc = Bun.spawn(["bun", "run", "sync"], {
-      cwd: REPO_ROOT,
-      stdout: "pipe",
-      stderr: "pipe",
+    await runSync(session, config, options, (line) => {
+      lines.push(line);
+      console.log(line);
     });
-    void (async () => {
-      let code = 1;
-      let output = "";
-      try {
-        const [out, err, exitCode] = await Promise.all([
-          new Response(proc.stdout).text(),
-          new Response(proc.stderr).text(),
-          proc.exited,
-        ]);
-        code = exitCode;
-        output = (out + err).slice(-4_000);
-      } catch (error) {
-        output = String(error);
-      }
-      syncBusy = false;
-      console.log(`sync finished (exit ${code})\n${output}`);
-      broadcast({ type: "sync-finished", code, output });
-    })();
   } catch (error) {
-    syncBusy = false;
-    broadcast({ type: "sync-finished", code: 1, output: String(error) });
-    return Response.json({ error: String(error) }, { status: 500 });
+    code = 1;
+    lines.push(String(error));
+    console.error("sync failed:", error);
   }
-  return Response.json({ started: true });
+  syncBusy = false;
+  const output = lines.join("\n").slice(-4_000);
+  console.log(`sync finished (exit ${code})`);
+  broadcast({ type: "sync-finished", code, output });
+  return Response.json({ code, output });
 }
 
 /** The game and the sim both dial TELEMETRY_PORT, so this is only for running
- * a second hub alongside a live one (a scratch instance, or a test). */
+ * a second hub alongside a live one (a scratch instance, or a test). Same for
+ * RFA_PORT, which otherwise comes from bitburner.config.json. */
 const PORT = Number(process.env["UI_PORT"] ?? TELEMETRY_PORT);
+
+// runSync builds with repo-relative entry paths, so the hub must run from the
+// repo root regardless of where it was launched.
+process.chdir(REPO_ROOT);
+const config = await loadConfig(path.join(REPO_ROOT, "bitburner.config.json"));
+const RFA_PORT = Number(process.env["RFA_PORT"] ?? config.port);
+
+/** The game's live Remote File API connection, replaced on reconnect. */
+let rfa: { session: RfaSession; socket: RfaSocket } | undefined;
+
+const rfaServer = new WebSocketServer({ host: config.host, port: RFA_PORT });
+rfaServer.on("connection", (socket: RfaSocket) => {
+  // A page reload gives the game a fresh socket; the newest connection wins.
+  rfa?.session.dispose(new Error("replaced by a newer Bitburner connection"));
+  rfa?.socket.close();
+  rfa = { session: new RfaSession(socket), socket };
+  console.log(`Bitburner connected on ws://${config.host}:${RFA_PORT}`);
+  broadcast({ type: "rfa-status", connected: true });
+  socket.on("close", () => {
+    if (rfa?.socket !== socket) return;
+    rfa = undefined;
+    console.log("Bitburner disconnected");
+    broadcast({ type: "rfa-status", connected: false });
+  });
+});
+rfaServer.on("error", (error: Error) => {
+  // Most likely EADDRINUSE from a fallback CLI sync; the hub still serves.
+  console.error(`Remote File API listener failed on port ${RFA_PORT}:`, error.message);
+});
 
 mkdirSync(RUNS_DIR, { recursive: true });
 backfillLegacyMetadata();
@@ -484,7 +521,13 @@ const server = Bun.serve<SocketData, never>({
     if (url.pathname === "/sim" && req.method === "POST") {
       return req.json().then(launchSim).catch(() => Response.json({ error: "bad JSON" }, { status: 400 }));
     }
-    if (url.pathname === "/sync" && req.method === "POST") return launchSync();
+    if (url.pathname === "/sync" && req.method === "POST") {
+      // An empty body (the dashboard button) means default options.
+      return req
+        .json()
+        .catch(() => ({}))
+        .then((body) => launchSync(syncOptionsFrom(body)));
+    }
     if (url.pathname === "/app.js") return appBundle();
     if (url.pathname === "/runs") return Response.json(listRunFiles());
     if (url.pathname === "/profiles") {
@@ -576,4 +619,6 @@ const server = Bun.serve<SocketData, never>({
 sweep();
 setInterval(sweep, SWEEP_EVERY_MS);
 
-console.log(`telemetry hub on http://127.0.0.1:${server.port} (ws /ingest, /live; POST /sim; retention ${RETENTION_MS / 3_600_000}h)`);
+console.log(
+  `telemetry hub on http://127.0.0.1:${server.port} (ws /ingest, /live; POST /sim, /sync; retention ${RETENTION_MS / 3_600_000}h); Remote File API on ws://${config.host}:${RFA_PORT}`,
+);

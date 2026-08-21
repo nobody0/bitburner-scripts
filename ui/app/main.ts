@@ -452,7 +452,26 @@ interface HubMessage {
   code?: number;
   output?: string;
   syncBusy?: boolean;
+  /** Snapshot: whether the game holds its Remote File API connection. */
+  rfaConnected?: boolean;
+  /** rfa-status: the same, live. */
+  connected?: boolean;
   compactOverBytes?: number;
+}
+
+// --- sync button --------------------------------------------------------
+// Syncing needs the game's persistent Remote File API connection to the hub,
+// so the button reflects both "a sync is running" and "the game is attached".
+let gameConnected = false;
+let syncRunning = false;
+const syncIdleTitle = $<HTMLButtonElement>("sync").title;
+
+function refreshSyncButton(): void {
+  const button = $<HTMLButtonElement>("sync");
+  button.disabled = syncRunning || !gameConnected;
+  button.title = gameConnected
+    ? syncIdleTitle
+    : "Bitburner is not connected — enable the Remote API in the game options";
 }
 
 function connect(): void {
@@ -471,7 +490,9 @@ function connect(): void {
       liveRuns = msg.runs ?? [];
       storedRuns = msg.stored ?? [];
       if (msg.compactOverBytes !== undefined) compactOverBytes = msg.compactOverBytes;
-      $<HTMLButtonElement>("sync").disabled = Boolean(msg.syncBusy);
+      syncRunning = Boolean(msg.syncBusy);
+      gameConnected = Boolean(msg.rfaConnected);
+      refreshSyncButton();
       refreshPicker();
       if (liveRuns.length > 0) {
         $<HTMLSelectElement>("runpick").value = `live:${liveRuns[0]!.id}`;
@@ -514,13 +535,18 @@ function connect(): void {
       }
       setStatus(`sim finished (exit ${msg.code})`);
     } else if (msg.type === "sync-status") {
-      $<HTMLButtonElement>("sync").disabled = Boolean(msg.busy);
-      if (msg.busy) setStatus("sync: waiting for game…");
+      syncRunning = Boolean(msg.busy);
+      refreshSyncButton();
+      if (msg.busy) setStatus("sync: building & pushing…");
     } else if (msg.type === "sync-finished") {
-      $<HTMLButtonElement>("sync").disabled = false;
+      syncRunning = false;
+      refreshSyncButton();
       const status = $("status");
       status.textContent = msg.code === 0 ? "sync complete" : `sync failed (exit ${msg.code})`;
       status.title = msg.output?.trim() ?? "";
+    } else if (msg.type === "rfa-status") {
+      gameConnected = Boolean(msg.connected);
+      refreshSyncButton();
     } else if (msg.type === "records" && run.live && (msg as { run?: string }).run === run.id) {
       if (run.t0 === null && msg.records?.length) {
         run.t0 = msg.records[0]!.t;
@@ -552,21 +578,17 @@ async function refreshLaunchers(): Promise<void> {
 void refreshLaunchers();
 
 $("sync").addEventListener("click", async () => {
-  const button = $<HTMLButtonElement>("sync");
-  button.disabled = true;
+  $<HTMLButtonElement>("sync").disabled = true;
   try {
+    // Resolves when the sync completes; progress and the final status also
+    // arrive as sync-status/sync-finished broadcasts on the live socket.
     const res = await fetch("/sync", { method: "POST" });
     const body = (await res.json()) as { error?: string };
-    if (!res.ok) {
-      button.disabled = false;
-      setStatus(`sync failed: ${body.error ?? res.statusText}`);
-    } else {
-      setStatus("sync: waiting for game…");
-    }
+    if (!res.ok) setStatus(`sync failed: ${body.error ?? res.statusText}`);
   } catch (error) {
-    button.disabled = false;
     setStatus(`sync failed: ${String(error)}`);
   }
+  refreshSyncButton();
 });
 
 $("simrun").addEventListener("click", async () => {
