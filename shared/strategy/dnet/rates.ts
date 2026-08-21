@@ -8,10 +8,96 @@
  *   src/DarkNet/controllers/NetworkMovement.ts (mutateDarknet)
  *   src/DarkNet/effects/labyrinth.ts          (getNetDepth) */
 
-/** The other network constants (MAX_NET_DEPTH, AIR_GAP_DEPTH, the connection
- * chances, MAX_PASSWORD_LENGTH) are written up in
- * spec/strategy/bitnodes/bn15.md rather than exported here; nothing computes
- * with them yet, and an unused constant is a claim nobody checks. */
+/** Columns the net is built on. `DarknetState.Network[depth][leftOffset]` is
+ * indexed by these two, and `leftOffset` is the half scripts are never told.
+ * Source: src/DarkNet/Enums.ts:7 */
+export const NET_WIDTH = 8;
+/** The deepest row that can exist, whatever the labyrinth says.
+ * Source: src/DarkNet/Enums.ts:8 */
+export const MAX_NET_DEPTH = 40;
+/** Depths that are structurally EMPTY: 8, 16, 24, 32.
+ *
+ * `isOnAirGap(x) = !!x && !(x % AIR_GAP_DEPTH)`, and `getAllOpenPositions` skips
+ * them, so no host is ever seated there. Since vertical wiring only ever reaches
+ * depth +- 1, an air gap means depth 7 and depth 9 are never adjacent — the net
+ * is genuinely segmented, which is what the name says and what a map that
+ * silently omits empty rows hides.
+ * Source: src/DarkNet/Enums.ts:6, src/DarkNet/utils/darknetNetworkUtils.ts:103 */
+export const AIR_GAP_DEPTH = 8;
+
+export function isOnAirGap(depth: number): boolean {
+  return depth > 0 && depth % AIR_GAP_DEPTH === 0;
+}
+
+/** The labyrinth ladder: the eight lab servers, the net depth each one implies,
+ * and the charisma it gates on.
+ *
+ * `getNetDepth()` IS the current lab's depth, so a single sighting of any lab
+ * host pins the size of the whole net exactly — the deepest row, and therefore
+ * how much of the grid we have never seen. That is the one number a crawler can
+ * learn for free and the map has been leaving on the floor.
+ *
+ * All eight are constructed at once by `addLabyrinth`, every one of them with
+ * `depth: -1, leftOffset: -1`, and the renderer pins them to `getNetDepth() +
+ * 0.5` instead. So the reported depth of a lab host is NOT its position, and
+ * anything that sorts by depth will otherwise put the goal above the root.
+ * Source: src/DarkNet/effects/labyrinth.ts (labData, getNetDepth),
+ *   src/Server/data/SpecialServers.ts:13-20,
+ *   src/DarkNet/controllers/NetworkGenerator.ts:235-261 */
+export interface LabStage {
+  hostname: string;
+  /** The whole net's depth while this lab is the current one. */
+  depth: number;
+  cha: number;
+  /** Solved through the UI maze rather than by a script. */
+  manual: boolean;
+}
+
+export const LAB_LADDER: readonly LabStage[] = [
+  { hostname: "th3_l4byr1nth", depth: 7, cha: 300, manual: true },
+  { hostname: "cru3l_l4byr1nth", depth: 12, cha: 600, manual: true },
+  { hostname: "m3rc1l3ss_l4byr1nth", depth: 19, cha: 1_500, manual: false },
+  { hostname: "ub3r_l4byr1nth", depth: 23, cha: 2_500, manual: false },
+  { hostname: "et3rn4l_l4byr1nth", depth: 29, cha: 3_000, manual: false },
+  { hostname: "end13ss_l4byr1nth", depth: 31, cha: 3_500, manual: false },
+  { hostname: "f1n4l_l4byr1nth", depth: 36, cha: 4_000, manual: false },
+  { hostname: "b0nus_l4byr1nth", depth: 36, cha: 4_000, manual: false },
+];
+
+const LAB_BY_HOST = new Map(LAB_LADDER.map((stage) => [stage.hostname, stage]));
+
+/** The model id every lab host reports. Source: src/DarkNet/Enums.ts (ModelIds.labyrinth) */
+export const LABYRINTH_MODEL_ID = "(The Labyrinth)";
+
+export function labStage(hostname: string): LabStage | undefined {
+  return LAB_BY_HOST.get(hostname);
+}
+
+/** Whether this host is a labyrinth, by either of the two things that identify
+ * one. The model id is the more robust of the two: it survives a rename, and it
+ * is what an agent sees first. */
+export function isLabyrinth(hostname: string, modelId?: string): boolean {
+  return LAB_BY_HOST.has(hostname) || modelId === LABYRINTH_MODEL_ID;
+}
+
+/** The net's depth, inferred from the deepest labyrinth we have laid eyes on.
+ *
+ * Undefined when we have seen none — which is honest, and different from the
+ * `DEFAULT_NET_DEPTH` fallback the timing functions use. A caller that
+ * wants to DRAW the grid needs to know it is guessing. */
+export function netDepthFromLabs(hostnames: Iterable<string>): number | undefined {
+  let depth: number | undefined;
+  for (const hostname of hostnames) {
+    const stage = LAB_BY_HOST.get(hostname);
+    if (stage && (depth === undefined || stage.depth > depth)) depth = stage.depth;
+  }
+  return depth;
+}
+
+/** The remaining network constants (the connection chances, MAX_PASSWORD_LENGTH)
+ * are written up in spec/strategy/bitnodes/bn15.md rather than exported here;
+ * nothing computes with them yet, and an unused constant is a claim nobody
+ * checks. */
 /** What darknet access costs, and where it can be bought.
  *
  * `ns.singularity.purchaseProgram` is the only scriptable path and it needs the
@@ -29,18 +115,28 @@ export const DARKSCAPE_COST = 50e6;
 export const TOR_COST = 200e3;
 
 const MS_PER_MUTATION_PER_ROW = 30_000;
-const NET_WIDTH = 8;
+
 const SERVER_DENSITY = 0.6;
-/** getNetDepth() falls back to 10 until the labyrinth reports its own depth. */
-const DEFAULT_NET_DEPTH = 10;
+/** The depth of a net whose labyrinth we have not identified.
+ *
+ * `getNetDepth()` reads `getLabyrinthDetails().depth ?? 10`, and that `?? 10` is
+ * DEAD: the no-access branch returns a literal `depth: 5` and every lab rung
+ * carries a number, so the fallback can never fire. Five is what the game
+ * actually runs before full darknet access, and it is the honest default here —
+ * ten would be off by a factor of two in `mutationIntervalMs`, which is the
+ * clock every staleness expiry is derived from.
+ *
+ * Source: src/DarkNet/effects/labyrinth.ts:393-396 (getNetDepth),
+ *   :485-497 (the no-access branch) */
+const DEFAULT_NET_DEPTH = 5;
 
 /** How often the net gets a mutation TICK.
  *
  * `getDarknetCyclesPerMutation` is `(rateMultiplier * 150) / depth` cycles at
  * 200 ms a cycle, where rateMultiplier is 1 in BN15 and 2 everywhere else. So
  * the net churns FASTER the deeper the labyrinth goes, and twice as slowly
- * outside its own BitNode. At the default depth of 10 in BN15 that is one tick
- * every three seconds. */
+ * outside its own BitNode. At the pre-labyrinth depth of 5 in BN15 that is one
+ * tick every six seconds; at the first labyrinth's depth of 7, every 4.3. */
 export function mutationIntervalMs(netDepth = DEFAULT_NET_DEPTH, bitNode = 15): number {
   const depth = Math.max(1, netDepth);
   return ((bitNode === 15 ? 1 : 2) * MS_PER_MUTATION_PER_ROW) / depth;

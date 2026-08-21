@@ -142,6 +142,60 @@ describe("the map's layout inputs are unambiguous", () => {
     expect(state("rumoured")).toBe("no-connection");
   });
 
+  test("the frontier is what is adjacent to something we HOLD, not what has its own map", () => {
+    // THE BUG this replaced: `authState` used to ask whether the host had its
+    // own fresh `neighbours` fact. That fact only exists once an agent is
+    // standing on the host, which only happens after it is cracked — so every
+    // host we could crack right now reported "(no connection)" and the panel
+    // called the entire work queue unreachable. Upstream's rule looks OUTWARD:
+    // `hasAdminRights || serversOnNetwork.some((n) => n.hasAdminRights)`.
+    //
+    // Nothing is cracked here. darkweb is held by construction, and its own
+    // one-hop list is the only thing that makes depth 0 actionable.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { depth: -1, neighbours: ["near-a", "near-b"] } },
+      { hostname: "near-a", present: true, facts: { depth: 0 } },
+      { hostname: "near-b", present: true, facts: { depth: 0 } },
+      { hostname: "far", present: true, facts: { depth: 3 } },
+    ]);
+    const digest = publishKnowledge(knowledge, NOW);
+    const state = (name: string) => digest.hosts.find((h) => h.hostname === name)!.authState;
+    expect(state("near-a")).toBe("auth-required");
+    expect(state("near-b")).toBe("auth-required");
+    // Genuinely out of reach, and still said so.
+    expect(state("far")).toBe("no-connection");
+  });
+
+  test("a one-sided adjacency claim still puts a host on the frontier", () => {
+    // `probe()` is host-local, so darkweb's own list comes only from home's
+    // one-hop probe. A depth-0 host reporting "my neighbour is darkweb" is
+    // exactly as good evidence, and often lands first.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { depth: -1 } },
+      { hostname: "claims-it", present: true, facts: { depth: 0, neighbours: ["darkweb"] } },
+    ]);
+    const digest = publishKnowledge(knowledge, NOW);
+    expect(digest.hosts.find((h) => h.hostname === "claims-it")!.authState).toBe("auth-required");
+  });
+
+  test("a cracked host opens the frontier one hop deeper", () => {
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { depth: -1, neighbours: ["shallow"] } },
+      { hostname: "shallow", present: true, facts: { depth: 0, neighbours: ["deeper"] } },
+      { hostname: "deeper", present: true, facts: { depth: 1 } },
+      { hostname: "deepest", present: true, facts: { depth: 2 } },
+    ]);
+    const state = (vault: string[], name: string) =>
+      publishKnowledge(knowledge, NOW, { vault: new Set(vault) }).hosts
+        .find((h) => h.hostname === name)!.authState;
+    // Before cracking `shallow`, its neighbour is out of reach...
+    expect(state([], "deeper")).toBe("no-connection");
+    // ...and after, it is the next thing to work on.
+    expect(state(["shallow"], "shallow")).toBe("authenticated");
+    expect(state(["shallow"], "deeper")).toBe("auth-required");
+    expect(state(["shallow"], "deepest")).toBe("no-connection");
+  });
+
   test("a gone host keeps its name and its death, and loses everything else", () => {
     let knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0, modelId: "TopPass" } }]);
     knowledge = foldReports(knowledge, [{ hostname: "dn-1", at: NOW + 1, present: false }], NOW + 1).knowledge;

@@ -193,9 +193,18 @@ export const dnetTab: Tab = {
     // still acting on. `stasisLinked` needs no set here — it arrives already
     // decided, as a per-host boolean.
     const now = knowledge.at;
-    const expiry: ExpiryOpts = { bitNode: state.topics.progression?.bitNode };
+    // `netDepth` matters here twice. Every expiry below is derived from the
+    // mutation clock, which is `30_000 / netDepth` — so leaving it out would put
+    // the panel on the default depth of 10 while the driver ran on the real one,
+    // and the two would disagree about what is still believable. It is also what
+    // lets the map draw the rows we have NOT reached; failing the topic, the
+    // layout infers it from any labyrinth we have seen.
+    const expiry: ExpiryOpts = {
+      bitNode: state.topics.progression?.bitNode,
+      ...(d.netDepth !== undefined ? { netDepth: d.netDepth } : {}),
+    };
 
-    const options = mapOptions(now, expiry);
+    const options = mapOptions(now, expiry, d.netDepth);
     const matched = options.query ? hosts.filter((host) => matches(host, options.query)) : hosts;
 
     const summary = tiles([
@@ -233,9 +242,16 @@ export const dnetTab: Tab = {
         { value: "100", label: "100%" },
       ], "100")
       + filters("dnet.edges", [
-        { value: "tree", label: "tree", title: "only parent-to-child links" },
+        {
+          value: "tree",
+          label: "near",
+          // Laterals are the only HARD evidence the column inference has, so
+          // hiding them by default made a correctly-constrained row look
+          // arbitrary. This drops only the long back edges.
+          title: "parent links and same-row links; hides the long ones",
+        },
         { value: "all", label: "all links" },
-        { value: "none", label: "no links" },
+        { value: "none", label: "no links", title: "contradictory links are still drawn" },
       ], "tree")
       + `</div>`
       // Search HIGHLIGHTS rather than removes, the way the in-game search box

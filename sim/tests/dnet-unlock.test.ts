@@ -157,7 +157,7 @@ function system(over: { fullAccess?: boolean; hasProgram?: boolean; installed?: 
  *  and writes the player's charisma, so its tests need both halves. */
 function darknetWorld(
   over: { fullAccess?: boolean; hasProgram?: boolean; installed?: string[]; bitNode?: number } = {},
-): { world: SimWorld; dnet: DarknetSystem } {
+): { world: SimWorld; dnet: DarknetSystem; network: Map<string, string[]> } {
   const world = new SimWorld({ seed: 1, bitnode: over.bitNode ?? 1, network: [] });
   const servers = world.servers;
   const darkweb = mockServer({ hostname: "darkweb", maxRam: 16, hasAdminRights: true }) as SimServer;
@@ -182,7 +182,7 @@ function darknetWorld(
     homeFiles: () => home,
     darknetMoneyMultiplier: () => 1,
   });
-  return { world, dnet };
+  return { world, dnet, network };
 }
 
 describe("the darknet model", () => {
@@ -278,20 +278,50 @@ describe("the darknet model", () => {
     // a host without rewiring it would make `topology` look as durable as
     // `position`, and the staleness policy would measure as far cheaper than it
     // is in game.
-    const dnet = system({ hasProgram: true });
+    //
+    // Sampled between CONSECUTIVE snapshots rather than against the state at
+    // populate(): one mutation is 150/netDepth cycles — about 30 at the depth-5
+    // fallback — so a 3000-cycle call is a hundred mutations, easily long enough
+    // for a host to move and then be deleted before anyone looked. Comparing
+    // against a fixed baseline measured survival, not movement.
+    const { dnet, network } = darknetWorld({ hasProgram: true });
     dnet.populate();
-    const before = new Map(
-      [...dnet.hosts.values()].map((host) => [host.hostname, { depth: host.depth }]),
-    );
-    let moved = false;
-    for (let i = 0; i < 60 && !moved; i++) {
-      dnet.darknetProcess(3_000);
-      for (const host of dnet.hosts.values()) {
-        const was = before.get(host.hostname);
-        if (was && host.online && was.depth !== host.depth) moved = true;
+    const snapshot = () =>
+      new Map(
+        [...dnet.hosts.values()]
+          .filter((host) => host.online && !host.isStationary)
+          .map((host) => [host.hostname, { depth: host.depth, links: [...(network.get(host.hostname) ?? [])] }]),
+      );
+
+    let moves = 0;
+    let before = snapshot();
+    for (let round = 0; round < 400 && moves === 0; round++) {
+      // One mutation is 150/netDepth cycles — 30 at the depth-5 fallback — so
+      // this is a handful of mutations per round rather than a hundred.
+      dnet.darknetProcess(60);
+      const after = snapshot();
+      for (const [hostname, was] of before) {
+        const now = after.get(hostname);
+        if (!now || now.depth === was.depth) continue;
+        moves++;
+        // THE CLAIM: a move re-wires from scratch, so every edge the host now
+        // holds is consistent with its NEW cell. `moveDarknetServer` calls
+        // `disconnectServer` before re-seating, which is why `topology` cannot
+        // outlive `position` and the two expire on different clocks.
+        const host = dnet.hosts.get(hostname)!;
+        for (const link of now.links) {
+          const other = dnet.hosts.get(link);
+          // darkweb and the labyrinth are pinned and adjacent to a whole row.
+          if (!other || other.isStationary) continue;
+          expect(Math.abs(other.depth - host.depth)).toBeLessThanOrEqual(1);
+          if (other.depth === host.depth) {
+            expect(Math.abs(other.leftOffset - host.leftOffset)).toBe(1);
+          }
+        }
       }
+      before = after;
     }
-    expect(moved).toBe(true);
+    expect(moves).toBeGreaterThan(0);
   });
 
   test("mutation draws a fixed width from the shared stream", () => {
@@ -436,21 +466,34 @@ describe("the darknet model's own claims", () => {
     expect(declared).toContain("stasis");
   });
 
-  test("the remaining mutation gap is placement, and says so", () => {
-    // This assumption used to say the tick applied deletes and restarts only,
-    // which quietly invalidated every staleness measurement AND made a long run
-    // end with an empty net. Both are fixed: the tick now rolls every kind
-    // upstream does, at upstream's probabilities. What is left is genuinely a
-    // shape — where a moved host lands — and the text has to say which is which,
-    // because a run's metadata is what decides whether a later measurement can
-    // invalidate an artifact.
+  test("the remaining mutation gap is entropy, not placement, and says so", () => {
+    // This assumption has been narrowed twice, and the text is the record of
+    // what a run's measurements may still be invalidated by.
+    //
+    // It first said the tick applied deletes and restarts only, which quietly
+    // invalidated every staleness measurement AND made a long run end with an
+    // empty net. Then it said placement was shape — a moved host was wired to
+    // plausible neighbours one row away instead of taking a grid cell. That one
+    // mattered more than it looked: a same-depth edge can only ever join cells
+    // one column apart, so a sim wiring same-depth pairs freely mints edges the
+    // game cannot produce, and `ui/`'s map infers columns from exactly those
+    // edges. Both are now modelled.
+    //
+    // What is left is the ENTROPY SOURCE, which is a real divergence and a much
+    // smaller one: upstream rolls a fresh random() per candidate pair, and doing
+    // that here would make the mutation's draw block variable-width.
     const gap = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.mutationPlacement"))!;
     expect(gap).toBeDefined();
-    expect(gap).toContain("Rates are faithful");
-    expect(gap).toContain("shape");
-    // And the claim it no longer makes: nothing may still describe the tick as
-    // delete-only.
-    expect(DNET_ASSUMPTIONS.join(" ")).not.toContain("deletes and restarts only");
+    expect(gap).toContain("ENTROPY SOURCE");
+    expect(gap).toContain("Same probabilities");
+    // The grid is now claimed as reproduced rather than as shape.
+    const topology = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.topology"))!;
+    expect(topology).toContain("leftOffset");
+    expect(topology).toContain("air-gap");
+    // And the claims it no longer makes.
+    const all = DNET_ASSUMPTIONS.join(" ");
+    expect(all).not.toContain("deletes and restarts only");
+    expect(all).not.toContain("the exact grid is shape");
   });
 });
 

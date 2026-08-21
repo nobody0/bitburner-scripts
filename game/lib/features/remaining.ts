@@ -23,13 +23,14 @@ import {
   type DnetRendezvous,
 } from "../../dnet/realm.ts";
 import type { DarknetAgentDigest } from "../../../shared/telemetry/topics/dnet.ts";
-import { mutationIntervalMs } from "../../../shared/strategy/dnet/rates.ts";
+import { mutationIntervalMs, netDepthFromLabs } from "../../../shared/strategy/dnet/rates.ts";
 import { DARKSCAPE_TOTAL_COST, stepDarkscape } from "../../../shared/strategy/dnet/unlock.ts";
 import {
   coverage,
   emptyKnowledge,
   foldReports,
   fresh,
+  isImmune,
   type DarknetKnowledge,
   type ExpiryOpts,
 } from "../../../shared/strategy/dnet/knowledge.ts";
@@ -2168,7 +2169,20 @@ const dnet: FeatureDriver = {
     // A stasis-linked host is outside the mutation clock entirely, and WE are the
     // only thing that links or releases one — so the set comes from here rather
     // than from an observed fact that could itself go stale.
-    const expiry: ExpiryOpts = { bitNode, stasisLinked: new Set(topic.stasisLinked ?? []) };
+    // `getNetDepth()` IS the current labyrinth's depth, and all eight lab servers
+    // are constructed with the net itself — so one sighting of any of them pins
+    // the net's depth exactly, long before it is reachable. That matters twice
+    // over: the mutation clock is `30_000 / netDepth`, so EVERY staleness expiry
+    // below was being computed against a default of 10, and the map cannot draw
+    // the rows we have not reached without knowing how many there are. Carried
+    // over from the topic between sightings, since it only changes when a lab is
+    // completed.
+    const netDepth = netDepthFromLabs(Object.keys(dnetKnowledge.hosts)) ?? topic.netDepth;
+    const expiry: ExpiryOpts = {
+      bitNode,
+      ...(netDepth !== undefined ? { netDepth } : {}),
+      stasisLinked: new Set(topic.stasisLinked ?? []),
+    };
     // Home's own probe is folded as one more vantage rather than kept beside the
     // map in a second shape. It is the only source for `darkweb` until a resident
     // is standing out there, and it costs nothing to merge.
@@ -2192,6 +2206,19 @@ const dnet: FeatureDriver = {
     // rather than a count of the one label a drain used to carry.
     for (const host of residents) dnetAgentsSeen.add(host);
     const cover = coverage(dnetKnowledge, now, expiry);
+    // From the FOLD, for the same reason `topologyComplete` is. Home's probe
+    // computes this over its own one hop, and `probe()` is HOST-LOCAL — so from
+    // home it sees `darkweb` and nothing else, and darkweb's depth is -1. The
+    // number could therefore never be anything but -1, however far the crawler
+    // had actually spread, which is exactly what the panel kept reporting.
+    const deepest = Object.values(dnetKnowledge.hosts).reduce((found, host) => {
+      if (host.goneAt !== undefined) return found;
+      const depth = fresh<number>(host, "depth", now, {
+        ...expiry,
+        immune: isImmune(host, { stasisLinked: expiry.stasisLinked }),
+      });
+      return depth !== undefined && depth > found ? depth : found;
+    }, -1);
     // Topology completeness is a property of the FOLD, not of home's own probe —
     // which hardcodes false because it can only ever see one hop. Deriving it
     // here is what makes it reachable at all: it becomes true the first time
@@ -2211,6 +2238,10 @@ const dnet: FeatureDriver = {
       // THE MAP, and the only host representation the topic carries.
       knowledge: publishKnowledge(dnetKnowledge, now, {
         bitNode,
+        // Without this the digest's own staleness ran on the default depth while
+        // the tick above ran on the real one, so the panel and the driver could
+        // disagree about what was still believable.
+        ...(netDepth !== undefined ? { netDepth } : {}),
         stasisLinked: expiry.stasisLinked,
         vault: new Set(dnetVault.keys()),
         unknownModels: dnetUnknownModels,
@@ -2237,7 +2268,9 @@ const dnet: FeatureDriver = {
           seedAttempts: dnetSeedAttempts,
         },
       }),
-      mutationIntervalMs: mutationIntervalMs(undefined, bitNode),
+      ...(netDepth !== undefined ? { netDepth } : {}),
+      maxDepth: deepest,
+      mutationIntervalMs: mutationIntervalMs(netDepth, bitNode),
       charisma: ctx.state.topics.player?.skills.charisma ?? 1,
       topologyComplete,
     });
@@ -2264,7 +2297,7 @@ const dnet: FeatureDriver = {
         };
       }),
       reachable: topic.reachable,
-      maxDepth: topic.maxDepth,
+      maxDepth: deepest,
       stasisLinkLimit: topic.stasisLinkLimit,
       stasisLinked: topic.stasisLinked ?? [],
       instability: topic.instability,

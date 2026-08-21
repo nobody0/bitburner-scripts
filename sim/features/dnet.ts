@@ -10,6 +10,7 @@ import {
   EU_COUNTRIES,
 } from "../../shared/strategy/dnet/dictionaries.ts";
 import type { ProcessTable } from "../ns/process.ts";
+import { isOnAirGap, LAB_LADDER, NET_WIDTH, type LabStage } from "../../shared/strategy/dnet/rates.ts";
 
 /** The darknet, modelled far enough that buying DarkscapeNavigator.exe is a real
  * event with real consequences.
@@ -21,31 +22,38 @@ import type { ProcessTable } from "../ns/process.ts";
  * itself rather than answering with a fabrication — an ns member this does not
  * model is simply absent from the namespace, so the root proxy reports it.
  *
- * The formulas are transcribed. The TOPOLOGY is not: upstream places servers
- * through `addRandomDarknetServers`/`balanceDarknetServers` over a grid with
- * guaranteed-connection passes, and this reproduces the population and a
- * connected graph rather than that exact placement. `DNET_ASSUMPTIONS` records
- * it, so a run's metadata says which parts are shape rather than transcription.
+ * The formulas are transcribed, and so is the GRID. A host holds a
+ * `(depth, leftOffset)` cell on an 8-wide board with air-gap rows, exactly as
+ * `DarknetState.Network[x][y]` does, because the geometry is not decoration: a
+ * same-depth edge can only ever join two cells at |Δcolumn| = 1, while a
+ * vertical edge is rolled against the whole adjacent row and so says nothing
+ * about the column. That asymmetry is the only evidence a script has for
+ * reconstructing a column it is never told, and a sim that wired same-depth
+ * pairs freely would mint edges the game cannot produce and quietly invalidate
+ * any map built on them.
  * Source: ../bitburner-src @ 3162fd2590e221eadd0c0fbd46151913f7c4c41c
  *   src/DarkNet/controllers/NetworkGenerator.ts, src/DarkNet/Enums.ts,
  *   src/DarkNet/models/DarknetServerOptions.ts, src/DarkNet/effects/ramblock.ts */
 
 export const DNET_ASSUMPTIONS: readonly string[] = [
-  "dnet.topology: population and connectivity are reproduced; upstream's exact grid placement and balancing passes are not",
+  "dnet.topology: population, the 8-wide grid, air-gap rows and the connection passes are reproduced — a host holds a "
+  + "(depth, leftOffset) cell, lateral edges reach only the cells beside it, and vertical edges are rolled against the whole "
+  + "adjacent row. What is not transcribed is the ORDER upstream's balancing pass visits candidates in",
   // THE ONE THAT MATTERS MOST. Every knowledge expiry in
   // shared/strategy/dnet/knowledge.ts is derived from the move, connect and
   // disconnect rates — none of which this tick produces. So the staleness policy
   // will always measure as CHEAPER here than in the game, and a sim run cannot
   // validate it. Said out loud rather than left for someone to discover.
-  // The tick now applies every kind upstream rolls. What is left is placement:
-  // upstream lays servers on an 8-wide grid with guaranteed-connection passes,
-  // and this wires a moved or added host to plausible neighbours one row away
-  // instead. So the RATES are faithful and the exact shape is not.
+  // The tick applies every kind upstream rolls, and now seats them on the real
+  // grid. What is left is the ENTROPY: upstream rolls a fresh Math.random() per
+  // candidate pair, which would make the draw block variable-width.
   "dnet.mutationPlacement: the tick applies every mutation kind upstream rolls — island moves, low-level restocking, "
   + "deletes, adds, restarts, moves, added connections, severed connections and the density balance — at upstream's own "
-  + "probabilities and in its order. What is reproduced rather than transcribed is PLACEMENT: a moved or added host is "
-  + "wired to plausible neighbours one row away, where upstream picks a free slot on an 8-wide grid and runs its own "
-  + "connection passes. Rates are faithful; the exact grid is shape",
+  + "probabilities and in its order, and a moved or added host takes a free (depth, leftOffset) cell from "
+  + "getAllOpenPositions with its band-widening. What differs is the ENTROPY SOURCE for the per-pair connection rolls: "
+  + "upstream draws a fresh random() per candidate, which would make the mutation's draw block variable-width and let "
+  + "topology perturb the stock stream, so the pairs are decided by hashing one draw instead. Same probabilities, same "
+  + "independence, fixed cost",
   "dnet.probeOrder: upstream shuffles probe() results to hide the network structure; this returns a stable order, because "
   + "lodash shuffle consumes a variable number of draws and taking them from the shared stream would let topology perturb stock prices",
   "dnet.logNoise: the noise mix is narrowed to the branches that leak password material plus the heartbeat everything else "
@@ -95,8 +103,10 @@ export function promoteStockCharismaExp(threads: number, charisma: number, chari
   return charismaExpMult * threads * 10 * ((200 + charisma) / 200);
 }
 
-const NET_WIDTH = 8;
 const SERVER_DENSITY = 0.6;
+/** Per-pair connection odds. Source: src/DarkNet/Enums.ts:4-5 */
+const HORIZONTAL_CONNECTION_CHANCE = 0.5;
+const VERTICAL_CONNECTION_CHANCE = 0.3;
 /** getNetDepth()'s fallback without full darknet access. */
 const NO_SF15_NET_DEPTH = 5;
 /** packetSniffing.ts:14. The ring is generous, which is why a wide heartbleed
@@ -107,26 +117,14 @@ const LOW_LEVEL_SERVER_DENSITY = 0.7;
  * does. Fixed so two strategy variants advance that stream identically. */
 export const MUTATION_DRAWS = 28;
 
-/** `labData`, in the order `getCurrentLabName` walks it. Depth is the whole
- * net's depth while that lab is current, so the net grows as the labyrinth is
- * walked. `manual` labs are solved through the UI maze, not by a script.
- * Source: src/DarkNet/effects/labyrinth.ts:37-108, src/Server/data/SpecialServers.ts:13-20 */
-export interface LabStage {
-  hostname: string;
-  depth: number;
-  cha: number;
-  manual: boolean;
-}
-export const LAB_STAGES: readonly LabStage[] = [
-  { hostname: "th3_l4byr1nth", depth: 7, cha: 300, manual: true },
-  { hostname: "cru3l_l4byr1nth", depth: 12, cha: 600, manual: true },
-  { hostname: "m3rc1l3ss_l4byr1nth", depth: 19, cha: 1_500, manual: false },
-  { hostname: "ub3r_l4byr1nth", depth: 23, cha: 2_500, manual: false },
-  { hostname: "et3rn4l_l4byr1nth", depth: 29, cha: 3_000, manual: false },
-  { hostname: "end13ss_l4byr1nth", depth: 31, cha: 3_500, manual: false },
-  { hostname: "f1n4l_l4byr1nth", depth: 36, cha: 4_000, manual: false },
-  { hostname: "b0nus_l4byr1nth", depth: 36, cha: 4_000, manual: false },
-];
+/** `labData`, in the order `getCurrentLabName` walks it.
+ *
+ * Held in `shared/strategy/dnet/rates.ts` rather than transcribed a second time
+ * here: `ui/` needs the same ladder to pin the labyrinth to the bottom of the
+ * map and to know how deep the net goes at all, and two copies of a table like
+ * this drift the moment one of them is corrected. Re-exported so the sim's own
+ * importers do not have to know where it moved to. */
+export { LAB_LADDER as LAB_STAGES, type LabStage } from "../../shared/strategy/dnet/rates.ts";
 
 /** The six labyrinth rewards, in prereq order. The Red Pill is spliced in by
  * `labReward` rather than listed, because where it lands depends on the node.
@@ -147,20 +145,20 @@ export const NEUROFLUX = "NeuroFlux Governor";
  * is what makes it the fifth reward there and the seventh elsewhere. */
 export function currentLab(installed: ReadonlySet<string>, bitNode: number, allowRedPill: boolean): LabStage {
   const has = (name: string): boolean => installed.has(name);
-  if (!has(LAB_AUGMENTATIONS[0])) return LAB_STAGES[0]!;
-  if (!has(LAB_AUGMENTATIONS[1])) return LAB_STAGES[1]!;
-  if (!has(LAB_AUGMENTATIONS[2])) return LAB_STAGES[2]!;
-  if (!has(LAB_AUGMENTATIONS[3])) return LAB_STAGES[3]!;
+  if (!has(LAB_AUGMENTATIONS[0])) return LAB_LADDER[0]!;
+  if (!has(LAB_AUGMENTATIONS[1])) return LAB_LADDER[1]!;
+  if (!has(LAB_AUGMENTATIONS[2])) return LAB_LADDER[2]!;
+  if (!has(LAB_AUGMENTATIONS[3])) return LAB_LADDER[3]!;
   if (bitNode === 15) {
-    if (!has(RED_PILL)) return LAB_STAGES[4]!;
-    if (!has(LAB_AUGMENTATIONS[4])) return LAB_STAGES[5]!;
-    if (!has(LAB_AUGMENTATIONS[5])) return LAB_STAGES[6]!;
-    return LAB_STAGES[7]!;
+    if (!has(RED_PILL)) return LAB_LADDER[4]!;
+    if (!has(LAB_AUGMENTATIONS[4])) return LAB_LADDER[5]!;
+    if (!has(LAB_AUGMENTATIONS[5])) return LAB_LADDER[6]!;
+    return LAB_LADDER[7]!;
   }
-  if (!has(LAB_AUGMENTATIONS[4])) return LAB_STAGES[4]!;
-  if (!has(LAB_AUGMENTATIONS[5])) return LAB_STAGES[5]!;
-  if (allowRedPill && !has(RED_PILL)) return LAB_STAGES[6]!;
-  return LAB_STAGES[7]!;
+  if (!has(LAB_AUGMENTATIONS[4])) return LAB_LADDER[4]!;
+  if (!has(LAB_AUGMENTATIONS[5])) return LAB_LADDER[5]!;
+  if (allowRedPill && !has(RED_PILL)) return LAB_LADDER[6]!;
+  return LAB_LADDER[7]!;
 }
 
 /** `getLabAugReward`: what completing the current lab awards. */
@@ -268,6 +266,21 @@ function rollBlockedRam(maxRam: number, random: () => number): number {
   return [maxRam, maxRam - 8, maxRam - 64, maxRam / 2][Math.floor(random() * 4)]!;
 }
 
+/** Independent sub-draws derived from one draw already taken from the stream.
+ *
+ * Upstream rolls a fresh `Math.random()` per candidate pair, and there is no
+ * bound on how many pairs a wiring pass considers. Doing that here would make
+ * the mutation's draw block variable-width, and `MUTATION_DRAWS` is fixed
+ * precisely so that topology cannot perturb the stock stream — a strategy A/B
+ * would stop being comparable. Hashing one draw gives the same per-pair
+ * independence at a fixed cost. */
+function subDraw(draw: number, salt: number): number {
+  let x = (Math.imul(Math.floor(draw * 0x7fffffff) >>> 0, 0x9e3779b1) ^ Math.imul(salt + 1, 0x85ebca6b)) >>> 0;
+  x = Math.imul(x ^ (x >>> 15), 0xc2b2ae35) >>> 0;
+  x ^= x >>> 13;
+  return (x >>> 0) / 0x1_0000_0000;
+}
+
 export interface DarknetHost {
   hostname: string;
   modelId: string;
@@ -288,6 +301,15 @@ export interface DarknetHost {
   blockedRam: number;
   difficulty: number;
   depth: number;
+  /** The COLUMN, 0..NET_WIDTH-1. Upstream's `DarknetServer.leftOffset`, and the
+   *  second half of the coordinate `DarknetState.Network[depth][leftOffset]` is
+   *  indexed by. `-1` for `darkweb` and the labyrinth, which are pinned.
+   *
+   *  Not exposed to scripts — `DarknetServerDetails` carries `depth` and nothing
+   *  about the column. It is modelled here anyway because it is what decides
+   *  which same-depth pairs may be wired at all, and a sim that skipped it would
+   *  generate lateral edges the game cannot produce. */
+  leftOffset: number;
   requiredCharismaSkill: number;
   isStationary: boolean;
   online: boolean;
@@ -444,42 +466,45 @@ export class DarknetSystem {
     this.#stockPromotions.clear();
   }
 
-  /** populateDarknet(). Idempotent, as upstream's guard makes it. */
+  /** populateDarknet(). Idempotent, as upstream's guard makes it.
+   *
+   * The labyrinth goes down FIRST, exactly as upstream orders it —
+   * `addLabyrinth()` then `addRandomDarknetServers()` — because
+   * `addServerToNetwork` links a host to the lab when it lands on the deepest
+   * row. Placing it last, as this used to, meant only one host ever reached it. */
   populate(): void {
     if (this.#populated) return;
     this.#populated = true;
-    const { generate, servers, network } = this.#opts;
+    const { generate } = this.#opts;
     const depth = this.netDepth();
     const count = Math.max(1, Math.round(depth * NET_WIDTH * SERVER_DENSITY) - 10);
-    let previousRow: string[] = ["darkweb"];
+    this.#placeLab();
     let placed = 0;
     for (let row = 0; row < depth && placed < count; row++) {
-      const rowHosts: string[] = [];
+      // An air-gap row holds nothing at all, which is what makes depth 7 and
+      // depth 9 non-adjacent: the vertical wiring only looks at depth ± 1.
+      if (isOnAirGap(row)) continue;
       // Rows 0 and 1 are topped up to five upstream; deeper rows take what is
-      // left of the population.
-      const target = row < 2 ? 5 : Math.min(NET_WIDTH, count - placed);
-      for (let i = 0; i < target && placed < count + 10; i++) {
-        const hostname = `dnet-${row}-${i}`;
-        const difficulty = row;
-        const maxRam = rollMaxRam(difficulty, generate);
-        const blockedRam = rollBlockedRam(maxRam, generate);
-        this.#buildHost(hostname, difficulty, row);
-        const parent = previousRow[Math.floor(generate() * previousRow.length)] ?? "darkweb";
-        network.set(hostname, [parent]);
-        network.set(parent, [...(network.get(parent) ?? []), hostname]);
-        rowHosts.push(hostname);
+      // left of the population. Never more than the row has cells.
+      const target = Math.min(NET_WIDTH, row < 2 ? 5 : count - placed);
+      for (let i = 0; i < target; i++) {
+        // One draw per host: it picks the CELL and seeds the wiring.
+        const draw = generate();
+        const free = this.#openPositions(row, row);
+        const cell = free[Math.floor(draw * free.length)];
+        if (!cell) break;
+        this.#buildHost(`dnet-${row}-${i}`, row, row, cell[1]);
+        this.#wire(`dnet-${row}-${i}`, row, cell[1], draw);
         placed++;
       }
-      if (rowHosts.length > 0) previousRow = rowHosts;
     }
-    this.#placeLab(previousRow);
   }
 
   /** One darknet host, exactly as `populate` and a later `addRandomDarknetServers`
    * both need it. Shared so a host added by a mutation is indistinguishable from
    * one the generator placed — otherwise a net that had churned would drift into
    * a different shape from a fresh one. */
-  #buildHost(hostname: string, difficulty: number, depth: number): void {
+  #buildHost(hostname: string, difficulty: number, depth: number, leftOffset: number): void {
     const { generate, servers } = this.#opts;
     const maxRam = rollMaxRam(difficulty, generate);
     const blockedRam = rollBlockedRam(maxRam, generate);
@@ -501,6 +526,8 @@ export class DarknetSystem {
       blockedRam,
       difficulty,
       depth,
+      // Assigned by #seat below, which is the only writer — see the grid index.
+      leftOffset: -1,
       // depthScaling for depth < 2, per DarknetServerOptions.ts:70.
       requiredCharismaSkill: Math.max(1, depth * 10),
       isStationary: false,
@@ -508,6 +535,9 @@ export class DarknetSystem {
       sessions: new Set<number>(),
       logs: [],
     });
+    // Into the grid index too, so `Network[depth][leftOffset]` and `hosts` agree
+    // from the moment the host exists rather than from its first wiring.
+    this.#seat(this.hosts.get(hostname)!, depth, leftOffset);
     const server = mockServer({
       hostname,
       ip: randomIp(generate),
@@ -527,7 +557,7 @@ export class DarknetSystem {
    * model id and the 128 GB / difficulty 10 / stationary values upstream gives
    * it.
    * Source: src/DarkNet/controllers/NetworkGenerator.ts:235-261 */
-  #placeLab(deepestRow: readonly string[]): void {
+  #placeLab(): void {
     const lab = this.currentLab();
     if (!lab) return;
     const { servers, network, generate } = this.#opts;
@@ -546,18 +576,19 @@ export class DarknetSystem {
       blockedRam: 0,
       difficulty: 10,
       depth: -1,
+      leftOffset: -1,
       requiredCharismaSkill: lab.cha,
       isStationary: true,
       online: true,
-          sessions: new Set<number>(),
+      sessions: new Set<number>(),
       logs: [],
-});
+    });
     const server = mockServer({ hostname: lab.hostname, ip: randomIp(generate), maxRam: 128 }) as SimServer;
     server.simKind = "DarknetServer";
     servers.set(lab.hostname, server);
-    const parent = deepestRow[0] ?? "darkweb";
-    network.set(lab.hostname, [parent]);
-    network.set(parent, [...(network.get(parent) ?? []), lab.hostname]);
+    // No edges of its own: every host that lands on the deepest row wires itself
+    // to the lab, which is `addServerToNetwork`'s own maxDepth-1 branch.
+    network.set(lab.hostname, []);
   }
 
   /** probe(): darknet neighbours of the CALLING host only. Not access-gated
@@ -594,6 +625,7 @@ export class DarknetSystem {
         blockedRam: 0,
         difficulty: 0,
         depth: -1,
+        leftOffset: -1,
         requiredCharismaSkill: 1,
         isStationary: true,
         online: true,
@@ -1082,28 +1114,157 @@ export class DarknetSystem {
     return names[Math.floor(draw * names.length)];
   }
 
-  /** Wire a host to plausible neighbours: hosts one row above and below, plus
-   * `darkweb` at depth 0. Upstream places on an 8-wide grid with guaranteed
-   * connection passes; this reproduces the CONNECTIVITY rather than the exact
-   * placement, which `DNET_ASSUMPTIONS` records as shape. */
-  #wire(hostname: string, depth: number, draw: number): void {
+  /** `DarknetState.Network`: depth -> column -> hostname.
+   *
+   * A real index rather than a scan over `hosts`. Wiring asks "who is beside
+   * this cell" and "which cells in this row are free" several times per
+   * mutation, and at a few hundred hosts the scan version turned a twelve-minute
+   * BN15 run into minutes of grid arithmetic. Upstream keeps the same second
+   * copy for the same reason; the drift it risks is why every seat and vacate
+   * goes through the two methods below and nothing else touches `leftOffset`. */
+  readonly #grid = new Map<number, (string | undefined)[]>();
+
+  #row(depth: number): (string | undefined)[] {
+    let row = this.#grid.get(depth);
+    if (!row) {
+      row = new Array<string | undefined>(NET_WIDTH).fill(undefined);
+      this.#grid.set(depth, row);
+    }
+    return row;
+  }
+
+  #seat(host: DarknetHost, depth: number, column: number): void {
+    host.depth = depth;
+    host.leftOffset = column;
+    // darkweb and the labyrinth are pinned rather than seated, and carry -1.
+    if (column < 0 || column >= NET_WIDTH) return;
+    this.#row(depth)[column] = host.hostname;
+  }
+
+  /** Free the cell a host holds. Idempotent, and it checks the occupant's name
+   * before clearing: a host that has already been re-seated must not have its
+   * NEW cell cleared by a late vacate of its old one. */
+  #vacate(host: DarknetHost): void {
+    const { depth, leftOffset } = host;
+    if (leftOffset < 0) return;
+    const row = this.#grid.get(depth);
+    if (row && row[leftOffset] === host.hostname) row[leftOffset] = undefined;
+    host.leftOffset = -1;
+  }
+
+  /** The host occupying one grid cell, if any. `DarknetState.Network[x][y]`. */
+  #at(depth: number, column: number): DarknetHost | undefined {
+    if (column < 0 || column >= NET_WIDTH) return undefined;
+    const name = this.#grid.get(depth)?.[column];
+    if (name === undefined) return undefined;
+    const host = this.hosts.get(name);
+    return host?.online === true ? host : undefined;
+  }
+
+  /** Every host on one depth, left to right. The row above and the row below
+   * are what vertical wiring rolls against, in full. */
+  #onRow(depth: number): DarknetHost[] {
+    const row = this.#grid.get(depth);
+    if (!row) return [];
+    const out: DarknetHost[] = [];
+    for (let column = 0; column < NET_WIDTH; column++) {
+      const host = this.#at(depth, column);
+      if (host) out.push(host);
+    }
+    return out;
+  }
+
+  /** `getAllOpenPositions`: free cells in a depth band, widening the band when
+   * the band itself is full, and never landing on an air gap. */
+  #openPositions(minDepth: number, maxDepth: number): [number, number][] {
+    const min = Math.max(0, minDepth);
+    const max = Math.min(maxDepth, this.netDepth() - 1);
+    const positions: [number, number][] = [];
+    for (let depth = min; depth <= max; depth++) {
+      if (isOnAirGap(depth)) continue;
+      for (let column = 0; column < NET_WIDTH; column++) {
+        if (!this.#at(depth, column)) positions.push([depth, column]);
+      }
+    }
+    if (positions.length > 0 || (min === 0 && max === this.netDepth() - 1)) return positions;
+    return this.#openPositions(min - 1, max + 1);
+  }
+
+  /** `getAllAdjacentNeighbors`: the rows above and below, plus the two cells
+   * beside this one.
+   *
+   * The vertical halves pass `close = true`, and that argument does something
+   * surprising. It reads
+   *
+   *     rowAbove.filter((server) => Math.abs(server.leftOffset ?? 0 - x) <= 1)
+   *
+   * and `??` binds looser than `-`, so it parses as `leftOffset ?? (0 - x)`.
+   * `leftOffset` is a number and never nullish, so the whole test collapses to
+   * `Math.abs(leftOffset) <= 1` — it keeps only COLUMNS 0 AND 1, whatever `x`
+   * is, rather than the cells near the host as the name promises. Transcribed
+   * with the bug, because it is what the live game does: it biases guaranteed
+   * connections towards the left of the board.
+   *
+   * The lateral half is NOT filtered, which is why a same-depth edge still
+   * implies |Δcolumn| = 1 and a map can infer a column it is never told.
+   * Source: src/DarkNet/utils/darknetNetworkUtils.ts:48-62, :80-85 */
+  #adjacent(depth: number, column: number): DarknetHost[] {
+    const near = (host: DarknetHost) => Math.abs(host.leftOffset) <= 1;
+    // Upstream's own order: "rowAbove" is depth + 1, "rowBelow" is depth - 1.
+    const rows = [...this.#onRow(depth + 1).filter(near), ...this.#onRow(depth - 1).filter(near)];
+    const beside = [this.#at(depth, column - 1), this.#at(depth, column + 1)]
+      .filter((entry): entry is DarknetHost => entry !== undefined);
+    return [...rows, ...beside];
+  }
+
+  /** `addRandomConnections` then `addGuaranteedConnection`, at upstream's own
+   * probabilities.
+   *
+   * Lateral pairs are rolled at `HORIZONTAL_CONNECTION_CHANCE` and can only ever
+   * be the two cells beside this one — that is the invariant `ui/`'s map infers
+   * columns from.
+   *
+   * Vertical pairs are rolled against the ENTIRE adjacent row: this path calls
+   * `getServersOnRowAbove/Below` WITHOUT `close`, so no column filter applies
+   * and a vertical edge carries no column information at all. (The `close`
+   * filter is a different story — see `#adjacent`.)
+   *
+   * `distance` is upstream's and is mis-parenthesised: `Math.abs(neighbor.depth
+   * ?? x - x) + 1` parses as `Math.abs(neighbor.depth ?? (x - x)) + 1`, and
+   * `depth` is never nullish, so it is `depth + 1` rather than the intended
+   * gap of 1. Deep rows therefore get far fewer vertical links than shallow
+   * ones. Kept.
+   * Source: src/DarkNet/controllers/NetworkGenerator.ts:178-232 */
+  #wire(hostname: string, depth: number, column: number, draw: number): void {
     const { network } = this.#opts;
-    const parents = depth === 0
-      ? ["darkweb"]
-      : [...this.hosts.values()]
-        .filter((entry) => entry.online && entry.depth === depth - 1)
-        .map((entry) => entry.hostname)
-        .sort();
-    const children = [...this.hosts.values()]
-      .filter((entry) => entry.online && entry.depth === depth + 1)
-      .map((entry) => entry.hostname)
-      .sort();
     const links = new Set<string>();
-    const parent = this.#pick(parents, draw);
-    if (parent) links.add(parent);
-    const child = this.#pick(children, draw);
-    if (child) links.add(child);
-    network.set(hostname, [...links]);
+    const lateralChance = HORIZONTAL_CONNECTION_CHANCE * (1.1 - depth * 0.01);
+    const verticalChance = VERTICAL_CONNECTION_CHANCE * (1.1 - depth * 0.01);
+    let salt = 0;
+
+    for (const beside of [this.#at(depth, column - 1), this.#at(depth, column + 1)]) {
+      if (beside && subDraw(draw, salt++) < lateralChance) links.add(beside.hostname);
+    }
+    const vertical = [...this.#onRow(depth - 1), ...this.#onRow(depth + 1)]
+      .sort((a, b) => (a.hostname < b.hostname ? -1 : 1));
+    for (const other of vertical) {
+      const distance = Math.abs(other.depth) + 1;
+      if (subDraw(draw, salt++) < verticalChance / distance) links.add(other.hostname);
+    }
+
+    // The guaranteed connection is what stops a host being born an island.
+    const adjacent = this.#adjacent(depth, column);
+    const guaranteed = adjacent[Math.floor(subDraw(draw, salt++) * adjacent.length)];
+    if (guaranteed) links.add(guaranteed.hostname);
+
+    // darkweb holds every depth-0 host, and the labyrinth every host on the
+    // deepest row. Both are pinned at the centre column and adjacent to their
+    // whole row, which is why neither can anchor a column inference.
+    if (depth === 0) links.add("darkweb");
+    const lab = this.currentLab();
+    if (lab && depth === this.netDepth() - 1 && this.hosts.has(lab.hostname)) links.add(lab.hostname);
+
+    network.set(hostname, [...links].sort());
     for (const other of links) {
       const existing = network.get(other) ?? [];
       if (!existing.includes(hostname)) network.set(other, [...existing, hostname]);
@@ -1119,14 +1280,23 @@ export class DarknetSystem {
     }
   }
 
-  /** `addRandomDarknetServers`: a new host at a random difficulty, wired in. */
+  /** `addRandomDarknetServers`: a new host at a random difficulty, seated in a
+   * free cell and wired in.
+   *
+   * The requested depth is a PREFERENCE, not a guarantee: `getAllOpenPositions`
+   * widens its band when the band is full, so a host asked for a saturated row
+   * lands near it instead. When the whole net is full nothing is added, which is
+   * the behaviour that holds the population at NET_WIDTH per row. */
   #addHost(difficulty: number, drawA: number, drawB: number): void {
-    const depth = Math.max(0, Math.min(Math.floor(difficulty), this.netDepth() - 1));
+    const wanted = Math.max(0, Math.min(Math.floor(difficulty), this.netDepth() - 1));
+    const free = this.#openPositions(wanted, wanted);
+    const cell = free[Math.floor(drawB * free.length)];
+    if (!cell) return;
+    const [depth, column] = cell;
     const hostname = `dnet-${depth}-x${this.#added++}`;
     if (this.hosts.has(hostname)) return;
-    this.#buildHost(hostname, depth, depth);
-    this.#wire(hostname, depth, drawA);
-    void drawB;
+    this.#buildHost(hostname, depth, depth, column);
+    this.#wire(hostname, depth, column, drawA);
   }
 
   /** `addLowLevelServersIfNeeded`: keep the shallow rows populated.
@@ -1158,22 +1328,35 @@ export class DarknetSystem {
     if (!host || !host.online || host.isStationary) return;
     const span = 3;
     const shift = Math.floor(drawA * (span * 2 + 1)) - span;
-    const depth = Math.max(0, Math.min(host.depth + shift, this.netDepth() - 1));
-    host.depth = depth;
+    const wanted = Math.max(0, Math.min(host.depth + shift, this.netDepth() - 1));
+    // Vacate FIRST, exactly as upstream does — `moveDarknetServer` clears the
+    // old cell and drops every edge before re-seating. That is why the cell it
+    // came from is a candidate for the cell it goes to, and why a move
+    // invalidates adjacency as thoroughly as it invalidates depth.
+    const from: [number, number] = [host.depth, host.leftOffset];
     this.#unwire(hostname);
-    this.#wire(hostname, depth, drawB);
+    this.#vacate(host);
+    const free = this.#openPositions(wanted, wanted);
+    const cell = free[Math.floor(drawB * free.length)] ?? from;
+    this.#seat(host, cell[0], cell[1]);
+    this.#wire(hostname, cell[0], cell[1], drawB);
   }
 
-  /** `addConnectionsToRandomServer`. Edges appear as well as vanish, which is
-   * the third rate the topology expiry is derived from. */
+  /** `addConnectionsToRandomServer` -> `addGuaranteedConnection`. Edges appear as
+   * well as vanish, which is the third rate the topology expiry is derived from.
+   *
+   * The candidate set is `getAllAdjacentNeighbors`, NOT "anything within one
+   * depth": a new same-depth edge can still only reach the cell beside this one.
+   * Getting this wrong is what let the sim mint lateral edges the game cannot
+   * produce, and any map that infers columns from them would infer nonsense. */
   #addConnections(drawA: number, drawB: number): void {
     const { network } = this.#opts;
     const names = this.#movable();
     const from = this.#pick(names, drawA);
     if (from === undefined) return;
     const host = this.hosts.get(from)!;
-    const candidates = [...this.hosts.values()]
-      .filter((entry) => entry.online && entry.hostname !== from && Math.abs(entry.depth - host.depth) <= 1)
+    const candidates = this.#adjacent(host.depth, host.leftOffset)
+      .filter((entry) => entry.hostname !== from)
       .map((entry) => entry.hostname)
       .sort();
     const to = this.#pick(candidates, drawB);
@@ -1192,8 +1375,10 @@ export class DarknetSystem {
     const victim = this.#pick(this.#movable(), draw);
     if (victim === undefined) return;
     const host = this.hosts.get(victim)!;
-    // Gone, permanently, with its files, sessions and logs.
+    // Gone, permanently, with its files, sessions and logs — and its cell, which
+    // is what lets the restocking branch put something back there.
     host.online = false;
+    this.#vacate(host);
     host.sessions.clear();
     host.logs = [];
     this.#opts.forgetFiles?.(victim);

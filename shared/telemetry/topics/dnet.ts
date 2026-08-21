@@ -151,6 +151,18 @@ export interface DarknetState {
    *  one-hop probe folds in here as another vantage rather than sitting beside
    *  it in a second shape. Absent only before the first probe has landed. */
   knowledge?: DarknetKnowledgeDigest;
+  /** How deep the net goes, when we can tell.
+   *
+   *  `getNetDepth()` IS the current labyrinth's depth, so ONE sighting of any
+   *  lab host pins it exactly — and every lab server is constructed at the same
+   *  time as the net, so it is knowable long before it is reachable. Two things
+   *  need it: the mutation clock (and therefore every staleness expiry) is
+   *  `30_000 / netDepth`, and the map cannot draw the rows we have not reached
+   *  without knowing how many there are.
+   *
+   *  Absent until a lab is seen, which is honest — the alternative is a default
+   *  of 10 that reads as knowledge. */
+  netDepth?: number;
   /** The net's own clock, so the panel can say how fast the map is rotting. */
   mutationIntervalMs?: number;
   /** Charisma, which gates heartbleed per host and slows authentication. */

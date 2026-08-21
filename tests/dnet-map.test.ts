@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { MAP_W, NET_WIDTH, layoutNet, matches, netMap } from "../ui/app/tabs/dnet-map.ts";
+import { BOX_W, COL_PITCH, MAP_W, NET_WIDTH, layoutNet, matches, netMap } from "../ui/app/tabs/dnet-map.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 import { emptyState } from "../ui/app/project.ts";
 import { setView } from "../ui/app/lib/viewstate.ts";
@@ -40,15 +40,18 @@ describe("layout puts the net on the game's grid", () => {
     expect(layout.rowLabels[0]!.label).toBe("darkweb");
   });
 
-  test("a host sits near the parent it hangs off", () => {
-    // Barycentre placement: an only child inherits its parent's column, which is
-    // what keeps edges short and mostly non-crossing without an iterative solve.
+  test("a host sits UNDER the parent it hangs off, not at the left margin", () => {
+    // THE HEADLINE TEST of the placement rewrite, and it used to assert the
+    // opposite of its own comment: an only child of `p3` landed at column 0,
+    // because the old layout sorted by barycentre and then assigned
+    // `slot = array index`, packing every row flush against the left margin.
+    // Ordering was never the bug. Packing was.
     const parents = Array.from({ length: 4 }, (_, i) => host({ hostname: `p${i}`, depth: 0 }));
     const layout = layoutNet([
       ...parents,
       host({ hostname: "child", depth: 1, neighbours: ["p3"] }),
     ]);
-    expect(layout.byHost.get("child")!.slot).toBe(0);
+    expect(layout.byHost.get("child")!.slot).toBe(layout.byHost.get("p3")!.slot);
     // ...and with two parents it lands between them rather than at an edge.
     const two = layoutNet([
       ...parents,
@@ -56,6 +59,128 @@ describe("layout puts the net on the game's grid", () => {
       host({ hostname: "b", depth: 1, neighbours: ["p3"] }),
     ]);
     expect(two.byHost.get("a")!.slot).toBeLessThan(two.byHost.get("b")!.slot);
+  });
+
+  test("holes are preserved: a sparse row keeps its parents' columns", () => {
+    // The shape of the net IS the holes. `DarknetState.Network[depth][col]` is a
+    // sparse array, and the in-game map shows rows like 0,1,2,·,4,5,6,7 with a
+    // gap in the middle. A layout that packs left destroys exactly the thing the
+    // map exists to show.
+    const parents = Array.from({ length: 8 }, (_, i) => host({ hostname: `p${i}`, depth: 0 }));
+    const layout = layoutNet([
+      ...parents,
+      host({ hostname: "x", depth: 1, neighbours: ["p6"] }),
+      host({ hostname: "y", depth: 1, neighbours: ["p7"] }),
+    ]);
+    expect(layout.byHost.get("x")!.slot).toBe(6);
+    expect(layout.byHost.get("y")!.slot).toBe(7);
+  });
+
+  test("a lateral edge pins two hosts to neighbouring columns", () => {
+    // The ONE hard constraint the game hands us. `getNeighborsOnRow(x, y)`
+    // returns only Network[x][y-1] and Network[x][y+1], and every connection
+    // pass routes through it, so a same-depth edge means |Δcolumn| == 1 exactly.
+    const layout = layoutNet([
+      host({ hostname: "a", depth: 0, neighbours: ["b"] }),
+      host({ hostname: "b", depth: 0, neighbours: ["a"] }),
+    ]);
+    expect(Math.abs(layout.byHost.get("a")!.slot - layout.byHost.get("b")!.slot)).toBe(1);
+  });
+
+  test("a lateral claim from one end only is still honoured", () => {
+    // Adjacency comes back from whichever agent happened to stand there, so a
+    // one-sided report is a report.
+    const layout = layoutNet([
+      host({ hostname: "a", depth: 0, neighbours: ["b"] }),
+      host({ hostname: "b", depth: 0 }),
+    ]);
+    expect(Math.abs(layout.byHost.get("a")!.slot - layout.byHost.get("b")!.slot)).toBe(1);
+  });
+
+  test("a lateral chain lands under its parents and reflects to fit them", () => {
+    const parents = Array.from({ length: 8 }, (_, i) => host({ hostname: `p${i}`, depth: 0 }));
+    const layout = layoutNet([
+      ...parents,
+      host({ hostname: "a", depth: 1, neighbours: ["b", "p7"] }),
+      host({ hostname: "b", depth: 1, neighbours: ["a", "c", "p6"] }),
+      host({ hostname: "c", depth: 1, neighbours: ["b", "p5"] }),
+    ]);
+    const seats = ["a", "b", "c"].map((name) => layout.byHost.get(name)!.slot);
+    // Consecutive, and seated where their parents are rather than at 0,1,2.
+    expect([...seats].sort((x, y) => x - y)).toEqual([5, 6, 7]);
+    // ...and reflected, so `a` (whose parent is p7) is to the RIGHT of `c`.
+    expect(seats[0]).toBeGreaterThan(seats[2]!);
+  });
+
+  test("a contradictory lateral claim degrades instead of throwing, and is reported", () => {
+    // Three lateral neighbours cannot all be true — a cell has two sides. In the
+    // live game this is impossible, so seeing it means our own knowledge is
+    // stale, which is worth surfacing rather than swallowing.
+    const layout = layoutNet([
+      host({ hostname: "hub", depth: 0, neighbours: ["n1", "n2", "n3"] }),
+      host({ hostname: "n1", depth: 0, neighbours: ["hub"] }),
+      host({ hostname: "n2", depth: 0, neighbours: ["hub"] }),
+      host({ hostname: "n3", depth: 0, neighbours: ["hub"] }),
+    ]);
+    const seats = ["hub", "n1", "n2", "n3"].map((name) => layout.byHost.get(name)!.slot);
+    expect(new Set(seats).size).toBe(4);
+    expect(layout.brokenLaterals.size).toBe(1);
+  });
+
+  test("a lateral cycle degrades to a chain with everyone placed", () => {
+    const layout = layoutNet([
+      host({ hostname: "a", depth: 0, neighbours: ["b", "c"] }),
+      host({ hostname: "b", depth: 0, neighbours: ["a", "c"] }),
+      host({ hostname: "c", depth: 0, neighbours: ["a", "b"] }),
+    ]);
+    const seats = ["a", "b", "c"].map((name) => layout.byHost.get(name)!.slot);
+    expect(new Set(seats).size).toBe(3);
+    expect(layout.brokenLaterals.size).toBe(1);
+  });
+
+  test("a chain longer than the board splits rather than overflowing it", () => {
+    // Nine hosts cannot sit in eight columns however good the evidence looks.
+    const names = Array.from({ length: 9 }, (_, i) => `c${i}`);
+    const layout = layoutNet(names.map((name, i) =>
+      host({
+        hostname: name,
+        depth: 0,
+        neighbours: [names[i - 1], names[i + 1]].filter((n): n is string => n !== undefined),
+      })
+    ));
+    expect(layout.placed).toHaveLength(9);
+    for (const entry of layout.placed) {
+      expect(entry.slot).toBeGreaterThanOrEqual(0);
+      expect(entry.slot).toBeLessThan(NET_WIDTH);
+    }
+    expect(layout.brokenLaterals.size).toBeGreaterThan(0);
+  });
+
+  test("every column on a row is distinct and on the board", () => {
+    // The invariant that makes the map a grid rather than a pile.
+    const hosts = [
+      host({ hostname: "darkweb", isDarkweb: true, depth: -1 }),
+      ...Array.from({ length: 7 }, (_, i) => host({ hostname: `a${i}`, depth: 0, neighbours: ["darkweb"] })),
+      ...Array.from({ length: 6 }, (_, i) =>
+        host({ hostname: `b${i}`, depth: 1, neighbours: [`a${i}`, `b${i + 1}`] })),
+      ...Array.from({ length: 5 }, (_, i) => host({ hostname: `c${i}`, depth: 2, neighbours: [`b${i}`] })),
+    ];
+    const layout = layoutNet(hosts);
+    const perRow = new Map<number, number[]>();
+    for (const entry of layout.placed) {
+      if (entry.kind !== "depth") continue;
+      const seats = perRow.get(entry.displayRow) ?? [];
+      seats.push(entry.slot);
+      perRow.set(entry.displayRow, seats);
+    }
+    expect(perRow.size).toBeGreaterThan(0);
+    for (const seats of perRow.values()) {
+      expect(new Set(seats).size).toBe(seats.length);
+      for (const seat of seats) {
+        expect(seat).toBeGreaterThanOrEqual(0);
+        expect(seat).toBeLessThan(NET_WIDTH);
+      }
+    }
   });
 
   test("a host with no placed parent sorts last rather than to a made-up column", () => {
@@ -77,20 +202,137 @@ describe("layout puts the net on the game's grid", () => {
     const layout = layoutNet(hosts);
     expect(layout.placed).toHaveLength(11);
     expect(layout.placed.every((entry) => entry.slot < NET_WIDTH)).toBe(true);
-    expect(layout.rowLabels.some((row) => row.label === "depth 2 (11)")).toBe(true);
+    // The label now says what the contradiction IS, rather than just the count:
+    // the game cannot hold eleven hosts at one depth, so we are believing a
+    // moved host and its ghost at the same time.
+    expect(layout.rowLabels.some((row) => row.label === "depth 2 (11 held, 8 fit)")).toBe(true);
     // The overflow really is on a second row, not stacked on the first.
     const ys = new Set(layout.placed.map((entry) => entry.y));
     expect(ys.size).toBe(2);
+    // Both chunks belong to the same GAME row, which is what keeps their stagger
+    // and their edge classification consistent.
+    expect(new Set(layout.placed.map((entry) => entry.row))).toEqual(new Set([2]));
   });
 
-  test("odd rows are staggered, as upstream does", () => {
+  test("an overcrowded depth puts its best guesses on the grid and its ghosts below", () => {
+    // A depth holding more than NET_WIDTH hosts is impossible in the live game —
+    // Network[depth] has exactly eight cells — so it means we are believing a
+    // host and its ghost at the same time. Which eight get the real row is then
+    // a real decision, and the answer is the ones we doubt least.
+    const hosts = [
+      ...Array.from({ length: 8 }, (_, i) => host({ hostname: `live-${i}`, depth: 0 })),
+      ...Array.from({ length: 3 }, (_, i) => host({ hostname: `ghost-${i}`, depth: 0, goneAt: 1 })),
+    ];
+    const layout = layoutNet(hosts, {
+      positionDoubt: (name) => (name.startsWith("ghost") ? 3 : 0),
+    });
+    const firstRow = Math.min(...layout.placed.map((entry) => entry.displayRow));
+    const onGrid = layout.placed.filter((entry) => entry.displayRow === firstRow).map((e) => e.host.hostname);
+    expect(onGrid).toHaveLength(8);
+    expect(onGrid.every((name) => name.startsWith("live"))).toBe(true);
+    // And nothing is dropped.
+    expect(layout.placed).toHaveLength(11);
+  });
+
+  test("odd grid rows are staggered; the pinned rows never are", () => {
     // Not decoration: without it a dense column of vertical edges collapses into
-    // an unreadable ladder.
+    // an unreadable ladder. Upstream's condition is
+    // `y >= 0 && y < getNetDepth() && y % 2`, and the middle clause — which we
+    // used to drop — is there to exempt the LABYRINTH, which sits at
+    // getNetDepth() + 0.5 rather than on the grid. Every odd grid row, bottom
+    // one included, is staggered.
     const layout = layoutNet([
       host({ hostname: "even", depth: 0 }),
       host({ hostname: "odd", depth: 1 }),
+      host({ hostname: "cru3l_l4byr1nth", depth: -1, modelId: "(The Labyrinth)" }),
     ]);
-    expect(layout.byHost.get("odd")!.x).toBeGreaterThan(layout.byHost.get("even")!.x);
+    const even = layout.byHost.get("even")!;
+    expect(layout.byHost.get("odd")!.x).toBeGreaterThan(even.x);
+
+    // th3_l4byr1nth pins netDepth to 7, so the lab lands on row 7 — ODD, and it
+    // would pick up a half-box stagger if the `< netDepth` clause were missing.
+    const oddLab = layoutNet([
+      host({ hostname: "flat", depth: 0 }),
+      host({ hostname: "th3_l4byr1nth", depth: -1, modelId: "(The Labyrinth)" }),
+    ]);
+    expect(oddLab.netDepth).toBe(7);
+    const lab = oddLab.byHost.get("th3_l4byr1nth")!;
+    expect(lab.row).toBe(7);
+    // Row 0 slot 0 is never staggered, so its x IS the left inset. An
+    // unstaggered lab is exactly that plus its own slot; a staggered one would
+    // be half a box further right.
+    const inset = oddLab.byHost.get("flat")!.x;
+    expect(lab.x).toBe(inset + lab.slot * COL_PITCH);
+  });
+
+  test("every depth gets a row, including ones we have never seen into", () => {
+    // An explorer's map has to show the shape of the unknown. Rendering only the
+    // depths we hold a host for makes a net we have barely touched look fully
+    // surveyed — which is how the panel came to show three rows for a net that
+    // has seven.
+    const layout = layoutNet([host({ hostname: "a", depth: 0 })], { netDepth: 7 });
+    for (let depth = 0; depth < 7; depth++) {
+      expect(layout.rowLabels.some((row) => row.depth === depth)).toBe(true);
+    }
+    expect(layout.netDepth).toBe(7);
+    expect(layout.netDepthGuessed).toBe(false);
+  });
+
+  test("air-gap depths are labelled as structurally empty, not as unexplored", () => {
+    // `isOnAirGap(x) = !!x && !(x % 8)`, and `getAllOpenPositions` skips them, so
+    // depths 8/16/24/32 hold nothing by construction. Since vertical wiring only
+    // reaches depth +- 1, that means depth 7 and depth 9 are never adjacent —
+    // the net is genuinely segmented, and "empty because nothing can be here"
+    // must not read the same as "empty because we have not looked".
+    const layout = layoutNet([host({ hostname: "a", depth: 0 })], { netDepth: 12 });
+    const gap = layout.rowLabels.find((row) => row.depth === 8)!;
+    expect(gap.kind).toBe("airgap");
+    expect(gap.label).toContain("air gap");
+    expect(layout.rowLabels.find((row) => row.depth === 7)!.kind).toBe("depth");
+  });
+
+  test("a host reported on an air gap is still placed, and the row says so", () => {
+    // Either the game changed or our model of it has a hole. Both are worth
+    // hearing about; neither is worth dropping a host over.
+    const layout = layoutNet([host({ hostname: "impossible", depth: 8 })], { netDepth: 12 });
+    expect(layout.byHost.has("impossible")).toBe(true);
+    expect(layout.rowLabels.find((row) => row.depth === 8)!.label).toContain("!?");
+  });
+
+  test("the labyrinth is pinned to the BOTTOM, not sorted to the top", () => {
+    // Every lab server reports `depth: -1` — `addLabyrinth` sets it literally for
+    // all eight at once — so sorting by depth put the goal of the whole feature
+    // above the root of the net. Upstream pins it at getNetDepth() + 0.5.
+    const layout = layoutNet([
+      host({ hostname: "darkweb", isDarkweb: true, depth: -1 }),
+      host({ hostname: "a", depth: 0 }),
+      host({ hostname: "th3_l4byr1nth", depth: -1, modelId: "(The Labyrinth)" }),
+    ]);
+    const lab = layout.byHost.get("th3_l4byr1nth")!;
+    expect(lab.y).toBeGreaterThan(layout.byHost.get("a")!.y);
+    expect(lab.kind).toBe("labyrinth");
+    // Seeing WHICH labyrinth pins the whole net's depth exactly, since
+    // getNetDepth() is that lab's depth.
+    expect(layout.netDepth).toBe(7);
+    expect(layout.netDepthGuessed).toBe(false);
+  });
+
+  test("two labyrinths sit side by side in ladder order", () => {
+    const layout = layoutNet([
+      host({ hostname: "cru3l_l4byr1nth", depth: -1, modelId: "(The Labyrinth)" }),
+      host({ hostname: "th3_l4byr1nth", depth: -1, modelId: "(The Labyrinth)" }),
+    ]);
+    // th3 gates on 300 charisma, cru3l on 600, so th3 is to the left.
+    expect(layout.byHost.get("th3_l4byr1nth")!.slot)
+      .toBeLessThan(layout.byHost.get("cru3l_l4byr1nth")!.slot);
+  });
+
+  test("no box is ever clipped by the viewBox, stagger included", () => {
+    // MAP_W used to ignore the half-box odd-row stagger, so column 7 of every
+    // odd row hung past the edge and was silently cut off.
+    const hosts = Array.from({ length: 8 }, (_, i) => host({ hostname: `s${i}`, depth: 1 }));
+    const layout = layoutNet(hosts, { netDepth: 4 });
+    for (const entry of layout.placed) expect(entry.x + BOX_W).toBeLessThanOrEqual(MAP_W);
   });
 
   test("a host with no known depth is placed, not dropped", () => {
@@ -141,6 +383,24 @@ describe("the rendered SVG", () => {
     // rebuilding it, which is what keeps hover and the native tooltip alive.
     expect(html).toContain('data-key="node:dn-1"');
     expect(html).toContain('data-key="edge:darkweb&gt;dn-1"');
+  });
+
+  test("every data-key in the map is unique, including the row gutter", () => {
+    // morph keys siblings to decide MOVE versus rebuild, so a duplicate key is
+    // not cosmetic — it makes two nodes fight over one slot. The row gutter is
+    // where this bit: an overflowing depth emits several rows that all share a
+    // depth, so the depth alone was not a key.
+    const crowded = [
+      host({ hostname: "darkweb", isDarkweb: true, depth: -1 }),
+      ...Array.from({ length: 11 }, (_, i) => host({ hostname: `dn-${i}`, depth: 0 })),
+      ...Array.from({ length: 3 }, (_, i) => host({ hostname: `deep-${i}`, depth: 2 })),
+      host({ hostname: "th3_l4byr1nth", depth: -1, modelId: "(The Labyrinth)" }),
+      host({ hostname: "rumour" }),
+    ];
+    const html = netMap(crowded, { ...OPTIONS, edges: "all" });
+    const keys = [...html.matchAll(/data-key="([^"]+)"/g)].map((match) => match[1]!);
+    expect(keys.length).toBeGreaterThan(0);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 
   test("selection is declarative, so main.ts needs no change", () => {

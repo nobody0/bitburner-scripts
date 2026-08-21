@@ -363,6 +363,14 @@ canvas.microchart { height: 88px; }
 .netmap { display: block; font-family: var(--font-mono); }
 
 .netmap .rowlabel { fill: var(--muted); font-size: 9px; }
+/* An air gap is a row the game guarantees is empty; a plain empty row is one we
+   have simply never reached. On an explorer's map those are the two most
+   different statements there are, so they must not look alike. */
+.netmap .rowlabel.airgap { fill: var(--bb-secondary-dark); font-style: italic; }
+.netmap .rowlabel.labyrinth { fill: var(--series-5); }
+.netmap .rowrule { stroke: var(--bb-well); stroke-width: 1; }
+.netmap .rowrule.depth { stroke-dasharray: 2 6; }
+.netmap .rowrule.airgap { stroke: var(--bb-secondary-dark); stroke-dasharray: 1 3; opacity: 0.6; }
 
 /* Edges. The game draws straight diagonals on a 6000px canvas; at panel scale
    those cross into noise, so these are routed orthogonally through the gutter. */
@@ -371,6 +379,11 @@ canvas.microchart { height: 88px; }
 .netmap .edge.lateral { stroke: var(--bb-well-light); }
 .netmap .edge.back { stroke: var(--bb-well-light); stroke-dasharray: 2 3; }
 .netmap .edge.stale { stroke-dasharray: 3 4; opacity: 0.5; }
+/* A same-depth link the layout could NOT honour. In the live game every lateral
+   edge joins two cells one column apart, with no exceptions — so one of these is
+   always our own knowledge contradicting itself, and it is the reason a row that
+   looks wrong looks wrong. Drawn whatever the edge filter says. */
+.netmap .edge.broken { stroke: var(--critical); stroke-dasharray: 1 2; opacity: 0.8; }
 
 /* Boxes. Border colour follows the in-game map: green when we are in, grey when
    we are not, gold for a stasis link. */
@@ -425,6 +438,11 @@ canvas.microchart { height: 88px; }
 .netkey .sw.linked { background: var(--series-5); border-color: var(--series-5); }
 .netkey .sw.stale { opacity: 0.55; }
 .netkey .gl { font-family: var(--font-mono); color: var(--bb-secondary); }
+/* Edge keys. Same tokens as the map's own strokes, so the two cannot drift. */
+.netkey .ln { width: 14px; height: 0; border-top: 1px solid var(--bb-well-light); }
+.netkey .ln.tree { border-top-color: var(--bb-primary-dark); }
+.netkey .ln.back { border-top-style: dashed; }
+.netkey .ln.broken { border-top-color: var(--critical); border-top-style: dotted; }
 
 @media (max-width: 760px) {
   header { padding-inline: 10px; }
