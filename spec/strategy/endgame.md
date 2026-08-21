@@ -110,10 +110,15 @@ From these, offline:
    Linked to calibration but independent of it: making augs cheaper changes
    the game; fixing the aug-rate estimate changes the guess.
 
-Live next-node selection follows `DEFAULT_BITNODE_TARGETS`. The small-set
-`orderingCost`/`bestOrdering` helpers in `decide.ts` are comparison tools, not
-the runtime policy; any future measured reordering should update the explicit
-target list rather than silently changing completion execution.
+Live next-node selection follows `BITNODE_SPEEDRUN_PLAN`
+(`shared/strategy/progression/bitnode-order.ts`), which `decide.ts` consumes as
+`ACTIVE_BITNODE_TARGETS` — the default `targets` of `chooseNextBitNode`. Its
+`BASELINE_ORDER` and `DEFAULT_BITNODE_TARGETS` lists, like the small-set
+`orderingCost`/`bestOrdering` helpers, are analytical and policy data rather
+than the runtime policy; the full intended route lives in
+`spec/strategy/speedrun-benchmark.md` and is restored into the live plan as each
+feature controller lands. Any future measured reordering should update the
+explicit target list rather than silently changing completion execution.
 
 ## How features consume the decision
 
