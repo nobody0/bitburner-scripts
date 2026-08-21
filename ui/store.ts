@@ -111,8 +111,20 @@ export class RunStore {
       if (record.kind === "state") this.#writeState(record, line);
       else this.#write(line);
     }
-    this.#writeMetadata();
+    this.#writeMetadataThrottled();
     return accepted;
+  }
+
+  #metaWrittenAt = 0;
+
+  /** The sidecar was rewritten (stat + write + rename, all synchronous) on
+   * every ingest batch — twice a second per emitter, forever. A live run's
+   * catalog data is served from this in-memory store, and the resume path
+   * reads the sidecar only after detach() forces a final write, so a sidecar
+   * that lags a couple of seconds costs nothing. */
+  #writeMetadataThrottled(): void {
+    if (Date.now() - this.#metaWrittenAt < 2_000) return;
+    this.#writeMetadata();
   }
 
   /** Persist one state record, collapsing a run of identical payloads to its
@@ -216,6 +228,7 @@ export class RunStore {
   }
 
   #writeMetadata(): void {
+    this.#metaWrittenAt = Date.now();
     const temporary = `${this.#metaFile}.tmp`;
     writeFileSync(temporary, JSON.stringify(this.metadata(), null, 2) + "\n");
     renameSync(temporary, this.#metaFile);

@@ -1,10 +1,8 @@
 import type { NS } from "@ns";
 import {
-  factsOnly,
+  stripNarration,
   TELEMETRY_PORT,
   WIRE_VERSION,
-  type LogRecord,
-  type WireMessage,
 } from "../../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
 import type { ArtifactIdentity } from "../../shared/run-identity.ts";
@@ -13,17 +11,92 @@ import type { ArtifactIdentity } from "../../shared/run-identity.ts";
  * `new WebSocket()` (browser global — 0 GB ns RAM).
  * Source (only `window`/`document` trigger DOM RAM): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Script/RamCalculations.ts#L180-L193
  *
+ * Every record is serialized ONCE, at push time, with the stripNarration
+ * replacer: no factsOnly deep clone, no second stringify at flush, and the
+ * buffer holds strings rather than references into live game state — so a
+ * buffered snapshot can never observe a later mutation, and memory while the
+ * hub is down is bounded in bytes, the unit that actually costs something.
+ *
  * The sink publishes the game-state store; controller lifecycle events use
  * the same client. Acquisition runs in every build, and every reference to
  * this module sits behind
  * `TELEMETRY: if (__TELEMETRY__)` so --perf builds eliminate it entirely
  * (see game/flags.d.ts). */
 
-const MAX_BUFFER = 5_000;
+const MAX_BUFFER_BYTES = 4_000_000;
 const FLUSH_AT = 100;
 const FLUSH_MS = 500;
 const BACKOFF_MIN_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
+
+export interface RecordBuffer {
+  /** Append one serialized record. May evict older entries to stay bounded. */
+  push(line: string, debug: boolean): void;
+  count(): number;
+  bytes(): number;
+  /** Evictions since the last takeDropped(); reading resets the counter. */
+  takeDropped(): number;
+  /** All buffered lines, oldest first; empties the buffer. */
+  drain(): string[];
+  clear(): void;
+}
+
+/** Byte-bounded FIFO of pre-serialized records.
+ *
+ * Eviction drops the oldest debug records first, then the oldest of anything —
+ * the same policy the object buffer had, but amortized: one O(n) pass frees a
+ * quarter of the budget instead of a findIndex + splice(0,1) shift per push,
+ * which at the old 5,000-record cap made every push O(n) for as long as the
+ * hub stayed down. */
+export function makeRecordBuffer(maxBytes = MAX_BUFFER_BYTES): RecordBuffer {
+  let entries: { line: string; debug: boolean }[] = [];
+  let bytes = 0;
+  let dropped = 0;
+
+  function evict(): void {
+    const target = (maxBytes * 3) / 4;
+    const drop = new Set<number>();
+    let toFree = bytes - target;
+    for (let pass = 0; pass < 2 && toFree > 0; pass++) {
+      for (let i = 0; i < entries.length && toFree > 0; i++) {
+        if (drop.has(i)) continue;
+        if (pass === 0 && !entries[i]!.debug) continue;
+        drop.add(i);
+        toFree -= entries[i]!.line.length;
+      }
+    }
+    entries = entries.filter((_, i) => !drop.has(i));
+    dropped += drop.size;
+    bytes = 0;
+    for (const entry of entries) bytes += entry.line.length;
+  }
+
+  return {
+    push(line, debug) {
+      entries.push({ line, debug });
+      bytes += line.length;
+      if (bytes > maxBytes) evict();
+    },
+    count: () => entries.length,
+    bytes: () => bytes,
+    takeDropped() {
+      const count = dropped;
+      dropped = 0;
+      return count;
+    },
+    drain() {
+      const lines = entries.map((entry) => entry.line);
+      entries = [];
+      bytes = 0;
+      return lines;
+    },
+    clear() {
+      entries = [];
+      bytes = 0;
+      dropped = 0;
+    },
+  };
+}
 
 export interface Telemetry {
   /** Typed app-state topic (shared/telemetry/state-map.ts): the payload type
@@ -41,26 +114,19 @@ export interface Telemetry {
 export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity): Telemetry {
   const run = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   const startedAt = Date.now();
-  const buffer: LogRecord[] = [];
+  const buffer = makeRecordBuffer();
   let seq = 0;
-  let dropped = 0;
   let ws: WebSocket | undefined;
   let backoff = BACKOFF_MIN_MS;
   let disposed = false;
   let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-
-  function send(message: WireMessage): boolean {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify(message));
-    return true;
-  }
 
   function connect(): void {
     if (disposed) return;
     ws = new WebSocket(`ws://127.0.0.1:${TELEMETRY_PORT}/ingest`);
     ws.onopen = () => {
       backoff = BACKOFF_MIN_MS;
-      send({ v: WIRE_VERSION, hello: { run, src: "game", script, startedAt, identity } });
+      ws!.send(JSON.stringify({ v: WIRE_VERSION, hello: { run, src: "game", script, startedAt, identity } }));
       flush();
     };
     ws.onclose = () => {
@@ -72,14 +138,9 @@ export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity
     ws.onerror = () => ws?.close();
   }
 
-  function push(record: LogRecord): void {
-    if (buffer.length >= MAX_BUFFER) {
-      const debugIndex = buffer.findIndex((r) => r.kind === "debug");
-      buffer.splice(debugIndex === -1 ? 0 : debugIndex, 1);
-      dropped++;
-    }
-    buffer.push(record);
-    if (buffer.length >= FLUSH_AT) flush();
+  function push(record: Record<string, unknown>, debug = false): void {
+    buffer.push(JSON.stringify(record, stripNarration), debug);
+    if (buffer.count() >= FLUSH_AT) flush();
   }
 
   function base() {
@@ -87,28 +148,33 @@ export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity
   }
 
   function flush(): void {
-    if (buffer.length === 0 && dropped === 0) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const dropped = buffer.takeDropped();
     if (dropped > 0) {
-      buffer.push({ ...base(), kind: "event", name: "telemetry.dropped", data: { count: dropped } });
-      dropped = 0;
+      buffer.push(JSON.stringify({ ...base(), kind: "event", name: "telemetry.dropped", data: { count: dropped } }), false);
     }
-    if (send({ v: WIRE_VERSION, records: buffer })) buffer.length = 0;
+    if (buffer.count() === 0) return;
+    // The frame is assembled from the already-serialized lines; it must parse
+    // as a WireMessage exactly as JSON.stringify of one would (pinned by
+    // tests/telemetry-client.test.ts).
+    ws.send(`{"v":${WIRE_VERSION},"records":[${buffer.drain().join(",")}]}`);
   }
 
   const flushTimer = setInterval(flush, FLUSH_MS);
   connect();
 
   const telemetry: Telemetry = {
-    state: (key, data) => push({ ...base(), kind: "state", key, data: factsOnly(data) }),
-    mirror: (key, data) => push({ ...base(), kind: "state", key, data: factsOnly(data) }),
-    event: (name, data) => push({ ...base(), kind: "event", name, data: factsOnly(data) }),
-    debug: (msg, data) => push({ ...base(), kind: "debug", msg, data: factsOnly(data) }),
+    state: (key, data) => push({ ...base(), kind: "state", key, data }),
+    mirror: (key, data) => push({ ...base(), kind: "state", key, data }),
+    event: (name, data) => push({ ...base(), kind: "event", name, data }),
+    debug: (msg, data) => push({ ...base(), kind: "debug", msg, data }, true),
     flush,
     dispose: () => {
       flush();
       disposed = true;
       clearInterval(flushTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      buffer.clear();
       ws?.close();
     },
   };

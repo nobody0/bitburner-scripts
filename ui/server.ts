@@ -345,6 +345,9 @@ async function appBundle(): Promise<Response> {
 }
 
 function broadcast(payload: unknown): void {
+  // Records arrive in batches around the clock; with no browser open,
+  // serializing them for nobody is the hub's single largest steady-state cost.
+  if (viewers.size === 0) return;
   const text = JSON.stringify(payload);
   for (const viewer of viewers) viewer.send(text);
 }
