@@ -201,7 +201,7 @@ describe("bladeburner", () => {
 
   test("the live probe reads base rank loss instead of assuming failure is free", async () => {
     const probe = DODGED_PROBES.find((entry) => entry.id === "bladeburner.actions")!;
-    if ("steps" in probe) throw new Error("bladeburner.actions unexpectedly stepped");
+    if (!("steps" in probe)) throw new Error("bladeburner.actions is expected to be stepped");
     const bladeburner = {
       getContractNames: () => ["Tracking"], getOperationNames: () => [], getBlackOpNames: () => [],
       getGeneralActionNames: () => [], getActionEstimatedSuccessChance: () => [1, 1], getActionTime: () => 1_000,
@@ -209,8 +209,12 @@ describe("bladeburner", () => {
       getActionRankGain: () => 50, getActionRankLoss: () => 7,
       getSkillNames: () => [], getSkillLevel: () => 0, getSkillUpgradeCost: () => 0,
     };
-    const [emission] = await probe.run({ bladeburner } as unknown as NS, {} as never);
-    expect((emission.data as { actions: { rankGain: number; rankLoss: number }[] }).actions[0]).toMatchObject({ rankGain: 50, rankLoss: 7 });
+    // Driven the way the runner drives a stepped probe: each step against one
+    // shared accumulator, then finish().
+    const acc: Record<string, unknown> = {};
+    for (const step of probe.steps) await step.run({ bladeburner } as unknown as NS, {} as never, acc);
+    const [emission] = probe.finish(acc);
+    expect((emission!.data as { actions: { rankGain: number; rankLoss: number }[] }).actions[0]).toMatchObject({ rankGain: 50, rankLoss: 7 });
   });
 
   test("continuing and stopping are distinct decisions", () => {
@@ -698,7 +702,7 @@ describe("corp staged script", () => {
 
   test("a zero-valued upstream investment offer is unavailable", async () => {
     const probe = DODGED_PROBES.find((entry) => entry.id === "corp.core")!;
-    if ("steps" in probe) throw new Error("corp.core unexpectedly stepped");
+    if (!("steps" in probe)) throw new Error("corp.core is expected to be stepped");
     const corporation = {
       getCorporation: () => ({
         name: "Acme", funds: 1, revenue: 0, expenses: 0, public: true,
@@ -707,8 +711,10 @@ describe("corp staged script", () => {
       }),
       getInvestmentOffer: () => ({ round: 5, funds: 0, shares: 0 }),
     };
-    const [emission] = await probe.run({ corporation } as unknown as NS, {} as never);
-    expect((emission.data as { investmentOffer?: unknown }).investmentOffer).toBeUndefined();
+    const acc: Record<string, unknown> = {};
+    for (const step of probe.steps) await step.run({ corporation } as unknown as NS, {} as never, acc);
+    const [emission] = probe.finish(acc);
+    expect((emission!.data as { investmentOffer?: unknown }).investmentOffer).toBeUndefined();
   });
 });
 

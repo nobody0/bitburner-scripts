@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import type { GoDodgeGlobals } from "../game/lib/dodge-shared.ts";
+import type { DodgeGlobals, GoDodgeGlobals } from "../game/lib/dodge-shared.ts";
 import { emptyBoard, type DriverContext } from "../game/lib/features/index.ts";
 import { GO_ANCHOR_POLL_MS, goModule, setGoCheatSuccessTableForTest, setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
 import { GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
@@ -68,6 +68,11 @@ async function runGrantedTurn(
     ...stubNs,
     go: Object.assign({
       getGameState: () => ({ bonusCycles: 0 }),
+      // The post-turn verification reads these. Default to agreeing with the
+      // mirror so ordinary turns verify clean; a test that wants drift
+      // overrides getBoardState in its own stubNs.go.
+      getBoardState: () => state.topics.go?.board ?? [],
+      getMoveHistory: () => state.topics.go?.previousBoards ?? [],
     }, stubNs.go),
     getPlayer: () => ({
       totalPlaytime: clock?.playtimes[Math.min(clockRead++, clock.playtimes.length - 1)] ?? dodgedPlaytime,
@@ -82,15 +87,28 @@ async function runGrantedTurn(
     getPlayer: () => ({ totalPlaytime: 10_000, money: 0 }),
     sleep: async () => {},
     getFunctionRamCost: (method: string) => method === "go.cheat.playTwoMoves"
-      ? 8 : method === "go.makeMove" ? 4 : method === "getPlayer" ? 0.5 : 0,
-    exec: (_script: string, _host: string, options: { ramOverride?: number }) => {
+      ? 8 : method === "go.makeMove" || method === "go.getBoardState" ? 4
+        : method === "getPlayer" ? 0.5 : 0,
+    // The 4th argument is the lane (dodge.ts passes lane.laneArg). The turn
+    // runs on "long"; the post-turn board verification runs on the ordinary
+    // lane, which uses a different global slot set — servicing only the long
+    // slots would hang that dodge until its watchdog.
+    exec: (_script: string, _host: string, options: { ramOverride?: number }, lane?: string) => {
       if (options.ramOverride !== undefined) ramOverrides.push(options.ramOverride);
-      const globals = globalThis as typeof globalThis & GoDodgeGlobals;
+      const globals = globalThis as typeof globalThis & DodgeGlobals & GoDodgeGlobals;
       queueMicrotask(async () => {
+        if (lane === "long") {
+          try {
+            globals.go_dodge_cb?.(await globals.go_dodge_func!(dodgedNs));
+          } catch (error) {
+            globals.go_dodge_reject?.(error);
+          }
+          return;
+        }
         try {
-          globals.go_dodge_cb?.(await globals.go_dodge_func!(dodgedNs));
+          globals.dodge_cb?.(await globals.dodge_func!(dodgedNs));
         } catch (error) {
-          globals.go_dodge_reject?.(error);
+          globals.dodge_reject?.(error);
         }
       });
       return 1;
@@ -358,8 +376,13 @@ describe("Go live seed observation", () => {
     expect(state.topics.go?.bonusCycles).toBe(17);
     // 1.6 GB stub + 8 GB cheat + 0.5 GB player read + pricing margin.
     // This catches execution accidentally resizing the granted cheat dodge to
-    // the cheaper ordinary-move method list.
-    expect(ramOverrides.at(-1)).toBeGreaterThan(10);
+    // the cheaper ordinary-move method list. Not `.at(-1)`: the post-turn board
+    // verification runs its own smaller stub after the turn, so the cheat grant
+    // is no longer necessarily the last exec.
+    expect(ramOverrides.some((gb) => gb > 10)).toBe(true);
+    // This turn ends the game, where the post-turn verification is skipped by
+    // design (newGame's resetBoardState returns the game's own rows next).
+    expect(ramOverrides).not.toContain(6.1);
   });
 
   test("a reset discards an in-flight planning result before dispatch", async () => {
@@ -731,6 +754,124 @@ describe("Go certified playbook integration", () => {
     await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
     expect(consulted).toBe(0);
     expect(state.topics.go?.lastTurn?.action.type).toBe("move");
+    goModule.reset?.(state, "bitnode");
+  });
+});
+
+describe("Go board desync recovery", () => {
+  // The mirror is advanced by applying rules LOCALLY; the game is the authority.
+  // Every one of these asserts the SAME recovery, reached by a different route,
+  // because the invalidation keys on whether a board-changing call was issued —
+  // never on what any error said.
+
+  test("a board the game disagrees with is detected and rebuilt, not replanned", async () => {
+    const state = goState();
+    const stubNs = {
+      go: {
+        makeMove: async (x: number, y: number) => ({ type: "move", x: x === 0 ? 4 : 0, y: y === 0 ? 4 : 0 }),
+        // The game's rows, and they are not the mirror's.
+        getBoardState: () => ["XXXXX", ".....", ".....", ".....", "....."],
+        getMoveHistory: () => [],
+      },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+
+    // The drift is recorded, and the chained continuation rebuilds from the
+    // game in the same breath — the whole point being that it never replans on
+    // a board the game does not agree with.
+    for (let settle = 0; settle < 200 && !state.topics.go?.boardResyncs; settle++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(state.topics.go?.lastTurn?.boardVerify?.result).toBe("drift");
+    expect(state.topics.go?.boardDrifts).toBe(1);
+    expect(state.topics.go?.boardResyncs).toBe(1);
+    expect(state.topics.go?.lastBoardResyncReason).toContain("board");
+    expect(state.topics.go?.boardUnverified).toBe(false);
+    expect(state.topics.go?.board).toEqual(["XXXXX", ".....", ".....", ".....", "....."]);
+    goModule.reset?.(state, "bitnode");
+  });
+
+  test("a history the game disagrees with is drift even when the rows match", async () => {
+    const state = goState();
+    const stubNs = {
+      go: {
+        makeMove: async (x: number, y: number) => ({ type: "move", x: x === 0 ? 4 : 0, y: y === 0 ? 4 : 0 }),
+        // Rows agree, superko history does not — the case the board read alone
+        // can never see, and the one that indicts the local rules.
+        getBoardState: () => state.topics.go?.board ?? [],
+        getMoveHistory: () => [],
+      },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+
+    for (let settle = 0; settle < 200 && !state.topics.go?.boardResyncs; settle++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(state.topics.go?.lastTurn?.boardVerify?.result).toBe("drift");
+    expect(state.topics.go?.lastBoardResyncReason).toContain("history");
+    expect(state.topics.go?.boardResyncs).toBe(1);
+    expect(state.topics.go?.boardUnverified).toBe(false);
+    goModule.reset?.(state, "bitnode");
+  });
+
+  test("a refused move rebuilds from the game instead of replanning it forever", async () => {
+    const state = goState();
+    let attempts = 0;
+    let hydrations = 0;
+    const stubNs = {
+      go: {
+        // The wedge as observed in-game: the mirror believes a point is empty
+        // and the game refuses it.
+        makeMove: async () => {
+          attempts++;
+          throw new Error("go.makeMove: The point 2,1 is occupied by a router, so you cannot place a router there");
+        },
+        getBoardState: () => {
+          hydrations++;
+          return ["XX...", ".....", ".....", ".....", "....."];
+        },
+        getMoveHistory: () => [],
+      },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+
+    expect(attempts).toBe(1);
+    expect(state.topics.go?.lastTurn?.ok).toBe(false);
+    // The board is still shown (never blanked), but it is no longer trusted.
+    expect(state.topics.go?.board).toBeDefined();
+    expect(state.topics.go?.boardUnverified).toBe(true);
+
+    // THE POINT OF THE FIX: the next pass reads the game rather than dispatching
+    // the same illegal move again.
+    const before = hydrations;
+    // A failed turn releases its claim on the completion edge, so the first pass
+    // after it is consumed by that transition; the next one rebuilds.
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+    expect(hydrations).toBeGreaterThan(before);
+    expect(attempts).toBe(1);
+    expect(state.topics.go?.board).toEqual(["XX...", ".....", ".....", ".....", "....."]);
+    expect(state.topics.go?.boardUnverified).toBe(false);
+    expect(state.topics.go?.boardResyncs).toBe(1);
+    // Published with the resync that fixed it: a refused turn shows a failure in
+    // lastTurn, but a silent divergence would show nothing without this.
+    expect(state.topics.go?.lastBoardResyncReason).toContain("refused");
+    goModule.reset?.(state, "bitnode");
+  });
+
+  test("a clean turn verifies and leaves nothing to resync", async () => {
+    const state = goState();
+    const stubNs = {
+      go: {
+        makeMove: async (x: number, y: number) => ({ type: "move", x: x === 0 ? 4 : 0, y: y === 0 ? 4 : 0 }),
+      },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
+
+    expect(state.topics.go?.lastTurn?.boardVerify?.result).toBe("match");
+    expect(state.topics.go?.boardUnverified).toBe(false);
+    expect(state.topics.go?.boardDrifts).toBeUndefined();
+    expect(state.topics.go?.boardResyncs).toBeUndefined();
     goModule.reset?.(state, "bitnode");
   });
 });

@@ -124,7 +124,13 @@ function boardMarkup(g: GoState): string {
   const territory = g.territory
     ? note(`controlled empty nodes — black ${g.territory.black}, white ${g.territory.white}`)
     : "";
-  return `<div class="go-snapshot">${gridMarkup(g.board, chosen, actual)}</div>${legend}${territory}`;
+  // Keep rendering the board rather than falling back to `waiting`: the rows are
+  // the last position we believed in, and blanking them hides the very state the
+  // reader needs to see.
+  const trust = g.boardUnverified
+    ? note("board unverified — the last turn's outcome was not confirmed; re-reading the game board before the next move")
+    : "";
+  return `${trust}<div class="go-snapshot">${gridMarkup(g.board, chosen, actual)}</div>${legend}${territory}`;
 }
 
 function describeAction(action: GoActionDigest): string {
@@ -211,6 +217,16 @@ function decisionMarkup(g: GoState, reference: number): string {
     : prediction
       ? `${prediction.boundaryRetries ? "boundary-replan" : "same-slot"}; full turn ${fmtMs(result.durationMs)}`
       : `${describeAction(result.action)} took ${fmtMs(result.durationMs)}`;
+  // The verification runs between turns, so its cost lands in the NEXT turn's
+  // admit segment. Publishing it here is the only thing that explains that.
+  const verify = result?.boardVerify;
+  // Survives the unverified flag clearing, so a corrected desync stays visible
+  // instead of healing silently.
+  const resyncNote = g.boardResyncs
+    ? note(`board resynced ${g.boardResyncs}x`
+      + (g.boardDrifts ? ` (${g.boardDrifts} verified drift)` : "")
+      + (g.lastBoardResyncReason ? `: ${esc(g.lastBoardResyncReason)}` : ""))
+    : "";
   const breakdown = prediction?.dispatchBreakdown;
   const latencyTile = breakdown
     ? { label: "ready to play", value: fmtMs(breakdown.totalMs), sub: breakdownMarkup(breakdown) }
@@ -281,8 +297,10 @@ function decisionMarkup(g: GoState, reference: number): string {
     paddedNote +
     note(`next game ${plan.selection.preferred.opponent} ${plan.selection.preferred.observedBoardSize}x${plan.selection.preferred.observedBoardSize}; ${fmtNum(plan.selection.preferred.utilityPerSec * 60, 2)} seconds saved/minute`) +
     (result
-      ? note(`${result.ok ? "completed" : "failed"}${turnAge ? ` ${turnAge} ago` : ""}: ${result.detail}`)
-      : "")
+      ? note(`${result.ok ? "completed" : "failed"}${turnAge ? ` ${turnAge} ago` : ""}: ${result.detail}`
+        + (verify ? `; board ${verify.result}${verify.ms ? ` in ${fmtMs(verify.ms)}` : ""}` : ""))
+      : "") +
+    resyncNote
   );
 }
 

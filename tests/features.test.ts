@@ -30,6 +30,7 @@ import {
 } from "../game/lib/probes/index.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 import type { GameState } from "../game/lib/state.ts";
+import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
 
 const root = resolve(import.meta.dir, "..");
 const nsDefs = readFileSync(resolve(root, "types/NetscriptDefinitions.d.ts"), "utf8");
@@ -264,6 +265,35 @@ describe("probe table", () => {
     expect(missing).toEqual([]);
   });
 
+  test("no dodged probe demands an unplaceable contiguous block", () => {
+    // A stub's RAM bill is the SUM of every distinct ns method its closure
+    // references, and the game must find that much CONTIGUOUS free RAM on one
+    // host. A probe that sums half a dozen 10 GB corporation reads into a single
+    // closure is not "expensive", it is unschedulable on a busy fleet — and it
+    // fails silently, by never being placed.
+    //
+    // For a stepped probe the launch cost is the LARGEST STEP, not the sum, so
+    // this is the assertion that keeps a split from quietly being merged back.
+    // Allocation = STUB_BASE_GB + priceMethods (probes carry no price margin).
+    const STUB_BASE_GB = 1.6;
+    // Set just above the largest per-call floor we cannot split below: the
+    // 10 GB CorporationInfo/codingcontract reads, plus the stub base.
+    const CEILING_GB = 14;
+    // Priced at SF4 level 3, where the singularity multiplier is 1. The
+    // multiplier is a property of the save, not of how a probe is grouped, and
+    // pricing at level 0 would flag probes that no split can fix while hiding
+    // whether their SHAPE is sound.
+    const ctx = { sf4Level: 3 };
+    const oversized = DODGED_PROBES.map((probe) => {
+      const peak = isStepped(probe)
+        ? probe.steps.reduce((most, step) =>
+          Math.max(most, step.methods.reduce((sum, m) => sum + getFunctionRamCost(m, ctx), 0)), 0)
+        : probe.methods.reduce((sum, m) => sum + getFunctionRamCost(m, ctx), 0);
+      return { id: probe.id, gb: STUB_BASE_GB + peak };
+    }).filter((entry) => entry.gb > CEILING_GB);
+    expect(oversized).toEqual([]);
+  });
+
   test("the Go score has exactly one producer", () => {
     // The score is an exact function of the board. When the 2 s core probe
     // also read it from the game, its clock and the board's clock disagreed,
@@ -374,6 +404,20 @@ function singleProbe(id: string) {
   return found;
 }
 
+function steppedProbe(id: string) {
+  const found = DODGED_PROBES.find((entry) => entry.id === id);
+  if (!found || !isStepped(found)) throw new Error(`missing stepped probe ${id}`);
+  return found;
+}
+
+/** Drive a stepped probe the way the runner does: every step against one shared
+ * accumulator, then finish(). */
+async function runStepped(probe: ReturnType<typeof steppedProbe>, stubNs: NS) {
+  const acc: ProbeAcc = {};
+  for (const step of probe.steps) await step.run(stubNs, {} as never, acc);
+  return probe.finish(acc);
+}
+
 describe("v3.0.1 feature observation contracts", () => {
   test("the fast fleet probe preserves cloud limits between dodged observations", () => {
     const state = freshState();
@@ -415,10 +459,11 @@ describe("v3.0.1 feature observation contracts", () => {
   });
 
   test("Bladeburner reads exact rank gain and Black Op rank gates", async () => {
-    const probe = singleProbe("bladeburner.actions");
-    expect(probe.methods).toContain("bladeburner.getActionRankGain");
-    expect(probe.methods).toContain("bladeburner.getActionRankLoss");
-    expect(probe.methods).toContain("bladeburner.getBlackOpRank");
+    const probe = steppedProbe("bladeburner.actions");
+    const methods = probe.steps.flatMap((step) => step.methods);
+    expect(methods).toContain("bladeburner.getActionRankGain");
+    expect(methods).toContain("bladeburner.getActionRankLoss");
+    expect(methods).toContain("bladeburner.getBlackOpRank");
     const bladeburner = {
       getContractNames: () => [], getOperationNames: () => [], getBlackOpNames: () => ["Operation Typhoon"],
       getGeneralActionNames: () => [], getActionEstimatedSuccessChance: () => [1, 1], getActionTime: () => 1_000,
@@ -426,8 +471,8 @@ describe("v3.0.1 feature observation contracts", () => {
       getActionRankGain: () => 50, getActionRankLoss: () => 7, getBlackOpRank: () => 2_500,
       getSkillNames: () => [], getSkillLevel: () => 0, getSkillUpgradeCost: () => 0,
     };
-    const [emission] = await probe.run({ bladeburner } as unknown as NS, {} as never);
-    expect((emission.data as { actions: { rankGain: number; rankLoss: number; rankNeeded?: number }[] }).actions[0])
+    const [emission] = await runStepped(probe, { bladeburner } as unknown as NS);
+    expect((emission!.data as { actions: { rankGain: number; rankLoss: number; rankNeeded?: number }[] }).actions[0])
       .toMatchObject({ rankGain: 50, rankLoss: 7, rankNeeded: 2_500 });
   });
 

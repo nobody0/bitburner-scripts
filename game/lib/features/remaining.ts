@@ -673,25 +673,62 @@ const sleeves: FeatureDriver = {
 
     const completed = [...pendingSleeveCompletions()];
     if (decision.assignments.length === 0 && completed.length === 0) return;
+
+    // ONE DODGE PER TASK TYPE, then one to read back.
+    //
+    // Every sleeve API method costs SleeveBase (4 GB), and the batch used to
+    // union getTask with one setter per DISTINCT task type — so a six-type
+    // batch demanded 4x(6+1) + 2.1 = 30.1 GB of CONTIGUOUS RAM on one host.
+    // Split, the peak is the 6.1 GB floor of any single sleeve call.
+    //
+    // The setters are independent writes on distinct sleeve indices: no shared
+    // stub state, no live handle crossing the boundary, and nothing here is
+    // read-then-write. The getTask pass is a read-back that arms completions —
+    // sleeves.core performs the identical read every 30 s — not an atomicity
+    // requirement, which is why it can be its own stub too.
+    const byType = new Map<string, typeof decision.assignments>();
+    for (const next of decision.assignments) {
+      const group = byType.get(next.task.type);
+      if (group) group.push(next);
+      else byType.set(next.task.type, [next]);
+    }
+    const changed: number[] = [];
+    let anyRefused = false;
+    for (const [type, group] of byType) {
+      const applied = await featureDodge(
+        ctx,
+        "sleeves",
+        `action:set-${type}`,
+        sleeveMethods(type),
+        (stubNs: NS) => {
+          const set: number[] = [];
+          for (const next of group) {
+            let ok = false;
+            if (next.task.type === "recovery") ok = stubNs["sleeve"]["setToShockRecovery"](next.index);
+            else if (next.task.type === "synchro") ok = stubNs["sleeve"]["setToSynchronize"](next.index);
+            else if (next.task.type === "crime") ok = stubNs["sleeve"]["setToCommitCrime"](next.index, next.task.detail as never);
+            else if (next.task.type === "gym") ok = stubNs["sleeve"]["setToGymWorkout"](next.index, "Powerhouse Gym" as never, next.task.detail as never);
+            else if (next.task.type === "class") ok = stubNs["sleeve"]["setToUniversityCourse"](next.index, "Rothman University" as never, next.task.detail as never);
+            else if (next.task.type === "faction") {
+              ok = Boolean(stubNs["sleeve"]["setToFactionWork"](next.index, next.task.detail as never, next.task.workType as never));
+            }
+            if (ok) set.push(next.index);
+          }
+          return set;
+        },
+      );
+      // A refused group leaves those sleeves on their previous task and retries
+      // next pass; the groups that did land are still worth reading back.
+      if (applied.ok) changed.push(...applied.value);
+      else anyRefused = true;
+    }
+
     const outcome = await featureDodge(
       ctx,
       "sleeves",
-      "action:batch",
-      sleeveBatchMethods(decision.assignments.map((entry) => entry.task.type)),
+      "action:observe",
+      ["sleeve.getTask"],
       (stubNs: NS) => {
-        const changed: number[] = [];
-        for (const next of decision.assignments) {
-          let ok = false;
-          if (next.task.type === "recovery") ok = stubNs["sleeve"]["setToShockRecovery"](next.index);
-          else if (next.task.type === "synchro") ok = stubNs["sleeve"]["setToSynchronize"](next.index);
-          else if (next.task.type === "crime") ok = stubNs["sleeve"]["setToCommitCrime"](next.index, next.task.detail as never);
-          else if (next.task.type === "gym") ok = stubNs["sleeve"]["setToGymWorkout"](next.index, "Powerhouse Gym" as never, next.task.detail as never);
-          else if (next.task.type === "class") ok = stubNs["sleeve"]["setToUniversityCourse"](next.index, "Rothman University" as never, next.task.detail as never);
-          else if (next.task.type === "faction") {
-            ok = Boolean(stubNs["sleeve"]["setToFactionWork"](next.index, next.task.detail as never, next.task.workType as never));
-          }
-          if (ok) changed.push(next.index);
-        }
         const observed: { index: number; task?: { type: string; detail?: string; workType?: string } }[] = [];
         for (const sleeve of topic.sleeves ?? []) {
           const task = stubNs["sleeve"]["getTask"](sleeve.index) as (WorkTaskLike & Record<string, unknown>) | null;
@@ -721,7 +758,14 @@ const sleeves: FeatureDriver = {
           return task === undefined ? { ...sleeve, task: undefined } : { ...sleeve, task };
         }),
       });
-      results["sleeves"] = { action: "batch", ok: true, detail: `updated ${outcome.value.changed.length} sleeves`, at: Date.now() };
+      results["sleeves"] = {
+        action: "batch",
+        ok: !anyRefused,
+        detail: anyRefused
+          ? `updated ${outcome.value.changed.length} sleeves; some assignments were refused RAM`
+          : `updated ${outcome.value.changed.length} sleeves`,
+        at: Date.now(),
+      };
     }
   },
 };
@@ -890,6 +934,28 @@ function resetGoPlaybookLine(): void {
   goPlaybookPendingCredit = undefined;
 }
 
+/** The held board is a LOCAL SIMULATION, advanced by applying our move and the
+ * AI's reply with this repo's own rules. It is trustworthy only between the
+ * moment the game's own rows were read and the moment we dispatch the next
+ * board-changing call.
+ *
+ * SET AT DISPATCH, cleared only by proof (the post-turn verification), a
+ * rebuild (hydrate), or an authoritative rows return (resetBoardState). That
+ * ordering is the whole design: every way a turn can fail after the call was
+ * issued — a refusal, a rules-drift throw, an unsettled lane promise, a stub
+ * killed after makeMove already resolved in-game — leaves this set, so the next
+ * pass rebuilds. None of them is classified by its error text, because the last
+ * of them records no text at all. */
+let goRehydrate = false;
+let goRehydrateReason: string | undefined;
+
+function invalidateGoMirror(reason: string): void {
+  goRehydrate = true;
+  goRehydrateReason = reason;
+}
+
+const GO_DISPATCH_UNMERGED = "a turn was dispatched and its outcome never merged";
+
 let testGoRuntime: GoNeuralRuntime | undefined;
 
 function goNeuralRuntime(): GoNeuralRuntime {
@@ -962,7 +1028,9 @@ function goCheatUnlocked(caps: DriverContext["caps"]): boolean {
 function goClaimAction(state: GameState, caps: DriverContext["caps"]): GoAction["type"] | "hydrate" | undefined {
   const topic = state.topics.go;
   if (!topic?.status || !topic.currentPlayer) return undefined;
-  if (!topic.board || !topic.previousBoards || (goCheatUnlocked(caps) && (!topic.cheat || !goCheatSuccessByCount))) return "hydrate";
+  // goRehydrate first: an unproven mirror must be rebuilt before it is
+  // planned on, and the claim has to be sized for the read that will happen.
+  if (goRehydrate || !topic.board || !topic.previousBoards || (goCheatUnlocked(caps) && (!topic.cheat || !goCheatSuccessByCount))) return "hydrate";
   if (topic.status === "gameOver" || topic.currentPlayer === "None") return "newGame";
   if (topic.currentPlayer !== "Black") return "resume";
   if (sameGoPosition(topic.plan, topic)) {
@@ -1046,7 +1114,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     if (!goActionAdmitted(ctx.state, ctx.caps)) return;
     const claimedAction = goClaimAction(ctx.state, ctx.caps);
     const cheatUnlocked = goCheatUnlocked(ctx.caps);
-    if (!topic.board || !topic.boardSize || !topic.previousBoards
+    if (goRehydrate || !topic.board || !topic.boardSize || !topic.previousBoards
       || (cheatUnlocked && (!topic.cheat || !goCheatSuccessByCount))) {
       const hydrated = await act(
         ctx,
@@ -1095,7 +1163,23 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             count: hydrated.cheat.count,
             successChance: hydrated.cheat.successByCount[hydrated.cheat.count] ?? 0,
           } } : {}),
+          boardUnverified: false,
+          // Live state, not the `topic` snapshot taken above: merge replaces the
+          // topic object, so a monotonic counter read from `topic` would reset.
+          ...(goRehydrate ? {
+            boardResyncs: (ctx.state.topics.go?.boardResyncs ?? 0) + 1,
+            lastBoardResyncAt: Date.now(),
+            ...(goRehydrateReason ? { lastBoardResyncReason: goRehydrateReason } : {}),
+          } : {}),
         });
+        goRehydrate = false;
+        goRehydrateReason = undefined;
+        // A rebuilt position invalidates the worker's committed parent and any
+        // certified line the lost turns were on: both describe a board we no
+        // longer believe we were ever on.
+        goPredictionParent = undefined;
+        resetGoPlaybookLine();
+        // Wake rather than wait: recovery is hydrate -> play, not hydrate -> 5 s.
         goContinuationReady = true;
       }
       return;
@@ -1474,6 +1558,9 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         action.type,
         goMethods(action.type, cheatUnlocked, alignedEntry !== undefined),
         async (stubNs: NS) => {
+          // A reset that lands in-game but whose stub then dies is a desync
+          // source like any other dispatch, so invalidate before either call.
+          invalidateGoMirror("a board reset was dispatched and its result never merged");
           if (!alignedEntry || !goTickPhase) {
             return stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize);
           }
@@ -1530,6 +1617,10 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           status: "inProgress",
           opponent: action.opponent,
           territory: { black: 0, white: 0 },
+          // `fresh` is built from the PREVIOUS topic, so an unverified flag set
+          // by the turn before this reset would survive into a board the game
+          // itself just handed us.
+          boardUnverified: false,
           ...(topic.cheat ? { cheat: { ...topic.cheat, count: 0 } } : {}),
           plan,
           lastTurn,
@@ -1538,6 +1629,11 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         delete fresh.whiteScore;
         delete fresh.komi;
         set(ctx.state, "go", fresh);
+        // The one merge that is authoritative without a separate read:
+        // resetBoardState RETURNS the game's own rows, and the history of a
+        // fresh game genuinely is empty.
+        goRehydrate = false;
+        goRehydrateReason = undefined;
         goContinuationReady = true;
       } else {
         merge(ctx.state, "go", { plan, lastTurn });
@@ -1680,6 +1776,10 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                 if (generation !== goGeneration) throw new Error("Go generation changed before dispatch");
                 const dispatchWallAt = Date.now();
                 moveDispatchedAt = dispatchWallAt;
+                // From here the game board and the mirror can only be reconciled
+                // by observing the game. Anything that stops us reaching the
+                // merge below leaves this set and the next pass rebuilds.
+                invalidateGoMirror(GO_DISPATCH_UNMERGED);
                 const responsePromise = finalized.action.type === "move"
                   ? stubNs["go"]["makeMove"](finalized.action.x, finalized.action.y)
                   : finalized.action.type === "pass"
@@ -1759,15 +1859,20 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           }
           if (response !== undefined) {
             // Seed-assured neural dispatch above already started and awaited
-            // the Go action at the verified tick.
-          } else if (dispatchedAction?.type === "move") {
-            response = await stubNs["go"]["makeMove"](dispatchedAction.x, dispatchedAction.y);
-          } else if (action.type === "resume") {
-            // makeMove/passTurn already await this same promise. This branch only
-            // reattaches after a restart interrupted an in-flight white turn.
-            response = await stubNs["go"]["opponentNextTurn"](false, false);
-          } else if (dispatchedAction?.type === "pass") {
-            response = await stubNs["go"]["passTurn"]();
+            // the Go action at the verified tick, and invalidated the mirror.
+          } else if (dispatchedAction?.type === "move" || action.type === "resume" || dispatchedAction?.type === "pass") {
+            // One statement for all three unseeded dispatch paths: each issues a
+            // board-changing call, so from here the mirror is unproven.
+            invalidateGoMirror(GO_DISPATCH_UNMERGED);
+            if (dispatchedAction?.type === "move") {
+              response = await stubNs["go"]["makeMove"](dispatchedAction.x, dispatchedAction.y);
+            } else if (action.type === "resume") {
+              // makeMove/passTurn already await this same promise. This branch only
+              // reattaches after a restart interrupted an in-flight white turn.
+              response = await stubNs["go"]["opponentNextTurn"](false, false);
+            } else {
+              response = await stubNs["go"]["passTurn"]();
+            }
           } else {
             throw new Error(`invalid Go turn action ${action.type}`);
           }
@@ -1816,8 +1921,15 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         ctx.state.playerObservedAt = rawOutcome.playerObservedAt ?? Date.now();
       }
       if (!rawOutcome?.response) {
+        // Refused AFTER dispatch: the game may or may not have applied it, so
+        // the mirror is unproven and goRehydrate is already set. The guard is
+        // what keeps a PRE-dispatch failure (RAM denial, queueing, a missed seed
+        // tick, a generation change) from forcing a pointless rebuild — the
+        // discrimination is whether the call was issued, never its error text.
+        if (goRehydrate) goRehydrateReason = `turn refused: ${result.detail}`;
         merge(ctx.state, "go", {
           plan,
+          boardUnverified: goRehydrate,
           lastTurn: {
             at: result.at,
             durationMs: Date.now() - actionStartedAt,
@@ -1891,6 +2003,18 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       }, 0);
       const controlled = goTerritory(board);
       const score = scoreBoard(board, view.komi);
+      // Hoisted out of the merge so the verification below can republish it with
+      // its own result attached.
+      const lastTurn: GoTurnResult = {
+        at: result.at,
+        durationMs: Date.now() - actionStartedAt,
+        action: goActionDigest(action),
+        opponentResponse: response,
+        ...(dispatched ? { prediction: dispatched } : {}),
+        ...(predictionTotal > 0 ? { predictionSupport: { matching, total: predictionTotal } } : {}),
+        ok: result.ok,
+        detail: result.detail,
+      };
       merge(ctx.state, "go", {
         board: board.rows,
         previousBoards,
@@ -1910,18 +2034,59 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         currentPlayer: response.type === "gameOver" ? "None" : "Black",
         status: response.type === "gameOver" ? "gameOver" : "inProgress",
         plan,
-        lastTurn: {
-          at: result.at,
-          durationMs: Date.now() - actionStartedAt,
-          action: goActionDigest(action),
-          opponentResponse: response,
-          ...(dispatched ? { prediction: dispatched } : {}),
-          ...(predictionTotal > 0 ? { predictionSupport: { matching, total: predictionTotal } } : {}),
-          ok: result.ok,
-          detail: result.detail,
-        },
+        lastTurn,
       });
-      goPredictionParent = response.type === "gameOver" ? undefined : rawOutcome.predictionParentId;
+
+      // The mirror was advanced by applying rules LOCALLY. Prove it against the
+      // game before the next turn plans on it.
+      //
+      // Its own small ordinary-lane dodge, deliberately: go.getBoardState is
+      // 4 GB and must not enlarge the turn's contiguous long-lane grant, and
+      // nothing may be inserted between the verified clock read and makeMove
+      // (go-neural.ts, runGoNeuralSeedDispatch). Running it here costs neither —
+      // the game board is settled, White has already replied, and no Go promise
+      // is outstanding.
+      //
+      // ORDERING: verifyGoMirror calls act(), which overwrites results["go"].
+      // That is safe only because requireResult("go") was consumed above and
+      // `lastTurn` was already built from it.
+      const verified = response.type === "gameOver"
+        ? { result: "skipped" as const, ms: 0, scope: undefined }
+        : await verifyGoMirror(ctx, board.rows, previousBoards);
+      if (generation !== goGeneration) return;
+      if (verified.result === "match" || verified.result === "skipped") {
+        goRehydrate = false;
+        goRehydrateReason = undefined;
+      } else if (verified.result === "drift") {
+        invalidateGoMirror(verified.scope === "history"
+          ? "the game move history disagreed with the simulated mirror"
+          : "the game board disagreed with the simulated mirror");
+      } else {
+        // "unavailable" deliberately leaves the mirror invalidated: an unproven
+        // mirror degrades into a hydrate, which reads board AND history — a
+        // superset of what this verification would have told us. It gets its
+        // own reason, though. The turn itself merged, so carrying the
+        // dispatch-time reason forward would tell the panel a desync happened
+        // when in fact only the proof could not be placed.
+        invalidateGoMirror("the post-turn board verification could not be placed");
+      }
+      merge(ctx.state, "go", {
+        boardUnverified: goRehydrate,
+        lastTurn: { ...lastTurn, boardVerify: { ms: verified.ms, result: verified.result } },
+        // Live state, not the `topic` snapshot: merge replaced the topic object.
+        ...(verified.result === "drift"
+          ? {
+            boardDrifts: (ctx.state.topics.go?.boardDrifts ?? 0) + 1,
+            lastBoardDriftAt: Date.now(),
+          }
+          : {}),
+      });
+      // A drifted position means the worker's committed parent and the certified
+      // alignment credit both describe a board that never existed.
+      goPredictionParent = response.type === "gameOver" || goRehydrate
+        ? undefined
+        : rawOutcome.predictionParentId;
+      if (goRehydrate) resetGoPlaybookLine();
       goTurnReadyAt = response.type === "gameOver" ? undefined : rawOutcome.responseReadyAt;
       turnCompleted = true;
       continueImmediately = response.type !== "gameOver";
@@ -3773,7 +3938,9 @@ export const sleevesModule: FeatureModule = {
     const view = sleeveView(ctx.state);
     if (!view) return [];
     const decision = stepSleeves(view, ctx.board);
-    const methods = sleeveBatchMethods(decision.assignments.map((entry) => entry.task.type));
+    // The batch now runs as one stub per task type plus a read-back, so the RAM
+    // the arbiter must find at once is the LARGEST of those, not their sum.
+    const methods = sleeveBatchPeakMethods(decision.assignments.map((entry) => entry.task.type));
     if (methods.length === 0 && pendingSleeveCompletions().size === 0) return [];
     return [actionRamClaim(ctx, "sleeves", "action:batch", methods.length > 0 ? methods : ["sleeve.getTask"])];
   },
@@ -3789,6 +3956,10 @@ export const goModule: FeatureModule = {
     // concurrently with the reset one.
     goCompletionReady = false;
     goContinuationReady = false;
+    // The topic is deleted below, so the next pass hydrates regardless; clearing
+    // keeps the flag from outliving the board it described.
+    goRehydrate = false;
+    goRehydrateReason = undefined;
     goPredictionParent = undefined;
     goCheatSuccessByCount = undefined;
     goTurnReadyAt = undefined;
@@ -3890,6 +4061,64 @@ function sleeveMethods(action: string | undefined): readonly string[] {
   }
 }
 
+/** Positional-superko history equality. Both sides are newest-first lists of
+ * board rows: the game's own `previousBoards` (go.getMoveHistory returns it
+ * directly) and the mirror's copy, advanced by unshift. */
+function sameGoHistory(live: readonly string[][], mirror: readonly string[][]): boolean {
+  if (live.length !== mirror.length) return false;
+  return live.every((position, index) => {
+    const held = mirror[index];
+    return held !== undefined && position.length === held.length
+      && position.every((column, row) => column === held[row]);
+  });
+}
+
+type GoVerification = "match" | "drift" | "unavailable" | "skipped";
+
+/** Read the game's own rows and compare them with the mirror we just merged.
+ *
+ * ORDINARY lane on purpose. The turn runs on the exclusive long lane, whose
+ * running-guard rejects a second concurrent call outright ("a Go turn is
+ * already running"), and go.getBoardState is 4 GB — folding it into the turn's
+ * method list would push that grant from 6.6 GB to 10.6 GB of CONTIGUOUS RAM on
+ * a single non-home host, since the long lane is banned from home. As its own
+ * 6.1 GB stub (1.6 base + 4 + 0.5 margin) it may sit on home and competes with
+ * nothing the turn needs.
+ *
+ * Deliberately NOT declared in goModule.claims: that returns exactly one claim
+ * per pass, and a permanent 4.5 GB claim would inflate Go's continuous
+ * reservation and fight goActionAdmitted. A queued verification degrades into a
+ * hydrate, which is the correct behaviour. */
+async function verifyGoMirror(
+  ctx: DriverContext,
+  expected: readonly string[],
+  expectedHistory: readonly string[][],
+): Promise<{ result: GoVerification; ms: number; scope?: "board" | "history" }> {
+  const startedAt = Date.now();
+  // go.getMoveHistory is 0 GB, so reading it here is FREE and keeps the whole
+  // check to a single consistent post-turn observation. It is also the only
+  // thing that can validate `previousBoards` — the positional-superko set —
+  // which the board rows alone cannot.
+  const live = await act(
+    ctx,
+    "go",
+    "verify",
+    ["go.getBoardState", "go.getMoveHistory"],
+    (stubNs: NS) => ({
+      board: stubNs["go"]["getBoardState"](),
+      history: stubNs["go"]["getMoveHistory"](),
+    }),
+    (value) => ({ ok: value.board.length > 0, detail: `verified ${value.board.length}x${value.board.length} board` }),
+  );
+  const ms = Date.now() - startedAt;
+  if (!live?.board.length) return { result: "unavailable", ms };
+  const sameBoard = live.board.length === expected.length
+    && live.board.every((column, index) => column === expected[index]);
+  if (!sameBoard) return { result: "drift", ms, scope: "board" };
+  if (!sameGoHistory(live.history, expectedHistory)) return { result: "drift", ms, scope: "history" };
+  return { result: "match", ms };
+}
+
 function goMethods(
   action: string | undefined,
   cheatUnlocked = false,
@@ -3927,10 +4156,15 @@ function goMethods(
   return [];
 }
 
-function sleeveBatchMethods(actions: readonly string[]): readonly string[] {
-  const methods = new Set<string>(["sleeve.getTask"]);
-  for (const action of actions) for (const method of sleeveMethods(action)) methods.add(method);
-  return [...methods];
+/** The peak single-stub cost of a batch: every sleeve method is SleeveBase, so
+ * the largest step is one setter (or the getTask read-back). Reserving the sum
+ * would re-create the 30 GB contiguous demand the split exists to remove. */
+function sleeveBatchPeakMethods(actions: readonly string[]): readonly string[] {
+  for (const action of actions) {
+    const methods = sleeveMethods(action);
+    if (methods.length > 0) return methods;
+  }
+  return ["sleeve.getTask"];
 }
 
 function dnetMethods(action: string | undefined): readonly string[] {

@@ -11,9 +11,11 @@ import {
 } from "../../../shared/strategy/side/contracts.ts";
 import { rotate } from "../../../shared/strategy/stanek/pack.ts";
 import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
+import type { CorpState } from "../../../shared/telemetry/topics/corp.ts";
+import type { BladeburnerState } from "../../../shared/telemetry/topics/bladeburner.ts";
 import type { ContractDigest } from "../../../shared/telemetry/topics/side.ts";
 import type { ReportHost } from "../../../shared/strategy/dnet/courier.ts";
-import { emit, emitPartial, type DodgedProbe, type Emission, type ProbeContext } from "./index.ts";
+import { emit, emitPartial, type DodgedProbe, type Emission, type ProbeAcc, type ProbeContext } from "./index.ts";
 import { fleetFrom } from "./local.ts";
 
 /** The dodged probe table — one entry per (feature, cost tier).
@@ -408,12 +410,23 @@ const factionAugs: DodgedProbe = {
     },
     {
       id: "prereqs",
-      methods: ["singularity.getAugmentationPrereq", "singularity.getAugmentationStats"],
+      // Split from the multipliers below: both are SingularityFn3, so pairing
+      // them made an 11.6 GB block at SF4 level 3 and 162.1 GB at level 0.
+      methods: ["singularity.getAugmentationPrereq"],
       run(stubNs: NS, _ctx: ProbeContext, acc) {
         const prereqs: Record<string, string[]> = {};
-        const mults: Record<string, Record<string, number>> = {};
         for (const name of listedAugs(acc)) {
           prereqs[name] = stubNs["singularity"]["getAugmentationPrereq"](name as never).map(String);
+        }
+        acc["prereqs"] = prereqs;
+      },
+    },
+    {
+      id: "mults",
+      methods: ["singularity.getAugmentationStats"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const mults: Record<string, Record<string, number>> = {};
+        for (const name of listedAugs(acc)) {
           // The multipliers are what the objective SCORES; without them the
           // planner can only rank by price, which is not the objective at all.
           //
@@ -428,28 +441,43 @@ const factionAugs: DodgedProbe = {
             /* no stable multipliers for this augmentation */
           }
         }
-        acc["prereqs"] = prereqs;
         acc["mults"] = mults;
       },
     },
     {
-      id: "graft",
+      id: "graft-list",
       // Grafting is gated by BN10/SF10, NOT the SF4 that gates the rest of
       // this probe, and it THROWS rather than returning empty. Its own step,
       // so a save with Singularity but no Grafting still gets everything else.
+      //
+      // The list is also split from the per-augmentation price/time reads: all
+      // three are 5 GB SingularityFn3-priced, so together they demanded a
+      // 14.1 GB contiguous block — and 4x that at SF4 level 2, 16x at level 0,
+      // where the probe simply never ran.
+      methods: ["grafting.getGraftableAugmentations"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        try {
+          acc["graftNames"] = stubNs["grafting"]["getGraftableAugmentations"]()
+            .slice(0, LIST_LIMIT).map(String);
+        } catch {
+          /* no Grafting API in this BitNode */
+        }
+      },
+    },
+    {
+      id: "graft-terms",
       methods: [
-        "grafting.getGraftableAugmentations",
         "grafting.getAugmentationGraftPrice",
         "grafting.getAugmentationGraftTime",
       ],
       run(stubNs: NS, _ctx: ProbeContext, acc) {
         const graftable: { name: string; price: number; timeMs: number }[] = [];
         try {
-          for (const name of stubNs["grafting"]["getGraftableAugmentations"]().slice(0, LIST_LIMIT)) {
+          for (const name of (acc["graftNames"] as string[] | undefined) ?? []) {
             graftable.push({
-              name: String(name),
-              price: stubNs["grafting"]["getAugmentationGraftPrice"](name),
-              timeMs: stubNs["grafting"]["getAugmentationGraftTime"](name),
+              name,
+              price: stubNs["grafting"]["getAugmentationGraftPrice"](name as never),
+              timeMs: stubNs["grafting"]["getAugmentationGraftTime"](name as never),
             });
           }
         } catch {
@@ -580,6 +608,11 @@ const careerWork: DodgedProbe = {
   },
 };
 
+const CRIME_NAMES = [
+  "Shoplift", "Rob Store", "Mug", "Larceny", "Deal Drugs", "Bond Forgery",
+  "Traffick Arms", "Homicide", "Grand Theft Auto", "Kidnap", "Assassination", "Heist",
+];
+
 const careerCrimes: DodgedProbe = {
   id: "career.crimes",
   kind: "dodged",
@@ -587,15 +620,42 @@ const careerCrimes: DodgedProbe = {
   requires: "factions",
   everyMs: MIN_5,
   merge: true,
-  methods: ["singularity.getCrimeChance", "singularity.getCrimeStats"],
-  run(stubNs: NS) {
-    const names = [
-      "Shoplift", "Rob Store", "Mug", "Larceny", "Deal Drugs", "Bond Forgery",
-      "Traffick Arms", "Homicide", "Grand Theft Auto", "Kidnap", "Assassination", "Heist",
-    ];
-    const crimes = names.map((name) => {
-      const stats = stubNs["singularity"]["getCrimeStats"](name as never);
-      const chance = stubNs["singularity"]["getCrimeChance"](name as never);
+  // Two INDEPENDENT SingularityFn3 reads. At SF4 level 3 they are 5 GB each and
+  // this is an 11.6 GB block; the singularity multiplier makes the same probe
+  // 41.6 GB at level 2 and 162.1 GB at level 0, where it simply never ran. Split
+  // one method per step, the peak follows the multiplier down to a single call.
+  steps: [
+    {
+      id: "stats",
+      methods: ["singularity.getCrimeStats"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const stats: Record<string, Record<string, number>> = {};
+        for (const name of CRIME_NAMES) {
+          stats[name] = stubNs["singularity"]["getCrimeStats"](name as never) as unknown as Record<string, number>;
+        }
+        acc["crimeStats"] = stats;
+      },
+    },
+    {
+      id: "chance",
+      methods: ["singularity.getCrimeChance"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const chances: Record<string, number> = {};
+        for (const name of CRIME_NAMES) chances[name] = stubNs["singularity"]["getCrimeChance"](name as never);
+        acc["crimeChance"] = chances;
+      },
+    },
+  ],
+  // Both halves are required to rank a crime — a rate needs the odds and the
+  // payout — so a partial accumulator emits nothing rather than a table sorted
+  // by a fabricated zero.
+  finish(acc) {
+    const statsByName = acc["crimeStats"] as Record<string, Record<string, number>> | undefined;
+    const chanceByName = acc["crimeChance"] as Record<string, number> | undefined;
+    if (!statsByName || !chanceByName) return [];
+    const crimes = CRIME_NAMES.map((name) => {
+      const stats = statsByName[name]!;
+      const chance = chanceByName[name] ?? 0;
       return {
         name,
         chance,
@@ -603,32 +663,32 @@ const careerCrimes: DodgedProbe = {
         // gains: money and exp already include player and BitNode multipliers.
         // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L1068-L1090
         gainsAreEffective: true,
-        money: stats.money,
-        timeMs: stats.time,
-        karma: stats.karma,
-        kills: stats.kills,
-        difficulty: stats.difficulty,
+        money: stats["money"]!,
+        timeMs: stats["time"]!,
+        karma: stats["karma"]!,
+        kills: stats["kills"]!,
+        difficulty: stats["difficulty"]!,
         weights: {
-          hacking: stats.hacking_success_weight,
-          strength: stats.strength_success_weight,
-          defense: stats.defense_success_weight,
-          dexterity: stats.dexterity_success_weight,
-          agility: stats.agility_success_weight,
-          charisma: stats.charisma_success_weight,
+          hacking: stats["hacking_success_weight"]!,
+          strength: stats["strength_success_weight"]!,
+          defense: stats["defense_success_weight"]!,
+          dexterity: stats["dexterity_success_weight"]!,
+          agility: stats["agility_success_weight"]!,
+          charisma: stats["charisma_success_weight"]!,
         },
         // The planner scores actions by how fast they move POSTED NEEDS, and
         // several of those are stat thresholds — so the experience table is a
         // decision input, not decoration.
         exp: {
-          hacking: stats.hacking_exp,
-          strength: stats.strength_exp,
-          defense: stats.defense_exp,
-          dexterity: stats.dexterity_exp,
-          agility: stats.agility_exp,
-          charisma: stats.charisma_exp,
-          intelligence: stats.intelligence_exp,
+          hacking: stats["hacking_exp"]!,
+          strength: stats["strength_exp"]!,
+          defense: stats["defense_exp"]!,
+          dexterity: stats["dexterity_exp"]!,
+          agility: stats["agility_exp"]!,
+          charisma: stats["charisma_exp"]!,
+          intelligence: stats["intelligence_exp"]!,
         },
-        moneyPerSec: stats.time > 0 ? (stats.money * chance) / (stats.time / 1000) : 0,
+        moneyPerSec: stats["time"]! > 0 ? (stats["money"]! * chance) / (stats["time"]! / 1000) : 0,
       };
     });
     crimes.sort((a, b) => b.moneyPerSec - a.moneyPerSec);
@@ -1035,37 +1095,117 @@ const corpCore: DodgedProbe = {
   requires: "corp",
   everyMs: MIN_1,
   merge: true,
-  methods: ["corporation.getCorporation", "corporation.getInvestmentOffer"],
-  run(stubNs: NS) {
-    const c = stubNs["corporation"]["getCorporation"]();
-    const offer = stubNs["corporation"]["getInvestmentOffer"]();
-    // Public/exhausted corporations receive a zero-valued offer rather than
-    // an exception. Keep the optional topic field for an actionable offer.
-    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Corporation/Corporation.ts#L333-L354
-    const investmentOffer = offer.funds > 0 && offer.shares > 0
-      ? { round: offer.round, funds: offer.funds, shares: offer.shares }
-      : undefined;
+  // Two INDEPENDENT CorporationInfo reads at 10 GB each. Together they demanded
+  // a 21.6 GB contiguous block once a minute; apart, 11.6 GB each for one extra
+  // stub base (+1.6 GB) — the cheapest split on the board.
+  steps: [
+    {
+      id: "corporation",
+      methods: ["corporation.getCorporation"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const c = stubNs["corporation"]["getCorporation"]();
+        acc["corp"] = {
+          name: c.name,
+          funds: c.funds,
+          revenue: c.revenue,
+          expenses: c.expenses,
+          public: c.public,
+          valuation: c.valuation,
+          sharePrice: c.sharePrice,
+          totalShares: c.totalShares,
+          numShares: c.numShares,
+          issuedShares: c.issuedShares,
+          dividendRate: c.dividendRate,
+          dividendEarnings: c.dividendEarnings,
+          state: String(c.nextState),
+        } satisfies CorpCoreAcc;
+      },
+    },
+    {
+      id: "offer",
+      methods: ["corporation.getInvestmentOffer"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const offer = stubNs["corporation"]["getInvestmentOffer"]();
+        // Public/exhausted corporations receive a zero-valued offer rather than
+        // an exception. Keep the optional topic field for an actionable offer.
+        // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Corporation/Corporation.ts#L333-L354
+        acc["offerRead"] = true;
+        if (offer.funds > 0 && offer.shares > 0) {
+          acc["investmentOffer"] = { round: offer.round, funds: offer.funds, shares: offer.shares };
+        }
+      },
+    },
+  ],
+  // The corporation identity is what makes the topic meaningful, so an
+  // unaffordable first step emits nothing rather than an offer with no corp.
+  // A missing offer, by contrast, is the ordinary case and already optional.
+  finish(acc) {
+    const corp = acc["corp"] as CorpCoreAcc | undefined;
+    if (!corp) return [];
     return [
-      emit("corp", {
-        name: c.name,
-        funds: c.funds,
-        revenue: c.revenue,
-        expenses: c.expenses,
-        public: c.public,
-        valuation: c.valuation,
-        sharePrice: c.sharePrice,
-        totalShares: c.totalShares,
-        numShares: c.numShares,
-        issuedShares: c.issuedShares,
-        dividendRate: c.dividendRate,
-        dividendEarnings: c.dividendEarnings,
-        state: String(c.nextState),
+      // emitPartial, not a cast: this probe declares `merge: true`, and the
+      // partial helper is what keeps every field name checked against CorpState
+      // instead of `as never` silently accepting a renamed one.
+      emitPartial("corp", {
+        ...corp,
         // `divisions` belongs to the corp.divisions probe — see CorpState.
-        investmentOffer,
+        // The offer key is written ONLY when its step ran: a step the fleet
+        // could not afford must leave a known offer standing rather than
+        // clearing it, which is the difference between "no offer" and "not
+        // asked".
+        ...(acc["offerRead"] ? { investmentOffer: acc["investmentOffer"] as CorpState["investmentOffer"] } : {}),
       }),
     ];
   },
 };
+
+/** The identity half of the core digest. The offer is accumulated separately
+ * because its step can be the one that does not fit. */
+type CorpCoreAcc = Omit<CorpState, "divisions" | "investmentOffer" | "bonusTime" | "plan">;
+
+/** Shapes accumulated across the division steps. Each step reads ONE
+ * CorporationInfo-priced method (10 GB apiece), so keeping them in one stub cost
+ * 51.6 GB of CONTIGUOUS RAM on a single host — large enough that a busy fleet
+ * simply never placed it, and this probe runs every two minutes. Split, the peak
+ * is one 11.6 GB step. The extra cost is four more stub bases (+6.4 GB total)
+ * spread across sequential launches, which is the trade this shape exists for.
+ *
+ * They are pure reads chained only by data — corporation -> division names ->
+ * per-division cities -> per-(division, city) office/warehouse — which is
+ * exactly what the accumulator carries between steps. */
+interface CorpDivisionAcc {
+  name: string;
+  industry: string;
+  awareness: number;
+  popularity: number;
+  productionMult: number;
+  researchPoints: number;
+  lastCycleRevenue: number;
+  lastCycleExpenses: number;
+  numAdVerts: number;
+  cities: string[];
+  products: string[];
+  maxProducts: number;
+  offices: {
+    city: string;
+    size: number;
+    numEmployees: number;
+    avgEnergy: number;
+    avgMorale: number;
+    jobs: Record<string, number>;
+  }[];
+  warehouses: {
+    city: string;
+    level: number;
+    size: number;
+    sizeUsed: number;
+    smartSupplyEnabled: boolean;
+  }[];
+}
+
+function corpDivisionAcc(acc: ProbeAcc): CorpDivisionAcc[] {
+  return (acc["divisions"] as CorpDivisionAcc[] | undefined) ?? [];
+}
 
 const corpDivisions: DodgedProbe = {
   id: "corp.divisions",
@@ -1074,57 +1214,102 @@ const corpDivisions: DodgedProbe = {
   requires: "corp",
   everyMs: MIN_2,
   merge: true,
-  methods: [
-    "corporation.getCorporation",
-    "corporation.getDivision",
-    "corporation.getOffice",
-    "corporation.getWarehouse",
-    "corporation.hasWarehouse",
-  ],
-  run(stubNs: NS) {
-    const divisions = stubNs["corporation"]["getCorporation"]().divisions.map((name) => {
-      const d = stubNs["corporation"]["getDivision"](name);
-      const offices = [];
-      const warehouses = [];
-      for (const city of d.cities) {
-        const office = stubNs["corporation"]["getOffice"](name, city);
-        offices.push({
-          city: String(city),
-          size: office.size,
-          numEmployees: office.numEmployees,
-          avgEnergy: office.avgEnergy,
-          avgMorale: office.avgMorale,
-          jobs: Object.fromEntries(Object.entries(office.employeeJobs).map(([k, v]) => [String(k), v])),
+  steps: [
+    {
+      id: "names",
+      methods: ["corporation.getCorporation"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        acc["names"] = stubNs["corporation"]["getCorporation"]().divisions.map(String);
+      },
+    },
+    {
+      id: "divisions",
+      methods: ["corporation.getDivision"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        acc["divisions"] = ((acc["names"] as string[] | undefined) ?? []).map((name) => {
+          const d = stubNs["corporation"]["getDivision"](name);
+          return {
+            name: d.name,
+            industry: String(d.industry),
+            awareness: d.awareness,
+            popularity: d.popularity,
+            productionMult: d.productionMult,
+            researchPoints: d.researchPoints,
+            lastCycleRevenue: d.lastCycleRevenue,
+            lastCycleExpenses: d.lastCycleExpenses,
+            numAdVerts: d.numAdVerts,
+            cities: d.cities.map(String),
+            products: d.products.map(String),
+            maxProducts: d.maxProducts,
+            offices: [],
+            warehouses: [],
+          } satisfies CorpDivisionAcc;
         });
-        if (stubNs["corporation"]["hasWarehouse"](name, city)) {
-          const w = stubNs["corporation"]["getWarehouse"](name, city);
-          warehouses.push({
-            city: String(city),
-            level: w.level,
-            size: w.size,
-            sizeUsed: w.sizeUsed,
-            smartSupplyEnabled: w.smartSupplyEnabled,
-          });
+      },
+    },
+    {
+      id: "offices",
+      methods: ["corporation.getOffice"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        for (const division of corpDivisionAcc(acc)) {
+          for (const city of division.cities) {
+            const office = stubNs["corporation"]["getOffice"](division.name, city as never);
+            division.offices.push({
+              city,
+              size: office.size,
+              numEmployees: office.numEmployees,
+              avgEnergy: office.avgEnergy,
+              avgMorale: office.avgMorale,
+              jobs: Object.fromEntries(Object.entries(office.employeeJobs).map(([k, v]) => [String(k), v])),
+            });
+          }
         }
-      }
-      return {
-        name: d.name,
-        industry: String(d.industry),
-        awareness: d.awareness,
-        popularity: d.popularity,
-        productionMult: d.productionMult,
-        researchPoints: d.researchPoints,
-        lastCycleRevenue: d.lastCycleRevenue,
-        lastCycleExpenses: d.lastCycleExpenses,
-        numAdVerts: d.numAdVerts,
-        cities: d.cities.map(String),
-        products: d.products.map(String),
-        maxProducts: d.maxProducts,
-        offices,
-        warehouses,
-      };
-    });
-    return [emitPartial("corp", { divisions })];
+      },
+    },
+    {
+      id: "warehouse-presence",
+      // hasWarehouse is its own CorporationInfo read, so asking it in the same
+      // stub as getWarehouse would put two 10 GB methods back in one block.
+      methods: ["corporation.hasWarehouse"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const stocked: Record<string, string[]> = {};
+        for (const division of corpDivisionAcc(acc)) {
+          stocked[division.name] = division.cities.filter((city) =>
+            stubNs["corporation"]["hasWarehouse"](division.name, city as never));
+        }
+        acc["stocked"] = stocked;
+      },
+    },
+    {
+      id: "warehouses",
+      methods: ["corporation.getWarehouse"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const stocked = (acc["stocked"] as Record<string, string[]> | undefined) ?? {};
+        for (const division of corpDivisionAcc(acc)) {
+          for (const city of stocked[division.name] ?? []) {
+            const w = stubNs["corporation"]["getWarehouse"](division.name, city as never);
+            division.warehouses.push({
+              city,
+              level: w.level,
+              size: w.size,
+              sizeUsed: w.sizeUsed,
+              smartSupplyEnabled: w.smartSupplyEnabled,
+            });
+          }
+        }
+        acc["complete"] = true;
+      },
+    },
+  ],
+  // Published ONLY when every step ran. A partial table is worse than none
+  // here: the topic merges shallowly, so an empty `divisions` (the getDivision
+  // step did not fit) or an empty `warehouses` (the getWarehouse step did not)
+  // replaces a good table with one the corp stages read as "not built yet" —
+  // and they answer that by re-issuing expandIndustry/buyWarehouse for things
+  // that already exist. Keeping the previous sweep is the correct partial.
+  finish(acc) {
+    if (!acc["complete"]) return [];
+    return [emitPartial("corp", { divisions: corpDivisionAcc(acc) })];
   },
 };
 
@@ -1137,36 +1322,81 @@ const bladeCore: DodgedProbe = {
   requires: "bladeburner",
   everyMs: SEC_30,
   merge: true,
-  methods: [
-    "bladeburner.getRank",
-    "bladeburner.getSkillPoints",
-    "bladeburner.getStamina",
-    "bladeburner.getCity",
-    "bladeburner.getCurrentAction",
-    "bladeburner.getActionCurrentTime",
-    "bladeburner.getNextBlackOp",
-    "bladeburner.getBlackOpNames",
+  // Six independent 4 GB reads summed to a 24.6 GB contiguous block every 30 s.
+  // Split three ways the peak is 9.6 GB, for two extra stub bases (+3.2 GB).
+  steps: [
+    {
+      id: "action",
+      // getCurrentAction and getActionCurrentTime MUST stay in one stub: the
+      // elapsed time is reported for whatever action is current when it is
+      // asked, so reading them from separate stubs would attribute one action's
+      // progress to another whenever the action changes in between.
+      methods: [
+        "bladeburner.getCurrentAction",
+        "bladeburner.getActionCurrentTime",
+        "bladeburner.getNextBlackOp",
+        "bladeburner.getBlackOpNames",
+      ],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        acc["actionRead"] = true;
+        const action = stubNs["bladeburner"]["getCurrentAction"]();
+        if (action) {
+          acc["current"] = {
+            type: String(action.type),
+            name: String(action.name),
+            elapsedMs: stubNs["bladeburner"]["getActionCurrentTime"](),
+          };
+        }
+        const next = stubNs["bladeburner"]["getNextBlackOp"]();
+        // Black ops complete in a fixed order, so the next uncompleted op's
+        // index IS the completed count (null next = all done). getBlackOpNames
+        // is 0 GB, which keeps this on the cheap 30 s core tier instead of the
+        // ~28 GB detail probe the endgame estimate would otherwise wait
+        // minutes for.
+        const blackOpNames = stubNs["bladeburner"]["getBlackOpNames"]().map(String);
+        const nextIndex = next ? blackOpNames.indexOf(String(next.name)) : blackOpNames.length;
+        if (next) acc["nextBlackOp"] = { name: String(next.name), rank: next.rank };
+        if (nextIndex >= 0) acc["blackOpsComplete"] = nextIndex;
+      },
+    },
+    {
+      id: "standing",
+      methods: ["bladeburner.getRank", "bladeburner.getSkillPoints"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        acc["rank"] = stubNs["bladeburner"]["getRank"]();
+        acc["skillPoints"] = stubNs["bladeburner"]["getSkillPoints"]();
+      },
+    },
+    {
+      id: "position",
+      methods: ["bladeburner.getStamina", "bladeburner.getCity"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        acc["stamina"] = stubNs["bladeburner"]["getStamina"]();
+        acc["city"] = String(stubNs["bladeburner"]["getCity"]());
+      },
+    },
   ],
-  run(stubNs: NS) {
-    const action = stubNs["bladeburner"]["getCurrentAction"]();
-    const next = stubNs["bladeburner"]["getNextBlackOp"]();
-    // Black ops complete in a fixed order, so the next uncompleted op's index
-    // IS the completed count (null next = all done). getBlackOpNames is 0 GB,
-    // which keeps this on the cheap 30 s core tier instead of the ~28 GB
-    // detail probe the endgame estimate would otherwise wait minutes for.
-    const blackOpNames = stubNs["bladeburner"]["getBlackOpNames"]().map(String);
-    const nextIndex = next ? blackOpNames.indexOf(String(next.name)) : blackOpNames.length;
+  // Rank is the field everything else is judged against, so an unaffordable
+  // standing step emits nothing rather than a division with no rank.
+  finish(acc) {
+    if (acc["rank"] === undefined) return [];
     return [
-      emit("bladeburner", {
-        rank: stubNs["bladeburner"]["getRank"](),
-        skillPoints: stubNs["bladeburner"]["getSkillPoints"](),
-        stamina: stubNs["bladeburner"]["getStamina"](),
-        city: String(stubNs["bladeburner"]["getCity"]()),
-        current: action
-          ? { type: String(action.type), name: String(action.name), elapsedMs: stubNs["bladeburner"]["getActionCurrentTime"]() }
-          : undefined,
-        nextBlackOp: next ? { name: String(next.name), rank: next.rank } : undefined,
-        blackOpsComplete: nextIndex >= 0 ? nextIndex : undefined,
+      // emitPartial, not a cast: this probe declares `merge: true`, and the
+      // partial helper keeps every field name checked against BladeburnerState
+      // instead of `as never` accepting anything.
+      emitPartial("bladeburner", {
+        rank: acc["rank"] as number,
+        skillPoints: acc["skillPoints"] as number | undefined,
+        stamina: acc["stamina"] as [number, number] | undefined,
+        city: acc["city"] as string | undefined,
+        // Written only when the action step ran, for the same reason as the
+        // corporation offer above: an unaffordable step must not read as "no
+        // action in progress".
+        ...(acc["actionRead"] ? {
+          current: acc["current"] as BladeburnerState["current"],
+          nextBlackOp: acc["nextBlackOp"] as BladeburnerState["nextBlackOp"],
+          blackOpsComplete: acc["blackOpsComplete"] as number | undefined,
+        } : {}),
         // skills/actions/cities belong to the detail probes — see
         // BladeburnerState; emitting placeholders here would blank them.
       }),
@@ -1174,71 +1404,170 @@ const bladeCore: DodgedProbe = {
   },
 };
 
-const bladeActions: DodgedProbe = {
+/** One row per Bladeburner action, filled in across several steps.
+ *
+ * Every getter here is BladeburnerApiBase (4 GB) and they summed to 39.6 GB of
+ * CONTIGUOUS RAM in a single stub. The four name lists and getSkillNames are
+ * 0 GB, so re-declaring them in each step is FREE — which is what makes this
+ * split cheap: the peak drops to 13.6 GB for four more stub bases (+4.8 GB).
+ *
+ * Each getter is an independent per-(type, name) read, so the only thing the
+ * steps share is the action list itself. */
+interface BladeActionAcc {
+  type: "contract" | "operation" | "blackop" | "general";
+  name: string;
+  chance: [number, number];
+  timeMs: number;
+  countRemaining: number;
+  level: number;
+  maxLevel: number;
+  rankGain: number;
+  rankLoss: number;
+  rankNeeded?: number;
+}
+
+/** The 0 GB name lists. Declared by every step that needs to address actions,
+ * because they cost nothing and re-reading them keeps the steps independent. */
+const BLADE_NAME_METHODS = [
+  "bladeburner.getContractNames",
+  "bladeburner.getOperationNames",
+  "bladeburner.getBlackOpNames",
+  "bladeburner.getGeneralActionNames",
+];
+
+function bladeActionRows(stubNs: NS): BladeActionAcc[] {
+  const groups: { type: BladeActionAcc["type"]; names: string[] }[] = [
+    { type: "contract", names: stubNs["bladeburner"]["getContractNames"]().map(String) },
+    { type: "operation", names: stubNs["bladeburner"]["getOperationNames"]().map(String) },
+    { type: "blackop", names: stubNs["bladeburner"]["getBlackOpNames"]().map(String) },
+    { type: "general", names: stubNs["bladeburner"]["getGeneralActionNames"]().map(String) },
+  ];
+  return groups.flatMap(({ type, names }) => names.map((name) => ({
+    type,
+    name,
+    chance: [0, 0] as [number, number],
+    timeMs: 0,
+    countRemaining: 0,
+    level: 0,
+    maxLevel: 0,
+    rankGain: 0,
+    rankLoss: 0,
+  })));
+}
+
+function bladeActions(acc: ProbeAcc): BladeActionAcc[] {
+  return (acc["actions"] as BladeActionAcc[] | undefined) ?? [];
+}
+
+const bladeActionsProbe: DodgedProbe = {
   id: "bladeburner.actions",
   kind: "dodged",
   feature: "bladeburner",
   requires: "bladeburner",
   everyMs: MIN_2,
   merge: true,
-  methods: [
-    "bladeburner.getContractNames",
-    "bladeburner.getOperationNames",
-    "bladeburner.getBlackOpNames",
-    "bladeburner.getGeneralActionNames",
-    "bladeburner.getActionEstimatedSuccessChance",
-    "bladeburner.getActionTime",
-    "bladeburner.getActionCountRemaining",
-    "bladeburner.getActionCurrentLevel",
-    "bladeburner.getActionMaxLevel",
-    "bladeburner.getActionRankGain",
-    "bladeburner.getActionRankLoss",
-    "bladeburner.getBlackOpRank",
-    "bladeburner.getSkillNames",
-    "bladeburner.getSkillLevel",
-    "bladeburner.getSkillUpgradeCost",
-  ],
-  run(stubNs: NS) {
-    const groups: { type: "contract" | "operation" | "blackop" | "general"; names: string[] }[] = [
-      { type: "contract", names: stubNs["bladeburner"]["getContractNames"]().map(String) },
-      { type: "operation", names: stubNs["bladeburner"]["getOperationNames"]().map(String) },
-      { type: "blackop", names: stubNs["bladeburner"]["getBlackOpNames"]().map(String) },
-      { type: "general", names: stubNs["bladeburner"]["getGeneralActionNames"]().map(String) },
-    ];
-    const actions = [];
-    for (const { type, names } of groups) {
-      for (const name of names) {
-        actions.push({
-          type,
-          name,
-          chance: stubNs["bladeburner"]["getActionEstimatedSuccessChance"](type as never, name as never),
-          timeMs: stubNs["bladeburner"]["getActionTime"](type as never, name as never),
-          countRemaining: stubNs["bladeburner"]["getActionCountRemaining"](type as never, name as never),
-          level: stubNs["bladeburner"]["getActionCurrentLevel"](type as never, name as never),
-          maxLevel: stubNs["bladeburner"]["getActionMaxLevel"](type as never, name as never),
+  steps: [
+    {
+      id: "timing",
+      methods: [
+        ...BLADE_NAME_METHODS,
+        "bladeburner.getActionEstimatedSuccessChance",
+        "bladeburner.getActionTime",
+      ],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const actions = bladeActionRows(stubNs);
+        for (const action of actions) {
+          action.chance = stubNs["bladeburner"]["getActionEstimatedSuccessChance"](action.type as never, action.name as never);
+          action.timeMs = stubNs["bladeburner"]["getActionTime"](action.type as never, action.name as never);
+        }
+        acc["actions"] = actions;
+      },
+    },
+    {
+      id: "levels",
+      methods: [
+        ...BLADE_NAME_METHODS,
+        "bladeburner.getActionCountRemaining",
+        "bladeburner.getActionCurrentLevel",
+        "bladeburner.getActionMaxLevel",
+      ],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        for (const action of bladeActions(acc)) {
+          action.countRemaining = stubNs["bladeburner"]["getActionCountRemaining"](action.type as never, action.name as never);
+          action.level = stubNs["bladeburner"]["getActionCurrentLevel"](action.type as never, action.name as never);
+          action.maxLevel = stubNs["bladeburner"]["getActionMaxLevel"](action.type as never, action.name as never);
+        }
+      },
+    },
+    {
+      id: "rank",
+      methods: [
+        ...BLADE_NAME_METHODS,
+        "bladeburner.getActionRankGain",
+        "bladeburner.getActionRankLoss",
+        "bladeburner.getBlackOpRank",
+      ],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        for (const action of bladeActions(acc)) {
           // Both values are public in v3.0.1. Reading them prevents a made-up
           // rank reward and enforces each Black Op's hard rank gate.
           // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L165-L171
           // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L94-L99
-          rankGain: stubNs["bladeburner"]["getActionRankGain"](type as never, name as never),
+          action.rankGain = stubNs["bladeburner"]["getActionRankGain"](action.type as never, action.name as never);
           // Failure rank loss is independently level-adjusted; expected-rank
           // scheduling must not treat a failed action as a zero-rank outcome.
           // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L164-L181
-          rankLoss: stubNs["bladeburner"]["getActionRankLoss"](type as never, name as never),
-          ...(type === "blackop" ? { rankNeeded: stubNs["bladeburner"]["getBlackOpRank"](name as never) } : {}),
-        });
-      }
-    }
-    const skills: Record<string, { level: number; upgradeCost: number }> = {};
-    for (const skill of stubNs["bladeburner"]["getSkillNames"]()) {
-      skills[String(skill)] = {
-        level: stubNs["bladeburner"]["getSkillLevel"](skill),
-        upgradeCost: stubNs["bladeburner"]["getSkillUpgradeCost"](skill, 1),
-      };
-    }
-    return [emitPartial("bladeburner", { actions, skills })];
+          action.rankLoss = stubNs["bladeburner"]["getActionRankLoss"](action.type as never, action.name as never);
+          if (action.type === "blackop") {
+            action.rankNeeded = stubNs["bladeburner"]["getBlackOpRank"](action.name as never);
+          }
+        }
+        acc["actionsComplete"] = true;
+      },
+    },
+    {
+      id: "skills",
+      methods: [
+        "bladeburner.getSkillNames",
+        "bladeburner.getSkillLevel",
+        "bladeburner.getSkillUpgradeCost",
+      ],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        const skills: Record<string, { level: number; upgradeCost: number }> = {};
+        for (const skill of stubNs["bladeburner"]["getSkillNames"]()) {
+          skills[String(skill)] = {
+            level: stubNs["bladeburner"]["getSkillLevel"](skill),
+            upgradeCost: stubNs["bladeburner"]["getSkillUpgradeCost"](skill, 1),
+          };
+        }
+        acc["skills"] = skills;
+      },
+    },
+  ],
+  // The action table is published ONLY once every step that fills a row has
+  // run. A half-filled row is not a missing field, it is a WRONG one: the topic
+  // merges shallowly, so `countRemaining: 0` on every row replaces a good table
+  // with one stepBladeburner filters away entirely (decide.ts, `countRemaining
+  // > 0`), and one the endgame estimate reads as "every Black Op complete".
+  // Keeping the previous sweep is the correct partial. Skills are their own
+  // independent field and are emitted whenever their step ran.
+  finish(acc) {
+    const skills = acc["skills"] as Record<string, { level: number; upgradeCost: number }> | undefined;
+    if (!acc["actionsComplete"] && !skills) return [];
+    return [emitPartial("bladeburner", {
+      ...(acc["actionsComplete"] ? { actions: bladeActions(acc) } : {}),
+      ...(skills ? { skills } : {}),
+    })];
   },
 };
+
+const BLADE_CITY_NAMES = ["Aevum", "Chongqing", "Sector-12", "New Tokyo", "Ishima", "Volhaven"];
+
+interface BladeCityAcc { name: string; population: number; communities: number; chaos: number }
+
+function bladeCityRows(acc: ProbeAcc): BladeCityAcc[] {
+  return (acc["cities"] as BladeCityAcc[] | undefined) ?? [];
+}
 
 const bladeCities: DodgedProbe = {
   id: "bladeburner.cities",
@@ -1247,21 +1576,55 @@ const bladeCities: DodgedProbe = {
   requires: "bladeburner",
   everyMs: MIN_2,
   merge: true,
-  methods: [
-    "bladeburner.getCityEstimatedPopulation",
-    "bladeburner.getCityCommunities",
-    "bladeburner.getCityChaos",
-    "bladeburner.getBonusTime",
+  // Three independent 4 GB per-city reads over a fixed name list; getBonusTime
+  // is 0 GB and rides along. 13.6 GB in one block becomes 5.6 GB peak for two
+  // extra stub bases (+3.2 GB).
+  steps: [
+    {
+      id: "population",
+      methods: ["bladeburner.getCityEstimatedPopulation"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        acc["cities"] = BLADE_CITY_NAMES.map((name) => ({
+          name,
+          population: stubNs["bladeburner"]["getCityEstimatedPopulation"](name as never),
+          communities: 0,
+          chaos: 0,
+        }));
+      },
+    },
+    {
+      id: "communities",
+      methods: ["bladeburner.getCityCommunities"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        for (const city of bladeCityRows(acc)) {
+          city.communities = stubNs["bladeburner"]["getCityCommunities"](city.name as never);
+        }
+      },
+    },
+    {
+      id: "chaos",
+      methods: ["bladeburner.getCityChaos", "bladeburner.getBonusTime"],
+      run(stubNs: NS, _ctx: ProbeContext, acc) {
+        for (const city of bladeCityRows(acc)) {
+          city.chaos = stubNs["bladeburner"]["getCityChaos"](city.name as never);
+        }
+        acc["bonusTime"] = stubNs["bladeburner"]["getBonusTime"]();
+        acc["citiesComplete"] = true;
+      },
+    },
   ],
-  run(stubNs: NS) {
-    const names = ["Aevum", "Chongqing", "Sector-12", "New Tokyo", "Ishima", "Volhaven"];
-    const cities = names.map((name) => ({
-      name,
-      population: stubNs["bladeburner"]["getCityEstimatedPopulation"](name as never),
-      communities: stubNs["bladeburner"]["getCityCommunities"](name as never),
-      chaos: stubNs["bladeburner"]["getCityChaos"](name as never),
-    }));
-    return [emitPartial("bladeburner", { cities, bonusTime: stubNs["bladeburner"]["getBonusTime"]() })];
+  // Same rule as the action table: a row whose communities/chaos step did not
+  // fit would publish 0 for both, and a shallow merge turns that into a chaos
+  // reading the decider trusts (CHAOS_CEILING) — silently disabling Diplomacy
+  // in a city that is actually over the ceiling. A missed sweep keeps the last
+  // good one instead. `bonusTime` is read in the same step, so it is never a
+  // fabricated 0 either.
+  finish(acc) {
+    if (!acc["citiesComplete"]) return [];
+    return [emitPartial("bladeburner", {
+      cities: bladeCityRows(acc),
+      bonusTime: acc["bonusTime"] as number | undefined,
+    })];
   },
 };
 
@@ -1571,7 +1934,7 @@ export const DODGED_PROBES: readonly DodgedProbe[] = [
   corpCore,
   corpDivisions,
   bladeCore,
-  bladeActions,
+  bladeActionsProbe,
   bladeCities,
   sleevesCore,
   stanekCore,

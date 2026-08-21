@@ -58,6 +58,24 @@ export interface GoState {
   /** Controlled empty territory per colour, from ns.go.analysis. */
   territory?: { black: number; white: number };
   stats?: GoOpponentStats[];
+  /** True while the held board is a local simulation that has not been proven
+   * equal to the game's. A turn was dispatched whose outcome never merged, a
+   * local rule disagreed with the game, or the post-turn verification could not
+   * run. The next Go pass re-reads board AND history before planning. */
+  boardUnverified?: boolean;
+  /** Times the mirror was rebuilt from the game because it could not be proven
+   * current. Counts every cause — refused move, rules drift, killed stub,
+   * verified drift — so one number answers "did this happen?". */
+  boardResyncs?: number;
+  lastBoardResyncAt?: number;
+  /** Why. A refused turn shows a failure in `lastTurn`; a silent divergence
+   * shows nothing at all unless this says so. */
+  lastBoardResyncReason?: string;
+  /** Times the post-turn verification found the game board and the mirror
+   * genuinely different. A subset of `boardResyncs`, and the one that indicts
+   * shared/strategy/go/rules.ts rather than an interrupted turn. */
+  boardDrifts?: number;
+  lastBoardDriftAt?: number;
   plan?: GoPlan;
   /** Outcome paired with the latest decision. Historical state records retain
    * each pair, while the live topic stays bounded to one turn. */
@@ -185,6 +203,11 @@ export interface GoTurnResult {
    * resume, or the unseeded fallback. Its presence is what distinguishes
    * those from an aligned turn, so nothing else needs to record alignment. */
   prediction?: GoTurnPrediction;
+  /** Post-turn proof of the mirror against the game board, and what it cost.
+   * That cost is paid before the NEXT turn's plan begins, so it lands in the
+   * next turn's `admitMs`; it is published here because this is the only place
+   * a reader can find the explanation for that segment. */
+  boardVerify?: { ms: number; result: "match" | "drift" | "unavailable" | "skipped" };
   ok: boolean;
   detail: string;
 }

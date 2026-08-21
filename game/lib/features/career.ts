@@ -735,7 +735,12 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
   const bandPriority = priorityForBand(candidate?.workPriority ?? "income");
 
   const actionType = schedule.due ? candidate?.action.type : undefined;
-  const methods = careerMethods(actionType);
+  // The same signal the dodge uses, so the reservation matches what the stub
+  // can actually spend.
+  const methods = careerMethods(
+    actionType,
+    actionType === "company" && promotionField(ctx.state, candidate?.action.subject) !== undefined,
+  );
   if (actionType && methods.length > 0) {
     // Player time and the dodge that STARTS that work are one atomic action —
     // the same rule factions applies to its work RAM. Left at the probe band,
@@ -849,13 +854,18 @@ function actionClaimId(type: string): string {
   return `action:${type}`;
 }
 
-function careerMethods(type: string | undefined): readonly string[] {
+function careerMethods(type: string | undefined, promotion = false): readonly string[] {
   switch (type) {
     case "crime": return ["singularity.commitCrime", "singularity.getCurrentWork"];
     case "gym": return ["singularity.gymWorkout", "singularity.getCurrentWork"];
     case "class": return ["singularity.universityCourse", "singularity.getCurrentWork"];
-    // applyToCompany rides along for the opportunistic promotion check.
-    case "company": return ["singularity.workForCompany", "singularity.applyToCompany", "singularity.getCurrentWork"];
+    // applyToCompany rides along ONLY when a promotion is actually due, exactly
+    // as the dodge decides it. Pricing it unconditionally over-reserved 3 GB on
+    // every ordinary work start — 12 GB at SF4 level 2, 48 at level 0, since the
+    // singularity multiplier scales it.
+    case "company": return promotion
+      ? ["singularity.workForCompany", "singularity.applyToCompany", "singularity.getCurrentWork"]
+      : ["singularity.workForCompany", "singularity.getCurrentWork"];
     case "apply": return ["singularity.applyToCompany", "singularity.getCurrentWork"];
     case "promote": return ["singularity.applyToCompany", "singularity.getCurrentWork"];
     case "quit": return ["singularity.quitJob", "singularity.getCurrentWork"];
