@@ -1,5 +1,5 @@
 import type { NS } from "@ns";
-import { bitNodeMultipliers, effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
+import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { formatMoney, formatNumber } from "../../../shared/format.ts";
 import { makeHackContext } from "../../../shared/formulas.ts";
 import { linearValueCurve, PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
@@ -7,6 +7,7 @@ import { installHorizonSec } from "../../../shared/strategy/progression/forecast
 import {
   stepHacknet,
   type HacknetMilestone,
+  type HacknetMilestoneKind,
   type HacknetView,
   type UpgradeOption,
 } from "../../../shared/strategy/hacknet/decide.ts";
@@ -28,6 +29,7 @@ import { coarseHorizonSec, scoreInvestment } from "../../../shared/strategy/inve
 import type { NeedUrgency } from "../../../shared/strategy/needs.ts";
 import { isScriptDeath } from "../errors.ts";
 import { moneyRateValue } from "../income.ts";
+import type { HacknetNodeDigest } from "../../../shared/telemetry/topics/hacknet.ts";
 import { merge } from "../state.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { FeatureClaim } from "./claims.ts";
@@ -62,10 +64,14 @@ function milestonePriority(urgency: NeedUrgency): number {
 }
 
 function factionMilestones(ctx: HacknetViewContext, topic: NonNullable<HacknetViewContext["state"]["topics"]["hacknet"]>): HacknetMilestone[] {
+  // Reached only through `buildView`, which has already refused a topic with
+  // no node list; the fallback keeps the totals honest rather than throwing if
+  // that ever stops being true.
+  const nodes = topic.nodes ?? [];
   const totals = {
-    hacknetRam: topic.nodes.reduce((sum, node) => sum + node.ram, 0),
-    hacknetCores: topic.nodes.reduce((sum, node) => sum + node.cores, 0),
-    hacknetLevels: topic.nodes.reduce((sum, node) => sum + node.level, 0),
+    hacknetRam: nodes.reduce((sum, node) => sum + node.ram, 0),
+    hacknetCores: nodes.reduce((sum, node) => sum + node.cores, 0),
+    hacknetLevels: nodes.reduce((sum, node) => sum + node.level, 0),
   };
   return ctx.board.open
     .filter((need) => need.kind === "hacknetRam" || need.kind === "hacknetCores" || need.kind === "hacknetLevels")
@@ -74,6 +80,7 @@ function factionMilestones(ctx: HacknetViewContext, topic: NonNullable<HacknetVi
       target: need.target,
       have: totals[need.kind as keyof typeof totals],
       priority: milestonePriority(need.urgency),
+      urgency: need.urgency,
     }));
 }
 
@@ -162,68 +169,138 @@ function decideHashes(ctx: HacknetViewContext): HashDecision | undefined {
   });
 }
 
-function buildView(ctx: HacknetViewContext, moneyGranted: number): HacknetView | undefined {
+export interface HacknetBasis {
+  hashMode: boolean;
+  /** Dollars one hash is worth, from the observed "Sell for Money" quote.
+   * Production above the bank's capacity is auto-sold upstream at exactly this
+   * rate, so this stays the correct valuation even with a full bank.
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/HacknetHelpers.tsx#L419-L429 */
+  hashDollarValue: number;
+  fleetUtilization: number;
+  fleetDemanded: boolean;
+}
+
+/** The quantities every hacknet decision depends on, derived ONCE per pass so
+ * the view, the executed purchase and the published digest cannot disagree.
+ *
+ * `undefined` means we must not decide yet. In hash mode that includes "the
+ * sale quote has not been observed": valuing a hash at zero there would score
+ * every upgrade at zero production, publish an all-zero table and silently
+ * freeze purchasing — which reads exactly like a considered hold. */
+export function hacknetBasis(ctx: HacknetViewContext): HacknetBasis | undefined {
   const topic = ctx.state.topics.hacknet;
   if (!topic) return undefined;
-
   const hashMode =
     ctx.caps.restrictions.disableHacknetServer !== true &&
     (ctx.caps.bitNode === 9 || (ctx.caps.sourceFiles["9"] ?? 0) > 0);
-  const hashDollarValue = hashMode && topic.hashes && topic.hashes.sellForMoneyCost > 0
-    ? HASH_SALE_DOLLARS / topic.hashes.sellForMoneyCost
-    : hashMode ? 0 : 1;
+  const saleCost = topic.hashes?.sellForMoneyCost ?? 0;
+  if (hashMode && !(saleCost > 0)) return undefined;
+  const fleet = ctx.state.topics.fleet;
+  const fleetUtilization = fleet && fleet.maxRam > 0 ? fleet.usedRam / fleet.maxRam : 0;
+  return {
+    hashMode,
+    hashDollarValue: hashMode ? HASH_SALE_DOLLARS / saleCost : 1,
+    fleetUtilization,
+    fleetDemanded: (ctx.state.topics.farm?.moneyPerSecPerGb ?? 0) > 0 && fleetUtilization >= 0.8,
+  };
+}
 
-  const nodes = (topic.nodes ?? []).map((node, index) => ({
+export interface UpgradeValuation {
+  /** Dollars per second the upgrade adds. */
+  value: number;
+  /** Which use of the new GB won, for hacknet-server RAM only. Published so
+   * the panel can say WHY a RAM upgrade is worth what it is. */
+  ramBasis?: "idle" | "occupied";
+}
+
+/** Dollars per second one upgrade adds — the same unit for every kind. */
+export function upgradeValue(
+  node: HacknetNodeDigest,
+  kind: string,
+  basis: HacknetBasis,
+  farmPerGb: number,
+): UpgradeValuation {
+  // Cache buys hash CAPACITY, never production. Only a capacity milestone can
+  // justify it; crediting it with production would corrupt every payback.
+  if (kind === "cache") return { value: 0 };
+  const shape = {
+    level: node.level,
+    ram: node.ram,
+    cores: node.cores,
+    production: node.production,
+    ramUsed: node.ramUsed,
+  };
+  const idle = productionDelta(shape, kind as "level" | "ram" | "core", basis.hashMode) * basis.hashDollarValue;
+  if (!basis.hashMode || kind !== "ram") return { value: idle };
+
+  // Hacknet-server RAM is hash capacity and fleet RAM at once, and the two are
+  // mutually exclusive: idle RAM raises the free-RAM hash multiplier, occupied
+  // RAM earns hacking money but produces FEWER hashes. Adding both would count
+  // the same GB twice. Which one happens is the scheduler's call, so take the
+  // better of the two rather than switching on a utilization threshold — a
+  // threshold quotes the idle case while the scheduler fills the RAM anyway,
+  // and jumps discontinuously the moment the fleet crosses it.
+  const occupied = productionDeltaWithAddedRamOccupied(shape) * basis.hashDollarValue + node.ram * farmPerGb;
+  return occupied > idle ? { value: occupied, ramBasis: "occupied" } : { value: idle, ramBasis: "idle" };
+}
+
+/** Progress toward the non-income milestones. RAM and cache both DOUBLE, so
+ * each adds exactly what the node already has. */
+function upgradeProgress(node: HacknetNodeDigest, kind: string): Partial<Record<HacknetMilestoneKind, number>> {
+  if (kind === "ram") return { hacknetRam: node.ram };
+  if (kind === "core") return { hacknetCores: 1 };
+  if (kind === "level") return { hacknetLevels: 1 };
+  if (kind === "cache") return { hashCapacity: node.hashCapacity ?? 0 };
+  return {};
+}
+
+export function buildView(
+  ctx: HacknetViewContext,
+  moneyGranted: number,
+  basis: HacknetBasis,
+  hashes: HashDecision | undefined,
+): HacknetView | undefined {
+  const topic = ctx.state.topics.hacknet;
+  // `nextUpgrades` arrives from a PARTIAL emission, so the topic can exist
+  // holding prices and no node list. Nothing can be valued without the nodes.
+  if (!topic?.nodes) return undefined;
+
+  const nodes = topic.nodes.map((node, index) => ({
     index,
     level: node.level,
     ram: node.ram,
     cores: node.cores,
-    production: node.production * hashDollarValue,
+    production: node.production * basis.hashDollarValue,
     ramUsed: node.ramUsed,
   }));
 
-  const fleet = ctx.state.topics.fleet;
-  const fleetUtilization = fleet && fleet.maxRam > 0 ? fleet.usedRam / fleet.maxRam : 0;
-  const fleetDemanded = (ctx.state.topics.farm?.moneyPerSecPerGb ?? 0) > 0 && fleetUtilization >= 0.8;
-  const upgrades: UpgradeOption[] = (topic.nextUpgrades ?? []).map((upgrade) => ({
-    kind: upgrade.kind as UpgradeOption["kind"],
-    node: upgrade.node,
-    cost: upgrade.cost,
-    deltaProduction: (() => {
-      const raw = topic.nodes[upgrade.node]?.production ?? 0;
-      const node = topic.nodes[upgrade.node];
-      if (!node) return 0;
-      if (upgrade.kind === "cache") return 0;
-      const nativeDelta = productionDelta(
-        { level: node.level, ram: node.ram, cores: node.cores, production: raw, ramUsed: node.ramUsed },
-        upgrade.kind as "level" | "ram" | "core",
-        hashMode,
-      );
-      // Hacknet-server RAM is simultaneously hash capacity and fleet RAM.
-      const fleetDelta = hashMode && upgrade.kind === "ram" && fleetDemanded
-        ? node.ram * (ctx.state.topics.farm?.moneyPerSecPerGb ?? 0)
-        : 0;
-      const hashDelta = hashMode && upgrade.kind === "ram" && fleetDemanded
-        ? productionDeltaWithAddedRamOccupied({ level: node.level, ram: node.ram, cores: node.cores, production: raw, ramUsed: node.ramUsed })
-        : nativeDelta;
-      return hashDelta * hashDollarValue + fleetDelta;
-    })(),
-    progress: (() => {
-      const node = topic.nodes[upgrade.node];
-      if (!node) return {};
-      if (upgrade.kind === "ram") return { hacknetRam: node.ram };
-      if (upgrade.kind === "core") return { hacknetCores: 1 };
-      if (upgrade.kind === "level") return { hacknetLevels: 1 };
-      if (upgrade.kind === "cache") return { hashCapacity: node.hashCapacity ?? 0 };
-      return {};
-    })(),
-  }));
+  const farmPerGb = ctx.state.topics.farm?.moneyPerSecPerGb ?? 0;
+  const upgrades: UpgradeOption[] = (topic.nextUpgrades ?? []).flatMap((upgrade) => {
+    const node = topic.nodes[upgrade.node];
+    if (!node) return [];
+    const valued = upgradeValue(node, upgrade.kind, basis, farmPerGb);
+    return [{
+      kind: upgrade.kind as UpgradeOption["kind"],
+      node: upgrade.node,
+      cost: upgrade.cost,
+      deltaProduction: valued.value,
+      progress: upgradeProgress(node, upgrade.kind),
+      ...(valued.ramBasis ? { ramBasis: valued.ramBasis } : {}),
+    }];
+  });
 
   const sf12 = ctx.caps.sourceFiles["12"] ?? 0;
-  const nodeMult = bitNodeMultipliers(ctx.caps.bitNode, sf12)?.HacknetNodeMoney ?? 0;
+  // The same multiplier source as every other hacknet estimate, BitNode-option
+  // overrides included. Defaulting to 1 rather than 0 is load-bearing: a
+  // missing row must not read as "a fresh node earns nothing", which would
+  // stop the very first node from ever being bought.
+  const nodeMult = effectiveBitNodeMultipliers(
+    ctx.caps.bitNode,
+    sf12,
+    ctx.state.topics.progression?.multipliers,
+  )?.HacknetNodeMoney ?? 1;
   const playerMult = ctx.state.topics.player?.mults.hacknet_node_money ?? 1;
-  const freshNative = freshProduction(hashMode, playerMult, nodeMult);
-  const hashes = decideHashes(ctx);
+  const freshNative = freshProduction(basis.hashMode, playerMult, nodeMult);
   const milestones = factionMilestones(ctx, topic);
   if (hashes?.capacityTarget !== undefined) {
     const selectedHashGoal = hashes.ranked[0];
@@ -237,6 +314,7 @@ function buildView(ctx: HacknetViewContext, moneyGranted: number): HacknetView |
       priority: selectedHashGoal?.urgency
         ? milestonePriority(selectedHashGoal.urgency)
         : PRIORITY["hacknet:wanted-need"],
+      urgency: selectedHashGoal?.urgency ?? "wanted",
     });
   }
 
@@ -246,20 +324,20 @@ function buildView(ctx: HacknetViewContext, moneyGranted: number): HacknetView |
     maxNodes: topic.maxNumNodes ?? Infinity,
     // A fresh Hacknet Server has 1 GB and cannot fit our 1.7 GB worker. It is
     // hash production first; its later RAM upgrades enter the fleet valuation.
-    newNodeProduction: freshNative * hashDollarValue,
-    ...(hashMode ? { newNodeHashCapacity: 64 } : {}),
+    newNodeProduction: freshNative * basis.hashDollarValue,
+    ...(basis.hashMode ? { newNodeHashCapacity: 64 } : {}),
     upgrades,
     moneyGranted,
     // Expected remaining run time from the endgame route decision. This is
     // the number that makes "worth buying?" a real question: an upgrade that
     // cannot repay itself before the run ends is a loss, not an investment.
     horizonSec: installHorizonSec(ctx.horizons),
-    hashMode,
+    hashMode: basis.hashMode,
     milestones,
   };
 }
 
-async function execute(_ns: NS, ctx: DriverContext, buy: UpgradeOption): Promise<void> {
+async function execute(ctx: DriverContext, buy: UpgradeOption): Promise<void> {
   const methods = hacknetMethods(buy.kind);
   const at = Date.now();
   const outcome = await featureDodge(
@@ -341,20 +419,26 @@ const driver: FeatureDriver = {
   id: "hacknet",
   everyMs: 10_000,
   async tick(ctx: DriverContext) {
-    const view = buildView(ctx, ctx.grants.money);
+    const basis = hacknetBasis(ctx);
+    if (!basis) return;
+    // ONE hash decision per pass. It runs the exact cycle solver three times
+    // over inside `targetHashValues`, so recomputing it for the view, the
+    // digest and the spend would triple that for an identical answer.
+    const hashDecision = decideHashes(ctx);
+    const view = buildView(ctx, ctx.grants.money, basis, hashDecision);
     if (!view) return;
     const decision = stepHacknet(view);
-    const hashDecision = decideHashes(ctx);
 
     const topic = ctx.state.topics.hacknet!;
-    const hashDollarValue = view.hashMode && topic.hashes && topic.hashes.sellForMoneyCost > 0
-      ? HASH_SALE_DOLLARS / topic.hashes.sellForMoneyCost
-      : view.hashMode ? 0 : 1;
-    const fleet = ctx.state.topics.fleet;
-    const fleetUtilization = fleet && fleet.maxRam > 0 ? fleet.usedRam / fleet.maxRam : 0;
-    const fleetDemanded = (ctx.state.topics.farm?.moneyPerSecPerGb ?? 0) > 0 && fleetUtilization >= 0.8;
+    const { hashDollarValue, fleetUtilization, fleetDemanded } = basis;
     const candidate = decision.ranked[0];
     const evaluatedAt = Date.now();
+
+    // The top of the ranking, plus the rung actually bought when the grant
+    // forced a fall-through past it. Without that the panel would show no
+    // highlighted row at all while `buy` reports a purchase.
+    const shown = decision.ranked.slice(0, 6);
+    if (decision.buy && !shown.includes(decision.buy)) shown.push(decision.buy);
 
     merge(ctx.state, "hacknet", {
       plan: {
@@ -369,7 +453,7 @@ const driver: FeatureDriver = {
         ...(candidate ? { candidate: { kind: candidate.kind, node: candidate.node, cost: candidate.cost } } : {}),
         ...(decision.buy ? { buy: { kind: decision.buy.kind, node: decision.buy.node, cost: decision.buy.cost } } : {}),
         rankedTotal: decision.ranked.length,
-        ranked: decision.ranked.slice(0, 6).map((entry, index) => ({
+        ranked: shown.map((entry, index) => ({
           kind: entry.kind,
           ...(entry.node !== undefined ? { node: entry.node } : {}),
           label: `${entry.kind}${entry.node !== undefined ? ` #${entry.node}` : ""}`,
@@ -379,7 +463,15 @@ const driver: FeatureDriver = {
           paybackSec: entry.paybackSec,
           netOverHorizon: entry.netOverHorizon,
           worthBuying: Boolean(entry.milestone) || entry.netOverHorizon > 0,
-          selected: index === 0,
+          // Which use of a server RAM upgrade's new GB set its value — the
+          // one part of the valuation that is not visible from cost and rate.
+          // Carried from the ranking, never recomputed, so the panel cannot
+          // quote a basis the decision did not use.
+          ...(entry.ramBasis ? { ramBasis: entry.ramBasis } : {}),
+          // The purchase, not the leader: when the leader costs more than the
+          // grant the driver falls through to the best affordable rung, and
+          // highlighting the leader would misreport what was bought.
+          selected: decision.buy ? entry === decision.buy : index === 0,
           ...(entry.milestone ? { milestone: {
             kind: entry.milestone.kind,
             target: entry.milestone.target,
@@ -429,22 +521,33 @@ const driver: FeatureDriver = {
       },
     });
 
-    try {
-      if (decision.buy) await execute(ctx.ns, ctx, decision.buy);
-      if (hashDecision) await spendHashes(ctx, hashDecision);
-    } catch (error) {
-      if (isScriptDeath(error)) throw error;
-      if (decision.buy) {
+    // Each action reports its OWN failure. Sharing one catch attributed a
+    // failed hash spend to the purchase whenever both ran in the same pass.
+    if (decision.buy) {
+      try {
+        await execute(ctx, decision.buy);
+      } catch (error) {
+        if (isScriptDeath(error)) throw error;
         lastResult = { action: decision.buy.kind, ok: false, detail: String(error), at: Date.now() };
-      } else {
-        lastHashResult = { action: hashDecision?.spend?.name ?? "hashes", ok: false, detail: String(error), at: Date.now() };
+      }
+    }
+    if (hashDecision) {
+      try {
+        await spendHashes(ctx, hashDecision);
+      } catch (error) {
+        if (isScriptDeath(error)) throw error;
+        lastHashResult = { action: hashDecision.spend?.name ?? "hashes", ok: false, detail: String(error), at: Date.now() };
       }
     }
   },
 };
 
 function claims(ctx: ClaimContext): FeatureClaim[] {
-  const view = buildView(ctx, Infinity);
+  const basis = hacknetBasis(ctx);
+  if (!basis) return [];
+  // One hash decision, shared with the view below — see the note in `tick`.
+  const hashes = decideHashes(ctx);
+  const view = buildView(ctx, Infinity, basis, hashes);
   const decision = view ? stepHacknet(view) : undefined;
   const best = decision?.buy;
   const out: FeatureClaim[] = [];
@@ -473,7 +576,6 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
       returnPerDollarSec: scored.returnPerDollarSec,
     });
   }
-  const hashes = decideHashes(ctx);
   if (hashes?.spend) {
     out.push(actionRamClaim(ctx, "hacknet", "action:spend-hashes", HASH_SPEND_METHODS));
   }

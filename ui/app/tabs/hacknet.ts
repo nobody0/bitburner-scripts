@@ -45,13 +45,20 @@ export const hacknetTab: Tab = {
           ["upgrade", "cost", "adds $/sec", "payback", "horizon net", "basis"],
           h.plan.ranked.map((u) => [
             esc(u.label),
-            fmtMoney(u.cost),
-            fmtMoney(u.deltaProduction),
+            // An upgrade the grant cannot reach yet is a different kind of
+            // "not bought" than one that never repays; say which.
+            h.plan!.moneyGranted < u.cost ? hint(fmtMoney(u.cost), "over the current grant") : fmtMoney(u.cost),
+            u.ramBasis
+              ? hint(fmtMoney(u.deltaProduction), u.ramBasis === "occupied"
+                ? "valued as fleet RAM: farm income beats the hashes the busy RAM gives up"
+                : "valued as idle RAM: the free-RAM hash multiplier beats farming it")
+              : fmtMoney(u.deltaProduction),
             hint(fmtTime(u.paybackSec * 1000), `return/$ ${fmtNum(u.returnPerDollarSec, 8)}`),
             fmtMoney(u.netOverHorizon),
             esc(u.milestone
               ? `${u.milestone.kind} ${fmtNum(u.milestone.have, 0)}/${fmtNum(u.milestone.target, 0)}`
-              : u.worthBuying === true ? "repays" : u.worthBuying === false ? "past horizon" : ""),
+              : u.worthBuying === true ? (h.plan!.moneyGranted < u.cost ? "repays, over grant" : "repays")
+              : u.worthBuying === false ? "past horizon" : ""),
           ]),
           { selected: (i) => h.plan!.ranked[i]!.selected, left: [0, 5] },
         )
@@ -62,7 +69,9 @@ export const hacknetTab: Tab = {
           { label: "horizon", value: Number.isFinite(h.plan.horizonSec) ? fmtTime(h.plan.horizonSec * 1000) : "–" },
           { label: "cash / grant", value: `${fmtMoney(h.plan.moneyAvailable)} / ${fmtMoney(h.plan.moneyGranted)}` },
           { label: "hash value", value: `${fmtMoney(h.plan.hashDollarValue)}/hash` },
-          { label: "fleet load", value: `${fmtNum(h.plan.fleetUtilization * 100, 1)}%`, sub: h.plan.fleetDemanded === true ? "Hacknet RAM has farm value" : h.plan.fleetDemanded === false ? "RAM demand not saturated" : "basis unavailable" },
+          // Context, not a switch: RAM upgrades are valued as the better of
+          // idle-hash and occupied-farm regardless, and each row says which won.
+          { label: "fleet load", value: `${fmtNum(h.plan.fleetUtilization * 100, 1)}%`, sub: h.plan.fleetDemanded === true ? "fleet RAM is scarce" : h.plan.fleetDemanded === false ? "fleet RAM is spare" : "basis unavailable" },
         ]) +
         (h.plan.lastResult ? outcome(h.plan.lastResult) : "") +
         upgrades +

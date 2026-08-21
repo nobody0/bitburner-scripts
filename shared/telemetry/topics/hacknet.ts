@@ -59,6 +59,10 @@ export interface HacknetPlan {
     paybackSec: number;
     netOverHorizon: number;
     worthBuying: boolean;
+    /** Hacknet-server RAM only: whether the new GB were valued as idle hash
+     * capacity or as occupied fleet RAM. The two are mutually exclusive, and
+     * the better of them sets the rate above. */
+    ramBasis?: "idle" | "occupied";
     selected: boolean;
     milestone?: { kind: string; target: number; have: number; delta: number; priority: number };
   }[];

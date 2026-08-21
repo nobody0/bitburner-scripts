@@ -1,6 +1,7 @@
 import type { Need, NeedUrgency } from "../needs.ts";
 import type { HackContext } from "../../formulas.ts";
 import { solveCycle, type RamCaps, type TargetStatics } from "../targeting.ts";
+import { HASH_SALE_DOLLARS } from "./formulas.ts";
 
 /** Pinned v3.0.1 registry for hash upgrade names, costs, targets, and effects:
  * https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Hacknet/HashUpgrades.ts
@@ -118,7 +119,7 @@ export function stepHashes(view: HashView): HashDecision {
   for (const goal of view.goals) {
     const quote = quotes.get(goal.name);
     if (!quote || !Number.isFinite(quote.cost) || quote.cost <= 0) continue;
-    const lostSaleValue = sell && sell.cost > 0 ? (quote.cost / sell.cost) * 1_000_000 : 0;
+    const lostSaleValue = sell && sell.cost > 0 ? (quote.cost / sell.cost) * HASH_SALE_DOLLARS : 0;
     const netDollars = goal.valueDollars === undefined ? undefined : goal.valueDollars - lostSaleValue;
     ranked.push({
       ...goal,

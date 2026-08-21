@@ -206,9 +206,6 @@ export class HacknetSystem {
     if (!Number.isFinite(cost) || this.#player.money < cost) return false;
     this.#player.money -= cost;
     this.#world.recordMoney("hacknet_expenses", -cost);
-    this.#world.recordMoney("hacknet_expenses", -cost);
-    this.#world.recordMoney("hacknet_expenses", -cost);
-    this.#world.recordMoney("hacknet_expenses", -cost);
     node.cache = Math.min(HacknetServerConstants.MaxCache, (node.cache ?? 1) + n);
     return true;
   }

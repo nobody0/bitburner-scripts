@@ -107,6 +107,38 @@ describe("purchase selection", () => {
     expect(decision.ranked[0]!.cost).toBeGreaterThan(100);
   });
 
+  test("an unaffordable leader falls through to the best affordable rung", () => {
+    // Idling a grant that already covers a profitable upgrade earns nothing,
+    // and taking it does not cost us the leader: the income reaches the same
+    // fund. So the leader is noted and the affordable rung is bought.
+    const leader = upgrade({ kind: "ram", node: 0, cost: 1e9, deltaProduction: 1e6 });
+    const affordable = upgrade({ kind: "level", node: 1, cost: 1_000, deltaProduction: 1 });
+    const decision = stepHacknet(view({ upgrades: [leader, affordable], moneyGranted: 5_000 }));
+    expect(decision.ranked[0]!.kind).toBe("ram");
+    expect(decision.buy?.kind).toBe("level");
+  });
+
+  test("but a MILESTONE leader is saved for, not skipped", () => {
+    // A goal is not an optimization: spending the grant elsewhere delays it.
+    const leader = upgrade({ kind: "core", node: 0, cost: 1e9, deltaProduction: 0, progress: { hacknetCores: 1 } });
+    const affordable = upgrade({ kind: "level", node: 1, cost: 1_000, deltaProduction: 1 });
+    const decision = stepHacknet(view({
+      upgrades: [leader, affordable],
+      milestones: [{ kind: "hacknetCores", target: 4, have: 3, priority: 75, urgency: "blocking" }],
+      moneyGranted: 5_000,
+    }));
+    expect(decision.ranked[0]!.kind).toBe("core");
+    expect(decision.buy).toBeUndefined();
+  });
+
+  test("the fall-through still refuses anything that loses money", () => {
+    const leader = upgrade({ kind: "ram", node: 0, cost: 1e9, deltaProduction: 1e6 });
+    const losing = upgrade({ kind: "level", node: 1, cost: 1_000, deltaProduction: 0.01 });
+    const decision = stepHacknet(view({ upgrades: [leader, losing], horizonSec: 3_600, moneyGranted: 5_000 }));
+    expect(netOverHorizon(losing, 3_600)).toBeLessThan(0);
+    expect(decision.buy).toBeUndefined();
+  });
+
   test("ranking is deterministic under ties", () => {
     const a = upgrade({ kind: "level", node: 0 });
     const b = upgrade({ kind: "ram", node: 1 });
@@ -160,7 +192,40 @@ describe("dynamic-programming oracle", () => {
     expect(decision.buy!.node).toBe(byPayback[0]!.node!);
   });
 
-  test("greedy reaches the DP optimum when purchases are made one per tick", () => {
+  test("under a BINDING budget the greedy is honestly suboptimal, and bounded", () => {
+    // The case the arbiter actually creates, and the one the unbounded test
+    // below cannot see: when the budget cannot buy everything, ordering by
+    // payback is a heuristic, not an optimum. Pin how far off it is so a
+    // regression that makes it worse is visible.
+    const options: UpgradeOption[] = [
+      // Fastest payback (100s), but it crowds out the two below.
+      upgrade({ kind: "ram", node: 0, cost: 6_000, deltaProduction: 60 }),
+      upgrade({ kind: "level", node: 1, cost: 5_000, deltaProduction: 40 }),
+      upgrade({ kind: "level", node: 2, cost: 5_000, deltaProduction: 40 }),
+    ];
+    const horizonSec = 10_000;
+    const budget = 10_000;
+
+    let remaining = [...options];
+    let spent = 0;
+    let greedyValue = 0;
+    for (let step = 0; step < options.length; step++) {
+      const decision = stepHacknet(view({ upgrades: remaining, horizonSec, moneyGranted: budget - spent }));
+      if (!decision.buy) break;
+      spent += decision.buy.cost;
+      greedyValue += netOverHorizon(decision.buy, horizonSec);
+      remaining = remaining.filter((option) => !(option.kind === decision.buy!.kind && option.node === decision.buy!.node));
+    }
+
+    const best = optimal(options, budget, horizonSec);
+    // Greedy takes the 60/s rung and can no longer afford either 40/s rung;
+    // the optimum takes both 40/s rungs instead.
+    expect(spent).toBeLessThanOrEqual(budget);
+    expect(greedyValue).toBeLessThan(best);
+    expect(greedyValue / best).toBeGreaterThan(0.65);
+  });
+
+  test("greedy reaches the DP optimum when the budget does NOT bind", () => {
     // The driver buys ONE upgrade per tick and re-plans, so the sequence it
     // produces is greedy-by-value repeated. With no budget constraint that
     // sequence takes every positive item — which IS the knapsack optimum.
@@ -209,6 +274,37 @@ describe("dynamic-programming oracle", () => {
       milestones: [{ kind: "hashCapacity", target: 100, have: 64, priority: 45 }],
     }));
     expect(wanted.buy?.kind).toBe("cache");
+  });
+
+  test("a nice-to-have milestone orders purchases but never justifies a loss", () => {
+    // Same upgrade, same milestone, only the urgency differs. A blocking need
+    // overrides the economics; a merely nice one falls back to ROI and holds.
+    const losing = upgrade({ kind: "core", cost: 5_000, deltaProduction: 0, progress: { hacknetCores: 1 } });
+    const blocking = stepHacknet(view({
+      upgrades: [losing],
+      milestones: [{ kind: "hacknetCores", target: 4, have: 3, priority: 75, urgency: "blocking" }],
+      horizonSec: 1,
+    }));
+    expect(blocking.buy?.kind).toBe("core");
+
+    const nice = stepHacknet(view({
+      upgrades: [losing],
+      milestones: [{ kind: "hacknetCores", target: 4, have: 3, priority: 35, urgency: "nice" }],
+      horizonSec: 1,
+    }));
+    expect(nice.buy).toBeUndefined();
+    expect(nice.ranked[0]!.milestone).toBeUndefined();
+  });
+
+  test("a nice-to-have milestone still outranks a better-paying upgrade that pays", () => {
+    const fast = upgrade({ kind: "level", node: 1, cost: 100, deltaProduction: 1 });
+    const wanted = upgrade({ kind: "core", node: 0, cost: 1_000, deltaProduction: 1, progress: { hacknetCores: 1 } });
+    const decision = stepHacknet(view({
+      upgrades: [fast, wanted],
+      milestones: [{ kind: "hacknetCores", target: 4, have: 3, priority: 35, urgency: "nice" }],
+      horizonSec: 28_800,
+    }));
+    expect(decision.buy?.kind).toBe("core");
   });
 
   test("the first server can establish capacity for a hash goal", () => {

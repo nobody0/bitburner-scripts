@@ -1,4 +1,5 @@
 import { scoreInvestment } from "../investment.ts";
+import type { NeedUrgency } from "../needs.ts";
 
 /** Hacknet purchase scheduling.
  *
@@ -39,6 +40,10 @@ export interface HacknetMilestone {
   target: number;
   have: number;
   priority: number;
+  /** How badly the need is wanted. A `nice` milestone ORDERS purchases but
+   * never justifies one that loses money; `blocking` and `wanted` override the
+   * economics outright. Absent means "override", for callers with no urgency. */
+  urgency?: NeedUrgency;
 }
 
 export interface UpgradeOption {
@@ -51,6 +56,10 @@ export interface UpgradeOption {
   /** Progress toward a non-income milestone, filled by the driver from the
    * observed node state. Cache upgrades use hash-capacity units. */
   progress?: Partial<Record<HacknetMilestoneKind, number>>;
+  /** Hacknet-server RAM only: which of the two mutually exclusive uses of the
+   * new GB set `deltaProduction`. Carried through so the published digest
+   * reports the basis the ranking actually used rather than recomputing it. */
+  ramBasis?: "idle" | "occupied";
 }
 
 export interface HacknetView {
@@ -122,21 +131,29 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
 
   const ranked = candidates
     .map((option): RankedUpgrade => {
+      const payback = paybackSec(option);
+      const net = netOverHorizon(option, view.horizonSec);
       let milestone: RankedUpgrade["milestone"];
       for (const wanted of view.milestones ?? []) {
         const delta = Math.max(0, option.progress?.[wanted.kind] ?? 0);
         if (delta <= 0 || wanted.have >= wanted.target) continue;
+        // A merely nice-to-have need does not get to buy at a loss. Skipping
+        // it here (rather than after ranking) lets the option fall back into
+        // the ordinary ROI ordering instead of blocking the whole feature.
+        if (wanted.urgency === "nice" && !(net > 0)) continue;
         const remaining = wanted.target - wanted.have;
         const candidate = { ...wanted, delta, completion: Math.min(1, delta / remaining) };
+        // Both sides would be divided by this option's cost, so compare the
+        // raw completion: for one option, more progress per purchase wins.
         if (!milestone || candidate.priority > milestone.priority ||
-          (candidate.priority === milestone.priority && candidate.completion / option.cost > milestone.completion / option.cost)) {
+          (candidate.priority === milestone.priority && candidate.completion > milestone.completion)) {
           milestone = candidate;
         }
       }
       return {
         ...option,
-        paybackSec: paybackSec(option),
-        netOverHorizon: netOverHorizon(option, view.horizonSec),
+        paybackSec: payback,
+        netOverHorizon: net,
         ...(milestone ? { milestone } : {}),
       };
     })
@@ -161,13 +178,25 @@ export function stepHacknet(view: HacknetView): HacknetDecision {
       return `${a.kind}${a.node ?? ""}` < `${b.kind}${b.node ?? ""}` ? -1 : 1;
     });
 
-  // Hold when there is nothing to buy, the best candidate loses money before
-  // the horizon without a milestone to justify it, or the grant does not
-  // cover it yet.
+  // Hold when there is nothing to buy, or the best candidate loses money
+  // before the horizon without a milestone to justify it.
   const best = ranked[0];
-  if (!best || (!best.milestone && best.netOverHorizon <= 0) || best.cost > view.moneyGranted) {
-    return { ranked };
-  }
+  if (!best || (!best.milestone && best.netOverHorizon <= 0)) return { ranked };
 
-  return { buy: best, ranked };
+  // The arbiter's grant is a hard ceiling.
+  if (best.cost <= view.moneyGranted) return { buy: best, ranked };
+
+  // The leader costs more than the grant. A MILESTONE purchase is a goal, so
+  // hold and let the grant accumulate toward it. A purely economic leader is
+  // not: idling a grant that already covers a profitable rung earns nothing,
+  // and taking that rung does not cost us the leader, because the income it
+  // adds reaches the same fund. So fall through to the best affordable
+  // profitable candidate rather than waiting.
+  if (best.milestone) return { ranked };
+  // Every milestone priority is above zero, so reaching here already means no
+  // candidate carries one; the `!option.milestone` term restates that rather
+  // than guarding a reachable case, and keeps the rule true if the sort moves.
+  const affordable = ranked.find((option) =>
+    !option.milestone && option.netOverHorizon > 0 && option.cost <= view.moneyGranted);
+  return affordable ? { buy: affordable, ranked } : { ranked };
 }
