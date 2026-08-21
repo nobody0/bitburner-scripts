@@ -18,6 +18,8 @@ import { getFunctionRamCost, SCRIPT_BASE_RAM_GB, type RamCostContext } from "./r
 import { ProcessTable, ScriptDeath, type SimProcess } from "./process.ts";
 import { publicResetInfo, publicServer, resolveServer } from "./contracts.ts";
 import { makeStanek } from "./stanek.ts";
+import { makeDnet } from "./dnet.ts";
+import type { DarknetSystem } from "../features/dnet.ts";
 import { ShareBonusTime } from "../vendor/bitburner/src/NetworkShare/Share.ts";
 
 /** A synthetic Netscript runtime over SimWorld, faithful enough to run
@@ -76,6 +78,8 @@ export interface SimNsHost {
    *  run that never uses one should not carry an empty map.
    *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptPort.ts#L48-L100 */
   ports?: Map<number, unknown[]>;
+  /** The darknet, present once something can reach it. */
+  dnet?: DarknetSystem;
   ramCtx: RamCostContext;
   /** ns.getResetInfo's answer. */
   reset: ResetInfo;
@@ -810,6 +814,10 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       host,
       process,
     );
+  }
+
+  if (host.dnet) {
+    impl["dnet"] = namespace(makeDnet({ system: host.dnet, process }), "dnet", host, process);
   }
 
   if (host.hacknet) {

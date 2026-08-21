@@ -12,6 +12,22 @@
  * chances, MAX_PASSWORD_LENGTH) are written up in
  * spec/strategy/bitnodes/bn15.md rather than exported here; nothing computes
  * with them yet, and an unused constant is a claim nobody checks. */
+/** What darknet access costs, and where it can be bought.
+ *
+ * `ns.singularity.purchaseProgram` is the only scriptable path and it needs the
+ * TOR router first (`NetscriptFunctions/Singularity.ts:429-431`).
+ *
+ * Not a constant, because no code can use it: the Chongqing "Shadowed Walkway"
+ * button sells the same program for **$30m AND grants TOR free** as part of
+ * `getDarkscapeNavigator()`, so it strictly dominates — but it is a UI button
+ * with no Singularity entry point (`Locations/ui/SpecialLocation.tsx:342-390`).
+ * Noted so the cheaper figure is not mistaken for one a script can reach.
+ * Source: src/DarkNet/Constants.ts, src/DarkWeb/DarkWebItems.ts:15-19 */
+export const DARKSCAPE_COST = 50e6;
+/** CONSTANTS.TorRouterCost. A precondition of the scriptable path, and lost at
+ * every install alongside the program itself. */
+export const TOR_COST = 200e3;
+
 const MS_PER_MUTATION_PER_ROW = 30_000;
 const NET_WIDTH = 8;
 const SERVER_DENSITY = 0.6;

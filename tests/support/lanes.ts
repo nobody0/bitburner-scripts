@@ -41,6 +41,7 @@ import { isAbsolute, join, relative } from "node:path";
  * useful when it answers "I changed X, what should I re-measure?", and a
  * taxonomy finer than that just means nobody remembers the right token. */
 export type Feature =
+  | "dnet"
   | "go"
   | "hacking"
   | "progression"

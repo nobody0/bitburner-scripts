@@ -55,6 +55,11 @@ export function withDarkwebServer(network: readonly ServerSpec[]): ServerSpec[] 
  * variance then measures the strategy, not a different set of servers. */
 export const VANILLA_NETWORK_SEED = 0xb17b_0301;
 
+/** Dedicated world-generation seed for the darknet, for the same reason as the
+ * one above: a gameplay seed must not change the POPULATION, or a seed-to-seed
+ * A/B would be measuring a different net rather than a different strategy. */
+export const DARKNET_NETWORK_SEED = 0xd4e7_0301;
+
 function randomInt(rng: () => number, [min, max]: Range): number {
   return Math.floor(rng() * (max - min + 1) + min);
 }
@@ -90,7 +95,7 @@ export function generateVanillaNetwork(seed: number): GeneratedNetwork {
   return generateInitialVanillaNetworkFromRng(mulberry32(seed));
 }
 
-function randomIp(rng: () => number): string {
+export function randomIp(rng: () => number): string {
   const encoded = rng().toString(16) + "000000000";
   return (encoded.match(/..?/g) ?? []).slice(1, 5).map((part) => parseInt(part, 16)).join(".");
 }

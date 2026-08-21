@@ -60,6 +60,19 @@ export interface Capabilities {
    *  its ambition instead of discovering the restriction by failing. Distinct
    *  from `unlocked`, which is about whether we may play it at all. */
   restrictions: BitNodeDisables;
+  /** Upstream has TWO darknet gates and they are not the same test:
+   *
+   *    hasDarknetAccess()     = BN15 || SF15 || DarkscapeNavigator.exe
+   *    hasFullDarknetAccess() = BN15 || SF15
+   *
+   *  `unlocked.dnet` is the first — whether the `ns.dnet` API answers at all.
+   *  This is the second, and it is what gates the LABYRINTH: without it
+   *  `getLabyrinthDetails()` returns `lab: null` and the net stays at depth 5,
+   *  so there are no labyrinth augmentations and no Red Pill route. Buying the
+   *  program grants access without granting this.
+   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/DarkNet/effects/effects.ts#L280
+   *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/DarkNet/effects/labyrinth.ts#L486-L496 */
+  darknetFullAccess: UnlockState;
 }
 
 /** Source file level for SF n, or 0. */
@@ -165,6 +178,7 @@ export function deriveCapabilities(r: GateReadings): Capabilities {
     unlocked,
     reason,
     restrictions: { ...options },
+    darknetFullAccess: dnetNode,
   };
 }
 

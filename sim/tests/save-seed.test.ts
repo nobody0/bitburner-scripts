@@ -235,12 +235,16 @@ describe("Singularity darkweb parity", () => {
     expect(api["getDarkwebProgramCost"]!("BRUTESSH.EXE" as never)).toBe(0);
     expect(world.person.exp.intelligence).toBeCloseTo(1.5 / 5_000, 15);
 
-    resetUnmodeled();
+    // DarkscapeNavigator.exe is an ordinary darkweb purchase now that the
+    // darknet it brings into existence is modelled. It is the only program whose
+    // purchase has a side effect beyond the file — upstream calls
+    // populateDarknet() in the same hook — but this harness has no DarknetSystem
+    // attached, so only the money and the file are asserted here. The
+    // population itself is covered in sim/tests/dnet-unlock.test.ts.
     const beforeDarkscape = world.player.money;
-    expect(() => api["purchaseProgram"]!("DarkscapeNavigator.exe" as never)).toThrow("darknet population");
-    expect(files.has("DarkscapeNavigator.exe")).toBe(false);
-    expect(world.player.money).toBe(beforeDarkscape);
-    resetUnmodeled();
+    expect(api["purchaseProgram"]!("DarkscapeNavigator.exe" as never)).toBe(true);
+    expect(files.has("DarkscapeNavigator.exe")).toBe(true);
+    expect(world.player.money).toBe(beforeDarkscape - 50e6);
 
     tor = false;
     expect(api["getDarkwebPrograms"]!()).toEqual([]);

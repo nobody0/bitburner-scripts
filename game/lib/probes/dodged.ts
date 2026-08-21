@@ -1413,7 +1413,14 @@ const dnetCore: DodgedProbe = {
     // probe() returns only Darknet neighbors of the SCRIPT EXECUTION host and
     // shuffles their order. One launch is not a complete graph traversal.
     // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L314-L335
-    const hosts = stubNs["dnet"]["probe"]();
+    // probe() only sees the CALLING host's darknet neighbours, and a dodged
+    // probe lands wherever the broker leased RAM — usually not home, the one
+    // fleet host that neighbours darkweb. So the local neighbour list is a
+    // bonus, not the source: getServerDetails takes no connection requirement
+    // (checkDarknetServer is called with no options upstream), so `darkweb` —
+    // the one darknet hostname guaranteed to exist — is readable from anywhere.
+    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L382-L385
+    const hosts = [...new Set(["darkweb", ...stubNs["dnet"]["probe"]()])];
     const linked = new Set(stubNs["dnet"]["getStasisLinkedServers"]().map(String));
     let maxDepth = -1;
     const servers = [];
@@ -1465,7 +1472,9 @@ const dnetCore: DodgedProbe = {
       emit("dnet", {
         observedFrom,
         topologyComplete: false,
-        reachable: hosts.length,
+        // The local neighbour count, which is what probe() actually answers —
+        // not the size of the union we inspected.
+        reachable: Math.max(0, hosts.length - 1),
         maxDepth,
         stasisLinkLimit: stubNs["dnet"]["getStasisLinkLimit"](),
         stasisLinked: [...linked],

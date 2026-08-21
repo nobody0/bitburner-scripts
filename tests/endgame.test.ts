@@ -151,31 +151,41 @@ describe("endgame routes", () => {
       optionalInstall: { allowed: true },
     });
 
-    const bn15 = stepEndgame(view({ bitNode: 15, darknetAvailable: true }));
+    const bn15 = stepEndgame(view({ bitNode: 15, darknetFullAccess: true }));
     expect(bn15.routes.find((route) => route.id === "daedalus")!.available).toBe(false);
     expect(bn15.routes.find((route) => route.id === "labyrinth")!.available).toBe(true);
   });
 
-  test("DarkscapeNavigator access makes the labyrinth real without SF15", () => {
-    const labyrinth = stepEndgame(view({ bitNode: 1, darknetAvailable: true })).routes.find(
-      (route) => route.id === "labyrinth",
-    )!;
-    expect(labyrinth.available).toBe(true);
+  test("DarkscapeNavigator access does NOT make the labyrinth real without SF15", () => {
+    // Upstream has two gates. hasDarknetAccess() admits the program and answers
+    // the ns.dnet API; hasFullDarknetAccess() is BN15/SF15 only and is what the
+    // labyrinth needs — without it getLabyrinthDetails() returns lab: null and
+    // the net never leaves depth 5. Promising a Red Pill route off the program
+    // alone would promise a route the game does not provide.
+    const bought = stepEndgame(view({ bitNode: 1, darknetAvailable: true, darknetFullAccess: false }))
+      .routes.find((route) => route.id === "labyrinth")!;
+    expect(bought.available).toBe(false);
+    expect(bought.blocker).toContain("active SF15");
+
+    // SF15 does grant it, program or not.
+    const withSf = stepEndgame(view({ bitNode: 1, sourceFiles: { "15": 1 } }))
+      .routes.find((route) => route.id === "labyrinth")!;
+    expect(withSf.available).toBe(true);
   });
 
   test("labyrinth rewards must be installed in sequence before The Red Pill", () => {
-    const first = stepEndgame(view({ darknetAvailable: true })).routes.find((route) => route.id === "labyrinth")!;
+    const first = stepEndgame(view({ darknetFullAccess: true })).routes.find((route) => route.id === "labyrinth")!;
     expect(first.blocker).toContain(LABYRINTH_AUGMENTATIONS[0]);
     expect(first.optionalInstall.allowed).toBe(false);
 
     const queued = stepEndgame(view({
-      darknetAvailable: true,
+      darknetFullAccess: true,
       queuedAugs: [LABYRINTH_AUGMENTATIONS[0]],
     })).routes.find((route) => route.id === "labyrinth")!;
     expect(queued.mandatoryInstall).toMatchObject({ augmentation: LABYRINTH_AUGMENTATIONS[0], ready: true });
 
     const allRewards = Object.fromEntries(LABYRINTH_AUGMENTATIONS.map((name) => [name, 1]));
-    const pill = stepEndgame(view({ darknetAvailable: true, installedAugs: allRewards })).routes.find(
+    const pill = stepEndgame(view({ darknetFullAccess: true, installedAugs: allRewards })).routes.find(
       (route) => route.id === "labyrinth",
     )!;
     expect(pill.blocker).toContain(RED_PILL);

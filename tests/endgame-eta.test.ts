@@ -180,7 +180,7 @@ describe("route ETAs", () => {
   });
 
   test("labyrinth ETA includes every remaining mandatory reward install", () => {
-    const v = view({ bitNode: 15, darknetAvailable: true });
+    const v = view({ bitNode: 15, darknetFullAccess: true });
     const labyrinth = etasFor(v).find((eta) => eta.id === "labyrinth")!;
     expect(labyrinth.parts.filter((part) => part.resource === "install")).toHaveLength(5);
     expect(labyrinth.nextMandatoryInstall).toMatchObject({ sec: LABYRINTH_WALK_SEC });
@@ -191,7 +191,7 @@ describe("route ETAs", () => {
     let evaluated = 0;
     for (let repeat = 0; repeat < 100; repeat++) {
       for (let bitNode = 1; bitNode <= 15; bitNode++) {
-        const v = view({ bitNode, darknetAvailable: true, bladeburnerAvailable: true });
+        const v = view({ bitNode, darknetFullAccess: true, bladeburnerAvailable: true });
         etasFor(v);
         evaluated++;
       }

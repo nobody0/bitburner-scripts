@@ -6,7 +6,7 @@ export type FeatureCoverage = "full" | "partial" | "oracle-only" | "unmodeled";
 
 /** Increment whenever handwritten simulator semantics change in a way that can
  * alter an outcome. It is part of every comparison fingerprint. */
-export const SIMULATOR_MODEL_VERSION = 5;
+export const SIMULATOR_MODEL_VERSION = 6;
 /** Pinned upstream revision mirrored by sim/vendor/manifest.json. */
 export const SIMULATOR_VENDOR_COMMIT = "3162fd2590e221eadd0c0fbd46151913f7c4c41c";
 
@@ -47,7 +47,10 @@ export const SIM_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> 
   // Core placement/charge/effect/process lifecycle is modeled. acceptGift,
   // sleeves, and save-seeded gift state remain explicit gaps.
   stanek: "partial",
-  dnet: "unmodeled",
+  // Population, the getters the controller probes, the access gate and the
+  // mutation clock are modelled; the labyrinth and the .cache reward table —
+  // which is the purchase's real payoff — are not. See DNET_ASSUMPTIONS.
+  dnet: "partial",
   side: "oracle-only",
 };
 

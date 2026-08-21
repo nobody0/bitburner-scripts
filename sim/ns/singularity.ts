@@ -36,6 +36,9 @@ import { nsString, resolveServer } from "./contracts.ts";
  * plausible-looking zero. */
 
 export interface SingularityDeps {
+  /** Called after DarkscapeNavigator.exe lands, so the darknet is generated
+   *  exactly as upstream's purchase hook does it. */
+  onDarknetUnlocked?: () => void;
   world: SimWorld;
   player: SimPlayer;
   factions: FactionSystem;
@@ -577,13 +580,6 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       const [program, cost] = item;
       if (deps.homeFiles().has(program)) return true;
       if (player.money < cost) return false;
-      if (program === "DarkscapeNavigator.exe") {
-        return unmodeled(
-          "subsystem",
-          "darknet population",
-          "buying DarkscapeNavigator.exe generates the movable darknet graph, authentication state, and labyrinth",
-        );
-      }
       // Upstream pushes the completed file before cancelling matching work;
       // its finish hook therefore does not leave a stale partial file.
       deps.homeFiles().add(program);
@@ -592,6 +588,11 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
       }
       player.money -= cost;
       world.recordMoney("other", -cost);
+      // Upstream calls populateDarknet() right here, so the program is not just
+      // a file: it brings a darknet into existence. Without this the purchase
+      // would change nothing observable and could not be tested.
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Singularity.ts#L458-L460
+      if (program === "DarkscapeNavigator.exe") deps.onDarknetUnlocked?.();
       world.gainIntelligenceExp(CONSTANTS.IntelligenceSingFnBaseExpGain / 5_000);
       world.emit({ kind: "event", name: "program.bought", data: { program, cost } });
       return true;

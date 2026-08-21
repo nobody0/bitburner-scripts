@@ -17,6 +17,7 @@ import { ProgramSystem } from "./features/programs.ts";
 import { FactionSystem } from "./features/factions.ts";
 import { GraftingSystem } from "./features/grafting.ts";
 import { HacknetSystem } from "./features/hacknet.ts";
+import { DarknetSystem } from "./features/dnet.ts";
 import { GoSystem } from "./features/go-system.ts";
 import { AggregateGoNeuralRuntime } from "./features/go-aggregate-runtime.ts";
 import { ShareSystem } from "./features/share.ts";
@@ -28,6 +29,7 @@ import {
   generateInitialVanillaNetworkFromRng,
   generateVanillaNetworkFromRng,
   isSeededVanillaNetwork,
+  DARKNET_NETWORK_SEED,
   VANILLA_NETWORK_SEED,
   withDarkwebServer,
 } from "./network.ts";
@@ -391,13 +393,6 @@ async function runGameInstalled(
       : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
   );
   const permanentDarknetAccess = (): boolean => bitnode === 15 || (world.player.sourceFiles["15"] ?? 0) > 0;
-  if (permanentDarknetAccess()) {
-    noteUnmodeled(
-      "initial-state",
-      "darknet",
-      "Darknet advances autonomously on the 200 ms engine clock but is not modeled",
-    );
-  }
   if (permanentDarknetAccess()) initialHomeFiles.add("DarkscapeNavigator.exe");
   const hasTor = {
     value: save?.hasTor === true || permanentDarknetAccess() || initialHomeFiles.has("DarkscapeNavigator.exe"),
@@ -490,6 +485,9 @@ async function runGameInstalled(
   const hashMode = (bitnode === 9 || (save?.sourceFiles["9"] ?? 0) > 0) && save?.bitNodeOptions.disableHacknetServer !== true;
   const hacknet = new HacknetSystem(world, world.player, hashMode, save?.hacknet);
   const education = new EducationSystem(world, world.player, (name) => hacknet.hashLevels[name] ?? 0);
+  // Declared before the engine so its 200 ms hook can close over it, assigned
+  // after the host exists because it needs the process table and file map.
+  let dnet: DarknetSystem | undefined;
 
   const engine: Engine = new Engine(clock, {
     addPlaytime: (milliseconds) => world.addPlaytime(milliseconds),
@@ -513,6 +511,7 @@ async function runGameInstalled(
     // LINEAR in cycles, with no bonus-time cap — the one subsystem that needs
     // no CycleBuffer.
     processHacknetEarnings: (cycles) => hacknet.processEarnings(cycles),
+    darknetProcess: (cycles) => dnet?.darknetProcess(cycles),
     // The real engine makes three coding-contract generation attempts every
     // ten minutes. Until the generated contract/reward lifecycle is modelled,
     // reaching that boundary with side automation enabled must be visible in
@@ -627,6 +626,7 @@ async function runGameInstalled(
       // rather than waiting out the 2 s cycle.
       pokeInvitationCounter: () => void (engine.counters["checkFactionInvitations"] = 0),
       homeFiles: () => host.files.get("home")!,
+      onDarknetUnlocked: () => dnet?.populate(),
       hasTor: () => hasTor.value,
       setTor: (value) => void (hasTor.value = value),
       augmentationStats: new Proxy({}, {
@@ -656,6 +656,22 @@ async function runGameInstalled(
     // realm. The successor controller must detect and invalidate the stale
     // module/global state itself, exactly as it does in the game.
   };
+
+  // The darknet exists as soon as anything can reach it: BN15, an active SF15,
+  // or DarkscapeNavigator.exe on home. `populate()` is idempotent, so the
+  // seeded start and a later purchase both route through it.
+  dnet = new DarknetSystem({
+    servers: world.servers,
+    network,
+    processes: host.processes,
+    generate: mulberry32(DARKNET_NETWORK_SEED),
+    random,
+    bitNode: bitnode,
+    fullAccess: permanentDarknetAccess,
+    hasProgram: () => host.files.get("home")?.has("DarkscapeNavigator.exe") === true,
+  });
+  host.dnet = dnet;
+  if (dnet.hasAccess()) dnet.populate();
 
   if (save?.servers.some((server) => server.ramUsed > 0)) {
     noteUnmodeled(

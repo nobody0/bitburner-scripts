@@ -174,8 +174,14 @@ export interface EndgameView {
   gangCreateFaction?: string;
   /** Bladeburner access is distinct from current membership. */
   bladeburnerAvailable?: boolean;
-  /** Full darknet access, including the DarkscapeNavigator.exe path. */
+  /** The `ns.dnet` API answers — BN15, SF15, or DarkscapeNavigator.exe.
+   * NOT sufficient for the labyrinth; see `darknetFullAccess`. */
   darknetAvailable?: boolean;
+  /** BN15 or an active SF15, which is what upstream's `hasFullDarknetAccess`
+   * tests. The labyrinth exists only under this: with the program alone
+   * `getLabyrinthDetails()` returns `lab: null` and the net stays at depth 5,
+   * so there is no labyrinth to walk and no Red Pill at the end of it. */
+  darknetFullAccess?: boolean;
   /** Whether the controller can carry out labyrinth traversal. Mechanical
    * availability and executable automation are intentionally distinct. */
   labyrinthAutomationAvailable?: boolean;
@@ -489,9 +495,12 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
 
   // --- Darknet labyrinth --------------------------------------------------
   {
+    // FULL access, not plain access. DarkscapeNavigator.exe grants the API but
+    // not the labyrinth, so pricing a Red Pill route off `darknetAvailable`
+    // would promise a route the game does not provide.
     const available =
       labyrinthOffersRedPill(view.bitNode, sf12)
-      && (view.darknetAvailable ?? (view.bitNode === 15 || sf(view, 15) > 0));
+      && (view.darknetFullAccess ?? (view.bitNode === 15 || sf(view, 15) > 0));
     const reward = nextLabyrinthReward(view);
     const stageIndex = labyrinthStageIndex(view);
     const queuedReward = isQueued(view, reward) || (reward === RED_PILL && view.ownsRedPill && !view.redPillInstalled);
@@ -511,7 +520,9 @@ export function stepEndgame(view: EndgameView): EndgameDecision {
       blocker: !available
         ? view.bitNode === 8
           ? "BN8 disables the labyrinth's Red Pill"
-          : "requires BN15 or SF15 for dark web access"
+          // Deliberately not "dark web access": the program buys that and still
+          // leaves no labyrinth.
+          : "the labyrinth requires BN15 or an active SF15"
         : view.ownsRedPill
           ? tail.blocker
           : queuedReward

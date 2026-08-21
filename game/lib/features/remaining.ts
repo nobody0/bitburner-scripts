@@ -10,6 +10,7 @@ import { successChance, type CrimeStats } from "../../../shared/strategy/career/
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
 import { DNET_REPORT_PORT, decodeReport, observationOf } from "../../../shared/strategy/dnet/courier.ts";
+import { stepDarkscape, type DarkscapeDecision } from "../../../shared/strategy/dnet/unlock.ts";
 import {
   coverage,
   emptyKnowledge,
@@ -2264,6 +2265,10 @@ function freshProgressionMemory(): ProgressionMemory {
 
 let progressionMemory = freshProgressionMemory();
 
+/** Install cycle in which the Darkscape purchase was attempted. The program is
+ * wiped by every install, so this is keyed to the cycle rather than being a
+ * plain boolean — a new cycle must be allowed to buy it again. */
+let darkscapeGrantedAt: number | undefined;
 /** Route change since the controller last asked, for the `endgame.route`
  * telemetry event — the takeTargetSwitch pattern: recorded here, emitted by
  * the controller, which is the only module that touches Telemetry. */
@@ -2380,6 +2385,10 @@ function endgameView(ctx: NeedContext): EndgameView | undefined {
     ...(gangCreateFaction ? { gangCreateFaction } : {}),
     bladeburnerAvailable,
     darknetAvailable: ctx.caps.unlocked.dnet === "yes",
+    // The labyrinth needs FULL access, which DarkscapeNavigator.exe does not
+    // grant. Passing only the first flag would advertise a Red Pill route that
+    // does not exist in the node we are standing in.
+    darknetFullAccess: ctx.caps.darknetFullAccess === "yes",
     // The current dnet driver can observe and plan traversal but deliberately
     // refuses host-local authentication/stasis actions until dispatch can
     // lease the intended darknet host. Do not select an ETA we cannot execute.
@@ -3205,6 +3214,34 @@ function progressionRefresh(ctx: NeedContext): void {
   });
 }
 
+/** DarkscapeNavigator.exe: darknet access, and the only path to it without BN15
+ * or an active SF15.
+ *
+ * **`progression` owns this purchase, not `dnet`, and that is forced.**
+ * `driverEnabled` never ticks a driver whose own feature reads anything but
+ * "yes", so a gated `dnet` can never buy its own unlock — the exact deadlock
+ * `spec/features.md` records from the stock rebuild, where gating on
+ * `hasWseAccount` made the account unbuyable. `progression` is always active and
+ * already reads darknet availability for the endgame route, so it is the module
+ * that can act. Moving this to `dnet` would silently stop it working. */
+function darkscapeDecision(ctx: DriverContext | NeedContext): DarkscapeDecision {
+  const caps = ctx.caps;
+  // The gate probe's raw `hasDarknetProgram` reading is consumed by
+  // deriveCapabilities and not retained, but it is recoverable from the two
+  // capability flags: access without full access can only have come from the
+  // program. Safe because stepDarkscape returns on the BN15/SF15 guard before
+  // it consults this, which is the one case where access does NOT imply the
+  // file is present.
+  const access = caps.unlocked.dnet;
+  return stepDarkscape({
+    dnetActive: ctx.activeFeatures.has("dnet"),
+    ...(caps.bitNode !== undefined ? { bitNode: caps.bitNode } : {}),
+    sf15: sfLevel(caps.sourceFiles, 15),
+    ...(access === "unknown" ? {} : { hasProgram: access === "yes" }),
+    money: ctx.state.topics.player?.money ?? 0,
+  });
+}
+
 const progression: FeatureDriver = {
   id: "progression",
   everyMs: 60_000,
@@ -3254,6 +3291,32 @@ const progression: FeatureDriver = {
         ["bladeburner.joinBladeburnerDivision"],
         (stubNs) => stubNs["bladeburner"]["joinBladeburnerDivision"](),
       );
+      return;
+    }
+
+    const darkscape = darkscapeDecision(ctx);
+    if (darkscape.buy && darkscapeGrantedAt !== progressionMemory.cycleResetAt) {
+      const outcome = await featureDodge(
+        ctx,
+        "progression",
+        "unlock:darkscape",
+        // TOR first: purchaseProgram fails without it, and purchaseTor is
+        // idempotent, so this is cheaper than probing for something the player
+        // snapshot does not expose.
+        ["singularity.purchaseTor", "singularity.purchaseProgram"],
+        (stubNs) => {
+          stubNs["singularity"]["purchaseTor"]();
+          return stubNs["singularity"]["purchaseProgram"]("DarkscapeNavigator.exe");
+        },
+      );
+      if (outcome.ok) {
+        // Latch on success regardless of the return value. The gate probe only
+        // re-reads the file on the 30 s sweep, and the real game returns false
+        // for an already-owned program — so without this the next few passes
+        // would re-attempt a purchase that has already happened.
+        darkscapeGrantedAt = progressionMemory.cycleResetAt;
+        record("progression", "unlock:darkscape", outcome.value === true, `bought for ${darkscape.cost}`);
+      }
       return;
     }
     if (plan?.routeAction?.type === "createGang") {
@@ -3621,6 +3684,9 @@ export const progressionModule: FeatureModule = {
     }
     routeChange = undefined;
     lastRouteEmit = undefined;
+    // The install that just happened wiped the program, so the next cycle must
+    // be free to buy it again.
+    darkscapeGrantedAt = undefined;
     resetInstallSignal();
     // Field-level, not the whole topic: the gate batch has ALREADY written
     // the new node's bitNode/sourceFiles/ownedAugs into it by the time the
@@ -3683,6 +3749,33 @@ export const progressionModule: FeatureModule = {
         "join the Bladeburner division selected by the endgame route",
       ));
     }
+    // Darknet access. Posted from routeClaims so it survives the imminent-install
+    // reserve check below only when it should: the program is wiped by the very
+    // install that reserve is protecting, so buying it minutes beforehand throws
+    // the money away. Falling through to the brake is correct.
+    const darkscape = darkscapeDecision(ctx);
+    if (darkscape.buy) {
+      routeClaims.push({
+        by: "progression",
+        id: "unlock:darkscape",
+        resource: "money",
+        amount: darkscape.cost,
+        priority: PRIORITY["income:investment"],
+        mode: "spend",
+        // Indivisible: there is no smaller version of a program, and it cannot
+        // be written (`create: null` upstream). Hard rather than economic
+        // because its payoff — the .cache reward table — is unmodelled, and
+        // asserting an income rate we have never measured would be worse than
+        // admitting we are buying it on affordability. The 10% affordability
+        // guard in stepDarkscape is what keeps an unpriced claim from
+        // displacing a priced investment.
+        shape: "step",
+        pricing: "hard",
+        value: { state: "unknown", reason: "darknet cache yield is not modelled" },
+        why: `DarkscapeNavigator.exe — ${darkscape.why}`,
+      });
+    }
+
     if (!plan?.installReady) {
       // The IMMINENT-install brake: when the install forecast says the reset
       // is minutes away, everything with an install lifetime stops buying —
