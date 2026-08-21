@@ -4,6 +4,7 @@ import { effectiveBitNodeMultipliers, WORLD_DAEMON_BASE_SKILL } from "../../../s
 import { BLADEBURNER_RANK_CHANNEL, currencyWorth } from "../../../shared/strategy/income.ts";
 import { careerBestPerSec, incomeShares } from "../income.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
+import { disabledByProfile } from "../../../shared/features/profile.ts";
 import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts";
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
@@ -3234,7 +3235,7 @@ function darkscapeDecision(ctx: DriverContext | NeedContext): DarkscapeDecision 
   // file is present.
   const access = caps.unlocked.dnet;
   return stepDarkscape({
-    dnetActive: ctx.activeFeatures.has("dnet"),
+    dnetDisabled: disabledByProfile(caps, "dnet"),
     ...(caps.bitNode !== undefined ? { bitNode: caps.bitNode } : {}),
     sf15: sfLevel(caps.sourceFiles, 15),
     ...(access === "unknown" ? {} : { hasProgram: access === "yes" }),

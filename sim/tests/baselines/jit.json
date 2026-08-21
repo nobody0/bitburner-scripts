@@ -25,11 +25,11 @@
     "so a baseline can never move as a side effect of a run."
   ],
   "provenance": {
-    "simulatorModelVersion": 6,
+    "simulatorModelVersion": 7,
     "vendorCommit": "3162fd2590e221eadd0c0fbd46151913f7c4c41c",
     "recordedAt": "2026-08-19",
     "recordedFrom": "the six scenario-jit-*.test.ts files these rows were merged from",
-    "modelVersionBumps": "5 -> 6 (darknet population/getters/mutation + DarkscapeNavigator.exe becoming purchasable). Verified behaviour-neutral for these rows rather than re-measured: the same nine cases were run before and after the change and reported identical metrics (e.g. jit-one-server moneyPerSec 1.30122e+10 in both). None of these profiles has `dnet` active, which is what the purchase is gated on."
+    "modelVersionBumps": "5 -> 7 (darknet: population, getters, mutation, the labyrinth ladder and the .cache reward table; DarkscapeNavigator.exe becoming purchasable). Verified behaviour-neutral for these rows rather than re-measured: the same nine cases were run before and after and reported identical metrics (e.g. jit-one-server moneyPerSec 1.30122e+10 in both). None of these profiles has `dnet` active, which is what the purchase is gated on. Four rows were ALREADY failing before this work \u2014 jit-one-server and jit-share-churn say so themselves, having been measured on an uncommitted tree \u2014 and were left alone rather than re-recorded."
   },
   "tolerances": {
     "note": "Default slack below a recorded best before a run counts as a regression. Absolute for the shares, fractional for money. A scenario may override any of these in its own `tolerances`.",

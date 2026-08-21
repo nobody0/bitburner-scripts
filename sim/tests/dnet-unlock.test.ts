@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { parseGoals } from "../../shared/goals/presets.ts";
 import { runGame } from "../game-run.ts";
-import { DarknetSystem, DNET_ASSUMPTIONS } from "../features/dnet.ts";
+import { CACHE_PROGRAMS, DarknetSystem, DNET_ASSUMPTIONS, LAB_STAGES, currentLab, labReward } from "../features/dnet.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { ProcessTable } from "../ns/process.ts";
-import { Clock } from "../clock.ts";
+import { SimWorld } from "../world.ts";
 import { mockServer } from "../core/mocks.ts";
 import type { SimServer } from "../core/effects.ts";
 import { lane } from "../../tests/support/lanes.ts";
@@ -77,14 +77,15 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
 
 });
 
-function system(over: { fullAccess?: boolean; hasProgram?: boolean } = {}) {
-  const servers = new Map<string, SimServer>();
+function system(over: { fullAccess?: boolean; hasProgram?: boolean; installed?: string[]; bitNode?: number } = {}) {
+  const world = new SimWorld({ seed: 1, bitnode: over.bitNode ?? 1, network: [] });
+  const servers = world.servers;
   const darkweb = mockServer({ hostname: "darkweb", maxRam: 16, hasAdminRights: true }) as SimServer;
   darkweb.simKind = "DarknetServer";
   servers.set("darkweb", darkweb);
-  servers.set("home", mockServer({ hostname: "home", maxRam: 64, hasAdminRights: true }) as SimServer);
   const network = new Map<string, string[]>([["home", ["darkweb"]], ["darkweb", ["home"]]]);
-  const clock = new Clock();
+  const home = new Set<string>();
+  const clock = world.clock;
   return new DarknetSystem({
     servers,
     network,
@@ -94,6 +95,12 @@ function system(over: { fullAccess?: boolean; hasProgram?: boolean } = {}) {
     bitNode: 1,
     fullAccess: () => over.fullAccess === true,
     hasProgram: () => over.hasProgram === true,
+    installedAugmentations: () => new Set(over.installed ?? []),
+    allowRedPill: () => true,
+    world,
+    player: world.player,
+    homeFiles: () => home,
+    darknetMoneyMultiplier: () => 1,
   });
 }
 
@@ -158,11 +165,12 @@ describe("the darknet model", () => {
     // strategy variants face different stock prices for reasons unrelated to
     // either strategy.
     let draws = 0;
-    const servers = new Map<string, SimServer>();
+    const world = new SimWorld({ seed: 1, bitnode: 1, network: [] });
+    const servers = world.servers;
     const darkweb = mockServer({ hostname: "darkweb", maxRam: 16 }) as SimServer;
     darkweb.simKind = "DarknetServer";
     servers.set("darkweb", darkweb);
-    const clock = new Clock();
+    const clock = world.clock;
     const dnet = new DarknetSystem({
       servers,
       network: new Map([["darkweb", []]]),
@@ -172,10 +180,103 @@ describe("the darknet model", () => {
       bitNode: 1,
       fullAccess: () => false,
       hasProgram: () => true,
+      installedAugmentations: () => new Set<string>(),
+      allowRedPill: () => true,
+      world,
+      player: world.player,
+      homeFiles: () => new Set<string>(),
+      darknetMoneyMultiplier: () => 1,
     });
     dnet.populate();
     dnet.darknetProcess(3_000);
     expect(draws).toBe(dnet.mutations * 2);
+  });
+});
+
+describe("the labyrinth ladder", () => {
+  test("which lab is open depends on INSTALLED rewards, not queued ones", () => {
+    // A reward waiting in the queue does not open the next lab, which is what
+    // makes the labyrinth a multi-install walk rather than one visit.
+    expect(currentLab(new Set(), 1, true).hostname).toBe("th3_l4byr1nth");
+    expect(currentLab(new Set(["The W1ngs of Icarus"]), 1, true).hostname).toBe("cru3l_l4byr1nth");
+    // Depth grows with progress, and depth is what sets both the population and
+    // the mutation rate.
+    expect(currentLab(new Set(), 1, true).depth).toBe(7);
+    expect(LAB_STAGES[LAB_STAGES.length - 1]!.depth).toBe(36);
+  });
+
+  test("BN15 hands over the Red Pill two labs earlier than anywhere else", () => {
+    const four = new Set([
+      "The W1ngs of Icarus", "The B00ts of Perseus", "The H4mmer of Daedalus", "The St4ff of Asclepius",
+    ]);
+    // In BN15 the fifth reward IS the Red Pill, in place of The L4w.
+    expect(labReward(four, 15, true)).toBe("The Red Pill");
+    // Elsewhere all six come first.
+    expect(labReward(four, 1, true)).toBe("The L4w of Bayes");
+    const all = new Set([...four, "The L4w of Bayes", "The B1ade of Solomonoff"]);
+    expect(labReward(all, 1, true)).toBe("The Red Pill");
+    // BN8 zeroes DarknetLabyrinthRewardsTheRedPill, so the walk yields NeuroFlux.
+    expect(labReward(all, 8, false)).toBe("NeuroFlux Governor");
+    expect(labReward(new Set([...all, "The Red Pill"]), 1, true)).toBe("NeuroFlux Governor");
+  });
+
+  test("the labyrinth needs full access, and the program alone does not grant it", () => {
+    expect(system({ hasProgram: true }).currentLab()).toBeUndefined();
+    expect(system({ hasProgram: true }).netDepth()).toBe(5);
+    const full = system({ fullAccess: true });
+    expect(full.currentLab()?.hostname).toBe("th3_l4byr1nth");
+    expect(full.netDepth()).toBe(7);
+  });
+
+  test("the current lab is placed on the net and never mutated away", () => {
+    const dnet = system({ fullAccess: true });
+    dnet.populate();
+    const lab = dnet.record("th3_l4byr1nth")!;
+    expect(lab).toMatchObject({ modelId: "(The Labyrinth)", isStationary: true, difficulty: 10 });
+    // isImmutable exempts stationary hosts from delete, move and restart.
+    dnet.darknetProcess(50_000);
+    expect(dnet.mutations).toBeGreaterThan(0);
+    expect(dnet.record("th3_l4byr1nth")!.online).toBe(true);
+  });
+});
+
+describe("cache files, which are what the purchase is actually worth", () => {
+  test("a cache hands over the first program not owned, up to Formulas.exe", () => {
+    const dnet = system({ hasProgram: true });
+    dnet.populate();
+    const [target] = [...dnet.hosts.keys()].filter((name) => name !== "darkweb");
+    const name = dnet.addCache(target!, false)!;
+    expect(dnet.cachesOn(target!)).toContain(name);
+    // The reward draw is random, so drive the program branch directly through
+    // repeated opens until it fires; what matters is WHICH program comes first.
+    let granted: string | undefined;
+    for (let i = 0; i < 200 && granted === undefined; i++) {
+      const file = dnet.addCache(target!, false);
+      if (!file) continue;
+      const result = dnet.openCache(target!, file);
+      if (result.message.includes("program")) granted = result.message;
+    }
+    expect(granted).toContain(CACHE_PROGRAMS[0]);
+  });
+
+  test("opening a cache costs karma scaled by difficulty, and consumes the file", () => {
+    const dnet = system({ hasProgram: true });
+    dnet.populate();
+    const [target] = [...dnet.hosts.keys()].filter((name) => name !== "darkweb");
+    const file = dnet.addCache(target!, false)!;
+    const difficulty = dnet.record(target!)!.difficulty;
+    const result = dnet.openCache(target!, file);
+    expect(result.success).toBe(true);
+    // Returned negative, as the CacheResult contract has it.
+    expect(result.karmaLoss).toBe(-(difficulty + 1));
+    expect(dnet.cachesOn(target!)).not.toContain(file);
+    // A second open of the same file finds nothing.
+    expect(dnet.openCache(target!, file).success).toBe(false);
+  });
+
+  test("a missing cache is refused rather than throwing", () => {
+    const dnet = system({ hasProgram: true });
+    expect(dnet.openCache("darkweb", "nope.cache")).toMatchObject({ success: false, karmaLoss: 0 });
   });
 });
 

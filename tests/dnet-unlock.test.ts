@@ -6,12 +6,14 @@ import {
   type DarkscapeView,
 } from "../shared/strategy/dnet/unlock.ts";
 import { DARKSCAPE_COST, TOR_COST } from "../shared/strategy/dnet/rates.ts";
+import { applyOverrides, disabledByProfile, only } from "../shared/features/profile.ts";
+import { deriveCapabilities } from "../shared/features/unlock.ts";
 
 /** Enough cash that the affordability guard is satisfied. */
 const RICH = DARKSCAPE_TOTAL_COST / DARKSCAPE_AFFORDABLE_SHARE;
 
 function view(over: Partial<DarkscapeView> = {}): DarkscapeView {
-  return { dnetActive: true, bitNode: 1, sf15: 0, hasProgram: false, money: RICH, ...over };
+  return { dnetDisabled: false, bitNode: 1, sf15: 0, hasProgram: false, money: RICH, ...over };
 }
 
 describe("buying DarkscapeNavigator.exe", () => {
@@ -65,12 +67,33 @@ describe("buying DarkscapeNavigator.exe", () => {
     expect(stepDarkscape(view({ money: 0 })).why).toContain("liquid cash");
   });
 
-  test("not bought for a run that does not play dnet", () => {
+  test("not bought for a run that has dnet switched off", () => {
     // An isolated hacking soak has no use for a darknet, and spending $50m in
     // one would make its numbers incomparable with every earlier measurement.
-    const decision = stepDarkscape(view({ dnetActive: false }));
+    // The signal is the profile override, NOT activeFeatures — that set is
+    // derived from driverEnabled, so dnet is absent from it while still locked
+    // and gating on it would deadlock the purchase.
+    const decision = stepDarkscape(view({ dnetDisabled: true }));
     expect(decision.buy).toBe(false);
-    expect(decision.why).toContain("not a feature this run plays");
+    expect(decision.why).toContain("switched off");
+  });
+
+  test("locked is not the same as switched off, which is what makes the purchase possible", () => {
+    // The bug this pins: gating the purchase on `activeFeatures.has("dnet")`
+    // deadlocks, because that set comes from driverEnabled and so excludes dnet
+    // exactly while it is locked — the state in which we need to buy it.
+    const locked = deriveCapabilities({ bitNode: 1, sourceFiles: {}, hasDarknetProgram: false });
+    expect(locked.unlocked.dnet).toBe("no");
+    expect(disabledByProfile(locked, "dnet")).toBe(false);
+
+    // A profile that switched it off is a different state, and the only one
+    // that should stop the purchase.
+    const off = applyOverrides(locked, only("hacking"));
+    expect(off.unlocked.dnet).toBe("no");
+    expect(disabledByProfile(off, "dnet")).toBe(true);
+
+    expect(stepDarkscape(view({ dnetDisabled: disabledByProfile(locked, "dnet") })).buy).toBe(true);
+    expect(stepDarkscape(view({ dnetDisabled: disabledByProfile(off, "dnet") })).buy).toBe(false);
   });
 
   test("an unknown BitNode does not read as redundant", () => {

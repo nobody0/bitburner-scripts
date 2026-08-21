@@ -68,5 +68,12 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       requireAccess();
       return system.instability();
     },
+
+    openCache: (rawFilename: unknown, _suppressToast?: unknown) => {
+      requireAccess();
+      // Upstream opens a cache on the CURRENT server only — the filename is a
+      // local path, not a host-qualified one.
+      return system.openCache(process.host, String(rawFilename));
+    },
   };
 }

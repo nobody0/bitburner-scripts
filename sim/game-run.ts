@@ -18,6 +18,7 @@ import { FactionSystem } from "./features/factions.ts";
 import { GraftingSystem } from "./features/grafting.ts";
 import { HacknetSystem } from "./features/hacknet.ts";
 import { DarknetSystem } from "./features/dnet.ts";
+import { currentNodeMults } from "./vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { GoSystem } from "./features/go-system.ts";
 import { AggregateGoNeuralRuntime } from "./features/go-aggregate-runtime.ts";
 import { ShareSystem } from "./features/share.ts";
@@ -669,6 +670,14 @@ async function runGameInstalled(
     bitNode: bitnode,
     fullAccess: permanentDarknetAccess,
     hasProgram: () => host.files.get("home")?.has("DarkscapeNavigator.exe") === true,
+    // INSTALLED, not queued: a reward waiting in the queue does not open the
+    // next lab, which is what makes the labyrinth a multi-install walk.
+    installedAugmentations: () => new Set(world.player.augmentations.keys()),
+    allowRedPill: () => currentNodeMults.DarknetLabyrinthRewardsTheRedPill !== 0,
+    world,
+    player: world.player,
+    homeFiles: () => host.files.get("home")!,
+    darknetMoneyMultiplier: () => currentNodeMults.DarknetMoneyMultiplier ?? 1,
   });
   host.dnet = dnet;
   if (dnet.hasAccess()) dnet.populate();

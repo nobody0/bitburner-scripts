@@ -377,8 +377,14 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     },
     fileExists: (filename: string, hostname: unknown = process.host): boolean =>
       filesOn(host, requireServer(host, hostname, process.host).hostname).has(filename),
-    ls: (hostname: unknown = process.host, substring = ""): string[] =>
-      [...filesOn(host, requireServer(host, hostname, process.host).hostname)].filter((f) => f.includes(substring)).sort(),
+    ls: (hostname: unknown = process.host, substring = ""): string[] => {
+      const target = requireServer(host, hostname, process.host).hostname;
+      // ls is how a script discovers .cache files: upstream appends a darknet
+      // server's caches to its file list rather than storing them alongside.
+      // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L845-L851
+      const caches = host.dnet?.cachesOn(target) ?? [];
+      return [...filesOn(host, target), ...caches].filter((f) => f.includes(substring)).sort();
+    },
     scp: (files: string | string[], rawDestination: unknown, rawSource: unknown = process.host): boolean => {
       const list = Array.isArray(files) ? files : [files];
       const source = requireServer(host, rawSource, process.host).hostname;

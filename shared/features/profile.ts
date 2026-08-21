@@ -21,6 +21,18 @@ export type FeatureOverrides = Partial<Record<FeatureId, FeatureOverride>>;
 const REASON_OFF = "disabled by simulation profile";
 const REASON_ON = "forced on by simulation profile";
 
+/** Did a simulation profile switch this feature OFF?
+ *
+ * Distinct from `unlocked[id] !== "yes"`, and the distinction matters for any
+ * decision about ACQUIRING a feature. A locked feature is one we may still want
+ * to unlock; a profile-disabled one is a feature this run has been told not to
+ * play, so spending on it is waste. `activeFeatures` cannot answer this — it is
+ * derived from `driverEnabled`, so a feature is absent from it precisely while
+ * it is still locked, which would deadlock any purchase that gated on it. */
+export function disabledByProfile(caps: Pick<Capabilities, "reason">, id: FeatureId): boolean {
+  return caps.reason[id] === REASON_OFF;
+}
+
 /** Overlay overrides onto derived capabilities. Pure, and returns a new object
  * so the underlying probe reading stays intact — the UI can still show what
  * the save actually has, alongside what this run was allowed to use. */
