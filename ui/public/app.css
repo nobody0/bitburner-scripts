@@ -397,6 +397,10 @@ canvas.microchart { height: 88px; }
 .netmap .node.gone .box { stroke: var(--critical); stroke-dasharray: 3 3; fill: var(--bb-background); }
 .netmap .node.sel .box { stroke: var(--bb-white); stroke-width: 2; }
 .netmap .node .stasis { fill: var(--series-5); }
+/* Where our residents stand. Solid = alive; hollow = the host dropped it, which
+   is the map's own read on where the mutation clock is killing them. */
+.netmap .node .agentdot { fill: var(--good); }
+.netmap .node .agentdot.dead { fill: none; stroke: var(--critical); stroke-width: 1; }
 
 .netmap .node text { font-size: 9px; fill: var(--text-secondary); }
 .netmap .node .host { font-size: 10px; fill: var(--text-primary); }
@@ -438,6 +442,7 @@ canvas.microchart { height: 88px; }
 .netkey .sw.linked { background: var(--series-5); border-color: var(--series-5); }
 .netkey .sw.stale { opacity: 0.55; }
 .netkey .gl { font-family: var(--font-mono); color: var(--bb-secondary); }
+.netkey .gl.agentkey { color: var(--good); }
 /* Edge keys. Same tokens as the map's own strokes, so the two cannot drift. */
 .netkey .ln { width: 14px; height: 0; border-top: 1px solid var(--bb-well-light); }
 .netkey .ln.tree { border-top-color: var(--bb-primary-dark); }

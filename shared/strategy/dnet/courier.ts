@@ -39,6 +39,10 @@ export const LOCAL_CODES = {
   902: "NoCredential",
   903: "NotEnoughRam",
   904: "ModelUnattempted",
+  /** The job's promise was rejected rather than settled: its process died with
+   *  its host, its resident was swept, or it hit the controller's timeout. Kept
+   *  apart from 903 so a dying net does not read as a RAM shortage. */
+  905: "JobDied",
 } as const;
 
 export function codeName(code: number): string {
@@ -61,9 +65,6 @@ export interface ReportHost {
   present: boolean;
   depth?: number;
   neighbours?: string[];
-  /** Shown by the in-game map, and NOT on `getServerDetails` — it costs a 2 GB
-   *  `ns.getServer`, so only a job with room to spare reports it. */
-  ip?: string;
   blockedRam?: number;
   maxRam?: number;
   usedRam?: number;

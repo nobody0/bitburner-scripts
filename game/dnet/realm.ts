@@ -269,8 +269,22 @@ export interface DnetHostQueue {
 export interface DnetDrain {
   hosts: ReportHost[];
   credentials: VaultEntry[];
+  /** Attempt outcomes since the last drain, tagged with their target. Home folds
+   *  them into its OWN ledger, so the panel's per-host cracking progress
+   *  survives a controller death the way the map itself does. `attempted` and
+   *  the oracle stay inside the realm: only the ledger summary is published. */
+  attempts: { hostname: string; outcome: AttemptOutcome }[];
   codes: Record<string, number>;
-  residents: { host: string; lastBeatAt: number; pending: number; active?: string; freeGb?: number }[];
+  residents: {
+    host: string;
+    lastBeatAt: number;
+    pending: number;
+    active?: string;
+    freeGb?: number;
+    completed: number;
+    failed: number;
+    lastError?: string;
+  }[];
   residentsLost: number;
 }
 
@@ -281,6 +295,13 @@ export interface DnetOrders {
   /** Credentials home already holds, replayed after a re-seed so a restarted
    *  controller does not re-crack a net we already opened. */
   vault?: VaultEntry[];
+  /** The net's real depth, when home has pinned it from a lab sighting. Without
+   *  it the controller derives tasks and expiries on `DEFAULT_NET_DEPTH`, which
+   *  errs toward re-observing — safe, but paid for in jobs. */
+  netDepth?: number;
+  /** The mutation clock runs at half speed outside BN15, and only home can see
+   *  which node this is. */
+  bitNode?: number;
   standDown?: boolean;
 }
 
@@ -347,10 +368,31 @@ export function overseerIsLive(
  *
  * Returns the hostnames dropped, so the caller can fail their in-flight jobs
  * rather than leaving promises nobody will ever settle. */
+/** The last instant this queue's resident gave evidence of life.
+ *
+ * While a job runs the resident is dead BY DESIGN — spawn killed it — so
+ * `lastBeatAt` freezes for the whole job. An active job is therefore evidence
+ * of life until its own timeout has passed. One function, because two readers
+ * decide from it: the sweep below, and home's re-seed gate — a seed gate on the
+ * raw beat alone would exec a SECOND resident onto a host whose first is merely
+ * mid-job. A long-lived job vouches for its queue indefinitely. */
+export function residentLastLife(queue: DnetHostQueue): number {
+  if (queue.active?.longLived === true) return Infinity;
+  return queue.active?.startedAt !== undefined
+    ? Math.max(queue.lastBeatAt, queue.active.startedAt + JOB_TIMEOUT_MS)
+    : queue.lastBeatAt;
+}
+
 export function sweepQueues(queues: Map<string, DnetHostQueue>, now: number): DnetHostQueue[] {
   const dead: DnetHostQueue[] = [];
   for (const [host, queue] of queues) {
-    if (now - queue.lastBeatAt <= RESIDENT_BEAT_MS * RESIDENT_BEAT_MISSES) continue;
+    // Sweeping on the beat window alone retired any queue whose job ran longer
+    // than three beats, losing the result of a merely slow authenticate and
+    // miscounting it as a lost resident. The controller's timeout loop fires at
+    // exactly `startedAt + JOB_TIMEOUT_MS` and stamps the beat as it clears the
+    // job, so the beat allowance on top of it here is what gives that loop
+    // first claim, and the returning resident time to beat.
+    if (now - residentLastLife(queue) <= RESIDENT_BEAT_MS * RESIDENT_BEAT_MISSES) continue;
     queues.delete(host);
     dead.push(queue);
   }

@@ -42,8 +42,10 @@ export interface SpreadLimits {
   /** Plants per SOURCE host per derivation, so one lucky breaker cannot spend
    *  the whole agent budget on its own neighbourhood. */
   fanOut: number;
-  /** Total live agents. The report port is a 50-entry queue drained every 30 s,
-   *  so an unbounded fleet would talk over itself. */
+  /** Total live agents. Bounded so a lucky run does not blanket the net before
+   *  we have watched how residents die out there: every agent is RAM held on a
+   *  host the mutation clock can restart, and mortality is the number the cap
+   *  should be raised against. */
   liveAgentCap: number;
   plantCooldownMs: number;
 }

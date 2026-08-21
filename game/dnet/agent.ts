@@ -81,10 +81,12 @@ export async function main(ns: NS): Promise<void> {
 
   const host = ns.getHostname();
   const jobId = jobIdFrom(ns.args);
-  const queue = ensureQueue(rendezvous.queues, host);
 
   if (jobId !== undefined) {
-    await performJob(ns, queue, jobId);
+    // The job settles into the queue it was spawned from. If the controller was
+    // replaced mid-job the promise it kept died with it, and the respawned
+    // resident below re-registers with whatever is live.
+    await performJob(ns, ensureQueue(rendezvous.queues, host), jobId);
     return;
   }
 
@@ -103,6 +105,12 @@ export async function main(ns: NS): Promise<void> {
     // session, on a host whose queue no longer exists.
     const live = dnetRealm().dnet_overseer;
     if (!live || live.generation !== mission.generation) return;
+    // The queue is resolved from the LIVE rendezvous every pass, not bound at
+    // boot. A replacement controller of the same generation — darkweb reboots,
+    // home re-seeds — installs a fresh rendezvous with a fresh queues Map, and a
+    // resident still beating into the old one would pass the generation check
+    // above while being invisible to the new controller for ever.
+    const queue = ensureQueue(live.queues, host);
 
     queue.lastBeatAt = Date.now();
     // Measured every pass, not cached: out here free RAM moves without warning

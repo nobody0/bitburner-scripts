@@ -10,7 +10,7 @@ import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts"
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
-import type { ReportHost } from "../../../shared/strategy/dnet/courier.ts";
+import type { AttemptOutcome, ReportHost } from "../../../shared/strategy/dnet/courier.ts";
 import { overseerArgs, residentArgs } from "../../../shared/strategy/dnet/mission.ts";
 import { versionedScript } from "../../../shared/deployment.ts";
 import { gameBuildId } from "../build-id.ts";
@@ -20,6 +20,7 @@ import {
   CONTROLLER_METHODS,
   RESIDENT_METHODS,
   priceAgent,
+  residentLastLife,
   type DnetRendezvous,
 } from "../../dnet/realm.ts";
 import type { DarknetAgentDigest } from "../../../shared/telemetry/topics/dnet.ts";
@@ -28,6 +29,7 @@ import { DARKSCAPE_TOTAL_COST, stepDarkscape } from "../../../shared/strategy/dn
 import {
   coverage,
   emptyKnowledge,
+  foldAttempts,
   foldReports,
   fresh,
   isImmune,
@@ -2203,12 +2205,11 @@ let dnetUnknownModels: Record<string, number> = {};
 /** Agent hosts seen this generation, and how many stopped reporting. The gap
  * between them is agent mortality — see spec/dnet.md's Observability note. */
 let dnetAgentsSeen: Set<string> = new Set();
-/** Agents the overseer last reported, keyed by AGENT ID rather than by host.
+/** Residents the overseer last reported, keyed by HOST.
  *
- * Several agents legitimately stand on one host — the whole starting crew lives
- * on `darkweb` — so keying by host would let them overwrite each other and make
- * the crew look permanently understaffed, which in turn makes home top it up for
- * ever. */
+ * A host keeps exactly one resident — that is the spawn-chain design — and the
+ * overseer is tracked separately (`dnetOverseerBeatAt`), so nothing shares a
+ * key. Keying by host is also what the map needs: the badge sits on a box. */
 let dnetAgents: Map<string, DarknetAgentDigest & { host: string }> = new Map();
 /** Residents the controller has lost since boot. Agent mortality, which out
  * there is the loss that actually matters: the channel does not drop data, hosts
@@ -2261,17 +2262,18 @@ let dnetSeedBackoffMs = DNET_SEED_BACKOFF_MS;
  *   into a topic and never sent. */
 function drainDarknet(generation: string): {
   hosts: ReportHost[];
+  attempts: { hostname: string; outcome: AttemptOutcome }[];
   residents: string[];
   drained: number;
   rejected: number;
   credentials: number;
 } {
   const rendezvous = dnetRendezvous();
-  if (!rendezvous) return { hosts: [], residents: [], drained: 0, rejected: 0, credentials: 0 };
+  if (!rendezvous) return { hosts: [], attempts: [], residents: [], drained: 0, rejected: 0, credentials: 0 };
   if (rendezvous.generation !== generation) {
     // A controller from a world this run no longer shares. Its facts describe a
     // darknet that was destroyed by the prestige that ended it.
-    return { hosts: [], residents: [], drained: 0, rejected: 1, credentials: 0 };
+    return { hosts: [], attempts: [], residents: [], drained: 0, rejected: 1, credentials: 0 };
   }
   const taken = rendezvous.drain();
   for (const entry of taken.credentials) {
@@ -2281,12 +2283,11 @@ function drainDarknet(generation: string): {
     dnetCodes[code] = (dnetCodes[code] ?? 0) + Number(count);
   }
   for (const resident of taken.residents) {
-    dnetAgents.set(resident.host, {
-      host: resident.host,
-      role: "resident",
-      lastBeatAt: resident.lastBeatAt,
-      alive: true,
-    });
+    // Every field of the drained resident IS a digest field — the digest is a
+    // superset — so the record travels whole rather than being re-listed and
+    // silently missing whatever counter is added next. `alive` is recomputed
+    // from the beat window at publish time.
+    dnetAgents.set(resident.host, { ...resident, role: "resident", alive: true });
   }
   dnetOverseerBeatAt = Math.max(dnetOverseerBeatAt, rendezvous.lastBeatAt);
   dnetResidentsLost += taken.residentsLost;
@@ -2294,6 +2295,7 @@ function drainDarknet(generation: string): {
     // Straight through: a `ReportHost` already carries the timestamp of the job
     // that saw it, which is the only thing the fold needs.
     hosts: taken.hosts,
+    attempts: taken.attempts,
     residents: taken.residents.map((resident) => resident.host),
     drained: taken.hosts.length,
     rejected: 0,
@@ -2328,7 +2330,14 @@ const dnet: FeatureDriver = {
       dnetKnowledge = emptyKnowledge(generation);
       dnetCodes = {};
     }
-    const { hosts: reported, residents, drained, rejected, credentials: vaultDrained } = drainDarknet(generation);
+    const {
+      hosts: reported,
+      attempts: reportedAttempts,
+      residents,
+      drained,
+      rejected,
+      credentials: vaultDrained,
+    } = drainDarknet(generation);
     const rendezvous = dnetRendezvous();
     const bitNode = progression?.bitNode ?? 1;
     // A stasis-linked host is outside the mutation clock entirely, and WE are the
@@ -2337,11 +2346,11 @@ const dnet: FeatureDriver = {
     // `getNetDepth()` IS the current labyrinth's depth, and all eight lab servers
     // are constructed with the net itself — so one sighting of any of them pins
     // the net's depth exactly, long before it is reachable. That matters twice
-    // over: the mutation clock is `30_000 / netDepth`, so EVERY staleness expiry
-    // below was being computed against a default of 10, and the map cannot draw
-    // the rows we have not reached without knowing how many there are. Carried
-    // over from the topic between sightings, since it only changes when a lab is
-    // completed.
+    // over: the mutation clock is `30_000 / netDepth`, so without a sighting
+    // every staleness expiry below runs on the `DEFAULT_NET_DEPTH` fallback
+    // instead of the real depth, and the map cannot draw the rows we have not
+    // reached without knowing how many there are. Carried over from the topic
+    // between sightings, since it only changes when a lab is completed.
     const netDepth = netDepthFromLabs(Object.keys(dnetKnowledge.hosts)) ?? topic.netDepth;
     const expiry: ExpiryOpts = {
       bitNode,
@@ -2353,6 +2362,18 @@ const dnet: FeatureDriver = {
     // is standing out there, and it costs nothing to merge.
     const folded = foldReports(dnetKnowledge, [...(topic.probed ?? []), ...reported], now, expiry);
     dnetKnowledge = folded.knowledge;
+    // Attempt outcomes fold into home's OWN ledger — the same helper the
+    // controller uses — so the panel's cracking progress survives a controller
+    // death the way the map does. An unknown-model outcome is also the only
+    // channel that ever populates `unknownModels`: the overseer detects the
+    // case, but only home accumulates it across controller lifetimes.
+    for (const { hostname, outcome } of reportedAttempts) {
+      foldAttempts(dnetKnowledge.hosts[hostname], [outcome]);
+      if (outcome.status === "unknown-model") {
+        const id = outcome.modelId ?? "(no model id)";
+        dnetUnknownModels[id] = (dnetUnknownModels[id] ?? 0) + 1;
+      }
+    }
     // A host we hold a credential for is flagged on the knowledge record so the
     // fold can drop the flag when the host disappears — the credential itself
     // stays in the vault and out of everything that is published.
@@ -2391,6 +2412,14 @@ const dnet: FeatureDriver = {
     // exactly the condition `reachableFrom` needs to be an exact answer rather
     // than a partial graph presented as one.
     const topologyComplete = cover.known > 0 && cover.adjacencyKnown === cover.known;
+    // Work in flight, summed from each resident's last report. Live residents
+    // only: a dead one's queue died with it, so counting its pending jobs would
+    // report work that no longer exists.
+    const liveResidents = [...dnetAgents.values()].filter((agent) => now - agent.lastBeatAt < OVERSEER_STALE_MS);
+    const activeByKind: Record<string, number> = {};
+    for (const agent of liveResidents) {
+      if (agent.active !== undefined) activeByKind[agent.active] = (activeByKind[agent.active] ?? 0) + 1;
+    }
     merge(ctx.state, "dnet", {
       channel: {
         drained,
@@ -2416,12 +2445,12 @@ const dnet: FeatureDriver = {
         agents: Object.fromEntries(
           [...dnetAgents.values()]
             .sort((a, b) => a.lastBeatAt - b.lastBeatAt)
-            .map((agent) => [
-              agent.host,
+            .map(({ host, ...digest }) => [
+              host,
               // Only "alive" while the beat is recent. A roster that never
               // expired would report a full crew on a net that has lost every
               // one of them, which is exactly the number worth watching.
-              { role: agent.role, lastBeatAt: agent.lastBeatAt, alive: now - agent.lastBeatAt < OVERSEER_STALE_MS },
+              { ...digest, alive: now - digest.lastBeatAt < OVERSEER_STALE_MS },
             ]),
         ),
         agentsLost: [...dnetAgents.values()].filter((agent) => now - agent.lastBeatAt >= OVERSEER_STALE_MS).length,
@@ -2431,6 +2460,11 @@ const dnet: FeatureDriver = {
           lastBeatAt: dnetOverseerBeatAt,
           alive: now - dnetOverseerBeatAt < OVERSEER_STALE_MS,
           seedAttempts: dnetSeedAttempts,
+        },
+        queue: {
+          pending: liveResidents.reduce((sum, agent) => sum + (agent.pending ?? 0), 0),
+          active: Object.values(activeByKind).reduce((sum, count) => sum + count, 0),
+          byKind: activeByKind,
         },
       }),
       ...(netDepth !== undefined ? { netDepth } : {}),
@@ -2492,8 +2526,8 @@ const dnet: FeatureDriver = {
     // it does exactly one thing: put an overseer on `darkweb` and let it run the
     // net from there. home cannot play this feature itself — `probe()` is
     // host-local, so from here the darknet is one host wide — and it cannot hold
-    // a session either, because a session belongs to the PID that won it and the
-    // controller's own RAM is pinned at 3.6 GB.
+    // a session either, because a session belongs to the PID that won it and
+    // home's controller (`start.js`) is pinned at 3.6 GB static.
     //
     // Pinned to `home` for a reason that is easy to get wrong: `ns.exec`
     // evaluates its direct-connection requirement BEFORE the darkweb early-out,
@@ -2508,9 +2542,13 @@ const dnet: FeatureDriver = {
     // Home keeps topping darkweb's resident up because a resident dies with its
     // host, and `darkweb` does reboot. Nothing else can put one back: planting
     // needs a session AND adjacency, and home is adjacent to nothing else.
+    // Job-aware, not raw-beat: `lastBeatAt` freezes for the whole job — spawn
+    // killed the resident, by design — and `JOB_TIMEOUT_MS` equals the stale
+    // window, so a merely slow authenticate read as a dead resident and home
+    // execed a SECOND agent onto darkweb while the first was still working.
     const darkwebResident = rendezvous?.queues.get("darkweb");
     const residentAlive = darkwebResident !== undefined
-      && now - darkwebResident.lastBeatAt < OVERSEER_STALE_MS;
+      && now - residentLastLife(darkwebResident) < OVERSEER_STALE_MS;
     if ((!overseerAlive || !residentAlive) && now >= dnetSeedNextAt
       && (topic.probed ?? []).some((server) => server.hostname === "darkweb")) {
       const buildId = gameBuildId();
@@ -2594,6 +2632,15 @@ const dnet: FeatureDriver = {
     if (overseerAlive && rendezvous) {
       rendezvous.order({
         charisma: ctx.state.topics.player?.skills.charisma ?? 1,
+        // The clock the controller's expiries run on. Home pins the real depth
+        // from a lab sighting and knows which node this is; without the order
+        // the controller sits on the shared defaults for ever and re-observes
+        // more than it needs to. Both conditional: the controller's own default
+        // (BN15, depth 5) errs toward re-observing, and ordering the `?? 1`
+        // guess would DOUBLE its expiries in a BN15 run whose progression topic
+        // has not landed — the unsafe direction.
+        ...(netDepth !== undefined ? { netDepth } : {}),
+        ...(progression?.bitNode !== undefined ? { bitNode } : {}),
         ...(dnetVault.size > 0
           ? {
             vault: [...dnetVault].map(([hostname, password]) => ({
@@ -3772,16 +3819,22 @@ const progression: FeatureDriver = {
         ["singularity.purchaseTor", "singularity.purchaseProgram"],
         (stubNs) => {
           stubNs["singularity"]["purchaseTor"]();
+          // `purchaseProgram` returns TRUE for an already-owned program
+          // (Singularity.ts logs "You already have..." and returns true), so a
+          // true return means owned-or-bought and the latch below is safe on it.
+          // False is a genuine refusal — no TOR, or the money moved between the
+          // decision and this call — which retries next pass.
           return stubNs["singularity"]["purchaseProgram"]("DarkscapeNavigator.exe");
         },
       );
-      if (outcome.ok) {
-        // Latch on success regardless of the return value. The gate probe only
-        // re-reads the file on the 30 s sweep, and the real game returns false
-        // for an already-owned program — so without this the next few passes
-        // would re-attempt a purchase that has already happened.
+      if (outcome.ok && outcome.value === true) {
+        // Latched because the gate probe only re-reads the file on its 30 s
+        // sweep — without this the next few passes would re-attempt a purchase
+        // that has already happened.
         darkscapeGrantedAt = progressionMemory.cycleResetAt;
-        record("progression", "unlock:darkscape", outcome.value === true, `bought for ${DARKSCAPE_TOTAL_COST}`);
+        record("progression", "unlock:darkscape", true, `bought for ${DARKSCAPE_TOTAL_COST}`);
+      } else if (outcome.ok) {
+        record("progression", "unlock:darkscape", false, "purchase refused; retrying next pass");
       }
       return;
     }

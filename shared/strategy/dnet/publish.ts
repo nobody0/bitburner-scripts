@@ -40,7 +40,7 @@ import type {
  * the allow-list below. */
 
 /** Hosts published per digest. The deepest labyrinth builds a net of roughly 163
- * servers (`spec/strategy/bitnodes/bn15.md`), so this clears the largest real
+ * servers (`spec/dnet.md`), so this clears the largest real
  * net with room to spare while still bounding a runaway. */
 export const KNOWLEDGE_MAX_HOSTS = 220;
 
@@ -50,7 +50,6 @@ export const KNOWLEDGE_MAX_HOSTS = 220;
 const PUBLISHED_FACTS = [
   "depth",
   "neighbours",
-  "ip",
   "maxRam",
   "blockedRam",
   "usedRam",
@@ -135,7 +134,6 @@ export function publishHost(
     // by depth, and -1 already means "darkweb" — one sentinel cannot mean both
     // "the root" and "we have no idea", or the root ends up in the unplaced row.
     ...(depth !== undefined ? { depth } : {}),
-    ...(values["ip"] !== undefined ? { ip: values["ip"] as string } : {}),
     ...(values["neighbours"] !== undefined ? { neighbours: values["neighbours"] as string[] } : {}),
     ...(values["maxRam"] !== undefined ? { maxRam: values["maxRam"] as number } : {}),
     ...(values["blockedRam"] !== undefined ? { blockedRam: values["blockedRam"] as number } : {}),
@@ -170,7 +168,6 @@ export function publishHost(
           tried: ledger.tried,
           probes: ledger.probes,
           ...(ledger.lastCode !== undefined ? { lastCode: ledger.lastCode } : {}),
-          ...(ledger.lastOracle !== undefined ? { lastOracle: ledger.lastOracle } : {}),
           ...(ledger.lastAt !== undefined ? { lastAt: ledger.lastAt } : {}),
         },
       }

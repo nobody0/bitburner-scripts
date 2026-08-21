@@ -11,6 +11,17 @@ export interface DarknetAgentDigest {
   role: "overseer" | "resident";
   lastBeatAt: number;
   alive: boolean;
+  /** Jobs waiting in this host's queue. */
+  pending?: number;
+  /** The job the agent has spawned into, by kind, if any. */
+  active?: string;
+  /** Free RAM the resident last measured on its host. */
+  freeGb?: number;
+  /** Jobs finished and failed here since the controller booted. */
+  completed?: number;
+  failed?: number;
+  /** Why the last one failed — out there failures are the normal case. */
+  lastError?: string;
 }
 
 /** One host as the map and the detail panel need it: the current best value of
@@ -22,9 +33,6 @@ export interface DarknetAgentDigest {
  * derives both from the same shared modules the controller uses. */
 export interface DarknetKnownHost {
   hostname: string;
-  /** Assigned at construction and shown by the in-game map. Costs a 2 GB
-   *  `ns.getServer`, so only an agent with room to spare reports it. */
-  ip?: string;
   lastSeenAt: number;
   /** Set when an observation found it gone. Its identity facts are dropped with
    *  it, because a host that returns is a new host with a new password. */
@@ -68,7 +76,6 @@ export interface DarknetKnownHost {
     /** Deliberate failures spent to make an unsolved model's oracle appear. */
     probes: number;
     lastCode?: number;
-    lastOracle?: string;
     lastAt?: number;
   };
   /** THAT we hold a credential, never the credential. This record is written to
@@ -96,7 +103,9 @@ export interface DarknetKnowledgeDigest {
    *  drop agents. */
   agents: { live: number; seenEver: number; lostSinceBoot: number };
   overseer?: { host: string; pid?: number; lastBeatAt: number; alive: boolean; seedAttempts: number };
-  queue?: { pending: number; claimed: number; byKind: Record<string, number> };
+  /** Work in flight across every resident, summed from their last reports:
+   *  jobs queued, jobs being run right now, and the running ones by kind. */
+  queue?: { pending: number; active: number; byKind: Record<string, number> };
 }
 
 export interface DarknetState {
@@ -160,8 +169,8 @@ export interface DarknetState {
    *  `30_000 / netDepth`, and the map cannot draw the rows we have not reached
    *  without knowing how many there are.
    *
-   *  Absent until a lab is seen, which is honest — the alternative is a default
-   *  of 10 that reads as knowledge. */
+   *  Absent until a lab is seen, which is honest — the alternative is a
+   *  fallback (`DEFAULT_NET_DEPTH`, 5) that reads as knowledge. */
   netDepth?: number;
   /** The net's own clock, so the panel can say how fast the map is rotting. */
   mutationIntervalMs?: number;

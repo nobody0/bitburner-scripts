@@ -56,11 +56,12 @@ export const SIM_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> 
   // agents' clock, and the session gates on scp and exec — which is what makes
   // "exec onto darkweb works only from home" fall out rather than be asserted.
   //
-  // Still absent, and still throwing: stasis links, memoryReallocation,
-  // phishing, induced migration, promoteStock, and the maze. Still NOT applied
-  // by the mutation tick: moves, connects and disconnects — the rates every
-  // knowledge expiry is derived from, which is why this stays "partial" and why
-  // DNET_ASSUMPTIONS says a sim run cannot validate the staleness policy.
+  // The mutation tick applies every kind upstream rolls — moves, connects and
+  // disconnects included, the rates every knowledge expiry is derived from — so
+  // a sim run does exercise the staleness policy, and promoteStock is
+  // transcribed exactly (see DNET_ASSUMPTIONS). Still absent, and still
+  // throwing: stasis links, memoryReallocation, phishing, induced migration,
+  // and the maze — which is why this stays "partial".
   dnet: "partial",
   side: "oracle-only",
 };

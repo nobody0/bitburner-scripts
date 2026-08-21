@@ -65,7 +65,7 @@ guessed: `calculateAuthenticationTime` and `getBackdoorAuthTimeDebuff`
 (`DarkNet/effects/ramblock.ts`), `getStasisLinkLimit` and
 `getSetStasisLinkDuration`, the network constants and mutation cadence
 (`DarkNet/Enums.ts`), and the 24-entry model list. They are written up in
-[`spec/strategy/bitnodes/bn15.md`](strategy/bitnodes/bn15.md).
+[`spec/dnet.md`](dnet.md).
 
 Two rules follow, and they are the reason to prefer transcription over shape:
 

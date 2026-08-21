@@ -1,5 +1,5 @@
 import { msPerHostEvent, msPerHostEventAny } from "./rates.ts";
-import type { ReportHost } from "./courier.ts";
+import type { AttemptOutcome, ReportHost } from "./courier.ts";
 
 /** What we know about the darknet, and when it stops being believable.
  *
@@ -37,9 +37,6 @@ export const FACT_CLASS: Readonly<Record<string, FactClass>> = {
   isStationary: "identity",
   logTrafficInterval: "identity",
   requiredCharisma: "identity",
-  // The IP is assigned at construction and dies with the host, exactly like the
-  // password model does.
-  ip: "identity",
   // Changes when the host moves.
   depth: "position",
   // Churned by move, connect and disconnect alike — the most perishable thing
@@ -71,9 +68,35 @@ export interface AttemptLedger {
   probes: number;
   lastAt?: number;
   lastCode?: number;
-  /** The most recent model response, verbatim, for the panel that shows it. */
-  lastOracle?: string;
   solved?: boolean;
+}
+
+/** Fold attempt outcomes into a host's ledger.
+ *
+ * Shared between the controller — whose ledger drives `planAttempt` — and home,
+ * whose copy survives the controller's death and feeds the panel. One function,
+ * so the two can never count a candidate differently. Mutates in place, like the
+ * ledger itself: attempts are about US, not the host, so they sit outside the
+ * fold's newest-wins rule. */
+export function foldAttempts(
+  host: DarknetHostKnowledge | undefined,
+  outcomes: readonly AttemptOutcome[],
+): void {
+  // A gone host's ledger stays dropped: the fold discards cracking progress on
+  // disappearance because a returning host is a new host with a new password,
+  // and an outcome that lands in the same drain as the gone report must not
+  // resurrect counts that belong to the dead identity.
+  if (!host || host.goneAt !== undefined) return;
+  for (const attempt of outcomes) {
+    const ledger = host.attempts ?? { tried: 0, probes: 0 };
+    if (attempt.modelId !== undefined) ledger.modelId = attempt.modelId;
+    if (attempt.status === "implemented") ledger.tried = (attempt.candidateIndex ?? ledger.tried) + 1;
+    else ledger.probes += 1;
+    ledger.lastAt = attempt.at;
+    ledger.lastCode = attempt.code;
+    if (attempt.success) ledger.solved = true;
+    host.attempts = ledger;
+  }
 }
 
 export interface DarknetHostKnowledge {

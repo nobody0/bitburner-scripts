@@ -695,7 +695,7 @@ export function factLife(
 
 /** True when nothing we hold about this host is still believable. Drawn faded,
  * because "we believed this five minutes ago" and "this is true" must not look
- * the same on a net that rewires itself every three seconds. */
+ * the same on a net that rewires itself every few seconds. */
 export function isStale(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): boolean {
   const keys = Object.keys(host.facts);
   if (keys.length === 0) return false;
@@ -710,7 +710,6 @@ function clip(text: string, max: number): string {
  * channel: every state also has a status line and this. */
 function titleOf(host: DarknetKnownHost, options: MapOptions): string {
   const parts = [host.hostname];
-  if (host.ip) parts.push(host.ip);
   parts.push(AUTH_LABEL[host.authState ?? "no-connection"] ?? "");
   const entry = modelEntry(host.modelId);
   if (host.modelId) parts.push(`model ${host.modelId}${entry ? ` (${entry.name})` : ""}`);
@@ -719,6 +718,15 @@ function titleOf(host: DarknetKnownHost, options: MapOptions): string {
     parts.push(`RAM ${fmtRam(host.freeRam ?? 0)} free of ${fmtRam(host.maxRam)}, ${fmtRam(host.blockedRam ?? 0)} blocked`);
   }
   if (host.requiredCharisma !== undefined) parts.push(`charisma ${fmtNum(host.requiredCharisma, 0)}`);
+  if (host.agent) {
+    parts.push(
+      host.agent.alive
+        ? `resident standing here${host.agent.active ? `, running ${host.agent.active}` : ""}${
+          host.agent.pending ? `, ${host.agent.pending} queued` : ""
+        }`
+        : "resident lost",
+    );
+  }
   if (host.goneAt !== undefined) parts.push("gone");
   if (isStale(host, options.now, options.expiry)) parts.push("every fact stale — believed, not confirmed");
   return parts.filter(Boolean).join(" · ");
@@ -752,9 +760,7 @@ function nodeMarkup(entry: Placed, options: MapOptions): string {
   if (query) classes.push(matches(host, query) ? "hit" : "dim");
 
   const glyph = FAMILY_GLYPH[modelEntry(host.modelId)?.family ?? "oracle"] ?? "?";
-  const meta = [host.ip ?? "", host.requiredCharisma !== undefined ? `cha:${fmtNum(host.requiredCharisma, 0)}` : ""]
-    .filter(Boolean)
-    .join(" ");
+  const meta = host.requiredCharisma !== undefined ? `cha:${fmtNum(host.requiredCharisma, 0)}` : "";
   const status = AUTH_LABEL[host.authState ?? "no-connection"] ?? "";
   const ram = host.maxRam === undefined
     ? ""
@@ -770,6 +776,13 @@ function nodeMarkup(entry: Placed, options: MapOptions): string {
     + `<rect class="box" x="${x}" y="${y}" width="${BOX_W}" height="${BOX_H}" rx="2"></rect>`
     + (host.stasisLinked ? `<rect class="stasis" x="${x}" y="${y}" width="3" height="${BOX_H}"></rect>` : "")
     + (host.isStationary ? `<text class="fixed" x="${x + BOX_W - 6}" y="${y + 14}">#</text>` : "")
+    // Where our residents are standing — the core exploration question. A solid
+    // dot is a live one; a hollow dot marks where one died, which is the map's
+    // own read on WHERE the mutation clock is killing them.
+    + (host.agent
+      ? `<circle class="agentdot${host.agent.alive ? "" : " dead"}"`
+        + ` cx="${x + BOX_W - 9}" cy="${y + BOX_H - 9}" r="3"></circle>`
+      : "")
     + `<text class="glyph" x="${x + 7}" y="${y + 15}">${esc(glyph)}</text>`
     + `<text class="host" x="${x + 20}" y="${y + 15}">${esc(clip(host.hostname, 14))}</text>`
     + `<text class="meta" x="${x + 7}" y="${y + 29}">${esc(meta)}</text>`
@@ -784,7 +797,6 @@ export function matches(host: DarknetKnownHost, query: string): boolean {
   const needle = query.toLowerCase();
   return (
     host.hostname.toLowerCase().includes(needle)
-    || (host.ip ?? "").toLowerCase().includes(needle)
     || (host.modelId ?? "").toLowerCase().includes(needle)
     || (modelEntry(host.modelId)?.name ?? "").toLowerCase().includes(needle)
     || (host.passwordHint ?? "").toLowerCase().includes(needle)
@@ -889,6 +901,7 @@ export function netLegend(): string {
     + line("back", "longer link")
     + line("broken", "contradiction — cannot both be true")
     + `<span class="netkey"><span class="gl">#</span>never moves</span>`
+    + `<span class="netkey"><span class="gl agentkey">●</span>resident standing here (hollow = lost)</span>`
     + `</div><div class="netlegend">${glyphs}</div>`
   );
 }

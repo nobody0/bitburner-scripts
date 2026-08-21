@@ -150,7 +150,6 @@ function detailCard(
       ...(attempt.lastCode !== undefined
         ? [[`last code`, `${attempt.lastCode} ${esc(codeName(attempt.lastCode))}`] as [Markup, Markup]]
         : []),
-      ...(attempt.lastOracle !== undefined ? [["last response", esc(attempt.lastOracle)] as [Markup, Markup]] : []),
     ]
     : [];
 
@@ -163,17 +162,111 @@ function detailCard(
     : note("no adjacency known — this host is a rumour until an agent stands next to it");
 
   return card(
-    // raw(), because `card` escapes a plain string title — the hostname and the
-    // ip are already escaped individually above.
-    raw(`${esc(host.hostname)}${host.ip ? ` <span class="muted">${esc(host.ip)}</span>` : ""}`),
+    // raw(), because `card` escapes a plain string title and the hostname is
+    // already escaped here.
+    raw(esc(host.hostname)),
     summary
     + (host.credentialKnown ? `<p class="good">credential held</p>` : "")
+    + (host.agent
+      ? host.agent.alive
+        ? `<p class="good">resident standing here`
+          + `${host.agent.active ? ` — running ${esc(host.agent.active)}` : ""}`
+          + `${host.agent.pending ? `, ${host.agent.pending} queued` : ""}</p>`
+        : `<p class="bad">resident lost — last beat ${fmtTime(now - host.agent.lastBeatAt)} ago</p>`
+      : "")
     + (host.goneAt !== undefined ? `<p class="bad">gone — its identity facts were dropped with it</p>` : "")
     + (modelRows.length > 0 ? definitions(modelRows) : note("no password model observed"))
     + (attemptRows.length > 0 ? collapsible("dnet.attempt", "attempts", definitions(attemptRows), true) : "")
     + collapsible("dnet.facts", "facts, with age", definitions(factRows(host, now, expiry)), true)
     + collapsible("dnet.neigh", "neighbours", neighbours, false),
   );
+}
+
+/** The beachhead and its crew: whether the overseer is standing, where every
+ * resident is, what each is doing, and where they die. This is the card that
+ * answers "is the thing running at all" — which out there is a real question,
+ * because the coordinator lives on a host that reboots. */
+function crewCard(d: DarknetState, hosts: readonly DarknetKnownHost[], now: number): string {
+  const knowledge = d.knowledge;
+  const overseer = knowledge?.overseer;
+  const queue = knowledge?.queue;
+  const residents = hosts
+    .filter((host) => host.agent !== undefined)
+    .map((host) => ({ hostname: host.hostname, agent: host.agent! }));
+
+  const summary = tiles([
+    {
+      label: "overseer",
+      value: overseer ? (overseer.alive ? "alive" : "silent") : NONE,
+      sub: overseer
+        ? `beat ${overseer.lastBeatAt > 0 ? `${fmtTime(now - overseer.lastBeatAt)} ago` : NONE} · ${overseer.seedAttempts} seeds`
+        : undefined,
+    },
+    {
+      label: "residents",
+      value: knowledge ? String(knowledge.agents.live) : NONE,
+      sub: knowledge
+        ? `${knowledge.agents.seenEver} seen · ${knowledge.agents.lostSinceBoot} lost`
+        : undefined,
+    },
+    {
+      label: hint("in flight", "jobs the residents are running right now, and what is queued behind them"),
+      value: queue ? String(queue.active) : NONE,
+      sub: queue
+        ? `${queue.pending} queued${
+          Object.keys(queue.byKind).length > 0
+            ? ` · ${Object.entries(queue.byKind).map(([kind, n]) => `${kind}×${n}`).join(" ")}`
+            : ""
+        }`
+        : undefined,
+    },
+  ]);
+
+  const roster = dataTable(
+    "dnet.crew",
+    residents,
+    [
+      {
+        id: "host",
+        label: "host",
+        left: true,
+        cell: (r) =>
+          `<button class="chip pick" data-view-key="dnet.sel" data-view-value="${esc(r.hostname)}">${esc(r.hostname)}</button>`,
+        sort: (r) => r.hostname,
+      },
+      {
+        id: "beat",
+        label: "beat",
+        cell: (r) =>
+          `<span class="${r.agent.alive ? "" : "bad"}">${fmtTime(now - r.agent.lastBeatAt)} ago</span>`,
+        sort: (r) => -r.agent.lastBeatAt,
+      },
+      { id: "job", label: "job", left: true, cell: (r) => (r.agent.active ? esc(r.agent.active) : NONE), sort: (r) => r.agent.active ?? "" },
+      { id: "queued", label: "queued", cell: (r) => String(r.agent.pending ?? 0), sort: (r) => r.agent.pending ?? 0 },
+      {
+        id: "free",
+        label: "free RAM",
+        cell: (r) => (r.agent.freeGb === undefined ? NONE : fmtRam(r.agent.freeGb)),
+        sort: (r) => r.agent.freeGb ?? -1,
+      },
+      { id: "done", label: "done", cell: (r) => String(r.agent.completed ?? 0), sort: (r) => r.agent.completed ?? 0 },
+      {
+        id: "failed",
+        label: "failed",
+        cell: (r) => {
+          const failed = r.agent.failed ?? 0;
+          const markup = `<span class="${failed > 0 ? "bad" : ""}">${failed}</span>`;
+          // The reason rides the count as a tooltip: a count with no reason is a
+          // number nobody can act on, and a column of 200-char strings is worse.
+          return r.agent.lastError ? `<span title="${esc(r.agent.lastError)}">${markup}</span>` : markup;
+        },
+        sort: (r) => r.agent.failed ?? 0,
+      },
+    ],
+    { defaultSort: { key: "beat", dir: 1 }, empty: "no resident is standing anywhere yet", limit: 16 },
+  );
+
+  return card("Beachhead", summary + roster);
 }
 
 export const dnetTab: Tab = {
@@ -195,10 +288,10 @@ export const dnetTab: Tab = {
     const now = knowledge.at;
     // `netDepth` matters here twice. Every expiry below is derived from the
     // mutation clock, which is `30_000 / netDepth` — so leaving it out would put
-    // the panel on the default depth of 10 while the driver ran on the real one,
-    // and the two would disagree about what is still believable. It is also what
-    // lets the map draw the rows we have NOT reached; failing the topic, the
-    // layout infers it from any labyrinth we have seen.
+    // the panel on the `DEFAULT_NET_DEPTH` fallback (5) while the driver ran on
+    // the real depth, and the two would disagree about what is still believable.
+    // It is also what lets the map draw the rows we have NOT reached; failing
+    // the topic, the layout infers it from any labyrinth we have seen.
     const expiry: ExpiryOpts = {
       bitNode: state.topics.progression?.bitNode,
       ...(d.netDepth !== undefined ? { netDepth: d.netDepth } : {}),
@@ -234,7 +327,7 @@ export const dnetTab: Tab = {
 
     const controls =
       `<div class="netcontrols">`
-      + search("dnet.q", "search host, ip, model, hint")
+      + search("dnet.q", "search host, model, hint")
       + filters("dnet.zoom", [
         { value: "40", label: "40%" },
         { value: "60", label: "60%" },
@@ -288,7 +381,6 @@ export const dnetTab: Tab = {
           sort: (h) => h.hostname,
         },
         { id: "depth", label: "depth", cell: (h) => (h.depth === undefined ? NONE : String(h.depth)), sort: (h) => h.depth ?? 999 },
-        { id: "ip", label: "ip", left: true, cell: (h) => (h.ip ? esc(h.ip) : NONE), sort: (h) => h.ip ?? "" },
         { id: "model", label: "model", left: true, cell: (h) => (h.modelId ? esc(h.modelId) : NONE), sort: (h) => h.modelId ?? "" },
         {
           id: "usable",
@@ -444,6 +536,7 @@ export const dnetTab: Tab = {
       + `</div>`
       + `<div class="col">`
       + detailCard(d, hosts, options.selected, now, expiry)
+      + crewCard(d, hosts, now)
       + card("Knowledge", reach)
       + card("Report channel", delivery)
       + card("Response codes", table(["code", "meaning", "n"], codes, { empty: "no darknet call has answered yet", left: [0, 1] }))

@@ -95,9 +95,8 @@ export function netDepthFromLabs(hostnames: Iterable<string>): number | undefine
 }
 
 /** The remaining network constants (the connection chances, MAX_PASSWORD_LENGTH)
- * are written up in spec/strategy/bitnodes/bn15.md rather than exported here;
- * nothing computes with them yet, and an unused constant is a claim nobody
- * checks. */
+ * are written up in spec/dnet.md rather than exported here; nothing computes
+ * with them yet, and an unused constant is a claim nobody checks. */
 /** What darknet access costs, and where it can be bought.
  *
  * `ns.singularity.purchaseProgram` is the only scriptable path and it needs the

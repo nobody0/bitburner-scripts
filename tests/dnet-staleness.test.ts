@@ -20,7 +20,20 @@ import {
   staleness,
 } from "../shared/strategy/dnet/knowledge.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
-import { overseerIsLive, RENDEZVOUS_PROTOCOL, type DnetRendezvous } from "../game/dnet/realm.ts";
+import {
+  JOB_TIMEOUT_MS,
+  overseerIsLive,
+  RENDEZVOUS_PROTOCOL,
+  RESIDENT_BEAT_MS,
+  RESIDENT_BEAT_MISSES,
+  sweepQueues,
+  type DnetHostQueue,
+  type DnetJob,
+  type DnetRendezvous,
+} from "../game/dnet/realm.ts";
+import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
+import { foldAttempts, type DarknetHostKnowledge } from "../shared/strategy/dnet/knowledge.ts";
+import type { AttemptOutcome } from "../shared/strategy/dnet/courier.ts";
 import { mutationIntervalMs, msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
 
 const GEN = "run-1";
@@ -337,9 +350,6 @@ describe("a credential is never written down", () => {
 
 describe("the facts the spreading agents added", () => {
   test("the new fact classes expire on the right clock", () => {
-    // An IP is assigned at construction and dies with the host, exactly like the
-    // password model does — so it never expires with age.
-    expect(FACT_CLASS["ip"]).toBe("identity");
     expect(expiryMs("identity")).toBe(Infinity);
     // A session belongs to the PID that won it, so it is worthless the moment
     // its observer dies. The shortest expiry we have is the honest answer.
@@ -412,4 +422,171 @@ describe("the facts the spreading agents added", () => {
     expect(cover.plantable).toBe(1);
   });
 
+});
+
+describe("the sweep does not race a running job", () => {
+  const BEAT_WINDOW = RESIDENT_BEAT_MS * RESIDENT_BEAT_MISSES;
+
+  const job = (over: Partial<DnetJob> = {}): DnetJob => ({
+    id: "survey:dn-1",
+    kind: "survey",
+    label: "test",
+    budgetGb: 2.6,
+    longLived: false,
+    state: { host: "dn-1", from: "dn-1" },
+    body: async () => ({ ok: true }),
+    settle: () => {},
+    fail: () => {},
+    ...over,
+  });
+
+  const queueOf = (over: Partial<DnetHostQueue> = {}): Map<string, DnetHostQueue> =>
+    new Map([["dn-1", { host: "dn-1", pending: [], lastBeatAt: 0, completed: 0, failed: 0, ...over }]]);
+
+  test("an idle resident that stops beating is retired after three beats", () => {
+    const queues = queueOf();
+    expect(sweepQueues(queues, BEAT_WINDOW)).toHaveLength(0);
+    expect(sweepQueues(queues, BEAT_WINDOW + 1)).toHaveLength(1);
+    expect(queues.size).toBe(0);
+  });
+
+  test("an active job is evidence of life until its own timeout has passed", () => {
+    // While a job runs the resident is dead BY DESIGN — spawn killed it — so
+    // lastBeatAt freezes for the whole job. Sweeping on the beat window alone
+    // retired any queue whose job outran three beats, losing the result of a
+    // merely slow authenticate and miscounting it as a lost resident.
+    const startedAt = 10_000;
+    const queues = queueOf({ active: job({ startedAt }) });
+    // Far past the beat window, well inside the job timeout: alive.
+    expect(sweepQueues(queues, startedAt + JOB_TIMEOUT_MS)).toHaveLength(0);
+    // The controller's own timeout loop fires at startedAt + JOB_TIMEOUT_MS, so
+    // the sweep concedes it a full beat window before treating silence as death.
+    expect(sweepQueues(queues, startedAt + JOB_TIMEOUT_MS + BEAT_WINDOW)).toHaveLength(0);
+    expect(sweepQueues(queues, startedAt + JOB_TIMEOUT_MS + BEAT_WINDOW + 1)).toHaveLength(1);
+  });
+
+  test("a long-lived job holds its queue open indefinitely", () => {
+    const queues = queueOf({ active: job({ startedAt: 0, longLived: true }) });
+    expect(sweepQueues(queues, Number.MAX_SAFE_INTEGER)).toHaveLength(0);
+  });
+});
+
+describe("a bleed leaves a mark, so the task stops re-deriving", () => {
+  // The queue is DERIVED, and heartbleed with `peek` leaves the ring intact —
+  // the game gives no signal that a host was just listened to. The controller's
+  // own `lastBleedAt` stamp is therefore the only thing standing between one
+  // bleed and an endless spawn/heartbleed/spawn loop on every held host.
+  test("a fresh stamp suppresses the bleed; an expired one revives it", () => {
+    // Late enough that the never-bled default of 0 reads as overdue.
+    const at = expiryMs("topology") + 1_000;
+    const { knowledge } = foldReports(emptyKnowledge(GEN), [report("dn-1", at, { depth: 1 })], at);
+    const agents = new Set(["dn-1"]);
+    const bleeds = (now: number) => deriveTasks(knowledge, now, { agents }).filter((t) => t.kind === "bleed");
+
+    expect(bleeds(at)).toHaveLength(1);
+
+    knowledge.hosts["dn-1"]!.facts["lastBleedAt"] = { value: true, at };
+    expect(bleeds(at + 1)).toHaveLength(0);
+
+    const expired = at + expiryMs("topology") + 1;
+    expect(bleeds(expired)).toHaveLength(1);
+  });
+});
+
+describe("the charisma gate withholds what heartbleed would refuse", () => {
+  // `heartbleed` is the ONE charisma-gated call: below the host's requirement
+  // it can only answer 451. A bleed below the gate is a wasted job, and a probe
+  // attempt's whole payoff is the oracle heartbleed reads back — so both are
+  // withheld until charisma catches up. Candidates are NOT gated: authenticate
+  // has no charisma gate and a dictionary hit reports success in its return.
+  const at = expiryMs("topology") + 1_000;
+
+  test("bleeds derive only above the host's requirement — or when it is unknown", () => {
+    const { knowledge } = foldReports(
+      emptyKnowledge(GEN),
+      [report("dn-1", at, { depth: 1, requiredCharisma: 120 })],
+      at,
+    );
+    const agents = new Set(["dn-1"]);
+    const bleeds = (charisma?: number) =>
+      deriveTasks(knowledge, at, { agents, ...(charisma !== undefined ? { charisma } : {}) })
+        .filter((t) => t.kind === "bleed");
+
+    expect(bleeds(50)).toHaveLength(0);
+    expect(bleeds(120)).toHaveLength(1);
+    // No charisma supplied: nothing is gated (backward-compatible callers).
+    expect(bleeds(undefined)).toHaveLength(1);
+
+    // Requirement unknown: the refused call's own describeHost report is what
+    // teaches us the number, so the first try IS the survey.
+    const unknown = foldReports(emptyKnowledge(GEN), [report("dn-2", at, { depth: 1 })], at).knowledge;
+    expect(
+      deriveTasks(unknown, at, { agents: new Set(["dn-2"]), charisma: 1 }).filter((t) => t.kind === "bleed"),
+    ).toHaveLength(1);
+  });
+
+  test("probe attempts are withheld below the gate; candidates are not", () => {
+    const { knowledge } = foldReports(
+      emptyKnowledge(GEN),
+      [
+        report("dn-0", at, { neighbours: ["probe-me", "dict-me"] }),
+        // An unrecognised model plans a PROBE — its payoff is the oracle.
+        report("probe-me", at, { depth: 1, modelId: "Mystery_9000", requiredCharisma: 120 }),
+        // A dictionary model plans CANDIDATES — no oracle needed.
+        report("dict-me", at, { depth: 1, modelId: "FreshInstall_1.0", requiredCharisma: 120 }),
+      ],
+      at,
+    );
+    const attempts = (charisma: number) =>
+      deriveTasks(knowledge, at, { agents: new Set(["dn-0"]), charisma }).filter((t) => t.kind === "attempt");
+
+    expect(attempts(50).map((t) => t.host)).toEqual(["dict-me"]);
+    expect(attempts(200).map((t) => t.host).sort()).toEqual(["dict-me", "probe-me"]);
+  });
+});
+
+describe("home and the controller count an attempt the same way", () => {
+  // One helper folds attempt outcomes on both sides of the drain, so the ledger
+  // that drives planAttempt and the ledger the panel shows can never disagree.
+  test("candidates advance the tried count, probes only accumulate", () => {
+    const host: DarknetHostKnowledge = { hostname: "dn-1", lastSeenAt: 0, facts: {} };
+    const outcome = (over: Partial<AttemptOutcome> = {}): AttemptOutcome => ({
+      at: 1_000,
+      modelId: "TopPass",
+      status: "implemented",
+      code: 401,
+      success: false,
+      ...over,
+    });
+
+    foldAttempts(host, [outcome({ candidateIndex: 0 })]);
+    expect(host.attempts).toMatchObject({ modelId: "TopPass", tried: 1, probes: 0, lastCode: 401 });
+
+    foldAttempts(host, [outcome({ candidateIndex: 1 }), outcome({ status: "unattempted", candidateIndex: undefined })]);
+    expect(host.attempts).toMatchObject({ tried: 2, probes: 1 });
+
+    foldAttempts(host, [outcome({ candidateIndex: 2, code: 200, success: true })]);
+    expect(host.attempts).toMatchObject({ tried: 3, solved: true, lastCode: 200 });
+
+    // A missing host is a host that disappeared between the job and the drain:
+    // nothing to count against.
+    expect(() => foldAttempts(undefined, [outcome()])).not.toThrow();
+  });
+
+  test("a gone host's ledger stays dropped", () => {
+    // The fold discards cracking progress when a host disappears, because a
+    // returning host is a new host with a new password. An attempt outcome that
+    // lands in the same drain as the gone report — the job saw the host die —
+    // must not resurrect counts that belong to the dead identity.
+    const gone: DarknetHostKnowledge = { hostname: "dn-2", lastSeenAt: 0, goneAt: 5_000, facts: {} };
+    foldAttempts(gone, [{
+      at: 6_000,
+      modelId: "TopPass",
+      status: "implemented",
+      code: 401,
+      success: false,
+      candidateIndex: 0,
+    }]);
+    expect(gone.attempts).toBeUndefined();
+  });
 });

@@ -52,8 +52,9 @@ note in `README.md`.
   `tests/build-perf.test.ts` pins both halves.
 - Darknet rule: every fact about the darknet carries where it came from and
   when, and is checked against the mutation clock before it is acted on. A
-  mutation tick lands every ~3 s in BN15, so unstamped topology or credentials
-  are a map of a dead world. Expiry is per fact CLASS and derived from the
+  mutation tick lands every ~6 s at the default net depth of 5 in BN15
+  (30 000/depth ms, twice as slow elsewhere), so unstamped topology or
+  credentials are a map of a dead world. Expiry is per fact CLASS and derived from the
   transcribed mutation rates (`shared/strategy/dnet/rates.ts`), never guessed.
   Agents run on darknet hosts because sessions are per-PID and the controller's
   static RAM is pinned; see `spec/dnet.md`.

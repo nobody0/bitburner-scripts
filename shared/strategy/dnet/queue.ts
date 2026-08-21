@@ -62,6 +62,14 @@ export interface DeriveOptions {
   plantable?: readonly { host: string; from: string }[];
   /** How many deliberate probes an unsolved model may cost, per host. */
   probeLimit?: number;
+  /** Our charisma, for the heartbleed gate: `heartbleed` refuses (451) below the
+   *  host's `requiredCharisma`, and it is the only charisma-gated call. A bleed
+   *  against a gated host can only ever collect a 451, and a probe attempt's
+   *  whole payoff is the oracle heartbleed would read back — so both are
+   *  withheld until charisma catches up, and the requirement is an identity
+   *  fact, so it never quietly expires into "try again". Omitted, nothing is
+   *  gated: one refused call per host is how the requirement gets learned. */
+  charisma?: number;
 }
 
 /** Where a process would have to stand to reach `host`: any neighbour of it we
@@ -105,6 +113,13 @@ export function deriveTasks(
     if (from === undefined) continue;
 
     const depth = fresh<number>(host, "depth", now, expiry) ?? 99;
+    // The heartbleed gate. An UNKNOWN requirement passes: the refused call's own
+    // describeHost report is what teaches us the number, so the first try is
+    // the survey.
+    const requiredCharisma = fresh<number>(host, "requiredCharisma", now, expiry);
+    const bleedable = opts.charisma === undefined
+      || requiredCharisma === undefined
+      || requiredCharisma <= opts.charisma;
 
     // SURVEY: only when the adjacency we hold has stopped being believable.
     // While it is fresh there is nothing to learn, so there is no task, so two
@@ -140,7 +155,12 @@ export function deriveTasks(
         ledger?.probes ?? 0,
         opts.probeLimit ?? 1,
       );
-      if (attempt.kind !== "none" && modelId !== undefined) {
+      // A probe's whole payoff is the oracle, and the oracle comes back through
+      // heartbleed — so below the charisma gate a probe is a wasted authenticate
+      // whose answer we cannot read. Candidates stay: authenticate itself has no
+      // charisma gate, and a dictionary hit reports success in its return value.
+      const withheld = attempt.kind === "probe" && !bleedable;
+      if (attempt.kind !== "none" && modelId !== undefined && !withheld) {
         tasks.push({
           id: `attempt:${host.hostname}`,
           kind: "attempt",
@@ -159,7 +179,7 @@ export function deriveTasks(
     // BLEED: a host we can already open is still worth listening to, because its
     // logs leak its NEIGHBOURS' passwords. That is the cheapest credential in
     // the game and it owes nothing to any minigame.
-    if (agents.has(host.hostname) || vault.has(host.hostname)) {
+    if (bleedable && (agents.has(host.hostname) || vault.has(host.hostname))) {
       const bled = host.facts["lastBleedAt"]?.at ?? 0;
       if (now - bled > expiryMs("topology", expiry)) {
         tasks.push({

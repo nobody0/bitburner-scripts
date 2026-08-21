@@ -36,7 +36,7 @@ The acceptance bar for a feature is the full vertical slice:
 | 8 | sleeves | **done** |
 | 9 | go | **done** |
 | 10 | stanek | **done** |
-| 11 | dnet | **strategy only †** — no darknet action is executed |
+| 11 | dnet | **exploring** — the overseer/agent pipeline (`game/dnet/`) surveys, bleeds, cracks and plants on live darknet hosts; the arbiter-facing stasis action is still refused (mechanical: `setStasisLink` needs 12 GB on the target itself) |
 | 12 | side | **done** |
 | 13 | progression | **done** — endgame route, install barrier, two-pass arm/execute, and post-install restart are live |
 | 14 | endgame route + refresh/act split | **done** — see below |
@@ -469,7 +469,7 @@ Every feature now has a real driver module; `inert()` is gone from
 | 8 | sleeves | Allocate N sleeves across the task menu | Exact per-sleeve argmax (sleeves do not interfere). Shock scales output down linearly, so recovery dominates. |
 | 9 | go | Wins, territory, streaks | Upstream-oracle arena; trained value network over legal candidates and their seeded faction replies, executed as a WebGPU compute shader. See `spec/go-ai.md`. |
 | 10 | stanek | Pack the grid, then charge | **Exhaustive packing is PROVABLY optimal** — the strongest evidence in the roster. Correctly leaves out a large fragment to fit two smaller ones. |
-| 11 | dnet | Traverse under a stasis-link budget | **None yet.** The max-reachable search is exact over an assumed complete graph, which the API cannot produce — `probe()` is host-local, `dnetCore` hard-codes `topologyComplete: false`, and `stepDarknet` idles on that. It has never run. |
+| 11 | dnet | Traverse under a stasis-link budget | **Search runs, actions wait.** `topologyComplete` is derived from the agents' folded adjacency (no longer the probe's hard-coded false), so `stepDarknet`'s max-reachable search runs each tick — but its actions are still refused: authentication happens on the agents next door to their targets, and `setStasisLink` needs a 12 GB script on the host being pinned. |
 | 12 | side | Solve every coding contract | **All 30 v3.0.1 contract types implemented** with exact registry coverage and known-answer tests. Discovery is ls-only; staged batches peak at `attempt` RAM, and a first rejection is logged and quarantined rather than retried. Infiltration stays manual. |
 | 13 | progression | Install timing, reset cadence, node order | Exact favor crossover (`addRepToFavor`); directly tested live milestone selector, with a small-set ordering oracle retained for offline comparisons. |
 
@@ -1376,7 +1376,7 @@ the `drift-pins` hash table. `ns.dnet.promoteStock` deposits charges in
 `sim/features/dnet.ts`; the adapter hooks are injected rather than stubbed, so
 the vendored price engine and `getVolatility` cannot disagree. Charges clear on
 prestige, on the same boundary that destroys the portfolio. See
-`spec/strategy/bitnodes/bn15.md` for the formulas.
+`spec/dnet.md` for the formulas.
 
 **Run cost.** The premise going in was that the BN8 sim was slow. It was not —
 one seed of `stock-only` was 2.4 s, and a full eight virtual hours with the goal
@@ -1423,20 +1423,21 @@ the *strategy* level without full end-to-end execution:
 - **Corporation actions are not executed.** The stage machine, its
   preconditions and its digest are complete and tested; issuing the calls
   against an unmodelled world is the one thing this project refuses to do.
-- **Every darknet action is refused, not faked.** Three separate reasons, and
-  only the first was previously recorded. `authenticate(host, password)` needs a
-  password behind the darknet's own discovery mechanic, so the driver reports
-  that rather than calling with an invented credential. `setStasisLink()` takes
-  **no host** — it pins the calling script's own server — so it cannot be issued
-  from `home` at all. And the topology is host-local by API design: `probe()`
-  returns only the calling host's darknet neighbours and `ns.scan` excludes the
-  darknet, so `topologyComplete` can never become true and the strategy's
-  reachability search never runs. See `spec/dnet.md`.
-- **Sim models exist for factions, crime, hacknet, stock and Go.** Gang, corp,
-  bladeburner, sleeves, stanek and dnet have pure strategy + driver + tests,
-  but no complete system model — so their ns calls report `unmodeled()` rather
-  than fabricating. Go additionally runs differential strategy tournaments
-  against the pinned upstream faction AI.
+- **Darknet exploration acts; the traversal strategy still waits.** The
+  overseer/agent pipeline (`game/dnet/`) does authenticate, heartbleed, scp and
+  exec on live darknet hosts — with discovered credentials, never invented ones.
+  What remains refused is the arbiter-facing `stepDarknet` action, for
+  mechanical reasons the driver records each time: authentication happens on the
+  agents, next door to their targets, and `setStasisLink()` takes **no host** —
+  it pins the calling script's own server, so spending a link means running a
+  12 GB script on the host being pinned. See `spec/dnet.md`.
+- **Sim models exist for factions, crime, hacknet, stock, Go and dnet** (the
+  darknet grid, mutation clock and session rules live in `sim/features/dnet.ts`,
+  with its unmodelled gaps declared in `DNET_ASSUMPTIONS`). Gang, corp,
+  bladeburner, sleeves and stanek have pure strategy + driver + tests, but no
+  complete system model — so their ns calls report `unmodeled()` rather than
+  fabricating. Go additionally runs differential strategy tournaments against
+  the pinned upstream faction AI.
 - **Installs use an explicit barrier**, and `phase === "ending"` is not it. The
   phase is the ANNOUNCEMENT — the signal to `stock` and `factions` that it is time
   to convert everything. Permission to reset is the conjunction of four barriers,

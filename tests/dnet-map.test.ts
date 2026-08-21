@@ -365,7 +365,6 @@ describe("the rendered SVG", () => {
       hostname: "dn-1",
       depth: 0,
       neighbours: ["darkweb"],
-      ip: "10.0.0.7",
       requiredCharisma: 120,
       modelId: "2G_cellular",
       maxRam: 16,
@@ -414,7 +413,7 @@ describe("the rendered SVG", () => {
   test("a box carries what the in-game box carries, plus the RAM", () => {
     const html = netMap(hosts, OPTIONS);
     expect(html).toContain("dn-1");
-    expect(html).toContain("10.0.0.7 cha:120");
+    expect(html).toContain("cha:120");
     expect(html).toContain("[ auth required ]");
     // The in-game box only hints at blocked RAM with a lock icon; we show the
     // split, because it is what decides whether an agent fits at all.
@@ -470,7 +469,6 @@ describe("the rendered SVG", () => {
   test("matches searches the fields an operator would actually type", () => {
     const h = hosts[1]!;
     expect(matches(h, "DN-1")).toBe(true);
-    expect(matches(h, "10.0.0")).toBe(true);
     expect(matches(h, "2g_cell")).toBe(true);
     expect(matches(h, "nothing")).toBe(false);
   });

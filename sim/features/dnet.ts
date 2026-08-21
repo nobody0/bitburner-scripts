@@ -39,14 +39,12 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   "dnet.topology: population, the 8-wide grid, air-gap rows and the connection passes are reproduced — a host holds a "
   + "(depth, leftOffset) cell, lateral edges reach only the cells beside it, and vertical edges are rolled against the whole "
   + "adjacent row. What is not transcribed is the ORDER upstream's balancing pass visits candidates in",
-  // THE ONE THAT MATTERS MOST. Every knowledge expiry in
-  // shared/strategy/dnet/knowledge.ts is derived from the move, connect and
-  // disconnect rates — none of which this tick produces. So the staleness policy
-  // will always measure as CHEAPER here than in the game, and a sim run cannot
-  // validate it. Said out loud rather than left for someone to discover.
-  // The tick applies every kind upstream rolls, and now seats them on the real
-  // grid. What is left is the ENTROPY: upstream rolls a fresh Math.random() per
-  // candidate pair, which would make the draw block variable-width.
+  // Every knowledge expiry in shared/strategy/dnet/knowledge.ts is derived from
+  // the move, connect and disconnect rates, and the tick produces ALL of them —
+  // every kind upstream rolls, at upstream's probabilities, seated on the real
+  // grid — so a sim run does exercise the staleness policy. What is left is the
+  // ENTROPY: upstream rolls a fresh Math.random() per candidate pair, which
+  // would make the draw block variable-width.
   "dnet.mutationPlacement: the tick applies every mutation kind upstream rolls — island moves, low-level restocking, "
   + "deletes, adds, restarts, moves, added connections, severed connections and the density balance — at upstream's own "
   + "probabilities and in its order, and a moved or added host takes a free (depth, leftOffset) cell from "

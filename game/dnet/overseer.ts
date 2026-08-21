@@ -1,14 +1,16 @@
 import type { NS } from "@ns";
 import type { ArtifactIdentity } from "../../shared/run-identity.ts";
-import type { AgentBeat, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
+import type { AgentBeat, AttemptOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import { parseOverseerArgs, residentArgs } from "../../shared/strategy/dnet/mission.ts";
 import {
   coverage,
   emptyKnowledge,
+  foldAttempts,
   foldReports,
   freeRam,
   fresh,
   type DarknetKnowledge,
+  type ExpiryOpts,
 } from "../../shared/strategy/dnet/knowledge.ts";
 import { deriveTasks, type Task } from "../../shared/strategy/dnet/queue.ts";
 import { DEFAULT_SPREAD_LIMITS, planSpread, type SpreadCandidate } from "../../shared/strategy/dnet/spread.ts";
@@ -116,12 +118,18 @@ export async function main(ns: NS): Promise<void> {
   const selfHost = ns.getHostname();
   const payloads = [mission.agentFile];
   let charisma = mission.charisma;
+  // Home's readings of the clock the expiries run on. Undefined until ordered:
+  // the shared defaults (depth 5, BN15) err toward re-observing, which is the
+  // safe direction while home has not pinned the real values.
+  let netDepth: number | undefined;
+  let bitNode: number | undefined;
   let knowledge: DarknetKnowledge = emptyKnowledge(mission.generation);
   const vault = new Map<string, string>();
   const codes: Record<string, number> = {};
   const lastPlantAt = new Map<string, number>();
   const pendingHosts: ReportHost[] = [];
   const pendingCredentials: VaultEntry[] = [];
+  const pendingAttempts: { hostname: string; outcome: AttemptOutcome }[] = [];
   const queues = new Map<string, DnetHostQueue>();
   let residentsSeenEver = 0;
   let residentsLost = 0;
@@ -140,6 +148,7 @@ export async function main(ns: NS): Promise<void> {
       const drained = {
         hosts: pendingHosts.splice(0, pendingHosts.length),
         credentials: pendingCredentials.splice(0, pendingCredentials.length),
+        attempts: pendingAttempts.splice(0, pendingAttempts.length),
         codes: { ...codes },
         residents: [...queues.values()].map((queue) => ({
           host: queue.host,
@@ -147,6 +156,9 @@ export async function main(ns: NS): Promise<void> {
           pending: queue.pending.length,
           ...(queue.active ? { active: queue.active.kind } : {}),
           ...(queue.freeGb !== undefined ? { freeGb: queue.freeGb } : {}),
+          completed: queue.completed,
+          failed: queue.failed,
+          ...(queue.lastError !== undefined ? { lastError: queue.lastError } : {}),
         })),
         residentsLost,
       };
@@ -156,6 +168,8 @@ export async function main(ns: NS): Promise<void> {
     },
     order(orders: DnetOrders) {
       charisma = orders.charisma;
+      if (orders.netDepth !== undefined) netDepth = orders.netDepth;
+      if (orders.bitNode !== undefined) bitNode = orders.bitNode;
       for (const entry of orders.vault ?? []) vault.set(entry.hostname, entry.password);
       if (orders.standDown === true) standDown = true;
     },
@@ -182,7 +196,7 @@ export async function main(ns: NS): Promise<void> {
     // the job that saw it looked.
     const at = Date.now();
     if (result.hosts && result.hosts.length > 0) {
-      knowledge = foldReports(knowledge, result.hosts, at).knowledge;
+      knowledge = foldReports(knowledge, result.hosts, at, expiryOpts()).knowledge;
       pendingHosts.push(...result.hosts);
     }
     for (const entry of result.credentials ?? []) {
@@ -196,19 +210,12 @@ export async function main(ns: NS): Promise<void> {
   };
 
   const recordAttempts = (hostname: string, result: DnetJobResult): void => {
-    const host = knowledge.hosts[hostname];
-    if (!host) return;
-    for (const attempt of result.attempts ?? []) {
-      const ledger = host.attempts ?? { tried: 0, probes: 0 };
-      if (attempt.modelId !== undefined) ledger.modelId = attempt.modelId;
-      if (attempt.status === "implemented") ledger.tried = (attempt.candidateIndex ?? ledger.tried) + 1;
-      else ledger.probes += 1;
-      ledger.lastAt = attempt.at;
-      ledger.lastCode = attempt.code;
-      if (attempt.oracle) ledger.lastOracle = attempt.oracle.data ?? attempt.oracle.message;
-      if (attempt.success) ledger.solved = true;
-      host.attempts = ledger;
-    }
+    const outcomes = result.attempts ?? [];
+    if (outcomes.length === 0) return;
+    foldAttempts(knowledge.hosts[hostname], outcomes);
+    // Queued for the drain as well: home keeps its own copy of the ledger, so
+    // the panel's cracking progress survives this process the way the map does.
+    for (const outcome of outcomes) pendingAttempts.push({ hostname, outcome });
   };
 
   /** Queue one job on a host, and KEEP ITS PROMISE.
@@ -226,14 +233,34 @@ export async function main(ns: NS): Promise<void> {
       job.settle = resolve;
       job.fail = reject;
     });
+    // The bleed task derives from this fact, and NOTHING else ever writes it:
+    // heartbleed with `peek` leaves the ring intact, so the game gives no
+    // signal that a host was just listened to. Without the stamp,
+    // `bleed:<host>` re-derives on every tick for every held host, for ever.
+    // Stamped on failure and rejection too, deliberately: a bleed that answers
+    // 351/408/503 — or whose process died — re-derived on the NEXT tick, one
+    // wasted spawn every couple of seconds until the target vanished. The read
+    // site's clock is topology expiry, so a failure-stamped host retries at
+    // exactly the cadence a success produces, once the belief that failed it
+    // has had time to be resurveyed.
+    const stampBleed = (): void => {
+      if (job.kind !== "bleed") return;
+      const host = knowledge.hosts[job.state.host];
+      if (host) host.facts["lastBleedAt"] = { value: true, at: Date.now() };
+    };
     void promise.then(
       (result) => {
         absorb(result);
         recordAttempts(job.state.host, result);
         if (job.kind === "plant" && result.ok) lastPlantAt.set(job.state.host, Date.now());
+        stampBleed();
       },
       () => {
-        note(903);
+        // 905, not 903: this path is a job whose promise was REJECTED — its host
+        // restarted under it, its resident was swept, or it timed out — and
+        // counting that as NotEnoughRam made a dying net read as a RAM shortage.
+        note(905);
+        stampBleed();
       },
     );
     queue.pending.push(job);
@@ -353,9 +380,15 @@ export async function main(ns: NS): Promise<void> {
 
     // Read the ring back whatever happened: on a failure it holds the model's
     // response, and on a success it still holds whatever the host leaked while
-    // we were working.
-    const bled = await jobNs["dnet"]["heartbleed"](state.host, { peek: true, logsToCapture: LOG_LINES });
-    const harvest = bled.success ? harvestLogs(bled.logs, state.host) : undefined;
+    // we were working. UNLESS the host's charisma gate is above us — heartbleed
+    // is the one charisma-gated call, so below the gate this read can only be a
+    // 451, and skipping it is what keeps a dictionary walk against a gated host
+    // from collecting one refusal per candidate.
+    const canBleed = details.requiredCharismaSkill <= charisma;
+    const bled = canBleed
+      ? await jobNs["dnet"]["heartbleed"](state.host, { peek: true, logsToCapture: LOG_LINES })
+      : undefined;
+    const harvest = bled?.success ? harvestLogs(bled.logs, state.host) : undefined;
     const credentials: VaultEntry[] = (harvest?.credentials ?? []).map((found) => ({
       hostname: found.host!,
       password: found.password,
@@ -444,14 +477,22 @@ export async function main(ns: NS): Promise<void> {
     return surveyJob;
   };
 
+  // The clock the expiries run on, rebuilt per tick because home's orders can
+  // update both fields at any time.
+  const expiryOpts = (): ExpiryOpts => ({
+    ...(netDepth !== undefined ? { netDepth } : {}),
+    ...(bitNode !== undefined ? { bitNode } : {}),
+  });
+
   const spreadCandidates = (at: number): SpreadCandidate[] => {
+    const expiry = expiryOpts();
     const standing = new Set([selfHost, ...queues.keys()]);
     const out: SpreadCandidate[] = [];
     for (const host of Object.values(knowledge.hosts)) {
       if (standing.has(host.hostname)) continue;
       let from: string | undefined;
       for (const where of standing) {
-        const neighbours = fresh<string[]>(knowledge.hosts[where], "neighbours", at);
+        const neighbours = fresh<string[]>(knowledge.hosts[where], "neighbours", at, expiry);
         if (neighbours?.includes(host.hostname)) {
           from = where;
           break;
@@ -461,8 +502,10 @@ export async function main(ns: NS): Promise<void> {
       out.push({
         host: host.hostname,
         from,
-        ...(fresh<number>(host, "depth", at) !== undefined ? { depth: fresh<number>(host, "depth", at)! } : {}),
-        freeRam: freeRam(host, at),
+        ...(fresh<number>(host, "depth", at, expiry) !== undefined
+          ? { depth: fresh<number>(host, "depth", at, expiry)! }
+          : {}),
+        freeRam: freeRam(host, at, expiry),
         hasCredential: vault.has(host.hostname),
         agentAlive: false,
         ...(lastPlantAt.has(host.hostname) ? { lastPlantAt: lastPlantAt.get(host.hostname)! } : {}),
@@ -477,6 +520,8 @@ export async function main(ns: NS): Promise<void> {
   const fileWork = (at: number): Task[] => {
     const plan = planSpread(spreadCandidates(at), DEFAULT_SPREAD_LIMITS, at, queues.size);
     const tasks = deriveTasks(knowledge, at, {
+      ...expiryOpts(),
+      charisma,
       agents: new Set([selfHost, ...queues.keys()]),
       vault: new Set(vault.keys()),
       plantable: plan.plant.map((entry) => ({ host: entry.host, from: entry.from })),
@@ -545,6 +590,11 @@ export async function main(ns: NS): Promise<void> {
       if (active?.startedAt !== undefined && !active.longLived && at - active.startedAt > JOB_TIMEOUT_MS) {
         queue.active = undefined;
         queue.failed++;
+        // Stamp the beat as the job is cleared: `lastBeatAt` froze for the whole
+        // job, and the sweep falls back to it the moment `active` is gone — an
+        // unstamped timeout handed the returning resident one tick, not the full
+        // beat window the sweep promises.
+        queue.lastBeatAt = at;
         active.fail(new Error(`${active.label} timed out on ${queue.host}`));
       }
     }
@@ -562,7 +612,7 @@ export async function main(ns: NS): Promise<void> {
           residents: queues.size,
           residentsSeenEver,
           residentsLost,
-          coverage: coverage(knowledge, at),
+          coverage: coverage(knowledge, at, expiryOpts()),
           tasks: tasks.length,
           queued: [...queues.values()].map((queue) => ({
             host: queue.host,
