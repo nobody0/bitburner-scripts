@@ -49,7 +49,12 @@ export interface LabStage {
   /** The whole net's depth while this lab is the current one. */
   depth: number;
   cha: number;
-  /** Solved through the UI maze rather than by a script. */
+  /** Whether the UI will ALSO walk this maze by hand. Every lab is scriptable —
+   *  the engine's movement handler gates on charisma alone and no ns call reads
+   *  this flag — so `false` means "script-only", not "unreachable".
+   *  Source: src/DarkNet/effects/labyrinth.ts:234-332 (no manual check),
+   *    src/DarkNet/ui/PasswordPrompt.tsx:29-45,
+   *    src/DarkNet/ui/LabyrinthSummary.tsx:60,73,83,147 */
   manual: boolean;
 }
 

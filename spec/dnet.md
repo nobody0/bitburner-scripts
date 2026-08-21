@@ -84,7 +84,7 @@ passwords. The clock is quantified under [The mutation clock](#the-mutation-cloc
 | `probe()`, `getServerDetails`, `getDepth`, `isDarknetServer`, `getServerRequiredCharismaLevel` | Enumerate and select targets, all **local to the calling host** |
 | `authenticate(host, password)` / `connectToSession(host, password)` | Access — the first needs a direct connection, the second does not. Both grant a session to the calling PID only |
 | `heartbleed(host, options)` | Scrape logs. Needs a direct connection and **charisma ≥ the host's requirement**, but no session. Threaded, priced by `formulas.dnet.getHeartbleedTime` |
-| `openCache(filename)` | Retrieve captured data. Returns `karmaLoss` — it is a karma sink, which couples it to `career` and `gang` |
+| `openCache(filename)` | Retrieve captured data. Returns `karmaLoss`, and karma only ever moves DOWN — a cache is free progress toward `karma <= -54000`, which couples it to `career` and `gang` (see [Caches](#caches)) |
 | `memoryReallocation()`, `getBlockedRam()` | Free RAM held by the server owner's processes. Needs an authenticated, directly-connected target; scales with charisma and threads |
 | `setStasisLink()`, `getStasisLinkLimit()`, `getStasisLinkedServers()` | **Takes no host** — pins the *calling script's own server* against moving or going offline. So pinning anything requires already running there. The global limit makes links scarce |
 | `induceServerMigration(host)` | *Raises the chance* a connected, non-stationary host moves. Scales with threads and charisma. Cannot target its own host |
@@ -93,7 +93,7 @@ passwords. The clock is quantified under [The mutation clock](#the-mutation-cloc
 | `unleashStormSeed()` | Runs `STORM_SEED.exe` if present on the calling host. Documented as catastrophic |
 | `promoteStock(sym)` | Raises a symbol's **volatility**, not its forecast. Earns nothing directly — it is a `stock` input (see [Stock propaganda](#stock-propaganda)) |
 | `phishingAttack()` | **Only from scripts on darknet servers.** Builds charisma, lifts money scaling with threads, occasionally yields a `.cache` file |
-| `labreport()`, `labradar()` | Labyrinth. 0 GB, `Result<any>`, and documented only as riddles — whether they are getters or actions is **unknown** |
+| `labreport()`, `labradar()` | The labyrinth's eyes: 0 GB, read-only, and the only two calls whose docs are riddles. `labreport()` answers `{coords, north, east, south, west}`; `labradar()` answers an ASCII render of radius 3. Both need a direct connection to the lab and both cost a full authentication time — see [The labyrinth](#the-labyrinth) |
 
 There is no scriptable "buy DarkScape" in `ns.dnet`: the purchase is
 `singularity.purchaseTor()` then
@@ -148,23 +148,35 @@ The net is a grid: `NET_WIDTH = 8` columns by `getNetDepth()` rows, filled to
 labyrinth is walked (`DarkNet/effects/labyrinth.ts`, `labData`; transcribed as
 `LAB_LADDER` in `shared/strategy/dnet/rates.ts`):
 
-| Lab | Net depth | Charisma | Solved by |
-|---|---|---|---|
-| *(before full darknet access)* | **5** | 300 | — |
-| NormalLab | 7 | 300 | **manual** |
-| CruelLab | 12 | 600 | **manual** |
-| MercilessLab | 19 | 1500 | script |
-| UberLab | 23 | 2500 | script |
-| EternalLab | 29 | 3000 | script |
-| EndlessLab | 31 | 3500 | script |
-| FinalLab | 36 | 4000 | script |
-| BonusLab | 36 | 4000 | script |
+| Lab | Net depth | Charisma | Maze | Manual UI allowed |
+|---|---|---|---|---|
+| *(before full darknet access)* | **5** | 300 | — | — |
+| NormalLab | 7 | 300 | 20x14 | **yes** |
+| CruelLab | 12 | 600 | 30x20 | **yes** |
+| MercilessLab | 19 | 1500 | 40x26 | no |
+| UberLab | 23 | 2500 | 60x40 | no |
+| EternalLab | 29 | 3000 | 60x40 | no |
+| EndlessLab | 31 | 3500 | 60x40 | no |
+| FinalLab | 36 | 4000 | 60x40 | no |
+| BonusLab | 36 | 4000 | 60x40 | no |
 
 So roughly 14 servers at depth 5, ~24 at depth 7, and ~163 at depth 36. Depth
 also sets the mutation rate, so a deeper net is both larger and faster-moving.
-`manual: true` on the first two labs means those two mazes are solved in the UI,
-not by a script. (`getNetDepth()` reads `getLabyrinthDetails().depth ?? 10`, but
-the `?? 10` is dead code: the no-access branch returns a literal `depth: 5` and
+**`manual` is a UI permission, not a solver requirement, and it reads the
+opposite way round to what the name suggests.** Every lab is scriptable: the
+engine's movement handler gates on charisma and nothing else
+(`labyrinth.ts:234-332`), and `NetscriptFunctions/Darknet.ts` never reads
+`manual` at all. The flag is referenced in exactly three places, all of them
+UI: a manual lab offers a `"Manual UI"` perspective (pid `-1`) in the viewer
+(`DarkNet/ui/LabyrinthSummary.tsx:60,73,83,147`) and keeps its password box
+(`DarkNet/ui/PasswordPrompt.tsx:29-45`), while a NON-manual lab replaces that
+box with *"It seems this place will challenge you to make your own tools..."*
+and renders *"This lab cannot be completed manually. Select a script PID..."*.
+So the first two labs may be walked by hand OR by script, and the last six are
+**script-only** — the engine asking for a solver by name.
+
+(`getNetDepth()` reads `getLabyrinthDetails().depth ?? 10`, but the `?? 10` is
+dead code: the no-access branch returns a literal `depth: 5` and
 every lab rung carries a depth — `labyrinth.ts:393-396, 485-497`.)
 
 ## The mutation clock
@@ -464,7 +476,7 @@ Two things worth reading twice:
 `ns.ls`. They are created by clearing a server's blocked RAM, and by
 `phishingAttack()` — a phishing cache is named `.d.cache`.
 
-`openCache(filename)` deducts `difficulty + 1` karma (returned as a negative
+`openCache(filename)` lowers karma by `difficulty + 1` (returned as a negative
 `karmaLoss`) and yields one reward drawn at random from:
 
 - a program or stock-market-related reward,
@@ -498,6 +510,34 @@ place `dnet_money` is read. Upstream attributes this to a `darknet` money source
 expose — so a script cannot see darknet income as its own line.
 
 ## The labyrinth
+
+### How a maze is walked
+
+There is no `move()` call. **The lab host's password field IS the direction**:
+`authenticate(labHost, "north" | "n" | "up" | ...)` steps one cell, parsed by
+`getDirectionFromInput` (`labyrinth.ts:340-346`). Every attempt is logged like
+any other model's (`getAuthResult` calls `logPasswordAttempt` unconditionally,
+`authentication.ts:166-177`), but the labyrinth is the only one that ALSO hands
+its response straight back through `authenticate`'s return value, so a maze
+walker needs no `heartbleed` round trip to see where it is. A wrong turn answers
+`AuthFailure` with the surroundings in `data`; attempting the lab's actual password is refused on purpose — *"the
+best way to beat a maze is to find the end, and not to try and skip it."*
+
+`labreport()` and `labradar()` are the free eyes on the same position, and both
+pay a full `calculateAuthenticationTime` per look, so vision is not cheaper than
+a step.
+
+Two constraints follow, and they shape the whole solver:
+
+- **Position is keyed by PID** (`DarknetState.labLocations[pid]`,
+  `labyrinth.ts:334-338`; the manual UI occupies pid `-1`). One process must walk
+  a whole maze — a dead PID abandons its progress, and the next one is re-seeded
+  at a randomly offset start. That is the one job in this feature that must NOT
+  spawn, which puts it at odds with the resident model in
+  [the shape that follows](#the-shape-that-follows-an-overseer-residents-and-a-spawn-chain).
+- **Reaching the exit** grants charisma xp at a fixed 32-thread equivalent, sets
+  `hasAdminRights`, and drops the lab cache — **three of them on BonusLab**, one
+  everywhere else (`labyrinth.ts:308-315`).
 
 `DarkNet/effects/labyrinth.ts` awards a fixed augmentation sequence; the
 authoritative order is the prereq chain in `AugmentationTable`:
@@ -725,7 +765,6 @@ out there.
 
 ## Open
 
-- Whether `labreport()` and `labradar()` have side effects.
 - The labyrinth's actual difficulty and time cost — the reward sequence and the
   charisma ladder are proven, the effort to walk it is not.
 - `Augmentation/Enums.ts` comments its labyrinth block `// in order of
