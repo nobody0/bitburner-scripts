@@ -126,8 +126,10 @@ export interface StockView {
    *  reach of the player's hacking skill. Empty means a held position cannot
    *  be manipulated yet. */
   farmableHosts: readonly string[];
-  /** Hostname -> symbol, derived in the game from public
-   * `stock.getOrganization` plus each server's public organization name. */
+  /** Hostname -> symbol. A constant: both halves of the join — a server's
+   * organization and a stock's — are fixed game data, so the driver passes
+   * `SYMBOL_BY_HOST` (shared/features/stocks.ts). Injected rather than imported
+   * so a test can hand the solver a different world. */
   symbolByHost: Readonly<Record<string, string>>;
 
   /** `FourSigmaMarketData*Cost` scale the unlock; `ScriptHackMoney*` scale what
@@ -356,7 +358,16 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   const tail = (survival / (1 - survival)) * TICKS_PER_CYCLE;
   const holdTicks = Math.max(0, Math.min(horizonTicks, guaranteedTicks + tail));
 
-  const farmable = new Set(view.farmableHosts);
+  // Which symbols a farm could actually influence, inverted ONCE. Asking it per
+  // symbol — `Object.entries(symbolByHost).some(...)` inside rankSymbol — walked
+  // every server 33 times a pass, at controller cadence, for the whole run: it
+  // was the single largest allocation source in a BN8 profile. `farmableHosts`
+  // already drops any host with no symbol, so the inversion is total.
+  const manipulableSymbols = new Set<string>();
+  for (const hostname of view.farmableHosts) {
+    const sym = view.symbolByHost[hostname];
+    if (sym !== undefined) manipulableSymbols.add(sym);
+  }
   const ranked: RankedSymbol[] = [];
   const perSymbol = new Map<string, { view: StockSymbolView; ranked: RankedSymbol }>();
   const cashBudget = positionBudget(view);
@@ -364,7 +375,14 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   for (const symbol of view.symbols) {
     const signal = estimateSignal(memory.history, symbol.sym, symbol.forecast);
     const side = favouredSide(signal.forecast);
-    const entry = rankSymbol({ symbol, signal, side, holdTicks, cashBudget, farmable, symbolByHost: view.symbolByHost });
+    const entry = rankSymbol({
+      symbol,
+      signal,
+      side,
+      holdTicks,
+      cashBudget,
+      manipulable: manipulableSymbols.has(symbol.sym),
+    });
     ranked.push(entry);
     perSymbol.set(symbol.sym, { view: symbol, ranked: entry });
   }
@@ -480,10 +498,10 @@ function rankSymbol(params: {
   side: PositionSide;
   holdTicks: number;
   cashBudget: number;
-  farmable: ReadonlySet<string>;
-  symbolByHost: Readonly<Record<string, string>>;
+  /** Whether any farmable host carries this symbol's organization. */
+  manipulable: boolean;
 }): RankedSymbol {
-  const { symbol, signal, side, holdTicks, cashBudget, farmable, symbolByHost } = params;
+  const { symbol, signal, side, holdTicks, cashBudget, manipulable } = params;
   const price = side === "short" ? symbol.bid : symbol.ask;
   const held = symbol.shares + symbol.sharesShort;
   const room = Math.max(0, symbol.maxShares - held);
@@ -520,11 +538,37 @@ function rankSymbol(params: {
     volatility: signal.volatility,
     exact: signal.exact,
     drift,
-    manipulable: Object.entries(symbolByHost).some(([host, sym]) => sym === symbol.sym && farmable.has(host)),
+    manipulable,
     breakEvenTicks: be,
     expectedProfit: profit,
     notional: shares * price,
   };
+}
+
+/** `symbolByHost` inverted, cached on the mapping's identity.
+ *
+ * Both halves of the join are fixed facts about the game — a server's
+ * organization and a stock's — so the driver passes the module-level constant
+ * and this inverts it exactly once for the life of the process. Keying on
+ * identity rather than assuming the constant keeps the mapping genuinely
+ * injectable: a caller that supplies a different one gets a rebuild, and a
+ * caller that supplies the same one gets a pointer compare.
+ *
+ * Rebuilding it per call cost real time. Scanning it per SYMBOL, which is what
+ * `rankSymbol` and this function both used to do, cost that much again times
+ * thirty-three, at controller cadence, for the whole run. */
+let hostsForSymbolsCache: { source: Readonly<Record<string, string>>; hosts: Map<string, string[]> } | undefined;
+
+function hostsForSymbols(symbolByHost: Readonly<Record<string, string>>): ReadonlyMap<string, string[]> {
+  if (hostsForSymbolsCache?.source === symbolByHost) return hostsForSymbolsCache.hosts;
+  const hosts = new Map<string, string[]>();
+  for (const [hostname, sym] of Object.entries(symbolByHost)) {
+    const bucket = hosts.get(sym);
+    if (bucket) bucket.push(hostname);
+    else hosts.set(sym, [hostname]);
+  }
+  hostsForSymbolsCache = { source: symbolByHost, hosts };
+  return hosts;
 }
 
 // --- exits ------------------------------------------------------------------
@@ -846,13 +890,12 @@ function planManipulation(params: {
   // fulcrumassets/4sigma/... against a network whose only symbol hosts were
   // foodnstuff, sigma-cosmetics and joesguns).
   const farmable = new Set(view.farmableHosts);
+  const hostsBySymbol = hostsForSymbols(view.symbolByHost);
   const consider = (sym: string, side: PositionSide, notional: number): void => {
     const entryView = perSymbol.get(sym);
     if (!entryView || notional <= 0) return;
-    const hosts = Object.entries(view.symbolByHost)
-      .filter(([, mapped]) => mapped === sym)
-      .map(([host]) => host);
-    if (hosts.length === 0) return;
+    const hosts = hostsBySymbol.get(sym);
+    if (!hosts || hosts.length === 0) return;
     const forecast = entryView.ranked.forecast;
     const volatility = entryView.ranked.volatility;
     // Manipulation is positive feedback, not a substitute for an edge. Once

@@ -32,6 +32,8 @@ export const TRANSCRIPTION_SOURCE_HASHES = {
   "src/Work/CreateProgramWork.ts": "45cd7ee4bbf89597d535668d4a928506c79950e1f353e18a43159d1561d68538",
   "src/Hacknet/HacknetHelpers.tsx": "601f6ff36b5a0a3782b16daad52c987a7cfa7bcb914e5d6b92758e0f3902379f",
   "src/StockMarket/BuyingAndSelling.tsx": "16d390c0032c5c46168bbbe80a5b0c3b3ee7bb8c6b60144b9b5ffa2e51fa28aa",
+  "src/DarkNet/effects/effects.ts": "e093c985f04f23fd524ef2ea473d6f381ea3a62a5b8b05d829d735b3c2e5a349",
+  "src/NetscriptFunctions/Darknet.ts": "f0db796bf565157df5fbe7b5fc4f0fde97b944532bd808e2e318c35f74dbd881",
   "src/Gang/Gang.ts": "7fb7eb00a37a1d8fd80759f45a05362da5b6839d8833783823e39f8c8685ccf3",
   "src/Bladeburner/Bladeburner.ts": "1543543ccd643598c7bb323e0bcc6fa7471cff31aeacf01ce5ce45715053202d",
   "src/Corporation/Corporation.ts": "8d66f56db09aaeebfe2c1af094ff3672d86610ec89d579d47a756874d4a68a9d",

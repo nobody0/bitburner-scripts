@@ -61,7 +61,39 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   "dnet.labyrinth: the ladder, depth, reward order and the lab server are modelled; the MAZE itself is not, so a lab is never completed from a script",
   "dnet.cacheRewards: the draw is narrowed to money and the program/market unlocks, both exact; upstream also draws stock shares, clue files and (from phishing caches) coding contracts, so the MIX is narrower than upstream even though every reward given is faithful",
   "dnet.cacheSources: caches are only created on request — memoryReallocation clearing a block, and phishingAttack, are not modelled",
+  "dnet.promoteStock: the charge curve, the 0.4x per-cycle decay, the wait time, the charisma XP and the prestige reset are transcribed exactly; the propaganda has no other modelled effect",
+  "dnet.prestige: an install clears the stock promotions, as upstream does; unlike upstream's prestigeDarknetState it does NOT regenerate the network or the labyrinth, so the map a run maps stays mapped across installs",
 ];
+
+/** `getDarknetVolatilityMult` — the propaganda curve `ns.dnet.promoteStock`
+ * feeds. Two saturating exponentials, so the boost approaches 4x and no
+ * quantity of threads can pass it. Charges decay 0.4x at every market cycle
+ * (`scaleDarknetVolatilityIncreases(0.4)` from `stockMarketCycle`), which is
+ * what makes a promotion something to be maintained rather than bought once.
+ * Source: src/DarkNet/effects/effects.ts:197-208 @ 3162fd2 */
+export const STOCK_PROMOTION_GROWTH_RATE = 0.001;
+export const STOCK_PROMOTION_CYCLE_DECAY = 0.4;
+
+export function stockPromotionMult(charges: number): number {
+  const g = STOCK_PROMOTION_GROWTH_RATE;
+  return 1 + (1 - Math.exp(-g * charges) + 2 * (1 - Math.exp(-g * 0.15 * charges)));
+}
+
+/** `promoteStock`'s netscriptDelay, floored at 200 ms however high charisma is.
+ *  Source: src/NetscriptFunctions/Darknet.ts:590 */
+export function promoteStockWaitMs(charisma: number): number {
+  return Math.max(8000 * (600 / (600 + charisma)), 200);
+}
+
+/** Charges bought by one call. Source: src/NetscriptFunctions/Darknet.ts:597 */
+export function promoteStockCharges(threads: number, charisma: number): number {
+  return threads * ((500 + charisma) / 500);
+}
+
+/** Charisma experience the call grants. Source: src/NetscriptFunctions/Darknet.ts:600 */
+export function promoteStockCharismaExp(threads: number, charisma: number, charismaExpMult: number): number {
+  return charismaExpMult * threads * 10 * ((200 + charisma) / 200);
+}
 
 const NET_WIDTH = 8;
 const SERVER_DENSITY = 0.6;
@@ -333,6 +365,10 @@ export class DarknetSystem {
   #nextMutation: Promise<void> = Promise.resolve();
   #cyclesSinceMutation = 0;
   #mutations = 0;
+  /** `DarknetState.stockPromotions`: accumulated propaganda per symbol. The
+   *  price engine reads this through the market adapter, so a promotion moves
+   *  the real vendored tick rather than a parallel estimate of it. */
+  readonly #stockPromotions = new Map<string, number>();
   readonly #opts: DarknetSystemOptions;
 
   constructor(options: DarknetSystemOptions) {
@@ -367,6 +403,45 @@ export class DarknetSystem {
 
   get mutations(): number {
     return this.#mutations;
+  }
+
+  // --- stock propaganda -----------------------------------------------------
+
+  /** `getDarknetVolatilityMult(symbol)`. Injected into the vendored market
+   *  adapter, so `processStockPrices` and `ns.stock.getVolatility` cannot
+   *  disagree about how volatile a promoted symbol is. */
+  stockVolatilityMult(symbol: string): number {
+    const charges = this.#stockPromotions.get(symbol) ?? 0;
+    return charges > 0 ? stockPromotionMult(charges) : 1;
+  }
+
+  /** `scaleDarknetVolatilityIncreases(scalar)`, called with 0.4 once per
+   *  75-tick market cycle. Upstream only touches positive entries. */
+  scaleStockPromotions(scalar: number): void {
+    for (const [symbol, charges] of this.#stockPromotions) {
+      if (charges > 0) this.#stockPromotions.set(symbol, charges * scalar);
+    }
+  }
+
+  /** The charges `promoteStock` deposits once its wait has elapsed. */
+  addStockPromotion(symbol: string, charges: number): void {
+    if (!Number.isFinite(charges) || charges <= 0) return;
+    this.#stockPromotions.set(symbol, (this.#stockPromotions.get(symbol) ?? 0) + charges);
+  }
+
+  stockPromotionCharges(symbol: string): number {
+    return this.#stockPromotions.get(symbol) ?? 0;
+  }
+
+  /** An install clears `DarknetState.stockPromotions`, on the same boundary at
+   *  which `initStockMarket` destroys the portfolio. Propaganda does not
+   *  survive a prestige any more than a position does.
+   *
+   *  Upstream's `prestigeDarknetState` also drops the network, the labyrinth and
+   *  the per-server state. This does not, and that predates the promotions —
+   *  see the `dnet.prestige` entry in `DNET_ASSUMPTIONS`. */
+  prestige(): void {
+    this.#stockPromotions.clear();
   }
 
   /** populateDarknet(). Idempotent, as upstream's guard makes it. */

@@ -10,6 +10,12 @@ import type { StockMarketSystem } from "../features/stock.ts";
 import { getBitNodeMultipliers as vendoredBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { currentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { StockMarketConstants as STOCK_CONSTANTS } from "../vendor/bitburner/src/StockMarket/data/Constants.ts";
+import { getDarknetVolatilityMult } from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
+import { PositionType } from "../vendor/bitburner/src/StockMarket/Enums.ts";
+import {
+  getBuyTransactionCost,
+  getSellTransactionGain,
+} from "../vendor/bitburner/src/StockMarket/StockMarketHelpers.ts";
 import { CodingContractName } from "../vendor/bitburner/src/CodingContract/Enums.ts";
 import { noteUnmodeled, unmodeled } from "../realm/unmodeled.ts";
 import type { SimWorld } from "../world.ts";
@@ -667,10 +673,30 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       if (!found) throw new Error(`${fn}: invalid stock symbol ${symbol}`);
       return found;
     };
+    /** Upstream `Player.activeSourceFileLvl`: a BitNodeOptions override REPLACES
+     *  the owned level when the key is present, including at level 0. Reading
+     *  `ownedSF` alone would hand a script a rung the run disabled. */
+    const activeSF = (n: number): number => {
+      const overrides = host.reset.bitNodeOptions?.sourceFileOverrides;
+      if (overrides?.has(n)) return overrides.get(n) ?? 0;
+      return host.reset.ownedSF.get(n) ?? 0;
+    };
     const requireShorts = (fn: string): void => {
-      if (host.ramCtx.bitNode !== 8 && (host.reset.ownedSF.get(8) ?? 0) <= 1) {
+      if (host.ramCtx.bitNode !== 8 && activeSF(8) <= 1) {
         throw new Error(`${fn}: shorts need BN8 or SF8 level 2`);
       }
+    };
+    // Upstream gates the whole order book — reading it included — on BN8 or
+    // SF8.3, and throws otherwise. Answering with an empty book instead would
+    // let a script below the rung believe it had looked and seen nothing.
+    const requireOrders = (fn: string): void => {
+      if (host.ramCtx.bitNode !== 8 && activeSF(8) <= 2) {
+        throw new Error(`${fn}: limit/stop orders need BN8 or SF8 level 3`);
+      }
+    };
+    const positionType = (raw: unknown, fn: string): PositionType => {
+      if (raw === PositionType.Long || raw === PositionType.Short) return raw;
+      throw new Error(`${fn}: invalid position type ${String(raw)}`);
     };
     impl["stock"] = namespace(
       {
@@ -697,9 +723,23 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
           const found = require4SPosition("getForecast", symbol);
           return found.getAbsoluteForecast() / 100;
         },
+        // `mv` alone is the UNPROMOTED volatility. Upstream multiplies by the
+        // darknet boost here exactly as the price engine does, so a script that
+        // promoted a symbol can see what the tick will actually use.
         getVolatility: (symbol: string) => {
           requireForecast("getVolatility");
-          return require4SPosition("getVolatility", symbol).mv / 100;
+          const found = require4SPosition("getVolatility", symbol);
+          return (found.mv * getDarknetVolatilityMult(found.symbol)) / 100;
+        },
+        getPurchaseCost: (symbol: string, shares: number, posType: unknown) => {
+          const found = require4SPosition("getPurchaseCost", symbol);
+          const cost = getBuyTransactionCost(found, Math.round(shares), positionType(posType, "getPurchaseCost"));
+          return cost ?? Infinity;
+        },
+        getSaleGain: (symbol: string, shares: number, posType: unknown) => {
+          const found = require4SPosition("getSaleGain", symbol);
+          const gain = getSellTransactionGain(found, Math.round(shares), positionType(posType, "getSaleGain"));
+          return gain ?? 0;
         },
         buyStock: (symbol: string, shares: number) => {
           requireTix("buyStock");
@@ -726,13 +766,15 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
           requireTix("purchase4SMarketDataTixApi");
           return stock.purchase4SMarketDataTixApi();
         },
-        // Reading an EMPTY order book is fully modelled. Fresh worlds have no
-        // orders, our strategy never places one, and save seeding separately
-        // marks a non-empty saved book invalid before the controller starts.
+        // Reading an EMPTY order book is fully modelled, once past the same
+        // BN8/SF8.3 gate upstream applies. Fresh worlds have no orders, our
+        // strategy never places one, and save seeding separately marks a
+        // non-empty saved book invalid before the controller starts.
         // Returning `{}` here is therefore observed state, not a fabricated
         // fill engine. Mutating the book remains deliberately unmodelled.
         getOrders: () => {
           requireTix("getOrders");
+          requireOrders("getOrders");
           return {};
         },
         placeOrder: () => unmodeled("ns", "stock.placeOrder", "limit/stop orders have no simulation model"),
@@ -903,6 +945,12 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
         hasBoots: () => host.world.player.augmentations.has("The B00ts of Perseus"),
         sf15Level: () => host.world.player.sourceFiles["15"] ?? 0,
         servers: host.world.servers,
+        charismaExpMult: () => host.world.person.mults.charisma_exp,
+        gainCharismaExp: (amount) => {
+          if (!Number.isFinite(amount)) return;
+          host.world.person.exp.charisma = Math.max(0, host.world.person.exp.charisma + amount);
+          host.world.recalculateSkills();
+        },
       }),
       "dnet",
       host,

@@ -4,6 +4,10 @@ import { SimWorld } from "../world.ts";
 import { ProcessTable, ScriptDeath } from "../ns/process.ts";
 import { makeSimNs, type SimNsHost } from "../ns/api.ts";
 import { StockMarketSystem } from "../features/stock.ts";
+import {
+  resetDarknetContext,
+  setDarknetContext,
+} from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { FactionSystem } from "../features/factions.ts";
 import { makeSingularity } from "../ns/singularity.ts";
@@ -645,11 +649,98 @@ describe("Netscript contract fidelity", () => {
     expect(bn5.FourSigmaMarketDataApiCost).toBe(1);
   });
 
+  /** The harness builds a StockMarketSystem with no access, so no market exists
+   *  until something buys one. Purchasing is what rolls the 33 symbols. */
+  function openMarket(host: SimNsHost, world: SimWorld, fourSigma = false): void {
+    world.player.money = 1e12;
+    host.stock!.purchaseWseAccount();
+    host.stock!.purchaseTixApi();
+    if (fourSigma) host.stock!.purchase4SMarketDataTixApi();
+    world.player.money = 1e12;
+  }
+
   test("a fresh stock market has an authoritatively empty order book", () => {
-    const { ns, host } = harness([], true);
+    // Upstream gates the order book on TIX AND (BN8 or SF8.3), and throws
+    // otherwise. Only past both rungs is the empty book observed state.
+    const { ns, host, world } = harness([], true);
     expect(() => ns.stock.getOrders()).toThrow("no TIX API access");
-    host.stock!.hasWseAccount = true;
-    host.stock!.hasTixApiAccess = true;
+    openMarket(host, world);
+    expect(() => ns.stock.getOrders()).toThrow("BN8 or SF8 level 3");
+
+    host.reset.ownedSF.set(8, 3);
     expect(ns.stock.getOrders()).toEqual({});
+
+    // BN8 grants it without any source file at all.
+    const bn8 = harness([], true, 8);
+    openMarket(bn8.host, bn8.world);
+    expect(bn8.ns.stock.getOrders()).toEqual({});
+  });
+
+  test("a BitNodeOptions override replaces the owned source-file level", () => {
+    // Player.activeSourceFileLvl: an override present at ANY level, zero
+    // included, wins over what the player owns. Reading ownedSF alone would
+    // hand a script a rung the run deliberately disabled.
+    const { ns, host, world } = harness([], true);
+    openMarket(host, world);
+    host.reset.ownedSF.set(8, 3);
+    expect(ns.stock.getOrders()).toEqual({});
+
+    host.reset.bitNodeOptions.sourceFileOverrides.set(8, 0);
+    expect(() => ns.stock.getOrders()).toThrow("BN8 or SF8 level 3");
+    expect(() => ns.stock.buyShort("ECP", 1)).toThrow("BN8 or SF8 level 2");
+  });
+
+  test("shorts need BN8 or SF8.2", () => {
+    const { ns, host, world } = harness([], true);
+    openMarket(host, world);
+    expect(() => ns.stock.buyShort("ECP", 1)).toThrow("BN8 or SF8 level 2");
+    expect(() => ns.stock.sellShort("ECP", 1)).toThrow("BN8 or SF8 level 2");
+
+    host.reset.ownedSF.set(8, 2);
+    // Past the gate the trade actually happens, and reports the bid.
+    expect(ns.stock.buyShort("ECP", 1)).toBeCloseTo(ns.stock.getBidPrice("ECP"), 6);
+  });
+
+  test("getPurchaseCost and getSaleGain are modelled, not merely priced", () => {
+    // ram-costs.ts charges for both. Before they existed here the proxy
+    // reported them unmodelled, which invalidates the whole run.
+    const { ns, host, world } = harness([], true);
+    openMarket(host, world);
+
+    const ask = ns.stock.getAskPrice("ECP");
+    const bid = ns.stock.getBidPrice("ECP");
+    const cost = ns.stock.getPurchaseCost("ECP", 100, "L" as never);
+    const gain = ns.stock.getSaleGain("ECP", 100, "L" as never);
+    // Commission is charged on BOTH legs, which is what makes a round trip cost
+    // $200k before the spread is paid at all.
+    expect(cost).toBeCloseTo(100 * ask + 100_000, 6);
+    expect(gain).toBeCloseTo(100 * bid - 100_000, 6);
+
+    // The quote is what an actual trade charges.
+    const before = world.player.money;
+    ns.stock.buyStock("ECP", 100);
+    // Relative, not absolute: differencing two ~$1e12 balances loses the last
+    // few cents to float64 long before the quote is wrong.
+    expect((before - world.player.money) / cost).toBeCloseTo(1, 10);
+
+    // Upstream's fallbacks for a refused transaction.
+    expect(ns.stock.getPurchaseCost("ECP", -1, "L" as never)).toBe(Infinity);
+    expect(ns.stock.getSaleGain("ECP", -1, "L" as never)).toBe(0);
+    expect(() => ns.stock.getPurchaseCost("ECP", 1, "nonsense" as never)).toThrow("invalid position type");
+  });
+
+  test("getVolatility reports the darknet-boosted figure the tick will use", () => {
+    const { ns, host, world } = harness([], true);
+    openMarket(host, world, true);
+    const plain = ns.stock.getVolatility("ECP");
+    expect(plain).toBeCloseTo(host.stock!.stock("ECP")!.mv / 100, 12);
+
+    setDarknetContext({ volatilityMult: (symbol) => (symbol === "ECP" ? 2.5 : 1) });
+    try {
+      expect(ns.stock.getVolatility("ECP")).toBeCloseTo(plain * 2.5, 12);
+      expect(ns.stock.getVolatility("MGCP")).toBeCloseTo(host.stock!.stock("MGCP")!.mv / 100, 12);
+    } finally {
+      resetDarknetContext();
+    }
   });
 });

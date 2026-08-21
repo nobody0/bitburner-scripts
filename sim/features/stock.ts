@@ -2,7 +2,14 @@ import type { SimPlayer } from "../core/player.ts";
 import type { SimWorld } from "../world.ts";
 import type { SaveStockMarket } from "../../shared/save/snapshot.ts";
 import { PositionType } from "../vendor/bitburner/src/StockMarket/Enums.ts";
-import { setMarketContext, StockMarket, SymbolToStockMap } from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
+import {
+  deleteStockMarket,
+  isStockMarketInitialized,
+  resetDarknetContext,
+  setMarketContext,
+  StockMarket,
+  SymbolToStockMap,
+} from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
 import {
   influenceStockThroughServerGrow,
   influenceStockThroughServerHack,
@@ -35,15 +42,23 @@ import {
  * transcription. `sim/tests/stock-parity.test.ts` checks the two against each
  * other; this file makes the model face the real thing.
  *
- * Three substitutions, all in MarketAdapter and all forced by the simulator's
+ * Four substitutions, all in MarketAdapter and all forced by the simulator's
  * requirements rather than by convenience:
  *  - the module-level `StockMarket` singleton (one market per process),
  *  - `Math.random` (reproducible seeds),
- *  - `new Date().getTime()` (virtual time).
+ *  - `new Date().getTime()` (virtual time),
+ *  - `isStockMarketInitialized`, which upstream answers with `lastUpdate > 0`
+ *    because that is a real epoch stamp. A run starts at virtual t=0, so the
+ *    same question is asked of the market's contents instead.
+ *
+ * The BN15 darknet volatility boost IS modelled: `ns.dnet.promoteStock` deposits
+ * charges in `sim/features/dnet.ts`, and the adapter's injected hooks feed them
+ * to the vendored price engine — the same `getDarknetVolatilityMult` the real
+ * tick calls, decaying 0.4x per market cycle. It matters in BN8, where the
+ * darknet's income multipliers are zero but nothing zeroes propaganda.
  *
  * What is genuinely NOT modelled: limit/stop orders (`processOrders` is a no-op
- * and `ns.stock.placeOrder` reports itself unmodelled), and the BN15 darknet
- * volatility boost (a neutral 1x, because `dnet` has no model to drive it).
+ * and `ns.stock.placeOrder` reports itself unmodelled).
  *
  * Only four things below are ours, transcribed from `BuyingAndSelling.tsx` —
  * which cannot be vendored because it is a `.tsx` file whose imports reach the
@@ -89,6 +104,14 @@ export class StockMarketSystem {
     // rolls its price, cap, spread, volatility and shareTxForMovement, and
     // `lastUpdate` is stamped from the clock.
     setMarketContext({ random: rng, now: () => world.clock.now() });
+    // The darknet hooks are module-global too. Drop them to the neutral 1x here
+    // so a market built without `dnet` cannot inherit the previous run's
+    // promotions; `sim/game-run.ts` re-installs them once the darknet exists.
+    resetDarknetContext();
+    // `StockMarket` and `SymbolToStockMap` are module-global, so a market built
+    // in a process that already ran one would inherit its stocks. Entering a
+    // BitNode is exactly when upstream calls deleteStockMarket().
+    deleteStockMarket();
     if (this.hasWseAccount || this.hasTixApiAccess) {
       initStockMarket();
       if (opts.seed) this.#restore(opts.seed);
@@ -268,8 +291,10 @@ export class StockMarketSystem {
     if (this.#player.money < cost) return false;
     this.hasWseAccount = true;
     // Upstream initialises the market on purchase, which is also when every
-    // symbol's price, cap and spread are first rolled.
-    initStockMarket();
+    // symbol's price, cap and spread are first rolled — but only if it is not
+    // already running. Buying TIX first is legal, and re-rolling here would
+    // destroy a live portfolio the game would have left alone.
+    if (!isStockMarketInitialized()) initStockMarket();
     this.#player.money -= cost;
     this.#world.recordMoney("stock", -cost);
     this.#world.emit({ kind: "event", name: "stock.unlock", data: { what: "wse", cost } });
@@ -281,7 +306,10 @@ export class StockMarketSystem {
     const cost = getStockMarketTixApiCost();
     if (this.#player.money < cost) return false;
     this.hasTixApiAccess = true;
-    if (this.symbols().length === 0) initStockMarket();
+    // `SymbolToStockMap` is a module global that `initSymbolToStockMap` only
+    // ever overwrites, so a symbol count can never say "no market". Upstream
+    // asks `lastUpdate > 0`, which a prestige/BitNode reset actually clears.
+    if (!isStockMarketInitialized()) initStockMarket();
     this.#player.money -= cost;
     this.#world.recordMoney("stock", -cost);
     this.#world.emit({ kind: "event", name: "stock.unlock", data: { what: "tix", cost } });

@@ -1339,6 +1339,82 @@ exposing the `O(n log n)` sorting still left in `launchDueJit`. The bound is a
 ratchet and must not be loosened; closing it means maintaining the ledger in
 landing order across `trackOp`/`untrackOp` instead of rebuilding it.
 
+## BN8 market fidelity, darknet propaganda, and stock-only run cost (2026-08-21)
+
+Three things, in that order: audit the market, model the one modifier that was
+still stubbed, then make the profile cheap enough to iterate on. The audit came
+first because tuning a wrong simulator only makes it wrong faster.
+
+**The price engine was already sound and was not touched.** A line diff of every
+vendored `StockMarket/*.ts` against the pinned upstream checkout shows
+differences only in import paths and the declared substitutions. What diverged
+was the surface we wrote ourselves:
+
+- **`ns.stock.getVolatility` dropped the darknet multiplier.** Upstream returns
+  `stock.mv * getDarknetVolatilityMult(symbol) / 100`; we returned `mv / 100`.
+  Latent while the stub returned 1, and exactly the call a promotion strategy
+  reads to see its own effect.
+- **`ns.stock.getOrders` had no BitNode gate.** Upstream needs TIX **and** BN8 or
+  SF8.3 and throws otherwise; we answered `{}` to anyone with TIX. An empty book
+  is observed state only once past the rung.
+- **`getPurchaseCost` / `getSaleGain` were priced but not implemented.**
+  `ram-costs.ts` charged for both while the namespace proxy reported them
+  unmodelled — a RAM budget for a call the runtime refuses.
+- **`purchaseWseAccount` re-rolled a live market.** Upstream guards on
+  `isStockMarketInitialized()`. Buying TIX first is legal, and in that order the
+  WSE purchase destroyed every price and every position. The sibling guard in
+  `purchaseTixApi` was wrong the other way: it tested `SymbolToStockMap`, which
+  `initSymbolToStockMap` only ever overwrites and never clears.
+- **The shorts gate read owned, not active, source files.** Upstream uses
+  `activeSourceFileLvl`, where a BitNodeOptions override at any level — zero
+  included — replaces what the player owns.
+
+**The darknet volatility boost is now modelled end to end.** `DarkNet/` cannot be
+vendored, so the charge curve, the 0.4x per-cycle decay and the
+wait/charge/charisma formulas are transcribed, with both upstream files added to
+the `drift-pins` hash table. `ns.dnet.promoteStock` deposits charges in
+`sim/features/dnet.ts`; the adapter hooks are injected rather than stubbed, so
+the vendored price engine and `getVolatility` cannot disagree. Charges clear on
+prestige, on the same boundary that destroys the portfolio. See
+`spec/strategy/bitnodes/bn15.md` for the formulas.
+
+**Run cost.** The premise going in was that the BN8 sim was slow. It was not —
+one seed of `stock-only` was 2.4 s, and a full eight virtual hours with the goal
+disabled was 3.8 s. What *was* wasteful was cheap to fix, and a CPU profile
+(`bun --cpu-prof`) picked the targets rather than reasoning did:
+
+| what | before | after |
+|---|---|---|
+| `stock-only`, 3 seeds, wall clock | 5.48 s | **2.42 s** |
+| one seed, full 8 h horizon | 3.82 s | **3.40 s** |
+| `Object.entries` self time in that run | 247 ms | **79 ms** |
+
+- **Multi-seed runs were sequential.** The fan-out to one child process per seed
+  is required — `currentNodeMults`, the `StockMarket` singleton and the patched
+  timers are all module state — but `await proc.exited` sat inside the loop,
+  leaving 11 of 12 cores idle. That isolation is precisely what makes the seeds
+  safe to run concurrently.
+- **`manipulable` re-scanned the network per symbol.** `rankSymbol` asked
+  `Object.entries(symbolByHost).some(...)` for each of 33 symbols, at controller
+  cadence, for the whole run. The set of influenceable symbols is inverted once
+  per pass instead.
+- **The symbol/host join was rebuilt every pass from live state.** A server's
+  organization is fixed in the game's own table and so is a stock's, so the join
+  is a constant — `SYMBOL_BY_HOST`, already in the bundle and already pinned
+  against vendored `SERVER_METADATA.org`. The driver now uses it, `farmableHosts`
+  walks the 33 known stock hosts instead of the whole network, and the
+  `stock.organizations` probe — whose only consumer was that rebuild, and which
+  paid `getOrganization` RAM to rediscover what the bundle ships — is gone.
+
+All three seeds reach the goal at the same virtual time with the same record
+count as before, which is the bar this work had to clear.
+
+**Open.** The largest remaining cost in a `stock-only` profile is not stock:
+`JSON.stringify` is 12.6% of the run, almost all of it `publishArena`'s
+change-filter encoding the RAM arena digest on every 200 ms controller pass, with
+`bestAnnounced`'s `join` at 4.3% behind it. Both are controller-wide and were out
+of scope here.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to
@@ -1404,13 +1480,17 @@ the *strategy* level without full end-to-end execution:
 - **Limit and stop orders are not used** (BN8 or SF8.3). The solver places none,
   so the simulator's `processOrders` is a no-op and `ns.stock.placeOrder` reports
   `unmodeled()` rather than filling an order that would never trigger.
-- **BN15's darknet volatility boost is a neutral 1x.** `ns.dnet.promoteStock`
-  raises a symbol's volatility only — it does not change forecasts and earns
-  nothing directly. `getDarknetVolatilityMult`
-  genuinely raises a symbol's volatility upstream, decaying at each market cycle,
-  but `dnet` has no simulation model to drive it. The vendored price engine calls
-  through an adapter, so the day darknet lands the mechanic connects with no
-  further change.
+- **The darknet volatility boost is modelled; the STRATEGY does not use it yet.**
+  `ns.dnet.promoteStock` raises a symbol's volatility only — it does not change
+  forecasts and earns nothing directly. The simulator now implements it end to
+  end: charges live in `sim/features/dnet.ts`, the adapter's
+  `getDarknetVolatilityMult` / `scaleDarknetVolatilityIncreases` are injected
+  rather than stubbed, so the vendored price engine and `ns.stock.getVolatility`
+  both see the boost, and it decays 0.4x at each market cycle. It is a live BN8
+  lever — the node zeroes the darknet's income multipliers but not propaganda,
+  and access needs only `DarkscapeNavigator.exe`. What is still open is whether
+  `shared/strategy/stock/` should spend threads on it: nothing plans a promotion
+  today.
 - **Route bias is heuristic, not an exact downstream schedule.** Factions now
   values augmentations against the selected route and the ETA-selected
   Daedalus hacking/combat alternative; career and Go consume the route's

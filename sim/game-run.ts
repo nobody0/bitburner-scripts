@@ -18,6 +18,7 @@ import { FactionSystem } from "./features/factions.ts";
 import { GraftingSystem } from "./features/grafting.ts";
 import { HacknetSystem } from "./features/hacknet.ts";
 import { DarknetSystem } from "./features/dnet.ts";
+import { setDarknetContext } from "./vendor/bitburner/src/StockMarket/MarketAdapter.ts";
 import { currentNodeMults } from "./vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { GoSystem } from "./features/go-system.ts";
 import { AggregateGoNeuralRuntime } from "./features/go-aggregate-runtime.ts";
@@ -703,7 +704,15 @@ async function runGameInstalled(
       }
     },
   });
-  host.dnet = dnet;
+  const darknet = dnet;
+  host.dnet = darknet;
+  // The vendored price engine calls these on every tick and every cycle. Wiring
+  // them to the darknet here is what makes `promoteStock` move the real market
+  // instead of a parallel estimate of it.
+  setDarknetContext({
+    volatilityMult: (symbol) => darknet.stockVolatilityMult(symbol),
+    scaleIncreases: (scalar) => darknet.scaleStockPromotions(scalar),
+  });
   if (dnet.hasAccess()) dnet.populate();
 
   if (save?.servers.some((server) => server.ramUsed > 0)) {
@@ -794,6 +803,9 @@ async function runGameInstalled(
     }, regenerated?.network);
     hacknet.prestige();
     stock.prestige();
+    // Before the market re-rolls, not after: propaganda and the portfolio are
+    // cleared on the same boundary upstream (DarknetState.ts:97).
+    dnet?.prestige();
     grafting.prestige();
     programs.prestige();
     hasTor.value = permanentDarknetAccess();

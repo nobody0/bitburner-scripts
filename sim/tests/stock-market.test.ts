@@ -10,7 +10,18 @@ import {
 import { initHistory, observeMarket, ticksUntilCycle } from "../../shared/strategy/stock/history.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { StockMarketSystem } from "../features/stock.ts";
-import { StockMarket } from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
+import {
+  getDarknetVolatilityMult,
+  resetDarknetContext,
+  setDarknetContext,
+  StockMarket,
+} from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
+import {
+  promoteStockCharges,
+  promoteStockCharismaExp,
+  promoteStockWaitMs,
+  stockPromotionMult,
+} from "../features/dnet.ts";
 import { replaceCurrentNodeMults } from "../vendor/bitburner/src/BitNode/BitNodeMultipliers.ts";
 import { getBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { SimWorld } from "../world.ts";
@@ -59,6 +70,7 @@ function makeMarket(seed = 1): { world: SimWorld; market: StockMarketSystem } {
 
 beforeEach(() => {
   replaceCurrentNodeMults(getBitNodeMultipliers(1, 1));
+  resetDarknetContext();
 });
 
 describe("the price tick", () => {
@@ -422,6 +434,45 @@ describe("hack/grow manipulation", () => {
   });
 });
 
+describe("the unlock ladder", () => {
+  test("buying the WSE account after the TIX API leaves the live market alone", () => {
+    // Upstream guards the purchase on isStockMarketInitialized(). Buying TIX
+    // first is legal and does initialise the market, so an unguarded re-init on
+    // the WSE purchase would re-roll every price and silently destroy the
+    // position the player was holding through it.
+    const world = makeWorld(42);
+    world.player.money = 1e12;
+    const market = new StockMarketSystem(world, world.player, mulberry32(43));
+    expect(market.purchaseTixApi()).toBe(true);
+    expect(market.symbols().length).toBeGreaterThan(0);
+
+    const stock = market.stock("ECP")!;
+    market.buyStock("ECP", 1_000);
+    const price = stock.price;
+    const cap = stock.cap;
+    const shares = stock.playerShares;
+    expect(shares).toBe(1_000);
+
+    expect(market.purchaseWseAccount()).toBe(true);
+    expect(market.stock("ECP")!.price).toBe(price);
+    expect(market.stock("ECP")!.cap).toBe(cap);
+    expect(market.stock("ECP")!.playerShares).toBe(shares);
+  });
+
+  test("a market bought from nothing IS rolled, in either order", () => {
+    for (const first of ["wse", "tix"] as const) {
+      const world = makeWorld(9);
+      world.player.money = 1e12;
+      const market = new StockMarketSystem(world, world.player, mulberry32(10));
+      expect(market.symbols()).toHaveLength(0);
+      if (first === "wse") market.purchaseWseAccount();
+      else market.purchaseTixApi();
+      expect(market.symbols().length).toBeGreaterThan(0);
+      expect(market.stock("ECP")!.price).toBeGreaterThan(0);
+    }
+  });
+});
+
 describe("transactions", () => {
   test("a save seed restores prices, forecasts, positions, and cycle progress", () => {
     const { world, market } = makeMarket(700);
@@ -558,5 +609,138 @@ describe("transactions", () => {
     expect(m.purchase4SMarketDataTixApi()).toBe(true);
     expect(m.has4SDataTixApi).toBe(true);
     expect(m.has4SData).toBe(false);
+  });
+});
+
+/** THE DARKNET'S PROPAGANDA.
+ *
+ * `ns.dnet.promoteStock` is the one mechanic outside the market that changes how
+ * the market MOVES, rather than what we know about it. It raises a symbol's
+ * volatility and nothing else: no forecast change, no income. These tests face
+ * the transcribed curve against the vendored price engine that consumes it, and
+ * pin the arithmetic against upstream's literal expression.
+ *
+ * The upstream source is `src/DarkNet/effects/effects.ts` and
+ * `src/NetscriptFunctions/Darknet.ts`; `DarkNet/` cannot be vendored, so
+ * `sim/tests/drift-pins.test.ts` pins both files by hash and this pins what we
+ * read out of them. */
+describe("darknet stock propaganda", () => {
+  /** Upstream's expression, written out again rather than imported, so a change
+   *  to ours has to be made twice to pass. */
+  function upstreamMult(charges: number): number {
+    const growthRate = 0.001;
+    return 1 + (1 - Math.exp(-growthRate * charges) + 2 * (1 - Math.exp(-growthRate * 0.15 * charges)));
+  }
+
+  test("the charge curve matches upstream and saturates at 4x", () => {
+    for (const charges of [0, 1, 10, 250, 1_000, 10_000, 250_000]) {
+      expect(stockPromotionMult(charges)).toBeCloseTo(upstreamMult(charges), 12);
+    }
+    expect(stockPromotionMult(0)).toBe(1);
+    // Two saturating exponentials, weighted 1 and 2: the ceiling is 1 + 1 + 2,
+    // approached from below and reached only once the exponentials underflow.
+    expect(stockPromotionMult(20_000)).toBeLessThan(4);
+    expect(stockPromotionMult(1e9)).toBe(4);
+    // Monotonic, so more propaganda is never worth less.
+    let previous = 0;
+    for (const charges of [0, 1, 100, 1_000, 50_000]) {
+      const mult = stockPromotionMult(charges);
+      expect(mult).toBeGreaterThan(previous);
+      previous = mult;
+    }
+  });
+
+  test("the wait, the charges and the charisma XP match upstream", () => {
+    // waitTime = max(8000 * (600 / (600 + cha)), 200)
+    expect(promoteStockWaitMs(0)).toBe(8_000);
+    expect(promoteStockWaitMs(600)).toBe(4_000);
+    // Charisma can only ever buy it down to the 200 ms floor.
+    expect(promoteStockWaitMs(1e9)).toBe(200);
+    expect(promoteStockWaitMs(24_000)).toBe(200);
+
+    // promotionAmount = threads * ((500 + cha) / 500)
+    expect(promoteStockCharges(1, 0)).toBe(1);
+    expect(promoteStockCharges(10, 500)).toBe(20);
+    // chaXp = charisma_exp * threads * 10 * ((200 + cha) / 200)
+    expect(promoteStockCharismaExp(1, 0, 1)).toBe(10);
+    expect(promoteStockCharismaExp(4, 200, 2)).toBe(160);
+  });
+
+  test("a promoted symbol moves further per tick, and the price engine sees it", () => {
+    const { world, market } = makeMarket(11);
+    const promotions = new Map<string, number>();
+    setDarknetContext({
+      volatilityMult: (symbol) => stockPromotionMult(promotions.get(symbol) ?? 0),
+      scaleIncreases: (scalar) => {
+        for (const [symbol, charges] of promotions) promotions.set(symbol, charges * scalar);
+      },
+    });
+    try {
+      const stock = market.stock("ECP")!;
+      // `mv` is immutable — the boost is applied at the tick, not to the stock.
+      const baseMv = stock.mv;
+      promotions.set("ECP", 5_000);
+      expect(stock.mv).toBe(baseMv);
+
+      // The engine's own step is `stock.mv * getDarknetVolatilityMult(symbol)`.
+      // Compare the realised log-step against an unpromoted control on the SAME
+      // shared roll: `v` is drawn once per tick for every symbol, so the ratio
+      // of the two symbols' steps isolates the boost exactly.
+      const control = market.stock("MGCP")!;
+      const boosted: number[] = [];
+      const plain: number[] = [];
+      for (let i = 0; i < 40; i++) {
+        const beforeStock = stock.price;
+        const beforeControl = control.price;
+        tick(world, market);
+        boosted.push(Math.abs(Math.log(stock.price / beforeStock)));
+        plain.push(Math.abs(Math.log(control.price / beforeControl)));
+      }
+      const mean = (xs: number[]): number => xs.reduce((a, b) => a + b, 0) / xs.length;
+      const expected = (baseMv * stockPromotionMult(5_000)) / control.mv;
+      expect(mean(boosted) / mean(plain)).toBeCloseTo(expected, 1);
+    } finally {
+      resetDarknetContext();
+    }
+  });
+
+  test("charges decay 0.4x per market CYCLE, not per tick", () => {
+    const { world, market } = makeMarket(5);
+    const promotions = new Map<string, number>([["ECP", 1_000]]);
+    let scaleCalls = 0;
+    setDarknetContext({
+      volatilityMult: (symbol) => stockPromotionMult(promotions.get(symbol) ?? 0),
+      scaleIncreases: (scalar) => {
+        scaleCalls++;
+        for (const [symbol, charges] of promotions) {
+          if (charges > 0) promotions.set(symbol, charges * scalar);
+        }
+      },
+    });
+    try {
+      // Ticks alone must not decay anything: only stockMarketCycle scales.
+      const untilCycle = market.ticksUntilCycle;
+      for (let i = 0; i < untilCycle - 1; i++) tick(world, market);
+      expect(scaleCalls).toBe(0);
+      expect(promotions.get("ECP")).toBe(1_000);
+
+      tick(world, market);
+      expect(scaleCalls).toBe(1);
+      expect(promotions.get("ECP")).toBeCloseTo(400, 9);
+
+      for (let i = 0; i < TICKS_PER_CYCLE; i++) tick(world, market);
+      expect(scaleCalls).toBe(2);
+      expect(promotions.get("ECP")).toBeCloseTo(160, 9);
+    } finally {
+      resetDarknetContext();
+    }
+  });
+
+  test("a market built without dnet is neutral, whatever the last run installed", () => {
+    // The hooks are module-global. A StockMarketSystem constructed with no
+    // darknet must not inherit the previous world's promotions.
+    setDarknetContext({ volatilityMult: () => 3.5, scaleIncreases: () => {} });
+    const { market } = makeMarket(3);
+    expect(getDarknetVolatilityMult(market.stock("ECP")!.symbol)).toBe(1);
   });
 });

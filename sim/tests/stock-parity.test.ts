@@ -26,6 +26,7 @@ import { InitStockMetadata } from "../vendor/bitburner/src/StockMarket/data/Init
 import { StockForecastInfluenceLimit } from "../vendor/bitburner/src/StockMarket/Stock.ts";
 import { forecastChangePerPriceMovement } from "../vendor/bitburner/src/StockMarket/StockMarketHelpers.ts";
 import { forecastForecastChangeFromHack } from "../vendor/bitburner/src/StockMarket/PlayerInfluence.ts";
+import { STOCK_PROMOTION_CYCLE_DECAY } from "../features/dnet.ts";
 import {
   getStockMarket4SDataCost,
   getStockMarket4STixApiCost,
@@ -121,6 +122,11 @@ describe("market constant parity", () => {
     return engine.then((text) => {
       expect(text).toContain(`if (roll < ${CYCLE_FLIP_CHANCE})`);
       expect(text).toContain(`stock.shareTxUntilMovement + ${SHARE_TX_RECOVERY_PER_TICK}`);
+      // The darknet decay is an inline literal too, and it is applied by the
+      // ENGINE rather than by us — `sim/features/dnet.ts` only holds the charges.
+      // So the source text is the only thing that can notice upstream changing
+      // how fast a promotion fades, or moving the call out of stockMarketCycle.
+      expect(text).toContain(`scaleDarknetVolatilityIncreases(${STOCK_PROMOTION_CYCLE_DECAY})`);
     });
   });
 

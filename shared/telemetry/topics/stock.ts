@@ -68,8 +68,6 @@ export interface StockState {
    *  that reason: the account probe runs unconditionally and creates the topic
    *  long before there is anything to put in these. */
   positions?: StockPosition[];
-  /** Public symbol -> organization mapping, sampled once per market. */
-  organizations?: Record<string, string>;
   /** Symbol -> 4S signal. Owned solely by the `stock.forecast` probe. */
   signals?: Record<string, StockSignal>;
   portfolioValue?: number;

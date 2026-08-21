@@ -1,6 +1,13 @@
 import type { SimProcess } from "./process.ts";
 import type { SimServer } from "../core/effects.ts";
-import type { DarknetSystem } from "../features/dnet.ts";
+import {
+  promoteStockCharges,
+  promoteStockCharismaExp,
+  promoteStockWaitMs,
+  type DarknetSystem,
+} from "../features/dnet.ts";
+import { SymbolToStockMap } from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
+import { Stock } from "../vendor/bitburner/src/StockMarket/Stock.ts";
 
 export interface DnetNsOptions {
   system: DarknetSystem;
@@ -19,6 +26,11 @@ export interface DnetNsOptions {
   /** activeSourceFileLvl(15) — the auth discount is gated on > 2, not on 2. */
   sf15Level: () => number;
   servers: Map<string, SimServer>;
+  /** `Player.mults.charisma_exp`, and `Player.gainCharismaExp` — which adds raw
+   *  experience and recomputes the skill. Only `promoteStock` needs them; every
+   *  other member reads charisma through `skills()`. */
+  charismaExpMult: () => number;
+  gainCharismaExp: (amount: number) => void;
 }
 
 /** v3.0.1 `src/NetscriptFunctions/Darknet.ts`, restricted to the members the
@@ -33,7 +45,7 @@ export interface DnetNsOptions {
  *
  * Deliberately still absent, and still throwing: `setStasisLink`,
  * `memoryReallocation`, `phishingAttack`, `induceServerMigration`,
- * `promoteStock`, `unleashStormSeed`, `labreport`, `labradar`. None is on the
+ * `unleashStormSeed`, `labreport`, `labradar`. None is on the
  * deploy path, and while `setStasisLink` is unmodelled
  * `getStasisLinkedServers()` returning `[]` is LITERALLY TRUE rather than a
  * stub — which is the difference between a gap and a fabrication. */
@@ -323,6 +335,44 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       // Upstream opens a cache on the CURRENT server only — the filename is a
       // local path, not a host-qualified one.
       return system.openCache(process.host, String(rawFilename));
+    },
+
+    /** Propaganda: raises a symbol's VOLATILITY, never its forecast, and earns
+     * nothing directly. The charges land in the darknet's own state and the
+     * vendored price engine reads them through the market adapter, so the boost
+     * moves the real tick rather than a parallel estimate of it.
+     *
+     * Upstream's ordering is reproduced: the symbol, the darknet-server check and
+     * the access check all run BEFORE the wait, and the charges and charisma
+     * experience are both priced by charisma as it stands AFTER it — so a call
+     * that raises charisma mid-wait pays the new rate, and each call makes the
+     * next one bigger.
+     * Source: src/NetscriptFunctions/Darknet.ts:582-609 @ 3162fd2 */
+    promoteStock: async (rawSymbol: unknown) => {
+      const symbol = String(rawSymbol);
+      // Not TIX-gated upstream: `getStockFromSymbol` only checks the symbol
+      // exists, so propaganda is spreadable before the market can be traded.
+      if (!(SymbolToStockMap[symbol] instanceof Stock)) {
+        throw new Error(`Invalid stock symbol: '${symbol}'`);
+      }
+      // `expectRunningOnDarknetServer`: the same `instanceof` the isDarknetServer
+      // member answers with, asked of the CALLING host.
+      if (servers.get(process.host)?.simKind !== "DarknetServer") {
+        throw new Error(
+          `This API can only be used on a darknet server, but it was called by ${process.filename} ` +
+            `(PID: ${process.pid}) on ${process.host}.`,
+        );
+      }
+      requireAccess();
+
+      await delay(promoteStockWaitMs(skills().charisma), "dnet.promoteStock");
+
+      const threads = process.threads;
+      system.addStockPromotion(symbol, promoteStockCharges(threads, skills().charisma));
+      options.gainCharismaExp(
+        promoteStockCharismaExp(threads, skills().charisma, options.charismaExpMult()),
+      );
+      return { success: true, code: OK, message: "Success" };
     },
   };
 }

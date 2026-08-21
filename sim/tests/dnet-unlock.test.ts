@@ -9,7 +9,13 @@ import {
   MUTATION_DRAWS,
   currentLab,
   labReward,
+  promoteStockCharges,
+  promoteStockCharismaExp,
+  promoteStockWaitMs,
+  stockPromotionMult,
 } from "../features/dnet.ts";
+import { makeDnet } from "../ns/dnet.ts";
+import { StockMarketSystem } from "../features/stock.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { ProcessTable } from "../ns/process.ts";
 import { SimWorld } from "../world.ts";
@@ -144,6 +150,14 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
 });
 
 function system(over: { fullAccess?: boolean; hasProgram?: boolean; installed?: string[]; bitNode?: number } = {}) {
+  return darknetWorld(over).dnet;
+}
+
+/** The same fixture, with the world it was built against — `promoteStock` reads
+ *  and writes the player's charisma, so its tests need both halves. */
+function darknetWorld(
+  over: { fullAccess?: boolean; hasProgram?: boolean; installed?: string[]; bitNode?: number } = {},
+): { world: SimWorld; dnet: DarknetSystem } {
   const world = new SimWorld({ seed: 1, bitnode: over.bitNode ?? 1, network: [] });
   const servers = world.servers;
   const darkweb = mockServer({ hostname: "darkweb", maxRam: 16, hasAdminRights: true }) as SimServer;
@@ -152,7 +166,7 @@ function system(over: { fullAccess?: boolean; hasProgram?: boolean; installed?: 
   const network = new Map<string, string[]>([["home", ["darkweb"]], ["darkweb", ["home"]]]);
   const home = new Set<string>();
   const clock = world.clock;
-  return new DarknetSystem({
+  const dnet = new DarknetSystem({
     servers,
     network,
     processes: new ProcessTable(servers, clock),
@@ -168,6 +182,7 @@ function system(over: { fullAccess?: boolean; hasProgram?: boolean; installed?: 
     homeFiles: () => home,
     darknetMoneyMultiplier: () => 1,
   });
+  return { world, dnet };
 }
 
 describe("the darknet model", () => {
@@ -436,5 +451,143 @@ describe("the darknet model's own claims", () => {
     // And the claim it no longer makes: nothing may still describe the tick as
     // delete-only.
     expect(DNET_ASSUMPTIONS.join(" ")).not.toContain("deletes and restarts only");
+  });
+});
+
+/** `ns.dnet.promoteStock` — the one darknet call whose payoff is entirely in
+ * another feature. It raises a symbol's VOLATILITY and nothing else, and it is
+ * a live lever in BN8, where the darknet's own income multipliers are zero but
+ * nothing zeroes propaganda.
+ *
+ * The curve itself is pinned in `sim/tests/stock-market.test.ts` against the
+ * vendored price engine; this pins the ns member's gates, its wait, and where
+ * the charges land. */
+describe("promoting a stock from the darknet", () => {
+  function promoter(over: { hasProgram?: boolean; host?: string; threads?: number } = {}) {
+    const { world, dnet } = darknetWorld({ bitNode: 8, hasProgram: over.hasProgram !== false });
+    // Constructed for its side effect: rolling the market is what registers the
+    // 33 symbols `promoteStock` validates against. Note it does NOT need the TIX
+    // API — propaganda is spreadable before a script can trade.
+    void new StockMarketSystem(world, world.player, mulberry32(3), {
+      hasWseAccount: true,
+      hasTixApiAccess: true,
+    });
+    const process = {
+      pid: 1,
+      filename: "promote.js",
+      host: over.host ?? "darkweb",
+      args: [],
+      threads: over.threads ?? 1,
+      temporary: false,
+      ramGb: 2,
+      atExit: new Map(),
+      killed: false,
+      onlineMoneyMade: 0,
+      onlineExpGained: 0,
+      onlineRunningTimeSeconds: 0,
+    };
+    let waited = 0;
+    const ns = makeDnet({
+      system: dnet,
+      process,
+      delay: (ms) => {
+        waited = ms;
+        world.clock.at(world.clock.now() + ms, () => {});
+        return Promise.resolve();
+      },
+      skills: () => ({
+        charisma: world.person.skills.charisma,
+        intelligence: world.person.skills.intelligence,
+      }),
+      nowMs: () => world.clock.now(),
+      hasBoots: () => false,
+      sf15Level: () => 0,
+      servers: world.servers,
+      charismaExpMult: () => world.person.mults.charisma_exp,
+      gainCharismaExp: (amount) => {
+        world.person.exp.charisma = Math.max(0, world.person.exp.charisma + amount);
+        world.recalculateSkills();
+      },
+    }) as { promoteStock: (symbol: string) => Promise<unknown> };
+    return { ns, dnet, world, waited: () => waited };
+  }
+
+  test("charges land on the symbol, priced by threads and charisma", async () => {
+    const { ns, dnet, world, waited } = promoter({ threads: 8 });
+    const charisma = world.person.skills.charisma;
+    const expBefore = world.person.exp.charisma;
+
+    await expect(ns.promoteStock("ECP")).resolves.toEqual({ success: true, code: 200, message: "Success" });
+
+    expect(waited()).toBe(promoteStockWaitMs(charisma));
+    expect(dnet.stockPromotionCharges("ECP")).toBeCloseTo(promoteStockCharges(8, charisma), 9);
+    expect(dnet.stockVolatilityMult("ECP")).toBe(stockPromotionMult(dnet.stockPromotionCharges("ECP")));
+    // Propaganda is charisma work, and it pays charisma experience for it.
+    expect(world.person.exp.charisma - expBefore).toBeCloseTo(
+      promoteStockCharismaExp(8, charisma, world.person.mults.charisma_exp),
+      9,
+    );
+    // Untouched symbols stay neutral: this is per-symbol, not market-wide.
+    expect(dnet.stockVolatilityMult("MGCP")).toBe(1);
+  });
+
+  test("repeated calls accumulate, and the charisma they build compounds", async () => {
+    const { ns, dnet, world } = promoter({ threads: 100 });
+    await ns.promoteStock("ECP");
+    const first = dnet.stockPromotionCharges("ECP");
+    const charismaAfterFirst = world.person.skills.charisma;
+
+    await ns.promoteStock("ECP");
+    const second = dnet.stockPromotionCharges("ECP") - first;
+    // Charges are priced by charisma at the moment they land, and the first
+    // call's own XP already raised it — so the second call buys strictly more
+    // than the first. Asserting equality here would be asserting that
+    // promoteStock does not build charisma, which it does.
+    expect(world.person.skills.charisma).toBeGreaterThan(charismaAfterFirst);
+    expect(second).toBeGreaterThan(first);
+    // Priced by charisma as it stood when the call landed — its OWN experience
+    // is granted afterwards and pays for the call after this one.
+    expect(second).toBeCloseTo(promoteStockCharges(100, charismaAfterFirst), 9);
+    expect(dnet.stockVolatilityMult("ECP")).toBeGreaterThan(1);
+  });
+
+  test("it refuses off a darknet server, without access, and on a bad symbol", async () => {
+    const offNet = promoter({ host: "home" });
+    await expect(offNet.ns.promoteStock("ECP")).rejects.toThrow("can only be used on a darknet server");
+    expect(offNet.dnet.stockPromotionCharges("ECP")).toBe(0);
+
+    const noAccess = promoter({ hasProgram: false });
+    await expect(noAccess.ns.promoteStock("ECP")).rejects.toThrow("do not have access to the dnet api");
+
+    const fine = promoter();
+    await expect(fine.ns.promoteStock("NOPE")).rejects.toThrow("Invalid stock symbol");
+  });
+
+  test("the symbol is checked before the wait, so a bad call costs no time", async () => {
+    const { ns, waited } = promoter();
+    await expect(ns.promoteStock("NOPE")).rejects.toThrow("Invalid stock symbol");
+    expect(waited()).toBe(0);
+  });
+
+  test("the charges are darknet state, and a prestige clears them", () => {
+    // `sim/tests/stock-market.test.ts` pins the curve against the vendored price
+    // engine; this pins where the charges LIVE. They die with the portfolio,
+    // because upstream's prestigeDarknetState clears stockPromotions on the same
+    // boundary at which initStockMarket re-rolls the market.
+    const dnet = system({ bitNode: 8 });
+    expect(dnet.stockVolatilityMult("ECP")).toBe(1);
+
+    dnet.addStockPromotion("ECP", 1_000);
+    expect(dnet.stockPromotionCharges("ECP")).toBe(1_000);
+    expect(dnet.stockVolatilityMult("ECP")).toBe(stockPromotionMult(1_000));
+    // Untouched symbols stay neutral: this is per-symbol, not market-wide.
+    expect(dnet.stockVolatilityMult("MGCP")).toBe(1);
+
+    dnet.scaleStockPromotions(0.4);
+    expect(dnet.stockPromotionCharges("ECP")).toBeCloseTo(400, 9);
+
+    dnet.prestige();
+    expect(dnet.stockPromotionCharges("ECP")).toBe(0);
+    expect(dnet.stockVolatilityMult("ECP")).toBe(1);
   });
 });

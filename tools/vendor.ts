@@ -49,6 +49,12 @@ const TRANSCRIPTION_SOURCE_PATHS = [
   "src/Work/CreateProgramWork.ts",
   "src/Hacknet/HacknetHelpers.tsx",
   "src/StockMarket/BuyingAndSelling.tsx",
+  // The darknet cannot be vendored — its import graph reaches the whole game
+  // UI — so sim/features/dnet.ts transcribes it. These two carry the stock
+  // propaganda: the charge curve and per-cycle decay, and the promoteStock
+  // wait/charge/charisma formulas.
+  "src/DarkNet/effects/effects.ts",
+  "src/NetscriptFunctions/Darknet.ts",
   "src/Gang/Gang.ts",
   "src/Bladeburner/Bladeburner.ts",
   "src/Corporation/Corporation.ts",
@@ -557,14 +563,18 @@ export type IStockMarket = Record<string, Stock> & {
   ticksUntilCycle: number;
 };
 
+/** Upstream \`getDefaultEmptyStockMarket\`: the bookkeeping fields, with no
+ *  stocks. The single definition of which own keys are NOT a Stock — both
+ *  \`isStockMarketInitialized\` and \`deleteStockMarket\` are derived from it. */
+function emptyStockMarket(): IStockMarket {
+  return { lastUpdate: 0, Orders: {}, storedCycles: 0, ticksUntilCycle: 0 } as IStockMarket;
+}
+
+const stockMarketBookkeeping: ReadonlySet<string> = new Set(Object.keys(emptyStockMarket()));
+
 /** Upstream: \`export let StockMarket\` in StockMarket.ts. Mutated in place by
  *  initStockMarket, never reassigned by anything we vendor. */
-export const StockMarket: IStockMarket = {
-  lastUpdate: 0,
-  Orders: {},
-  storedCycles: 0,
-  ticksUntilCycle: 0,
-} as IStockMarket;
+export const StockMarket: IStockMarket = emptyStockMarket();
 
 export const SymbolToStockMap: Record<string, Stock> = {};
 
@@ -607,16 +617,74 @@ export function getRandomIntInclusive(min: number, max: number): number {
   return Math.floor(random() * (max - min + 1) + min);
 }
 
-/** BN15's darknet can raise a symbol's volatility (src/DarkNet/effects/effects.ts),
- *  decaying by 0.4x at every market cycle. \`dnet\` has no simulation model, so the
- *  neutral 1x is the truth for every run we can currently produce — NOT an
- *  approximation of a modelled effect. Wire these to the darknet system the day
- *  it lands, and the price engine picks it up with no further change. */
-export function getDarknetVolatilityMult(_symbol: string): number {
-  return 1;
+/** Upstream \`isStockMarketInitialized\`, which the two purchase paths guard on.
+ *  Without it, buying the WSE account after the TIX API re-rolls a live market
+ *  and destroys the portfolio.
+ *
+ *  Upstream asks \`StockMarket.lastUpdate > 0\`, which it can because that is a
+ *  real epoch timestamp. Under the virtual clock a run starts at t=0, so the
+ *  same question has to be asked of the market's CONTENTS instead — otherwise a
+ *  market created on the first tick reports itself uninitialised and the next
+ *  purchase re-rolls it. This is the fourth adapter substitution, and it exists
+ *  for the same reason \`stockNow\` does. */
+export function isStockMarketInitialized(): boolean {
+  for (const key of Object.keys(StockMarket)) {
+    if (!stockMarketBookkeeping.has(key)) return true;
+  }
+  return false;
 }
 
-export function scaleDarknetVolatilityIncreases(_scalar: number): void {}
+/** Upstream \`deleteStockMarket\` — back to the uninitialised state, which is what
+ *  entering a BitNode does. \`SymbolToStockMap\` goes with it: \`initSymbolToStockMap\`
+ *  only ever overwrites entries, so without this a second market in the same
+ *  process would answer \`getSymbols\` from the previous one. Upstream reassigns
+ *  the singleton; we mutate in place, because everything vendored holds a
+ *  reference to it. */
+export function deleteStockMarket(): void {
+  for (const key of Object.keys(StockMarket)) {
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+    delete StockMarket[key];
+  }
+  for (const symbol of Object.keys(SymbolToStockMap)) {
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+    delete SymbolToStockMap[symbol];
+  }
+  Object.assign(StockMarket, emptyStockMarket());
+}
+
+/** BN15's darknet raises a symbol's volatility (src/DarkNet/effects/effects.ts),
+ *  decaying by 0.4x at every market cycle. \`DarkNet/\` cannot be vendored — its
+ *  import graph reaches the whole game UI — so \`sim/features/dnet.ts\` transcribes
+ *  the charge curve and injects it here, and the price engine picks it up with no
+ *  further change. The default is the neutral 1x a world without \`dnet\` has. */
+const neutralVolatilityMult = (): number => 1;
+const noScaleIncreases = (): void => {};
+
+let darknetVolatilityMult: (symbol: string) => number = neutralVolatilityMult;
+let darknetScaleIncreases: (scalar: number) => void = noScaleIncreases;
+
+export function setDarknetContext(ctx: {
+  volatilityMult?: (symbol: string) => number;
+  scaleIncreases?: (scalar: number) => void;
+}): void {
+  if (ctx.volatilityMult) darknetVolatilityMult = ctx.volatilityMult;
+  if (ctx.scaleIncreases) darknetScaleIncreases = ctx.scaleIncreases;
+}
+
+/** Drop the injected hooks back to neutral. A new market in the same process
+ *  must not read the previous run's promotions. */
+export function resetDarknetContext(): void {
+  darknetVolatilityMult = neutralVolatilityMult;
+  darknetScaleIncreases = noScaleIncreases;
+}
+
+export function getDarknetVolatilityMult(symbol: string): number {
+  return darknetVolatilityMult(symbol);
+}
+
+export function scaleDarknetVolatilityIncreases(scalar: number): void {
+  darknetScaleIncreases(scalar);
+}
 `;
 const marketAdapterPath = "src/StockMarket/MarketAdapter.ts";
 const marketAdapterOut = path.join(OUT_DIR, marketAdapterPath);

@@ -1,6 +1,7 @@
 import type { NS } from "@ns";
 import { effectiveBitNodeMultipliers } from "../../../shared/features/bitnode.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
+import { SYMBOL_BY_HOST } from "../../../shared/features/stocks.ts";
 import { linearValueCurve, PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
 import { usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { secondsForTicks, TICKS_PER_CYCLE } from "../../../shared/strategy/stock/market.ts";
@@ -93,30 +94,35 @@ export function resetStockState(): void {
  * at all. Reading the same server snapshot the dispatcher does closes it.
  *
  * The same three conditions the target evaluator uses (`isCandidate` plus a skill
- * check), because a host that fails any of them cannot carry an influencing op. */
-function symbolByHost(ctx: DriverContext): Record<string, string> {
-  const servers = ctx.state.topics.servers ?? {};
-  const organizations = ctx.state.topics.stock?.organizations ?? {};
-  const byOrganization = new Map(Object.entries(organizations).map(([sym, organization]) => [organization, sym]));
-  const out: Record<string, string> = {};
-  for (const server of Object.values(servers)) {
-    const sym = byOrganization.get(server.organizationName);
-    if (sym) out[server.hostname] = sym;
-  }
-  return out;
-}
-
-function farmableHosts(ctx: DriverContext, mapping: Readonly<Record<string, string>>): string[] {
+ * check), because a host that fails any of them cannot carry an influencing op.
+ *
+ * WHICH host carries which symbol is NOT one of those conditions. It is a
+ * constant — a server's organization is fixed in the game's own server table,
+ * and so is a stock's — and `shared/features/stocks.ts` already says so: the
+ * mapping is "computed here rather than through the public
+ * `ns.stock.getOrganization` API in production". `SYMBOL_BY_HOST` is that
+ * constant, and `sim/tests/stock-parity.test.ts` pins it against the vendored
+ * `SERVER_METADATA.org`.
+ *
+ * This used to re-derive it every pass anyway, from the live server topic joined
+ * against a `stock.organizations` probe — an `Object.values(servers)` scan plus
+ * a Map build at controller cadence, for an answer that cannot change. The probe
+ * existed only to feed that join, and paid `getOrganization` RAM for data the
+ * bundle ships, which is exactly what the `stock.forecast` probe already refuses
+ * to do; it is gone. Only the FARMABLE half is dynamic, and it now walks the 33
+ * hosts that carry a symbol rather than the whole network. */
+function farmableHosts(ctx: DriverContext): string[] {
   const servers = ctx.state.topics.servers;
   const skill = ctx.state.topics.player?.skills.hacking ?? 0;
   if (!servers) return [];
   const out: string[] = [];
-  for (const server of Object.values(servers)) {
+  for (const hostname of Object.keys(SYMBOL_BY_HOST)) {
+    const server = servers[hostname];
+    if (!server) continue;
     if (!server.hasAdminRights || server.purchasedByPlayer) continue;
     if ((server.moneyMax ?? 0) <= 0) continue;
     if ((server.requiredHackingSkill ?? Infinity) > skill) continue;
-    if (mapping[server.hostname] === undefined) continue;
-    out.push(server.hostname);
+    out.push(hostname);
   }
   return out;
 }
@@ -206,7 +212,6 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     progression?.multipliers,
   );
 
-  const mapping = symbolByHost(ctx);
   return {
     symbols: (topic.positions ?? []).map((position) => ({
       sym: position.sym,
@@ -228,8 +233,8 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     // the ranking, which blocked every long ranked below it.
     canShort: ctx.caps.bitNode === 8 || (ctx.caps.sourceFiles["8"] ?? 0) >= 2,
     fourSigmaDisabled: ctx.caps.restrictions.disable4SData === true,
-    farmableHosts: farmableHosts(ctx, mapping),
-    symbolByHost: mapping,
+    farmableHosts: farmableHosts(ctx),
+    symbolByHost: SYMBOL_BY_HOST,
     ...(nodeMults ? { nodeMults } : {}),
     moneyGranted: ctx.grants.money,
     totalMoney: ctx.state.topics.player?.money ?? 0,

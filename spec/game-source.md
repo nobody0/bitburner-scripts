@@ -97,16 +97,24 @@ rather than by convenience:
 | the module-level `StockMarket` singleton | an adapter-owned object | one market per process otherwise |
 | `Math.random` | an injected seeded stream | reproducible A/B runs |
 | `new Date().getTime()` | the virtual clock | virtual time |
+| `isStockMarketInitialized` | asks the market's contents, not `lastUpdate > 0` | a run starts at virtual t=0, where a real epoch stamp never is |
 
 `getRandomIntInclusive` is re-implemented over the injected stream for the same
 reason: upstream's version calls `Math.random`, and it is what rolls each
 symbol's price cap, spread and volatility in the constructor. Left global, two
 runs with the same seed would face different markets.
 
+The darknet's volatility boost is modelled, through the same seam: the adapter's
+`getDarknetVolatilityMult` / `scaleDarknetVolatilityIncreases` are injected from
+`sim/features/dnet.ts` rather than stubbed, so `ns.dnet.promoteStock` moves the
+real vendored tick. `DarkNet/` cannot be vendored — its import graph reaches the
+whole game UI — so the charge curve, the 0.4x per-cycle decay and the
+wait/charge/charisma formulas are transcribed, with
+`src/DarkNet/effects/effects.ts` and `src/NetscriptFunctions/Darknet.ts` pinned
+by hash in `sim/tests/drift-pins.test.ts`.
+
 Genuinely NOT modelled, and reported rather than approximated: limit/stop orders
-(`processOrders` is a no-op and `ns.stock.placeOrder` calls `unmodeled()`), and
-BN15's darknet volatility boost (a neutral 1x, because `dnet` has no model to
-drive it).
+(`processOrders` is a no-op and `ns.stock.placeOrder` calls `unmodeled()`).
 
 After a vendor bump, a failing parity suite is the expected signal, not a
 regression: update the transcription to match the new game data. Without them a
