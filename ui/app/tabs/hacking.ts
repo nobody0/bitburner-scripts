@@ -17,6 +17,7 @@ import { view } from "../lib/viewstate.ts";
 import type { BatchAggregateReport, FarmRollup } from "../../../shared/telemetry/topics/hacking.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
+import { contractHosts, serverInspector } from "./hacking-server.ts";
 
 /** Hacking tab: the farm. Dispatcher rollup on top (rates, target, RAM pie),
  * fleet capacity next, per-server detail below.
@@ -157,7 +158,9 @@ const COLUMNS: Column<Row>[] = [
     sort: (r) => r.server.hostname,
     cell: (r) => {
       const { status, label } = ROOT_DOT[r.root];
-      return `${dot(status, label)}${esc(r.server.hostname)}`;
+      return `<button class="server-link" data-view-key="hacking.selected" ` +
+        `data-view-value="${esc(r.server.hostname)}" title="Inspect ${esc(r.server.hostname)}">` +
+        `${dot(status, label)}${esc(r.server.hostname)}</button>`;
     },
   },
   {
@@ -984,25 +987,45 @@ export const hackingTab: Tab = {
 
     // --- servers ---
     const all = buildRows(state);
+    const activeHosts = new Set([
+      ...(farm?.pipelines ?? []).map((pipeline) => pipeline.host),
+      ...[farm?.target, farm?.prepTarget].filter((host): host is string => Boolean(host)),
+    ]);
+    const hostsWithContracts = contractHosts(state);
     const counts = {
       rooted: all.filter((r) => r.root === "rooted").length,
       ready: all.filter((r) => r.root === "ready").length,
       blocked: all.filter((r) => r.root === "blocked").length,
       prepped: all.filter((r) => r.atMaxMoney && r.atMinSec).length,
+      active: all.filter((r) => activeHosts.has(r.server.hostname)).length,
+      needsPrep: all.filter((r) => r.root === "rooted" && (r.server.moneyMax ?? 0) > 0 && !(r.atMaxMoney && r.atMinSec)).length,
+      contracts: all.filter((r) => hostsWithContracts.has(r.server.hostname)).length,
+      owned: all.filter((r) => r.server.purchasedByPlayer || r.server.hostname === "home").length,
+      busy: all.filter((r) => (r.server.ramUsed ?? 0) > 0).length,
     };
     const mode = view("hacking.servers", "money");
     const needle = view("hacking.search").trim().toLowerCase();
+    const selectedName = view("hacking.selected", farm?.target ?? farm?.prepTarget ?? "");
     const rows = all
       .filter((r) => {
         if (needle && !r.server.hostname.toLowerCase().includes(needle)) return false;
         if (mode === "money") return (r.server.moneyMax ?? 0) > 0;
         if (mode === "rooted") return r.root === "rooted";
+        if (mode === "active") return activeHosts.has(r.server.hostname);
+        if (mode === "needs-prep") return r.root === "rooted" && (r.server.moneyMax ?? 0) > 0 && !(r.atMaxMoney && r.atMinSec);
+        if (mode === "contracts") return hostsWithContracts.has(r.server.hostname);
+        if (mode === "owned") return r.server.purchasedByPlayer || r.server.hostname === "home";
+        if (mode === "busy") return (r.server.ramUsed ?? 0) > 0;
         if (mode === "ready") return r.root === "ready";
         if (mode === "blocked") return r.root === "blocked";
         if (mode === "prepped") return r.atMaxMoney && r.atMinSec;
         return true;
       });
 
+    const selected = all.find((r) => r.server.hostname === selectedName)
+      ?? all.find((r) => activeHosts.has(r.server.hostname))
+      ?? rows[0]
+      ?? all[0];
     const serverControls =
       filters(
         "hacking.servers",
@@ -1011,6 +1034,11 @@ export const hackingTab: Tab = {
           { value: "rooted", label: "rooted", badge: String(counts.rooted), title: "root access held" },
           { value: "ready", label: "rootable", badge: String(counts.ready), title: "rootable now" },
           { value: "blocked", label: "blocked", badge: String(counts.blocked), title: "needs more skill or port openers" },
+          { value: "active", label: "active", badge: String(counts.active), title: "farm or preparation pipeline" },
+          { value: "needs-prep", label: "needs prep", badge: String(counts.needsPrep), title: "rooted money server below max money or above min security" },
+          { value: "contracts", label: "contracts", badge: String(counts.contracts), title: "queued or quarantined coding contracts" },
+          { value: "owned", label: "owned", badge: String(counts.owned), title: "home and purchased servers" },
+          { value: "busy", label: "RAM in use", badge: String(counts.busy), title: "server currently using RAM" },
           { value: "prepped", label: "prepped", badge: String(counts.prepped), title: "at max money and min security" },
           { value: "all", label: "all", badge: String(all.length) },
         ],
@@ -1021,6 +1049,7 @@ export const hackingTab: Tab = {
       defaultSort: { key: "money", dir: -1 },
       empty: "no servers match this filter",
       limit: 120,
+      rowClass: (row) => row.server.hostname === selected?.server.hostname ? "picked" : "",
     });
 
     return (
@@ -1035,7 +1064,7 @@ export const hackingTab: Tab = {
           : waiting("the farm rollup", "the dispatcher publishes one per second"),
       ) +
       card("Landing order", landingOrderCard(state)) +
-      card("Servers", servers, serverControls) +
+      card("Servers", servers + (selected ? serverInspector(selected, state) : ""), serverControls) +
       `</div>` +
       `<div class="col">` +
       card("Fleet", fleetTiles) +

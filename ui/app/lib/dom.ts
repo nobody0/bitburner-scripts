@@ -292,18 +292,20 @@ export interface Column<T> {
   left?: boolean;
 }
 
-export interface DataTableOptions {
+export interface DataTableOptions<T = unknown> {
   empty?: Markup;
   /** Applied when no sort has been chosen. */
   defaultSort: Sort;
   /** Rows past this are dropped, with a note saying how many. */
   limit?: number;
+  /** Optional visual state for a row after filtering and sorting. */
+  rowClass?(row: T): string;
 }
 
 /** A sortable table. Header cells carry `data-sort-table`/`data-sort-key`; the
  * delegated click handler in main.ts writes the choice to viewstate, so the
  * sort survives the re-render it triggers. */
-export function dataTable<T>(id: string, rows: readonly T[], columns: Column<T>[], options: DataTableOptions): string {
+export function dataTable<T>(id: string, rows: readonly T[], columns: Column<T>[], options: DataTableOptions<T>): string {
   if (rows.length === 0) return note(options.empty ?? "no data");
   const active = sortOf(id, options.defaultSort);
   // A persisted key can outlive its column (mode-dependent columns, renames);
@@ -339,6 +341,7 @@ export function dataTable<T>(id: string, rows: readonly T[], columns: Column<T>[
       wrap: columns.flatMap((c, i) => (c.wrap ? [i] : [])),
       left: columns.flatMap((c, i) => (c.left ? [i] : [])),
       rawHeaders: true,
+      rowClass: (index) => options.rowClass?.(shown[index]!) ?? "",
     },
   );
 

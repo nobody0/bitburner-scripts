@@ -45,6 +45,54 @@ nav#tabs {
 }
 .tab.locked { color: var(--bb-secondary-dark); opacity: 0.65; }
 .tab.unknown { color: var(--bb-secondary); opacity: 0.8; font-style: italic; }
+.tab.spec-toggle { margin-left: auto; align-self: center; }
+
+/* Checked-in feature documentation. It is a sibling of the live panel rather
+   than content inside it, so a telemetry refresh never resets its scroll. */
+#specdrawer {
+  max-height: 58vh;
+  overflow: auto;
+  margin: 10px 16px 0;
+  border: 1px solid var(--bb-well-light);
+  background: var(--bb-background);
+}
+#specdrawer[hidden] { display: none; }
+.spec-head {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  justify-content: space-between;
+  border-bottom-color: var(--bb-well-light);
+}
+#spectitle { color: var(--bb-primary-light); font-weight: 600; }
+#specpath { color: var(--muted); font-size: var(--fs-xs); }
+#specbody { padding: 10px 14px 18px; color: var(--text-secondary); }
+#specbody h1, #specbody h2, #specbody h3, #specbody h4 {
+  color: var(--bb-primary-light);
+  margin: 16px 0 7px;
+}
+#specbody h2 { font-size: var(--fs-lg); }
+#specbody h3 { font-size: var(--fs-base); }
+#specbody h4 { font-size: var(--fs-md); }
+#specbody p { margin: 7px 0; max-width: 110ch; }
+#specbody li { margin: 3px 0; }
+#specbody code { color: var(--bb-hack); background: var(--bb-well); padding: 0 3px; }
+#specbody pre {
+  overflow: auto;
+  padding: 9px;
+  border: 1px solid var(--bb-well-light);
+  background: var(--bb-well);
+}
+#specbody pre code { padding: 0; }
+#specbody blockquote {
+  margin: 8px 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--bb-primary-dark);
+  color: var(--muted);
+}
+#specbody hr { border: 0; border-top: 1px solid var(--bb-well-light); }
+#specbody .spec-link { border-bottom: 1px dotted var(--bb-secondary); cursor: help; }
+.spec-table { overflow-x: auto; margin: 9px 0; }
 
 #scrubrow {
   display: none;
@@ -461,4 +509,40 @@ canvas.microchart { height: 88px; }
   nav#tabs { padding-inline: 4px; }
   main#view { padding-inline: 8px; }
   .go-snapshot .goboard { max-width: min(100%, 520px); }
+}
+
+.summary-section + .summary-section { margin-top: 12px; }
+.summary-section h3,
+.server-inspector h3,
+.server-inspector h4 {
+  margin: 0 0 6px;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+
+.server-link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+.server-link:hover { color: var(--bb-primary-light); background: none; }
+.server-inspector {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--bb-well-light);
+}
+.server-inspector > h3 { color: var(--bb-primary-light); font-size: var(--fs-md); }
+.server-detail-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 2fr) minmax(360px, 3fr);
+  gap: 16px;
+  align-items: start;
+}
+.server-detail-grid p { margin: 4px 0 9px; color: var(--text-secondary); }
+@media (max-width: 900px) {
+  .server-detail-grid { grid-template-columns: minmax(0, 1fr); }
 }

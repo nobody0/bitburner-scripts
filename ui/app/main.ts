@@ -8,6 +8,7 @@ import { appendRecords, emptyState, project, type ProjectedState } from "./proje
 import { TABS, type TabId } from "./tabs/index.ts";
 import { BITNODES } from "../../shared/features/bitnode.ts";
 import type { RunCatalogEntry } from "../../shared/run-catalog.ts";
+import { renderMarkdown } from "./lib/markdown.ts";
 
 /** Viewer shell: one live socket, one loaded run, one active tab.
  *
@@ -45,6 +46,10 @@ let storedRuns: RunCatalogEntry[] = [];
 let compactOverBytes = 8_000_000;
 let active: TabId = "overview";
 let state: ProjectedState = emptyState();
+let specOpen = false;
+let specRequest = 0;
+const specCache = new Map<string, string>();
+const specPending = new Map<string, Promise<string>>();
 
 const TAB_ORDER: { id: TabId; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -59,7 +64,7 @@ function readHash(): TabId {
 }
 
 function renderTabs(): void {
-  morph($("tabs"), TAB_ORDER.map((tab) => {
+  const links = TAB_ORDER.map((tab) => {
     const feature = FEATURES.find((f) => f.id === tab.id);
     const unlocked = feature ? state.caps.unlocked[feature.id] : "yes";
     const cls = [tab.id === active ? "on" : "", unlocked === "no" ? "locked" : unlocked === "unknown" ? "unknown" : ""]
@@ -68,7 +73,69 @@ function renderTabs(): void {
     const title = feature ? feature.problem : "Cross-feature view";
     const mark = unlocked === "no" ? "✕ " : unlocked === "unknown" ? "? " : "";
     return `<a class="tab ${cls}" href="#/${tab.id}" title="${esc(title)}">${mark}${esc(tab.label)}</a>`;
-  }).join(""));
+  }).join("");
+  const feature = FEATURES.find((candidate) => candidate.id === active);
+  const spec = feature
+    ? `<button class="tab spec-toggle${specOpen ? " on" : ""}" type="button" data-spec-toggle="1" ` +
+      `title="Read the checked-in ${esc(feature.label)} strategy specification">spec</button>`
+    : "";
+  morph($("tabs"), links + spec);
+}
+
+function closeSpec(): void {
+  specOpen = false;
+  specRequest++;
+  $("specdrawer").hidden = true;
+  renderTabs();
+}
+
+async function renderSpec(): Promise<void> {
+  const feature = FEATURES.find((candidate) => candidate.id === active);
+  const drawer = $("specdrawer");
+  if (!specOpen || !feature) {
+    drawer.hidden = true;
+    return;
+  }
+
+  drawer.hidden = false;
+  $("spectitle").textContent = `${feature.label} specification`;
+  $("specpath").textContent = `spec/strategy/feature-catalog.md · ${feature.id}`;
+  const cached = specCache.get(feature.id);
+  if (cached !== undefined) {
+    morph($("specbody"), renderMarkdown(cached));
+    return;
+  }
+
+  morph($("specbody"), note("loading checked-in specification..."));
+  const request = specRequest;
+  let pending = specPending.get(feature.id);
+  if (!pending) {
+    const created = fetch(`/spec/${encodeURIComponent(feature.id)}`).then(async (response) => {
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+      return response.text();
+    });
+    pending = created;
+    specPending.set(feature.id, created);
+    void created.then(
+      () => {
+        if (specPending.get(feature.id) === created) specPending.delete(feature.id);
+      },
+      () => {
+        if (specPending.get(feature.id) === created) specPending.delete(feature.id);
+      },
+    );
+  }
+  try {
+    const markdown = await pending;
+    specCache.set(feature.id, markdown);
+    if (request === specRequest && specOpen && active === feature.id) {
+      morph($("specbody"), renderMarkdown(markdown));
+    }
+  } catch (error) {
+    if (request === specRequest) {
+      morph($("specbody"), note(`spec unavailable: ${String(error)}`));
+    }
+  }
 }
 
 /** Locked and unknown panels explain themselves rather than showing nothing. */
@@ -151,6 +218,7 @@ function reproject(): void {
 function render(): void {
   reproject();
   renderTabs();
+  void renderSpec();
   renderView();
   $("scrubt").textContent = cutoff === Infinity ? "" : fmtTime(cutoff - (run.t0 ?? 0));
 }
@@ -184,6 +252,15 @@ window.addEventListener("hashchange", () => {
   render();
 });
 window.addEventListener("resize", queueRender);
+
+$("tabs").addEventListener("click", (ev) => {
+  const toggle = (ev.target as HTMLElement | null)?.closest<HTMLElement>("[data-spec-toggle]");
+  if (!toggle) return;
+  specOpen = !specOpen;
+  renderTabs();
+  void renderSpec();
+});
+$("specclose").addEventListener("click", closeSpec);
 
 // --- panel interaction -----------------------------------------------------
 

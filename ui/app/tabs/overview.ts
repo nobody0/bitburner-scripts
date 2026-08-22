@@ -5,6 +5,7 @@ import { esc, fmtMoney, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { Markup } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
+import { automationSummary } from "./overview-summary.ts";
 import type { Tab } from "./index.ts";
 
 /** Overview: the cross-feature view. Money over time, plus the one number
@@ -180,6 +181,7 @@ export const overviewTab: Tab = {
 
     return (
       `<div class="col wide">` +
+      card("Automation summary", automationSummary(state)) +
       card("Money", money + chart) +
       card(
         "Income by feature",
