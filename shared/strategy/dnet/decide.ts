@@ -26,8 +26,8 @@
  *    the only thing that makes a host immune to move, delete and restart
  *    (`darknetNetworkUtils.ts:72`, `NetworkMovement.ts:228`), so a link on a
  *    host really does keep every path through it alive — the correction that a
- *    stasis link grants no remote `exec` narrows what stasis BUYS, and does not
- *    touch what it PRESERVES.
+ *    stasis link also sets `backdoorInstalled` means a pinned host preserves
+ *    its resident and remains a tax-free remote `exec` recovery target.
  * 2. **`charismaNeeded`.** Read by `dnetNeeds` and posted to the needs board, so
  *    career delivers charisma instead of this feature grinding it. That is a
  *    real action, taken by the feature that owns it. */

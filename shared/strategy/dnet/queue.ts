@@ -1,6 +1,6 @@
-import { LAST_BLEED_AT, expiryMs, fresh, type DarknetKnowledge, type DarknetHostKnowledge } from "./knowledge.ts";
+import { expiryMs, fresh, type DarknetKnowledge, type DarknetHostKnowledge } from "./knowledge.ts";
 import { modelEntry, planAttempt } from "./models.ts";
-import { shouldListen, type ListenContext, type ListenRefusal, type ListenTarget } from "./listen.ts";
+import { conclusiveAttempt } from './courier.ts';
 
 /** What there is to do out there, and who is doing it.
  *
@@ -34,14 +34,14 @@ import { shouldListen, type ListenContext, type ListenRefusal, type ListenTarget
  * password; those never reach this module, because a pure function that held a
  * credential would eventually be asked to explain itself in a log line. */
 
-/** The four jobs that LEARN or SPREAD, the four that FARM, and the three
+/** The four jobs that LEARN or SPREAD, the four that FARM, and the four
  * DELIBERATE ones.
  *
  * `cache`, `reclaim`, `phish` and `promote` are decided by
- * `shared/strategy/dnet/farm.ts`, and `pin`, `induce` and `walk` by
- * `shared/strategy/dnet/hold.ts`. Both are merged here exactly as `plant` is
- * merged from `spread.ts`: the queue does not second-guess a planner that has
- * already named its refusals. */
+ * `shared/strategy/dnet/farm.ts`; `pin`, `induce` and `walk` by
+ * `shared/strategy/dnet/hold.ts`; `storm` by `shared/strategy/dnet/storm.ts`.
+ * All are merged here exactly as `plant` is merged from `spread.ts`: the queue
+ * does not second-guess a planner that has already named its refusals. */
 export type TaskKind =
   | "survey"
   | "bleed"
@@ -51,14 +51,15 @@ export type TaskKind =
   | "reclaim"
   | "phish"
   | "promote"
-  // --- the deliberate three, from `hold.ts` -----------------------------------
+  // --- the deliberate four, from `hold.ts` and `storm.ts` ---------------------
   //
-  // Merged exactly as `plant` and the farm rungs are: `planStasis`, `planInduce`
-  // and the walker's own gate have already named their refusals, and the queue
-  // does not second-guess a planner that has.
+  // Merged exactly as `plant` and the farm rungs are: `planStasis`, `planInduce`,
+  // the walker's own gate and `planStorm` have already named their refusals, and
+  // the queue does not second-guess a planner that has.
   | "pin"
   | "induce"
-  | "walk";
+  | "walk"
+  | "storm";
 
 export interface Task {
   id: string;
@@ -70,6 +71,8 @@ export interface Task {
    *  task rather than a detail of whoever runs it — and it is what decides which
    *  host's queue the job is filed against. */
   from: string;
+  /** A plant may reuse a global rooted session without current adjacency. */
+  remote?: boolean;
   /** Lower is more urgent. */
   priority: number;
   /** Why this task exists, in one line, for the panel and the failure line. */
@@ -84,6 +87,18 @@ export interface Task {
   filename?: string;
   /** The symbol a `promote` task spreads propaganda about. */
   symbol?: string;
+  /** Walks only: a SECOND, disposable walker in the same maze. The maze is
+   *  global while positions are per PID, so a scout on another adjacent host
+   *  maps the macro-route the finisher is not on and feeds the shared field —
+   *  and unlike the finisher it is expendable: it is never marked
+   *  irreplaceable, never attracts a stasis link, and a mutation eating its
+   *  host costs only its own position. */
+  role?: "scout";
+  /** Pins only: the neighbour the pin exists to keep. See the hold entry's
+   *  field of the same name — this merely carries it to the job state. */
+  edge?: string;
+  /** Pins only: release the link instead of applying one. */
+  unpin?: boolean;
   /** Which unattributed password an `attempt` task is spending, BY REFERENCE.
    *
    *  The password itself never enters this module. A log's `--<password>--`
@@ -110,16 +125,36 @@ export interface DeriveOptions {
   /** Hosts with a live agent, so we do not survey what is already being watched
    *  and do not plant where someone is standing. */
   agents?: ReadonlySet<string>;
+  /** What a JOB would get on each agent host: the resident's measured free RAM
+   *  plus the allocation the resident hands back when it spawns — the exact
+   *  figure the overseer's own fit check uses, so a vantage chosen here is one
+   *  the job actually fits on. Omitted, every vantage reads as 0 GB and the
+   *  ordering falls back to the name tie-break: today's behaviour. */
+  agentFreeGb?: ReadonlyMap<string, number>;
+  /** What ONE THREAD of an attempt job costs. `authenticate`'s duration scales
+   *  `1/(1 + 0.2*(threads-1))` with the calling script's threads, so when this
+   *  is provided an attempt is sized to the RAM its vantage can spare. Omitted,
+   *  attempts run at one thread: today's behaviour. */
+  attemptGbPerThread?: number;
+  /** The same for a bleed job: `heartbleed`'s capture time scales with the
+   *  calling script's threads exactly as `authenticate`'s does (at 1.5x the
+   *  base), so a drain is sized to its vantage too. Omitted, one thread. */
+  bleedGbPerThread?: number;
   /** Hosts we hold a credential for. */
   vault?: ReadonlySet<string>;
   /** Hosts admitted by `planSpread`, already filtered and ordered. */
-  plantable?: readonly { host: string; from: string }[];
-  /** Farm work admitted by `planFarm`, already laddered and thread-sized. All
-   *  four calls act on the host the script stands on, so the vantage IS the
-   *  target and there is no pairing to do here. */
+  plantable?: readonly { host: string; from: string; remote?: boolean }[];
+  /** Farm work admitted by `planFarm`, already laddered and thread-sized.
+   *  Three of the four calls act on the host the script stands on, so the
+   *  vantage IS the target — but `memoryReallocation` reaches an authenticated
+   *  adjacent host too, so a reclaim may carry its own `from` when a roomy
+   *  neighbour grinds a cramped host's block remotely. */
   farm?: readonly {
     kind: "cache" | "reclaim" | "phish" | "promote";
     host: string;
+    /** The vantage, when it is not the target: a remote reclaim's helper.
+     *  Absent means self-host, which is every other farm task. */
+    from?: string;
     threads: number;
     filename?: string;
     symbol?: string;
@@ -130,11 +165,22 @@ export interface DeriveOptions {
    *  `induceServerMigration` REFUSES its own host — so each carries its own
    *  vantage. */
   hold?: readonly {
-    kind: "pin" | "induce" | "walk";
+    kind: "pin" | "induce" | "walk" | "storm";
     host: string;
     from: string;
     threads?: number;
     reason: string;
+    /** See `Task.role`: the walk planner may admit one finisher AND one scout
+     *  for the same lab, distinguished by vantage. */
+    role?: "scout";
+    /** Pins only: the neighbour this pin exists to keep — the lab. The job
+     *  re-probes for it at act time and refuses to spend the link if the
+     *  mutation clock severed the edge after this was derived. */
+    edge?: string;
+    /** Pins only: run `setStasisLink(false)` instead — release a link whose
+     *  host no longer earns it, freeing the slot. Same kind, same 12 GB call,
+     *  opposite argument. */
+    unpin?: boolean;
   }[];
   /** Unattributed passwords matched to hosts they could open, by reference.
    *
@@ -152,6 +198,9 @@ export interface DeriveOptions {
    *  fact, so it never quietly expires into "try again". Omitted, nothing is
    *  gated: one refused call per host is how the requirement gets learned. */
   charisma?: number;
+  /** Latest `nextMutation()` event observed by the overseer. A resident's own
+   * adjacency is re-surveyed once after this stamp, coalescing multiple ticks. */
+  lastMutationAt?: number;
   /** Work a live process is already doing, keyed by TARGET. A `(kind, target)`
    *  pair in here emits no task.
    *
@@ -159,15 +208,6 @@ export interface DeriveOptions {
    *  it from `DnetClaim` by naming the two fields it may pass, so a field added
    *  to a claim later cannot leak in by default. */
   inFlight?: ReadonlyMap<string, readonly { from: string; kind: TaskKind }[]>;
-  /** Filled IN by the derivation: why each host we declined to listen to was
-   *  declined, by name.
-   *
-   *  An out-parameter rather than a second return value, because `deriveTasks`
-   *  returns the task list and every caller destructures it. Same contract
-   *  `planSpread` and `planFarm` already keep: a planner that has run out of
-   *  work must not look like one that has stopped working, and until now the
-   *  bleed gate was the last decision in this file with no name for its "no". */
-  listenOut?: { refused: Record<string, number>; examples: { host: string; why: string; detail: string }[] };
 }
 
 /** Where the three farm kinds sit against everything else.
@@ -179,9 +219,10 @@ export interface DeriveOptions {
 const FARM_PRIORITY: Readonly<Record<"cache" | "reclaim" | "phish" | "promote", number>> = {
   cache: 100,
   reclaim: 300,
+  // These two only order ACROSS hosts now: which of the pair a given host runs
+  // is `planFarm`'s expected-value comparison, and one rung per host means the
+  // bands never arbitrate between them on the same host.
   phish: 400,
-  // Last of everything, which is what "the bottom rung" means once the ladder's
-  // one-rung-per-host rule has already decided nothing else fits.
   promote: 500,
 };
 
@@ -193,7 +234,7 @@ const FARM_PRIORITY: Readonly<Record<"cache" | "reclaim" | "phish" | "promote", 
  * host that has already been restarted. `induce` is the exception: it is a
  * project of hundreds of calls whose value is realised at the end, so it waits
  * behind anything that opens the net. */
-const HOLD_PRIORITY: Readonly<Record<"pin" | "induce" | "walk", number>> = {
+const HOLD_PRIORITY: Readonly<Record<"pin" | "induce" | "walk" | "storm", number>> = {
   // THE PIN GOES FIRST, and the order is load-bearing rather than aesthetic.
   // A host runs ONE process at a time, and a walk holds its host for hours — so
   // a pin queued behind a walk is a pin that starts after the thing it exists
@@ -203,15 +244,32 @@ const HOLD_PRIORITY: Readonly<Record<"pin" | "induce" | "walk", number>> = {
   // walk then starts on a host the mutation clock can no longer touch.
   pin: -95,
   walk: -90,
+  // Below the pin STRUCTURALLY: a pending pin is a reason not to fire yet, and
+  // the ordering enforces what `planStorm`'s `links-unspent` gate argues. Above
+  // every attempt band, because the admitting policy has already proved a
+  // timing window (a `.d.cache` landed seconds ago) and a storm queued behind a
+  // 36-second attempt could miss it.
+  storm: -85,
   // A project of hundreds of calls whose value arrives at the end, so it waits
-  // behind anything that opens the net.
-  induce: 200,
+  // behind everything that opens the net — cracking, caches AND the grind:
+  // `memoryReallocation` is what makes a pushed giant plantable when it lands,
+  // so freeing RAM comes first. Only the earn pair queues behind a push.
+  induce: 350,
 };
 
 /** Placing a process is the scarcest thing we do — it is the only action that
  *  grows the set of places we can act FROM — so it outranks everything, the
  *  deliberate three included. */
 const PLANT_PRIORITY = -100;
+
+/** There is NO thread ceiling. A resident runs ONE job at a time, so RAM the
+ * running job does not take is simply idle — the marginal gigabyte has no
+ * opportunity cost, and "diminishing returns per GB" is the wrong lens. So an
+ * attempt or a bleed takes every thread its vantage can afford, bounded only
+ * by RAM. The per-thread price already carries the 1.6 GB script base, the
+ * 2.0 GB `spawn` the atExit respawn needs, and the margin — and the engine
+ * charges `ramOverride × threads` — so `floor(room / perThreadCost)` reserves
+ * all of that once per thread, exactly as the engine requires. */
 
 /** The per-host offsets, all applied to `rank` (the negated depth).
  *
@@ -230,22 +288,24 @@ const ORACLE_SOLVE_SURCHARGE = 10;
 const PROBE_SURCHARGE = 50;
 /** The band a bleed sits in, above every attempt on the same host. */
 const BLEED_BAND = 10;
-/** How far a chatty host may climb WITHIN the bleed band. One less than the
- *  band itself, so even the loudest host cannot cross into the attempts. */
-const BLEED_VALUE_CAP = BLEED_BAND - 1;
+/** A failed read is operational, not evidence that the ring is empty. Retry
+ * eventually, without tying the backoff to passive traffic the API never
+ * materialises. */
+const BLEED_RETRY_MS = 10_000;
 
 /** Every place a process could stand to reach `host`, best first.
  *
- * ALL of them, not the first one found, because two jobs against one target are
- * two calls the target's own log ring has to interleave — and because
- * `authenticate` and `heartbleed` both need adjacency, so running them from
- * different neighbours is the only way to overlap them at all.
+ * All of them so a task can avoid a vantage already occupied by another job.
  *
- * Ordered: the host itself first when we are standing on it (a resident is
- * already there, and self counts as directly connected), then every resident
- * neighbour BY NAME. Sorted rather than in `agents` iteration order, because
- * that order is insertion order and would make the derived queue depend on the
- * sequence in which hosts happened to be planted.
+ * Ordered by the RAM a job would get there (`agentFreeGb`), most first, because
+ * `authenticate`'s duration shrinks with the calling script's threads and
+ * threads are bought with the vantage's free RAM — so the roomiest vantage is
+ * the fastest crack. Self is a candidate like any other (a resident there
+ * counts as directly connected). Ties break BY NAME rather than in `agents`
+ * iteration order, because that order is insertion order and would make the
+ * derived queue depend on the sequence in which hosts happened to be planted;
+ * with no `agentFreeGb` at all, every vantage ties at 0 and the ordering is
+ * the old name sort with self first.
  *
  * An empty list is itself the answer: the host is a rumour until someone stands
  * next to it. */
@@ -257,16 +317,24 @@ function vantagesFor(
 ): string[] {
   const agents = opts.agents ?? new Set<string>();
   const expiry = { netDepth: opts.netDepth, bitNode: opts.bitNode, backdoored: opts.backdoored };
-  const neighbourly: string[] = [];
+  const vantages: string[] = [];
+  if (agents.has(host.hostname)) vantages.push(host.hostname);
   for (const agentHost of agents) {
     if (agentHost === host.hostname) continue;
     const standing = knowledge.hosts[agentHost];
     if (!standing) continue;
     const neighbours = fresh<string[]>(standing, "neighbours", now, expiry);
-    if (neighbours?.includes(host.hostname)) neighbourly.push(agentHost);
+    if (neighbours?.includes(host.hostname)) vantages.push(agentHost);
   }
-  neighbourly.sort();
-  return agents.has(host.hostname) ? [host.hostname, ...neighbourly] : neighbourly;
+  const roomOn = (name: string): number => opts.agentFreeGb?.get(name) ?? 0;
+  // Self wins RAM ties: it is already a session holder, and keeping it ahead of
+  // an equal-RAM neighbour preserves the old ordering wherever RAM is unknown.
+  const selfBias = (name: string): number => (name === host.hostname ? 1 : 0);
+  vantages.sort((a, b) =>
+    roomOn(b) - roomOn(a)
+    || selfBias(b) - selfBias(a)
+    || (a < b ? -1 : a > b ? 1 : 0));
+  return vantages;
 }
 
 /** Everything worth doing, given what we believe right now.
@@ -286,30 +354,18 @@ export function deriveTasks(
    *  Passing no `inFlight` is exactly today's behaviour: nothing is busy. */
   const busy = (kind: TaskKind, host: string): boolean =>
     (opts.inFlight?.get(host) ?? []).some((claim) => claim.kind === kind);
+  const netHasUncrackedMovable = Object.values(knowledge.hosts).some((candidate) =>
+    candidate.goneAt === undefined
+    && fresh<boolean>(candidate, "isStationary", now, expiry) !== true
+    && !vault.has(candidate.hostname));
 
-  // Branch 6 of the noise generator leaks a password belonging to some OTHER
-  // movable host, so its value is a property of the NET rather than of the host
-  // being listened to: while one movable host anywhere is still shut, every ring
-  // in the net is worth reading for that branch alone. Computed once — per-host
-  // it would be both wrong-shaped and quadratic.
-  const netHasUncrackedMovable = Object.values(knowledge.hosts).some((host) =>
-      host.goneAt === undefined
-      && fresh<boolean>(host, "isStationary", now, {
-        netDepth: opts.netDepth,
-        bitNode: opts.bitNode,
-        backdoored: opts.backdoored,
-      }) !== true
-      && !vault.has(host.hostname));
 
   for (const host of Object.values(knowledge.hosts)) {
     if (host.goneAt !== undefined) continue;
     const vantages = vantagesFor(host, knowledge, now, opts);
     if (vantages.length === 0) continue;
     const from = vantages[0]!;
-    // Vantages a live job is already working this target from. A second job
-    // launched from the same host would queue behind the first anyway — one
-    // resident, one process — so the pairing below spends the other neighbours
-    // instead of stacking.
+    // Prefer a vantage not already occupied by another job on this target.
     const taken = new Set((opts.inFlight?.get(host.hostname) ?? []).map((entry) => entry.from));
     const free = vantages.filter((vantage) => !taken.has(vantage));
 
@@ -333,77 +389,46 @@ export function deriveTasks(
       || requiredCharisma === undefined
       || requiredCharisma <= opts.charisma;
 
-    // Whether a bleed is wanted is decided BEFORE the attempt is planned,
-    // because the two are a pair: they are the same round trip against the same
-    // ring, and splitting them across two neighbours is what lets them overlap.
-    // `heartbleed` with `peek` leaves the ring intact, so nothing marks a host
-    // as recently listened to except our own stamp.
-    //
-    // The gate used to be "has it been longer than the topology expiry", which
-    // is a clock and not a reason. `shouldListen` prices the call instead: how
-    // many lines the ring will have minted since we last looked, times the
-    // chance a line carries something we do not already hold. The two scaling
-    // laws pull in OPPOSITE directions — a deep host is chatty but its
-    // neighbour-credential branch is 30x rarer — so no single proxy works, and
-    // a clock is the worst of them.
-    const lastBleedAt = host.facts[LAST_BLEED_AT]?.at ?? 0;
-    const neighbours = fresh<string[]>(host, "neighbours", now, expiry);
-    const target: ListenTarget = {
-      hostname: host.hostname,
-      ...(fresh<number>(host, "difficulty", now, expiry) !== undefined
-        ? { difficulty: fresh<number>(host, "difficulty", now, expiry)! }
-        : {}),
-      ...(fresh<number>(host, "logTrafficInterval", now, expiry) !== undefined
-        ? { logTrafficIntervalSec: fresh<number>(host, "logTrafficInterval", now, expiry)! }
-        : {}),
-      ...(fresh<string>(host, "modelId", now, expiry) !== undefined
-        ? { modelId: fresh<string>(host, "modelId", now, expiry)! }
-        : {}),
-      hasCredential: vault.has(host.hostname),
-      uncrackedNeighbours: (neighbours ?? []).filter((name) => !vault.has(name)).length,
-      topologyStale: neighbours === undefined,
-      // Its ring holds our OWN attempt records, which is the only channel a
-      // model's feedback ever uses — so a host mid-solve is always worth a look.
-      solveInFlight: host.attempts?.solver !== undefined,
-      ...(lastBleedAt > 0 ? { lastBleedAt } : {}),
-    };
-    // `charismaOk` reads as net-wide on `ListenContext` but its refusal says
-    // "this host is above us", so it is the PER-HOST gate — the same `bleedable`
-    // the attempt path uses. Only `netHasUncrackedMovable` is genuinely net-wide.
-    const context: ListenContext = { netHasUncrackedMovable, charismaOk: bleedable };
-    const verdict = shouldListen(target, now, context);
-    // A refusal the derivation makes is only useful if it is attributable, and
-    // "busy" and "nowhere to stand" are OURS rather than the model's — so they
-    // are not counted here, where they would drown the three that mean
-    // something about the host.
-    const reachable = agents.has(host.hostname) || vault.has(host.hostname);
-    if (reachable && !busy("bleed", host.hostname) && verdict.refusal !== undefined && opts.listenOut) {
-      const out = opts.listenOut;
-      out.refused[verdict.refusal] = (out.refused[verdict.refusal] ?? 0) + 1;
-      if (out.refused[verdict.refusal] === 1) {
-        out.examples.push({ host: host.hostname, why: verdict.refusal, detail: verdict.why });
-      }
-    }
-    const wantsBleed = verdict.worth && !busy("bleed", host.hostname) && reachable;
-    // The bleed takes the first vantage nobody is using; the attempt takes one
-    // the bleed is NOT using. With a single vantage both fall back to it, which
-    // is exactly the behaviour before there was ever a choice to make.
-    const bleedFrom = free[0] ?? from;
-    const attemptFrom = (wantsBleed ? free.find((vantage) => vantage !== bleedFrom) : undefined)
-      ?? free[0]
-      ?? from;
-
+    const ringBusy = busy("bleed", host.hostname) || busy("attempt", host.hostname);
+    const ledger = host.attempts;
+    const ring = host.ring;
+    const retryDue = ring?.lastBleedAttemptAt === undefined
+      || now - ring.lastBleedAttemptAt >= BLEED_RETRY_MS;
+    const pendingBleed = (ring?.pendingAuthRecords ?? 0) > 0
+      && bleedable && !ringBusy && retryDue;
+    // A target with undrained authentication records is serialized: drain it
+    // first, then let the next derivation resume its attempt from shared state.
+    const workFrom = free[0] ?? from;
+    // Threads for the two calls that scale with them — authenticate and
+    // heartbleed — sized to what the chosen vantage can spare. Sized here
+    // rather than in the overseer because the vantage choice and the thread
+    // count are the same decision: the roomiest vantage was picked FOR its
+    // room. With no pricing input, one thread — today's behaviour.
+    const attemptRoom = opts.agentFreeGb?.get(workFrom);
+    const sized = (gbPerThread: number | undefined): number =>
+      gbPerThread !== undefined && gbPerThread > 0 && attemptRoom !== undefined
+        ? Math.max(1, Math.floor(attemptRoom / gbPerThread))
+        : 1;
+    const attemptThreads = sized(opts.attemptGbPerThread);
+    const bleedThreads = sized(opts.bleedGbPerThread);
     // SURVEY: only when the adjacency we hold has stopped being believable.
     // While it is fresh there is nothing to learn, so there is no task, so two
     // workers cannot both go and learn it.
-    if (fresh<string[]>(host, "neighbours", now, expiry) === undefined && !busy("survey", host.hostname)) {
+    const neighboursFact = host.facts["neighbours"];
+    const changedSinceSurvey = agents.has(host.hostname)
+      && opts.lastMutationAt !== undefined
+      && (neighboursFact?.at ?? 0) < opts.lastMutationAt;
+    if ((fresh<string[]>(host, "neighbours", now, expiry) === undefined || changedSinceSurvey)
+      && !busy("survey", host.hostname)) {
       tasks.push({
         id: `survey:${host.hostname}`,
         kind: "survey",
         host: host.hostname,
         from,
         priority: rank,
-        reason: host.facts["neighbours"] ? "adjacency expired" : "never surveyed",
+        reason: changedSinceSurvey
+          ? "mutation observed since last survey"
+          : host.facts["neighbours"] ? "adjacency expired" : "never surveyed",
       });
     }
 
@@ -415,7 +440,8 @@ export function deriveTasks(
     // free candidate is waiting has paid for information the candidate might
     // have made unnecessary.
     const candidates = (opts.guesses ?? []).filter((guess) => guess.host === host.hostname);
-    const guessing = candidates.length > 0
+    const guessing = !pendingBleed && !ringBusy
+      && candidates.length > 0
       && !vault.has(host.hostname)
       && !busy("attempt", host.hostname);
     if (guessing) {
@@ -424,21 +450,22 @@ export function deriveTasks(
         id: `guess:${host.hostname}:${guess.id}`,
         kind: "attempt",
         host: host.hostname,
-        from: attemptFrom,
+        from: workFrom,
         // Below every model attempt on the same host and above every survey:
         // one call, no oracle, no charisma gate.
         priority: rank + GUESS_BONUS,
         reason: guess.reason,
+        ...(attemptThreads !== 1 ? { threads: attemptThreads } : {}),
         guessId: guess.id,
       });
     }
 
+    let scheduledAttempt = guessing;
     // ATTEMPT: only for a host we cannot already open, and only while its model
     // has something left to try.
-    if (!guessing && !vault.has(host.hostname) && host.hostname !== "darkweb" && !busy("attempt", host.hostname)) {
+    if (!pendingBleed && !guessing && !ringBusy && !vault.has(host.hostname) && host.hostname !== "darkweb") {
       const modelId = fresh<string>(host, "modelId", now, expiry);
       const entry = modelEntry(modelId);
-      const ledger = host.attempts;
       const attempt = planAttempt(
         entry,
         {
@@ -448,10 +475,23 @@ export function deriveTasks(
           ...(fresh<string>(host, "passwordFormat", now, expiry) !== undefined
             ? { passwordFormat: fresh<string>(host, "passwordFormat", now, expiry)! }
             : {}),
+          ...(fresh<string>(host, "passwordHint", now, expiry) !== undefined
+            ? { passwordHint: fresh<string>(host, "passwordHint", now, expiry)! }
+            : {}),
+          ...(fresh<string>(host, "data", now, expiry) !== undefined
+            ? { data: fresh<string>(host, "data", now, expiry)! }
+            : {}),
+          ...(fresh<number>(host, "difficulty", now, expiry) !== undefined
+            ? { difficulty: fresh<number>(host, "difficulty", now, expiry)! }
+            : {}),
+          ...(ledger?.evidence !== undefined ? { evidence: ledger.evidence } : {}),
         },
         ledger?.tried ?? 0,
         ledger?.probes ?? 0,
         opts.probeLimit ?? 1,
+        ledger?.history?.filter(conclusiveAttempt)
+          .map((outcome) => outcome.attempted)
+          .filter((value): value is string => value !== undefined) ?? [],
       );
       // Anything whose whole payoff is the ORACLE is withheld below the host's
       // charisma requirement, because `heartbleed` is the only charisma-gated
@@ -471,38 +511,51 @@ export function deriveTasks(
           : attempt.kind === "solve"
             ? (attempt.needsOracle ? ORACLE_SOLVE_SURCHARGE : 0)
             : PROBE_SURCHARGE;
+        scheduledAttempt = true;
         tasks.push({
           id: `attempt:${host.hostname}`,
           kind: "attempt",
           host: host.hostname,
-          from: attemptFrom,
+          from: workFrom,
           priority: rank + surcharge,
           reason: attempt.kind === "candidate"
             ? `${entry?.name ?? modelId} candidate ${attempt.index + 1}/${attempt.total}`
             : attempt.kind === "solve"
               ? `${entry?.name ?? modelId}: ${attempt.note} (up to ${attempt.budget} attempts)`
               : attempt.reason,
+          ...(attemptThreads !== 1 ? { threads: attemptThreads } : {}),
         });
       }
     }
 
-    // BLEED: a host we can already open is still worth listening to, because its
-    // logs leak its NEIGHBOURS' passwords. That is the cheapest credential in
-    // the game and it owes nothing to any minigame.
+    // INITIAL BLEED: attempts consume their own records, so listening is only
+    // admitted when no authentication job owns this target's shared ring.
+    const neighbours = fresh<string[]>(host, "neighbours", now, expiry);
+    const initialRingUseful = !vault.has(host.hostname)
+      || neighbours === undefined
+      || neighbours.some((name) => !vault.has(name))
+      || ledger?.solver !== undefined
+      || netHasUncrackedMovable;
+    // v3.0.1 heartbleed only drains the existing ring. It does NOT call
+    // populateServerLogsWithNoise, and authenticate snapshots the old ring then
+    // discards the noise its own population call generated. Therefore elapsed
+    // logTrafficInterval time cannot create anything for Netscript to read.
+    // Drain once per identity (retrying a refused call until one succeeds), and
+    // thereafter only when an authentication record is known to be pending.
+    const initialBleed = !pendingBleed && !scheduledAttempt && !ringBusy
+      && bleedable && ring?.lastBleedAt === undefined && retryDue && initialRingUseful;
+    const wantsBleed = pendingBleed || initialBleed;
     if (wantsBleed) {
       tasks.push({
         id: `bleed:${host.hostname}`,
         kind: "bleed",
         host: host.hostname,
-        from: bleedFrom,
-        // Ordered by expected useful lines WITHIN the bleed band, never across
-        // it: a host with a lot to say goes before one with a little, and
-        // neither goes before a survey. Clamped so a single very chatty host
-        // cannot reach into the band below.
-        priority: rank + BLEED_BAND - Math.min(BLEED_VALUE_CAP, Math.round(verdict.value)),
-        // The verdict's own sentence, so the queue says WHY rather than
-        // repeating a constant.
-        reason: verdict.why,
+        from: workFrom,
+        priority: rank + BLEED_BAND,
+        reason: pendingBleed
+          ? `drain ${ring!.pendingAuthRecords} authentication log record(s)`
+          : "drain this identity's initial log ring",
+        ...(bleedThreads !== 1 ? { threads: bleedThreads } : {}),
       });
     }
   }
@@ -516,6 +569,7 @@ export function deriveTasks(
       kind: "plant",
       host: entry.host,
       from: entry.from,
+      ...(entry.remote ? { remote: true } : {}),
       priority: PLANT_PRIORITY,
       reason: "a credential and room for an agent",
     });
@@ -531,7 +585,7 @@ export function deriveTasks(
       id: `${entry.kind}:${entry.host}`,
       kind: entry.kind,
       host: entry.host,
-      from: entry.host,
+      from: entry.from ?? entry.host,
       priority: FARM_PRIORITY[entry.kind],
       reason: entry.reason,
       ...(entry.threads !== 1 ? { threads: entry.threads } : {}),
@@ -545,15 +599,25 @@ export function deriveTasks(
   // each carries its own vantage, because `induceServerMigration` is the one
   // call in the feature that refuses the host it is running on.
   for (const entry of opts.hold ?? []) {
-    if (busy(entry.kind, entry.host)) continue;
+    // A walk dedups on (kind, target, VANTAGE), not (kind, target): the lab is
+    // the one target that may legitimately carry two walks at once — the
+    // pinned finisher and a disposable scout on another adjacent host. Every
+    // other hold kind keeps the plain per-target check.
+    const walking = entry.kind === "walk"
+      ? (opts.inFlight?.get(entry.host) ?? []).some((claim) => claim.kind === "walk" && claim.from === entry.from)
+      : busy(entry.kind, entry.host);
+    if (walking) continue;
     tasks.push({
-      id: `${entry.kind}:${entry.host}`,
+      id: entry.kind === "walk" ? `walk:${entry.host}:${entry.from}` : `${entry.kind}:${entry.host}`,
       kind: entry.kind,
       host: entry.host,
       from: entry.from,
       priority: HOLD_PRIORITY[entry.kind],
       reason: entry.reason,
       ...(entry.threads !== undefined && entry.threads !== 1 ? { threads: entry.threads } : {}),
+      ...(entry.role !== undefined ? { role: entry.role } : {}),
+      ...(entry.edge !== undefined ? { edge: entry.edge } : {}),
+      ...(entry.unpin === true ? { unpin: true } : {}),
     });
   }
 

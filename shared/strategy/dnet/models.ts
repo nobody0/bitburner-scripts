@@ -1,15 +1,15 @@
 import { solverFor } from "./solvers/index.ts";
+import { candidateMatchesEvidence, type PasswordEvidence } from "./evidence.ts";
 import { COMMON_PASSWORDS, DEFAULT_SETTINGS, DOG_NAMES, EU_COUNTRIES } from "./dictionaries.ts";
+import { getPasswordType } from "./codecs.ts";
 
 /** The twenty-four darknet server models, and what each one tells you when you
  * guess wrong.
  *
- * This is GROUNDWORK, deliberately. Five models are implemented, because their
- * password is drawn from a transcribed list and "solving" them is a `for` loop.
- * The other nineteen are recorded with their mechanic, their oracle and where
- * that oracle surfaces — and left unattempted, so the puzzles stay puzzles. Each
- * is a one-arm change once someone wants to write the solver, and by then the
- * oracle it needs is already being captured and displayed.
+ * This registry is total: all 24 non-labyrinth models have either an ordered
+ * dictionary or a solver, while the labyrinth is routed to its PID-bound maze
+ * walker. Raw entries retain their upstream audit metadata; `modelEntry`
+ * derives implementation status from the actual dispatcher.
  *
  * Two facts decide the shape of everything here, and both are the opposite of
  * what the API docs suggest:
@@ -95,6 +95,12 @@ export interface PasswordFacts {
   passwordHint?: string;
   data?: string;
   difficulty?: number;
+  /** Formula time for zero matching prefix characters (2G timing baseline). */
+  authenticateBaseMs?: number;
+  /** Formula delta added by one matching prefix character for this job. */
+  authenticateStepMs?: number;
+  /** Normalized constraints drained from this target's shared log ring. */
+  evidence?: readonly PasswordEvidence[];
 }
 
 export interface ModelEntry {
@@ -170,7 +176,7 @@ function describeModelShape(id: ModelId): ModelEntry {
         "A 93-entry common-password list. Bounded but long, so the ledger resumes rather than restarting.",
       );
 
-    // --- unattempted: the hint already contains the answer -------------------
+    // --- details and closed-form decoders ------------------------------------
     // These need a DECODER, not a search, and the input arrives free in
     // getServerDetails. They are the cheapest ones to pick up next.
     case "DeskMemo_3.1":
@@ -278,7 +284,7 @@ function describeModelShape(id: ModelId): ModelEntry {
         blocked: "factoriser not written",
       };
 
-    // --- unattempted: genuine search problems --------------------------------
+    // --- interactive search problems -----------------------------------------
     case "DeepGreen":
       return {
         id,
@@ -507,6 +513,7 @@ export function planAttempt(
   tried: number,
   probesUsed: number,
   probeLimit = 1,
+  attempted: readonly string[] = [],
 ): Attempt {
   if (!entry) {
     return probesUsed < probeLimit
@@ -514,9 +521,17 @@ export function planAttempt(
       : { kind: "none", reason: "unknown model" };
   }
   if (entry.candidates) {
-    const list = entry.candidates(facts);
-    if (tried < list.length) {
-      return { kind: "candidate", password: list[tried]!, index: tried, total: list.length };
+    const list = entry.candidates(facts)
+      .filter((candidate) => facts.passwordLength === undefined || candidate.length === facts.passwordLength)
+      .filter((candidate) => facts.passwordFormat === undefined
+        || getPasswordType(candidate) === facts.passwordFormat)
+      .filter((candidate) => candidateMatchesEvidence(candidate, facts.evidence));
+    const attemptedSet = new Set(attempted);
+    const index = attempted.length > 0
+      ? list.findIndex((candidate) => !attemptedSet.has(candidate))
+      : (tried < list.length ? tried : -1);
+    if (index >= 0) {
+      return { kind: "candidate", password: list[index]!, index, total: list.length };
     }
     return { kind: "none", reason: `${entry.name} dictionary exhausted (${list.length} candidates)` };
   }

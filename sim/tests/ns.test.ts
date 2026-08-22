@@ -76,6 +76,8 @@ describe("ram costs", () => {
     expect(getRamCost("getFunctionRamCost")).toBe(0);
     expect(getFunctionRamCost("baseCost")).toBe(1.6);
     expect(getFunctionRamCost("sleep")).toBe(0);
+    expect(getFunctionRamCost("formulas.dnet.getAuthenticateTime")).toBe(0);
+    expect(() => getFunctionRamCost("formulas.dnet")).toThrow("invalid type");
     expect(() => getFunctionRamCost("noSuchFunction")).toThrow();
     expect(() => getFunctionRamCost("gang.noSuchFunction")).toThrow();
   });

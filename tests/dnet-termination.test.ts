@@ -2,13 +2,17 @@ import { describe, expect, test } from "bun:test";
 import { solvedModels, solverFor } from "../shared/strategy/dnet/solvers/index.ts";
 import type { SolverObservation, SolverStep } from "../shared/strategy/dnet/solvers/types.ts";
 import { generateSecret, passwordRng } from "../sim/features/dnet-generators.ts";
+import { generateMaze, MAZE_PATH } from "../sim/features/dnet-maze.ts";
+import { mulberry32 } from "../sim/core/rng.ts";
 import {
   ahead,
-  emptyMaze,
-  markBlocked,
-  stepMaze,
+  decideLab,
+  emptyField,
+  labPrior,
+  observeLab,
+  refuseEdge,
   type Cell,
-  type MazeKnowledge,
+  type LabField,
 } from "../shared/strategy/dnet/maze.ts";
 
 /** Does it STOP?
@@ -181,76 +185,114 @@ describe("the maze walker stops when every move is refused", () => {
   /** The engine answers a blocked move by leaving the position UNCHANGED and
    * re-rendering the same surroundings. So the walker sees an identical world on
    * every call — which is precisely the input that made it bump one wall for
-   * ever. */
-  test("a walker whose every move is refused terminates", () => {
-    // PATH is a SPACE, so the OPEN slots are the blanks: row 0 column 1 is
-    // north, row 2 column 1 is south. Both open here; east and west walled.
-    const render = "# #\n#@#\n# #";
-    let known: MazeKnowledge = emptyMaze();
+   * ever.
+   *
+   * Asserted against `decideLab`, the DEPLOYED walker. That matters more than it
+   * reads: the planner is meant never to choose a refused edge at all, because
+   * the prior pre-walls the border and every response's free render resolves all
+   * four adjacent slots before the next decision. This file's job is to check
+   * that the failure path is REACHED rather than that it has the right shape, so
+   * a walker whose model of the maze has been contradicted must still run out of
+   * ideas instead of running for ever. */
+  const stage = { mazeWidth: 20, mazeHeight: 14, offsetStartAndEnd: false };
+
+  test("a walker the engine contradicts on every move gives up", () => {
+    // A render claiming north and south are open, at a cell the engine then
+    // refuses in every direction. PATH is a SPACE, so the OPEN slots are blanks.
+    const prior = labPrior(stage);
     const at: Cell = [5, 5];
+    let field: LabField = observeLab(emptyField(), at, ["# #", "#@#", "# #"].join("\n"), prior)!;
     const tried: string[] = [];
 
     for (let i = 0; i < 200; i++) {
-      const step = stepMaze(known, at, render, { width: 21, height: 13 });
-      if (step.kind !== "go") {
+      const plan = decideLab(field, at, prior);
+      if (plan.kind === "lost") {
         // Terminated. That is the whole assertion.
         expect(tried.length, "it gave up without ever trying a direction").toBeGreaterThan(0);
         return;
       }
-      tried.push(step.direction);
+      if (plan.kind === "radar") {
+        // A radar it has already paid for is never offered twice from one cell,
+        // so this cannot be the loop — but it is not a direction either.
+        field = plan.field;
+        continue;
+      }
+      tried.push(plan.direction);
       // The engine refused: position unchanged, and the walker must record it.
-      known = markBlocked(step.known, at, step.direction);
+      field = refuseEdge(plan.field, at, plan.direction);
     }
     throw new Error(`the walker never stopped; it tried ${JSON.stringify(tried.slice(0, 8))}...`);
   });
 
   test("a refused direction is never offered twice from the same cell", () => {
     // The narrower property underneath the one above, and the one that actually
-    // failed: without it the walk is not merely slow, it cannot progress at all.
-    const render = "   \n @ \n   "; // everything open
-    let known: MazeKnowledge = emptyMaze();
+    // failed on the walker this replaced: without it the walk is not merely
+    // slow, it cannot progress at all.
+    const prior = labPrior(stage);
     const at: Cell = [5, 5];
+    let field: LabField = observeLab(emptyField(), at, ["   ", " @ ", "   "].join("\n"), prior)!;
     const seen = new Set<string>();
 
     for (let i = 0; i < 20; i++) {
-      const step = stepMaze(known, at, render, { width: 21, height: 13 });
-      if (step.kind !== "go") break;
-      expect(seen.has(step.direction), `${step.direction} was offered twice after being refused`).toBe(false);
-      seen.add(step.direction);
-      known = markBlocked(step.known, at, step.direction);
+      const plan = decideLab(field, at, prior);
+      if (plan.kind === "lost") break;
+      if (plan.kind === "radar") { field = plan.field; continue; }
+      expect(seen.has(plan.direction), `${plan.direction} was offered twice after being refused`).toBe(false);
+      seen.add(plan.direction);
+      field = refuseEdge(plan.field, at, plan.direction);
     }
     // Four directions, so it must have run out rather than looped.
     expect(seen.size).toBeLessThanOrEqual(4);
   });
 
-  test("a walk in a real maze still finishes once refusals are recorded", () => {
-    // The regression guard for the fix: recording blocked edges must not break
-    // ordinary progress.
-    const maze = ["#####", "#   #", "### #", "#   #", "#####"];
-    const exit: Cell = [3, 3];
-    let known: MazeKnowledge = emptyMaze();
-    let at: Cell = [1, 1];
-    const PATHCH = " ";
-    for (let i = 0; i < 100; i++) {
+  test("a walk still finishes when the engine contradicts a move it believed", () => {
+    // The regression guard: recording a contradicted edge must not break
+    // ordinary progress. It is walked against a maze the GENERATOR actually
+    // built rather than a hand-drawn one, because the planner's whole edge is
+    // trusting the generator's arithmetic — a hand-drawn grid that breaks the
+    // stitching rules would have the walker correctly refuse to believe it, and
+    // the test would be measuring the fixture.
+    //
+    // The contradiction is injected: the first move is refused however the maze
+    // is really shaped. Nothing in the engine does that, which is exactly why
+    // it belongs in this file — the question is whether a walker whose model
+    // has been contradicted still terminates, and terminates by ARRIVING.
+    const stage14 = { mazeWidth: 20, mazeHeight: 14, offsetStartAndEnd: false };
+    const maze = generateMaze(stage14.mazeWidth, stage14.mazeHeight, mulberry32(7));
+    const prior = labPrior(stage14);
+    const exit: Cell = [prior.width - 2, prior.height - 2];
+    const render = (cell: Cell): string => {
       const rows: string[] = [];
-      for (let y = at[1] - 1; y <= at[1] + 1; y++) {
+      for (let y = cell[1] - 1; y <= cell[1] + 1; y++) {
         let row = "";
-        for (let x = at[0] - 1; x <= at[0] + 1; x++) {
-          row += (y === at[1] && x === at[0]) ? "@" : (maze[y]?.[x] ?? PATHCH);
+        for (let x = cell[0] - 1; x <= cell[0] + 1; x++) {
+          row += (y === cell[1] && x === cell[0]) ? "@" : (maze[y]?.[x] ?? MAZE_PATH);
         }
         rows.push(row);
       }
-      const step = stepMaze(known, at, rows.join("\n"), { width: 5, height: 5 });
-      if (step.kind !== "go") break;
-      const next = ahead(at, step.direction);
-      const wallX = (at[0] + next[0]) / 2;
-      const wallY = (at[1] + next[1]) / 2;
-      if (maze[wallY]?.[wallX] === PATHCH) {
-        known = step.known;
+      return rows.join("\n");
+    };
+    let at: Cell = [1, 1];
+    let field: LabField = observeLab(emptyField(), at, render(at), prior)!;
+    let contradicted = false;
+
+    for (let i = 0; i < 2_000; i++) {
+      const plan = decideLab(field, at, prior);
+      if (plan.kind === "lost") break;
+      if (plan.kind === "radar") { field = plan.field; continue; }
+      field = plan.field;
+      const next = ahead(at, plan.direction);
+      const open = maze[(at[1] + next[1]) / 2]?.[(at[0] + next[0]) / 2] === MAZE_PATH;
+      if (open && contradicted) {
         at = next;
-        if (at[0] === exit[0] && at[1] === exit[1]) return;
+        if (at[0] === exit[0] && at[1] === exit[1]) {
+          expect(contradicted, "the contradiction was never injected").toBe(true);
+          return;
+        }
+        field = observeLab(field, at, render(at), prior) ?? field;
       } else {
-        known = markBlocked(step.known, at, step.direction);
+        contradicted = true;
+        field = refuseEdge(field, at, plan.direction);
       }
     }
     throw new Error(`never reached the exit; stopped at ${at[0]},${at[1]}`);

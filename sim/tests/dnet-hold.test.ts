@@ -144,6 +144,7 @@ describe("a backdoor is reach, and it is taxed", () => {
     rigged[15] = 0;  // the first backdoored host, alphabetically
     const h = harness({ rigged });
     const host = movableHosts(h)[0]!;
+    const password = h.dnet.hosts.get(host)!.password;
     h.world.servers.get(host)!.backdoorInstalled = true;
     h.dnet.hosts.get(host)!.sessions.add(1);
     h.dnet.darknetProcess(10_000);
@@ -152,6 +153,7 @@ describe("a backdoor is reach, and it is taxed", () => {
     // The host itself survives: a restart takes the scripts and the sessions,
     // never the files or the admin rights.
     expect(h.dnet.hosts.get(host)!.online).toBe(true);
+    expect(h.dnet.hosts.get(host)!.password).toBe(password);
   });
 
   test("...and deleted by the other one, which takes the host outright", () => {

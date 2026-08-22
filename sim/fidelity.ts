@@ -63,9 +63,12 @@ export const SIM_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> 
   // farm calls the net pays with: memoryReallocation, with its clamped per-call
   // figure and the two SEPARATE writes it makes to blockedRam and ramUsed, and
   // phishingAttack, with the three-minute net-wide cache cooldown, both chance
-  // formulas and the quarter-rate charisma on the failure path. Still absent,
-  // and still throwing: stasis links, induced migration, the storm seed and the
-  // maze — which is why this stays "partial".
+  // formulas and the quarter-rate charisma on the failure path. Stasis links,
+  // induced migration, the maze and the storm seed with its webstorm have all
+  // since been modelled as each reached the deploy path (see DNET_ASSUMPTIONS,
+  // dnet.webstorm for the storm's declared divergences). Still absent, and
+  // still throwing: labreport, plus the reward kinds cacheRewards narrows away
+  // — which is why this stays "partial".
   dnet: "partial",
   side: "oracle-only",
 };

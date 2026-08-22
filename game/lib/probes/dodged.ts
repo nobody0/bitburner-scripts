@@ -13,8 +13,14 @@ import { rotate } from "../../../shared/strategy/stanek/pack.ts";
 import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
 import type { CorpState } from "../../../shared/telemetry/topics/corp.ts";
 import type { BladeburnerState } from "../../../shared/telemetry/topics/bladeburner.ts";
-import type { ContractDigest } from "../../../shared/telemetry/topics/side.ts";
 import type { ReportHost } from "../../../shared/strategy/dnet/courier.ts";
+import {
+  contractKey,
+  darknetContractsFromListings,
+  mergeContractQueue,
+  pendingDarknetContracts,
+  type ContractQueueEntry,
+} from "../contracts.ts";
 import { emit, emitPartial, type DodgedProbe, type Emission, type ProbeAcc, type ProbeContext } from "./index.ts";
 import { fleetFrom } from "./local.ts";
 
@@ -1817,7 +1823,6 @@ const dnetCore: DodgedProbe = {
         logTrafficInterval: details.logTrafficInterval,
         difficulty: details.difficulty,
         isStationary: details.isStationary,
-        hasSession: details.hasSession,
         ...(maxRam !== undefined ? { maxRam } : {}),
         ...(usedRam !== undefined ? { usedRam } : {}),
       });
@@ -1863,7 +1868,7 @@ const sideContracts: DodgedProbe = {
   merge: true,
   methods: ["ls", "codingcontract.getContractTypes"],
   run(stubNs: NS, { servers, state }: ProbeContext) {
-    const queue: ContractDigest[] = [];
+    const ordinary: ContractQueueEntry[] = [];
     // Track only quarantined keys, not every contract in a large save. Each
     // discovered file removes itself; leftovers are stale failures to reap.
     const staleQuarantine = new Set(Object.keys(state.contractQuarantine ?? {}));
@@ -1873,9 +1878,25 @@ const sideContracts: DodgedProbe = {
         contractTotal++;
         const key = `${host}\0${file}`;
         staleQuarantine.delete(key);
-        if (!state.contractQuarantine?.[key] && queue.length < CONTRACT_QUEUE_LIMIT) queue.push({ host, file });
+        if (!state.contractQuarantine?.[key] && ordinary.length < CONTRACT_QUEUE_LIMIT) ordinary.push({ host, file });
       }
     }
+
+    // A normal network scan cannot see darknet hosts. Preserve only resident
+    // observations that are still inside their mutation-clock validity window,
+    // and keep their quarantines until a newer resident listing proves absence.
+    const now = Date.now();
+    const allDarknet = darknetContractsFromListings(state.darknetContractListings, now);
+    const darknet = pendingDarknetContracts(
+      allDarknet,
+      state.darknetContractHandledAt,
+      state.contractQuarantine,
+    );
+    for (const [host, listing] of Object.entries(state.darknetContractListings ?? {})) {
+      for (const file of listing.files) staleQuarantine.delete(contractKey({ host, file }));
+    }
+    const queue = mergeContractQueue(darknet, ordinary, CONTRACT_QUEUE_LIMIT);
+    contractTotal += allDarknet.length;
 
     // A manually solved/deleted quarantined contract is no longer a failure
     // in the current world. This full-network ls sweep is the authoritative
@@ -1899,7 +1920,7 @@ const sideContracts: DodgedProbe = {
       .map(({ data: _data, answer: _answer, ...summary }) => summary);
     return [
       emit("side", {
-        contracts: queue.slice(0, CONTRACT_REPORT_LIMIT),
+        contracts: queue.slice(0, CONTRACT_REPORT_LIMIT).map(({ host, file }) => ({ host, file })),
         contractTotal,
         // Types are intentionally unknown until the bounded driver inspection.
         // This is therefore the unquarantined candidate count; unsupported

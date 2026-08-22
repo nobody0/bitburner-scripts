@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { romanNumeralEncoder } from "../shared/strategy/dnet/codecs.ts";
 import {
   SEARCH_SOLVERS,
+  alphabetFor,
   chineseRemainder,
   distinctPermutations,
   readRmsd,
@@ -208,6 +209,7 @@ describe("NIL — yes and yesn't, per position", () => {
   test("a numeric password of any length falls in at most ten exchanges", () => {
     // The cost depends on the ALPHABET, not the length — that is the point.
     const rng = seeded(0x1417);
+
     const solver = SEARCH_SOLVERS.yesNo;
     let worst = 0;
     for (let i = 0; i < 200; i++) {
@@ -222,12 +224,33 @@ describe("NIL — yes and yesn't, per position", () => {
     expect(worst).toBeLessThanOrEqual(11);
   });
 
+  test("drained character hints move known symbols to the front without removing any", () => {
+    const alphabet = alphabetFor({
+      passwordFormat: "numeric",
+      evidence: [{ kind: "contains", chars: ["7", "4"], at: 1 }],
+    });
+    expect(alphabet).toBe("7401235689");
+    expect(new Set(alphabet).size).toBe(10);
+  });
+
   test("the alphanumeric case still converges, and still inside budget", () => {
     const solver = SEARCH_SOLVERS.yesNo;
     const h = host("a1B2c3", "alphanumeric");
     const result = crack(solver, h);
     expect(result.password).toBe("a1B2c3");
     expect(result.calls).toBeLessThanOrEqual(solver.budget(h.facts));
+  });
+
+  test("placement hints stay fixed while NIL probes unknown positions", () => {
+    const solver = SEARCH_SOLVERS.yesNo;
+    const h = host("401", "numeric");
+    h.facts.evidence = [
+      { kind: "contains", chars: ["9"], at: 1 },
+      { kind: "placement", attempted: "412", placed: ["4"], at: 2 },
+    ];
+    const result = crack(solver, h);
+    expect(result.password).toBe("401");
+    expect(result.calls).toBeLessThan(10);
   });
 
   test("without a reported length there is nothing to probe with", () => {
@@ -305,6 +328,17 @@ describe("PHP 5.4 — the sorted echo, in both regimes", () => {
     }
     expect(tried.length).toBeGreaterThan(0);
     for (const candidate of tried) expect(candidate.startsWith("0"), `${candidate} starts with 0`).toBe(false);
+  });
+
+  test("contradictory harvested evidence does not fall back to an evidence-blind search", () => {
+    const step = SEARCH_SOLVERS.sortedEcho.first({
+      passwordLength: 5,
+      passwordFormat: "numeric",
+      data: "12345",
+      evidence: [{ kind: "contains", chars: ["9", "9"], at: 1 }],
+    });
+    expect(step.kind).toBe("give-up");
+    if (step.kind === "give-up") expect(step.code).toBe(SOLVER_CODES.SolverExhausted);
   });
 
   test("distinctPermutations does not repeat a repeated character", () => {

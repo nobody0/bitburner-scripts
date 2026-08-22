@@ -18,6 +18,8 @@ import {
   ramBlockRemoved,
   reclaimCharismaExp,
   roundToTwo,
+  STORM_COOLDOWN_MS,
+  STORM_SEED_CHANCE,
   type LabStage,
 } from "../../shared/strategy/dnet/rates.ts";
 import { generateSecret, passwordRng, type PasswordFormat } from "./dnet-generators.ts";
@@ -30,7 +32,7 @@ import {
   logEntryFor,
   type PacketWorld,
 } from "./dnet-feedback.ts";
-import { PACKET_SNIFF_PHRASES } from "./dnet-phrases.ts";
+import { PACKET_SNIFF_PHRASES } from "../../shared/strategy/dnet/phrases.ts";
 
 /** The darknet, modelled far enough that buying DarkscapeNavigator.exe is a real
  * event with real consequences.
@@ -133,13 +135,18 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   + "overlay and without the exit, and all four response branches — the 451 below the lab's charisma, the deliberate "
   + "refusal of the lab's own password, the wall that leaves the position UNCHANGED, and the exit, which pays charisma at a "
   + "fixed 32-thread equivalent, sets admin rights, drops the_great_work cache (three on BonusLab) and opens a session. "
+  + "labradar is modelled too, because the deployed walker pays for one whenever a single render decides the exit: its "
+  + "radius-3 view WITH the exit overlay, its full authentication delay, its riddle-worded refusals when there is no lab "
+  + "or no direct connection, and the fact that it grants NO charisma — upstream delays and renders without ever reaching "
+  + "getAuthResult. labreport is still absent: it answers the same walls the free render already carries. "
   + "Opening that cache queues the labyrinth augmentation rather than drawing from the reward table. The net DEEPENS at the "
   + "install that follows rather than at the exit, because getNetDepth reads the current lab and the current lab is chosen "
   + "by installed augmentations — which is upstream's behaviour, not a simplification. What differs: the maze carve takes "
   + "an unbounded number of draws, so it runs on a generator derived from ONE world draw (same treatment as a host's "
   + "password), and the start/endpoint offsets come off the dedicated stream (see dnet.playerDraws)",
   "dnet.cacheRewards: the draw is narrowed to money and the program/market unlocks, both exact; upstream also draws stock shares, clue files and (from phishing caches) coding contracts, so the MIX is narrower than upstream even though every reward given is faithful",
-  "dnet.cacheSources: three of upstream's four sources are now modelled and exact. A first successful authenticate rolls its 0.1 * 1.05^difficulty cache; memoryReallocation frees getRamBlockRemoved's clamped, roundToTwo'd figure per call, decrements blockedRam AND ramUsed as the two separate writes upstream makes, pays 10 * 1.1^(difficulty+1) charisma xp a call and drops a .cache the moment the block reaches zero on a non-lab host; phishingAttack reproduces the whole handler in upstream's branch order and short-circuit order — the 3-minute NET-WIDE cooldown on DarknetState.lastPhishingCacheTime, both chance formulas, the money term with its depth factor and U(0.9,1.2), and the charisma xp INCLUDING the quarter rate on the failure path. What is not modelled: handleRamBlockClearedRewards' two side rolls, a 30% clue file and the STORM_SEED.exe drop, neither of which any subsystem here reads; hasDarknetBonusTime(), which is false by truth since the sim has no offline accrual; and the cooldown window starts OPEN at the beginning of a run rather than closed as upstream's construction-time stamp makes it — an install restamps it exactly as prestigeDarknetState does",
+  "dnet.cacheSources: three of upstream's four sources are now modelled and exact. A first successful authenticate rolls its 0.1 * 1.05^difficulty cache; memoryReallocation frees getRamBlockRemoved's clamped, roundToTwo'd figure per call, decrements blockedRam AND ramUsed as the two separate writes upstream makes, pays 10 * 1.1^(difficulty+1) charisma xp a call and drops a .cache the moment the block reaches zero on a non-lab host; phishingAttack reproduces the whole handler in upstream's branch order and short-circuit order — the 3-minute NET-WIDE cooldown on DarknetState.lastPhishingCacheTime, both chance formulas, the money term with its depth factor and U(0.9,1.2), and the charisma xp INCLUDING the quarter rate on the failure path. The STORM_SEED.exe side roll is now modelled too (see dnet.webstorm). What is not modelled: handleRamBlockClearedRewards' other side roll, a 30% clue file, which nothing here reads; hasDarknetBonusTime(), which is false by truth since the sim has no offline accrual; and the cooldown window starts OPEN at the beginning of a run rather than closed as upstream's construction-time stamp makes it — an install restamps it exactly as prestigeDarknetState does",
+  "dnet.webstorm: the storm seed and the webstorm are modelled. The seed drops from a cleared RAM block behind upstream's four gates — block at zero, a 15% roll, no seed among the MOVABLE servers (a pinned holder blocks nothing), and 30 minutes since the last storm — lands in the cleared server's own listing (ls appends it, scp cannot move it, a delete takes it, restarts and moves do not), and unleashStormSeed consumes it and stamps lastStormTime BEFORE checking the lock, so firing into a running storm burns it. The burst runs launchWebstorm's phases on the engine's own 200 ms cycles — 5 s warning, movable*0.6 + rand*netDepth - 6 deletes, 60% of survivors moved and every movable restarted, three add waves totalling NET_WIDTH*5, the density balance — under a mutationLock analog that freezes the ordinary clock and resolves nextMutation() on storm phases. Three declared divergences: the burst's draws come off the DEDICATED stream (player-initiated work, see dnet.playerDraws); lastStormTime starts ELIGIBLE rather than stamped at load, the same treatment the phishing stamp gets, with prestige restamping both; and the success/refusal messages are paraphrased",
   "dnet.promoteStock: the charge curve, the 0.4x per-cycle decay, the wait time, the charisma XP and the prestige reset are transcribed exactly; the propaganda has no other modelled effect",
   "dnet.prestige: an install clears the stock promotions and every stasis link, as upstream does; unlike upstream's prestigeDarknetState it does NOT regenerate the network or the labyrinth, so the map a run maps stays mapped across installs",
 ];
@@ -204,6 +211,13 @@ const LOW_LEVEL_SERVER_DENSITY = 0.7;
 /** Draws taken from the shared gameplay stream per mutation, whatever the tick
  * does. Fixed so two strategy variants advance that stream identically. */
 export const MUTATION_DRAWS = 32;
+
+/** The webstorm's phase gaps in engine cycles (200 ms each): the 5 s warning,
+ * then 4 s to the deletes' aftermath, 4 s, 4 s, 8 s between the add waves, and
+ * a 5 s tail — ~30 s in all, during which `mutationLock` freezes the ordinary
+ * clock. Each phase's ACTION is applied when its gap elapses.
+ * Source: src/DarkNet/effects/webstorm.ts:41-70 */
+export const STORM_PHASE_CYCLES = [25, 20, 20, 20, 40, 25] as const;
 
 /** `labData`, in the order `getCurrentLabName` walks it.
  *
@@ -558,6 +572,12 @@ export class DarknetSystem {
     // starts with the phishing cache window SHUT. Modelled because it is a real
     // three-minute hole at exactly the moment a run has the most residents.
     if (nowMs !== undefined) this.#lastPhishingCacheMs = nowMs;
+    // The storm clock too: `lastStormTime` is module scope and restamped when
+    // the engine reloads, so no seed can be minted in an install's first
+    // thirty minutes. The seeds themselves go with the per-server state.
+    if (nowMs !== undefined) this.#lastStormMs = nowMs;
+    this.#stormSeeds.clear();
+    this.#storm = undefined;
   }
 
   /** populateDarknet(). Idempotent, as upstream's guard makes it.
@@ -931,6 +951,150 @@ export class DarknetSystem {
     return this.caches.get(hostname) ?? [];
   }
 
+  // --- the storm ------------------------------------------------------------
+
+  /** Hosts holding `STORM_SEED.exe`. Upstream keeps the file in
+   * `server.programs`; the sim keeps it here for the same reason the caches
+   * are here — SimServer is the shared Server shape. A set rather than a
+   * single slot because the engine's seed-exists gate scans MOVABLES only, so
+   * a seed parked on a stasis-pinned host does not stop another spawning. */
+  readonly #stormSeeds = new Set<string>();
+  /** `lastStormTime`. Undefined means the eligibility window starts OPEN — a
+   * declared divergence, same treatment as the phishing cooldown stamp: the
+   * upstream clock is module scope stamped at load, and an install restamps
+   * it in `prestige` exactly as `prestigeDarknetState` does. */
+  #lastStormMs: number | undefined;
+  /** The webstorm in progress — the `mutationLock` analog. While set, the
+   * ordinary mutation clock is frozen and `nextMutation()` resolves on storm
+   * phases instead. */
+  #storm: { phase: number; cyclesLeft: number } | undefined;
+
+  /** Whether `STORM_SEED.exe` sits on this host — what `ls` appends. */
+  stormSeedOn(hostname: string): boolean {
+    return this.#stormSeeds.has(hostname);
+  }
+
+  /** Test hook: place a seed directly, the way a scenario arranges its board. */
+  plantStormSeed(hostname: string): void {
+    this.#stormSeeds.add(hostname);
+  }
+
+  stormActive(): boolean {
+    return this.#storm !== undefined;
+  }
+
+  /** `handleRamBlockClearedRewards`' seed roll, taken once per block cleared
+   * to zero. Player-initiated, so the entropy comes off the dedicated noise
+   * stream (see `dnet.playerDraws`). Order matters and is upstream's: the
+   * cooldown gate, the movables-only seed-exists scan, then the 15% roll.
+   * Source: src/DarkNet/effects/ramblock.ts:50-66 */
+  #maybeDropSeed(hostname: string, nowMs: number | undefined): void {
+    if (this.#lastStormMs !== undefined && nowMs !== undefined
+      && nowMs - this.#lastStormMs <= STORM_COOLDOWN_MS) return;
+    for (const name of this.#stormSeeds) {
+      const held = this.hosts.get(name);
+      if (held?.online === true && !this.#immutable(held)) return;
+    }
+    const draw = this.#opts.logNoise ?? this.#opts.generate;
+    if (draw() >= STORM_SEED_CHANCE) return;
+    this.#stormSeeds.add(hostname);
+  }
+
+  /** `unleashStormSeed`, from the calling host.
+   *
+   * The consume-then-check order is upstream's own hazard, reproduced
+   * deliberately: `handleStormSeed` deletes the file and stamps
+   * `lastStormTime` BEFORE `launchWebstorm` checks the lock, so firing into a
+   * storm already running burns the seed for nothing.
+   * Source: src/DarkNet/effects/webstorm.ts:25-40, ramblock.ts:50-66 */
+  unleashStormSeed(hostname: string, nowMs: number): { success: boolean; code: number; message: string } {
+    if (!this.#stormSeeds.has(hostname)) {
+      return { success: false, code: 404, message: "STORM_SEED.exe not found on this server." };
+    }
+    this.#stormSeeds.delete(hostname);
+    this.#lastStormMs = nowMs;
+    if (this.#storm !== undefined) {
+      return { success: false, code: 503, message: "Service Unavailable" };
+    }
+    this.#storm = { phase: 0, cyclesLeft: STORM_PHASE_CYCLES[0]! };
+    return { success: true, code: 200, message: "The webstorm approaches. There is no escape." };
+  }
+
+  /** The burst, one phase gap at a time on the same 200 ms cycles the ordinary
+   * clock runs on. Each elapsed gap applies its phase's action and resolves
+   * `nextMutation()` — upstream's waiters wake on storm phases while the lock
+   * is held. */
+  #stormProcess(cycles: number): void {
+    let storm: { phase: number; cyclesLeft: number } | undefined = this.#storm;
+    if (!storm) return;
+    storm.cyclesLeft -= cycles;
+    while (storm.cyclesLeft <= 0) {
+      // Annotated to break TS7022: narrowing the reassigned `let` above makes
+      // these two circular through the assignment below without them.
+      const leftover: number = storm.cyclesLeft;
+      this.#applyStormPhase(storm.phase);
+      this.#triggerNextMutation();
+      const next: number = storm.phase + 1;
+      if (next >= STORM_PHASE_CYCLES.length) {
+        this.#storm = undefined;
+        // The ordinary clock resumes from zero: the lock held it, it did not
+        // accumulate under it.
+        this.#cyclesSinceMutation = 0;
+        return;
+      }
+      storm = { phase: next, cyclesLeft: STORM_PHASE_CYCLES[next]! + leftover };
+      this.#storm = storm;
+    }
+  }
+
+  /** One phase's action, per `launchWebstorm`'s sequence: warning, then
+   * ~60% of movables deleted (+/- a depth-scaled jitter), 60% of the survivors
+   * moved and EVERY movable restarted, then three add waves totalling
+   * NET_WIDTH * 5 fresh hosts, then the density balance. Every pool the
+   * phases draw from excludes stationary and stasis-linked hosts, which is
+   * the entire reason a link is worth a slot. Player-initiated draws, so the
+   * dedicated stream (see `dnet.playerDraws`). */
+  #applyStormPhase(phase: number): void {
+    const draw = this.#opts.logNoise ?? this.#opts.generate;
+    switch (phase) {
+      case 0: {
+        // deleteRandomDarknetServers(movable * 0.6 + rand * netDepth - 6)
+        const movable = this.#movable();
+        const count = Math.max(0, Math.floor(movable.length * 0.6 + draw() * this.netDepth() - 6));
+        for (let i = 0; i < count; i++) this.#deleteOne(draw());
+        break;
+      }
+      case 1: {
+        // 60% of the survivors moved, then restartAllDarknetServers — which
+        // draws from the movable pool only, so a pinned host keeps its
+        // scripts, sessions and backdoor through the whole burst.
+        for (const name of this.#movable()) {
+          if (draw() < 0.6) this.#moveHost(name, draw(), draw());
+        }
+        for (const name of this.#movable()) this.#restartHost(name);
+        break;
+      }
+      case 2:
+      case 3:
+      case 4: {
+        const count = phase === 2 ? NET_WIDTH : 2 * NET_WIDTH;
+        for (let i = 0; i < count; i++) {
+          this.#addHost(Math.floor(draw() * this.netDepth()), draw(), draw());
+        }
+        break;
+      }
+      case 5: {
+        // balanceDarknetServers, off a synthesized draw block: `#balance`
+        // indexes into a mutation-shaped roll array, and the storm's draws
+        // come off the dedicated stream rather than the gameplay one.
+        const roll: number[] = [];
+        for (let i = 0; i < MUTATION_DRAWS; i++) roll.push(draw());
+        this.#balance(roll);
+        break;
+      }
+    }
+  }
+
   // --- memoryReallocation ---------------------------------------------------
 
   /** `handleRamBlockRemoved`, and the two writes are separate ON PURPOSE.
@@ -950,6 +1114,7 @@ export class DarknetSystem {
     hostname: string,
     threads: number,
     charisma: number,
+    nowMs?: number,
   ): { freed: number; blockedRam: number; cleared: boolean; charismaExp: number } | undefined {
     const host = this.record(hostname);
     if (!host) return undefined;
@@ -960,7 +1125,13 @@ export class DarknetSystem {
     let cleared = false;
     if (host.blockedRam <= 0) {
       cleared = true;
-      if (!isLabyrinth(hostname, host.modelId)) this.addCache(hostname, false);
+      if (!isLabyrinth(hostname, host.modelId)) {
+        this.addCache(hostname, false);
+        // `handleRamBlockClearedRewards`' second side roll, now modelled: the
+        // storm seed, behind its own four gates. The 30% clue file remains
+        // declared in DNET_ASSUMPTIONS rather than invented.
+        this.#maybeDropSeed(hostname, nowMs);
+      }
     }
     return {
       freed,
@@ -1359,7 +1530,6 @@ export class DarknetSystem {
   captureLogs(hostname: string, count: number, peek: boolean, nowMs: number): string[] {
     const host = this.record(hostname);
     if (!host) return [];
-    this.populateLogs(hostname, nowMs);
     const taken = host.logs.slice(0, count);
     if (!peek) host.logs = host.logs.slice(count);
     return taken;
@@ -1383,14 +1553,13 @@ export class DarknetSystem {
   ): void {
     const host = this.record(hostname);
     if (!host) return;
-    // Seed the ring FIRST, exactly as upstream's logPasswordAttempt does. Its
-    // first-touch branch REPLACES the log array, so writing the attempt before
-    // the seed would have the seed throw it away — and the oracle would vanish
-    // on the very first attempt against every host, which is the only one that
-    // matters for a model we have never seen.
+    // Upstream snapshots the old ring, advances the traffic clock/RNG through
+    // populateLogs, then discards that generated noise when it installs the
+    // authentication record in front of the snapshot.
+    const serverLogs = host.logs;
     this.populateLogs(hostname, nowMs);
     const entry = logEntryFor(host.modelId, attempted, code, response);
-    host.logs = [JSON.stringify(entry), ...host.logs].slice(0, MAX_LOG_LINES);
+    host.logs = [JSON.stringify(entry), ...serverLogs].slice(0, MAX_LOG_LINES);
   }
 
   // --- the labyrinth --------------------------------------------------------
@@ -1560,6 +1729,17 @@ export class DarknetSystem {
     };
   }
 
+  /** `labradar`: the paid radius-3 look at the CALLING PID's position, with the
+   * exit overlay ON — the one call that can show the exit before it is stood
+   * on. The ns layer charges the full authentication delay; no experience is
+   * granted by anyone. Source: src/NetscriptFunctions/Darknet.ts:671-704 */
+  labRadar(pid: number): { success: boolean; message: string } {
+    const built = this.labMaze();
+    if (!built) return { success: false, message: "You feel blind..." };
+    const [x, y] = this.labPosition(pid);
+    return { success: true, message: surroundingsVisualized(built.maze, x, y, 3, true, true, built.endpoint) };
+  }
+
   /** Check a password, and say what the model says back.
    *
    * All fifteen of upstream's arms, transcribed in `dnet-feedback.ts` — see the
@@ -1664,6 +1844,13 @@ export class DarknetSystem {
    * not reproduce. */
   darknetProcess(cycles: number): void {
     if (!this.hasAccess() || this.hosts.size === 0) return;
+    // THE MUTATION LOCK. While a webstorm runs, `mutateDarknet` early-returns
+    // and `nextMutation()` resolves on storm phases instead — the ordinary
+    // clock is frozen, not queued.
+    if (this.#storm !== undefined) {
+      this.#stormProcess(cycles);
+      return;
+    }
     const perMutation = ((this.#opts.bitNode === 15 ? 1 : 2) * 150) / this.netDepth();
     this.#cyclesSinceMutation += cycles;
     while (this.#cyclesSinceMutation > perMutation) {
@@ -2087,6 +2274,11 @@ export class DarknetSystem {
     this.#unwire(victim);
     this.#opts.network.delete(victim);
     this.#migrationCharge.delete(victim);
+    // A delete takes the host's files with it — the seed included. Restarts
+    // and moves do NOT reach in here, which is what makes the seed survive
+    // them: `restartServer` clears scripts, sessions and the backdoor, never
+    // `programs`.
+    this.#stormSeeds.delete(victim);
   }
 
   /** `moveDarknetServer(server, maxDecrease, maxIncrease)` with the real band.

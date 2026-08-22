@@ -3,7 +3,7 @@ import type { NS } from "@ns";
 import { SimWorld } from "../world.ts";
 import { ProcessTable } from "../ns/process.ts";
 import { makeSimNs, type SimNsHost } from "../ns/api.ts";
-import { DarknetSystem, MUTATION_DRAWS } from "../features/dnet.ts";
+import { DarknetSystem, MUTATION_DRAWS, STORM_PHASE_CYCLES } from "../features/dnet.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { darkwebServerSpec } from "../network.ts";
 import { harvestLogs } from "../../shared/strategy/dnet/oracle.ts";
@@ -159,6 +159,38 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
     });
   });
 
+  describe("recovering a resident after adjacency changes", () => {
+    test("connectToSession reopens a rooted host at distance, and a backdoor makes remote exec possible", async () => {
+      const h = harness();
+      const target = neighbourOf(h, "darkweb");
+      const record = h.dnet.record(target)!;
+      const openerPid = h.start("agent.js", "darkweb");
+      const opener = makeSimNs(h.host, h.host.processes.get(openerPid)!);
+      const opening = opener["dnet"]["authenticate"](target, record.password);
+      let opened = false;
+      void opening.then(() => { opened = true; });
+      expect(await h.world.clock.runAsync(() => opened)).toBe("goal");
+      expect((await opening).success).toBe(true);
+
+      // Lose adjacency and the original PID's session. Root and the password are
+      // global host state, so a new process can cheaply recover its own session.
+      h.host.processes.kill(openerPid);
+      h.host.network.set("darkweb", ["home"]);
+      const recoveryPid = h.start("agent.js", "darkweb");
+      const recovery = makeSimNs(h.host, h.host.processes.get(recoveryPid)!);
+      expect(recovery["dnet"]["connectToSession"](target, record.password).success).toBe(true);
+      expect(recovery.scp("agent.js", target, "darkweb")).toBe(true);
+      expect(recovery.exec("agent.js", target, 1)).toBe(0);
+
+      h.world.servers.get(target)!.backdoorInstalled = true;
+      expect(recovery.exec("agent.js", target, 1)).toBeGreaterThan(0);
+
+      const unrooted = [...h.dnet.hosts.entries()]
+        .find(([hostname, host]) => hostname !== target && host.online && !h.world.servers.get(hostname)!.hasAdminRights)!;
+      expect(recovery["dnet"]["connectToSession"](unrooted[0], unrooted[1].password).success).toBe(false);
+    });
+  });
+
   describe("a session belongs to the PID that won it", () => {
     test("it dies with its process, and is not inherited by a recycled pid", () => {
       const h = harness();
@@ -242,7 +274,7 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       const neighbour = neighbourOf(h, "darkweb");
       h.dnet.logAttempt(neighbour, "0000", 401, { ok: false, message: "Unauthorized", data: "2,1" }, 0);
       const lines = h.dnet.captureLogs(neighbour, 4, true, 0);
-      const harvest = harvestLogs(lines, neighbour);
+      const harvest = harvestLogs(lines, { bledFrom: neighbour });
       expect(harvest.oracles[0]).toMatchObject({ code: 401, passwordAttempted: "0000", data: "2,1" });
     });
 
@@ -299,7 +331,7 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       let found = 0;
       for (let i = 1; i <= 400 && found === 0; i++) {
         h.dnet.populateLogs(neighbour, interval * i);
-        const harvest = harvestLogs(h.dnet.captureLogs(neighbour, 200, true, interval * i), neighbour);
+        const harvest = harvestLogs(h.dnet.captureLogs(neighbour, 200, true, interval * i), { bledFrom: neighbour });
         found = harvest.credentials.length + harvest.loose.length;
       }
       expect(found).toBeGreaterThan(0);
@@ -478,6 +510,7 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       // standing on the host being pinned.
       expect(h.dnet.setStasisLink(first!.hostname, true)).toBe(200);
       expect(h.dnet.stasisLinkedServers()).toEqual([first!.hostname]);
+      expect(h.world.servers.get(first!.hostname)!.backdoorInstalled).toBe(true);
 
       // The limit is one until the labyrinth starts paying out, and it is
       // GLOBAL — which is the whole reason candidates have to be ranked.
@@ -495,10 +528,9 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
 
     test("a pinned host is outside every mutation branch's victim pool", () => {
       // What the link actually BUYS. It is not remote exec — upstream's own doc
-      // comment says so and is wrong, the reachability gate tests
-      // `backdoorBypasses && backdoorInstalled` and nothing else. It is that the
-      // mutation clock cannot touch this host, which is why it is worth a slot
-      // to a process that cannot be restarted.
+      // line is stale: `setStasisLink` also sets `backdoorInstalled`. This
+      // test isolates the other benefit, that the mutation clock cannot touch
+      // the pinned host.
       const h = harness();
       const rigged = new Array<number>(MUTATION_DRAWS).fill(0.9);
       rigged[0] = 0;    // under the depth throttle, so the tick runs
@@ -682,14 +714,15 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       // a strategy be measured against behaviour that does not exist.
       const h = harness();
       const dnet = (h.ns as unknown as { dnet: Record<string, unknown> }).dnet;
-      // Two members have LEFT this list, and both left because they were
+      // Three members have LEFT this list, and every one left because it was
       // modelled rather than because the rule was relaxed.
       // `induceServerMigration` is on the deploy path as the only thing that can
       // move a host toward the labyrinth's row; `setStasisLink` is what makes a
-      // walker's host survivable at all. `unleashStormSeed` stays: it is
-      // documented as catastrophic and is an anti-goal rather than an unwritten
-      // model.
-      for (const name of ["unleashStormSeed"]) {
+      // walker's host survivable at all; `unleashStormSeed` became the deploy
+      // path's cache engine the day the storm trigger policy shipped — the
+      // catastrophe is now the point, prepared for and fired on purpose.
+      // `labreport` stays: it answers the same walls the free render carries.
+      for (const name of ["labreport"]) {
         expect(() => (dnet[name] as () => unknown)(), `ns.dnet.${name} must stay unmodelled`).toThrow();
       }
     });
@@ -705,6 +738,124 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       const host = [...h.dnet.hosts.values()].find((entry) => entry.online && !entry.isStationary)!;
       expect(h.dnet.setStasisLink(host.hostname, true)).toBe(200);
       expect(h.ns.dnet.getStasisLinkedServers()).toEqual([host.hostname]);
+    });
+
+    test("the storm seed and the webstorm — reroll the net, spare the pinned", async () => {
+      // The endgame cache farm's whole mechanism, in one arranged board: a seed
+      // is fired, the burst deletes/moves/restarts everything movable, adds
+      // fresh hosts, and the stasis-linked survivor keeps its sessions — the
+      // exact property the trigger policy's `links-unspent` gate exists for.
+      const h = harness();
+      const now = 60 * 60 * 1000;
+
+      // Firing without a seed answers 404 through the ns surface — a refusal,
+      // never a throw, so a stale sighting costs a job and not an agent.
+      const empty = h.ns.dnet.unleashStormSeed();
+      expect(empty.success).toBe(false);
+      expect(empty.code).toBe(404);
+
+      // Arrange: one pinned survivor with a session, sessions on every movable,
+      // and a second seed parked on the pinned host.
+      const pinned = [...h.dnet.hosts.values()].find((entry) => entry.online && !entry.isStationary)!;
+      expect(h.dnet.setStasisLink(pinned.hostname, true)).toBe(200);
+      h.dnet.addSession(pinned.hostname, 42);
+      const movableBefore = [...h.dnet.hosts.values()]
+        .filter((entry) => entry.online && !entry.isStationary && !entry.stasisLinked);
+      for (const entry of movableBefore) h.dnet.addSession(entry.hostname, 43);
+      const seedHost = movableBefore[0]!.hostname;
+      h.dnet.plantStormSeed(seedHost);
+      h.dnet.plantStormSeed(pinned.hostname);
+      expect(h.dnet.stormSeedOn(seedHost)).toBe(true);
+
+      // Fire. The seed is consumed, the lock is held, and the ordinary
+      // mutation clock is frozen for the whole burst.
+      const fired = h.dnet.unleashStormSeed(seedHost, now);
+      expect(fired.success).toBe(true);
+      expect(h.dnet.stormSeedOn(seedHost)).toBe(false);
+      expect(h.dnet.stormActive()).toBe(true);
+      const mutationsBefore = h.dnet.mutations;
+
+      // A second fire mid-burst BURNS its seed — the engine consumes and stamps
+      // before checking the lock, and so does the model.
+      const burned = h.dnet.unleashStormSeed(pinned.hostname, now + 1000);
+      expect(burned.success).toBe(false);
+      expect(h.dnet.stormSeedOn(pinned.hostname)).toBe(false);
+
+      // nextMutation resolves on storm PHASES while the lock is held: a waiter
+      // parked on the clock wakes when the first gap elapses.
+      const wake = h.dnet.nextMutation();
+      h.dnet.darknetProcess(STORM_PHASE_CYCLES[0]!);
+      await wake;
+
+      // Run the burst out: the phase gaps sum to ~30 s.
+      h.dnet.darknetProcess(STORM_PHASE_CYCLES.reduce((sum, cycles) => sum + cycles, 0));
+      expect(h.dnet.stormActive()).toBe(false);
+      // The ordinary clock never ticked under the lock.
+      expect(h.dnet.mutations).toBe(mutationsBefore);
+
+      // The pinned host survived whole — online, session intact. So did the
+      // stationary beachhead.
+      expect(h.dnet.hosts.get(pinned.hostname)!.online).toBe(true);
+      expect(h.dnet.hosts.get(pinned.hostname)!.sessions.has(42)).toBe(true);
+      expect(h.dnet.hosts.get("darkweb")?.online ?? true).toBe(true);
+
+      // Every movable host that survived was restarted: its sessions are gone.
+      for (const entry of movableBefore) {
+        const held = h.dnet.hosts.get(entry.hostname);
+        if (held?.online !== true) continue;
+        expect(held.sessions.has(43)).toBe(false);
+      }
+
+      // The add waves refilled the net: fresh hosts exist that predate nothing.
+      const onlineAfter = [...h.dnet.hosts.values()].filter((entry) => entry.online);
+      const fresh = onlineAfter.filter((entry) =>
+        !entry.isStationary && !movableBefore.some((old) => old.hostname === entry.hostname)
+        && entry.hostname !== pinned.hostname);
+      expect(fresh.length).toBeGreaterThan(0);
+    });
+
+    test("the seed drop honours all four of the engine's gates", () => {
+      const h = harness();
+      const grind = [...h.dnet.hosts.values()].filter((entry) => entry.online && !entry.isStationary);
+      const clearOn = (hostname: string, nowMs: number): void => {
+        const host = h.dnet.hosts.get(hostname)!;
+        host.blockedRam = 0.01;
+        const freed = h.dnet.reallocateRam(hostname, 1, 1000, nowMs);
+        expect(freed?.cleared).toBe(true);
+      };
+      const seedAnywhere = (): string | undefined =>
+        [...h.dnet.hosts.keys()].find((name) => h.dnet.stormSeedOn(name));
+
+      // Gate (d): inside the 30-minute window after the storm clock is
+      // stamped, no clear can mint a seed however many times the 15% roll
+      // would have passed. Stamped via `prestige`, which restamps
+      // `lastStormTime` exactly as an install does — a real burst here would
+      // delete the very hosts the rest of this test grinds.
+      const stormAt = 60 * 60 * 1000;
+      h.dnet.prestige(stormAt);
+      for (let i = 0; i < 60; i++) clearOn(grind[1]!.hostname, stormAt + 60_000);
+      expect(seedAnywhere()).toBeUndefined();
+
+      // Past the cooldown the roll is live: with a fixed noise stream, sixty
+      // 15%-rolls mint one deterministically.
+      const later = stormAt + 31 * 60 * 1000;
+      for (let i = 0; i < 60 && seedAnywhere() === undefined; i++) clearOn(grind[1]!.hostname, later);
+      const minted = seedAnywhere();
+      expect(minted).toBe(grind[1]!.hostname);
+
+      // Gate (c) scans MOVABLES only: while a movable seed exists, more clears
+      // mint nothing — but the same seed parked on a PINNED host blocks
+      // nothing, and a second can spawn.
+      for (let i = 0; i < 60; i++) clearOn(grind[2]!.hostname, later);
+      expect(h.dnet.stormSeedOn(grind[2]!.hostname)).toBe(false);
+      expect(h.dnet.setStasisLink(minted!, true)).toBe(200);
+      for (let i = 0; i < 60 && !h.dnet.stormSeedOn(grind[2]!.hostname); i++) {
+        clearOn(grind[2]!.hostname, later);
+      }
+      expect(h.dnet.stormSeedOn(grind[2]!.hostname)).toBe(true);
+
+      // The seed is `ls`-visible from anywhere — it is the only channel.
+      expect(h.ns.ls(grind[2]!.hostname)).toContain("STORM_SEED.exe");
     });
 
     test("instability is still exactly neutral, because no backdoor path exists", () => {

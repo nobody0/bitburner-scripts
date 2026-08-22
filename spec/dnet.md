@@ -218,6 +218,91 @@ file and stamps the clock *before* `launchWebstorm` checks the lock
 (`webstorm.ts:81-85`, `:26-28`), so firing into a storm already running burns
 the seed for nothing.
 
+Four facts about the seed itself, each verified against the pinned checkout:
+
+- **It lands in `server.programs` on the memoryReallocation TARGET**
+  (`ramblock.ts:50-66`) — a movable host, usually one a resident is grinding.
+- **`ls` is the only channel that shows it**: upstream appends a darknet
+  server's `programs` to the listing (`NetscriptFunctions.ts:845-851`), the
+  same append that exposes the caches, and `ls` works at any distance.
+  `getServerDetails` never mentions it.
+- **It cannot be moved**: `ns.scp` throws on anything but script/text/`.lit`
+  files (`NetscriptFunctions.ts:786-798`), so `unleashStormSeed` must run on
+  the holding host — and the member answers `404 NotFound` rather than
+  throwing when the seed is absent.
+- **It survives restarts and moves** (neither touches `programs`); only a
+  delete takes it. And the seed-exists gate scans
+  `getAllMovableDarknetServers()` only, so a seed sitting on a stasis-pinned
+  host blocks nothing — a storm-proof held fire button, noted below.
+
+### Storming as a cache farm
+
+After the lab, the storm IS the cache engine. Phishing yields one `.d.cache`
+per three net-wide minutes; a reroll mints ~40 fresh servers, each a new
+first-authentication cache roll and a new blocked block whose clearing drops a
+guaranteed `.cache`. The catastrophe the docs warn about is exactly the point —
+prepared for, then fired on purpose.
+
+The preparation is the stasis links: every destructive path early-returns on
+immutable hosts and every victim pool excludes stationary + stasis, and — since
+the pinned-host↔lab edge can only be severed from one of its two endpoints,
+both outside every pool — **a pinned bottom-row host keeps its lab edge,
+resident, session, files and running walker through the storm**. The new net is
+then conquered from the top (`darkweb`) and every pinned survivor at once, and
+a storm may safely fire mid-walk once the finisher's host is linked.
+
+**Where the links go** (`stasisTargetDepths`, `hold.ts`): the walker's slot is
+the bottom row, exact; the spares sit at depth-weighted equal-mass targets —
+evenly spread by a weight that grows with depth, so denser toward the bottom —
+each filled by the biggest measured host within one row of its target
+(`STASIS_TARGET_SLACK`), with `planInduce`'s `seat` purpose re-rolling a big
+host into an empty window. Three wiring facts drive the shape: a pin can only
+receive edges from arrivals in its own row and the rows beside it, so stacked
+pins buy the same catchment twice; the vertical connection roll of an arriving
+server is divided by the NEIGHBOUR's depth + 1 (a precedence slip in
+`addRandomConnections`, `NetworkGenerator.ts:196` — `Math.abs(neighbor.depth ??
+x - x) + 1` parses as `neighbor.depth`), so deep pins regain vertical edges at
+a few percent per arrival against ~45% lateral and density must compensate
+where the odds are worst; and the deep rows are the slow half of any
+reconquest, `darkweb` re-covering row 0 for free. Our sim's `#wire` transcribes
+the division faithfully.
+
+The trigger policy is `shared/strategy/dnet/storm.ts` — pure, one admitted fire
+or named refusals, in gate order: `storm-in-flight` (our own quiet window;
+the engine consumes the seed before checking the lock), `no-seed` (a fresh
+`ls` sighting, reported by the same `describeHost` listing that reports
+caches), `seed-unreachable` (the holder needs a live resident), `links-unspent`
+(every slot deployed, none mid-spend — `planStasis`'s own standards define
+"valuable"), `walker-unpinned` (retired once the lab is walked), and
+`phish-window-open` (fire only within `STORM_PHISH_OVERLAP_MS` of a `.d.cache`,
+so the burst sits inside the dead phish window). The lab cache needs no gate:
+the lab is stationary and `cache-lab-deferred` already holds it.
+
+**A lab-less world storms too.** `getCurrentLabName` is gated on full darknet
+access, so a DarkscapeNavigator-only run gets the 5-deep net and no labyrinth
+is ever generated — there is no walk to protect and `walker-unpinned` never
+binds. Home sends `DnetOrders.labExpected = false` (it can see the bitNode and
+SF15), which stands the walker's slot reservation down and hands the bottom-row
+anchor to the spare targets — the deepest, hardest-to-reconquer row becomes an
+ordinary spare's, and since the limit can never grow there (the +1s are
+labyrinth augmentations) that world runs on exactly one link, at the bottom.
+Links spent is then the whole preparation, and the storm fires on the
+remaining gates alone.
+
+Around the fire: the overseer stamps `lastStormFiredAt` **pessimistically at
+claim time** — the firing host dies ~5 s after a successful call
+(`restartAllDarknetServers`), so the authoritative drained stamp may never
+arrive and a lost report must not skip the recovery. It then derives nothing
+for 35 s (`STORM_QUIET_MS`), runs one `stormWipe` over knowledge (non-immune
+hosts lose position/topology/resource facts and their log rings; identities and
+the vault survive, because restart and move change no password), and lets the
+ordinary re-survey machinery fan out from the survivors. Home mirrors the wipe
+with the same shared function and replays `lastStormAt` to a re-seeded
+overseer, exactly as it replays the phishing stamp. While the storm's other
+gates are met, no seed is in hand and the 30-minute window is open, the farm
+runs a **seed hunt**: `FarmInputs.seedHunt` suspends `reclaim-not-needed`'s
+clear budget, since every block ground to zero is a 15% roll.
+
 ## Passwords and the oracle
 
 Every non-labyrinth server has a `password` (max length 50,
@@ -258,14 +343,23 @@ For every other model the response is written to the server's own log ring by
 `typeof log.message === "string" ? log.message : JSON.stringify(log.message)`
 (`NetscriptFunctions/Darknet.ts:286-288`).
 
-So the oracle loop is **`authenticate(wrong)` → `heartbleed(peek)` → parse the
-JSON lines**, and both halves must be the same agent standing on the same host —
+So the oracle loop is **`authenticate(wrong)` -> `heartbleed({ peek: false,
+logsToCapture: 200 })` -> parse every line**. Reads are destructive and complete:
+the target ledger counts authentication records not yet drained, and a standalone
+bleed is derived for that explicit debt. There is also one initial full-ring drain
+per server identity, retried until it succeeds: earlier UI or script activity can
+leave useful records in the ring before our controller arrives. Pinned v3.0.1
+does **not** populate noise from the Netscript `heartbleed` path, however; it
+only removes entries already present. Consequently an elapsed-time polling clock
+manufactures no script-visible evidence and is never used.
+Attempts, correlated hints and drain state live on the shared TARGET entry, so
+the next vantage continues the same conversation.
 `heartbleed` needs a direct connection too. That is a hard constraint on where
 the cracking code can live, not an implementation detail.
 
 ### The logs leak passwords outright
 
-`heartbleed` is not only the oracle channel; it is a **credential channel**, and
+`heartbleed` is not only the oracle channel; it is a **credential-candidate channel**, and
 this is the "leaky logs" the node description names. `getLogNoise`
 (`DarkNet/models/packetSniffing.ts:154-192`) emits one line per
 `logTrafficInterval`, drawn from:
@@ -282,11 +376,22 @@ this is the "leaky logs" the node description names. `getLogNoise`
 
 `capturePackets` additionally embeds ` <hostname>:<password> ` inside a ~130-char
 junk blob whenever `difficulty <= 16`, and the bare password above that.
+The same generated junk can contain any of the eight partial-character hints or
+the exact-placement hint for the previous authentication record, and can contain
+an unattributed `--password--` leak. These are not standalone log lines: the
+parser scans the complete oracle `data` blob, preserves every occurrence, and
+correlates placement evidence with the next older record in the newest-first
+ring. Generator-backed tests pin all three cases.
 
-The consequence for strategy is large: **a log-mining pass is a credential source
-independent of every one of the 24 minigames.** Combined with the difficulty
-tiering below, it is why the shallow net can be traversed without solving a
-single password puzzle.
+The consequence for strategy is large: **a log-mining pass is a password source
+independent of every one of the 24 minigames.** A parsed line is not trusted as
+an opened credential: named leaks remain provisional and target only the named
+host, while unattributed `--password--` leaks are matched by length and format.
+Both are verified with `authenticate` before entering the vault; an own-host
+passcode or packet credential is tried immediately before the model solver.
+Combined with the difficulty tiering
+below, this is why the shallow net can be traversed without solving a single
+password puzzle.
 
 `requiredCharismaSkill` is rolled as `max(floor(depthScaling + levelVariance), 1)`
 where `depthScaling = depth < 2 ? depth * 10 : (depth / labDepth) ** 1.5 *
@@ -329,6 +434,18 @@ is [dnet-solvers.md](dnet-solvers.md).
 | `OpenWebAccessPoint` | packet sniffer | captured packets (`capturePackets`) |
 | `OrdoXenos` | encrypted password | encrypted password |
 | `(The Labyrinth)` | labyrinth | the maze, handled before the model switch |
+
+### Implementation coverage
+
+The implementation is total over the upstream taxonomy: five bounded dictionary
+models use the shared candidate walker; eight details/closed-form models decode in
+one exchange; eleven feedback models use resumable solvers; and `(The Labyrinth)`
+has its own PID-bound maze walker. `MODEL_IDS` is equality-tested against all 24
+upstream ids plus the labyrinth sentinel, `solvedModels()` is checked against every
+non-lab model, and `tests/dnet-solvers-vs-sim.test.ts` opens simulator-minted hosts
+through the real dispatcher. Its coverage includes both `BellaCuore` regimes,
+`OpenWebAccessPoint` on both sides of difficulty 16, two-large-prime `Factori-Os`
+at difficulties 28 and 36, and the WHRNG-predictive `KingOfTheHill` solver.
 
 ### Models are drawn by difficulty tier, and the shallow net is soft
 
@@ -387,7 +504,18 @@ A large server can therefore arrive with **all** of its RAM blocked.
 `server.updateRamUsed(server.blockedRam)` is applied at construction, by
 `applyRamBlocks()`, and again in `NetscriptWorker.ts:243` whenever a server's
 used RAM is recalculated — so blocked RAM presents as *used* RAM and cannot be
-allocated. Usable RAM is `maxRam - blockedRam`.
+allocated. The capacity the owner permits us to use is `maxRam - blockedRam`;
+the amount free right now is `maxRam - max(blockedRam, usedRam)`. The folded
+knowledge digest computes that free value once, with the RAM facts' timestamps
+and expiry, so consumers cannot accidentally subtract the owner's block twice.
+
+For a current RAM observation, the UI keeps the resulting buckets separate on
+every server: **ours** is `maxRam - blockedRam - freeRam`, **free** is the
+centrally published value, and **blocked** remains the owner's allocation. The
+map labels them `O/F/B`, uses
+the same order in its coloured bar and tooltip, and the server table exposes
+all three values plus total RAM. Stale server facts remain visible but faded,
+as they are elsewhere on the darknet map.
 
 `memoryReallocation` reduces `blockedRam` by
 `clamp(0.02 * 2 * 0.92^(difficulty+1) * threads * (1 + charisma/100), 0,
@@ -478,6 +606,17 @@ cost *and* its churn risk at once.
 |---|---|---|---|
 | Backdoor | unlimited | remote `exec` — the only bypass | auth slowdown past the free allowance; restart/delete targeting; the restart clears the backdoor |
 | Stasis link | 1-4 | remote `exec` (it sets `backdoorInstalled`) **and** exemption from delete, move and restart — tax-free | a limited slot; 12 GB and the apply time on the target |
+
+The resident recovery path consumes these facts conservatively. Home sends each
+ordinary backdoor with its install time; the overseer accepts it only inside the
+derived restart/delete lifetime. Stasis links are generation-bound probe results
+and do not expire while linked. Either fact admits a session-only remote plant
+from the roomiest live resident. A credential by itself never does.
+
+The existing automatic install/pin ranking is intentionally unchanged here.
+Whether ordinary backdoors should be installed more aggressively for recovery
+coverage is a separate policy review, because each extra install changes both
+authentication cost and the mutation clock.
 
 So backdoors are the expendable frontier, and a stasis link keeps one HOST
 alive rather than keeping the graph reachable. What most deserves one is the
@@ -575,6 +714,27 @@ decision.
 - a coding contract — **only** for `.d.cache` files, i.e. from phishing,
 - money — **only** when the node's `DarknetMoneyMultiplier` is non-zero.
 
+### Coding contracts leave the darknet immediately
+
+A resident reads `.cct` names from the same `ns.ls` listing it already pays for
+to discover caches and storm seeds. The report carries the host identity and
+the observation time; home folds `contracts` as a `resource` fact and derives
+its validity from the mutation clock. The private contract queue retains only
+the identity and observation stamp, while the authoritative private listing
+owns the expiry.
+
+Fresh darknet contracts lead the ordinary coding-contract queue and use the
+same bounded inspect/data/attempt pipeline. Before every resumed pipeline stage,
+the side driver requires the listing to still be current, to name the same host
+identity, and still to contain the filename. A terminal outcome is recorded
+against that exact observation, so it is not retried until a newer resident
+listing arrives. The ordinary network sweep rebuilds darknet work from these
+fresh listings because `ns.scan` cannot see darknet hosts; neither the listings
+nor their stamps are added to dnet telemetry.
+
+`.txt`, `.lit`, and `.msg` files are intentionally outside this path. They are
+neither copied nor opened.
+
 `karmaLoss` is worth sizing: `difficulty` tracks a server's original depth, so a
 deep-net cache pays up to −37 karma against a depth-7 net's −8, and karma
 survives an install. A gang wants −54000, so a full sweep of a depth-36 net is
@@ -645,7 +805,78 @@ best way to beat a maze is to find the end, and not to try and skip it."*
 
 `labreport()` and `labradar()` are the free eyes on the same position, and both
 pay a full `calculateAuthenticationTime` per look, so vision is not cheaper than
-a step.
+a step. `labradar()` is the only call that renders the exit overlay, and radars
+grant no charisma where every failed move does (`handleFailedAuth` runs for
+every `authenticate`, walls included).
+
+### What the generator fixes in advance
+
+`generateMaze` (`labyrinth.ts:112-186`) stitches four `mazeMaker` carves and
+punches four seam gaps, and everything it fixes is computable before the first
+move — the planner in `shared/strategy/dnet/maze.ts` exploits all of it, and
+`sim/tests/dnet-maze.test.ts` proves each property against the transcribed
+generator:
+
+- **The maze is not the requested size** (a 20x14 request builds 21x13, 60x40
+  builds 61x41 — `labMazeSize`), every odd/odd cell is floor, and the border is
+  wall — so the walker pre-walls the frame and never tests it.
+- **The seams between the four quadrants are wall except four punched doors**,
+  and the door candidate slots follow from the gap formulas (top/left:
+  `floor(random·half/4)·2+1`; bottom/right indexed off the REQUESTED dimensions).
+  On every real rung the four candidate sets are disjoint, so the first door
+  found in a set closes the rest of it.
+- **Each quadrant is a spanning tree plus AT MOST one extra edge**, because
+  `mazeMaker` never marks its start `[1,1]` visited and the wave later carves
+  into it once more — so the only cycle a quadrant can carry touches the
+  quadrant's own top-left cell. An unknown slot between two cells already
+  connected by known-open edges is therefore provably wall, except that one
+  licensed slot.
+- **The exit is one of at most nine cells**: `[width-2-ox, height-2-oy]` with
+  each offset 0/2/4 on the deep rungs and exactly 0 on the shallow ones
+  (`getRandomOffset`).
+
+The deployed walker (`decideLab`) folds every response's free radius-1 render
+into a slot map and replans with A* each step: known-open edges cost one
+authentication, provably-walled edges are impassable, unknown edges cost a
+tuned premium. The first edge of any plan is always already known, so it never
+pays an authentication to bump a wall (the blind first probe aside). It pays
+for a `labradar` only when the radius-3 window would decide the exit outright —
+show it, or rule out all-but-one candidates — or scout three or more unknown
+door candidates at once. `sim/tests/dnet-lab-benchmark.test.ts` and
+`bun run bench:sim:dnet-lab` hold the paired evidence: the planner solves the
+whole ladder in ~0.65x the DFS's wall-clock (attempts land ~1.4x the omniscient
+shortest path, against the DFS's ~2.2x).
+
+### Two walkers, one maze
+
+The maze is global (`DarknetState.labyrinth`) while positions are per PID, each
+PID's authentication delays run in parallel, every failed attempt from any pid
+feeds the one charisma pool, and WHICHEVER pid reaches the endpoint roots the
+lab. So when a second host stands next to the lab, the overseer files a second
+walk — a **scout** (`Task.role: "scout"`) — and the two share one map: every
+walker folds the overseer's `labFields` entry in before each decision and
+merges its own field back after each observation (`mergeLabFields`). The scout
+commits to the southern door pair (`routePrior`) so the pair splits the maze
+instead of shadowing each other; a door the other walker has SEEN open always
+outranks the bias.
+
+The alternatives were measured in the party arena (`runLabParty` in
+`sim/dnet-lab.ts`, `bun run bench:sim:dnet-lab`) and rejected by number:
+
+- **A bleeder instead of a second walker**: worthless. `logPasswordAttempt`
+  logs every lab attempt, so the lab's ring holds only the responses our own
+  walkers already received — `heartbleed` can replay the map we have, never
+  extend it. A second vantage always walks.
+- **Shadowing** (two unbiased walkers): the split route is what buys the gain —
+  one scout ~0.91x a lone walker's wall-clock on the deep rungs, a third
+  walker ~0.86x, with sharply diminishing returns after that.
+- **Pinning the scout**: the stasis question, and the arena's mortality model
+  answers it. A scout that dies every few minutes (mutation eats its unpinned
+  host; the replacement PID re-seeds at a fresh offset start and inherits the
+  shared field, so only the POSITION is lost) still lands ~0.97x. The few
+  percent a link would rescue are worth far less than the link — so only the
+  finisher's host is marked `irreplaceable`, the scout never is, and with 1-4
+  links total the ladder spends them on hosts that cannot be rebuilt.
 
 One constraint follows, and it shapes the whole solver:
 
@@ -732,7 +963,7 @@ longer exist. Expiry is per fact CLASS, and derived rather than chosen
 | `identity` | `modelId`, `passwordFormat`, `passwordLength`, `difficulty` | **never by age** — only by the host disappearing, since a host that returns is cleaned and given a new password |
 | `position` | `depth` | a move |
 | `topology` | `neighbours` | a move, a disconnect, *or* a new connection — three compounding rates, so edges are the shortest-lived thing we hold |
-| `resource` | `blockedRam`, `maxRam`, `hasSession` | a restart |
+| `resource` | `blockedRam`, `usedRam`, `caches`, `contracts` | a restart or one of our own actions |
 
 **Unless the host is outside the clock altogether.** Every branch of
 `mutateDarknet` picks its victim from `getAllMovableDarknetServers`
@@ -744,8 +975,10 @@ exclusion is what does the work for both. See
 [Backdoors and stasis links](#backdoors-and-stasis-links) for what that guard
 buys.)
 
-Immunity is therefore a property of the HOST, not of a fact class: nothing about
-such a server ages, and since it cannot be deleted it is never forgotten either.
+Immunity freezes a host's own position and prevents deletion/restart, but not
+all facts about it. A movable neighbour can still disconnect from or connect to
+a stationary/stasis-linked host, so `neighbours` continues to age on the
+topology clock. An immune host itself is never forgotten.
 Upstream marks `darkweb` and the labyrinth stationary — so showing darkweb's
 depth as expiring is a bug, not a conservative default. A webstorm
 is what makes that immunity decisive rather than merely tidy: it invalidates every
@@ -780,12 +1013,104 @@ In practice:
 
 `tests/dnet-staleness.test.ts` pins these as behaviour.
 
+### Mutation recovery and server identity
+
+Expiry is the fallback; `nextMutation()` is the prompt path. The overseer keeps
+one edge-triggered waiter alive, stamps each event, and coalesces multiple ticks
+into one fresh survey per resident vantage. On the same event it checks the
+resident/job PID with `isRunning(pid, host)`; only a process proven dead loses
+its queue. A surviving process is killed only through the hard-cancel path
+below — an ARMORED job whose work is provably pointless — never merely because
+the map changed.
+
+Every survey records `ns.getServer(host).ip` as the lifetime identity behind a
+hostname. Before a resident surrenders itself to a targeted job it checks both
+`probe()` membership and `probe(true)` identity membership. A new IP for the
+same hostname replaces the complete lifetime record: facts, cracking history,
+ring state, credential flag, pending work and recovery state. A late report
+from the old IP cannot replace it back, and an absence older than the newest
+sighting cannot delete it.
+
+Attempts retain normalized dispositions in addition to their raw response code;
+jobs expose only the target changes the overseer can act on:
+
+- `351`: the direct edge was lost;
+- `503`: the target is gone;
+- `408`: transient network timeout (diagnostic and retryable, not a target change);
+- preflight IP mismatch or a previously verified password now returning `401`:
+  reconcile the server identity;
+- retirement, cooperative or hard: cancelled. A hard-killed job settles with
+  the same `targetState: 'cancelled'` and counts as completed, because it ended
+  with a result rather than an error.
+
+Only a successful authentication or a real wrong-password response consumes an
+attempt. Timeouts, lost edges and missing oracle feedback may remain as
+diagnostics but do not advance a dictionary or probe budget. Deletion and
+identity replacement retire the old lifetime's history; cooperative
+cancellation is a job result and creates no attempt of its own.
+
+Cancellation is cooperative FIRST and hard SECOND. A fresh survey settles
+impossible pending work and sets a cancellation reason on active work; attempt
+conversations, migration batches and maze walks stop at a safe boundary, then
+the job's `finally` restores the resident. But a body seconds deep in a
+blocking call cannot look at the flag — the engine's concurrency lock blocks
+every `ns.*` call while one is in flight — so on the next tick the overseer's
+`hardCancelSweep` kills an ARMORED job still carrying a reason, via
+`ns.kill(pid)`, which works globally by pid with no host relationship.
+
+What makes that safe is an engine invariant this design now leans on: a kill
+runs the victim's `atExit` callbacks synchronously in the killer's stack,
+AFTER the concurrency lock is released and BEFORE the script is marked
+stopped, so inside `atExit` every ns function is callable — and
+`ns.spawn(..., {spawnDelay: 0})` there frees the dying allocation and launches
+the replacement within the same `ns.kill` call. The agent arms exactly that
+hook before running a job (settle the job `cancelled`, clear `queue.active`,
+respawn the resident) and stamps `job.armored` as proof; the sweep kills
+nothing unarmored, so a pre-armor agent build is never shot without its safety
+net. The job's own `catch`/`finally` still runs afterwards as a zombie
+continuation in which every ns call throws — which is why the respawn lives in
+`atExit` and a `murdered` guard keeps the zombie from double-booking. The hook
+is disarmed before every DELIBERATE exit (the spawn into a job, the spawn back,
+a dead-rendezvous return), or those would respawn forever.
+
+Two kinds are exempt (`HARD_CANCEL_EXEMPT_KINDS`): `pin`, because its budget
+has no `spawn` and so no hook — killing it would empty the host without the
+reasoning `planSpread` applies — and `walk`, because a maze position is keyed
+by PID and unrecoverable while its loop already polls the flag at every move,
+so a kill would trade hours of maze for seconds of latency. The same armed
+hook is what lets a resident survive a host-RESTART mutation (the killall runs
+`atExit` too, and the host keeps its files), while on a DELETE the hook's
+liveness guard declines quietly and `planSpread` re-plants from a neighbour.
+
+Credentials have the same lifetime discipline. Plaintext parsed from a log is
+only a provisional candidate, even when the line names a host; it enters the
+bounded named-candidate pool and targets only that host. A line that names no
+host enters the separate loose-password pool and is matched by length and
+format. Both become vault facts only after `authenticate` succeeds. Named
+candidates expire on the deletion-class lifetime from `rates.ts`, and are
+removed earlier on disappearance, identity replacement, or verification. The
+verified entry is bound to the surveyed IP.
+Pinned v3.0.1 does not change a password on move, disconnect or restart;
+`restartServer` clears scripts, sessions, logs and the backdoor but leaves the
+server/password object intact. Passwords change when deletion creates a new
+server lifetime (new IP), which is exactly the boundary above. A verified
+credential returning `401` is therefore treated as an invariant failure and
+forces identity reconciliation rather than an impossible plant retry loop.
+
+After verification, cracking attempts, solver state and evidence for that
+target are pruned immediately. The log-ring retry state is separate so an
+already-completed initial drain is not repeated and outstanding authentication
+records can still be drained. Deletion/replacement prunes both, plus
+target-specific guesses, queued work and credentials. Home
+replays an authoritative identity-bearing vault snapshot at every rendezvous,
+so an overseer replacement cannot resurrect an entry home has already removed.
+
 ## The shape that follows: an overseer, residents, and a spawn chain
 
 Two processes share the word "controller", so this document names them: the
 **home driver** is `start.js`'s dnet feature driver, pinned inside home's 3.6 GB
 static budget (`tests/ram-budget.test.ts`); the **overseer**
-(`game/dnet/overseer.ts`) is the darknet's own controller, 1.65 GB, living on
+(`game/dnet/overseer.ts`) is the darknet's own small controller, living on
 `darkweb`.
 
 **Home cannot play the feature.** `probe()` is host-local, so from `home` the
@@ -811,7 +1136,8 @@ than the sum of the work.
 `spawn` costs 2.0 GB against `exec`'s 1.3, and every job pays that tax on the
 way back. It is still the cheap option, because the alternative is holding two
 allocations at once — and because a host left with no resident cannot be
-repaired from outside: planting one needs a session AND adjacency.
+repaired from an adjacent resident, or remotely while a stamped backdoor or
+stasis-link fact remains believable.
 
 **The rule that nearly makes this impossible.** A session belongs to the PID,
 and `spawn` ends the PID, so a job that authenticates cannot hand its session to
@@ -820,12 +1146,17 @@ distance, with no delay and no connection requirement, for **0.05 GB**. That
 single cheap call is what makes the whole chain affordable. Its one
 precondition: it passes `requireAdminRights`, which only a successful
 `authenticate` ever sets — so it re-opens a session on a host we have opened
-once, and cannot open a NEW one. Log-leaked passwords belong to hosts we may
-never have touched, so the first use of one has to be the 0.4 GB call;
-`plantJob` tries the cheap path and falls back.
+once, and cannot open a NEW one. Log-leaked passwords are therefore tried by an
+adjacent attempt job first; only success creates the identity-bound vault entry
+that a plant consumes. A remote recovery job is session-only: if
+`connectToSession` fails, authentication cannot rescue it without adjacency,
+so the job stops and forces identity reconciliation when a verified password is
+rejected.
 
-The overseer costs 1.65 GB static — the base plus `getHostname` — and describes
-jobs it cannot afford to run as closures calling through bracket notation on an
+The overseer pays for `getHostname`, the zero-cost `nextMutation` event,
+`isRunning` liveness reconciliation, and `kill` for the hard-cancel sweep —
+2.75 GB in all — then describes jobs it cannot afford to
+run as closures calling through bracket notation on an
 ns it does not own, so the analyser charges the agent's declared `ramOverride`
 instead. Same trick as `game/lib/dodge.ts`; `tests/ram-budget.test.ts` checks
 the declared method lists against the calls the closures actually make, because
@@ -851,7 +1182,7 @@ enforced by the engine — per-PID sessions, host-local `probe()`, target-only
 none of that is helped by a slower message. What the realm buys is the thing a
 message cannot carry: the overseer hands each resident a **live function
 reference**, a closure over calls it cannot afford itself, which is the
-mechanism behind the 1.65 GB figure above.
+mechanism behind the small controller allocation above.
 
 The hazard is real — a realm map holds live references that outlive the servers
 they describe — so the realm is allowed only under four rules, each enforced in
@@ -892,11 +1223,12 @@ bodies, `game/dnet/realm.ts` the contract between them.
    requirement BEFORE the darkweb early-out. A failed seed backs off
    exponentially; a live overseer is left strictly alone, because it holds the
    only copy of the map.
-2. **The overseer derives and files.** Every 2 s it sweeps dead queues, times out
-   jobs that stopped answering, then derives — spread, farm, hold, loose-password
-   guesses, `deriveTasks` — and files each task onto the queue of the host that
-   would have to run it, in PRIORITY order rather than arrival order. It launches
-   nothing.
+2. **The overseer derives and files.** Every 2 s it sweeps dead queues, retires
+   impossible pending work, hard-kills armored jobs whose reason is already
+   stamped (`hardCancelSweep`), times out jobs that stopped answering, then
+   derives — spread, farm, hold, loose-password guesses, `deriveTasks` — and
+   files each task onto the queue of the host that would have to run it, in
+   PRIORITY order rather than arrival order. It launches nothing.
 3. **The resident takes it.** Every 1 s (`RESIDENT_POLL_MS`) the resident stamps
    its beat, measures real free RAM, and takes the first pending job that fits
    `free + residentGb` — its own allocation counts, because `spawn` frees the
@@ -914,6 +1246,15 @@ bodies, `game/dnet/realm.ts` the contract between them.
    host: planting one needs a session AND adjacency. The overseer's promise
    handlers fold the result into the map, so the very next derivation already
    accounts for it and the task simply stops existing.
+
+Both modes also ARM an `atExit` respawn hook — registered before the first
+await, disarmed before every deliberate exit — so an agent killed mid-call (by
+the hard-cancel sweep, or by a restart mutation's killall) puts a resident
+back inside the very kill that took it down. Job mode's hook additionally
+settles the murdered job and stamps `job.armored`, the overseer's licence to
+hard-kill it at all; the mutation-recovery section above owns the full
+invariant. The hook's one guard is a `getServerMaxRam(host)` probe, so a
+DELETED host declines the respawn instead of throwing out of `atExit`.
 
 Two kinds break the pattern, and both are encoded rather than commented:
 
@@ -958,6 +1299,44 @@ that died before reporting — the gap is a direct read on **agent mortality**,
 which, since the transport does not lose data, is the loss that actually matters
 out there.
 
+### What a walk reports
+
+A walk is the longest-running thing the darknet does — hours on the deep rungs —
+and it used to be the least observable: a resident row saying `active: walk` was
+the whole of it. The `dnet.lab` topic block fixes that, and it carries exactly
+one thing the panel cannot work out for itself.
+
+Everything else about a lab is DERIVED in `ui/`: `labStage(hostname)` gives the
+rung, the charisma gate and the requested maze size, and `labPrior()` turns that
+into the produced dimensions, the two seam positions, the four door-candidate
+sets and the nine exit candidates. What no formula supplies is what the walkers
+have actually **seen**, so the digest carries the discovered map as one character
+per grid cell (`renderLabField`: `?` unknown, `#` wall, `.` open) — 2501
+characters for a 61x41 rung, which is what makes it cheap enough to send every
+drain where the `slots` record it is built from would not be.
+
+Beside it travel the live exit candidates (at most nine, so they travel whole
+rather than as a count) and one entry per walker: role, position, moves, refused
+moves, radars, authentications, the planner's own plan cost, and whether the host
+is pinned. Two derivations in `ui/app/tabs/dnet-lab.ts` are worth naming:
+
+- **Mapped %** counts WALL SLOTS only — the odd/even cells the generator actually
+  decides. Counting the pillars and standing cells too would start every walk at
+  60% and never mean anything.
+- **ETA** is the plan cost at the walk's own measured pace, so threads, charisma
+  above the gate, The B00ts, SF15 and the backdoor tax are all already in it —
+  times a calibration constant. The plan is optimistic by construction: it routes
+  through unmapped ground as though the walls it has not seen are not there.
+  Measured over 10,276 mid-walk samples across all eight rungs, actual-over-plan
+  runs p25 0.97, median 1.31, p75 1.81, optimistic in 72% of samples. The panel
+  multiplies by the median so the number reads low about half the time instead of
+  three times in four.
+
+The card degrades in four states, because most runs never reach a lab at all: no
+sighting draws no card, a sighting we cannot walk draws the ladder plus the
+planner's own refusal for that host, a map with no walker on it says the map
+outlives them, and a rooted lab says the maze is finished.
+
 ## Open
 
 - The labyrinth's actual difficulty and time cost — the reward sequence and the
@@ -966,11 +1345,17 @@ out there.
   acquisition` and lists The St4ff before The H4mmer, contradicting the prereq
   chain in its own `AugmentationTable`. The prereq data is the mechanic, so our
   code follows it; the comment is unexplained.
-- Cache creation is now modelled and farmed — three of upstream's four sources
-  are exact (see `dnet.cacheSources` in `DNET_ASSUMPTIONS`,
-  `sim/features/dnet.ts`), and `tests/dnet-farm.test.ts` covers the ladder. What
-  remains open is only `handleRamBlockClearedRewards`' two side rolls (the 30%
-  clue file and the STORM_SEED.exe drop), which nothing here reads.
+- Cache creation is now modelled and farmed — all four sources plus the storm
+  reroll (see `dnet.cacheSources` and `dnet.webstorm` in `DNET_ASSUMPTIONS`,
+  `sim/features/dnet.ts`); `tests/dnet-farm.test.ts` covers the ladder and
+  `tests/dnet-storm.test.ts` the trigger gates. What remains open is only
+  `handleRamBlockClearedRewards`' other side roll, the 30% clue file, which
+  nothing here reads.
+- Seed banking: a block cleared on a stasis-pinned host can drop a seed that is
+  both storm-proof and invisible to the engine's movables-only seed-exists
+  gate — a held fire button beside a spawnable second seed. Opportunistic only
+  (pinned blocks never regenerate), and not pursued by the trigger policy yet
+  beyond preferring a pinned holder when two seeds exist.
 - The $30m "Shadowed Walkway" Darkscape discount is real but unreachable from a
   script (`shared/strategy/dnet/rates.ts:101-115`) — unmodelled, and probably
   staying that way.

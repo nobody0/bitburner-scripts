@@ -1,7 +1,6 @@
 import { stripCredentials } from "./courier.ts";
 import { modelEntry } from "./models.ts";
 import {
-  LAST_BLEED_AT,
   freeRam,
   fresh,
   isImmune,
@@ -63,7 +62,6 @@ const PUBLISHED_FACTS = [
   "passwordHint",
   "data",
   "logTrafficInterval",
-  "hasSession",
   // The unopened `.cache` files on a host. Already collected by `surveyJob` and
   // already classed `resource`, so its timestamp carries its own staleness — it
   // was simply missing from the allow-list, which is why nothing downstream
@@ -73,7 +71,6 @@ const PUBLISHED_FACTS = [
   // When we last read this host's log ring. The `.at` IS the payload, so this
   // adds no field to `DarknetKnownHost` — it rides `facts` like everything
   // else, and it is what lets a reader work out whether a bleed is due.
-  LAST_BLEED_AT,
 ] as const;
 
 /** How far a feedback solver has got, and NOTHING else from its state.

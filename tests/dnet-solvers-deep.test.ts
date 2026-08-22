@@ -51,7 +51,7 @@ const seeded = (seed: number): (() => number) => {
   };
 };
 
-describe("2G_cellular — the index makes the timing channel unnecessary", () => {
+describe("2G_cellular — prefix feedback from logs or timing", () => {
   /** authentication.ts:95-99 verbatim. */
   const host = (password: string, format: PasswordFacts["passwordFormat"]): Host => ({
     password,
@@ -111,8 +111,34 @@ describe("2G_cellular — the index makes the timing channel unnecessary", () =>
     // the stated index is therefore unreadable.
     expect(correctCharsFromTiming(1000, 1000)).toBe(0);
     expect(correctCharsFromTiming(1150, 1000)).toBe(3);
-    // Threads shrink the per-character addition by the same factor as the base.
-    expect(correctCharsFromTiming(1075, 1000, 0.5)).toBe(3);
+    // Formula calibration already incorporates the calling thread count.
+    expect(correctCharsFromTiming(1075, 1000, 25)).toBe(3);
+  });
+
+  test("the formula baseline solves without reading the ring", () => {
+    const solver = DEEP_SOLVERS.timingAttack;
+    const password = "12";
+    const facts: PasswordFacts = {
+      passwordLength: password.length,
+      passwordFormat: "numeric",
+      authenticateBaseMs: 1000,
+    };
+    let step = solver.first(facts);
+    let calls = 0;
+    while (step.kind === "attempt" && calls++ < solver.budget(facts)) {
+      const attempted = step.password;
+      const shared = password.split("").findIndex((char, index) => char !== attempted[index]);
+      const correct = shared < 0 ? password.length : shared;
+      const seen: SolverObservation = {
+        attempted,
+        code: 401,
+        success: false,
+        elapsedMs: 1000 + correct * 50,
+      };
+      step = solver.next(facts, step.state, seen);
+    }
+    expect(step.kind === "answer" ? step.password : undefined).toBe(password);
+    expect(solver.needsOracle).toBe(false);
   });
 
   test("an unreadable ring stops as OracleUnavailable and keeps its place", () => {

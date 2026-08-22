@@ -1,7 +1,8 @@
 import type { NS } from "@ns";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
+import { CONTRACT_QUEUE_LIMIT } from "../../../shared/strategy/side/contracts.ts";
 import { holdHostFrom, planBackdoors, type HoldHost } from "../../../shared/strategy/dnet/hold.ts";
-import type { AttemptOutcome, ReportHost } from "../../../shared/strategy/dnet/courier.ts";
+import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../../shared/strategy/dnet/courier.ts";
 import { overseerArgs, residentArgs } from "../../../shared/strategy/dnet/mission.ts";
 import { publishKnowledge } from "../../../shared/strategy/dnet/publish.ts";
 import {
@@ -14,10 +15,14 @@ import {
 import {
   coverage,
   emptyKnowledge,
+  expiryMs,
+  foldLogDrain,
   foldAttempts,
   foldReports,
   fresh,
   isImmune,
+  markCredentialKnown,
+  stormWipe,
   type DarknetKnowledge,
   type ExpiryOpts,
 } from "../../../shared/strategy/dnet/knowledge.ts";
@@ -34,13 +39,20 @@ import {
   type DnetRendezvous,
   type DnetSpreadReport,
   type DnetFarmReport,
-  type DnetListenReport,
+  type DnetLabReport,
   type DnetHoldReport,
+  type DnetStormReport,
 } from "../../dnet/realm.ts";
 import { gameBuildId } from "../build-id.ts";
 import { gameGlobal } from "../globals.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge, type GameState } from "../state.ts";
+import {
+  darknetContractsFromListings,
+  mergeContractQueue,
+  pendingDarknetContracts,
+  type DarknetContractListing,
+} from "../contracts.ts";
 import { actionRamClaim, featureDodgeOn } from "./dodge.ts";
 import type { DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
 
@@ -66,6 +78,65 @@ const OVERSEER_STALE_MS = 60_000;
  * can never work must not re-exec every tick for ever. */
 const DNET_SEED_BACKOFF_MS = 30_000;
 const DNET_SEED_MAX_BACKOFF_MS = 5 * 60_000;
+
+/** Fold the newest resource listings into the private side-work queue.
+ *
+ * The queue entry names the fact's identity and observation; the authoritative
+ * private listing owns its mutation-derived validity boundary. */
+export function syncDarknetContracts(
+  state: GameState,
+  knowledge: DarknetKnowledge,
+  now: number,
+  expiry: ExpiryOpts,
+): void {
+  const listings = state.darknetContractListings ??= {};
+  const handled = state.darknetContractHandledAt ??= {};
+  const deleteHostKeys = <T>(record: Record<string, T> | undefined, hostname: string): void => {
+    const prefix = `${hostname}\0`;
+    for (const key of Object.keys(record ?? {})) {
+      if (key.startsWith(prefix)) delete record![key];
+    }
+  };
+
+  const forgetHost = (hostname: string): void => {
+    delete listings[hostname];
+    deleteHostKeys(handled, hostname);
+    deleteHostKeys(state.contractQuarantine, hostname);
+  };
+
+  for (const hostname of Object.keys(listings)) {
+    if (!knowledge.hosts[hostname] || knowledge.hosts[hostname].goneAt !== undefined) forgetHost(hostname);
+  }
+
+  for (const host of Object.values(knowledge.hosts).sort((a, b) => a.hostname.localeCompare(b.hostname))) {
+    if (host.goneAt !== undefined) {
+      forgetHost(host.hostname);
+      continue;
+    }
+    const fact = host.facts["contracts"] as { value: string[]; at: number } | undefined;
+    if (!fact) continue;
+    if (listings[host.hostname]?.identity !== host.identity) forgetHost(host.hostname);
+    const files = [...fact.value].sort();
+    const validUntil = fact.at + expiryMs("resource", { ...expiry, immune: isImmune(host, expiry) });
+    if (host.identity === undefined) continue;
+    const listing: DarknetContractListing = {
+      identity: host.identity,
+      observedAt: fact.at,
+      validUntil,
+      files,
+    };
+    listings[host.hostname] = listing;
+    if (files.length === 0) {
+      deleteHostKeys(handled, host.hostname);
+      deleteHostKeys(state.contractQuarantine, host.hostname);
+    }
+  }
+
+  const observed = darknetContractsFromListings(listings, now);
+  const darknet = pendingDarknetContracts(observed, handled, state.contractQuarantine);
+  const ordinary = (state.contractQueue ?? []).filter((contract) => contract.dnet === undefined);
+  state.contractQueue = mergeContractQueue(darknet, ordinary, CONTRACT_QUEUE_LIMIT);
+}
 
 /** What the seed stub calls. The seed is the one darknet action home performs
  * itself, and it is a real 1.9 GB of dynamic RAM inside the stub — pricing it is
@@ -103,11 +174,10 @@ interface DnetHomeState {
   spread: DnetSpreadReport | undefined;
   /** The overseer's last farm verdict, on the same snapshot discipline. */
   farm: DnetFarmReport | undefined;
-  /** The last bleed-gate verdict, on the same snapshot discipline as the two
-   *  above. */
-  listen: DnetListenReport | undefined;
   /** The last hold derivation: the pin, the push and the walk. */
   hold: DnetHoldReport | undefined;
+  /** The last storm derivation: the seed, the gates, the fire. */
+  storm: DnetStormReport | undefined;
   /** Karma spent opening caches this generation. Negative, and it SURVIVES an
    * install — which is the whole reason it is worth publishing rather than
    * logging: `gang` wants -54000 and a cache is free progress toward it. */
@@ -119,22 +189,38 @@ interface DnetHomeState {
    * overseer death and is replayed to the replacement. The phishing cache
    * cooldown is NET-WIDE engine state exposed through no ns member at all. */
   lastPhishCacheAt: number | undefined;
+  /** When the last storm was fired, on our own clocks — the overseer's
+   * pessimistic claim-time stamp or its drained authoritative one, whichever is
+   * newest. Held here so it survives an overseer death and is replayed to the
+   * replacement: the engine's `lastStormTime` is module state no ns member
+   * exposes, and it gates both the quiet period and when a new seed can be
+   * minted (`STORM_COOLDOWN_MS`). */
+  lastStormAt: number | undefined;
   /** When the lab-cache install deferral was first raised, so it can EXPIRE.
    *
    * The asymmetry is the point and it is stated here because this is the field
    * that enforces it: missing the deferral costs one augmentation's price
    * scaling, once. Blocking an install costs the whole cycle. */
   labCacheSince: number | undefined;
+  /** The maze as the overseer last drew it — the discovered map and whoever is
+   * walking it.
+   *
+   * Held on home rather than only published because it is the walk's ONLY
+   * durable state: a walker dies with its PID and its map does not, so this is
+   * what lets the panel show a walk that is half done instead of only one that
+   * finished. Undefined for every run that never reaches a lab, which is most
+   * of them. */
+  lab: DnetLabReport | undefined;
   /** Credentials agents recovered, keyed by host.
    *
-   * MODULE STATE AND NOTHING ELSE. It is never merged into a topic and never
-   * sent: the telemetry rule permits holding state we do not send, and forbids
-   * the reverse. What the panel gets is the boolean `credentialKnown` per host.
+   * MODULE STATE AND NOTHING ELSE. It is never merged into a topic or sent to
+   * telemetry; its only replay is the in-realm order to the overseer. What the
+   * panel gets is the boolean `credentialKnown` per host.
    *
    * Held here rather than only out in the darknet because an overseer dies with
    * its host, and re-cracking a net we already opened would be the most
    * expensive possible way to recover from a reboot. */
-  vault: Map<string, string>;
+  vault: Map<string, VaultEntry>;
   /** Darknet hosts HOME has backdoored, keyed to when each was installed.
    *
    *  Home's own record rather than an observed fact, for the same reason the
@@ -196,12 +282,14 @@ function freshDnetHomeState(): DnetHomeState {
     codes: {},
     spread: undefined,
     farm: undefined,
-    listen: undefined,
     hold: undefined,
+    storm: undefined,
     karmaLoss: 0,
     grammar: undefined,
     lastPhishCacheAt: undefined,
+    lastStormAt: undefined,
     labCacheSince: undefined,
+    lab: undefined,
     vault: new Map(),
     backdoored: new Map(),
     backdoorNextAt: 0,
@@ -246,28 +334,29 @@ function record(action: string, ok: boolean, detail: string): void {
 function drainDarknet(generation: string): {
   hosts: ReportHost[];
   attempts: { hostname: string; outcome: AttemptOutcome }[];
+  logDrains: { hostname: string; outcome: LogDrainOutcome }[];
   residents: string[];
   drained: number;
   rejected: number;
   credentials: number;
+  mutations: number;
 } {
   const rendezvous = dnetRendezvous();
-  if (!rendezvous) return { hosts: [], attempts: [], residents: [], drained: 0, rejected: 0, credentials: 0 };
+  if (!rendezvous) return { hosts: [], attempts: [], logDrains: [], residents: [], drained: 0, rejected: 0, credentials: 0, mutations: 0 };
   if (rendezvous.generation !== generation) {
     // An overseer from a world this run no longer shares. Its facts describe a
     // darknet that was destroyed by the prestige that ended it.
-    return { hosts: [], attempts: [], residents: [], drained: 0, rejected: 1, credentials: 0 };
+    return { hosts: [], attempts: [], logDrains: [], residents: [], drained: 0, rejected: 1, credentials: 0, mutations: 0 };
   }
   const taken = rendezvous.drain();
   for (const entry of taken.credentials) {
-    if (entry.hostname.length > 0) home.vault.set(entry.hostname, entry.password);
+    if (entry.hostname.length > 0) home.vault.set(entry.hostname, entry);
   }
   for (const [code, count] of Object.entries(taken.codes)) {
     home.codes[code] = (home.codes[code] ?? 0) + Number(count);
   }
   if (taken.spread) home.spread = taken.spread;
   if (taken.farm) home.farm = taken.farm;
-  if (taken.listen) home.listen = taken.listen;
   if (taken.hold) home.hold = taken.hold;
   for (const hostname of taken.stasisLinked ?? []) home.stasisLinked.add(hostname);
   if (taken.charismaNeeded !== undefined) {
@@ -279,8 +368,26 @@ function drainDarknet(generation: string): {
   // since-boot total would reset home's tally to zero for the rest of the run.
   if (taken.karmaLoss !== undefined) home.karmaLoss += taken.karmaLoss;
   if (taken.grammar) home.grammar = taken.grammar;
+  // ASSIGNED, and only when the overseer had something to say. The maze is a
+  // standing picture rather than a since-last-drain delta, so the newest one
+  // wins outright — but an overseer that has not reached a lab sends nothing,
+  // and blanking home's copy on those drains would make the panel flicker
+  // between a map and an empty card every tick.
+  if (taken.lab) home.lab = taken.lab;
   if (taken.lastPhishCacheAt !== undefined) {
     home.lastPhishCacheAt = Math.max(home.lastPhishCacheAt ?? 0, taken.lastPhishCacheAt);
+  }
+  if (taken.storm) home.storm = taken.storm;
+  // A NEW storm stamp wipes home's own fold with the SAME shared function the
+  // overseer runs, because the two must not disagree about what a storm
+  // destroys. Immediately rather than after the quiet period: home only
+  // publishes, so the movable hosts' facts are garbage from the first second
+  // of the burst and there is no derivation to hold still for.
+  if (taken.stormFiredAt !== undefined && taken.stormFiredAt > (home.lastStormAt ?? 0)) {
+    home.lastStormAt = taken.stormFiredAt;
+    if (home.knowledge !== undefined) {
+      home.knowledge = stormWipe(home.knowledge, { stasisLinked: home.stasisLinked });
+    }
   }
   for (const resident of taken.residents) {
     // Every field of the drained resident IS a digest field — the digest is a
@@ -296,10 +403,12 @@ function drainDarknet(generation: string): {
     // that saw it, which is the only thing the fold needs.
     hosts: taken.hosts,
     attempts: taken.attempts,
+    logDrains: taken.logDrains,
     residents: taken.residents.map((resident) => resident.host),
     drained: taken.hosts.length,
     rejected: 0,
     credentials: taken.credentials.length,
+    mutations: taken.mutations,
   };
 }
 
@@ -329,15 +438,20 @@ const dnet: FeatureDriver = {
     if (!home.knowledge || home.knowledge.generation !== generation) {
       home.knowledge = emptyKnowledge(generation);
       home.codes = {};
+      delete ctx.state.darknetContractListings;
+      delete ctx.state.darknetContractHandledAt;
+      ctx.state.contractQueue = ctx.state.contractQueue?.filter((contract) => contract.dnet === undefined);
     }
     const knowledge = home.knowledge;
     const {
       hosts: reported,
       attempts: reportedAttempts,
+      logDrains: reportedLogDrains,
       residents,
       drained,
       rejected,
       credentials: vaultDrained,
+      mutations,
     } = drainDarknet(generation);
     const rendezvous = dnetRendezvous();
     const bitNode = progression?.bitNode ?? 1;
@@ -355,6 +469,7 @@ const dnet: FeatureDriver = {
     const netDepth = netDepthFromLabs(Object.keys(knowledge.hosts)) ?? topic.netDepth;
     const expiry: ExpiryOpts = {
       bitNode,
+      backdoored: home.backdoored.size,
       ...(netDepth !== undefined ? { netDepth } : {}),
       // Both sources, because they see the set at different cadences: the
       // dodged probe reads `getStasisLinkedServers` when it happens to run, and
@@ -366,6 +481,7 @@ const dnet: FeatureDriver = {
     // is standing out there, and it costs nothing to merge.
     const folded = foldReports(knowledge, [...(topic.probed ?? []), ...reported], now, expiry);
     home.knowledge = folded.knowledge;
+    syncDarknetContracts(ctx.state, home.knowledge, now, expiry);
     // Attempt outcomes fold into home's OWN ledger — the same helper the
     // overseer uses — so the panel's cracking progress survives an overseer
     // death the way the map does. An unknown-model outcome is also the only
@@ -378,20 +494,32 @@ const dnet: FeatureDriver = {
         home.unknownModels[id] = (home.unknownModels[id] ?? 0) + 1;
       }
     }
+    for (const { hostname, outcome } of reportedLogDrains) {
+      foldLogDrain(home.knowledge.hosts[hostname], outcome);
+    }
     // A host we hold a credential for is flagged on the knowledge record so the
     // fold can drop the flag when the host disappears — the credential itself
     // stays in the vault and out of everything that is published.
-    for (const hostname of home.vault.keys()) {
+    //
+    // A vault entry for a host that has GONE — or that the fold has forgotten
+    // entirely, or that a new identity now answers — is dead weight: the host
+    // returns cleaned, with a new password, so keeping it would hand a stale
+    // credential to the next attempt and burn a call proving it wrong. It also
+    // rides every `order()` back out to the overseer, so a forgotten one never
+    // stops being replayed.
+    for (const [hostname, entry] of [...home.vault]) {
       const host = home.knowledge.hosts[hostname];
-      if (host && host.goneAt === undefined) host.credentialKnown = true;
+      if (!host
+        || (folded.hostsReplaced.includes(hostname)
+          && (entry.identity === undefined || entry.identity !== host.identity))
+        || host.goneAt !== undefined
+        || (entry.identity !== undefined && host.identity !== undefined && entry.identity !== host.identity)) {
+        home.vault.delete(hostname);
+      } else {
+        markCredentialKnown(host);
+      }
     }
-    // A vault entry for a host that has gone is dead weight: the host returns
-    // cleaned, with a new password, so keeping it would hand a stale credential
-    // to the next attempt and burn a call proving it wrong.
-    for (const hostname of [...home.vault.keys()]) {
-      const host = home.knowledge.hosts[hostname];
-      if (!host || host.goneAt !== undefined) home.vault.delete(hostname);
-    }
+    home.knowledge.mutationsSeen += mutations;
     // The hosts that actually reported, so `seenEver - live` is agent mortality
     // rather than a count of the one label a drain used to carry.
     for (const host of residents) home.agentsSeen.add(host);
@@ -486,7 +614,6 @@ const dnet: FeatureDriver = {
           },
         }
         : {}),
-      ...(home.listen ? { listen: home.listen } : {}),
       // The deliberate three, beside the farm and the spread and for the same
       // reason: each has a real price, so "why not" is the common answer.
       ...(home.hold || home.backdoorReport
@@ -497,9 +624,25 @@ const dnet: FeatureDriver = {
           },
         }
         : {}),
+      // The storm, beside the other deliberate decisions. The refusal names are
+      // the status display: which gate is holding fire IS the answer to "why
+      // has the storm not fired". Home's own fire stamp wins over the drained
+      // snapshot's, because home is the copy that survives an overseer death.
+      ...(home.storm
+        ? {
+          storm: {
+            ...home.storm,
+            ...(home.lastStormAt !== undefined ? { firedAt: home.lastStormAt } : {}),
+          },
+        }
+        : {}),
       ...(home.karmaLoss !== 0 ? { karmaLoss: home.karmaLoss } : {}),
       ...(home.grammar ? { grammar: home.grammar } : {}),
       ...(labCache ? { labCache } : {}),
+      // THE MAZE. The one part of the lab the panel cannot derive from the
+      // hostname, so the one part that travels. Absent until a walk has learned
+      // something, which is most runs.
+      ...(home.lab ? { lab: home.lab } : {}),
       // THE MAP, and the only host representation the topic carries.
       knowledge: publishKnowledge(home.knowledge, now, {
         bitNode,
@@ -722,7 +865,9 @@ const dnet: FeatureDriver = {
     const promoteSymbols = (ctx.state.topics.stock?.plan?.ranked ?? [])
       .filter((entry) => entry.expectedProfit > 0)
       .slice(0, 2)
-      .map((entry) => entry.sym);
+      // The expected profit rides along: it is the promote side of the farm's
+      // phish-vs-promote comparison, and only home can price it.
+      .map((entry) => ({ symbol: entry.sym, expectedProfit: entry.expectedProfit }));
 
     if (overseerAlive && rendezvous) {
       rendezvous.order({
@@ -743,14 +888,17 @@ const dnet: FeatureDriver = {
         // Three things only home can see, and every one of them is a term in a
         // decision the overseer makes rather than a status line.
         //
-        // The backdoor COUNT is a mutation rate: a backdoored host carries a
-        // ~9%/tick restart and a ~4%/tick delete on top of the ordinary
-        // branches, so every knowledge expiry out there is shorter once we hold
-        // any. The stasis LIMIT is `1 + TheBrokenWings + TheHammer + TheStaff`,
-        // read by the dodged probe. And the symbols are the market, which the
-        // darknet cannot see at all.
-        backdoored: home.backdoored.size,
+        // Backdoors carry their observation times: the overseer can count only
+        // the still-believable ones and may reuse a session remotely only until
+        // the restart/delete clock expires. The stasis LIMIT is
+        // `1 + TheBrokenWings + TheHammer + TheStaff`, read by the dodged
+        // probe. And the symbols are the market, which the darknet cannot see.
+        backdoors: [...home.backdoored].map(([hostname, installedAt]) => ({ hostname, installedAt })),
         ...(promoteSymbols.length > 0 ? { promoteSymbols } : {}),
+        // A term in both phishing chances, and only home can see the player.
+        ...(ctx.state.topics.player?.mults.crime_success !== undefined
+          ? { crimeSuccessMult: ctx.state.topics.player.mults.crime_success }
+          : {}),
         // The net facts only the dodged probe can read. The overseer PLANS
         // stasis — it is the only thing that knows which hosts have live
         // residents and which are irreplaceable — and it ACTS, because
@@ -758,18 +906,23 @@ const dnet: FeatureDriver = {
         // links exist or which hosts already hold one, so those come from here.
         ...(topic.stasisLinkLimit !== undefined ? { stasisLimit: topic.stasisLinkLimit } : {}),
         ...(topic.stasisLinked !== undefined ? { stasisLinked: topic.stasisLinked } : {}),
+        // Whether a labyrinth can exist at all: `getCurrentLabName` is gated on
+        // FULL access (BN15 or SF15), so a program-only run gets the 5-deep net
+        // and no lab is ever generated. Only home can see the bitNode and the
+        // source files. Sent only once progression has landed — the overseer's
+        // default is true, the conservative side.
+        ...(progression !== undefined
+          ? { labExpected: progression.bitNode === 15 || (progression.sourceFiles["15"] ?? 0) > 0 }
+          : {}),
 
         ...(home.lastPhishCacheAt !== undefined ? { lastPhishCacheAt: home.lastPhishCacheAt } : {}),
-        ...(home.vault.size > 0
-          ? {
-            vault: [...home.vault].map(([hostname, password]) => ({
-              hostname,
-              password,
-              via: "cracked" as const,
-              at: now,
-            })),
-          }
-          : {}),
+        // Replayed for the same reason as the phishing window, plus one: a
+        // re-seeded overseer standing in a net mid-storm must not mistake the
+        // burst for ordinary churn, and the 30-minute seed-eligibility window
+        // is what gates its seed hunt.
+        ...(home.lastStormAt !== undefined ? { lastStormAt: home.lastStormAt } : {}),
+        vault: [...home.vault.values()],
+        vaultSnapshotAt: now,
       });
     }
 
@@ -1013,6 +1166,14 @@ export const dnetModule: FeatureModule = {
     // starts with the window SHUT. Leaving this undefined would tell the
     // next overseer the opposite; stamping it now is what upstream does.
     home.lastPhishCacheAt = Date.now();
+    // The storm clock too: `lastStormTime` is module scope and restamped when
+    // the engine reloads, so no seed can be minted in the first thirty
+    // minutes — and a seed hunt started before then would grind for rolls
+    // that cannot pay.
+    home.lastStormAt = Date.now();
+    delete state.darknetContractListings;
+    delete state.darknetContractHandledAt;
+    state.contractQueue = state.contractQueue?.filter((contract) => contract.dnet === undefined);
     delete state.topics.dnet;
   },
   claims: (ctx) => {

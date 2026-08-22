@@ -1,5 +1,5 @@
 import type { NS } from "@ns";
-import type { AttemptOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
+import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
 
 /** The rendezvous the overseer and its resident agents meet at.
@@ -79,7 +79,7 @@ import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
  * build handoff leaves both on disk: an agent from the previous build reading a
  * rendezvous whose shape moved under it is a bug with no symptom. Refusing by
  * number makes it exit instead. */
-export const RENDEZVOUS_PROTOCOL = 2;
+export const RENDEZVOUS_PROTOCOL = 3;
 
 /** The script base, which every allocation starts from. Transcribed rather than
  * read, because a launcher sizes a process it has not started yet.
@@ -97,17 +97,22 @@ const PRICE_MARGIN_GB = 0.5;
  * mode. Both modes pay these, so both lists below start from them. */
 const AGENT_BASE_METHODS = ["getHostname", "spawn"] as const;
 
-/** Resident mode: the base pair, plus the two getters it uses to decide whether
- * the next queued job actually fits. */
+/** Resident mode: the base pair, the two RAM getters, and a last-moment
+ * adjacency/identity preflight before it gives up the resident to spawn. */
 export const RESIDENT_METHODS: readonly string[] = [
   ...AGENT_BASE_METHODS,
   "getServerMaxRam",
   "getServerUsedRam",
+  "dnet.probe",
 ];
 
-/** The overseer: the base, and `getHostname`. It observes nothing, cracks
- * nothing and launches nothing, so it costs nothing else. */
-export const CONTROLLER_METHODS: readonly string[] = ["getHostname"];
+/** The overseer observes the mutation clock and process liveness, and holds the
+ * one destructive member in the whole system: `kill`, for retiring a live job
+ * whose work is provably pointless. It still cannot inspect a target, crack it,
+ * or launch work. `kill` works by PID from anywhere — the engine's worker map
+ * is global and the pid form checks no host — which is what lets the overseer
+ * on darkweb reach a job seconds deep in an `authenticate` on a distant host. */
+export const CONTROLLER_METHODS: readonly string[] = ["getHostname", "dnet.nextMutation", "isRunning", "kill"];
 
 /** Every job also calls `describeHost`. */
 const DESCRIBE_METHODS = ["dnet.getServerDetails", "getServerMaxRam", "getServerUsedRam"] as const;
@@ -143,17 +148,15 @@ export const ROUTINE_JOB_KINDS: readonly string[] = [
 ];
 
 export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
-  // `ls` is here and nowhere it is not needed: it is the ONLY way a `.cache`
-  // file can be seen at all — upstream appends a darknet server's caches to its
-  // ns.ls listing and exposes them through no other member — and it works at any
-  // distance, so the surveyor already standing in the right place can read them.
-  // Without it a `cache` task can never be derived.
-  survey: [...AGENT_BASE_METHODS, "dnet.probe", "ls", ...DESCRIBE_METHODS],
+  // `ls` is here and nowhere it is not needed: it is the only view of caches,
+  // coding contracts and storm seeds. It works at any distance, so a surveyor
+  // already standing at the right vantage can report the whole listing.
+  survey: [...AGENT_BASE_METHODS, "dnet.probe", "getServer", "ls", ...DESCRIBE_METHODS],
   bleed: [...AGENT_BASE_METHODS, "dnet.heartbleed", ...DESCRIBE_METHODS],
   // authenticate and heartbleed together, because `authenticate()` answers with
   // a GENERIC failure for every model but the labyrinth: the model's real
   // response goes to the target's log ring, and only heartbleed reads it back.
-  attempt: [...AGENT_BASE_METHODS, "dnet.authenticate", "dnet.heartbleed", ...DESCRIBE_METHODS],
+  attempt: [...AGENT_BASE_METHODS, "dnet.authenticate", "dnet.heartbleed", "formulas.dnet.getAuthenticateTime", ...DESCRIBE_METHODS],
   // connectToSession FIRST, because the credential was usually won by an earlier
   // process whose session died with it, and re-opening one costs 0.05 GB and no
   // time. But it requires the host to be already ROOTED, which only a successful
@@ -180,13 +183,13 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
   // happened past. The body calls it, so the list must declare it — the union
   // check in `tests/ram-budget.test.ts` cannot see a per-kind mismatch, and the
   // engine expresses one by killing the process on its first unlisted call.
-  reclaim: [...AGENT_BASE_METHODS, "dnet.memoryReallocation", "ls", ...DESCRIBE_METHODS],
+  reclaim: [...AGENT_BASE_METHODS, "dnet.memoryReallocation", "getServer", "ls", ...DESCRIBE_METHODS],
   phish: [...AGENT_BASE_METHODS, "dnet.phishingAttack", ...DESCRIBE_METHODS],
   // `ls` again, and for two reasons: the job re-reads the host's file list after
   // opening one so the overseer's belief is not one tick stale, and it is the
   // guard against `openCache` THROWING — the call raises rather than refuses on
   // a filename the host does not hold, and a throw kills the agent.
-  cache: [...AGENT_BASE_METHODS, "dnet.openCache", "ls", ...DESCRIBE_METHODS],
+  cache: [...AGENT_BASE_METHODS, "dnet.openCache", "getServer", "ls", ...DESCRIBE_METHODS],
   // --- the deliberate ones -------------------------------------------------
   //
   // None of these four is routine. Each is decided once, for one host, by a
@@ -209,16 +212,29 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
   // host empty for `planSpread` to re-plant, which is safe precisely BECAUSE
   // the host is now immutable. The overseer files this variant only when a
   // neighbour could actually re-plant it, and refuses by name otherwise.
-  pin: ["getHostname", "dnet.setStasisLink", ...DESCRIBE_METHODS],
+  // `dnet.probe` is the act-time edge check: the pin re-verifies the lab edge
+  // it exists for immediately before the irrevocable `setStasisLink`, and
+  // refuses (912 EdgeGone) rather than spend the slot on a severed one.
+  pin: ["getHostname", "dnet.probe", "dnet.setStasisLink", ...DESCRIBE_METHODS],
   // The maze walker. It keeps `spawn` — the walk is over by the time it runs —
   // and it is the only long-lived kind, because a lab is hundreds of moves and
   // `DarknetState.labLocations` is keyed by PID, so the walk cannot be resumed
   // by a second process. No `heartbleed`: the labyrinth is the one model that
-  // answers through `authenticate`'s own return value.
+  // answers through `authenticate`'s own return value. `labradar` is 0 GB and
+  // the planner pays its authentication-time price only when one radius-3
+  // render decides the exit or scouts a seam's door candidates.
   // `ls` for the ONE report that matters: reaching the exit drops a `.cache` on
   // the lab (three on BonusLab), and a walk that finished without looking would
   // leave the file it just spent hours earning invisible.
-  walk: [...AGENT_BASE_METHODS, "dnet.authenticate", "ls", ...DESCRIBE_METHODS],
+  walk: [...AGENT_BASE_METHODS, "dnet.authenticate", "dnet.labradar", "getServer", "ls", ...DESCRIBE_METHODS],
+  // The reroll. `unleashStormSeed` is 0.1 GB and fires `STORM_SEED.exe` off the
+  // CALLING host — the seed cannot be scp'd, so the job runs where the file is.
+  // `ls` is the act-time re-check: the sighting can go stale exactly like a
+  // cache filename, and unlike `openCache` the member answers 404 rather than
+  // throwing, but the fresh listing in the failure report is what corrects the
+  // next derivation without spending anything. Deliberate, so not routine —
+  // `wantedGb` must not grow to fit a job that runs a handful of times a run.
+  storm: [...AGENT_BASE_METHODS, "dnet.unleashStormSeed", "ls", ...DESCRIBE_METHODS],
 };
 
 /** Kinds whose process does NOT hand the host back to a resident.
@@ -227,6 +243,24 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
  * Read by `game/dnet/agent.ts`, which otherwise respawns unconditionally in a
  * `finally`. */
 export const NO_RESPAWN_KINDS: readonly string[] = ["pin"];
+
+/** Kinds the overseer's kill sweep must never hard-cancel, even armored.
+ *
+ * `pin` because it is never armored in the first place — no `spawn` in its
+ * budget, so no atExit respawn (see `JOB_METHODS.pin`) — and a kill would
+ * leave the host empty without the deliberate reasoning `planSpread` applies.
+ * `walk` because a labyrinth position is keyed by PID and cannot be resumed:
+ * its loop polls `cancelled?.()` at every move, so a cooperative cancel lands
+ * within one authenticate-time, while a kill throws away hours of maze. */
+export const HARD_CANCEL_EXEMPT_KINDS: readonly string[] = ["pin", "walk"];
+
+/** Whether the overseer may `kill` this job outright. Pure, so the policy is
+ * testable without an ns: armored (the agent proved its atExit respawn hook),
+ * a live pid to aim at, and not a kind whose loss outweighs the cancel. The
+ * sweep still vouches the pid with `isRunning` immediately before firing. */
+export function hardCancelEligible(job: DnetJob): boolean {
+  return job.armored === true && job.pid !== undefined && !HARD_CANCEL_EXEMPT_KINDS.includes(job.kind);
+}
 
 /** Price an allocation from the game's OWN table.
  *
@@ -273,11 +307,11 @@ export const RESIDENT_BEAT_MISSES = 3;
  * knowledge, and knowledge has to outlive the process that produced it. */
 export interface DnetJobResult {
   ok: boolean;
+  /** Network diagnosis for work that could not reach the identity it targeted. */
+  targetState?: "edge-lost" | "gone" | "replaced" | "cancelled";
   hosts?: ReportHost[];
+  /** Summary of attempts already written through to the target ledger. */
   attempts?: AttemptOutcome[];
-  /** Credentials recovered. The overseer keeps them so the NEXT job can use
-   *  them without a round trip, and `drain()` hands them to home's vault. */
-  credentials?: VaultEntry[];
   codes?: Record<string, number>;
   /** Charisma a job refused for want of, as the ENGINE stated it.
    *
@@ -287,18 +321,16 @@ export interface DnetJobResult {
    *  already posts `charismaNeeded` as a career need — so this is a second
    *  source for a channel that exists rather than a new one. */
   charismaNeeded?: number;
-  /** Passwords a log leaked WITHOUT saying whose they were.
-   *
-   *  They never reach `drain()` and never reach home: an unattributed password
-   *  is still a password, and the only thing that can spend one is the
-   *  overseer, which knows which hosts its length and format could belong
-   *  to. See `looseCandidates` in `shared/strategy/dnet/listen.ts`. */
-  loose?: string[];
   /** Karma an `openCache` spent, as the engine returns it: NEGATIVE, because
    *  karma only ever moves down. That is what makes a cache free progress
    *  toward the gang threshold rather than a cost, so the overseer sums it
    *  and publishes the total for `gang` to read. */
   karmaLoss?: number;
+  /** When a `storm` job's `unleashStormSeed` succeeded, by the job's own clock.
+   *  The authoritative stamp — but the overseer has already stamped
+   *  pessimistically at claim time, because `restartAllDarknetServers` reaches
+   *  the firing host seconds after the call and this result may never drain. */
+  stormFiredAt?: number;
   /** How far our log grammar has drifted from the game's.
    *
    *  SHAPES, never lines: an unrecognised line is one the parser failed to read,
@@ -324,10 +356,30 @@ export interface DnetJobState {
   host: string;
   /** Where the job RUNS — the resident's own host, the vantage. */
   from: string;
+  /** IP identity observed when this work was derived. */
+  targetIdentity?: string;
   /** Credential for `host`, when the overseer holds one. The one field that
    *  must never leave the realm: it travels only to home's vault, and
    *  `stripCredentials` keeps it out of anything that is published. */
   password?: string;
+  /** All host identities known when a log is parsed. Heartbleed's bare
+   * credential lines can name any server, not only the target being drained. */
+  knownHosts?: string[];
+  /** Actual process threads, needed by formulas whose time scales per thread. */
+  jobThreads?: number;
+
+  /** This plant is intentionally non-adjacent and may only reuse an existing
+   * rooted session. Falling back to authenticate would always fail remotely. */
+  sessionOnly?: boolean;
+  /** Pins only: the neighbour the pin exists to keep — the lab. The job probes
+   *  for it before `setStasisLink` and refuses (912 EdgeGone) rather than
+   *  spend a near-irrevocable slot on a host whose edge was severed after the
+   *  plan was derived. */
+  edge?: string;
+  /** Pins only: run `setStasisLink(false)` — release the link this host holds,
+   *  freeing the slot for a host that still earns one. The edge check does not
+   *  apply: a release is filed precisely BECAUSE the edge is gone. */
+  unpin?: boolean;
   /** Payload filenames, for a job that plants a resident elsewhere. A job never
    *  builds a filename: they are build-versioned, and a guess would `exec` a
    *  version that is not on disk and get a silent 0. */
@@ -354,6 +406,11 @@ export interface DnetJobState {
    *  failing the job — so the name comes from a listing we actually observed,
    *  and the job re-checks it before spending the call. */
   filename?: string;
+  /** Walks only: this walker is the disposable SECOND one. It biases its
+   *  route prior onto the macro-route the finisher is not on, and it is the
+   *  walk whose loss costs only its own position — the shared field it fed
+   *  lives with the overseer. Absent means the finisher. */
+  role?: "scout";
 }
 
 export interface DnetJob {
@@ -399,10 +456,27 @@ export interface DnetJob {
    *  Runs with the JOB process's ns, which is where the budget lives. Written
    *  with bracket notation on that ns so the analyser charges the declared
    *  override rather than the overseer's bundle. */
-  body: (jobNs: NS, state: DnetJobState, beat?: JobBeat) => Promise<DnetJobResult>;
+  body: (jobNs: NS, state: DnetJobState, beat?: JobBeat, cancelled?: JobCancellation) => Promise<DnetJobResult>;
   settle: (result: DnetJobResult) => void;
   fail: (error: unknown) => void;
   startedAt?: number;
+  /** PID written through by job mode as soon as it starts. */
+  pid?: number;
+  /** Set by the overseer when the job's work became pointless. Cooperative
+   * FIRST: bodies poll it at their loop boundaries and stop there. But a body
+   * seconds deep in a blocking call cannot look — the engine's concurrency lock
+   * blocks every ns call while one is in flight — so the overseer's kill sweep
+   * also hard-kills an ARMORED job carrying a reason. Safe only because the
+   * agent's atExit hook puts the resident back in the same `ns.kill` call;
+   * `armored` is how a job proves it has that hook. */
+  cancelReason?: string;
+  /** Stamped true by job mode immediately after arming its atExit-respawn
+   * hook, and the overseer's licence to hard-kill this job: a kill lands in a
+   * process whose atExit settles the job and respawns the resident before the
+   * killer's `ns.kill` even returns. Never set by a pre-armor agent build, so
+   * an old process is never killed without its safety net. NOT named after any
+   * ns member — the static analyser charges by member name (see `body`). */
+  armored?: boolean;
   /** Last time a LONG-LIVED job's body said it was still going, stamped by the
    *  body itself once per iteration. Meaningless on a short job, which is
    *  vouched for by `startedAt + JOB_TIMEOUT_MS` instead. */
@@ -424,6 +498,7 @@ export interface DnetJob {
  * watchdog both read. Called with a payload, it also records where the job has
  * got to — free in RAM, and the general mechanism any future long job wants. */
 export type JobBeat = (progress?: Record<string, unknown>) => void;
+export type JobCancellation = () => string | undefined;
 
 /** One darknet host's work, as the overseer sees it.
  *
@@ -439,6 +514,8 @@ export interface DnetHostQueue {
   /** The job the resident has spawned into. While this is set the resident is
    *  not running: the process IS the job. */
   active?: DnetJob;
+  /** The resident PID while resident mode is alive. */
+  residentPid?: number;
   /** Last time the resident said it was alive. */
   lastBeatAt: number;
   /** Free RAM the resident last measured. The overseer uses it to avoid
@@ -516,10 +593,6 @@ export interface DnetFarmReport extends RefusalRollup {
   cacheHunter?: string;
 }
 
-/** What the bleed gate declined, and why. The bare roll-up: the gate admits
- * nothing of its own, so there is no `admitted` half to carry. */
-export type DnetListenReport = RefusalRollup;
-
 /** What the three DELIBERATE decisions did, and what they declined.
  *
  * These are the decisions with a real price — a stasis link is one of at most
@@ -528,6 +601,24 @@ export type DnetListenReport = RefusalRollup;
  * one to read. */
 export interface DnetHoldReport extends RefusalRollup {
   admitted: Record<string, number>;
+}
+
+/** What the storm trigger decided last derivation, and where the seed stands.
+ *
+ * The refusal names ARE the status display: while no storm has fired, the one
+ * open gate is exactly what the panel should show — "phish-window-open" says
+ * everything is ready and we are waiting on a `.d.cache` to fire behind. */
+export interface DnetStormReport extends RefusalRollup {
+  /** Fires the last derivation admitted: 0 or 1. */
+  admitted: number;
+  /** The freshest believed seed holder, when there is one. */
+  seedHost?: string;
+  /** When that sighting was made. */
+  seedSeenAt?: number;
+  /** Our stamp of the last fire, pessimistic-at-claim or drained-authoritative. */
+  firedAt?: number;
+  /** Whether the farm is currently grinding blocks for seed rolls. */
+  seedHunt?: boolean;
 }
 
 /** What one darknet run has learned and has not yet handed to home. */
@@ -539,17 +630,22 @@ export interface DnetDrain {
    *  survives an overseer death the way the map itself does. `attempted` and
    *  the oracle stay inside the realm: only the ledger summary is published. */
   attempts: { hostname: string; outcome: AttemptOutcome }[];
+  /** Ring evidence and pending counts, owned by the target just like attempts. */
+  logDrains: { hostname: string; outcome: LogDrainOutcome }[];
   codes: Record<string, number>;
   /** The last spread derivation. Absent before the first one has run. */
   spread?: DnetSpreadReport;
   /** The last farm derivation. Absent before the first one has run. */
   farm?: DnetFarmReport;
-  /** Why the derivation declined to listen, by name. Snapshot, like the two
-   *  above: a host that has had nothing to say for a minute is one problem, not
-   *  the thirty ticks that noticed it. */
-  listen?: DnetListenReport;
   /** The last hold derivation: the pin, the push and the walk. */
   hold?: DnetHoldReport;
+  /** The last storm derivation: the seed, the gates, the fire. */
+  storm?: DnetStormReport;
+  /** Our stamp of the last storm fire, so home can carry it across an overseer
+   *  death exactly as it carries `lastPhishCacheAt`: `lastStormTime` is engine
+   *  module state exposed nowhere, and our own stamp is the only clock there is
+   *  for both the quiet period and the 30-minute seed-eligibility window. */
+  stormFiredAt?: number;
   /** Hosts the overseer has pinned with a stasis link.
    *
    *  It travels UP rather than down because the overseer is the only thing
@@ -586,6 +682,57 @@ export interface DnetDrain {
     lastError?: string;
   }[];
   residentsLost: number;
+  mutations: number;
+  /** The maze, as far as the walkers have got. Absent unless a walk has learned
+   *  something or is running right now.
+   *
+   *  It is on the drain rather than derived from `hosts` for the reason nothing
+   *  else here is: the discovered map lives in the overseer's `labFields` and
+   *  in nothing else. A walker dies with its PID and the map does not, so this
+   *  is the one channel that can report a walk that is HALF DONE rather than
+   *  only one that finished. */
+  lab?: DnetLabReport;
+}
+
+/** One PID-bound walker, as the overseer can see it from its queue. */
+export interface DnetLabWalker {
+  /** The vantage the walk RUNS on. Not the target: the target is the lab. */
+  from: string;
+  /** Absent for the finisher; `"scout"` for the disposable second walker. */
+  role?: "scout";
+  /** `"x,y"`, from the engine's own message. Absent before the first response. */
+  at?: string;
+  moves: number;
+  walls: number;
+  radars: number;
+  /** Authentications spent, which is what actually costs time — moves plus
+   *  refused moves plus radars. */
+  attempts: number;
+  /** The planner's own A* estimate of the authentications left. */
+  believedLeft?: number;
+  startedAt: number;
+  beatAt: number;
+  /** Whether a mutation can take this walker. The finisher's host is pinned
+   *  first; a scout's never is, by design. */
+  pinned: boolean;
+}
+
+/** The labyrinth as the panel needs it: the discovered map, the exit question,
+ * and who is walking. */
+export interface DnetLabReport {
+  host: string;
+  /** The PRODUCED maze size, which is never the size `labData` asks for. */
+  width: number;
+  height: number;
+  /** One character per grid cell, row-major: `?` unknown, `#` wall, `.` open.
+   *  See `renderLabField` — 2501 characters for the largest rung, which is what
+   *  makes the map cheap enough to send every drain. */
+  grid: string;
+  /** Exit candidates not yet disproved, `"x,y"`. One entry once it is known. */
+  candidates: string[];
+  /** True once a radar showed the exit or eliminated everything else. */
+  exitKnown: boolean;
+  walkers: DnetLabWalker[];
 }
 
 /** What home tells the overseer. Small on purpose: home does not plan the
@@ -595,6 +742,9 @@ export interface DnetOrders {
   /** Credentials home already holds, replayed after a re-seed so a restarted
    *  overseer does not re-crack a net we already opened. */
   vault?: VaultEntry[];
+  /** Time of home's authoritative vault snapshot. Locally verified entries
+   * newer than this survive a concurrent order. */
+  vaultSnapshotAt?: number;
   /** The net's real depth, when home has pinned it from a lab sighting. Without
    *  it the overseer derives tasks and expiries on `DEFAULT_NET_DEPTH`, which
    *  errs toward re-observing — safe, but paid for in jobs. */
@@ -618,24 +768,46 @@ export interface DnetOrders {
   /** The net-wide phishing cooldown, replayed after a re-seed so a restarted
    *  overseer does not believe the window is open when it is not. */
   lastPhishCacheAt?: number;
-  /** Symbols worth spreading propaganda about, best first.
+  /** When the last storm was fired, replayed after a re-seed for two reasons: a
+   *  restarted overseer must not mistake a fresh burst for ordinary churn, and
+   *  the 30-minute seed-eligibility window (`STORM_COOLDOWN_MS`) is what gates
+   *  the seed hunt. */
+  lastStormAt?: number;
+  /** Symbols worth spreading propaganda about, best first, each with home's
+   *  expected profit for the position — the promote side of the farm's earn
+   *  comparison.
    *
    *  The one farm rung whose value is invisible from the darknet: propaganda
    *  moves a symbol's VOLATILITY, and only home holds the market. Absent or
    *  empty — the usual answer — and the ladder refuses `promote` by name. */
-  promoteSymbols?: string[];
+  promoteSymbols?: { symbol: string; expectedProfit: number }[];
+  /** The player's crime success multiplier, a term in both phishing chances.
+   *  Only home can see the player object; absent means 1. */
+  crimeSuccessMult?: number;
   /** `getStasisLinkedServers()`. Home's probe is the authority; a pin job's own
    *  0 GB reading updates the overseer's copy in between. */
   stasisLinked?: string[];
 
-  /** How many darknet hosts home has backdoored.
+  /** Darknet hosts home has backdoored, with the install observation time.
    *
    *  A term in the mutation rates, not a status line: a backdoored host carries
    *  a ~9%/tick restart and a ~4%/tick delete on top of the ordinary branches,
    *  so every knowledge expiry the overseer runs is shorter once we hold any.
    *  Home installs them (`singularity.installBackdoor` acts on the terminal's
-   *  own server), so home is the only thing that can count them. */
-  backdoored?: number;
+   *  own server), so home is the only thing that can stamp them. */
+  backdoors?: { hostname: string; installedAt: number }[];
+  /** Whether a labyrinth can exist in this world at all.
+   *
+   *  `getCurrentLabName` is gated on FULL darknet access (BN15 or an SF15), so
+   *  a DarkscapeNavigator-only run gets the 5-deep net and no lab is ever
+   *  generated. Only home can see the bitNode and the source files. False
+   *  stands the walker's stasis reservation down and hands its bottom-row
+   *  anchor to the spare targets (`stasisTargetDepths`), so links — and
+   *  therefore the storm — are reachable in a lab-less net. Absent reads as
+   *  true, the conservative side: holding a reservation for a walker that
+   *  cannot exist costs a slot for a while; spending the walker's slot in a
+   *  world that DOES have a lab costs the walk. */
+  labExpected?: boolean;
   /** `getStasisLinkLimit()`: `1 + TheBrokenWings + TheHammer + TheStaff`.
    *
    *  Ordered rather than read because the overseer cannot afford

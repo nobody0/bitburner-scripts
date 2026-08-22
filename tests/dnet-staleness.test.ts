@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { NS } from "@ns";
 import { DARKNET_CODES, LOCAL_CODES, codeName, stripCredentials } from "../shared/strategy/dnet/courier.ts";
 import {
   overseerArgs,
@@ -13,11 +14,13 @@ import {
   coverage,
   emptyKnowledge,
   expiryMs,
+  foldLogDrain,
   foldReports,
   forgetMs,
   freeRam,
   fresh,
   isImmune,
+  markCredentialKnown,
   staleness,
 } from "../shared/strategy/dnet/knowledge.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
@@ -38,6 +41,8 @@ import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
 import { foldAttempts, type DarknetHostKnowledge } from "../shared/strategy/dnet/knowledge.ts";
 import type { AttemptOutcome } from "../shared/strategy/dnet/courier.ts";
 import { mutationIntervalMs, msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
+import { preflightJob } from "../game/dnet/agent.ts";
+import { retireLostEdgeJobs, retireLostPin } from "../game/dnet/overseer.ts";
 
 const GEN = "run-1";
 
@@ -130,6 +135,53 @@ describe("every fact carries an observation time", () => {
     expect(superseded).toBeGreaterThan(0);
   });
 
+  test("an IP change replaces the whole server lifetime, and a late old IP cannot replace it back", () => {
+    let knowledge = foldReports(
+      emptyKnowledge(GEN),
+      [report("dn-1", 1_000, { identity: "10.0.0.1", modelId: "TopPass", depth: 1 })],
+      1_000,
+    ).knowledge;
+    const old = knowledge.hosts["dn-1"]!;
+    old.attempts = { tried: 3, probes: 0 };
+    old.ring = { pendingAuthRecords: 2 };
+    old.credentialKnown = true;
+
+    const replaced = foldReports(
+      knowledge,
+      [report("dn-1", 2_000, { identity: "10.0.0.2", modelId: "DeskMemo_3.1", depth: 4 })],
+      2_000,
+    );
+    knowledge = replaced.knowledge;
+    expect(replaced.hostsReplaced).toEqual(["dn-1"]);
+    expect(knowledge.hosts["dn-1"]).toMatchObject({
+      identity: "10.0.0.2",
+      facts: { modelId: { value: "DeskMemo_3.1", at: 2_000 } },
+    });
+    expect(knowledge.hosts["dn-1"]!.attempts).toBeUndefined();
+    expect(knowledge.hosts["dn-1"]!.ring).toBeUndefined();
+    expect(knowledge.hosts["dn-1"]!.credentialKnown).toBeUndefined();
+
+    const late = foldReports(
+      knowledge,
+      [report("dn-1", 1_500, { identity: "10.0.0.1", modelId: "TopPass", depth: 9 })],
+      3_000,
+    );
+    expect(late.hostsReplaced).toEqual([]);
+    expect(late.knowledge.hosts["dn-1"]!.identity).toBe("10.0.0.2");
+    expect(fresh<number>(late.knowledge.hosts["dn-1"], "depth", 3_000)).toBe(4);
+  });
+
+  test("an absence older than the newest sighting cannot delete the live host", () => {
+    const knowledge = foldReports(
+      emptyKnowledge(GEN),
+      [report("dn-1", 2_000, { identity: "10.0.0.2", depth: 2 })],
+      2_000,
+    ).knowledge;
+    const late = foldReports(knowledge, [absent("dn-1", 1_000)], 3_000).knowledge;
+    expect(late.hosts["dn-1"]!.goneAt).toBeUndefined();
+    expect(late.hosts["dn-1"]!.identity).toBe("10.0.0.2");
+  });
+
   test("a future timestamp is clamped rather than trusted", () => {
     const { knowledge } = foldReports(emptyKnowledge(GEN), [report("dn-1", 999_999, { depth: 1 })], 1_000);
     // Otherwise a clock we do not control could make a fact immortal.
@@ -161,10 +213,10 @@ describe("a run from a dead world is refused at the channel", () => {
   });
 });
 
-describe("a host outside the mutation clock never ages", () => {
+describe("host immunity freezes its lifetime, not its neighbours", () => {
   // getAllMovableDarknetServers skips isStationary and hasStasisLink servers,
-  // and EVERY mutation branch draws from that pool — move, delete, disconnect
-  // and restart alike. So immunity is not per fact class.
+  // and EVERY mutation branch draws its victim from that pool. The host itself
+  // is immutable, but mutable neighbours can still invalidate its edge list.
   test("darkweb is stationary, so its position never expires", () => {
     const { knowledge } = foldReports(
       emptyKnowledge(GEN),
@@ -180,16 +232,15 @@ describe("a host outside the mutation clock never ages", () => {
     expect(fresh<number>(host, "depth", wayLater)).toBe(-1);
   });
 
-  test("a stasis link freezes a neighbour list, and releasing it thaws again", () => {
+  test("a stasis link freezes position, but its neighbours can still change", () => {
     const { knowledge } = foldReports(emptyKnowledge(GEN), [report("dn-1", 0, { neighbours: ["dn-2"] })], 0);
     const host = knowledge.hosts["dn-1"]!;
     const beyond = expiryMs("topology") + 1;
     const linked = { stasisLinked: new Set(["dn-1"]) };
 
     expect(isImmune(host, linked)).toBe(true);
-    expect(fresh<string[]>(host, "neighbours", beyond, linked)).toEqual(["dn-2"]);
-    // Released: it is an ordinary host again and the edge is the first thing to
-    // go, exactly as before.
+    expect(fresh<string[]>(host, "neighbours", beyond, linked)).toBeUndefined();
+    // Released: it remains stale, and its position resumes ageing too.
     expect(isImmune(host, { stasisLinked: new Set<string>() })).toBe(false);
     expect(fresh<string[]>(host, "neighbours", beyond)).toBeUndefined();
   });
@@ -359,7 +410,7 @@ describe("the facts the spreading agents added", () => {
     expect(expiryMs("identity")).toBe(Infinity);
     // A session belongs to the PID that won it, so it is worthless the moment
     // its observer dies. The shortest expiry we have is the honest answer.
-    expect(FACT_CLASS["hasSession"]).toBe("resource");
+    expect(FACT_CLASS["hasSession"]).toBeUndefined();
     expect(FACT_CLASS["usedRam"]).toBe("resource");
   });
 
@@ -532,132 +583,176 @@ describe("a job's allocation is PER THREAD, and both fit checks know it", () => 
   });
 });
 
-describe("a bleed leaves a mark, so the task stops re-deriving", () => {
-  // The queue is DERIVED, and heartbleed with `peek` leaves the ring intact —
-  // the game gives no signal that a host was just listened to. The controller's
-  // own `lastBleedAt` stamp is therefore the only thing standing between one
-  // bleed and an endless spawn/heartbleed/spawn loop on every held host.
-  //
-  // What the stamp is measured AGAINST changed: it used to be the topology
-  // expiry, which is a clock with nothing to do with logs, and is now the host's
-  // own log traffic interval by way of `shouldListen`. A ring that has not
-  // written a line since we last read it has nothing to give however long ago
-  // that was, which the old gate could not express.
-  test("a fresh stamp suppresses the bleed; a line's worth of time revives it", () => {
-    // Stated rather than inferred: the host writes a line every 10s, so the
-    // arithmetic below is the rule itself and not a coincidence of defaults.
-    const interval = 10;
+describe("target-owned bleed scheduling", () => {
+  test("pending records derive one serialized full-ring drain", () => {
     const at = 100_000;
-    const { knowledge } = foldReports(
-      emptyKnowledge(GEN),
-      [report("dn-1", at, { depth: 1, logTrafficInterval: interval })],
-      at,
-    );
+    const { knowledge } = foldReports(emptyKnowledge(GEN), [report("dn-1", at, { depth: 1 })], at);
     const agents = new Set(["dn-1"]);
-    const bleeds = (now: number) => deriveTasks(knowledge, now, { agents }).filter((t) => t.kind === "bleed");
+    const tasks = () => deriveTasks(knowledge, at, {
+      agents,
+      guesses: [{ host: "dn-1", id: "leak", reason: "compatible leaked password" }],
+    });
 
-    // Never bled, and the ring has had ages to fill.
-    expect(bleeds(at)).toHaveLength(1);
+    expect(tasks().filter((task) => task.kind === "bleed")).toHaveLength(0);
+    knowledge.hosts["dn-1"]!.attempts = { tried: 1, probes: 0 };
+    knowledge.hosts["dn-1"]!.ring = { pendingAuthRecords: 2 };
+    const pending = tasks();
+    expect(pending.filter((task) => task.kind === "bleed")).toHaveLength(1);
+    expect(pending.find((task) => task.kind === "bleed")?.reason).toContain("2 authentication log record");
+    expect(pending.filter((task) => task.kind === "attempt")).toHaveLength(0);
+  });
 
-    knowledge.hosts["dn-1"]!.facts["lastBleedAt"] = { value: true, at };
-    // One second later it cannot have written anything.
-    expect(bleeds(at + 1_000)).toHaveLength(0);
-    // Still nothing a hair under one interval.
-    expect(bleeds(at + interval * 1_000 - 1)).toHaveLength(0);
-    // One line's worth of time, and it is worth a call again.
-    expect(bleeds(at + interval * 1_000 + 1)).toHaveLength(1);
+  test("initial reads happen once per identity; elapsed time cannot materialize Netscript-visible logs", () => {
+    const at = 100_000;
+    const knowledge = foldReports(emptyKnowledge(GEN), [
+      report("dn-1", at, { depth: 1, neighbours: ["dn-2"], logTrafficInterval: 2 }),
+      report("dn-2", at, { depth: 2 }),
+    ], at).knowledge;
+    const opts = { agents: new Set(["dn-1"]), vault: new Set(["dn-1"]) };
+    knowledge.hosts["dn-1"]!.attempts = { tried: 0, probes: 0 };
+    expect(deriveTasks(knowledge, at, opts).find((task) => task.kind === "bleed")?.reason)
+      .toContain("initial log ring");
+    knowledge.hosts["dn-1"]!.ring = {
+      pendingAuthRecords: 0,
+      lastBleedAt: at - 40_000,
+      lastBleedAttemptAt: at - 40_000,
+    };
+    expect(deriveTasks(knowledge, at, opts).some((task) => task.id === "bleed:dn-1")).toBe(false);
+  });
+
+  test("failed and successful reads fold their distinct timestamps monotonically", () => {
+    const host = report("dn-1", 1_000, { depth: 1 });
+    const knowledge = foldReports(emptyKnowledge(GEN), [host], 1_000).knowledge;
+    foldLogDrain(knowledge.hosts["dn-1"], {
+      pendingAuthRecords: 2,
+      evidence: [],
+      attemptedAt: 2_000,
+    });
+    foldLogDrain(knowledge.hosts["dn-1"], {
+      pendingAuthRecords: 0,
+      evidence: [],
+      attemptedAt: 3_000,
+      drainedAt: 3_100,
+    });
+    expect(knowledge.hosts["dn-1"]!.ring).toMatchObject({
+      lastBleedAttemptAt: 3_000,
+      lastBleedAt: 3_100,
+    });
   });
 });
 
-describe("a bleed is priced, not merely timed", () => {
-  // What replacing the clock with `shouldListen` actually buys. The old gate
-  // asked "has it been a while"; this one asks "will the ring have anything in
-  // it, and could any of it be something we do not already hold".
-  const at = 1_000_000;
-
-  test("a host with nothing left to leak is refused BY NAME", () => {
-    // We hold its password and its only neighbour's, its adjacency is fresh, and
-    // no movable host anywhere is still shut — so every line it can write is
-    // spam or a heartbeat. The old gate would have bled it forever on a timer.
-    const { knowledge } = foldReports(
+describe("mutation-triggered recovery", () => {
+  test("one observed mutation refreshes a resident's otherwise-fresh adjacency", () => {
+    const at = 100_000;
+    const knowledge = foldReports(
       emptyKnowledge(GEN),
-      [
-        report("dn-1", at, { depth: 1, neighbours: ["dn-2"], logTrafficInterval: 1, isStationary: true }),
-        report("dn-2", at, { depth: 1, neighbours: ["dn-1"], isStationary: true }),
-      ],
+      [report("dn-1", at, { neighbours: ["dn-2"], depth: 1 })],
       at,
-    );
-    const listenOut = { refused: {} as Record<string, number>, examples: [] as { host: string; why: string; detail: string }[] };
-    const tasks = deriveTasks(knowledge, at, {
+    ).knowledge;
+    const ordinary = deriveTasks(knowledge, at + 1, { agents: new Set(["dn-1"]) });
+    expect(ordinary.some((task) => task.kind === "survey" && task.host === "dn-1")).toBe(false);
+    const changed = deriveTasks(knowledge, at + 1, {
       agents: new Set(["dn-1"]),
-      vault: new Set(["dn-1", "dn-2"]),
-      listenOut,
+      lastMutationAt: at + 1,
     });
-
-    expect(tasks.filter((t) => t.kind === "bleed")).toHaveLength(0);
-    // The refusal is attributable rather than a silence — the same contract
-    // `planSpread` and `planFarm` keep, and the last decision in the derivation
-    // that had no name for its "no". BOTH hosts refuse: we hold both passwords
-    // and neither can leak the other, which is the whole point of the case.
-    expect(listenOut.refused["nothing-to-learn"]).toBe(2);
-    // One example per reason, so the panel can print a sentence without
-    // carrying a row per host.
-    expect(listenOut.examples).toHaveLength(1);
-    expect(listenOut.examples[0]!.why).toBe("nothing-to-learn");
+    expect(changed.find((task) => task.kind === "survey" && task.host === "dn-1")?.reason)
+      .toBe("mutation observed since last survey");
   });
 
-  test("an uncracked movable host anywhere keeps every ring worth reading", () => {
-    // Branch 6 leaks a password belonging to some OTHER movable host, so its
-    // value is a property of the NET. Same two hosts as above, except dn-2 is
-    // movable and still shut.
-    const { knowledge } = foldReports(
-      emptyKnowledge(GEN),
-      [
-        report("dn-1", at, { depth: 1, neighbours: ["dn-2"], logTrafficInterval: 1, isStationary: true }),
-        report("dn-2", at, { depth: 1, neighbours: ["dn-1"] }),
-      ],
-      at,
-    );
-    const tasks = deriveTasks(knowledge, at, {
-      agents: new Set(["dn-1"]),
-      vault: new Set(["dn-1"]),
-    });
-    expect(tasks.filter((t) => t.kind === "bleed")).toHaveLength(1);
+  test("resident preflight distinguishes a lost edge from a replaced identity", () => {
+    const draft = {
+      kind: "attempt",
+      state: { host: "dn-2", from: "dn-1", targetIdentity: "10.0.0.2" },
+    } as DnetJob;
+    const calls: unknown[][] = [];
+    const ns = {
+      dnet: {
+        probe: (...args: unknown[]) => {
+          calls.push(args);
+          return args[0] === true ? ["10.0.0.9"] : ["dn-2"];
+        },
+      },
+    } as unknown as NS;
+    expect(preflightJob(ns, draft)?.targetState).toBe("replaced");
+    expect(calls).toEqual([[], [true]]);
+
+    const lost = {
+      dnet: { probe: () => ["somewhere-else"] },
+    } as unknown as NS;
+    expect(preflightJob(lost, draft)?.targetState).toBe("edge-lost");
   });
 
-  test("a chatty host outranks a quiet one, but never outranks a survey", () => {
-    // Ordering is by expected useful lines WITHIN the +10 band. A host with a
-    // lot to say should be read first; nothing that merely has a lot to say
-    // should displace learning the shape of the net.
-    const { knowledge } = foldReports(
-      emptyKnowledge(GEN),
-      [
-        // Both have an uncracked neighbour, so they are worth the same PER LINE
-        // and differ only in how many lines they will have minted.
-        report("chatty", at, { depth: 1, neighbours: ["unmapped"], logTrafficInterval: 1 }),
-        report("quiet", at, { depth: 1, neighbours: ["unmapped"], logTrafficInterval: 500 }),
-        // Adjacency never observed, so a survey derives for it — which is what
-        // the band assertion below needs something to compare against.
-        report("unmapped", at, { depth: 2 }),
-      ],
-      at,
-    );
-    const tasks = deriveTasks(knowledge, at, { agents: new Set(["chatty", "quiet"]) });
-    const bleeds = tasks.filter((t) => t.kind === "bleed");
-    const chatty = bleeds.find((t) => t.host === "chatty")!;
-    const quiet = bleeds.find((t) => t.host === "quiet")!;
-    expect(chatty.priority).toBeLessThan(quiet.priority);
+  test("a fresh neighbour set settles pending edge work and only flags active work", () => {
+    const settled: string[] = [];
+    const make = (id: string, host: string, state: Partial<DnetJob["state"]> = {}): DnetJob => ({
+      id,
+      kind: "attempt",
+      label: id,
+      budgetGb: 1,
+      threads: 1,
+      priority: 0,
+      longLived: false,
+      state: { host, from: "dn-1", ...state },
+      body: async () => ({ ok: true }),
+      settle: (result) => settled.push(`${id}:${result.targetState}`),
+      fail: () => undefined,
+    });
+    const pendingLost = make("pending-lost", "dn-2");
+    const remote = make("remote", "dn-3", { sessionOnly: true });
+    const self = make("self", "dn-1");
+    const active = make("active-lost", "dn-4");
+    const queue: DnetHostQueue = {
+      host: "dn-1",
+      pending: [pendingLost, remote, self],
+      active,
+      lastBeatAt: 0,
+      completed: 0,
+      failed: 0,
+    };
 
-    // ...and every bleed still sits behind every survey, which is what the
-    // clamp on the value bias is for.
-    const surveys = tasks.filter((t) => t.kind === "survey");
-    expect(surveys.length).toBeGreaterThan(0);
-    for (const survey of surveys) {
-      for (const bleed of bleeds) expect(survey.priority).toBeLessThan(bleed.priority);
-    }
+    expect(retireLostEdgeJobs(queue, "dn-1", ["dn-live"])).toBe(2);
+    expect(queue.pending).toEqual([remote, self]);
+    expect(settled).toEqual(["pending-lost:edge-lost"]);
+    expect(active.cancelReason).toContain("no longer adjacent");
+  });
+
+  test("a pending pin is abandoned when the lab edge it exists for is severed", () => {
+    // A pin is self-targeting, so `retireLostEdgeJobs` never matches it — its
+    // edge is the LAB it carries in `state.edge`, and a survey showing that
+    // edge gone dooms the pin. `retireLostPin` retires it before it spawns; a
+    // live edge, an unpin (release) job, and a plain pin with no edge are all
+    // left alone.
+    const settled: string[] = [];
+    const pin = (id: string, state: Partial<DnetJob["state"]>): DnetJob => ({
+      id,
+      kind: "pin",
+      label: id,
+      budgetGb: 12,
+      threads: 1,
+      priority: -95,
+      longLived: false,
+      state: { host: "dn-1", from: "dn-1", ...state },
+      body: async () => ({ ok: true }),
+      settle: (result) => settled.push(`${id}:${result.targetState}`),
+      fail: () => undefined,
+    });
+    const doomed = pin("pin-doomed", { edge: "lab" });
+    const alive = pin("pin-alive", { edge: "lab2" });
+    const releasing = pin("pin-release", { edge: "lab", unpin: true });
+    const edgeless = pin("pin-plain", {});
+    const q: DnetHostQueue = {
+      host: "dn-1",
+      pending: [doomed, alive, releasing, edgeless],
+      lastBeatAt: 0,
+      completed: 0,
+      failed: 0,
+    };
+    // Fresh neighbours include lab2 but not lab.
+    expect(retireLostPin(q, "dn-1", ["lab2", "dn-x"])).toBe(1);
+    expect(q.pending).toEqual([alive, releasing, edgeless]);
+    expect(settled).toEqual(["pin-doomed:edge-lost"]);
   });
 });
-
 describe("the charisma gate withholds what heartbleed would refuse", () => {
   // `heartbleed` is the ONE charisma-gated call: below the host's requirement
   // it can only answer 451. A bleed below the gate is a wasted job, and a probe
@@ -667,15 +762,14 @@ describe("the charisma gate withholds what heartbleed would refuse", () => {
   const at = expiryMs("topology") + 1_000;
 
   test("bleeds derive only above the host's requirement — or when it is unknown", () => {
-    // `logTrafficInterval` is supplied so the ring is known to have something in
-    // it: this test is about the CHARISMA gate, and a host with no new lines
-    // would refuse for an unrelated reason and pass for the wrong one.
     const { knowledge } = foldReports(
       emptyKnowledge(GEN),
       [report("dn-1", at, { depth: 1, requiredCharisma: 120, logTrafficInterval: 1 })],
       at,
     );
     const agents = new Set(["dn-1"]);
+    knowledge.hosts["dn-1"]!.attempts = { tried: 1, probes: 0 };
+    knowledge.hosts["dn-1"]!.ring = { pendingAuthRecords: 1 };
     const bleeds = (charisma?: number) =>
       deriveTasks(knowledge, at, { agents, ...(charisma !== undefined ? { charisma } : {}) })
         .filter((t) => t.kind === "bleed");
@@ -692,6 +786,8 @@ describe("the charisma gate withholds what heartbleed would refuse", () => {
       [report("dn-2", at, { depth: 1, logTrafficInterval: 1 })],
       at,
     ).knowledge;
+    unknown.hosts["dn-2"]!.attempts = { tried: 1, probes: 0 };
+    unknown.hosts["dn-2"]!.ring = { pendingAuthRecords: 1 };
     expect(
       deriveTasks(unknown, at, { agents: new Set(["dn-2"]), charisma: 1 }).filter((t) => t.kind === "bleed"),
     ).toHaveLength(1);
@@ -720,7 +816,7 @@ describe("the charisma gate withholds what heartbleed would refuse", () => {
 describe("home and the controller count an attempt the same way", () => {
   // One helper folds attempt outcomes on both sides of the drain, so the ledger
   // that drives planAttempt and the ledger the panel shows can never disagree.
-  test("candidates advance the tried count, probes only accumulate", () => {
+  test("only conclusive candidates and probes advance their counters", () => {
     const host: DarknetHostKnowledge = { hostname: "dn-1", lastSeenAt: 0, facts: {} };
     const outcome = (over: Partial<AttemptOutcome> = {}): AttemptOutcome => ({
       at: 1_000,
@@ -734,8 +830,18 @@ describe("home and the controller count an attempt the same way", () => {
     foldAttempts(host, [outcome({ candidateIndex: 0 })]);
     expect(host.attempts).toMatchObject({ modelId: "TopPass", tried: 1, probes: 0, lastCode: 401 });
 
-    foldAttempts(host, [outcome({ candidateIndex: 1 }), outcome({ status: "unattempted", candidateIndex: undefined })]);
+    foldAttempts(host, [
+      outcome({ candidateIndex: 1 }),
+      outcome({
+        status: "unattempted",
+        candidateIndex: undefined,
+        oracle: { kind: "oracle", passwordAttempted: "x", code: 401 },
+      }),
+    ]);
     expect(host.attempts).toMatchObject({ tried: 2, probes: 1 });
+
+    foldAttempts(host, [outcome({ candidateIndex: 2, code: 408, disposition: "transient" })]);
+    expect(host.attempts).toMatchObject({ tried: 2, probes: 1, lastCode: 408 });
 
     foldAttempts(host, [outcome({ candidateIndex: 2, code: 200, success: true })]);
     expect(host.attempts).toMatchObject({ tried: 3, solved: true, lastCode: 200 });
@@ -760,5 +866,19 @@ describe("home and the controller count an attempt the same way", () => {
       candidateIndex: 0,
     }]);
     expect(gone.attempts).toBeUndefined();
+  });
+
+  test("verifying a credential prunes cracking history but preserves ring scheduling", () => {
+    const host: DarknetHostKnowledge = {
+      hostname: "dn-3",
+      lastSeenAt: 0,
+      facts: {},
+      attempts: { tried: 20, probes: 2, history: [] },
+      ring: { pendingAuthRecords: 1, lastBleedAt: 5_000 },
+    };
+    markCredentialKnown(host);
+    expect(host.credentialKnown).toBe(true);
+    expect(host.attempts).toBeUndefined();
+    expect(host.ring).toEqual({ pendingAuthRecords: 1, lastBleedAt: 5_000 });
   });
 });

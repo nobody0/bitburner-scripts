@@ -32,6 +32,16 @@ export interface FarmRateModel {
   experienceScore?: number;
 }
 
+/** Hacking income per GB-second with stock-manipulation value removed. Money
+ * purchases cannot spend the bankroll and simultaneously claim the return of
+ * positions that require that same bankroll. */
+export function capitalIndependentScore(solution: { score: number; incomePerBatch: number; stockIncomePerBatch: number }): number {
+  const money = Math.max(0, solution.incomePerBatch);
+  const stock = Math.max(0, solution.stockIncomePerBatch);
+  const total = money + stock;
+  return total > 0 ? Math.max(0, solution.score) * (money / total) : Math.max(0, solution.score);
+}
+
 /** GB beyond which more farm RAM earns nothing: the pipeline holds at most
  * one batch per interval for one weakenTime. */
 export function depthCapGb(model: FarmRateModel): number {

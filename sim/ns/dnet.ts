@@ -34,6 +34,32 @@ export interface DnetNsOptions {
   gainCharismaExp: (amount: number) => void;
 }
 
+/** Exact formula surface shared by authenticate and ns.formulas.dnet. */
+export function calculateDnetAuthenticateTime(
+  options: Pick<DnetNsOptions, "system" | "skills" | "hasBoots" | "sf15Level">,
+  details: {
+    modelId: string;
+    difficulty: number;
+    depth: number;
+    requiredCharismaSkill: number;
+  },
+  threads = 1,
+  correctChars = 0,
+): number {
+  const { charisma, intelligence } = options.skills();
+  const skillFactor = (5 * details.requiredCharismaSkill + (details.difficulty + 1) * 100) / (charisma + 150);
+  const threadsFactor = 1 / (1 + 0.2 * (threads - 1));
+  const underleveled = charisma <= details.requiredCharismaSkill && details.depth > 1
+    ? 1.5 + (details.requiredCharismaSkill + 50) / (charisma + 50)
+    : 1;
+  const bootsFactor = options.hasBoots() ? 0.8 : 1;
+  const backdoorFactor = options.system.instability().authenticationDurationMultiplier;
+  const sf15Factor = options.sf15Level() > 2 ? 0.8 : 1;
+  const base = 850 * skillFactor * backdoorFactor * underleveled * bootsFactor * sf15Factor * threadsFactor;
+  const intelligenceBonus = 1 + (Math.pow(intelligence, 0.8) * 0.25) / 600;
+  return base / intelligenceBonus
+    + (details.modelId === "2G_cellular" ? correctChars : 0) * 50 * threadsFactor;
+}
 /** v3.0.1 `src/NetscriptFunctions/Darknet.ts`, restricted to the members the
  * controller and its agents actually call. Everything else is absent, so the
  * root namespace's unknown-member proxy reports it and throws rather than
@@ -44,15 +70,20 @@ export interface DnetNsOptions {
  * api"*. Without that, buying DarkscapeNavigator.exe would have no observable
  * effect and the purchase could not be tested at all.
  *
- * Deliberately still absent, and still throwing: `induceServerMigration`,
- * `unleashStormSeed`, `labreport`, `labradar`. None is on the deploy path.
+ * Deliberately still absent, and still throwing: `labreport` — it answers the
+ * same walls the free render already carries, and nothing deploys it.
+ * `labradar` IS modelled, because the walker pays for one whenever a single
+ * render can decide the exit or scout a seam's door candidates.
+ * `unleashStormSeed` left that list the day the storm became the deploy path's
+ * cache engine — modelled rather than the rule relaxed, exactly as the
+ * enforcing test's comment prescribes.
  *
  * `setStasisLink` IS modelled, and modelling it is what makes
  * `getStasisLinkedServers()` a reading rather than a constant: the link pins the
  * calling host against move, delete and restart, so it changes the pool every
  * mutation branch draws from. */
 export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
-  const { system, process, delay, skills, hasBoots, sf15Level, servers } = options;
+  const { system, process, delay, skills, servers } = options;
 
   const requireAccess = (): void => {
     if (system.hasAccess()) return;
@@ -70,37 +101,10 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
   const NO_BLOCK_RAM = 454;
   const SERVICE_UNAVAILABLE = 503;
 
-  /** `calculateAuthenticationTime`, transcribed.
-   *
-   * The `2G_cellular` term is included from the start and is not optional: it is
-   * the only leak a timing attack can climb, and omitting it would not fail
-   * loudly — a strategy would measure a flat curve and conclude the model is
-   * uncrackable, which is precisely the "blends measured and invented behaviour"
-   * failure AGENTS.md forbids.
-   * Source: src/DarkNet/effects/effects.ts:60-89 */
+  /** `calculateAuthenticationTime`, shared with `formulas.dnet`. */
   const authTimeMs = (hostname: string, threads: number, correctChars: number): number => {
     const host = system.record(hostname);
-    if (!host) return 100;
-    const { charisma, intelligence } = skills();
-    const skillFactor = (5 * host.requiredCharismaSkill + (host.difficulty + 1) * 100) / (charisma + 150);
-    const threadsFactor = 1 / (1 + 0.2 * (threads - 1));
-    const underleveled = charisma <= host.requiredCharismaSkill && host.depth > 1
-      ? 1.5 + (host.requiredCharismaSkill + 50) / (charisma + 50)
-      : 1;
-    const bootsFactor = hasBoots() ? 0.8 : 1;
-    // `getBackdoorAuthTimeDebuff`, and it is not optional. It multiplies EVERY
-    // authentication in the run — including ones against hosts that are not
-    // backdoored — so leaving it out would make a backdoor read as free and any
-    // policy that spends the allowance untestable in the only direction that
-    // matters.
-    const backdoorFactor = system.instability().authenticationDurationMultiplier;
-    // The docs attribute the discount to SF15.2; the code tests level > 2.
-    // Code wins.
-    const sf15Factor = sf15Level() > 2 ? 0.8 : 1;
-    const base = 850 * skillFactor * backdoorFactor * underleveled * bootsFactor * sf15Factor * threadsFactor;
-    const intelligenceBonus = 1 + (Math.pow(intelligence, 0.8) * 0.25) / 600;
-    return base / intelligenceBonus
-      + (host.modelId === "2G_cellular" ? correctChars : 0) * 50 * threadsFactor;
+    return host ? calculateDnetAuthenticateTime(options, host, threads, correctChars) : 100;
   };
 
   /** `checkDarknetServer`, in upstream's exact check ORDER.
@@ -271,6 +275,25 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       return system.isLab(hostname)
         ? { success: true, code: OK, message: verdict.message, data: verdict.data }
         : { success: true, code: OK, message: "Success" };
+    },
+
+    /** The labyrinth's paid eye: radius 3, player AND exit shown, one full
+     * authentication delay, and NO charisma — upstream delays and renders
+     * without ever reaching `getAuthResult`. Needs the current lab to exist
+     * and a direct connection to it; both refusals are riddle-worded successes
+     * of `false` with no code, exactly as upstream answers them.
+     * Source: src/NetscriptFunctions/Darknet.ts:671-704 */
+    labradar: async () => {
+      requireAccess();
+      const stage = system.currentLab();
+      if (!stage || !system.record(stage.hostname)) {
+        return { success: false, message: "You feel blind..." };
+      }
+      if (!system.isDirectConnected(process.host, stage.hostname)) {
+        return { success: false, message: "You feel disconnected..." };
+      }
+      await delay(authTimeMs(stage.hostname, process.threads, 0), "dnet.labradar");
+      return system.labRadar(process.pid);
     },
 
     /** Re-open a session at ANY distance, with the password.
@@ -475,7 +498,7 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       if (!record || record.blockedRam <= 0) {
         return { success: false, code: NO_BLOCK_RAM, message: "No Block RAM" };
       }
-      const freed = system.reallocateRam(hostname, process.threads, skills().charisma);
+      const freed = system.reallocateRam(hostname, process.threads, skills().charisma, options.nowMs());
       if (!freed) return { success: false, code: SERVICE_UNAVAILABLE, message: "Service Unavailable" };
       options.gainCharismaExp(options.charismaExpMult() * freed.charismaExp);
       return {
@@ -505,6 +528,17 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       const outcome = system.phish(process.host, process.threads, skills().charisma, options.nowMs());
       options.gainCharismaExp(options.charismaExpMult() * outcome.charismaExp);
       return { success: outcome.success, code: outcome.code, message: outcome.message };
+    },
+
+    /** Fires `STORM_SEED.exe` off the CALLING host — synchronous, unlike the
+     * other destructive members, and 404 rather than a throw when the seed is
+     * absent. The system consumes the seed and stamps its clock BEFORE the
+     * lock check, upstream's own hazard: a second fire mid-burst burns the
+     * seed for nothing. Source: src/NetscriptFunctions/Darknet.ts:4650-4659,
+     * src/DarkNet/effects/webstorm.ts:25-79 */
+    unleashStormSeed: () => {
+      requireAccess();
+      return system.unleashStormSeed(process.host, options.nowMs());
     },
 
     openCache: (rawFilename: unknown, _suppressToast?: unknown) => {

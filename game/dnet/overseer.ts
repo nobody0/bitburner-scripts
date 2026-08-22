@@ -1,30 +1,52 @@
 import type { NS } from "@ns";
 import type { ArtifactIdentity } from "../../shared/run-identity.ts";
 import {
+  conclusiveAttempt,
   LOCAL_CODE,
   type AttemptOutcome,
+  type LogDrainOutcome,
+  type ProvisionalCredential,
   type ReportHost,
   type VaultEntry,
 } from "../../shared/strategy/dnet/courier.ts";
 import { parseOverseerArgs, residentArgs } from "../../shared/strategy/dnet/mission.ts";
 import {
-  LAST_BLEED_AT,
   coverage,
   emptyKnowledge,
+  foldLogDrain,
   foldAttempts,
   foldReports,
   freeRam,
   fresh,
+  markCredentialKnown,
+  stormWipe,
   type DarknetKnowledge,
   type ExpiryOpts,
 } from "../../shared/strategy/dnet/knowledge.ts";
 import { deriveTasks, type DeriveOptions, type Task, type TaskKind } from "../../shared/strategy/dnet/queue.ts";
 import { DEFAULT_SPREAD_LIMITS, candidatesFrom, planSpread } from "../../shared/strategy/dnet/spread.ts";
-import { planFarm, type FarmHost, type FarmKind } from "../../shared/strategy/dnet/farm.ts";
-import { holdHostFrom, planInduce, planStasis, type HoldHost, type HoldView } from "../../shared/strategy/dnet/hold.ts";
-import { looseCandidates, type LooseTarget } from "../../shared/strategy/dnet/listen.ts";
-import { getPasswordType } from "../../shared/strategy/dnet/codecs.ts";
-import { DEFAULT_NET_DEPTH, isLabyrinth, labStage } from "../../shared/strategy/dnet/rates.ts";
+import { planFarm, type FarmHost, type FarmKind, type PromoteSymbol } from "../../shared/strategy/dnet/farm.ts";
+import { holdHostFrom, planInduce, planStasis, stasisTargetDepths, type HoldHost, type HoldView } from "../../shared/strategy/dnet/hold.ts";
+import { planStorm, type StormHost } from "../../shared/strategy/dnet/storm.ts";
+import { looseCandidates, type LooseTarget } from "../../shared/strategy/dnet/oracle.ts";
+import {
+  DEFAULT_NET_DEPTH,
+  STORM_BURST_MS,
+  STORM_COOLDOWN_MS,
+  STORM_QUIET_MS,
+  isLabyrinth,
+  labStage,
+  msPerHostEvent,
+  msPerHostEventAny,
+} from "../../shared/strategy/dnet/rates.ts";
+import {
+  emptyField,
+  labPrior,
+  liveExitCandidates,
+  mergeLabFields,
+  renderLabField,
+  type LabField,
+} from "../../shared/strategy/dnet/maze.ts";
 import {
   JOB_METHODS,
   ROUTINE_JOB_KINDS,
@@ -34,6 +56,7 @@ import {
   RESIDENT_METHODS,
   dnetRealm,
   foldRefusals,
+  hardCancelEligible,
   priceAgent,
   overseerIsLive,
   sweepClaims,
@@ -41,12 +64,14 @@ import {
   type DnetSpreadReport,
   type DnetFarmReport,
   type DnetHoldReport,
-  type DnetListenReport,
+  type DnetStormReport,
   type DnetClaim,
   type DnetHostQueue,
   type DnetJob,
   type DnetJobResult,
   type DnetJobState,
+  type DnetLabReport,
+  type DnetLabWalker,
   type DnetOrders,
   type DnetRendezvous,
 } from "./realm.ts";
@@ -77,10 +102,9 @@ import { initTelemetry } from "../lib/telemetry.ts";
  *
  * ## What it costs
  *
- * base 1.6 + `getHostname` 0.05 = **1.65 GB static**, pinned by
- * tests/ram-budget.test.ts. Home launches it with a little more than that, since
- * every allocation carries `priceAgent`'s margin. Everything else it does is
- * free: `sleep` is 0 GB and the queues are live objects in the page realm.
+ * Its priced surface is the base plus `getHostname`, `nextMutation` and
+ * `isRunning`, pinned by tests/ram-budget.test.ts. Home launches it with
+ * `priceAgent`'s margin. Target observation and action remain absent.
  *
  * Deliberately absent: `probe`, `getServerDetails`, `heartbleed`, `authenticate`,
  * `scp`, `exec` and `spawn`. It cannot observe, cannot crack, and cannot launch.
@@ -96,7 +120,7 @@ import { initTelemetry } from "../lib/telemetry.ts";
  * this one, reaching ns only through bracket notation on the ns they are handed
  * — `jobNs["dnet"]["authenticate"]`. The static analyser therefore charges the
  * agent's declared `ramOverride` rather than this bundle, which is the same
- * trick `game/lib/dodge.ts` uses and the reason this file stays at 1.65 GB while
+ * trick `game/lib/dodge.ts` uses and the reason this file stays small while
  * the work it describes costs several times that. They bundle into this same
  * artifact, so that rule binds them exactly as hard as it binds this file. */
 
@@ -149,6 +173,105 @@ type HoldTask = NonNullable<DeriveOptions["hold"]>[number];
  * ten minutes, and a deleted host comes back with a new password. So this is a
  * working set, not an archive, and the oldest entry is the one to lose. */
 const MAX_LOOSE_PASSWORDS = 40;
+/** Named but unverified leaks are more valuable than loose strings. */
+const MAX_PROVISIONAL_CREDENTIALS = 80;
+
+/** Reconcile one resident queue against a newly observed neighbour set.
+ * Returns how many pending/active jobs were retired. Active work is flagged
+ * here, not killed: setting `cancelReason` gives the body its cooperative
+ * window, and `hardCancelSweep` on the next tick shoots whatever armored job
+ * is still burning seconds inside a blocking call. */
+export function retireLostEdgeJobs(
+  queue: DnetHostQueue,
+  vantage: string,
+  neighbours: readonly string[],
+): number {
+  const applies = (job: DnetJob): boolean => job.state.from === vantage
+    && job.state.host !== vantage
+    && job.state.sessionOnly !== true
+    && !neighbours.includes(job.state.host);
+  const retired = queue.pending.filter(applies);
+  if (retired.length > 0) {
+    queue.pending = queue.pending.filter((job) => !applies(job));
+    for (const job of retired) {
+      job.settle({ ok: false, targetState: "edge-lost", detail: `${job.state.host} is no longer adjacent to ${vantage}` });
+    }
+  }
+  let active = 0;
+  if (queue.active && applies(queue.active)) {
+    queue.active.cancelReason = `${queue.active.state.host} is no longer adjacent to ${vantage}`;
+    active = 1;
+  }
+  return retired.length + active;
+}
+
+/** Retire a PENDING pin whose lab edge has just been observed severed.
+ *
+ * `retireLostEdgeJobs` cannot see this one: a pin is self-targeting
+ * (`host === from`), so its `applies` check — which keys on the job's TARGET
+ * no longer being adjacent to the vantage — never matches. But a pin exists
+ * for a DIFFERENT edge, the lab it carries in `state.edge`, and when a survey
+ * shows this host's fresh neighbours no longer include that lab the pin is
+ * doomed: `pinJob`'s own act-time `probe()` would refuse it with 912. Retiring
+ * it here just saves spawning the doomed job. Returns how many were retired.
+ *
+ * The ACTIVE pin is deliberately left alone. `setStasisLink` is a single quick
+ * call rather than a minutes-long batch, so there is no in-flight window worth
+ * a hard-cancel — and the act-time probe inside the body is the backstop for
+ * the case where the edge dies between this observation and the call firing. */
+export function retireLostPin(queue: DnetHostQueue, host: string, neighbours: readonly string[]): number {
+  const doomed = (job: DnetJob): boolean =>
+    job.kind === "pin"
+    && job.state.unpin !== true
+    && job.state.edge !== undefined
+    && !neighbours.includes(job.state.edge);
+  const retired = queue.pending.filter(doomed);
+  if (retired.length > 0) {
+    queue.pending = queue.pending.filter((job) => !doomed(job));
+    for (const job of retired) {
+      job.settle({ ok: false, targetState: "edge-lost", detail: `${host}'s edge to ${job.state.edge} is gone; pin abandoned before spending` });
+    }
+  }
+  return retired.length;
+}
+
+/** Kill live jobs whose work is provably pointless. Returns how many died.
+ *
+ * A job carrying a `cancelReason` is pointless work still burning real
+ * seconds, and a body deep inside a blocking call cannot look at the flag —
+ * the engine's concurrency lock blocks every ns call while one is in flight.
+ * If the job is ARMORED — its agent proved the atExit-respawn hook — it can be
+ * killed outright: the engine runs that hook synchronously inside this very
+ * `kill` call, with the dying process's ns fully usable, so by the time `kill`
+ * returns the job has settled 'cancelled', `queue.active` is clear, and a
+ * fresh resident is already running on the host.
+ *
+ * Called once per tick, AFTER the retire* setters stamped their reasons, so a
+ * body at a loop boundary still gets to stop on its own first. `pin` and
+ * `walk` never qualify (`HARD_CANCEL_EXEMPT_KINDS`), nor does any pre-armor
+ * agent build — `hardCancelEligible` is the whole policy. Bracket notation
+ * throughout: the overseer's static RAM figure must stay `getHostname` alone,
+ * and its allocation prices `isRunning` and `kill` from `CONTROLLER_METHODS`. */
+export function hardCancelSweep(ns: NS, queues: Map<string, DnetHostQueue>): number {
+  let killed = 0;
+  for (const queue of queues.values()) {
+    const active = queue.active;
+    const pid = active?.pid;
+    if (!active || pid === undefined || active.cancelReason === undefined || !hardCancelEligible(active)) continue;
+    // Vouch the pid this tick: a stale or recycled one is the timeout loop's
+    // corpse to count, not ours to shoot at.
+    let alive = false;
+    try {
+      alive = ns["isRunning"](pid, queue.host);
+    } catch {
+      alive = false;
+    }
+    if (!alive) continue;
+    ns["kill"](pid);
+    killed++;
+  }
+  return killed;
+}
 
 export async function main(ns: NS): Promise<void> {
   ns.disableLog("ALL");
@@ -184,7 +307,7 @@ export async function main(ns: NS): Promise<void> {
   let netDepth: number | undefined;
   let bitNode: number | undefined;
   let knowledge: DarknetKnowledge = emptyKnowledge(mission.generation);
-  const vault = new Map<string, string>();
+  const vault = new Map<string, VaultEntry>();
   const codes: Record<string, number> = {};
   // The last derivation's spread verdict, overwritten every tick. A snapshot
   // rather than a tally: a host that has been full for a minute is one problem,
@@ -192,12 +315,12 @@ export async function main(ns: NS): Promise<void> {
   let spread: DnetSpreadReport | undefined;
   /** The last farm derivation, on the same snapshot discipline as `spread`. */
   let farm: DnetFarmReport | undefined;
-  /** The last bleed-gate verdict, same discipline again. */
-  let listen: DnetListenReport | undefined;
   /** The last hold derivation — the pin, the push and the walk. Same
    *  discipline: a snapshot of the current answer, not a tally of the ticks
    *  that reached it. */
   let hold: DnetHoldReport | undefined;
+  /** The last storm derivation, same snapshot discipline. */
+  let storm: DnetStormReport | undefined;
   /** Passwords a log leaked with no owner attached.
    *
    *  Realm-only and never drained: an unattributed password is still a
@@ -206,6 +329,8 @@ export async function main(ns: NS): Promise<void> {
    *  because a chatty net mints these faster than they can be spent and the
    *  oldest are the least likely to still belong to a live host. */
   const loosePool: string[] = [];
+  /** Named plaintext leaks, retained separately until authenticate verifies. */
+  const provisionalPool: ProvisionalCredential[] = [];
   /** `<host>\u0000<password>` pairs already spent, so a candidate that was
    *  wrong is not offered again for the life of this overseer. The engine
    *  charges nothing for a wrong `authenticate`, but a call is still a call and
@@ -219,22 +344,36 @@ export async function main(ns: NS): Promise<void> {
    *  member the overseer can afford. Drained so home can carry it into the
    *  expiry it runs its own fold on. */
   const stasisLinked = new Set<string>();
+  /** Hosts whose link we RELEASED, by release time. Home's `stasisLinked`
+   *  order is a union (a pin we just made is newer than a probe that missed
+   *  it), and the same asymmetry cuts the other way: a probe taken before our
+   *  release would union the dead link back in. Entries older than the window
+   *  defer to home again — by then its probe has seen the release. */
+  const recentUnpins = new Map<string, number>();
+  const RECENT_UNPIN_MS = 60_000;
   /** The highest charisma any job has said it needed and did not have. Only the
    *  maze walker reports one, and it is drained to home's existing career
    *  need rather than to a new channel. */
   let charismaNeeded: number | undefined;
-  /** Symbols home has named as worth promoting. Empty is the usual answer, and
-   *  the farm ladder refuses propaganda by name on it. */
-  let promoteSymbols: string[] = [];
+  /** Symbols home has named as worth promoting, each carrying home's expected
+   *  profit — the promote side of the farm's earn comparison. Empty is the
+   *  usual answer, and the farm ladder refuses propaganda by name on it. */
+  let promoteSymbols: PromoteSymbol[] = [];
+  /** The player's crime success multiplier, a term in both phishing chances.
+   *  Only home can see the player object; 1 until ordered. */
+  let crimeSuccessMult = 1;
   /** `getStasisLinkLimit()`. One until the labyrinth pays out, and home says so
    *  when it can see the augmentations. */
   let stasisLimit = 1;
-  /** How many darknet hosts home has backdoored. It is a term in the mutation
+  /** Whether a labyrinth can exist in this world. True until home says
+   *  otherwise — the conservative side, see `DnetOrders.labExpected`. */
+  let labExpected = true;
+  /** Home's stamped ordinary backdoors. Their count is a term in the mutation
    *  rates every expiry is derived from — a backdoored host carries a ~9%/tick
    *  restart and a ~4%/tick delete on top of the ordinary branches — so a
    *  overseer that did not hear about them would believe its facts lasted
    *  longer than they do. */
-  let backdoored: number | undefined;
+  const backdoors = new Map<string, number>();
   /** Karma spent opening caches SINCE THE LAST DRAIN. Negative, because karma
    *  only falls — which is what makes a cache free progress toward the gang
    *  threshold. A delta rather than a running total, so that home's tally
@@ -246,6 +385,20 @@ export async function main(ns: NS): Promise<void> {
    *  there is. Undefined reads as "the window is open", which is the direction
    *  that costs nothing: the call is made either way. */
   let lastPhishCacheAt: number | undefined;
+  /** When the last storm was fired, on OUR clock — `lastStormTime` is engine
+   *  module state exposed nowhere. Stamped PESSIMISTICALLY the moment a storm
+   *  job is filed, because the firing host's agent dies seconds after a
+   *  successful call and the authoritative result may never drain: a lost
+   *  report must not skip the quiet period or the wipe. Rolled back if the job
+   *  reports it did not fire, confirmed by the drained `stormFiredAt`, and
+   *  max-merged from home's replay after a re-seed. */
+  let lastStormFiredAt: number | undefined;
+  /** What `lastStormFiredAt` held before the pessimistic claim-time stamp, so
+   *  a storm job that answered 404 can put the clock back. */
+  let stormStampPrior: number | undefined;
+  /** When the post-burst wipe is due. Set alongside every advance of
+   *  `lastStormFiredAt`; cleared once the wipe has run. */
+  let stormWipeAt: number | undefined;
   /** Log shapes our parser could not read, and how often each turned up.
    *
    *  A TALLY rather than a snapshot, unlike `spread` and `farm`: drift is a
@@ -261,6 +414,7 @@ export async function main(ns: NS): Promise<void> {
   const pendingHosts: ReportHost[] = [];
   const pendingCredentials: VaultEntry[] = [];
   const pendingAttempts: { hostname: string; outcome: AttemptOutcome }[] = [];
+  const pendingLogDrains: { hostname: string; outcome: LogDrainOutcome }[] = [];
   const queues = new Map<string, DnetHostQueue>();
   // What is being done TO each host, from wherever. The other axis from
   // `queues`, which is per-VANTAGE. See DnetClaim.
@@ -268,6 +422,73 @@ export async function main(ns: NS): Promise<void> {
   let residentsSeenEver = 0;
   let residentsLost = 0;
   let standDown = false;
+  let lastMutationAt: number | undefined;
+  let pendingMutations = 0;
+  let mutationSweepDue = false;
+  /** The lab's shared maze knowledge, keyed by lab hostname. The ONE piece of
+   * walk progress that survives a walker's PID: every walker folds it in before
+   * deciding and merges its own field back after observing, so a finisher and a
+   * scout act as one mapper and a re-seeded walker starts with its
+   * predecessor's map. Merged, never replaced — two concurrent walkers must not
+   * clobber each other's slots. Never cleared: rungs have distinct hostnames, a
+   * finished lab derives no more walks, and the install that regenerates a maze
+   * also ends this process. */
+  const labFields = new Map<string, LabField>();
+
+  /** The maze as the panel needs it, assembled from the two halves only this
+   * process holds: the shared field, and the walks its queues are carrying.
+   *
+   * Absent when there is nothing to say — no field learned and nobody walking —
+   * which is the common case, because most runs never reach a lab at all. */
+  const labReport = (at: number): DnetLabReport | undefined => {
+    /** Live walks, by the lab they are walking. A queue's `active` job is the
+     *  process; a pending one has not started, so it has no position yet and is
+     *  deliberately not reported as a walker. */
+    const walkers = new Map<string, DnetLabWalker[]>();
+    for (const queue of queues.values()) {
+      const job = queue.active;
+      if (job === undefined || job.kind !== "walk") continue;
+      const held = job.progress ?? {};
+      const moves = typeof held["moves"] === "number" ? held["moves"] : 0;
+      const walls = typeof held["walls"] === "number" ? held["walls"] : 0;
+      const radars = typeof held["radars"] === "number" ? held["radars"] : 0;
+      const list = walkers.get(job.state.host) ?? [];
+      list.push({
+        from: queue.host,
+        ...(job.state.role !== undefined ? { role: job.state.role } : {}),
+        ...(typeof held["at"] === "string" ? { at: held["at"] } : {}),
+        moves,
+        walls,
+        radars,
+        // Moves that landed, moves the engine refused, and radars: every one of
+        // them paid a full authentication, and that is what the walk's pace is
+        // measured in.
+        attempts: moves + walls + radars,
+        ...(typeof held["believedLeft"] === "number" ? { believedLeft: held["believedLeft"] } : {}),
+        startedAt: job.startedAt ?? at,
+        beatAt: job.beatAt ?? job.startedAt ?? at,
+        pinned: stasisLinked.has(queue.host),
+      });
+      walkers.set(job.state.host, list);
+    }
+    // The lab we have most to say about: one being walked beats one merely
+    // mapped, and there is only ever one open rung anyway.
+    const host = [...walkers.keys()][0] ?? [...labFields.keys()][0];
+    if (host === undefined) return undefined;
+    const stage = labStage(host);
+    if (stage === undefined) return undefined;
+    const prior = labPrior(stage);
+    const field = labFields.get(host) ?? emptyField();
+    return {
+      host,
+      width: prior.width,
+      height: prior.height,
+      grid: renderLabField(field, prior),
+      candidates: liveExitCandidates(field, prior),
+      exitKnown: field.exit !== undefined,
+      walkers: (walkers.get(host) ?? []).sort((a, b) => a.from.localeCompare(b.from)),
+    };
+  };
 
   const rendezvous: DnetRendezvous = {
     protocol: RENDEZVOUS_PROTOCOL,
@@ -280,18 +501,24 @@ export async function main(ns: NS): Promise<void> {
     // Home's whole view of the darknet, handed over once and forgotten. See the
     // note on DnetRendezvous.drain for why it clears.
     drain() {
+      // Built once: the grid is a couple of thousand characters and rendering it
+      // twice for a spread guard would be the most expensive thing in this
+      // function.
+      const lab = labReport(Date.now());
       const drained = {
         hosts: pendingHosts.splice(0, pendingHosts.length),
         credentials: pendingCredentials.splice(0, pendingCredentials.length),
         attempts: pendingAttempts.splice(0, pendingAttempts.length),
+        logDrains: pendingLogDrains.splice(0, pendingLogDrains.length),
         codes: { ...codes },
         ...(spread ? { spread } : {}),
         ...(farm ? { farm } : {}),
-        ...(listen ? { listen } : {}),
         ...(hold ? { hold } : {}),
+        ...(storm ? { storm } : {}),
         ...(stasisLinked.size > 0 ? { stasisLinked: [...stasisLinked].sort() } : {}),
         ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
         ...(lastPhishCacheAt !== undefined ? { lastPhishCacheAt } : {}),
+        ...(lastStormFiredAt !== undefined ? { stormFiredAt: lastStormFiredAt } : {}),
         ...(grammarUnrecognised > 0
           ? { grammar: { unrecognised: grammarUnrecognised, shapes: { ...grammarShapes } } }
           : {}),
@@ -307,6 +534,11 @@ export async function main(ns: NS): Promise<void> {
           ...(queue.lastError !== undefined ? { lastError: queue.lastError } : {}),
         })),
         residentsLost,
+        mutations: pendingMutations,
+        // NOT cleared below with the deltas: the maze is a standing picture, not
+        // a since-last-drain event, and home ASSIGNS it. Clearing it would blank
+        // the panel between drains.
+        ...(lab !== undefined ? { lab } : {}),
       };
       for (const key of Object.keys(codes)) delete codes[key];
       // A DELTA, cleared like `codes` and `residentsLost` beside it. Handing
@@ -316,17 +548,36 @@ export async function main(ns: NS): Promise<void> {
       // cache before the restart bought.
       karmaLoss = 0;
       residentsLost = 0;
+      pendingMutations = 0;
       return drained;
     },
     order(orders: DnetOrders) {
       charisma = orders.charisma;
       if (orders.netDepth !== undefined) netDepth = orders.netDepth;
       if (orders.bitNode !== undefined) bitNode = orders.bitNode;
-      for (const entry of orders.vault ?? []) vault.set(entry.hostname, entry.password);
+      if (orders.vault !== undefined) {
+        const snapshotAt = orders.vaultSnapshotAt ?? Date.now();
+        const supplied = new Set(orders.vault.map((entry) => entry.hostname));
+        for (const [hostname, entry] of vault) {
+          if (!supplied.has(hostname) && entry.at <= snapshotAt) vault.delete(hostname);
+        }
+        for (const entry of orders.vault) {
+          const host = knowledge.hosts[entry.hostname];
+          if (host?.goneAt !== undefined) continue;
+          if (entry.identity !== undefined && host?.identity !== undefined && entry.identity !== host.identity) continue;
+          vault.set(entry.hostname, entry);
+          markCredentialKnown(host);
+        }
+      }
       if (orders.openLabCache !== undefined) openLabCache = orders.openLabCache;
       if (orders.promoteSymbols !== undefined) promoteSymbols = [...orders.promoteSymbols];
-      if (orders.backdoored !== undefined) backdoored = orders.backdoored;
+      if (orders.crimeSuccessMult !== undefined) crimeSuccessMult = orders.crimeSuccessMult;
+      if (orders.backdoors !== undefined) {
+        backdoors.clear();
+        for (const entry of orders.backdoors) backdoors.set(entry.hostname, entry.installedAt);
+      }
       if (orders.stasisLimit !== undefined) stasisLimit = orders.stasisLimit;
+      if (orders.labExpected !== undefined) labExpected = orders.labExpected;
       // Home's probe is the AUTHORITY on which hosts are pinned; the set below
       // is only what this overseer has seen itself do. Replayed for the same
       // reason the vault and the phishing window are: a re-seeded overseer
@@ -334,11 +585,25 @@ export async function main(ns: NS): Promise<void> {
       // stretch filing 16 GB pin jobs for links the game already holds and
       // collecting 453s. Union rather than replacement, because a pin this
       // overseer has just made is newer than the probe that missed it.
-      for (const hostname of orders.stasisLinked ?? []) stasisLinked.add(hostname);
+      for (const hostname of orders.stasisLinked ?? []) {
+        const releasedAt = recentUnpins.get(hostname);
+        if (releasedAt !== undefined && Date.now() - releasedAt < RECENT_UNPIN_MS) continue;
+        recentUnpins.delete(hostname);
+        stasisLinked.add(hostname);
+      }
       // Replayed after a re-seed so a fresh overseer does not believe a window
       // is open that home watched close under the previous one.
       if (orders.lastPhishCacheAt !== undefined) {
         lastPhishCacheAt = Math.max(lastPhishCacheAt ?? 0, orders.lastPhishCacheAt);
+      }
+      // Same replay as the phishing window, with one extra duty: a stamp still
+      // inside the quiet window means this (re-seeded) overseer is standing in
+      // a net mid-storm or just after one, so the wipe it never saw is due.
+      if (orders.lastStormAt !== undefined && orders.lastStormAt > (lastStormFiredAt ?? 0)) {
+        lastStormFiredAt = orders.lastStormAt;
+        if (Date.now() - lastStormFiredAt < STORM_QUIET_MS) {
+          stormWipeAt = lastStormFiredAt + STORM_QUIET_MS;
+        }
       }
       if (orders.standDown === true) standDown = true;
     },
@@ -352,29 +617,130 @@ export async function main(ns: NS): Promise<void> {
 
   realm.dnet_overseer = rendezvous;
 
+  // The API supplies no mutation details, only an exact edge-triggered clock.
+  // Keep one waiter alive, coalesce ticks for surveys, and let the controller
+  // prove process death before clearing any active queue.
+  void (async () => {
+    while (!standDown) {
+      await ns["dnet"]["nextMutation"]();
+      if (standDown) break;
+      lastMutationAt = Date.now();
+      pendingMutations++;
+      mutationSweepDue = true;
+    }
+  })();
+
   const note = (code: number, n = 1): void => {
     codes[String(code)] = (codes[String(code)] ?? 0) + n;
   };
 
-  /** Fold a finished job's findings into the map, so the very next derivation
-   * already accounts for them. This is the dedup: work a believable fact covers
-   * does not exist, so a job that just refreshed one has, by returning, removed
-   * the task that asked for it. No acknowledgement protocol, nothing to drift. */
+  /** Settle pending work locally and ask active work to stop cooperatively. */
+  const retireJobs = (
+    hostname: string,
+    reason: string,
+    applies: (job: DnetJob) => boolean,
+  ): void => {
+    const targetsHost = (job: DnetJob): boolean => job.state.host === hostname && applies(job);
+    for (const queue of queues.values()) {
+      const retired = queue.pending.filter(targetsHost);
+      if (retired.length > 0) {
+        queue.pending = queue.pending.filter((job) => !targetsHost(job));
+        for (const job of retired) job.settle({ ok: false, targetState: 'cancelled', detail: reason });
+      }
+      if (queue.active && targetsHost(queue.active)) queue.active.cancelReason = reason;
+    }
+  };
+
+  const forgetGuesses = (hostname: string): void => {
+    for (const key of [...spentGuesses]) {
+      if (key.startsWith(`${hostname}\u0000`)) spentGuesses.delete(key);
+    }
+  };
+
+  /** A verified credential makes only cracking work obsolete. */
+  const retireCracking = (hostname: string, reason: string): void => {
+    forgetGuesses(hostname);
+    retireJobs(hostname, reason, (job) => job.kind === 'attempt');
+  };
+
+  /** Retire every fact and job tied to one server lifetime. */
+  const retireLifetime = (hostname: string, reason: string): void => {
+    vault.delete(hostname);
+    lastPlantAt.delete(hostname);
+    backdoors.delete(hostname);
+    forgetGuesses(hostname);
+    for (let index = provisionalPool.length - 1; index >= 0; index--) {
+      if (provisionalPool[index]!.hostname === hostname) provisionalPool.splice(index, 1);
+    }
+    retireJobs(hostname, reason, () => true);
+  };
+
+  // Successful authentication writes through to the shared vault immediately;
+  // it never depends on the worker surviving long enough to settle its job.
+  const recordCredential = (entry: VaultEntry): void => {
+    if (entry.hostname.length === 0) return;
+    const host = knowledge.hosts[entry.hostname];
+    if (host?.goneAt !== undefined) return;
+    const identity = entry.identity ?? host?.identity;
+    if (entry.identity !== undefined && host?.identity !== undefined && entry.identity !== host.identity) return;
+    const verified = { ...entry, ...(identity !== undefined ? { identity } : {}) };
+    vault.set(entry.hostname, verified);
+    markCredentialKnown(host);
+    for (let index = provisionalPool.length - 1; index >= 0; index--) {
+      if (provisionalPool[index]!.hostname === entry.hostname) provisionalPool.splice(index, 1);
+    }
+    retireCracking(entry.hostname, 'credential verified; cracking retired');
+    pendingCredentials.push(verified);
+  };
+  const recordLoose = (password: string): void => {
+    if (loosePool.includes(password)) return;
+    loosePool.push(password);
+    // Oldest out first. A leaked password belongs to a host that may since
+    // have been deleted and re-minted, so age is exactly the right discard.
+    if (loosePool.length > MAX_LOOSE_PASSWORDS) loosePool.shift();
+  };
+
+  const recordProvisional = (entry: ProvisionalCredential): void => {
+    if (entry.hostname.length === 0) return;
+    const host = knowledge.hosts[entry.hostname];
+    if (host?.goneAt !== undefined || vault.has(entry.hostname)) return;
+    const identity = entry.identity ?? host?.identity;
+    const candidate = { ...entry, ...(identity !== undefined ? { identity } : {}) };
+    const existing = provisionalPool.findIndex((held) =>
+      held.hostname === candidate.hostname
+      && held.password === candidate.password
+      && held.identity === candidate.identity);
+    if (existing >= 0) provisionalPool.splice(existing, 1);
+    provisionalPool.push(candidate);
+    if (provisionalPool.length > MAX_PROVISIONAL_CREDENTIALS) provisionalPool.shift();
+  };
+
+  /** Fold a finished job's ordinary findings into the map, so the next
+   * derivation already accounts for them. Attempts and logs arrive earlier via
+   * the write-through functions below. */
   const absorb = (result: DnetJobResult): void => {
     // The fold's own clock, not a fact's: each reported host carries the time
     // the job that saw it looked.
     const at = Date.now();
     if (result.hosts && result.hosts.length > 0) {
-      knowledge = foldReports(knowledge, result.hosts, at, expiryOpts()).knowledge;
+      const folded = foldReports(knowledge, result.hosts, at, expiryOpts());
+      knowledge = folded.knowledge;
+      for (const hostname of folded.hostsReplaced) retireLifetime(hostname, 'server identity replaced');
+      for (const host of result.hosts) {
+        if (!host.present) retireLifetime(host.hostname, 'server is gone');
+        else if (host.neighbours !== undefined) {
+          const queue = queues.get(host.hostname);
+          if (queue) {
+            retireLostEdgeJobs(queue, host.hostname, host.neighbours);
+            // A pin's edge is the lab, not its own adjacency, so it needs its
+            // own retire pass — the release verdict fires on the next derive.
+            retireLostPin(queue, host.hostname, host.neighbours);
+          }
+        }
+      }
       pendingHosts.push(...result.hosts);
     }
-    for (const entry of result.credentials ?? []) {
-      if (entry.hostname.length === 0) continue;
-      vault.set(entry.hostname, entry.password);
-      const host = knowledge.hosts[entry.hostname];
-      if (host) host.credentialKnown = true;
-      pendingCredentials.push(entry);
-    }
+
     for (const [code, count] of Object.entries(result.codes ?? {})) note(Number(code), count);
     if (result.grammar) {
       grammarUnrecognised += result.grammar.unrecognised;
@@ -389,27 +755,24 @@ export async function main(ns: NS): Promise<void> {
     if (result.charismaNeeded !== undefined) {
       charismaNeeded = Math.max(charismaNeeded ?? 0, result.charismaNeeded);
     }
-    for (const bare of result.loose ?? []) {
-      if (loosePool.includes(bare)) continue;
-      loosePool.push(bare);
-      // Oldest out first. A leaked password belongs to a host that may since
-      // have been deleted and re-minted, so age is exactly the right thing to
-      // discard on.
-      if (loosePool.length > MAX_LOOSE_PASSWORDS) loosePool.shift();
-    }
+
     // A won cache window is the ONLY sighting we ever get of the net-wide
     // phishing cooldown. Stamping it here rather than in the job keeps the
     // belief in the one place that survives the job's process.
     if ((result.codes ?? {})[LOCAL_CODE.PhishingCacheWon] !== undefined) lastPhishCacheAt = at;
   };
 
-  const recordAttempts = (hostname: string, result: DnetJobResult): void => {
-    const outcomes = result.attempts ?? [];
-    if (outcomes.length === 0) return;
-    foldAttempts(knowledge.hosts[hostname], outcomes);
-    // Queued for the drain as well: home keeps its own copy of the ledger, so
-    // the panel's cracking progress survives this process the way the map does.
-    for (const outcome of outcomes) pendingAttempts.push({ hostname, outcome });
+  // Jobs write each completed call/read through immediately. The target entry,
+  // not the worker process, owns the conversation and survives a worker death.
+  const recordAttempt = (hostname: string, outcome: AttemptOutcome): void => {
+    foldAttempts(knowledge.hosts[hostname], [outcome]);
+    if (!pendingAttempts.some((entry) => entry.hostname === hostname && entry.outcome === outcome)) {
+      pendingAttempts.push({ hostname, outcome });
+    }
+  };
+  const recordLogDrain = (hostname: string, outcome: LogDrainOutcome): void => {
+    foldLogDrain(knowledge.hosts[hostname], outcome);
+    pendingLogDrains.push({ hostname, outcome });
   };
 
   /** Queue one job on a host, and KEEP ITS PROMISE.
@@ -425,49 +788,87 @@ export async function main(ns: NS): Promise<void> {
     if (queue.pending.length >= MAX_QUEUED_PER_HOST) return;
     if (queue.pending.some((entry) => entry.id === draft.id) || queue.active?.id === draft.id) return;
     const job = draft as DnetJob;
+    // THE PESSIMISTIC STAMP. A storm job's host has ~5 s of life after a
+    // successful `unleashStormSeed` — `restartAllDarknetServers` takes its
+    // agent — so the authoritative result may never drain. Filed-means-fired
+    // is the assumption that cannot be caught out: a wasted quiet period costs
+    // 35 s of stillness, while a skipped wipe leaves the whole map asserting a
+    // net that no longer exists. Rolled back below if the job reports it did
+    // not fire.
+    if (job.kind === "storm") {
+      stormStampPrior = lastStormFiredAt;
+      lastStormFiredAt = Date.now();
+      stormWipeAt = lastStormFiredAt + STORM_QUIET_MS;
+    }
     const promise = new Promise<DnetJobResult>((resolve, reject) => {
       job.settle = resolve;
       job.fail = reject;
     });
-    // The bleed task derives from this fact, and NOTHING else ever writes it:
-    // heartbleed with `peek` leaves the ring intact, so the game gives no
-    // signal that a host was just listened to. Without the stamp,
-    // `bleed:<host>` re-derives on every tick for every held host, for ever.
-    // Stamped on failure and rejection too, deliberately: a bleed that answers
-    // 351/408/503 — or whose process died — re-derived on the NEXT tick, one
-    // wasted spawn every couple of seconds until the target vanished. The read
-    // site's clock is topology expiry, so a failure-stamped host retries at
-    // exactly the cadence a success produces, once the belief that failed it
-    // has had time to be resurveyed.
-    const stampBleed = (): void => {
-      if (job.kind !== "bleed") return;
-      const host = knowledge.hosts[job.state.host];
-      if (host) host.facts[LAST_BLEED_AT] = { value: true, at: Date.now() };
-    };
     void promise.then(
       (result) => {
         absorb(result);
-        recordAttempts(job.state.host, result);
-        if (job.kind === "plant" && result.ok) lastPlantAt.set(job.state.host, Date.now());
-        // The only place a link is ever recorded. `setStasisLink` takes no
-        // host, so the host it pinned is the one the job ran on — and a 453
-        // means the engine's limit is already spent, which is home's belief
-        // being wrong rather than ours.
-        if (job.kind === "pin" && result.ok) stasisLinked.add(job.state.host);
+        if (result.targetState === 'edge-lost' || result.targetState === 'replaced') {
+          lastMutationAt = Date.now();
+        }
+        if (result.targetState === 'gone') {
+          const gone: ReportHost = { hostname: job.state.host, at: Date.now(), present: false };
+          knowledge = foldReports(knowledge, [gone], gone.at, expiryOpts()).knowledge;
+          pendingHosts.push(gone);
+          retireLifetime(job.state.host, 'server reported gone');
+        } else if (result.targetState === 'replaced') {
+          const host = knowledge.hosts[job.state.host];
+          if (host) {
+            host.facts = {};
+            delete host.attempts;
+            delete host.ring;
+            delete host.credentialKnown;
+          }
+          retireLifetime(job.state.host, 'server identity changed');
+        }
+        if (job.kind === "plant") lastPlantAt.set(job.state.host, Date.now());
+        // The only place a link is ever recorded — or erased. `setStasisLink`
+        // takes no host, so the host it acted on is the one the job ran on; a
+        // 453 on the pin direction means the engine's limit is already spent,
+        // which is home's belief being wrong rather than ours. A successful
+        // RELEASE is also remembered briefly, so home's next order — whose
+        // probe may predate the release — cannot union the dead link back in
+        // and trigger a second 12 GB release of nothing.
+        if (job.kind === "pin" && result.ok) {
+          if (job.state.unpin === true) {
+            stasisLinked.delete(job.state.host);
+            recentUnpins.set(job.state.host, Date.now());
+          } else {
+            stasisLinked.add(job.state.host);
+          }
+        }
+        // The storm stamp resolves. A drained `stormFiredAt` is the
+        // authoritative clock and replaces the pessimistic one; a result that
+        // says the fire did NOT happen (the seed was gone, the engine refused)
+        // puts the clock back so the quiet period and the wipe stand down.
+        if (job.kind === "storm") {
+          if (result.stormFiredAt !== undefined) {
+            lastStormFiredAt = Math.max(lastStormFiredAt ?? 0, result.stormFiredAt);
+            stormWipeAt = lastStormFiredAt + STORM_QUIET_MS;
+          } else {
+            lastStormFiredAt = stormStampPrior;
+            stormWipeAt = undefined;
+          }
+        }
         // A guess that was refused is never offered again: the pair is wrong,
         // and it would otherwise re-derive on every tick for ever.
-        if (job.kind === "attempt" && job.state.guess !== undefined) {
+        const lastAttempt = result.attempts?.[result.attempts.length - 1];
+        if (job.kind === "attempt" && job.state.guess !== undefined
+          && lastAttempt !== undefined && conclusiveAttempt(lastAttempt)) {
           spentGuesses.add(`${job.state.host}\u0000${job.state.guess}`);
         }
-        stampBleed();
       },
       () => {
+        if (job.kind === "plant") lastPlantAt.set(job.state.host, Date.now());
         // JobDied, not NotEnoughRam: this path is a job whose promise was
         // REJECTED — its host restarted under it, its resident was swept, or it
         // timed out — and counting that as a RAM shortage made a dying net read
         // as a full one.
         note(LOCAL_CODE.JobDied);
-        stampBleed();
       },
     );
     // Filed IN PRIORITY ORDER, not in arrival order. The resident takes the
@@ -529,6 +930,21 @@ export async function main(ns: NS): Promise<void> {
   const bodies = makeJobBodies({
     charisma: () => charisma,
     ledgerFor: (host) => knowledge.hosts[host]?.attempts,
+    ringFor: (host) => knowledge.hosts[host]?.ring,
+    recordAttempt,
+    recordLogDrain,
+    recordCredential,
+    recordLoose,
+    labField: (host) => labFields.get(host),
+    // MERGED, never assigned: two walkers publish into this between each
+    // other's reads, so an assignment would drop whatever the other one learned
+    // since. `mergeLabFields` returns the base untouched when there is nothing
+    // to fold in, so the first publish costs nothing.
+    publishLabField: (host, field) => {
+      const held = labFields.get(host);
+      labFields.set(host, held === undefined ? field : mergeLabFields(held, field));
+    },
+    recordProvisional,
   });
   const bodyFor = (kind: string): DnetJob["body"] => bodies[kind] ?? bodies["survey"]!;
 
@@ -537,7 +953,7 @@ export async function main(ns: NS): Promise<void> {
   const expiryOpts = (): ExpiryOpts => ({
     ...(netDepth !== undefined ? { netDepth } : {}),
     ...(bitNode !== undefined ? { bitNode } : {}),
-    ...(backdoored !== undefined ? { backdoored } : {}),
+    backdoored: backdoors.size,
     // Ours, and exact: nothing else in the run pins or releases a host, so an
     // observed copy would be a worse source that can itself go stale.
     ...(stasisLinked.size > 0 ? { stasisLinked } : {}),
@@ -564,16 +980,20 @@ export async function main(ns: NS): Promise<void> {
    * figure of speech: the walk is keyed by PID, so losing the process loses the
    * whole maze with no way to resume. */
   const projectHoldHosts = (at: number, expiry: ExpiryOpts): HoldHost[] => {
+    // Only the FINISHER's host is irreplaceable. A scout walk is disposable by
+    // design — its map lives in `labFields`, its position is the only thing a
+    // mutation can take — so its host must not attract a stasis link.
     const walking = new Set<string>();
     for (const queue of queues.values()) {
-      if (queue.active?.kind === "walk") walking.add(queue.host);
-      for (const job of queue.pending) if (job.kind === "walk") walking.add(queue.host);
+      if (queue.active?.kind === "walk" && queue.active.state.role !== "scout") walking.add(queue.host);
+      for (const job of queue.pending) {
+        if (job.kind === "walk" && job.state.role !== "scout") walking.add(queue.host);
+      }
     }
     return Object.values(knowledge.hosts).map((host) => {
       const queue = queues.get(host.hostname);
       const difficulty = fresh<number>(host, "difficulty", at, expiry);
       const maxRam = fresh<number>(host, "maxRam", at, expiry);
-      const blockedRam = fresh<number>(host, "blockedRam", at, expiry);
       return {
         ...holdHostFrom(host, {
           at,
@@ -584,18 +1004,31 @@ export async function main(ns: NS): Promise<void> {
         }),
         ...(difficulty !== undefined ? { difficulty } : {}),
         ...(maxRam !== undefined ? { maxRam } : {}),
-        ...(blockedRam !== undefined ? { blockedRam } : {}),
         freeGb: (queue?.freeGb ?? freeRam(host, at, expiry)) + (queue ? residentGb : 0),
         ...(walking.has(host.hostname) ? { irreplaceable: true } : {}),
       };
     });
   };
 
-  /** Whether to start walking a maze, and from where.
+  /** Whether to start walking a maze, and from where — and whether a SECOND
+   * adjacent host should walk it too.
    *
    * The whole point of the feature's deep half. A completed lab hands over admin
    * rights, a cache and a queued augmentation, and it DEEPENS THE NET, which is
    * the only thing that ever changes the mutation clock.
+   *
+   * The second walker is a SCOUT, and the engine facts that make it worth
+   * filing are all verified in `sim/dnet-lab.ts`'s party arena: the maze is
+   * global while positions are per PID, both walkers' delays run in parallel,
+   * every failed move feeds the one charisma pool, and EITHER pid reaching the
+   * endpoint roots the lab. The scout commits to the southern macro-route and
+   * shares its map through `labFields`, which is also why it is disposable —
+   * a mutation eating it costs its position, never the map. Reading the lab's
+   * log ring instead would be worthless: the ring holds only the responses our
+   * own walkers already received, so a second vantage is always better spent
+   * WALKING than bleeding. And the arena's mortality runs are why the scout
+   * never gets a stasis link: a pinned scout buys a few percent over a mortal
+   * one, and a link is worth far more on the ladder itself.
    *
    * A closure rather than a top-level function because it both reads `charisma`
    * and writes `charismaNeeded`, and the overseer reassigns the first on every
@@ -606,17 +1039,17 @@ export async function main(ns: NS): Promise<void> {
     expiry: ExpiryOpts,
     hosts: readonly HoldHost[],
     refuse: (host: string, why: string, detail: string) => void,
-  ): { lab?: HoldHost; task?: HoldTask } => {
+  ): { lab?: HoldHost; tasks: HoldTask[]; walking: boolean } => {
     const lab = hosts.find((host) => isLabyrinth(
       host.hostname,
       fresh<string>(knowledge.hosts[host.hostname]!, "modelId", at, expiry),
     ) && !host.gone);
     // Not a refusal worth a name per host: there is exactly one lab in a net
     // and we have not laid eyes on it.
-    if (lab === undefined) return {};
+    if (lab === undefined) return { tasks: [], walking: false };
     if (vault.has(lab.hostname)) {
       refuse(lab.hostname, "lab-walked", "we already hold this lab's password, so its maze has been finished");
-      return { lab };
+      return { lab, tasks: [], walking: false };
     }
     const needed = labStage(lab.hostname)?.cha;
     if (needed !== undefined && charisma < needed) {
@@ -625,12 +1058,24 @@ export async function main(ns: NS): Promise<void> {
       // for hours and learn nothing. Posted as a career need instead.
       charismaNeeded = Math.max(charismaNeeded ?? 0, needed);
       refuse(lab.hostname, "charisma", `the maze needs charisma ${needed}, and every move below it answers 451`);
-      return { lab };
+      return { lab, tasks: [], walking: false };
+    }
+    // What is already in flight, by role. The finisher is never doubled: two
+    // unbiased walkers would shadow each other, and the second could steal the
+    // stasis argument from the first.
+    let finisherAt: string | undefined;
+    const scoutsAt = new Set<string>();
+    for (const queue of queues.values()) {
+      for (const job of [queue.active, ...queue.pending]) {
+        if (job === undefined || job.kind !== "walk") continue;
+        if (job.state.role === "scout") scoutsAt.add(queue.host);
+        else finisherAt = queue.host;
+      }
     }
     // Its host must be ADJACENT to the lab, which out here means on the
     // bottom row — `addServerToNetwork` wires anything landing at
     // `netDepth - 1` to the labyrinth automatically.
-    const vantage = [...queues.values()]
+    const vantages = [...queues.values()]
       .map((queue) => queue.host)
       .filter((host) => {
         const standing = knowledge.hosts[host];
@@ -638,22 +1083,60 @@ export async function main(ns: NS): Promise<void> {
         return (fresh<string[]>(standing, "neighbours", at, expiry) ?? []).includes(lab.hostname);
       })
       .sort()
-      .find((host) => {
+      .filter((host) => {
         const queue = queues.get(host)!;
         return queue.freeGb === undefined || budgets["walk"]! <= queue.freeGb + residentGb;
       });
-    if (vantage === undefined) {
-      refuse(
-        lab.hostname,
-        "no-vantage",
-        "nothing of ours is standing next to the labyrinth with room for a walker",
-      );
-      return { lab };
-    }
-    return {
-      lab,
-      task: { kind: "walk", host: lab.hostname, from: vantage, reason: `walk the maze from ${vantage}` },
+    const tasks: HoldTask[] = [];
+    // A walker is threaded to its vantage: every maze move is an
+    // `authenticate`, whose duration shrinks `1/(1 + 0.2*(threads-1))` with
+    // the calling script's threads, and a deep lab is thousands of moves — so
+    // the same RAM that would sit idle under a 1-thread walk buys hours of
+    // wall clock. The host holds one job at a time, so there is nothing else
+    // the RAM could have done. No ceiling: the per-thread `budgets["walk"]`
+    // carries the script base and the 2.0 GB spawn the walker's atExit needs,
+    // and the engine charges per thread, so this fills the vantage exactly.
+    const walkThreadsOn = (host: string): number => {
+      const queue = queues.get(host);
+      if (queue?.freeGb === undefined || budgets["walk"] === undefined) return 1;
+      return Math.max(1, Math.floor((queue.freeGb + residentGb) / budgets["walk"]));
     };
+    if (finisherAt === undefined) {
+      const vantage = vantages[0];
+      if (vantage === undefined) {
+        refuse(
+          lab.hostname,
+          "no-vantage",
+          "nothing of ours is standing next to the labyrinth with room for a walker",
+        );
+        return { lab, tasks, walking: false };
+      }
+      finisherAt = vantage;
+      tasks.push({
+        kind: "walk",
+        host: lab.hostname,
+        from: vantage,
+        threads: walkThreadsOn(vantage),
+        reason: `walk the maze from ${vantage}`,
+      });
+    }
+    // One scout at most: the party arena shows a second walker buys ~10% of
+    // the walk and a third much less, and every extra vantage held here is a
+    // vantage not doing the net's other work.
+    if (scoutsAt.size === 0) {
+      const second = vantages.find((host) => host !== finisherAt);
+      if (second !== undefined) {
+        tasks.push({
+          kind: "walk",
+          host: lab.hostname,
+          from: second,
+          threads: walkThreadsOn(second),
+          role: "scout",
+          reason: `scout the maze's southern route from ${second}`,
+        });
+      }
+    }
+    return { lab, tasks, walking: finisherAt !== undefined };
   };
 
   /** Which pins `planStasis` asked for can actually be carried out.
@@ -666,6 +1149,7 @@ export async function main(ns: NS): Promise<void> {
     expiry: ExpiryOpts,
     pin: readonly string[],
     refuse: (host: string, why: string, detail: string) => void,
+    labHost?: string,
   ): HoldTask[] => {
     const tasks: HoldTask[] = [];
     for (const hostname of pin) {
@@ -697,12 +1181,23 @@ export async function main(ns: NS): Promise<void> {
         );
         continue;
       }
-      tasks.push({ kind: "pin", host: hostname, from: hostname, reason: "pin the host nothing can replace" });
+      tasks.push({
+        kind: "pin",
+        host: hostname,
+        from: hostname,
+        reason: "pin the host nothing can replace",
+        // The edge the pin exists to keep. Every pin is lab-adjacent by policy
+        // — the walker's vantage by `planWalk`'s collection, a spare by the
+        // bottom-row-giant-with-proven-edge standard — and the job re-probes
+        // for it at act time, because the mutation clock can sever it between
+        // this derivation and the 12 GB call landing.
+        ...(labHost !== undefined ? { edge: labHost } : {}),
+      });
     }
     return tasks;
   };
 
-  const planHold = (at: number): { tasks: HoldTask[]; report: DnetHoldReport } => {
+  const planHold = (at: number): { tasks: HoldTask[]; report: DnetHoldReport; labWalked: boolean } => {
     const expiry = expiryOpts();
     const refused: DnetHoldReport["examples"] = [];
     const refuse = (host: string, why: string, detail: string): void => {
@@ -715,6 +1210,15 @@ export async function main(ns: NS): Promise<void> {
       hosts,
       netDepth: netDepth ?? DEFAULT_NET_DEPTH,
       stasisLimit,
+      // Where the spare links should sit: depth-weighted coverage anchors for
+      // the post-storm reconquest. In a lab world one slot is the walker's
+      // (bottom row, exact), so the spares are the rest; lab-less, every slot
+      // is a spare and the bottom row is the first anchor.
+      spareTargets: stasisTargetDepths(
+        netDepth ?? DEFAULT_NET_DEPTH,
+        labExpected ? stasisLimit - 1 : stasisLimit,
+        labExpected,
+      ),
       charisma,
       // Backdoors are home's to install and home's to count; from out here the
       // multiplier is unobservable, and 1 is the value that makes `planStasis`
@@ -724,8 +1228,8 @@ export async function main(ns: NS): Promise<void> {
 
     // --- the walk ----------------------------------------------------------
     const walk = planWalk(at, expiry, hosts, refuse);
-    if (walk.task) {
-      tasks.push(walk.task);
+    for (const task of walk.tasks) {
+      tasks.push(task);
       // Marked BEFORE `planStasis` runs, and that is the whole point: the
       // host is about to carry work that cannot be rebuilt, and a link
       // spent after the walk has started is a link spent on a host whose
@@ -733,49 +1237,93 @@ export async function main(ns: NS): Promise<void> {
       // `irreplaceable` above everything else, so this is what makes the
       // walker's host the first stasis target rather than merely the best
       // argued one. The order of these three blocks is the policy.
-      const standing = hosts.find((host) => host.hostname === walk.task!.from);
+      // ONLY the finisher: a scout is disposable on purpose — its map lives in
+      // `labFields` — and marking it would let it steal the scarcest resource
+      // in the feature from the walk that actually must survive.
+      if (task.role === "scout") continue;
+      const standing = hosts.find((host) => host.hostname === task.from);
       if (standing) standing.irreplaceable = true;
     }
 
     // --- the pin -----------------------------------------------------------
-    const stasis = planStasis(view);
+    //
+    // While the labyrinth still needs walking — including before it has even
+    // been sighted, since one always exists — one free slot is held back for
+    // the walk's vantage. Spending every link on spare coverage and then
+    // finding the walker unpinnable would trade the critical thing for a nice
+    // one; the reservation stands down on its own once an irreplaceable host
+    // is linked or being pinned, because that IS the walker's slot in use.
+    const labWalked = walk.lab !== undefined && vault.has(walk.lab.hostname);
+    const stasis = planStasis({
+      ...view,
+      // No reservation for a walker that cannot exist: a lab-less world
+      // (program-only access — home says so) has no walk to hold a slot for.
+      reserveForWalker: !labWalked && labExpected,
+    });
     for (const refusal of stasis.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
-    // A RECYCLE the planner wants and nothing carries out. `setStasisLink(false)`
-    // is the same 12 GB call with a different argument, and no job kind takes
-    // one — so rather than dropping the verdict on the floor (which is what
-    // `planSpread`'s refusals did for months and why nobody could tell a
-    // planner with nothing to do from a broken one), it is published by name.
-    for (const hostname of stasis.release) {
-      refuse(
-        hostname,
-        "release-unwired",
-        "this link would be better spent elsewhere, but no job carries setStasisLink(false)",
-      );
+    // A RELEASE the planner wants is now CARRIED OUT: `setStasisLink(false)` is
+    // the same 12 GB call with the opposite argument, filed as a `pin` task
+    // with `unpin` set. It shares the pin's admission gates — the job cannot
+    // spawn back, so its host still needs a re-planter — but never the edge
+    // check, because a release is filed precisely when the edge is gone.
+    for (const task of admitPins(at, expiry, stasis.release, refuse)) {
+      tasks.push({ ...task, unpin: true, reason: "release a link its host no longer earns" });
     }
-    tasks.push(...admitPins(at, expiry, stasis.pin, refuse));
+    // Only the WALKER's pin carries the lab edge for the act-time re-probe: a
+    // spare sits at its coverage target, nowhere near the lab, and holding it
+    // to the walker's edge check would refuse every spare ever filed.
+    const walkerPin = (name: string): boolean =>
+      hosts.find((entry) => entry.hostname === name)?.irreplaceable === true;
+    tasks.push(...admitPins(at, expiry, stasis.pin.filter(walkerPin), refuse, walk.lab?.hostname));
+    tasks.push(...admitPins(at, expiry, stasis.pin.filter((name) => !walkerPin(name)), refuse));
 
     // --- the push ----------------------------------------------------------
     //
-    // Only ever in service of the walk. `induceServerMigration` is a re-roll of
-    // one host's position inside `[difficulty - 2, difficulty + 4]`, and the
-    // one thing that re-roll buys is landing on the bottom row, where
-    // `addServerToNetwork` wires a host to the labyrinth for free. With a
-    // vantage on the lab already, pushing anything is churn we are paying for:
-    // it costs hundreds of calls and, if the net is full, the host itself.
+    // In service of the walk, and of the spare-stasis standard that feeds it.
+    // `induceServerMigration` is a re-roll of one host's position inside
+    // `[difficulty - 2, difficulty + 4]`, and the one thing that re-roll buys
+    // is landing on the bottom row, where `addServerToNetwork` wires a host to
+    // the labyrinth for free. So pushing is worth paying for on two occasions:
+    // while the lab still needs reaching (the landing is the walk's vantage),
+    // and while unspent stasis links remain (`planInduce`'s `seat` purpose
+    // pushes a big host into an open target's window when nothing stands
+    // there already). With the lab reachable AND every link spent, a push is
+    // churn: hundreds of calls and, if the net is full, the host itself.
     const lab = walk.lab;
-    const wantsPush = lab !== undefined
-      && !vault.has(lab.hostname)
-      && !tasks.some((task) => task.kind === "walk");
+    const spareLinks = Math.max(0, stasisLimit - stasisLinked.size);
+    // "A walk exists" now means filed this pass OR already in flight — with the
+    // in-flight finisher no longer re-filed each pass, checking only `tasks`
+    // would have started pushing hosts around mid-walk.
+    const wantsPush = !walk.walking
+      && ((lab !== undefined && !vault.has(lab.hostname)) || spareLinks > 0);
     if (!wantsPush) {
-      if (lab !== undefined) refuse(lab.hostname, "push-not-needed", "we can already reach the labyrinth, or have finished it");
+      if (lab !== undefined) {
+        refuse(
+          lab.hostname,
+          "push-not-needed",
+          walk.walking
+            ? "a walk is in flight; pushing hosts around mid-walk is churn"
+            : "the labyrinth is reachable and every stasis link is spent",
+        );
+      }
     } else {
-      const induce = planInduce(view);
+      const induce = planInduce({
+        ...view,
+        induceGbPerThread: budgets["induce"],
+        // The bottom row is only worth minting a landing on while a walk still
+        // needs a vantage — afterwards (and in a lab-less world) the same big
+        // hosts serve the spare seats instead.
+        needLabVantage: lab !== undefined && !labWalked,
+      });
       for (const refusal of induce.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
       if (induce.push) {
         tasks.push({
           kind: "induce",
           host: induce.push.host,
           from: induce.push.from,
+          // Sized from the pusher's free RAM: the charge is linear in the
+          // calling script's threads and the 6 s wait is not.
+          threads: induce.push.threads,
           reason: induce.push.reason,
         });
       }
@@ -783,7 +1331,10 @@ export async function main(ns: NS): Promise<void> {
 
     const admitted: Record<string, number> = {};
     for (const task of tasks) admitted[task.kind] = (admitted[task.kind] ?? 0) + 1;
-    return { tasks, report: { admitted, ...foldRefusals(refused) } };
+    // `labWalked` is surfaced for the storm trigger: the walker-protection gate
+    // retires itself once the vault holds the lab's password, and this closure
+    // is the one place that already knows both halves.
+    return { tasks, report: { admitted, ...foldRefusals(refused) }, labWalked };
   };
 
   /** Every host the farm ladder could act on.
@@ -812,11 +1363,17 @@ export async function main(ns: NS): Promise<void> {
       const depth = fresh<number>(host, "depth", at, expiry);
       const difficulty = fresh<number>(host, "difficulty", at, expiry);
       const blockedRam = fresh<number>(host, "blockedRam", at, expiry);
+      const neighbours = fresh<string[]>(host, "neighbours", at, expiry);
       farmHosts.push({
         host: queue.host,
         ...(depth !== undefined ? { depth } : {}),
         ...(difficulty !== undefined ? { difficulty } : {}),
         ...(blockedRam !== undefined ? { blockedRam } : {}),
+        // For the remote-reclaim election: a helper proves the edge from its
+        // own fresh adjacency, and a target proves its admin rights from the
+        // vault — the cross-host call checks both.
+        ...(neighbours !== undefined ? { neighbours } : {}),
+        hasCredential: vault.has(queue.host),
         // What a JOB would get: the resident hands its own allocation back when
         // it spawns. `freeGb` is the resident's own measurement where it has
         // made one, and the folded facts otherwise.
@@ -884,16 +1441,29 @@ export async function main(ns: NS): Promise<void> {
       state: {
         host: task.host,
         from: task.from,
-        ...(vault.has(task.host) ? { password: vault.get(task.host)! } : {}),
+        jobThreads: threads,
+        ...(vault.has(task.host) ? { password: vault.get(task.host)!.password } : {}),
+        ...(knowledge.hosts[task.host]?.identity !== undefined
+          ? { targetIdentity: knowledge.hosts[task.host]!.identity }
+          : {}),
         ...(task.filename !== undefined ? { filename: task.filename } : {}),
         ...(task.symbol !== undefined ? { symbol: task.symbol } : {}),
+        ...(task.edge !== undefined ? { edge: task.edge } : {}),
+        ...(task.unpin === true ? { unpin: true } : {}),
+        // A scout walk stays a scout in the job: `walkJob` biases its route
+        // prior off this, and the sweep above kept its host un-pinnable.
+        ...(task.role !== undefined ? { role: task.role } : {}),
         // Resolved HERE and nowhere else: the queue carried an id precisely so
         // that a pure module never had to hold a password.
         ...(task.guessId !== undefined && guessFor.has(task.guessId)
           ? { guess: guessFor.get(task.guessId)! }
           : {}),
+        ...(task.kind === "bleed" || task.kind === "attempt"
+          ? { knownHosts: Object.keys(knowledge.hosts) }
+          : {}),
         ...(task.kind === "plant"
           ? {
+            ...(task.remote ? { sessionOnly: true } : {}),
             payloads,
             plantArgs: residentArgs({
               missionId: mission.missionId,
@@ -915,11 +1485,47 @@ export async function main(ns: NS): Promise<void> {
    * turns leaked strings into opaque guess ids, and `deriveTasks` merges all four
    * with what the map alone implies. */
   const fileWork = (at: number): Task[] => {
+    // THE QUIET PERIOD. While our own storm is believed to be running, every
+    // movable host is being deleted, moved or restarted under us: a job filed
+    // now dies into the churn and poisons the failure counters, and a plan
+    // derived now is a plan against a net that will not exist in thirty
+    // seconds. So nothing is derived at all — 35 s of stillness is cheaper
+    // than 35 s of jobs dying — and the panel is told why. The post-burst
+    // wipe in the main loop is what ends this state.
+    if (lastStormFiredAt !== undefined && at - lastStormFiredAt < STORM_QUIET_MS) {
+      const quietLeft = Math.round((STORM_QUIET_MS - (at - lastStormFiredAt)) / 1000);
+      storm = {
+        admitted: 0,
+        refused: { "storm-in-flight": 1 },
+        examples: [{
+          host: "(net)",
+          why: "storm-in-flight",
+          detail: `the storm we fired is rerolling the net; deriving nothing for ${quietLeft}s more`,
+        }],
+        firedAt: lastStormFiredAt,
+      };
+      return [];
+    }
+    const remoteExec = new Set(stasisLinked);
+    const backdoorLife = msPerHostEventAny(
+      ["restarted", "deleted"],
+      netDepth ?? DEFAULT_NET_DEPTH,
+      bitNode ?? 15,
+      backdoors.size,
+    );
+    for (const [hostname, installedAt] of backdoors) {
+      const host = knowledge.hosts[hostname];
+      if (host !== undefined && host.goneAt === undefined && at - installedAt <= backdoorLife) {
+        remoteExec.add(hostname);
+      }
+    }
     const plan = planSpread(
       candidatesFrom(knowledge, at, {
         standing: new Set([selfHost, ...queues.keys()]),
         vault: new Set(vault.keys()),
         lastPlantAt,
+        remoteExec,
+        remoteVantages: [...queues.values()].map((queue) => ({ host: queue.host, freeGb: queue.freeGb })),
         expiry: expiryOpts(),
       }),
       DEFAULT_SPREAD_LIMITS,
@@ -930,7 +1536,38 @@ export async function main(ns: NS): Promise<void> {
     // reason is what turns a count into somewhere to look.
     spread = { planted: plan.plant.length, ...foldRefusals(plan.refused) };
 
+    // The storm's projection of every knowledge host, built here because the
+    // seed-hunt decision below reads it too. Only the trigger CALL waits for
+    // the hold pass — see the storm block.
+    const stormExpiry = expiryOpts();
+    const stormHosts: StormHost[] = Object.values(knowledge.hosts).map((host) => {
+      const seed = fresh<boolean>(host, "stormSeed", at, stormExpiry);
+      return {
+        hostname: host.hostname,
+        ...(seed !== undefined ? { stormSeed: seed } : {}),
+        agentAlive: queues.has(host.hostname),
+        ...(stasisLinked.has(host.hostname) ? { stasisLinked: true } : {}),
+        ...(host.goneAt !== undefined ? { gone: true } : {}),
+      };
+    });
+
     // --- the farm ---------------------------------------------------------
+    //
+    // THE SEED HUNT. Every RAM block ground to zero is a 15% roll for
+    // `STORM_SEED.exe`, so while the storm's preparation gates are already met
+    // (every link spent, or the lab walked), no seed is in hand, and the
+    // engine could actually mint one (30+ minutes since our last storm — its
+    // own clock is unreadable, so ours is the only evidence), the reclaim
+    // rung's clear budget stands down and blocks keep being ground outright.
+    // Never having fired reads as eligible, which errs toward grinding: the
+    // grind still pays RAM, caches and charisma even when the roll cannot.
+    const seedHolder = stormHosts.find((host) => host.gone !== true && host.stormSeed === true);
+    const labWalkedNow = Object.values(knowledge.hosts).some((host) =>
+      isLabyrinth(host.hostname, fresh<string>(host, "modelId", at, stormExpiry))
+      && vault.has(host.hostname));
+    const seedHunt = seedHolder === undefined
+      && (labWalkedNow || stasisLinked.size >= stasisLimit)
+      && (lastStormFiredAt === undefined || at - lastStormFiredAt > STORM_COOLDOWN_MS);
     const farmPlan = planFarm(projectFarmHosts(at, expiryOpts()), {
       now: at,
       charisma,
@@ -938,7 +1575,9 @@ export async function main(ns: NS): Promise<void> {
       wantedGb: heaviestJobGb,
       ...(lastPhishCacheAt !== undefined ? { lastPhishCacheAt } : {}),
       ...(promoteSymbols.length > 0 ? { promoteSymbols } : {}),
+      crimeSuccessMult,
       openLabCache,
+      ...(seedHunt ? { seedHunt: true } : {}),
     });
     const farmAdmitted: Record<string, number> = {};
     for (const task of farmPlan.tasks) farmAdmitted[task.kind] = (farmAdmitted[task.kind] ?? 0) + 1;
@@ -952,11 +1591,56 @@ export async function main(ns: NS): Promise<void> {
     const holdPlan = planHold(at);
     hold = holdPlan.report;
 
+    // --- the storm --------------------------------------------------------
+    //
+    // Decided AFTER the hold pass on purpose: `links-unspent` reads the pins
+    // this very derivation just filed, so a storm can never race the pin it is
+    // waiting for. The policy is pure (`storm.ts`); the view was projected
+    // above, beside the seed hunt that shares it.
+    // A pin still pending — filed this pass, or claimed and not yet landed —
+    // is a slot mid-spend, and the storm waits for it.
+    const pinsPending = holdPlan.tasks.some((task) => task.kind === "pin" && task.unpin !== true)
+      || [...claims.values()].some((held) => held.some((claim) => claim.kind === "pin"));
+    // The finisher's vantage, whether the walk is in flight or filed this pass.
+    let walkFrom: string | undefined;
+    for (const queue of queues.values()) {
+      for (const job of [queue.active, ...queue.pending]) {
+        if (job !== undefined && job.kind === "walk" && job.state.role !== "scout") walkFrom = queue.host;
+      }
+    }
+    for (const task of holdPlan.tasks) {
+      if (task.kind === "walk" && task.role !== "scout") walkFrom = task.from;
+    }
+    const stormPlan = planStorm({
+      hosts: stormHosts,
+      now: at,
+      stasisLimit,
+      stasisLinked: stasisLinked.size,
+      pinsPending,
+      walkInFlight: walkFrom !== undefined,
+      walkerPinned: walkFrom !== undefined && stasisLinked.has(walkFrom),
+      labWalked: holdPlan.labWalked,
+      ...(lastPhishCacheAt !== undefined ? { lastPhishCacheAt } : {}),
+      ...(lastStormFiredAt !== undefined ? { lastStormFiredAt } : {}),
+    });
+    const seedSeenAt = seedHolder !== undefined
+      ? knowledge.hosts[seedHolder.hostname]?.facts["stormSeed"]?.at
+      : undefined;
+    storm = {
+      admitted: stormPlan.fire !== undefined ? 1 : 0,
+      ...foldRefusals(stormPlan.refused.map((entry) =>
+        ({ host: entry.hostname, why: entry.why, detail: entry.detail }))),
+      ...(seedHolder !== undefined ? { seedHost: seedHolder.hostname } : {}),
+      ...(seedSeenAt !== undefined ? { seedSeenAt } : {}),
+      ...(lastStormFiredAt !== undefined ? { firedAt: lastStormFiredAt } : {}),
+      ...(seedHunt ? { seedHunt: true } : {}),
+    };
+
     // --- unattributed passwords -------------------------------------------
     const looseTargets = projectLooseTargets(at, expiryOpts());
     guessFor.clear();
     const guesses: { host: string; id: string; reason: string }[] = [];
-    for (const candidate of looseCandidates(loosePool, looseTargets, getPasswordType)) {
+    for (const candidate of looseCandidates(loosePool, looseTargets)) {
       if (spentGuesses.has(`${candidate.hostname}\u0000${candidate.password}`)) continue;
       // Derived from the PASSWORD rather than from its position in the pool,
       // which is what the id has to be for `enqueue`'s duplicate check to keep
@@ -967,15 +1651,35 @@ export async function main(ns: NS): Promise<void> {
       guessFor.set(id, candidate.password);
       guesses.push({ host: candidate.hostname, id, reason: candidate.reason });
     }
+    // Named leaks stay provisional but target exactly the host the line named.
+    // Their lifetime is the password-changing deletion class, never a guessed
+    // TTL; replacement and disappearance also remove them eagerly above.
+    const provisionalLife = msPerHostEvent(
+      "deleted",
+      netDepth ?? DEFAULT_NET_DEPTH,
+      bitNode ?? 15,
+      backdoors.size,
+    );
+    for (let index = provisionalPool.length - 1; index >= 0; index--) {
+      const candidate = provisionalPool[index]!;
+      const host = knowledge.hosts[candidate.hostname];
+      const stale = at - candidate.at > provisionalLife;
+      const replaced = candidate.identity !== undefined && host?.identity !== undefined
+        && candidate.identity !== host.identity;
+      if (stale || replaced || host?.goneAt !== undefined || vault.has(candidate.hostname)) {
+        provisionalPool.splice(index, 1);
+        continue;
+      }
+      if (spentGuesses.has(`${candidate.hostname}\u0000${candidate.password}`)) continue;
+      const id = looseId(candidate.password);
+      guessFor.set(id, candidate.password);
+      guesses.unshift({ host: candidate.hostname, id, reason: `a ${candidate.via} log named this host and password` });
+    }
 
-    // Filled in BY the derivation. The bleed gate is the one decision in
-    // `deriveTasks` that used to refuse silently, so a net with nothing left to
-    // overhear read exactly like a gate that had stopped working.
-    const listenOut: DnetListenReport = { refused: {}, examples: [] };
     const tasks = deriveTasks(knowledge, at, {
-      listenOut,
       ...expiryOpts(),
       charisma,
+      ...(lastMutationAt !== undefined ? { lastMutationAt } : {}),
       // Data only. The two fields are NAMED rather than spread, which is what
       // keeps `queue.ts` pure: a claim carries a password, and a field added to
       // `DnetClaim` later cannot arrive in a shared module by default.
@@ -986,15 +1690,69 @@ export async function main(ns: NS): Promise<void> {
         ]),
       ),
       agents: new Set([selfHost, ...queues.keys()]),
+      // What a job would get on each vantage — the same figure `fileTask`'s fit
+      // check compares against, so a vantage the derivation prefers is one the
+      // filed job actually fits on. `selfHost` is absent deliberately: the
+      // overseer never runs attempts.
+      agentFreeGb: new Map(
+        [...queues.values()]
+          .filter((queue) => queue.freeGb !== undefined)
+          .map((queue) => [queue.host, queue.freeGb! + residentGb]),
+      ),
+      ...(budgets["attempt"] !== undefined ? { attemptGbPerThread: budgets["attempt"] } : {}),
+      ...(budgets["bleed"] !== undefined ? { bleedGbPerThread: budgets["bleed"] } : {}),
       vault: new Set(vault.keys()),
-      plantable: plan.plant.map((entry) => ({ host: entry.host, from: entry.from })),
+      plantable: plan.plant.map((entry) => ({
+        host: entry.host,
+        from: entry.from,
+        ...(entry.remote ? { remote: true } : {}),
+      })),
       farm: farmPlan.tasks,
-      hold: holdPlan.tasks,
+      hold: [
+        ...holdPlan.tasks,
+        ...(stormPlan.fire !== undefined
+          ? [{
+            kind: "storm" as const,
+            host: stormPlan.fire.host,
+            from: stormPlan.fire.from,
+            reason: stormPlan.fire.reason,
+          }]
+          : []),
+      ],
       ...(guesses.length > 0 ? { guesses } : {}),
     });
-    listen = listenOut;
     for (const task of tasks) fileTask(task);
     return tasks;
+  };
+
+  /** Keep the materialized per-resident queues aligned with the facts that
+   * derive them. This is deliberately conservative for standalone ring drains;
+   * every impossible or already-completed form is retired immediately. */
+  const reconcilePending = (at: number): void => {
+    const expiry = expiryOpts();
+    for (const queue of queues.values()) {
+      const keep: DnetJob[] = [];
+      for (const job of queue.pending) {
+        const host = knowledge.hosts[job.state.host];
+        let reason: string | undefined;
+        if (!host || host.goneAt !== undefined) reason = 'target is gone';
+        else if (job.state.targetIdentity !== undefined && host.identity !== undefined
+          && job.state.targetIdentity !== host.identity) reason = 'target identity changed';
+        else if (job.kind === 'attempt' && vault.has(job.state.host)) reason = 'credential already verified';
+        else if (job.kind === 'plant' && queues.has(job.state.host)) reason = 'resident already present';
+        else if (job.kind === 'cache' && job.state.filename !== undefined
+          && !(fresh<string[]>(host, 'caches', at, expiry) ?? []).includes(job.state.filename)) {
+          reason = 'cache listing changed';
+        } else if (job.kind === 'survey') {
+          const neighbours = fresh<string[]>(host, 'neighbours', at, expiry);
+          const mutationFresh = lastMutationAt === undefined || (host.facts['neighbours']?.at ?? 0) >= lastMutationAt;
+          if (neighbours !== undefined && mutationFresh) reason = 'survey already satisfied';
+        }
+        if (reason === undefined) keep.push(job);
+        else job.settle({ ok: false, targetState: 'cancelled', detail: reason });
+      }
+      queue.pending = keep;
+    }
   };
 
   let lastBeat = bootAt;
@@ -1002,6 +1760,42 @@ export async function main(ns: NS): Promise<void> {
   while (!standDown) {
     const at = Date.now();
     rendezvous.lastBeatAt = at;
+
+    // THE POST-BURST WIPE, exactly once per storm. Everything outside
+    // stationary/stasis was just deleted, moved or restarted, and we KNOW —
+    // we fired it — so the ordinary expiries are the wrong clock: they would
+    // keep asserting positions and free RAM for a net that no longer exists.
+    // `stormWipe` drops the perishable fact classes on every non-immune host
+    // and keeps identities (survivors' are still true; the dead die by the
+    // ordinary goneAt path when re-surveys miss them). `lastMutationAt` is
+    // stamped to the burst's end so the existing changed-since-survey
+    // machinery fans the re-surveys out from darkweb and the pinned
+    // survivors on its own.
+    if (stormWipeAt !== undefined && at >= stormWipeAt) {
+      stormWipeAt = undefined;
+      knowledge = stormWipe(knowledge, expiryOpts());
+      lastMutationAt = Math.max(lastMutationAt ?? 0, (lastStormFiredAt ?? at) + STORM_BURST_MS);
+    }
+
+    if (mutationSweepDue) {
+      mutationSweepDue = false;
+      for (const [hostname, queue] of [...queues]) {
+        const pid = queue.active?.pid ?? queue.residentPid;
+        if (pid === undefined) continue;
+        let alive = false;
+        try {
+          alive = ns["isRunning"](pid, hostname);
+        } catch {
+          alive = false;
+        }
+        if (alive) continue;
+        queues.delete(hostname);
+        residentsLost++;
+        if (queue.active) queue.active.fail(new Error(`${hostname} process died during a mutation`));
+        for (const job of queue.pending) job.fail(new Error(`${hostname} resident died during a mutation`));
+        backdoors.delete(hostname);
+      }
+    }
 
     // The condition the realm exception rests on: entries are expired by the
     // overseer, never trusted. A resident dies with its host, and a queue left
@@ -1016,6 +1810,8 @@ export async function main(ns: NS): Promise<void> {
     // Right after the queue sweep, so it reads the verdict that sweep just
     // reached: a claim whose vantage was retired has no queue to be in.
     sweepClaims(claims, queues, at);
+    reconcilePending(at);
+    hardCancelSweep(ns, queues);
     // A job whose process was killed never settles. The timeout is what turns
     // that into a counted fact rather than a leak.
     for (const queue of queues.values()) {

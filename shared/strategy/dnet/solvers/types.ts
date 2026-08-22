@@ -2,9 +2,9 @@
  *
  * `planAttempt` (`../models.ts`) can only walk an ordered list of candidates: it
  * takes a COUNT of how many have been ruled out and hands back the next one.
- * That is exactly right for the five dictionary models and useless for the other
- * nineteen, because their attacks are conversations — you send a guess, the host
- * answers with something about the guess, and the answer decides what to send
+ * That is exactly right for the five dictionary models. Eight more decode
+ * directly from host facts, while eleven are conversations: you send a guess,
+ * the host answers with something about it, and the answer decides what to send
  * next. There was nowhere for that answer to go.
  *
  * A solver is therefore `(facts, state, observation) -> step`, pure, with the
@@ -175,6 +175,10 @@ export function stateMatches(state: SolverState, facts: PasswordFacts): boolean 
  * very nearly the password. The solvers never see it: `withoutPending` removes
  * it before the state is handed back to one. */
 export const PENDING_ATTEMPT = "__pendingAttempt";
+/** Whether the pending attempt's response has to be read from the ring. Kept
+ * beside the password because solver-wide `needsOracle` is deliberately
+ * pessimistic and can differ from a later candidate step. */
+export const PENDING_NEEDS_ORACLE = "__pendingNeedsOracle";
 
 /** The phase a solver's state is parked in once its search space is GONE.
  *
@@ -182,10 +186,8 @@ export const PENDING_ATTEMPT = "__pendingAttempt";
  * game says it must be, so running the identical search again cannot reach a
  * different answer — and nothing else stops it running: `planAttempt` calls
  * `solver.first()` fresh on every derivation, and the ledger's `lastCode` holds
- * the engine's 401 rather than our 910. Without this marker a host whose model
- * we cannot open (`Factori-Os` above difficulty 24 is the transcribed example,
- * and `deep.ts` says so in its own give-up) spends its whole walk, gives up, and
- * is filed again on the next tick, for ever.
+ * the engine's 401 rather than our 910. Without this marker a search that
+ * eliminates every candidate is filed again on the next tick, for ever.
  *
  * It is a normal `SolverState`, so it carries the identity fingerprint and dies
  * exactly when the identity does: `foldReports` drops a host's whole ledger when
@@ -194,7 +196,11 @@ export const EXHAUSTED_PHASE = "__exhausted";
 
 /** The state as its solver expects it, with the job's own bookkeeping removed. */
 export function withoutPending(state: SolverState): SolverState {
-  const { [PENDING_ATTEMPT]: _pending, ...scratch } = state.scratch;
+  const {
+    [PENDING_ATTEMPT]: _pending,
+    [PENDING_NEEDS_ORACLE]: _pendingNeedsOracle,
+    ...scratch
+  } = state.scratch;
   return { ...state, scratch };
 }
 
@@ -219,8 +225,15 @@ export function resumableState(
   carried: SolverState | undefined,
   modelId: string | undefined,
   facts: PasswordFacts,
-): { state?: SolverState; pending?: string } {
+): { state?: SolverState; pending?: string; pendingNeedsOracle?: boolean } {
   if (carried === undefined || carried.model !== modelId || !stateMatches(carried, facts)) return {};
   const pending = carried.scratch[PENDING_ATTEMPT];
-  return typeof pending === "string" ? { state: carried, pending } : { state: carried };
+  const pendingNeedsOracle = carried.scratch[PENDING_NEEDS_ORACLE];
+  return typeof pending === "string"
+    ? {
+        state: carried,
+        pending,
+        ...(typeof pendingNeedsOracle === "boolean" ? { pendingNeedsOracle } : {}),
+      }
+    : { state: carried };
 }

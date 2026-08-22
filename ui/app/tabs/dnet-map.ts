@@ -720,8 +720,9 @@ function titleOf(host: DarknetKnownHost, options: MapOptions): string {
   const entry = modelEntry(host.modelId);
   if (host.modelId) parts.push(`model ${host.modelId}${entry ? ` (${entry.name})` : ""}`);
   if (entry?.blocked !== undefined) parts.push(entry.blocked);
-  if (host.maxRam !== undefined) {
-    parts.push(`RAM ${fmtRam(host.freeRam ?? 0)} free of ${fmtRam(host.maxRam)}, ${fmtRam(host.blockedRam ?? 0)} blocked`);
+  const ram = ramBuckets(host);
+  if (ram) {
+    parts.push(`RAM ${fmtRam(ram.ours)} ours, ${fmtRam(ram.free)} free, ${fmtRam(ram.blocked)} blocked of ${fmtRam(ram.max)}`);
   }
   if (host.requiredCharisma !== undefined) parts.push(`charisma ${fmtNum(host.requiredCharisma, 0)}`);
   if (host.agent) {
@@ -738,20 +739,42 @@ function titleOf(host: DarknetKnownHost, options: MapOptions): string {
   return parts.filter(Boolean).join(" · ");
 }
 
+export interface RamBuckets {
+  max: number;
+  ours: number;
+  free: number;
+  blocked: number;
+}
+
+/** Split capacity into the three buckets the player can act on. The game's
+ * raw usedRam includes owner-blocked RAM, so deriving ours from the centrally
+ * normalised freeRam is the only representation that does not double-count. */
+export function ramBuckets(host: DarknetKnownHost): RamBuckets | undefined {
+  if (host.maxRam === undefined) return undefined;
+  const max = Math.max(0, host.maxRam);
+  const blocked = Math.max(0, Math.min(host.blockedRam ?? 0, max));
+  const free = Math.max(0, Math.min(host.freeRam ?? 0, max - blocked));
+  return { max, ours: Math.max(0, max - blocked - free), free, blocked };
+}
+
+function compactRam(gb: number): string {
+  if (gb >= 1e6) return `${(gb / 1e6).toFixed(1)}P`;
+  if (gb >= 1e3) return `${(gb / 1e3).toFixed(1)}T`;
+  return gb.toFixed(gb < 10 && !Number.isInteger(gb) ? 2 : 0).replace(/\.0+$/, '');
+}
+
 function ramBar(host: DarknetKnownHost, x: number, y: number): string {
-  if (host.maxRam === undefined || host.maxRam <= 0) return "";
+  const ram = ramBuckets(host);
+  if (!ram || ram.max <= 0) return "";
   const width = BOX_W - 16;
-  const blocked = Math.max(0, Math.min(host.blockedRam ?? 0, host.maxRam));
-  const free = Math.max(0, Math.min(host.freeRam ?? 0, host.maxRam));
-  const used = Math.max(0, host.maxRam - blocked - free);
-  const w = (value: number) => Math.max(0, (value / host.maxRam!) * width);
-  const freeW = w(free);
-  const usedW = w(used);
-  const blockedW = w(blocked);
+  const w = (value: number) => Math.max(0, (value / ram.max) * width);
+  const oursW = w(ram.ours);
+  const freeW = w(ram.free);
+  const blockedW = w(ram.blocked);
   return (
-    `<rect class="ram free" x="${x}" y="${y}" width="${freeW.toFixed(1)}" height="4"></rect>`
-    + `<rect class="ram used" x="${(x + freeW).toFixed(1)}" y="${y}" width="${usedW.toFixed(1)}" height="4"></rect>`
-    + `<rect class="ram blocked" x="${(x + freeW + usedW).toFixed(1)}" y="${y}" width="${blockedW.toFixed(1)}" height="4"></rect>`
+    `<rect class="ram ours ram-ours" x="${x}" y="${y}" width="${oursW.toFixed(1)}" height="4"></rect>`
+    + `<rect class="ram free ram-free" x="${(x + oursW).toFixed(1)}" y="${y}" width="${freeW.toFixed(1)}" height="4"></rect>`
+    + `<rect class="ram blocked ram-blocked" x="${(x + oursW + freeW).toFixed(1)}" y="${y}" width="${blockedW.toFixed(1)}" height="4"></rect>`
   );
 }
 
@@ -767,9 +790,10 @@ function nodeMarkup(entry: Placed, options: MapOptions): string {
   const glyph = FAMILY_GLYPH[modelEntry(host.modelId)?.family ?? "oracle"] ?? "?";
   const meta = host.requiredCharisma !== undefined ? `cha:${fmtNum(host.requiredCharisma, 0)}` : "";
   const status = AUTH_LABEL[host.authState ?? "no-connection"] ?? "";
-  const ram = host.maxRam === undefined
+  const buckets = ramBuckets(host);
+  const ram = buckets === undefined
     ? ""
-    : `${fmtRam(host.freeRam ?? 0)}/${fmtRam(host.maxRam)}`;
+    : `O/F/B ${compactRam(buckets.ours)}/${compactRam(buckets.free)}/${compactRam(buckets.blocked)}`;
 
   return (
     // data-view-key is the whole selection mechanism: main.ts's delegated
@@ -901,6 +925,11 @@ export function netLegend(): string {
     // describing a class the map does not render.
     + swatch("stasis", "stasis")
     + swatch("stale", "faded = believed, not confirmed")
+    + `</div>`
+    + `<div class="netlegend">`
+    + swatch("ram-ours", "RAM: ours")
+    + swatch("ram-free", "RAM: free")
+    + swatch("ram-blocked", "RAM: owner-blocked")
     + `</div>`
     // The edge vocabulary, which had no key at all — including the one edge that
     // means our own knowledge is wrong.

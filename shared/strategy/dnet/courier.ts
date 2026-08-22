@@ -1,4 +1,5 @@
 import type { OracleCapture } from "./oracle.ts";
+import type { PasswordEvidence } from "./evidence.ts";
 
 /** The shapes the darknet's findings travel in, and the rule that keeps a
  * password out of everything that is written down.
@@ -66,6 +67,13 @@ export const LOCAL_CODES = {
    *  state — `DarknetState.lastPhishingCacheTime` is exposed nowhere — and the
    *  overseer stamps its cooldown belief off it. */
   911: "PhishingCacheWon",
+  /** A pin job's act-time check found the edge it exists for already severed,
+   *  and the link was NOT spent. The mutation clock cuts every connection on
+   *  one host per branch roll, and a stasis link freezes a host's edges only
+   *  once it is applied — so a pin planned against a live edge can arrive at a
+   *  dead one, and pinning anyway would spend a near-irrevocable slot on a
+   *  host that no longer reaches what it was pinned FOR. */
+  912: "EdgeGone",
 } as const;
 
 /** The same vocabulary, by name, for the code we EMIT.
@@ -87,6 +95,7 @@ export const LOCAL_CODE = {
   ModelUnattempted: 904,
   JobDied: 905,
   PhishingCacheWon: 911,
+  EdgeGone: 912,
 } as const;
 
 export function codeName(code: number): string {
@@ -98,6 +107,9 @@ export function codeName(code: number): string {
 /** One host, as an agent standing next to it saw it. */
 export interface ReportHost {
   hostname: string;
+  /** Stable for one server lifetime. Darknet hostnames may be reused after a
+   * deletion; the IP distinguishes the replacement from the old identity. */
+  identity?: string;
   /** When the observing job looked, stamped where the observation HAPPENED.
    *
    *  Not at drain time: residents run on their own clocks and home collects them
@@ -121,9 +133,6 @@ export interface ReportHost {
   passwordHint?: string;
   data?: string;
   logTrafficInterval?: number;
-  /** Whether the OBSERVING process held a session. Per-PID, so it says nothing
-   *  about anyone else and expires with its observer. */
-  hasSession?: boolean;
   /** `.cache` files `ns.ls` listed on the host.
    *
    *  The only channel there is: upstream appends a darknet server's caches to
@@ -132,6 +141,14 @@ export interface ReportHost {
    *  is a real observation — "we looked and there were none" — and is what stops
    *  a `cache` task from being derived, so it must not be conflated with absent. */
   caches?: string[];
+  /** Coding contracts seen by the same `ls` call as caches.
+   * Empty is conclusive and retires the previous listing. */
+  contracts?: string[];
+  /** Whether `STORM_SEED.exe` sat in the host's program list — read off the
+   *  same `ls` call that reports the caches, since upstream appends programs to
+   *  the listing too. Explicit `false` is "we looked and it was not there",
+   *  which is what retires a stale sighting; absent means the job did not look. */
+  stormSeed?: boolean;
 }
 
 /** One password attempt and what it taught us.
@@ -150,6 +167,8 @@ export interface AttemptOutcome {
   attempted?: string;
   code: number;
   success: boolean;
+  /** Whether the call actually tested this password against the expected host. */
+  disposition?: AttemptDisposition;
   /** Wall time. For `2G_cellular` this IS the oracle: each correct leading
    *  character adds 50ms, so the duration is the signal, not the response. */
   elapsedMs?: number;
@@ -161,6 +180,46 @@ export interface AttemptOutcome {
   solver?: Record<string, unknown>;
 }
 
+export type AttemptDisposition =
+  | 'success'
+  | 'wrong-password'
+  | 'transient'
+  | 'edge-lost'
+  | 'gone'
+  | 'oracle-unavailable';
+
+/** Normalize the engine's response codes without hiding them. */
+export function attemptDisposition(
+  code: number,
+  success: boolean,
+  oracleRequired = false,
+  oracleCaptured = true,
+): AttemptDisposition {
+  if (success) return 'success';
+  if (code === 351) return 'edge-lost';
+  if (code === 503) return 'gone';
+  if (code === 408) return 'transient';
+  if (oracleRequired && !oracleCaptured) return 'oracle-unavailable';
+  return 'wrong-password';
+}
+
+export function conclusiveAttempt(outcome: Pick<AttemptOutcome, 'code' | 'success' | 'disposition'>): boolean {
+  const disposition = outcome.disposition ?? attemptDisposition(outcome.code, outcome.success);
+  return disposition === 'success' || disposition === 'wrong-password';
+}
+
+/** Final state of one full destructive read of a target's shared ring. */
+export interface LogDrainOutcome {
+  pendingAuthRecords: number;
+  evidence: PasswordEvidence[];
+  /** Last time we paid for a heartbleed call, successful or not. This is our
+   * retry clock, not a claim that the ring was consumed. */
+  attemptedAt?: number;
+  /** Last successful destructive full-ring read. Passive line estimates are
+   * measured from this stamp; a refusal must never pretend logs were drained. */
+  drainedAt?: number;
+}
+
 /** A resident saying it is alive. Three missed beats and the overseer retires
  * its queue, because a resident dies with its host. */
 export interface AgentBeat {
@@ -170,7 +229,7 @@ export interface AgentBeat {
   at: number;
 }
 
-/** A password an agent recovered, on its way to the overseer's vault.
+/** A password an agent verified, on its way to the overseer's vault.
  *
  * The one structure in the feature that carries a secret. It never crosses a
  * channel that is written down: it lives in the realm between the job that found
@@ -178,10 +237,23 @@ export interface AgentBeat {
 export interface VaultEntry {
   hostname: string;
   password: string;
-  /** How it was learned. A `leak` credential came out of a log and is worth
-   *  trying anywhere; a `cracked` one is a fact about this host. */
-  via: "cracked" | "leak" | "loose";
+  /** Server lifetime this credential was verified against. */
+  identity?: string;
   at: number;
+}
+
+/** A plaintext leak whose owner was named, but whose password has not yet been
+ * verified against that server lifetime. It is a targeted candidate, never a
+ * vault entry and never an unattributed spray candidate. */
+export interface ProvisionalCredential {
+  hostname: string;
+  password: string;
+  via: "connecting" | "passcode" | "packet";
+  /** When heartbleed exposed the line. The ring carries no creation stamp, so
+   * this is the only honest WHEN the script can attach to the observation. */
+  at: number;
+  /** Server identity held when the overseer received the observation. */
+  identity?: string;
 }
 
 /** Field names that carry a recovered credential and must never be recorded.
@@ -198,6 +270,8 @@ const CREDENTIAL_KEYS: ReadonlySet<string> = new Set([
   "vault",
   "solver",
   "scratch",
+  "history",
+  "evidence",
 ]);
 
 /** Strip credentials at every depth.

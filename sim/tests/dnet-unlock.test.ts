@@ -128,6 +128,41 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
     expect(adjacency).toBeGreaterThan(0);
   }, 180_000);
 
+  test("the storm trigger derives on the live controller, and refuses by name", async () => {
+    // End-to-end wiring proof for the storm: the overseer runs `planStorm`
+    // every derivation, the verdict rides the drain to home, and home
+    // publishes it as the `storm` telemetry block. A real FIRE needs a
+    // 30-minute-converged net (links spent, a seed minted, a fresh
+    // `.d.cache`), which is soak territory — what this pins is that every
+    // stage of the pipeline exists and speaks the policy's refusal names,
+    // so a storm that never fires is attributable rather than silent.
+    const refusals = new Set<string>();
+    let sawStorm = false;
+    const result = await runGame({
+      goal: parseGoals(["wealth:1e12"]),
+      seed: 3,
+      horizonMs: 6 * 60_000,
+      bitnode: 15,
+      homeRam: 256,
+      features: only("progression", "dnet"),
+      onRecord: (line) => {
+        const record = JSON.parse(line) as {
+          key?: string;
+          data?: { storm?: { admitted?: number; refused?: Record<string, number> } };
+        };
+        if (record.key !== "dnet" || record.data?.storm === undefined) return;
+        sawStorm = true;
+        for (const name of Object.keys(record.data.storm.refused ?? {})) refusals.add(name);
+      },
+    });
+    expect(result.crashes).toEqual([]);
+    expect(result.unmodeled).toEqual({});
+    expect(sawStorm, "the storm block never published").toBe(true);
+    // Six minutes into a fresh net no seed can exist, so the standing refusal
+    // is the policy's second gate by name.
+    expect([...refusals]).toContain("no-seed");
+  }, 180_000);
+
   test("the same seed generates the same darknet", async () => {
     const run = async () => {
       const hosts: string[] = [];

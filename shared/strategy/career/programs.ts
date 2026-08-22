@@ -1,3 +1,5 @@
+import { TOR_COST } from "../dnet/rates.ts";
+
 /** Handwritten v3.0.1 program-creation economics. The simulator parity suite
  * compares this table with upstream; game/shared never imports upstream.
  *
@@ -70,7 +72,7 @@ export function preferProgramCreation(
   const timeMs = programCreateTimeMs(program, hacking, intelligence);
   if (!Number.isFinite(timeMs)) return false;
   const timeSec = timeMs / 1_000;
-  const buyCost = program.purchaseCost + (hasTor ? 0 : 200_000);
+  const buyCost = program.purchaseCost + (hasTor ? 0 : TOR_COST);
   const forgoneMoney = timeSec * Math.max(0, alternative.moneyPerSec);
   if (valueSecPerDollar === undefined || !(valueSecPerDollar > 0)) return forgoneMoney < buyCost;
   // The larger of two estimates of ONE cost, not their sum: the money the slot

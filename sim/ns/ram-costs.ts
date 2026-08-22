@@ -423,6 +423,13 @@ export const RAM_COSTS: CostNode = {
   gang,
   go,
   dnet,
+  formulas: {
+    dnet: {
+      getAuthenticateTime: 0,
+      getHeartbleedTime: 0,
+      getExpectedRamBlockRemoved: 0,
+    },
+  },
   bladeburner,
   format: { number: 0, ram: 0, percent: 0, time: 0 },
   infiltration: { getPossibleLocations: 0, getInfiltration: C.InfiltrationGetInfiltrations },

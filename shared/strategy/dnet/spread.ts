@@ -24,19 +24,23 @@ import { compareDepthDesc, freeRam, fresh, type DarknetKnowledge, type ExpiryOpt
  * The mechanical ladder a plant executes, all in ONE process:
  *
  *     probe()                           -> my neighbours
- *     authenticate(Y, password)         -> needs a direct connection; the
- *                                          session belongs to this PID alone
+ *     connectToSession(Y, password)     -> needs prior root; no connection
+ *     authenticate(Y, password)         -> first opening needs a connection
  *     scp([payloads], Y, X)             -> needs the session, no connection
- *     exec(payload, Y, ...)             -> needs the session AND the connection
+ *     exec(payload, Y, ...)             -> needs the session and either a
+ *                                          connection or a backdoor
  *
- * That is why a plant is planned per (from, to) pair rather than per target: the
- * vantage is part of the move. A credential we hold for a host we are not
- * standing next to buys `scp` and nothing else. */
+ * An ordinary plant is still planned per adjacent (from, to) pair. A recovery
+ * plant may instead use any live resident when a stamped backdoor or stasis fact
+ * says remote exec remains believable. */
 
 export interface SpreadCandidate {
   host: string;
   /** Where a worker would have to be STANDING to do this. */
   from: string;
+  /** The target is not adjacent; this vantage reuses a global rooted session
+   * through a still-believable backdoor or stasis link. */
+  remote?: boolean;
   depth?: number;
   freeRam?: number;
   hasCredential: boolean;
@@ -204,6 +208,10 @@ export function candidatesFrom(
     vault: ReadonlySet<string>;
     /** When each host was last planted, for the cooldown. */
     lastPlantAt?: ReadonlyMap<string, number>;
+    /** Targets whose backdoor/stasis fact is fresh enough for remote exec. */
+    remoteExec?: ReadonlySet<string>;
+    /** Live resident queues able to run a session-only remote plant. */
+    remoteVantages?: readonly { host: string; freeGb?: number }[];
     expiry?: ExpiryOpts;
   },
 ): SpreadCandidate[] {
@@ -212,11 +220,22 @@ export function candidatesFrom(
   for (const host of Object.values(knowledge.hosts)) {
     if (opts.standing.has(host.hostname)) continue;
     let from: string | undefined;
+    let remote = false;
     for (const where of opts.standing) {
       const neighbours = fresh<string[]>(knowledge.hosts[where], "neighbours", at, expiry);
       if (neighbours?.includes(host.hostname)) {
         from = where;
         break;
+      }
+    }
+    if (from === undefined && opts.remoteExec?.has(host.hostname)) {
+      const vantage = [...(opts.remoteVantages ?? [])]
+        .filter((candidate) => opts.standing.has(candidate.host))
+        .sort((a, b) => (b.freeGb ?? -1) - (a.freeGb ?? -1)
+          || (a.host < b.host ? -1 : a.host > b.host ? 1 : 0))[0];
+      if (vantage !== undefined) {
+        from = vantage.host;
+        remote = true;
       }
     }
     if (from === undefined) continue;
@@ -225,6 +244,7 @@ export function candidatesFrom(
     out.push({
       host: host.hostname,
       from,
+      ...(remote ? { remote: true } : {}),
       ...(depth !== undefined ? { depth } : {}),
       freeRam: freeRam(host, at, expiry),
       hasCredential: opts.vault.has(host.hostname),

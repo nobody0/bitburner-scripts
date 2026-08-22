@@ -9,6 +9,11 @@ import {
   SOLVERS,
 } from "../../../shared/strategy/side/contracts.ts";
 import type { ContractFailure } from "../../../shared/telemetry/topics/side.ts";
+import {
+  contractKey,
+  darknetContractIsActionable,
+  type ContractQueueEntry,
+} from "../contracts.ts";
 import { merge, type GameState } from "../state.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
 import type { DriverContext, FeatureDriver, FeatureModule } from "./index.ts";
@@ -19,12 +24,7 @@ const CLAIM_ID = "action:contract";
 
 type Result = { action: string; ok: boolean; detail: string; at: number };
 
-interface ContractRef {
-  host: string;
-  file: string;
-}
-
-interface InspectedContract extends ContractRef {
+interface InspectedContract extends ContractQueueEntry {
   type: string;
   triesBefore: number;
 }
@@ -34,15 +34,21 @@ interface ContractJob extends InspectedContract {
   answer: unknown;
 }
 
-type ContractInspectionResult = InspectedContract | (ContractRef & { error: string });
+type ContractInspectionResult = InspectedContract | (ContractQueueEntry & { error: string });
 type ContractDataResult = (InspectedContract & { data: unknown }) | (InspectedContract & { error: string });
 type ContractAttemptResult = { key: string; reward: string } | { key: string; error: string };
 
 /** Queued broker stages retain their data-dependent inputs. A ready getData
  * lease must resume getData, not restart inspection with the wrong budget. */
-let pipelineBatch: ContractRef[] | undefined;
+let pipelineBatch: ContractQueueEntry[] | undefined;
 let pipelineInspection: ContractInspectionResult[] | undefined;
 let pipelineData: ContractDataResult[] | undefined;
+
+function clearContractPipeline(): void {
+  pipelineBatch = undefined;
+  pipelineInspection = undefined;
+  pipelineData = undefined;
+}
 
 /** The exact solver boundary shipped to the game. Simulator parity tests use
  * this export so they verify deployed wiring as well as the pure registry. */
@@ -51,10 +57,6 @@ export const solveContract = solve;
 
 function record(ok: boolean, detail: string): Result {
   return { action: "contract", ok, detail, at: Date.now() };
-}
-
-function contractKey(contract: ContractRef): string {
-  return `${contract.host}\0${contract.file}`;
 }
 
 function replayValue(value: unknown): string {
@@ -77,7 +79,7 @@ function compactReason(reason: string): string {
 
 function quarantineContract(
   ctx: DriverContext,
-  contract: ContractRef,
+  contract: ContractQueueEntry,
   type: string,
   reason: string,
   data?: unknown,
@@ -113,15 +115,21 @@ const side: FeatureDriver = {
     }
     const quarantine = ctx.state.contractQuarantine ??= {};
 
+    const now = Date.now();
+    if (pipelineBatch?.some((contract) =>
+      !darknetContractIsActionable(contract, ctx.state.darknetContractListings, now))) {
+      clearContractPipeline();
+    }
     const queue = (ctx.state.contractQueue ?? topic.contracts.map(({ host, file }) => ({ host, file })))
+      .filter((contract) => darknetContractIsActionable(contract, ctx.state.darknetContractListings, now))
       .slice(0, CONTRACT_QUEUE_LIMIT);
     ctx.state.contractQueue = queue;
 
     const solvable = queue.filter((contract) => !quarantine[contractKey(contract)]);
     const solvableTotal = topic.solvableTotal ?? solvable.length;
 
-    const batch = pipelineBatch
-      ?? solvable.slice(0, CONTRACT_BATCH_SIZE).map(({ host, file }) => ({ host, file }));
+    const batch: ContractQueueEntry[] = pipelineBatch
+      ?? solvable.slice(0, CONTRACT_BATCH_SIZE);
     if (batch.length === 0) return;
     pipelineBatch = batch;
 
@@ -148,7 +156,7 @@ const side: FeatureDriver = {
     );
     if (!inspection.ok) {
       if (inspection.queued) return;
-      pipelineBatch = undefined;
+      clearContractPipeline();
       merge(ctx.state, "side", { lastResult: record(false, inspection.reason) });
       return;
     }
@@ -188,8 +196,7 @@ const side: FeatureDriver = {
       );
       if (!dataResult.ok) {
         if (dataResult.queued) return;
-        pipelineBatch = undefined;
-        pipelineInspection = undefined;
+        clearContractPipeline();
         merge(ctx.state, "side", { lastResult: record(false, dataResult.reason) });
         return;
       }
@@ -228,9 +235,7 @@ const side: FeatureDriver = {
       );
       if (!attemptResult.ok) {
         if (attemptResult.queued) return;
-        pipelineBatch = undefined;
-        pipelineInspection = undefined;
-        pipelineData = undefined;
+        clearContractPipeline();
         merge(ctx.state, "side", { lastResult: record(false, attemptResult.reason) });
         return;
       }
@@ -252,6 +257,11 @@ const side: FeatureDriver = {
     }
 
     const allFailures = Object.values(quarantine).sort((a, b) => b.at - a.at);
+    for (const contract of batch) {
+      if (contract.dnet && finished.has(contractKey(contract))) {
+        (ctx.state.darknetContractHandledAt ??= {})[contractKey(contract)] = contract.dnet.observedAt;
+      }
+    }
     const remaining = queue.filter((contract) => !finished.has(contractKey(contract)));
     ctx.state.contractQueue = remaining;
     const rewardDetail = rewards.length > 0
@@ -262,7 +272,7 @@ const side: FeatureDriver = {
       `${solved} solved, ${failures.length} quarantined from a batch of ${batch.length}${rewardDetail}`,
     );
     merge(ctx.state, "side", {
-      contracts: remaining.slice(0, CONTRACT_REPORT_LIMIT),
+      contracts: remaining.slice(0, CONTRACT_REPORT_LIMIT).map(({ host, file }) => ({ host, file })),
       contractTotal: Math.max(0, (topic.contractTotal ?? topic.contracts.length) - solved),
       solvableTotal: Math.max(0, solvableTotal - solved - failures.length),
       failures: allFailures
@@ -271,9 +281,7 @@ const side: FeatureDriver = {
       quarantinedTotal: allFailures.length,
       lastResult: result,
     });
-    pipelineBatch = undefined;
-    pipelineInspection = undefined;
-    pipelineData = undefined;
+    clearContractPipeline();
   },
 };
 
@@ -284,9 +292,7 @@ export const sideModule: FeatureModule = {
     state.contractQuarantine = {};
     delete state.contractQueue;
     state.contractSolverVersion = CONTRACT_SOLVER_VERSION;
-    pipelineBatch = undefined;
-    pipelineInspection = undefined;
-    pipelineData = undefined;
+    clearContractPipeline();
   },
   claims: (ctx) => (ctx.state.contractQueue?.length ?? ctx.state.topics.side?.contracts?.length)
     ? [actionRamClaim(ctx, "side", CLAIM_ID, ["codingcontract.attempt"])]

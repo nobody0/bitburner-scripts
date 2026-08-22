@@ -139,22 +139,22 @@ const SOLVED: { model: ModelId; difficulties: number[]; worst: number }[] = [
   { model: "MathML", difficulties: [10, 14, 18, 22, 30], worst: 1 },
   { model: "Pr0verFl0", difficulties: [4, 6, 8, 12], worst: 1 },
   // Feedback-driven.
-  { model: "AccountsManager_4.2", difficulties: [4, 6, 8, 12, 16], worst: 7 },
-  { model: "BigMo%od", difficulties: [10, 14, 18, 24, 30], worst: 9 },
+  { model: "AccountsManager_4.2", difficulties: [4, 6, 8, 12, 16], worst: 6 },
+  { model: "BigMo%od", difficulties: [10, 14, 18, 24, 30], worst: 8 },
   // BOTH regimes. Below difficulty 8 `data` is a bare Roman numeral and the
   // answer is a decode; at or above it is a range and the answer is a search.
   { model: "BellaCuore", difficulties: [2, 4, 6, 7, 10, 14, 18, 24], worst: 11 },
   { model: "PHP 5.4", difficulties: [4, 8, 14, 21, 28], worst: 23 },
-  { model: "NIL", difficulties: [4, 6, 8, 12], worst: 63 },
-  { model: "Factori-Os", difficulties: [4, 8, 12, 16, 20], worst: 104 },
+  { model: "NIL", difficulties: [4, 6, 8, 12], worst: 62 },
+  { model: "Factori-Os", difficulties: [4, 8, 12, 16, 20, 28, 36], worst: 173 },
   // Group testing: a count becomes a binary search once the attempt is allowed
   // to contain a character the password cannot.
-  { model: "DeepGreen", difficulties: [4, 8, 14, 20, 28], worst: 72 },
-  { model: "RateMyPix.Auth", difficulties: [8, 14, 20, 28], worst: 110 },
+  { model: "DeepGreen", difficulties: [4, 8, 14, 20, 28], worst: 69 },
+  { model: "RateMyPix.Auth", difficulties: [8, 14, 20, 28], worst: 104 },
   // Not a minigame: the capture leaks the password outright below difficulty 17,
   // and above it the same password sits in every fresh blob.
   { model: "OpenWebAccessPoint", difficulties: [4, 8, 12, 16, 20, 26], worst: 4 },
-  { model: "KingOfTheHill", difficulties: [8, 14, 20, 28, 36], worst: 54 },
+  { model: "KingOfTheHill", difficulties: [8, 14, 20, 28, 36], worst: 42 },
   // The one that spans vantage windows: 62 symbols by up to 8 positions.
   { model: "2G_cellular", difficulties: [10, 14, 18, 24], worst: 266 },
 ];

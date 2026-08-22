@@ -382,6 +382,45 @@ export function phishMoneyChance(charisma: number, crimeSuccessMult = 1): number
   return 0.05 * crimeSuccessMult * ((200 + charisma) / 200);
 }
 
+// --- the storm ---------------------------------------------------------------
+//
+// `STORM_SEED.exe` and the webstorm it fires are the whole reason these numbers
+// exist in one place: the trigger policy (`storm.ts`), the overseer's quiet
+// period and the sim's burst model all have to agree on them, and they are
+// engine state no ns call exposes — a storm can only be timed from our own
+// stamps. Source: src/DarkNet/effects/ramblock.ts:50-66 (the seed drop),
+//         src/DarkNet/effects/webstorm.ts:25-79 (the burst).
+
+/** How long after a storm the engine refuses to mint another seed. The gate is
+ * `Date.now() - lastStormTime > 30 min`, and `lastStormTime` is MODULE SCOPE —
+ * absent from the save, restamped on load — so a session's first seed cannot
+ * exist before its first half hour either.
+ * Source: src/DarkNet/effects/ramblock.ts:58-60 */
+export const STORM_COOLDOWN_MS = 30 * 60 * 1000;
+
+/** The seed roll, taken once per RAM block cleared to zero — and only when no
+ * seed already exists among the MOVABLE servers, which is why a seed parked on
+ * a stasis-pinned host does not stop another from spawning.
+ * Source: src/DarkNet/effects/ramblock.ts:56-65 */
+export const STORM_SEED_CHANCE = 0.15;
+
+/** How long the burst itself runs: 5 s warning, 4 s deletes, 4 s moves+restarts,
+ * 4+8 s adds, 5 s tail — the phase gaps in `launchWebstorm` sum to ~30 s, during
+ * which `mutationLock` freezes the ordinary clock.
+ * Source: src/DarkNet/effects/webstorm.ts:41-70 */
+export const STORM_BURST_MS = 30_000;
+
+/** The burst plus margin: how long after firing we treat the net as mid-storm —
+ * derive nothing for movable hosts, refuse a second fire. The margin covers the
+ * stamp being taken at claim time rather than at the engine's own clock. */
+export const STORM_QUIET_MS = 35_000;
+
+/** How recently a `.d.cache` must have landed for a storm to fire: within this
+ * window of a phish cache, the phishing cooldown is freshly spent, so the
+ * storm's ~30 s of downtime sits entirely inside the three dead minutes and
+ * costs no cache we could otherwise have rolled for. */
+export const STORM_PHISH_OVERLAP_MS = 30_000;
+
 /** Money one paying call yields, at the mean of upstream's U(0.9, 1.2) factor.
  * DEPTH is the term that matters to a planner: `0.1 + depth * 0.05` is why the
  * deepest resident is the one worth phishing from.

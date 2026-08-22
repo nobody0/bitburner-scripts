@@ -1,12 +1,13 @@
 import type { NS } from "@ns";
-import { LOCAL_CODE, type ReportHost, type VaultEntry } from "../../shared/strategy/dnet/courier.ts";
-import type { AttemptLedger } from "../../shared/strategy/dnet/knowledge.ts";
+import { attemptDisposition, conclusiveAttempt, LOCAL_CODE, type AttemptOutcome, type LogDrainOutcome, type ProvisionalCredential, type ReportHost, type VaultEntry } from "../../shared/strategy/dnet/courier.ts";
+import type { AttemptLedger, LogRingState } from "../../shared/strategy/dnet/knowledge.ts";
 import { modelEntry, planAttempt, type ModelId, type PasswordFacts } from "../../shared/strategy/dnet/models.ts";
 import { harvestLogs, logShape, oracleFor } from "../../shared/strategy/dnet/oracle.ts";
 import { solverFor } from "../../shared/strategy/dnet/solvers/index.ts";
 import {
   EXHAUSTED_PHASE,
   PENDING_ATTEMPT,
+  PENDING_NEEDS_ORACLE,
   SOLVER_CODES,
   freshState,
   resumableState,
@@ -16,9 +17,22 @@ import {
   type SolverStep,
 } from "../../shared/strategy/dnet/solvers/types.ts";
 import { FARM_BATCH_MS, batchHasRoom } from "../../shared/strategy/dnet/farm.ts";
-import { INDUCE_WAIT_MS, labMazeSize, labStage } from "../../shared/strategy/dnet/rates.ts";
-import { emptyMaze, markBlocked, readCoords, stepMaze, type Cell } from "../../shared/strategy/dnet/maze.ts";
-import { RESIDENT_METHODS, priceAgent, type DnetJobResult, type DnetJobState, type JobBeat } from "./realm.ts";
+import { INDUCE_WAIT_MS, labStage } from "../../shared/strategy/dnet/rates.ts";
+import {
+  decideLab,
+  emptyField,
+  LAB_FIRST_PROBE,
+  labPrior,
+  mergeLabFields,
+  observeLab,
+  readCoords,
+  refuseEdge,
+  routePrior,
+  type Cell,
+  type Direction,
+  type LabField,
+} from "../../shared/strategy/dnet/maze.ts";
+import { RESIDENT_METHODS, priceAgent, type DnetJobResult, type DnetJobState, type JobBeat, type JobCancellation } from "./realm.ts";
 
 /** What a darknet job actually DOES, separated from the overseer that decides
  * it should happen.
@@ -36,17 +50,17 @@ import { RESIDENT_METHODS, priceAgent, type DnetJobResult, type DnetJobState, ty
  * analyser charges by MEMBER NAME across the whole bundle. So every `ns` reach
  * here is bracket notation on the `jobNs` the body was HANDED
  * (`jobNs["dnet"]["authenticate"]`), and one dot-access would bill the entire
- * job surface — authenticate, heartbleed, scp, exec — to an overseer pinned at
- * 1.65 GB. `tests/ram-budget.test.ts` greps every file in this directory for
+ * job surface — authenticate, heartbleed, scp, exec — to the small overseer
+ * allocation. `tests/ram-budget.test.ts` greps every file in this directory for
  * that shape and pins the built artifact against esbuild rewriting it.
  *
  * The same trap catches names: a local called `exec`, `scan`, `read` or `run`
  * is never free, and `RegExp.prototype.exec` bills the full 1.3 GB of `ns.exec`
  * wherever it appears. Use `String.prototype.match`. */
 
-/** Log lines pulled per bleed. `peek` leaves them, so this does not consume
- * evidence another agent may want, and the ring holds 200. */
-const LOG_LINES = 8;
+/** Every read drains the complete upstream ring. A target-owned pending count
+ * preserves any records that cannot be read yet because charisma is too low. */
+const LOG_LINES = 200;
 
 /** At most this many distinct shapes per job. Drift shows up in the first one or
  * two; a whole bleed's worth would be a list of the same shape. */
@@ -70,6 +84,12 @@ function grammarDrift(
   return { unrecognised: unrecognised.length, shapes };
 }
 
+function targetStateFor(code: number): Pick<DnetJobResult, 'targetState'> {
+  if (code === 351) return { targetState: 'edge-lost' };
+  if (code === 503) return { targetState: 'gone' };
+  return {};
+}
+
 /** How long one attempt job may keep talking to a host.
  *
  * Not a taste decision. A vantage — the adjacency `authenticate` and
@@ -84,18 +104,28 @@ function grammarDrift(
  * home on the attempt ledger and the next vantage resumes the conversation. */
 const ATTEMPT_WALL_MS = 36_000;
 
-/** The `.cache` files on a host, out of `ns.ls`.
+/** The storm seed's filename, exactly as upstream's program enum spells it. */
+const STORM_SEED_FILE = "STORM_SEED.exe";
+
+/** Everything one `ls` teaches about a darknet host, in one call.
  *
- * `ls` returns every file the host holds and upstream appends a darknet
- * server's caches to that list — there is no cache-specific member — so the
- * filter is ours. `.d.cache` ends in `.cache` too, which is deliberate: a
- * phishing cache is the only kind that can hand back a coding contract, and both
- * are opened by the same call.
+ * `ls` returns every file the host holds, and upstream appends a darknet
+ * server's caches, contracts and programs to that list — none has a member of
+ * its own — so the filters are ours. `.d.cache` ends in `.cache` too, which is
+ * deliberate: a phishing cache is the only kind that can hand back a coding
+ * contract, and both are opened by the same call. The seed flag is a boolean
+ * rather than a listing because there is exactly one filename to see, and an
+ * explicit `false` is the observation that retires a stale sighting.
  *
  * `String.prototype.endsWith`, never a RegExp: `RegExp.prototype.exec` anywhere
  * in a bundle that reaches a game script bills the full 1.3 GB of `ns.exec`. */
-function cacheFilesOn(jobNs: NS, host: string): string[] {
-  return jobNs["ls"](host).filter((name) => name.endsWith(".cache"));
+function listingOn(jobNs: NS, host: string): { caches: string[]; contracts: string[]; stormSeed: boolean } {
+  const names = jobNs["ls"](host);
+  return {
+    caches: names.filter((name) => name.endsWith(".cache")),
+    contracts: names.filter((name) => name.endsWith(".cct")),
+    stormSeed: names.includes(STORM_SEED_FILE),
+  };
 }
 
 /** The two pieces of overseer state a job needs and cannot be handed once.
@@ -109,6 +139,24 @@ export interface JobDeps {
   /** What this host's model has already been asked, so a dictionary walk
    *  resumes rather than restarting at candidate one. */
   ledgerFor: (host: string) => AttemptLedger | undefined;
+  ringFor?: (host: string) => LogRingState | undefined;
+  /** Write through to the target-owned ledger after every call, so a worker
+   *  death cannot take completed attempts or drained evidence with it. */
+  recordAttempt?: (host: string, outcome: AttemptOutcome) => void;
+  recordLogDrain?: (host: string, outcome: LogDrainOutcome) => void;
+  recordCredential?: (entry: VaultEntry) => void;
+  recordLoose?: (password: string) => void;
+  recordProvisional?: (entry: ProvisionalCredential) => void;
+  /** The lab's shared maze knowledge, keyed by lab hostname and held by the
+   *  overseer — the ONE piece of walk progress that outlives a walker's PID.
+   *  A walker folds it in before every decision and publishes after every
+   *  observation, which is what lets a finisher and a scout in the same maze
+   *  act as one mapper, and what lets a re-seeded walker start with the map
+   *  its dead predecessor paid for. Live references, like everything in the
+   *  realm; the overseer merges rather than replaces, so two concurrent
+   *  walkers cannot clobber each other's slots. */
+  labField?: (host: string) => LabField | undefined;
+  publishLabField?: (host: string, field: LabField) => void;
 }
 
 /** What a job body is handed.
@@ -116,16 +164,20 @@ export interface JobDeps {
  * The third argument is the LONG-JOB BEAT and short jobs ignore it: a job that
  * declares `longLived` is skipped by the overseer's timeout loop, so the only
  * evidence it is still alive is its own stamp. See `LONG_JOB_BEAT_MS`. */
-export type JobBody = (jobNs: NS, state: DnetJobState, beat?: JobBeat) => Promise<DnetJobResult>;
+export type JobBody = (
+  jobNs: NS,
+  state: DnetJobState,
+  beat?: JobBeat,
+  cancelled?: JobCancellation,
+) => Promise<DnetJobResult>;
 
 export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> {
   /** One host, as the caller can see it from where it is standing.
    *
-   * `withCaches` is a parameter rather than always-on because `ns.ls` is 0.2 GB
-   * and only two kinds declare it: `survey`, which is how a `.cache` is ever
-   * discovered, and `cache`, which re-reads the listing after opening one. Every
-   * other job would be paying for a call it never makes. */
-  const describeHost = (jobNs: NS, host: string, withCaches = false): ReportHost => {
+   * `withListing` is a parameter rather than always-on because `ns.ls` is
+   * 0.2 GB. Survey, reclaim, cache and the completed labyrinth walk pay for it;
+   * every other job would be paying for a call it never makes. */
+  const describeHost = (jobNs: NS, host: string, withListing = false, withIdentity = false): ReportHost => {
     // Stamped HERE, at the getter, not when home eventually drains this. A
     // resident runs on its own clock and a drain is a batch; a drain-time stamp
     // would give every host in the batch one age and make the fold's
@@ -135,6 +187,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     if (!details.isOnline) return { hostname: host, at, present: false };
     return {
       hostname: host,
+      ...(withIdentity ? { identity: jobNs["getServer"](host).ip } : {}),
       at,
       present: true,
       depth: details.depth,
@@ -148,7 +201,6 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       passwordHint: details.passwordHint,
       data: details.data,
       logTrafficInterval: details.logTrafficInterval,
-      hasSession: details.hasSession,
       // The two ordinary getters, 0.05 each. Without them `freeRam` is 0 for
       // every host, `planSpread` refuses every plant for want of room, and the
       // net never grows past the beachhead — which looks exactly like a
@@ -157,8 +209,9 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       usedRam: jobNs["getServerUsedRam"](host),
       // An EMPTY array is a real observation and has to reach the fold as one:
       // "we looked and there were none" is exactly what stops a `cache` task
-      // being derived for ever off a listing nobody ever refreshed.
-      ...(withCaches ? { caches: cacheFilesOn(jobNs, host) } : {}),
+      // being derived for ever off a listing nobody ever refreshed. The seed
+      // flag rides the same `ls` — one call, two facts.
+      ...(withListing ? listingOn(jobNs, host) : {}),
     };
   };
 
@@ -171,8 +224,8 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     // neighbour's survey — so a host at the edge of the crawl, which is exactly
     // the one worth farming, never reported its own blocked RAM or its own
     // `.cache` files at all.
-    const hosts: ReportHost[] = [{ ...describeHost(jobNs, state.from, true), neighbours: [...around] }];
-    for (const host of around) hosts.push(describeHost(jobNs, host, true));
+    const hosts: ReportHost[] = [{ ...describeHost(jobNs, state.from, true, true), neighbours: [...around] }];
+    for (const host of around) hosts.push(describeHost(jobNs, host, true, true));
     return { ok: true, hosts, detail: `${around.length} neighbours` };
   };
 
@@ -184,31 +237,43 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
    * solving one. */
   const bleedJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
     const jobCodes: Record<string, number> = {};
-    const bled = await jobNs["dnet"]["heartbleed"](state.host, { peek: true, logsToCapture: LOG_LINES });
+    const attemptedAt = Date.now();
+    const bled = await jobNs["dnet"]["heartbleed"](state.host, { peek: false, logsToCapture: LOG_LINES });
     jobCodes[String(bled.code)] = 1;
     if (!bled.success) {
-      return { ok: false, codes: jobCodes, hosts: [describeHost(jobNs, state.host)], detail: bled.message };
+      const logDrain: LogDrainOutcome = {
+        pendingAuthRecords: deps.ringFor?.(state.host)?.pendingAuthRecords ?? 0,
+        evidence: [],
+        attemptedAt,
+      };
+      deps.recordLogDrain?.(state.host, logDrain);
+      return {
+        ok: false,
+        codes: jobCodes,
+        ...targetStateFor(bled.code),
+        hosts: [describeHost(jobNs, state.host)],
+        detail: bled.message,
+      };
     }
-    const harvest = harvestLogs(bled.logs, state.host);
-    const credentials: VaultEntry[] = harvest.credentials.map((found) => ({
-      hostname: found.host!,
-      password: found.password,
-      via: "leak" as const,
-      at: Date.now(),
-    }));
+    const at = Date.now();
+    const harvest = harvestLogs(bled.logs, { bledFrom: state.host, knownHosts: state.knownHosts ?? [state.host], at });
+    for (const found of harvest.credentials)
+      deps.recordProvisional?.({ hostname: found.host, password: found.password, via: found.via, at });
+    for (const password of harvest.loose) deps.recordLoose?.(password);
     const drift = grammarDrift(harvest.unrecognised);
+    const logDrain: LogDrainOutcome = {
+      pendingAuthRecords: 0,
+      evidence: harvest.evidence,
+      attemptedAt,
+      drainedAt: at,
+    };
+    deps.recordLogDrain?.(state.host, logDrain);
     return {
       ok: true,
       codes: jobCodes,
-      credentials,
-      // The `--<password>--` lines, which name no owner. They travel to the
-      // overseer and no further: it is the only thing that knows which hosts
-      // a password of this length and format could belong to, and an
-      // unattributed password is still a password.
-      ...(harvest.loose.length > 0 ? { loose: harvest.loose } : {}),
       hosts: [describeHost(jobNs, state.host)],
       ...(drift ? { grammar: drift } : {}),
-      detail: `${credentials.length} credentials, ${harvest.loose.length} unattributed,`
+      detail: `${harvest.credentials.length} named candidates, ${harvest.loose.length} unattributed,`
         + ` ${harvest.unrecognised.length} unrecognised lines`,
     };
   };
@@ -219,78 +284,157 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
    * the model's real answer goes into the target's log ring, and only
    * `heartbleed` reads it back. Splitting them across two jobs would race the
    * 200-line ring against every other agent's noise for the sake of 0.6 GB. */
-  const attemptJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
+  const attemptJob = async (
+    jobNs: NS,
+    state: DnetJobState,
+    _beat?: JobBeat,
+    cancelled?: JobCancellation,
+  ): Promise<DnetJobResult> => {
     const jobCodes: Record<string, number> = {};
     const count = (code: number | string): void => {
       jobCodes[String(code)] = (jobCodes[String(code)] ?? 0) + 1;
     };
     const details = jobNs["dnet"]["getServerDetails"](state.host);
     if (!details.isOnline) {
-      return { ok: false, hosts: [{ hostname: state.host, at: Date.now(), present: false }], codes: { "503": 1 } };
+      return { ok: false, targetState: 'gone', hosts: [{ hostname: state.host, at: Date.now(), present: false }], codes: { "503": 1 } };
     }
     const entry = modelEntry(details.modelId);
     const ledger = deps.ledgerFor(state.host);
-    const facts: PasswordFacts = {
-      passwordLength: details.passwordLength,
-      passwordFormat: details.passwordFormat,
-      passwordHint: details.passwordHint,
-      data: details.data,
-      difficulty: details.difficulty,
-    };
+    const ring = deps.ringFor?.(state.host);
+
     // `heartbleed` is the only charisma-gated call, so below the requirement the
     // log ring is unreadable and every feedback model is deaf. Read once: it
     // decides whether a solver may hold a conversation at all.
     const canBleed = details.requiredCharismaSkill <= deps.charisma();
 
-    const credentials: VaultEntry[] = [];
-    /** Unattributed passwords the ring gave up while we were talking to it. */
-    const loose: string[] = [];
     const attempts: NonNullable<DnetJobResult["attempts"]> = [];
+    const targetCandidates: string[] = [];
+    const factsEvidence = [...(ledger?.evidence ?? [])];
     /** Lines this conversation could not parse, pooled across its rounds. */
+    let pendingAuthRecords = ring?.pendingAuthRecords ?? 0;
+    let lastBleedAttemptAt = ring?.lastBleedAttemptAt;
+    let lastBleedAt = ring?.lastBleedAt;
     const driftLines: string[] = [];
 
-    /** One `authenticate`, plus the log read its real answer may be hiding in. */
+    const drainLogs = async (): Promise<ReturnType<typeof harvestLogs> | undefined> => {
+      const attemptedAt = Date.now();
+      lastBleedAttemptAt = attemptedAt;
+      const bled = await jobNs["dnet"]["heartbleed"](state.host, { peek: false, logsToCapture: LOG_LINES });
+      count(bled.code);
+      if (!bled.success) {
+        deps.recordLogDrain?.(state.host, {
+          pendingAuthRecords,
+          evidence: [],
+          attemptedAt,
+        });
+        return undefined;
+      }
+      const at = Date.now();
+      lastBleedAt = at;
+      const harvest = harvestLogs(bled.logs, { bledFrom: state.host, knownHosts: state.knownHosts ?? [state.host], at });
+      pendingAuthRecords = 0;
+      deps.recordLogDrain?.(state.host, { pendingAuthRecords, evidence: harvest.evidence, attemptedAt, drainedAt: at });
+      factsEvidence.push(...harvest.evidence);
+      driftLines.push(...harvest.unrecognised);
+      for (const found of harvest.credentials) {
+        deps.recordProvisional?.({ hostname: found.host, password: found.password, via: found.via, at });
+        if (found.host === state.host && !targetCandidates.includes(found.password)) {
+          targetCandidates.push(found.password);
+        }
+      }
+      for (const password of harvest.loose) deps.recordLoose?.(password);
+      return harvest;
+    };
+
+    // Drain before this identity's first attempt: authenticate prepends into a
+    // capped ring, so even one attempt could otherwise evict its oldest hint or
+    // leaked credential. The ring's own stamp is authoritative—a standalone
+    // drain may already have done this before an attempt job was scheduled.
+    if (canBleed && (lastBleedAt === undefined || pendingAuthRecords > 0)) await drainLogs();
+
+    const facts: PasswordFacts = {
+      passwordLength: details.passwordLength,
+      passwordFormat: details.passwordFormat,
+      passwordHint: details.passwordHint,
+      data: details.data,
+      evidence: factsEvidence,
+      difficulty: details.difficulty,
+    };
+
+    /** Whether the timing channel is available at all. `ns.formulas` is gated
+     *  on OWNING Formulas.exe ($5b on the dark web) and THROWS without it — so
+     *  the very first 2G_cellular attempt of a run that has not bought it would
+     *  otherwise raise out of the body, fail the job, and re-derive for ever.
+     *  One probe decides it; the solver's other channel — the mismatch index
+     *  the failure log states outright — needs no formulas at all. */
+    let timingChannel = true;
+
+    /** One measured authentication and its optional full-ring drain. */
     const send = async (password: string, wantsOracle: boolean): Promise<SolverObservation> => {
+      // The fourth formula argument is the caller's assumed prefix length; it
+      // does not inspect the password. Refresh the zero-prefix baseline before
+      // every measurement because failed attempts can raise charisma.
+      if (details.modelId === "2G_cellular" && timingChannel) {
+        try {
+          const threads = state.jobThreads ?? 1;
+          const baseline = jobNs["formulas"]["dnet"]["getAuthenticateTime"](details, threads, undefined, 0);
+          facts.authenticateBaseMs = baseline;
+          const stepMs = jobNs["formulas"]["dnet"]["getAuthenticateTime"](details, threads, undefined, 1) - baseline;
+          // Defensive for incomplete test doubles; upstream always returns > 0.
+          if (stepMs > 0) facts.authenticateStepMs = stepMs;
+        } catch {
+          // No Formulas.exe, or no darknet formulas surface at all. Stop asking
+          // and leave the baseline unset: `readMismatchIndex` is the channel
+          // the solver falls back to, and it gives up by name if neither is
+          // available rather than killing the agent.
+          timingChannel = false;
+          delete facts.authenticateBaseMs;
+          delete facts.authenticateStepMs;
+        }
+      }
       const at = Date.now();
       const answer = await jobNs["dnet"]["authenticate"](state.host, password);
       const elapsedMs = Date.now() - at;
       count(answer.code);
+      if (answer.code === 401 || answer.success) {
+        pendingAuthRecords++;
+        deps.recordLogDrain?.(state.host, { pendingAuthRecords, evidence: [], ...(lastBleedAttemptAt !== undefined ? { attemptedAt: lastBleedAttemptAt } : {}), ...(lastBleedAt !== undefined ? { drainedAt: lastBleedAt } : {}) });
+      }
       // A model id our transcription does not know is either a game update or a
       // hole in `shared/strategy/dnet/models.ts`.
       if (entry === undefined) count(LOCAL_CODE.UnknownModel);
 
-      // Read the ring whatever happened: on a failure it holds the model's
-      // response, and on a success it still holds whatever the host leaked while
-      // we were working.
-      const bled = (wantsOracle || answer.success) && canBleed
-        ? await jobNs["dnet"]["heartbleed"](state.host, { peek: true, logsToCapture: LOG_LINES })
+      // Feedback models drain immediately. Timing-only 2G rounds can safely
+      // batch until the full-ring bound; success always drains the remainder.
+      const harvest = canBleed && (wantsOracle || answer.success || pendingAuthRecords >= LOG_LINES)
+        ? await drainLogs()
         : undefined;
-      const harvest = bled?.success ? harvestLogs(bled.logs, state.host) : undefined;
-      // Drift accumulates across the whole conversation rather than per round:
-      // a solve is many bleeds against one ring, and reporting each round
-      // separately would count the same unparsed line a dozen times.
-      for (const line of harvest?.unrecognised ?? []) driftLines.push(line);
-      for (const found of harvest?.credentials ?? []) {
-        credentials.push({ hostname: found.host!, password: found.password, via: "leak", at: Date.now() });
-      }
-      for (const bare of harvest?.loose ?? []) loose.push(bare);
-      if (answer.success) {
-        credentials.push({ hostname: state.host, password, via: "cracked", at: Date.now() });
-      }
       // Match the response to THIS attempt. The ring is shared with every other
       // agent and with the host's own noise, so folding whichever oracle came
       // back first would hand the solver someone else's feedback.
       const oracle = harvest ? oracleFor(harvest, password, details.modelId) : undefined;
-      attempts.push({
+      const outcome: AttemptOutcome = {
         at,
         ...(details.modelId !== undefined ? { modelId: details.modelId } : {}),
         status: entry === undefined ? "unknown-model" : entry.status,
         attempted: password,
         code: answer.code,
         success: answer.success,
+        disposition: attemptDisposition(answer.code, answer.success, wantsOracle, oracle !== undefined),
         elapsedMs,
         ...(oracle ? { oracle } : {}),
-      });
+      };
+      attempts.push(outcome);
+      deps.recordAttempt?.(state.host, outcome);
+      if (answer.success) {
+        const credential: VaultEntry = {
+          hostname: state.host,
+          password,
+          ...(state.targetIdentity !== undefined ? { identity: state.targetIdentity } : {}),
+          at: Date.now(),
+        };
+        deps.recordCredential?.(credential);
+      }
       return {
         attempted: password,
         code: answer.code,
@@ -300,7 +444,13 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       };
     };
 
-    const settle = (ok: boolean, detail: string, carried?: SolverState, pending?: string): DnetJobResult => {
+    const settle = (
+      ok: boolean,
+      detail: string,
+      carried?: SolverState,
+      pending?: string,
+      pendingNeedsOracle?: boolean,
+    ): DnetJobResult => {
       // The solver's place rides home on the LAST attempt, which is the record
       // the fold writes into the ledger. `pending` is the attempt that state was
       // waiting on — see the resume path for why the pair has to travel
@@ -308,15 +458,27 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       if (carried !== undefined && attempts.length > 0) {
         const withPending = pending === undefined
           ? carried
-          : { ...carried, scratch: { ...carried.scratch, [PENDING_ATTEMPT]: pending } };
-        attempts[attempts.length - 1]!.solver = withPending as unknown as Record<string, unknown>;
+          : {
+              ...carried,
+              scratch: {
+                ...carried.scratch,
+                [PENDING_ATTEMPT]: pending,
+                ...(pendingNeedsOracle !== undefined ? { [PENDING_NEEDS_ORACLE]: pendingNeedsOracle } : {}),
+              },
+            };
+        const outcome = attempts[attempts.length - 1]!;
+        outcome.solver = withPending as unknown as Record<string, unknown>;
+        deps.recordAttempt?.(state.host, outcome);
       }
       const grammar = grammarDrift(driftLines);
+      const disposition = attempts[attempts.length - 1]?.disposition;
+      const targetState = disposition === 'edge-lost' || disposition === 'gone'
+        ? disposition
+        : undefined;
       return {
         ok,
+        ...(targetState !== undefined ? { targetState } : {}),
         codes: jobCodes,
-        credentials,
-        ...(loose.length > 0 ? { loose } : {}),
         hosts: [describeHost(jobNs, state.host)],
         attempts,
         ...(grammar ? { grammar } : {}),
@@ -324,7 +486,27 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       };
     };
 
+    const cancelledResult = (carried?: SolverState, pending?: string, pendingNeedsOracle?: boolean): DnetJobResult =>
+      ({ ...settle(false, `${state.host}: ${cancelled?.() ?? 'cancelled'}`, carried, pending, pendingNeedsOracle), targetState: 'cancelled' });
+
     // --- one unattributed password, and nothing else -----------------------
+
+    /** Spend newly drained candidates for THIS target before paying for more
+     * model information. This covers both the pre-drain and candidates found
+     * inside an OpenWeb response during the conversation. */
+    const tryTargetCandidates = async (): Promise<SolverObservation | undefined> => {
+      while (targetCandidates.length > 0) {
+        const seen = await send(targetCandidates.shift()!, false);
+        if (seen.success || seen.code === 351 || seen.code === 503) return seen;
+      }
+      return undefined;
+    };
+
+    const drainedCandidate = await tryTargetCandidates();
+    if (drainedCandidate?.success) return settle(true, `opened ${state.host} with a named log leak`);
+    if (drainedCandidate?.code === 351 || drainedCandidate?.code === 503) {
+      return settle(false, `${state.host}: lost the target while checking a named log leak`);
+    }
     //
     // A log line that reads `--<password>--` leaks a random MOVABLE host's
     // password with no name attached, and the overseer has already narrowed
@@ -366,6 +548,13 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
         let step = first;
         let spent = alreadySpent;
         while (step.kind !== "give-up") {
+          if (cancelled?.() !== undefined) {
+            return cancelledResult(
+              step.kind === "attempt" ? step.state : undefined,
+              step.password,
+              step.kind === "attempt" ? step.needsOracle : false,
+            );
+          }
           if (Date.now() > deadline || spent >= budget) {
             count(SOLVER_CODES.SolverBudget);
             return settle(
@@ -373,6 +562,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
               `${state.host}: solve paused after ${spent} attempts`,
               step.kind === "attempt" ? step.state : undefined,
               step.password,
+              step.kind === "attempt" ? step.needsOracle : false,
             );
           }
           const seen = await send(step.password, step.kind === "attempt" ? step.needsOracle : false);
@@ -390,9 +580,16 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
               `${state.host}: lost the vantage mid-solve`,
               step.kind === "attempt" ? step.state : undefined,
               step.password,
+              step.kind === "attempt" ? step.needsOracle : false,
             );
           }
           spent++;
+          const leaked = await tryTargetCandidates();
+          if (leaked?.success) return settle(true, `opened ${state.host} with a named log leak`);
+          if (leaked?.code === 351 || leaked?.code === 503) {
+            return settle(false, `${state.host}: lost the target while checking a named log leak`);
+          }
+
           if (step.kind === "answer") {
             // We asserted a decoded password and it was refused, so our reading of
             // this model is wrong rather than unlucky. That is worth hearing.
@@ -407,7 +604,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
             // been thirty exchanges deep — and this stop is the most resumable
             // one there is: charisma catches up, the ring becomes readable, and
             // re-sending the same password recovers the answer that was lost.
-            return settle(false, `${state.host}: no readable response`, step.state, step.password);
+            return settle(false, `${state.host}: no readable response`, step.state, step.password, step.needsOracle);
           }
           step = solver.next(facts, step.state, seen);
         }
@@ -420,49 +617,6 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
         );
       };
 
-      /** Re-enter a conversation the previous vantage did not finish.
-       *
-       * A solver's state pairs with the attempt it was about to make, and the
-       * answer to that attempt is what advances it. The previous job sent that
-       * attempt and never heard back, so what has to be recovered is the ANSWER,
-       * not the state.
-       *
-       * Re-sending the same password recovers it exactly: every model's response
-       * is a pure function of (password, attempt), so the reply is the one that
-       * was lost. That is why this is a resume rather than an approximation — and
-       * it costs exactly one exchange, against restarting a search that may have
-       * been thirty deep. */
-      const resume = async (usable: SolverState, pending: string): Promise<DnetJobResult> => {
-        // Carried forward only when we are actually continuing. Charging a
-        // restarted solve for the attempts it is NOT building on would shrink its
-        // budget every time it was interrupted, until `spent >= budget` fired on
-        // the first pass and the host could never be opened at all.
-        const spent = usable.spent;
-        if (spent >= budget) {
-          // THE BUDGET BOUNDS THE RESUME, and it has to: the resume sends its
-          // pending attempt before `converse`'s own check is ever reached, so
-          // without this a solve that had spent its budget made one more exchange
-          // on every vantage, for ever — `solver.next` handed back a fresh pending
-          // each time, the task re-derived on the next tick, and the declared
-          // "most attempts this solver may spend on one identity" was exceeded
-          // without bound. Stopping here costs nothing and keeps the state
-          // resumable, so a later budget change picks the conversation back up.
-          count(SOLVER_CODES.SolverBudget);
-          return settle(
-            false,
-            `${state.host}: solve is at its ${budget}-attempt budget`,
-            withoutPending(usable),
-            pending,
-          );
-        }
-        const seen = await send(pending, true);
-        if (seen.success) return settle(true, `opened ${state.host}`);
-        if (seen.code === 351 || seen.code === 503) {
-          return settle(false, `${state.host}: lost the vantage again`, usable);
-        }
-        return await converse(solver.next(facts, withoutPending(usable), seen), spent);
-      };
-
       // An identity we have already eliminated. Costs nothing and spends no
       // call: see `EXHAUSTED_PHASE`.
       if (carried.state?.phase === EXHAUSTED_PHASE) {
@@ -470,30 +624,50 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
         return settle(false, `${state.host}: this identity was eliminated already`);
       }
       if (carried.state !== undefined && carried.pending !== undefined) {
-        return await resume(carried.state, carried.pending);
+        const needsOracle = carried.pendingNeedsOracle ?? solver.needsOracle;
+        // Reconstruct the pending step and use the ordinary loop, so resumed
+        // work shares its budget, deadline, cancellation, timeout, and
+        // target-loss semantics.
+        return await converse({
+          kind: "attempt",
+          password: carried.pending,
+          state: withoutPending(carried.state),
+          needsOracle,
+          note: "resumed pending attempt",
+        }, carried.state.spent);
       }
+      if (cancelled?.() !== undefined) return cancelledResult();
       return await converse(solver.first(facts), 0);
     }
 
     // --- no solver: a dictionary walk, or the one deliberate probe -----------
-    const plan = planAttempt(entry, facts, ledger?.tried ?? 0, ledger?.probes ?? 0);
+    const plan = planAttempt(
+      entry,
+      facts,
+      ledger?.tried ?? 0,
+      ledger?.probes ?? 0,
+      1,
+      ledger?.history?.filter(conclusiveAttempt)
+        .map((outcome) => outcome.attempted)
+        .filter((value): value is string => value !== undefined) ?? [],
+    );
     if (plan.kind === "none") {
       return { ok: false, codes: { [LOCAL_CODE.ModelUnattempted]: 1 }, detail: plan.reason };
     }
-    const seen = await send(plan.password, true);
+    if (cancelled?.() !== undefined) return cancelledResult();
+    const seen = await send(plan.password, plan.kind === "probe");
     if (plan.kind === "candidate" && attempts.length > 0) {
       attempts[attempts.length - 1]!.candidateIndex = plan.index;
     }
     return settle(seen.success, seen.success ? `opened ${state.host}` : `${state.host}: ${plan.password} refused`);
   };
 
-  /** connectToSession + scp + exec: put a resident on a host we have opened.
+  /** connectToSession/authenticate + scp + exec: put a resident on an open host.
    *
-   * `connectToSession` rather than `authenticate`, and that choice is what makes
-   * the whole spawn design affordable. The credential was won by a PREVIOUS
-   * process and its session died with that PID. Re-opening one costs 0.05 GB and
-   * no time at all; authenticating again would cost 0.4 GB and seconds of it,
-   * every time an agent chained.
+   * `connectToSession` comes first, and that choice makes the normal spawn chain
+   * affordable. The credential was won by a PREVIOUS process and its session
+   * died with that PID. Re-opening one costs 0.05 GB and no time; authenticate is
+   * the fallback when the target no longer has the state the cheap path needs.
    *
    * `exec` and not `spawn` here, because the target is a DIFFERENT host: spawn
    * only ever starts a script where the caller already is. */
@@ -502,19 +676,34 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     if (state.password === undefined) {
       return { ok: false, codes: { [LOCAL_CODE.NoCredential]: 1 }, detail: "no credential" };
     }
-    // connectToSession is the cheap path, and it only works on a host that is
-    // ALREADY ROOTED — `requireAdminRights`, which only a successful
-    // `authenticate` ever sets. A credential harvested from a log is for a host
-    // we may never have authenticated to, so the first use of one has to be the
-    // expensive call. Trying the cheap one first and falling back keeps a
-    // re-planted host at 0.05 GB while still opening a leaked one at all.
+    // connectToSession is the cheap optimistic path. If the identity-bound
+    // credential outlived the target's session state, authenticate restores it.
     let session = jobNs["dnet"]["connectToSession"](state.host, state.password);
     jobCodes[String(session.code)] = (jobCodes[String(session.code)] ?? 0) + 1;
-    if (!session.success) {
+    if (!session.success && state.sessionOnly) {
+      return {
+        ok: false,
+        codes: jobCodes,
+        ...targetStateFor(session.code),
+        detail: session.message,
+      };
+    } else if (!session.success) {
       session = await jobNs["dnet"]["authenticate"](state.host, state.password);
       jobCodes[String(session.code)] = (jobCodes[String(session.code)] ?? 0) + 1;
     }
-    if (!session.success) return { ok: false, codes: jobCodes, detail: session.message };
+    if (!session.success) {
+      return {
+        ok: false,
+        codes: jobCodes,
+        // A verified credential is valid for one server identity. If that
+        // identity now rejects it, continuing to plant with the cached value is
+        // impossible; force identity reconciliation and discard the credential.
+        ...(session.code === 401
+          ? { targetState: "replaced" as const }
+          : targetStateFor(session.code)),
+        detail: session.message,
+      };
+    }
     if (!jobNs["scp"](state.payloads ?? [], state.host, state.from)) {
       return { ok: false, codes: jobCodes, detail: "scp refused" };
     }
@@ -545,12 +734,20 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
 
   /** memoryReallocation, in a bounded grind.
    *
-   * It works on the CALLING host with no credential. The call declares
+   * On the CALLING host it needs no credential: the call declares
    * `requireAdminRights`, but `checkDarknetServer` evaluates the direct-
    * connection requirement first and then early-outs on self
    * (`offlineServerHandling.ts:98-101`) BEFORE the admin-rights check is
    * reached — so a resident grinds its own owner's block open for free. That is
-   * what makes blocked RAM a problem the net can solve for itself. */
+   * what makes blocked RAM a problem the net can solve for itself.
+   *
+   * The call reaches an authenticated NEIGHBOUR too, and `state.host` already
+   * carries the target — so when the farm elects a roomy helper to grind a
+   * cramped host's block remotely (`state.from !== state.host`), this body runs
+   * unchanged; only the vantage the overseer filed it on differs. The remote
+   * case is the one that pays the admin check, which is why the planner gates
+   * it on the vault. 454/351/503 semantics carry over: 454 NoBlockRAM is still
+   * the successful end whichever side the call stands on. */
   const reclaimJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
     const jobCodes: Record<string, number> = {};
     const count = (code: number | string): void => {
@@ -579,7 +776,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       codes: jobCodes,
       // With the cache listing: the whole point of grinding a block to the end
       // is the file that lands when it reaches zero.
-      hosts: [describeHost(jobNs, state.host, true)],
+      hosts: [describeHost(jobNs, state.host, true, true)],
       detail: cleared
         ? `${state.host}: block cleared after ${calls} calls`
         : `${calls} calls against ${state.host}'s block`,
@@ -646,14 +843,15 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
         detail: "no cache filename; a job never invents one",
       };
     }
-    const held = cacheFilesOn(jobNs, state.host);
+    const heldListing = listingOn(jobNs, state.host);
+    const held = heldListing.caches;
     if (!held.includes(wanted)) {
       // The listing moved under us — someone else opened it, or the host was
       // restarted. Report the fresh one so the next derivation is right.
       return {
         ok: false,
         codes: { "404": 1 },
-        hosts: [{ ...describeHost(jobNs, state.host), caches: held }],
+        hosts: [{ ...describeHost(jobNs, state.host, false, true), ...heldListing }],
         detail: `${wanted} is no longer on ${state.host}`,
       };
     }
@@ -664,7 +862,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       return {
         ok: false,
         codes: { "404": 1 },
-        hosts: [{ ...describeHost(jobNs, state.host), caches: cacheFilesOn(jobNs, state.host) }],
+        hosts: [{ ...describeHost(jobNs, state.host, false, true), ...listingOn(jobNs, state.host) }],
         detail: `openCache threw on ${wanted}: ${String(error)}`.slice(0, 200),
       };
     }
@@ -675,7 +873,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       // free progress toward the gang threshold. The overseer accumulates it
       // and publishes the total for `gang` to read.
       ...(opened.success ? { karmaLoss: opened.karmaLoss } : {}),
-      hosts: [{ ...describeHost(jobNs, state.host), caches: cacheFilesOn(jobNs, state.host) }],
+      hosts: [{ ...describeHost(jobNs, state.host, false, true), ...listingOn(jobNs, state.host) }],
       detail: opened.message.slice(0, 200),
     };
   };
@@ -733,7 +931,12 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
    * no member reads it back, so progress is only ever inferred: the DEPTH
    * moving is the one observation that says the move landed, and
    * `describeHost` at the end is what carries it home. */
-  const induceJob = async (jobNs: NS, state: DnetJobState, beat?: JobBeat): Promise<DnetJobResult> => {
+  const induceJob = async (
+    jobNs: NS,
+    state: DnetJobState,
+    beat?: JobBeat,
+    cancelled?: JobCancellation,
+  ): Promise<DnetJobResult> => {
     const jobCodes: Record<string, number> = {};
     const count = (code: number | string): void => {
       jobCodes[String(code)] = (jobCodes[String(code)] ?? 0) + 1;
@@ -741,13 +944,21 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     const before = jobNs["dnet"]["getServerDetails"](state.host);
     const startedAt = Date.now();
     let calls = 0;
+    let stopped: { code: number; message: string } | undefined;
     for (;;) {
+      const cancellation = cancelled?.();
+      if (cancellation !== undefined) {
+        return { ok: false, targetState: "cancelled", codes: jobCodes, detail: `${state.host}: ${cancellation}` };
+      }
       // The wait is a hardcoded 6 s that no skill shortens, so the batch fits
       // six of them and the check is made before the call rather than after.
       if (Date.now() + INDUCE_WAIT_MS > startedAt + FARM_BATCH_MS) break;
       const pushed = await jobNs["dnet"]["induceServerMigration"](state.host);
       count(pushed.code);
-      if (!pushed.success) break;
+      if (!pushed.success) {
+        stopped = pushed;
+        break;
+      }
       calls++;
       beat?.({ calls });
     }
@@ -756,10 +967,11 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     return {
       ok: calls > 0,
       codes: jobCodes,
+      ...(stopped === undefined ? {} : targetStateFor(stopped.code)),
       hosts: [after],
       detail: moved
         ? `${state.host} migrated from depth ${before.depth} to ${after.depth} after ${calls} calls`
-        : `${calls} calls of charge against ${state.host}`,
+        : `${calls} calls of charge against ${state.host}${stopped ? `; ${stopped.message}` : ""}`,
     };
   };
 
@@ -777,6 +989,35 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
    * until the labyrinth starts paying out, and a 453 means home's belief about
    * which hosts are pinned has drifted from the engine's. */
   const pinJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
+    // THE RELEASE DIRECTION. Same call, opposite argument, and no edge check —
+    // a release is filed precisely because the edge is gone, so probing for it
+    // would refuse the one job that fixes the situation.
+    if (state.unpin === true) {
+      const released = await jobNs["dnet"]["setStasisLink"](false);
+      return {
+        ok: released.success,
+        codes: { [String(released.code)]: 1 },
+        hosts: [describeHost(jobNs, state.host)],
+        detail: released.success
+          ? `${state.host}: link released, slot freed`
+          : `${state.host}: ${released.message}`,
+      };
+    }
+    // THE LAST LOOK BEFORE THE IRREVOCABLE ACT. A pin freezes this host's
+    // edges only from the moment it is applied — the mutation clock can sever
+    // every connection on one host per branch roll, so the lab edge this pin
+    // was planned against may already be gone. Pinning anyway would spend a
+    // slot on a host that no longer reaches the thing it was pinned FOR, so
+    // the job probes first and refuses without spending. `dnet.probe` is
+    // declared in `JOB_METHODS.pin` for exactly this call.
+    if (state.edge !== undefined && !jobNs["dnet"]["probe"]().includes(state.edge)) {
+      return {
+        ok: false,
+        codes: { [String(LOCAL_CODE.EdgeGone)]: 1 },
+        hosts: [describeHost(jobNs, state.host)],
+        detail: `${state.host}: the edge to ${state.edge} is severed; the link was NOT spent`,
+      };
+    }
     const pinned = await jobNs["dnet"]["setStasisLink"](true);
     return {
       ok: pinned.success,
@@ -786,26 +1027,73 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     };
   };
 
-  /** The maze walker: `authenticate(lab, <direction>)`, over and over.
+  /** unleashStormSeed, on the calling host and taking no target.
+   *
+   * The seed cannot be moved (`scp` allows only scripts, text and `.lit`), so
+   * the job runs where the file is. Two properties shape the body. The listing
+   * is re-read first because the sighting can go stale exactly like a cache
+   * filename — unlike `openCache` the member refuses with a 404 rather than
+   * throwing, but a fresh `stormSeed: false` in the failure report is what
+   * corrects the next derivation without spending anything. And the SUCCESS
+   * path is deliberately minimal — no `describeHost`, nothing slow — because
+   * `restartAllDarknetServers` reaches this host about five seconds after the
+   * call and the facts it would report are about to be garbage anyway; a small
+   * result has the best chance of draining home before the agent dies. The
+   * overseer stamps `lastStormFiredAt` pessimistically at claim time for
+   * exactly the case where it does not. */
+  const stormJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
+    const listing = listingOn(jobNs, state.host);
+    if (!listing.stormSeed) {
+      return {
+        ok: false,
+        codes: { "404": 1 },
+        hosts: [{ ...describeHost(jobNs, state.host), ...listing }],
+        detail: `${STORM_SEED_FILE} is no longer on ${state.host}`,
+      };
+    }
+    const fired = jobNs["dnet"]["unleashStormSeed"]();
+    return {
+      ok: fired.success,
+      codes: { [String(fired.code)]: 1 },
+      ...(fired.success ? { stormFiredAt: Date.now() } : {}),
+      detail: fired.message.slice(0, 200),
+    };
+  };
+
+  /** The maze walker: `authenticate(lab, <direction>)`, over and over, with the
+   * occasional paid `labradar` when one render decides more than one move can.
    *
    * THE ONE JOB THAT MUST NEVER END EARLY. Position is
    * `DarknetState.labLocations[pid]`, so a dead PID abandons the walk and the
    * next process is re-seeded at the start — there is no resuming, and a deep
    * lab is thousands of moves. That is why it is the only `longLived` kind, why
    * it beats every move, and why its host is the first thing a stasis link is
-   * spent on.
+   * spent on — the FINISHER's host, that is. A walk with `state.role: "scout"`
+   * is the deliberately disposable second walker the overseer files when two
+   * hosts stand next to the lab: it maps the southern macro-route into the
+   * shared field and is never pinned, because everything it learns outlives it
+   * and only its position dies with it.
    *
    * The lab is the one model that answers through `authenticate`'s own return
-   * value: `message` carries the new coordinates and `data` a radius-1 render,
-   * so there is no `heartbleed` round trip and no need for `labradar` — which
-   * would cost a full authentication time for a radius-3 look at the same
-   * information.
+   * value: `message` carries the new coordinates and `data` a radius-1 render.
+   * That free render reveals all four adjacent walls BEFORE the next choice, so
+   * the planner in `shared/strategy/dnet/maze.ts` never pays an authentication
+   * to bump a wall — except the deliberate first probe, made blind because the
+   * position is unknown until the first response. `labradar` costs the same
+   * full authentication as a move and earns no charisma, so `decideLab` pays
+   * for one only when its radius-3 window would decide the exit outright or
+   * scout several of a seam's door candidates at once.
    *
    * **A wall refusal leaves the position UNCHANGED.** The engine tests the cell
    * BETWEEN us and the target and returns "You are still at X,Y" without
    * moving, so every position comes from parsing the response rather than from
    * assuming the move worked. */
-  const walkJob = async (jobNs: NS, state: DnetJobState, beat?: JobBeat): Promise<DnetJobResult> => {
+  const walkJob = async (
+    jobNs: NS,
+    state: DnetJobState,
+    beat?: JobBeat,
+    cancelled?: JobCancellation,
+  ): Promise<DnetJobResult> => {
     const jobCodes: Record<string, number> = {};
     const count = (code: number | string): void => {
       jobCodes[String(code)] = (jobCodes[String(code)] ?? 0) + 1;
@@ -827,40 +1115,112 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
         detail: `${state.host} needs charisma ${details.requiredCharismaSkill}`,
       };
     }
-    const bounds = stage ? labMazeSize(stage) : undefined;
-    let known = emptyMaze();
+    // The planner's whole edge is knowing the generator's arithmetic for THIS
+    // stage — the seams, the door candidates, the exit candidates. A lab host
+    // outside the ladder has no stage to know, and walking it blind would be
+    // the old DFS without its aim; stop and say so instead.
+    if (!stage) {
+      return {
+        ok: false,
+        codes: { [String(SOLVER_CODES.OracleUnparsed)]: 1 },
+        hosts: [describeHost(jobNs, state.host)],
+        detail: `${state.host} is not a labyrinth rung the walker knows`,
+      };
+    }
+    const basePrior = labPrior(stage);
+    // A scout commits to the southern macro-route — the door pair the pinned
+    // finisher's east-leaning planner is usually not on — so the two walkers
+    // map different halves of the maze instead of shadowing each other. The
+    // bias only closes doors nobody has SEEN: the shared field outranks it,
+    // and if it ever proves unroutable the scout falls back to planning over
+    // everything.
+    let prior = state.role === "scout" ? routePrior(basePrior, "southern") : basePrior;
+    // Seed from the overseer's shared field: the one piece of walk progress
+    // that outlives a PID. A re-seeded walker starts with its predecessor's
+    // map, and a scout starts with everything the finisher has already seen.
+    let field: LabField = deps.labField?.(state.host) ?? emptyField();
     let at: Cell | undefined;
-    /** The radius-1 render the LAST response carried. It is the only vision the
-     *  walker has, and it arrives with the move rather than being asked for. */
-    let lastRender = "";
+    /** The direction of the move in flight, so a refusal can be written down. */
+    let pending: Direction | undefined;
     let moves = 0;
     let walls = 0;
+    let radars = 0;
+    /** The planner's own A* estimate of what is left, refreshed every decision.
+     *  The walk's only forward-looking number, and the one the panel turns into
+     *  an ETA against the walk's own observed pace. */
+    let believedLeft: number | undefined;
+    const progress = (): Record<string, unknown> => ({
+      ...(at !== undefined ? { at: `${at[0]},${at[1]}` } : {}),
+      moves,
+      walls,
+      radars,
+      learned: Object.keys(field.slots).length,
+      ...(believedLeft !== undefined ? { believedLeft } : {}),
+      ...(state.role !== undefined ? { role: state.role } : {}),
+    });
     for (;;) {
+      const cancellation = cancelled?.();
+      if (cancellation !== undefined) {
+        return { ok: false, targetState: "cancelled", codes: jobCodes, detail: `${state.host}: ${cancellation}` };
+      }
+      // The FIRST call has no known position, so it is a deliberate blind
+      // probe: any direction answers with our coordinates whether it moves us
+      // or not, and probing TOWARD the exit's corner turns the lucky half of
+      // those probes into a free first step.
+      let direction: Direction;
+      if (at === undefined) {
+        direction = LAB_FIRST_PROBE;
+      } else {
+        // Fold in whatever the OTHER walker has published since our last look,
+        // then decide. Merging every step is cheap — a field tops out around
+        // two thousand slots — and it is what turns two walkers into one
+        // mapper rather than two strangers.
+        field = mergeLabFields(field, deps.labField?.(state.host));
+        let plan = decideLab(field, at, prior);
+        if (plan.kind === "lost" && prior !== basePrior) {
+          // The route bias closed every remaining path. Drop it for good and
+          // help wherever the map still has questions.
+          prior = basePrior;
+          plan = decideLab(field, at, prior);
+        }
+        if (plan.kind === "lost") {
+          return {
+            ok: false,
+            codes: jobCodes,
+            hosts: [describeHost(jobNs, state.host)],
+            detail: `${state.host}: ${plan.reason}`.slice(0, 200),
+          };
+        }
+        field = plan.field;
+        if (plan.kind === "radar") {
+          // One authentication for a radius-3 render with the exit overlay ON.
+          // `decideLab` has already written this vantage down, so a refused or
+          // unreadable radar is skipped rather than retried forever.
+          const seen = await jobNs["dnet"]["labradar"]();
+          radars++;
+          count(seen.success ? "radar" : "radar-refused");
+          if (seen.success) {
+            field = observeLab(field, at, String(seen.message ?? ""), basePrior) ?? field;
+          }
+          deps.publishLabField?.(state.host, field);
+          beat?.(progress());
+          continue;
+        }
+        direction = plan.direction;
+        believedLeft = plan.believedCost;
+      }
       // The direction word IS the password. `getDirectionFromInput` splits on
       // spaces and takes the first token that parses, so "north" and "go north"
       // are the same move and the shorter one is one less thing to get wrong.
-      //
-      // The FIRST call has no known position, so it is a deliberate probe: any
-      // direction answers with our coordinates, whether it moves us or not.
-      const step = at === undefined
-        ? { kind: "go" as const, direction: "north" as const, known, note: "first look" }
-        : stepMaze(known, at, lastRender, bounds);
-      if (step.kind !== "go") {
-        return {
-          ok: false,
-          codes: jobCodes,
-          hosts: [describeHost(jobNs, state.host)],
-          detail: `${state.host}: ${step.reason}`.slice(0, 200),
-        };
-      }
-      const answer = await jobNs["dnet"]["authenticate"](state.host, step.direction);
+      pending = direction;
+      const answer = await jobNs["dnet"]["authenticate"](state.host, direction);
       count(answer.code);
       if (answer.success) {
         return {
           ok: true,
           codes: jobCodes,
-          hosts: [describeHost(jobNs, state.host, true)],
-          detail: `${state.host}: reached the exit after ${moves} moves`,
+          hosts: [describeHost(jobNs, state.host, true, true)],
+          detail: `${state.host}: reached the exit after ${moves} moves and ${radars} radars`,
         };
       }
       // A move that never reached the model — the host moved, or we lost the
@@ -871,6 +1231,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
           ok: false,
           codes: jobCodes,
           hosts: [describeHost(jobNs, state.host)],
+          ...targetStateFor(answer.code),
           ...(answer.code === 451 ? { charismaNeeded: details.requiredCharismaSkill } : {}),
           detail: `${state.host}: ${answer.message}`.slice(0, 200),
         };
@@ -887,23 +1248,36 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
           detail: `${state.host}: could not read a position out of the response`,
         };
       }
+      const seen = observeLab(field, where, String(answer.data ?? ""), basePrior);
+      if (seen === undefined) {
+        // Same verdict for a render that is no longer a centred odd square: a
+        // walker that believed it would learn confident lies.
+        count(SOLVER_CODES.OracleUnparsed);
+        return {
+          ok: false,
+          codes: jobCodes,
+          hosts: [describeHost(jobNs, state.host)],
+          detail: `${state.host}: could not read the surroundings out of the response`,
+        };
+      }
+      field = seen;
       const moved = at === undefined || where[0] !== at[0] || where[1] !== at[1];
       if (at !== undefined && moved) moves++;
       if (at !== undefined && !moved) {
         walls++;
-        // THE RENDER SAID THIS WAY WAS OPEN AND THE ENGINE DISAGREED. Record the
-        // refusal, or the next `stepMaze` reaches the identical decision off the
-        // identical render and this wall is bumped until the host dies — which
-        // no watchdog would catch, because the beat below keeps stamping. The
-        // trail is kept as it was: a step that did not happen has not earned a
-        // way back from anywhere.
-        known = markBlocked({ ...(step.known ?? known), trail: known.trail }, at, step.direction);
-      } else {
-        known = step.known ?? known;
+        // THE ENGINE REFUSED A STEP WE BELIEVED OPEN. With the prior in place
+        // this should never happen — the border is pre-walled and the first
+        // edge of every plan is already known — but an engine that disagrees
+        // with our model must be written down, or the identical decision
+        // repeats until the host dies, which no watchdog would catch because
+        // the beat below keeps stamping.
+        field = refuseEdge(field, at, pending);
       }
       at = where;
-      lastRender = String(answer.data ?? "");
-      beat?.({ at: `${where[0]},${where[1]}`, moves, walls, visited: known.visited.length });
+      // Publish AFTER folding this response in, so the other walker — and any
+      // successor of ours — plans over everything this step just paid for.
+      deps.publishLabField?.(state.host, field);
+      beat?.(progress());
     }
   };
 
@@ -922,5 +1296,6 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     induce: induceJob,
     pin: pinJob,
     walk: walkJob,
+    storm: stormJob,
   };
 }

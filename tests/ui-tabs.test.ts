@@ -484,7 +484,7 @@ describe("tab rendering", () => {
           hostname: "dn-1", at: 1_000, present: true, depth: 1, blockedRam: 11, requiredCharisma: 50,
           maxRam: 16, usedRam: 0, modelId: "2G_cellular", passwordLength: 6,
           passwordFormat: "numeric", passwordHint: "the dog, obviously", data: "rex",
-          logTrafficInterval: 45, difficulty: 3, isStationary: true, hasSession: false,
+          logTrafficInterval: 45, difficulty: 3, isStationary: true,
         },
         // A host that went offline answers with a dummy details object, so
         // everything except its liveness is absent.
@@ -503,9 +503,6 @@ describe("tab rendering", () => {
             hostname: "dn-1", depth: 1, lastSeenAt: 1_000, blockedRam: 11, requiredCharisma: 50,
             maxRam: 16, usedRam: 0, freeRam: 5, modelId: "2G_cellular", passwordLength: 6,
             passwordFormat: "numeric", passwordHint: "the dog, obviously", data: "rex",
-            // Half a second, so against this fixture's 1s clock the ring has
-            // genuinely minted lines and the listening ranking has something to
-            // rank. A deep host really is this chatty — 2.3s at difficulty 30.
             logTrafficInterval: 0.5, difficulty: 3, isStationary: true,
             authState: "auth-required",
             facts: { depth: 1_000, modelId: 1_000, maxRam: 1_000 },
@@ -536,11 +533,34 @@ describe("tab rendering", () => {
           examples: [{ host: "dn-gone", why: "unstable", detail: "authentication already costs x1.30" }],
         },
       },
-      listen: {
-        refused: { "nothing-to-learn": 4 },
-        examples: [{ host: "dn-gone", why: "nothing-to-learn", detail: "every line it can write is spam" }],
-      },
       labCache: { host: "th3_l4byr1nth", filename: "lab.cache", openable: false },
+      // A live walk, mid-maze. The grid is the real produced size for the first
+      // rung — 21x13, not the 20x14 `labData` asks for — with one corridor
+      // resolved and the rest still fog, which is what a walk a few dozen moves
+      // in actually looks like.
+      lab: {
+        host: "th3_l4byr1nth",
+        width: 21,
+        height: 13,
+        grid: Array.from({ length: 13 }, (_, y) => Array.from({ length: 21 }, (_, x) => {
+          if (x === 0 || y === 0 || x === 20 || y === 12) return "#";
+          if ((x % 2) + (y % 2) === 0) return "#";
+          if ((x % 2) + (y % 2) === 2) return ".";
+          return y === 1 && x < 8 ? "." : x === 4 && y === 2 ? "#" : "?";
+        }).join("")).join(""),
+        candidates: ["19,11"],
+        exitKnown: true,
+        walkers: [
+          {
+            from: "dn-1", at: "7,1", moves: 24, walls: 0, radars: 1, attempts: 25,
+            believedLeft: 30, startedAt: 1_000 - 60_000, beatAt: 1_000, pinned: true,
+          },
+          {
+            from: "dn-2", role: "scout", at: "3,5", moves: 11, walls: 1, radars: 0, attempts: 12,
+            believedLeft: 48, startedAt: 1_000 - 30_000, beatAt: 1_000, pinned: false,
+          },
+        ],
+      },
       channel: { drained: 4, rejected: 1, forgotten: 0 },
       farm: {
         admitted: { phish: 1 },
@@ -633,6 +653,17 @@ describe("tab rendering", () => {
     // The ladder's charisma gate, against what we actually hold.
     expect(rendered).toContain("Labyrinth");
 
+    // THE WALK, which had no readout at all until the maze started travelling:
+    // a walk holds a host for hours and the panel could only say "active: walk".
+    // The map itself, drawn from the published grid...
+    expect(rendered).toContain("labmaze");
+    // ...both walkers, by the role that decides whether losing one matters...
+    expect(rendered).toContain("finisher");
+    expect(rendered).toContain("scout");
+    expect(rendered).toContain("dn-2");
+    // ...and the exit, which on this rung is known before the first move.
+    expect(rendered).toContain("19,11");
+
     // `offline` is a real auth state that the servers table used to omit while
     // the map rendered it, so a host that answered "I am not there" was blank.
     expect(rendered).toContain("(offline)");
@@ -663,16 +694,6 @@ describe("tab rendering", () => {
     // cleartext passwords into log lines.
     expect(rendered).toContain("unparsed log lines");
     expect(rendered).toContain("a a: a#");
-
-    // Which ring to read next, ranked by expected USEFUL lines. Depth and age
-    // both fail as proxies — a deep host is chatty but its neighbour-credential
-    // branch is thirty times rarer — so the panel ranks on the model's own
-    // number, derived here from facts the digest already carries.
-    expect(rendered).toContain("useful lines");
-    expect(rendered).toContain('data-sort-table="dnet.listen"');
-    // And why the rest were declined, by name.
-    expect(rendered).toContain("nothing-to-learn");
-    expect(rendered).toContain("every line it can write is spam");
 
     // The three actions with a real price. Their refusals get as much room as
     // the actions, because "why not" is the usual answer for all three.
@@ -718,6 +739,71 @@ describe("tab rendering", () => {
     // -1 is getDepth's "no idea". It is not a depth, so it is not rendered as
     // one — in the TILE as well as in the table.
     expect(html).not.toContain(">-1<");
+  });
+
+  test("the labyrinth card degrades through every state, and is absent when there is no lab", () => {
+    // MOST RUNS NEVER REACH A LAB. The card carries the maze, the walkers and
+    // the ETA now, so every one of those has to fold away cleanly rather than
+    // leave a headed card with four dashes in it — and the states are not a
+    // gradient: a lab we cannot walk yet, a map whose walker died, and a maze
+    // already behind us each want a different sentence.
+    const at = (dnet: Record<string, unknown>): string => {
+      const state = emptyState();
+      state.topics.dnet = dnet as never;
+      return TABS.dnet.render(state);
+    };
+    const knowledge = {
+      at: 1_000, generation: "15:0", gone: 0,
+      agents: { live: 1, seenEver: 1, lostSinceBoot: 0 },
+      hosts: [{ hostname: "dn-1", depth: 1, lastSeenAt: 1_000, facts: { depth: 1_000 }, authState: "auth-required" }],
+    };
+    const labHost = {
+      hostname: "th3_l4byr1nth", lastSeenAt: 1_000, modelId: "(The Labyrinth)",
+      facts: { modelId: 1_000 }, authState: "auth-required",
+    };
+
+    // 1. Nothing has ever seen a lab: no card at all, not an empty one.
+    expect(at({ maxDepth: 1, knowledge, charisma: 120 })).not.toContain(">Labyrinth<");
+
+    // 2. A lab we can see and cannot walk. The reason used to be reachable only
+    // by hunting the Deliberate card's refusal table, which put the answer to
+    // "why has the maze not started" in a different card from the maze.
+    const gated = at({
+      maxDepth: 1, charisma: 120, netDepth: 7,
+      knowledge: { ...knowledge, hosts: [...knowledge.hosts, labHost] },
+      hold: {
+        admitted: {}, refused: { charisma: 1 },
+        examples: [{ host: "th3_l4byr1nth", why: "charisma", detail: "the maze needs charisma 300" }],
+      },
+    });
+    expect(gated).toContain(">Labyrinth<");
+    expect(gated).toContain("the maze needs charisma 300");
+    expect(gated).not.toContain("labmaze");
+
+    // 3. A map with nobody on it. The walk died with its host; the shared field
+    // did not, which is the whole reason the next walker is cheap.
+    const orphaned = at({
+      maxDepth: 1, charisma: 400, netDepth: 7, knowledge,
+      lab: {
+        host: "th3_l4byr1nth", width: 21, height: 13, grid: "?".repeat(21 * 13),
+        candidates: ["19,11"], exitKnown: true, walkers: [],
+      },
+    });
+    expect(orphaned).toContain("labmaze");
+    expect(orphaned).toContain("outlives them");
+
+    // 4. Finished. A credential for a lab host can only have come from reaching
+    // the exit — the engine refuses the lab's own password on purpose.
+    const done = at({
+      maxDepth: 1, charisma: 400, netDepth: 7,
+      knowledge: { ...knowledge, hosts: [{ ...labHost, credentialKnown: true, authState: "session" }] },
+    });
+    expect(done).toContain("this maze is finished");
+
+    for (const html of [gated, orphaned, done]) {
+      expect(html).not.toContain("NaN");
+      expect(html).not.toContain("undefined");
+    }
   });
 
   test("the raw event view renders payload facts and observed codes", () => {

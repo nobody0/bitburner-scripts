@@ -30,6 +30,7 @@
 
 import type { ModelId, PasswordFacts } from "../models.ts";
 import { LETTERS, NUMBERS } from "../codecs.ts";
+import { fixedPositionsFromEvidence } from "../evidence.ts";
 import { alphabetFor } from "./search.ts";
 import {
   SOLVER_CODES,
@@ -113,8 +114,9 @@ function groupTestSolver(model: ModelId, readCount: ReadCount): Solver {
     budget: (facts) => {
       const length = facts.passwordLength ?? 8;
       const alphabet = alphabetFor(facts).length;
-      // One pass over the alphabet to get the counts, then a binary split per
-      // character per position.
+      // At most one pass over the alphabet to get counts (the last count is
+      // inferred), then binary splits for every symbol except the fallback,
+      // whose remaining positions are inferred.
       return alphabet + length * Math.ceil(Math.log2(Math.max(2, length))) + length + 4;
     },
 
@@ -126,8 +128,13 @@ function groupTestSolver(model: ModelId, readCount: ReadCount): Solver {
       const alphabet = alphabetFor(facts);
       const state = freshState(model, facts, "counts");
       state.scratch["symbolIndex"] = 0;
+      state.scratch["alphabet"] = alphabet;
       state.scratch["counts"] = {};
-      state.scratch["solved"] = new Array<string | null>(length).fill(null);
+      const solved = fixedPositionsFromEvidence(length, facts.evidence).map((char) => char ?? null);
+      state.scratch["solved"] = solved;
+      if (solved.every((char) => char !== null)) {
+        return { kind: "answer", password: solved.join(""), note: `${model}: every position came from harvested placement hints` };
+      }
       return {
         kind: "attempt",
         password: alphabet[0]!.repeat(length),
@@ -156,7 +163,7 @@ function groupTestSolver(model: ModelId, readCount: ReadCount): Solver {
         };
       }
       const length = (state.scratch["solved"] as (string | null)[]).length;
-      const alphabet = alphabetFor(facts);
+      const alphabet = String(state.scratch["alphabet"] ?? alphabetFor(facts));
 
       if (state.phase === "counts") return afterCount(model, state, seen, observed, alphabet, length);
       return afterSplit(model, state, observed, length);
@@ -179,6 +186,14 @@ function afterCount(
 
   const placed = Object.values(counts).reduce((sum, n) => sum + n, 0);
   const symbolIndex = Number(state.scratch["symbolIndex"] ?? 0) + 1;
+
+  // Counts sum to the password length. Once only the final alphabet symbol is
+  // unmeasured, its count is the remainder and another authenticate is pure
+  // redundancy.
+  if (placed < length && symbolIndex === alphabet.length - 1) {
+    counts[alphabet[symbolIndex]!] = length - placed;
+    return beginLocating(model, state, counts, length);
+  }
 
   // Stop early the moment the counts account for every position — there is no
   // reason to ask about the rest of the alphabet.
@@ -211,12 +226,34 @@ function beginLocating(
   counts: Record<string, number>,
   length: number,
 ): SolverStep {
-  const all = Array.from({ length }, (_, i) => i);
-  const queue: Task[] = Object.entries(counts)
-    .filter(([, count]) => count > 0)
+  const solved = [...(state.scratch["solved"] as (string | null)[])];
+  const all = Array.from({ length }, (_, i) => i).filter((at) => solved[at] === null);
+  if (all.length === 0) {
+    return { kind: "answer", password: solved.join(""), note: `${model}: every position located` };
+  }
+  const remainingCounts: Record<string, number> = {};
+  for (const [symbol, total] of Object.entries(counts)) {
+    const remaining = total - solved.filter((placed) => placed === symbol).length;
+    if (remaining > 0) remainingCounts[symbol] = remaining;
+  }
+  const remainingTotal = Object.values(remainingCounts).reduce((sum, count) => sum + count, 0);
+  if (remainingTotal !== all.length) {
+    return {
+      kind: "give-up",
+      code: SOLVER_CODES.OracleUnparsed,
+      reason: `${model}: harvested placements conflict with the reported character counts`,
+    };
+  }
+  // Locate every symbol except the most frequent one. Once those positions are
+  // known, every unresolved slot must be the omitted fallback symbol.
+  const fallback = Object.entries(remainingCounts).reduce((best, entry) =>
+    entry[1] > best[1] ? entry : best);
+  const queue: Task[] = Object.entries(remainingCounts)
+    .filter(([symbol, count]) => count > 0 && symbol !== fallback[0])
     .map(([symbol, count]) => ({ symbol, positions: all, count }));
-  const solved = new Array<string | null>(length).fill(null);
-  return advance(model, { ...state, phase: "locate" }, queue, solved, length);
+  return advance(model, {
+    ...state, phase: "locate", scratch: { ...state.scratch, fallback: fallback[0] },
+  }, queue, solved, length);
 }
 
 /** Phase two: resolve one pending split, then ask the next question. */
@@ -284,6 +321,10 @@ function advance(
       needsOracle: true,
       note: `locating ${JSON.stringify(task.symbol)} among ${split.left.length} positions`,
     };
+  }
+  const fallback = state.scratch["fallback"];
+  if (typeof fallback === "string") {
+    for (let at = 0; at < solved.length; at++) if (solved[at] === null) solved[at] = fallback;
   }
 
   if (solved.every((char) => char !== null)) {

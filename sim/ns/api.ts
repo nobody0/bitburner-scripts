@@ -24,7 +24,7 @@ import { getFunctionRamCost, SCRIPT_BASE_RAM_GB, type RamCostContext } from "./r
 import { ProcessTable, ScriptDeath, type SimProcess } from "./process.ts";
 import { publicResetInfo, publicServer, resolveServer } from "./contracts.ts";
 import { makeStanek } from "./stanek.ts";
-import { darknetGate, makeDnet } from "./dnet.ts";
+import { calculateDnetAuthenticateTime, darknetGate, makeDnet } from "./dnet.ts";
 import type { DarknetSystem } from "../features/dnet.ts";
 import { ShareBonusTime } from "../vendor/bitburner/src/NetworkShare/Share.ts";
 
@@ -366,7 +366,10 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       // server's caches to its file list rather than storing them alongside.
       // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L845-L851
       const caches = host.dnet?.cachesOn(target) ?? [];
-      return [...filesOn(host, target), ...caches].filter((f) => f.includes(substring)).sort();
+      // The storm seed rides the same append: upstream lists a darknet
+      // server's `programs` in `ls` too, and exposes them nowhere else.
+      const seed = host.dnet?.stormSeedOn(target) === true ? ["STORM_SEED.exe"] : [];
+      return [...filesOn(host, target), ...caches, ...seed].filter((f) => f.includes(substring)).sort();
     },
     scp: (files: string | string[], rawDestination: unknown, rawSource: unknown = process.host): boolean => {
       const list = Array.isArray(files) ? files : [files];
@@ -469,6 +472,20 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
       throw new ScriptDeath(process.pid);
     },
     kill: (pid: number): boolean => host.processes.kill(pid),
+    // The pid form ignores the hostname, as upstream does: the worker map is
+    // global, and this is what lets the darknet overseer vouch (and kill) a
+    // job on a host it could never exec onto.
+    isRunning: (script: unknown, hostname?: unknown, ...args: (string | number | boolean)[]): boolean => {
+      if (typeof script === "number") return host.processes.get(script) !== undefined;
+      const target = requireServer(host, hostname, process.host).hostname;
+      return host.processes
+        .ps(target)
+        .some((p) =>
+          p.filename === script
+          && p.args.length === args.length
+          && p.args.every((arg, index) => arg === args[index]),
+        );
+    },
     killall: (hostname: unknown = process.host): boolean =>
       host.processes.killall(requireServer(host, hostname, process.host).hostname, process.pid) > 0,
     ps: (hostname: unknown = process.host) =>
@@ -920,6 +937,32 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     );
   }
 
+  if (host.dnet) {
+    const timingOptions = {
+      system: host.dnet,
+      skills: () => ({
+        charisma: host.world.person.skills.charisma,
+        intelligence: host.world.person.skills.intelligence,
+      }),
+      hasBoots: () => host.world.player.augmentations.has("The B00ts of Perseus"),
+      sf15Level: () => host.world.player.sourceFiles["15"] ?? 0,
+    };
+    impl["formulas"] = namespace({
+      dnet: namespace({
+        getAuthenticateTime: (rawDetails: unknown, threads = 1, rawPlayer?: unknown, correctChars = 0): number => {
+          if (rawPlayer !== undefined) {
+            return unmodeled("ns", "formulas.dnet.getAuthenticateTime", "an explicit mock player is not retained");
+          }
+          return calculateDnetAuthenticateTime(
+            timingOptions,
+            rawDetails as { modelId: string; difficulty: number; depth: number; requiredCharismaSkill: number },
+            Number(threads),
+            Number(correctChars),
+          );
+        },
+      }, "formulas.dnet", host, process),
+    }, "formulas", host, process);
+  }
   if (host.hacknet) {
     const hacknet = host.hacknet;
     impl["hacknet"] = namespace(

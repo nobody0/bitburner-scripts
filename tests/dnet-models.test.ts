@@ -151,6 +151,20 @@ describe("planAttempt walks a dictionary and then stops", () => {
     expect(result.kind === "none" && result.reason).toContain("exhausted");
   });
 
+  test("reported length and format prune impossible dictionary entries", () => {
+    expect(planAttempt(
+      describeModel("FreshInstall_1.0"),
+      { passwordLength: 5, passwordFormat: "numeric" }, 0, 0,
+    )).toEqual({ kind: "candidate", password: "12345", index: 0, total: 1 });
+  });
+
+  test("drained contains hints prune a dictionary before the next attempt", () => {
+    expect(planAttempt(describeModel("TopPass"), {
+      passwordLength: 6, passwordFormat: "numeric",
+      evidence: [{ kind: "contains", chars: ["6", "6"], at: 1 }],
+    }, 0, 0)).toEqual({ kind: "candidate", password: "696969", index: 0, total: 2 });
+  });
+
   test("a solver-backed model plans a CONVERSATION, not a single guess", () => {
     const entry = describeModel("DeepGreen");
     const planned = planAttempt(entry, { passwordLength: 5, passwordFormat: "numeric" }, 0, 0);

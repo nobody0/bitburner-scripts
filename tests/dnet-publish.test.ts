@@ -47,15 +47,12 @@ describe("the wire carries only what cannot be derived", () => {
     expect(Object.values(host.facts).every((at) => typeof at === "number")).toBe(true);
   });
 
-  test("the caches a host is holding, and when we last read its ring", () => {
-    // Both were collected by the jobs and neither was on the allow-list, so a
-    // reader could not say which hosts had an unopened `.cache` sitting on them
-    // — and a cache dies with its host. `lastBleedAt` adds no field: the
-    // observation time IS the value, so it rides `facts` like everything else.
+  test("the caches a host is holding", () => {
+    // Cache listings are timestamped because a cache dies with its host.
     const knowledge = fold([{
       hostname: "dn-1",
       present: true,
-      facts: { depth: 0, caches: ["loot.cache", "phish.d.cache"], lastBleedAt: true },
+      facts: { depth: 0, caches: ["loot.cache", "phish.d.cache"] },
     }]);
     const host = publishKnowledge(knowledge, NOW + 1_000).hosts[0]!;
 
@@ -64,7 +61,6 @@ describe("the wire carries only what cannot be derived", () => {
     // acting on a stale listing means calling openCache on a filename the host
     // no longer holds, and that call THROWS rather than refusing.
     expect(host.facts["caches"]).toBe(NOW);
-    expect(host.facts["lastBleedAt"]).toBe(NOW);
   });
 
   test("a stale value is still SHOWN rather than hidden", () => {

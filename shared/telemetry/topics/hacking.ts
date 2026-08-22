@@ -343,6 +343,17 @@ export interface FleetRollup {
    *  seen on the network — a lower bound until the first rooting sweep, exact
    *  after it. Free, unlike asking the game for home's file list. */
   portOpeners?: number;
+  /** Positive evidence that TOR is owned. Absent means unknown, never false. */
+  hasTor?: boolean;
+  /** Economic value of the next port opener, refreshed from the real target
+   * solver. Null explicitly clears a plan after the observed world changes. */
+  openerPlan?: {
+    program: string;
+    targetOpeners: number;
+    cost: number;
+    addedMoneyPerSec: number;
+    addedHackingExpPerSec: number;
+  } | null;
   home: { maxRam: number; usedRam: number; cores: number };
   /** Singularity quote; absent when home upgrades are not scriptable. */
   homeRamUpgradeCost?: number;

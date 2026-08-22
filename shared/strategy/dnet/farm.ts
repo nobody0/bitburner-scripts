@@ -1,6 +1,8 @@
 import { compareDepthDesc } from "./knowledge.ts";
 import {
   PHISH_CACHE_COOLDOWN_MS,
+  phishMoney,
+  phishMoneyChance,
   phishWaitMs,
   promoteWaitMs,
   ramBlockRemoved,
@@ -14,18 +16,19 @@ import {
  * Three calls, and none of them needs a credential or a neighbour: `openCache`,
  * `memoryReallocation` and `phishingAttack` all act on the host the script is
  * already standing on. (`memoryReallocation` reaches an adjacent host too, but
- * only a rooted one — and the self case is free, because `isDirectConnected` is
+ * only a rooted one — the self case is free, because `isDirectConnected` is
  * true for self and the self early-out at `offlineServerHandling.ts:98-101`
- * returns before the admin-rights check. So a resident grinds its OWN block
- * open, which is the fact the whole ladder rests on.)
+ * returns before the admin-rights check. A resident grinds its OWN block open
+ * by default; the one exception is below, where a roomy neighbour grinds a
+ * cramped host's block for it, and that neighbour case is exactly the one that
+ * pays the admin check — which is why it is gated on the vault.)
  *
- * ## A strict ladder, not a weighting
+ * ## A ladder on top, an exchange rate at the bottom
  *
- * The three payoffs are not commensurable — a cache is a one-shot draw off an
- * ordered reward table, a reclaim is RAM plus a guaranteed cache at the end of a
- * long grind, and a phish is charisma with a money tail — so anything that
- * scored them against each other would be inventing an exchange rate. They are
- * ordered instead, and the order is argued rather than tuned:
+ * The top two payoffs are not commensurable with anything — a cache is a
+ * one-shot draw off an ordered reward table, a reclaim is RAM plus a guaranteed
+ * cache at the end of a long grind — so they stay a strict ladder, ordered by
+ * argument rather than tuned:
  *
  * 1. **`cache`.** One call, and its reward ladder walks the program list up to
  *    `Formulas.exe` ($5b on the dark web) before it falls through to money. It
@@ -34,18 +37,26 @@ import {
  *    the files with it. Everything else can wait; this cannot.
  * 2. **`reclaim`**, while there is a block and the grind is worth its wall
  *    clock. RAM is the binding constraint on every other job out there.
- * 3. **`phish`** with what is left. Charisma is the feature's master resource
- *    (it gates `heartbleed` outright and taxes every `authenticate`), and every
- *    call pays it — a quarter rate even on the failure path.
+ * 3./4. **`phish` or `promote`**, whichever pays better RIGHT NOW. These two
+ *    are the ones that genuinely compete — both are "earn with what is left" —
+ *    so they are the one place an exchange rate is honest. Phish's expected
+ *    $/ms is priced from the engine's own formulas (success chance × money ÷
+ *    wait), weighted up by `PHISH_CHARISMA_WEIGHT` because every call also pays
+ *    charisma, the feature's master resource (it gates `heartbleed` outright
+ *    and taxes every `authenticate`). Promote's worth cannot be seen from the
+ *    darknet at all — propaganda raises VOLATILITY, not forecast, and its
+ *    charges decay 0.4x per market cycle — so its side of the rate is home's
+ *    `expectedProfit` for the symbol, scaled by `PROMOTE_PROFIT_SHARE`.
+ *    Without a symbol from `shared/strategy/stock/` promote is refused by
+ *    name, which is the usual answer, and the comparison degenerates to the
+ *    old ladder. The loser still runs when the winner refuses on its own gate
+ *    (no room, in flight) — 6.15 GB against 6.35 is still a reason.
  *
- * 4. **`promote`**, and only on a symbol home has named. It pays nothing on its
- *    own — propaganda raises VOLATILITY, not forecast, so it is symmetric —
- *    and its charges decay 0.4x per 75-tick market cycle, which makes it a
- *    maintenance RATE rather than a purchase. It is the bottom rung because it
- *    is the only one whose value is decided somewhere else entirely: without a
- *    symbol from `shared/strategy/stock/` it is refused by name, which will be
- *    the usual answer. What it is good for is the host that cannot afford a
- *    phish — 6.15 GB against 6.35 — or whose phish is already running.
+ *    THE ONE EXCEPTION: the elected cache hunter, while the net-wide phishing
+ *    cache window is open, phishes whatever the arithmetic says — a promote
+ *    with a higher EV does not divert it. The window is one cache every three
+ *    minutes for the whole net, so one host is pinned to the roll while the
+ *    rest optimise their own earn (see `electCacheHunter`).
  *
  * ## Named refusals, and they are PUBLISHED
  *
@@ -109,6 +120,14 @@ export interface FarmHost {
   goneAt?: number;
   /** Farm work a live process is already doing to this host. */
   busy?: ReadonlySet<FarmKind>;
+  /** Believable adjacency, for the remote-reclaim election: a helper must be
+   *  DIRECTLY connected to the host whose block it grinds. Absent means we
+   *  cannot prove the edge, so this host helps nobody. */
+  neighbours?: readonly string[];
+  /** We hold this host's password. Cross-host `memoryReallocation` passes the
+   *  admin-rights check only on an authenticated target — the self case dodges
+   *  it — so a host without a credential can only ever grind itself. */
+  hasCredential?: boolean;
 }
 
 export interface FarmInputs {
@@ -134,24 +153,39 @@ export interface FarmInputs {
   maxPhishThreads?: number;
   /** The same for propaganda. */
   maxPromoteThreads?: number;
-  /** Symbols home says are worth promoting, best first.
+  /** Symbols home says are worth promoting, best first, each carrying home's
+   *  expected profit for the position — the promote side of the earn
+   *  comparison's exchange rate.
    *
    *  Propaganda is the one farm call whose value cannot be seen from the
    *  darknet at all: it moves a stock's volatility, and only home holds the
    *  market. An empty list — the usual case — is not a missing input, it is the
    *  answer, and the ladder refuses by name on it. */
-  promoteSymbols?: readonly string[];
+  promoteSymbols?: readonly PromoteSymbol[];
+  /** The player's crime success multiplier, a term in both phishing chances.
+   *  Absent means 1. */
+  crimeSuccessMult?: number;
   /** The same ceiling for the grind. Separate from the phishing one because the
    *  two are limited by different things: a phish is capped by a cache window
    *  there is only one of, while a grind is capped only by not wanting one host
    *  to sit in a forty-second batch on every gigabyte it owns. */
   maxReclaimThreads?: number;
+  /** The overseer wants a `STORM_SEED.exe` and none exists: every block cleared
+   *  to zero is a 15% seed roll, so the `reclaim-not-needed` budget stands down
+   *  and blocks keep getting ground outright however long they take. Set only
+   *  while the storm's other gates are already met and the engine could
+   *  actually mint one (30+ minutes since the last storm) — otherwise the lift
+   *  buys rolls that cannot pay. */
+  seedHunt?: boolean;
 }
 
 export interface FarmTask {
   kind: FarmKind;
-  /** The host, which is also the vantage: all three calls are self-host. */
+  /** The target. Also the vantage, for everything but a remote reclaim. */
   host: string;
+  /** The vantage, when it is not the target: the neighbour elected to grind a
+   *  cramped host's block remotely. Absent means self-host. */
+  from?: string;
   threads: number;
   /** The `.cache` file to open, for a `cache` task and nothing else. */
   filename?: string;
@@ -185,23 +219,42 @@ export const RECLAIM_MIN_PER_CALL_GB = 0.005;
  * few times that. */
 export const RECLAIM_CLEAR_BUDGET_MS = 10 * 60 * 1000;
 
-const DEFAULT_MAX_PHISH_THREADS = 4;
+/** One symbol home names as worth promoting, with the expected profit of the
+ * position it protects — the only number that can price a promote at all. */
+export interface PromoteSymbol {
+  symbol: string;
+  expectedProfit: number;
+}
 
-/** Ceiling on propaganda threads. Charges are linear in threads and the wait is
- * not, so this is the same shape as the grind — but low, because the charge
- * curve saturates and the decay is what actually has to be outrun. */
-const DEFAULT_MAX_PROMOTE_THREADS = 4;
+/** How much of a symbol's `expectedProfit` one promote batch is credited with,
+ * in the earn comparison. THE ONE INVENTED NUMBER IN THIS FILE: no engine
+ * formula relates propaganda to realised profit — promote moves volatility,
+ * not forecast, the trader earns `expectedProfit` with or without help, and a
+ * batch's charge decays 0.4x a market cycle — so this is a judgment call, kept
+ * deliberately small and in one place. At 1e-6 the break-even against a
+ * shallow host's phish sits near a ~$13m position and near ~$70m against the
+ * deepest, so promote wins only behind an edge big enough that amplifying its
+ * volatility plausibly beats pocket change. Calibrate against `sim/` rather
+ * than by argument. */
+export const PROMOTE_PROFIT_SHARE = 1e-6;
 
-/** Ceiling on grind threads.
- *
- * `getRamBlockRemoved` is LINEAR in threads and the wait is not, so threads are
- * the only lever this rung has: at one thread a call frees a hundredth of a
- * gigabyte for six seconds of wall clock and the grind is hopeless on anything
- * but the shallowest host. Eight is where the RAM runs out first on every host
- * a resident actually stands on — a `reclaim` job is over 5 GB a thread, so
- * eight of them is 43 GB — which is the honest way to say "this is not the
- * binding constraint, RAM is". */
-const DEFAULT_MAX_RECLAIM_THREADS = 8;
+/** Phish's thumb on the earn scale: every call pays charisma exp (a quarter
+ * rate even on failure), and charisma gates `heartbleed` and taxes every
+ * `authenticate` — value the $/ms figure cannot see. */
+export const PHISH_CHARISMA_WEIGHT = 1.25;
+
+/** No default thread ceiling on any farm call. A resident runs one job at a
+ * time, so RAM the job does not take is idle; money, charisma and block-clear
+ * are all linear in threads; and the batch is TIME-bounded so threads never
+ * extend how long a host is held. The per-thread price already reserves the
+ * script base and the `spawn` the atExit respawn needs, and the engine charges
+ * per thread, so `floor(freeGb / gbPerThread)` fills the host exactly. Callers
+ * may still pass an explicit ceiling (`maxPhishThreads` &c.) to constrain a
+ * particular run, but the default is RAM. `Infinity` is the "no cap" value —
+ * `Math.min(x, Infinity) === x`. */
+const DEFAULT_MAX_PHISH_THREADS = Infinity;
+const DEFAULT_MAX_PROMOTE_THREADS = Infinity;
+const DEFAULT_MAX_RECLAIM_THREADS = Infinity;
 
 /** Whether the net-wide phishing cache window is believed open.
  *
@@ -215,21 +268,21 @@ export function phishWindowOpen(inputs: Pick<FarmInputs, "now" | "lastPhishCache
   return inputs.now - inputs.lastPhishCacheAt > PHISH_CACHE_COOLDOWN_MS;
 }
 
-/** Which resident carries the window.
+/** Which resident is guaranteed to keep rolling for the window.
  *
- * There is exactly ONE cache every three minutes for the whole net, and the roll
- * that claims it scales with threads — so spreading threads evenly across every
- * phisher buys nothing at all, while concentrating them on one host buys the
- * whole window. The deepest resident is elected because depth is also the money
- * term (`0.1 + depth * 0.05`), so the same host is the best one to be spending
- * threads on when the window is shut. Ties by free RAM, then by name, so the
- * election is deterministic and does not move under the panel.
+ * There is exactly ONE cache every three minutes for the whole net. Every
+ * phisher now runs at full threads (see the phish rung), so the election no
+ * longer rations threads — what it decides is which host keeps PHISHING while
+ * the window is open instead of being diverted to a higher-EV promote. One
+ * host is pinned to the cache roll; the rest optimise their own earn. The
+ * deepest resident is elected because depth is also the money term
+ * (`0.1 + depth * 0.05`), so if only one host is going to roll it should be the
+ * one whose calls pay most. Ties by free RAM, then by name, so the election is
+ * deterministic and does not move under the panel.
  *
- * `eligible` is how a caller says which hosts can actually SPEND the window.
- * Without it the ladder elected the deepest resident whatever its state, and
- * threads are handed to the hunter and to nobody else — so electing a host that
- * cannot afford a `phishingAttack` left the entire net rolling at one thread for
- * the whole three-minute window the election exists to win. */
+ * `eligible` is how a caller says which hosts can actually SPEND the window: a
+ * hunter with no room for a `phishingAttack` is a host pinned to a roll it
+ * cannot make, leaving nobody guaranteed to chase the cache. */
 export function electCacheHunter(
   hosts: readonly FarmHost[],
   eligible?: (host: FarmHost) => boolean,
@@ -338,16 +391,38 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
     // THE THREAD COUNT COMES FIRST, and it is not a detail of the task: it is a
     // term in both of the refusals below. `getRamBlockRemoved` is linear in
     // threads while the wait is not, so a grind that is hopeless at one thread
-    // can be routine at eight — and pricing the rung at one thread and then
-    // running it at eight would refuse work that was affordable all along.
+    // can be routine at several — and pricing the rung at one thread and then
+    // running it at what fits would refuse work that was affordable all along.
     // Everything that does not depend on the count is asked first, so the
     // affordability question is answered before it is spent.
     const blocked = host.blockedRam ?? 0;
     const grindable = Math.floor(host.freeGb / inputs.gbPerThread.reclaim);
-    const reclaimThreads = Math.max(
-      1,
-      Math.min(grindable, inputs.maxReclaimThreads ?? DEFAULT_MAX_RECLAIM_THREADS),
-    );
+    const maxReclaim = inputs.maxReclaimThreads ?? DEFAULT_MAX_RECLAIM_THREADS;
+    const selfThreads = Math.min(grindable, maxReclaim);
+    // THE HELPER. `memoryReallocation` reaches an authenticated, directly
+    // connected neighbour, so a block the host cannot afford to grind itself —
+    // or can only grind at fewer threads than a roomy neighbour would — is
+    // ground from next door instead. Gated on the vault because the cross-host
+    // call is the one that pays the admin-rights check, and on the HELPER's own
+    // fresh adjacency because that is the edge the call will actually test.
+    // Election is deterministic: most free RAM, ties by name. The lab never
+    // helps — its host is reserved for the walk.
+    const helper = host.hasCredential === true
+      ? [...hosts]
+        .filter((other) =>
+          other.host !== host.host
+          && other.goneAt === undefined
+          && other.isLab !== true
+          && (other.neighbours?.includes(host.host) ?? false)
+          && Math.floor(other.freeGb / inputs.gbPerThread.reclaim) >= 1)
+        .sort((a, b) => b.freeGb - a.freeGb || (a.host < b.host ? -1 : a.host > b.host ? 1 : 0))[0]
+      : undefined;
+    const helperThreads = helper === undefined
+      ? 0
+      : Math.min(Math.floor(helper.freeGb / inputs.gbPerThread.reclaim), maxReclaim);
+    // Self wins ties: it is the free case (no admin check) and the old shape.
+    const remote = helper !== undefined && helperThreads > selfThreads;
+    const reclaimThreads = Math.max(1, remote ? helperThreads : selfThreads);
     const forecast = reclaimForecast(host, inputs.charisma, reclaimThreads);
     if (blocked <= 0) {
       refuse("reclaim-no-block", "no owner-blocked RAM left to liberate");
@@ -355,11 +430,14 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
       refuse("reclaim-grind-stalled", "difficulty unknown, so the grind cannot be priced; survey it first");
     } else if (busy.has("reclaim")) {
       refuse("reclaim-in-flight", "a job is already grinding this block");
-    } else if (grindable < 1) {
+    } else if (!remote && grindable < 1) {
       refuse(
         "reclaim-no-room",
         `${host.freeGb.toFixed(2)}GB free, a memoryReallocation job needs ${inputs.gbPerThread.reclaim.toFixed(2)}GB`
-        + " — the block is holding its own cure hostage",
+        + " — the block is holding its own cure hostage"
+        + (host.hasCredential === true
+          ? ", and no authenticated neighbour has room to grind it remotely"
+          : ", and without its password no neighbour can grind it remotely"),
       );
     } else if (forecast.rawPerCallGb < RECLAIM_MIN_PER_CALL_GB) {
       // roundToTwo takes anything under 0.005 to exactly zero, so this is not a
@@ -373,12 +451,18 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
         `one call at ${reclaimThreads} thread${reclaimThreads === 1 ? "" : "s"} would free `
         + `${forecast.rawPerCallGb.toFixed(4)}GB, which rounds to zero; charisma has to catch up first`,
       );
-    } else if (host.freeGb >= inputs.wantedGb && forecast.clearMs > RECLAIM_CLEAR_BUDGET_MS) {
+    } else if (
+      host.freeGb >= inputs.wantedGb
+      && forecast.clearMs > RECLAIM_CLEAR_BUDGET_MS
+      && inputs.seedHunt !== true
+    ) {
       // Two ways a grind earns its wall clock, and this is the refusal when
       // neither holds: the host already has room for the heaviest job we would
       // file here, AND clearing the block outright — which is what mints the
       // free `.cache` — is further away than we are willing to spend, even at
-      // every thread the host can hold.
+      // every thread the host can hold. A seed hunt suspends the budget: while
+      // the overseer wants a `STORM_SEED.exe` and one could be minted, every
+      // cleared block is a 15% roll and the grind pays in rolls, not RAM.
       refuse(
         "reclaim-not-needed",
         `${host.freeGb.toFixed(2)}GB free already, and clearing ${blocked.toFixed(2)}GB would take `
@@ -389,33 +473,62 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
       tasks.push({
         kind: "reclaim",
         host: host.host,
+        ...(remote ? { from: helper!.host } : {}),
         threads: reclaimThreads,
-        reason: host.freeGb < inputs.wantedGb
-          ? `${forecast.perCallGb.toFixed(2)}GB a call on ${reclaimThreads} thread${reclaimThreads === 1 ? "" : "s"}`
-            + ` against ${blocked.toFixed(2)}GB blocked; the host is cramped`
-          : `${blocked.toFixed(2)}GB blocked clears in ~${Math.round(forecast.clearMs / 60_000)} min`
-            + ` on ${reclaimThreads} thread${reclaimThreads === 1 ? "" : "s"}, and a cleared block drops a .cache`,
+        reason: (remote ? `ground remotely from ${helper!.host}: ` : "")
+          + (host.freeGb < inputs.wantedGb
+            ? `${forecast.perCallGb.toFixed(2)}GB a call on ${reclaimThreads} thread${reclaimThreads === 1 ? "" : "s"}`
+              + ` against ${blocked.toFixed(2)}GB blocked; the host is cramped`
+            : `${blocked.toFixed(2)}GB blocked clears in ~${Math.round(forecast.clearMs / 60_000)} min`
+              + ` on ${reclaimThreads} thread${reclaimThreads === 1 ? "" : "s"}, and a cleared block drops a .cache`
+              + (inputs.seedHunt === true ? " and rolls for a storm seed" : "")),
       });
       admitted = true;
     }
     if (admitted) continue;
 
-    // --- 3. phish ---------------------------------------------------------
-    if (busy.has("phish")) {
-      refuse("phish-in-flight", "a job is already phishing here");
-    } else if (host.freeGb < inputs.gbPerThread.phish) {
-      refuse(
-        "phish-no-room",
-        `${host.freeGb.toFixed(2)}GB free, a phishingAttack job needs ${inputs.gbPerThread.phish.toFixed(2)}GB`,
+    // --- 3./4. earn: phish or promote, whichever pays better ---------------
+    //
+    // The one place the ladder becomes an exchange rate; the header argues it.
+    // Both rungs are tried, in expected-$/ms order, and the loser still runs
+    // when the winner refuses on its own gate — no room and in-flight are
+    // reasons to fall through, not to idle. The hunter with an open window
+    // bypasses the arithmetic entirely: the net-wide cache roll is worth more
+    // than either figure.
+    const symbols = inputs.promoteSymbols ?? [];
+    const isHunter = host.host === hunter;
+    // Per thread on both sides, so the comparison is thread-count-independent.
+    const phishEvPerMs = phishMoneyChance(inputs.charisma, inputs.crimeSuccessMult ?? 1)
+      * phishMoney(host.depth ?? 0, 1, inputs.charisma)
+      / phishWaitMs(inputs.charisma)
+      * PHISH_CHARISMA_WEIGHT;
+    const promoteEvPerMs = symbols.length > 0
+      ? (symbols[0]!.expectedProfit * PROMOTE_PROFIT_SHARE) / promoteWaitMs(inputs.charisma)
+      : 0;
+
+    const tryPhish = (): boolean => {
+      if (busy.has("phish")) {
+        refuse("phish-in-flight", "a job is already phishing here");
+        return false;
+      }
+      if (host.freeGb < inputs.gbPerThread.phish) {
+        refuse(
+          "phish-no-room",
+          `${host.freeGb.toFixed(2)}GB free, a phishingAttack job needs ${inputs.gbPerThread.phish.toFixed(2)}GB`,
+        );
+        return false;
+      }
+      // EVERY phisher runs at what its own RAM affords: money and charisma are
+      // linear in threads, the batch is TIME-bounded so threads never extend
+      // how long the host is held, and a resident runs one job at a time so
+      // the RAM would otherwise sit idle. The hunter election survives as the
+      // panel's answer to "who claims the window" — the deepest host is still
+      // the one whose calls pay most — but it no longer rations anyone else's
+      // threads.
+      const threads = Math.min(
+        Math.max(1, Math.floor(host.freeGb / inputs.gbPerThread.phish)),
+        maxPhishThreads,
       );
-    } else {
-      // Threads are the only lever on the cache roll, and RAM is charged per
-      // thread. So they are spent on the elected hunter and on nobody else: the
-      // window is one cache for the whole net, and two hosts rolling at one
-      // thread each is strictly worse than one host rolling at two.
-      const isHunter = host.host === hunter;
-      const affordable = Math.max(1, Math.floor(host.freeGb / inputs.gbPerThread.phish));
-      const threads = isHunter && windowOpen ? Math.min(affordable, maxPhishThreads) : 1;
       tasks.push({
         kind: "phish",
         host: host.host,
@@ -426,53 +539,57 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
             : "cache hunter, window shut: charisma and money until it reopens")
           : "charisma every call, money by depth",
       });
-      admitted = true;
-    }
-    if (admitted) continue;
+      return true;
+    };
 
-    // --- 4. promote -------------------------------------------------------
-    //
-    // The bottom rung, and the only one whose worth is decided off the net. A
-    // host reaches it when it cannot afford a phish or is already running one,
-    // and it is admitted only when home has named a symbol — propaganda on a
-    // symbol with no edge moves volatility in both directions for nothing.
-    const symbols = inputs.promoteSymbols ?? [];
-    if (symbols.length === 0) {
-      refuse("promote-no-symbol", "no symbol home names has an edge; propaganda is symmetric and pays nothing alone");
-      continue;
-    }
-    if (busy.has("promote")) {
-      refuse("promote-in-flight", "a job is already spreading propaganda here");
-      continue;
-    }
-    if (host.freeGb < inputs.gbPerThread.promote) {
-      refuse(
-        "promote-no-room",
-        `${host.freeGb.toFixed(2)}GB free, a promoteStock job needs ${inputs.gbPerThread.promote.toFixed(2)}GB`,
+    const tryPromote = (): boolean => {
+      // Admitted only when home has named a symbol — propaganda on a symbol
+      // with no edge moves volatility in both directions for nothing.
+      if (symbols.length === 0) {
+        refuse("promote-no-symbol", "no symbol home names has an edge; propaganda is symmetric and pays nothing alone");
+        return false;
+      }
+      if (busy.has("promote")) {
+        refuse("promote-in-flight", "a job is already spreading propaganda here");
+        return false;
+      }
+      if (host.freeGb < inputs.gbPerThread.promote) {
+        refuse(
+          "promote-no-room",
+          `${host.freeGb.toFixed(2)}GB free, a promoteStock job needs ${inputs.gbPerThread.promote.toFixed(2)}GB`,
+        );
+        return false;
+      }
+      // Hosts are spread across the named symbols rather than piled onto the
+      // first: the charge curve saturates (two exponentials approaching 4x), so
+      // the second symbol's first charge is worth more than the first symbol's
+      // hundredth. Indexed by the host's ORDER in this pass, which is
+      // deterministic, so the assignment does not move under the panel.
+      const symbol = symbols[promoted % symbols.length]!.symbol;
+      promoted++;
+      const promoteThreads = Math.max(
+        1,
+        Math.min(
+          Math.floor(host.freeGb / inputs.gbPerThread.promote),
+          inputs.maxPromoteThreads ?? DEFAULT_MAX_PROMOTE_THREADS,
+        ),
       );
-      continue;
+      tasks.push({
+        kind: "promote",
+        host: host.host,
+        threads: promoteThreads,
+        symbol,
+        reason: `propaganda for ${symbol}: volatility only, and it decays 0.4x a market cycle`,
+      });
+      return true;
+    };
+
+    const phishFirst = (isHunter && windowOpen) || phishEvPerMs >= promoteEvPerMs;
+    if (phishFirst) {
+      if (!tryPhish()) tryPromote();
+    } else if (!tryPromote()) {
+      tryPhish();
     }
-    // Hosts are spread across the named symbols rather than piled onto the
-    // first: the charge curve saturates (two exponentials approaching 4x), so
-    // the second symbol's first charge is worth more than the first symbol's
-    // hundredth. Indexed by the host's ORDER in this pass, which is
-    // deterministic, so the assignment does not move under the panel.
-    const symbol = symbols[promoted % symbols.length]!;
-    promoted++;
-    const promoteThreads = Math.max(
-      1,
-      Math.min(
-        Math.floor(host.freeGb / inputs.gbPerThread.promote),
-        inputs.maxPromoteThreads ?? DEFAULT_MAX_PROMOTE_THREADS,
-      ),
-    );
-    tasks.push({
-      kind: "promote",
-      host: host.host,
-      threads: promoteThreads,
-      symbol,
-      reason: `propaganda for ${symbol}: volatility only, and it decays 0.4x a market cycle`,
-    });
   }
 
   return { tasks, refused, ...(hunter !== undefined ? { cacheHunter: hunter } : {}) };

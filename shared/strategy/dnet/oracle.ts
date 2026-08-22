@@ -1,3 +1,7 @@
+import { getPasswordType } from "./codecs.ts";
+import type { PasswordEvidence } from "./evidence.ts";
+import { PACKET_SNIFF_PHRASES } from "./phrases.ts";
+
 /** Reading the darknet's logs.
  *
  * `heartbleed` returns raw log lines, and they are the feature's real channel —
@@ -49,6 +53,12 @@ export interface CredentialLeak {
   via: "connecting" | "passcode" | "bare" | "packet";
 }
 
+/** A credential shape whose owner was present in the same log record. */
+export interface AttributedCredentialLeak extends CredentialLeak {
+  host: string;
+  via: "connecting" | "passcode" | "packet";
+}
+
 /** A partial constraint on a password: characters known to be in it, or known to
  * be correctly placed in the last attempt. Not a credential, but it shrinks the
  * search enough to be worth keeping. */
@@ -63,28 +73,23 @@ export interface HintCapture {
   nonePlaced?: boolean;
 }
 
-/** A topology edge, leaked by the transaction-noise line. Free adjacency. */
-export interface EdgeCapture {
-  kind: "edge";
-  host: string;
-}
-
 export interface NoiseLine {
   kind: "noise";
   /** Kept so an unrecognised shape can be shown rather than silently dropped —
    *  this is how we find out the grammar has drifted. */
   text: string;
-  /** True for the heartbeat line, which we DO recognise and which is not drift. */
-  heartbeat: boolean;
+  /** Known game noise is not grammar drift. */
+  recognised: boolean;
 }
 
-export type LogCapture = OracleCapture | CredentialLeak | HintCapture | EdgeCapture | NoiseLine;
+export type LogCapture = OracleCapture | CredentialLeak | HintCapture | NoiseLine;
 
 /** `Connecting to <host>:<password> ...` — a neighbour's password in cleartext.
  * Upstream emits it at `0.05 * 1/(difficulty+1)` per noise line, and the packet
  * sniffer emits it far more often. The password may contain anything except a
  * space, so the trailing ` ...` is the anchor, not a character class. */
-const CONNECTING = /^Connecting to ([^\s:]+):(.*) \.\.\.$/;
+const CONNECTING_PREFIX = "Connecting to ";
+const CONNECTING_SUFFIX = " ...";
 
 /** `Logging in with passcode: <password> ...` — the host's OWN password.
  * `OpenWebAccessPoint` only. */
@@ -92,14 +97,16 @@ const PASSCODE = /^Logging in with passcode: (.*) \.\.\.$/;
 
 /** `--<password>--` — some random movable host's password, unattributed. Still
  * worth keeping: it is a free candidate to try against everything. */
-const BARE = /^--(.+)--$/;
+const BARE = /^--(.*)--$/;
 
-/** `[sending transaction details to <host>.]` — an adjacency, free. */
-const TRANSACTION = /^\[sending transaction details to ([^\s\].]+)\.\]$/;
+/** `[sending transaction details to <host>.]` — recognised game noise. */
+const TRANSACTION_PREFIX = "[sending transaction details to ";
+const TRANSACTION_SUFFIX = ".]";
 
 /** `<time>: <host> - heartbeat check (alive)`. Recognised so it does not count
  * as grammar drift. */
 const HEARTBEAT = /- heartbeat check \(alive\)$/;
+const PACKET_SPAM = new Set(PACKET_SNIFF_PHRASES);
 
 /** The eight `getRandomCharsInPassword` templates. Each names two characters
  * that are somewhere in this host's password. Transcribed verbatim, because a
@@ -123,6 +130,49 @@ const NONE_PLACED = /^No characters are in the right place\.$/;
 /** The empty-password variant of the contains-hint. */
 const NO_PASSWORD_HINT = "There's definitely nothing in that password...";
 
+/** Hints can also occur inside `OpenWebAccessPoint`'s difficulty <= 16 packet
+ * blob. `getRandomData` appends them among ~130 characters of unrelated junk,
+ * then `capturePackets` inserts the attributed credential into the same blob.
+ * The anchored line grammar above is therefore deliberately not reused here.
+ *
+ * Keep an offset for each capture: exact-placement hints describe the most
+ * recent auth record that existed BEFORE the packet response was logged, so a
+ * newest-first ring must queue them for the next older oracle in stream order. */
+function embeddedHints(blob: string): HintCapture[] {
+  const found: { at: number; hint: HintCapture }[] = [];
+  const add = (pattern: RegExp, build: (match: RegExpMatchArray) => HintCapture): void => {
+    for (const match of blob.matchAll(pattern)) found.push({ at: match.index ?? 0, hint: build(match) });
+  };
+
+  add(/There's definitely a (.) and a (.)\.\.\./g, (match) => ({ kind: "hint", contains: [match[1]!, match[2]!] }));
+  add(/I can see a (.) and a (.)\./g, (match) => ({ kind: "hint", contains: [match[1]!, match[2]!] }));
+  add(/I must use (.) & (.)!/g, (match) => ({ kind: "hint", contains: [match[1]!, match[2]!] }));
+  add(/Did it have a (.) and a (.)\?/g, (match) => ({ kind: "hint", contains: [match[1]!, match[2]!] }));
+  add(/Note to self: (.) and (.) are important\./g, (match) => ({ kind: "hint", contains: [match[1]!, match[2]!] }));
+  add(/I think (.) with (.) is key\./g, (match) => ({ kind: "hint", contains: [match[1]!, match[2]!] }));
+  add(/I need to remember (.) 'n (.)\./g, (match) => ({ kind: "hint", contains: [match[1]!, match[2]!] }));
+  add(/Theres a (.), and maybe a (.)\.\.\./g, (match) => ({ kind: "hint", contains: [match[1]!, match[2]!] }));
+  add(/There's definitely nothing in that password\.\.\./g, () => ({ kind: "hint", contains: [] }));
+  add(/No characters are in the right place\./g, () => ({ kind: "hint", nonePlaced: true }));
+  add(/The characters ([A-Za-z0-9](?:, [A-Za-z0-9])?) are in the right place\.\s*/g, (match) => ({
+    kind: "hint", placed: match[1]!.split(",").map((part) => part.trim()),
+  }));
+
+  return found.sort((a, b) => a.at - b.at).map((entry) => entry.hint);
+}
+
+/** Whole passwords can be returned from `getRandomData` before that text is
+ * wrapped in an OpenWeb packet capture. They keep the same `--password--`
+ * delimiters as a standalone noise line, but now sit inside an oracle's data.
+ * A false positive is harmless: loose values are only ever tried as candidates. */
+function embeddedLoosePasswords(blob: string): string[] {
+  const found: string[] = [];
+  for (const match of blob.matchAll(/--(.+?)--/g)) {
+    const password = match[1];
+    if (password !== undefined && !found.includes(password)) found.push(password);
+  }
+  return found;
+}
 /** NOTE: nothing in this file may call `RegExp.prototype.exec`.
  *
  * Bitburner's static RAM analyser charges by MEMBER NAME, so a `pattern.exec(s)`
@@ -184,8 +234,18 @@ function parseOracle(raw: string): OracleCapture | undefined {
  * never as a fact, which makes a wrong hit cost one `authenticate` call. */
 const PACKET_PAIR = /(^|\s)([A-Za-z0-9_.-]+):(\S+)(?=\s|$)/g;
 
-export function extractPacketCredentials(blob: string): CredentialLeak[] {
-  const found: CredentialLeak[] = [];
+export function extractPacketCredentials(blob: string, knownHosts: readonly string[] = []): AttributedCredentialLeak[] {
+  const found: AttributedCredentialLeak[] = [];
+  for (const host of [...knownHosts].sort((a, b) => b.length - a.length)) {
+    const marker = ` ${host}:`;
+    const start = blob.indexOf(marker);
+    if (start < 0) continue;
+    const passwordStart = start + marker.length;
+    const end = blob.indexOf(" ", passwordStart);
+    const password = blob.slice(passwordStart, end < 0 ? undefined : end);
+    if (password.length > 0) found.push({ kind: "credential", host, password, via: "packet" });
+  }
+  if (found.length > 0) return found;
   // matchAll on a /g regex resets lastIndex itself, but the literal is shared
   // with redactLogLine, so it is re-created per call rather than trusted.
   for (const match of blob.matchAll(new RegExp(PACKET_PAIR.source, "g"))) {
@@ -201,15 +261,25 @@ export function extractPacketCredentials(blob: string): CredentialLeak[] {
  *
  * Order matters only in that the JSON check runs first: every other shape is a
  * distinct literal prefix, so they cannot collide. */
-export function parseHeartbleedLine(raw: string): LogCapture {
+export function parseHeartbleedLine(raw: string, knownHosts: readonly string[] = []): LogCapture {
   const line = raw.trim();
 
   const oracle = parseOracle(line);
   if (oracle) return oracle;
 
-  const connecting = line.match(CONNECTING);
-  if (connecting) {
-    return { kind: "credential", host: connecting[1]!, password: connecting[2]!, via: "connecting" };
+  if (line.startsWith(CONNECTING_PREFIX) && line.endsWith(CONNECTING_SUFFIX)) {
+    const pair = line.slice(CONNECTING_PREFIX.length, -CONNECTING_SUFFIX.length);
+    const known = [...knownHosts].sort((a, b) => b.length - a.length)
+      .find((host) => pair.startsWith(`${host}:`));
+    const split = known === undefined ? pair.indexOf(":") : known.length;
+    if (split > 0) {
+      return {
+        kind: "credential",
+        host: pair.slice(0, split),
+        password: pair.slice(split + 1),
+        via: "connecting",
+      };
+    }
   }
 
   const passcode = line.match(PASSCODE);
@@ -217,10 +287,12 @@ export function parseHeartbleedLine(raw: string): LogCapture {
   // knows which server it bled. Attributing it here would be a guess.
   if (passcode) return { kind: "credential", password: passcode[1]!, via: "passcode" };
 
-  const transaction = line.match(TRANSACTION);
-  if (transaction) return { kind: "edge", host: transaction[1]! };
+  if (line.startsWith(TRANSACTION_PREFIX) && line.endsWith(TRANSACTION_SUFFIX)) {
+    return { kind: "noise", text: line, recognised: true };
+  }
 
-  if (HEARTBEAT.test(line)) return { kind: "noise", text: line, heartbeat: true };
+  if (HEARTBEAT.test(line)) return { kind: "noise", text: line, recognised: true };
+  if (PACKET_SPAM.has(line)) return { kind: "noise", text: line, recognised: true };
 
   if (line === NO_PASSWORD_HINT) return { kind: "hint", contains: [] };
   if (NONE_PLACED.test(line)) return { kind: "hint", nonePlaced: true };
@@ -241,20 +313,18 @@ export function parseHeartbleedLine(raw: string): LogCapture {
   const bare = line.match(BARE);
   if (bare) return { kind: "credential", password: bare[1]!, via: "bare" };
 
-  return { kind: "noise", text: line, heartbeat: false };
+  return { kind: "noise", text: line, recognised: false };
 }
 
 export interface HarvestSummary {
   oracles: OracleCapture[];
-  /** Credentials whose owner the log named. Directly usable. */
-  credentials: CredentialLeak[];
+  /** Targeted candidates whose owner the same record named. */
+  credentials: AttributedCredentialLeak[];
   /** Passwords with no owner. Candidates to spray, not facts. */
   loose: string[];
-  hints: HintCapture[];
-  /** Hosts the logs mentioned, which is free adjacency. */
-  edges: string[];
-  /** Lines we recognised as ordinary traffic. */
-  heartbeats: number;
+  /** Constraints correlated with the attempt record they describe. */
+  evidence: PasswordEvidence[];
+
   /** Lines we did NOT recognise. A rising count means the grammar has drifted
    *  from the game and this parser needs revisiting — so it is surfaced rather
    *  than swallowed. */
@@ -311,41 +381,63 @@ const SHAPE_MAX = 60;
  * to — it is always the logging server's own password. Passing the host here is
  * what turns that from a loose candidate into an attributed credential; omit it
  * and the line degrades safely to `loose` rather than being mis-attributed. */
-export function harvestLogs(lines: readonly string[], bledFrom?: string): HarvestSummary {
+export interface HarvestContext {
+  bledFrom?: string;
+  knownHosts?: readonly string[];
+  at?: number;
+}
+
+export function harvestLogs(lines: readonly string[], context: HarvestContext = {}): HarvestSummary {
+  const knownHosts = context.knownHosts ?? (context.bledFrom ? [context.bledFrom] : []);
+  const at = context.at ?? Date.now();
   const summary: HarvestSummary = {
     oracles: [],
     credentials: [],
     loose: [],
-    hints: [],
-    edges: [],
-    heartbeats: 0,
+    evidence: [],
     unrecognised: [],
   };
+  const pendingPlacement: string[][] = [];
+  const recordHint = (hint: HintCapture): void => {
+
+    if (hint.contains !== undefined) summary.evidence.push({ kind: "contains", chars: hint.contains, at });
+    if (hint.placed !== undefined) pendingPlacement.push(hint.placed);
+    if (hint.nonePlaced) pendingPlacement.push([]);
+  };
   for (const raw of lines) {
-    const capture = parseHeartbleedLine(raw);
+    const capture = parseHeartbleedLine(raw, knownHosts);
     switch (capture.kind) {
       case "oracle":
         summary.oracles.push(capture);
+        if (capture.passwordAttempted !== undefined) {
+          for (const placed of pendingPlacement.splice(0)) {
+            summary.evidence.push({ kind: "placement", attempted: capture.passwordAttempted, placed, at });
+          }
+        }
         // A packet-sniffer response carries its blob in `data`, and the blob is
         // where that model hides the credential. Mining it here means the caller
         // gets the password without knowing which model it was talking to.
-        if (capture.data) summary.credentials.push(...extractPacketCredentials(capture.data));
+        if (capture.data) {
+          summary.credentials.push(...extractPacketCredentials(capture.data, knownHosts));
+          for (const password of embeddedLoosePasswords(capture.data)) {
+            if (!summary.loose.includes(password)) summary.loose.push(password);
+          }
+          for (const embedded of embeddedHints(capture.data)) recordHint(embedded);
+        }
         break;
       case "credential": {
-        const host = capture.host ?? (capture.via === "passcode" ? bledFrom : undefined);
-        if (host === undefined) summary.loose.push(capture.password);
-        else summary.credentials.push({ ...capture, host });
+        const host = capture.host ?? (capture.via === "passcode" ? context.bledFrom : undefined);
+        if (host === undefined || capture.via === "bare") {
+          if (!summary.loose.includes(capture.password)) summary.loose.push(capture.password);
+        }
+        else summary.credentials.push({ ...capture, host, via: capture.via });
         break;
       }
       case "hint":
-        summary.hints.push(capture);
-        break;
-      case "edge":
-        summary.edges.push(capture.host);
+        recordHint(capture);
         break;
       case "noise":
-        if (capture.heartbeat) summary.heartbeats++;
-        else summary.unrecognised.push(capture.text);
+        if (!capture.recognised) summary.unrecognised.push(capture.text);
         break;
     }
   }
@@ -384,4 +476,45 @@ export function oracleFor(
     return undefined;
   }
   return harvest.oracles.find((capture) => capture.passwordAttempted === attempted);
+}
+
+/** A host an unattributed leaked password might belong to. */
+export interface LooseTarget {
+  hostname: string;
+  passwordLength?: number;
+  passwordFormat?: string;
+  hasCredential: boolean;
+  isStationary?: boolean;
+  gone?: boolean;
+}
+
+export interface LooseGuess {
+  hostname: string;
+  password: string;
+  reason: string;
+}
+
+/** Match unattributed passwords to movable hosts by their identity facts. */
+export function looseCandidates(loose: readonly string[], hosts: readonly LooseTarget[]): LooseGuess[] {
+  const out: LooseGuess[] = [];
+  const seen = new Set<string>();
+  for (const password of loose) {
+    const format = getPasswordType(password);
+    for (const host of hosts) {
+      if (host.gone || host.hasCredential || host.isStationary) continue;
+      if (host.passwordLength !== undefined && host.passwordLength !== password.length) continue;
+      if (host.passwordFormat !== undefined && host.passwordFormat !== format) continue;
+      const key = `${host.hostname}\u0000${password}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({
+        hostname: host.hostname,
+        password,
+        reason: `a log leaked an unattributed ${password.length}-character ${format} password`
+          + ` and ${host.hostname} matches both facts`,
+      });
+    }
+  }
+  return out.sort((a, b) =>
+    a.hostname < b.hostname ? -1 : a.hostname > b.hostname ? 1 : a.password < b.password ? -1 : 1);
 }

@@ -1,3 +1,4 @@
+import type { ContractQueueEntry, DarknetContractListing } from "./contracts.ts";
 import { applyOverrides, type FeatureOverrides } from "../../shared/features/profile.ts";
 import { unknownCapabilities, type Capabilities } from "../../shared/features/unlock.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
@@ -61,7 +62,11 @@ export interface GameState {
   contractQuarantine?: Record<string, ContractFailure>;
   /** Private bounded work queue. The Side topic exposes only its front batch
    * plus totals, so this never gets serialized into telemetry. */
-  contractQueue?: { host: string; file: string }[];
+  contractQueue?: ContractQueueEntry[];
+  /** Authoritative resident observations used to validate darknet work. */
+  darknetContractListings?: Record<string, DarknetContractListing>;
+  /** Newest listing already given a terminal solver outcome, by contract key. */
+  darknetContractHandledAt?: Record<string, number>;
   contractSolverVersion?: number;
   /** Injected feature switches. Empty in the real game; a simulation sets them
    *  to isolate a feature. Applied in caps(), so every consumer agrees. */

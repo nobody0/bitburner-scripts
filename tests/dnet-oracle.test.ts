@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { capturePackets, type PacketWorld } from "../sim/features/dnet-feedback.ts";
+import { mulberry32 } from "../sim/core/rng.ts";
+import { PACKET_SNIFF_PHRASES } from "../shared/strategy/dnet/phrases.ts";
 import {
   extractPacketCredentials,
   harvestLogs,
   logShape,
+  looseCandidates,
   parseHeartbleedLine,
 } from "../shared/strategy/dnet/oracle.ts";
+
 
 /** Every fixture here is a literal from the pinned checkout
  * (src/DarkNet/models/packetSniffing.ts), not an invention. That matters more
@@ -43,7 +48,7 @@ describe("the log lines that hand over a password", () => {
       password: "4815",
       via: "passcode",
     });
-    const attributed = harvestLogs(["Logging in with passcode: 4815 ..."], "dn-2-0");
+    const attributed = harvestLogs(["Logging in with passcode: 4815 ..."], { bledFrom: "dn-2-0" });
     expect(attributed.credentials).toEqual([
       { kind: "credential", host: "dn-2-0", password: "4815", via: "passcode" },
     ]);
@@ -55,9 +60,17 @@ describe("the log lines that hand over a password", () => {
   test("`--<password>--` is a real password belonging to nobody in particular", () => {
     // getLogNoise picks a random MOVABLE server, so this is a live credential
     // with no owner attached — worth spraying, not worth trusting.
-    const summary = harvestLogs(["--swordfish--"], "dn-1-1");
+    const summary = harvestLogs(["--swordfish--"], { bledFrom: "dn-1-1" });
     expect(summary.loose).toEqual(["swordfish"]);
     expect(summary.credentials).toEqual([]);
+  });
+
+  test("the empty-password form is parsed rather than counted as drift", () => {
+    expect(parseHeartbleedLine("----")).toEqual({
+      kind: "credential",
+      password: "",
+      via: "bare",
+    });
   });
 
   test("a capturePackets blob gives up the host:password pair buried in it", () => {
@@ -82,7 +95,7 @@ describe("the log lines that hand over a password", () => {
       passwordAttempted: "0000",
       data: "filler dn-6-1:trustno1 filler",
     });
-    const summary = harvestLogs([line], "dn-6-1");
+    const summary = harvestLogs([line], { bledFrom: "dn-6-1" });
     expect(summary.oracles).toHaveLength(1);
     expect(summary.credentials).toContainEqual({
       kind: "credential",
@@ -90,6 +103,16 @@ describe("the log lines that hand over a password", () => {
       password: "trustno1",
       via: "packet",
     });
+  });
+
+  test("a packet blob can carry a whole unattributed password too", () => {
+    const line = JSON.stringify({
+      code: 401,
+      passwordAttempted: "0000",
+      data: "packet-prefix--swordfish--packet-suffix",
+    });
+    const summary = harvestLogs([line], { bledFrom: "dn-6-1" });
+    expect(summary.loose).toContain("swordfish");
   });
 });
 
@@ -161,7 +184,7 @@ describe("the partial hints, which constrain rather than reveal", () => {
     }
     // ...and none of them fell through to the unrecognised bucket.
     expect(harvestLogs(lines).unrecognised).toEqual([]);
-    expect(harvestLogs(lines).hints).toHaveLength(8);
+    expect(harvestLogs(lines).evidence).toHaveLength(8);
   });
 
   test("the empty-password variant is a hint, not drift", () => {
@@ -185,12 +208,14 @@ describe("the partial hints, which constrain rather than reveal", () => {
   });
 });
 
-describe("noise, topology and grammar drift", () => {
-  test("the transaction line is free adjacency", () => {
+describe("noise and grammar drift", () => {
+  test("the transaction line is recognised, so it is not counted as drift", () => {
     expect(parseHeartbleedLine("[sending transaction details to dn-2-7.]")).toEqual({
-      kind: "edge",
-      host: "dn-2-7",
+      kind: "noise",
+      text: "[sending transaction details to dn-2-7.]",
+      recognised: true,
     });
+    expect(harvestLogs(["[sending transaction details to dn-2-7.]"]).unrecognised).toEqual([]);
   });
 
   test("the heartbeat line is recognised, so it is not counted as drift", () => {
@@ -198,7 +223,7 @@ describe("noise, topology and grammar drift", () => {
     expect(capture).toEqual({
       kind: "noise",
       text: "4:15:23 PM: dn-0-1 - heartbeat check (alive)",
-      heartbeat: true,
+      recognised: true,
     });
     expect(harvestLogs(["4:15:23 PM: dn-0-1 - heartbeat check (alive)"]).unrecognised).toEqual([]);
   });
@@ -208,7 +233,6 @@ describe("noise, topology and grammar drift", () => {
     // moved and this parser needs revisiting. Dropping the text would hide that.
     const summary = harvestLogs(["Some phrase we have never seen before"]);
     expect(summary.unrecognised).toEqual(["Some phrase we have never seen before"]);
-    expect(summary.heartbeats).toBe(0);
   });
 
   test("harvest folds a realistic mixed batch", () => {
@@ -222,16 +246,14 @@ describe("noise, topology and grammar drift", () => {
         JSON.stringify({ code: 401, passwordAttempted: "0000", data: "Higher" }),
         "packet sniffing is fun",
       ],
-      "dn-1-0",
+      { bledFrom: "dn-1-0" },
     );
     expect(summary.credentials).toEqual([
       { kind: "credential", host: "dn-1-3", password: "letmein", via: "connecting" },
     ]);
     expect(summary.loose).toEqual(["dragon"]);
-    expect(summary.edges).toEqual(["dn-1-4"]);
-    expect(summary.hints).toEqual([{ kind: "hint", contains: ["l", "n"] }]);
+    expect(summary.evidence).toContainEqual({ kind: "contains", chars: ["l", "n"], at: expect.any(Number) });
     expect(summary.oracles).toHaveLength(1);
-    expect(summary.heartbeats).toBe(1);
     expect(summary.unrecognised).toEqual(["packet sniffing is fun"]);
   });
 
@@ -240,16 +262,27 @@ describe("noise, topology and grammar drift", () => {
     expect(summary.credentials).toEqual([]);
     expect(summary.unrecognised).toEqual([]);
   });
+
+  test("the same loose password is emitted once per drain", () => {
+    expect(harvestLogs(["--dragon--", "--dragon--"]).loose).toEqual(["dragon"]);
+  });
 });
 
 describe("grammar drift is reported as a shape, never as a line", () => {
   test("every digit and letter run is erased, and the structure survives", () => {
+
     // The shape has to be specific enough to write a fix against...
     expect(logShape("Logging in with passcode: hunter2")).toBe("a a a a: a#");
     expect(logShape("Response time: 1234ms")).toBe("a a: #a");
     // ...and identical for two lines that differ only in their secret, which is
     // what makes it safe to publish and useful to count.
     expect(logShape("passcode: swordfish")).toBe(logShape("passcode: correcthorse"));
+  });
+
+  test("every upstream packet-spam phrase is recognized rather than reported as grammar drift", () => {
+    const summary = harvestLogs(PACKET_SNIFF_PHRASES);
+    expect(summary.unrecognised).toEqual([]);
+    expect(summary.credentials).toEqual([]);
   });
 
   test("no password survives being turned into a shape", () => {
@@ -270,5 +303,103 @@ describe("grammar drift is reported as a shape, never as a line", () => {
   test("a shape is bounded, however long the line was", () => {
     // Unbounded, a single pathological line would become a 200-entry map key.
     expect(logShape("x!".repeat(500)).length).toBeLessThanOrEqual(60);
+  });
+});
+
+describe("target-owned log evidence", () => {
+  test("newest-first placement hints attach to the next older authentication record", () => {
+    const summary = harvestLogs([
+      "The characters b are in the right place. ",
+      JSON.stringify({ code: 401, passwordAttempted: "abc", data: "false" }),
+      "I can see a x and a y.",
+    ], { bledFrom: "dn-1", at: 123 });
+
+    expect(summary.evidence).toEqual([
+      { kind: "placement", attempted: "abc", placed: ["b"], at: 123 },
+      { kind: "contains", chars: ["x", "y"], at: 123 },
+    ]);
+  });
+
+
+  test("capturePackets really can bury multiple contains hints in packet junk", () => {
+    const rand = mulberry32(2);
+    const world: PacketWorld = {
+      movablePasswords: () => ["9999"], serverNames: () => ["dn-1"],
+      lastAttempted: () => "4800", rand,
+    };
+    const data = capturePackets({ hostname: "dn-1", password: "4827", difficulty: 8 }, world);
+    expect(data).toContain("I can see a 7 and a 4.");
+    expect(data).toContain("Theres a 7, and maybe a 4...");
+    const summary = harvestLogs([
+      JSON.stringify({ code: 401, passwordAttempted: "0000", data }),
+    ], { bledFrom: "dn-1", knownHosts: ["dn-1"], at: 456 });
+    expect(summary.credentials).toContainEqual({ kind: "credential", host: "dn-1", password: "4827", via: "packet" });
+    expect(summary.evidence.filter((fact) => fact.kind === "contains")).toEqual([
+      { kind: "contains", chars: ["7", "4"], at: 456 },
+      { kind: "contains", chars: ["7", "4"], at: 456 },
+    ]);
+  });
+
+  test("capturePackets can also bury placement feedback in the same junk", () => {
+    const data = capturePackets({ hostname: "dn-1", password: "4827", difficulty: 8 }, {
+      movablePasswords: () => ["9999"], serverNames: () => ["dn-1"],
+      lastAttempted: () => "4800", rand: mulberry32(4),
+    });
+    expect(data).toContain("The characters 4, 8 are in the right place.");
+    const summary = harvestLogs([
+      JSON.stringify({ code: 401, passwordAttempted: "1111", data }),
+      JSON.stringify({ code: 401, passwordAttempted: "4800", data: "older response" }),
+    ], { bledFrom: "dn-1", at: 789 });
+    expect(summary.evidence).toContainEqual({ kind: "placement", attempted: "4800", placed: ["4", "8"], at: 789 });
+  });
+
+  test("known hostnames disambiguate colons in both names and passwords", () => {
+    expect(parseHeartbleedLine("Connecting to dn:west:p:a:ss ...", ["dn:west"])).toEqual({
+      kind: "credential",
+      host: "dn:west",
+      password: "p:a:ss",
+      via: "connecting",
+    });
+    expect(extractPacketCredentials("junk dn:west:p:a:ss tail", ["dn:west"])).toContainEqual({
+      kind: "credential",
+      host: "dn:west",
+      password: "p:a:ss",
+      via: "packet",
+    });
+  });
+});
+
+describe("unattributed passwords", () => {
+  const host = (over: Partial<Parameters<typeof looseCandidates>[1][number]> & { hostname: string }) => ({
+    hasCredential: false,
+    ...over,
+  });
+
+  test("length and format narrow a leak to compatible hosts", () => {
+    const guesses = looseCandidates(["4821"], [
+      host({ hostname: "match", passwordLength: 4, passwordFormat: "numeric" }),
+      host({ hostname: "too-long", passwordLength: 6, passwordFormat: "numeric" }),
+      host({ hostname: "wrong-format", passwordLength: 4, passwordFormat: "alphabetic" }),
+    ]);
+    expect(guesses.map((guess) => guess.hostname)).toEqual(["match"]);
+    expect(guesses[0]!.password).toBe("4821");
+  });
+
+  test("owned, stationary, and gone hosts are excluded", () => {
+    expect(looseCandidates(["4821"], [
+      host({ hostname: "owned", hasCredential: true }),
+      host({ hostname: "darkweb", isStationary: true }),
+      host({ hostname: "gone", gone: true }),
+    ])).toEqual([]);
+  });
+
+  test("missing identity facts do not exclude an unsurveyed host", () => {
+    expect(looseCandidates(["4821"], [host({ hostname: "unknown" })]).map((guess) => guess.hostname))
+      .toEqual(["unknown"]);
+  });
+
+  test("pairs are deduplicated and ordered by host", () => {
+    const hosts = [host({ hostname: "b" }), host({ hostname: "a" })];
+    expect(looseCandidates(["4821", "4821"], hosts).map((guess) => guess.hostname)).toEqual(["a", "b"]);
   });
 });

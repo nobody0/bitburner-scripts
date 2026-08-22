@@ -285,7 +285,7 @@ describe("in-game static RAM budget", () => {
       .filter((name) => !MANGLE_COLLISIONS.includes(name))
       .sort();
     expect(referenced).toEqual(["getHostname"]);
-    expect(CONTROLLER_METHODS).toEqual(["getHostname"]);
+    expect(CONTROLLER_METHODS).toEqual(["getHostname", "dnet.nextMutation", "isRunning", "kill"]);
     expect(getFunctionRamCost("getHostname")).toBe(0.05);
 
     // The ABSENCES are the design. It describes the jobs in this very file —
@@ -350,8 +350,8 @@ describe("in-game static RAM budget", () => {
     // makes them greppable.
     const referenced = new Set<string>();
     for (const source of sources) {
-      for (const match of source.matchAll(/jobNs\["(\w+)"\](?:\["(\w+)"\])?/g)) {
-        referenced.add(match[2] ? `${match[1]}.${match[2]}` : match[1]!);
+      for (const match of source.matchAll(/jobNs\["(\w+)"\](?:\["(\w+)"\])?(?:\["(\w+)"\])?/g)) {
+        referenced.add([match[1], match[2], match[3]].filter(Boolean).join("."));
       }
     }
     expect(referenced.size).toBeGreaterThan(4);
@@ -385,7 +385,7 @@ describe("in-game static RAM budget", () => {
     expect(starts.length).toBe(bound.size);
 
     // The two shared helpers, and what reaching for them implies. `describeHost`
-    // takes a third argument that turns on the cache listing, and `cacheFilesOn`
+    // takes a third argument that turns on the file listing, and `listingOn`
     // IS the listing — both resolve to `ls` plus the describe trio.
     const DESCRIBE = ["dnet.getServerDetails", "getServerMaxRam", "getServerUsedRam"];
 
@@ -397,12 +397,12 @@ describe("in-game static RAM budget", () => {
       const slice = source.slice(from, to);
 
       const wanted = new Set<string>();
-      for (const match of slice.matchAll(/jobNs\["(\w+)"\](?:\["(\w+)"\])?/g)) {
-        wanted.add(match[2] ? `${match[1]}.${match[2]}` : match[1]!);
+      for (const match of slice.matchAll(/jobNs\["(\w+)"\](?:\["(\w+)"\])?(?:\["(\w+)"\])?/g)) {
+        wanted.add([match[1], match[2], match[3]].filter(Boolean).join("."));
       }
       if (slice.includes("describeHost(")) for (const method of DESCRIBE) wanted.add(method);
-      // `describeHost(jobNs, x, true)` and `cacheFilesOn(jobNs, x)` both call ls.
-      if (slice.includes("cacheFilesOn(") || /describeHost\([^)]*,\s*true\)/.test(slice)) wanted.add("ls");
+      // `describeHost(jobNs, x, true)` and `listingOn(jobNs, x)` both call ls.
+      if (slice.includes("listingOn(") || /describeHost\([^)]*,\s*true\)/.test(slice)) wanted.add("ls");
 
       const declared = new Set(JOB_METHODS[kind] ?? []);
       for (const method of wanted) {

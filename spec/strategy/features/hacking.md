@@ -105,6 +105,12 @@ waits on · hacking exp, read as skill by `factions` and `progression` · the ro
 dodges run on. **Contends** fleet RAM, against dodges and probes, `share` and `stanek` · money, in
 `income:investment` against `hacknet` and `stock` · target choice, against `stock` in BN8.
 
+**Port-opener policy** TOR and crackers have two independent payoffs. Darkscape buys TOR as part of
+darknet access; the farm separately prices each next cracker from the steady-state income and hacking
+experience of newly available targets plus the worker RAM of every newly rootable host
+(`shared/strategy/access/openers.ts`). That economic claim competes with other income investments in
+`income:investment`. A posted root/backdoor need keeps the existing higher-priority blocking path.
+
 `shared/strategy/arbiter.ts:42` contends exactly `money` and `time`; RAM is brokered separately. The broker
 carves a dodge *arena* out of the rooted fleet — ladder `home` → `n00dles` → `foodnstuff`, growing further only
 for a request starved past `STARVATION_MS = 5 s` (`shared/ram/broker.ts:327-395`) — and the rest is the

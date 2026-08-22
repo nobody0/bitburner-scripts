@@ -1,11 +1,10 @@
 /** Two models whose feedback gives away more than it looks like it does.
  *
  * `2G_cellular` is documented — by us and by upstream's own formula parameter —
- * as a TIMING attack, and reading it that way makes it look like the hardest
- * model in the set: measure a 50 ms difference across a network call and climb.
- * It is not. The failure response states the index of the first mismatched
- * character in words, so the attack is an ordinary prefix walk and the timing
- * channel is a fallback nobody needs.
+ * as a TIMING attack. The failure log states the first mismatch index directly;
+ * when charisma blocks that log, `formulas.dnet.getAuthenticateTime` supplies
+ * the zero-prefix baseline and the measured call duration supplies the same
+ * index. Either channel turns it into an ordinary prefix walk.
  *
  * `Factori-Os` answers only "yes" or "no" to "is the password divisible by
  * this?", which sounds like one bit per exchange. But the password is built as a
@@ -18,6 +17,7 @@
 
 import type { PasswordFacts } from "../models.ts";
 import { LARGE_PRIMES, SMALL_PRIMES } from "../codecs.ts";
+import { fixedPositionsFromEvidence } from "../evidence.ts";
 import { alphabetFor } from "./search.ts";
 import {
   SOLVER_CODES,
@@ -28,7 +28,7 @@ import {
   type SolverStep,
 } from "./types.ts";
 
-// --- 2G_cellular: the timing attack that does not need timing ---------------
+// --- 2G_cellular: one prefix walk, two feedback channels --------------------
 
 /** The index out of `"Found a mismatch while checking each character (N)"`.
  *
@@ -45,19 +45,19 @@ export function readMismatchIndex(seen: SolverObservation): number | undefined {
 
 /** How many leading characters were correct, from the measured round trip.
  *
- * The fallback, and the reason it is worth keeping: each correct character adds
- * `50 ms * threadsFactor` to authentication (`effects.ts:60-89`), and this
+ * `stepMs` is the formula-calibrated delay added by one correct character
+ * (`effects.ts:60-89`), and this
  * arrives in `elapsedMs` — which the calling process measures for itself. So it
  * needs no `heartbleed`, and `heartbleed` is the one charisma-gated call. On a
  * host whose charisma requirement we have not met, this is the only channel this
  * model has.
  *
- * Deliberately NOT used while the index is available: a stated integer beats an
+ * Deliberately not used while the index is available: a stated integer beats an
  * inferred one, and the inference needs a baseline we would have to calibrate. */
-export function correctCharsFromTiming(elapsedMs: number, baselineMs: number, threadsFactor = 1): number {
+export function correctCharsFromTiming(elapsedMs: number, baselineMs: number, stepMs = 50): number {
   const extra = elapsedMs - baselineMs;
-  if (!(extra > 0)) return 0;
-  return Math.max(0, Math.round(extra / (50 * threadsFactor)));
+  if (!(extra > 0) || !(stepMs > 0)) return 0;
+  return Math.max(0, Math.round(extra / stepMs));
 }
 
 /** Walk the prefix one character at a time.
@@ -69,7 +69,7 @@ export function correctCharsFromTiming(elapsedMs: number, baselineMs: number, th
  * therefore adopt the whole prefix, and a lucky pad can resolve several
  * positions in one exchange. */
 const timingAttackSolver: Solver = {
-  needsOracle: true,
+  needsOracle: false,
   budget: (facts) => alphabetFor(facts).length * (facts.passwordLength ?? 8) + 2,
 
   first(facts): SolverStep {
@@ -79,13 +79,20 @@ const timingAttackSolver: Solver = {
     }
     const alphabet = alphabetFor(facts);
     const state = freshState("2G_cellular", facts, "prefix");
-    state.scratch["known"] = "";
+    const fixed = fixedPositionsFromEvidence(length, facts.evidence);
+    let known = "";
+    while (known.length < fixed.length && fixed[known.length] !== undefined) known += fixed[known.length];
+    if (known.length === length) {
+      return { kind: "answer", password: known, note: "2G_cellular: whole prefix came from harvested placement hints" };
+    }
+    state.scratch["known"] = known;
     state.scratch["symbol"] = 0;
+    state.scratch["alphabet"] = alphabet;
     return {
       kind: "attempt",
-      password: padTo("", alphabet[0]!, length, alphabet),
+      password: padTo(known, alphabet[0]!, length, alphabet),
       state,
-      needsOracle: true,
+      needsOracle: false,
       note: "prefix walk, position 1",
     };
   },
@@ -93,21 +100,17 @@ const timingAttackSolver: Solver = {
   next(facts, state, seen): SolverStep {
     if (seen.success) return { kind: "answer", password: seen.attempted, note: "2G_cellular: opened" };
     const length = facts.passwordLength ?? seen.attempted.length;
-    const alphabet = alphabetFor(facts);
-    if (!seen.oracle) {
-      return {
-        kind: "give-up",
-        code: SOLVER_CODES.OracleUnavailable,
-        reason: "2G_cellular: needs the log ring, or a measured round trip",
-        state,
-      };
-    }
-    const index = readMismatchIndex(seen);
+    const alphabet = String(state.scratch["alphabet"] ?? alphabetFor(facts));
+    const index = readMismatchIndex(seen)
+      ?? (facts.authenticateBaseMs !== undefined && seen.elapsedMs !== undefined
+        ? correctCharsFromTiming(seen.elapsedMs, facts.authenticateBaseMs, facts.authenticateStepMs)
+        : undefined);
     if (index === undefined) {
       return {
         kind: "give-up",
-        code: SOLVER_CODES.OracleUnparsed,
-        reason: `2G_cellular: response ${JSON.stringify(seen.oracle.message ?? "")} states no mismatch index`,
+        code: SOLVER_CODES.OracleUnavailable,
+        reason: "2G_cellular: needs either a mismatch log or the formula timing baseline",
+        state,
       };
     }
 
@@ -142,7 +145,7 @@ const timingAttackSolver: Solver = {
       kind: "attempt",
       password: padTo(known, alphabet[symbol]!, length, alphabet),
       state: { ...state, spent: state.spent + 1, scratch: { ...state.scratch, known, symbol } },
-      needsOracle: true,
+      needsOracle: false,
       note: `prefix walk, position ${known.length + 1}`,
     };
   },
@@ -186,14 +189,14 @@ function padTo(known: string, guess: string, length: number, alphabet: string): 
  * against a small divisor is then exact too. So a long password is not a reason
  * to refuse; it is only a reason to reconstruct in BigInt, which this does.
  *
- * What this genuinely cannot do is the difficulty > 24 case, where a SECOND
- * large prime is multiplied in: the candidate set becomes pairs, and the
- * reported length does not narrow it enough to be worth walking. That gives up
- * by name rather than guessing. */
+ * Above difficulty 24 a SECOND large prime is multiplied in. Locate one of the
+ * two with direct divisibility probes, then enumerate only length-compatible,
+ * exactly representable partners. Duplicate factors remain valid, because the
+ * generator draws the two primes independently. */
 
 const divisibilitySolver: Solver = {
   needsOracle: true,
-  budget: (facts) => SMALL_PRIMES.length * 2 + LARGE_PRIMES.length + 4,
+  budget: (facts) => SMALL_PRIMES.length * 2 + LARGE_PRIMES.length * 2 + 8,
 
   first(facts): SolverStep {
     const state = freshState("Factori-Os", facts, "small");
@@ -267,6 +270,58 @@ const divisibilitySolver: Solver = {
       };
     }
 
+    if (state.phase === "large-pair") {
+      if (!seen.oracle) {
+        return {
+          kind: "give-up",
+          code: SOLVER_CODES.OracleUnavailable,
+          reason: "Factori-Os: needs the log ring while locating the first large factor",
+          state,
+        };
+      }
+      const raw = (seen.oracle.data ?? "").trim().toLowerCase();
+      if (raw !== "true" && raw !== "false") {
+        return {
+          kind: "give-up",
+          code: SOLVER_CODES.OracleUnparsed,
+          reason: `Factori-Os: response ${JSON.stringify(raw)} is not a divisibility verdict`,
+        };
+      }
+      const largeIndex = Number(state.scratch["largeIndex"] ?? 0);
+      if (raw === "true") {
+        const candidates = pairCandidates(facts, known, LARGE_PRIMES[largeIndex]!);
+        if (candidates.length === 0) {
+          return {
+            kind: "give-up",
+            code: SOLVER_CODES.SolverExhausted,
+            reason: "Factori-Os: the located large factor has no length-compatible partner",
+          };
+        }
+        return {
+          kind: "attempt",
+          password: candidates[0]!,
+          state: {
+            ...state,
+            phase: "large",
+            spent: state.spent + 1,
+            scratch: { ...state.scratch, candidates, candidateIndex: 0 },
+          },
+          needsOracle: false,
+          note: `two-large-factor candidate 1/${candidates.length}`,
+        };
+      }
+      const nextLarge = largeIndex + 1;
+      if (nextLarge >= LARGE_PRIMES.length) {
+        return { kind: "give-up", code: SOLVER_CODES.SolverExhausted, reason: "Factori-Os: no large factor divides the password" };
+      }
+      return {
+        kind: "attempt",
+        password: String(LARGE_PRIMES[nextLarge]),
+        state: { ...state, spent: state.spent + 1, scratch: { ...state.scratch, largeIndex: nextLarge } },
+        needsOracle: true,
+        note: `locating large factor ${nextLarge + 1}/${LARGE_PRIMES.length}`,
+      };
+    }
     // --- the large-prime residue ---
     //
     // These are sent as CANDIDATE PASSWORDS, not as divisibility questions.
@@ -282,9 +337,7 @@ const divisibilitySolver: Solver = {
       return {
         kind: "give-up",
         code: SOLVER_CODES.SolverExhausted,
-        reason:
-          `Factori-Os: the small factors gave ${known}, and no admissible large prime completed it`
-          + " — above difficulty 24 upstream uses two large primes, which this does not reconstruct",
+        reason: `Factori-Os: the known factors ${known} had no admissible large-prime completion`,
       };
     }
     return {
@@ -304,6 +357,20 @@ const divisibilitySolver: Solver = {
  * Only the entries that could still fit the reported length are asked about, in
  * ascending order — which is usually a handful rather than all 83. */
 function enterLargePhase(facts: PasswordFacts, state: SolverState, small: bigint): SolverStep {
+  if ((facts.difficulty ?? 0) > 24) {
+    return {
+      kind: "attempt",
+      password: String(LARGE_PRIMES[0]),
+      state: {
+        ...state,
+        phase: "large-pair",
+        spent: state.spent + 1,
+        scratch: { ...state.scratch, known: small.toString(), largeIndex: 0 },
+      },
+      needsOracle: true,
+      note: `locating first of two large factors 1/${LARGE_PRIMES.length}`,
+    };
+  }
   const length = facts.passwordLength;
   const candidates: string[] = [];
 
@@ -346,7 +413,20 @@ function enterLargePhase(facts: PasswordFacts, state: SolverState, small: bigint
   };
 }
 
-
+function pairCandidates(facts: PasswordFacts, small: bigint, first: number): string[] {
+  const length = facts.passwordLength;
+  const low = length === undefined ? undefined : 10n ** BigInt(Math.max(0, length - 1));
+  const high = length === undefined ? undefined : 10n ** BigInt(length);
+  const candidates: string[] = [];
+  for (const partner of LARGE_PRIMES) {
+    const product = small * BigInt(first) * BigInt(partner);
+    if (low !== undefined && high !== undefined && (product < low || product >= high)) continue;
+    if (BigInt(Number(product)) !== product) continue;
+    const value = product.toString();
+    if (!candidates.includes(value)) candidates.push(value);
+  }
+  return candidates;
+}
 
 // --- OpenWebAccessPoint: read the password out of the noise ----------------
 

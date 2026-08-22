@@ -159,7 +159,7 @@ reset. Three levels: *install* (buying augs), *node* (destroying a BitNode),
 | **Home RAM** | money | our scripts, dodges, probes, the farm | **Yes** | No |
 | **Fleet RAM** | purchased + rooted + hacknet servers | dispatch, dodge placement, `stanek` charging | **No** | No |
 | **Darknet RAM** | `dnet` `memoryReallocation` on hosts we hold | dnet agents only — never in `ns.scan`, never in the heap, partly owner-blocked, and able to vanish | **No** | No |
-| **Programs** (port openers) | darkweb ($) or creation (work slot + skill) | rooting, therefore the whole fleet | **No** → NUKE plus augmentation/SF-granted programs (and BitFlume) | No → the new node's grants (and BitFlume) |
+| **Programs** (TOR + port openers) | darkweb ($) or creation (work slot + skill); each next tier is priced from newly unlocked targets and worker RAM | rooting, therefore farm income/experience and the whole fleet; TOR also gates Darkscape/darknet | **No** → NUKE plus augmentation/SF-granted programs (and BitFlume) | No → the new node's grants (and BitFlume) |
 | **City** | travel, $200 000 | city factions, Tetrads, Dark Army, Syndicate, Tian Di Hui | **No** → Sector-12 | No |
 | **Source-File levels** | destroying BitNodes | everything on graph 1 | Yes | **Yes** |
 

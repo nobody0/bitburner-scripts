@@ -126,6 +126,59 @@ export interface DarknetKnowledgeDigest {
   queue?: { pending: number; active: number; byKind: Record<string, number> };
 }
 
+/** One PID-bound walker in the maze.
+ *
+ * There can be two: a FINISHER, whose host is the first thing a stasis link is
+ * spent on because losing its PID loses its position, and a disposable SCOUT on
+ * a second adjacent host, which commits to the macro-route the finisher is not
+ * on and is deliberately never pinned. Both feed one shared map, so the scout
+ * dying costs its position and nothing else. */
+export interface DarknetLabWalker {
+  /** The vantage the walk RUNS on — never the lab, which is the target. */
+  from: string;
+  /** Absent for the finisher; `"scout"` for the second, disposable walker. */
+  role?: "scout";
+  /** `"x,y"`, parsed from the engine's own message. Absent before the first
+   *  response, because the position is unknowable until then. */
+  at?: string;
+  moves: number;
+  /** Refused moves. The planner should never bump a wall after its blind first
+   *  probe, so a climbing number here is our model disagreeing with the engine. */
+  walls: number;
+  radars: number;
+  /** Authentications spent: moves, walls and radars all pay one. This is what
+   *  the walk's PACE is measured in, and dividing it by the elapsed time gives
+   *  the only honest ETA there is. */
+  attempts: number;
+  /** The planner's own A* estimate of the authentications still to come. */
+  believedLeft?: number;
+  startedAt: number;
+  beatAt: number;
+  /** Whether a mutation can take this walker's host out from under it. */
+  pinned: boolean;
+}
+
+export interface DarknetLabDigest {
+  host: string;
+  /** The PRODUCED maze size. Never the size `labData` asks for: `generateMaze`
+   *  stitches four sub-mazes and rounds each up to odd, so a 60x40 request is a
+   *  61x41 maze. */
+  width: number;
+  height: number;
+  /** The discovered maze, one character per grid cell in row-major order:
+   *  `?` unknown, `#` wall, `.` open. `width * height` characters — 2501 for the
+   *  largest rung, which is why it can travel every tick where the `slots`
+   *  record it is built from could not. */
+  grid: string;
+  /** Exit candidates not yet disproved. The exit is `[w-2-ox, h-2-oy]` with each
+   *  offset 0, 2 or 4 on the deep rungs, so this starts at nine there and one on
+   *  the shallow rungs, and shrinks as radars and arrivals rule them out. */
+  candidates: string[];
+  /** True once a radar showed the exit or eliminated everything else. */
+  exitKnown: boolean;
+  walkers: DarknetLabWalker[];
+}
+
 export interface DarknetState {
   /** Script host from which the latest local probe was made. */
   observedFrom?: string;
@@ -217,23 +270,9 @@ export interface DarknetState {
    *  A rising count is the same class of event as `unknownModels`: a game update,
    *  or a hole in our transcription, and both are things to hear about. */
   grammar?: { unrecognised: number; shapes: Record<string, number> };
-  /** Why the derivation declined to read a host's log ring.
-   *
-   *  The bleed gate used to be a clock — "has it been longer than the topology
-   *  expiry" — which is a rule with nothing to do with logs and no name for its
-   *  refusals. `listen.ts` prices the call instead, and this is the third member
-   *  of the `spread`/`farm` family: what our own planner declined, by name.
-   *
-   *  Only the REFUSALS travel. The ranking is derivable — `shouldListen` is pure
-   *  in facts the digest already carries — so a reader computes it the same way
-   *  it computes a model's oracle from `modelId`. */
-  listen?: {
-    refused: Record<string, number>;
-    examples: { host: string; why: string; detail: string }[];
-  };
   /** The three DELIBERATE decisions, and the fourth one home makes itself.
    *
-   *  `spread`, `farm` and `listen` above are all things a host does as a matter
+   *  `spread` and `farm` above are things a host does as a matter
    *  of course. These four are not: a stasis link is one of at most four in a
    *  whole run, a backdoor past the free allowance taxes every authentication
    *  in the net, an induced migration can cost the host outright, and a maze
@@ -254,6 +293,27 @@ export interface DarknetState {
       examples: { host: string; why: string; detail: string }[];
     };
   };
+  /** The storm trigger: where the seed stands and which gate is holding fire.
+   *
+   *  The refusal names ARE the status display — "phish-window-open" with every
+   *  other gate green means the storm fires behind the next `.d.cache`. The
+   *  timing constants (`STORM_QUIET_MS`, `STORM_COOLDOWN_MS`) live in
+   *  `rates.ts`; only the stamps travel, exactly as with the phishing window. */
+  storm?: {
+    /** Fires the last derivation admitted: 0 or 1. */
+    admitted: number;
+    refused: Record<string, number>;
+    examples: { host: string; why: string; detail: string }[];
+    /** The freshest believed `STORM_SEED.exe` holder, when there is one. */
+    seedHost?: string;
+    seedSeenAt?: number;
+    /** Our own stamp of the last fire — the engine's `lastStormTime` is module
+     *  state no ns member exposes, so this is the only clock there is for both
+     *  the quiet period and the 30-minute seed-eligibility window. */
+    firedAt?: number;
+    /** Whether the farm is grinding blocks for seed rolls right now. */
+    seedHunt?: boolean;
+  };
   /** Karma spent opening caches this run, summed and NEGATIVE.
    *
    *  Karma only ever moves down and it survives an install, so a cache is free
@@ -271,6 +331,18 @@ export interface DarknetState {
    *  blocker off it, and a blocker raised for a cache we cannot reach would
    *  stall the whole cycle. Absent means "no deferral, install normally". */
   labCache?: { host: string; filename: string; openable: boolean };
+  /** THE MAZE, as far as the walkers have got. Absent for every run that has
+   *  not reached a labyrinth, which is most of them — the panel's ladder card
+   *  stands on its own without it.
+   *
+   *  This is the one part of the darknet whose state the panel genuinely cannot
+   *  derive. Everything else about a lab follows from the hostname:
+   *  `labStage()` gives the rung, the charisma gate and the requested maze size,
+   *  and `labPrior()` turns that into the produced dimensions, the seam
+   *  positions, the door candidates and the nine exit candidates. What no
+   *  formula can supply is what the walkers have actually SEEN, so that — and
+   *  only that — travels. */
+  lab?: DarknetLabDigest;
   /** What we know versus what we still believe. `freshFraction` falling is the
    *  signal that the net is moving faster than we are learning it. */
   coverage?: {

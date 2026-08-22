@@ -24,13 +24,13 @@ import type { ProjectedState } from "../project.ts";
 import { codeName } from "../../../shared/strategy/dnet/courier.ts";
 import { modelEntry, type PasswordFacts } from "../../../shared/strategy/dnet/models.ts";
 import { solverFor } from "../../../shared/strategy/dnet/solvers/index.ts";
-import { shouldListen } from "../../../shared/strategy/dnet/listen.ts";
 import { reclaimForecast } from "../../../shared/strategy/dnet/farm.ts";
-import { PHISH_CACHE_COOLDOWN_MS } from "../../../shared/strategy/dnet/rates.ts";
+import { PHISH_CACHE_COOLDOWN_MS, STORM_COOLDOWN_MS } from "../../../shared/strategy/dnet/rates.ts";
 import { LAB_LADDER, isLabyrinth } from "../../../shared/strategy/dnet/rates.ts";
 import { FACT_CLASS, type ExpiryOpts } from "../../../shared/strategy/dnet/knowledge.ts";
-import type { DarknetKnownHost, DarknetState } from "../../../shared/telemetry/topics/dnet.ts";
-import { AUTH_LABEL, factLife, isStale, matches, mapOptions, netLegend, netMap } from "./dnet-map.ts";
+import type { DarknetKnownHost, DarknetLabWalker, DarknetState } from "../../../shared/telemetry/topics/dnet.ts";
+import { AUTH_LABEL, factLife, isStale, matches, mapOptions, netLegend, netMap, ramBuckets } from "./dnet-map.ts";
+import { labEtaMs, labExplored, labMaze, labMazeLegend, labPriorFor, walkerEtaMs } from "./dnet-lab.ts";
 import type { Tab } from "./index.ts";
 
 /** The Darknet panel.
@@ -64,6 +64,10 @@ import type { Tab } from "./index.ts";
  * never truncates; a table is where a limit belongs. */
 const TABLE_LIMIT = 60;
 
+/** `1 radar` rather than `1 radars`. The walk's counters start at one and stay
+ * small for a while, so the ungrammatical case is the one a reader sees first. */
+const plural = (n: number, noun: string): string => `${n} ${noun}${n === 1 ? "" : "s"}`;
+
 /** A host's row, as something other than a raw number.
  *
  * `-1` reaches the panel from three different places and means something
@@ -81,10 +85,8 @@ function depthLabel(host: DarknetKnownHost): string {
 
 /** Why a planner declined, rendered the one way.
  *
- * Three of them now answer the same question in the same shape — `spread`,
- * `farm` and `listen` all carry `{refused, examples}` — and each had its own
- * copy of this twelve-line loop. The shape is dnet's own, so the helper lives
- * here rather than in the shared vocabulary.
+ * Spread and farm both carry `{refused, examples}`. Keeping this loop here
+ * makes their rendering consistent without putting UI vocabulary in shared code.
  *
  * Sorted by count, and one example per reason: a reason with no example is a
  * number nobody can act on, and a row per host is a wall. */
@@ -198,19 +200,18 @@ function detailCard(
     ?? hosts[0];
   if (!host) return card("Host", note("no host selected"));
 
+  const ram = ramBuckets(host);
   const summary = tiles([
     { label: "depth", value: depthLabel(host) },
     {
-      label: "usable RAM",
-      value: host.maxRam === undefined ? NONE : fmtRam(host.freeRam ?? 0),
-      // `used` and `blocked` are separate problems with separate fixes — the
+      label: "RAM",
+      value: ram === undefined ? NONE : `${fmtRam(ram.ours)} ours`,
+      // Ours and owner-blocked are separate problems with separate fixes — the
       // owner's block is what `memoryReallocation` grinds, our own use is not —
-      // so the tile names both rather than folding them into one shortfall.
-      sub: host.maxRam === undefined
+      // so the tile keeps all three buckets separate.
+      sub: ram === undefined
         ? undefined
-        : `of ${fmtRam(host.maxRam)}`
-          + (host.usedRam ? ` · ${fmtRam(host.usedRam)} used` : "")
-          + (host.blockedRam ? ` · ${fmtRam(host.blockedRam)} blocked` : ""),
+        : `${fmtRam(ram.free)} free · ${fmtRam(ram.blocked)} blocked · ${fmtRam(ram.max)} total`,
     },
     {
       label: "charisma",
@@ -575,8 +576,17 @@ export const dnetTab: Tab = {
         },
         { id: "model", label: "model", left: true, cell: (h) => (h.modelId ? esc(h.modelId) : NONE), sort: (h) => h.modelId ?? "" },
         {
-          id: "usable",
-          label: "usable RAM",
+          id: "ours",
+          label: "ours",
+          cell: (h) => {
+            const ram = ramBuckets(h);
+            return ram === undefined ? NONE : fmtRam(ram.ours);
+          },
+          sort: (h) => ramBuckets(h)?.ours ?? -1,
+        },
+        {
+          id: "free",
+          label: "free",
           cell: (h) => {
             if (h.maxRam === undefined) return NONE;
             const free = h.freeRam ?? 0;
@@ -584,8 +594,8 @@ export const dnetTab: Tab = {
           },
           sort: (h) => h.freeRam ?? -1,
         },
-        { id: "max", label: "max RAM", cell: (h) => (h.maxRam === undefined ? NONE : fmtRam(h.maxRam)), sort: (h) => h.maxRam ?? -1 },
         { id: "blocked", label: "blocked", cell: (h) => (h.blockedRam === undefined ? NONE : fmtRam(h.blockedRam)), sort: (h) => h.blockedRam ?? -1 },
+        { id: "max", label: "max RAM", cell: (h) => (h.maxRam === undefined ? NONE : fmtRam(h.maxRam)), sort: (h) => h.maxRam ?? -1 },
         {
           id: "charisma",
           label: "charisma",
@@ -907,41 +917,163 @@ export const dnetTab: Tab = {
 
     // --- the labyrinth -------------------------------------------------------
     //
-    // The ladder is static registry data, so it costs nothing to draw and it is
-    // the only place the charisma ramp (300 -> 4000) is visible as a whole. The
-    // rung we are on is inferred the way the game infers it: `getNetDepth()` IS
-    // the current lab's depth, so the deepest lab we have laid eyes on pins it.
+    // The feature's whole point, and until now the only part of it with no
+    // readout: a walk holds a host for hours and the panel could say nothing
+    // about it beyond "active: walk" on a resident row. Three things are worth
+    // knowing while one is running and none of them were visible — how far it
+    // has got, when it expects to arrive, and whether a mutation can take it.
     //
-    // `labCache` is the reason this card exists rather than a tile. Opening one
-    // queues an augmentation DIRECTLY, and the generic price multiplier is
-    // 1.9 ^ (queued non-SoA) charged against everything bought afterwards — so
-    // it is the one cache that waits, and "can it be opened yet" is a decision
-    // home makes rather than a status the net reports.
+    // Almost everything here is DERIVED from the hostname rather than sent:
+    // `labStage` gives the rung and the charisma gate, `labPrior` turns that
+    // into the produced maze size, the seams and the exit candidates. The one
+    // thing no formula supplies is what the walkers have SEEN, and that is the
+    // one thing `d.lab` carries.
+    //
+    // Most runs never reach a lab at all, so every branch below degrades: no
+    // sighting draws no card, a sighting with no walk draws the ladder and the
+    // reason we are not walking, and a walk draws the maze.
     const labCache = d.labCache;
+    const lab = d.lab;
     const seenLabs = hosts.filter((h) => isLabyrinth(h.hostname, h.modelId));
     const currentDepth = d.netDepth;
     const rung = currentDepth === undefined
       ? undefined
-      : LAB_LADDER.findIndex((stage) => stage.depth === currentDepth);
+      : LAB_LADDER.findIndex((entry) => entry.depth === currentDepth);
     const stage = rung !== undefined && rung >= 0 ? LAB_LADDER[rung] : undefined;
+    // The lab this card is about: the one being walked, else the deepest one we
+    // have laid eyes on, else the rung the net's depth implies.
+    const labHost = lab?.host ?? seenLabs[seenLabs.length - 1]?.hostname ?? stage?.hostname;
+    // Whether this maze is already behind us. A credential for a lab host can
+    // only have come from reaching the exit — the engine refuses the lab's own
+    // password on purpose — so it is a stronger statement than any refusal.
+    const labSolved = labHost !== undefined
+      && seenLabs.some((h) => h.hostname === labHost && h.credentialKnown === true);
+    // Why we are not walking, straight from the planner that declined. These
+    // used to be reachable only by hunting through the Deliberate card's
+    // refusal table, which meant the answer to "why has the maze not started"
+    // lived in a different card from the maze.
+    const labRefusals = (d.hold?.examples ?? []).filter((entry) => entry.host === labHost);
+    const walkers = lab?.walkers ?? [];
+    const explored = lab ? labExplored(lab) : undefined;
+    const etaMs = lab ? labEtaMs(lab) : undefined;
+    // Empty for a grid that does not match its own dimensions — a shape change
+    // between a running overseer and a rebuilt panel. The legend follows the
+    // maze rather than the digest, so a card that could not draw one does not
+    // caption it either.
+    const maze = lab === undefined ? "" : labMaze(lab, labPriorFor(lab));
 
-    const labCard = labCache !== undefined || seenLabs.length > 0 || stage !== undefined
+    /** One walker, as a line rather than a table row: the numbers matter less
+     *  than which of the two we cannot afford to lose. */
+    const walkerLine = (walker: DarknetLabWalker): string => {
+      const eta = walkerEtaMs(walker);
+      const role = walker.role ?? "finisher";
+      return `<div class="labwalker">`
+        + `<span class="who ${role}">${dot(walker.pinned ? "good" : "wait", walker.pinned
+          ? "stasis-pinned: a mutation cannot move or delete this host"
+          : "not pinned: a mutation can take this walker, and its position dies with the PID")}`
+        + ` ${esc(role)}</span>`
+        + `<span class="muted">on ${esc(walker.from)}${walker.at ? ` at ${esc(walker.at)}` : ""}</span>`
+        + `<span class="num">${plural(walker.moves, "move")}`
+        + (walker.walls > 0 ? ` · ${plural(walker.walls, "wall")}` : "")
+        + (walker.radars > 0 ? ` · ${plural(walker.radars, "radar")}` : "")
+        + `</span>`
+        + (eta !== undefined ? `<span class="num">~${fmtTime(eta)} left</span>` : "")
+        + `</div>`;
+    };
+
+    const labCard = labCache !== undefined || seenLabs.length > 0 || stage !== undefined || lab !== undefined
       ? card(
         "Labyrinth",
         tiles([
           {
             label: "rung",
             value: stage === undefined ? NONE : `${(rung ?? 0) + 1} / ${LAB_LADDER.length}`,
-            sub: stage?.hostname,
+            sub: labHost,
           },
           {
-            label: hint("charisma gate", "the movement handler gates on charisma and nothing else"),
-            value: stage === undefined ? NONE : fmtNum(stage.cha, 0),
-            sub: d.charisma !== undefined ? `have ${fmtNum(d.charisma, 0)}` : undefined,
+            label: hint("charisma gate", "the movement handler gates on charisma and nothing else — below it every move answers 451"),
+            // Written out rather than through `fmtNum`, which switches to
+            // scientific notation at a thousand. These are exact registry
+            // thresholds a reader compares against their own charisma, and
+            // `2.500e3` beside `have 2.740e3` obscures the one comparison the
+            // tile exists to make.
+            value: stage === undefined ? NONE : String(stage.cha),
+            sub: d.charisma !== undefined ? `have ${Math.round(d.charisma)}` : undefined,
           },
-          { label: "net depth", value: currentDepth === undefined ? NONE : String(currentDepth) },
-          { label: "labs seen", value: String(seenLabs.length) },
+          // The two tiles that only mean something while a walk is running swap
+          // in for the two that only mean something before one starts.
+          ...(lab !== undefined
+            ? [
+              {
+                label: hint("mapped", "wall slots the walkers have resolved, out of the ones the generator actually decides"),
+                value: explored === undefined ? NONE : fmtPct(explored.fraction),
+                sub: `${lab.width} x ${lab.height}`,
+              },
+              {
+                label: hint(
+                  "eta",
+                  "the planner's own plan cost, calibrated for its optimism (median 1.31x, quartiles 0.97-1.81) and"
+                  + " priced at this walk's own measured pace — so threads, charisma and The B00ts are already in it",
+                ),
+                value: etaMs === undefined ? NONE : fmtTime(etaMs),
+                sub: walkers.length > 1 ? `soonest of ${walkers.length}` : undefined,
+              },
+            ]
+            : [
+              { label: "net depth", value: currentDepth === undefined ? NONE : String(currentDepth) },
+              { label: "labs seen", value: String(seenLabs.length) },
+            ]),
         ])
+        // --- what is actually happening --------------------------------------
+        + (labSolved
+          ? note(raw(`<span class="good">this maze is finished</span> — the exit was reached and ${esc(labHost ?? "the lab")} is rooted`))
+          : walkers.length > 0
+            ? `<div class="labwalkers">${walkers.map(walkerLine).join("")}</div>`
+            : lab !== undefined
+              // A map with nobody on it: the walk died with its host and the
+              // overseer has not re-filed one yet. Worth saying out loud, because
+              // the map still being there is exactly what makes it recoverable.
+              ? note("no walker is in the maze right now — the map below outlives them, so the next one resumes from it")
+              : "")
+        // --- the maze --------------------------------------------------------
+        + (maze === "" ? "" : maze + labMazeLegend())
+        + (lab !== undefined
+          ? definitions([
+            [
+              hint("exit", "the endpoint is [w-2, h-2] less a 0/2/4 jitter on each axis, so nine cells on the deep rungs"),
+              lab.exitKnown
+                ? `<span class="good">${esc(lab.candidates[0] ?? "found")}</span>`
+                // The COUNT is the fact worth reading at a glance — nine pairs
+                // of coordinates is a wall of text in a narrow column — so the
+                // list appears only once it is short enough to be a shortlist.
+                : `<span class="muted">${plural(lab.candidates.length, "candidate")} left`
+                  + (lab.candidates.length <= 3 ? ` — ${esc(lab.candidates.join(", "))}` : "")
+                  + `</span>`,
+            ],
+            ...(explored !== undefined
+              ? [[
+                hint("shared map", "both walkers read and write one field, so a walker dying costs its position and not the map"),
+                `${explored.known} of ${explored.total} wall slots resolved`,
+              ] as [Markup, Markup]]
+              : []),
+          ])
+          : "")
+        // --- why not, when not -----------------------------------------------
+        //
+        // The refusals for THIS host, in the card the question is asked in.
+        + (!labSolved && walkers.length === 0 && labRefusals.length > 0
+          ? table(
+            ["not walking", "why"],
+            labRefusals.map((entry) => [esc(entry.why), esc(entry.detail)]),
+            { left: [0, 1], wrap: [1] },
+          )
+          : "")
+        // --- the deferred cache ----------------------------------------------
+        //
+        // Opening one queues an augmentation DIRECTLY, and the generic price
+        // multiplier is 1.9 ^ (queued non-SoA) charged against everything bought
+        // afterwards — so it is the one cache that waits, and "can it be opened
+        // yet" is a decision home makes rather than a status the net reports.
         + (labCache !== undefined
           ? definitions([
             [
@@ -961,19 +1093,27 @@ export const dnetTab: Tab = {
             ],
           ])
           : note("no labyrinth cache is waiting"))
-        + table(
-          ["lab", "net depth", "charisma", "seen"],
-          LAB_LADDER.map((entry, index) => [
-            index === rung ? `<span class="good">${esc(entry.hostname)}</span>` : esc(entry.hostname),
-            String(entry.depth),
-            // Coloured against what we actually have, so the ladder reads as a
-            // plan rather than a table of constants.
-            d.charisma === undefined
-              ? String(entry.cha)
-              : `<span class="${d.charisma >= entry.cha ? "good" : "muted"}">${fmtNum(entry.cha, 0)}</span>`,
-            seenLabs.some((h) => h.hostname === entry.hostname) ? `<span class="good">yes</span>` : NONE,
-          ]),
-          { left: [0] },
+        // The ladder is reference data — a static registry table of the charisma
+        // ramp — so it folds away behind the live walk rather than pushing it
+        // off the bottom of the card.
+        + collapsible(
+          "dnet.ladder",
+          "the ladder — eight rungs, 300 to 4000 charisma",
+          table(
+            ["lab", "net depth", "charisma", "seen"],
+            LAB_LADDER.map((entry, index) => [
+              index === rung ? `<span class="good">${esc(entry.hostname)}</span>` : esc(entry.hostname),
+              String(entry.depth),
+              // Coloured against what we actually have, so the ladder reads as a
+              // plan rather than a table of constants.
+              d.charisma === undefined
+                ? String(entry.cha)
+                : `<span class="${d.charisma >= entry.cha ? "good" : "muted"}">${entry.cha}</span>`,
+              seenLabs.some((h) => h.hostname === entry.hostname) ? `<span class="good">yes</span>` : NONE,
+            ]),
+            { left: [0] },
+          ),
+          false,
         ),
       )
       : "";
@@ -1031,91 +1171,44 @@ export const dnetTab: Tab = {
       )
       : "";
 
-    // --- listening -----------------------------------------------------------
+    // --- the storm -----------------------------------------------------------
     //
-    // Which ring is worth reading next, and why the rest are not. The RANKING is
-    // derived here rather than shipped: `shouldListen` is pure in facts the
-    // digest already carries, exactly like the model registry, so the wire
-    // carries only the refusals the controller actually acted on.
-    //
-    // The ordering is not the intuition, which is why it is worth drawing. A
-    // deep host is chatty — it writes a line every 2s at difficulty 30 — but the
-    // branch that leaks a NEIGHBOUR's password scales as 1/(difficulty+1), so it
-    // is thirty times rarer there. Neither depth nor age is a proxy for value.
-    const listenNow = hosts
-      .filter((h) => h.goneAt === undefined)
-      .map((h) => {
-        const neighbours = h.neighbours ?? [];
-        return {
-          hostname: h.hostname,
-          verdict: shouldListen(
-            {
-              hostname: h.hostname,
-              ...(h.difficulty !== undefined ? { difficulty: h.difficulty } : {}),
-              ...(h.logTrafficInterval !== undefined ? { logTrafficIntervalSec: h.logTrafficInterval } : {}),
-              ...(h.modelId !== undefined ? { modelId: h.modelId } : {}),
-              hasCredential: h.credentialKnown === true,
-              uncrackedNeighbours: neighbours.filter((name) =>
-                hosts.find((other) => other.hostname === name)?.credentialKnown !== true).length,
-              topologyStale: h.neighbours === undefined,
-              solveInFlight: h.attempt?.solving === true,
-              ...(h.facts["lastBleedAt"] !== undefined ? { lastBleedAt: h.facts["lastBleedAt"] } : {}),
-            },
-            now,
-            {
-              netHasUncrackedMovable: hosts.some((other) =>
-                other.goneAt === undefined && other.isStationary !== true && other.credentialKnown !== true),
-              charismaOk: d.charisma === undefined
-                || h.requiredCharisma === undefined
-                || h.requiredCharisma <= d.charisma,
-            },
-          ),
-        };
-      })
-      .filter((entry) => entry.verdict.worth)
-      .sort((a, b) => b.verdict.value - a.verdict.value);
-
-    const bestListen = listenNow[0]?.verdict.value ?? 0;
-    const listening = d.listen;
-    const listenCard = listenNow.length > 0 || listening !== undefined
+    // The refusal names ARE the status display: with everything prepared, the
+    // one open gate says exactly what the storm is waiting for —
+    // "phish-window-open" means it fires behind the next .d.cache. The stamps
+    // travel; the intervals are constants.
+    const stormReport = d.storm;
+    const stormCard = stormReport
       ? card(
-        "Listening",
-        dataTable(
-          "dnet.listen",
-          listenNow,
+        "Storm",
+        definitions([
           [
-            {
-              id: "host",
-              label: "host",
-              left: true,
-              cell: (r) =>
-                `<button class="chip pick" data-view-key="dnet.sel" data-view-value="${esc(r.hostname)}">`
-                + `${esc(r.hostname)}</button>`,
-              sort: (r) => r.hostname,
-            },
-            {
-              id: "lines",
-              label: "new lines",
-              cell: (r) => String(r.verdict.lines),
-              sort: (r) => r.verdict.lines,
-            },
-            {
-              id: "value",
-              label: "useful lines",
-              cell: (r) =>
-                meter(bestListen > 0 ? r.verdict.value / bestListen : 0, fmtNum(r.verdict.value, 2)),
-              sort: (r) => r.verdict.value,
-            },
-            { id: "why", label: "why", left: true, wrap: true, cell: (r) => esc(r.verdict.why), sort: (r) => r.verdict.why },
+            hint("seed", "STORM_SEED.exe — drops from a cleared RAM block (15% roll), fires only from the host holding it"),
+            stormReport.seedHost !== undefined
+              ? esc(stormReport.seedHost)
+              + (stormReport.seedSeenAt !== undefined
+                ? ` <span class="muted">· seen ${Math.round((now - stormReport.seedSeenAt) / 1000)}s ago</span>`
+                : "")
+              : NONE,
           ],
-          { defaultSort: { key: "value", dir: -1 }, empty: "no ring is worth reading right now", limit: 12 },
-        )
-        + (listening
-          // `no-new-lines` clears itself by waiting; `nothing-to-learn` does not
-          // — it clears only when the world changes. Same table, but they are
-          // not the same kind of "no", and the detail says which.
-          ? refusals(listening.refused, listening.examples, "nothing was declined")
-          : ""),
+          ...(stormReport.seedHunt === true
+            ? [[
+              hint("seed hunt", "the reclaim clear budget is lifted: every block ground to zero is a seed roll"),
+              "grinding blocks for rolls",
+            ] as [Markup, Markup]]
+            : []),
+          ...(stormReport.firedAt !== undefined
+            ? [[
+              hint("last storm", "the engine mints no seed for 30 minutes after a storm; the clock is our own stamp"),
+              `${Math.round((now - stormReport.firedAt) / 60_000)}m ago · `
+              + (now - stormReport.firedAt < STORM_COOLDOWN_MS
+                ? `seed eligible in ${Math.ceil((STORM_COOLDOWN_MS - (now - stormReport.firedAt)) / 60_000)}m`
+                : "a new seed can mint"),
+            ] as [Markup, Markup]]
+            : []),
+          ...(stormReport.admitted > 0 ? [["fire", "admitted this derivation"] as [Markup, Markup]] : []),
+        ])
+        + refusals(stormReport.refused, stormReport.examples, "every gate is green"),
       )
       : "";
 
@@ -1186,16 +1279,22 @@ export const dnetTab: Tab = {
       + card("Decision", decision)
       + `</div>`
       + `<div class="col">`
+      // The labyrinth FIRST, and only when there is one. It is what the whole
+      // feature is for — it deepens the net, it pays the augmentations, and a
+      // walk is the longest-running thing the darknet ever does — so once a lab
+      // exists it outranks the drill-downs below it. Every run before the first
+      // sighting draws no card at all, so this reorders nothing until there is
+      // something to reorder.
+      + labCard
       + detailCard(d, hosts, options.selected, now, expiry)
       + crewCard(d, hosts, now)
       + card("Knowledge", reach)
       + card("Report channel", delivery)
       + card("Response codes", table(["code", "meaning", "n"], codes, { empty: "no darknet call has answered yet", left: [0, 1] }))
-      + labCard
       + holdCard
-      + listenCard
       + spreadCard
       + farmCard
+      + stormCard
       + unknownCard
       + `</div>`
     );

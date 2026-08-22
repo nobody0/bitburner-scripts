@@ -19,7 +19,7 @@ import { LocationName } from "../vendor/bitburner/src/Locations/Enums.ts";
 import { COMMON_PASSWORDS } from "../../shared/strategy/dnet/dictionaries.ts";
 import { getPassword, LETTERS, romanNumeralEncoder } from "../../shared/strategy/dnet/codecs.ts";
 import { generateSimpleArithmeticExpression } from "./dnet-generators.ts";
-import { PACKET_SNIFF_PHRASES } from "./dnet-phrases.ts";
+import { PACKET_SNIFF_PHRASES } from "../../shared/strategy/dnet/phrases.ts";
 
 /** The four `darknetAuthUtils` helpers the switch is built out of. Transcribed
  * rather than reimplemented because `getMisplacedCorrectCharsCount`'s duplicate

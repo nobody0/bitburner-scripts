@@ -4,15 +4,20 @@ import type { SimServer } from "../core/effects.ts";
 /** The process table: pids, per-host RAM accounting, and atExit.
  *
  * Modelled on bitburner-src/src/NetscriptWorker.ts and killWorkerScript.ts
- * @ v3.0.1. Two properties matter and both are load-bearing for the dispatcher:
+ * @ v3.0.1. Three properties matter and each is load-bearing for a consumer:
  *
  * 1. exec's bookkeeping is SYNCHRONOUS — the pid exists, RAM is deducted and
  *    ns.ps sees the process before exec returns. Only main() is deferred.
  * 2. kill runs atExit callbacks synchronously in the killer's stack, BEFORE
- *    the killed script's own rejection propagates, and frees RAM immediately.
- *    game/worker/worker.ts depends on exactly this: it registers atExit before
- *    awaiting its op, so a kill still reports the completion and releases the
- *    dispatcher's reservation. */
+ *    the killed script's own rejection propagates. game/worker/worker.ts
+ *    depends on exactly this: it registers atExit before awaiting its op, so a
+ *    kill still reports the completion and releases the dispatcher's
+ *    reservation.
+ * 3. During those callbacks the process is still ALIVE to ns — the lock is
+ *    released, `killed` not yet set — and an ns.spawn there finalizes the
+ *    teardown re-entrantly so its spawnDelay:0 launch fits in the freed RAM.
+ *    game/dnet/agent.ts's atExit-respawn hook depends on exactly this;
+ *    sim/tests/process-atexit.test.ts pins it against the engine. */
 
 /** Bitburner's cancellation marker: a named Error with the killed pid. */
 export class ScriptDeath extends Error {
@@ -36,6 +41,12 @@ export interface SimProcess {
   ramGb: number;
   atExit: Map<string, () => void>;
   killed: boolean;
+  /** True while #stop is running this process's atExit handlers. The engine's
+   * equivalent window is stopFlag still false with runningFn cleared: every ns
+   * function is callable, and a re-entrant kill (ns.spawn's kill-the-caller)
+   * must finalize the teardown — free the RAM — so the spawnDelay:0 launch that
+   * follows it fits. */
+  stopping?: boolean;
   /** Running-script accounting used by getTotalScriptIncome/ExpGain. The game
    * reports each live script's lifetime average, not a global historical
    * average. */
@@ -184,10 +195,27 @@ export class ProcessTable {
   }
 
   /** stopAndCleanUpWorkerScript: cancel the pending delay, reject the script's
-   * await, run atExit, then release RAM. */
+   * await, run atExit, then release RAM.
+   *
+   * The ORDER mirrors the engine and every clause is load-bearing:
+   * - The delay lock (`runningFn`) is cleared and `killed` stays FALSE while the
+   *   atExit handlers run, so ns is fully callable inside them — the engine sets
+   *   `runningFn = ""` before the callback loop and `stopFlag = true` after it.
+   * - A handler that calls ns.spawn re-enters kill; the `stopping` branch
+   *   finalizes the teardown there and then, freeing this process's RAM so the
+   *   spawnDelay:0 launch that follows fits in the vacated allocation — the
+   *   engine's `if (ws.stopFlag) return` fall-through does the same.
+   * - #stop is fully synchronous, so the ScriptDeath rejection of a cancelled
+   *   await (a microtask) is always delivered AFTER the atExit handlers ran. */
   #stop(process: SimProcess, cancelled: boolean): void {
     if (process.killed) return;
-    process.killed = true;
+    if (process.stopping) {
+      // Re-entrant kill from inside an atExit handler (ns.spawn kills its own
+      // caller). Finalize now; the outer #stop's trailing #finalize no-ops.
+      this.#finalize(process);
+      return;
+    }
+    process.stopping = true;
 
     if (process.delay !== undefined) {
       this.#clock.cancel(process.delay);
@@ -196,14 +224,6 @@ export class ProcessTable {
     if (cancelled) process.delayReject?.(new ScriptDeath(process.pid));
     process.delayReject = undefined;
     process.runningFn = undefined;
-
-    // NetscriptWorker transfers a terminating child's earnings to its live
-    // parent, including when the child was killed.
-    const parent = process.parentPid === undefined ? undefined : this.#processes.get(process.parentPid);
-    if (parent && !parent.killed) {
-      parent.onlineMoneyMade += process.onlineMoneyMade;
-      parent.onlineExpGained += process.onlineExpGained;
-    }
 
     // Cleared before iterating: calling exit from inside atExit would recurse.
     const handlers = [...process.atExit.values()];
@@ -214,6 +234,24 @@ export class ProcessTable {
       } catch {
         /* an atExit that throws must not strand the RAM */
       }
+    }
+
+    this.#finalize(process);
+  }
+
+  /** The idempotent tail of a teardown: mark dead, settle earnings, free RAM,
+   * drop from the table. Reached once per process — either from #stop's tail or
+   * early via a re-entrant kill out of an atExit handler. */
+  #finalize(process: SimProcess): void {
+    if (process.killed) return;
+    process.killed = true;
+
+    // NetscriptWorker transfers a terminating child's earnings to its live
+    // parent, including when the child was killed.
+    const parent = process.parentPid === undefined ? undefined : this.#processes.get(process.parentPid);
+    if (parent && !parent.killed) {
+      parent.onlineMoneyMade += process.onlineMoneyMade;
+      parent.onlineExpGained += process.onlineExpGained;
     }
 
     const server = this.#servers.get(process.host);

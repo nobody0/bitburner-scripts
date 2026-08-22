@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SPREAD_LIMITS, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/spread.ts";
+import { DEFAULT_SPREAD_LIMITS, candidatesFrom, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/spread.ts";
 import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
 import {
   emptyKnowledge,
@@ -177,6 +177,39 @@ describe("spreading prefers the deep and the roomy, deterministically", () => {
   });
 });
 
+describe("remote recovery candidates", () => {
+  test("a fresh backdoor can be replanted from the roomiest resident without adjacency", () => {
+    const knowledge = fold([
+      { hostname: "resident-a", present: true, facts: { neighbours: [], depth: 1 } },
+      { hostname: "resident-b", present: true, facts: { neighbours: [], depth: 2 } },
+      { hostname: "target", present: true, facts: { depth: 7, maxRam: 32, ramUsed: 0, ownerBlockGb: 0 } },
+    ]);
+    const candidates = candidatesFrom(knowledge, NOW, {
+      standing: new Set(["resident-a", "resident-b"]),
+      vault: new Set(["target"]),
+      remoteExec: new Set(["target"]),
+      remoteVantages: [{ host: "resident-a", freeGb: 4 }, { host: "resident-b", freeGb: 12 }],
+    });
+    expect(candidates).toContainEqual(expect.objectContaining({
+      host: "target",
+      from: "resident-b",
+      remote: true,
+    }));
+  });
+
+  test("a credential alone never creates a non-adjacent plant", () => {
+    const knowledge = fold([
+      { hostname: "resident", present: true, facts: { neighbours: [], depth: 1 } },
+      { hostname: "target", present: true, facts: { depth: 7, maxRam: 32, ramUsed: 0, ownerBlockGb: 0 } },
+    ]);
+    expect(candidatesFrom(knowledge, NOW, {
+      standing: new Set(["resident"]),
+      vault: new Set(["target"]),
+      remoteVantages: [{ host: "resident", freeGb: 12 }],
+    })).toEqual([]);
+  });
+});
+
 describe("the queue is derived, so dedup needs no bookkeeping", () => {
   /** There is no "add task" call anywhere in this module, and that is the design.
    * A fact that is still believable produces no task, so two workers cannot
@@ -189,10 +222,10 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
       { hostname: "dn-1", present: true, facts: { neighbours: ["darkweb"], depth: 0, modelId: "ZeroLogon" } },
     ]);
     const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]), vault: new Set(["dn-1", "darkweb"]) });
-    // Both adjacency lists are fresh and both hosts are already open, so the
-    // only thing left worth doing is listening to their logs.
+    // Both adjacency lists are fresh and both hosts are already open.
     expect(tasks.filter((t) => t.kind === "survey")).toEqual([]);
     expect(tasks.filter((t) => t.kind === "attempt")).toEqual([]);
+    expect(tasks.filter((t) => t.kind === "bleed")).toEqual([]);
   });
 
   test("an expired adjacency brings the survey back by itself", () => {
@@ -236,10 +269,10 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     ]);
     const opts = { agents: new Set(["darkweb"]) };
     const first = deriveTasks(knowledge, NOW, opts).find((t) => t.kind === "attempt");
-    expect(first?.reason).toBe("DefaultPassword candidate 1/4");
+    expect(first?.reason).toBe("DefaultPassword candidate 1/1");
 
-    // Walk the ledger to the end of the four-entry dictionary...
-    knowledge.hosts["dn-1"]!.attempts = { modelId: "FreshInstall_1.0", tried: 4, probes: 0 };
+    // Length and format reduce this identity to the sole compatible default.
+    knowledge.hosts["dn-1"]!.attempts = { modelId: "FreshInstall_1.0", tried: 1, probes: 0 };
     expect(deriveTasks(knowledge, NOW, opts).some((t) => t.kind === "attempt")).toBe(false);
   });
 
@@ -306,14 +339,15 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(during.some((t) => t.id === "survey:dn-1")).toBe(true);
   });
 
-  test("a claim of a different kind on the same host suppresses nothing", () => {
+  test("a bleed claim owns the target ring until it finishes", () => {
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
       { hostname: "dn-1", present: true, facts: { depth: 0, modelId: "ZeroLogon" } },
     ]);
     const inFlight = new Map([["dn-1", [{ from: "darkweb", kind: "bleed" as const }]]]);
     const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]), inFlight });
-    expect(tasks.some((t) => t.id === "attempt:dn-1")).toBe(true);
+    expect(tasks.some((t) => t.id === "attempt:dn-1")).toBe(false);
+    expect(tasks.some((t) => t.id === "survey:dn-1")).toBe(true);
   });
 
   test("a plant already in flight is not filed twice", () => {
@@ -331,30 +365,23 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
       .some((t) => t.kind === "plant")).toBe(false);
   });
 
-  test("two vantages split the pair, so the bleed and the attempt overlap", () => {
-    // `authenticate` and `heartbleed` both need adjacency and both take seconds,
-    // and a second job from the SAME vantage would only queue behind the first —
-    // one resident, one process. Splitting them is the only way to overlap them.
+  test("an attempt does not create a separate bleed task", () => {
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["a", "b"], depth: -1 } },
       { hostname: "a", present: true, facts: { neighbours: ["target"], depth: 0 } },
       { hostname: "b", present: true, facts: { neighbours: ["target"], depth: 0 } },
       { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon" } },
     ]);
-    // We hold `target`'s credential, so it is worth listening to; we do not hold
-    // it in the vault for the attempt's sake, so force both by standing on it.
+    // An attempt drains its own authentication record; it does not derive a
+    // second, speculative listening task.
     const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["a", "b", "target"]) });
-    const bleed = tasks.find((t) => t.id === "bleed:target")!;
-    const attempt = tasks.find((t) => t.id === "attempt:target")!;
-    // Standing on it, self is the first vantage — a resident is already there.
-    expect(bleed.from).toBe("target");
-    // ...and the attempt goes next door rather than queueing behind it.
-    expect(attempt.from).not.toBe(bleed.from);
-    expect(["a", "b"]).toContain(attempt.from);
+    const bleed = tasks.find((t) => t.id === "bleed:target");
+    const attempt = tasks.find((t) => t.id === "attempt:target");
+    expect(bleed).toBeUndefined();
+    expect(attempt).toBeDefined();
   });
 
-  test("one vantage is exactly the old behaviour: both fall back to it", () => {
-    // The whole pairing must be invisible until there is a choice to make.
+  test("a single available vantage is selected directly", () => {
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["target"], depth: -1 } },
       { hostname: "target", present: true, facts: { depth: 0, modelId: "ZeroLogon" } },
@@ -363,7 +390,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(tasks.find((t) => t.id === "attempt:target")!.from).toBe("darkweb");
   });
 
-  test("a vantage already working the target is not handed a second job", () => {
+  test("another vantage does not bypass target-ring ownership", () => {
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["a", "b"], depth: -1 } },
       { hostname: "a", present: true, facts: { neighbours: ["target"], depth: 0 } },
@@ -371,9 +398,8 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
       { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon" } },
     ]);
     const inFlight = new Map([["target", [{ from: "a", kind: "bleed" as const }]]]);
-    const attempt = deriveTasks(knowledge, NOW, { agents: new Set(["a", "b"]), inFlight })
-      .find((t) => t.id === "attempt:target")!;
-    expect(attempt.from).toBe("b");
+    expect(deriveTasks(knowledge, NOW, { agents: new Set(["a", "b"]), inFlight })
+      .find((t) => t.id === "attempt:target")).toBeUndefined();
   });
 
   test("vantages are ordered by name, not by the order hosts were planted", () => {
@@ -429,6 +455,9 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
       guesses: [{ host: "dn-1", id: "7", reason: "leak" }],
     });
     expect(tasks.filter((t) => t.kind === "attempt")).toEqual([]);
+    // An unrelated identity may still need its one initial ring drain; only
+    // this target's shared ring is owned by the in-flight attempt.
+    expect(tasks.filter((t) => t.kind === "bleed" && t.host === "dn-1")).toEqual([]);
   });
 
   test("the deliberate three are merged with their own vantage, and only the push waits", () => {
@@ -473,6 +502,36 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(tasks.indexOf(pin)).toBeLessThan(tasks.indexOf(push));
   });
 
+  test("a finisher and a scout may walk the same lab, but never two from one vantage", () => {
+    // The lab is the one target that legitimately carries two walks at once:
+    // the maze is global while positions are per PID, so a scout on a second
+    // adjacent host maps the macro-route the finisher is not on. Walk dedup is
+    // therefore by (kind, target, VANTAGE) — the same lab from the same host is
+    // the same walk, while another vantage is another walker.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
+      { hostname: "dn-1", present: true, facts: { neighbours: ["darkweb", "dn-2"], depth: 0 } },
+      { hostname: "dn-2", present: true, facts: { neighbours: ["dn-1"], depth: 1 } },
+    ]);
+    const hold = [
+      { kind: "walk" as const, host: "dn-2", from: "dn-1", reason: "walk the maze" },
+      { kind: "walk" as const, host: "dn-2", from: "darkweb", role: "scout" as const, reason: "scout the southern route" },
+    ];
+    const base = { agents: new Set(["darkweb", "dn-1"]), vault: new Set(["darkweb", "dn-1", "dn-2"]) };
+    const both = deriveTasks(knowledge, NOW, { ...base, hold }).filter((t) => t.kind === "walk");
+    expect(both.map((t) => t.id).sort()).toEqual(["walk:dn-2:darkweb", "walk:dn-2:dn-1"]);
+    expect(both.find((t) => t.from === "dn-1")!.role).toBeUndefined();
+    expect(both.find((t) => t.from === "darkweb")!.role).toBe("scout");
+
+    // With the finisher already in flight, only the scout's vantage re-derives.
+    const rederived = deriveTasks(knowledge, NOW, {
+      ...base,
+      hold,
+      inFlight: new Map([["dn-2", [{ from: "dn-1", kind: "walk" as const }]]]),
+    }).filter((t) => t.kind === "walk");
+    expect(rederived.map((t) => t.from)).toEqual(["darkweb"]);
+  });
+
   test("a plant outranks everything, because it is the only thing that grows the map", () => {
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
@@ -485,5 +544,87 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     // Placing a process is the only action that grows the set of places we can
     // act FROM, which is what makes it the scarcest thing we do.
     expect(tasks[0]!.kind).toBe("plant");
+  });
+});
+
+describe("attempts stand on the roomiest vantage, and buy threads with it", () => {
+  // `authenticate`'s duration scales 1/(1 + 0.2*(threads-1)) with the calling
+  // script's threads, and threads are bought with the vantage's free RAM — so
+  // the vantage with the most room is the fastest crack, and the thread count
+  // is sized where the vantage is chosen.
+  const net = () => fold([
+    { hostname: "darkweb", present: true, facts: { neighbours: ["dn-a", "dn-b"], depth: -1 } },
+    { hostname: "dn-a", present: true, facts: { neighbours: ["target"], depth: 0 } },
+    { hostname: "dn-b", present: true, facts: { neighbours: ["target"], depth: 0 } },
+    { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon" } },
+  ]);
+  const agents = () => new Set(["darkweb", "dn-a", "dn-b"]);
+
+  test("the biggest free RAM wins the vantage, and sizes the threads", () => {
+    const attempt = deriveTasks(net(), NOW, {
+      agents: agents(),
+      agentFreeGb: new Map([["dn-a", 4], ["dn-b", 6.4]]),
+      attemptGbPerThread: 2,
+    }).find((t) => t.kind === "attempt" && t.host === "target")!;
+    expect(attempt.from).toBe("dn-b");
+    // floor(6.4 / 2) = 3, under the cap.
+    expect(attempt.threads).toBe(3);
+  });
+
+  test("threads scale with RAM, with no ceiling but the RAM itself", () => {
+    const attempt = deriveTasks(net(), NOW, {
+      agents: agents(),
+      agentFreeGb: new Map([["dn-a", 4], ["dn-b", 1000]]),
+      attemptGbPerThread: 2,
+    }).find((t) => t.kind === "attempt" && t.host === "target")!;
+    // floor(1000 / 2) = 500 — the whole vantage, no arbitrary cap.
+    expect(attempt.threads).toBe(500);
+  });
+
+  test("a bleed is threaded from its vantage too, on its own price", () => {
+    // `heartbleed` scales with the calling script's threads exactly as
+    // `authenticate` does, so a drain uses the RAM its vantage can spare. A
+    // pending-record drain is the deterministic case.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["dn-a"], depth: -1 } },
+      { hostname: "dn-a", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon", requiredCharisma: 1 } },
+    ]);
+    knowledge.hosts["target"]!.ring = { pendingAuthRecords: 2 };
+    const bleed = deriveTasks(knowledge, NOW, {
+      agents: new Set(["darkweb", "dn-a"]),
+      charisma: 500,
+      agentFreeGb: new Map([["dn-a", 12]]),
+      bleedGbPerThread: 3,
+    }).find((t) => t.kind === "bleed" && t.host === "target");
+    expect(bleed?.threads).toBe(4);
+  });
+
+  test("an equal-RAM tie breaks by name, so the queue stays deterministic", () => {
+    const attempt = deriveTasks(net(), NOW, {
+      agents: agents(),
+      agentFreeGb: new Map([["dn-a", 8], ["dn-b", 8]]),
+      attemptGbPerThread: 2,
+    }).find((t) => t.kind === "attempt" && t.host === "target")!;
+    expect(attempt.from).toBe("dn-a");
+  });
+
+  test("without the pricing inputs, one thread from the name-sorted vantage — today's behaviour", () => {
+    const attempt = deriveTasks(net(), NOW, {
+      agents: agents(),
+    }).find((t) => t.kind === "attempt" && t.host === "target")!;
+    expect(attempt.from).toBe("dn-a");
+    expect(attempt.threads).toBeUndefined();
+  });
+
+  test("a vantage too cramped for even one thread still attempts at one", () => {
+    // The floor is 1: a queue that derived zero-thread work would file nothing
+    // for a host that a resident could still crack slowly.
+    const attempt = deriveTasks(net(), NOW, {
+      agents: agents(),
+      agentFreeGb: new Map([["dn-a", 0.5], ["dn-b", 0.4]]),
+      attemptGbPerThread: 2,
+    }).find((t) => t.kind === "attempt" && t.host === "target")!;
+    expect(attempt.threads).toBeUndefined();
   });
 });

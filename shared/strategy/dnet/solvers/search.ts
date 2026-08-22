@@ -21,6 +21,7 @@
 
 import type { ModelId, PasswordFacts } from "../models.ts";
 import { LETTERS, NUMBERS, romanNumeralDecoder } from "../codecs.ts";
+import { candidateMatchesEvidence, fixedPositionsFromEvidence, prioritizeAlphabet } from "../evidence.ts";
 import {
   SOLVER_CODES,
   freshState,
@@ -35,18 +36,20 @@ import {
  * five values it can hold — but only the first three are reachable for a
  * generated password, since every generator draws from digits and letters. */
 export function alphabetFor(facts: PasswordFacts): string {
+  let alphabet: string;
   switch (facts.passwordFormat) {
     case "numeric":
-      return NUMBERS;
+      alphabet = NUMBERS; break;
     case "alphabetic":
-      return LETTERS;
+      alphabet = LETTERS; break;
     case "alphanumeric":
-      return NUMBERS + LETTERS;
+      alphabet = NUMBERS + LETTERS; break;
     default:
       // Unknown or exotic: digits first, because every model here generates a
       // numeric password unless difficulty pushed it alphanumeric.
-      return NUMBERS + LETTERS;
+      alphabet = NUMBERS + LETTERS;
   }
+  return prioritizeAlphabet(alphabet, facts.evidence);
 }
 
 const stalled = (reason: string, state: SolverState): SolverStep => ({
@@ -104,8 +107,14 @@ interface Bounds {
 function boundsFromLength(facts: PasswordFacts): Bounds {
   const length = facts.passwordLength;
   if (length === undefined || length < 1) return { lo: 0, hi: 10 ** 9 };
-  if (length === 1) return { lo: 0, hi: 9 };
-  return { lo: 10 ** (length - 1), hi: 10 ** length - 1 };
+  const lo = length === 1 ? 0 : 10 ** (length - 1);
+  let hi = 10 ** length - 1;
+  // getGuessNumberConfig is tighter than the displayed power-of-ten hint.
+  // Its exact upper bound is public through difficulty, so use it when held.
+  if (facts.difficulty !== undefined) {
+    hi = Math.min(hi, Math.ceil((10 * (facts.difficulty + 3)) / 3) - 1);
+  }
+  return { lo, hi };
 }
 
 /** The range `BellaCuore` publishes in `data` as `"<min>,<max>"`. */
@@ -121,12 +130,21 @@ function boundsFromRomanRange(facts: PasswordFacts): Bounds | undefined {
 
 function binarySearchSolver(model: ModelId, startBounds: (facts: PasswordFacts) => Bounds | undefined): Solver {
   const midpoint = (b: Bounds): number => Math.floor((b.lo + b.hi) / 2);
+  const admissible = (facts: PasswordFacts, b: Bounds): number[] | undefined => {
+    if ((facts.evidence?.length ?? 0) === 0 || b.hi - b.lo > 100_000) return undefined;
+    const out: number[] = [];
+    for (let value = b.lo; value <= b.hi; value++) {
+      if (candidateMatchesEvidence(String(value), facts.evidence)) out.push(value);
+    }
+    return out;
+  };
 
   return {
     needsOracle: true,
     budget: (facts) => {
       const b = startBounds(facts) ?? { lo: 0, hi: 10 ** 9 };
-      return Math.ceil(Math.log2(Math.max(2, b.hi - b.lo + 1))) + 2;
+      const candidates = admissible(facts, b);
+      return Math.ceil(Math.log2(Math.max(2, candidates?.length ?? (b.hi - b.lo + 1)))) + 2;
     },
 
     first(facts): SolverStep {
@@ -135,7 +153,10 @@ function binarySearchSolver(model: ModelId, startBounds: (facts: PasswordFacts) 
       const state = freshState(model, facts, "search");
       state.scratch["lo"] = b.lo;
       state.scratch["hi"] = b.hi;
-      const guess = midpoint(b);
+      const candidates = admissible(facts, b);
+      if (candidates?.length === 0) return unparsed(`${model}: log evidence eliminates the published range`);
+      if (candidates !== undefined) state.scratch["candidates"] = candidates;
+      const guess = candidates === undefined ? midpoint(b) : candidates[Math.floor(candidates.length / 2)]!;
       return {
         kind: "attempt",
         password: String(guess),
@@ -179,8 +200,21 @@ function binarySearchSolver(model: ModelId, startBounds: (facts: PasswordFacts) 
           reason: `${model}: the search range collapsed without a hit`,
         };
       }
-      const next = { ...state, spent: state.spent + 1, scratch: { ...state.scratch, lo, hi } };
-      const guess = midpoint({ lo, hi });
+      const held = state.scratch["candidates"] as number[] | undefined;
+      const candidates = held?.filter((value) => value >= lo && value <= hi);
+      if (candidates !== undefined && candidates.length === 0) {
+        return {
+          kind: "give-up",
+          code: SOLVER_CODES.SolverExhausted,
+          reason: `${model}: the failure response eliminated every evidence-compatible candidate`,
+        };
+      }
+      const next = {
+        ...state,
+        spent: state.spent + 1,
+        scratch: { ...state.scratch, lo, hi, ...(candidates !== undefined ? { candidates } : {}) },
+      };
+      const guess = candidates === undefined ? midpoint({ lo, hi }) : candidates[Math.floor(candidates.length / 2)]!;
       return {
         kind: "attempt",
         password: String(guess),
@@ -209,7 +243,9 @@ function binarySearchSolver(model: ModelId, startBounds: (facts: PasswordFacts) 
  * is well inside one vantage.
  *
  * `n <= 1` is never sent: `(P % 1) % 1` is 0 whatever the password is. */
-const CRT_MODULI = [32, 27, 25, 7, 11, 13, 17, 19, 23, 29, 31] as const;
+// Largest coprime information first. The previous ascending tail spent an extra
+// exchange at long lengths even though every modulus costs the same call.
+const CRT_MODULI = [32, 31, 29, 27, 25, 23, 19, 17, 13, 11, 7] as const;
 
 const tripleModuloSolver: Solver = {
   needsOracle: true,
@@ -328,10 +364,15 @@ const yesNoSolver: Solver = {
     const alphabet = alphabetFor(facts);
     const state = freshState("NIL", facts, "positions");
     state.scratch["index"] = 0;
-    state.scratch["known"] = new Array<string | null>(length).fill(null);
+    state.scratch["alphabet"] = alphabet;
+    const known = fixedPositionsFromEvidence(length, facts.evidence).map((char) => char ?? null);
+    state.scratch["known"] = known;
+    if (known.every((char) => char !== null)) {
+      return { kind: "answer", password: known.join(""), note: "NIL: every position came from harvested placement hints" };
+    }
     return {
       kind: "attempt",
-      password: alphabet[0]!.repeat(length),
+      password: positionProbe(known, alphabet[0]!),
       state,
       needsOracle: true,
       note: `per-position probe for ${JSON.stringify(alphabet[0])}`,
@@ -348,17 +389,27 @@ const yesNoSolver: Solver = {
       return unparsed(`NIL: response ${JSON.stringify(raw)} is not a yes/yesn't list`);
     }
     const known = [...(state.scratch["known"] as (string | null)[])];
-    const symbol = seen.attempted[0] ?? "";
+    const alphabet = String(state.scratch["alphabet"] ?? alphabetFor(facts));
+    const symbol = alphabet[Number(state.scratch["index"] ?? 0)] ?? "";
     verdicts.forEach((verdict, i) => {
-      if (verdict === "yes" && i < known.length) known[i] = symbol;
+      // Known positions are preserved in the probe, so their "yes" confirms
+      // the harvested character rather than the symbol under test elsewhere.
+      if (verdict === "yes" && i < known.length && known[i] === null) known[i] = symbol;
     });
 
     if (known.every((char) => char !== null)) {
       return { kind: "answer", password: known.join(""), note: "NIL: every position resolved" };
     }
 
-    const alphabet = alphabetFor(facts);
     const index = Number(state.scratch["index"] ?? 0) + 1;
+    // If every position survived every symbol but the final one, the final
+    // symbol is forced at all unresolved positions. Asking it would only
+    // confirm what alphabet completeness already proves.
+    if (index === alphabet.length - 1) {
+      for (let at = 0; at < known.length; at++) if (known[at] === null) known[at] = alphabet[index]!;
+      return { kind: "answer", password: known.join(""), note: "NIL: inferred the final alphabet symbol" };
+    }
+
     if (index >= alphabet.length) {
       // Every symbol tried and positions still unresolved: the password contains
       // something outside the format the host reported.
@@ -370,7 +421,7 @@ const yesNoSolver: Solver = {
     }
     return {
       kind: "attempt",
-      password: alphabet[index]!.repeat(known.length),
+      password: positionProbe(known, alphabet[index]!),
       state: { ...state, spent: state.spent + 1, scratch: { ...state.scratch, index, known } },
       needsOracle: true,
       note: `per-position probe for ${JSON.stringify(alphabet[index])}`,
@@ -416,7 +467,9 @@ const sortedEchoSolver: Solver = {
     const length = facts.passwordLength ?? sorted.length;
 
     if (length < 5) {
-      const orderings = distinctPermutations(sorted).filter((candidate) => !isLeadingZero(candidate, facts));
+      const orderings = distinctPermutations(sorted)
+        .filter((candidate) => !isLeadingZero(candidate, facts))
+        .filter((candidate) => candidateMatchesEvidence(candidate, facts.evidence));
       if (orderings.length === 0) {
         return { kind: "give-up", code: SOLVER_CODES.SolverExhausted, reason: "PHP 5.4: no admissible ordering" };
       }
@@ -431,6 +484,32 @@ const sortedEchoSolver: Solver = {
         needsOracle: false,
         state,
         note: `ordering 1/${orderings.length} of a known multiset`,
+      };
+    }
+
+    // At every length v3.0.1 can mint this is at most 7! candidates. Keep a
+    // defensive length ceiling so synthetic callers do not first materialize
+    // hundreds of thousands of permutations merely to discover the fallback.
+    if (length <= RMS_CANDIDATE_MAX_LENGTH) {
+      const candidates = distinctPermutations(sorted)
+        .filter((candidate) => !isLeadingZero(candidate, facts))
+        .filter((candidate) => candidateMatchesEvidence(candidate, facts.evidence));
+      if (candidates.length === 0) {
+        return {
+          kind: "give-up",
+          code: SOLVER_CODES.SolverExhausted,
+          reason: "PHP 5.4: harvested evidence eliminates every ordering",
+        };
+      }
+      const state = freshState("PHP 5.4", facts, "rms-candidates");
+      state.scratch["candidates"] = candidates;
+      const password = chooseRmsProbe(candidates);
+      return {
+        kind: "attempt",
+        password,
+        state,
+        needsOracle: true,
+        note: `RMS partition over ${candidates.length} candidate orderings`,
       };
     }
 
@@ -473,6 +552,34 @@ const sortedEchoSolver: Solver = {
     const rmsd = readRmsd(seen.oracle.data ?? "");
     if (rmsd === undefined) {
       return unparsed(`PHP 5.4: response ${JSON.stringify(seen.oracle.data ?? "")} carries no RMS deviation`);
+    }
+
+    if (state.phase === "rms-candidates") {
+      const key = rmsd.toFixed(3);
+      const candidates = (state.scratch["candidates"] as string[])
+        .filter((candidate) => candidate !== seen.attempted && rmsBucket(candidate, seen.attempted) === key);
+      if (candidates.length === 0) {
+        return {
+          kind: "give-up",
+          code: SOLVER_CODES.SolverExhausted,
+          reason: `PHP 5.4: RMS ${key} eliminated every remaining ordering`,
+        };
+      }
+      if (candidates.length === 1) {
+        return { kind: "answer", password: candidates[0]!, note: "PHP 5.4: one ordering survived the failure hint" };
+      }
+      const password = chooseRmsProbe(candidates);
+      return {
+        kind: "attempt",
+        password,
+        state: {
+          ...state,
+          spent: state.spent + 1,
+          scratch: { ...state.scratch, candidates },
+        },
+        needsOracle: true,
+        note: `RMS partition over ${candidates.length} remaining orderings`,
+      };
     }
 
     const digits = [...(state.scratch["digits"] as (number | null)[])];
@@ -522,6 +629,59 @@ const sortedEchoSolver: Solver = {
     };
   },
 };
+
+function positionProbe(known: readonly (string | null)[], symbol: string): string {
+  return known.map((char) => char ?? symbol).join("");
+}
+
+const RMS_CANDIDATE_MAX_LENGTH = 7;
+const RMS_PROBE_SAMPLE = 96;
+
+/** The exact three-decimal response bucket upstream writes for this pair. */
+function rmsBucket(candidate: string, attempted: string): string {
+  let squared = 0;
+  for (let index = 0; index < candidate.length; index++) {
+    squared += (Number(attempted[index]) - Number(candidate[index])) ** 2;
+  }
+  return Math.sqrt(squared / candidate.length).toFixed(3);
+}
+
+/** Pick the authentication whose FAILURE response has the smallest worst
+ * surviving partition. Candidate probes retain the chance of opening directly;
+ * a wrong one returns a patterned RMS bucket that eliminates the rest. */
+function chooseRmsProbe(candidates: readonly string[]): string {
+  if (candidates.length === 1) return candidates[0]!;
+  const probes: string[] = [];
+  const count = Math.min(RMS_PROBE_SAMPLE, candidates.length);
+  for (let index = 0; index < count; index++) {
+    const at = Math.floor((index * candidates.length) / count);
+    const probe = candidates[at]!;
+    probes.push(probe);
+  }
+  let best = probes[0]!;
+  let bestWorst = Number.POSITIVE_INFINITY;
+  let bestSquares = Number.POSITIVE_INFINITY;
+  for (const probe of probes) {
+    const buckets = new Map<string, number>();
+    for (const candidate of candidates) {
+      if (candidate === probe) continue; // success is its own size-one bucket
+      const key = rmsBucket(candidate, probe);
+      buckets.set(key, (buckets.get(key) ?? 0) + 1);
+    }
+    let worst = 1;
+    let squares = 1;
+    for (const size of buckets.values()) {
+      worst = Math.max(worst, size);
+      squares += size * size;
+    }
+    if (worst < bestWorst || (worst === bestWorst && squares < bestSquares)) {
+      best = probe;
+      bestWorst = worst;
+      bestSquares = squares;
+    }
+  }
+  return best;
+}
 
 /** `"0…090…0"` — a 9 at `position`, zeros elsewhere. The attempt must be the
  * same length as the password or upstream's arm returns before measuring. */

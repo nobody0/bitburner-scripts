@@ -104,4 +104,25 @@ describe("Side contract execution", () => {
     expect(h.execs()).toBe(3);
   });
 
+  test("a solved darknet contract retires exactly the observation that was attempted", async () => {
+    const h = harness(() => "$1m");
+    const observedAt = Date.now();
+    h.state.contractQueue = [{
+      host: "dn-1",
+      file: "jump.cct",
+      dnet: { identity: "10.0.0.1", observedAt },
+    }];
+    h.state.darknetContractListings = {
+      "dn-1": {
+        identity: "10.0.0.1",
+        observedAt,
+        validUntil: observedAt + 60_000,
+        files: ["jump.cct"],
+      },
+    };
+    await sideModule.driver.tick(h.ctx);
+    expect(h.state.darknetContractHandledAt?.["dn-1\0jump.cct"]).toBe(observedAt);
+    expect(h.state.contractQueue).toEqual([]);
+  });
+
 });

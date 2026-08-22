@@ -36,7 +36,7 @@ The acceptance bar for a feature is the full vertical slice:
 | 8 | sleeves | **done** |
 | 9 | go | **done** |
 | 10 | stanek | **done** |
-| 11 | dnet | **done** — the overseer/agent pipeline (`game/dnet/`) surveys, bleeds, cracks and plants on live darknet hosts; every one of the 24 password models has a solver (`shared/strategy/dnet/solvers/`), the labyrinth walker included; and the feature acts on the net: memoryReallocation (reclaim), phishing, caches, stock propaganda (promote), stasis pins and induced migrations are wired as jobs in `game/dnet/jobs.ts`, and backdoors — the one darknet action that can only be taken from home's terminal — as a dodge in `game/lib/features/dnet.ts` |
+| 11 | dnet | **done** — the overseer/agent pipeline (`game/dnet/`) surveys, bleeds, cracks and plants on live darknet hosts; every one of the 24 password models has a solver (`shared/strategy/dnet/solvers/`), the labyrinth walker included; and the feature acts on the net: memoryReallocation (reclaim), phishing, caches, stock propaganda (promote), stasis pins and induced migrations are wired as jobs in `game/dnet/jobs.ts`, and backdoors — the one darknet action that can only be taken from home's terminal — as a dodge in `game/lib/features/dnet.ts`. The storm is farmed too: `shared/strategy/dnet/storm.ts` gates `unleashStormSeed` on the prepared net (links spent, walker pinned, phish window freshly dead), the farm's seed hunt grinds blocks for the 15% roll, the overseer quiet-periods and `stormWipe`s after a fire, and the sim models the seed drop and the phased burst (`dnet.webstorm` in `DNET_ASSUMPTIONS`) |
 | 12 | side | **done** |
 | 13 | progression | **done** — endgame route, install barrier, two-pass arm/execute, and post-install restart are live |
 | 14 | endgame route + refresh/act split | **done** — see below |
@@ -353,6 +353,14 @@ factions posts Need{kind:"backdoor", subject:"CSEC"}   (it needs the outcome)
   -> the engine's invitation counter fires
   -> factions joins CyberSec
 ```
+
+That blocking chain is not the only reason to own TOR and crackers. Hacking
+also evaluates the next missing opener as an ordinary income investment: the
+real target solver prices newly available farm targets, and every host that
+becomes rootable contributes its RAM to the post-purchase fleet. The claim is
+one tier at a time and competes at `income:investment`; explicit root/backdoor
+needs retain `hacking:blocking-prerequisite`. TOR ownership proven by the
+Darkscape path is reused rather than budgeted twice.
 
 Hacking is unregressed by the slice (20.8 / 18.4 / 18.4 min on `earn:1e6`,
 identical to the post-Phase-0 baseline).

@@ -1,5 +1,6 @@
 import { msPerHostEvent, msPerHostEventAny } from "./rates.ts";
-import type { AttemptOutcome, ReportHost } from "./courier.ts";
+import { conclusiveAttempt, type AttemptOutcome, type LogDrainOutcome, type ReportHost } from "./courier.ts";
+import type { PasswordEvidence } from "./evidence.ts";
 
 /** What we know about the darknet, and when it stops being believable.
  *
@@ -24,15 +25,6 @@ export interface HostFact<T> {
  * neighbour list long after the net rewired it. */
 export type FactClass = "identity" | "position" | "topology" | "resource";
 
-/** When we last read a host's log ring.
- *
- * The one fact key that is OURS rather than the game's: `heartbleed` with `peek`
- * leaves the ring intact, so the engine gives no signal that a host was just
- * listened to, and without this stamp `bleed:<host>` re-derives on every tick
- * for every host we hold, for ever. The overseer writes it and the queue reads
- * it, which is exactly why it is named here instead of spelled out at both ends. */
-export const LAST_BLEED_AT = "lastBleedAt";
-
 export const FACT_CLASS: Readonly<Record<string, FactClass>> = {
   // Fixed for the lifetime of a host identity. A deleted host that later
   // reappears is a NEW host with a new password, so these are invalidated by
@@ -53,24 +45,24 @@ export const FACT_CLASS: Readonly<Record<string, FactClass>> = {
   neighbours: "topology",
   // Ours to change, and only changes when we or the owner act.
   blockedRam: "resource",
-  maxRam: "resource",
+  maxRam: "identity",
   usedRam: "resource",
-  // A session belongs to the PID that won it, so this is worthless the moment
-  // its observer dies. Classing it `resource` gives it the shortest expiry we
-  // have, which is the honest answer rather than a flattering one.
-  hasSession: "resource",
   // Cache files change when WE open one, when a RAM block is cleared, when a
   // phish lands one — and they go with the host when it is deleted. `resource`
   // is the shortest expiry we have and therefore the honest one: acting on a
   // stale listing means calling `openCache` on a filename the host no longer
   // holds, and that call THROWS rather than refusing.
   caches: "resource",
-  // Not an observation of the HOST at all: it is our own bookkeeping stamp,
-  // written when we read a host's log ring. Nothing reads it through `fresh` —
-  // the `.at` IS the payload — so the class it is given never decides anything,
-  // and `topology` is named here only because it is what the table's `??`
-  // fallback was already giving it. Listed so the table stops lying by omission.
-  [LAST_BLEED_AT]: "topology",
+  // Contracts share the listing and its invalidators. A stale contract is less
+  // destructive than a stale cache (the API reports absence), but could name a
+  // replacement host, so it gets the same shortest honest expiry.
+  contracts: "resource",
+  // The seed file survives restarts and moves (neither touches a server's
+  // program list) but a delete takes it with the host, and it is consumed the
+  // moment anyone fires it. `resource` is conservative — it expires the
+  // sighting sooner than the file actually perishes — and conservative is the
+  // right side: a storm fired on a stale sighting spends a job to learn 404.
+  stormSeed: "resource",
 };
 
 /** How far the cracker got against one host identity.
@@ -103,6 +95,17 @@ export interface AttemptLedger {
    * is redacted by `stripCredentials` — see `courier.ts` — because a partly
    * solved password is still a password. */
   solver?: Record<string, unknown>;
+  /** Every attempt against this identity, shared by all future vantages. */
+  history?: AttemptOutcome[];
+  /** Parsed constraints owned by this target, never by the draining agent. */
+  evidence?: PasswordEvidence[];
+}
+
+/** Minimal target-ring state, independent of password-cracking history. */
+export interface LogRingState {
+  pendingAuthRecords: number;
+  lastBleedAttemptAt?: number;
+  lastBleedAt?: number;
 }
 
 /** Fold attempt outcomes into a host's ledger.
@@ -123,13 +126,29 @@ export function foldAttempts(
   if (!host || host.goneAt !== undefined) return;
   for (const attempt of outcomes) {
     const ledger = host.attempts ?? { tried: 0, probes: 0 };
+    const history = ledger.history ??= [];
+    const existing = history.find((item) => item === attempt || (
+      item.at === attempt.at
+      && item.attempted === attempt.attempted
+      && item.code === attempt.code
+      && item.status === attempt.status
+      && item.candidateIndex === attempt.candidateIndex
+    ));
+    const firstFold = existing === undefined;
+    if (existing) Object.assign(existing, attempt);
+    else history.push(attempt);
     if (attempt.modelId !== undefined) ledger.modelId = attempt.modelId;
     // The solver's own place in the conversation. Carried verbatim: this module
     // does not interpret it, and `solvers/` refuses a state whose fingerprint no
     // longer matches the host.
     if (attempt.solver !== undefined) ledger.solver = attempt.solver;
-    if (attempt.status === "implemented") ledger.tried = (attempt.candidateIndex ?? ledger.tried) + 1;
-    else ledger.probes += 1;
+    if (firstFold && conclusiveAttempt(attempt)) {
+      if (attempt.status === "implemented") {
+        ledger.tried = Math.max(ledger.tried, (attempt.candidateIndex ?? ledger.tried) + 1);
+      } else if (attempt.oracle !== undefined) {
+        ledger.probes += 1;
+      }
+    }
     ledger.lastAt = attempt.at;
     ledger.lastCode = attempt.code;
     if (attempt.success) ledger.solved = true;
@@ -137,17 +156,50 @@ export function foldAttempts(
   }
 }
 
+/** Fold a completed or deferred ring read into the target-owned ledger. */
+export function foldLogDrain(host: DarknetHostKnowledge | undefined, outcome: LogDrainOutcome | undefined): void {
+  if (!host || host.goneAt !== undefined || outcome === undefined) return;
+  const ring = host.ring ?? { pendingAuthRecords: 0 };
+  ring.pendingAuthRecords = outcome.pendingAuthRecords;
+  if (outcome.attemptedAt !== undefined) {
+    ring.lastBleedAttemptAt = Math.max(ring.lastBleedAttemptAt ?? 0, outcome.attemptedAt);
+  }
+  if (outcome.drainedAt !== undefined) {
+    ring.lastBleedAt = Math.max(ring.lastBleedAt ?? 0, outcome.drainedAt);
+  }
+  host.ring = ring;
+  if (host.credentialKnown !== true && outcome.evidence.length > 0) {
+    const ledger = host.attempts ?? { tried: 0, probes: 0 };
+    const evidence = ledger.evidence ?? [];
+    for (const item of outcome.evidence) {
+      const key = JSON.stringify(item);
+      if (!evidence.some((existing) => JSON.stringify(existing) === key)) evidence.push(item);
+    }
+    ledger.evidence = evidence;
+    host.attempts = ledger;
+  }
+}
+
 export interface DarknetHostKnowledge {
   hostname: string;
+  identity?: string;
   /** Newest observation of this host by anything, for any fact. */
   lastSeenAt: number;
   /** Set when an observation reported the host gone. Identity facts die here. */
   goneAt?: number;
   facts: Record<string, HostFact<unknown>>;
   attempts?: AttemptLedger;
+  ring?: LogRingState;
   /** That we HOLD a credential, never the credential. This record is published
    *  to telemetry; the password lives only in the driver's vault. */
   credentialKnown?: boolean;
+}
+
+/** A verified credential makes cracking history dead weight. */
+export function markCredentialKnown(host: DarknetHostKnowledge | undefined): void {
+  if (!host || host.goneAt !== undefined) return;
+  host.credentialKnown = true;
+  delete host.attempts;
 }
 
 export interface DarknetKnowledge {
@@ -163,6 +215,46 @@ export interface DarknetKnowledge {
 
 export function emptyKnowledge(generation: string): DarknetKnowledge {
   return { hosts: {}, generation, mutationsSeen: 0 };
+}
+
+/** What a webstorm invalidates, applied the moment the burst is believed over.
+ *
+ * A storm is the one event whose scope we know at the instant it happens —
+ * because we fired it. Waiting for the ordinary expiries would leave the map
+ * asserting positions, edges and free RAM for a net that was just rerolled, and
+ * every derivation in the quiet minutes after would plan against ghosts.
+ *
+ * One function, shared by the overseer and home's fold, because the two must
+ * not disagree about what a storm destroys. The rule is upstream's own victim
+ * pool: everything OUTSIDE `isStationary`/stasis can be deleted, moved and
+ * restarted, so a non-immune host keeps only what survives all three —
+ * its IDENTITY facts (a survivor's are still true; a deleted host's die by the
+ * ordinary goneAt path when re-surveys report it missing) and its credential
+ * (restart and move change no password; only a delete retires an identity, and
+ * that path clears the vault entry elsewhere). Position, topology and resource
+ * facts are dropped outright, and the log ring goes with them — a restart
+ * resets the server's logs, so a pending-records count would send a bleed to
+ * drain records that no longer exist. Immune hosts keep everything: the storm
+ * cannot touch them, which is the entire reason stasis links are spent first. */
+export function stormWipe(knowledge: DarknetKnowledge, opts: ExpiryOpts = {}): DarknetKnowledge {
+  const hosts: Record<string, DarknetHostKnowledge> = {};
+  for (const [name, host] of Object.entries(knowledge.hosts)) {
+    if (isImmune(host, opts)) {
+      hosts[name] = host;
+      continue;
+    }
+    const facts: Record<string, HostFact<unknown>> = {};
+    for (const [key, fact] of Object.entries(host.facts)) {
+      // Unknown keys default to `topology` everywhere else in this file, which
+      // here means they are wiped — the conservative side for a fact nobody
+      // classified.
+      if ((FACT_CLASS[key] ?? "topology") === "identity") facts[key] = fact;
+    }
+    const wiped: DarknetHostKnowledge = { ...host, facts };
+    delete wiped.ring;
+    hosts[name] = wiped;
+  }
+  return { ...knowledge, hosts };
 }
 
 /** Deepest first; a host whose depth we cannot place sorts LAST.
@@ -200,10 +292,10 @@ export interface ExpiryOpts {
  * `NetworkMovement.ts:227` is a second, narrower guard covering stasis links but
  * NOT `isStationary`; the pool exclusion is what does the work for both.)
  *
- * So immunity is a property of the HOST, not of a fact class: ageing anything
- * about such a server would invent churn the engine cannot produce. Upstream
- * marks `darkweb` and the labyrinth stationary, and raises rather than move
- * `darkweb` at all. */
+ * Immunity fixes the host's own lifetime and position. Its edge list still
+ * ages: mutable neighbours can move, disconnect, appear or disappear without
+ * the immune host itself being selected. Upstream marks `darkweb` and the
+ * labyrinth stationary, and raises rather than move `darkweb` at all. */
 export function isImmune(
   host: Pick<DarknetHostKnowledge, "hostname" | "facts"> | undefined,
   opts: ExpiryOpts = {},
@@ -228,17 +320,17 @@ function hostExpiry(
  * Derived, not chosen: `msPerHostEvent` gives the expected time before a
  * mutation touches one named host in the relevant way, and we distrust a fact
  * at a fraction of that. `identity` never expires with age — only with the
- * host's disappearance — and on an immune host nothing does. */
+ * host's disappearance. Immunity freezes position; topology still ages because
+ * neighbours remain mutable. */
 export function expiryMs(factClass: FactClass, opts: ExpiryOpts = {}): number {
   const { netDepth, bitNode, backdoored, immune } = opts;
-  if (immune === true) return Infinity;
   const anyOf = (kinds: Parameters<typeof msPerHostEventAny>[0]): number =>
     msPerHostEventAny(kinds, netDepth, bitNode, backdoored);
   switch (factClass) {
     case "identity":
       return Infinity;
     case "position":
-      return anyOf(["moved"]) * TRUST_FRACTION;
+      return immune === true ? Infinity : anyOf(["moved"]) * TRUST_FRACTION;
     case "topology":
       // A move, a disconnect and a new connection each invalidate an edge list,
       // so their rates compound — edges are strictly shorter-lived than position.
@@ -296,6 +388,7 @@ export interface FoldOutcome {
   /** Facts that lost to a newer observation of the same field. */
   superseded: number;
   hostsForgotten: string[];
+  hostsReplaced: string[];
 }
 
 /** Merge reported hosts into knowledge.
@@ -318,24 +411,43 @@ export function foldReports(
     hosts[name] = { ...host, facts: { ...host.facts } };
   }
   let superseded = 0;
+  const hostsReplaced: string[] = [];
 
   for (const seen of reports) {
-    const { hostname, present, at, ...rest } = seen;
+    const { hostname, identity, present, at, ...rest } = seen;
     // A clock we do not control can hand us the future; treat it as now.
     const observedAt = Math.min(at, now);
     const existing = hosts[hostname];
-    const host: DarknetHostKnowledge = existing ?? {
+    const staleIdentity = present && identity !== undefined
+      && existing?.identity !== undefined && existing.identity !== identity
+      && observedAt < existing.lastSeenAt;
+    if (staleIdentity) {
+      superseded++;
+      continue;
+    }
+    const replaced = present && identity !== undefined
+      && existing?.identity !== undefined && existing.identity !== identity
+      && observedAt >= existing.lastSeenAt;
+    if (replaced) hostsReplaced.push(hostname);
+    const host: DarknetHostKnowledge = replaced ? {
       hostname,
+      identity,
+      lastSeenAt: observedAt,
+      facts: {},
+    } : existing ?? {
+      hostname,
+      ...(identity !== undefined ? { identity } : {}),
       lastSeenAt: observedAt,
       facts: {},
     };
+    if (identity !== undefined && host.identity === undefined) host.identity = identity;
     if (observedAt >= host.lastSeenAt) host.lastSeenAt = observedAt;
 
     if (!present) {
       // Absence is itself an observation, and a newer one wins. A host that
       // comes back is a different host with a different password, so its
       // identity facts must not survive the gap.
-      if (host.goneAt === undefined || observedAt > host.goneAt) {
+      if (observedAt >= host.lastSeenAt && (host.goneAt === undefined || observedAt > host.goneAt)) {
         host.goneAt = observedAt;
         host.facts = {};
         // The cracking progress goes with the identity facts, and for the same
@@ -343,6 +455,7 @@ export function foldReports(
         // upstream, so a ledger saying "the first 40 candidates are ruled out"
         // would be ruling out candidates for a password that no longer exists.
         delete host.attempts;
+        delete host.ring;
         delete host.credentialKnown;
       }
       hosts[hostname] = host;
@@ -381,6 +494,7 @@ export function foldReports(
     knowledge: { ...knowledge, hosts },
     superseded,
     hostsForgotten,
+    hostsReplaced,
   };
 }
 

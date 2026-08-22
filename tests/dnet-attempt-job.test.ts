@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import { makeJobBodies } from "../game/dnet/jobs.ts";
+import { makeJobBodies, type JobDeps } from "../game/dnet/jobs.ts";
 import { checkPassword, logEntryFor, type PacketWorld } from "../sim/features/dnet-feedback.ts";
 import { generateSecret, passwordRng } from "../sim/features/dnet-generators.ts";
 import type { AttemptLedger } from "../shared/strategy/dnet/knowledge.ts";
+import type { ProvisionalCredential, VaultEntry } from "../shared/strategy/dnet/courier.ts";
 
 /** The wiring, not the algorithms.
  *
@@ -31,15 +32,19 @@ interface Rig {
   /** Every password the job sent, in order. */
   sent: string[];
   /** How many times the log ring was read. */
+  /** Options prove reads consume the complete upstream ring. */
+  bleedOptions: { peek: boolean; logsToCapture: number }[];
   bleeds: number;
   /** Flip to make the host answer as though it had moved away. */
   moved: boolean;
+  /** Refuse calls after this many authenticate requests. */
+  moveAfter?: number;
   /** Flip to make the next authenticate time out. */
   timeoutOnce: boolean;
   password: string;
 }
 
-function rig(modelId: string, difficulty: number, opts: { charismaGate?: number } = {}): Rig {
+function rig(modelId: string, difficulty: number, opts: { charismaGate?: number; initialLogs?: string[] } = {}): Rig {
   const host = "dn-1";
   const secret = generateSecret(modelId, difficulty, passwordRng(0.4242, host));
   const server = {
@@ -50,8 +55,8 @@ function rig(modelId: string, difficulty: number, opts: { charismaGate?: number 
     data: secret.data,
     difficulty,
   };
-  const ring: string[] = [];
-  const state: Rig = { ns: undefined as unknown as NS, sent: [], bleeds: 0, moved: false, timeoutOnce: false, password: secret.password };
+  const ring: string[] = [...(opts.initialLogs ?? [])];
+  const state: Rig = { ns: undefined as unknown as NS, sent: [], bleeds: 0, bleedOptions: [], moved: false, timeoutOnce: false, password: secret.password };
 
   state.ns = {
     dnet: {
@@ -79,21 +84,29 @@ function rig(modelId: string, difficulty: number, opts: { charismaGate?: number 
           // log line is written — that is the whole point of the case.
           return Promise.resolve({ success: false, code: 408, message: "RequestTimeOut" });
         }
-        if (state.moved) return Promise.resolve({ success: false, code: 351, message: "DirectConnectionRequired" });
+        if (state.moved || (state.moveAfter !== undefined && state.sent.length > state.moveAfter)) {
+          return Promise.resolve({ success: false, code: 351, message: "DirectConnectionRequired" });
+        }
         const response = checkPassword(server, password, 1000, world);
         // The ring holds the JSON the game serialises, which is what
         // `heartbleed` hands back and `harvestLogs` parses.
-        ring.push(JSON.stringify(logEntryFor(modelId, password, response.ok ? 200 : 401, response)));
+        ring.unshift(JSON.stringify(logEntryFor(modelId, password, response.ok ? 200 : 401, response)));
         return Promise.resolve({
           success: response.ok,
           code: response.ok ? 200 : 401,
           message: response.message,
         });
       },
-      heartbleed: () => {
+      heartbleed: (_target: string, options: { peek: boolean; logsToCapture: number }) => {
         state.bleeds++;
-        return Promise.resolve({ success: true, code: 200, message: "ok", logs: [...ring] });
+        state.bleedOptions.push(options);
+        const logs = ring.slice(0, options.logsToCapture);
+        if (!options.peek) ring.splice(0, options.logsToCapture);
+        return Promise.resolve({ success: true, code: 200, message: "ok", logs });
       },
+    },
+    formulas: {
+      dnet: { getAuthenticateTime: () => 1_000 },
     },
     getServerMaxRam: () => 32,
     getServerUsedRam: () => 0,
@@ -102,8 +115,8 @@ function rig(modelId: string, difficulty: number, opts: { charismaGate?: number 
   return state;
 }
 
-function bodies(ledger?: AttemptLedger) {
-  return makeJobBodies({ charisma: () => 1000, ledgerFor: () => ledger });
+function bodies(ledger?: AttemptLedger, overrides: Partial<JobDeps> = {}) {
+  return makeJobBodies({ charisma: () => 1000, ledgerFor: () => ledger, ...overrides });
 }
 
 describe("attemptJob runs the whole conversation in one process", () => {
@@ -112,28 +125,102 @@ describe("attemptJob runs the whole conversation in one process", () => {
       // AccountsManager needs ~7 exchanges. Under the old one-attempt-per-job
       // shape that was seven spawns and seven controller ticks.
       const r = rig("AccountsManager_4.2", 12);
-      const result = await bodies().attempt!(r.ns, { host: "dn-1", from: "darkweb" });
+      const recovered: VaultEntry[] = [];
+      const drained: number[] = [];
+      const result = await bodies(undefined, {
+        recordCredential: (entry) => recovered.push(entry),
+        recordLogDrain: (_host, outcome) => drained.push(outcome.pendingAuthRecords),
+      }).attempt!(r.ns, {
+        host: "dn-1",
+        from: "darkweb",
+        targetIdentity: "10.0.0.1",
+      });
       expect(result.ok, result.detail).toBe(true);
       expect(r.sent.length).toBeGreaterThan(1);
       expect(r.sent[r.sent.length - 1]).toBe(r.password);
       // Every exchange is reported, so the panel can see what the solve cost.
       expect(result.attempts?.length).toBe(r.sent.length);
-      // And the credential comes home.
-      expect(result.credentials?.some((c) => c.hostname === "dn-1" && c.via === "cracked")).toBe(true);
+      // And the credential writes through before the job settles.
+      expect(recovered).toContainEqual({
+        hostname: "dn-1",
+        identity: "10.0.0.1",
+        password: r.password,
+        at: expect.any(Number),
+      });
+      expect(r.bleedOptions.every((options) => !options.peek && options.logsToCapture === 200)).toBe(true);
+      expect(drained.at(-1)).toBe(0);
+      expect(r.bleedOptions).toHaveLength(r.sent.length + 1);
     })();
   });
 
-  test("a closed-form model costs exactly one authenticate and never reads the ring", () => {
+  test("a closed-form model costs one authenticate and needs no log feedback", () => {
     return (async () => {
       const r = rig("DeskMemo_3.1", 2);
       const result = await bodies().attempt!(r.ns, { host: "dn-1", from: "darkweb" });
       expect(result.ok, result.detail).toBe(true);
       expect(r.sent).toEqual([r.password]);
-      // One bleed is allowed AFTER success — the ring may hold a neighbour's
-      // leaked password and that is free money. What must not happen is a read
-      // to obtain feedback this model does not need.
-      expect(r.bleeds).toBeLessThanOrEqual(1);
+      // The first drain protects existing logs from the capped-ring prepend;
+      // the second consumes the successful authentication record.
+      expect(r.bleeds).toBe(2);
     })();
+  });
+
+  test("a completed standalone initial drain is not repeated by the first attempt", async () => {
+    const r = rig("DeskMemo_3.1", 2);
+    const result = await bodies(undefined, {
+      ringFor: () => ({ pendingAuthRecords: 0, lastBleedAttemptAt: 1, lastBleedAt: 1 }),
+    }).attempt!(r.ns, { host: "dn-1", from: "darkweb" });
+    expect(result.ok, result.detail).toBe(true);
+    // Only the successful authentication record remains to drain.
+    expect(r.bleeds).toBe(1);
+  });
+
+  test("existing leaks are drained before authenticate can evict them, but stay provisional", async () => {
+    const r = rig("DeskMemo_3.1", 2, {
+      initialLogs: ["Connecting to dn-2:swordfish ..."],
+    });
+    const recovered: VaultEntry[] = [];
+    const candidates: ProvisionalCredential[] = [];
+    const result = await bodies(undefined, {
+      recordCredential: (entry) => recovered.push(entry),
+      recordProvisional: (entry) => candidates.push(entry),
+    })
+      .attempt!(r.ns, { host: "dn-1", from: "darkweb" });
+    expect(candidates).toContainEqual({ hostname: "dn-2", password: "swordfish", via: "connecting", at: expect.any(Number) });
+    expect(recovered.some((entry) => entry.hostname === "dn-2")).toBe(false);
+    expect(r.bleedOptions[0]).toEqual({ peek: false, logsToCapture: 200 });
+  });
+
+  test("a pre-drained leak for the current host is authenticated before the model solver", async () => {
+    const r = rig("DeskMemo_3.1", 2);
+    const leaked = r.password;
+    const withLeak = rig("DeskMemo_3.1", 2, {
+      initialLogs: [`Logging in with passcode: ${leaked} ...`],
+    });
+    const result = await bodies().attempt!(withLeak.ns, { host: "dn-1", from: "darkweb" });
+    expect(result.ok, result.detail).toBe(true);
+    expect(withLeak.sent).toEqual([leaked]);
+  });
+
+  test("attempts and log drains write through to the target ledger as they happen", async () => {
+    const r = rig("AccountsManager_4.2", 12);
+    const recordedAttempts: string[] = [];
+    const drains: { pendingAuthRecords: number; attemptedAt?: number; drainedAt?: number }[] = [];
+    const job = makeJobBodies({
+      charisma: () => 1_000,
+      ledgerFor: () => undefined,
+      recordAttempt: (_host, outcome) => recordedAttempts.push(outcome.attempted ?? ""),
+      recordLogDrain: (_host, outcome) => drains.push(outcome),
+    });
+    const result = await job.attempt!(r.ns, { host: "dn-1", from: "darkweb" });
+    expect(result.ok, result.detail).toBe(true);
+    expect(recordedAttempts).toEqual(r.sent);
+    expect(drains.some((outcome) => outcome.pendingAuthRecords === 1)).toBe(true);
+    expect(drains[drains.length - 1]).toMatchObject({
+      pendingAuthRecords: 0,
+      attemptedAt: expect.any(Number),
+      drainedAt: expect.any(Number),
+    });
   });
 
   test("a timeout is retried without being charged, because it taught nothing", () => {
@@ -149,6 +236,18 @@ describe("attemptJob runs the whole conversation in one process", () => {
       expect(result.codes?.["408"]).toBe(1);
     })();
   });
+
+  test("cooperative cancellation stops before the next authenticate boundary", async () => {
+    const r = rig("DeskMemo_3.1", 2);
+    const result = await bodies().attempt!(
+      r.ns,
+      { host: "dn-1", from: "darkweb" },
+      undefined,
+      () => "credential was verified elsewhere",
+    );
+    expect(result.targetState).toBe("cancelled");
+    expect(r.sent).toEqual([]);
+  });
 });
 
 describe("a solve that loses its host keeps its place", () => {
@@ -161,10 +260,10 @@ describe("a solve that loses its host keeps its place", () => {
       // Now the same solve, interrupted after its opening move.
       const r2 = rig("AccountsManager_4.2", 12);
       const bodiesA = bodies();
-      const stepOne = bodiesA.attempt!(r2.ns, { host: "dn-1", from: "darkweb" });
-      r2.moved = true;
-      const interrupted = await stepOne;
+      r2.moveAfter = 1;
+      const interrupted = await bodiesA.attempt!(r2.ns, { host: "dn-1", from: "darkweb" });
       expect(interrupted.ok).toBe(false);
+      expect(interrupted.targetState).toBe("edge-lost");
       expect(interrupted.detail).toContain("vantage");
       // The state rides home on the last attempt, which is what the fold writes
       // into the ledger — otherwise the next vantage restarts the binary search
@@ -179,9 +278,8 @@ describe("a solve that loses its host keeps its place", () => {
     return (async () => {
       // Run once to get a genuine mid-solve state.
       const r = rig("AccountsManager_4.2", 16);
-      const partial = bodies().attempt!(r.ns, { host: "dn-1", from: "darkweb" });
-      r.moved = true;
-      const stopped = await partial;
+      r.moveAfter = 1;
+      const stopped = await bodies().attempt!(r.ns, { host: "dn-1", from: "darkweb" });
       const carried = stopped.attempts?.[stopped.attempts.length - 1]?.solver as Record<string, unknown>;
       expect(carried).toBeDefined();
 
@@ -211,6 +309,42 @@ describe("a solve that loses its host keeps its place", () => {
       );
       expect(result.ok, result.detail).toBe(true);
     })();
+  });
+
+  test("a timeout while resending a pending attempt retries that same attempt", async () => {
+    const firstRig = rig("AccountsManager_4.2", 16);
+    firstRig.moveAfter = 1;
+    const stopped = await bodies().attempt!(firstRig.ns, { host: "dn-1", from: "darkweb" });
+    const carried = stopped.attempts?.at(-1)?.solver as Record<string, unknown>;
+    expect(carried).toBeDefined();
+
+    const resumedRig = rig("AccountsManager_4.2", 16);
+    resumedRig.timeoutOnce = true;
+    const resumed = await bodies({ tried: 0, probes: 0, solver: carried }).attempt!(
+      resumedRig.ns,
+      { host: "dn-1", from: "darkweb" },
+    );
+    expect(resumed.ok, resumed.detail).toBe(true);
+    expect(resumedRig.sent[0]).toBe(resumedRig.sent[1]);
+    expect(resumed.codes?.["408"]).toBe(1);
+  });
+});
+
+describe("a verified credential is bound to the server lifetime", () => {
+  test("a 401 while re-opening it forces identity reconciliation", async () => {
+    const ns = {
+      dnet: {
+        connectToSession: () => ({ success: false, code: 401, message: "wrong" }),
+        authenticate: () => Promise.resolve({ success: false, code: 401, message: "wrong" }),
+      },
+    } as unknown as NS;
+    const result = await bodies().plant!(ns, {
+      host: "dn-1",
+      from: "darkweb",
+      password: "formerly-right",
+      targetIdentity: "10.0.0.1",
+    });
+    expect(result.targetState).toBe("replaced");
   });
 });
 

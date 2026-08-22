@@ -166,14 +166,20 @@ describe("propaganda is the bottom rung, and usually refused", () => {
     // 6.15 GB against 6.35: the window where propaganda is the only farm call
     // that fits. That is what "bottom rung" buys — a host too cramped for the
     // charisma engine is not a host with nothing to do.
-    const plan = planFarm([host({ freeGb: 6.2 })], inputs({ promoteSymbols: ["ECP"] }));
+    const plan = planFarm(
+      [host({ freeGb: 6.2 })],
+      inputs({ promoteSymbols: [{ symbol: "ECP", expectedProfit: 1e6 }] }),
+    );
     expect(kindsOf(plan)).toEqual(["promote"]);
     expect(reasonsOf(plan)).toContain("phish-no-room");
     expect(plan.tasks[0]!.symbol).toBe("ECP");
   });
 
-  test("a phish still outranks it whenever both fit", () => {
-    const plan = planFarm([host({ freeGb: 12 })], inputs({ promoteSymbols: ["ECP"] }));
+  test("a phish still outranks it whenever both fit and the symbol's edge is small", () => {
+    const plan = planFarm(
+      [host({ freeGb: 12 })],
+      inputs({ promoteSymbols: [{ symbol: "ECP", expectedProfit: 1e5 }] }),
+    );
     expect(kindsOf(plan)).toEqual(["phish"]);
   });
 
@@ -184,7 +190,12 @@ describe("propaganda is the bottom rung, and usually refused", () => {
     const cramped = (name: string) => host({ host: name, freeGb: 6.2 });
     const plan = planFarm(
       [cramped("dn-a"), cramped("dn-b"), cramped("dn-c")],
-      inputs({ promoteSymbols: ["ECP", "MGCP"] }),
+      inputs({
+        promoteSymbols: [
+          { symbol: "ECP", expectedProfit: 1e6 },
+          { symbol: "MGCP", expectedProfit: 8e5 },
+        ],
+      }),
     );
     expect(plan.tasks.map((task) => task.symbol)).toEqual(["ECP", "MGCP", "ECP"]);
   });
@@ -218,14 +229,16 @@ describe("the reclaim rung is priced, not guessed", () => {
     expect(plan.tasks[0]!.threads).toBe(2);
   });
 
-  test("threads are taken from free RAM and capped", () => {
-    // The cap is not the binding constraint and is not meant to be: RAM runs
-    // out first on every host a resident stands on. It is there so a host with
-    // an enormous block cannot spend its entire allocation on one grind.
+  test("threads are taken from free RAM, unbounded but for the RAM itself", () => {
+    // No default ceiling: a resident runs one job at a time, so RAM the grind
+    // does not take is idle. A giant with an enormous block spends its whole
+    // allocation on the one grind, which is exactly what "one thing per server
+    // at max threads" asks for. A caller may still pass an explicit cap.
     const roomy = host({ difficulty: 2, blockedRam: 200, freeGb: 33 });
     expect(planFarm([roomy], inputs({ wantedGb: 100 })).tasks[0]!.threads).toBe(6);
     const huge = host({ difficulty: 2, blockedRam: 200, freeGb: 400 });
-    expect(planFarm([huge], inputs({ wantedGb: 500 })).tasks[0]!.threads).toBe(8);
+    // floor(400 / 5.35) = 74, the whole host.
+    expect(planFarm([huge], inputs({ wantedGb: 500 })).tasks[0]!.threads).toBe(74);
     expect(planFarm([huge], inputs({ wantedGb: 500, maxReclaimThreads: 3 })).tasks[0]!.threads).toBe(3);
   });
 
@@ -300,18 +313,21 @@ describe("exactly one host hunts the cache window", () => {
     expect(electCacheHunter([...tied, host({ host: "c", depth: 5, freeGb: 99 })])).toBe("c");
   });
 
-  test("only the hunter spends threads, and only while the window is open", () => {
+  test("EVERY phisher runs at what its own RAM affords", () => {
+    // Money and charisma are linear in threads, the batch is TIME-bounded so
+    // threads never extend how long a host is held, and a resident runs one
+    // job at a time — RAM a phish does not take is simply idle. The hunter is
+    // still elected (deepest = best money per call, and the panel's answer to
+    // "who claims the window"), but it no longer rations anyone's threads.
     const open = planFarm(crew(), inputs());
     expect(open.cacheHunter).toBe("dn-deep");
-    const byHost = new Map(open.tasks.map((task) => [task.host, task]));
-    expect(byHost.get("dn-deep")!.threads).toBeGreaterThan(1);
-    expect(byHost.get("dn-mid")!.threads).toBe(1);
-    expect(byHost.get("dn-shallow")!.threads).toBe(1);
+    // 40 GB against a 6.35 GB phish is six threads, for everyone.
+    for (const task of open.tasks) expect(task.threads).toBe(6);
   });
 
-  test("a shut window drops the hunter back to one thread", () => {
+  test("a shut window changes the hunter's story, never anyone's threads", () => {
     const shut = planFarm(crew(), inputs({ lastPhishCacheAt: NOW - 1_000 }));
-    expect(shut.tasks.every((task) => task.threads === 1)).toBe(true);
+    expect(shut.tasks.every((task) => task.threads === 6)).toBe(true);
     expect(shut.tasks.find((t) => t.host === "dn-deep")!.reason).toContain("window shut");
   });
 
@@ -353,6 +369,137 @@ describe("a farm job is a bounded batch, not an open-ended loop", () => {
     // A high-charisma grind therefore fits many more calls in one batch.
     expect(batchHasRoom("reclaim", 0, FARM_BATCH_MS - 300, 1e9)).toBe(true);
     expect(batchHasRoom("reclaim", 0, FARM_BATCH_MS - 300, 0)).toBe(false);
+  });
+});
+
+describe("a cramped block is ground from next door", () => {
+  // `memoryReallocation` reaches an authenticated, directly connected
+  // neighbour, and the cross-host call is the one that pays the admin-rights
+  // check — so the helper path is gated on the target's credential and proved
+  // from the HELPER's own fresh adjacency.
+  const cramped = () =>
+    host({ host: "dn-tight", difficulty: 2, blockedRam: 12, freeGb: 4, hasCredential: true });
+  const helper = (over: Partial<FarmHost> = {}) =>
+    host({ host: "dn-roomy", freeGb: 40, neighbours: ["dn-tight"], ...over });
+
+  test("a target that cannot afford its own cure is ground remotely by a credentialed neighbour", () => {
+    const plan = planFarm([cramped(), helper()], inputs());
+    const remote = plan.tasks.find((task) => task.host === "dn-tight")!;
+    expect(remote.kind).toBe("reclaim");
+    expect(remote.from).toBe("dn-roomy");
+    // Threads come from the HELPER's room: floor(40 / 5.35) = 7.
+    expect(remote.threads).toBe(7);
+    expect(remote.reason).toContain("dn-roomy");
+  });
+
+  test("without the target's password the hostage refusal stands, and says why", () => {
+    const plan = planFarm([{ ...cramped(), hasCredential: false }, helper()], inputs());
+    expect(plan.tasks.find((task) => task.host === "dn-tight")).toBeUndefined();
+    const refusal = plan.refused.find((r) => r.host === "dn-tight" && r.why === "reclaim-no-room")!;
+    expect(refusal.detail).toContain("hostage");
+    expect(refusal.detail).toContain("password");
+  });
+
+  test("a grind already in flight against the target admits no remote double", () => {
+    const busyTarget = { ...cramped(), busy: new Set<FarmKind>(["reclaim"]) };
+    const plan = planFarm([busyTarget, helper()], inputs());
+    expect(plan.tasks.find((task) => task.host === "dn-tight")).toBeUndefined();
+    expect(reasonsOf(plan)).toContain("reclaim-in-flight");
+  });
+
+  test("the election is deterministic: most free RAM, ties by name", () => {
+    const plan = planFarm(
+      [cramped(), helper({ host: "dn-b", freeGb: 20 }), helper({ host: "dn-a", freeGb: 40 })],
+      inputs(),
+    );
+    expect(plan.tasks.find((task) => task.host === "dn-tight")!.from).toBe("dn-a");
+    const tied = planFarm(
+      [cramped(), helper({ host: "dn-b", freeGb: 20 }), helper({ host: "dn-a", freeGb: 20 })],
+      inputs(),
+    );
+    expect(tied.tasks.find((task) => task.host === "dn-tight")!.from).toBe("dn-a");
+  });
+
+  test("self wins whenever it affords as many threads — the free case stays the default", () => {
+    // Both sides afford two threads: no `from`, exactly the old shape.
+    const selfSufficient = host({
+      host: "dn-tight", difficulty: 2, blockedRam: 12, freeGb: 12, hasCredential: true,
+    });
+    const plan = planFarm([selfSufficient, helper({ freeGb: 12 })], inputs({ wantedGb: 20 }));
+    const grind = plan.tasks.find((task) => task.host === "dn-tight")!;
+    expect(grind.from).toBeUndefined();
+    expect(grind.threads).toBe(2);
+  });
+
+  test("a helper with MORE threads takes over even when self affords a few", () => {
+    const plan = planFarm(
+      [host({ host: "dn-tight", difficulty: 2, blockedRam: 30, freeGb: 12, hasCredential: true }),
+        helper()],
+      inputs({ wantedGb: 20 }),
+    );
+    const grind = plan.tasks.find((task) => task.host === "dn-tight")!;
+    expect(grind.from).toBe("dn-roomy");
+    expect(grind.threads).toBe(7);
+  });
+});
+
+describe("phish and promote compete on expected value", () => {
+  // The one place the ladder is an exchange rate: phish's $/ms is priced from
+  // the engine's own formulas (weighted 1.25x for the charisma exp every call
+  // pays), promote's from home's expectedProfit scaled by PROMOTE_PROFIT_SHARE.
+  // At the fixtures' charisma 200 and depth 3 the break-even sits near a ~$22m
+  // position, rising with depth — the money term phish has and promote lacks.
+  const rich = [{ symbol: "ECP", expectedProfit: 1e9 }];
+
+  test("a big enough edge flips a host to promote even with room for both", () => {
+    const plan = planFarm([host({ freeGb: 12 })], inputs({
+      promoteSymbols: rich,
+      // Window shut, so the hunter exception stays out of the comparison.
+      lastPhishCacheAt: NOW - 1_000,
+    }));
+    expect(kindsOf(plan)).toEqual(["promote"]);
+  });
+
+  test("the hunter with an open window phishes whatever the arithmetic says", () => {
+    const plan = planFarm([host({ freeGb: 30 })], inputs({ promoteSymbols: rich }));
+    const task = plan.tasks[0]!;
+    expect(task.kind).toBe("phish");
+    expect(task.threads).toBe(4);
+    expect(task.reason).toContain("window open");
+  });
+
+  test("depth is phish's term: the same edge loses to a deep host and wins on a shallow one", () => {
+    // $50m: above the shallow break-even (~$22m), below the deep one (~$120m).
+    const plan = planFarm(
+      [host({ host: "dn-shallow", depth: 3, freeGb: 12 }), host({ host: "dn-deep", depth: 25, freeGb: 12 })],
+      inputs({
+        promoteSymbols: [{ symbol: "ECP", expectedProfit: 5e7 }],
+        lastPhishCacheAt: NOW - 1_000,
+      }),
+    );
+    const byHost = new Map(plan.tasks.map((task) => [task.host, task.kind]));
+    expect(byHost.get("dn-shallow")).toBe("promote");
+    expect(byHost.get("dn-deep")).toBe("phish");
+  });
+
+  test("the loser still runs when the winner refuses on its own gate", () => {
+    // Promote wins the arithmetic but is already in flight; the host phishes
+    // rather than idling, and the refusal survives by name.
+    const plan = planFarm(
+      [host({ freeGb: 12, busy: new Set<FarmKind>(["promote"]) })],
+      inputs({ promoteSymbols: rich, lastPhishCacheAt: NOW - 1_000 }),
+    );
+    expect(kindsOf(plan)).toEqual(["phish"]);
+    expect(reasonsOf(plan)).toContain("promote-in-flight");
+  });
+
+  test("no symbol degenerates to the old ladder", () => {
+    // With nothing on promote's side of the scale, phish wins the comparison
+    // outright — and an admitted winner means the loser's rung is never
+    // reached, exactly as the old ladder behaved.
+    const plan = planFarm([host({ freeGb: 12 })], inputs({ lastPhishCacheAt: NOW - 1_000 }));
+    expect(kindsOf(plan)).toEqual(["phish"]);
+    expect(reasonsOf(plan)).not.toContain("promote-no-symbol");
   });
 });
 

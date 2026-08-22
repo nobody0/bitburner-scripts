@@ -1,9 +1,10 @@
 # The password solvers
 
-The darknet's 24 server models are the feature's whole difficulty, and nineteen
-of them cannot be attacked with a list. This is the framework that attacks them,
-what its contract promises, and how a solve survives losing the host it was
-talking through. Everything here is `shared/strategy/dnet/solvers/`; the code is
+The darknet's 24 server models are the feature's whole difficulty. Five use
+bounded dictionaries, eight decode from server details, and eleven require a
+feedback conversation. This is the framework for the latter two groups, what
+its contract promises, and how a solve survives losing the host it was talking
+through. Everything here is `shared/strategy/dnet/solvers/`; the code is
 pure and the job that drives it is `attemptJob` in `game/dnet/jobs.ts`.
 
 For the models themselves — which is which, what each answers with, and the
@@ -18,8 +19,9 @@ their attacks are conversations — send a guess, the host answers with somethin
 *about* the guess, and the answer decides what to send next. A count has nowhere
 to put the answer.
 
-So a solver is `(facts, state, observation) -> step`, pure, with its state
-serialised onto the host's attempt ledger between calls.
+So a solver is `(facts, state, observation) -> step`, pure. Every completed
+attempt and destructive log read writes through immediately to the target's
+shared ledger; a worker never owns the conversation it is advancing.
 
 ## The contract
 
@@ -89,13 +91,17 @@ Two keys carry this, both in `solvers/types.ts`:
   with everything else in there. A pending attempt is a guess at the password,
   and late in a solve that is very nearly the password. Solvers never see it:
   `withoutPending` removes it before the state is handed back to one.
+- **`PENDING_NEEDS_ORACLE`** (`"__pendingNeedsOracle"`) records whether that
+  exact step expected feedback. It cannot be reconstructed from the solver's
+  global `needsOracle`: several solvers switch between feedback probes and
+  candidate passwords. A resumed 408 retries the same attempt with the same
+  channel requirement and remains uncharged.
 - **`EXHAUSTED_PHASE`** (`"__exhausted"`) parks an identity whose search space is
   gone. Nothing else would stop it being retried: `planAttempt` calls `first()`
   fresh on every derivation, and the ledger's `lastCode` holds the engine's 401
-  rather than our 910. Without the marker, a host whose model we cannot open
-  (`Factori-Os` above difficulty 24 is the transcribed example) spends its whole
-  walk, gives up, and is filed again on the next tick, for ever. It is a normal
-  state, so it dies exactly when the identity does.
+  rather than our 910. Without the marker, an eliminated search is filed again
+  on the next tick, for ever. It is a normal state, so it dies exactly when the
+  identity does.
 
 `resumableState(carried, modelId, facts)` is the one gate, and it checks three
 things because each fails differently:
@@ -113,12 +119,11 @@ things because each fails differently:
 3. **A pending attempt must travel with it**, or there is no way back in and the
    solve restarts from `first()`.
 
-**The budget bounds the resume.** `resume` sends its pending attempt before the
-exchange loop's own check is reached, so without an explicit test a solve that
-had spent its budget would make one more exchange on every vantage, for ever —
-`next` hands back a fresh pending each time and the task re-derives next tick.
-Stopping at the cap keeps the state resumable, so a later budget change picks the
-conversation back up.
+**The budget bounds the resume.** A pending attempt is reconstructed as an
+ordinary `attempt` step and re-enters the same exchange loop, whose budget,
+deadline, cancellation, 408 retry and target-loss checks therefore apply before
+and after it exactly as they do to a fresh step. The state remains resumable at
+the cap, so a later budget change can pick the conversation back up.
 
 ## Giving up is a named outcome, not a silence
 
@@ -150,6 +155,11 @@ guess, turning a nine-exchange solve into half a minute of scheduling. Inside it
 `resume` re-enters an unfinished conversation, and `converse` runs the exchanges
 until the solver stops or the wall clock does.
 
+The exception is `2G_cellular`: it needs no ring feedback, so its records may be
+drained in a batch. Its timing baseline and one-correct-character delta are both
+read from `formulas.dnet.getAuthenticateTime` with the attempt job's actual
+thread count; hardcoding one thread changes the inferred prefix length.
+
 `ATTEMPT_WALL_MS` (36 s) is not a taste decision: it is comfortably under the
 ~108 s a vantage lasts and well under `JOB_TIMEOUT_MS`, so the overseer never
 times out a job that is working, and a job never converses with a host it can no
@@ -164,3 +174,29 @@ is kept — the password has not changed, only our ability to reach it.
 `tests/dnet-attempt-job.test.ts` drives the real bodies against the simulator's
 feedback models, and `tests/dnet-solvers-vs-sim.test.ts` checks each solver
 against the generator it is transcribed from.
+
+## Failure guesses are chosen for what they teach
+
+A wrong authentication is not merely a miss. Where the model has a patterned
+response, the next attempt is selected for the partition that response creates:
+
+- `AccountsManager_4.2` and ranged `BellaCuore` enumerate the still-admissible
+  values when the range is bounded, discard candidates contradicted by harvested
+  hints, and probe the median of what remains.
+- `BigMo%od` asks the largest pairwise-coprime moduli first, so the CRT product
+  grows faster. The simulator cost ratchet falls from nine calls to eight.
+- `PHP 5.4` at the generator's real lengths (at most seven) keeps every
+  evidence-compatible ordering and samples candidate probes for the smallest
+  worst three-decimal RMS bucket. A correct probe opens immediately; a failure
+  removes a whole bucket complement. Longer synthetic inputs retain the
+  constant-time positional RMS equations rather than materialising factorially
+  many orderings.
+
+The generic log hints feed the same decisions. Contains hints prune finite
+candidate sets and prioritize complete probe alphabets without removing symbols.
+Placement hints fix a position only when its character occurred once in the
+attempt—the log reports values, not indices, so repeated-character probes are
+constraints but not coordinates. `NIL`, `DeepGreen`, `RateMyPix.Auth`, and
+`2G_cellular` seed their known positions/prefix from those safe placements.
+Their chosen alphabet is stored in solver state, preventing a later log drain
+from reordering an in-progress conversation underneath its numeric cursor.

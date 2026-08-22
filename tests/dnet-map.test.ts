@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { AUTH_LABEL, BOX_W, COL_PITCH, MAP_W, NET_WIDTH, layoutNet, matches, netLegend, netMap } from "../ui/app/tabs/dnet-map.ts";
+import { AUTH_LABEL, BOX_W, COL_PITCH, MAP_W, NET_WIDTH, layoutNet, matches, netLegend, netMap, ramBuckets } from "../ui/app/tabs/dnet-map.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 import { emptyState } from "../ui/app/project.ts";
 import { setView } from "../ui/app/lib/viewstate.ts";
@@ -374,6 +374,17 @@ describe("the rendered SVG", () => {
     }),
   ];
 
+  test("shows ours, free and owner-blocked RAM without double-counting", () => {
+    const split = ramBuckets(host({ hostname: "dn-ram", maxRam: 16, usedRam: 7, freeRam: 9, blockedRam: 4 }));
+    expect(split).toEqual({ max: 16, ours: 3, free: 9, blocked: 4 });
+
+    const html = netMap([
+      host({ hostname: "dn-ram", depth: 0, maxRam: 16, usedRam: 7, freeRam: 9, blockedRam: 4 }),
+    ], OPTIONS);
+    expect(html).toContain("O/F/B 3/9/4");
+    expect(html).toContain("RAM 3.00GB ours, 9.00GB free, 4.00GB blocked of 16GB");
+  });
+
   test("every host is drawn exactly once, with a stable key", () => {
     const html = netMap(hosts, OPTIONS);
     expect(html).toContain("<svg");
@@ -417,9 +428,10 @@ describe("the rendered SVG", () => {
     expect(html).toContain("[ auth required ]");
     // The in-game box only hints at blocked RAM with a lock icon; we show the
     // split, because it is what decides whether an agent fits at all.
-    expect(html).toContain('class="ram free"');
-    expect(html).toContain('class="ram blocked"');
-    expect(html).toContain("12GB/16GB");
+    expect(html).toContain('class="ram free ram-free"');
+    expect(html).toContain('class="ram blocked ram-blocked"');
+    expect(html).toContain('class="ram ours ram-ours"');
+    expect(html).toContain("O/F/B 0/12/4");
   });
 
   test("zoom changes the width attribute and never the viewBox", () => {
@@ -558,7 +570,7 @@ describe("the key describes the map, and not something near it", () => {
   /** Every host state the map can draw, one host each, so the markup below
    *  contains every class the map is capable of emitting. */
   const EVERY_STATE: DarknetKnownHost[] = [
-    host({ hostname: "dn-session", depth: 0, authState: "session" }),
+    host({ hostname: "dn-session", depth: 0, authState: "session", maxRam: 16, freeRam: 8, blockedRam: 4 }),
     host({ hostname: "dn-auth", depth: 0, authState: "authenticated" }),
     host({ hostname: "dn-locked", depth: 0, authState: "auth-required" }),
     host({ hostname: "dn-unreached", depth: 1, authState: "no-connection" }),

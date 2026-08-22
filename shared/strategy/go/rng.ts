@@ -1,21 +1,9 @@
-/** Exact Wichmann-Hill stream used by IPvGO v3.0.1. The seed accepted by the
- * game is Player.totalPlaytime in milliseconds.
+import { whrng } from "../../rng/whrng.ts";
+export { whrng };
+
+/** The shared stream is seeded with Player.totalPlaytime in milliseconds.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Casino/RNG.ts
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/goAI.ts */
-export function whrng(totalPlaytimeMs: number, count = 1): number[] {
-  const seed = (totalPlaytimeMs / 1000) % 30000;
-  let s1 = seed;
-  let s2 = seed;
-  let s3 = seed;
-  const values: number[] = [];
-  for (let i = 0; i < count; i++) {
-    s1 = (171 * s1) % 30269;
-    s2 = (172 * s2) % 30307;
-    s3 = (170 * s3) % 30323;
-    values.push((s1 / 30269 + s2 / 30307 + s3 / 30323) % 1);
-  }
-  return values;
-}
 
 /** Player.totalPlaytime advances by this amount in Engine.updateGame().
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Constants.ts */

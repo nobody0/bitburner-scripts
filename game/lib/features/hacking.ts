@@ -24,6 +24,7 @@ import {
   type ProgramOption,
 } from "../../../shared/strategy/career/programs.ts";
 import { needValueSeconds, type Need } from "../../../shared/strategy/needs.ts";
+import { planNextOpener } from "../../../shared/strategy/access/openers.ts";
 import {
   backdoorCostSeconds,
   NOMINAL_VALUE_SEC_PER_WEIGHT,
@@ -37,11 +38,11 @@ import {
   type RepContext,
   type WorkType,
 } from "../../../shared/strategy/factions/rep.ts";
-import { farmExperienceRate, farmIncomeRate } from "../../../shared/strategy/economics.ts";
+import { capitalIndependentScore, farmExperienceRate, farmIncomeRate } from "../../../shared/strategy/economics.ts";
 import { installHorizonSec, nodeHorizonSec, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { growingProgressSecondsPerRelativeRate, linearSecondsPerRelativeRate } from "../../../shared/strategy/progression/marginal.ts";
 import type { MeasuredMarginal } from "../../../shared/strategy/progression/marginal.ts";
-import { hackMarginalValue, hackRungValue, type HackMarginalInput } from "../../../shared/strategy/share.ts";
+import { hackMarginalValue, hackRungValue, relativeGainSaving, type HackMarginalInput } from "../../../shared/strategy/share.ts";
 import type { FarmPipeline, FarmRollup } from "../../../shared/telemetry/topics/hacking.ts";
 import {
   marginalCostPerGb,
@@ -50,8 +51,9 @@ import {
   type RamSupplyQuote,
   type RamSupplyState,
 } from "../../../shared/strategy/ram-supply.ts";
+import { TOR_COST } from "../../../shared/strategy/dnet/rates.ts";
 import { gameGlobal } from "../globals.ts";
-import { bestReinvestmentReturnPerDollarSec, moneyRateValue } from "../income.ts";
+import { bestReinvestmentReturnPerDollarSec, moneyRateValue, moneyStepValue } from "../income.ts";
 import { buildView, drainCompletions, initDriver, pump, type DriverState } from "../dispatch-driver.ts";
 import { merge, recordProbeFailure, set, type GameState } from "../state.ts";
 import { takeTickLateness } from "../tick-health.ts";
@@ -131,6 +133,7 @@ export function resetHackingState(): void {
   switched = undefined;
   backdoorBackoff.clear();
   backdoorInFlight = false;
+  openerInFlight = false;
   lastServerAccessAt = 0;
   infrastructureInFlight = false;
   lastInfrastructureResult = undefined;
@@ -669,6 +672,7 @@ function recordBackdoorFailure(host: string, now: number): void {
 const BACKDOOR_CALLS = ["scan", "singularity.connect", "singularity.installBackdoor"] as const;
 const PORT_OPENER_CALLS = ["ls", "singularity.purchaseTor", "singularity.purchaseProgram"] as const;
 let backdoorInFlight = false;
+let openerInFlight = false;
 let lastServerAccessAt = 0;
 let requestedProgram: ProgramOption | undefined;
 /** BN-seconds the requested write is worth — see `ServerAccessPlan`. Carried
@@ -681,29 +685,6 @@ const CLOUD_BUY_METHODS = ["cloud.purchaseServer"] as const;
 const CLOUD_UPGRADE_METHODS = ["cloud.upgradeServer"] as const;
 let infrastructureInFlight = false;
 let lastInfrastructureResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
-
-/** The farm solution's $/GB/sec with the stock-manipulation term removed —
- * what a MONEY purchase may be priced from.
- *
- * `score` blends hacked income with `stockIncome`, the dollar value of the
- * ops' price manipulation on the market's HELD positions. For RAM allocation
- * that blend is correct: allocating RAM consumes no capital. For a purchase it
- * is a double-count — the manipulation income exists only while the bankroll
- * is deployed as positions, so a server bought WITH that bankroll destroys the
- * very income that justified it. Measured before this split (bn8-manipulation
- * seed 1): the market grew $250m to ~$390m and a manipulation-priced $318m
- * home-RAM rung then took all of it, twice in one two-hour run. The market's
- * own reserve claim already bids the return on that capital; counting it again
- * here bids the same dollars twice.
- *
- * Both per-batch terms share `score`'s denominator, so the capital-independent
- * share is the income fraction of the blend. */
-function capitalIndependentScore(solution: { score: number; incomePerBatch: number; stockIncomePerBatch: number }): number {
-  const money = Math.max(0, solution.incomePerBatch);
-  const stock = Math.max(0, solution.stockIncomePerBatch);
-  const total = money + stock;
-  return total > 0 ? Math.max(0, solution.score) * (money / total) : Math.max(0, solution.score);
-}
 
 /** Marginal farm income from one more home core. The target solve is repeated
  * with exactly the current and next core count over home's usable capacity.
@@ -1512,11 +1493,69 @@ function programsForPortNeed(game: GameState, portsRequired: number): readonly P
   return PORT_OPENER_PROGRAMS.slice(owned, portsRequired);
 }
 
-/** Conservative atomic budget: TOR is included even when it may already be
- * owned because the ordinary player snapshot does not expose that fact. */
+/** Positive evidence of TOR, and only positive evidence — an atomic budget
+ * that omits the router when we do not actually own it under-funds the grant
+ * by TOR_COST and the purchase then fails on the router rather than the
+ * program.
+ *
+ * Owning port openers is NOT evidence: `createProgram` writes BruteSSH.exe and
+ * the rest with no dark web at all, which is exactly the branch
+ * `preferProgramCreation` takes when money is tight. So the flag is set only
+ * where a dark web purchase actually succeeded, plus darknet access — which
+ * means DarkscapeNavigator was bought (and therefore TOR first), or BN15/SF15
+ * granted both. */
+function hasTor(game: GameState): boolean {
+  return game.topics.fleet?.hasTor === true
+    || game.topics.capabilities?.unlocked.dnet === "yes";
+}
+
 function portOpenerPurchaseCost(game: GameState, portsRequired: number): number {
-  return 200_000 + programsForPortNeed(game, portsRequired)
+  return (hasTor(game) ? 0 : TOR_COST) + programsForPortNeed(game, portsRequired)
     .reduce((total, program) => total + program.purchaseCost, 0);
+}
+
+/** Re-score the next opener from the world already held in state. This is run
+ * at the 1 Hz rollup boundary, not in claims(), because target solves are the
+ * expensive half of the dispatcher and claim collection must remain pure. */
+function evaluateEconomicOpener(game: GameState) {
+  const fleet = game.topics.fleet;
+  const player = game.topics.player;
+  const hackCtx = hackingState().memory.dispatch.evaluator.ctx;
+  if (!fleet || !player || !hackCtx) return undefined;
+  return planNextOpener({
+    servers: Object.values(game.topics.servers ?? {}),
+    hackingSkill: player.skills.hacking,
+    hackContext: hackCtx,
+    fleetGb: Math.max(0, fleet.maxRam - (game.topics.ramArena?.arenaGb ?? 0)),
+    ownedOpeners: fleet.portOpeners ?? 0,
+    hasTor: hasTor(game),
+    ...(hackingState().memory.dispatch.evaluator.directive.farm
+      ? { currentFarm: hackingState().memory.dispatch.evaluator.directive.farm }
+      : {}),
+  });
+}
+
+function economicOpenerValue(ctx: ClaimContext, plan: { addedMoneyPerSec: number; addedHackingExpPerSec: number }): MeasuredMarginal {
+  const values: number[] = [];
+  const unknown: string[] = [];
+  const money = moneyStepValue(ctx.state, plan.addedMoneyPerSec, ctx.now);
+  if (money.state === "measured") values.push(money.value);
+  else unknown.push(money.reason);
+
+  const marginal = ctx.state.topics.progression?.plan?.marginals?.hacking;
+  const observed = Math.max(
+    0,
+    ctx.state.topics.fleet?.scriptExpGain ?? 0,
+    ctx.state.topics.farm?.expRate ?? 0,
+    marginal?.atRatePerSec ?? 0,
+  );
+  if (marginal?.state === "estimated" && observed > 0 && plan.addedHackingExpPerSec > 0) {
+    values.push(marginal.secondsPerRelativeRate * relativeGainSaving(plan.addedHackingExpPerSec / observed));
+  } else if (plan.addedHackingExpPerSec > 0) {
+    unknown.push(marginal?.reason ?? "the progression hacking marginal is not published");
+  }
+  if (values.length > 0) return { state: "measured", value: values.reduce((sum, value) => sum + value, 0) };
+  return { state: "unknown", reason: unknown.join("; ") || "the opener unlock has no priced progression channel" };
 }
 
 function shouldWriteProgram(game: GameState, program: ProgramOption): boolean {
@@ -1529,7 +1568,7 @@ function shouldWriteProgram(game: GameState, program: ProgramOption): boolean {
     skills.hacking,
     skills.intelligence,
     careerAlternative(game, timeMs / 1_000),
-    (game.topics.fleet?.portOpeners ?? 0) > 0,
+    hasTor(game),
     moneyValueSecPerDollar(game),
   );
 }
@@ -1586,14 +1625,15 @@ function moneyValueSecPerDollar(game: GameState): number | undefined {
  * five 30-second fleet observations can miss an otherwise completed node.
  * Returns true if anything was bought.
  *
- * Deliberately narrow: this runs ONLY to unblock a posted root/backdoor need, so
- * the fleet does not spend money on crackers nothing has asked for. */
-async function buyPortOpener(ctx: DriverContext, portsRequired: number): Promise<boolean> {
+ * Used by both blocking access needs and the economically priced fleet unlock;
+ * neither path may spend without its own exact arbiter grant. */
+async function buyPortOpener(ctx: DriverContext, portsRequired: number, claimId?: string): Promise<boolean> {
   if (portsRequired === 0) return false;
   const program = programForPortNeed(ctx.state, portsRequired);
   const requiredGrant = portOpenerPurchaseCost(ctx.state, portsRequired);
   // Never let an imperative purchase bypass the shared money policy.
-  if (!program || moneyGrantFor(ctx, `port-opener:${program.name}`) < requiredGrant) return false;
+  if (!program || openerInFlight || moneyGrantFor(ctx, claimId ?? `port-opener:${program.name}`) < requiredGrant) return false;
+  openerInFlight = true;
   try {
     const outcome = await featureDodge(
       ctx,
@@ -1618,12 +1658,20 @@ async function buyPortOpener(ctx: DriverContext, portsRequired: number): Promise
     );
     if (!outcome.ok) return false;
     const before = ctx.state.topics.fleet?.portOpeners ?? 0;
-    if (outcome.value > before) merge(ctx.state, "fleet", { portOpeners: outcome.value });
+    // `hasTor` rides the PROGRAM purchase, not the call: the stub returns early
+    // without touching purchaseTor when the openers are already owned, and
+    // returns the same count when purchaseTor itself refuses. A dark web
+    // program that actually landed is the only proof the router exists.
+    if (outcome.value > before) {
+      merge(ctx.state, "fleet", { portOpeners: outcome.value, hasTor: true, openerPlan: null });
+    }
     return outcome.value > before;
   } catch (error) {
     if (isScriptDeath(error)) throw error;
     // No singularity access — the crackers must come from elsewhere.
     return false;
+  } finally {
+    openerInFlight = false;
   }
 }
 
@@ -1792,6 +1840,7 @@ export const hacking: FeatureDriver = {
         result.directive.segments.map((segment) => segment.kind),
       );
       const infrastructure = ramInvestment(ctx);
+      const openerPlan = evaluateEconomicOpener(game);
       const infrastructureOption = infrastructure?.option;
       const homeRamCost = game.topics.fleet?.homeRamUpgradeCost;
       const homeRam = homeRamCost === undefined ? undefined : scoreHomeRam({
@@ -1802,6 +1851,7 @@ export const hacking: FeatureDriver = {
       });
       if (game.topics.fleet) {
         merge(game, "fleet", {
+          openerPlan: openerPlan ?? null,
           ...(homeRam ? { homeRamPlan: {
             cost: game.topics.fleet!.homeRamUpgradeCost!,
             addedRam: homeRam.addedRam,
@@ -1851,6 +1901,11 @@ export const hacking: FeatureDriver = {
     // must not await a multi-second dodge on its 200 ms cadence.
     // `infrastructureInFlight` keeps it single-flight.
     const investment = ramInvestment(ctx);
+    const openerPlan = game.topics.fleet?.openerPlan ?? undefined;
+    if (openerPlan && moneyGrantFor(ctx, `opener-investment:${openerPlan.program}`) + 1e-9 >= openerPlan.cost) {
+      void buyPortOpener(ctx, openerPlan.targetOpeners, `opener-investment:${openerPlan.program}`)
+        .catch((error) => { if (isScriptDeath(error)) throw error; });
+    }
     // Only attempt a rung the grant actually covers.
     //
     // The claim is CONTINUOUS — it asks for `valuableGb * costPerGb`, the
@@ -1942,6 +1997,26 @@ export const hackingModule: FeatureModule = {
           },
         );
       }
+    }
+    const openerPlan = ctx.state.topics.fleet?.openerPlan ?? undefined;
+    if (openerPlan && plan?.primary.action !== "port-opener") {
+      const value = economicOpenerValue(ctx, openerPlan);
+      claims.push(
+        actionRamClaim(ctx, "hacking", "action:port-opener", PORT_OPENER_CALLS),
+        {
+          by: "hacking",
+          id: `opener-investment:${openerPlan.program}`,
+          resource: "money",
+          amount: openerPlan.cost,
+          priority: PRIORITY["income:investment"],
+          mode: "spend",
+          shape: "step",
+          pricing: "economic",
+          value,
+          ratePerSec: openerPlan.addedMoneyPerSec,
+          returnPerDollarSec: openerPlan.addedMoneyPerSec / openerPlan.cost,
+        },
+      );
     }
     const investment = ramInvestment(ctx, ctx.now);
     if (investment) {
