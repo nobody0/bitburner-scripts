@@ -549,7 +549,14 @@ const server = Bun.serve<SocketData, never>({
     if (url.pathname.startsWith("/spec/") && req.method === "GET") {
       const featureId = url.pathname.slice("/spec/".length) as FeatureId;
       if (!FEATURE_IDS.includes(featureId)) return new Response("not found", { status: 404 });
-      const section = extractFeatureSpec(readFileSync(FEATURE_SPEC_PATH, "utf8"), featureId);
+      let catalogue: string;
+      try {
+        catalogue = readFileSync(FEATURE_SPEC_PATH, "utf8");
+      } catch {
+        // A moved or missing catalogue is the drawer's 404, not a 500.
+        return new Response("feature spec missing", { status: 404 });
+      }
+      const section = extractFeatureSpec(catalogue, featureId);
       return section === undefined
         ? new Response("feature spec missing", { status: 404 })
         : new Response(section, {

@@ -992,54 +992,51 @@ export const hackingTab: Tab = {
       ...[farm?.target, farm?.prepTarget].filter((host): host is string => Boolean(host)),
     ]);
     const hostsWithContracts = contractHosts(state);
-    const counts = {
-      rooted: all.filter((r) => r.root === "rooted").length,
-      ready: all.filter((r) => r.root === "ready").length,
-      blocked: all.filter((r) => r.root === "blocked").length,
-      prepped: all.filter((r) => r.atMaxMoney && r.atMinSec).length,
-      active: all.filter((r) => activeHosts.has(r.server.hostname)).length,
-      needsPrep: all.filter((r) => r.root === "rooted" && (r.server.moneyMax ?? 0) > 0 && !(r.atMaxMoney && r.atMinSec)).length,
-      contracts: all.filter((r) => hostsWithContracts.has(r.server.hostname)).length,
-      owned: all.filter((r) => r.server.purchasedByPlayer || r.server.hostname === "home").length,
-      busy: all.filter((r) => (r.server.ramUsed ?? 0) > 0).length,
+    // One predicate per filter chip: the badge count and the row filter are
+    // derived from the same function so they cannot drift apart.
+    const modes: Record<string, (r: Row) => boolean> = {
+      money: (r) => (r.server.moneyMax ?? 0) > 0,
+      rooted: (r) => r.root === "rooted",
+      ready: (r) => r.root === "ready",
+      blocked: (r) => r.root === "blocked",
+      active: (r) => activeHosts.has(r.server.hostname),
+      "needs-prep": (r) => r.root === "rooted" && (r.server.moneyMax ?? 0) > 0 && !(r.atMaxMoney && r.atMinSec),
+      contracts: (r) => hostsWithContracts.has(r.server.hostname),
+      owned: (r) => Boolean(r.server.purchasedByPlayer) || r.server.hostname === "home",
+      busy: (r) => (r.server.ramUsed ?? 0) > 0,
+      prepped: (r) => r.atMaxMoney && r.atMinSec,
+      all: () => true,
     };
+    const badge = (value: string): string => String(all.filter(modes[value]!).length);
     const mode = view("hacking.servers", "money");
     const needle = view("hacking.search").trim().toLowerCase();
     const selectedName = view("hacking.selected", farm?.target ?? farm?.prepTarget ?? "");
     const rows = all
       .filter((r) => {
         if (needle && !r.server.hostname.toLowerCase().includes(needle)) return false;
-        if (mode === "money") return (r.server.moneyMax ?? 0) > 0;
-        if (mode === "rooted") return r.root === "rooted";
-        if (mode === "active") return activeHosts.has(r.server.hostname);
-        if (mode === "needs-prep") return r.root === "rooted" && (r.server.moneyMax ?? 0) > 0 && !(r.atMaxMoney && r.atMinSec);
-        if (mode === "contracts") return hostsWithContracts.has(r.server.hostname);
-        if (mode === "owned") return r.server.purchasedByPlayer || r.server.hostname === "home";
-        if (mode === "busy") return (r.server.ramUsed ?? 0) > 0;
-        if (mode === "ready") return r.root === "ready";
-        if (mode === "blocked") return r.root === "blocked";
-        if (mode === "prepped") return r.atMaxMoney && r.atMinSec;
-        return true;
+        return (modes[mode] ?? modes.all!)(r);
       });
 
-    const selected = all.find((r) => r.server.hostname === selectedName)
-      ?? all.find((r) => activeHosts.has(r.server.hostname))
-      ?? rows[0]
-      ?? all[0];
+    // The inspector's subject comes from the VISIBLE rows: a selection the
+    // active filter excludes must not render detail under a table (or an
+    // empty-table note) that does not contain it.
+    const selected = rows.find((r) => r.server.hostname === selectedName)
+      ?? rows.find((r) => activeHosts.has(r.server.hostname))
+      ?? rows[0];
     const serverControls =
       filters(
         "hacking.servers",
         [
           { value: "money", label: "worth hacking" },
-          { value: "rooted", label: "rooted", badge: String(counts.rooted), title: "root access held" },
-          { value: "ready", label: "rootable", badge: String(counts.ready), title: "rootable now" },
-          { value: "blocked", label: "blocked", badge: String(counts.blocked), title: "needs more skill or port openers" },
-          { value: "active", label: "active", badge: String(counts.active), title: "farm or preparation pipeline" },
-          { value: "needs-prep", label: "needs prep", badge: String(counts.needsPrep), title: "rooted money server below max money or above min security" },
-          { value: "contracts", label: "contracts", badge: String(counts.contracts), title: "queued or quarantined coding contracts" },
-          { value: "owned", label: "owned", badge: String(counts.owned), title: "home and purchased servers" },
-          { value: "busy", label: "RAM in use", badge: String(counts.busy), title: "server currently using RAM" },
-          { value: "prepped", label: "prepped", badge: String(counts.prepped), title: "at max money and min security" },
+          { value: "rooted", label: "rooted", badge: badge("rooted"), title: "root access held" },
+          { value: "ready", label: "rootable", badge: badge("ready"), title: "rootable now" },
+          { value: "blocked", label: "blocked", badge: badge("blocked"), title: "needs more skill or port openers" },
+          { value: "active", label: "active", badge: badge("active"), title: "farm or preparation pipeline" },
+          { value: "needs-prep", label: "needs prep", badge: badge("needs-prep"), title: "rooted money server below max money or above min security" },
+          { value: "contracts", label: "contracts", badge: badge("contracts"), title: "queued or quarantined coding contracts" },
+          { value: "owned", label: "owned", badge: badge("owned"), title: "home and purchased servers" },
+          { value: "busy", label: "RAM in use", badge: badge("busy"), title: "server currently using RAM" },
+          { value: "prepped", label: "prepped", badge: badge("prepped"), title: "at max money and min security" },
           { value: "all", label: "all", badge: String(all.length) },
         ],
         "money",

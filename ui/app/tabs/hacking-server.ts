@@ -1,4 +1,5 @@
 import type { Server } from "@ns";
+import { coreBonus } from "../../../shared/formulas.ts";
 import type { RootState } from "../../../shared/features/servers.ts";
 import { definitions, meter, note, table, tiles } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
@@ -82,7 +83,7 @@ export function serverInspector(row: ServerExplorerRow, state: ProjectedState): 
   const minSecurity = server.minDifficulty;
   const currentSecurity = server.hackDifficulty;
   const cores = server.cpuCores ?? 1;
-  const coreBonus = 1 + (Math.max(1, cores) - 1) / 16;
+  const supportBonus = coreBonus(Math.max(1, cores));
   const flags = [
     server.purchasedByPlayer ? "purchased" : "network",
     server.backdoorInstalled ? "backdoored" : "no backdoor",
@@ -121,7 +122,7 @@ export function serverInspector(row: ServerExplorerRow, state: ProjectedState): 
     tiles([
       { label: "assignment", value: role.label },
       { label: "root", value: row.root },
-      { label: "RAM", value: `${fmtRam(server.ramUsed ?? 0)} / ${fmtRam(server.maxRam ?? 0)}`, sub: `${cores} core(s) · ${coreBonus.toFixed(4)}x support effect` },
+      { label: "RAM", value: `${fmtRam(server.ramUsed ?? 0)} / ${fmtRam(server.maxRam ?? 0)}`, sub: `${cores} core(s) · ${supportBonus.toFixed(4)}x support effect` },
       { label: "contracts", value: String(contracts + quarantined), sub: flags },
     ]) +
     `<div class="server-detail-grid">` +

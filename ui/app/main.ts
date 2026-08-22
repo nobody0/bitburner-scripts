@@ -48,6 +48,8 @@ let active: TabId = "overview";
 let state: ProjectedState = emptyState();
 let specOpen = false;
 let specRequest = 0;
+/** Rendered HTML per feature id: renderSpec runs on every telemetry render
+ * while the drawer is open, so the markdown parse must not be repeated. */
 const specCache = new Map<string, string>();
 const specPending = new Map<string, Promise<string>>();
 
@@ -102,7 +104,7 @@ async function renderSpec(): Promise<void> {
   $("specpath").textContent = `spec/strategy/feature-catalog.md · ${feature.id}`;
   const cached = specCache.get(feature.id);
   if (cached !== undefined) {
-    morph($("specbody"), renderMarkdown(cached));
+    morph($("specbody"), cached);
     return;
   }
 
@@ -127,9 +129,10 @@ async function renderSpec(): Promise<void> {
   }
   try {
     const markdown = await pending;
-    specCache.set(feature.id, markdown);
+    const rendered = renderMarkdown(markdown);
+    specCache.set(feature.id, rendered);
     if (request === specRequest && specOpen && active === feature.id) {
-      morph($("specbody"), renderMarkdown(markdown));
+      morph($("specbody"), rendered);
     }
   } catch (error) {
     if (request === specRequest) {
