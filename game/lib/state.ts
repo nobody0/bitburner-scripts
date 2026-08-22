@@ -43,6 +43,19 @@ export interface GameState {
   /** Wall-clock time of the last unconditional ns.getPlayer snapshot. Kept
    * private so time-sensitive strategies can advance totalPlaytime honestly. */
   playerObservedAt?: number;
+  /** Something just changed the player's MULTIPLIERS, so the cadenced snapshot
+   * below is describing a player who no longer exists. Set by any feature whose
+   * action moves `mults` -- an IPvGO game ending, an augmentation install --
+   * and cleared by the controller's next refresh.
+   *
+   * This exists because a stale multiplier is not merely imprecise to the
+   * batcher, it is actively wrong: hack/grow/weaken durations are derived from
+   * `hacking_speed`, the dispatcher pads each op with
+   * `landing - now - duration`, and an overstated duration lands the op early
+   * in proportion to its own length. A feature that can hand over the fresh
+   * snapshot it already holds should do that instead (the Go driver does); this
+   * is the backstop for the ones that cannot. */
+  playerDirty?: boolean;
   /** Coding contracts rejected once are never automatically retried. Kept
    * outside topics so the full quarantine never reaches telemetry. */
   contractQuarantine?: Record<string, ContractFailure>;

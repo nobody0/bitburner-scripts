@@ -927,6 +927,24 @@ function syncTopology(
   return { fleetGb, largestBlockGb, hostBlocksGb, prepWaveGb, prepFreeGb, prepWaveInFlight, effectiveShareThreadsPerGb };
 }
 
+/** The last landing still expected on a target, or -Infinity when nothing is in
+ * flight there.
+ *
+ * Walks the target's ledger rather than maintaining an index, because it is
+ * read on exactly one kind of pass: the one that re-anchors a pipeline after
+ * `lastAnchor` was reset. An index would have to survive `untrackOp` removing
+ * the current maximum, which costs a rescan on every completion — the hot path
+ * — to save a walk on a rare one. */
+function lastLandingOn(memory: DispatchMemory, target: string): number {
+  let latest = -Infinity;
+  const onTarget = memory.byTarget.get(target);
+  if (!onTarget) return latest;
+  for (const tracked of onTarget.values()) {
+    if (tracked.landing !== undefined && tracked.landing > latest) latest = tracked.landing;
+  }
+  return latest;
+}
+
 /** The logical weaken landing a fragment belongs to. A spread weaken lands as
  * several calls at one instant and only its last fragment proves min security,
  * so the group — not the op — is the unit that settles. */
@@ -3053,10 +3071,28 @@ function planJitBatches(
     // A cheap floor only: the exact one depends on batchWorstDifficulty, which
     // is not known until the batch is sized, so any startAt still left in the
     // past is corrected by the shift below.
+    //
+    // The third term only ever binds on a RE-ANCHOR. Within a pipeline
+    // `lastAnchor` is monotone (every anchor is at least one interval past the
+    // previous one), so a shrinking interval cannot walk a new landing back
+    // into an old one. After a reset (`abandonJitPending` and friends set
+    // `lastAnchor` to -Infinity) the floor is just `now + weakenMs`, and a
+    // weaken that has just got SHORTER — which is exactly what an IPvGO win
+    // against Illuminati does, and is also a plausible cause of the desync
+    // reset that got us here — places that floor INSIDE the tail of the
+    // abandoned pipeline, whose landings were laid out on the longer horizon.
+    // Two effects a few milliseconds apart are not ordered by anything, so the
+    // new batch's hack can land under the old pipeline's cover instead of its
+    // own. Clearing the last in-flight landing by one interval costs nothing
+    // when nothing is in flight, which is the common re-anchor.
     let anchor = Math.max(
       now + weakenMs,
       memory.lastAnchor + schedule.intervalMs,
     );
+    if (memory.lastAnchor === -Infinity) {
+      const tail = lastLandingOn(memory, server.hostname);
+      if (tail > -Infinity) anchor = Math.max(anchor, tail + schedule.intervalMs);
+    }
     const predicted = predictAtLanding(
       ctx,
       statics,

@@ -1984,10 +1984,32 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           // cheat path. Observe this public state unconditionally so offline
           // bonus-cycle accounting never depends on speculative continuations.
           const responseBonusCycles = stubNs["go"]["getGameState"]().bonusCycles;
-          // Resume turns have no worker commit to confirm and their RAM claim
-          // intentionally excludes getPlayer. Only sample the compact clock
-          // confirmation after a neural move actually armed the worker.
-          const responsePlayer = predictionParentId ? stubNs["getPlayer"]() : undefined;
+          // Two unrelated reasons to sample the player here, and the union is
+          // deliberate: the compact clock confirmation a neural move's armed
+          // worker needs, and the multiplier step a FINISHED game just applied.
+          //
+          // Upstream recomputes the Go bonuses exactly once, at game end
+          // (Go/boardAnalysis/scoring.ts calls Player.applyEntropy, which runs
+          // updateGoMults), so this is the only instant at which the new
+          // hacking_speed exists and the cheapest one at which to observe it.
+          // Waiting for the controller's 2 s player cadence instead leaves the
+          // batcher planning hack/grow/weaken durations that are too LONG, and
+          // an overstated duration understates additionalMsec, so every op
+          // launched in that window lands early -- weaken by four times the
+          // hack, which shears the batch out of order rather than shifting it.
+          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Go/boardAnalysis/scoring.ts#L86-L98
+          //
+          // A RESUME turn is the one exclusion, and it is a HARD one: its grant
+          // (goMethods) is deliberately free of getPlayer, so calling it here
+          // would spend the whole of PRICE_MARGIN_GB on an undeclared 0.5 GB
+          // call and leave the stub with nothing between it and a RAM USAGE
+          // ERROR. A resume that ends the game raises `playerDirty` after the
+          // merge instead, which is exactly what that flag exists for.
+          const responsePlayer =
+            predictionParentId
+            || (response?.type === "gameOver" && action.type !== "resume")
+              ? stubNs["getPlayer"]()
+              : undefined;
           const responseObservedAt = responsePlayer ? Date.now() : undefined;
           return {
             response,
@@ -2093,9 +2115,27 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           rawOutcome.responsePlayer.totalPlaytime,
           rawOutcome.responseObservedAt,
         );
+      }
+      // Outside the confirm block on purpose. The worker commit needs a
+      // predictionParentId; the STORE only needs a fresher snapshot than the
+      // one it holds, and a game-over turn produces one with no prediction to
+      // confirm. The store is the write target for every acquisition path
+      // (game/lib/state.ts), so publishing here is what lets the batcher's
+      // launch context see the new hacking_speed on its very next pass instead
+      // of up to a full player cadence later.
+      if (rawOutcome.responsePlayer && rawOutcome.responseObservedAt !== undefined) {
         set(ctx.state, "player", rawOutcome.responsePlayer);
         ctx.state.playerObservedAt = rawOutcome.responseObservedAt;
       }
+      // Deliberately NOT followed by a `signalWake`. The dispatcher re-derives
+      // durations once per pass, so a fresh snapshot still leaves up to one
+      // TICK_MS of batches planned on the old speed, and poking the landing
+      // wake here would collapse that to the next continuation. Measured on the
+      // scenario-jit hacking_speed-step row it did not: intra-batch shear was
+      // 3.45 ms without the wake and 4.18 ms with it, which is run-to-run noise
+      // on a fixture whose fleet trajectory differs between runs. A coupling
+      // from the Go driver into the hacking wake channel has to be paid for by
+      // a measurement, and this one was not.
       const predicted = decision.forecast ?? [];
       const predictionTotal = predicted.reduce((sum, candidate) => sum + candidate.count, 0);
       const matching = predicted.reduce((sum, candidate) => {
@@ -2191,6 +2231,13 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         : rawOutcome.predictionParentId;
       if (goRehydrate) resetGoPlaybookLine();
       goTurnReadyAt = response.type === "gameOver" ? undefined : rawOutcome.responseReadyAt;
+      // The other half of the publish above, not merely a backstop for it. A
+      // game that ends on a RESUME has no getPlayer in its grant on purpose
+      // (see goMethods), so this is the only way that path learns its
+      // multipliers moved; it also covers a move/pass turn whose snapshot was
+      // lost. Either way the Node Power effect is already applied to the real
+      // player, so the held one is wrong until the controller re-reads it.
+      if (response.type === "gameOver" && !rawOutcome.responsePlayer) ctx.state.playerDirty = true;
       turnCompleted = true;
       continueImmediately = response.type !== "gameOver";
       goContinuationReady = false;
@@ -2267,14 +2314,26 @@ const stanek: FeatureDriver = {
     if (first === undefined) return;
     const placement = topic.fragments.find((entry) => entry.id === first && entry.chargeable !== false);
     if (!placement) return;
-    await act(
+    const charged = await act(
       ctx,
       "stanek",
       "charge",
       ["stanek.chargeFragment"],
-      async (stubNs: NS) => await stubNs["stanek"]["chargeFragment"](placement.x, placement.y),
+      async (stubNs: NS) => {
+        await stubNs["stanek"]["chargeFragment"](placement.x, placement.y);
+        return true;
+      },
       () => ({ ok: true, detail: `charged fragment ${first}` }),
     );
+    // A charge raises the gift's power, and the gift multiplies hacking_speed
+    // among everything else, so the held player snapshot's operation durations
+    // are now wrong. Unlike the Go driver this action's grant has no getPlayer
+    // to hand over, so it asks the controller for one.
+    //
+    // Only on a charge that actually RAN: a queued or refused dodge changed no
+    // multiplier, and flagging it anyway would ask the controller for a fresh
+    // getPlayer on every tick for as long as the broker keeps denying stanek.
+    if (charged) ctx.state.playerDirty = true;
   },
 };
 
@@ -3808,6 +3867,12 @@ function goMethods(
       ? ["getPlayer", "sleep", "go.getGameState", "go.cheat.playTwoMoves"]
       : ["getPlayer", "sleep", "go.getGameState", "go.makeMove", "go.passTurn"];
   }
+  // Deliberately still free. A resume reattaches to White's turn, and White
+  // passing second DOES end the game and apply the Node Power multipliers — but
+  // both calls here cost zero dynamic RAM, and adding getPlayer would turn the
+  // one Go action the broker can always admit into a 0.5 GB request. The
+  // game-over branch in goTick raises `playerDirty` instead, which buys the
+  // same refreshed multipliers one controller tick later for nothing.
   if (action === "resume") return ["go.getGameState", "go.opponentNextTurn"];
   if (action === "newGame") {
     return alignedStart

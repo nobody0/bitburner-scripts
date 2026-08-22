@@ -5,7 +5,7 @@ import { parseGoals } from "../../shared/goals/presets.ts";
 import { makeHackContext } from "../../shared/formulas.ts";
 import { staticsFromRolls } from "../../shared/strategy/bounds.ts";
 import { solveCycle } from "../../shared/strategy/targeting.ts";
-import { HWGW_MIN_INTERVAL_MS } from "../../shared/strategy/jit.ts";
+import { HWGW_MIN_INTERVAL_MS, MINIMUM_LANDING_GAP_MS } from "../../shared/strategy/jit.ts";
 import { calculateExp } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
 import { getBitNodeMultipliers } from "../vendor/bitburner/src/BitNode/BitNodeMults.ts";
 import { SIMULATOR_MODEL_VERSION, SIMULATOR_VENDOR_COMMIT } from "../fidelity.ts";
@@ -594,15 +594,25 @@ runScenario({
   },
 });
 
-/** SKILL JUMP — the disturbance case. `runGame` exposes no supported mid-run
- * person mutation, so rather than editing state the fixture uses a real
+/** HACKING_SPEED STEP — the disturbance case. `runGame` exposes no supported
+ * mid-run person mutation, so rather than editing state the fixture uses a real
  * unpredictable duration change: it starts one experience point below level 250
  * and lets a modelled Go win against Illuminati raise `hacking_speed` while a
  * healthy pipeline has calls in flight. Nothing is fabricated; the question is
- * purely how cleanly we recover when every in-flight duration shifts at once. */
+ * purely how cleanly we recover when every in-flight duration shifts at once.
+ *
+ * The `jit-skill-jump` id below is the ledger key, kept for baseline
+ * continuity. It is a misnomer: the level boundary only makes the run's
+ * *timing* unpredictable, and every recorded run has raised hacking_speed
+ * without the raw skill moving at all. What this row measures is an IPvGO
+ * reward landing on a running batcher. */
 runScenario({
   id: "jit-skill-jump",
-  title: "scenario: JIT mid-batch skill jump",
+  // The lane case name, unlike the ledger id above, is free to say what this
+  // actually is. Illuminati Node Power multiplies `hacking_speed`
+  // (Go/effects/effect.ts calculateMults); the locked skill-1000 target is what
+  // creates the hacking-speed demand that makes Go choose that reward.
+  title: "scenario: JIT mid-batch hacking_speed step (IPvGO / Illuminati)",
   what: "recovers target state, window completion, and income after durations shift",
   steadyFromMs: 2 * 60_000,
   // Measured 79.6s and 80.4s wall-clock when it passes, but this fixture also
@@ -656,11 +666,24 @@ runScenario({
       ? final.money / final.moneyMax
       : 0;
 
+    // The signature of a step planned on a STALE multiplier, and the reason
+    // this fixture reads the by-kind split rather than the aggregate. Grow and
+    // weaken are 3.2x and 4x the hack time, so a duration model that is wrong
+    // by a ratio is wrong by four times as much on a weaken as on that same
+    // batch's hack: the batch does not shift, it shears, and the aggregate mean
+    // -- which averages the two -- is the one number that cannot see it.
+    const byKind = final?.landingErrorByKind;
+    const meanOf = (kind: "hack" | "grow" | "weaken"): number => byKind?.[kind]?.meanMs ?? 0;
+    const shearMs = Math.abs(meanOf("weaken") - meanOf("hack"));
+    const skipped = final?.batchesSkipped ?? 0;
+
     console.info(
       `[jit-skill-jump] jump=${jump?.from ?? 0}->${jump?.hacking ?? 0}`
       + ` speed=${(jump?.hackingSpeed ?? 1).toFixed(6)} at=${(jump?.atMs ?? 0) / 1_000}s`
       + ` post-windows=${postCompletion.toFixed(6)} post-money/sec=$${postRate.toExponential(6)}`
-      + ` final-security-gap=${securityGap.toFixed(6)} final-money-share=${moneyShare.toFixed(6)}`,
+      + ` final-security-gap=${securityGap.toFixed(6)} final-money-share=${moneyShare.toFixed(6)}`
+      + ` landing-error-ms h=${meanOf("hack").toFixed(4)} g=${meanOf("grow").toFixed(4)}`
+      + ` w=${meanOf("weaken").toFixed(4)} shear=${shearMs.toFixed(4)} skipped=${skipped}`,
     );
 
     expect(pressure.demandByTarget.size).toBeGreaterThan(0);
@@ -675,6 +698,51 @@ runScenario({
     expect(postLaunches).toBeGreaterThan(0);
     expect(postCompletion).toBeGreaterThanOrEqual(0.8);
     expect(postRate).toBeGreaterThan(0);
+    // The step must not separate a batch's own effects by even one landing gap.
+    // Below that the roles cannot be reordered, which is the only thing the
+    // grid has to guarantee.
+    //
+    // MEASURED, on this fixture's ~4.3% Illuminati step. Before the Go driver
+    // published its post-game player snapshot the controller learned the new
+    // multiplier on its ordinary 2 s cadence, and the per-kind means came out
+    // h=-4.24 g=-10.60 w=-15.50 ms -- every op early, in proportion to its own
+    // length, with 11.26 ms between a batch's hack and its own W2. That is more
+    // than two landing gaps: the batch reordered, and the run finished holding
+    // 85.2% of the target's money. With the snapshot published at game end the
+    // same step gives h=-1.42 g=-4.39 w=-4.87, shear 3.45 ms, and 100.0%.
+    //
+    // Income is deliberately not compared between those two runs: they diverge
+    // into different fleets (peak-usable 133 TB against 64 TB), so only the
+    // within-batch geometry and the band are like for like.
+    //
+    // Asserted present first: `meanOf` reads 0 for a kind the telemetry never
+    // reported, so an emitter that stopped publishing the split would make the
+    // shear below exactly 0 and this row would pass while measuring nothing.
+    expect(byKind?.hack).toBeDefined();
+    expect(byKind?.weaken).toBeDefined();
+    expect(shearMs).toBeLessThan(MINIMUM_LANDING_GAP_MS);
+    // `skipped` is reported, not ratcheted: it varied 6762 / 7164 / 8487 across
+    // three runs whose fleet trajectories differed, which is wider than the
+    // ledger's default 5% slack, so a record on one seed would fail honest runs.
+    //
+    // This row currently PRINTS an improvement it has deliberately not recorded
+    // (medianIdleShare 0.655907 -> 0.4116, moneyPerSec 1.62e7 -> 1.4486e8), and
+    // that is not an oversight. Two reasons, both measured rather than assumed:
+    //
+    //   1. The gain is not this change's. The same row on the commit before the
+    //      post-game player publish earns MORE, $1.6199e8/s, so recording
+    //      $1.4486e8 would pin the record BELOW what the tree already achieves
+    //      -- the exact inversion the ledger exists to prevent.
+    //   2. Neither figure is trustworthy on its own. That earlier run FAILED
+    //      this row's own contention premise (offered 112346.7 GB against
+    //      peak-usable 133236.2 GB), and the harness checks premises before
+    //      believing any number it measured.
+    //
+    // What that leaves is a real question -- whether publishing the snapshot
+    // earlier costs this fixture income, or whether the two runs simply bought
+    // different fleets -- which one seed cannot answer either way. BB_JIT_SEED
+    // is the hook for answering it; until someone does, the honest record is
+    // the old one.
   },
 });
 

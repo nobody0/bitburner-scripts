@@ -145,9 +145,14 @@ export async function runController(
     }
     reportedRespawnFailure = undefined;
 
-    if (tick % PLAYER_EVERY_TICKS === 0) {
+    // `playerDirty` short-circuits the cadence rather than replacing it: a
+    // multiplier change makes the held snapshot wrong, not just old, and the
+    // batcher derives every operation duration from it. Costs one extra 0.5 GB
+    // getPlayer on the tick after such a change and nothing otherwise.
+    if (tick % PLAYER_EVERY_TICKS === 0 || state.playerDirty) {
       set(state, "player", ns.getPlayer());
       state.playerObservedAt = Date.now();
+      state.playerDirty = false;
     }
 
     if (tick % SWEEP_EVERY_TICKS === 0) {

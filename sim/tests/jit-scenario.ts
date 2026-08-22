@@ -1,6 +1,13 @@
 import { runGame, type GameRunOptions, type GameRunResult } from "../game-run.ts";
 import { AGGREGATE_GO_MODEL } from "../fidelity.ts";
 
+export interface LandingErrorSample {
+  meanMs: number;
+  minMs: number;
+  maxMs: number;
+  maxAbsMs: number;
+}
+
 export interface JitSample {
   atMs: number;
   target?: string;
@@ -15,7 +22,14 @@ export interface JitSample {
   batchesSkipped: number;
   missedWindow: { deadline: number; "arrival-security": number; "arrival-money": number; placement: number };
   /** Observed minus planned landing, ms. Absent until an op has landed. */
-  landingError?: { meanMs: number; minMs: number; maxMs: number; maxAbsMs: number };
+  landingError?: LandingErrorSample;
+  /** The same distribution split by kind. The aggregate cannot tell "one role
+   * is systematically off" from "everything jitters", and those have opposite
+   * causes. A multiplier step is the sharpest example: grow and weaken are 3.2x
+   * and 4x the hack time, so planning on a stale `speedDenom` moves a weaken
+   * FOUR TIMES as far as its own batch's hack, which shears the landing order
+   * apart. Aggregate mean hides it; this split is the signature. */
+  landingErrorByKind?: Partial<Record<"hack" | "grow" | "weaken", LandingErrorSample>>;
   inFlightHack: number;
   inFlightGrow: number;
   inFlightWeaken: number;
@@ -190,6 +204,9 @@ export async function runJitScenario(options: JitRunOptions): Promise<JitRun> {
         batchesSkipped?: number;
         missedWindow?: { deadline?: number; "arrival-security"?: number; "arrival-money"?: number; placement?: number };
         landingError?: { meanMs?: number; minMs?: number; maxMs?: number; maxAbsMs?: number };
+        landingErrorByKind?: Partial<Record<"hack" | "grow" | "weaken", {
+          meanMs?: number; minMs?: number; maxMs?: number; maxAbsMs?: number;
+        }>>;
         inFlight?: { hack?: number; grow?: number; weaken?: number };
         launched?: { hack?: number };
         landed?: { hack?: number };
@@ -231,6 +248,22 @@ export async function runJitScenario(options: JitRunOptions): Promise<JitRun> {
               maxAbsMs: data.landingError.maxAbsMs ?? 0,
             } }
           : last?.landingError !== undefined ? { landingError: last.landingError } : {}),
+        ...(data.landingErrorByKind
+          ? { landingErrorByKind: Object.fromEntries(
+              (["hack", "grow", "weaken"] as const)
+                .map((kind) => [kind, data.landingErrorByKind?.[kind]] as const)
+                .filter((entry): entry is readonly [typeof entry[0], NonNullable<typeof entry[1]>] =>
+                  entry[1] !== undefined)
+                .map(([kind, d]) => [kind, {
+                  meanMs: d.meanMs ?? 0,
+                  minMs: d.minMs ?? 0,
+                  maxMs: d.maxMs ?? 0,
+                  maxAbsMs: d.maxAbsMs ?? 0,
+                }]),
+            ) }
+          : last?.landingErrorByKind !== undefined
+            ? { landingErrorByKind: last.landingErrorByKind }
+            : {}),
         inFlightHack: data.inFlight?.hack ?? last?.inFlightHack ?? 0,
         inFlightGrow: data.inFlight?.grow ?? last?.inFlightGrow ?? 0,
         inFlightWeaken: data.inFlight?.weaken ?? last?.inFlightWeaken ?? 0,

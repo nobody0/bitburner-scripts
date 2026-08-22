@@ -13,7 +13,7 @@ import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/
 import { planTake, type PoolRole } from "../../shared/strategy/worker-pool.ts";
 import { expForSkill } from "../../shared/formulas.ts";
 import { PREPPED_MONEY_FRACTION, PREPPED_SEC_TOLERANCE, solvePrep } from "../../shared/strategy/targeting.ts";
-import type { Action, CompletionEvent, HgwAction } from "../../shared/world.ts";
+import type { Action, CompletionEvent, HgwAction, WorldView } from "../../shared/world.ts";
 import { WORKER_RAM } from "../../shared/world.ts";
 import type { ServerSpec } from "../core/effects.ts";
 import { calculateExp } from "../vendor/bitburner/src/PersonObjects/formulas/skill.ts";
@@ -66,7 +66,19 @@ function prepareJitTestWorld(world: SimWorld): void {
   target.moneyAvailable = target.moneyMax;
 }
 
-function harness(options: { seed?: number; homeRam?: number; network?: ServerSpec[]; plan?: DispatchOptions; setup?: (world: SimWorld) => void } = {}): Harness {
+function harness(options: {
+  seed?: number;
+  homeRam?: number;
+  network?: ServerSpec[];
+  plan?: DispatchOptions;
+  setup?: (world: SimWorld) => void;
+  /** Interpose on the view the planner sees. The real driver never reads the
+   * player live: it reads `state.topics.player`, a snapshot the controller
+   * refreshes on a cadence, so a scenario about a snapshot going stale has to
+   * be able to reproduce a stale snapshot. Default is identity, which is the
+   * always-fresh case. */
+  view?: (view: WorldView, world: SimWorld) => WorldView;
+} = {}): Harness {
   const world = new SimWorld({
     seed: options.seed ?? 1,
     network: options.network ?? DEFAULT_NETWORK,
@@ -94,7 +106,8 @@ function harness(options: { seed?: number; homeRam?: number; network?: ServerSpe
     }
     const inbox = pending;
     pending = [];
-    const result = planFarm(world.view(), memory, inbox, options.plan);
+    const live = world.view();
+    const result = planFarm(options.view ? options.view(live, world) : live, memory, inbox, options.plan);
     memory = result.memory;
     const failed: number[] = [];
     let executed = 0;
@@ -576,6 +589,89 @@ describe("HWGW dispatcher", () => {
       expect(at(hack.at + 3 * SPACER_MS, "weaken")).toBe(true);
     }
   });
+
+  /** An IPvGO win against Illuminati multiplies `hacking_speed`
+   * (Go/effects/effect.ts calculateMults), which divides every hack, grow and
+   * weaken duration at once. It is a discrete step applied at game end — a
+   * moment our own Go driver causes.
+   *
+   * That is a benefit: shorter operations hold their RAM for less time, so the
+   * same fleet sustains more depth. These two cases pin the condition on which
+   * it IS one. The engine freezes a duration at the instant hack/grow/weaken is
+   * invoked, so an op already in flight keeps the landing it was planned for;
+   * only ops planned AFTER the step can be got wrong, and only if the planner
+   * is still looking at the old multiplier.
+   *
+   * The converse -- what a STALE multiplier costs -- is not asserted here. Its
+   * arithmetic is exact and belongs to `tests/jit-speed-step.test.ts`, which
+   * pins it in the default suite for the price of no simulation at all; and its
+   * end-to-end consequence is `scenario-jit`'s hacking_speed-step row, which
+   * runs the real controller and therefore the real player-snapshot cadence.
+   * This fixture farms for about a minute of virtual time, which is shorter
+   * than the weaken it would have to plan stale, so a stale window wide enough
+   * to matter here outlives the pipeline it was supposed to disturb.
+   * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L537-L561 */
+  const SPEED_STEP = 1.25;
+  /** Inside the window where this fixture actually runs a settled pipeline —
+   * its first batch lands around 251 s and it farms for about a minute after
+   * that, so a step here has complete batches on both sides of it. */
+  const STEP_AT_MS = 280_000;
+
+  /** 8 GB of home is what makes the pipeline dense enough to have batches
+   * either side of a step: at 256 GB this fixture completes a single HWGW
+   * batch in fifteen minutes of virtual time, which can neither straddle a
+   * step nor recover from one. */
+  const stepHarness = (
+    view?: (view: WorldView, world: SimWorld) => WorldView,
+  ): Harness => harness({
+    homeRam: 8_192,
+    network: JIT_TEST_NETWORK,
+    setup: prepareJitTestWorld,
+    ...(view ? { view } : {}),
+  });
+
+  /** The complete batches a run produced, as hack landings whose three
+   * covering effects can be looked for one spacer apart. Observed from the
+   * world, never recomputed from the planner's own arithmetic. */
+  function gridOf(h: Harness): { hacks: { at: number }[]; onGrid: (hack: { at: number }) => boolean } {
+    const landings = h.completions.filter((c) => c.batched).sort((a, b) => a.at - b.at);
+    const lastLanding = landings.at(-1)?.at ?? -Infinity;
+    const at = (time: number, kind: string): boolean =>
+      landings.some((l) => l.kind === kind && Math.abs(l.at - time) < 1e-6);
+    return {
+      hacks: landings.filter((l) => l.kind === "hack" && l.at + 3 * SPACER_MS <= lastLanding),
+      onGrid: (hack) =>
+        at(hack.at + SPACER_MS, "weaken")
+        && at(hack.at + 2 * SPACER_MS, "grow")
+        && at(hack.at + 3 * SPACER_MS, "weaken"),
+    };
+  }
+
+  soak.test("a hacking_speed step keeps every batch on its landing grid", () => {
+    let steppedAt: number | undefined;
+    const h = stepHarness((view, world) => {
+      if (steppedAt === undefined && world.clock.now() > STEP_AT_MS) {
+        steppedAt = world.clock.now();
+        world.person.mults.hacking_speed *= SPEED_STEP;
+        world.recalculateSkills();
+      }
+      return view;
+    });
+    h.run(900_000);
+    expect(steppedAt).toBeDefined();
+
+    const { hacks, onGrid } = gridOf(h);
+    // The step has to fall inside the farming window, or this proves nothing.
+    expect(hacks.some((l) => l.at < steppedAt!)).toBe(true);
+    expect(hacks.some((l) => l.at > steppedAt!)).toBe(true);
+    for (const hack of hacks) expect(onGrid(hack)).toBe(true);
+
+    // A sheared batch shows up here too: an uncovered hack or grow ratchets
+    // security above the prepped tolerance.
+    for (const sample of h.samples.filter((s) => s.maxMoney > 0)) {
+      expect(sample.sec).toBeLessThanOrEqual(sample.minSec + PREPPED_SEC_TOLERANCE);
+    }
+  }, 180_000);
 
   soak.test("hgw mode lands H -> G -> W, one spacer apart, and stays in band", () => {
     const h = harness({ homeRam: 256, plan: { modeOverride: "hgw" } });
