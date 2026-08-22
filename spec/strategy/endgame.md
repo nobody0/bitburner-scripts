@@ -16,7 +16,7 @@ acquire The Red Pill; Bladeburner is the independent no-pill proof:
 | `daedalus` | 30 augs (node-dependent) → $100b → skill gate → 2.5m rep → Red Pill → install → regrow | `endgame.ts` |
 | `gang` | in BN2, create a gang → 2.5m gang-faction rep → Red Pill → install → regrow | `endgame.ts` |
 | `labyrinth` | walk the darknet labyrinth (BN15 or SF15; not BN8) → Red Pill → install → regrow | `endgame.ts` |
-| `bladeburner` | all 20 black operations — no pill, no hacking requirement | `endgame.ts` |
+| `bladeburner` | all 21 black operations — no pill, no hacking requirement | `endgame.ts` |
 
 Once per progression cadence (60 s) the `progression` module's **refresh**:
 

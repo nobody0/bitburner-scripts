@@ -6,15 +6,20 @@ folder describes what those features are for.
 
 | Document | Answers |
 |---|---|
-| [`bitnodes/bn01.md` … `bn15.md`](bitnodes/) | "What are the rules in this node, and what does that do to our plan?" |
+| [`bitnodes/bn01.md` … `bn15.md`](bitnodes/) | "What are this node's rules — what it unlocks, its multiplier table, its Source-File?" |
+| [`features/`](features/README.md) | "What is this feature, how does it unlock, what are its rules, and what makes it hard?" |
 | [`endgame.md`](endgame.md) | "Which way do we finish this node, how long will that take, and how does the guess steer the features?" |
 | [`speedrun-benchmark.md`](speedrun-benchmark.md) | "What historical order and times must the full Source-File run beat, under which rules?" |
-| [`feature-catalog.md`](feature-catalog.md) | "When does this feature unlock, what does it need, what does it give back?" |
 | [`graph.md`](graph.md) | "What depends on what, and which resources are contended?" |
 
-The immediate target is **BN1 near-perfect** — [`bitnodes/bn01.md`](bitnodes/bn01.md)
-is the only note written as a playbook. The other fourteen exist so the BN1
-plan is written knowing which of its assumptions are BN1-only.
+**Two kinds of file, and the split is strict.** A BitNode note is a fact sheet
+about one node: what it unlocks, its multipliers, its Source-File, and nothing
+else. A feature file is everything about one feature, across all fifteen nodes.
+Interpretation, route choice and plan live in `endgame.md` and `graph.md`. A fact
+belongs to exactly one file; the others link to it.
+
+The immediate target is **BN1 near-perfect**. The other fourteen notes exist so
+the BN1 plan is written knowing which of its assumptions are BN1-only.
 
 ## Sourcing
 

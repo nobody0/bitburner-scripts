@@ -21,7 +21,7 @@ import { runSync, syncOptionsFrom, type SyncOptions } from "../tools/sync.ts";
 import { RunStore } from "./store.ts";
 import type { ArtifactMetadata, RunCatalogEntry } from "../shared/run-catalog.ts";
 import { FEATURE_IDS, type FeatureId } from "../shared/features/ids.ts";
-import { extractFeatureSpec, FEATURE_SPEC_FILE } from "./specs.ts";
+import { featureSpecFile } from "./specs.ts";
 
 /** Telemetry hub: one Bun.serve hosting
  *  - ws /ingest — game scripts and sim runs push WireMessages in
@@ -48,7 +48,7 @@ const PUBLIC_DIR = modulePath("./public");
 const APP_DIR = modulePath("./app");
 const APP_ENTRY = path.join(APP_DIR, "main.ts");
 const REPO_ROOT = modulePath("..");
-const FEATURE_SPEC_PATH = path.join(REPO_ROOT, FEATURE_SPEC_FILE);
+// Feature specs are read per feature id; see ./specs.ts.
 const RETENTION_MS = 24 * 3_600_000;
 const SWEEP_EVERY_MS = 3_600_000;
 
@@ -549,22 +549,19 @@ const server = Bun.serve<SocketData, never>({
     if (url.pathname.startsWith("/spec/") && req.method === "GET") {
       const featureId = url.pathname.slice("/spec/".length) as FeatureId;
       if (!FEATURE_IDS.includes(featureId)) return new Response("not found", { status: 404 });
-      let catalogue: string;
+      let spec: string;
       try {
-        catalogue = readFileSync(FEATURE_SPEC_PATH, "utf8");
+        spec = readFileSync(path.join(REPO_ROOT, featureSpecFile(featureId)), "utf8");
       } catch {
-        // A moved or missing catalogue is the drawer's 404, not a 500.
+        // A moved or missing spec file is the drawer's 404, not a 500.
         return new Response("feature spec missing", { status: 404 });
       }
-      const section = extractFeatureSpec(catalogue, featureId);
-      return section === undefined
-        ? new Response("feature spec missing", { status: 404 })
-        : new Response(section, {
-            headers: {
-              "content-type": "text/markdown; charset=utf-8",
-              "cache-control": "no-store",
-            },
-          });
+      return new Response(spec, {
+        headers: {
+          "content-type": "text/markdown; charset=utf-8",
+          "cache-control": "no-store",
+        },
+      });
     }
     if (url.pathname === "/pin" && req.method === "POST") {
       return req

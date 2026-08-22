@@ -36,8 +36,12 @@ export const DAEDALUS_HACKING = 2500;
 export const DAEDALUS_COMBAT = 1500;
 /** Rank for Operation Daedalus, the last black op (Bladeburner/data). */
 export const BLACK_OP_FINAL_RANK = 400_000;
-/** The count the game checks for "all black ops complete". */
-export const BLACK_OP_COUNT = 20;
+/** The count the game checks for "all black ops complete":
+ *  numberOfBlackOperations = Object.keys(BladeburnerBlackOpName).length, which
+ *  is 21 at v3.0.1 (src/Bladeburner/data/BlackOperations.ts:735,
+ *  src/Bladeburner/Enums.ts). Both the in-UI destroy button and
+ *  Singularity.destroyW0r1dD43m0n compare against it. */
+export const BLACK_OP_COUNT = 21;
 export const GANG_KARMA = -54_000;
 export const GANG_FACTIONS = [
   "Slum Snakes",

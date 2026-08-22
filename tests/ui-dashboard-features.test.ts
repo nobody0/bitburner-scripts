@@ -5,21 +5,19 @@ import type { StateMap } from "../shared/telemetry/state-map.ts";
 import { renderMarkdown } from "../ui/app/lib/markdown.ts";
 import { emptyState } from "../ui/app/project.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
-import { extractFeatureSpec, FEATURE_SPEC_FILE } from "../ui/specs.ts";
+import { featureSpecFile } from "../ui/specs.ts";
 
 describe("feature specification drawer", () => {
-  const catalogue = readFileSync(FEATURE_SPEC_FILE, "utf8");
-
-  test("the canonical catalogue has exactly one extractable section per feature", () => {
+  test("every feature has its own specification file, headed by its own id", () => {
     for (const feature of FEATURES) {
-      const section = extractFeatureSpec(catalogue, feature.id);
-      expect(section, feature.id).toBeDefined();
-      expect(section).toStartWith(`## \`${feature.id}\``);
-      expect(section!.match(/^## `/gm)?.length ?? 0).toBe(1);
+      const spec = readFileSync(featureSpecFile(feature.id), "utf8");
+      expect(spec, feature.id).toStartWith(`# \`${feature.id}\``);
+      // One feature per file: nothing else may claim a top-level heading in it.
+      expect(spec.match(/^# /gm)?.length ?? 0, feature.id).toBe(1);
     }
   });
 
-  test("the spec renderer handles catalogue tables and never accepts raw HTML", () => {
+  test("the spec renderer handles specification tables and never accepts raw HTML", () => {
     const rendered = renderMarkdown([
       "## `hacking` — the farm",
       "",

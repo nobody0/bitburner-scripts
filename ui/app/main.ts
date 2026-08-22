@@ -9,6 +9,7 @@ import { TABS, type TabId } from "./tabs/index.ts";
 import { BITNODES } from "../../shared/features/bitnode.ts";
 import type { RunCatalogEntry } from "../../shared/run-catalog.ts";
 import { renderMarkdown } from "./lib/markdown.ts";
+import { featureSpecFile } from "../specs.ts";
 
 /** Viewer shell: one live socket, one loaded run, one active tab.
  *
@@ -101,7 +102,7 @@ async function renderSpec(): Promise<void> {
 
   drawer.hidden = false;
   $("spectitle").textContent = `${feature.label} specification`;
-  $("specpath").textContent = `spec/strategy/feature-catalog.md · ${feature.id}`;
+  $("specpath").textContent = featureSpecFile(feature.id);
   const cached = specCache.get(feature.id);
   if (cached !== undefined) {
     morph($("specbody"), cached);

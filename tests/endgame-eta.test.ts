@@ -127,10 +127,11 @@ describe("route ETAs", () => {
   });
 
   test("black ops overlap with the rank climb — slower of the two, not the sum", () => {
-    const v = view({ inBladeburner: true, blackOpsComplete: 10, bladeburnerRank: 399_999 });
+    const done = 10;
+    const v = view({ inBladeburner: true, blackOpsComplete: done, bladeburnerRank: 399_999 });
     const blade = etasFor(v, { ...noRates(), bladeburnerRankPerSec: 1 }).find((eta) => eta.id === "bladeburner")!;
-    // Rank is 1 second away; the 10 remaining ops at the fallback dominate.
-    expect(blade.etaSec).toBe(10 * FALLBACK_SEC_PER_BLACK_OP);
+    // Rank is 1 second away; the remaining ops at the fallback dominate.
+    expect(blade.etaSec).toBe((BLACK_OP_COUNT - done) * FALLBACK_SEC_PER_BLACK_OP);
   });
 
   test("the labyrinth walk is an explicit unmeasured guess", () => {

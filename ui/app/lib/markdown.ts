@@ -1,7 +1,7 @@
 import { esc } from "./format.ts";
 
 /** Small, deliberately limited Markdown renderer for repository-owned specs.
- * It covers the constructs used by spec/strategy/feature-catalog.md without
+ * It covers the constructs used by spec/strategy/features/*.md without
  * accepting raw HTML. Text is escaped before inline markup is introduced. */
 
 function inlineMarkdown(source: string): string {
