@@ -302,6 +302,14 @@ Two rules that are easy to get backwards:
   while the old workers keep running, and the registry is the only proof they
   are alive. A node reset is the opposite: every script was killed, so every
   op id in it is unreportable.
+- **`stock`'s self-measured trade ledger must survive too** (`StockFlows` on
+  `gameGlobal`, like `farmTarget`). It is the only record of what the market
+  actually earned — the game's own money-sources ledger counts an open
+  position's purchase as money gone — and it is republished onto the topic at
+  every trade. Held in a module `let` it restarted at zero on each build push
+  and the next trade wrote that zero over the real total, corrupting both the
+  viewer's earnings curve and `earnedSinceInstall`. Only an install may clear
+  it, and `resetStockState` does so explicitly.
 
 ## The simulator
 

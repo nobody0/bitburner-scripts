@@ -203,6 +203,22 @@ export interface ProgressionPlan {
    *  the renewal threshold sqrt(2·overhead·pushRate). `effective` folds in
    *  the driver's hysteresis/latch; "legacy" means no route ETA existed and
    *  the cash-ratio phase gate decided. */
+  /** How fast the run is accelerating, and what a prestige costs to replay.
+   *
+   * A DIGEST of the cycle curve, not the curve: the samples stay in
+   * progression's memory and only the fitted exponents cross the wire.
+   * `factions` converts reputation and money gaps to seconds through these, so
+   * a deep breakpoint is priced at the rate it will actually be earned at
+   * rather than at today's — see `shared/strategy/factions/pace.ts`. */
+  pace?: {
+    elapsedSec: number;
+    /** Bounded exponent of cumulative progress. 1 is a stationary rate. */
+    money?: number;
+    hacking?: number;
+    combat?: number;
+    /** Measured seconds a prestige spends replaying what the reset erased. */
+    resetOverheadSec: number;
+  };
   installDecision?: {
     verdict: "push" | "install" | "no-data";
     effective: "push" | "install" | "legacy";

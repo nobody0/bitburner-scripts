@@ -51,7 +51,6 @@ function aggregate(over: Partial<BatchAggregateReport>): BatchAggregateReport {
     spanMs: 0,
     inOrder: 0,
     noHack: 0,
-    lostOps: 0,
     ...over,
   };
 }
@@ -200,27 +199,61 @@ describe("farm series projection", () => {
 
 });
 
-describe("per-batch-kind projection", () => {
-  test("launched and landed are running TOTALS, not rates", () => {
+describe("dispatcher health curves", () => {
+  test("a gauge is folded from the FIRST rollup, not once a window has filled", () => {
+    // These are read straight off each rollup rather than differenced against a
+    // baseline. Folding them behind the rate window left every health curve
+    // empty for the first thirty seconds of a run, and permanently on a short
+    // one — which is exactly when an operator is watching them.
+    const state = appendRecords(emptyState(), [
+      rollup(1_000, { launched: counts(1, 1, 1), landed: counts(1, 1, 1), pumpOccupancy: 0.04 }),
+      rollup(2_000, { launched: counts(2, 2, 2), landed: counts(2, 2, 2), pumpOccupancy: 0.06 }),
+    ]);
+    expect(state.farmHealth.pumpOccupancy).toEqual([[1_000, 0.04], [2_000, 0.06]]);
+  });
+
+  test("ops adrift subtracts what is still in flight", () => {
+    // launched - landed alone is mostly BACKLOG at steady state, and a curve
+    // that never returns to zero cannot be read as loss.
+    const state = appendRecords(emptyState(), [
+      rollup(1_000, {
+        launched: counts(10, 10, 10),
+        landed: counts(7, 7, 7),
+        inFlight: { hack: 3, grow: 3, weaken: 3 },
+      }),
+    ]);
+    expect(state.farmHealth.opsLost).toEqual([[1_000, 0]]);
+  });
+
+  test("ops adrift is what is left when nothing is in flight to explain it", () => {
+    const state = appendRecords(emptyState(), [
+      rollup(1_000, {
+        launched: counts(10, 10, 10),
+        landed: counts(9, 9, 9),
+        inFlight: { hack: 0, grow: 0, weaken: 0 },
+      }),
+    ]);
+    expect(state.farmHealth.opsLost).toEqual([[1_000, 3]]);
+  });
+
+  test("the in-order share is graded batches, not all batches", () => {
+    // A prep wave has no landing grid and can never be in order. Dividing by
+    // every batch would report a farm that grades perfectly as failing.
     const state = appendRecords(emptyState(), [
       rollup(1_000, {
         launched: counts(1, 1, 1),
         landed: counts(1, 1, 1),
-        batches: { hgw: aggregate({ batches: 50, ops: 150, landed: 150 }) },
-      }),
-      rollup(3_000, {
-        launched: counts(2, 2, 2),
-        landed: counts(2, 2, 2),
-        batches: { hgw: aggregate({ batches: 100, ops: 300, landed: 298 }) },
+        batches: {
+          hgw: aggregate({ batches: 50, graded: 50, inOrder: 45 }),
+          prep: aggregate({ batches: 50, graded: 0, inOrder: 0 }),
+        },
       }),
     ]);
-    // The quantity being watched is the BAND between the two curves — ops that
-    // were dispatched and never arrived. Differentiating both is exactly the
-    // operation that destroys it, so these are the counters themselves.
-    expect(state.batchSeries.hgw!.launched).toEqual([[3_000, 300]]);
-    expect(state.batchSeries.hgw!.landed).toEqual([[3_000, 298]]);
+    expect(state.farmHealth.inOrderShare).toEqual([[1_000, 0.9]]);
   });
+});
 
+describe("per-batch-kind projection", () => {
   test("a batch COMPLETION rate is windowed, unlike the op totals", () => {
     const state = appendRecords(emptyState(), [
       rollup(1_000, {
@@ -282,7 +315,7 @@ describe("per-batch-kind projection", () => {
 });
 
 describe("settled-batch history", () => {
-  test("accumulates past the rollup's eight-entry ring by deduping on id", () => {
+  test("accumulates past the rollup's bounded ring by deduping on id", () => {
     const state = appendRecords(emptyState(), [
       rollup(1_000, { recentBatches: [settled(1, 1_000), settled(2, 1_010), settled(3, 1_020)] }),
       // Successive rollups overlap: the ring is bounded, the ids are not.
@@ -292,15 +325,66 @@ describe("settled-batch history", () => {
     expect(state.batchHistory.map((batch) => batch.id)).toEqual([1, 2, 3, 4, 5]);
   });
 
-  test("an id going backwards is an install, and the history is dropped", () => {
+  test("a batch that settles out of id order is KEPT, not discarded", () => {
     const state = appendRecords(emptyState(), [
       rollup(1_000, { recentBatches: [settled(40, 1_000), settled(41, 1_010)] }),
-      // A fresh dispatcher restarts nextBatchId, so id 1 here is a DIFFERENT
-      // batch from the id 1 of the previous life; interleaving them would
-      // silently mix two runs into one sequence.
-      rollup(2_000, { recentBatches: [settled(1, 2_000)] }),
+      // Batch 7 opened long before 40 and settled long after it: ids are handed
+      // out when a batch OPENS, the ring is ordered by when it SETTLED, and one
+      // counter serves both prep waves and farm cycles. A prep wave spans a
+      // whole grow, so this is the ordinary case, not a corner one.
+      rollup(2_000, { recentBatches: [settled(41, 1_010), settled(7, 2_000)] }),
+    ]);
+    expect(state.batchHistory.map((batch) => batch.id)).toEqual([40, 41, 7]);
+  });
+
+  test("an out-of-order id arriving LAST does not wipe the history", () => {
+    // The regression this set replaced a watermark for. With "newer than the
+    // newest kept" as the dedupe, a low id at the end of the ring read as a
+    // restarted counter and discarded every batch accumulated so far.
+    const state = appendRecords(emptyState(), [
+      rollup(1_000, { recentBatches: [settled(40, 1_000), settled(41, 1_010), settled(42, 1_020)] }),
+      rollup(2_000, { recentBatches: [settled(9, 2_000)] }),
+    ]);
+    expect(state.batchHistory.map((batch) => batch.id)).toEqual([40, 41, 42, 9]);
+  });
+
+  test("an install clears the history, detected on the counters not the ids", () => {
+    // A fresh dispatcher restarts nextBatchId, so its id 1 is a different batch
+    // from the previous life's id 1. That is a real reset — but it is read off
+    // the cumulative op counters moving backwards, which is unambiguous, rather
+    // than inferred from an arrival order that is legitimately out of order.
+    const state = appendRecords(emptyState(), [
+      rollup(1_000, {
+        launched: counts(100, 100, 100),
+        landed: counts(100, 100, 100),
+        recentBatches: [settled(40, 1_000), settled(41, 1_010)],
+      }),
+      rollup(2_000, {
+        launched: counts(1, 1, 1),
+        landed: counts(1, 1, 1),
+        recentBatches: [settled(1, 2_000)],
+      }),
     ]);
     expect(state.batchHistory.map((batch) => batch.id)).toEqual([1]);
+  });
+
+  test("a settled batch carries its size-normalised figures", () => {
+    // Batches are not comparable as they arrive: a prep wave is a hundred grow
+    // threads that steal nothing, a farm cycle is four ops that do. $/GB·s is
+    // the figure that asks both the same question.
+    const state = appendRecords(emptyState(), [
+      rollup(1_000, {
+        recentBatches: [settled(1, 1_000, {
+          spanMs: 2_000, gb: 500, moneyEarned: 1_000,
+          threads: counts(10, 20, 30), order: "h-g-w2", planned: "h-w1-g-w2",
+        })],
+      }),
+    ]);
+    const batch = state.batchHistory[0]!;
+    expect(batch.totalThreads).toBe(60);
+    // 1000 / (500 GB * 2 s)
+    expect(batch.moneyPerGbSec).toBeCloseTo(1);
+    expect(batch.misordered).toBe(true);
   });
 
   test("a counter reset also clears the per-kind series", () => {
@@ -323,6 +407,7 @@ describe("settled-batch history", () => {
     ]);
     // The reset sample yields nothing and becomes the next baseline; the
     // pre-install curve must not survive to be differenced against it.
-    expect(state.batchSeries.hgw?.launched ?? []).toEqual([]);
+    expect(state.batchSeries.hgw?.perSec ?? []).toEqual([]);
+    expect(state.batchSeries.hgw?.moneyPerBatch ?? []).toEqual([]);
   });
 });

@@ -583,14 +583,31 @@ export const PROFILES: readonly SimProfile[] = [
     id: "install-cadence",
     experiment: "feature-scenario",
     description:
-      "Two consecutive install resets on the banked-rep fixture: prestige soundness and the install-vs-push cadence at speed.",
+      "Augmentation value per unit time on the banked-rep fixture: how much permanent capability two prestige cycles actually buy.",
     bitnode: 4,
     // The second-cycle packages include city factions. Career owns travel and
     // therefore has to participate; otherwise the faction planner correctly
     // rejects those packages as impossible and this is no longer a cadence
     // experiment.
     features: only("hacking", "factions", "career", "progression"),
-    goals: ["installs:2"],
+    // AUGMENTATIONS, not installs. `installs:2` was the goal here, and it is a
+    // trap: time-to-N-installs rewards resetting as fast as possible whatever
+    // the reset converts, and the run ends AT the install whose augmentations it
+    // is supposed to be measuring — so nothing those augmentations buy is ever
+    // observed. Install count is an OUTPUT of maximising value per unit time,
+    // never the target.
+    //
+    // Measured on this fixture at a fixed 125m horizon: the cadence that scored
+    // 33% "worse" on time-to-2-installs held 12 distinct augmentations and
+    // $6.9e16 against 8 and $2.6e16 — same wall clock, same two installs. The
+    // old goal ranked those two runs the wrong way round.
+    //
+    // `augs:` counts DISTINCT names and includes queued purchases, so repeated
+    // NeuroFlux levels cannot inflate it and a run holding a bought-but-not-yet-
+    // installed package is not punished for being mid-cycle. `installs:2` stays
+    // as a soundness rider — the profile still has to exercise two prestiges —
+    // but it is no longer what the clock is measuring.
+    goals: ["augs:10", "installs:2"],
     homeRam: 256,
     startingMoney: 1.5e9,
     world: CYBERSEC_CADENCE_WORLD,

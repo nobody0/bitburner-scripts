@@ -1,5 +1,5 @@
 import { FEATURES } from "../../../shared/features/registry.ts";
-import { attachChartHover, drawChart } from "../lib/chart.ts";
+import { chartCanvas, mountChart } from "../lib/chart.ts";
 import { card, filters, hint, meter, note, search, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
@@ -97,7 +97,7 @@ export const overviewTab: Tab = {
 
     // Replay scrubbing is a run-level control and lives in the shell header,
     // so this panel can be rebuilt wholesale without resetting the slider.
-    const chart = `<div id="chartwrap"><canvas id="chart"></canvas><div id="tooltip"></div></div>`;
+    const chart = chartCanvas("moneychart", "full");
 
     const income = incomeRows(state);
     const gaps = fidelityRows(state);
@@ -208,12 +208,6 @@ export const overviewTab: Tab = {
     );
   },
   mount(state, el) {
-    const canvas = el.querySelector<HTMLCanvasElement>("#chart");
-    const tooltip = el.querySelector<HTMLElement>("#tooltip");
-    if (!canvas || !tooltip) return;
-    drawChart(canvas, state.moneySeries, state.t0);
-    // The canvas node now survives a render, so this must stay idempotent:
-    // attachChartHover wires a given canvas exactly once.
-    attachChartHover(canvas, tooltip);
+    mountChart(el, "moneychart", [{ pts: state.moneySeries, color: "--series-1" }], state.t0);
   },
 };

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  BATCH_KINDS,
   HACK_ZERO_DESYNC_STREAK,
   JIT_LAUNCH_GUARD_MS,
   MAX_LAUNCH_ACTIONS_PER_PASS,
@@ -1311,6 +1312,24 @@ describe("shotgun mode", () => {
     expect(shotgun.batches).toBeGreaterThan(0);
     expect(shotgun.hacks).toBeGreaterThan(0);
     expect(h.memory.dispatch.stats.batchesByKind.hwgw.batches).toBe(0);
+
+    // A SETTLED batch has landed every op it launched — `noteBatchLanding`
+    // only settles once `landed >= ops`, so the aggregate sums are equal for
+    // every kind, in every run that can exist.
+    //
+    // Pinned because the viewer spent a long time plotting `ops` against
+    // `landed` per kind as a "band" whose width was meant to be ops lost in
+    // flight. The band is identically zero: the chart drew one curve twice, and
+    // the `lostOps` counter behind it could never fire. Op loss shows up on the
+    // abandoned counters (a batch that loses an op never settles at all and is
+    // evicted instead) and on the global launched/landed/inFlight residual. If
+    // this assertion ever fails, that reasoning needs revisiting before any
+    // display built on it does.
+    for (const kind of BATCH_KINDS) {
+      const aggregate = h.memory.dispatch.stats.batchesByKind[kind];
+      expect(aggregate.landed).toBe(aggregate.ops);
+      expect(aggregate.abandonedOps).toBeGreaterThanOrEqual(aggregate.abandonedLanded);
+    }
 
     // The target stays inside its bands throughout, which is the whole reason
     // same-tick FIFO is an acceptable substitute for ordered deadlines.

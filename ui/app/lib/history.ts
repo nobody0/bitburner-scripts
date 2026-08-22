@@ -12,6 +12,13 @@ interface DecisionData {
     candidate?: { kind?: string };
     spend?: { name?: string };
     reserve?: { name?: string };
+    /** `stock`'s selection is a position, not a purchase: it names a symbol and
+     * a side rather than a `kind` or a `name`, and its `reserve` is
+     * `{amount, ratePerSec}` with no name at all — so without these two the
+     * whole subsystem falls through to the "hold" default and every trade it
+     * ever made reads as an idle tick. */
+    entry?: { sym?: string; side?: string };
+    unlock?: { type?: string };
   };
   result?: { detail?: string };
   detail?: string;
@@ -63,6 +70,10 @@ export function decisionHistory(state: ProjectedState, options: DecisionHistoryO
             data?.plan?.reserve?.name ??
             data?.plan?.buy?.kind ??
             data?.plan?.candidate?.kind ??
+            (data?.plan?.entry
+              ? `${data.plan.entry.side ?? ""} ${data.plan.entry.sym ?? ""}`.trim() || undefined
+              : undefined) ??
+            data?.plan?.unlock?.type ??
             "hold");
       return [
         fmtTime(event.t - (state.t0 ?? event.t)),

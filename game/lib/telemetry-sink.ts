@@ -29,10 +29,12 @@ export function makeSink(tel: Telemetry): TelemetrySink {
   let sentHacknetDecision: string | undefined;
   let sentHashDecision: string | undefined;
   let sentFactionDecision: string | undefined;
+  let sentStockDecision: string | undefined;
   let sentInfrastructureResultAt: number | undefined;
   let sentHacknetResultAt: number | undefined;
   let sentHashResultAt: number | undefined;
   let sentFactionResultAt: number | undefined;
+  let sentStockResultAt: number | undefined;
 
   return {
     flush(state: GameState): void {
@@ -160,6 +162,40 @@ export function makeSink(tel: Telemetry): TelemetrySink {
           if (plan.lastResult && plan.lastResult.at !== sentFactionResultAt) {
             sentFactionResultAt = plan.lastResult.at;
             tel.event("faction.result", plan.lastResult);
+          }
+        }
+      }
+
+      if (dirty.has("stock")) {
+        const plan = state.topics.stock?.plan;
+        if (plan) {
+          // Coarse ON PURPOSE, and more so than the branches above. This plan
+          // is rebuilt every 500 ms against a market that moves every tick, so
+          // `cost`, `shares`, `expectedProfit` and `breakEvenTicks` all drift
+          // continuously — signing any of them would emit an event twice a
+          // second for the whole run, which is the failure the note above
+          // describes. A new symbol, side, unlock rung, action set,
+          // liquidation or funding outcome is a decision; the price moving is
+          // not. `actions` earns its place despite `entry`: an EXIT appears
+          // only there, so without it a liquidation is an invisible decision.
+          const signature = JSON.stringify({
+            entry: plan.entry ? { sym: plan.entry.sym, side: plan.entry.side } : undefined,
+            unlock: plan.unlock?.type,
+            actions: plan.actions.map((action) => `${action.type}:${action.sym ?? ""}`),
+            liquidate: Boolean(plan.liquidate),
+            flat: plan.flat,
+            arbitration: moneyArbitrationDecision,
+          });
+          if (signature !== sentStockDecision) {
+            sentStockDecision = signature;
+            tel.event("investment.decision", { subsystem: "stock", plan, arbitration: moneyArbitration });
+          }
+          // One event per executed trade batch, `ok` and `detail` included:
+          // this IS the trade log. The topic carries only the newest result, so
+          // without it a run's trades are unrecoverable from the record.
+          if (plan.lastResult && plan.lastResult.at !== sentStockResultAt) {
+            sentStockResultAt = plan.lastResult.at;
+            tel.event("investment.result", { subsystem: "stock", result: plan.lastResult });
           }
         }
       }

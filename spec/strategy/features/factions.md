@@ -68,6 +68,36 @@ NeuroFlux    = baseCost * 1.14^level * AugmentationMoneyCost * generic ; rep als
 SoA aug      = baseCost * 7^ownedSoA ; rep = baseRep * 1.3^ownedSoA ; NOT in queuedNonSoA
 ```
 
+**Plan a SET, not a faction.** Selection runs over the whole install cycle: a budget of seconds, and
+the best set of `(faction, reputation target)` pairs that fits it (`shared/strategy/factions/portfolio.ts`).
+Three facts are inexpressible one faction at a time. Most augmentations have several sellers, so a set is
+worth the value of its UNION; money escalates as `1.9^queued` across the cycle, so two factions' purchases
+are cheaper priced together than summed apart; and there is one player work slot, so reputation work is
+sequential and per-package ETAs cannot be added. Value over a union is monotone and submodular and the work
+term is additive, so a greedy marginal-value-per-second seed carries the standard `(1 - 1/e)` guarantee;
+local search then moves each push along its own ladder, swaps membership and REORDERS. Reordering matters
+because rates rise within a cycle: a cheap unlock done first raises the rate everything behind it is earned
+at. A fractional multi-choice-knapsack relaxation gives the published `boundGap`.
+
+**The cycle length is derived, not assumed.** `V*(T)` is swept over a geometric grid and the budget maximises
+`V*(T) / (T + O)`. Because value is `sum of w*ln(mult)`, that ratio is a log-growth rate per second — what a
+repeated prestige actually maximises — and it reduces to progression's `T* = sqrt(2*O/p)` (`progression/decide.ts:247`)
+whenever `V*` is linear, so it generalises that rule rather than competing with it. The whole grid is evaluated:
+`V*(T)` is not concave, because a faction unreachable at a short budget can be cheap at a long one. `O` is the
+measured `resetOverheadSec`, floored at `INSTALL_OVERHEAD_SEC`, plus a **forfeit** for every faction the set does
+not finish — an install resets membership and reputation, so a cycle that stops halfway up a ladder pays to
+unlock that faction again and re-earn what it banked. Without that term the rule installs at the grid minimum.
+The forfeit is scaled by the share of that faction's remaining VALUE left behind, not by whether anything is left
+at all: in a 137-entry catalogue almost every faction still sells something, so a count test charges the full
+re-establish cost nearly always and pushes every cycle to the longest budget on the grid.
+
+**Rates accelerate within a cycle.** A gap becomes seconds through progression's fitted `y = a*t^p` curve rather
+than divided by a spot rate (`shared/strategy/factions/pace.ts`). For a curve observed to elapsed time `e`,
+`T = (e^p + spot*p*e^(p-1))^(1/p) - e`, which is `spot` exactly at `p = 1` and strictly less above it — closed
+form, no search, and it may only ever shorten. Only the fitted exponents cross the wire (`ProgressionPlan.pace`),
+never the samples. Reputation borrows the curve of the skill its work type reads: `hacking` for contracts,
+`combat` for security and field work.
+
 **Choose by value, buy in `orderPurchases` order.** Reputation cost carries no `generic` term, so only money scales
 with the queue, and an augmentation's multipliers apply only once installed. The dearest item therefore belongs in the
 cheapest slot: sets are chosen on value and ordered most-expensive-first subject to prerequisites, and every cost
@@ -110,6 +140,25 @@ signal (`decide.ts:348`, `game/lib/features/factions.ts:977`). **Contends** mone
 - `not(A and B)` must be pushed down to `(not A) or (not B)`, and an empty blocker array is truthy in JS: getting that
   wrong evaluates every negated leaf positively (`requirements.ts:194-197`).
 
+## Measured
+
+The set solver was compared against the single-faction selector on the `install-cadence` fixture, three seeds,
+identical 125-minute horizon:
+
+| | prestiges | augmentations | distinct | money at last prestige |
+|---|---|---|---|---|
+| single-faction selector | 2 | 20 | 8 | $2.6e16 |
+| set solver | 2 | 31 | **12** | **$6.9e16** |
+
+Same wall clock and the same two installs, for 50% more distinct augmentations and 2.7x the money.
+
+The same pair scored the OPPOSITE way on the lane's previous goal, `installs:2`: 25.6m against 34.2m, a 33%
+"regression". That goal is a trap and the profile no longer uses it — time-to-N-installs rewards resetting as fast
+as possible whatever the reset converts, and the run ends at the install whose augmentations it is measuring, so
+none of the value ever lands inside the measurement. **Install count is an output of maximising augmentation value
+per unit time, never the target.** The profile now measures `augs:10` (distinct names, queued included) with
+`installs:2` retained only as a prestige-soundness rider.
+
 ## Rewards
 
 At install, every faction's `favor` becomes `addRepToFavor(favor, rep)` and its reputation, membership and ban all
@@ -142,10 +191,13 @@ SF11 makes company favor multiply salary by `1 + favor/100` as well as reputatio
 | requirement interpreter | `shared/strategy/factions/requirements.ts` |
 | rep / favor / donation math | `shared/strategy/factions/rep.ts` |
 | valuation, pricing, ordering | `shared/strategy/factions/augs.ts` |
-| package frontier · decision | `shared/strategy/factions/packages.ts` · `decide.ts` |
+| package frontier | `shared/strategy/factions/packages.ts` |
+| set solver · cycle budget | `shared/strategy/factions/portfolio.ts` |
+| rate pacing | `shared/strategy/factions/pace.ts` |
+| decision | `shared/strategy/factions/decide.ts` |
 | static augmentation table | `shared/features/augmentations.ts` |
 | driver · probes | `game/lib/features/factions.ts` · `game/lib/probes/dodged.ts`, `local.ts` |
-| telemetry topic · tab | `shared/telemetry/topics/factions.ts` · `ui/app/tabs/factions.ts` |
+| telemetry topic · tab | `shared/telemetry/topics/factions.ts` · `ui/app/tabs/factions.ts`, `factions-aug.ts` |
 | sim model | `sim/features/factions.ts`, `requirements.ts`, `grafting.ts` |
 | vendored rules | `sim/vendor/bitburner/src/Faction/`, `Augmentation/AugmentationTable.ts`, `Constants.ts` |
 
@@ -156,5 +208,14 @@ SF11 makes company favor multiply salary by `1 + favor/100` as well as reputatio
   `calculateEntropy` nor `Player.applyEntropy` is in the vendored extract, so the two cannot be reconciled here.
 - Where does upstream v3.0.1 apply the SF11 augmentation-price discount? It is not in the vendored extract; `[1, 0.96,
   0.94, 0.93]` is pinned only by `sim/ns/singularity.ts:230`.
+- Charisma has no cumulative curve. `CyclePoint` tracks money, hacking and combat only
+  (`shared/strategy/progression/regrowth.ts:5-10`), so field work's charisma term is paced at its spot rate
+  while its combat term accelerates. Field-work reputation is therefore under-estimated by an unknown amount
+  on a charisma-heavy build. Adding a fourth curve is cheap; whether it changes a decision is not established.
+- The forfeit term charges a faction's `unlockSec` and banked reputation when the set leaves value behind there.
+  For a faction already JOINED this cycle `unlockSec` is zero, so the membership the reset destroys is charged at
+  nothing — the true cost is re-satisfying its invite requirements next cycle, which needs a post-reset
+  `RequirementView` that does not exist at planning time.
+
 - Shadows of Anarchy needs one infiltration. Is the resulting invitation observable well enough to plan toward, or
   does it stay a reported manual-only blocker (`requirements.ts:39-41`)?

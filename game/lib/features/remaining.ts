@@ -3391,6 +3391,23 @@ function progressionRefresh(ctx: NeedContext): void {
         : {}),
       install: decision.installReady && armedAt !== undefined,
       favorCrossings: decision.favorCrossings,
+      // Published so `factions` prices a deep reputation breakpoint at the rate
+      // it will actually be earned at. The exponents are already fitted here for
+      // the bootstrap-delay term above; only the fit crosses the wire, never the
+      // samples.
+      pace: {
+        elapsedSec: runSec,
+        ...(bootstrapExponent !== undefined ? { money: bootstrapExponent } : {}),
+        ...((): { hacking?: number; combat?: number } => {
+          const hacking = cycleProgressExponent(progressionMemory.cyclePoints, "hacking");
+          const combat = cycleProgressExponent(progressionMemory.cyclePoints, "combat");
+          return {
+            ...(hacking !== undefined ? { hacking } : {}),
+            ...(combat !== undefined ? { combat } : {}),
+          };
+        })(),
+        resetOverheadSec,
+      },
       installDecision: {
         verdict: rawVerdict.verdict,
         effective: marginalInstall === undefined ? "legacy" : marginalInstall ? "install" : "push",

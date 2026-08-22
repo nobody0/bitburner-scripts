@@ -5,6 +5,57 @@ import type { WorkType } from "./rep.ts";
 /** The vocabulary of a faction decision: what we are trying to do, what we do
  * next, what else we considered, and what would make us reconsider. */
 
+/** One point of the budget sweep: what the best reachable set is worth if the
+ * install cycle is allowed to run this long. */
+export interface HorizonSample {
+  /** Budget in seconds. */
+  sec: number;
+  /** Best portfolio value reachable inside it. */
+  value: number;
+  /** `value / (sec + resetOverheadSec)` — the long-run rate this budget earns.
+   * Because value is `sum of w*ln(mult)`, this is a log-growth rate per second,
+   * which is the quantity a repeated prestige actually maximises. */
+  rate: number;
+  /** Number of factions the winning set at this budget uses. */
+  factions: number;
+}
+
+/** A SET of faction pushes chosen together, rather than one faction chosen
+ * greedily and extended.
+ *
+ * The unit of the decision is the whole install cycle. Augmentations sold by
+ * several factions are worth acquiring once, purchases across the set pay one
+ * escalating price ladder, and the single player work slot makes reputation
+ * work sequential — none of which is expressible one faction at a time. */
+export interface FactionPortfolio {
+  /** Chosen pushes, in the order they should be worked. */
+  packages: FactionIntent[];
+  /** The UNION of augmentations the set acquires, prerequisite-closed and in
+   * purchase order. Deduplicated by construction: this is the whole point. */
+  augmentations: string[];
+  /** Value of the union under the run's objective weights, in BN-seconds. */
+  value: number;
+  /** The budget this set was solved for. */
+  budgetSec: number;
+  /** Critical-path seconds the set actually needs: `max(workSec, moneySec)`
+   * plus the final sweep. Never exceeds `budgetSec`. */
+  etaSec: number;
+  /** Sequential player work across the set — one work slot, so this adds up. */
+  workSec: number;
+  /** Money production for the whole set's escalated purchases, priced once
+   * over the union. Overlaps the work, so it does not add to it. */
+  moneySec: number;
+  /** Relative gap to the relaxation's upper bound, in [0, 1]. Published so the
+   * heuristic is auditable rather than trusted: 0 means provably optimal. */
+  boundGap: number;
+  /** Why this solve happened — a changed input, or the recalibration tick.
+   * Carried so a moving budget is attributable rather than mysterious. */
+  basis: string;
+  /** The previous budget, when it moved. Published so an adapting `T*` reads
+   * as adaptation rather than thrash. */
+  previousBudgetSec?: number;
+}
+
 export interface FactionObjective {
   /** Factions committed to, best first. */
   factions: string[];
@@ -26,8 +77,15 @@ export interface FactionObjective {
    * starvation and does not set this. */
   horizonStarved?: boolean;
   /** Best alternative package at the same decision point. Its marginal rate
-   * is the opportunity cost that stops us pushing `intent` indefinitely. */
+   * is the opportunity cost that stops us pushing `intent` indefinitely.
+   * With a portfolio this is simply the next package in it. */
   runnerUp?: FactionIntent;
+  /** The whole committed set. `intent` is its head; every other consumer keeps
+   * reading `intent` unchanged. */
+  portfolio?: FactionPortfolio;
+  /** The budget sweep this portfolio's `budgetSec` was chosen from, so the
+   * choice is visible rather than asserted. */
+  horizonCurve?: HorizonSample[];
 }
 
 export interface FactionIntent {
@@ -52,6 +110,11 @@ export interface FactionIntent {
   repSec: number;
   moneySec: number;
   favorAfterInstall: number;
+  /** Sequential player work already committed to the pushes AHEAD of this one
+   * in the portfolio. Zero for the head, which is the push being worked now.
+   * Published so a queued package's ETA reads as "after the current one", not
+   * as a second thing starting immediately. */
+  workSecFromNow?: number;
   /** Donation plus escalated augmentation purchases. */
   totalCost: number;
   /** Escalated cash needed for the augmentation package itself. */
@@ -169,6 +232,20 @@ export interface FactionMemory {
   lastAction?: FactionAction;
   /** Invalidation keys as of the last decision. */
   lastInvalidation: InvalidationKey[];
+  /** The committed install-cycle budget, and the inputs it was derived from.
+   *
+   * The budget is a forecast over a whole cycle, so it is re-derived on
+   * progression's recalibration cadence or whenever a structural input moves —
+   * not every pass. Between those, today's frontiers are re-solved AT this
+   * budget, which keeps the set current without paying for a fresh sweep. */
+  portfolioBudgetSec?: number;
+  portfolioBasis?: string;
+  portfolioAt?: number;
+  /** The committed set, so a pass between re-solves can RE-PRICE it against
+   * today's frontiers instead of searching for it again. Reputation targets
+   * rather than frontier indices: an index is a position in a list that the
+   * next frontier may reshape. */
+  portfolioChoices?: { faction: string; repTarget: number }[];
   /** Which intent the stall tracker is watching, the best rep seen for it,
    * and when that rep last MOVED. The committed-objective latch exists so
    * near-equal packages do not thrash — but a latch with no progress escape

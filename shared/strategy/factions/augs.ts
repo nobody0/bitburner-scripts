@@ -13,7 +13,7 @@ import { fieldChannelResponse, VALUED_FIELDS } from "../multipliers.ts";
  *  2. **Therefore buy most-expensive-first.** The escalation multiplies the
  *     price of each SUBSEQUENT purchase, so the cheapest augmentation should
  *     absorb the largest multiplier. This is provable, not a heuristic, and
- *     `tests/factions-augs.test.ts` checks it against brute force over all
+ *     `tests/factions.test.ts` checks it against brute force over all
  *     permutations.
  *  3. **Two augmentation families price differently.** NeuroFlux Governor
  *     scales `1.14^level` on BOTH rep and money (and then also takes the queue
@@ -388,6 +388,25 @@ export function weightsFromMarginals(worth: ChannelWorth, context?: RouteWeightC
  * impossible in the real data (the vendor step verifies prereqs resolve) but
  * is guarded anyway — an infinite loop inside the game's 200 ms tick would
  * hang the controller, not just this feature. */
+/** Prerequisite closure for a set that is about to be BOUGHT.
+ *
+ * `closePrereqs` treats an owned augmentation as satisfied, and NeuroFlux is
+ * the exception that rule cannot see: the next level stays purchasable after
+ * the name is owned, and its `1.14^level` price is the whole cost of that
+ * breakpoint. Counting it as satisfied made every later NeuroFlux package cost
+ * $0 with a 1-second ETA — an infinite-looking marginal frontier that could
+ * veto installs forever. Both cost paths need this exception, so it lives once
+ * rather than being restated wherever a set is priced. */
+export function closePurchaseSet(
+  wanted: readonly string[],
+  catalog: ReadonlyMap<string, AugInfo>,
+  owned: ReadonlySet<string>,
+): string[] {
+  const closureOwned = new Set(owned);
+  if (wanted.includes(NEUROFLUX)) closureOwned.delete(NEUROFLUX);
+  return closePrereqs(wanted, catalog, closureOwned);
+}
+
 export function closePrereqs(
   wanted: readonly string[],
   catalog: ReadonlyMap<string, AugInfo>,

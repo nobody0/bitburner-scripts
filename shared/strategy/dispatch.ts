@@ -546,9 +546,21 @@ export interface BatchAggregate {
   inOrder: number;
   /** Batches that settled having never launched a hack. */
   noHack: number;
-  /** Batches that settled with fewer landings than launches — an op was lost
-   * between dispatch and arrival. */
-  lostOps: number;
+  /** Batches EVICTED without ever settling, and the work they took with them.
+   *
+   * This is where op loss actually lives. A batch only settles once its last
+   * op arrives (`noteBatchLanding` returns early below `ops`), so a settled
+   * batch has `landed === ops` by construction and a "settled with fewer
+   * landings" counter can never fire. A batch that loses an op instead never
+   * settles at all and is evicted by `openBatch`, which used to drop it
+   * silently — so the one failure mode these counters exist to expose was the
+   * one they structurally could not.
+   *
+   * `abandonedOps - abandonedLanded` is the ops that were paid for and never
+   * arrived. */
+  abandoned: number;
+  abandonedOps: number;
+  abandonedLanded: number;
 }
 
 /** One settled batch, retained for display. Deliberately small and bounded:
@@ -581,9 +593,18 @@ const LANDING_ANOMALY_RING = 12;
  * never lands (a failed exec whose batch was dropped) would otherwise leave
  * its entry behind forever. */
 const LANDING_TRACK_LIMIT = 512;
-/** Settled batches retained as examples. Small: the aggregates carry the
- * steady state, and this exists to name an individual bad batch. */
-const RECENT_BATCH_RING = 8;
+/** Settled batches retained as examples, newest last.
+ *
+ * Read once a second by the rollup, so this is also the SAMPLE RATE of the
+ * viewer's per-batch history: a farm settling faster than this overflows the
+ * ring between reads. At eight it caught 96 of ~965 batches on a measured run,
+ * which is enough to name one bad batch and far too few to reason about the
+ * distribution of them. Sixty-four keeps the payload a digest — one rollup
+ * carries at most this many small flat records, once a second — while making
+ * per-batch health answerable. The true count travels alongside it (the
+ * per-kind `batches` sums), so the viewer states its sampling rate rather than
+ * implying the sample is the population. */
+const RECENT_BATCH_RING = 64;
 
 function emptyByKind(): ByKind {
   return { hack: 0, grow: 0, weaken: 0 };
@@ -606,7 +627,9 @@ function emptyBatchAggregate(): BatchAggregate {
     graded: 0,
     inOrder: 0,
     noHack: 0,
-    lostOps: 0,
+    abandoned: 0,
+    abandonedOps: 0,
+    abandonedLanded: 0,
   };
 }
 
@@ -1771,10 +1794,19 @@ function openBatch(
   // settles, so without this the map would only grow. Evicting the oldest is
   // right because a batch settles within roughly one batch interval; anything
   // still open after this many is abandoned, not slow.
+  //
+  // The eviction is COUNTED, not silent. An abandoned batch is precisely a
+  // batch that lost an op, so dropping it without a trace made real op loss
+  // invisible to every counter in this file — see `BatchAggregate.abandoned`.
   while (memory.batches.size > LANDING_TRACK_LIMIT) {
-    const oldest = memory.batches.keys().next();
+    const oldest = memory.batches.entries().next();
     if (oldest.done) break;
-    memory.batches.delete(oldest.value);
+    const [oldestId, abandoned] = oldest.value;
+    const aggregate = memory.stats.batchesByKind[abandoned.kind];
+    aggregate.abandoned++;
+    aggregate.abandonedOps += abandoned.ops;
+    aggregate.abandonedLanded += abandoned.landed;
+    memory.batches.delete(oldestId);
   }
   return id;
 }
@@ -1836,7 +1868,9 @@ function settleBatch(memory: DispatchMemory, batch: OpenBatch, at: number): void
   aggregate.hacks += batch.hacks;
   aggregate.spanMs += Math.max(0, at - batch.startedAt);
   for (const kind of ["hack", "grow", "weaken"] as const) aggregate.threads[kind] += batch.threads[kind];
-  if (batch.landed < batch.ops) aggregate.lostOps++;
+  // No loss check here: `noteBatchLanding` only reaches this function once
+  // `landed >= ops`, so an incomplete batch never arrives. Loss is counted on
+  // the abandon path in `openBatch` instead.
   if (batch.planned.length > 0) aggregate.graded++;
 
   let observed: string | undefined;

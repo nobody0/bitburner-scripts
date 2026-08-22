@@ -148,13 +148,27 @@ section.card h2 .acts { margin-left: auto; display: flex; gap: 6px; align-items:
 .tile .v { color: var(--bb-primary-light); font-size: var(--fs-lg); font-weight: 500; }
 .tile .l { color: var(--bb-secondary); font-size: var(--fs-xs); }
 
-/* The two original wrappers are ids because there was one chart each; the
-   class is what any further chart uses. Kept together so a tooltip can never
-   be positioned against the page instead of its own chart. */
-#chartwrap, #cadencewrap, .chartwrap { position: relative; }
+/* The wrapper and the tooltip are one unit: the tooltip is positioned
+   absolutely, so without the relative wrapper it lands against the page
+   instead of against its own chart. Emitted together by chartCanvas(). */
+.chartwrap { position: relative; }
 canvas { width: 100%; height: 240px; display: block; }
 canvas.minichart { height: 140px; }
-#tooltip, #cadencetip, .charttip {
+canvas.microchart { height: 88px; }
+/* Several charts read together, wrapping instead of scrolling. Below ~280px a
+   140px chart is more axis than curve. */
+.chartgrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+/* Keys a prose readout, or a legend dot, to the curve it describes. A mini or
+   microchart has no room for a built-in legend. `kN` names `--series-N`, so a
+   class and the stroke it describes cannot drift apart — a `.k2` pinned to
+   `--series-5` is how the old launched/landed key came to name the wrong curve.
+   ui/app/tabs/hacking.ts derives the class from the stroke for that reason. */
+.k1 { color: var(--series-1); }
+.k2 { color: var(--series-2); }
+.k3 { color: var(--series-3); }
+.k4 { color: var(--series-4); }
+.k5 { color: var(--series-5); }
+.charttip {
   position: absolute;
   pointer-events: none;
   background: var(--bb-well);
@@ -202,12 +216,6 @@ canvas.minichart { height: 140px; }
 .batchcol .tile .v { font-size: var(--fs-md); }
 .batchcol p { margin: 3px 0; font-size: var(--fs-sm); }
 .batchcol .barkey { font-size: var(--fs-xs); gap: var(--sp-2); margin-top: 2px; }
-canvas.microchart { height: 88px; }
-/* Keys the launched/landed readout to the two curves above it. A microchart
-   has no room for a legend, and the curves coincide exactly whenever nothing
-   is being lost — which is most of the time, and is the good case. */
-.batchcol .k1 { color: var(--series-1); }
-.batchcol .k2 { color: var(--series-5); }
 
 /* --- a missing requirement, with the feature that owes it --- */
 .need {
@@ -546,3 +554,35 @@ canvas.microchart { height: 88px; }
 @media (max-width: 900px) {
   .server-detail-grid { grid-template-columns: minmax(0, 1fr); }
 }
+
+/* --- master-detail, generically ---
+   `.server-link` and `.server-inspector` were named for the first table that
+   needed them. They are the shared primitives for "click a row, get a panel
+   under the table", and the augmentation table is the second user; alias them
+   under neutral names rather than renaming a class the hacking tab depends on. */
+.rowlink { border: 0; padding: 0; background: none; color: inherit; font: inherit; text-align: left; }
+.rowlink:hover { color: var(--bb-primary-light); background: none; }
+
+/* --- augmentation state ---
+   The panel's first job is "what is already mine, what have I paid for, what
+   am I about to buy". A coloured dot carried all of that and could not: three
+   states that call for three different actions rendered identically. The word
+   is the answer; the dot stays as the scan colour. */
+.augstate { font-size: var(--fs-xs); text-transform: uppercase; letter-spacing: 0.04em; }
+.augstate.installed { color: var(--bb-primary-light); }
+.augstate.queued { color: var(--bb-primary-light); opacity: 0.75; }
+.augstate.banked,
+.augstate.planned { color: var(--bb-warning); }
+.augstate.buyable { color: var(--bb-primary); }
+.augstate.short { color: var(--text-secondary); }
+.augstate.locked { color: var(--muted); opacity: 0.6; }
+
+/* Installed rows recede and planned rows are marked, so the three groups are
+   separable without reading a column. */
+tbody tr.installed td { opacity: 0.55; }
+tbody tr.planned td:first-child { box-shadow: inset 2px 0 0 var(--bb-warning); }
+
+/* `gives` is the widest column and the only wrapping one now, so its chips set
+   the row height; keep them tight. */
+td .chips { gap: 4px; }
+td .chip { padding: 0 4px; line-height: 1.4; }

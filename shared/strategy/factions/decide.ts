@@ -28,7 +28,9 @@ import {
   type ScoredAlternative,
   type Until,
 } from "./plan.ts";
-import { selectFactionPackage } from "./packages.ts";
+import { buildFrontiers } from "./packages.ts";
+import { selectFactionPortfolio } from "./portfolio.ts";
+import { FORECAST_RECALIBRATION_MS } from "../progression/forecast.ts";
 import {
   donationCrossoverIncome,
   donationForRep,
@@ -427,16 +429,59 @@ function decideFactions(
     <= view.moneyAvailable + Math.max(0, view.pendingProceeds);
 
   // --- objective ------------------------------------------------------------
-  const selection = selectFactionPackage(planningView, blockers);
-  const objectiveAugs = closePrereqs(selection.intent?.augmentations ?? [], view.catalog, planningOwned);
+  // The frontiers are rebuilt every pass — reputation, income and blockers all
+  // move — but the BUDGET is not re-swept every pass. A sweep is 24 solves; a
+  // re-solve at the committed budget is one, and it is what keeps the plan
+  // current against today's frontiers between recalibrations. The budget itself
+  // re-derives on the same cadence progression re-forecasts on, or immediately
+  // when a structural input changes.
+  const { frontiers, horizonDropped } = buildFrontiers(planningView, blockers);
+  const basis = invalidation.map((entry) => `${entry.label}=${entry.value}`).join("|");
+  const budgetStale = basis !== memory.portfolioBasis
+    || view.time - (memory.portfolioAt ?? 0) >= FORECAST_RECALIBRATION_MS;
+  const selection = selectFactionPortfolio(planningView, frontiers, {
+    resetOverheadSec: view.resetOverheadSec ?? 0,
+    basis,
+    ...(memory.portfolioBudgetSec !== undefined ? { previousBudgetSec: memory.portfolioBudgetSec } : {}),
+    ...(budgetStale || memory.portfolioBudgetSec === undefined
+      ? {}
+      : {
+          budgetSec: memory.portfolioBudgetSec,
+          ...(memory.portfolioChoices ? { committed: memory.portfolioChoices } : {}),
+        }),
+  });
+  // The objective is the whole SET, not its head. `shouldRecommendInstall` reads
+  // this list to decide the cycle's work is done; giving it only the package
+  // being worked now would declare the run over the moment the FIRST push
+  // completed, with the rest of the committed portfolio still outstanding.
+  const objectiveAugs = closePrereqs(
+    selection.portfolio.augmentations.length > 0
+      ? selection.portfolio.augmentations
+      : (selection.intent?.augmentations ?? []),
+    view.catalog,
+    planningOwned,
+  );
   const fresh: FactionObjective = {
-    factions: selection.intent ? [selection.intent.faction] : [],
+    // The whole committed set, in the order it will be worked — not the one
+    // faction that happened to win a rate comparison.
+    factions: selection.portfolio.packages.map((pkg) => pkg.faction),
     augmentations: objectiveAugs,
     value: selection.intent?.value ?? 0,
     foreclosed: selection.foreclosed,
     ...(selection.intent ? { intent: selection.intent } : {}),
     ...(selection.runnerUp ? { runnerUp: selection.runnerUp } : {}),
-    ...(selection.horizonStarved ? { horizonStarved: true } : {}),
+    ...(selection.intent === undefined && horizonDropped > 0 ? { horizonStarved: true } : {}),
+    portfolio: selection.portfolio,
+    // The sweep only runs on the recalibration cadence, so most passes carry no
+    // curve of their own. Republish the last one rather than dropping it: the
+    // budget it justifies is still the committed budget, and a field that
+    // vanishes for 59 of every 60 seconds reads as "no sweep happened" to every
+    // consumer of the record.
+    ...(selection.horizonCurve.length > 0
+      ? { horizonCurve: selection.horizonCurve }
+      : memory.objective?.horizonCurve && memory.objective.horizonCurve.length > 0
+        ? { horizonCurve: memory.objective.horizonCurve }
+        : {}),
   };
 
   // Keep the promised breakpoint stable while it is in flight. In
@@ -516,7 +561,19 @@ function decideFactions(
   let keepPrevious = Boolean(
     previousIntent
     && previousStanding
-    && (!previousComplete || (runnerBlockedThisCycle && view.queued.size > 0)),
+    && (!previousComplete || (runnerBlockedThisCycle && view.queued.size > 0))
+    // A latched package that can no longer DELIVER anything is not worth
+    // protecting from replanning: every augmentation it promised is already
+    // owned or queued, so continuing to grind its reputation target earns
+    // nothing at all. Completeness is deliberately about reputation rather than
+    // ownership — purchases are end-loaded — but "nothing left to buy" is a
+    // different question from "not paid for yet", and only this one can strand
+    // the work loop on an empty promise.
+    // An EMPTY promise is not the same thing: a favor-only breakpoint sells no
+    // augmentation at all, and `[].every(...)` is true, so testing ownership
+    // alone would refuse to latch every favor push and thrash the plan.
+    && !(previousIntent.augmentations.length > 0
+      && previousIntent.augmentations.every((name) => view.owned.has(name))),
   );
   // Membership is a structural improvement in certainty. A speculative
   // package whose faction is still locked must not hold the latch after a
@@ -608,6 +665,20 @@ function decideFactions(
     bankedAugmentations: [...bankedAugmentations].sort(),
     objective,
     lastInvalidation: invalidation,
+    // Committed only when the budget was actually re-derived this pass. A
+    // reused budget must not refresh its own timestamp, or the recalibration
+    // cadence would never fire.
+    ...(budgetStale
+      ? {
+          portfolioBudgetSec: selection.portfolio.budgetSec,
+          portfolioBasis: basis,
+          portfolioAt: view.time,
+          portfolioChoices: selection.portfolio.packages.map((pkg) => ({
+            faction: pkg.faction,
+            repTarget: pkg.repTarget,
+          })),
+        }
+      : {}),
     ...(intentKey !== undefined ? { intentKey } : {}),
     ...(intentRepSeen !== undefined ? { intentRepSeen } : {}),
     ...(intentProgressAt !== undefined ? { intentProgressAt } : {}),
@@ -637,7 +708,26 @@ function decideFactions(
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L109-L141
   // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Augmentation/AugmentationHelpers.ts#L24-L38
 
-  const graft = view.installRequested || drainLatched ? undefined : nextGraft(view, objective.augmentations);
+  // Grafting is priced in MONEY AND TIME and needs no reputation at all, so the
+  // reputation-budgeted objective is the wrong filter for it. An augmentation
+  // this cycle declined to grind for — because its reputation gate is hours
+  // away — may still be sixty seconds and ten million dollars away at the
+  // clinic. Offer the objective first (it keeps purchase priority), then every
+  // other graftable name by its own value; `nextGraft` applies the entropy,
+  // affordability and horizon tests itself, so widening the candidate list
+  // cannot loosen any of them.
+  const graftCandidates = objective.augmentations.concat(
+    (view.graftable ?? [])
+      .filter((offer) => !objective.augmentations.includes(offer.name) && !view.owned.has(offer.name))
+      .map((offer) => offer.name)
+      .sort((a, b) => {
+        const left = view.catalog.get(a);
+        const right = view.catalog.get(b);
+        return (right ? scoreAug(right, view.weights, view.rates?.worth) : 0)
+          - (left ? scoreAug(left, view.weights, view.rates?.worth) : 0);
+      }),
+  );
+  const graft = view.installRequested || drainLatched ? undefined : nextGraft(view, graftCandidates);
   if (graft) {
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Grafting.ts#L17-L103
     const action: FactionAction = view.requirementView.city === "New Tokyo"
@@ -1523,17 +1613,36 @@ function pickWorkFaction(
     if (needed <= standing.rep) continue; // nothing left to earn here
     const rate = chooseWorkType(name, standing, view, memory);
     if (!rate) continue;
-    // Rank by how much of the remaining gap this closes per second.
     const value = rate.repPerSec;
     alternatives.push({ label: `work ${name} (${rate.type})`, value });
-    if (!best || value > best.repPerSec) {
+    // FIRST viable member of the set, not the fastest one.
+    //
+    // `objective.factions` is the order the plan committed to, and the order is
+    // load-bearing: player work is sequential, so the solver chose it against
+    // the whole cycle's critical path and reordered it when that helped.
+    // Re-ranking here by raw reputation per second silently overrides that —
+    // and on a route it would work an optional faction ahead of the terminal
+    // package the node cannot end without, purely because the optional one
+    // grinds faster.
+    if (!best) {
       best = { faction: name, standing, workType: rate.type, repPerSec: value, produces: rate.produces, needed };
     }
   }
 
   // Focus dwell: do not switch faction before FOCUS_DWELL_MS unless the new
   // one is clearly better, because switching cancels the current work.
-  if (best && memory.focusFaction && memory.focusFaction !== best.faction) {
+  //
+  // It does not get to hold an optional faction in front of the augmentation
+  // the node cannot end without. The dwell exists to stop thrash between
+  // near-equal bidders, and a route's terminal package is not a bidder — the
+  // same reason the objective latch has its own Red Pill escape. Without this,
+  // a multi-faction plan whose head IS the terminal package would still grind
+  // the optional member, because near-equal reputation rates keep the incumbent
+  // every pass and the dwell window never opens.
+  const terminalHead = objective.intent !== undefined
+    && objective.factions[0] === objective.intent.faction
+    && objective.intent.augmentations.includes("The Red Pill");
+  if (!terminalHead && best && memory.focusFaction && memory.focusFaction !== best.faction) {
     const incumbent = view.factions.find((entry) => entry.name === memory.focusFaction);
     const withinDwell = view.time - memory.focusSince < FOCUS_DWELL_MS;
     if (incumbent && incumbent.joined && withinDwell) {

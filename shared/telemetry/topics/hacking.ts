@@ -88,8 +88,22 @@ export interface BatchAggregateReport {
   inOrder: number;
   /** Batches that settled having never launched a hack. */
   noHack: number;
-  /** Batches that settled with fewer landings than launches. */
-  lostOps: number;
+  /** Batches EVICTED without ever settling, and the work they took with them.
+   *
+   * Where op loss actually shows up. A batch settles only once its last op
+   * arrives, so a settled batch has `landed === ops` by construction — which is
+   * why the old "settled with fewer landings" counter could never fire, and why
+   * `launched` against `landed` per kind was two copies of one curve. A batch
+   * that loses an op never settles and is evicted instead; that eviction is now
+   * counted here.
+   *
+   * `abandonedOps - abandonedLanded` is the ops paid for that never arrived.
+   *
+   * Optional because runs recorded before this existed have no value for it,
+   * and zero would assert a healthy farm rather than an unmeasured one. */
+  abandoned?: number;
+  abandonedOps?: number;
+  abandonedLanded?: number;
 }
 
 /** One settled batch, kept as an example. The aggregates say whether the farm

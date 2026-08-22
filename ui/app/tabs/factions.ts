@@ -1,34 +1,50 @@
-import { AUGMENTATIONS, describeMults, offeredBy } from "../../../shared/features/augmentations.ts";
+import { AUGMENTATIONS, describeMults } from "../../../shared/features/augmentations.ts";
 import type {
-  AugmentationOffer,
   FactionGate,
   FactionPlan,
   FactionStanding,
   GateBlocker,
 } from "../../../shared/telemetry/topics/factions.ts";
+import {
+  augInspector,
+  augRows,
+  givesCell,
+  sellerCell,
+  stateCell,
+  stateStatus,
+  stateTitle,
+  type AugRow,
+} from "./factions-aug.ts";
 import { formatScientific } from "../../../shared/format.ts";
-import { card, collapsible, dataTable, dot, filters, hint, meter, note, search, table, tiles, waiting, type Column, type Status } from "../lib/dom.ts";
+import { card, collapsible, dataTable, dot, filters, hint, meter, note, rankedTable, search, table, tiles, waiting, type Column, type Status } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
 
-/** Factions tab: three questions, three cards.
+/** Factions tab: four questions, four cards.
  *
- *  1. **Plan** — what the driver selected and the inputs it selected from. A
- *     faction run spends most of its time doing one long thing, so the action
- *     belongs beside its target, ETA, package economics, and alternatives,
- *     and a blocked feature must name the feature it is waiting on.
- *  2. **Factions** — every faction the game has, whether we are in, how close
+ *  1. **Plan** — the action being executed and the inputs it was chosen from.
+ *     A blocked feature must name the feature it is waiting on.
+ *  2. **Portfolio** — the committed SET of faction pushes, in the order they
+ *     will be worked, and the cycle length it was solved for. The plan stopped
+ *     being one faction: reputation work is sequential, augmentations are
+ *     shared between sellers, and purchases pay one escalating price ladder, so
+ *     the unit of the decision is the whole install cycle. The budget sweep is
+ *     shown beside it because "why this long a cycle" is a decision, not a
+ *     constant.
+ *  3. **Factions** — every faction the game has, whether we are in, how close
  *     an invitation is, and exactly what is still missing. This replaces what
  *     used to be three separate cards (standings, invitations, blockers) that
  *     each showed a different subset of the same 34 rows.
- *  3. **Augmentations** — the whole catalogue, what each one gives and who
- *     sells it. Not just the ones our current factions offer: which faction to
- *     join is the decision this panel exists to support, and it cannot be made
- *     from a list that only contains factions already joined. Static facts come
- *     from the bundled transcription; live price, rep gap and ownership are
- *     overlaid from telemetry. */
+ *  4. **Augmentations** — the whole catalogue: what state each one is in, what
+ *     it gives, what it is worth to THIS run, and who sells it. Not just the
+ *     ones our current factions offer — which faction to join is the decision
+ *     this panel exists to support, and it cannot be made from a list that only
+ *     contains factions already joined. Static facts come from the bundled
+ *     transcription; live price, rep gap, score and ownership are overlaid from
+ *     telemetry. It spans the full width because it is seven columns wide and
+ *     one of them is prose. Row model and inspector live in `factions-aug.ts`. */
 
 // --- plan ------------------------------------------------------------------
 
@@ -273,6 +289,8 @@ interface FactionRow {
   /** Augmentations this faction sells that we do not own. */
   augsLeft: number;
   inObjective: boolean;
+  /** 1-based position in the committed work order, when it is in the plan. */
+  planPosition?: number;
 }
 
 function describeBlocker(blocker: GateBlocker): string {
@@ -292,7 +310,9 @@ function factionRows(state: ProjectedState): FactionRow[] {
   const joined = new Set(f.joined);
   const invited = new Set(f.invites ?? []);
   const owned = new Set(f.ownedAugs ?? []);
-  const objective = new Set(f.plan?.objective?.factions ?? []);
+  // Position in the committed order, not merely membership: the plan is a
+  // SEQUENCE now (one work slot), so "third" is a different fact from "in it".
+  const order = new Map((f.plan?.objective?.factions ?? []).map((name, index) => [name, index + 1]));
   const gate = f.favorToDonate;
 
   // Every faction we know of from any source: the gate map is complete once
@@ -325,7 +345,8 @@ function factionRows(state: ProjectedState): FactionRow[] {
       workTypes: f.workTypes?.[name] ?? [],
       enemies: f.enemies?.[name] ?? [],
       augsLeft,
-      inObjective: objective.has(name),
+      ...(order.has(name) ? { planPosition: order.get(name)! } : {}),
+      inObjective: order.has(name),
     };
   });
 }
@@ -345,7 +366,13 @@ const FACTION_COLUMNS: Column<FactionRow>[] = [
     sort: (r) => r.name,
     cell: (r) => {
       const { status, tooltip } = factionStatus(r);
-      const star = r.inObjective ? ` <span class="warn" title="in the current objective">★</span>` : "";
+      const star = r.planPosition !== undefined
+        ? ` <span class="warn" title="${esc(
+            r.planPosition === 1
+              ? "the push being worked now"
+              : `queued in the plan — ${r.planPosition - 1} push(es) ahead of it`,
+          )}">${r.planPosition}</span>`
+        : "";
       return `${dot(status, tooltip)}${esc(r.name)}${star}`;
     },
   },
@@ -408,143 +435,160 @@ const FACTION_COLUMNS: Column<FactionRow>[] = [
 
 // --- augmentations ---------------------------------------------------------
 
-interface AugRow {
-  name: string;
-  owned: boolean;
-  /** Live offer from a joined faction, when there is one. */
-  offer?: AugmentationOffer;
-  cost: number;
-  rep: number;
-  factions: readonly string[];
-  /** Factions we are in that sell it. */
-  fromJoined: string[];
-  gives: string;
-  multsUnknown: boolean;
-  prereqs: readonly string[];
-  inPlan: boolean;
-}
-
-function augRows(state: ProjectedState): AugRow[] {
-  const f = state.topics.factions;
-  const owned = new Set(f?.ownedAugs ?? []);
-  const joined = new Set(f?.joined ?? []);
-  const planned = new Set(f?.plan?.objective?.augmentations ?? []);
-  // Cheapest live offer per augmentation: the same aug from four factions is
-  // one decision, not four rows.
-  const bestOffer = new Map<string, AugmentationOffer>();
-  for (const offer of f?.offers ?? []) {
-    const existing = bestOffer.get(offer.name);
-    if (!existing || offer.price < existing.price) bestOffer.set(offer.name, offer);
-  }
-  const meta = f?.augMeta ?? {};
-
-  return Object.entries(AUGMENTATIONS).map(([name, info]) => {
-    const offer = bestOffer.get(name);
-    // The live probe wins on multipliers where it has them: one augmentation
-    // has its multipliers randomised per save, so the static table is wrong
-    // for it by design.
-    const mults = info.multsUnknown ? meta[name]?.mults : (info.mults ?? meta[name]?.mults);
-    return {
-      name,
-      owned: owned.has(name),
-      ...(offer ? { offer } : {}),
-      cost: offer?.price ?? info.cost,
-      rep: offer?.repReq ?? info.rep,
-      factions: info.factions,
-      fromJoined: info.factions.filter((faction) => joined.has(faction)),
-      gives:
-        describeMults(mults, 3)
-          .map((m) => m.text)
-          .join(", ") ||
-        (info.startingMoney ? `${fmtMoney(info.startingMoney)} on install` : "") ||
-        (info.programs?.length ? `${info.programs.length} program(s)` : "") ||
-        "—",
-      multsUnknown: info.multsUnknown === true && meta[name]?.mults === undefined,
-      prereqs: info.prereqs ?? [],
-      inPlan: planned.has(name),
-    };
-  });
-}
+// --- augmentations ---------------------------------------------------------
 
 const AUG_COLUMNS: Column<AugRow>[] = [
-  {
-    id: "name",
-    label: "augmentation",
-    left: true,
-    sort: (r) => r.name,
-    cell: (r) => {
-      const status: Status = r.owned ? "good" : r.offer?.affordableRep ? "ready" : r.fromJoined.length ? "wait" : "off";
-      const tooltip = r.owned
-        ? "owned"
-        : r.offer?.affordableRep
-          ? "reputation met — purchasable"
-          : r.fromJoined.length
-            ? "offered by a faction we are in, reputation short"
-            : "no faction we are in offers this";
-      const plan = r.inPlan ? ` <span class="warn" title="in the current shopping list">★</span>` : "";
-      const pre = r.prereqs.length
-        ? ` <span class="muted" title="${esc(`needs ${r.prereqs.join(", ")}`)}">(needs ${r.prereqs.length})</span>`
-        : "";
-      return `${dot(status, tooltip)}${esc(r.name)}${plan}${pre}`;
+    {
+      id: "name",
+      label: "augmentation",
+      left: true,
+      sort: (r) => r.name,
+      cell: (r) => {
+        const pre = r.prereqs.length
+          ? ` <span class="muted" title="${esc(`needs ${r.prereqs.join(", ")}`)}">(needs ${r.prereqs.length})</span>`
+          : "";
+        // A button, so the row opens the inspector — the same master-detail
+        // affordance the hacking tab uses for servers.
+        return (
+          `${dot(stateStatus(r), stateTitle(r))}` +
+          `<button class="rowlink" data-view-key="augs.selected" data-view-value="${esc(r.name)}">${esc(r.name)}</button>` +
+          pre
+        );
+      },
     },
-  },
-  {
-    id: "gives",
-    label: "gives",
-    left: true,
-    wrap: true,
-    sort: (r) => r.gives,
-    cell: (r) =>
-      r.multsUnknown
-        ? `<span class="muted" title="upstream randomises this augmentation's multipliers per save">randomised</span>`
-        : `<span class="muted">${esc(r.gives)}</span>`,
-  },
-  {
-    id: "from",
-    label: "from",
-    left: true,
-    wrap: true,
-    sort: (r) => r.factions.length,
-    cell: (r) => {
-      if (r.factions.length === 0) return `<span class="muted">not sold</span>`;
-      // Factions we are already in first, and marked: that is the difference
-      // between "buy it" and "join something first".
-      const inside = r.fromJoined.map((name) => `<span class="good">${esc(name)}</span>`);
-      const outside = r.factions
-        .filter((name) => !r.fromJoined.includes(name))
-        .map((name) => `<span class="muted">${esc(name)}</span>`);
-      return [...inside, ...outside].join(", ");
+    {
+      id: "state",
+      label: "state",
+      left: true,
+      sort: (r) => r.state,
+      cell: (r) => stateCell(r),
     },
-  },
-  {
-    id: "cost",
-    label: "price",
-    sort: (r) => r.cost,
-    cell: (r) => {
-      if (!Number.isFinite(r.cost)) return `<span class="muted">unbuyable</span>`;
-      const base = r.offer?.basePrice;
-      // Both prices when they differ: the 1.9^queued escalation should be
-      // visible as an escalation, not look like a price change.
-      return base !== undefined && base !== r.cost
-        ? `${fmtMoney(r.cost)} <span class="muted">(base ${fmtMoney(base)})</span>`
-        : fmtMoney(r.cost);
+    {
+      id: "gives",
+      label: "gives",
+      left: true,
+      wrap: true,
+      sort: (r) => r.gives,
+      cell: (r) => givesCell(r),
     },
-  },
-  {
-    id: "rep",
-    label: "rep",
-    sort: (r) => r.rep,
-    cell: (r) => {
-      if (!Number.isFinite(r.rep)) return `<span class="muted">–</span>`;
-      if (r.owned) return `<span class="muted">owned</span>`;
-      if (r.offer?.affordableRep) return `<span class="good">met</span>`;
-      const gap = r.offer?.repGap;
-      return gap !== undefined
-        ? `<span class="muted" title="reputation still needed at the cheapest offering faction">${fmtNum(gap, 0)} short</span>`
-        : fmtNum(r.rep, 0);
+    {
+      id: "score",
+      label: "worth",
+      sort: (r) => r.score ?? -1,
+      cell: (r) =>
+        r.score === undefined
+          ? `<span class="muted" title="scored only for augmentations with a live offer">–</span>`
+          : `<span title="BN-seconds under the run's objective weights">${fmtNum(r.score, 2)}</span>`,
     },
-  },
+    {
+      id: "from",
+      label: "from",
+      left: true,
+      sort: (r) => r.seller ?? "",
+      cell: (r) => sellerCell(r),
+    },
+    {
+      id: "cost",
+      label: "price",
+      sort: (r) => r.cost,
+      cell: (r) => {
+        if (!Number.isFinite(r.cost)) return `<span class="muted">unbuyable</span>`;
+        const base = r.offer?.basePrice;
+        // Both prices when they differ: the 1.9^queued escalation should be
+        // visible as an escalation, not look like a price change.
+        return base !== undefined && base !== r.cost
+          ? `${fmtMoney(r.cost)} <span class="muted">(base ${fmtMoney(base)})</span>`
+          : fmtMoney(r.cost);
+      },
+    },
+    {
+      id: "rep",
+      label: "rep",
+      sort: (r) => r.rep,
+      cell: (r) => {
+        if (!Number.isFinite(r.rep)) return `<span class="muted">–</span>`;
+        if (r.owned) return `<span class="muted">owned</span>`;
+        if (r.offer?.affordableRep) return `<span class="good">met</span>`;
+        return r.repGap !== undefined
+          ? `<span class="muted" title="reputation still needed at the cheapest offering faction">${fmtNum(r.repGap, 0)} short</span>`
+          : fmtNum(r.rep, 0);
+      },
+    },
 ];
+
+// --- portfolio -------------------------------------------------------------
+
+/** The committed SET and the cycle length it was solved for.
+ *
+ * The plan used to be one faction, so the panel could describe it in a line.
+ * It is now an ordered set costed together, and two things about it have to be
+ * arguable rather than trusted: which pushes are in it and in what order, and
+ * why THIS cycle length. Both are published, so both are shown. */
+function portfolioCard(state: ProjectedState): string {
+  const objective = state.topics.factions?.plan?.objective;
+  const portfolio = objective?.portfolio;
+  if (!portfolio) return "";
+
+  const rows = portfolio.packages.map((pkg) => [
+    esc(pkg.faction),
+    fmtNum(pkg.repTarget, 0),
+    esc(fmtTime((pkg.workSecFromNow ?? 0) * 1000)),
+    esc(fmtTime(pkg.etaSec * 1000)),
+    String(pkg.augmentations.length),
+    fmtMoney(pkg.totalCost),
+    fmtRate(pkg.marginalRate),
+  ]);
+
+  const summary = tiles([
+    { label: "cycle budget", value: fmtTime(portfolio.budgetSec * 1000),
+      sub: portfolio.previousBudgetSec !== undefined && portfolio.previousBudgetSec !== portfolio.budgetSec
+        ? `was ${fmtTime(portfolio.previousBudgetSec * 1000)}`
+        : "steady" },
+    { label: "set ETA", value: fmtTime(portfolio.etaSec * 1000),
+      sub: `${fmtTime(portfolio.workSec * 1000)} work · ${fmtTime(portfolio.moneySec * 1000)} money` },
+    { label: "augmentations", value: String(portfolio.augmentations.length),
+      sub: `${portfolio.packages.length} faction(s)` },
+    { label: "value", value: fmtNum(portfolio.value, 2),
+      sub: `within ${(portfolio.boundGap * 100).toFixed(0)}% of the bound` },
+  ]);
+
+  const curve = objective.horizonCurve ?? [];
+  const chosen = curve.reduce(
+    (best, sample, index) => (sample.rate > (curve[best]?.rate ?? -Infinity) ? index : best),
+    0,
+  );
+  const sweep = curve.length > 0
+    ? rankedTable(
+        ["budget", "value", "rate", "factions"],
+        curve.map((sample) => [
+          esc(fmtTime(sample.sec * 1000)),
+          fmtNum(sample.value, 2),
+          fmtRate(sample.rate),
+          String(sample.factions),
+        ]),
+        { selected: (index) => index === chosen, left: [0] },
+      )
+    : note("the budget sweep re-runs on the forecast's recalibration tick");
+
+  return card(
+    "Portfolio",
+    summary +
+      table(["faction", "rep target", "starts after", "adds", "augs", "cash", "marginal/sec"], rows, {
+        left: [0],
+        empty: "no set committed yet",
+      }) +
+      collapsible(
+        "factions.horizon",
+        `cycle length — ${curve.length} budget(s) evaluated`,
+        note(
+          hint(
+            "chosen to maximise value per second of cycle, reset overhead included",
+            "the whole grid is evaluated rather than walked: rates rise within a cycle, so a faction unreachable at a short budget can be cheap at a long one",
+          ),
+        ) + sweep,
+      ),
+  );
+}
 
 // --- tab -------------------------------------------------------------------
 
@@ -598,38 +642,67 @@ export const factionsTab: Tab = {
     const augs = augRows(state);
     const augMode = view("augs.mode", "available");
     const needle = view("augs.search").trim().toLowerCase();
+    // One predicate per filter, used for both the badge and the rows — the same
+    // rule the faction filters follow, so a badge cannot promise a count its
+    // own view does not show.
+    const AUG_VIEWS: { value: string; label: string; title: string; match(row: AugRow): boolean }[] = [
+      { value: "plan", label: "this cycle", title: "committed to the current install cycle, bought or not",
+        match: (a) => a.state === "planned" || a.state === "banked" || a.state === "queued" },
+      { value: "available", label: "buyable", title: "reputation met at a joined faction",
+        match: (a) => a.state === "buyable" },
+      { value: "short", label: "rep short", title: "a joined faction sells it, but the gate is not met",
+        match: (a) => a.state === "short" },
+      { value: "installed", label: "installed", title: "installed and working for us",
+        match: (a) => a.state === "installed" },
+      { value: "locked", label: "locked", title: "no faction we are in sells it",
+        match: (a) => a.state === "locked" },
+      { value: "all", label: "all", title: "the whole catalogue", match: () => true },
+    ];
     const augCounts = {
-      owned: augs.filter((a) => a.owned).length,
-      available: augs.filter((a) => !a.owned && a.fromJoined.length > 0).length,
-      planned: augs.filter((a) => a.inPlan).length,
+      installed: augs.filter((a) => a.state === "installed").length,
+      queued: augs.filter((a) => a.state === "queued").length,
+      available: augs.filter((a) => a.state === "buyable").length,
+      planned: augs.filter((a) => a.state === "planned" || a.state === "banked").length,
     };
+    const activeAug = AUG_VIEWS.find((v) => v.value === augMode) ?? AUG_VIEWS[1]!;
     const shownAugs = augs.filter((a) => {
-      if (needle && !a.name.toLowerCase().includes(needle) && !a.gives.toLowerCase().includes(needle)) return false;
-      if (augMode === "owned") return a.owned;
-      if (augMode === "available") return !a.owned && a.fromJoined.length > 0;
-      if (augMode === "planned") return a.inPlan;
-      if (augMode === "locked") return !a.owned && a.fromJoined.length === 0;
-      return true;
+      // Sellers are searchable because they are no longer scannable: the column
+      // names one faction and counts the rest, so "everything NiteSec sells" has
+      // to be a query rather than a read.
+      if (
+        needle
+        && !a.name.toLowerCase().includes(needle)
+        && !a.gives.toLowerCase().includes(needle)
+        && !a.factions.some((faction) => faction.toLowerCase().includes(needle))
+      ) {
+        return false;
+      }
+      return activeAug.match(a);
     });
 
     const augControls =
       filters(
         "augs.mode",
-        [
-          { value: "available", label: "buyable", badge: String(augCounts.available) },
-          { value: "planned", label: "planned", badge: String(augCounts.planned) },
-          { value: "owned", label: "owned", badge: String(augCounts.owned) },
-          { value: "locked", label: "locked" },
-          { value: "all", label: "all", badge: String(augs.length) },
-        ],
+        AUG_VIEWS.map((v) => ({
+          value: v.value,
+          label: v.label,
+          title: v.title,
+          badge: String(augs.filter((a) => v.match(a)).length),
+        })),
         "available",
-      ) + search("augs.search", "name or effect…");
+      ) + search("augs.search", "name, effect or faction…");
+
+    // The inspector's subject comes from the VISIBLE rows: a selection that a
+    // filter has hidden would render a panel with no row above it.
+    const selectedAug = shownAugs.find((a) => a.name === view("augs.selected"));
 
     const summary = tiles([
       { label: "joined", value: String(counts.joined), sub: `${rows.length} exist` },
       { label: "invites", value: String(counts.invited) },
-      { label: "augs owned", value: String(augCounts.owned), sub: `${augs.length} exist` },
-      { label: "buyable now", value: String(augCounts.available) },
+      { label: "installed", value: String(augCounts.installed),
+        sub: augCounts.queued > 0 ? `${augCounts.queued} queued for next install` : `${augs.length} exist` },
+      { label: "buyable now", value: String(augCounts.available),
+        sub: augCounts.planned > 0 ? `${augCounts.planned} planned this cycle` : "" },
     ]);
 
     const graft =
@@ -654,24 +727,40 @@ export const factionsTab: Tab = {
           )
         : note("no scored alternatives");
 
+    // The augmentation table spans the full width rather than sharing the
+    // two-column grid. Seven columns inside three fifths of the page is what
+    // squeezed `gives` into an unreadable sliver; the sidebar cards do not need
+    // to sit beside it.
     return (
       `<div class="col wide">` +
       planCard(state) +
+      portfolioCard(state) +
       card("Factions", summary + factionTable, factionControls) +
-      card("Augmentations", dataTable("augs.list", shownAugs, AUG_COLUMNS, {
-        defaultSort: { key: "cost", dir: 1 },
-        empty: "nothing matches this filter",
-        limit: 200,
-      }), augControls) +
       `</div>` +
       `<div class="col">` +
       card("Decision history", decisionHistory(state)) +
       card("Alternatives considered", alternatives) +
       card("Grafting", graft) +
+      `</div>` +
+      `<div class="col span">` +
+      card(
+        "Augmentations",
+        dataTable("augs.list", shownAugs, AUG_COLUMNS, {
+          defaultSort: { key: "score", dir: -1 },
+          empty: "nothing matches this filter",
+          limit: 200,
+          rowClass: (row) =>
+            row.name === selectedAug?.name
+              ? "picked"
+              : row.state === "installed"
+                ? "installed"
+                : row.state === "planned" || row.state === "banked" || row.state === "queued"
+                  ? "planned"
+                  : "",
+        }) + (selectedAug ? augInspector(selectedAug, state) : ""),
+        augControls,
+      ) +
       `</div>`
     );
   },
 };
-
-/** Re-exported for the tests, which assert the catalogue joins correctly. */
-export { augRows, factionRows, offeredBy };

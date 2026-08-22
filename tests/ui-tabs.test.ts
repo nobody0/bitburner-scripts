@@ -76,13 +76,17 @@ describe("tab rendering", () => {
         effectThreads: { farm: { hack: 1_600, grow: 625, weaken: 500 } },
       },
       batches: {
+        // `landed === ops` on both: a settled batch cannot have lost an op.
+        // Loss lives on the abandoned counters.
         hgw: {
-          batches: 100, ops: 300, landed: 298, threads: { hack: 1_700, grow: 4_000, weaken: 600 },
-          gb: 100_000, moneyEarned: 5e9, hacks: 99, spanMs: 2_000_000, inOrder: 98, noHack: 1, lostOps: 2,
+          batches: 100, ops: 300, landed: 300, threads: { hack: 1_700, grow: 4_000, weaken: 600 },
+          gb: 100_000, moneyEarned: 5e9, hacks: 99, spanMs: 2_000_000, inOrder: 98, noHack: 1,
+          abandoned: 2, abandonedOps: 6, abandonedLanded: 4,
         },
         prep: {
           batches: 4, ops: 40, landed: 40, threads: { hack: 0, grow: 800, weaken: 400 },
-          gb: 20_000, moneyEarned: 0, hacks: 0, spanMs: 800_000, inOrder: 0, noHack: 0, lostOps: 0,
+          gb: 20_000, moneyEarned: 0, hacks: 0, spanMs: 800_000, inOrder: 0, noHack: 0,
+          abandoned: 0, abandonedOps: 0, abandonedLanded: 0,
         },
       },
       recentBatches: [
@@ -105,18 +109,29 @@ describe("tab rendering", () => {
     expect(html).toContain(">hgw<");
     expect(html).toContain(">prep<");
     expect(html).toContain(`class="batchgrid"`);
+    // The per-batch view is the headline; the per-kind grid is a disclosure
+    // under it. A cumulative mean per kind is a number no individual batch
+    // resembles, which is the reason for the demotion.
+    expect(html).toContain(`data-open-key="hacking.batchKinds"`);
     // 300 ops over 100 batches, 100_000 GB over 100 batches, $5e9 over 100.
     expect(html).toContain("3.0");
     expect(html).toContain("1.00TB");
-    // Batches that lost an op, and those that landed support with no steal.
-    expect(html).toContain("2 lost");
+    // Batches that landed support with no steal. There is deliberately no
+    // "N lost" assertion here any more: a settled batch has `landed === ops` by
+    // construction, so that badge could never fire. Loss is the abandoned
+    // counters and the global op residual instead.
     expect(html).toContain("1 no-hack");
-    // The launched/landed band is stated as TOTALS. The gap between them is
-    // the finding, and a per-second reading of both would compress it away.
-    // Colour-keyed to the two curves: the microchart has no room for a legend,
-    // and the curves coincide exactly whenever nothing is being lost.
-    expect(html).toContain(`<span class="k1">300 launched</span> → <span class="k2">298 landed</span>`);
-    expect(html).toContain(`<span class="k1">40 launched</span> → <span class="k2">40 landed</span>`);
+    // There is deliberately NO launched-against-landed band any more. Those two
+    // counters are equal by construction — a batch settles only once its last op
+    // lands — so the chart that plotted them against each other drew one curve
+    // twice, and the gap it was captioned as showing was always exactly zero.
+    expect(html).not.toContain("launched</span> →");
+    expect(html).not.toContain("300 launched");
+    // Loss is reported where it can actually be observed: batches evicted
+    // without ever settling, and the ops they took with them.
+    expect(html).toContain("2 abandoned, 2 ops lost");
+    // Ops launched that are neither in flight nor landed, as a run-level tile.
+    expect(html).toContain("ops adrift");
     // In-order is a FRACTION, so the denominator is visible: it counts every
     // batch of the kind, including ones that never had a grid to be right about.
     expect(html).toContain("98 / 100 in order");
@@ -215,7 +230,7 @@ describe("tab rendering", () => {
       factions: { joined: ["CyberSec"], standings: [{ name: "CyberSec", rep: 100, favor: 1 }], invites: ["NiteSec"], favorToDonate: 150, workTypes: { CyberSec: ["hacking"] }, enemies: { CyberSec: [] }, requirements: { NiteSec: [{ type: "skills", skills: { hacking: 200 } }] }, gates: { CyberSec: { joined: true, invited: false, progress: 1, reachable: true, missing: [] }, NiteSec: { joined: false, invited: true, progress: 1, reachable: true, missing: [] }, "The Covenant": { joined: false, invited: false, progress: 0.4, reachable: true, missing: [{ kind: "skill", subject: "agility", target: 850, have: 340, progress: 0.4, owner: "career", reachable: true }] }, Illuminati: { joined: false, invited: false, progress: 0, reachable: false, missing: [{ kind: "bitNode", target: 0, have: 0, progress: 0, owner: "progression", reachable: false }] } }, augMeta: { Rootkit: { prereqs: [], mults: { hacking: 1.1 } } }, ownedAugs: ["BitWire"], offers: [{ name: "Rootkit", faction: "CyberSec", price: 1.9e6, basePrice: 1e6, repReq: 100, affordableRep: true, repGap: 0, owned: false }], augTotal: 1, graftable: [{ name: "Rootkit", price: 1e6, timeMs: 6e4 }], plan: { context: { evaluatedAt: 0, horizonSec: 3600, ownedAugCount: 1, queuedAugCount: 0, incomePerSec: 1000, moneyAvailable: 1e6, moneyGranted: 1e6, holdsWorkSlot: true, favorToDonate: 150, priceQueue: { nonSoA: 0, ownedSoA: 0, neurofluxLevel: 0 } }, objective: { factions: ["CyberSec"], augmentations: ["Rootkit"], value: 1.5, foreclosed: [{ name: "Volhaven", bannedBy: "Sector-12" }] }, action: { type: "workForFaction", faction: "CyberSec", workType: "hacking" }, alternatives: [{ label: "work NiteSec", value: 0.2 }], blockers: [{ faction: "NiteSec", kind: "skill", subject: "hacking", target: 200, have: 50, progress: 0.25, owner: "hacking", reachable: true }], until: { kind: "rep", faction: "CyberSec", target: 100, have: 40, etaSec: 120 }, lastResult: { action: "workForFaction", ok: true, detail: "started", at: 1 }, recommendInstall: { augmentations: ["Rootkit"] } } },
       career: { karma: -100, numPeopleKilled: 0, skills: { hacking: 10, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1, intelligence: 0 }, exp: { hacking: 10, strength: 0, defense: 0, dexterity: 0, agility: 0, charisma: 0, intelligence: 0 }, city: "Sector-12", location: "home", entropy: 0, totalPlaytime: 1e6, jobs: { ECorp: "Software" }, companies: { ECorp: { rep: 10, favor: 1 } }, currentWork: { type: "CRIME", detail: "Mug" }, crimes: [{ name: "Mug", chance: 0.5, money: 1000, timeMs: 4000, karma: -0.25, moneyPerSec: 125 }] },
       hacknet: { servers: false, numNodes: 2, maxNumNodes: 30, purchaseNodeCost: 1e5, totalProduction: 500, productionPerSec: 1.5, nodes: [{ name: "hacknet-node-0", level: 10, ram: 2, cores: 1, production: 1.5, totalProduction: 500, timeOnline: 3600 }], nextUpgrades: [{ kind: "level", node: 0, cost: 1000 }] },
-      stock: { hasWseAccount: true, hasTixApiAccess: true, has4SData: false, has4SDataApi: true, positions: [{ sym: "ECP", price: 100, ask: 100.2, bid: 99.8, maxShares: 1e6, shares: 100, avgPx: 90, sharesShort: 0, avgPxShort: 0, value: 9980, costBasis: 9000 }], signals: { ECP: { forecast: 0.6, volatility: 0.0045 } }, portfolioValue: 9980, portfolioCost: 9000, market: { tick: 120, ticksUntilCycle: 43, cyclesSeen: 1, lastFlipCount: 0, lastV: 0.42 }, manipulation: { ecorp: { sym: "ECP", side: "long", valuePerOp: 12000, notional: 9980 } }, plan: { actions: [{ type: "buy" }], ranked: [{ sym: "ECP", side: "long", forecast: 0.6, volatility: 0.0045, exact: true, breakEvenTicks: 4.2, expectedProfit: 5e5 }], entry: { sym: "ECP", side: "long", shares: 1000, cost: 1e5, expectedProfit: 5e5, holdTicks: 43, breakEvenTicks: 4.2 }, unlock: { type: "buy4SApi", cost: 25e9, investmentCost: 25e9, gainPerSec: 1e6, paybackSec: 25000, netOverHorizon: 1e9 }, flat: false, lastResult: { action: "buy", ok: true, detail: "bought 1000 ECP", at: 1 } } },
+      stock: { hasWseAccount: true, hasTixApiAccess: true, has4SData: false, has4SDataApi: true, positions: [{ sym: "ECP", price: 100, ask: 100.2, bid: 99.8, maxShares: 1e6, shares: 100, avgPx: 90, sharesShort: 0, avgPxShort: 0, value: 9980, costBasis: 9000 }], signals: { ECP: { forecast: 0.6, volatility: 0.0045 } }, portfolioValue: 9980, portfolioCost: 9000, tradeCashFlow: -4e8, unlockSpend: 5.2e9, wealth: 1.2e10, orders: { ECP: [{ type: "Limit Buy Order", position: "Long", shares: 500, price: 95 }] }, market: { tick: 120, ticksUntilCycle: 43, cyclesSeen: 1, lastFlipCount: 15, lastV: 0.42 }, manipulation: { ecorp: { sym: "ECP", side: "long", valuePerOp: 12000, notional: 9980 } }, plan: { actions: [{ type: "buy" }], ranked: [{ sym: "ECP", side: "long", forecast: 0.6, volatility: 0.0045, exact: true, manipulable: true, breakEvenTicks: 4.2, expectedProfit: 5e5 }], entry: { sym: "ECP", side: "long", shares: 1000, cost: 1e5, expectedProfit: 5e5, holdTicks: 43, breakEvenTicks: 4.2 }, unlock: { type: "buy4SApi", cost: 25e9, investmentCost: 30.2e9, gainPerSec: 1e6, paybackSec: 25000, netOverHorizon: 1e9 }, reserve: { amount: 2e8, ratePerSec: 5e4 }, horizons: { positionSec: 258, unlockSec: 4320 }, flat: false, lastResult: { action: "buy", ok: true, detail: "bought 1000 ECP", at: 1 } } },
       gang: { faction: "Slum Snakes", isHacking: false, respect: 100, respectGainRate: 1, wantedLevel: 2, wantedLevelGainRate: 0.1, wantedPenalty: 0.9, moneyGainRate: 500, power: 10, territory: 0.2, territoryClashChance: 0.1, territoryWarfareEngaged: false, respectForNextRecruit: 200, recruitsAvailable: 1, canRecruit: true, members: [{ name: "a", task: "Mug People", earnedRespect: 10, respectGain: 0.5, wantedLevelGain: 0.01, moneyGain: 100, skills: { hack: 1, str: 10, def: 10, dex: 10, agi: 10, cha: 1 }, ascMults: { hack: 1, str: 1, def: 1, dex: 1, agi: 1, cha: 1 }, upgrades: 2, augmentations: 1 }], clashChances: { Tetrads: 0.4 } },
       corp: { name: "Acme", funds: 1e9, revenue: 1e6, expenses: 5e5, public: false, valuation: 1e10, sharePrice: 10, totalShares: 1e9, numShares: 9e8, issuedShares: 0, dividendRate: 0, dividendEarnings: 0, state: "START", divisions: [{ name: "Ag", industry: "Agriculture", awareness: 1, popularity: 1, productionMult: 2, researchPoints: 100, lastCycleRevenue: 1e6, lastCycleExpenses: 5e5, numAdVerts: 1, cities: ["Sector-12"], products: [], maxProducts: 0, offices: [{ city: "Sector-12", size: 9, numEmployees: 9, avgEnergy: 99, avgMorale: 99, jobs: { Operations: 3 } }], warehouses: [{ city: "Sector-12", level: 1, size: 100, sizeUsed: 50, smartSupplyEnabled: true }] }], investmentOffer: { round: 1, funds: 1e9, shares: 1e8 } },
       bladeburner: { rank: 100, skillPoints: 5, stamina: [50, 100], city: "Sector-12", current: { type: "Contract", name: "Tracking", elapsedMs: 1000 }, nextBlackOp: { name: "Operation Typhoon", rank: 2500 }, skills: { "Blade's Intuition": { level: 1, upgradeCost: 3 } }, actions: [{ type: "contract", name: "Tracking", chance: [0.5, 0.7], timeMs: 30000, countRemaining: 100, level: 1, maxLevel: 5 }], cities: [{ name: "Sector-12", population: 1e6, communities: 5, chaos: 10 }] },
@@ -331,7 +346,114 @@ describe("tab rendering", () => {
     expect(TABS["sleeves"].render(state)).toContain('data-sort-table="sleeves.list"');
     expect(TABS["bladeburner"].render(state)).toContain('data-sort-table="bladeburner.actions"');
     expect(TABS["stock"].render(state)).toContain('data-sort-table="stock.positions"');
+    expect(TABS["stock"].render(state)).toContain('data-sort-table="stock.market"');
     expect(TABS["hacknet"].render(state)).toContain('data-sort-table="hacknet.nodes"');
+  });
+
+  test("the stock tab reads the whole ledger the topic publishes", () => {
+    const state = emptyState();
+    state.topics.stock = {
+      hasWseAccount: true,
+      hasTixApiAccess: true,
+      has4SDataApi: false,
+      positions: [{ sym: "ECP", price: 100, ask: 100.2, bid: 99.8, maxShares: 1e6, shares: 100, avgPx: 90, sharesShort: 0, avgPxShort: 0, value: 9980, costBasis: 9000 }],
+      portfolioValue: 9980,
+      portfolioCost: 9000,
+      // A book underwater and a market that has not yet earned back its access.
+      tradeCashFlow: -4e8,
+      unlockSpend: 5.2e9,
+      wealth: 1.2e10,
+      orders: { ECP: [{ type: "Limit Buy Order", position: "Long", shares: 500, price: 95 }] },
+      market: { tick: 120, ticksUntilCycle: 43, cyclesSeen: 1, lastFlipCount: 15, lastV: 0.42 },
+      plan: {
+        actions: [],
+        ranked: [{ sym: "ECP", side: "long", forecast: 0.6, volatility: 0.0045, exact: true, manipulable: true, breakEvenTicks: 4.2, expectedProfit: 5e5 }],
+        // No entry, only a reserve: the case that used to render as an idle tab.
+        reserve: { amount: 2e8, ratePerSec: 5e4 },
+        unlock: { type: "buy4SApi", cost: 25e9, investmentCost: 30.2e9, gainPerSec: 1e6, paybackSec: 25000, netOverHorizon: 1e9 },
+        horizons: { positionSec: 258, unlockSec: 4320 },
+        flat: false,
+      },
+    } as StateMap["stock"];
+    const html = TABS["stock"].render(state);
+
+    // Realised net is cost-basis, so holding leaves it at the cash flow plus
+    // the book at cost: -4e8 + 9000, still a loss.
+    expect(html).toContain("realised P/L");
+    expect(html).toContain("contribution");
+    // A P/L is signed OUTSIDE the currency mark, and coloured by direction.
+    expect(html).toContain(`<span class="bad">-$4.000e8</span>`);
+    // No records were folded, so there is no interval to divide by and the tile
+    // says so rather than reporting an infinite rate.
+    expect(html).toContain("no trade yet");
+    // The unlock ladder, three rungs rather than two loose yes/no bits. 4S is
+    // unpaid here, so it is the one rung that is not `good`.
+    expect(html).toContain("the unlock ladder");
+    expect(html).toContain(`<span class="dot wait"`);
+    // The cycle countdown now shows the flip count it was derived from.
+    expect(html).toContain("15 flips");
+    expect(html).toContain("v 0.42");
+    // Total capital is DISTINCT from the next rung's price — the whole point of
+    // publishing investmentCost.
+    expect(html).toContain("total capital");
+    expect(html).toContain("<td>$2.500e10</td><td>$3.020e10</td>");
+    // The reserve explains a tab with no actions.
+    expect(html).toContain("no entry clears its round trip yet");
+    // The horizon, and the manipulable flag joining market to farm.
+    expect(html).toContain("horizon");
+    expect(html).toContain("the farm can drive this symbol's host");
+    // Open orders are the game's, never ours, and the probe pays for them.
+    expect(html).toContain("Limit Buy Order");
+    // Nothing has been folded, so there is no curve and the charts are withheld
+    // rather than drawn as two empty boxes.
+    expect(html).not.toContain('id="stock-book"');
+  });
+
+  test("the capital charts appear once the fold has a curve to draw", () => {
+    const record = (t: number, stock: Partial<StateMap["stock"]>): LogRecord =>
+      ({ t, seq: t, run: "r", src: "sim", kind: "state", key: "stock", data: { hasWseAccount: true, hasTixApiAccess: true, ...stock } }) as LogRecord;
+    const state = appendRecords(emptyState(), [
+      record(0, { tradeCashFlow: -10_000, portfolioValue: 10_000, portfolioCost: 10_000, unlockSpend: 5.2e9 }),
+      record(1_000, { tradeCashFlow: -10_000, portfolioValue: 12_000, portfolioCost: 10_000, unlockSpend: 5.2e9 }),
+    ]);
+    const html = TABS["stock"].render(state);
+    // Both canvases, each paired with its own tooltip — the id convention
+    // mountChart resolves against.
+    expect(html).toContain('id="stock-book"');
+    expect(html).toContain('id="stock-booktip"');
+    expect(html).toContain('id="stock-earnings"');
+    expect(html).toContain('id="stock-earningstip"');
+    // The rate tile now has an interval to divide by.
+    expect(html).toContain("/s since first trade");
+  });
+
+  test("a collapsed position horizon is named, not left as an empty action list", () => {
+    const state = emptyState();
+    state.topics.stock = {
+      hasWseAccount: true,
+      hasTixApiAccess: true,
+      plan: { actions: [], ranked: [], horizons: { positionSec: 0, unlockSec: 0 }, flat: true },
+    } as StateMap["stock"];
+    const html = TABS["stock"].render(state);
+    expect(html).toContain("collapsed");
+    expect(html).toContain("no trade can clear its round trip");
+  });
+
+  test("the stock decision history names the trade, not \"hold\"", () => {
+    const state = emptyState();
+    state.topics.stock = { hasWseAccount: true, hasTixApiAccess: true } as StateMap["stock"];
+    // A StockPlan carries neither `buy.kind` nor a named `reserve`, so without
+    // the entry/unlock rungs in the shared selection chain every stock row
+    // falls through to the "hold" default and the trade log says nothing.
+    state.events.push(
+      { t: 10, seq: 1, run: "r", src: "sim", kind: "event", name: "investment.decision", data: { subsystem: "stock", plan: { entry: { sym: "ECP", side: "long" } } } } as never,
+      { t: 20, seq: 2, run: "r", src: "sim", kind: "event", name: "investment.result", data: { subsystem: "stock", result: { action: "buy", ok: true, detail: "bought 1000 ECP" } } } as never,
+    );
+    const html = TABS["stock"].render(state);
+    expect(html).toContain("Decision history");
+    expect(html).toContain("long ECP");
+    expect(html).toContain("bought 1000 ECP");
+    expect(html).not.toContain(">hold<");
   });
 
   test("structured plans expose decision evidence without authored rationale", () => {
@@ -1433,5 +1555,150 @@ describe("filter badges count the rows their filter shows", () => {
     expect(html).toMatch(/reachable<span class="badge">2<\/span>/);
 
     setView("factions.mode", "all");
+  });
+});
+
+/** The reworked Batches card, driven through the real fold so the per-batch
+ * history exists — the card's primary view is a scatter over it, and setting
+ * `topics.farm` directly leaves it empty. */
+describe("the Batches card is per-batch", () => {
+  const batch = (id: number, at: number, over: Record<string, unknown> = {}) => ({
+    id, kind: "hgw", target: "phantasy", at, spanMs: 2_000, ops: 4, landed: 4,
+    threads: { hack: 10, grow: 20, weaken: 5 }, gb: 500, moneyEarned: 1_000,
+    order: "h-w1-g-w2", planned: "h-w1-g-w2", ...over,
+  });
+
+  const farm = (t: number, over: Record<string, unknown>): LogRecord =>
+    ({ t, seq: t, run: "r", src: "sim", kind: "state", key: "farm",
+       data: { totals: { moneyEarned: 0, hacks: 0 }, ...over } }) as LogRecord;
+
+  function populated(): ProjectedState {
+    return appendRecords(emptyState(), [
+      farm(1_000, {
+        launched: { hack: 10, grow: 10, weaken: 10 },
+        landed: { hack: 10, grow: 10, weaken: 10 },
+        inFlight: { hack: 0, grow: 0, weaken: 0 },
+        pumpOccupancy: 0.04,
+        batches: {
+          hgw: {
+            batches: 20, ops: 80, landed: 80, threads: { hack: 200, grow: 400, weaken: 100 },
+            gb: 10_000, moneyEarned: 20_000, hacks: 20, spanMs: 40_000, graded: 20, inOrder: 20,
+            noHack: 0, abandoned: 0, abandonedOps: 0, abandonedLanded: 0,
+          },
+        },
+        recentBatches: [batch(1, 1_000), batch(2, 1_100)],
+      }),
+      farm(3_000, {
+        // Three ops launched that are neither in flight nor landed: adrift.
+        launched: { hack: 20, grow: 20, weaken: 20 },
+        landed: { hack: 19, grow: 19, weaken: 19 },
+        inFlight: { hack: 0, grow: 0, weaken: 0 },
+        pumpOccupancy: 0.06,
+        batches: {
+          hgw: {
+            batches: 40, ops: 160, landed: 160, threads: { hack: 400, grow: 800, weaken: 200 },
+            gb: 20_000, moneyEarned: 40_000, hacks: 40, spanMs: 80_000, graded: 40, inOrder: 39,
+            noHack: 0, abandoned: 1, abandonedOps: 4, abandonedLanded: 3,
+          },
+        },
+        recentBatches: [batch(3, 3_000, { moneyEarned: 9_000 }), batch(4, 3_100, { order: "g-h-w1-w2" })],
+      }),
+    ]);
+  }
+
+  test("the per-batch timeline leads, and the per-kind grid is demoted below it", () => {
+    const html = TABS.hacking.render(populated());
+    expect(html).toContain(`id="batch-timeline"`);
+    // Both present, and in this order: the batch is the unit, the kind is a summary.
+    expect(html.indexOf("batch-timeline")).toBeGreaterThan(-1);
+    expect(html.indexOf(`class="batchgrid"`)).toBeGreaterThan(html.indexOf("batch-timeline"));
+  });
+
+  test("the metric chips pick what the scatter plots, defaulting to a rate", () => {
+    const html = TABS.hacking.render(populated());
+    // Size-normalised by default: ranking batches on raw earnings ranks them by
+    // size, and a prep wave and a farm cycle differ by orders of magnitude.
+    expect(html).toContain(`data-view-key="hacking.batchMetric"`);
+    expect(html).toContain(">$/GB·s<");
+    expect(html).toMatch(/class="chip pick sel"[^>]*data-view-value="rate"/);
+  });
+
+  test("the sample is reported as a sample, with its census beside it", () => {
+    // Four batches caught out of forty settled. Presenting the four as if they
+    // were the population is the trap this wording exists to avoid.
+    const html = TABS.hacking.render(populated());
+    expect(html).toContain("4 of 40 batches sampled");
+  });
+
+  test("loss is reported where it can be observed", () => {
+    const html = TABS.hacking.render(populated());
+    // The abandoned batch, and the op it took with it.
+    expect(html).toContain("1 abandoned, 1 ops lost");
+    // And the run-level residual: 60 launched, 57 landed, none in flight.
+    expect(html).toContain("ops adrift");
+    expect(html).toContain(`id="ops-lost"`);
+  });
+
+  test("picking a batch opens it, and names what it is compared against", () => {
+    setView("hacking.batch", "3");
+    const html = TABS.hacking.render(populated());
+    expect(html).toContain("batch #3");
+    expect(html).toContain("phantasy");
+    // 9000 over 500 GB * 2 s = $9/GB·s against a median of $1 — the outlier is
+    // the point of picking it.
+    expect(html).toContain("x its kind's median");
+    setView("hacking.batch", "");
+  });
+
+  test("a picked batch that has aged out says so rather than vanishing", () => {
+    setView("hacking.batch", "99999");
+    const html = TABS.hacking.render(populated());
+    expect(html).toContain("no longer held");
+    setView("hacking.batch", "");
+  });
+
+  test("health gauges are drawn as trends, not as a row of latest values", () => {
+    const html = TABS.hacking.render(populated());
+    // Occupancy is the leading indicator the tab's own notes name, and it was
+    // published and drawn nowhere.
+    expect(html).toContain(`id="health-occupancy"`);
+    expect(html).toContain(`id="health-inorder"`);
+  });
+
+  test("a compacted run says why the card is empty", () => {
+    const state = emptyState();
+    state.compacted = true;
+    const html = TABS.hacking.render(state);
+    expect(html).toContain("served compacted");
+    // Not "waiting for a batch to settle", which blames the farm for a
+    // limitation of how the run was stored.
+    expect(html).not.toContain("waiting for a batch to settle");
+  });
+});
+
+/** The pure-failure case, end to end through the wire shape.
+ *
+ * A kind whose every batch dies before settling has `batches: 0`. Both the
+ * emitter's publication filter and the tab's own filter tested that field
+ * alone, so the mode most worth reporting rendered exactly like one the save
+ * had never used. */
+describe("a batch kind that only ever fails is still reported", () => {
+  test("an abandoned-only kind gets a column and says what happened", () => {
+    const state = emptyState();
+    state.topics.farm = {
+      totals: { moneyEarned: 0, hacks: 0 },
+      batches: {
+        hwgw: {
+          batches: 0, ops: 0, landed: 0, threads: { hack: 0, grow: 0, weaken: 0 },
+          gb: 0, moneyEarned: 0, hacks: 0, spanMs: 0, graded: 0, inOrder: 0, noHack: 0,
+          abandoned: 7, abandonedOps: 28, abandonedLanded: 12,
+        },
+      },
+    } as StateMap["farm"];
+    const html = TABS.hacking.render(state);
+    expect(html).toContain(">hwgw<");
+    expect(html).toContain("7 abandoned, 16 ops lost");
+    // And it is not mistaken for a farm that has not started yet.
+    expect(html).not.toContain("waiting for a batch to settle");
   });
 });

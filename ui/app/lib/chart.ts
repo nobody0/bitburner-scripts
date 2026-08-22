@@ -15,13 +15,40 @@ export interface ChartSeries {
   /** CSS custom property naming the stroke, e.g. "--series-1". */
   color: string;
   label?: string;
+  /** How to render it. `"points"` draws a mark per sample instead of joining
+   * them, for a series whose samples are INDEPENDENT observations rather than
+   * a quantity moving over time — one settled batch each, say. Joining those
+   * with a line asserts a continuity between neighbours that does not exist,
+   * and the shape of the resulting zig-zag is an artefact of arrival order.
+   *
+   * Defaults to `"line"`, so every existing caller is unchanged. */
+  kind?: "line" | "points";
 }
 
 /** Per-draw geometry choices. A small multiple has ~200px of width, where the
  * full chart's 56px y-axis gutter and five gridlines are most of the panel. */
 export interface ChartOptions {
   compact?: boolean;
+  /** Scale y to the data instead of anchoring the axis at zero.
+   *
+   * Zero is the right floor for a magnitude — money, op counts, RAM — where
+   * "how big" is the reading. It destroys a series that lives in a narrow band
+   * far from zero, which is what every RATIO and every LATENCY here is: an
+   * in-order share sitting between 0.97 and 1.00 renders as a flat line hugging
+   * the top of a 0..1 axis, and the 3% that is the entire finding is a third of
+   * one pixel.
+   *
+   * Off by default. Only a caller that knows its series is a band should ask,
+   * because a fitted axis exaggerates noise into mountains for anything else —
+   * and because the gridline labels are what tell the reader the axis does not
+   * start at zero, so it is only honest on a chart big enough to show them. */
+  fitY?: boolean;
 }
+
+/** Canvas heights, from `canvas`, `canvas.minichart` and `canvas.microchart`
+ * in app.css. A size is a layout decision and `compact` a geometry one: the
+ * 88px microchart needs both, the 140px minichart only the first. */
+export type ChartSize = "full" | "mini" | "micro";
 
 export interface ChartGeom {
   series: ChartSeries[];
@@ -39,6 +66,79 @@ const geoms = new WeakMap<HTMLCanvasElement, ChartGeom>();
 
 function color(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
+/** The chartwrap / canvas / charttip trio, worded once.
+ *
+ * `${id}tip` is the tooltip id by convention, so `mountChart` needs only the
+ * canvas id. The wrapper is what makes the tooltip's absolute position relative
+ * to its OWN chart rather than to the page, so the two cannot be emitted
+ * separately — which is the whole reason this lives here and not in dom.ts. */
+export function chartCanvas(id: string, size: ChartSize = "mini"): string {
+  const cls = size === "full" ? "" : ` class="${size}chart"`;
+  return `<div class="chartwrap"><canvas id="${id}"${cls}></canvas><div class="charttip" id="${id}tip"></div></div>`;
+}
+
+export interface SeriesBounds {
+  x0: number;
+  x1: number;
+  y0: number;
+  y1: number;
+}
+
+/** The drawn extent of a set of series.
+ *
+ * `y0` is `min(0, …)` rather than the data minimum: zero is the reading the
+ * eye takes off a money chart, so it stays on the axis even when nothing is
+ * near it. That also makes a SIGNED series drawable at all — a realized-P/L
+ * curve dips below zero on a genuine loss, and the earlier fixed zero floor
+ * clipped exactly that case into the bottom padding.
+ *
+ * Pure, and separate from the drawing, because this is the part worth
+ * asserting: with every point >= 0 it returns `y0 === 0` and the caller's
+ * arithmetic reduces to what it was before signed series existed.
+ *
+ * With `fit`, the floor is the data minimum instead — for a series that lives
+ * in a band far from zero, where anchoring zero flattens the whole reading. The
+ * fitted range carries a small margin so the extreme points do not sit exactly
+ * on the frame.
+ *
+ * Every series must carry at least one point; `drawSeries` filters to the ones
+ * that can be drawn before asking. */
+export function seriesBounds(series: ChartSeries[], fit = false): SeriesBounds {
+  let x0 = Infinity;
+  let x1 = -Infinity;
+  let y0 = fit ? Infinity : 0;
+  let y1 = fit ? -Infinity : 0;
+  for (const s of series) {
+    // NOT pts[0] / pts[last]: a point series is a scatter of independent
+    // observations and nothing promises they arrive sorted by x.
+    for (const p of s.pts) {
+      if (p[0] < x0) x0 = p[0];
+      if (p[0] > x1) x1 = p[0];
+      if (p[1] > y1) y1 = p[1];
+      if (p[1] < y0) y0 = p[1];
+    }
+  }
+  if (fit) {
+    // A margin, so the min and max are readable rather than clipped to the
+    // frame. Proportional to the span, with a fallback for a dead-flat band —
+    // whose span is zero, and which must still occupy the middle of the chart
+    // rather than divide by it.
+    const span = y1 - y0;
+    const margin = span > 0 ? span * 0.08 : Math.max(Math.abs(y1), 1) * 0.08;
+    y0 -= margin;
+    y1 += margin;
+    // No snapping back to zero when the band happens to sit near it. Fitting is
+    // opt-in and means what it says: a caller asks for it because the SHAPE of
+    // its band is the reading, and a band from 0.01 to 0.03 varies threefold —
+    // re-flooring that at zero would hide exactly what was asked for. Signed
+    // data needs no special case either; the minimum is simply negative, and
+    // `drawSeries` already rules zero in whenever the domain crosses it.
+  }
+  // A flat-at-zero series would otherwise divide by a zero span.
+  if (y1 === y0) y1 = y0 + 1;
+  return { x0, x1, y0, y1 };
 }
 
 export function drawSeries(
@@ -65,25 +165,23 @@ export function drawSeries(
 
   const pad = options.compact ? { l: 34, r: 4, t: 4, b: 14 } : { l: 56, r: 10, t: 8, b: 22 };
   const lines = options.compact ? 2 : 4;
-  let x0 = Infinity;
-  let x1 = -Infinity;
-  let y1 = 0;
-  for (const s of drawn) {
-    x0 = Math.min(x0, s.pts[0]![0]);
-    x1 = Math.max(x1, s.pts[s.pts.length - 1]![0]);
-    for (const p of s.pts) if (p[1] > y1) y1 = p[1];
-  }
-  y1 = y1 || 1;
+  const { x0, x1, y0, y1 } = seriesBounds(drawn, options.fitY);
   const base = t0 ?? x0;
   const sx = (t: number) => pad.l + ((t - x0) / Math.max(1, x1 - x0)) * (w - pad.l - pad.r);
-  const sy = (v: number) => h - pad.b - (v / y1) * (h - pad.t - pad.b);
+  const sy = (v: number) => h - pad.b - ((v - y0) / (y1 - y0)) * (h - pad.t - pad.b);
   geoms.set(canvas, { series: drawn, sx, sy, t0: base, pad, w, h, fmtY, options });
 
+  // Below this fraction of the span, a gridline IS the zero line and takes the
+  // stronger stroke. With `y0 === 0` that is the bottom line, exactly as when
+  // zero was the hard floor.
+  const zeroish = (v: number) => Math.abs(v) <= (y1 - y0) * 1e-9;
   ctx.font = `${options.compact ? 9 : 11}px ${color("--font-mono") || 'JetBrainsMono, "Courier New", monospace'}`;
+  let drewZero = false;
   for (let i = 0; i <= lines; i++) {
-    const v = (y1 / lines) * i;
+    const v = y0 + ((y1 - y0) / lines) * i;
     const y = sy(v);
-    ctx.strokeStyle = i === 0 ? color("--baseline") : color("--grid");
+    if (zeroish(v)) drewZero = true;
+    ctx.strokeStyle = zeroish(v) ? color("--baseline") : color("--grid");
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(pad.l, y);
@@ -94,6 +192,16 @@ export function drawSeries(
     ctx.textBaseline = "middle";
     ctx.fillText(fmtY(v), pad.l - 6, y);
   }
+  // A signed chart's gridlines rarely land on zero, and the sign of the curve
+  // is the reading — so where no gridline drew it, zero gets its own rule.
+  if (!drewZero && y0 < 0 && y1 > 0) {
+    ctx.strokeStyle = color("--baseline");
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, sy(0));
+    ctx.lineTo(w - pad.r, sy(0));
+    ctx.stroke();
+  }
   ctx.textBaseline = "top";
   // A compact chart labels only its ends, and anchors them INWARD: a centred
   // label at f=0 would hang into the y-axis gutter it no longer has room for.
@@ -102,7 +210,18 @@ export function drawSeries(
     ctx.textAlign = options.compact ? (f === 0 ? "left" : "right") : "center";
     ctx.fillText(fmtTime(t - base), sx(t), h - pad.b + 2);
   }
+  const dot = options.compact ? 1.6 : 2.4;
   for (const s of drawn) {
+    if (s.kind === "points") {
+      // Independent observations: a mark each, no path between them.
+      ctx.fillStyle = color(s.color);
+      for (const p of s.pts) {
+        ctx.beginPath();
+        ctx.arc(sx(p[0]), sy(p[1]), dot, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      continue;
+    }
     ctx.strokeStyle = color(s.color);
     ctx.lineWidth = 2;
     ctx.lineJoin = "round";
@@ -110,12 +229,6 @@ export function drawSeries(
     s.pts.forEach((p, i) => (i === 0 ? ctx.moveTo(sx(p[0]), sy(p[1])) : ctx.lineTo(sx(p[0]), sy(p[1]))));
     ctx.stroke();
   }
-}
-
-/** The original single-series entry point, kept because the overview tab and
- * its tests use it directly. */
-export function drawChart(canvas: HTMLCanvasElement, pts: [number, number][], t0: number | null): void {
-  drawSeries(canvas, [{ pts, color: "--series-1" }], t0);
 }
 
 /** Canvases that already carry their listeners.
@@ -189,4 +302,27 @@ export function attachChartHover(canvas: HTMLCanvasElement, tooltip: HTMLElement
     const geom = geoms.get(canvas);
     if (geom) drawSeries(canvas, geom.series, geom.t0, geom.fmtY, geom.options);
   });
+}
+
+/** Draw one chart emitted by `chartCanvas`, if it is present and has something
+ * to say. A series with fewer than two points draws nothing (see drawSeries),
+ * so an empty chart is silence rather than a misleading flat line at zero.
+ *
+ * Called from a tab's `mount`, i.e. after every render, so it must stay
+ * idempotent — `attachChartHover` wires a given canvas exactly once. A canvas
+ * inside a collapsed `<details>` measures 0x0 and draws a blank bitmap; opening
+ * the disclosure re-renders, which redraws it at its real size. */
+export function mountChart(
+  el: HTMLElement,
+  canvasId: string,
+  series: ChartSeries[],
+  t0: number | null,
+  fmtY?: (value: number) => string,
+  options: ChartOptions = {},
+): void {
+  const canvas = el.querySelector<HTMLCanvasElement>(`#${canvasId}`);
+  const tooltip = el.querySelector<HTMLElement>(`#${canvasId}tip`);
+  if (!canvas || !tooltip) return;
+  drawSeries(canvas, series, t0, fmtY, options);
+  attachChartHover(canvas, tooltip);
 }

@@ -7,7 +7,7 @@ import {
 } from "../../../shared/features/bitnode.ts";
 import { featureForBitNode } from "../../../shared/features/registry.ts";
 import { formatScientific } from "../../../shared/format.ts";
-import { attachChartHover, drawSeries } from "../lib/chart.ts";
+import { chartCanvas, mountChart } from "../lib/chart.ts";
 import { NONE, card, collapsible, definitions, dot, filters, note, rankedTable, table, tiles, waiting } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtTime } from "../lib/format.ts";
 import { html } from "../lib/html.ts";
@@ -258,9 +258,7 @@ function cadenceCard(plan: Plan, hasSeries: boolean): string {
         { left: [0] },
       )
     : note("no faction crosses the donation threshold on install");
-  const chart = hasSeries
-    ? `<div id="cadencewrap"><canvas id="cadencechart" class="minichart"></canvas><div id="cadencetip"></div></div>`
-    : "";
+  const chart = hasSeries ? chartCanvas("cadencechart") : "";
   return header + chart + crossings;
 }
 
@@ -514,11 +512,9 @@ export const bitnodeTab: Tab = {
     );
   },
   mount(state, el) {
-    const canvas = el.querySelector<HTMLCanvasElement>("#cadencechart");
-    const tooltip = el.querySelector<HTMLElement>("#cadencetip");
-    if (!canvas || !tooltip) return;
-    drawSeries(
-      canvas,
+    mountChart(
+      el,
+      "cadencechart",
       [
         { pts: state.cadenceAccrued, color: "--series-1", label: "accrued" },
         { pts: state.cadenceThreshold, color: "--series-2", label: "threshold" },
@@ -526,8 +522,5 @@ export const bitnodeTab: Tab = {
       state.t0,
       (v) => fmtNum(v, 2),
     );
-    // The canvas node now survives a render, so this must stay idempotent:
-    // attachChartHover wires a given canvas exactly once.
-    attachChartHover(canvas, tooltip);
   },
 };

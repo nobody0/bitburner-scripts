@@ -22,6 +22,7 @@ import {
 } from "../../../shared/strategy/stock/decide.ts";
 import type { StockManipulation, StockPlan as StockPlanDigest, StockState } from "../../../shared/telemetry/topics/stock.ts";
 import { isScriptDeath } from "../errors.ts";
+import { gameGlobal, type StockFlows } from "../globals.ts";
 import { moneyRateValue, moneyStepValue } from "../income.ts";
 import { merge } from "../state.ts";
 import { actionRamClaim, featureDodge } from "./dodge.ts";
@@ -74,21 +75,11 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
 let memory: StockMemory = initStockMemory();
 let lastPlan: StockPlan | undefined;
 let lastResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
-/** Cumulative cash moved by OUR trades — each batch's (after − before), both
- * read inside the same dodge stub, so the two samples cannot skew. Together
- * with the live book this is the market's measured wealth contribution:
- * `tradeCashFlow + portfolioValue` = realized net + mark-to-market, with no
- * dependency on the 2-minute money-sources probe whose stale mid-hold
- * snapshots read deeply negative exactly while the strategy is working. */
-let tradeCashFlow = 0;
-let tradeFlowSince: number | undefined;
-/** Cumulative cash spent on unlock purchases (WSE/TIX/4S) since the install.
- * Tracked apart from `tradeCashFlow` because the two feed different consumers:
- * the trading RATE must exclude unlocks (a $25b purchase is not a trading
- * loss), while cumulative EARNINGS must still count the spend — the game's
- * own ledger records unlocks under the "stock" source, so the correction in
- * earnedSinceInstall would otherwise erase them entirely. */
-let unlockSpend = 0;
+/** This install's trade ledger, created on first use. Held in the page realm so
+ * it outlives a build handoff — see `StockFlows` for why that matters. */
+function flows(): StockFlows {
+  return (gameGlobal.stockFlows ??= { tradeCashFlow: 0, unlockSpend: 0 });
+}
 
 export function resetStockState(): void {
   // An install re-rolls every symbol's price, cap, spread and volatility
@@ -98,9 +89,9 @@ export function resetStockState(): void {
   memory = initStockMemory();
   lastPlan = undefined;
   lastResult = undefined;
-  tradeCashFlow = 0;
-  tradeFlowSince = undefined;
-  unlockSpend = 0;
+  // An install is the one event that may zero the ledger, and it does so here
+  // rather than by a module instance being replaced.
+  delete gameGlobal.stockFlows;
 }
 
 /** Hosts the farm could actually drive right now — the other half of the
@@ -287,13 +278,14 @@ export function buildView(ctx: DriverContext): StockView | undefined {
  * needs it. Undefined until positive over a positive interval — a losing or
  * not-yet-traded book falls back to the solver's closed-form expectations. */
 function measuredStockIncomePerSec(portfolioCost: number): number | undefined {
-  if (tradeFlowSince === undefined) return undefined;
+  const ledger = flows();
+  if (ledger.tradeFlowSince === undefined) return undefined;
   // Cost basis rather than mark-to-market, matching earnedSinceInstall: the
   // realized-net series is unmoved by opening a position and by price wobble,
   // so the reserve's measured rate cannot vanish mid-hold.
-  const contributed = tradeCashFlow + Math.max(0, portfolioCost);
+  const contributed = ledger.tradeCashFlow + Math.max(0, portfolioCost);
   if (!(contributed > 0)) return undefined;
-  const elapsedSec = Math.max(0, (Date.now() - tradeFlowSince) / 1_000);
+  const elapsedSec = Math.max(0, (Date.now() - ledger.tradeFlowSince) / 1_000);
   return elapsedSec > 0 ? contributed / elapsedSec : undefined;
 }
 
@@ -417,12 +409,13 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
     (action) => action.type === "buyWse" || action.type === "buyTix" || action.type === "buy4SApi",
   );
   const tradeDelta = outcome.value.tradeDelta as number;
+  const ledger = flows();
   if (traded) {
-    tradeCashFlow += tradeDelta;
-    tradeFlowSince ??= at;
+    ledger.tradeCashFlow += tradeDelta;
+    ledger.tradeFlowSince ??= at;
   }
   if (unlocked) {
-    unlockSpend += Math.max(
+    ledger.unlockSpend += Math.max(
       0,
       (outcome.value.cashBefore as number) - outcome.value.cash + tradeDelta,
     );
@@ -445,8 +438,8 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
   const portfolioValue = positions.reduce((sum, position) => sum + position.value, 0);
   merge(ctx.state, "stock", {
     ...outcome.value.access,
-    tradeCashFlow,
-    unlockSpend,
+    tradeCashFlow: ledger.tradeCashFlow,
+    unlockSpend: ledger.unlockSpend,
     wealth: outcome.value.cash + portfolioValue,
     ...(Object.keys(holdings).length > 0 ? {
       positions,

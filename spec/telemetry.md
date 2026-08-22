@@ -86,9 +86,30 @@ both describes neither. Every launch group opens a batch id
 completion is attributed back through the `opId` it already echoes — so
 **nothing was added to the worker protocol**: `opId` already resolves to the
 batch. `farm.batches` publishes the sums per kind (ops, RAM, threads, span,
-money, in-order and lost-op counts) plus a small ring of recently settled
+money, in-order and abandoned counts) plus a bounded ring of recently settled
 batches as examples, because a record per batch is no more sendable than a
 record per op.
+
+Where op LOSS is observable is worth stating precisely, because the obvious
+answer is wrong and cost a display. A batch settles only when its last op
+lands, so a settled batch has `landed === ops` by construction and the per-kind
+sums of the two are equal in every run that can exist. `launched` against
+`landed` per kind is therefore one curve drawn twice, and a "settled with fewer
+landings" counter can never fire — the viewer plotted that pair as a band for a
+long time, captioned as the ops that went missing, and the band was identically
+zero. A batch that loses an op never settles at all: it is evicted from the
+open-batch map, which is why that eviction is COUNTED (`abandoned`,
+`abandonedOps`, `abandonedLanded`). The two places loss shows up are those
+counters and the run-level residual `launched - landed - inFlight`; subtracting
+the in-flight gauge is what makes the residual loss rather than pipeline depth.
+
+The per-kind sums are also the wrong unit for judging an individual batch, and
+the viewer leads with the settled-batch ring for that reason. Batches within one
+kind differ by orders of magnitude in size, so a cumulative mean per kind
+reports a figure no single batch resembles; the ring is a SAMPLE (it is bounded
+and read once a second, so a farm settling faster than it is deep overflows it
+between reads) and the per-kind sums are the census. Any panel showing the two
+together has to say which is which.
 
 The rollup is also where a question that *looks* per-op gets answered without
 per-op records. Farm landings run at roughly one per 20 ms at scale, so "did
@@ -105,6 +126,27 @@ hide the more expensive one. The same reasoning covers rates: the rollup
 publishes CUMULATIVE `launched`/`landed`/`allocation` counters and the viewer
 differentiates them (`ui/app/project.ts`), which costs no bytes and makes a
 replay scrub recompute the identical curve.
+
+`stock` is the second instance of that division, and the one where the levels
+matter more than any rate. The topic publishes `portfolioValue`/`portfolioCost`
+from the 3-second price probe and the driver's self-measured `tradeCashFlow` /
+`unlockSpend` ledger; the viewer folds them into four curves and plots two
+BANDS, because in both cases the gap is the finding — the book at market against
+the book at cost is unrealised P/L, and realised net against cumulative unlock
+spend is whether the market has yet earned back the $200m/$5b/$25b it cost to
+get in. Realised net is taken at COST BASIS, matching `earnedSinceInstall`, so
+the curve is unmoved by opening a position and by price wobble and moves only on
+a genuinely realised gain or loss. No $/sec curve is derived from it: trades are
+discrete and holds run minutes to regime cycles, so any window short enough to
+respond reads zero with spikes, and the tab reports one measured scalar instead.
+Two properties of the fold are not visible in the panel and are pinned by
+`tests/ui-stock-series.test.ts`: the ledger is genuinely ABSENT until the
+install's first trade, so it is never plotted as $0; and a reset drops every
+curve rather than splicing it. That reset is detected by `market.tick` going
+backwards — the only counter here monotone within an install, `tradeCashFlow`
+being a cash delta that goes negative on every open — or by the ledger vanishing
+after having been present, which is what deleting the topic looks like from the
+viewer.
 
 Feature probes add `probe.failed {id, error}` when a body throws; silence would
 read as "this feature has no data". A probe that cannot be PLACED is no longer a
@@ -174,7 +216,15 @@ ranked alternatives, the uncapped candidate count and rejection evidence. The
 full observed quote menus remain in the surrounding topic for offline
 recomputation. Hash rankings additionally
 carry capacity/affordability, the forgone cash-sale value and estimated net
-value. `investment.decision`, `hash.decision`, `investment.result` and
+value. `stock` posts to the same arbiter (`position`,
+`working-capital` and the unlock rungs) and indexes the same way, with the
+coarsest signature of the three: its plan is rebuilt every 500 ms against a
+market that re-prices every tick, so every money figure on it drifts
+continuously and only the symbol, side, unlock rung, action set, liquidation and
+funding outcome are signed. Its `investment.result` doubles as the trade log —
+one event per executed batch, keyed on `lastResult.at`, because the topic
+carries only the newest result and the trades are otherwise unrecoverable.
+`investment.decision`, `hash.decision`, `investment.result` and
 `hash.result` form a compact index over those snapshots: they fire when the
 winner, hold/funding state, or outcome changes, not once per sample. The raw
 topic stream remains the authoritative high-frequency history; the events make
@@ -183,10 +233,19 @@ transitions easy to find in replay and fit in the UI's bounded event ring.
 Faction planning follows that pattern too. `factions.plan.context` records the
 planning horizon and route, augmentation-count goal, income, available/granted
 cash, work-slot grant, donation threshold, and augmentation price-queue state.
-The objective records both the chosen and runner-up reputation breakpoints with
-value rates, unlock/rep/money ETA components, favor after install, and purchase
-versus donation cost. Standings, invitations, gates, offers, and ownership stay
-in the surrounding faction topic. `faction.decision` indexes changes to the
+The objective records the committed **portfolio** — the ordered set of faction
+pushes with their reputation targets, value rates, unlock/rep/money ETA
+components, favor after install, and purchase versus donation cost — plus the
+budget sweep it was chosen from (`horizonCurve`, one row per candidate cycle
+length). `intent` and `runnerUp` remain the head and second member, so consumers
+that predate the set read them unchanged. Standings, invitations, gates, offers,
+and ownership stay in the surrounding faction topic.
+
+`progression.plan.pace` carries the fitted cycle-progress exponents and the
+measured reset overhead. It is a DIGEST for the same reason everything else here
+is: the samples it is fitted from are up to 240 `CyclePoint`s that stay in
+progression's memory, and `factions` needs only the exponents to price a
+reputation gap at the rate it will actually be earned at. `faction.decision` indexes changes to the
 chosen package or action, while `faction.result` preserves each executed
 outcome without repeating unchanged plans every sample.
 
@@ -205,10 +264,13 @@ one `hello` on connect, then batched `{v, records: LogRecord[]}` flushed every
 500 ms or at 100 buffered records. On disk: one JSONL file per install artifact
 under `runs/`, one LogRecord per line.
 
-Client behavior (`game/lib/telemetry.ts`): bounded ring buffer (5000; drops
-oldest debug first, reports `telemetry.dropped`), reconnect with 1s→30s
-backoff (same run id, seq continues — gaps are visible), final flush in
-`ns.atExit`.
+Client behavior (`game/lib/telemetry.ts`): byte-bounded buffer of
+pre-serialized records (4 MB; drops oldest debug first, then oldest of
+anything, reports `telemetry.dropped`), reconnect with 1s→30s backoff (same run
+id, seq continues — gaps are visible), final flush in `ns.atExit`. Bounded in
+BYTES rather than records because state payloads vary by three orders of
+magnitude, and amortized rather than per-push — at the old 5,000-record cap
+every push was O(n) for as long as the hub stayed down.
 
 ## Acquisition is not telemetry
 

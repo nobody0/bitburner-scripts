@@ -7,15 +7,15 @@ import {
   serverRanges,
   type RootState,
 } from "../../../shared/features/servers.ts";
-import { bar, card, collapsible, dataTable, dot, filters, hint, meter, note, outcome, rankedTable, search, shownOf, table, tiles, waiting, type Column } from "../lib/dom.ts";
-import { inline, raw } from "../lib/html.ts";
-import { attachChartHover, drawSeries, type ChartSeries } from "../lib/chart.ts";
+import { bar, card, collapsible, dataTable, dot, filters, hint, meter, NONE, note, outcome, rankedTable, search, table, tiles, waiting, type Column } from "../lib/dom.ts";
+import { inline, raw, type Html } from "../lib/html.ts";
+import { chartCanvas, mountChart, type ChartSeries } from "../lib/chart.ts";
 import { decisionHistory } from "../lib/history.ts";
 import { esc, fmtMoney, fmtMs, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
 import { hackTimeSeconds, makeHackContext, type HackContext } from "../../../shared/formulas.ts";
 import { view } from "../lib/viewstate.ts";
 import type { BatchAggregateReport, FarmRollup } from "../../../shared/telemetry/topics/hacking.ts";
-import type { ProjectedState } from "../project.ts";
+import type { FarmHealthSeries, ProjectedState, SettledBatchView } from "../project.ts";
 import type { Tab } from "./index.ts";
 import { contractHosts, serverInspector } from "./hacking-server.ts";
 
@@ -511,56 +511,439 @@ function allocationDetail(state: ProjectedState): string {
   ];
 
   const ratios = table(["", "hack", "grow", "weaken", "per hack"], rows, { left: [0, 4] });
-  const chart = state.allocShare.hack.length >= 2
-    ? `<div class="chartwrap"><canvas id="allocchart" class="minichart"></canvas><div class="charttip" id="alloctip"></div></div>`
-    : "";
+  const chart = state.allocShare.hack.length >= 2 ? chartCanvas("allocchart") : "";
   return collapsible("hacking.allocDetail", "farm segment: planned vs observed, core leverage", split + ratios + chart);
 }
 
-/** Batch kinds this run has actually settled, busiest first.
+/** Batch kinds this run has actually run, busiest first.
  *
  * Read from the rollup rather than from `BATCH_KINDS`, so a kind the
- * dispatcher grows later needs no change here — and a kind that has settled
- * nothing does not take a column to say zero. */
+ * dispatcher grows later needs no change here — and a kind that has done
+ * nothing does not take a column to say zero.
+ *
+ * A kind with no SETTLED batches still counts if it abandoned any. That is a
+ * mode which is running and failing every batch it starts, which is the single
+ * most important thing this card can say — and testing `batches > 0` alone
+ * dropped it, rendering it identically to a mode the save has never used. */
 function activeBatchKinds(state: ProjectedState): [string, BatchAggregateReport][] {
   return Object.entries(state.topics.farm?.batches ?? {})
-    .filter(([, entry]) => entry.batches > 0)
+    .filter(([, entry]) => entry.batches > 0 || (entry.abandoned ?? 0) > 0)
     .sort(([, a], [, b]) => b.batches - a.batches);
 }
 
-/** A batch kind's canvas id. The kind is a string off the wire, so it is
- * slugged rather than trusted: `morph` keys nodes on `id`, and an id with a
- * space in it would silently stop matching across renders. */
-function kindSlug(kind: string): string {
-  return kind.replace(/[^a-zA-Z0-9]/g, "-");
+/** Metrics the per-batch timeline can plot.
+ *
+ * Batches are not comparable as they arrive, which is the whole reason this
+ * view exists: a prep wave is a hundred grow threads that steal nothing and a
+ * HWGW cycle is four ops that do, so ranking them on raw `moneyEarned` ranks
+ * them by size. The default is therefore a RATE — what one batch earned per GB
+ * it occupied per second it held it — which asks both the same question. The
+ * raw totals stay available, because "which batch was expensive" is also a real
+ * question; it is just a different one. */
+interface BatchMetric {
+  label: string;
+  title: string;
+  value(batch: SettledBatchView): number;
+  fmt(value: number): string;
+  /** Scale to the band rather than to zero. Right for a quantity whose spread
+   * is the reading (a span, a rate); wrong for one whose magnitude is. */
+  fit: boolean;
 }
 
-/** What one batch costs and earns, one column per class of batch.
+const BATCH_METRICS: Record<string, BatchMetric> = {
+  rate: {
+    label: "$/GB·s",
+    title: "money earned per GB-second the batch occupied — size-normalised, so a prep wave and a farm cycle are comparable",
+    value: (batch) => batch.moneyPerGbSec,
+    fmt: (value) => fmtMoney(value),
+    fit: true,
+  },
+  money: {
+    label: "$/batch",
+    title: "money this batch earned outright — ranks by batch size, which is sometimes the question",
+    value: (batch) => batch.moneyEarned,
+    fmt: (value) => fmtMoney(value),
+    fit: false,
+  },
+  span: {
+    label: "span",
+    title: "start to settle. A pipeline slipping shows up here before it shows up in income",
+    value: (batch) => batch.spanMs,
+    fmt: (value) => fmtMs(value),
+    fit: true,
+  },
+  threads: {
+    label: "threads",
+    title: "threads across all of the batch's ops — its size",
+    value: (batch) => batch.totalThreads,
+    fmt: (value) => fmtNum(value),
+    fit: false,
+  },
+};
+
+const BATCH_METRIC_ORDER = ["rate", "money", "span", "threads"] as const;
+const DEFAULT_BATCH_METRIC = "rate";
+
+function batchMetric(): BatchMetric {
+  const key = view("hacking.batchMetric", DEFAULT_BATCH_METRIC);
+  return BATCH_METRICS[key] ?? BATCH_METRICS[DEFAULT_BATCH_METRIC]!;
+}
+
+/** How a settled batch landed, which is what the timeline colours by. */
+type BatchVerdict = "ordered" | "misordered" | "ungraded";
+
+function verdictOf(batch: SettledBatchView): BatchVerdict {
+  if (batch.order === undefined) return "ungraded";
+  return batch.misordered ? "misordered" : "ordered";
+}
+
+const VERDICTS: { verdict: BatchVerdict; color: string; label: string; title: string }[] = [
+  {
+    verdict: "ordered",
+    color: "--series-1",
+    label: "in order",
+    title: "landed in the order the cycle planned",
+  },
+  {
+    verdict: "misordered",
+    color: "--series-4",
+    label: "mis-ordered",
+    title: "had a landing grid and landed out of order — the effects fought each other",
+  },
+  {
+    verdict: "ungraded",
+    color: "--series-2",
+    label: "no grid",
+    title: "no landing grid to be right about — a prep wave, a shotgun cycle, or a batch that never launched a hack",
+  },
+];
+
+/** The `kN` class that colours prose to match a `--series-N` stroke.
  *
- * The farm's unit of work is the batch, not the op: a prep wave is a hundred
- * grow threads that steal nothing and a farm cycle is four ops that do, so a
- * global op counter describes neither, and a single blended row describes
- * neither either. Every launch group carries an id and every completion is
- * attributed back through the `opId` it already echoes, which is what makes
- * these per-kind sums possible without sending a record per batch — as
- * impossible as a record per op.
+ * Derived rather than restated: app.css defines `kN` as `var(--series-N)`, so a
+ * legend that hard-codes its own class alongside its own colour is two facts
+ * that can drift, and did — a `.k2` pinned to `--series-5` is what made the
+ * launched/landed key describe the wrong curve. */
+function seriesKey(color: string): string {
+  return `k${color.slice("--series-".length)}`;
+}
+
+/** The timeline's series: one point per settled batch, split by verdict.
  *
- * A column reads top to bottom as: how many ran, what one costs, the band
- * between what it launched and what landed, how its threads split, and how
- * often it lands in order. */
-function batchesCard(state: ProjectedState): string {
-  const kinds = activeBatchKinds(state);
-  if (kinds.length === 0) return waiting("a batch to settle", "a batch counts once every one of its ops has landed");
-  return (
-    `<div class="batchgrid">${kinds.map(([kind, entry]) => batchColumn(state, kind, entry)).join("")}</div>` +
-    batchHistoryDetail(state) +
-    allocationDetail(state)
+ * POINTS, not a line. Each sample is a different batch, so joining them would
+ * assert a continuity between neighbours that does not exist — and the shape of
+ * the zig-zag would be an artefact of the order they happened to settle in.
+ *
+ * Shared by `render` and `mount` so the two cannot disagree about what is on
+ * the chart. */
+function batchTimelineSeries(state: ProjectedState): ChartSeries[] {
+  const metric = batchMetric();
+  const byVerdict = new Map<BatchVerdict, [number, number][]>();
+  for (const batch of state.batchHistory) {
+    const value = metric.value(batch);
+    if (!Number.isFinite(value)) continue;
+    const verdict = verdictOf(batch);
+    let pts = byVerdict.get(verdict);
+    if (!pts) byVerdict.set(verdict, (pts = []));
+    pts.push([batch.at, value]);
+  }
+  return VERDICTS
+    .map((entry) => ({
+      pts: byVerdict.get(entry.verdict) ?? [],
+      color: entry.color,
+      label: entry.label,
+      kind: "points" as const,
+    }))
+    // `drawSeries` discards a series with fewer than two points, so anything
+    // shorter is not on the chart and must not be in the legend either: a key
+    // for a mark that was never drawn sends the reader hunting for it.
+    .filter((series) => series.pts.length >= 2);
+}
+
+/** The per-kind aggregates added up. Two panels need these sums — the run-level
+ * tiles and the sampling note's census — and summing them in each was how the
+ * two drifted the last time. */
+interface BatchTotals {
+  settled: number;
+  abandoned: number;
+  /** Ops the abandoned batches launched and never landed. */
+  opsLost: number;
+}
+
+function batchTotals(state: ProjectedState): BatchTotals {
+  let settled = 0;
+  let abandoned = 0;
+  let opsLost = 0;
+  for (const [, entry] of activeBatchKinds(state)) {
+    settled += entry.batches;
+    abandoned += entry.abandoned ?? 0;
+    opsLost += (entry.abandonedOps ?? 0) - (entry.abandonedLanded ?? 0);
+  }
+  return { settled, abandoned, opsLost };
+}
+
+/** Run-level throughput and earnings, and the loss curve.
+ *
+ * The aggregates a per-batch view still needs: no scatter answers "is the farm
+ * earning" at a glance. Deliberately short — five tiles and one chart — because
+ * the batch is what this card is about. */
+function throughputStrip(state: ProjectedState): string {
+  const farm = state.topics.farm;
+  // `opsLost` here is the ops the abandoned batches took with them. A batch
+  // only settles once its last op lands, so an abandoned batch is the ONLY
+  // place a lost op is ever counted.
+  const { settled, abandoned, opsLost } = batchTotals(state);
+  let perSec = 0;
+  for (const series of Object.values(state.batchSeries)) perSec += series.perSec.at(-1)?.[1] ?? 0;
+  const residual = state.farmHealth.opsLost.at(-1)?.[1];
+
+  const strip = tiles([
+    { label: "$/sec", value: farm?.moneyRate !== undefined ? `${fmtMoney(farm.moneyRate)}/s` : NONE },
+    {
+      label: "settling",
+      value: perSec > 0 ? `${fmtNum(perSec, 2)}/s` : NONE,
+      sub: `over ${fmtTime(state.farmWindowMs)}`,
+    },
+    { label: "settled", value: fmtNum(settled), sub: "batches, this install" },
+    {
+      label: "abandoned",
+      value: abandoned > 0 ? raw(`<span class="bad">${fmtNum(abandoned)}</span>`) : "0",
+      sub: abandoned > 0 ? `${fmtNum(opsLost)} ops never arrived` : "every batch settled",
+    },
+    {
+      label: "ops adrift",
+      value: residual === undefined
+        ? NONE
+        : residual > 0 ? raw(`<span class="bad">${fmtNum(residual)}</span>`) : "0",
+      sub: "launched, not in flight, never landed",
+    },
+  ]);
+
+  // A magnitude, so the axis keeps zero: zero adrift is the healthy reading and
+  // the distance from it is the finding.
+  const chart = state.farmHealth.opsLost.length >= 2
+    ? chartCanvas("ops-lost", "micro") +
+      note(hint(
+        raw(`<span class="k4">ops adrift</span> over time`),
+        "launched minus landed minus in flight. Subtracting the in-flight gauge is what makes this loss rather than " +
+          "pipeline depth: at steady state most of the launched/landed gap is simply work still on its way. " +
+          "A curve that climbs and stays up is the farm losing ops.",
+      ))
+    : "";
+  return strip + chart;
+}
+
+/** One mark per settled batch — the card's primary view.
+ *
+ * This is the unit the farm reasons in, and the unit its health lives at. The
+ * per-kind aggregates below are a summary of these, and summarising is exactly
+ * what hides the finding: batches within one kind differ by orders of magnitude
+ * in size, so a run-cumulative mean per kind reports a number no individual
+ * batch resembles. A scatter shows the spread, and the outlier is the batch
+ * worth looking at. */
+function batchTimeline(state: ProjectedState): string {
+  const history = state.batchHistory;
+  const metric = batchMetric();
+  const chips = filters(
+    "hacking.batchMetric",
+    BATCH_METRIC_ORDER.map((key) => ({
+      value: key,
+      label: BATCH_METRICS[key]!.label,
+      title: BATCH_METRICS[key]!.title,
+    })),
+    DEFAULT_BATCH_METRIC,
+  );
+  if (history.length < 2) {
+    return chips + note(
+      state.compacted
+        ? "this run was served compacted — its per-batch history is not recoverable, only the final rollup"
+        : "waiting for a second batch to settle",
+    );
+  }
+
+  const shown = batchTimelineSeries(state);
+  const legend =
+    `<div class="barkey">` +
+    VERDICTS.filter((entry) => shown.some((series) => series.label === entry.label))
+      .map((entry) =>
+        `<span class="${seriesKey(entry.color)}" title="${esc(entry.title)}">●</span>` +
+        `<span class="muted">${esc(entry.label)}</span>`
+      )
+      .join("") +
+    `</div>`;
+
+  return chips + chartCanvas("batch-timeline", "full") + legend + note(samplingNote(state));
+}
+
+/** What the history is a sample OF, stated wherever the sample is shown.
+ *
+ * The rollup carries a bounded ring of recently settled batches and is read
+ * once a second, so a farm settling faster than the ring is deep overflows it
+ * between reads. Every figure derived from the history is therefore a sample —
+ * and the per-kind totals beside it are a census, which is exactly the pair of
+ * numbers most likely to be silently compared. */
+function samplingNote(state: ProjectedState): Html {
+  const { settled } = batchTotals(state);
+  const sampled = state.batchHistory.length;
+  // No census to divide by. Still a sample, and still says so: the count is the
+  // one number here that must never be read as a total.
+  if (settled <= 0) {
+    return hint(
+      `${fmtNum(sampled)} batch(es) sampled`,
+      "individual batches caught from the dispatcher's bounded ring, read once a second — a sample of batches, not " +
+        "a count of them. The per-kind totals that would say how many actually settled are not in this rollup.",
+    );
+  }
+  return hint(
+    `${fmtNum(sampled)} of ${fmtNum(settled)} batches sampled (${fmtPct(Math.min(1, sampled / settled), 1)})`,
+    "individual batches are caught from the dispatcher's bounded ring, read once a second. A farm settling faster " +
+      "than that overflows the ring between reads, so this is a sample of batches, not a count of them — the " +
+      "per-kind totals are the count. The sample is unbiased in what a batch LOOKS like and useless as a denominator.",
+  );
+}
+
+/** Everything known about one batch, when the operator picks it.
+ *
+ * The aggregates say whether the farm is healthy; this says what happened to
+ * the batch that was not — including how far from its own kind's middle it sat,
+ * which is the reading that makes a single batch mean anything. */
+function batchInspector(state: ProjectedState): string {
+  const id = view("hacking.batch");
+  if (id === "") return "";
+  const batch = state.batchHistory.find((entry) => String(entry.id) === id);
+  if (!batch) {
+    return note(hint(
+      `batch ${esc(id)} is no longer held`,
+      "the history is bounded, and an install clears it — the batch has aged out of the retained window",
+    ));
+  }
+  const metric = batchMetric();
+  // Its own kind is the only fair comparison, and the MEDIAN rather than the
+  // mean: the distribution has a long tail (a batch that lost its window earns
+  // nothing at all), and a mean sits inside that tail rather than in the body.
+  const peers = state.batchHistory
+    .filter((entry) => entry.kind === batch.kind)
+    .map((entry) => metric.value(entry))
+    .filter((value) => Number.isFinite(value))
+    .sort((a, b) => a - b);
+  const median = peers.length > 0 ? peers[Math.floor(peers.length / 2)]! : undefined;
+  const value = metric.value(batch);
+  const versus = median === undefined || median === 0
+    ? undefined
+    : `${fmtNum(value / median, 2)}x its kind's median`;
+
+  const head = tiles([
+    { label: "batch", value: `#${fmtNum(batch.id)}`, sub: batch.kind },
+    { label: "target", value: batch.target },
+    { label: "settled", value: fmtTime(batch.at - (state.t0 ?? 0)), sub: `span ${fmtMs(batch.spanMs)}` },
+    { label: "earned", value: fmtMoney(batch.moneyEarned), sub: `${fmtRam(batch.gb)} committed` },
+    { label: metric.label, value: metric.fmt(value), ...(versus ? { sub: versus } : {}) },
+  ]);
+
+  const split = bar(KINDS.map((each) => ({ label: each, value: batch.threads[each], className: KIND_SEG[each] })));
+  const threads = note(`${KINDS.map((each) => fmtNum(batch.threads[each])).join(" : ")} threads · ${fmtNum(batch.ops)} ops`);
+
+  const order = batch.order === undefined
+    ? note(hint("no landing grid", "lands as a group, with no intended internal order to be right about"))
+    : batch.misordered
+      ? `<p class="bad" title="${esc("the effects landed in a different order from the one the cycle planned")}">` +
+        `landed <b>${esc(batch.order)}</b>, planned <b>${esc(batch.planned ?? "")}</b></p>`
+      : `<p class="good">landed <b>${esc(batch.order)}</b>, as planned</p>`;
+
+  return collapsible(
+    "hacking.batchDetail",
+    `batch #${fmtNum(batch.id)} — ${batch.kind} on ${batch.target}`,
+    head + split + threads + order,
+    true,
+  );
+}
+
+/** The sampled batches as a sortable table, so "which was worst" is one click.
+ *
+ * Sortable rather than newest-first because the question is almost never "what
+ * happened last" — it is "what was the worst one", and on a scatter you can see
+ * an outlier but not read it. */
+function batchHistoryDetail(state: ProjectedState): string {
+  const history = state.batchHistory;
+  if (history.length === 0) return "";
+  const selected = view("hacking.batch");
+  const columns: Column<SettledBatchView>[] = [
+    {
+      id: "at",
+      label: "at",
+      left: true,
+      sort: (batch) => batch.at,
+      cell: (batch) =>
+        `<button class="server-link" data-view-key="hacking.batch" data-view-value="${batch.id}" ` +
+        `title="Inspect batch ${batch.id}">#${fmtNum(batch.id)}</button>` +
+        ` <span class="muted">${fmtTime(batch.at - (state.t0 ?? 0))}</span>`,
+    },
+    { id: "kind", label: "kind", left: true, sort: (batch) => batch.kind, cell: (batch) => esc(batch.kind) },
+    { id: "target", label: "target", left: true, sort: (batch) => batch.target, cell: (batch) => esc(batch.target) },
+    { id: "ops", label: "ops", sort: (batch) => batch.ops, cell: (batch) => fmtNum(batch.ops) },
+    { id: "threads", label: "threads", sort: (batch) => batch.totalThreads, cell: (batch) => fmtNum(batch.totalThreads) },
+    { id: "span", label: "span", sort: (batch) => batch.spanMs, cell: (batch) => fmtMs(batch.spanMs) },
+    { id: "earned", label: "earned", sort: (batch) => batch.moneyEarned, cell: (batch) => fmtMoney(batch.moneyEarned) },
+    {
+      // The same reading the timeline defaults to, so the two cannot disagree
+      // about what "$/GB·s" means.
+      id: "rate",
+      label: BATCH_METRICS.rate!.label,
+      sort: (batch) => BATCH_METRICS.rate!.value(batch),
+      cell: (batch) => BATCH_METRICS.rate!.fmt(BATCH_METRICS.rate!.value(batch)),
+    },
+    {
+      id: "order",
+      label: "landed as",
+      left: true,
+      sort: (batch) => batch.order ?? "",
+      cell: (batch) =>
+        batch.order === undefined
+          ? `<span class="muted">no grid</span>`
+          : batch.misordered
+            ? `<span class="bad" title="${esc(`planned ${batch.planned ?? ""}`)}">${esc(batch.order)}</span>`
+            : `<span class="good">${esc(batch.order)}</span>`,
+    },
+  ];
+  return collapsible(
+    "hacking.batchHistory",
+    samplingNote(state),
+    dataTable("hacking.batches", history, columns, {
+      defaultSort: { key: "at", dir: -1 },
+      empty: "no batches sampled yet",
+      limit: 80,
+      rowClass: (batch) => String(batch.id) === selected ? "picked" : "",
+    }),
+  );
+}
+
+/** Per-kind sums, demoted to a disclosure.
+ *
+ * Still worth having — "what does a prep wave cost against a farm cycle" is a
+ * per-kind question and nothing else answers it — but no longer the headline.
+ * A cumulative mean per kind is a number no individual batch resembles, which
+ * is what put the per-batch view above it.
+ *
+ * The launched-against-landed chart these columns used to carry is GONE. Those
+ * two counters are equal by construction: a batch settles only once its last op
+ * lands, so the per-kind sums of `ops` and `landed` never differ and the chart
+ * drew one curve twice. Loss is `abandoned` here, and the adrift curve above. */
+function perKindDetail(state: ProjectedState, kinds: [string, BatchAggregateReport][]): string {
+  if (kinds.length === 0) return "";
+  return collapsible(
+    "hacking.batchKinds",
+    `per-kind totals — ${kinds.map(([kind]) => kind).join(", ")}`,
+    `<div class="batchgrid">${kinds.map(([kind, entry]) => batchColumn(state, kind, entry)).join("")}</div>`,
   );
 }
 
 function batchColumn(state: ProjectedState, kind: string, entry: BatchAggregateReport): string {
-  const per = (value: number): number => value / entry.batches;
-  const slug = kindSlug(kind);
+  // A kind can reach this column having settled NOTHING — that is exactly the
+  // case `activeBatchKinds` was widened to admit. `0/0` is NaN, which every
+  // formatter renders as an em dash, so the column added to shout "this mode is
+  // failing every batch it starts" would be a column of dashes. Say so instead.
+  const settledAny = entry.batches > 0;
+  const per = (value: number): number => (settledAny ? value / entry.batches : NaN);
 
   const head =
     `<div class="pipehead">` +
@@ -575,7 +958,6 @@ function batchColumn(state: ProjectedState, kind: string, entry: BatchAggregateR
   // cumulative mean is structurally incapable of showing — a target drying out
   // moves the recent number long before it moves the average.
   const recentMoney = series?.moneyPerBatch.at(-1)?.[1];
-  const recentRate = series?.perSec.at(-1)?.[1];
   const summary = tiles([
     { label: "ops", value: fmtNum(per(entry.ops), 1), sub: "per batch" },
     { label: "RAM", value: fmtRam(per(entry.gb)), sub: "per batch" },
@@ -585,32 +967,18 @@ function batchColumn(state: ProjectedState, kind: string, entry: BatchAggregateR
       value: fmtMoney(per(entry.moneyEarned)),
       sub: recentMoney === undefined ? "per batch, run mean" : `run mean · now ${fmtMoney(recentMoney)}`,
     },
-    {
-      label: "settling",
-      value: recentRate === undefined ? "–" : `${fmtNum(recentRate, 2)}/s`,
-      sub: `over ${fmtTime(state.farmWindowMs)}`,
-    },
   ]);
 
-  // Totals, not rates: the finding is the BAND between the two curves, and a
-  // rate of each would compress it to nothing. See BatchKindSeries.
-  const chart = (series?.launched.length ?? 0) >= 2
-    ? `<div class="chartwrap"><canvas id="batch-${slug}" class="microchart"></canvas>` +
-      `<div class="charttip" id="batchtip-${slug}"></div></div>`
-    : note("waiting for a second rollup");
-
-  const lost = entry.ops - entry.landed;
-  // Colour-keyed to the two curves. The chart carries no legend at this size,
-  // and when nothing is being lost the curves coincide exactly — so without
-  // the key there is no way to tell which line you are looking at, or that
-  // there are two.
-  const band =
-    `<p class="muted" title="${esc(
-      "ops this kind launched against the ops that arrived. The two curves separating is the finding: " +
-        "an op that never lands is a batch dying between dispatch and arrival, visible here long before it becomes a fall in income.",
-    )}"><span class="k1">${fmtNum(entry.ops)} launched</span> → ` +
-    `<span class="k2">${fmtNum(entry.landed)} landed</span>` +
-    (lost > 0 ? ` · <span class="bad">${fmtNum(lost)} lost</span>` : "") +
+  const abandoned = entry.abandoned ?? 0;
+  const adrift = (entry.abandonedOps ?? 0) - (entry.abandonedLanded ?? 0);
+  const loss =
+    `<p class="muted">` +
+    `${fmtNum(entry.ops)} ops in ${fmtNum(entry.batches)} settled batches` +
+    (abandoned > 0
+      ? ` · <span class="bad" title="${esc(
+          "batches evicted without ever settling — a batch that loses an op never completes, and this is the only counter that sees it",
+        )}">${fmtNum(abandoned)} abandoned, ${fmtNum(adrift)} ops lost</span>`
+      : "") +
     (entry.noHack
       ? ` · <span class="bad" title="${esc("support landed with no steal to protect")}">${fmtNum(entry.noHack)} no-hack</span>`
       : "") +
@@ -636,7 +1004,11 @@ function batchColumn(state: ProjectedState, kind: string, entry: BatchAggregateR
   // Runs recorded before the dispatcher published it fall back to the old
   // inference, which is right whenever it fires at all.
   const graded = entry.graded !== undefined ? entry.graded > 0 : entry.inOrder + entry.noHack > 0;
-  const order = graded
+  const order = !settledAny
+    ? `<p class="bad" title="${esc(
+        "no batch of this kind has ever settled, so there is no landing order to grade",
+      )}">nothing settled</p>`
+    : graded
     ? `<p class="${entry.inOrder >= entry.batches ? "good" : "bad"}" title="${esc(
         "batches whose effects landed in the order the cycle planned, out of every batch of this kind. " +
           "A batch launched without a landing grid can never contribute, so this reads low on a kind that only sometimes lands on a grid.",
@@ -645,54 +1017,126 @@ function batchColumn(state: ProjectedState, kind: string, entry: BatchAggregateR
         "this kind has never produced a landing-order verdict — its batches land as a group with no intended internal sequence",
       )}">no landing grid</p>`;
 
-  return `<section class="batchcol">${head}${summary}${chart}${band}${split}${threads}${order}</section>`;
+  return `<section class="batchcol">${head}${summary}${loss}${split}${threads}${order}</section>`;
 }
 
-/** Individual settled batches, accumulated far past the eight the rollup carries.
+/** The card. Aggregates for "is it earning", the batch scatter for "is it
+ * healthy", the picked batch for "what went wrong with that one". */
+function batchesCard(state: ProjectedState): string {
+  const kinds = activeBatchKinds(state);
+  if (kinds.length === 0 && state.batchHistory.length === 0) {
+    return state.compacted
+      ? note(hint(
+          "this run was served compacted",
+          "runs past a size threshold are folded to one record per state key before being served, so the per-batch " +
+            "history and every series on this card are gone — only the final rollup survives. Nothing is wrong with the farm.",
+        ))
+      : waiting("a batch to settle", "a batch counts once every one of its ops has landed");
+  }
+  return (
+    throughputStrip(state) +
+    batchTimeline(state) +
+    batchInspector(state) +
+    batchHistoryDetail(state) +
+    perKindDetail(state, kinds) +
+    allocationDetail(state)
+  );
+}
+
+/** Dispatcher health, as curves rather than the latest scalar.
  *
- * The aggregates above say whether the farm is healthy; these say which batch
- * was not, and the accumulated history (ui/app/project.ts) is what makes "which
- * one" answerable more than eight seconds after the fact.
+ * Every one of these was already published and already rendered — as a single
+ * number in a table, which cannot answer the only question worth asking of a
+ * gauge: is it getting worse. `pumpOccupancy` is the case that matters most.
+ * The tab's own notes call it the leading indicator of the landing error that
+ * eventually shows up as lost money, and it was drawn nowhere.
  *
- * SAMPLED, and the summary says so. The rollup's ring holds eight entries and
- * is read once a second, so a farm settling more than eight batches per second
- * overflows it between reads — measured on a real run, 96 of ~965 batches came
- * through. That is a perfectly good sample of what a batch looks like, and a
- * useless denominator; the aggregates above are the denominator. */
-function batchHistoryDetail(state: ProjectedState): string {
-  const history = state.batchHistory;
-  if (history.length === 0) return "";
-  const LIMIT = 60;
-  // Tail first, THEN reverse: this runs twice a second, and reversing a copy
-  // of the whole history to keep sixty rows would copy the other 1,940.
-  const shown = history.slice(-LIMIT).reverse();
-  return collapsible(
-    "hacking.batchHistory",
-    hint(
-      `${fmtNum(history.length)} batch(es) sampled, newest first`,
-      "individual batches caught from the dispatcher's eight-deep ring, read once a second. " +
-        "A farm settling faster than that overflows it between reads, so this is a sample of batches, not a count of them — " +
-        "the per-kind totals above are the count.",
-    ),
-    table(
-      ["at", "kind", "target", "ops", "span", "earned", "landed as"],
-      shown.map((batch) => [
-        fmtTime(batch.at - (state.t0 ?? 0)),
-        esc(batch.kind),
-        esc(batch.target),
-        batch.landed === batch.ops
-          ? fmtNum(batch.ops)
-          : `<span class="bad" title="${esc("an op never landed")}">${fmtNum(batch.landed)}/${fmtNum(batch.ops)}</span>`,
-        fmtMs(batch.spanMs),
-        fmtMoney(batch.moneyEarned),
-        batch.order === undefined
-          ? `<span class="muted">no grid</span>`
-          : batch.order === batch.planned
-            ? `<span class="good">${esc(batch.order)}</span>`
-            : `<span class="bad">${esc(batch.order)}</span>`,
-      ]),
-      { left: [1, 2, 6] },
-    ) + (history.length > LIMIT ? shownOf(LIMIT, history.length, "older batches") : ""),
+ * `fit` is per-metric, and the distinction is real: a count or a cost reads
+ * against zero, while a RATIO living in a narrow band far from zero — an
+ * in-order share between 0.97 and 1.00 — is a flat line on a zero-anchored
+ * axis, with the entire finding inside one pixel. */
+const HEALTH_TRENDS: {
+  id: string;
+  label: string;
+  title: string;
+  color: string;
+  fit: boolean;
+  series(health: FarmHealthSeries): [number, number][];
+  fmt(value: number): string;
+}[] = [
+  {
+    id: "occupancy",
+    label: "planner occupancy",
+    title: "planner milliseconds per millisecond of wall clock. A healthy run sits near 5%; past about a fifth of " +
+      "wall time the game's own timers and every in-flight delay start missing their deadlines, and the landing " +
+      "error that follows is what gets noticed instead. Zero is kept on the axis because the distance from it is the reading.",
+    color: "--series-3",
+    fit: false,
+    series: (health) => health.pumpOccupancy,
+    fmt: (value) => fmtPct(value, 1),
+  },
+  {
+    id: "inorder",
+    label: "landed in order",
+    title: "share of GRADED batches whose effects landed in the planned order. Scaled to its own band: a healthy " +
+      "run sits just under 1.0, and against a zero-anchored axis the few percent that matter are invisible.",
+    color: "--series-1",
+    fit: true,
+    series: (health) => health.inOrderShare,
+    fmt: (value) => fmtPct(value, 1),
+  },
+  {
+    id: "span",
+    label: "mean batch span",
+    title: "start to settle, averaged over every kind by summed spans over summed batches. A pipeline slipping " +
+      "shows up here before it shows up in income. Scaled to its band — the level is known, the drift is the finding.",
+    color: "--series-2",
+    fit: true,
+    series: (health) => health.batchSpanMs,
+    fmt: (value) => fmtMs(value),
+  },
+  {
+    id: "landingerror",
+    label: "landing error",
+    title: "observed minus planned landing time, signed mean and worst absolute. A mean far from zero means the " +
+      "duration model is biased; a worst case above one landing gap means effects are reordering.",
+    color: "--series-4",
+    fit: false,
+    series: (health) => health.landingErrorMeanMs,
+    fmt: (value) => fmtMs(value),
+  },
+  {
+    id: "lateness",
+    label: "engine lateness",
+    title: "main-thread starvation, measured directly. Leads landing error by about a weaken time, which makes it " +
+      "the earliest warning on this card.",
+    color: "--series-5",
+    fit: false,
+    series: (health) => health.engineLatenessMs,
+    fmt: (value) => fmtMs(value),
+  },
+];
+
+/** The trends that have enough points to draw. Shared by render and mount so
+ * the two cannot disagree about which canvases exist. */
+function drawableTrends(state: ProjectedState): typeof HEALTH_TRENDS {
+  return HEALTH_TRENDS.filter((trend) => trend.series(state.farmHealth).length >= 2);
+}
+
+function healthTrends(state: ProjectedState): string {
+  const drawable = drawableTrends(state);
+  if (drawable.length === 0) return "";
+  return (
+    `<div class="chartgrid">` +
+    drawable
+      .map((trend) =>
+        `<div>` +
+        note(hint(raw(`<span class="${seriesKey(trend.color)}">${esc(trend.label)}</span>`), trend.title)) +
+        chartCanvas(`health-${trend.id}`, "micro") +
+        `</div>`
+      )
+      .join("") +
+    `</div>`
   );
 }
 
@@ -736,26 +1180,6 @@ function ramSegmentsCard(farm: FarmRollup | undefined): string {
   );
 }
 
-/** Draw one of this tab's mini charts, if its canvas is present and it has
- * something to say. A series with fewer than two points draws nothing (see
- * drawSeries), so an empty chart is silence rather than a misleading flat
- * line at zero. */
-function drawMini(
-  el: HTMLElement,
-  canvasId: string,
-  tooltipId: string,
-  series: ChartSeries[],
-  t0: number | null,
-  fmtY: (value: number) => string,
-  compact = false,
-): void {
-  const canvas = el.querySelector<HTMLCanvasElement>(`#${canvasId}`);
-  const tooltip = el.querySelector<HTMLElement>(`#${tooltipId}`);
-  if (!canvas || !tooltip) return;
-  drawSeries(canvas, series, t0, fmtY, { compact });
-  attachChartHover(canvas, tooltip);
-}
-
 export const hackingTab: Tab = {
   id: "hacking",
   render(state: ProjectedState) {
@@ -797,6 +1221,7 @@ export const hackingTab: Tab = {
         : "";
 
     const segments = ramSegmentsCard(farm);
+    const trends = healthTrends(state);
 
     const health =
       farm &&
@@ -1069,16 +1494,14 @@ export const hackingTab: Tab = {
         homeRamPlan ? card("Home RAM investment", homeRamPlan) : "") +
       (infrastructureHistory ? card("Decision history", infrastructureHistory) : "") +
       (segments ? card("RAM segments", segments) : "") +
-      (health ? card("Dispatcher health", health) : "") +
+      (health || trends ? card("Dispatcher health", trends + (health || "")) : "") +
       `</div>`
     );
   },
 
-  /** Charts are drawn imperatively after the panel is in the DOM. The canvases
-   * survive a re-render now (the viewer patches rather than rebuilds), so
-   * `attachChartHover` must be — and is — idempotent. A canvas that is not
-   * present (a kind with no series yet) is skipped by drawMini rather than
-   * guarded for here.
+  /** Charts are drawn imperatively after the panel is in the DOM. A canvas that
+   * is not present (a kind with no series yet) is skipped by mountChart rather
+   * than guarded for here.
    *
    * A COLLAPSED disclosure is a different case and is NOT skipped: `<details>`
    * keeps its children, so the canvas is found and measures 0x0, which draws a
@@ -1086,28 +1509,42 @@ export const hackingTab: Tab = {
    * `toggle` handler does), or a stored run — which never re-renders on its
    * own — shows the section blank. */
   mount(state, el) {
-    for (const [kind] of activeBatchKinds(state)) {
-      const series = state.batchSeries[kind];
-      if (!series) continue;
-      const slug = kindSlug(kind);
-      drawMini(
+    // One mark per settled batch. POINTS rather than a line: each sample is a
+    // different batch, so a path between them would assert a continuity that
+    // does not exist. The metric follows the chips, and `fit` follows the
+    // metric — a span or a rate reads by its spread, a total by its magnitude.
+    const metric = batchMetric();
+    mountChart(
+      el,
+      "batch-timeline",
+      batchTimelineSeries(state),
+      state.t0,
+      (value) => metric.fmt(value),
+      { fitY: metric.fit },
+    );
+    // Ops launched that are neither in flight nor landed. A magnitude, so zero
+    // stays on the axis: zero adrift is the healthy reading.
+    mountChart(
+      el,
+      "ops-lost",
+      [{ pts: state.farmHealth.opsLost, color: "--series-4", label: "adrift" }],
+      state.t0,
+      (value) => fmtNum(value),
+      { compact: true },
+    );
+    for (const trend of drawableTrends(state)) {
+      mountChart(
         el,
-        `batch-${slug}`,
-        `batchtip-${slug}`,
-        [
-          { pts: series.launched, color: "--series-1", label: "launched" },
-          { pts: series.landed, color: "--series-5", label: "landed" },
-        ],
+        `health-${trend.id}`,
+        [{ pts: trend.series(state.farmHealth), color: trend.color, label: trend.label }],
         state.t0,
-        // A COUNT, not a rate. The band between the two totals is the point.
-        (v) => fmtNum(v),
-        true,
+        (value) => trend.fmt(value),
+        { compact: true, fitY: trend.fit },
       );
     }
-    drawMini(
+    mountChart(
       el,
       "allocchart",
-      "alloctip",
       KINDS.map((each) => ({ pts: state.allocShare[each], color: KIND_SERIES[each], label: each })),
       state.t0,
       (v) => `${(v * 100).toFixed(0)}%`,

@@ -230,3 +230,79 @@ describe("decision telemetry", () => {
     expect(events).toHaveLength(4);
   });
 });
+
+describe("stock decision telemetry", () => {
+  test("a plan rebuilt against a moving market emits one event per DECISION", () => {
+    // The stock plan is rebuilt every 500 ms against a market that re-prices
+    // every tick, so every money figure on it drifts continuously. That makes
+    // the signature the whole design: sign a cost or an expected profit and the
+    // event feed carries a record twice a second for the length of the run.
+    const events: { name: string; data: unknown }[] = [];
+    const tel = {
+      state: () => {},
+      mirror: () => {},
+      event: (name: string, data?: unknown) => events.push({ name, data }),
+      debug: () => {},
+      flush: () => {},
+      dispose: () => {},
+    } as Telemetry;
+    const state = {
+      topics: {
+        stock: {
+          hasWseAccount: true,
+          hasTixApiAccess: true,
+          plan: {
+            actions: [],
+            ranked: [],
+            entry: { sym: "ECP", side: "long", shares: 1_000, cost: 1e5, expectedProfit: 5e5, holdTicks: 43, breakEvenTicks: 4.2 },
+            horizons: { positionSec: 258, unlockSec: 4_320 },
+            flat: false,
+          },
+        },
+      },
+      dirty: new Set(["stock"]),
+      mirrors: {},
+      mirrorDirty: new Set(),
+      probeFailures: {},
+      featureLastRun: {},
+    } as unknown as GameState;
+    const sink = makeSink(tel);
+
+    sink.flush(state);
+    expect(events.map((event) => event.name)).toEqual(["investment.decision"]);
+    expect((events[0]!.data as { subsystem: string }).subsystem).toBe("stock");
+
+    // The market moved: the entry is repriced, its edge re-solved, the horizon
+    // shortened. Same decision — buy ECP long — so no event.
+    state.topics.stock!.plan!.entry = {
+      ...state.topics.stock!.plan!.entry!,
+      cost: 1.04e5,
+      expectedProfit: 4.1e5,
+      breakEvenTicks: 5.1,
+    };
+    state.topics.stock!.plan!.horizons = { positionSec: 240, unlockSec: 4_300 };
+    state.dirty.add("stock");
+    sink.flush(state);
+    expect(events).toHaveLength(1);
+
+    // A different symbol IS a new decision.
+    state.topics.stock!.plan!.entry = { ...state.topics.stock!.plan!.entry!, sym: "FSIG" };
+    state.dirty.add("stock");
+    sink.flush(state);
+    expect(events.map((event) => event.name)).toEqual(["investment.decision", "investment.decision"]);
+
+    // An executed trade is the log. One event per batch, keyed on its timestamp
+    // — the topic only ever carries the newest, so without this the trades are
+    // unrecoverable from the record.
+    state.topics.stock!.plan!.lastResult = { action: "buy", ok: true, detail: "bought 1000 FSIG", at: 7 };
+    state.dirty.add("stock");
+    sink.flush(state);
+    expect(events.slice(2).map((event) => event.name)).toEqual(["investment.result"]);
+    expect((events[2]!.data as { result: { detail: string } }).result.detail).toBe("bought 1000 FSIG");
+
+    // Flushed again with nothing new: silence, including no repeat of the trade.
+    state.dirty.add("stock");
+    sink.flush(state);
+    expect(events).toHaveLength(3);
+  });
+});

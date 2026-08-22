@@ -1117,6 +1117,33 @@ end.
   rendered nowhere, so the live reading two disabled timing tightenings wait on
   could not be taken by looking at the game. Now split per op kind and shown in
   the hacking tab.
+- **The batch panel's only chart was a curve drawn twice.** It plotted per-kind
+  `ops` against `landed`, captioned as the band of ops that never arrived.
+  `noteBatchLanding` returns early below `ops`, so a settled batch is complete
+  by construction and those two sums are equal in every run that can exist: the
+  band was identically zero, `BatchAggregate.lostOps` was unreachable, and the
+  "N lost" badge could not fire. `tests/ui-farm-rates.test.ts` had been pinning
+  the intent with a hand-written `ops: 300, landed: 298`, which is why it
+  survived. Real loss went to a silent `delete` in `openBatch`'s eviction —
+  a batch that loses an op never settles at all. That eviction is now counted
+  (`abandoned`, `abandonedOps`, `abandonedLanded`), the run-level residual
+  `launched - landed - inFlight` is drawn, and the invariant is pinned against a
+  real dispatcher in `sim/tests/dispatch.test.ts`.
+- **Per-kind means described no batch that existed.** Batches within one kind
+  differ by orders of magnitude in size, so the cumulative per-kind mean the
+  card led with was a figure no individual batch resembled. The card now leads
+  with one mark per settled batch, defaulting to `$/GB·s` so a prep wave and a
+  HWGW cycle are asked the same question; measured on a 20-minute sim run that
+  spread is 3.1x inside a single kind. The per-kind sums remain, demoted, and
+  the settled-batch ring says what fraction of the population it sampled.
+- **The batch history dropped batches and sometimes discarded itself.** The
+  viewer deduped the rollup's overlapping ring on a high-water mark, but ids are
+  assigned when a batch OPENS and the ring is ordered by when it SETTLED, from
+  one counter shared by prep waves and farm cycles. A prep wave spans a whole
+  grow, so its low id routinely arrives late: it was silently dropped, and when
+  it landed last in the ring it read as a restarted counter and cleared the
+  entire accumulated history. Deduped on a set of seen ids now; a genuine
+  install is still detected, on the cumulative counters where it is unambiguous.
 
 **Answered, no code.**
 

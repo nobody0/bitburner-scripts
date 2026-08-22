@@ -126,6 +126,29 @@ the proposal requires, not just the next spend; a wealth snapshot combines cash 
 from one probe, so a stale balance cannot complete a wealth goal; and outside BN8 the peak RAM
 reserve waits for TIX (BN8 keeps it from pass one, TIX being free there).
 
+The tab measures the run rather than the tick. Two bands, both drawn from the
+viewer's fold of the topic (`ui/app/project.ts`), because in each case the gap is
+the finding and differencing either curve destroys it:
+
+- **book at market against book at cost** — the gap is unrealised P/L, and the
+  crossing is the moment the open book goes underwater.
+- **realised net against cumulative unlock spend** — the crossing is the moment
+  the market has earned back the $200m/$5b/$25b of access it was given, which is
+  the quantity the whole unlock ladder argues about. Realised net is taken at
+  COST BASIS, matching `earnedSinceInstall`, so it is unmoved by opening a
+  position and by price wobble.
+
+Both are per-install: positions die at the reset and every symbol is re-rolled,
+so a curve spanning one would be two markets drawn as one line. What survives is
+one closed-out figure per install — sound because `plan.flat` is required to
+install at all. The headline figure is `tradeCashFlow + portfolioValue`, the
+contribution with no probe-cadence skew, next to the measured $/sec the
+working-capital claim actually bids with. The unlock table now shows
+`investmentCost` beside `cost`, so the ROI-against-all-capital constraint pinned
+above is readable rather than asserted, and `plan.horizons` is shown as a tile
+that says "collapsed" — the failure where no entry clears its round trip and the
+feature looks idle instead of blocked.
+
 ## BitNode modifiers
 
 | Field | Nodes |
@@ -147,11 +170,16 @@ volatility, spread, commission or `maxShares`. [BN8](../bitnodes/bn08.md) is the
 | model · recovery · solver | `shared/strategy/stock/market.ts`, `history.ts`, `decide.ts`; symbol data `shared/features/stocks.ts` |
 | driver · probes | `game/lib/features/stock.ts` · `game/lib/probes/dodged.ts` (`stock.account`, `stock.tick`, `stock.forecast`, `stock.orders`) |
 | topic · tab · sim | `shared/telemetry/topics/stock.ts` · `ui/app/tabs/stock.ts` · `sim/features/stock.ts` |
-| tests | `sim/tests/stock-parity.test.ts`, `stock-market.test.ts`, `stock-strategy.test.ts`, `stock-ladder-profile.test.ts` |
+| capital/earnings curves | `ui/app/project.ts` (`foldStockSeries`, `StockSeries`) · `ui/app/lib/chart.ts` |
+| tests | `sim/tests/stock-parity.test.ts`, `stock-market.test.ts`, `stock-strategy.test.ts`, `stock-ladder-profile.test.ts`; viewer fold `tests/ui-stock-series.test.ts` |
 | vendored rules | `sim/vendor/bitburner/src/StockMarket/` |
 
 ## Open
 
+- The viewer's capital and earnings curves are built per browser session from the
+  record stream, so a stored run served compacted (over `COMPACT_OVER_BYTES`,
+  `ui/server.ts`) has no history to fold and the charts fill from connect time.
+  A hub-side series sidecar in `RunStore.append` would fix it; not yet warranted.
 - Does the discrete-grid volatility recovery in `history.ts` still resolve after a darknet
   `promoteStock` charge, which multiplies `mv` off that grid?
 - `NUDGE_CONVERGENCE` is asserted at 0.5 as the convergence ramp's midpoint; what does the

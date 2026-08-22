@@ -5,6 +5,7 @@ import type { MeasuredMarginal } from "../progression/marginal.ts";
 import type { RepContext, RepPerson, WorkType } from "./rep.ts";
 import type { RequirementView } from "./requirements.ts";
 import type { RouteId } from "../progression/endgame.ts";
+import type { CyclePace } from "./pace.ts";
 import type { FeatureId } from "../../features/ids.ts";
 
 /** The flat snapshot `stepFactions` decides from.
@@ -91,6 +92,11 @@ export interface FactionsView extends RepProfileView {
   /** Elapsed seconds since the current augmentation prestige. Incremental
    * post-plan work is capped as a fraction of this measured cycle length. */
   installCycleSec?: number;
+  /** How fast the run is accelerating, so a gap becomes seconds at a rate that
+   * RISES rather than at today's spot rate. Fitted by progression from its cycle
+   * samples and published as a digest. Absent means no signal yet, and every
+   * conversion degrades to the spot-rate answer — see `pace.ts`. */
+  cyclePace?: CyclePace;
   /** The permanent augmentation-count target. Infinity means "take as many as
    * the horizon permits" rather than inventing a count target. */
   targetAugCount: number;
@@ -144,6 +150,13 @@ export interface FactionsView extends RepProfileView {
 
   /** Measured income per second, for the donate-vs-work crossover. */
   incomePerSec: number;
+  /** Measured seconds a prestige spends replaying what the reset erased, from
+   * progression's own install verdict. The install-cycle budget divides by it,
+   * and it is NOT a constant: a cycle that installs bigger multipliers replays
+   * faster, so the overhead shrinks as the run improves. Absent means no
+   * measurement yet, which prices the reset as free rather than inventing a
+   * cost. */
+  resetOverheadSec?: number;
 
   /** SF4 level and BitNode, for the 80 GB single-call blocker. */
   sf4Level: number;

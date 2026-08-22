@@ -542,6 +542,25 @@ export function buildFactionsView(ctx: DriverContext, now: number): FactionsView
       0,
       (now - (state.topics.progression?.lastAugReset ?? now)) / 1_000,
     ),
+    // Rates do not hold still within a cycle, so a reputation or money gap is
+    // converted to seconds through progression's fitted curve rather than
+    // divided by today's rate. Absent until progression has enough samples to
+    // fit, and the conversion degrades to the spot answer meanwhile.
+    ...((): { cyclePace?: FactionsView["cyclePace"]; resetOverheadSec?: number } => {
+      const pace = ctx.state.topics.progression?.plan?.pace;
+      if (!pace) return {};
+      return {
+        cyclePace: {
+          elapsedSec: pace.elapsedSec,
+          exponent: {
+            ...(pace.money !== undefined ? { money: pace.money } : {}),
+            ...(pace.hacking !== undefined ? { hacking: pace.hacking } : {}),
+            ...(pace.combat !== undefined ? { combat: pace.combat } : {}),
+          },
+        },
+        resetOverheadSec: pace.resetOverheadSec,
+      };
+    })(),
     // Only a route KNOWN not to be Daedalus lifts the count goal. Before
     // progression has published one — the whole early window, until an endgame
     // view and measured rates exist — `Infinity` would zero `countSlotWeight`,

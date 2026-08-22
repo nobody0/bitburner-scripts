@@ -678,7 +678,8 @@ describe("augmentation scoring", () => {
 
 import { blockersFor, chooseWorkType, stepFactions } from "../shared/strategy/factions/decide.ts";
 import { workRepPerSec } from "../shared/strategy/factions/rep.ts";
-import { factionPackageFrontier, selectFactionPackage } from "../shared/strategy/factions/packages.ts";
+import { factionPackageFrontier } from "../shared/strategy/factions/packages.ts";
+import { selectFactionPlan } from "../shared/strategy/factions/portfolio.ts";
 import { initFactionMemory } from "../shared/strategy/factions/plan.ts";
 import type { FactionStanding, FactionsView } from "../shared/strategy/factions/state.ts";
 
@@ -888,7 +889,7 @@ describe("faction breakpoint package planner", () => {
       ["B-next", aug("B-next", { factions: ["B"], baseCost: 0, baseRepRequirement: 200 })],
     ]);
     const world = factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 });
-    const selection = selectFactionPackage(world, new Map(factions.map((faction) => [faction.name, []])));
+    const selection = selectFactionPlan(world, new Map(factions.map((faction) => [faction.name, []])));
 
     expect(selection.intent?.faction).toBe("A");
     expect(selection.intent?.repTarget).toBe(100);
@@ -956,7 +957,19 @@ describe("faction breakpoint package planner", () => {
     expect(completed.decision.recommendInstall).toBeUndefined();
   });
 
-  test("moves to a compatible fresh package when a completed package's recorded runner is enemy-blocked", () => {
+  test("never records a runner-up that the chosen package has already foreclosed", () => {
+    // WAS: "moves to a compatible fresh package when a completed package's
+    // recorded runner is enemy-blocked". The recovery is no longer needed
+    // because the state cannot arise. The old selector chose its runner-up by
+    // rate alone, so it would happily nominate B while committing to A — and
+    // joining A bans B for the whole cycle. The plan is a SET now, and a set is
+    // built under the mutual-enemy constraint, so B is never in it and C (the
+    // compatible faction) is the runner from the start.
+    //
+    // This matters beyond bookkeeping: the runner-up is the opportunity cost
+    // that decides when to STOP pushing the chosen faction. Costing it against
+    // a faction we have already foreclosed stops the push early in favour of
+    // work that can never happen.
     const a = packageStanding("A", { joined: false, invited: true, enemies: ["B"] });
     const b = packageStanding("B", { joined: false, invited: true, enemies: ["A"] });
     const c = packageStanding("C");
@@ -970,7 +983,8 @@ describe("faction breakpoint package planner", () => {
       initFactionMemory(),
     );
     expect(first.decision.objective?.intent?.faction).toBe("A");
-    expect(first.decision.objective?.runnerUp?.faction).toBe("B");
+    expect(first.decision.objective?.runnerUp?.faction).toBe("C");
+    expect(first.decision.objective?.factions).not.toContain("B");
 
     const completed = stepFactions(
       factionsView({
@@ -1260,7 +1274,15 @@ describe("faction breakpoint package planner", () => {
     expect(cheapExtra.decision.recommendInstall).toBeUndefined();
   });
 
-  test("pushes the best faction farther when switching is much worse", () => {
+  test("a deep breakpoint competes with ENDING the cycle, not only with switching", () => {
+    // WAS: "pushes the best faction farther when switching is much worse" —
+    // which pushed A all the way to its deepest breakpoint whenever no other
+    // faction offered a better rate. That comparison was missing its third
+    // option. Reputation is not the only cost of going deeper: ten times the
+    // grind for one more augmentation also delays the install that switches the
+    // first one on, and an install is what every earned multiplier is waiting
+    // for. With nothing banked at A yet, there is nothing for a reset to
+    // destroy, so the cheap breakpoint wins and A-deep is next cycle's work.
     const factions = [packageStanding("A"), packageStanding("B")];
     const catalog = new Map([
       ["A-fast", aug("A-fast", { factions: ["A"], baseCost: 0, baseRepRequirement: 100 })],
@@ -1268,11 +1290,28 @@ describe("faction breakpoint package planner", () => {
       ["B-later", aug("B-later", { factions: ["B"], baseCost: 0, baseRepRequirement: 10_000 })],
     ]);
     const world = factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 });
-    const selection = selectFactionPackage(world, new Map(factions.map((faction) => [faction.name, []])));
+    const selection = selectFactionPlan(world, new Map(factions.map((faction) => [faction.name, []])));
 
     expect(selection.intent?.faction).toBe("A");
-    expect(selection.intent?.repTarget).toBe(1_000);
-    expect(selection.intent?.augmentations).toContain("A-deep");
+    expect(selection.intent?.repTarget).toBe(100);
+    // ...and the budget it was solved for is published, so the choice of cycle
+    // length can be argued with rather than inferred from the breakpoint.
+    expect(selection.portfolio.budgetSec).toBeGreaterThan(0);
+    expect(selection.horizonCurve.length).toBeGreaterThan(1);
+
+    // The same faction IS pushed deeper once reputation is banked there, because
+    // then ending the cycle forfeits it.
+    const banked = selectFactionPlan(
+      factionsView({
+        factions: [packageStanding("A", { rep: 900 }), packageStanding("B")],
+        catalog,
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+      }),
+      new Map(factions.map((faction) => [faction.name, []])),
+    );
+    expect(banked.intent?.repTarget).toBe(1_000);
+    expect(banked.intent?.augmentations).toContain("A-deep");
   });
 
   test("does not count a shared augmentation again as runner-up value", () => {
@@ -1282,7 +1321,7 @@ describe("faction breakpoint package planner", () => {
       ["A-unique", aug("A-unique", { factions: ["A"], baseCost: 0, baseRepRequirement: 1_000 })],
     ]);
     const world = factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15 });
-    const selection = selectFactionPackage(world, new Map(factions.map((faction) => [faction.name, []])));
+    const selection = selectFactionPlan(world, new Map(factions.map((faction) => [faction.name, []])));
 
     expect(selection.intent?.faction).toBe("A");
     expect(selection.intent?.repTarget).toBe(1_000);
@@ -1297,15 +1336,15 @@ describe("faction breakpoint package planner", () => {
       [NEUROFLUX, aug(NEUROFLUX, { factions: ["CyberSec"], baseCost: 1, baseRepRequirement: 0, mults: { hacking: 2 } })],
     ]);
     const blockers = new Map(factions.map((faction) => [faction.name, []]));
-    const labyrinth = selectFactionPackage(
+    const labyrinth = selectFactionPlan(
       factionsView({ factions, catalog, route: "labyrinth", horizonSec: 100_000, moneyAvailable: 1e15 }),
       blockers,
     );
-    const daedalus = selectFactionPackage(
+    const daedalus = selectFactionPlan(
       factionsView({ factions, catalog, route: "daedalus", horizonSec: 100_000, moneyAvailable: 1e15, owned: new Set([NEUROFLUX]) }),
       blockers,
     );
-    const gang = selectFactionPackage(
+    const gang = selectFactionPlan(
       factionsView({ factions, catalog, route: "gang", horizonSec: 100_000, moneyAvailable: 1e15, owned: new Set([NEUROFLUX]) }),
       blockers,
     );
@@ -1396,7 +1435,7 @@ describe("faction breakpoint package planner", () => {
         baseRepRequirement: 2_500_000,
       })],
     ]);
-    const selection = selectFactionPackage(
+    const selection = selectFactionPlan(
       factionsView({
         factions: [daedalus],
         catalog,
@@ -1424,7 +1463,7 @@ describe("faction breakpoint package planner", () => {
     // value realizable, so it is discounted and still selectable. A selectable
     // package is not starvation — the install verdict must not be told the
     // frontier was filtered empty.
-    const discounted = selectFactionPackage(
+    const discounted = selectFactionPlan(
       factionsView({
         factions: [packageStanding("CyberSec")],
         catalog,
@@ -1441,7 +1480,7 @@ describe("faction breakpoint package planner", () => {
 
     // Far enough out that under half the value is realizable: dropped as
     // noise, nothing left to select, and THAT is starvation.
-    const dropped = selectFactionPackage(
+    const dropped = selectFactionPlan(
       factionsView({
         factions: [packageStanding("CyberSec")],
         catalog,
@@ -1474,7 +1513,7 @@ describe("faction breakpoint package planner", () => {
         mults: { hacking: 1.1 },
       })],
     ]);
-    const selection = selectFactionPackage(
+    const selection = selectFactionPlan(
       factionsView({
         factions: [daedalus, cybersec],
         catalog,
@@ -1590,12 +1629,12 @@ describe("faction breakpoint package planner", () => {
       horizonSec: 100_000,
       moneyAvailable: 1e15,
     });
-    const selection = selectFactionPackage(world, new Map([["A", []], ["B", []]]));
+    const selection = selectFactionPlan(world, new Map([["A", []], ["B", []]]));
     expect(selection.intent).toBeUndefined();
 
     // Once the finite gate is complete, another NFG level is ordinary
     // multiplier value again. Routes without a count gate behave the same.
-    const completed = selectFactionPackage({
+    const completed = selectFactionPlan({
       ...world,
       targetAugCount: 1,
     }, new Map([["A", []], ["B", []]]));
@@ -1604,7 +1643,7 @@ describe("faction breakpoint package planner", () => {
     expect(completed.intent!.value).toBeGreaterThan(0);
     expect(completed.intent!.purchaseCost).toBeGreaterThan(0);
 
-    const openEnded = selectFactionPackage({
+    const openEnded = selectFactionPlan({
       ...world,
       targetAugCount: Infinity,
     }, new Map([["A", []], ["B", []]]));
@@ -1617,7 +1656,7 @@ describe("faction breakpoint package planner", () => {
       factions: ["Daedalus"], baseCost: 0, baseRepRequirement: 100,
     })]]);
     const frontier = (route: FactionsView["route"], horizonSec: number) =>
-      selectFactionPackage(
+      selectFactionPlan(
         factionsView({ factions, catalog, route, horizonSec, moneyAvailable: 1e15, targetAugCount: Infinity }),
         new Map(factions.map((faction) => [faction.name, []])),
       ).frontiers.get("Daedalus")?.[0];
@@ -1653,7 +1692,7 @@ describe("faction breakpoint package planner", () => {
     // Only the count gate is priced here, so the frontier isolates slot value
     // from the favor breakpoints that would otherwise dominate it.
     const countOnly = { best: new Map(), worth: new Map([["augmentations", 30], ["hacking", 10]]) };
-    const bootstrap = selectFactionPackage(
+    const bootstrap = selectFactionPlan(
       factionsView({ factions, catalog, horizonSec: 100_000, moneyAvailable: 1e15, rates: countOnly }),
       blockers,
     );
@@ -1662,7 +1701,7 @@ describe("faction breakpoint package planner", () => {
       pkg.augmentations.includes("CashRoot Starter Kit"));
     // A finite Daedalus gate makes it one real slot.
     expect(cashRoot?.value).toBeGreaterThan(0);
-    const noCount = selectFactionPackage(
+    const noCount = selectFactionPlan(
       factionsView({
         factions,
         catalog,
@@ -1679,7 +1718,7 @@ describe("faction breakpoint package planner", () => {
     // With no count gate there is no slot either, and no multipliers to value.
     expect(noCountCashRoot?.value ?? 0).toBe(0);
 
-    const established = selectFactionPackage(
+    const established = selectFactionPlan(
       factionsView({
         factions,
         catalog,
@@ -1691,7 +1730,7 @@ describe("faction breakpoint package planner", () => {
     );
     expect(established.intent?.faction).toBe("CyberSec");
 
-    const installed = selectFactionPackage(
+    const installed = selectFactionPlan(
       factionsView({
         factions,
         catalog,
@@ -1720,7 +1759,7 @@ describe("faction breakpoint package planner", () => {
       })],
     ]);
     const blockers = new Map(factions.map((faction) => [faction.name, []]));
-    const pick = (worth: [string, number][], owned = new Set<string>()) => selectFactionPackage(
+    const pick = (worth: [string, number][], owned = new Set<string>()) => selectFactionPlan(
       factionsView({
         factions, catalog, owned, horizonSec: 100_000, moneyAvailable: 1e15,
         rates: { best: new Map(), worth: new Map(worth) },
@@ -1752,9 +1791,18 @@ describe("faction breakpoint package planner", () => {
     expect(factionPackageFrontier(east, [], nextCycle).length).toBeGreaterThan(0);
   });
 
-  test("keeps the pre-join stopping point when joining forecloses the runner-up", () => {
+  test("pushes past the pre-join breakpoint when joining forecloses the alternative", () => {
+    // WAS: "keeps the pre-join stopping point when joining forecloses the
+    // runner-up". Both names describe the same trap from opposite sides. A and
+    // B ban each other, so committing to A means B will not happen this cycle —
+    // and the old selector nonetheless priced A's next breakpoint against
+    // switching to B, stopped at the shallow one, and then had no runner to
+    // switch to. Stopping to preserve an option that no longer exists is not
+    // caution. With B excluded from the set by the enemy constraint, A's deeper
+    // breakpoint is measured against ending the cycle, and wins.
     const { firstA, firstB, catalog, first } = enemyChoice();
-    expect(first.decision.objective?.intent?.repTarget).toBe(100);
+    expect(first.decision.objective?.intent?.repTarget).toBe(1_000);
+    expect(first.decision.objective?.factions).not.toContain("B");
 
     const afterJoin = stepFactions(
       factionsView({
@@ -1770,9 +1818,8 @@ describe("faction breakpoint package planner", () => {
       }),
       first.memory,
     );
-    expect(afterJoin.decision.objective?.intent?.repTarget).toBe(100);
-    expect(afterJoin.decision.objective?.intent?.augmentations).not.toContain("A-deep");
-    expect(afterJoin.decision.recommendInstall).toBeDefined();
+    expect(afterJoin.decision.objective?.intent?.repTarget).toBe(1_000);
+    expect(afterJoin.decision.objective?.intent?.augmentations).toContain("A-deep");
   });
 
   test("does not install when the completed package is already installed", () => {
@@ -1798,6 +1845,11 @@ describe("faction breakpoint package planner", () => {
     const catalog = new Map(baseCatalog);
     catalog.set("low", aug("low", { factions: ["C"], baseCost: 1, baseRepRequirement: 0, mults: { hacking: 1.1 } }));
     catalog.set("high", aug("high", { factions: ["C"], baseCost: 1, baseRepRequirement: 0, mults: { hacking: 2 } }));
+    // A's ladder is owned out, so the committed SET really is complete and the
+    // drain is the state under test. Leaving A-deep unowned no longer reaches
+    // it: the plan is a portfolio now, and a portfolio with reputation work
+    // still outstanding at one member is not a concluded cycle — purchases stay
+    // end-loaded behind it, which is the whole point of end-loading.
     const afterJoin = stepFactions(
       factionsView({
         factions: [
@@ -1806,7 +1858,7 @@ describe("faction breakpoint package planner", () => {
           packageStanding("C", { rep: 1e9 }),
         ],
         catalog,
-        owned: new Set(["A-fast"]),
+        owned: new Set(["A-fast", "A-deep"]),
         queued: new Set(["A-fast"]),
         horizonSec: 100_000,
         moneyAvailable: 1e15,
@@ -1830,7 +1882,9 @@ describe("faction breakpoint package planner", () => {
           packageStanding("C", { rep: 0, favor: 150 }),
         ],
         catalog,
-        owned: new Set(["A-fast"]),
+        // As above: the set must be complete for the final sweep to be the
+        // state under test.
+        owned: new Set(["A-fast", "A-deep"]),
         queued: new Set(["A-fast"]),
         horizonSec: 100_000,
         moneyAvailable: 1_001_000_000,
@@ -2348,10 +2402,19 @@ describe("patience — waiting for the bankroll before committing the order", ()
     // idles toward it) rather than buying the cheap item early — an early buy
     // would charge the 1.9x queue escalation to everything the rest of the
     // run still plans to buy.
+    //
+    // `dear` must be an augmentation this cycle actually COMMITS to, which now
+    // takes both a reachable reputation gate and enough value to be worth the
+    // grind. Previously any unreachable gate would do, because the planner
+    // extended one faction's ladder for as long as nothing else competed — it
+    // would spend seven hundred seconds earning favor worth 0.4% more, and the
+    // sweep stayed shut as a side effect of that grind rather than because
+    // anything was still owed. A budgeted plan declines that trade, so a fixture
+    // that relies on it is testing the flaw rather than the invariant.
     const decision = step({
       factions: [{ ...standing("CyberSec", { hacking: true, field: true, security: true }), rep: 1e5 }],
       catalog: new Map([
-        ["dear", aug("dear", { baseCost: 5e8, baseRepRequirement: 1e9, mults: { hacking: 1.01 } })],
+        ["dear", aug("dear", { baseCost: 5e8, baseRepRequirement: 110_000, mults: { hacking: 3 } })],
         ["cheap", aug("cheap", { baseCost: 1e6, baseRepRequirement: 0, mults: { hacking: 2 } })],
       ]),
       moneyGranted: 1e9,

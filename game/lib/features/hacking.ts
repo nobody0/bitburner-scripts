@@ -591,9 +591,15 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     ...(landingOrder ? { landingOrder } : {}),
     // Only kinds that have actually run: an all-zero row for a mode this save
     // has never used is noise in both the record and the panel.
+    //
+    // `abandoned` counts too. A kind whose every batch died before settling has
+    // `batches === 0`, and filtering on that alone dropped the one case most
+    // worth publishing — a mode that is running and failing looked identical to
+    // a mode that was never used.
     batches: Object.fromEntries(
-      BATCH_KINDS.filter((kind) => stats.batchesByKind[kind].batches > 0)
-        .map((kind) => [kind, stats.batchesByKind[kind]]),
+      BATCH_KINDS.filter((kind) =>
+        stats.batchesByKind[kind].batches > 0 || stats.batchesByKind[kind].abandoned > 0
+      ).map((kind) => [kind, stats.batchesByKind[kind]]),
     ),
     ...(stats.recentBatches.length > 0 ? { recentBatches: stats.recentBatches.map((batch) => ({ ...batch })) } : {}),
     allocation: {
