@@ -1600,17 +1600,27 @@ influence-ops-per-second for the current farm target, and folding
 is the designed next step; folding an invented rate in instead is how an
 estimator starts trading on its own guesses.
 
-Remaining for tuning (measured, not fixed): seed 2's treatment still buys one
-$318m rung at a sale boundary (wealth ends $256m — above the grant, below its
-siblings). The reserve's claim rate is now refreshed at the auction boundary
-from the live measurement rather than the one-tick-stale plan, which narrows
-that window but measurably does not close it (the run is byte-identical with
-and without the refresh), so the residual gap is upstream of the rate — the
-granting pass sees a pool holding the sale proceeds while some valuation
-input still predates them. Whether that single marginal purchase is genuinely
-optimal there is exactly what the lane measures. The uplift question —
-treatment BEATING control — remains open (medians $482m vs $557m) and is the
-manipulation tuning target.
+Remaining for tuning (measured, not fixed): one treatment seed still buys one
+$318m rung at a boundary pass (staying above the viability floor). The
+reserve's claim rate is refreshed at the auction boundary from the live
+measurement rather than the one-tick-stale plan, which narrows the windows
+but does not close every one. A rebase onto upstream work reshuffled pass
+timings and surfaced the last member of the one-pass-hole family: an ENTRY
+whose buy is RAM-starved for a few passes leaves its granted-but-unspent
+bankroll in a band with no continuous claim (the reserve had subtracted
+entry.cost), and a rung took it at lambda zero. The reserve is now floored at
+the viability floor whenever the auction is CONTESTED — any money bid last
+pass from a feature other than the market and progression's install machinery
+— so no pass composition can drop a market-only economy below the point where
+a trade clears its commissions. Both miscalibrations of that insurance were
+measured before landing on this: a full-bankroll overlap froze trading
+entirely (three seeds, $250m defended, zero trades ever — the reserve's own
+hyperbolic curve out-bid its flat-valued entry), and an unconditional floor
+cost a 7% median shortfall on the isolation ladder, a pure premium with no
+counterparty to insure against. The per-seed lane invariant is exactly that
+floor.
+The uplift question — treatment BEATING control — remains the manipulation
+tuning target.
 
 **The full-day leg exposed two more layers, both repaired by calculation.**
 The first 24h bn8-full benchmark ran VALID end to end (283,872 records, zero

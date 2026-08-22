@@ -150,6 +150,14 @@ export interface StockView {
   /** progression wants the book flat: reset imminent. Overrides everything. */
   liquidate: boolean;
 
+  /** Whether any feature other than the market itself (and progression's own
+   *  install machinery) bid for money in the last arbitration. The viability
+   *  floor is insurance against a COUNTERPARTY taking the last viable dollars
+   *  through a one-pass claim gap; with nobody bidding, the premium — a
+   *  floor-sized slice held out of every fresh entry — is pure drag (measured:
+   *  a 7% median shortfall on the isolation ladder's hour). */
+  moneyContested?: boolean;
+
   /** The market's MEASURED realized rate since the last install, when one
    *  exists: `getMoneySources().sinceInstall.stock / elapsed` — buys are
    *  negative and sells positive in the game's own ledger, so this is net
@@ -485,19 +493,30 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
 
   const unlock = unlockLadder(view, costs, ranked, holdTicks);
   const manipulation = planManipulation({ view, perSymbol, holdTicks, exiting });
-  // The reserve is ALWAYS posted, covering whatever part of the bankroll the
-  // other claims do not: the entry claim defends its own cost and the unlock
-  // ladder proposes a purchase only when its net gain over the node horizon is
-  // positive, so the reserve bids the remainder. Skipping it on entry passes
-  // left the rest of the bankroll — and the book about to become proceeds —
-  // undefended for exactly those passes, and a competitor's standing claim
-  // took $318m of working capital through that one-pass hole.
-  const reserve = planReserve(
-    view,
-    ranked,
-    holdTicks,
-    Math.max(0, cashBudget - (unlock?.cost ?? 0) - (entry?.cost ?? 0)),
-  );
+  // The reserve is ALWAYS posted, covering whatever the other claims do not —
+  // the entry claim defends its own cost, the unlock ladder vouches for its
+  // purchase — but never LESS than the viability floor. The floor overlap is
+  // the load-bearing part: an entry whose buy is RAM-starved for a few passes
+  // leaves its granted-but-unspent bankroll in the band, and with the reserve
+  // fully subtracted the band had NO continuous claim for exactly those
+  // passes — lambda read zero and a $318m rung took the money through the
+  // window (bn8-manipulation seed 3, surfaced when an upstream rebase
+  // reshuffled pass timings; the same one-pass-hole family as the
+  // sale-proceeds and liquidation gaps). Reserving the floor at all times
+  // costs the entry at most the last dollars blind trading could not deploy
+  // anyway, and guarantees the economy of a market-only node can never drop
+  // below the point where no trade clears its commissions. Covering MORE than
+  // the floor while an entry stands does not work: the reserve's own
+  // hyperbolic curve out-bids the flat-valued entry and freezes trading —
+  // measured, three seeds, $250m defended and zero trades ever placed.
+  const uncommitted = Math.max(0, cashBudget - (unlock?.cost ?? 0) - (entry?.cost ?? 0));
+  const bankrollForFloor = cashBudget + Math.max(0, view.portfolioValue) - (unlock?.cost ?? 0);
+  const reserveAmount = entry === undefined
+    ? Math.max(0, cashBudget - (unlock?.cost ?? 0))
+    : view.moneyContested === true
+      ? Math.max(uncommitted, Math.min(bankrollForFloor, blindViableBankroll()) - Math.max(0, view.portfolioValue))
+      : uncommitted;
+  const reserve = planReserve(view, ranked, holdTicks, reserveAmount);
 
   const best = ranked[0];
   return {

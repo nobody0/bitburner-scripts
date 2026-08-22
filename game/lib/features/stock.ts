@@ -231,6 +231,15 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     progression?.multipliers,
   );
   const measuredIncomePerSec = measuredStockIncomePerSec(topic.portfolioCost ?? 0);
+  // Contested = any money bid last pass from a feature that is neither the
+  // market nor progression's own install machinery. This arms the
+  // viability-floor insurance in planReserve — with no counterparty, the
+  // floor's premium is pure drag on a pure-market world (measured: a 7%
+  // median shortfall over the isolation ladder's hour).
+  const moneyContested = [
+    ...(ctx.state.topics.arbitration?.grants ?? []),
+    ...(ctx.state.topics.arbitration?.denied ?? []),
+  ].some((row) => row.resource === "money" && row.by !== "stock" && row.by !== "progression");
 
   return {
     symbols: (topic.positions ?? []).map((position) => ({
@@ -261,6 +270,7 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     positionHorizonSec,
     unlockHorizonSec: nodeHorizonSec,
     liquidate,
+    moneyContested,
     ...(measuredIncomePerSec !== undefined ? { measuredIncomePerSec } : {}),
   };
 }
