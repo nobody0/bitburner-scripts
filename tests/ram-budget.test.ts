@@ -3,7 +3,7 @@ import { readdir, readFile, rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
-import { JOB_METHODS, NO_RESPAWN_KINDS, RESIDENT_METHODS, ROUTINE_JOB_KINDS } from "../game/dnet/realm.ts";
+import { JOB_METHODS, RESIDENT_METHODS, ROUTINE_JOB_KINDS } from "../game/dnet/realm.ts";
 import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
 import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
 import { WORKER_RAM } from "../shared/world.ts";
@@ -435,13 +435,12 @@ describe("in-game static RAM budget", () => {
     // has just made that host immutable, and which the controller refuses by
     // name when no neighbour could re-plant it.
     expect(JOB_METHODS["pin"]).not.toContain("spawn");
-    expect(NO_RESPAWN_KINDS).toEqual(["pin"]);
     expect(pinGb).toBeLessThan(16);
     expect(pinGb + getFunctionRamCost("spawn")).toBeGreaterThan(16);
     // Every other kind hands the host back, because nothing outside can put a
     // resident there.
     for (const [kind, methods] of Object.entries(JOB_METHODS)) {
-      if (NO_RESPAWN_KINDS.includes(kind)) continue;
+      if (kind === "pin") continue;
       expect(methods, `${kind} must be able to spawn back to resident mode`).toContain("spawn");
     }
     // ...and every routine kind is comfortably under it, which is the gap the

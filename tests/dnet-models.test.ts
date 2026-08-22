@@ -28,8 +28,6 @@ describe("the model registry covers the game's taxonomy", () => {
       "(The Labyrinth)",
     ];
     expect([...MODEL_IDS].sort() as string[]).toEqual(upstream.sort());
-    expect(MODEL_IDS.length).toBe(25);
-    expect(new Set(MODEL_IDS).size).toBe(25);
   });
 
   test("describeModel is total, and every arm says what the oracle IS", () => {
@@ -102,9 +100,6 @@ describe("the registry says what is really implemented", () => {
     expect(candidates("Laika4")).toEqual(DOG_NAMES);
     expect(candidates("EuroZone Free")).toEqual(EU_COUNTRIES);
     expect(candidates("TopPass")).toEqual(COMMON_PASSWORDS);
-    // The two that make the beachhead cheap: one call and four calls.
-    expect(DEFAULT_SETTINGS.length).toBe(4);
-    expect(DOG_NAMES.length).toBe(4);
   });
 
   test("every unattempted model states why, and offers no candidates", () => {

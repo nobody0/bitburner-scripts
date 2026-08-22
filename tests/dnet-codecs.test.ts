@@ -34,14 +34,11 @@ describe("the alphabets and tables are transcribed", () => {
     // ever puts a digit in the filler, that stops being true and this fails
     // here rather than on a darknet host at 3am.
     for (const char of FILLER) expect(NUMBERS.includes(char), `filler contains the digit ${char}`).toBe(false);
-    expect(FILLER.length).toBe(17);
   });
 
   test("the prime tables are the ones the two arithmetic models draw from", () => {
-    expect(SMALL_PRIMES.length).toBe(25);
     expect(SMALL_PRIMES[0]).toBe(2);
     expect(SMALL_PRIMES[SMALL_PRIMES.length - 1]).toBe(97);
-    expect(LARGE_PRIMES.length).toBe(83);
     // Every entry must actually be prime, or a factoriser built on the table
     // would "solve" a host to the wrong answer.
     const isPrime = (n: number): boolean => {

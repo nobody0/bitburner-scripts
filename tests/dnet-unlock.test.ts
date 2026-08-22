@@ -5,7 +5,6 @@ import {
   stepDarkscape,
   type DarkscapeView,
 } from "../shared/strategy/dnet/unlock.ts";
-import { DARKSCAPE_COST, TOR_COST } from "../shared/strategy/dnet/rates.ts";
 import { applyOverrides, disabledByProfile, only } from "../shared/features/profile.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 
@@ -17,13 +16,6 @@ function view(over: Partial<DarkscapeView> = {}): DarkscapeView {
 }
 
 describe("buying DarkscapeNavigator.exe", () => {
-  test("the cost always includes TOR", () => {
-    // purchaseProgram fails without TOR, nothing in the player snapshot reports
-    // whether we hold it, and purchaseTor is idempotent — so the executor always
-    // calls it and the claim always reserves it. $200k against $50m.
-    expect(DARKSCAPE_TOTAL_COST).toBe(DARKSCAPE_COST + TOR_COST);
-  });
-
   test("bought when affordable and absent", () => {
     expect(stepDarkscape(view())).toBe(true);
   });

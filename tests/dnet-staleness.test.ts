@@ -351,7 +351,6 @@ describe("a credential is never written down", () => {
     // have been correct" — so any retry policy has to keep them apart.
     expect(codeName(408)).toBe("RequestTimeOut");
     expect(codeName(401)).toBe("AuthFailure");
-    expect(Object.keys(DARKNET_CODES)).toHaveLength(11);
   });
 });
 

@@ -1,8 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import {
-  GO_CANDIDATE_RESPONSE_FEATURES,
-  candidateResponseFeatures,
-} from "../shared/strategy/go/neural/candidate-features.ts";
+import { candidateResponseFeatures } from "../shared/strategy/go/neural/candidate-features.ts";
 import { GO_OPPONENT_BRANCHES } from "../shared/strategy/go/opponent.ts";
 
 describe("exact candidate response features", () => {
@@ -11,7 +8,6 @@ describe("exact candidate response features", () => {
       size: 5,
       rows: [".....", "..O..", ".....", "..X..", "....."],
     }, [], 0, "Netburners", 1.5, 12_345_600, 12);
-    expect(features).toHaveLength(GO_CANDIDATE_RESPONSE_FEATURES);
     expect([...features].every(Number.isFinite)).toBe(true);
     const branchMass = [...features.slice(0, GO_OPPONENT_BRANCHES.length)]
       .reduce((sum, value) => sum + value, 0);

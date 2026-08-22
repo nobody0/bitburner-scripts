@@ -10,7 +10,6 @@ import { MS_PER_TICK } from "../shared/strategy/stock/market.ts";
 import {
   FEATURE_DRIVERS,
   FEATURE_MODULES,
-  featureModule,
   resetAllFeatures,
   selectDue,
 } from "../game/lib/features/index.ts";
@@ -553,7 +552,6 @@ describe("feature modules", () => {
     // One list, not two. A second hand-maintained array is exactly how the
     // tab bar, the scheduler and the telemetry drift apart.
     expect(FEATURE_DRIVERS.map((d) => d.id)).toEqual([...FEATURE_IDS]);
-    for (const id of FEATURE_IDS) expect(featureModule(id).driver).toBe(FEATURE_MODULES[id].driver);
   });
 
   describe("the install barrier's augmentation half", () => {

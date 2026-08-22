@@ -35,7 +35,6 @@ describe("farmIncomeRate", () => {
   test("scales with RAM until the depth cap, then saturates", () => {
     const m = model({ score: 2, ramPerBatch: 10, weakenTimeS: 8 });
     const cap = Math.floor(8 / BATCH_INTERVAL_S) * 10;
-    expect(depthCapGb(m)).toBe(cap);
     expect(farmIncomeRate(m, 50)).toBe(100);
     expect(farmIncomeRate(m, cap)).toBe(2 * cap);
     expect(farmIncomeRate(m, 10_000)).toBe(2 * cap); // surplus earns nothing
@@ -194,8 +193,6 @@ describe("evaluatePrep", () => {
   test("a depth-capped farm preps for free: surplus RAM has no opportunity cost", () => {
     // Even the 0.6 prep share leaves (1-0.6)*1000 = 400 GB, above the
     // incumbent's cadence-derived cap, so lost = 0 and any better candidate pays.
-    const current = model({ score: 1, ramPerBatch: 10, weakenTimeS: 80 });
-    expect(depthCapGb(current)).toBe(Math.floor(80 / BATCH_INTERVAL_S) * 10);
     // Expressed in cadence units, not a hardcoded 8s: the depth cap is
     // `floor(weakenTimeS / BATCH_INTERVAL_S) * ramPerBatch`, so a literal
     // weaken time silently stops being "capped" when the batch interval
@@ -205,9 +202,12 @@ describe("evaluatePrep", () => {
     const candidate = model({ score: 1.5, ramPerBatch: 10, weakenTimeS: cappedWeakenTimeS });
     const p = plan({ ramSec: 60_000, weakenTimeS: 100 });
     const result = evaluatePrep({ current: capped, candidate, plan: p, fleetGb: 1_000, horizonMs: 1_800_000 })!;
-    const gain = (farmIncomeRate(candidate, 1_000) - farmIncomeRate(capped, 1_000)) * (1_800 - result.prepSeconds);
-    expect(result.net).toBeCloseTo(gain, 6); // lost === 0
-    expect(result.net).toBeGreaterThan(0);
+    // Both farms are capped at 30 GB of depth, so the incumbent earns 30/s and
+    // the candidate 45/s. Prep takes 100 s of the 1800 s horizon and costs
+    // nothing, leaving 15/s x 1700 s exactly. A prep that started charging for
+    // surplus RAM would land below this number.
+    expect(result.prepSeconds).toBe(100);
+    expect(result.net).toBe(25_500);
   });
 
   test("RAM-bound prep takes the large share; latency-bound prep takes the small one", () => {

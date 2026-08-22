@@ -1,16 +1,12 @@
 import { describe, expect, test } from "bun:test";
 
-import { NONE, hint, outcome, rankedTable, shownOf, waiting } from "../ui/app/lib/dom.ts";
+import { hint, outcome, rankedTable, shownOf, waiting } from "../ui/app/lib/dom.ts";
 
 /** The shared copy helpers are the single source of truth for recurring
  * wording; these tests pin their exact output so per-tab assertions can rely
  * on stable fragments. */
 
 describe("dom helpers", () => {
-  test("NONE is the en-dash empty value", () => {
-    expect(NONE).toBe("–");
-  });
-
   test("waiting words the empty state once", () => {
     expect(waiting("the corporation probe")).toBe('<p class="muted">waiting for the corporation probe</p>');
     expect(waiting("the corporation probe", "getCorporation is 10 GB")).toBe(

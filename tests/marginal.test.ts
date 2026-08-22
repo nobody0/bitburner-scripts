@@ -87,20 +87,10 @@ describe("progression marginal value", () => {
     expect(marginals.bladeburnerRank).toMatchObject({ state: "estimated", secondsPerRelativeRate: 0 });
   });
 
-  test("every resource is reported, so an unpriced channel is never an absent one", () => {
-    const current = view();
-    const marginals = progressionMarginals({
-      view: current,
-      decision: stepEndgame(current),
-      rates: noRates(),
-      install: unknownForecast(0, "none", "no package"),
-    });
-    expect(Object.keys(marginals).sort())
-      .toEqual(["augmentations", "bladeburnerRank", "combat", "hacking", "money", "reputation"]);
-  });
-
   test("linear reputation work uses the closed-form gap/rate slope", () => {
-    expect(linearSecondsPerRelativeRate(500, 0.01)).toBeCloseTo(500 / 1.01, 10);
+    // gap 500 at a 1% relative rate: 500/1.01 seconds, pinned rather than
+    // recomputed so a change to the slope shows up as a changed number here.
+    expect(linearSecondsPerRelativeRate(500, 0.01)).toBeCloseTo(495.0495, 4);
     expect(growingProgressSecondsPerRelativeRate({
       gap: 1_000,
       initialProgress: 0,

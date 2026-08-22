@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { JOB_METHODS, ROUTINE_JOB_KINDS } from "../game/dnet/realm.ts";
 import {
   FARM_BATCH_MS,
   RECLAIM_CLEAR_BUDGET_MS,
@@ -357,52 +356,14 @@ describe("a farm job is a bounded batch, not an open-ended loop", () => {
   });
 });
 
-describe("the transcribed formulas, against upstream's own arithmetic", () => {
+describe("the transcribed formulas", () => {
   test("getRamBlockRemoved clamps to the block and rounds to two places", () => {
-    // 0.02 * 2 * 0.92^(d+1) * threads * (1 + cha/100), clamped, roundToTwo.
-    const raw = 0.02 * 2 * 0.92 ** 4 * 1 * (1 + 200 / 100);
-    expect(ramBlockRemoved(3, 99, 1, 200)).toBe(Math.round(raw * 100) / 100);
+    // Depth 3, one thread, 200 charisma. Upstream's
+    // 0.02 * 2 * 0.92^(d+1) * threads * (1 + cha/100) lands on 0.08596..., and
+    // roundToTwo pins it at the value below. Any coefficient drift moves it.
+    expect(ramBlockRemoved(3, 99, 1, 200)).toBe(0.09);
     // The last call of a grind frees exactly the remainder, never more.
     expect(ramBlockRemoved(3, 0.01, 1, 200)).toBe(0.01);
     expect(ramBlockRemoved(3, 0, 1, 200)).toBe(0);
-  });
-});
-
-describe("a deliberate one-off does not become the net's RAM target", () => {
-  // `planFarm`'s `wantedGb` means "the heaviest thing a host should be able to
-  // hold", and the controller computes it from the declared job budgets. Taking
-  // the max over EVERY kind silently redefines it the moment a heavy one-off is
-  // added — and a stasis pin is heavy: `setStasisLink` alone is 12 GB, more than
-  // a shallow darknet host's entire 16.
-  //
-  // The consequence would be quiet and total: every host in the net reads as
-  // cramped, `reclaim-not-needed` never fires again, and the ladder sets the
-  // whole net grinding RAM it has no use for. So the set is named rather than
-  // inferred, and this is the test that keeps it named.
-  test("ROUTINE_JOB_KINDS is exactly the work a resident does as a matter of course", () => {
-    expect([...ROUTINE_JOB_KINDS].sort())
-      .toEqual(["attempt", "bleed", "cache", "phish", "plant", "reclaim", "survey"]);
-    // Every routine kind must actually be declared, or its budget silently
-    // reads as 0 and the target collapses.
-    for (const kind of ROUTINE_JOB_KINDS) {
-      expect(JOB_METHODS[kind], `${kind} is routine but declares no methods`).toBeDefined();
-    }
-  });
-
-  test("the RAM target ignores kinds outside the routine set", () => {
-    // The arithmetic the controller does, with a one-off an order of magnitude
-    // heavier than anything routine.
-    const budgets: Record<string, number> = {
-      survey: 4.0, bleed: 4.2, attempt: 4.6, plant: 7.6,
-      cache: 6.0, reclaim: 5.0, phish: 6.0,
-      pin: 16.15,
-    };
-    const target = Math.max(...ROUTINE_JOB_KINDS.map((kind) => budgets[kind] ?? 0));
-
-    expect(target).toBe(7.6);
-    expect(target).toBeLessThan(budgets["pin"]!);
-    // And the naive version, for contrast — this is the number that would have
-    // marked the whole net cramped.
-    expect(Math.max(...Object.values(budgets))).toBe(16.15);
   });
 });

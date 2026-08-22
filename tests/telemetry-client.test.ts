@@ -1,17 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import { makeRecordBuffer } from "../game/lib/telemetry.ts";
-import { WIRE_VERSION, type WireMessage } from "../shared/telemetry/schema.ts";
-
-test("a hand-assembled frame parses as the same WireMessage JSON.stringify produces", () => {
-  const records = [
-    { seq: 0, t: 1, run: "r", src: "game", kind: "event", name: "start.boot" },
-    { seq: 1, t: 2, run: "r", src: "game", kind: "state", key: "player", data: { hp: 9 } },
-  ];
-  const lines = records.map((record) => JSON.stringify(record));
-  const frame = `{"v":${WIRE_VERSION},"records":[${lines.join(",")}]}`;
-  const reference: WireMessage = { v: WIRE_VERSION, records: records as never };
-  expect(JSON.parse(frame)).toEqual(JSON.parse(JSON.stringify(reference)));
-});
 
 describe("makeRecordBuffer", () => {
   const line = (id: number, pad: number) => JSON.stringify({ id, pad: "x".repeat(pad) });

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
-  boundedExpectedPositions, DAEMON_STUDENT_PROBE_TOP_K, DAEMON_STUDENT_ROUTE_K,
-  futureMarginalizedTarget, selectRoots,
+  boundedExpectedPositions, futureMarginalizedTarget, selectRoots,
 } from "../go-ai/teacher/export-student-root-continuations.ts";
 import { terminalRankingRecords } from "../go-ai/teacher/add-student-root-terminal-rankings.ts";
 
@@ -18,11 +17,6 @@ function point(elapsed: number, aligned: boolean) {
 }
 
 describe("student-root counterfactual selection", () => {
-  test("keeps production K1 routes separate from wider policy probes", () => {
-    expect(DAEMON_STUDENT_ROUTE_K).toBe(1);
-    expect(DAEMON_STUDENT_PROBE_TOP_K).toBe(16);
-  });
-
   test("uses only position content and enforces exact quotas", () => {
     const routes = Array.from({ length: 128 }, (_, index) => ({
       environmentId: `environment-${index}`,

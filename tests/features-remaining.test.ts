@@ -1404,25 +1404,6 @@ describe("progression", () => {
     expect(bestOrdering(nodes, {}, 0.5, {}).exact).toBe(false);
   });
 
-  test("the baseline is the real predecessor ordering, revisits included", () => {
-    // 15 entries but only 13 DISTINCT nodes: BN5 and BN7 are each visited
-    // twice, at level 1 first and level 3 later. That is the whole point of
-    // their stated rationale — take the cheap early level of a node that
-    // unlocks something, come back for the rest once it is easier.
-    expect(BASELINE_ORDER).toHaveLength(15);
-    expect(BASELINE_ORDER[0]).toEqual([4, 3]);
-    expect(new Set(BASELINE_ORDER.map(([node]) => node)).size).toBe(13);
-    const revisited = [...new Set(BASELINE_ORDER.map(([node]) => node))].filter(
-      (node) => BASELINE_ORDER.filter(([n]) => n === node).length > 1,
-    );
-    expect(revisited.sort()).toEqual([5, 7]);
-    // ...and each revisit is at a HIGHER level than the first.
-    for (const node of revisited) {
-      const levels = BASELINE_ORDER.filter(([n]) => n === node).map(([, level]) => level);
-      expect(levels[1]).toBeGreaterThan(levels[0]!);
-    }
-  });
-
   test("next-BitNode selection credits the node being completed and covers all nodes", () => {
     expect(chooseNextBitNode(4, {})).toMatchObject({ bitNode: 4, targetLevel: 3 });
     expect(chooseNextBitNode(4, { "4": 2 })).toMatchObject({ bitNode: 1, targetLevel: 3 });

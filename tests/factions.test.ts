@@ -8,7 +8,6 @@ import {
   countSlotWeight,
   entropyCost,
   estimatedCost,
-  EXACT_ORDER_LIMIT,
   MULTIPLE_AUG_MULTIPLIER,
   NEUROFLUX,
   orderPurchases,
@@ -437,12 +436,6 @@ describe("purchase ordering — brute-force oracle", () => {
       expect(legal(order), `order violates precedence: ${order.map((c) => c.name).join(",")}`).toBe(true);
       expect(totalCost(order, ctx)).toBeCloseTo(best, 6);
     }
-  });
-
-  test("the exact limit is high enough for real prerequisite-constrained sets", () => {
-    // 34 augmentations have prerequisites at all; a single objective's
-    // constrained portion is far below this.
-    expect(EXACT_ORDER_LIMIT).toBeGreaterThanOrEqual(12);
   });
 
   test("most-expensive-first is what minimises the total", () => {

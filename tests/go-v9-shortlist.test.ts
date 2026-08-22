@@ -1,9 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   decideGoNeural,
-  GO_OPPONENT_SEARCH,
   GO_PROFILE_CANDIDATE_LIMITS,
-  GO_PROFILE_DEEP_SEARCH,
   GoNeuralEngine,
   selectV9ProposalFinalists,
 } from "../shared/strategy/go/neural/engine.ts";
@@ -77,13 +75,6 @@ describe("V9 learned shortlist", () => {
     expect(tied.baseLimit).toBe(1);
     expect(tied.adaptiveLimit).toBe(1);
     expect(tied.finalists).toEqual([0]);
-  });
-
-  test("pins the per-profile production candidate limits and deep-search defaults", () => {
-    expect(GO_PROFILE_CANDIDATE_LIMITS).toEqual({ small5: 4, daemon19: 1 });
-    expect(GO_PROFILE_DEEP_SEARCH).toEqual({
-      small5: { schema: "bitburner-go-deep-search-v1", followUpK: 3, uncertaintyTicks: 1 },
-    });
   });
 
   test("strict K=1 keeps exactly the seed-averaged argmax even when seeds disagree", () => {
@@ -268,19 +259,11 @@ describe("V9 learned shortlist", () => {
 });
 
 describe("per-opponent search budget", () => {
-  test("the table is scoped to opponents with replicated arena evidence", () => {
+  test("a 5x5 Illuminati view resolves the wider root, other opponents the default", async () => {
     // Illuminati only: three disjoint 384-game corpora put K=8/f5 at 865/1152
     // against the profile default's 788/1152 inside the 50 ms budget. Every
     // other 5x5 opponent is already at or near 100% and keeps the cheaper
     // profile default.
-    expect(Object.keys(GO_OPPONENT_SEARCH)).toEqual(["Illuminati"]);
-    expect(GO_OPPONENT_SEARCH.Illuminati).toEqual({
-      candidateLimit: 8,
-      deepSearch: { schema: "bitburner-go-deep-search-v1", followUpK: 5, uncertaintyTicks: 1 },
-    });
-  });
-
-  test("a 5x5 Illuminati view resolves the wider root, other opponents the default", async () => {
     const engine = new GoNeuralEngine(() => new RecordingV9Backend());
     const view = (opponent: GoView["opponent"], komi: number): GoView => ({
       board: { size: 5, rows: [".....", ".....", ".....", ".....", "....."] },

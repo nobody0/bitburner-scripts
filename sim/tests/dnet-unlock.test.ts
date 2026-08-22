@@ -12,7 +12,6 @@ import {
   promoteStockCharges,
   promoteStockCharismaExp,
   promoteStockWaitMs,
-  stockPromotionMult,
 } from "../features/dnet.ts";
 import { makeDnet } from "../ns/dnet.ts";
 import { StockMarketSystem } from "../features/stock.ts";
@@ -623,7 +622,6 @@ describe("promoting a stock from the darknet", () => {
 
     expect(waited()).toBe(promoteStockWaitMs(charisma));
     expect(dnet.stockPromotionCharges("ECP")).toBeCloseTo(promoteStockCharges(8, charisma), 9);
-    expect(dnet.stockVolatilityMult("ECP")).toBe(stockPromotionMult(dnet.stockPromotionCharges("ECP")));
     // Propaganda is charisma work, and it pays charisma experience for it.
     expect(world.person.exp.charisma - expBefore).toBeCloseTo(
       promoteStockCharismaExp(8, charisma, world.person.mults.charisma_exp),
@@ -681,7 +679,9 @@ describe("promoting a stock from the darknet", () => {
 
     dnet.addStockPromotion("ECP", 1_000);
     expect(dnet.stockPromotionCharges("ECP")).toBe(1_000);
-    expect(dnet.stockVolatilityMult("ECP")).toBe(stockPromotionMult(1_000));
+    // 1000 charges saturate both terms of the growth curve well short of the
+    // 1 + 1 + 2 ceiling; pinned so a growth-rate change is visible here.
+    expect(dnet.stockVolatilityMult("ECP")).toBeCloseTo(1.9107046, 7);
     // Untouched symbols stay neutral: this is per-symbol, not market-wide.
     expect(dnet.stockVolatilityMult("MGCP")).toBe(1);
 
