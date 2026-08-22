@@ -237,33 +237,38 @@ export async function runProbes(
     if (isStepped(probe)) await runSteppedProbe(ns, runner, state, probe, ctx, acquire, now);
   }
 
-  // ONE probe per pass, not a packed batch. Keeping the broker request
+  // ONE probe RUNS per pass, not a packed batch. Keeping the broker request
   // identity stable while it is queued matters more than sharing a stub: a
   // cheap arrival joining an older waiting request would change that request's
   // executable footprint under the broker and restart its wait.
-  const batch: SingleStepProbe[] = [];
-  let cost = 0;
+  //
+  // But a probe that cannot be PLACED must not keep the slot. Earliest-
+  // deadline-first made an unaffordable head permanent: a 4.6 GB probe that
+  // no cold-start host can hold was due first every pass, its acquire came
+  // back queued, the pass returned, and every affordable probe behind it —
+  // including the 0.2 GB stock account ladder, the market's only eye — waited
+  // ~3.5 virtual minutes for the farm to happen to free RAM (measured on
+  // bn8-full seed 1: first stock topic at t=212 s, and the whole BN8 bankroll
+  // was spent by measurable claims in that blind window). The blocked head's
+  // broker request STAYS queued — its starvation feedback is what grows the
+  // arena — but the pass now falls through to the next due probe that can
+  // actually be placed.
+  let placed: { probe: SingleStepProbe; cost: number; lease: Extract<DodgeAcquire, { status: 'placed' }> } | undefined;
   for (const probe of dueProbes) {
     if (isStepped(probe)) continue;
-    batch.push(probe);
-    cost = priceMethods(ns, probe.methods);
+    const cost = priceMethods(ns, probe.methods);
+    const lease = acquire(cost, `batch:${probe.id}`);
+    if (lease.status === 'queued') continue;
+    placed = { probe, cost, lease };
     break;
   }
 
-  if (batch.length === 0) return;
+  if (!placed) return;
+  const batch: SingleStepProbe[] = [placed.probe];
+  const cost = placed.cost;
+  const lease = placed.lease;
   for (const probe of batch) runner.lastRunAt.set(probe.id, now);
   state.probeBatch = { ids: batch.map((p) => p.id), cost, budget: cost };
-
-  const lease = acquire(cost, `batch:${batch.map((probe) => probe.id).join(',')}`);
-  if (lease.status === 'queued') {
-    // Placement moved under us between pricing and launching. Report it as a
-    // skip against every member rather than a failure — nothing went wrong,
-    // the RAM simply went elsewhere first. Each probe is reported at ITS OWN
-    // price, not the batch's: telling the panel that `hacknet.core` costs the
-    // whole batch's 13.2 GB would be a plain lie about that probe.
-    for (const probe of batch) runner.lastRunAt.delete(probe.id);
-    return;
-  }
 
   let results: { id: string; emissions?: Emission[]; error?: string }[];
   try {

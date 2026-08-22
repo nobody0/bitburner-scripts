@@ -11,6 +11,23 @@ describe("simulation experiment identity", () => {
     expect(() => assertValidExperiment(identity)).not.toThrow();
   });
 
+  test("accepts a fresh entrance of the leg's own BitNode — a market-first BN8 route needs no checkpoint", () => {
+    const identity: ExperimentIdentity = {
+      class: "bitnode-route",
+      entrance: { kind: "fresh", bitNode: 8 },
+      route: { route: "bn8-first", leg: "bn8-fresh", index: 0, bitNode: 8 },
+    };
+    expect(() => assertValidExperiment(identity)).not.toThrow();
+  });
+
+  test("a fresh entrance must still enter the leg's declared BitNode", () => {
+    expect(() => assertValidExperiment({
+      class: "bitnode-route",
+      entrance: { kind: "fresh", bitNode: 1 },
+      route: { route: "bn8-first", leg: "bn8-fresh", index: 0, bitNode: 8 },
+    })).toThrow("expects BN8, but its entrance is BN1");
+  });
+
   test("route evidence cannot originate from a synthetic fixture", () => {
     expect(() => assertValidExperiment({
       class: "bitnode-route",

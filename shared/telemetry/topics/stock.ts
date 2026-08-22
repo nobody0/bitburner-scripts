@@ -71,6 +71,18 @@ export interface StockState {
   /** Symbol -> 4S signal. Owned solely by the `stock.forecast` probe. */
   signals?: Record<string, StockSignal>;
   portfolioValue?: number;
+  /** Self-tracked cumulative cash moved by the feature's own trades — each
+   *  batch's after-minus-before, both read inside the same stub. Together with
+   *  the live `portfolioValue` this is the market's wealth contribution with
+   *  no probe-cadence skew, which the slow money-sources ledger cannot offer:
+   *  its stale snapshots count an open position's purchase as money gone and
+   *  read deeply negative at exactly the passes that matter. */
+  tradeCashFlow?: number;
+  /** Cumulative cash spent on WSE/TIX/4S unlocks since the install. Excluded
+   *  from `tradeCashFlow` (a purchase is not a trading loss) but still a real
+   *  spend the game ledger records under the "stock" source, so cumulative
+   *  earnings corrections must subtract it separately. */
+  unlockSpend?: number;
   portfolioCost?: number;
   /** Cash plus liquidation value from one coherent controller snapshot. */
   wealth?: number;
@@ -104,6 +116,9 @@ export interface StockPlan {
     volatility: number;
     /** From 4S rather than estimated from price history. */
     exact: boolean;
+    /** The farm can currently drive one of this symbol's hosts, so a position
+     *  in it could be pushed rather than merely waited on. */
+    manipulable?: boolean;
     breakEvenTicks: number;
     expectedProfit: number;
   }[];
@@ -124,6 +139,15 @@ export interface StockPlan {
     paybackSec: number;
     netOverHorizon: number;
   };
+  /** Working capital claimed (mode "reserve") while no entry is actionable:
+   *  the bankroll's expected trading rate, defending the cash in the shared
+   *  auction between entries. */
+  reserve?: { amount: number; ratePerSec: number };
+  /** The horizons the plan was made under: a position dies at the next
+   *  install, an unlock at the node's end. Published because a collapsed
+   *  position horizon silently refuses every trade, and that must be readable
+   *  from the record rather than inferred from the absence of entries. */
+  horizons?: { positionSec: number; unlockSec: number };
   /** Nothing held, nothing pending, nothing wanted. `progression` reads THIS as
    *  its install barrier rather than scanning `positions`: a snapshot says nothing
    *  about intent, and a position about to be opened or an exit not yet executed

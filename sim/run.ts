@@ -391,7 +391,10 @@ if (import.meta.main) {
         sha256: (await import("../tools/save-io.ts")).saveFileSha256(saveEntry),
       }
     : experimentClass === "bitnode-route"
-      ? { kind: "fresh", bitNode: 1 }
+      // A fresh entrance is the run's own BitNode; assertValidExperiment
+      // enforces that it equals the leg's declared node, so a stray --bitnode
+      // cannot silently retime a route leg against the wrong world.
+      ? { kind: "fresh", bitNode: runBitnode }
       : { kind: "synthetic", bitNode: runBitnode, ...(profileId ? { profile: profileId } : {}) };
   const experiment: ExperimentIdentity = {
     class: experimentClass,
@@ -402,9 +405,6 @@ if (import.meta.main) {
     throw new Error("--route requires a bitnode-route profile");
   }
   assertValidExperiment(experiment);
-  if (experiment.class === "bitnode-route" && entrance.kind === "fresh" && runBitnode !== 1) {
-    throw new Error(`fresh route entrance is BN1, but profile/CLI selected BN${runBitnode}`);
-  }
 
   console.log(`goal: ${goal.describe()}`);
   console.log(

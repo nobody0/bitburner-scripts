@@ -14,6 +14,7 @@
     "test:sim:scenarios": "bun run tools/test-lanes.ts hacking --file scenario-",
     "bench:sim:jit-lategame": "bun run sim/run.ts --profile jit-lategame --compact --perf",
     "bench:sim:install-cadence": "bun run sim/run.ts --profile install-cadence --compact --perf",
+    "bench:sim:bn8-full": "bun run sim/run.ts --profile bn8-full --compact --perf",
     "sync": "bun run tools/rfa-server.ts --sync",
     "types": "bun run tools/rfa-server.ts --types-only",
     "vendor": "bun run tools/vendor.ts",

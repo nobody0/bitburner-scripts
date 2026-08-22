@@ -46,8 +46,12 @@ export interface SimProfile {
   startingMoney?: number;
   /** Focused synthetic initial conditions. Kept separate from the common CLI
    * fields so profiles can pose a precise cross-feature experiment without
-   * teaching the simulator a magic scenario name. */
-  world?: Pick<GameRunOptions, "network" | "topology" | "homeIp" | "augmentationStats" | "person" | "playerState" | "factions" | "companies" | "bladeburnerRank" | "homeFiles">;
+   * teaching the simulator a magic scenario name. `gates` and `disable4SData`
+   * let a profile declare a capability rung directly — pre-granted market
+   * unlocks, or the upstream BitNodeOption that forbids the 4S purchases —
+   * which is what makes the stock capability ladder three otherwise-identical
+   * worlds. */
+  world?: Pick<GameRunOptions, "network" | "topology" | "homeIp" | "augmentationStats" | "person" | "playerState" | "factions" | "companies" | "bladeburnerRank" | "homeFiles" | "gates" | "disable4SData">;
 }
 
 export const FACTION_DONATION_TARGET = "Synaptic Enhancement Implant";
@@ -268,12 +272,14 @@ const JIT_LATEGAME_WORLD: NonNullable<SimProfile["world"]> = {
 };
 
 
-/** Full first-route benchmark: a genuinely fresh BN1 save fixture. It grants
- * no earned Source Files, augmentations, money, skill, reputation, fleet or
- * home upgrades. The controller harness separately applies the declared SF4.3
- * automation allowance; unlike the older calibration fixture, it grants no
- * SF14 policy/reward advantage. */
-const BN1_FULL_WORLD: NonNullable<SimProfile["world"]> = {
+/** Full-route benchmark world: a genuinely fresh save fixture on the vanilla
+ * v3.0.1 network. It grants no earned Source Files, augmentations, money,
+ * skill, reputation, fleet or home upgrades. The controller harness separately
+ * applies the declared SF4.3 automation allowance; unlike the older
+ * calibration fixture, it grants no SF14 policy/reward advantage. The server
+ * table itself is node-agnostic (BitNode multipliers apply at runtime), so the
+ * same fixture is the fresh entrance for BN1 and BN8 route legs alike. */
+const VANILLA_FULL_WORLD: NonNullable<SimProfile["world"]> = {
   ...VANILLA_NETWORK,
   augmentationStats: { "Unstable Circadian Modulator": UCM_FIXTURE_ROLL },
 };
@@ -285,7 +291,7 @@ const BN1_FULL_WORLD: NonNullable<SimProfile["world"]> = {
  * start from prestige state and the real controller sees ordinary APIs. */
 const SF12_CALIBRATION_LEVEL = 30;
 const BN1_FULL_SF12_30_WORLD: NonNullable<SimProfile["world"]> = {
-  ...BN1_FULL_WORLD,
+  ...VANILLA_FULL_WORLD,
   person: {
     mults: augmentationMultiplierSnapshot(
       Array.from({ length: SF12_CALIBRATION_LEVEL }, () => "NeuroFlux Governor"),
@@ -324,6 +330,51 @@ const JIT_PROCESS_PRESSURE_WORLD: NonNullable<SimProfile["world"]> = {
     exp: { hacking: calculateExp(1_000) },
   },
 };
+
+/** BN8 manipulation interplay. BN8 is the isolator: `ScriptHackMoneyGain: 0`
+ * means adding hacking adds ONLY manipulation value (the drained fraction still
+ * rolls stock influence at `ScriptHackMoney: 0.3` strength), and
+ * `DarknetMoneyMultiplier: 0` zeroes darknet income while leaving stock
+ * propaganda intact — so the treatment/control difference is the interplay
+ * being tuned, not a second income stream.
+ *
+ * The three hosts are the vendored low-tier symbol carriers (FNS, SGC, JGN via
+ * SYMBOL_BY_HOST). Small `moneyMax` is the point: the influence roll's
+ * probability is `moneyMoved / moneyMax`, so these are the strongest per-op
+ * manipulators in the game. DarkscapeNavigator.exe on home grants `ns.dnet`
+ * (shared/features/unlock.ts) so the promoteStock volatility lever EXISTS for
+ * later tuning; no strategy spends on it yet (spec/progress.md). */
+const BN8_MANIPULATION_WORLD: NonNullable<SimProfile["world"]> = {
+  network: [
+    { hostname: "foodnstuff", organizationName: "FoodNStuff", hackDifficulty: 10, moneyAvailable: 2_000_000, requiredHackingSkill: 1, serverGrowth: 5, numOpenPortsRequired: 0, maxRam: 16 },
+    { hostname: "sigma-cosmetics", organizationName: "Sigma Cosmetics", hackDifficulty: 10, moneyAvailable: 2_300_000, requiredHackingSkill: 5, serverGrowth: 10, numOpenPortsRequired: 0, maxRam: 16 },
+    { hostname: "joesguns", organizationName: "Joe's Guns", hackDifficulty: 15, moneyAvailable: 2_500_000, requiredHackingSkill: 10, serverGrowth: 20, numOpenPortsRequired: 0, maxRam: 16 },
+  ],
+  person: {
+    skills: { hacking: 50 },
+    exp: { hacking: calculateExp(50) },
+  },
+  homeFiles: ["DarkscapeNavigator.exe"],
+};
+
+/** The stock capability ladder: three profiles over ONE world, differing only
+ * in capability, each a strict superset of the one below it. BitNode 5, not 8:
+ * BN8 grants shorts unconditionally, so the lower rungs could not exist there.
+ * Hacking is off, which leaves BN5's other multipliers inert; WSE+TIX are
+ * pre-granted because the unlock LADDER purchases are already exercised by
+ * `stock-only` and `bn5-hacking-stock` — the experiment here is signal quality
+ * (inferred vs read) and the trading surface (longs vs both sides). */
+const STOCK_LADDER_GATES = { hasWseAccount: true, hasTixApiAccess: true } as const;
+const STOCK_LADDER = {
+  bitnode: 5,
+  features: only("stock", "progression"),
+  goals: ["wealth:2e9"],
+  // 600 ticks — eight full 75-tick regime cycles, enough for the blind
+  // estimator to earn its FORECAST_PRIOR_STRENGTH samples many times over.
+  horizon: "1h",
+  seeds: [1, 2, 3, 4, 5],
+  startingMoney: 1e9,
+} satisfies Partial<SimProfile>;
 
 export const PROFILES: readonly SimProfile[] = [
   {
@@ -368,7 +419,7 @@ export const PROFILES: readonly SimProfile[] = [
     features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock"),
     goals: ["bn:1", "installs:2"],
     homeRam: 8,
-    world: BN1_FULL_WORLD,
+    world: VANILLA_FULL_WORLD,
     horizon: "24h",
     seeds: [1, 2, 3],
   },
@@ -384,6 +435,33 @@ export const PROFILES: readonly SimProfile[] = [
     world: BN1_FULL_SF12_30_WORLD,
     horizon: "24h",
     seeds: [1],
+  },
+  {
+    id: "bn8-full",
+    experiment: "bitnode-route",
+    route: { route: "bn8-first", leg: "bn8-fresh", index: 0, bitNode: 8 },
+    description:
+      "Complete BN8 cold start on the fixed vanilla network: hacked money, crime, company and hacknet all pay zero, " +
+      "WSE+TIX are node-granted, and the Daedalus bankroll must be traded into existence across strategy-chosen installs " +
+      "to the actual w0r1d_d43m0n transition, with the declared SF4.3 automation allowance.",
+    bitnode: 8,
+    // The same full mechanically playable surface as bn1-full: the zeroed
+    // income multipliers are the node's OWN statement about hacknet, crime and
+    // company money, and the arbiter refusing to fund them is part of what
+    // this leg measures. `dnet` stays excluded like bn1-full — its session,
+    // authentication and password models are still explicit simulator gaps
+    // (spec/dnet.md), and one unmodeled call would invalidate the whole leg;
+    // the bn8-manipulation pair carries the darknet interplay instead.
+    features: only("hacking", "factions", "progression", "go", "career", "hacknet", "stock"),
+    goals: ["bn:8", "installs:2"],
+    homeRam: 8,
+    // BN8's starting money (Prestige.ts: BitNode8StartingMoney) — the node
+    // grants it because the market is the only income and $200k round trips
+    // need a real bankroll.
+    startingMoney: 250e6,
+    world: VANILLA_FULL_WORLD,
+    horizon: "24h",
+    seeds: [1, 2, 3],
   },
   {
     id: "jit-lategame",
@@ -546,6 +624,69 @@ export const PROFILES: readonly SimProfile[] = [
     // BN8's starting money (Prestige.ts: BitNode8StartingMoney). Below roughly
     // this the $200k round trip dominates any position the bankroll can fund.
     startingMoney: 250e6,
+  },
+  {
+    id: "bn8-manipulation-control",
+    experiment: "feature-scenario",
+    description:
+      "BN8 interplay control: the market alone on the three low-tier symbol hosts — the same world as bn8-manipulation " +
+      "with the farm and darknet switched off.",
+    bitnode: 8,
+    features: only("stock", "progression"),
+    goals: ["wealth:1e9"],
+    horizon: "2h",
+    seeds: [1, 2, 3],
+    startingMoney: 250e6,
+    homeRam: 256,
+    world: BN8_MANIPULATION_WORLD,
+  },
+  {
+    id: "bn8-manipulation",
+    experiment: "feature-scenario",
+    description:
+      "BN8 interplay treatment: hacking earns nothing (ScriptHackMoneyGain 0) so every {stock:true} op it lands is pure " +
+      "price manipulation, and the darknet's propaganda lever is present for tuning.",
+    bitnode: 8,
+    features: only("hacking", "stock", "dnet", "progression"),
+    goals: ["wealth:1e9"],
+    horizon: "2h",
+    seeds: [1, 2, 3],
+    startingMoney: 250e6,
+    homeRam: 256,
+    world: BN8_MANIPULATION_WORLD,
+  },
+  {
+    id: "stock-ladder-blind",
+    experiment: "feature-scenario",
+    description:
+      "Ladder stage 1: buy/sell only. No 4S (the node option forbids the purchase), no shorts — forecast and " +
+      "volatility must be inferred by watching prices against the transcribed generation ranges.",
+    ...STOCK_LADDER,
+    world: { gates: STOCK_LADDER_GATES, disable4SData: true },
+  },
+  {
+    id: "stock-ladder-4s",
+    experiment: "feature-scenario",
+    description:
+      "Ladder stage 2: the identical world with the 4S TIX API granted — the exact signal is read, not inferred. " +
+      "Still no shorts. A straight upgrade over stage 1.",
+    ...STOCK_LADDER,
+    world: { gates: { ...STOCK_LADDER_GATES, has4SDataTixApi: true } },
+  },
+  {
+    id: "stock-ladder-shorts",
+    experiment: "feature-scenario",
+    description:
+      "Ladder stage 3: the identical world plus owned SF8.2 — shorts unlocked, the full trading surface. " +
+      "A straight upgrade over stage 2.",
+    ...STOCK_LADDER,
+    world: {
+      gates: { ...STOCK_LADDER_GATES, has4SDataTixApi: true },
+      // Owned SF8.2 is the upstream shorts gate outside BN8, and (via
+      // Prestige.ts) also grants WSE+TIX — redundant with the gates above,
+      // which is exactly what makes this stage a strict superset of stage 2.
+      playerState: { sourceFiles: { "8": 2 } },
+    },
   },
 ] as const;
 

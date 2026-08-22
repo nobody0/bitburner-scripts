@@ -41,7 +41,7 @@ import { farmExperienceRate, farmIncomeRate } from "../../../shared/strategy/eco
 import { installHorizonSec, nodeHorizonSec, usableForecastSec } from "../../../shared/strategy/progression/forecast.ts";
 import { growingProgressSecondsPerRelativeRate, linearSecondsPerRelativeRate } from "../../../shared/strategy/progression/marginal.ts";
 import type { MeasuredMarginal } from "../../../shared/strategy/progression/marginal.ts";
-import { hackMarginalValue } from "../../../shared/strategy/share.ts";
+import { hackMarginalValue, hackRungValue, type HackMarginalInput } from "../../../shared/strategy/share.ts";
 import type { FarmPipeline, FarmRollup } from "../../../shared/telemetry/topics/hacking.ts";
 import {
   marginalCostPerGb,
@@ -498,6 +498,7 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
     target,
     ...(targetSolveExact !== undefined ? { targetSolveExact } : {}),
     ...(farmSolution?.score !== undefined ? { moneyPerSecPerGb: farmSolution.score } : {}),
+    ...(farmSolution ? { moneyPerSecPerGbCapitalIndependent: capitalIndependentScore(farmSolution) } : {}),
     ...(prepTarget !== undefined ? { prepTarget } : {}),
     prepBudgetGb,
     ...(segOrder !== undefined ? { segOrder } : {}),
@@ -675,6 +676,29 @@ const CLOUD_UPGRADE_METHODS = ["cloud.upgradeServer"] as const;
 let infrastructureInFlight = false;
 let lastInfrastructureResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
 
+/** The farm solution's $/GB/sec with the stock-manipulation term removed —
+ * what a MONEY purchase may be priced from.
+ *
+ * `score` blends hacked income with `stockIncome`, the dollar value of the
+ * ops' price manipulation on the market's HELD positions. For RAM allocation
+ * that blend is correct: allocating RAM consumes no capital. For a purchase it
+ * is a double-count — the manipulation income exists only while the bankroll
+ * is deployed as positions, so a server bought WITH that bankroll destroys the
+ * very income that justified it. Measured before this split (bn8-manipulation
+ * seed 1): the market grew $250m to ~$390m and a manipulation-priced $318m
+ * home-RAM rung then took all of it, twice in one two-hour run. The market's
+ * own reserve claim already bids the return on that capital; counting it again
+ * here bids the same dollars twice.
+ *
+ * Both per-batch terms share `score`'s denominator, so the capital-independent
+ * share is the income fraction of the blend. */
+function capitalIndependentScore(solution: { score: number; incomePerBatch: number; stockIncomePerBatch: number }): number {
+  const money = Math.max(0, solution.incomePerBatch);
+  const stock = Math.max(0, solution.stockIncomePerBatch);
+  const total = money + stock;
+  return total > 0 ? Math.max(0, solution.score) * (money / total) : Math.max(0, solution.score);
+}
+
 /** Marginal farm income from one more home core. The target solve is repeated
  * with exactly the current and next core count over home's usable capacity.
  * This stays conservative: only the home slice receives the improvement. */
@@ -698,8 +722,10 @@ function homeCoreIncomeDelta(ctx: Pick<ClaimContext, "state">): number {
     baseDifficulty: target.baseDifficulty ?? 1,
   };
   const caps = { batchGb: usable, hackBlockGb: usable, growBlockGb: usable };
-  const before = solveCycle(hackCtx, statics, home.cores, caps)?.score ?? 0;
-  const after = solveCycle(hackCtx, statics, home.cores + 1, caps)?.score ?? 0;
+  const solvedBefore = solveCycle(hackCtx, statics, home.cores, caps);
+  const solvedAfter = solveCycle(hackCtx, statics, home.cores + 1, caps);
+  const before = solvedBefore ? capitalIndependentScore(solvedBefore) : 0;
+  const after = solvedAfter ? capitalIndependentScore(solvedAfter) : 0;
   return Math.max(0, after - before) * usable;
 }
 
@@ -717,8 +743,17 @@ function marginalRamIncome(
   // that absence to zero posted a real economic claim worth exactly zero.
   // Prefer the current evaluator solve when it exists, otherwise use the last
   // published rollup, and preserve absence until either source has evidence.
-  const solvedPerGb = hackingState().memory.dispatch.evaluator.directive.farm?.solution.score;
-  const observedPerGb = solvedPerGb ?? ctx.state.topics.farm?.moneyPerSecPerGb;
+  // Capital-independent on purpose: this number prices a PURCHASE, and the
+  // solve's stock-manipulation term is income the purchase's own spend would
+  // remove (see capitalIndependentScore).
+  const solution = hackingState().memory.dispatch.evaluator.directive.farm?.solution;
+  const solvedPerGb = solution ? capitalIndependentScore(solution) : undefined;
+  // The rollup fallback must be the capital-independent field too: the plain
+  // `moneyPerSecPerGb` is the blended score, and reading it here whenever the
+  // directive is momentarily absent (controller handoff, evaluator reset)
+  // reintroduced the manipulation double-count on exactly the passes that
+  // re-arbitrate pooled money.
+  const observedPerGb = solvedPerGb ?? ctx.state.topics.farm?.moneyPerSecPerGbCapitalIndependent;
   if (observedPerGb === undefined) return undefined;
   const perGb = Math.max(0, observedPerGb);
   const depthCap = ctx.state.topics.farm?.depthCapGb;
@@ -776,9 +811,9 @@ function ramSupplyState(ctx: Pick<ClaimContext, "state" | "caps">): RamSupplySta
 
 type RamInvestmentContext = Pick<ClaimContext, "state" | "caps" | "horizons">;
 
-function productiveRamMarginal(ctx: RamInvestmentContext): MeasuredMarginal {
+function productiveRamInputs(ctx: RamInvestmentContext): HackMarginalInput | undefined {
   const marginals = ctx.state.topics.progression?.plan?.marginals;
-  if (!marginals) return { state: "unknown", reason: "progression RAM marginals have not been published" };
+  if (!marginals) return undefined;
   const solution = hackingState().memory.dispatch.evaluator.directive.farm?.solution;
   const scriptIncome = ctx.state.topics.fleet?.scriptIncome?.[0];
   const scriptExp = ctx.state.topics.fleet?.scriptExpGain;
@@ -787,14 +822,37 @@ function productiveRamMarginal(ctx: RamInvestmentContext): MeasuredMarginal {
   // across that gap, so prefer either positive observation over a transient 0.
   const totalMoneyPerSec = Math.max(scriptIncome ?? 0, ctx.state.topics.farm?.moneyRate ?? 0);
   const totalHackingExpPerSec = Math.max(scriptExp ?? 0, ctx.state.topics.farm?.expRate ?? 0);
-  return hackMarginalValue({
+  return {
     moneySecondsPerRelativeRate: marginals.money.secondsPerRelativeRate,
     hackingSecondsPerRelativeRate: marginals.hacking.secondsPerRelativeRate,
     ...(scriptIncome !== undefined || ctx.state.topics.farm?.moneyRate !== undefined ? { totalMoneyPerSec } : {}),
     ...(scriptExp !== undefined || ctx.state.topics.farm?.expRate !== undefined ? { totalHackingExpPerSec } : {}),
-    moneyPerSecPerGb: solution?.score ?? 0,
+    // Capital-independent: this marginal prices money PURCHASES, so the
+    // stock-manipulation share of the score — income that only exists while
+    // the market's bankroll stays deployed — must not justify spending that
+    // bankroll (see capitalIndependentScore).
+    moneyPerSecPerGb: solution ? capitalIndependentScore(solution) : 0,
     hackingExpPerSecPerGb: solution?.experienceScore ?? 0,
-  });
+  };
+}
+
+const MARGINALS_UNPUBLISHED: MeasuredMarginal = {
+  state: "unknown",
+  reason: "progression RAM marginals have not been published",
+};
+
+function productiveRamMarginal(ctx: RamInvestmentContext): MeasuredMarginal {
+  const inputs = productiveRamInputs(ctx);
+  return inputs ? hackMarginalValue(inputs) : MARGINALS_UNPUBLISHED;
+}
+
+/** BN-seconds one exact rung saves — the hyperbolic whole-purchase valuation
+ * (shared/strategy/share.ts#hackRungValue), not the per-GB tangent line, so a
+ * rung that triples a rate is priced at the 75% of the gated time it actually
+ * saves rather than an impossible 300%. */
+function productiveRungValue(ctx: RamInvestmentContext, addedRam: number): MeasuredMarginal {
+  const inputs = productiveRamInputs(ctx);
+  return inputs ? hackRungValue(inputs, addedRam) : MARGINALS_UNPUBLISHED;
 }
 
 interface RamInvestment {
@@ -813,6 +871,32 @@ function investmentRank(investment: RamInvestment): number {
   return investment.valuePerDollar.state === "measured"
     ? investment.valuePerDollar.value
     : investment.option.returnPerDollarSec;
+}
+
+/** An investment must carry EVIDENCE of value before it may claim money.
+ *
+ * Two admissible kinds, both calculations rather than rules:
+ *  - a measured-positive BN-seconds value per dollar (the economic auction
+ *    then prices it against every other claim in the band); or
+ *  - while that conversion is still unmeasured, a positive closed-form
+ *    expected return — the option's own `returnPerDollarSec`, computed from
+ *    the vendored formulas WITH the node's multipliers. This is the bootstrap
+ *    fallback: a spender whose formulas say it earns must not be erased just
+ *    because the BN-time model has no measurements yet.
+ *
+ * What is NOT admissible is the case both are zero: the formulas already
+ * multiplied in everything that scales income (`ScriptHackMoneyGain`, the
+ * manipulation value of held positions), so a zero there is a measurement of
+ * worthlessness, not an absence of one. The unmeasured `hard`/Infinity claim
+ * used to fire anyway and, in a node whose farm pays nothing, converted the
+ * entire bankroll into servers that could never repay it — starving the one
+ * feature (the market) that could have measured a positive return with the
+ * same dollars. When the market later holds a manipulable position, the farm
+ * score's `stockIncome` term turns this same gate back on BY CALCULATION. */
+function isEvidencedInvestment(investment: RamInvestment): boolean {
+  return investment.valuePerDollar.state === "measured"
+    ? investment.valuePerDollar.value > 0
+    : investment.option.returnPerDollarSec > 0;
 }
 
 /** Select one continuous supply segment. Nominal dollars/GB comes from the
@@ -846,7 +930,6 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
     });
   }
 
-  const marginal = productiveRamMarginal(ctx);
   const fleetGb = Math.max(
     0,
     (fleet.maxRam ?? 0) - (ctx.state.topics.ramArena?.arenaGb ?? 0),
@@ -887,9 +970,17 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
     if (!(valuableGb > 0)) return [];
     const incomePerSec = marginalRamIncome(ctx, 0, supply.addedRam);
     if (incomePerSec === undefined) return [];
-    const valuePerDollar: MeasuredMarginal = marginal.state === "measured"
-      ? { state: "measured", value: marginal.value * lifetimeFraction / supply.costPerGb }
-      : marginal;
+    // Whole-rung hyperbolic value, not per-GB tangent times GB: a rung big
+    // enough to triple a rate saves 75% of the gated time, never 300% of it.
+    // Valued over the PRODUCTIVE slice only — the same demand ceiling the
+    // money channel already applies inside marginalRamIncome. RAM past the
+    // farm's pipeline cap produces neither money nor experience, and crediting
+    // the whole rung's GB let a 256 GB home step claim to triple the exp rate
+    // a ~70 GB-headroom farm could never triple.
+    const rung = productiveRungValue(ctx, Math.min(supply.addedRam, valuableGb));
+    const valuePerDollar: MeasuredMarginal = rung.state === "measured"
+      ? { state: "measured", value: rung.value * lifetimeFraction / Math.max(1, supply.cost) }
+      : rung;
     const option = scoreInfrastructure({
       kind: supply.kind,
       cost: supply.cost,
@@ -916,7 +1007,7 @@ function ramInvestment(ctx: RamInvestmentContext, now = Date.now()): RamInvestme
     return [{ source, supply, option, claimAmount: supply.cost, valuePerDollar }];
   }));
   }
-  return candidates.sort((a, b) =>
+  return candidates.filter(isEvidencedInvestment).sort((a, b) =>
     investmentRank(b) - investmentRank(a)
     || (a.supply?.costPerGb ?? Infinity) - (b.supply?.costPerGb ?? Infinity)
     || (b.supply?.addedRam ?? 0) - (a.supply?.addedRam ?? 0)

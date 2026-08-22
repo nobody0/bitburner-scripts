@@ -118,6 +118,12 @@ export interface FarmRollup {
   targetSolveExact?: boolean;
   /** Current target's expected $/sec/GB, used to price added fleet RAM. */
   moneyPerSecPerGb?: number;
+  /** The same $/sec/GB with the stock-manipulation term removed — what a
+   * money PURCHASE may be priced from when the live solve is absent. The
+   * blended score above stays correct for RAM allocation (allocating consumes
+   * no capital), but a purchase priced with capital-coupled manipulation
+   * income double-counts the bankroll it would spend. */
+  moneyPerSecPerGbCapitalIndependent?: number;
   prepTarget?: string;
   /** Current demand-driven reservation for the executable prep wave. */
   prepBudgetGb?: number;

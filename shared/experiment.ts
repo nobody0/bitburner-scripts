@@ -16,7 +16,10 @@ export interface RouteLegIdentity {
 }
 
 export type EntranceIdentity =
-  | { kind: "fresh"; bitNode: 1 }
+  /** A brand-new save of the named BitNode: no source files, no checkpoint.
+   * The canonical checkpoint-free state for any node a route enters first —
+   * BN1 for the historical first leg, BN8 for a market-first route. */
+  | { kind: "fresh"; bitNode: number }
   | {
       kind: "save";
       saveId: string;
@@ -34,7 +37,7 @@ export interface ExperimentIdentity {
 }
 
 /** Route legs may start at a real checkpoint, or at the one canonical state
- * that needs no checkpoint: a brand-new BN1 save. */
+ * that needs no checkpoint: a brand-new save of the leg's own BitNode. */
 export function assertValidExperiment(identity: ExperimentIdentity): void {
   if (identity.class === "bitnode-route") {
     if (!identity.route) throw new Error("a bitnode-route experiment requires route-leg identity");

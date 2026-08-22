@@ -1330,6 +1330,339 @@ change-filter encoding the RAM arena digest on every 200 ms controller pass, wit
 `bestAnnounced`'s `join` at 4.3% behind it. Both are controller-wide and were out
 of scope here.
 
+## Stock correctness pass and the staged capability ladder (2026-08-21)
+
+A review of the stock stack (strategy, driver, probes, sim wiring) plus the
+simulations that turn its capability rungs into measured experiments. Fixes
+first, so every baseline below was recorded on corrected behavior:
+
+- **The price sampler had zero margin.** `stock.tick`/`stock.forecast` polled at
+  exactly 4,000 ms — equal to `msPerStockUpdateMin`, the tick interval during
+  stored-cycle catch-up — so any stub latency straddled two ticks, compounding
+  two moves into one observed step and corrupting the volatility inversion and
+  the cycle clock. Both probes now sample at 3 s (`SEC_3`), and the ladder's
+  blind lane asserts ≥580 of ~600 hourly ticks observed.
+- **The documented confidence gate is now the implemented one.**
+  `ForecastEstimate.confident` (samples ≥ `FORECAST_PRIOR_STRENGTH`) rides
+  `RankedSymbol` into `planEntry`; the weaker `isConfident` re-check is gone.
+- **The $25b 4S pricer un-shrinks with the estimator's own factor.**
+  `estimateSignal` exposes its Beta shrink `n/(n+k)`; `fourSigmaGainPerSec`
+  divides by it instead of asserting ×2, and looks symbols up through a Map
+  instead of an O(n²) `find`.
+- Dead `StockView.moneyGranted` removed; `resetStockState`'s double reset
+  dropped; `planExits`' misnamed `holdTicks` renamed to `guaranteedTicks`.
+- **Synthetic SF8 now grants WSE+TIX** (`sim/game-run.ts` reads
+  `world.player.sourceFiles`, matching `canAccessBitNodeFeature(8)` — owned SF8
+  in any node), and **`disable4SData` is a first-class run option** wired into
+  both `ns.getResetInfo().bitNodeOptions` and the market's purchase gates.
+
+**The ladder** (`stock-ladder-blind|4s|shorts`, `sim/tests/stock-ladder-profile.test.ts`,
+`bun run long stock`): one BN5 world, three strictly increasing capability
+rungs — blind (no 4S by node option, no shorts, signals inferred from prices),
++4S TIX API, +owned SF8.2. The blind lane pins fidelity: every acted-on signal
+estimated, zero 4S purchases, and every recovered volatility inside its
+transcribed generation range AND equal to the actual hidden roll read off the
+vendored market (the shared-roll grid inversion solves after one hour of
+ticks). The upgrade lane pins monotonicity at a fixed horizon across the five
+profile seeds: `median(4s) >= median(blind)`, `median(shorts) >= median(4s)`.
+
+**The interplay pair** (`bn8-manipulation-control|bn8-manipulation`,
+`sim/tests/bn8-manipulation-profile.test.ts`): the three low-tier symbol hosts
+in BN8, where `ScriptHackMoneyGain: 0` makes `{stock:true}` manipulation the
+only thing hacking can add and `DarknetMoneyMultiplier: 0` zeroes darknet
+income but not propaganda. Both sides run fidelity-clean with dnet enabled.
+
+**The route leg** (`bn8-full`, `bitnode-route`, route `bn8-first`):
+`EntranceIdentity` now admits a declared-fresh BN-N entrance (entrance BitNode
+must equal the leg's), so a market-first route needs no checkpoint. The smoke
+lane (`sim/tests/bn8-full-profile.test.ts`) proves the full surface is
+simulatable — zero unmodeled, node-granted WSE+TIX on the first account probe.
+
+**FINDING, pinned in both BN8 lanes: the unmeasured RAM-investment fallback
+drains the node grant before the market can trade.** Hacking's
+`infrastructure:ram` claim is granted unconditionally while its BN-time value
+is unmeasured (`pricing: "hard", value: Infinity` — the deliberate BN1
+bootstrap rule). In BN8 the largest affordable rung is a $225m 256 GB server,
+the farm it feeds pays $0 forever, and the market — the node's only income —
+is left below one round trip and cannot even measure its own value to
+counter-bid; hacknet's Netburners-milestone nodes ride the same window. The
+$250m node grant is gone within minutes, `tradesMade` stays 0 for the whole
+horizon while the stock-only control multiplies the same bankroll. The repair
+belongs to the interplay tuning: the option's own vendored-formula expectation
+is a KNOWN zero in BN8, not an absent measurement, so the fallback must not
+apply — and when it lands, the pinned FINDING cases in both lanes fail by
+design and become the real uplift/trading assertions.
+
+Also recorded: the pre-fix sampler risk of compound steps inside `history.ts`
+(a corpus-solve failure with a median roll estimate above 1) is second-order
+now that the cadence is 3 s, and remains unhardened by choice.
+
+## The BN8 capital drain, repaired by calculation (2026-08-21)
+
+The finding above — the whole node grant converted into zero-return servers
+before the market's first trade — is retired by three fixes, each a
+calculation the model was already entitled to make rather than a rule keyed on
+a node number:
+
+1. **Investments must carry evidence** (`isEvidencedInvestment`,
+   game/lib/features/hacking.ts). The unmeasured-value fallback ("unknown must
+   not erase a productive spender") now applies only to a spender whose OWN
+   closed-form expectation — computed from the vendored formulas WITH the
+   node's multipliers — is positive. A zero there is a measurement of
+   worthlessness, not an absence of one: BN8's farm income is a known zero, so
+   its RAM rungs stop claiming money the moment the formulas say so, and start
+   again by the same calculation once a held position gives ops manipulation
+   value (`stockIncome` in the target score). BN1's bootstrap is untouched
+   because its expected income is positive from the first solve.
+2. **Marginals publish their operating point** (`ResourceMarginal.atRatePerSec`,
+   shared/strategy/progression/marginal.ts → game/lib/income.ts). The money
+   marginal is a derivative taken at `max(measured rate, FALLBACK_MONEY_PER_SEC)`
+   — the same rate the route ETA itself is priced with. `moneyRateValue` now
+   converts absolute $/sec at that exact operating point when no income has
+   been measured, instead of refusing. The refusal was circular starvation:
+   the FIRST income source of a node can never show a measured income before
+   it is funded, so it silently lost every auction to any claim that happened
+   to be priceable (BN8: experience-valued fleet RAM).
+3. **The market defends its working capital** (`StockPlan.reserve`,
+   shared/strategy/stock/decide.ts → the stock driver's `mode: "reserve"`
+   claim). Between entries — while the estimator gathers samples or the best
+   edge sits inside the band — the bankroll's expected trading rate (the
+   larger of the closed-form blind rate and the best ranked candidate's
+   expectation) is posted under the position claim id. A competitor must now
+   out-price the market's expected return to take the cash, and the reserved
+   money is simply still there when an entry clears its gates.
+
+Measured on `bn8-manipulation` seed 1 (30 virtual minutes): before — $250m →
+$80k, zero trades, 8 servers bought; after — zero servers bought, 4 trades,
+realized profit +$8.7m, wealth $258.5m.
+
+Running the same seed for the full two hours exposed the next layers of the
+same auction, each fixed by another calculation:
+
+- **Sale proceeds were a stale-topic windfall.** A liquidation's cash landed
+  in the arbiter's pool up to two passes before the market's own view (the
+  sweep-sampled player topic) knew about it, and the reserve — sized on the
+  stale pocket change — was absent for exactly that window ($390m scooped by a
+  $318m rung in 500 ms). Two fixes: the reserve is sized over the whole
+  BANKROLL (cash + book at liquidation value; claims are full-ambition
+  requests, the pool bounds what is actually reserved), and a trade batch now
+  advances `topics.player.money` from the cash its own stub read — the exact
+  pattern executeInfrastructure already used after purchases.
+- **Money purchases were priced with capital-coupled income.** The farm score
+  blends hacked income with `stockIncome` — manipulation value that exists
+  only while the market's bankroll stays deployed. Pricing a purchase OF that
+  bankroll with it double-counts the same dollars (the market's reserve
+  already bids the return on that capital). `capitalIndependentScore` strips
+  the stock share out of `marginalRamIncome`, `hackMarginalValue`'s money
+  channel and `homeCoreIncomeDelta`; RAM ALLOCATION keeps the blended score,
+  because allocating RAM consumes no capital.
+- **The measured trading rate was built from misaligned ledgers.** The money-
+  sources probe's 2-minute-stale net cashflow (which counts an open position's
+  purchase as money GONE) mixed with a live portfolio value made the market's
+  measured rate vanish at precisely the post-sale pass the reserve most needs
+  it. The driver now tracks its own trade cashflow — each batch's
+  after-minus-before cash, both read inside the same stub — and adds the live
+  book; `moneyRateValue`'s cumulative income likewise adds the book back so a
+  deployed portfolio no longer understates every money-priced claim (measured:
+  17x) relative to non-money channels.
+
+**The lane's remaining pinned finding — the tuning step's calibration
+target.** With every distortion above removed, the auction is honest and the
+model still eventually converts the grown bankroll into fleet RAM on its
+EXPERIENCE value: under progression's install-horizon marginals, money and
+hacking-exp seconds price at similar scale (~1e4 s per relative rate), so a
+$318m home rung that roughly triples exp throughput out-values the reserve's
+~2.6x smaller relative money gain. Measured, seed 1, two hours: control
+(market alone) $250m → $404m; treatment $250m → $74k after +$88m of realized
+trading profit. Whether the install-horizon marginal may price a node whose
+only money source is the market — the $100b Daedalus gate lives on the NODE
+horizon — is the calibration question `bn8-manipulation` now measures
+directly.
+
+**Still open, pinned by `bn8-full-profile.test.ts`:** the 8 GB cold start.
+The market is PROBE-BLIND for its first ~3.5 virtual minutes (the known
+dodge-budget starvation for fresh 8 GB homes — first `stock` topic record at
+t=212 s on seed 1), so no plan exists, so not even the reserve is posted, while
+progression's route marginals land at ~200 s and briefly make RAM the only
+priced bidder. The $250m is spent in that ~10 s gap. The repair is the probe
+starvation itself, or pricing home RAM's probe-enabling value; the stock-side
+economics are proven sound wherever the market can see.
+
+Also observed while verifying: `sim/tests/scenario-bootstrap.test.ts`
+(`infrastructure.length > 0`), one `sim/tests/dnet-unlock.test.ts` case, and
+three hacking scenario lanes (`scenario-share`, two `scenario-jit` cases) fail
+on the BASE commit with a clean tree — pre-existing breakage unrelated to this
+work, each verified by a stash-and-rerun.
+
+## The exp/money inversion and the probe convoy, repaired by calculation (2026-08-21)
+
+The follow-up pass to the drain repair. Its instruction was explicit: never a
+node-keyed rule, always a computed value — and every defect below turned out to
+be a place where the computation was wrong, not missing.
+
+**The 8 GB cold start's probe half is solved; its allocation half is the
+remaining pin.** The probe runner's single per-pass slot had
+head-of-line blocking: earliest-deadline-first re-selected the same
+unplaceable 4.6 GB probe every pass, its acquire came back queued, and the
+pass returned — so even the 0.2 GB stock account probe waited ~3.5 virtual
+minutes for the farm to happen to free RAM (bn8-full seed 1: first stock topic
+at t=212 s; the node grant was spent by then-priceable RAM claims in the blind
+window). The runner now falls through to the next due probe that can actually
+place; the blocked head's broker request stays queued, so its starvation
+feedback still grows the arena. Measured after: the market's first trades land
+inside the 15-minute smoke window from a cold 8 GB home. What the probe fix
+does NOT settle by itself is the cold-start ALLOCATION with the full surface
+live: RAM claims become priceable (exp rates measure immediately) while the
+market's measured rate cannot exist before its first trades, and the route's
+unmeasured money rate was one flat hacking-era constant.
+
+**The cold-start allocation is settled by a node-aware money PRIOR.** When no
+income has been measured, `sampledRates` now composes the rate per channel
+from the node's own transcribed multipliers instead of assuming the flat
+`FALLBACK_MONEY_PER_SEC`: the hacking channel is that fallback scaled by
+`ScriptHackMoney x ScriptHackMoneyGain` (exactly the tuned constant in BN1,
+exactly zero in BN8), plus — when WSE+TIX are accessible — the market's
+closed-form blind trading rate on the current bankroll
+(`blindBankrollRatePerSec`, the same vendored-generation-ranges estimate the
+unlock ladder already prices with). A rough node-aware guess beats a precise
+wrong-node number: the money gate then reads ~2.3e7 seconds at the blind rate
+instead of ~4e5 at the fallback, the money marginal dwarfs the exp marginal
+from the first pass, and the reserve defends the grant before any income
+exists. Measured on the bn8-full 15-minute smoke (8 GB cold start, full
+surface): $229m of the $250m grant still working with zero RAM spend and live
+trading, against the $11k the finding pinned.
+
+**The exp-over-money inversion was five computational errors stacked:**
+
+1. **A realized trading loss reset the route's money tracker.** RateTracker's
+   decrease-clearing is its prestige detector; a cumulative-earnings series
+   dips on every losing round trip, so the window never accumulated and
+   `rates.moneyPerSec` read ~0 — the route then priced money at the 250k/s
+   FALLBACK (63x the market's real ~20k/s at that bankroll), making
+   S_hacking (4.1e6 s) tower over S_money (396k s). The exact inversion of the
+   truth. The moneyEarned tracker is now monotone (small decreases clamp to
+   the running maximum) and is cleared explicitly at the prestige boundary
+   sampledRates already detects, like the augs tracker.
+2. **Route earnings used the position-blind ledger.** `sinceInstall.total`
+   plunges by a position's whole cost at every open; the route's rates and
+   cycle curve now read `earnedSinceInstall` (game/lib/income.ts) — ledger
+   total with the stock component replaced by the driver's self-tracked trade
+   cashflow plus the open book at COST basis (monotone except realized
+   losses, which the tracker above absorbs).
+3. **Rungs were priced on the tangent line.** `secondsPerRelativeRate` is a
+   derivative; multiplying it by a +294% relative gain claimed 2.94 nodes of
+   saved time on one clock. Whole-purchase values now use the exact
+   hyperbolic saving `g/(1+g)` (`relativeGainSaving`,
+   `hackRungValue` in shared/strategy/share.ts; same form in
+   `moneyRateValue`), identical to the derivative at small g.
+4. **The exp channel ignored the demand ceiling.** The money channel always
+   capped a rung's productive GB by the farm's pipeline demand
+   (`marginalRamIncome`); the exp channel credited the whole rung. Both now
+   value only `min(addedRam, valuableGb)`.
+5. **A fully-covered band quoted zero scarcity.** `waterFill` returns
+   lambda 0 when the pool covers all continuous demand, so any priced step
+   bought ahead of a working-capital reserve that demanded every dollar at
+   1.72e-3. Economic steps are now priced against the lambda their own grant
+   would DISPLACE — the band's clearing price with the pool reduced by the
+   step's cost (floored at $1 of pool so an oversize step prices against the
+   first displaced dollar). The one behavior pin this moved
+   (tests/arbiter.test.ts "callback's next rung") was asserting a
+   value-DESTROYING allocation (460 against the curve-only 500) and now pins
+   the corrected auction.
+
+Supporting seams from the same pass: route marginals take the LARGER of the
+install and node slopes so one clock cannot mask the other's dependency (the
+$100b Daedalus gate lives on the node clock); trades advance
+`topics.player.money` from the cash their own stub read, closing the stale-
+topic window a $390m liquidation was scooped through; the working-capital
+reserve is sized over the whole bankroll and posted ALONGSIDE the entry claim
+under its own id (`working-capital`), so no pass is undefended; and money
+purchases are priced from the capital-independent farm score
+(`capitalIndependentScore`), because manipulation income exists only while
+the bankroll it would spend stays deployed.
+
+**Measured, bn8-manipulation, 2h.** Before the pass: treatment $74k terminal
+against the control's $404m. After: treatment $482m/$256m/$537m on seeds
+1/2/3 against controls $404m/$682m/$557m — every seed keeps and grows the
+$250m grant. Controls are byte-identical to the pre-pass baseline; the
+BN1 guards (`hacking-early` 12.9m byte-stable, bn1-progression, the stock
+ladder) are unchanged.
+
+**Manipulable preference (v1) and its follow-up.** The solver's ranking now
+breaks genuine return-on-capital ties toward manipulable symbols — at equal
+calculated return, the farm's push optionality is free — and the plan digest
+publishes `manipulable` per ranked entry so tuning can see it. The full
+version needs the one quantity nothing measures yet: the ops-per-second the
+farm would deliver to a PROSPECTIVE position (the realized rate exists only
+while manipulating, `stats.stockOps`). Publishing a measured
+influence-ops-per-second for the current farm target, and folding
+`manipulationValuePerOp x thatRate` into the candidate's expected profit,
+is the designed next step; folding an invented rate in instead is how an
+estimator starts trading on its own guesses.
+
+Remaining for tuning (measured, not fixed): seed 2's treatment still buys one
+$318m rung at a sale boundary (wealth ends $256m — above the grant, below its
+siblings). The reserve's claim rate is now refreshed at the auction boundary
+from the live measurement rather than the one-tick-stale plan, which narrows
+that window but measurably does not close it (the run is byte-identical with
+and without the refresh), so the residual gap is upstream of the rate — the
+granting pass sees a pool holding the sale proceeds while some valuation
+input still predates them. Whether that single marginal purchase is genuinely
+optimal there is exactly what the lane measures. The uplift question —
+treatment BEATING control — remains open (medians $482m vs $557m) and is the
+manipulation tuning target.
+
+**The full-day leg exposed two more layers, both repaired by calculation.**
+The first 24h bn8-full benchmark ran VALID end to end (283,872 records, zero
+unmodeled, zero crashes) but ended at $284k with no install: at t≈56 min
+progression ordered a liquidation for an install it then never performed, the
+solver's liquidate branch posted NO reserve by design ("reset imminent,
+overrides everything"), and the freed $247m book was eaten by infrastructure
+claims at zero opposition — after which no trade could ever clear its $200k
+round trip again. Two fixes: (1) the working-capital reserve now STANDS during
+liquidation — conversion is for the INSTALL, whose own higher-priority claims
+outrank the reserve, so it blocks only peers; (2) the reserve's value curve is
+no longer flat-marginal: the same closed form its rate comes from has two
+fixed $100k commissions per round trip, so it implies a computable viability
+floor (`blindViableBankroll` ≈ $31m blind), and the q-th reserved dollar is
+priced hyperbolically against that floor — taking the LAST viable dollars of
+a market-only economy must out-bid the whole enterprise by the model's own
+arithmetic. Measured (bn8-full seed 1): hour one ends with the full $250m
+grant intact where it previously ended at $38k and dead. The standing
+liquidation reserve shifts the manipulation fixture's paths too (2h seeds now
+$482m/$119m/$537m; seed 2 still concedes its one $318m rung) — every seed
+keeps a live, trading economy above the viability floor, which is what the
+lane now pins per seed; holding the full grant everywhere stays the tuning
+target.
+
+**A second harness discovery: `--perf` is a different TRAJECTORY, not the same
+run without records.** The telemetry sink's batched sends live on the virtual
+timer queue, so switching telemetry off reorders equal-deadline timers from
+the first pass — measured: the same seed's `faction.joined` lands at
+...61706527 vs ...37914297 microseconds, and the divergence compounds into a
+genuinely different run. `tests/build-perf.test.ts` pins per-pass stored-state
+behavior, which holds; trajectory equality was never true. Consequence: the
+24h `--compact --perf` bn8-full benchmark samples a DIFFERENT path than the
+telemetry-on lane, and that path still contains a reserve-absent drain window
+(byte-identical across the liquidation-reserve and viability-curve fixes,
+proving the window it dies through is one those fixes never see — most likely
+a probe-timing hold where the stock topic's book reads zero while the cash is
+deployed). The telemetry-on trajectory is healthy through hour one with the
+full grant. Open item: either give the reserve a bankroll source that cannot
+be probe-stale (the driver's own tradeCashFlow implies the book), or accept
+that benchmark trajectories need the same per-window defenses chased on the
+lane trajectories.
+
+A harness lesson from verifying it: the one-run-per-process contract
+(spec/simulator.md) is real for OUTCOMES, not just for crashes. A treatment
+run that ends at $482m first-in-process ends at $248m as the sixth sequential
+`runGame` in the same Bun process — module state in the game's drivers
+carries across runs and legitimately changes decisions. The BN8 lanes were
+restructured so every `runGame` is its own lane case (the runner spawns one
+process per registered case); multi-run cases like the stock ladder remain
+tolerable only because their assertions are medians and range checks rather
+than per-run economics.
+
 ## Known gaps in the current implementation
 
 Stated plainly rather than buried, because several features are implemented to

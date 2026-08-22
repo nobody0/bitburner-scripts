@@ -106,6 +106,11 @@ export interface GameRunOptions {
   bladeburnerRank?: number;
   homeFiles?: string[];
   gates?: Partial<GateFlags>;
+  /** `BitNodeOptions.disable4SData` for synthetic worlds: the forecast cannot
+   * be bought at all. Reaches the controller via `ns.getResetInfo()` and makes
+   * the market refuse both 4S purchases, exactly like the upstream option. A
+   * decoded save's own option still applies when this is absent. */
+  disable4SData?: boolean;
   /** Initial conditions from a real save (shared/save/to-sim.ts). Supplies the
    *  BitNode, source files, fleet, topology, player stats and gate flags —
    *  every explicit option above it still wins, so a profile can override one
@@ -269,6 +274,7 @@ function buildResetInfo(
   installedAugs: ReadonlyMap<string, number>,
   nowMs: number,
   save?: SaveSeed,
+  disable4SData?: boolean,
 ): ResetInfo {
   // ResetInfo is what the real controller trusts for capability gates. Read
   // the constructed player, not only an imported save: synthetic profiles can
@@ -293,7 +299,7 @@ function buildResetInfo(
       disableGang: savedOptions?.disableGang ?? false,
       disableCorporation: savedOptions?.disableCorporation ?? false,
       disableBladeburner: savedOptions?.disableBladeburner ?? false,
-      disable4SData: savedOptions?.disable4SData ?? false,
+      disable4SData: disable4SData ?? savedOptions?.disable4SData ?? false,
       disableHacknetServer: savedOptions?.disableHacknetServer ?? false,
       disableSleeveExpAndAugmentation: savedOptions?.disableSleeveExpAndAugmentation ?? false,
     },
@@ -474,17 +480,20 @@ async function runGameInstalled(
       );
     }
   }
-  // BN8 and SF8.1 grant WSE + TIX permanently (Prestige.ts:149). SF8 specifically
-  // — `sourceFileLevel` is the level of the CURRENT node's file, which only
-  // implies stock access when that node IS 8.
-  const sf8 = save?.sourceFiles["8"] ?? (bitnode === 8 ? sourceFileLevel : 0);
+  // BN8 and SF8.1 grant WSE + TIX permanently (Prestige.ts:149, gated on
+  // `canAccessBitNodeFeature(8)` — the current node being 8 OR an OWNED SF8 at
+  // any level, in any node). Synthetic player state counts as owned exactly
+  // like a save's: `world.player.sourceFiles` already merged both, and
+  // `sourceFileLevel` (the current node's file) only implies access when that
+  // node IS 8.
+  const sf8 = world.player.sourceFiles["8"] ?? (bitnode === 8 ? sourceFileLevel : 0);
   const freeAccess = bitnode === 8 || sf8 > 0;
   const stock = new StockMarketSystem(world, world.player, random, {
     hasWseAccount: freeAccess || world.gates.hasWseAccount,
     hasTixApiAccess: freeAccess || world.gates.hasTixApiAccess,
     has4SData: world.gates.has4SData,
     has4SDataTixApi: world.gates.has4SDataTixApi,
-    disable4SData: save?.bitNodeOptions.disable4SData === true,
+    disable4SData: options.disable4SData ?? save?.bitNodeOptions.disable4SData === true,
     ...(save?.stockMarket ? { seed: save.stockMarket } : {}),
   });
   if (save?.stockMarket?.hasOrders) {
@@ -607,6 +616,7 @@ async function runGameInstalled(
       world.player.augmentations,
       virtualTime.nowMs(),
       save,
+      options.disable4SData,
     ),
     output: [],
     crashes: [],

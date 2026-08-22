@@ -737,10 +737,24 @@ export function resolveClaims(input: ArbiterInput): ArbiterResult {
         (claim) => !stepUnpriceable(claim, input, pools[resource]),
       ).length;
       while (pending.length > 0 && pools[resource] > 0) {
-        const provisional = waterFillBand(pools[resource], continuous);
-        const lambda = continuous.length > 0 ? provisional.lambda : 0;
+        // A step is priced against what granting it would DISPLACE: the band's
+        // clearing lambda with the pool reduced by the step's own cost. The
+        // band-wide clearing lambda is the wrong price at one boundary — a
+        // pool that exactly covers the continuous demand clears at zero (no
+        // scarcity), yet a step spending from it forces exactly that demand
+        // out. Measured: a $318m RAM rung priced 8.6e-5 bought ahead of a
+        // working-capital reserve that demanded the whole $360m pool at
+        // 1.72e-3, because the covered band quoted lambda 0. The $1 floor is
+        // the same boundary: a step at least as large as the pool displaces
+        // the FIRST demanded dollar, whose price the fill only reveals on a
+        // positive pool.
+        const lambdaFor = (cost: number): number => {
+          if (continuous.length === 0) return 0;
+          const residual = Math.max(0, pools[resource] - Math.max(0, cost));
+          return waterFillBand(Math.max(Math.min(1, pools[resource]), residual), continuous).lambda;
+        };
         const priced = pending
-          .map((claim) => priceStep(claim, pools[resource], lambda, input))
+          .map((claim) => priceStep(claim, pools[resource], lambdaFor(claim.amount), input))
           .filter((entry): entry is PricedStep => entry !== undefined)
           .sort((a, b) =>
             b.valuePerResource - a.valuePerResource

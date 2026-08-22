@@ -75,11 +75,18 @@ describe("simulation profiles", () => {
     }
   });
 
-  test("only the genuine fresh BN1 benchmark is promotable route evidence", () => {
+  test("only the genuine fresh cold-start benchmarks are promotable route evidence", () => {
     const routeProfiles = PROFILES.filter((profile) => profile.experiment === "bitnode-route");
-    expect(routeProfiles.map((profile) => profile.id)).toEqual(["bn1-full"]);
-    expect(routeProfiles[0]?.route).toEqual({ route: "all-source-files-3", leg: "bn1-first", index: 0, bitNode: 1 });
-    expect(routeProfiles[0]?.world?.playerState?.sourceFiles).toBeUndefined();
+    expect(routeProfiles.map((profile) => profile.id)).toEqual(["bn1-full", "bn8-full"]);
+    for (const profile of routeProfiles) {
+      // A fresh route entrance grants nothing: no earned Source Files means
+      // the leg really is the cold start its route id claims. The declared
+      // entrance BitNode is enforced against the leg by assertValidExperiment.
+      expect(profile.route?.bitNode).toBe(profile.bitnode!);
+      expect(profile.world?.playerState?.sourceFiles).toBeUndefined();
+    }
+    expect(findProfile("bn1-full").route).toEqual({ route: "all-source-files-3", leg: "bn1-first", index: 0, bitNode: 1 });
+    expect(findProfile("bn8-full").route).toEqual({ route: "bn8-first", leg: "bn8-fresh", index: 0, bitNode: 8 });
     expect(findProfile("jit-lategame").experiment).toBe("feature-scenario");
     expect(findProfile("bn1-full-sf12-30").experiment).toBe("feature-scenario");
   });

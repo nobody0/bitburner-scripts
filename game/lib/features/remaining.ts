@@ -2,7 +2,8 @@ import type { NS } from "@ns";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { effectiveBitNodeMultipliers, WORLD_DAEMON_BASE_SKILL } from "../../../shared/features/bitnode.ts";
 import { BLADEBURNER_RANK_CHANNEL, currencyWorth } from "../../../shared/strategy/income.ts";
-import { careerBestPerSec, incomeShares } from "../income.ts";
+import { careerBestPerSec, earnedSinceInstall, incomeShares } from "../income.ts";
+import { blindBankrollRatePerSec } from "../../../shared/strategy/stock/decide.ts";
 import { sfLevel } from "../../../shared/features/unlock.ts";
 import { disabledByProfile } from "../../../shared/features/profile.ts";
 import { PRIORITY, type Claim, type ClaimValueCurve } from "../../../shared/strategy/arbiter.ts";
@@ -109,6 +110,7 @@ import {
 } from "../../../shared/strategy/progression/endgame.ts";
 import {
   chooseRoute,
+  FALLBACK_MONEY_PER_SEC,
   regrowInstallOverride,
   routeEtas,
   type RouteChoice,
@@ -3083,10 +3085,31 @@ function dnetNeeds(ctx: NeedContext): Need[] {
 class RateTracker {
   private samples: { t: number; v: number }[] = [];
 
+  /** `monotone` treats the series as cumulative earnings: small decreases (a
+   * realized trading loss shaving the net) are clamped to the running maximum
+   * instead of read as a prestige. Without this, every losing round trip
+   * cleared the money tracker's whole window and the route priced a
+   * market-driven node at the 250k/s FALLBACK rate while the market produced
+   * 20k+/s measured — inverting the money/exp marginal ratio and funding
+   * experience RAM out of the trading bankroll. Prestige still clears these
+   * trackers, explicitly, at the reset boundary sampledRates already detects —
+   * but a PLUNGE (below half the running max) still clears even a monotone
+   * tracker: the explicit clear latches on `lastAugReset`, and if the
+   * money-sources probe was queued on the post-install pass the clear fired
+   * on, the first sample after it is the surviving PRE-install topic value.
+   * Clamping to that fabricated high would pin the window there until real
+   * earnings exceeded the previous run's total; the input series
+   * (earnedSinceInstall) is cost-basis-corrected, so its only genuine
+   * decreases are small realized losses and a halving is a boundary. */
+  constructor(private readonly monotone = false) {}
+
   sample(t: number, v: number): void {
     const last = this.samples[this.samples.length - 1];
     if (last && t - last.t < 30_000) return;
-    if (last && v < last.v) this.samples.length = 0;
+    if (last && v < last.v) {
+      if (!this.monotone || v < last.v * 0.5) this.samples.length = 0;
+      else v = last.v;
+    }
     this.samples.push({ t, v });
     while (this.samples.length > 0 && t - this.samples[0]!.t > 1_800_000) this.samples.shift();
   }
@@ -3142,7 +3165,7 @@ interface ProgressionMemory {
 function freshProgressionMemory(): ProgressionMemory {
   return {
     trackers: {
-      moneyEarned: new RateTracker(),
+      moneyEarned: new RateTracker(true),
       hacking: new RateTracker(),
       combat: new RateTracker(),
       augs: new RateTracker(),
@@ -3297,7 +3320,11 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
   const t = ctx.now;
   const trackers = progressionMemory.trackers;
   const progression = ctx.state.topics.progression;
-  const earned = progression?.moneySources?.sinceInstall?.total;
+  // Distortion-corrected (see earnedSinceInstall): the raw ledger plunges by a
+  // position's whole cost at every open, and the decrease-clearing RateTracker
+  // then never accumulates a window — a market-driven node measured 0.554 $/s
+  // while the market produced 22,400 $/s, and every route ETA priced off it.
+  const earned = earnedSinceInstall(ctx.state);
   const resetAt = progression?.lastAugReset;
   if (resetAt !== undefined && progressionMemory.cycleResetAt !== resetAt) {
     const previousResetAt = progressionMemory.cycleResetAt;
@@ -3326,8 +3353,10 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
     // Aug count does not decrease on prestige, so RateTracker's generic
     // decrease detector cannot discover the boundary. Without this explicit
     // clear, the install jump is divided by post-install idle time and remains
-    // a fabricated acquisition rate for another 30 minutes.
+    // a fabricated acquisition rate for another 30 minutes. The monotone
+    // moneyEarned tracker opted out of that detector, so it clears here too.
     trackers.augs.clear();
+    trackers.moneyEarned.clear();
   }
   if (resetAt !== undefined && earned !== undefined) {
     const sec = Math.max(0, (t - resetAt) / 1_000);
@@ -3394,8 +3423,35 @@ function sampledRates(ctx: NeedContext, view: EndgameView): RouteRates {
     }
     return result;
   };
+  // The unmeasured-money PRIOR, composed per channel from the node's own
+  // transcribed multipliers instead of one flat hacking-era constant. In BN1
+  // this reduces to exactly the tuned FALLBACK_MONEY_PER_SEC (both hacking
+  // multipliers are 1, the market is inaccessible), so nothing recalibrates.
+  // In BN8 it is what the multipliers already say out loud: hacked money pays
+  // `ScriptHackMoney x ScriptHackMoneyGain = 0`, and the accessible market's
+  // rough worth is the same closed-form blind rate the unlock ladder prices
+  // with, taken on the current bankroll. Without this, the route priced a
+  // market-only node's money at 250k/s until the first trades were measured,
+  // the money marginal read ~400k seconds while the hacking marginal read
+  // millions, and the cold-start auction handed the trading bankroll to
+  // experience RAM before the market could prove itself.
+  const measuredMoneyPerSec = trackers.moneyEarned.perSec();
+  const nodeMultsForPrior = effectiveBitNodeMultipliers(
+    ctx.caps.bitNode,
+    sfLevel(ctx.caps.sourceFiles, 12),
+    progression?.multipliers,
+  );
+  const hackingPrior = FALLBACK_MONEY_PER_SEC
+    * (nodeMultsForPrior?.["ScriptHackMoney"] ?? 1)
+    * (nodeMultsForPrior?.["ScriptHackMoneyGain"] ?? 1);
+  const stockTopicForPrior = ctx.state.topics.stock;
+  const marketPrior = stockTopicForPrior?.hasTixApiAccess === true
+    ? blindBankrollRatePerSec(
+        (ctx.state.topics.player?.money ?? 0) + Math.max(0, stockTopicForPrior.portfolioValue ?? 0),
+      )
+    : 0;
   return {
-    moneyPerSec: trackers.moneyEarned.perSec(),
+    moneyPerSec: measuredMoneyPerSec > 0 ? measuredMoneyPerSec : hackingPrior + marketPrior,
     hackingSkillPerSec: trackers.hacking.perSec(),
     combatSkillPerSec: trackers.combat.perSec(),
     augsPerSec: augmentationAcquisitionRate(progressionMemory.augmentationCycles) || trackers.augs.perSec(),
@@ -3909,7 +3965,10 @@ function progressionRefresh(ctx: NeedContext): void {
     ...(purchasable !== undefined ? { purchasableAugmentation: purchasable } : {}),
     graftInProgress: ctx.state.topics.career?.currentWork?.type === "GRAFTING",
     money: player.money,
-    earnedThisRun: prog?.moneySources?.sinceInstall?.total ?? ctx.state.topics.farm?.totals?.moneyEarned ?? 0,
+    // Distortion-corrected (see earnedSinceInstall): the raw ledger plunges by
+    // an open position's whole cost, which held this figure at ~0 in a
+    // market-driven run and silently disarmed phaseOf's cash-ratio install arm.
+    earnedThisRun: earnedSinceInstall(ctx.state) ?? ctx.state.topics.farm?.totals?.moneyEarned ?? 0,
     factions: standings,
     favorToDonate: factions?.favorToDonate ?? 150,
     homeRam: ctx.state.topics.servers?.["home"]?.maxRam ?? 8,
@@ -4642,7 +4701,8 @@ function progressionReserveValueCurve(claim: Claim, ctx: ClaimContext): ClaimVal
   if (!(marginal.secondsPerRelativeRate > 0)) return { demandAt: () => 0 };
 
   const progression = ctx.state.topics.progression;
-  const earned = progression?.moneySources?.sinceInstall?.total;
+  // Same distortion-corrected earnings as the route rates (earnedSinceInstall).
+  const earned = earnedSinceInstall(ctx.state);
   const resetAt = progression?.lastAugReset;
   const elapsedSec = resetAt === undefined ? 0 : Math.max(0, (ctx.now - resetAt) / 1_000);
   if (earned === undefined || !(earned > 0) || !(elapsedSec > 0)) return undefined;

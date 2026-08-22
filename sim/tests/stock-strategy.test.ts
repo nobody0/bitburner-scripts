@@ -172,7 +172,6 @@ function tradeRun(options: RunOptions): RunResult {
         // manipulation preference is exercised rather than bypassed.
         farmableHosts: options.manipulationOps ? FARMABLE_HOSTS : [],
         symbolByHost: SYMBOL_BY_HOST,
-        moneyGranted: world.player.money,
         totalMoney: world.player.money,
         portfolioValue: market.portfolioValue(),
         positionHorizonSec: remainingTicks * 6,
@@ -404,7 +403,6 @@ describe("the install barrier", () => {
       fourSigmaDisabled: false,
       farmableHosts: [],
       symbolByHost: SYMBOL_BY_HOST,
-      moneyGranted: world.player.money,
       totalMoney: world.player.money,
       portfolioValue: market.portfolioValue(),
       positionHorizonSec: remaining * 6,

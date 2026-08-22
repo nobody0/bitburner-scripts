@@ -44,6 +44,14 @@ export interface ResourceMarginal {
   state: "estimated" | "unknown";
   /** BN seconds saved by a 100% relative increase at the local derivative. */
   secondsPerRelativeRate: number;
+  /** The absolute production rate the relative perturbation was applied AT —
+   * the derivative's operating point, in the resource's own units per second.
+   * When nothing is measured yet this is the same declared fallback the route
+   * ETA itself was priced with, so a consumer converting an absolute rate to
+   * a relative one divides by the exact rate the slope was taken at instead
+   * of refusing to price the claim. That refusal was circular starvation: the
+   * FIRST income source can never measure an income rate before it is funded. */
+  atRatePerSec?: number;
   /** Which clock supplied the value. */
   horizon?: "install" | "node" | "future-binding";
   reason?: string;
@@ -156,6 +164,26 @@ function scalePointResource(
     : { ...point, hacking: 1 + Math.max(0, point.hacking - 1) * scale };
 }
 
+/** The absolute rate a resource's relative perturbation operates on — the same
+ * measured-or-declared-fallback substitution `perturbedRates` applies, exposed
+ * so the published marginal can carry its own operating point. */
+function operatingRate(rates: RouteRates, resource: MarginalResource): number | undefined {
+  switch (resource) {
+    case "money":
+      return rates.moneyPerSec > 0 ? rates.moneyPerSec : FALLBACK_MONEY_PER_SEC;
+    case "hacking":
+      return rates.hackingSkillPerSec > 0 ? rates.hackingSkillPerSec : 1 / FALLBACK_SEC_PER_HACK_LEVEL;
+    case "combat":
+      return rates.combatSkillPerSec > 0 ? rates.combatSkillPerSec : 1 / FALLBACK_SEC_PER_COMBAT_LEVEL;
+    case "augmentations":
+      return rates.augsPerSec > 0 ? rates.augsPerSec : 1 / FALLBACK_SEC_PER_AUG;
+    case "bladeburnerRank":
+      return rates.bladeburnerRankPerSec > 0 ? rates.bladeburnerRankPerSec : FALLBACK_RANK_PER_SEC;
+    default:
+      return undefined;
+  }
+}
+
 /** Perturb both the linear rate and the cumulative fresh-cycle curve. The
  * latter is what makes nonlinear regrowth/cycle ETAs genuinely re-price rather
  * than pretending their current sec value is linear. */
@@ -231,22 +259,41 @@ export function progressionMarginals(
   const baselineRoute = selected(baselineEtas, input.selectedRoute);
 
   const one = (resource: MarginalResource): ResourceMarginal => {
+    // The operating point the slope is taken at rides along with the slope, so
+    // an absolute-rate consumer converts with the same denominator the ETA
+    // itself was priced with — measured when measured, the declared fallback
+    // when not.
+    const atRate = operatingRate(input.rates, resource);
+    const at = atRate !== undefined && atRate > 0 ? { atRatePerSec: atRate } : {};
     const installSaved = forecastSaved(input.install, resource, delta);
-    if (installSaved !== undefined && installSaved > 0) {
-      return { state: "estimated", secondsPerRelativeRate: installSaved / delta, horizon: "install" };
-    }
 
+    // Both clocks are perturbed and the LARGER slope wins, for the same reason
+    // the future-binding branch below exists: one clock must not hide a
+    // dependency the other can see. Preferring the install slope whenever it
+    // moved at all did exactly that — in a node whose only income is the
+    // market, money's install slope (a few augmentations' worth) masked the
+    // $100b Daedalus gate on the node clock, pricing money and hacking-exp
+    // seconds at the same ~1e4 scale and letting an experience-valued RAM rung
+    // out-bid the working capital of the node's entire economy. The install
+    // slope still stands wherever it is genuinely the larger dependency, which
+    // is the case the original preference was protecting.
+    let nodeSaved: number | undefined;
     if (baselineRoute) {
       const afterRoute = selected(
         routeEtas(input.view, input.decision, perturbedRates(input.rates, resource, delta)),
         input.selectedRoute,
       );
-      if (afterRoute) {
-        const nodeSaved = Math.max(0, baselineRoute.etaSec - afterRoute.etaSec);
-        if (nodeSaved > 0) {
-          return { state: "estimated", secondsPerRelativeRate: nodeSaved / delta, horizon: "node" };
-        }
-      }
+      if (afterRoute) nodeSaved = Math.max(0, baselineRoute.etaSec - afterRoute.etaSec);
+    }
+    const install = installSaved !== undefined && installSaved > 0 ? installSaved : 0;
+    const node = nodeSaved !== undefined && nodeSaved > 0 ? nodeSaved : 0;
+    if (install > 0 || node > 0) {
+      return {
+        state: "estimated",
+        secondsPerRelativeRate: Math.max(install, node) / delta,
+        horizon: node > install ? "node" : "install",
+        ...at,
+      };
     }
 
     // Preserve the slope of a dependency hidden behind a parallel maximum.
@@ -262,6 +309,7 @@ export function progressionMarginals(
         state: "estimated",
         secondsPerRelativeRate: linearSecondsPerRelativeRate(dependentSec, delta),
         horizon: "future-binding",
+        ...at,
       };
     }
 

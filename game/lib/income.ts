@@ -10,6 +10,7 @@ import {
   REPUTATION_CHANNEL,
 } from "../../shared/strategy/income.ts";
 import type { NeedBoard } from "../../shared/strategy/needs.ts";
+import { relativeGainSaving } from "../../shared/strategy/share.ts";
 import { MS_PER_TICK } from "../../shared/strategy/stock/market.ts";
 import type { GameState } from "./state.ts";
 
@@ -140,6 +141,34 @@ export function bestIncomePerSec(state: GameState) {
   return bestAnnounced(announcedIncome(state));
 }
 
+/** Money earned since the last install, with the market's distortion removed.
+ *
+ * The raw ledger (`getMoneySources().sinceInstall.total`) counts an open stock
+ * position's purchase as money GONE: every position-open plunges it by the
+ * position's whole cost, which both understates cumulative income and — worse —
+ * trips every decrease-detecting rate tracker into a full reset, so the
+ * measured money rate of a market-driven run reads near zero forever
+ * (observed: 0.554 $/s while the market produced 22,400 $/s). Replace the
+ * ledger's stock component with the driver's aligned stream — self-tracked
+ * trade cashflow plus the open book at COST BASIS. Cost rather than
+ * mark-to-market on purpose: the realized-net series is unmoved by opening a
+ * position and unmoved by price wobble, so it stays monotone except for
+ * genuinely realized losses, which is the shape both the trackers and a
+ * cumulative earnings figure claim to have. */
+export function earnedSinceInstall(state: GameState): number | undefined {
+  const sources = state.topics.progression?.moneySources?.sinceInstall;
+  if (!sources) return undefined;
+  const stock = state.topics.stock;
+  if (stock?.tradeCashFlow === undefined) return sources.total;
+  // `sources.stock` also carries the WSE/TIX/4S unlock debits (the game ledger
+  // records them under "stock"), and `tradeCashFlow` deliberately excludes
+  // them — so stripping the stock source would silently erase those spends
+  // from cumulative earnings forever. Subtract the driver's own unlock ledger.
+  return sources.total - sources.stock
+    + stock.tradeCashFlow - (stock.unlockSpend ?? 0)
+    + Math.max(0, stock.portfolioCost ?? 0);
+}
+
 /** Convert an added $/sec per unit into BN-seconds saved per unit. The unit can
  * be one atomic purchase (step pricing) or one dollar deployed (a continuous
  * value curve); both must use this same measured conversion. */
@@ -151,7 +180,13 @@ export function moneyRateValue(state: GameState, addedIncomePerUnit: number, now
   const added = Math.max(0, addedIncomePerUnit);
   if (!(added > 0) || !(marginal.secondsPerRelativeRate > 0)) return { state: "measured", value: 0 };
 
-  const earned = state.topics.progression?.moneySources?.sinceInstall?.total;
+  // See earnedSinceInstall: the raw ledger plunges by a position's whole cost
+  // at every open and mixes 2-minute-stale stock flows with live book values —
+  // at the pass a sale lands, the sum turned negative, this function fell back
+  // to the declared operating rate (17x above the run's real income), and the
+  // market's reserve lost a $318m rung auction 7.26e-5 to 7.33e-5 at exactly
+  // the moment the sale proceeds needed defending.
+  const earned = earnedSinceInstall(state);
   const resetAt = state.topics.progression?.lastAugReset;
   const elapsedSec = resetAt === undefined ? 0 : Math.max(0, (now - resetAt) / 1_000);
   const observedIncomePerSec = Math.max(
@@ -163,17 +198,34 @@ export function moneyRateValue(state: GameState, addedIncomePerUnit: number, now
   // probe runs on a slower cadence than claims, so requiring it exclusively
   // left Hacknet unpriced during the one pass where it actually competed with
   // infrastructure and reduced a real two-way auction to pricedClaimCount=1.
+  //
+  // With nothing measured yet, convert at the marginal's OWN operating point:
+  // `secondsPerRelativeRate` is a derivative taken at a specific rate (the
+  // route ETA's measured-or-declared-fallback income), and progression now
+  // publishes that rate alongside the slope. Dividing by any other number is
+  // inconsistent with the value being scaled — and refusing to divide at all
+  // was circular starvation: the FIRST income source of a node can never show
+  // a measured income before it is funded, so an "unknown" here silently lost
+  // every auction to any claim whose value happened to be measurable (BN8's
+  // entire bankroll went to experience-priced fleet RAM this way, and the
+  // market that was the node's only income never placed a trade).
   const currentIncomePerSec = observedIncomePerSec > 0
     ? observedIncomePerSec
     : earned !== undefined && earned > 0 && elapsedSec > 0
       ? earned / elapsedSec
-      : undefined;
+      : marginal.atRatePerSec !== undefined && marginal.atRatePerSec > 0
+        ? marginal.atRatePerSec
+        : undefined;
   if (currentIncomePerSec === undefined) {
     return { state: "unknown", reason: "since-install money income has not been measured over a positive interval" };
   }
+  // Exact hyperbolic saving, not the tangent line: adding `added` on top of
+  // `current` multiplies the rate by (1 + g) and saves g/(1+g) of the gated
+  // time — never more than all of it. Identical to the derivative at small g
+  // (see shared/strategy/share.ts#relativeGainSaving).
   return {
     state: "measured",
-    value: marginal.secondsPerRelativeRate * added / currentIncomePerSec,
+    value: marginal.secondsPerRelativeRate * relativeGainSaving(added / currentIncomePerSec),
   };
 }
 

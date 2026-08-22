@@ -60,6 +60,48 @@ function channelMarginal(seconds: number, total: number | undefined, perGb: numb
   return { state: "measured", value: modeled * marginalRate / total };
 }
 
+/** Exact time saved by multiplying a gap/rate clock's rate by (1 + g), as a
+ * fraction of the gated time: `g / (1 + g)`, never more than ALL of it.
+ *
+ * `secondsPerRelativeRate` is a derivative; multiplying it by a large relative
+ * gain extrapolates the tangent line past the curve it belongs to. Measured on
+ * bn8-manipulation seed 1: a 512 GB home rung claimed a +294% exp-rate gain,
+ * the linear form priced it at 2.94x the whole hacking-gated node time —
+ * saving 2.94 nodes of time on one clock — and that impossible number outbid
+ * the working capital of the node's only income. The exact form says tripling
+ * a rate saves 74.6% of the gated time, which loses that auction, and it is
+ * IDENTICAL to the derivative in the small-g limit where every true marginal
+ * decision lives. */
+export function relativeGainSaving(g: number): number {
+  const gain = Math.max(0, g);
+  return gain / (1 + gain);
+}
+
+/** BN-seconds one whole purchase saves, per channel, with the exact hyperbolic
+ * saving instead of the tangent-line extrapolation (see relativeGainSaving). */
+export function hackRungValue(input: HackMarginalInput, addedRam: number): MeasuredMarginal {
+  const gb = Math.max(0, addedRam);
+  const channel = (seconds: number, total: number | undefined, perGb: number): MeasuredMarginal => {
+    const modeled = Math.max(0, seconds);
+    const rate = Math.max(0, perGb) * gb;
+    if (modeled <= 0 || rate <= 0) return { state: "measured", value: 0 };
+    if (total === undefined) return { state: "unknown", reason: "the productive rate has not been measured" };
+    if (!(total > 0)) {
+      return { state: "unknown", reason: "the modeled farm can produce this resource but its measured rate is not positive yet" };
+    }
+    return { state: "measured", value: modeled * relativeGainSaving(rate / total) };
+  };
+  const money = channel(input.moneySecondsPerRelativeRate, input.totalMoneyPerSec, input.moneyPerSecPerGb);
+  const hacking = channel(input.hackingSecondsPerRelativeRate, input.totalHackingExpPerSec, input.hackingExpPerSecPerGb);
+  if (money.state === "unknown" || hacking.state === "unknown") {
+    return {
+      state: "unknown",
+      reason: [money, hacking].filter((entry) => entry.state === "unknown").map((entry) => entry.reason).join("; "),
+    };
+  }
+  return { state: "measured", value: money.value + hacking.value };
+}
+
 /** Convert BN-seconds-per-relative-rate into BN-sec / wall-sec / GB. */
 export function hackMarginalValue(input: HackMarginalInput): MeasuredMarginal {
   const money = channelMarginal(

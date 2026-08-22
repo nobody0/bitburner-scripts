@@ -38,6 +38,13 @@ import { fleetFrom } from "./local.ts";
  * initializer pins the whole probe object into --perf bundles instead of
  * letting it tree-shake away with the rest of the telemetry code. */
 const SEC_2 = 2_000;
+/** Stock sampling cadence. Strictly BELOW `msPerStockUpdateMin` (4 s): during
+ * stored-cycle catch-up the market ticks every 4 s exactly, so a 4 s sampler has
+ * zero margin — any stub latency or scheduler jitter straddles two ticks, and a
+ * missed tick folds two price moves into one observed step, corrupting the
+ * volatility inversion and the cycle clock's tick count. 3 s leaves ~1 s of
+ * jitter margin; `observeMarket` is idempotent under the resulting oversampling. */
+const SEC_3 = 3_000;
 const SEC_4 = 4_000;
 const SEC_30 = 30_000;
 const MIN_1 = 60_000;
@@ -856,14 +863,15 @@ const stockAccount: DodgedProbe = {
   },
 };
 
-/** Prices and positions, at the market's own cadence.
+/** Prices and positions, faster than the market's own cadence.
  *
- * 4 s, and that is the whole point of this probe: the market updates every 6 s
+ * 3 s, and that is the whole point of this probe: the market updates every 6 s
  * (4 s while burning stored cycles), and sampling slower than the tick makes the
  * tick structure unobservable — no up-tick count, so no forecast without 4S; no
  * per-tick magnitude, so no measured volatility; and no way to see the 45%-flip
  * cycle boundary that ends every regime. The old 30 s cadence saw one tick in
- * five and could recover none of it.
+ * five and could recover none of it; the 4 s cadence that replaced it matched
+ * `msPerStockUpdateMin` exactly and could still miss catch-up ticks (see SEC_3).
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/StockMarket.ts#L218-L258
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/StockMarket/data/Constants.ts#L3-L8
  *
@@ -875,7 +883,7 @@ const stockTick: DodgedProbe = {
   id: "stock.tick",
   kind: "dodged",
   feature: "stock",
-  everyMs: SEC_4,
+  everyMs: SEC_3,
   merge: true,
   when: (_caps, topics) => topics.stock?.hasTixApiAccess === true,
   methods: [
@@ -921,13 +929,13 @@ const stockTick: DodgedProbe = {
 
 /** The 4S signal. Gated on `has4SDataApi` rather than try/catch: the flag is
  *  already probed for 0.05 GB, so launching a 7 GB stub to discover it throws is
- *  pure waste. Same 4 s cadence as the prices, because the forecast is half of
+ *  pure waste. Same 3 s cadence as the prices, because the forecast is half of
  *  each tick's observation and the two must describe the same tick. */
 const stockForecast: DodgedProbe = {
   id: "stock.forecast",
   kind: "dodged",
   feature: "stock",
-  everyMs: SEC_4,
+  everyMs: SEC_3,
   merge: true,
   when: (_caps, topics) => topics.stock?.has4SDataApi === true,
   methods: ["stock.getSymbols", "stock.getForecast", "stock.getVolatility"],

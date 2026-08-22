@@ -309,27 +309,33 @@ export interface ForecastEstimate {
   exact: boolean;
   /** Enough evidence to open a position on. */
   confident: boolean;
+  /** The Beta-prior shrink factor `n / (n + k)` this estimate was multiplied by
+   *  (1 for exact values, 0 with no samples). The KNOWN inverse for anything
+   *  that needs the un-shrunk forecast back — pricing the 4S purchase — rather
+   *  than a guessed one. */
+  shrink: number;
 }
 
 export function estimateSignal(history: MarketHistory, sym: string, exactForecast?: number): ForecastEstimate {
   const entry = history.symbols[sym];
   const volatility = entry?.volatility ?? metadataVolatility(sym);
   if (exactForecast !== undefined) {
-    return { forecast: exactForecast, volatility, exact: true, confident: true };
+    return { forecast: exactForecast, volatility, exact: true, confident: true, shrink: 1 };
   }
   if (!entry || entry.samples === 0) {
-    return { forecast: 0.5, volatility, exact: false, confident: false };
+    return { forecast: 0.5, volatility, exact: false, confident: false, shrink: 0 };
   }
   // Effective sample size of an EWMA saturates at 1/alpha, so evidence stops
   // accumulating however long we watch — which is correct, because the thing
   // being estimated changes every 75 ticks anyway.
   const effective = Math.min(entry.samples, 1 / FORECAST_ALPHA);
-  const shrunk = 0.5 + (entry.upRate - 0.5) * (effective / (effective + FORECAST_PRIOR_STRENGTH));
+  const shrink = effective / (effective + FORECAST_PRIOR_STRENGTH);
   return {
-    forecast: shrunk,
+    forecast: 0.5 + (entry.upRate - 0.5) * shrink,
     volatility,
     exact: false,
     confident: entry.samples >= FORECAST_PRIOR_STRENGTH,
+    shrink,
   };
 }
 

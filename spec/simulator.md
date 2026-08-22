@@ -15,8 +15,10 @@ Two drivers, both driven from `sim/run.ts`:
 ## Two performance experiment classes
 
 - `bitnode-route` runs are the only promotable speedrun evidence. Each is one
-  BitNode leg with a stable route/leg id and an entrance of either fresh BN1 or
-  a registered save checkpoint. Session manifests carry the save's exact-byte
+  BitNode leg with a stable route/leg id and an entrance of either a declared
+  fresh save of the leg's own BitNode (fresh BN1 for `bn1-full`, fresh BN8 for
+  `bn8-full`'s market-first route) or a registered save checkpoint. Session
+  manifests carry the save's exact-byte
   SHA-256, scenario fingerprint and terminal validity/result. The entrance's
   BitNode must equal the leg's declared BitNode. A route session is promotable
   only when it reached the goal with `valid` fidelity.
@@ -242,15 +244,23 @@ decoder does not yet retain the live board, history, scores, or stored cycles.
 
 ## Two findings this harness surfaced
 
-1. **The probe runner starved on a fresh 8 GB home** (FIXED by fleet dodging).
-   The home-only arithmetic still reads `8 - 3.6 (controller) - 4.1 (stub) -
+1. **The probe runner starved on a fresh 8 GB home** (FIXED, twice). The
+   home-only arithmetic still reads `8 - 3.6 (controller) - 4.1 (stub) -
    1.6 - 0.5 < 0`, so every probe — including the capability gate — would be
    skipped on every sweep, forever, with the farm running normally and nothing
    looking wrong from the outside. Fleet placement funds it instead: the stub
    ships to every rooted host, so the gate batch lands on a client rather than
    competing for a home reserve that can never hold it. `sim/tests/ns.test.ts`
    pins both halves — the arithmetic, and the inverse assertion that
-   `capabilities` is now emitted.
+   `capabilities` is now emitted. What remained after that was head-of-line
+   blocking in the runner's one-probe-per-pass slot: earliest-deadline-first
+   re-selected the same unplaceable probe every pass, so every affordable
+   probe behind it waited minutes for the farm to free RAM (measured on
+   bn8-full: the market's first price sample at t=212 s, after the node grant
+   had already been spent by then-priceable claims). The runner now falls
+   through to the next due probe that can actually place; the blocked head's
+   broker request stays queued so its starvation feedback still grows the
+   arena.
 2. **A 32 GB home stalls the dispatcher** (FIXED). `earn:1e6` was reached at 8,
    16 and 64 GB but not at 32 (30.2 m vs 20.7 m at 8 GB, planner driver,
    seed 1), with `allocFails` climbing while `inFlight` stayed at zero. Two

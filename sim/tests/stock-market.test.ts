@@ -73,6 +73,27 @@ beforeEach(() => {
   resetDarknetContext();
 });
 
+describe("disable4SData", () => {
+  test("the BitNodeOption refuses both 4S purchases however much money is present", () => {
+    // Upstream: purchase4SMarketData / purchase4SMarketDataTixApi both check
+    // `bitNodeOptions.disable4SData` before anything else. The option is what
+    // makes the ladder's blind stage a robust capability rung rather than a
+    // bankroll accident.
+    const world = makeWorld(11);
+    const market = new StockMarketSystem(world, world.player, mulberry32(3), {
+      hasWseAccount: true,
+      hasTixApiAccess: true,
+      disable4SData: true,
+    });
+    world.player.money = 1e12;
+    expect(market.purchase4SMarketData()).toBe(false);
+    expect(market.purchase4SMarketDataTixApi()).toBe(false);
+    expect(market.has4SData).toBe(false);
+    expect(market.has4SDataTixApi).toBe(false);
+    expect(world.player.money).toBe(1e12);
+  });
+});
+
 describe("the price tick", () => {
   test("TIX access alone initializes and advances the market, as canAccessStockMarket permits", () => {
     const world = makeWorld(43);

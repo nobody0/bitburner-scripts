@@ -85,7 +85,6 @@ function view(over: Partial<StockView> = {}): StockView {
     fourSigmaDisabled: false,
     farmableHosts: [],
     symbolByHost: SYMBOL_BY_HOST,
-    moneyGranted: 1e10,
     totalMoney: 1e10,
     portfolioValue: 0,
     positionHorizonSec: 3_600,
@@ -380,10 +379,10 @@ describe("stepStock", () => {
   test("it produces a plan on the FIRST pass, with no money granted", () => {
     // The deadlock this replaces: the claim was derived from what executed last
     // pass, the execution from the grant, and the grant from the claim. With
-    // moneyGranted 0 the old solver could never emit an action, so the claim
+    // no grant the old solver could never emit an action, so the claim
     // never existed and no trade was ever placed. A plan must exist regardless.
     const { decision } = run(
-      view({ moneyGranted: 0, symbols: [symbol({ forecast: 0.68, volatility: 0.0045 })] }),
+      view({ symbols: [symbol({ forecast: 0.68, volatility: 0.0045 })] }),
       MIN_HOLD_TICKS + 2,
       () => true,
     );

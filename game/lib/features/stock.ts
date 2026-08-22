@@ -9,8 +9,10 @@ import {
   fundedActions,
   initStockMemory,
   manipulationByHost,
+  blindViableBankroll,
   POSITION_CLAIM_ID,
   stepStock,
+  WORKING_CAPITAL_CLAIM_ID,
   unlockClaimId,
   type StockAction,
   type StockGrants,
@@ -18,7 +20,6 @@ import {
   type StockPlan,
   type StockView,
 } from "../../../shared/strategy/stock/decide.ts";
-import { resetHistory } from "../../../shared/strategy/stock/history.ts";
 import type { StockManipulation, StockPlan as StockPlanDigest, StockState } from "../../../shared/telemetry/topics/stock.ts";
 import { isScriptDeath } from "../errors.ts";
 import { moneyRateValue, moneyStepValue } from "../income.ts";
@@ -37,16 +38,17 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
  * always-playable feature and the ladder is the driver's own job.
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Prestige.ts#L163-L168
  *
- * Market probes run every 4 s and that is load-bearing: the market updates
- * every 6 s (4 s while burning stored cycles), while measured volatility and
- * the no-4S forecast estimate come from observing every tick exactly once. A
- * poller slower than the tick cannot count up-ticks reliably. It must also be
- * no slower than the price
- * probe, which declares the same 4 s, or a tick the probe captured would be
- * overwritten before we folded it into the history. The pure driver runs at
- * controller cadence so plan -> claim -> grant and retryable actions do not
- * each wait another market sample. `observeMarket` is idempotent when nothing
- * moved, so those extra evaluations add neither samples nor Netscript calls.
+ * Market probes run every 3 s and that is load-bearing: the market updates
+ * every 6 s — 4 s while burning stored cycles, so the sampler must be strictly
+ * FASTER than 4 s or a catch-up tick can slip between two samples — while
+ * measured volatility and the no-4S forecast estimate come from observing every
+ * tick exactly once. A poller slower than the tick cannot count up-ticks
+ * reliably. It must also be no slower than the price probe, which declares the
+ * same 3 s, or a tick the probe captured would be overwritten before we folded
+ * it into the history. The pure driver runs at controller cadence so
+ * plan -> claim -> grant and retryable actions do not each wait another market
+ * sample. `observeMarket` is idempotent when nothing moved, so those extra
+ * evaluations add neither samples nor Netscript calls.
  *
  * The plan/fund split is the other structural rule. `stepStock` sizes a position
  * at full ambition with NO knowledge of the money grant, the claim is posted from
@@ -72,16 +74,33 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule } from "
 let memory: StockMemory = initStockMemory();
 let lastPlan: StockPlan | undefined;
 let lastResult: { action: string; ok: boolean; detail: string; at: number } | undefined;
+/** Cumulative cash moved by OUR trades — each batch's (after − before), both
+ * read inside the same dodge stub, so the two samples cannot skew. Together
+ * with the live book this is the market's measured wealth contribution:
+ * `tradeCashFlow + portfolioValue` = realized net + mark-to-market, with no
+ * dependency on the 2-minute money-sources probe whose stale mid-hold
+ * snapshots read deeply negative exactly while the strategy is working. */
+let tradeCashFlow = 0;
+let tradeFlowSince: number | undefined;
+/** Cumulative cash spent on unlock purchases (WSE/TIX/4S) since the install.
+ * Tracked apart from `tradeCashFlow` because the two feed different consumers:
+ * the trading RATE must exclude unlocks (a $25b purchase is not a trading
+ * loss), while cumulative EARNINGS must still count the spend — the game's
+ * own ledger records unlocks under the "stock" source, so the correction in
+ * earnedSinceInstall would otherwise erase them entirely. */
+let unlockSpend = 0;
 
 export function resetStockState(): void {
   // An install re-rolls every symbol's price, cap, spread and volatility
   // (prestigeAugmentation -> initStockMarket), so a surviving history describes
   // a market that no longer exists, and a surviving intent commits us to a side
   // of a position that was destroyed.
-  resetHistory(memory.history);
   memory = initStockMemory();
   lastPlan = undefined;
   lastResult = undefined;
+  tradeCashFlow = 0;
+  tradeFlowSince = undefined;
+  unlockSpend = 0;
 }
 
 /** Hosts the farm could actually drive right now — the other half of the
@@ -211,6 +230,7 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     sfLevel(ctx.caps.sourceFiles, 12),
     progression?.multipliers,
   );
+  const measuredIncomePerSec = measuredStockIncomePerSec(topic.portfolioCost ?? 0);
 
   return {
     symbols: (topic.positions ?? []).map((position) => ({
@@ -236,13 +256,35 @@ export function buildView(ctx: DriverContext): StockView | undefined {
     farmableHosts: farmableHosts(ctx),
     symbolByHost: SYMBOL_BY_HOST,
     ...(nodeMults ? { nodeMults } : {}),
-    moneyGranted: ctx.grants.money,
     totalMoney: ctx.state.topics.player?.money ?? 0,
     portfolioValue: topic.portfolioValue ?? 0,
     positionHorizonSec,
     unlockHorizonSec: nodeHorizonSec,
     liquidate,
+    ...(measuredIncomePerSec !== undefined ? { measuredIncomePerSec } : {}),
   };
+}
+
+/** The market's measured rate since its first trade of this install:
+ * self-tracked trade cashflow (each batch's after-minus-before, both read
+ * inside the same stub) PLUS the current book at mark-to-market. Cashflow
+ * alone counts an open position's purchase as money gone, so mid-hold it
+ * reads deeply negative exactly while the strategy is working; adding the
+ * book back makes the number what it claims to be — the market's total
+ * wealth contribution per second. Deliberately NOT the 2-minute money-sources
+ * probe: its stale mid-hold snapshots mixed with a live portfolio value made
+ * the measurement vanish at precisely the post-sale pass the reserve most
+ * needs it. Undefined until positive over a positive interval — a losing or
+ * not-yet-traded book falls back to the solver's closed-form expectations. */
+function measuredStockIncomePerSec(portfolioCost: number): number | undefined {
+  if (tradeFlowSince === undefined) return undefined;
+  // Cost basis rather than mark-to-market, matching earnedSinceInstall: the
+  // realized-net series is unmoved by opening a position and by price wobble,
+  // so the reserve's measured rate cannot vanish mid-hold.
+  const contributed = tradeCashFlow + Math.max(0, portfolioCost);
+  if (!(contributed > 0)) return undefined;
+  const elapsedSec = Math.max(0, (Date.now() - tradeFlowSince) / 1_000);
+  return elapsedSec > 0 ? contributed / elapsedSec : undefined;
 }
 
 async function execute(ctx: DriverContext, actions: StockAction[], claimId: string): Promise<void> {
@@ -264,6 +306,13 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
     const out: string[] = [];
     const touched = new Set<string>();
     const access: Partial<Pick<StockState, "hasWseAccount" | "hasTixApiAccess" | "has4SDataApi">> = {};
+    const cashBefore = stubNs["getServerMoneyAvailable"]("home");
+    // Trade-only cash movement, measured around each buy/sell inside the same
+    // stub. Gating the whole batch on "no unlock present" instead dropped the
+    // trade's cost from the cashflow while the position's cost basis still
+    // entered portfolioCost — a PERMANENT +cost skew in earnedSinceInstall for
+    // every mixed unlock+trade batch, not the "one lost sample" it looked like.
+    let tradeDelta = 0;
     for (const action of actions) {
       switch (action.type) {
         case "buyWse": {
@@ -292,9 +341,11 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
             out.push(`already holding ${action.sym}`);
             break;
           }
+          const before = stubNs["getServerMoneyAvailable"]("home");
           const price = action.short
             ? stubNs["stock"]["buyShort"](action.sym as never, action.shares)
             : stubNs["stock"]["buyStock"](action.sym as never, action.shares);
+          tradeDelta += stubNs["getServerMoneyAvailable"]("home") - before;
           out.push(price > 0 ? `bought ${action.shares} ${action.sym}` : `buy ${action.sym} refused`);
           break;
         }
@@ -311,9 +362,11 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
             out.push(`${action.sym} already flat`);
             break;
           }
+          const before = stubNs["getServerMoneyAvailable"]("home");
           const price = action.short
             ? stubNs["stock"]["sellShort"](action.sym as never, held)
             : stubNs["stock"]["sellStock"](action.sym as never, held);
+          tradeDelta += stubNs["getServerMoneyAvailable"]("home") - before;
           out.push(price > 0 ? `sold ${held} ${action.sym}` : `sell ${action.sym} refused`);
           break;
         }
@@ -323,12 +376,46 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
       detail: out,
       access,
       holdings: Object.fromEntries([...touched].map((sym) => [sym, stubNs["stock"]["getPosition"](sym as never)])),
+      cashBefore,
+      tradeDelta,
       cash: stubNs["getServerMoneyAvailable"]("home"),
     };
   });
   if (!outcome.ok) {
     lastResult = { action: actions[0]!.type, ok: false, detail: outcome.reason, at };
     return;
+  }
+  // Advance the held balance now, exactly as executeInfrastructure does after
+  // a purchase: the stub read the REAL post-trade cash, and the player topic's
+  // sweep sample is up to seconds stale. Without this, a sale's proceeds land
+  // in the arbiter's pool while this feature's own next plan still reads the
+  // pre-sale pocket change — too small to post the working-capital reserve —
+  // and the one or two passes before the sweep catches up are exactly enough
+  // for another feature's standing claim to spend the entire bankroll
+  // (measured: a $390m liquidation scooped by a $318m home-RAM rung).
+  if (ctx.state.topics.player) {
+    merge(ctx.state, "player", { money: outcome.value.cash });
+  }
+  // Unlock purchases (WSE/TIX/4S) are spends, not trading cashflow. The stub
+  // measured the trade-only delta around each buy/sell, so a mixed batch
+  // (fundedActions concatenates the funded claims) records its trades exactly
+  // and the remainder of the batch's cash movement is the unlock spend —
+  // which earnedSinceInstall must still count, because the game's own ledger
+  // debits unlocks under the "stock" source the correction strips out.
+  const traded = actions.some((action) => action.type === "buy" || action.type === "sell");
+  const unlocked = actions.some(
+    (action) => action.type === "buyWse" || action.type === "buyTix" || action.type === "buy4SApi",
+  );
+  const tradeDelta = outcome.value.tradeDelta as number;
+  if (traded) {
+    tradeCashFlow += tradeDelta;
+    tradeFlowSince ??= at;
+  }
+  if (unlocked) {
+    unlockSpend += Math.max(
+      0,
+      (outcome.value.cashBefore as number) - outcome.value.cash + tradeDelta,
+    );
   }
   const holdings = outcome.value.holdings as Record<string, [number, number, number, number]>;
   const positions = (ctx.state.topics.stock?.positions ?? []).map((position) => {
@@ -348,6 +435,8 @@ async function execute(ctx: DriverContext, actions: StockAction[], claimId: stri
   const portfolioValue = positions.reduce((sum, position) => sum + position.value, 0);
   merge(ctx.state, "stock", {
     ...outcome.value.access,
+    tradeCashFlow,
+    unlockSpend,
     wealth: outcome.value.cash + portfolioValue,
     ...(Object.keys(holdings).length > 0 ? {
       positions,
@@ -378,7 +467,7 @@ const driver: FeatureDriver = {
         ...(memory.history.lastV !== undefined ? { lastV: memory.history.lastV } : {}),
       },
       manipulation: manipulationDigest(decision.plan),
-      plan: planDigest(decision.plan, actions, view.liquidate),
+      plan: planDigest(decision.plan, actions, view),
     });
 
     try {
@@ -404,8 +493,14 @@ function manipulationDigest(plan: StockPlan): Record<string, StockManipulation> 
   return out;
 }
 
-function planDigest(plan: StockPlan, actions: readonly StockAction[], liquidate: boolean): StockPlanDigest {
+function planDigest(
+  plan: StockPlan,
+  actions: readonly StockAction[],
+  view: Pick<StockView, "liquidate" | "positionHorizonSec" | "unlockHorizonSec">,
+): StockPlanDigest {
+  const liquidate = view.liquidate;
   return {
+    horizons: { positionSec: view.positionHorizonSec, unlockSec: view.unlockHorizonSec },
     actions: actions.map((action) => ({
       type: action.type,
       ...(action.type === "buy" || action.type === "sell" ? { sym: action.sym, shares: action.shares, short: action.short } : {}),
@@ -417,6 +512,7 @@ function planDigest(plan: StockPlan, actions: readonly StockAction[], liquidate:
       forecast: entry.forecast,
       volatility: entry.volatility,
       exact: entry.exact,
+      manipulable: entry.manipulable,
       breakEvenTicks: Number.isFinite(entry.breakEvenTicks) ? entry.breakEvenTicks : -1,
       expectedProfit: entry.expectedProfit,
     })),
@@ -445,6 +541,7 @@ function planDigest(plan: StockPlan, actions: readonly StockAction[], liquidate:
           },
         }
       : {}),
+    ...(plan.reserve ? { reserve: plan.reserve } : {}),
     flat: plan.flat,
     // Published because `factions` has to tell a liquidation that is actually
     // HAPPENING from a book that merely exists: it waits for the proceeds before
@@ -519,6 +616,42 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
         plan.entry.expectedProfit / Math.max(1, plan.entry.cost * plan.entry.holdTicks * 6),
     });
   }
+  if (plan.reserve) {
+    // The standing working-capital reserve, ALWAYS posted alongside whatever
+    // else the plan claims: the entry claim defends its own cost and this
+    // defends the rest of the bankroll (including the book about to become
+    // sale proceeds). The arbiter's auction — via valueCurve — decides each
+    // pass whether the market's expected return still beats every other
+    // bidder for the cash. `mode: "reserve"` sequesters, it never spends —
+    // the money is simply still there when an entry clears its gates.
+    // The rate is refreshed HERE, at the auction boundary, not taken from the
+    // plan alone: claims are collected from `lastPlan`, up to one driver tick
+    // stale, and a sale's realized profit raises the MEASURED income in the
+    // same pass its proceeds enter the pool — a reserve bidding the pre-sale
+    // rate against post-sale income undervalues the claim for that window.
+    // NOTE: this narrows the window but does not close it — bn8-manipulation
+    // seed 2 still loses one $318m rung auction at a sale boundary
+    // (byte-identical with and without the refresh), so the remaining gap is
+    // upstream of the rate: the arbitration that grants the rung sees a pool
+    // with the proceeds while some input still predates them. That single
+    // marginal purchase (the run stays above the node grant) is the tuning
+    // step's open case, with the lane as its instrument.
+    const rate = Math.max(
+      plan.reserve.ratePerSec,
+      measuredStockIncomePerSec(ctx.state.topics.stock?.portfolioCost ?? 0) ?? 0,
+    );
+    out.push({
+      by: "stock",
+      id: WORKING_CAPITAL_CLAIM_ID,
+      resource: "money",
+      amount: plan.reserve.amount,
+      priority: PRIORITY["income:investment"],
+      mode: "reserve",
+      shape: "continuous",
+      ratePerSec: rate,
+      returnPerDollarSec: rate / Math.max(1, plan.reserve.amount),
+    });
+  }
   return out;
 }
 
@@ -527,14 +660,41 @@ function claims(ctx: ClaimContext): FeatureClaim[] {
  * measured money-rate marginal. An absent rate stays absent; a measured zero
  * returns a real zero-value curve. */
 function valueCurve(claim: Claim, ctx: ClaimContext): ClaimValueCurve | undefined {
-  if (claim.id !== POSITION_CLAIM_ID || claim.resource !== "money" || claim.shape !== "continuous") return undefined;
+  if (
+    (claim.id !== POSITION_CLAIM_ID && claim.id !== WORKING_CAPITAL_CLAIM_ID)
+    || claim.resource !== "money"
+    || claim.shape !== "continuous"
+  ) return undefined;
   if (!(claim.amount > 0)) return { demandAt: () => 0 };
   const marginalIncomePerDollar = (claim.ratePerSec ?? 0) / claim.amount;
   const value = moneyRateValue(ctx.state, marginalIncomePerDollar, ctx.now);
   if (value.state === "unknown") return undefined;
   // A zero marginal is evidence for zero demand, not an absent measurement and
   // not linearValueCurve(0), whose inclusive lambda=0 boundary means "take all".
-  return value.value > 0 ? linearValueCurve(value.value, claim.amount) : { demandAt: () => 0 };
+  if (!(value.value > 0)) return { demandAt: () => 0 };
+  if (claim.id === WORKING_CAPITAL_CLAIM_ID) {
+    // Working capital is NOT flat-marginal: the closed form the rate itself
+    // comes from has two fixed $100k commissions per round trip, so the rate
+    // reaches zero at a computable bankroll floor — below it the market can
+    // never rebuild, and in a node with no other income that is the end of
+    // the economy, not a reallocation (measured: a bn8-full run drained to
+    // $38k placed zero further trades for twenty-three virtual hours). Price
+    // the q-th dollar hyperbolically against that floor: the marginal at the
+    // full amount is the measured average, and it rises toward
+    // value x (1 + amount/floor) as the remaining capital approaches the
+    // floor — so taking the LAST viable dollars must out-bid the whole
+    // enterprise, by the model's own arithmetic rather than a veto.
+    const floor = blindViableBankroll();
+    if (Number.isFinite(floor) && floor > 0) {
+      const amount = claim.amount;
+      const v = value.value;
+      return {
+        marginalValueAt: (granted: number) =>
+          v * (floor + amount) / (floor + Math.min(Math.max(0, granted), amount)),
+      };
+    }
+  }
+  return linearValueCurve(value.value, claim.amount);
 }
 
 function stockClaimId(actions: readonly StockAction[]): string {

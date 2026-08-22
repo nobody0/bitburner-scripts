@@ -136,8 +136,6 @@ export interface StockView {
    *  manipulation is worth against hacking. See market.ts#StockNodeMults. */
   nodeMults?: StockNodeMults;
 
-  /** What the arbiter granted this pass. Used ONLY by fundedActions. */
-  moneyGranted: number;
   /** Liquid cash. */
   totalMoney: number;
   /** Mark-to-market value of what is already held. */
@@ -151,6 +149,16 @@ export interface StockView {
   unlockHorizonSec: number;
   /** progression wants the book flat: reset imminent. Overrides everything. */
   liquidate: boolean;
+
+  /** The market's MEASURED realized rate since the last install, when one
+   *  exists: `getMoneySources().sinceInstall.stock / elapsed` — buys are
+   *  negative and sells positive in the game's own ledger, so this is net
+   *  realized profit per second. The reserve bids it in preference to the
+   *  closed-form expectations: a bankroll demonstrably producing X $/s must
+   *  not defend itself with a meeker model of X, or any claim priced off the
+   *  market's own success (a manipulation-boosted farm score, say) outbids
+   *  the capital that success runs on. */
+  measuredIncomePerSec?: number;
 
   // No `incomePerSec` here, deliberately. An unlock's opportunity cost — what the
   // cash would earn elsewhere — is not this feature's judgement to make: the
@@ -198,6 +206,12 @@ export interface RankedSymbol {
   volatility: number;
   /** Exact (4S) or estimated from price history. */
   exact: boolean;
+  /** Enough samples behind a non-exact estimate to act on it
+   *  (`ForecastEstimate.confident`). Always true for exact signals. */
+  confident: boolean;
+  /** The estimator's shrink factor `n / (n + k)` (1 when exact). The known
+   *  inverse fourSigmaGainPerSec uses to recover the un-shrunk forecast. */
+  shrink: number;
   /** Expected log return per tick on the favoured side. */
   drift: number;
   /** The farm can drive at least one of this symbol's hosts, so a position in it
@@ -277,6 +291,24 @@ export interface StockPlan {
   unlock?: UnlockPurchase;
   /** The position to open, at full ambition. */
   entry?: PositionTarget;
+  /** Working capital wanted while NO entry is actionable this pass.
+   *
+   * The market's value does not vanish between entries: an estimator still
+   * gathering its samples, or a ranking whose best edge is momentarily inside
+   * the band, is hours of future trades away from worthless. Without a
+   * standing claim the arbiter reads the bankroll as idle and any OTHER
+   * feature with a measurable value — however small — takes it unopposed,
+   * which is how BN8's only income source was defunded by experience-priced
+   * fleet RAM before it could place its first trade.
+   *
+   * `ratePerSec` is a calculation, not an assertion: the larger of the
+   * closed-form blind trading rate (vendored generation ranges at the meek
+   * BLIND_FORECAST) and the best currently-ranked candidate's expectation.
+   * The driver posts it as a `mode: "reserve"` claim — money sequestered, not
+   * spent — so a competitor must out-price the market's expected return to
+   * take the cash, and the reserve becomes the spend budget the moment an
+   * entry clears its gates. */
+  reserve?: { amount: number; ratePerSec: number };
   ranked: RankedSymbol[];
   /** hostname -> manipulation intent, for the hacking evaluator. */
   manipulation: ManipulationIntent[];
@@ -389,11 +421,18 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   // Ranked by RETURN ON CAPITAL, not by absolute profit.
   //
   // Capital is allocated by the arbiter, so rank the claim by return on each
-  // dollar requested. Absolute profit is the tie-break, and the symbol name the
-  // final one, so the order is total.
+  // dollar requested. A manipulable symbol wins genuine ties — a position the
+  // farm can PUSH carries optionality a pure-drift twin does not, and at equal
+  // calculated return the option is free. Deliberately only a tie-break: the
+  // push's dollar value per op is priced (manipulationValuePerOp), but the
+  // OPS-PER-SECOND the farm would deliver to a prospective position is not yet
+  // a measured quantity, and folding an invented rate into the ranking is how
+  // an estimator starts trading on its own guesses. Absolute profit and the
+  // symbol name complete the total order.
   ranked.sort(
     (a, b) =>
       returnOnCapital(b) - returnOnCapital(a) ||
+      Number(b.manipulable) - Number(a.manipulable) ||
       b.expectedProfit - a.expectedProfit ||
       (a.sym < b.sym ? -1 : 1),
   );
@@ -405,10 +444,22 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
   // install: the shares are destroyed and the money is reset, so anything not
   // converted to augmentations first is simply lost.
   if (view.liquidate) {
+    // Liquidation converts the book to cash FOR THE INSTALL — it does not
+    // donate it. The reserve therefore STANDS during liquidation: progression's
+    // own install claims outrank it, so the conversion is never blocked, but a
+    // peer feature must still out-bid the working capital to take the
+    // proceeds. Without this, a liquidation ordered for a pocket-change
+    // install freed a $247m book, the no-reserve state held for the whole
+    // conversion window, and infrastructure claims ate the node's entire
+    // economy at zero opposition (bn8-full seed 1, t≈56 min: terminal wealth
+    // $38k, no install ever performed, no further trade possible for the
+    // remaining twenty-three hours).
+    const liquidationReserve = planReserve(view, ranked, holdTicks, cashBudget);
     return {
       memory: forgetIntent(memory, held.map((s) => s.sym)),
       plan: {
         exits,
+        ...(liquidationReserve ? { reserve: liquidationReserve } : {}),
         ranked,
         manipulation: [],
         ...(cycleTicks !== undefined ? { ticksUntilCycle: cycleTicks } : {}),
@@ -434,6 +485,19 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
 
   const unlock = unlockLadder(view, costs, ranked, holdTicks);
   const manipulation = planManipulation({ view, perSymbol, holdTicks, exiting });
+  // The reserve is ALWAYS posted, covering whatever part of the bankroll the
+  // other claims do not: the entry claim defends its own cost and the unlock
+  // ladder proposes a purchase only when its net gain over the node horizon is
+  // positive, so the reserve bids the remainder. Skipping it on entry passes
+  // left the rest of the bankroll — and the book about to become proceeds —
+  // undefended for exactly those passes, and a competitor's standing claim
+  // took $318m of working capital through that one-pass hole.
+  const reserve = planReserve(
+    view,
+    ranked,
+    holdTicks,
+    Math.max(0, cashBudget - (unlock?.cost ?? 0) - (entry?.cost ?? 0)),
+  );
 
   const best = ranked[0];
   return {
@@ -442,6 +506,7 @@ export function stepStock(view: StockView, memory: StockMemory): StockDecision {
       exits,
       ...(unlock ? { unlock } : {}),
       ...(entry ? { entry } : {}),
+      ...(reserve ? { reserve } : {}),
       ranked,
       manipulation,
       ...(cycleTicks !== undefined ? { ticksUntilCycle: cycleTicks } : {}),
@@ -494,7 +559,7 @@ function forgetIntent(memory: StockMemory, symbols: readonly string[]): StockMem
 
 function rankSymbol(params: {
   symbol: StockSymbolView;
-  signal: { forecast: number; volatility: number; exact: boolean };
+  signal: { forecast: number; volatility: number; exact: boolean; confident: boolean; shrink: number };
   side: PositionSide;
   holdTicks: number;
   cashBudget: number;
@@ -537,6 +602,8 @@ function rankSymbol(params: {
     forecast: signal.forecast,
     volatility: signal.volatility,
     exact: signal.exact,
+    confident: signal.confident,
+    shrink: signal.shrink,
     drift,
     manipulable,
     breakEvenTicks: be,
@@ -577,7 +644,7 @@ function planExits(
   view: StockView,
   memory: StockMemory,
   perSymbol: Map<string, { view: StockSymbolView; ranked: RankedSymbol }>,
-  holdTicks: number,
+  guaranteedTicks: number,
 ): StockAction[] {
   const exits: StockAction[] = [];
   for (const symbol of view.symbols) {
@@ -589,9 +656,10 @@ function planExits(
     const committed = memory.intent[symbol.sym];
     const heldTicks = committed ? memory.history.tick - committed.sinceTick : Infinity;
 
-    // Liquidation, or a horizon too short to clear the round trip: either way
-    // every further tick held is risk taken for a payoff that cannot arrive.
-    if (view.liquidate || holdTicks <= 0) {
+    // Liquidation, or a guaranteed hold too short to clear the round trip:
+    // either way every further tick held is risk taken for a payoff that
+    // cannot arrive.
+    if (view.liquidate || guaranteedTicks <= 0) {
       if (long > 0) exits.push(sell(symbol.sym, long, false));
       if (short > 0) exits.push(sell(symbol.sym, short, true));
       continue;
@@ -650,7 +718,11 @@ function planEntry(params: {
     // overlay is enabled only after the position exists and only in its
     // favorable direction (planManipulation below).
     if (Math.abs(candidate.forecast - 0.5) < ENTER_BAND) continue;
-    if (!candidate.exact && !isConfident(candidate)) continue;
+    // A no-4S estimate is only actionable once it has evidence behind it. The
+    // shrinkage in estimateSignal already pulls a thin estimate toward 0.5;
+    // `confident` (samples >= FORECAST_PRIOR_STRENGTH) is the second guard, so
+    // an estimate that clears ENTER_BAND has both a real edge and real samples.
+    if (!candidate.exact && (!candidate.confident || !(candidate.volatility > 0))) continue;
 
     const price = candidate.side === "short" ? symbol.bid : symbol.ask;
     if (!(price > 0)) continue;
@@ -696,14 +768,6 @@ function planEntry(params: {
     };
   }
   return undefined;
-}
-
-/** A no-4S estimate is only actionable once it has evidence behind it. The
- *  shrinkage in estimateSignal already pulls a thin estimate toward 0.5, so this
- *  is the second guard: an estimate that survives shrinkage AND clears
- *  ENTER_BAND has both a real edge and real samples. */
-function isConfident(candidate: RankedSymbol): boolean {
-  return Math.abs(candidate.forecast - 0.5) >= ENTER_BAND && candidate.volatility > 0;
 }
 
 // --- the unlock ladder ------------------------------------------------------
@@ -807,23 +871,100 @@ function propose(
   };
 }
 
+/** Working capital wanted between entries (see StockPlan.reserve).
+ *
+ * Measured beats modeled: once the market has a realized rate since the last
+ * install, the reserve bids THAT. Before any history, two closed-form
+ * expectations remain — the blind rate prices the bankroll from the vendored
+ * generation ranges alone, and the ranked head prices it from the live
+ * (shrunk) signal when that is already better. A candidate whose side cannot
+ * be opened is not an expectation this run can realize, so shorts are skipped
+ * without SF8.2/BN8. */
+function planReserve(
+  view: StockView,
+  ranked: readonly RankedSymbol[],
+  holdTicks: number,
+  cashBudget: number,
+): StockPlan["reserve"] {
+  // The working capital is the BANKROLL — cash plus the book at liquidation
+  // value — not merely what happens to be liquid this pass. A position's sale
+  // proceeds land between two driver ticks, and a reserve sized on the
+  // pre-sale cash leaves them undefended for exactly that gap: measured on
+  // bn8-manipulation seed 1, a $390m sale was scooped by a $318m RAM rung in
+  // the 500 ms before the next stock plan existed. Claims are full-ambition
+  // requests (the arbiter reserves only what the pool actually holds), so
+  // sizing over the book is free while nothing lands and exactly right the
+  // instant something does.
+  const bankroll = cashBudget + Math.max(0, view.portfolioValue);
+  if (!(bankroll > COMMISSION)) return undefined;
+  // `holdTicks` guards only the ranked-rate division, NOT the reserve itself:
+  // during a liquidation the install forecast decays below one 6 s market tick
+  // (holdTicks = 0) for the last seconds of every recalibration window, and a
+  // reserve gated on it vanished exactly while the freed book's proceeds most
+  // needed defending — "the reserve STANDS during liquidation" was false for
+  // those passes. The blind and measured rates are horizon-independent.
+  const best = ranked.find((candidate) =>
+    candidate.expectedProfit > 0 && (view.canShort || candidate.side === "long"));
+  const rankedRate = best && holdTicks > 0 ? best.expectedProfit / secondsForTicks(holdTicks) : 0;
+  const rate = Math.max(blindRatePerSec(view), rankedRate, view.measuredIncomePerSec ?? 0);
+  return rate > 0 ? { amount: bankroll, ratePerSec: rate } : undefined;
+}
+
 /** Conservative trading-rate estimate while the market is entirely invisible.
  * Uses known upstream generation ranges, never a live hidden value. */
 function blindRatePerSec(view: StockView): number {
-  const bankroll = view.totalMoney + view.portfolioValue;
+  return blindBankrollRatePerSec(view.totalMoney + view.portfolioValue);
+}
+
+/** The same closed-form blind expectation as a pure function of the bankroll,
+ * exported because it is also the honest ROUTE-LEVEL prior for money income in
+ * a node whose other channels are zeroed by its own multipliers (BN8): before
+ * any income is measured, "what could this bankroll earn traded blind" is a
+ * declared calculation over the vendored generation ranges, where a flat
+ * hacking-era fallback rate is simply the wrong node's number. */
+export function blindBankrollRatePerSec(bankroll: number): number {
   if (!(bankroll > 0)) return 0;
+  const { cycleEdge } = blindMarketShape();
+  if (!(cycleEdge > 0)) return 0;
+  const net = bankroll * cycleEdge - 2 * COMMISSION;
+  return net > 0 ? net / secondsForTicks(TICKS_PER_CYCLE) : 0;
+}
+
+/** The blind model's per-cycle edge: median-volatility drift at BLIND_FORECAST
+ * minus the median round-trip spread, both from the vendored generation
+ * ranges. The one shape every blind-bankroll figure derives from. A pure
+ * function of static metadata, memoized because its callers sit on hot paths
+ * (every stock plan, every working-capital value curve, every sampledRates
+ * pass) and the two 33-symbol sorts never produce a different answer. */
+let blindMarketShapeMemo: { cycleEdge: number } | undefined;
+function blindMarketShape(): { cycleEdge: number } {
+  if (blindMarketShapeMemo) return blindMarketShapeMemo;
+  blindMarketShapeMemo = computeBlindMarketShape();
+  return blindMarketShapeMemo;
+}
+
+function computeBlindMarketShape(): { cycleEdge: number } {
   const volatilities = Object.keys(STOCK_METADATA)
     .map((sym) => midpoint(STOCK_METADATA[sym]!.mv) / 100)
     .sort((a, b) => a - b);
   const median = volatilities[volatilities.length >> 1] ?? 0;
   const drift = (2 * BLIND_FORECAST - 1) * meanLogStep(median);
-  if (!(drift > 0)) return 0;
   const spread = Object.keys(STOCK_METADATA)
     .map((sym) => worstSpreadFraction(sym))
     .sort((a, b) => a - b)[Math.floor(Object.keys(STOCK_METADATA).length / 2)] ?? 0;
-  const gross = bankroll * Math.expm1(drift * TICKS_PER_CYCLE);
-  const net = gross - bankroll * spread - 2 * COMMISSION;
-  return net > 0 ? net / secondsForTicks(TICKS_PER_CYCLE) : 0;
+  return { cycleEdge: Math.expm1(Math.max(0, drift) * TICKS_PER_CYCLE) - spread };
+}
+
+/** The smallest bankroll blind trading can grow at all: below this, the two
+ * fixed $100k commissions per round trip eat the whole per-cycle edge and the
+ * closed form's net is <= 0. The same break-even the rate formula encodes,
+ * solved for the bankroll — in a node whose only income is the market,
+ * spending below this line is not a trade-off, it is the end of the economy
+ * (measured on bn8-full: a run drained to $38k placed zero further trades for
+ * twenty-three virtual hours, because no position clears its commission). */
+export function blindViableBankroll(): number {
+  const { cycleEdge } = blindMarketShape();
+  return cycleEdge > 0 ? (2 * COMMISSION) / cycleEdge : Infinity;
 }
 
 /** What the exact forecast adds over the estimated one, in $/sec.
@@ -837,11 +978,12 @@ function fourSigmaGainPerSec(view: StockView, ranked: readonly RankedSymbol[], h
   if (holdTicks <= 0) return 0;
   let remaining = Math.max(0, view.totalMoney);
   if (!(remaining > COMMISSION)) return 0;
+  const bySym = new Map(view.symbols.map((symbol) => [symbol.sym, symbol]));
   let estimated = 0;
   let exact = 0;
   for (const candidate of ranked) {
     if (remaining <= COMMISSION) break;
-    const symbol = view.symbols.find((s) => s.sym === candidate.sym);
+    const symbol = bySym.get(candidate.sym);
     if (!symbol) continue;
     const price = candidate.side === "short" ? symbol.bid : symbol.ask;
     if (!(price > 0)) continue;
@@ -850,10 +992,13 @@ function fourSigmaGainPerSec(view: StockView, ranked: readonly RankedSymbol[], h
     if (shares <= 0) continue;
     const common = { shares, ask: symbol.ask, bid: symbol.bid, volatility: candidate.volatility, side: candidate.side, ticks: holdTicks };
     estimated += Math.max(0, expectedProfit({ ...common, forecast: candidate.forecast }));
-    // Un-shrink: the estimator reports 0.5 + (true - 0.5) * n/(n+k), so the
-    // observed deviation understates the true one by that same factor. Doubling
-    // it is the conservative inverse (it assumes n = k, the halfway point).
-    const unshrunk = 0.5 + (candidate.forecast - 0.5) * 2;
+    // Un-shrink with the estimator's OWN factor: it reports
+    // 0.5 + (true - 0.5) * shrink, so dividing the observed deviation by that
+    // shrink recovers the forecast the estimate is a shrunken view of. A symbol
+    // with no samples (shrink 0) has no deviation to un-shrink.
+    const unshrunk = candidate.shrink > 0
+      ? 0.5 + (candidate.forecast - 0.5) / candidate.shrink
+      : candidate.forecast;
     exact += Math.max(0, expectedProfit({ ...common, forecast: Math.min(1, Math.max(0, unshrunk)) }));
     remaining -= shares * price + COMMISSION;
   }
@@ -967,9 +1112,15 @@ export interface StockGrants {
   position: number;
 }
 
-/** The two money claim ids this feature posts. Shared with the driver so the
+/** The money claim ids this feature posts. Shared with the driver so the
  *  claim it posts and the grant it reads back cannot drift apart. */
 export const POSITION_CLAIM_ID = "position";
+/** The standing working-capital reserve (see StockPlan.reserve). Its own id
+ *  because it must COEXIST with the position claim: an entry pass that
+ *  replaced the reserve left the rest of the bankroll undefended for exactly
+ *  that pass. `fundedActions` never reads its grants — reserves sequester,
+ *  they do not spend. */
+export const WORKING_CAPITAL_CLAIM_ID = "working-capital";
 export function unlockClaimId(action: StockAction): string {
   return `unlock:${action.type}`;
 }
