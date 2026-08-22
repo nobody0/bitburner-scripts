@@ -50,6 +50,12 @@ export const FACT_CLASS: Readonly<Record<string, FactClass>> = {
   // its observer dies. Classing it `resource` gives it the shortest expiry we
   // have, which is the honest answer rather than a flattering one.
   hasSession: "resource",
+  // Cache files change when WE open one, when a RAM block is cleared, when a
+  // phish lands one — and they go with the host when it is deleted. `resource`
+  // is the shortest expiry we have and therefore the honest one: acting on a
+  // stale listing means calling `openCache` on a filename the host no longer
+  // holds, and that call THROWS rather than refusing.
+  caches: "resource",
 };
 
 /** How far the cracker got against one host identity.
@@ -69,6 +75,19 @@ export interface AttemptLedger {
   lastAt?: number;
   lastCode?: number;
   solved?: boolean;
+  /** A feedback solver's place in its conversation with this host.
+   *
+   * It lives here rather than in the job because a solve can outlast the
+   * ADJACENCY it depends on: a vantage lasts about 108 s while the password
+   * itself only changes when the host is deleted, roughly five times longer. So
+   * an expensive solve has to be resumable from a different neighbour, and this
+   * is what it resumes from.
+   *
+   * Typed loosely on purpose. `shared/strategy/dnet/solvers/` owns the shape and
+   * validates it with its own fingerprint; the ledger only has to carry it. It
+   * is redacted by `stripCredentials` — see `courier.ts` — because a partly
+   * solved password is still a password. */
+  solver?: Record<string, unknown>;
 }
 
 /** Fold attempt outcomes into a host's ledger.
@@ -90,6 +109,10 @@ export function foldAttempts(
   for (const attempt of outcomes) {
     const ledger = host.attempts ?? { tried: 0, probes: 0 };
     if (attempt.modelId !== undefined) ledger.modelId = attempt.modelId;
+    // The solver's own place in the conversation. Carried verbatim: this module
+    // does not interpret it, and `solvers/` refuses a state whose fingerprint no
+    // longer matches the host.
+    if (attempt.solver !== undefined) ledger.solver = attempt.solver;
     if (attempt.status === "implemented") ledger.tried = (attempt.candidateIndex ?? ledger.tried) + 1;
     else ledger.probes += 1;
     ledger.lastAt = attempt.at;

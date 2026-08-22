@@ -50,11 +50,25 @@ const TRANSCRIPTION_SOURCE_PATHS = [
   "src/Hacknet/HacknetHelpers.tsx",
   "src/StockMarket/BuyingAndSelling.tsx",
   // The darknet cannot be vendored — its import graph reaches the whole game
-  // UI — so sim/features/dnet.ts transcribes it. These two carry the stock
+  // UI — so sim/features/dnet*.ts transcribes it. The first two carry the stock
   // propaganda: the charge curve and per-cycle decay, and the promoteStock
-  // wait/charge/charisma formulas.
+  // wait/charge/charisma formulas. The rest carry the password models: how
+  // every one of the twenty-four mints its secret, what a wrong attempt answers
+  // and how that answer reaches a script's log ring.
   "src/DarkNet/effects/effects.ts",
   "src/NetscriptFunctions/Darknet.ts",
+  "src/DarkNet/controllers/ServerGenerator.ts",
+  "src/DarkNet/effects/authentication.ts",
+  "src/DarkNet/effects/phishing.ts",
+  // The reclaim ladder in `shared/strategy/dnet/rates.ts` is transcribed from
+  // these two — `getRamBlockRemoved` and its charisma reward, and the self
+  // early-out that makes `memoryReallocation` free on the calling host — so
+  // they belong under the drift check beside the calls that use them.
+  "src/DarkNet/effects/ramblock.ts",
+  "src/DarkNet/effects/offlineServerHandling.ts",
+  "src/DarkNet/utils/darknetAuthUtils.ts",
+  "src/DarkNet/models/packetSniffing.ts",
+  "src/DarkNet/models/dictionaryData.ts",
   "src/Gang/Gang.ts",
   "src/Bladeburner/Bladeburner.ts",
   "src/Corporation/Corporation.ts",

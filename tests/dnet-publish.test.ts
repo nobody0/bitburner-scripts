@@ -47,6 +47,26 @@ describe("the wire carries only what cannot be derived", () => {
     expect(Object.values(host.facts).every((at) => typeof at === "number")).toBe(true);
   });
 
+  test("the caches a host is holding, and when we last read its ring", () => {
+    // Both were collected by the jobs and neither was on the allow-list, so a
+    // reader could not say which hosts had an unopened `.cache` sitting on them
+    // — and a cache dies with its host. `lastBleedAt` adds no field: the
+    // observation time IS the value, so it rides `facts` like everything else.
+    const knowledge = fold([{
+      hostname: "dn-1",
+      present: true,
+      facts: { depth: 0, caches: ["loot.cache", "phish.d.cache"], lastBleedAt: true },
+    }]);
+    const host = publishKnowledge(knowledge, NOW + 1_000).hosts[0]!;
+
+    expect(host.caches).toEqual(["loot.cache", "phish.d.cache"]);
+    // `resource` is the shortest expiry we have, and it is the honest one:
+    // acting on a stale listing means calling openCache on a filename the host
+    // no longer holds, and that call THROWS rather than refusing.
+    expect(host.facts["caches"]).toBe(NOW);
+    expect(host.facts["lastBleedAt"]).toBe(NOW);
+  });
+
   test("a stale value is still SHOWN rather than hidden", () => {
     // Blanking it would leave the operator with nothing exactly when they most
     // want to know what we last believed and how long ago. The digest publishes
@@ -68,7 +88,11 @@ describe("the wire carries only what cannot be derived", () => {
     expect(entry.name).toBe("TimingAttack");
     expect(entry.family).toBe("timing");
     expect(entry.oracle).toContain("50ms");
-    expect(entry.blocked).toBe("timing climb not written");
+    // It has a solver now, so it carries no `blocked` note — and `status` is
+    // read off the solver registry rather than written by hand, which is what
+    // stops the panel reporting a reason that stopped being true.
+    expect(entry.status).toBe("implemented");
+    expect(entry.blocked).toBeUndefined();
     expect(JSON.stringify(host)).not.toContain("50ms");
   });
 });
@@ -92,6 +116,70 @@ describe("a credential never reaches the panel", () => {
     const knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0 } }]);
     const host = publishKnowledge(knowledge, NOW, { vault: new Set() }).hosts[0]!;
     expect(host.credentialKnown).toBe(false);
+  });
+
+  test("solve progress travels; the solver's scratch does not", () => {
+    // `scratch` accumulates resolved characters and known prefixes — late in a
+    // solve it IS the password — while `phase` and `spent` are ordinary
+    // progress. Publishing the second without leaking the first is the whole
+    // reason `attempt.solve` is built by an allow-list rather than a spread.
+    const knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0, modelId: "DeepGreen" } }]);
+    knowledge.hosts["dn-1"]!.attempts = {
+      tried: 4,
+      probes: 2,
+      solver: {
+        model: "DeepGreen",
+        fingerprint: "fp-1",
+        phase: "narrowing",
+        spent: 12,
+        scratch: { prefix: "hunter", residue: 7, resolved: ["h", "u", "n"] },
+      },
+    };
+
+    const digest = publishKnowledge(knowledge, NOW, {});
+    const attempt = digest.hosts[0]!.attempt!;
+
+    // The progress an operator wants.
+    expect(attempt.solving).toBe(true);
+    expect(attempt.solve).toEqual({ phase: "narrowing", spent: 12 });
+    // EXACTLY those two keys. A new field on SolverState must not become a new
+    // field here by default — that is what an allow-list buys over a spread.
+    expect(Object.keys(attempt.solve!).sort()).toEqual(["phase", "spent"]);
+
+    // And nothing of the scratch, anywhere in the serialised digest.
+    const serialised = JSON.stringify(digest);
+    expect(serialised).not.toContain("hunter");
+    expect(serialised).not.toContain("scratch");
+    expect(serialised).not.toContain("fp-1");
+    expect(serialised).not.toContain("residue");
+  });
+
+  test("stripCredentials still deletes the solver state wholesale", () => {
+    // The guard against "simplifying" CREDENTIAL_KEYS once `attempt.solve`
+    // exists. The two are not alternatives: `solve` is published BECAUSE the
+    // redaction below stays absolute.
+    const knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0, modelId: "DeepGreen" } }]);
+    knowledge.hosts["dn-1"]!.attempts = {
+      tried: 1,
+      probes: 0,
+      solver: { model: "DeepGreen", fingerprint: "f", phase: "p", spent: 1, scratch: { secret: "s3cr3t" } },
+    };
+    const digest = publishKnowledge(knowledge, NOW, {});
+    expect(JSON.stringify(digest)).not.toContain("s3cr3t");
+    expect((digest.hosts[0]!.attempt as Record<string, unknown>)["solver"]).toBeUndefined();
+  });
+
+  test("a phase longer than a label is capped rather than trusted", () => {
+    // `phase` is solver-defined free text. A solver that wrote password material
+    // into it would be a bug, but the cap means it could not write MUCH.
+    const knowledge = fold([{ hostname: "dn-1", present: true, facts: { depth: 0, modelId: "DeepGreen" } }]);
+    knowledge.hosts["dn-1"]!.attempts = {
+      tried: 0,
+      probes: 0,
+      solver: { model: "DeepGreen", fingerprint: "f", phase: "x".repeat(200), spent: 0, scratch: {} },
+    };
+    const solve = publishKnowledge(knowledge, NOW, {}).hosts[0]!.attempt!.solve!;
+    expect(solve.phase.length).toBe(32);
   });
 });
 

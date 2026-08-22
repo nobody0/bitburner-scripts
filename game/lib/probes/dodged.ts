@@ -1818,9 +1818,6 @@ const dnetCore: DodgedProbe = {
       emit("dnet", {
         observedFrom,
         topologyComplete: false,
-        // The local neighbour count, which is what probe() actually answers —
-        // not the size of the union we inspected.
-        reachable: Math.max(0, hosts.length - 1),
         maxDepth,
         stasisLinkLimit: stubNs["dnet"]["getStasisLinkLimit"](),
         stasisLinked: [...linked],

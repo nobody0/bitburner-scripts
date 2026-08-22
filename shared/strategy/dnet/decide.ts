@@ -1,18 +1,40 @@
-/** Darknet traversal.
+/** Which darknet hosts are worth pinning, and how much charisma the net wants.
  *
- * Objective: reach as much of the darknet graph as possible while managing
- * authentication, charisma, instability and — the binding constraint — the
- * LIMITED STASIS LINKS. A stasis link freezes a server so it stays reachable;
- * there are only so many, which makes this a max-reachable-under-a-budget
- * problem rather than a plain traversal.
+ * **This module decides nothing that anybody executes, and that is deliberate
+ * rather than unfinished.** It used to emit `authenticate`, `stasis` and
+ * `releaseStasis` actions, and every one of them was mechanically unexecutable
+ * from where home stands:
  *
- * That budget is a genuinely contended resource, so it goes through the
- * arbiter as a third claim class alongside money and the work slot. */
+ * - `authenticate` needs a DIRECT CONNECTION, and home is adjacent to exactly
+ *   one thing — `darkweb`. Authentication happens in a job, standing next door
+ *   to its target, and `shared/strategy/dnet/queue.ts` is what plans it.
+ * - `setStasisLink` takes no host at all: it pins the CALLING script's own
+ *   server, so spending a link means running a 12 GB script on the host being
+ *   pinned. Home cannot be that script, and neither can anything home launches
+ *   directly.
+ *   Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L337-L374
+ *
+ * So the actions were a plan expressed in calls the planner could never make,
+ * and they were rendered as a "selected" action next to a refusal explaining
+ * why it would not happen. They are deleted rather than left refusing, on the
+ * same principle as `spread.ts`'s deleted refusal names: a decision nothing can
+ * carry out teaches the reader that something is about to happen.
+ *
+ * What survives is two things a reader genuinely wants:
+ *
+ * 1. **The stasis RANKING.** Still exact and still meaningful. A stasis link is
+ *    the only thing that makes a host immune to move, delete and restart
+ *    (`darknetNetworkUtils.ts:72`, `NetworkMovement.ts:228`), so a link on a
+ *    host really does keep every path through it alive — the correction that a
+ *    stasis link grants no remote `exec` narrows what stasis BUYS, and does not
+ *    touch what it PRESERVES.
+ * 2. **`charismaNeeded`.** Read by `dnetNeeds` and posted to the needs board, so
+ *    career delivers charisma instead of this feature grinding it. That is a
+ *    real action, taken by the feature that owns it. */
 
 export interface DarknetServer {
   hostname: string;
   depth: number;
-  blockedRam: number;
   isOnline: boolean;
   requiredCharisma: number;
   stasisLinked: boolean;
@@ -21,28 +43,16 @@ export interface DarknetServer {
 }
 
 export interface DarknetView {
-  /** True only when every server's neighbor list has been observed. */
+  /** True only when every server's neighbour list has been observed. */
   topologyComplete: boolean;
   servers: DarknetServer[];
-  reachable: number;
-  maxDepth: number;
-  stasisLinkLimit: number;
   stasisLinked: string[];
-  instability: { authenticationDurationMultiplier: number; authenticationTimeoutChance: number };
   charisma: number;
-  /** Instability above which further backdooring is counter-productive. */
-  instabilityCeiling: number;
 }
 
-export type DarknetAction =
-  | { type: "authenticate"; hostname: string }
-  | { type: "stasis"; hostname: string }
-  | { type: "releaseStasis"; hostname: string }
-  | { type: "idle" };
-
 export interface DarknetDecision {
-  action: DarknetAction;
-  /** Servers ranked by how much depth they unlock per stasis link spent. */
+  /** Servers ranked by how much of the graph a stasis link on them keeps alive.
+   *  Empty while the topology is partial: see `stepDarknet`. */
   ranked: { hostname: string; depth: number; unlocks: number }[];
   /** Charisma the run needs, posted to the board for career to deliver. */
   charismaNeeded?: number;
@@ -77,18 +87,21 @@ export function unlockValue(view: DarknetView, hostname: string): number {
 }
 
 export function stepDarknet(view: DarknetView): DarknetDecision {
-  const linked = new Set(view.stasisLinked);
+  // Charisma is worked out FIRST, before the topology gate below, because the
+  // two answer independent questions. The gate is about whether a reachability
+  // number is exact; a charisma requirement is a per-host identity fact that is
+  // just as true on a partial map. Computing it after the gate meant the need
+  // never reached the board on any run whose topology was incomplete — which is
+  // nearly every run, and exactly the runs whose charisma is short.
+  const blocked = view.servers.filter((server) => server.requiredCharisma > view.charisma);
+  const charismaNeeded = blocked.length > 0 ? Math.min(...blocked.map((server) => server.requiredCharisma)) : undefined;
+  const need = charismaNeeded !== undefined ? { charismaNeeded } : {};
 
-  // ns.dnet.probe() is local to the script execution host. Ranking stasis
-  // links from one local neighbor list would present a partial graph as an
-  // exact reachability answer, so refuse until acquisition traverses it.
+  // ns.dnet.probe() is local to the script execution host. Ranking stasis links
+  // from one local neighbour list would present a partial graph as an exact
+  // reachability answer, so refuse until the fold has traversed it.
   // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L314-L335
-  if (!view.topologyComplete) {
-    return {
-      action: { type: "idle" },
-      ranked: [],
-    };
-  }
+  if (!view.topologyComplete) return { ranked: [], ...need };
 
   const ranked = view.servers
     .filter((server) => !server.stasisLinked)
@@ -99,60 +112,5 @@ export function stepDarknet(view: DarknetView): DarknetDecision {
     }))
     .sort((a, b) => b.unlocks - a.unlocks || b.depth - a.depth || (a.hostname < b.hostname ? -1 : 1));
 
-  // Charisma gates authentication; career can deliver it, so it becomes a need
-  // rather than something this feature grinds itself.
-  const blocked = view.servers.filter((server) => server.requiredCharisma > view.charisma);
-  const charismaNeeded = blocked.length > 0 ? Math.min(...blocked.map((server) => server.requiredCharisma)) : undefined;
-
-  // Instability rises with activity and makes authentication unreliable;
-  // above the ceiling, more backdooring makes things worse, not better.
-  if (view.instability.authenticationTimeoutChance > view.instabilityCeiling) {
-    return {
-      action: { type: "idle" },
-      ranked,
-      ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-    };
-  }
-
-  // Spend a stasis link on the server that keeps the most of the graph alive.
-  if (linked.size < view.stasisLinkLimit) {
-    const best = ranked.find((entry) => entry.unlocks > 0);
-    if (best) {
-      return {
-        action: { type: "stasis", hostname: best.hostname },
-        ranked,
-        ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-      };
-    }
-  }
-
-  // Links exhausted: release one that no longer unlocks anything, so the
-  // budget is recycled rather than stranded.
-  if (linked.size >= view.stasisLinkLimit) {
-    const wasted = view.servers.find((server) => server.stasisLinked && server.isOnline && unlockValue(view, server.hostname) === 0);
-    if (wasted) {
-      return {
-        action: { type: "releaseStasis", hostname: wasted.hostname },
-        ranked,
-        ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-      };
-    }
-  }
-
-  const target = view.servers.find(
-    (server) => server.isOnline && server.requiredCharisma <= view.charisma && !server.stasisLinked,
-  );
-  if (target) {
-    return {
-      action: { type: "authenticate", hostname: target.hostname },
-      ranked,
-      ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-    };
-  }
-
-  return {
-    action: { type: "idle" },
-    ranked,
-    ...(charismaNeeded !== undefined ? { charismaNeeded } : {}),
-  };
+  return { ranked, ...need };
 }

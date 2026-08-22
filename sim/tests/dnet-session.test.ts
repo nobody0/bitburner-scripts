@@ -3,10 +3,11 @@ import type { NS } from "@ns";
 import { SimWorld } from "../world.ts";
 import { ProcessTable } from "../ns/process.ts";
 import { makeSimNs, type SimNsHost } from "../ns/api.ts";
-import { DarknetSystem } from "../features/dnet.ts";
+import { DarknetSystem, MUTATION_DRAWS } from "../features/dnet.ts";
 import { mulberry32 } from "../core/rng.ts";
 import { darkwebServerSpec } from "../network.ts";
 import { harvestLogs } from "../../shared/strategy/dnet/oracle.ts";
+import { darknetGate } from "../ns/dnet.ts";
 import { lane } from "../../tests/support/lanes.ts";
 
 /** The half of the darknet the controller actually runs on.
@@ -239,7 +240,7 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       // target's ring and comes back only through heartbleed.
       const h = harness();
       const neighbour = neighbourOf(h, "darkweb");
-      h.dnet.logAttempt(neighbour, "0000", 401, "Unauthorized", "2,1", 0);
+      h.dnet.logAttempt(neighbour, "0000", 401, { ok: false, message: "Unauthorized", data: "2,1" }, 0);
       const lines = h.dnet.captureLogs(neighbour, 4, true, 0);
       const harvest = harvestLogs(lines, neighbour);
       expect(harvest.oracles[0]).toMatchObject({ code: 401, passwordAttempted: "0000", data: "2,1" });
@@ -348,15 +349,30 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       // missing payload.
       const h = harness();
       // Rather than reach into private state, drive the real tick with a rigged
-      // stream: the first draw picks the branch (0.2 is [0.1, 0.3) — restart)
-      // and the second picks the victim.
+      // stream.
+      //
+      // The rigging has to name the SLOT, not the call order. `#mutate` takes
+      // one fixed-width block of MUTATION_DRAWS draws up front and then indexes
+      // into it, precisely so that what a tick does cannot change how much of
+      // the shared stream it consumes — so "the first draw picks the branch" has
+      // not been true since that block landed, and an alternating stream simply
+      // lands on whichever branch its parity happens to select. (It selected the
+      // ADD branch, which returns before the restart is ever reached, and the
+      // test went quietly green on an assertion it was no longer exercising.)
+      //
+      // So: 0.9 in every slot that guards a branch we do not want, 0 in the two
+      // that select the restart and its victim.
+      const rigged = new Array<number>(MUTATION_DRAWS).fill(0.9);
+      rigged[0] = 0;    // under the depth throttle, so the tick runs at all
+      rigged[14] = 0;   // < 0.2: restart
+      rigged[15] = 0;   // the victim: the first movable host, alphabetically
       let call = 0;
       const restarts = new DarknetSystem({
         servers: h.world.servers,
         network: h.host.network,
         processes: h.host.processes,
         generate: mulberry32(5),
-        random: () => (call++ % 2 === 0 ? 0.2 : 0),
+        random: () => rigged[call++ % MUTATION_DRAWS]!,
         logNoise: mulberry32(7),
         bitNode: 15,
         fullAccess: () => true,
@@ -441,6 +457,224 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
     });
   });
 
+  describe("a stasis link is durability, and it is scarce", () => {
+    // Modelling this is what turns `getStasisLinkedServers()` from a constant
+    // into a reading. Until now it returned `[]` — true, because nothing could
+    // ever link anything — so no strategy that spends a link could be exercised
+    // at all.
+    test("it pins the CALLING host, and the limit is global", () => {
+      const h = harness();
+      const movable = [...h.dnet.hosts.values()]
+        .filter((host) => host.online && !host.isStationary)
+        .sort((a, b) => (a.hostname < b.hostname ? -1 : 1));
+      const [first, second] = movable;
+      expect(first).toBeDefined();
+      expect(second).toBeDefined();
+
+      expect(h.dnet.stasisLinkedServers()).toEqual([]);
+
+      // 200: pinned. Note the argument is the CALLER's host — the real member
+      // takes no hostname at all, which is why spending a link needs a process
+      // standing on the host being pinned.
+      expect(h.dnet.setStasisLink(first!.hostname, true)).toBe(200);
+      expect(h.dnet.stasisLinkedServers()).toEqual([first!.hostname]);
+
+      // The limit is one until the labyrinth starts paying out, and it is
+      // GLOBAL — which is the whole reason candidates have to be ranked.
+      expect(h.dnet.stasisLinkLimit()).toBe(1);
+      expect(h.dnet.setStasisLink(second!.hostname, true)).toBe(453);
+      expect(h.dnet.stasisLinkedServers()).toEqual([first!.hostname]);
+
+      // Releasing frees the slot rather than the host: re-pinning the same host
+      // is idempotent, so a job that runs twice does not spend two.
+      expect(h.dnet.setStasisLink(first!.hostname, true)).toBe(200);
+      expect(h.dnet.setStasisLink(first!.hostname, false)).toBe(200);
+      expect(h.dnet.stasisLinkedServers()).toEqual([]);
+      expect(h.dnet.setStasisLink(second!.hostname, true)).toBe(200);
+    });
+
+    test("a pinned host is outside every mutation branch's victim pool", () => {
+      // What the link actually BUYS. It is not remote exec — upstream's own doc
+      // comment says so and is wrong, the reachability gate tests
+      // `backdoorBypasses && backdoorInstalled` and nothing else. It is that the
+      // mutation clock cannot touch this host, which is why it is worth a slot
+      // to a process that cannot be restarted.
+      const h = harness();
+      const rigged = new Array<number>(MUTATION_DRAWS).fill(0.9);
+      rigged[0] = 0;    // under the depth throttle, so the tick runs
+      // The ORDINARY restart branch. It sits at 18 rather than at 14 because the
+      // two BACKDOOR branches — a 10% restart and a 5% delete, both drawing from
+      // `getBackdooredDarknetServers` — come first in `mutateDarknet` and now
+      // occupy 14-17. Both are no-ops here: nothing is backdoored, and the one
+      // host that is pinned is filtered out of that pool by `!hasStasisLink`.
+      rigged[18] = 0;   // < 0.2: restart
+      rigged[19] = 0;   // the victim: the first movable host, alphabetically
+      let call = 0;
+      const pinned = new DarknetSystem({
+        servers: h.world.servers,
+        network: h.host.network,
+        processes: h.host.processes,
+        generate: mulberry32(5),
+        random: () => rigged[call++ % MUTATION_DRAWS]!,
+        logNoise: mulberry32(7),
+        bitNode: 15,
+        fullAccess: () => true,
+        hasProgram: () => false,
+        installedAugmentations: () => new Set<string>(),
+        allowRedPill: () => true,
+        world: h.world,
+        player: h.world.player,
+        homeFiles: () => h.host.files.get("home")!,
+        darknetMoneyMultiplier: () => 1,
+      });
+      pinned.populate();
+      const victim = [...pinned.hosts.values()]
+        .filter((host) => host.online && !host.isStationary)
+        .sort((a, b) => (a.hostname < b.hostname ? -1 : 1))[0]!;
+
+      // A session marker on every movable host, so the tick's effect is visible
+      // without needing a real process — a restart clears `sessions`, and these
+      // hosts do not all have the free RAM to hold one.
+      const movable = [...pinned.hosts.values()].filter((host) => host.online && !host.isStationary);
+      for (const host of movable) host.sessions.add(1);
+
+      // Pin the host the rigged stream would otherwise have picked.
+      expect(pinned.setStasisLink(victim.hostname, true)).toBe(200);
+      pinned.darknetProcess(10_000);
+
+      // The pinned host is untouched...
+      expect(victim.sessions.has(1)).toBe(true);
+      // ...and the branch really did fire, on somebody else. Without this the
+      // assertion above would pass just as well for a tick that did nothing.
+      const restarted = movable.filter((host) => !host.sessions.has(1));
+      expect(restarted).toHaveLength(1);
+      expect(restarted[0]!.hostname).not.toBe(victim.hostname);
+    });
+
+    test("an install takes every link with it", () => {
+      const h = harness();
+      const host = [...h.dnet.hosts.values()].find((entry) => entry.online && !entry.isStationary)!;
+      expect(h.dnet.setStasisLink(host.hostname, true)).toBe(200);
+      h.dnet.prestige(0);
+      expect(h.dnet.stasisLinkedServers()).toEqual([]);
+    });
+  });
+
+  describe("the two farm calls, which are what the net PAYS with", () => {
+    // Driven through the SYSTEM rather than through ns, deliberately. Both ns
+    // members are `netscriptDelay`-shaped, and this harness has no pump for the
+    // virtual clock — awaiting one here would hang for ever rather than fail.
+    // What the system layer owns is every fact worth pinning: the check order,
+    // the two separate writes, the cache on clear, and the net-wide cooldown.
+    // The ns wrapper contributes the wait and the charisma-xp call, and
+    // `tests/ram-budget.test.ts` pins that its RAM was declared.
+
+    test("memoryReallocation frees the block on the CALLING host with no credential", () => {
+      // The single most useful fact in the feature. The call declares
+      // `requireAdminRights`, but `checkDarknetServer` evaluates the direct-
+      // connection requirement first and then early-outs on self BEFORE the
+      // admin-rights check is reached — so a resident grinds its own owner's
+      // block open for free. If this stops being true, the farm ladder's second
+      // rung becomes unreachable on every host we have not cracked.
+      const h = harness();
+      const target = neighbourOf(h, "darkweb");
+      const record = h.dnet.record(target)!;
+      record.blockedRam = 8;
+      const server = h.world.servers.get(target)!;
+      server.ramUsed = 8;
+      server.hasAdminRights = false;
+
+      const freed = h.dnet.reallocateRam(target, 1, 200)!;
+      expect(freed.freed).toBeGreaterThan(0);
+      expect(record.blockedRam).toBe(8 - freed.freed);
+      // The two writes are SEPARATE upstream and both have to land: blocked RAM
+      // presents AS used RAM, so a model that moved one without the other would
+      // have `freeRam` disagree with what `exec` would actually accept.
+      expect(server.ramUsed).toBeCloseTo(record.blockedRam, 6);
+      // Every call pays charisma, scaled by the difficulty that makes it slow.
+      expect(freed.charismaExp).toBeGreaterThan(0);
+    });
+
+    test("clearing a block to zero drops a .cache, with no roll at all", () => {
+      const h = harness();
+      const target = neighbourOf(h, "darkweb");
+      const record = h.dnet.record(target)!;
+      // Small enough that one call clamps to the remainder and clears it.
+      record.blockedRam = 0.01;
+      const before = h.dnet.cachesOn(target).length;
+      const freed = h.dnet.reallocateRam(target, 1, 200)!;
+      expect(freed.cleared).toBe(true);
+      expect(record.blockedRam).toBe(0);
+      expect(h.dnet.cachesOn(target).length).toBe(before + 1);
+    });
+
+    test("a neighbour's block still needs the credential the self case does not", () => {
+      // The other half of the same check order, read through the gate `exec` and
+      // `scp` share: the early-out is on SELF, so a directly-connected host we
+      // have never rooted refuses with 401 while our own host never asks.
+      const h = harness();
+      const pid = h.start("agent.js", "darkweb");
+      const process = h.host.processes.get(pid)!;
+      const neighbour = neighbourOf(h, "darkweb");
+      h.world.servers.get(neighbour)!.hasAdminRights = false;
+      expect(darknetGate(h.dnet, h.world.servers, process, neighbour, {}).code).toBe(401);
+      expect(darknetGate(h.dnet, h.world.servers, process, "darkweb", {}).code).toBe(200);
+    });
+
+    test("phishingAttack pays charisma on EVERY call, including the failures", () => {
+      // A quarter rate on the failure path, which is what makes phishing the
+      // reliable charisma source rather than the lottery it looks like.
+      const h = harness();
+      const target = neighbourOf(h, "darkweb");
+      const now = h.world.clock.now();
+      let failures = 0;
+      for (let i = 0; i < 40; i++) {
+        const outcome = h.dnet.phish(target, 1, 50, now);
+        expect(outcome.charismaExp).toBeGreaterThan(0);
+        expect(outcome.code === 200 || outcome.code === 455).toBe(true);
+        if (!outcome.success) failures++;
+      }
+      // At charisma 50 the money chance is ~6%, so most calls fail and still pay.
+      expect(failures).toBeGreaterThan(0);
+    });
+
+    test("the phishing cache cooldown is NET-WIDE, not per host", () => {
+      // `lastPhishingCacheTime` lives on DarknetState, so the whole net yields at
+      // most twenty caches an hour however many hosts are phishing. That fact is
+      // exactly what the farm ladder's cache-hunter election exists to exploit:
+      // one host with threads beats every host with one.
+      const h = harness();
+      // NOT the labyrinth: `handlePhishingAttack` excludes a lab server from the
+      // cache branch outright, which is also why `electCacheHunter` never picks
+      // one. `populate` places the lab first, so an unfiltered list starts with
+      // exactly the host that can never claim a window.
+      const hosts = [...h.dnet.hosts.values()]
+        .filter((host) => host.hostname !== "darkweb" && !host.isStationary)
+        .map((host) => host.hostname)
+        .slice(0, 2);
+      expect(hosts.length).toBe(2);
+      const now = h.world.clock.now();
+      expect(h.dnet.phishCooldownReached(now)).toBe(true);
+      let claimed = false;
+      for (let i = 0; i < 4000 && !claimed; i++) {
+        claimed = h.dnet.phish(hosts[0]!, 1, 1000, now).message.includes("Found a cache file");
+      }
+      expect(claimed).toBe(true);
+      // ...and the OTHER host's window is shut by it.
+      expect(h.dnet.phishCooldownReached(now)).toBe(false);
+      expect(h.dnet.phish(hosts[1]!, 1, 1000, now).message).not.toContain("Found a cache file");
+      expect(h.dnet.phishCooldownReached(now + 3 * 60 * 1000 + 1)).toBe(true);
+    });
+
+    test("phishing refuses to run anywhere but a darknet host, before its wait", () => {
+      // `expectRunningOnDarknetServer` is evaluated BEFORE the netscriptDelay, so
+      // a script on an ordinary server throws rather than waiting ten seconds to
+      // be told no. Reached synchronously, which is the point.
+      const h = harness();
+      expect(() => (h.ns.dnet as unknown as { phishingAttack: () => unknown }).phishingAttack()).toThrow();
+    });
+  });
+
   describe("the gaps did not silently shrink", () => {
     test("the actions nobody calls still report themselves rather than answering", () => {
       // An ns member this does not model must be ABSENT, so the root proxy
@@ -448,23 +682,38 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       // a strategy be measured against behaviour that does not exist.
       const h = harness();
       const dnet = (h.ns as unknown as { dnet: Record<string, unknown> }).dnet;
-      for (const name of [
-        "setStasisLink",
-        "memoryReallocation",
-        "phishingAttack",
-        "induceServerMigration",
-        "promoteStock",
-        "unleashStormSeed",
-      ]) {
+      // Two members have LEFT this list, and both left because they were
+      // modelled rather than because the rule was relaxed.
+      // `induceServerMigration` is on the deploy path as the only thing that can
+      // move a host toward the labyrinth's row; `setStasisLink` is what makes a
+      // walker's host survivable at all. `unleashStormSeed` stays: it is
+      // documented as catastrophic and is an anti-goal rather than an unwritten
+      // model.
+      for (const name of ["unleashStormSeed"]) {
         expect(() => (dnet[name] as () => unknown)(), `ns.dnet.${name} must stay unmodelled`).toThrow();
       }
     });
 
-    test("stasis links report empty because they ARE empty, not because they are stubbed", () => {
-      // The difference matters: while setStasisLink is unmodelled, nothing can
-      // create a link, so [] is literally true rather than a fabrication.
+    test("a stasis link is now a reading rather than a constant", () => {
+      // This test used to assert `[]` and say so honestly: while nothing could
+      // create a link, empty was literally true rather than a fabrication. Now
+      // that `setStasisLink` is modelled, empty has to be earned — so the
+      // assertion is that it CHANGES, which the old one could never have caught.
       const h = harness();
       expect(h.ns.dnet.getStasisLinkedServers()).toEqual([]);
+
+      const host = [...h.dnet.hosts.values()].find((entry) => entry.online && !entry.isStationary)!;
+      expect(h.dnet.setStasisLink(host.hostname, true)).toBe(200);
+      expect(h.ns.dnet.getStasisLinkedServers()).toEqual([host.hostname]);
+    });
+
+    test("instability is still exactly neutral, because no backdoor path exists", () => {
+      // Unchanged and still honest: the surplus is over BACKDOORED darknet
+      // servers, `ns.dnet` has no member that installs one, so zero is a truth
+      // rather than a stub. It is also why `authenticate` can never answer 408
+      // in a sim run — anything handling a timeout needs a unit test that
+      // injects one.
+      const h = harness();
       expect(h.ns.dnet.getDarknetInstability()).toEqual({
         authenticationDurationMultiplier: 1,
         authenticationTimeoutChance: 0,

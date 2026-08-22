@@ -261,6 +261,49 @@ export interface HarvestSummary {
   unrecognised: string[];
 }
 
+/** One unrecognised line, reduced to its SHAPE.
+ *
+ * A rising `unrecognised` count means our grammar has drifted from the game, and
+ * a count on its own cannot say WHICH shape drifted — so the natural fix is to
+ * report examples. That fix is unsafe, and dangerously so: an unrecognised line
+ * is by definition one we failed to parse, and three of the noise generator's
+ * branches put a plaintext password into a log line. Shipping examples would
+ * ship exactly the passwords our parser missed.
+ *
+ * So the shape travels and the text does not. Every run of digits collapses to
+ * `#` and every run of letters to `a`, which leaves the punctuation and the
+ * structure — enough to say "a line like `a: a-#` stopped parsing" and to write
+ * the fix against, and not enough to carry a secret.
+ *
+ * A character loop and `String` methods only: `RegExp.prototype.exec` anywhere
+ * in a bundle that reaches a game script bills the full 1.3 GB of `ns.exec`, and
+ * this module is imported by the job bodies. */
+export function logShape(line: string): string {
+  let out = "";
+  let last = "";
+  for (const ch of line.slice(0, SHAPE_SCAN)) {
+    const cls = ch >= "0" && ch <= "9"
+      ? "#"
+      : (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")
+        ? "a"
+        : "";
+    if (cls === "") {
+      out += ch;
+      last = "";
+      continue;
+    }
+    // Collapse the RUN, so `passcode1234` and `passcode9` are one shape.
+    if (cls !== last) out += cls;
+    last = cls;
+  }
+  return out.slice(0, SHAPE_MAX);
+}
+
+/** Enough of a line to tell its shape; the rest is more of the same. */
+const SHAPE_SCAN = 240;
+/** What actually travels. A shape longer than this is not a shape. */
+const SHAPE_MAX = 60;
+
 /** Fold a batch of log lines into everything they gave us.
  *
  * `bledFrom` is the host these lines came off. It matters for one shape: the
@@ -307,4 +350,38 @@ export function harvestLogs(lines: readonly string[], bledFrom?: string): Harves
     }
   }
   return summary;
+}
+
+/** The response to OUR attempt, out of a harvest that may hold several.
+ *
+ * The log ring is 200 lines and is shared: other agents attempt against the same
+ * host, and the host writes its own noise into it between our calls. Folding
+ * whichever oracle line happened to come back first would feed a solver another
+ * process's feedback, which is worse than no feedback — it is wrong feedback
+ * that looks right, and every solver here trusts what it is handed.
+ *
+ * So the match is on `passwordAttempted`, which upstream stamps on every
+ * authentication record.
+ *
+ * **`Pr0verFl0` is the one exception, and it is not optional.** That model's
+ * log entry is rewritten before it is stored: `logPasswordAttempt` replaces
+ * `passwordAttempted` with the RECEIVED BUFFER — the overwritten first half of
+ * the simulated buffer — rather than the string we sent
+ * (`packetSniffing.ts:99-119`). A matcher that only compared the attempt would
+ * therefore discard this model's response every single time, silently and
+ * forever. It needs no oracle to be solved, so the honest thing is to say so
+ * here rather than to loosen the rule for everyone.
+ *
+ * Source: ../bitburner-src at 3162fd2590e221eadd0c0fbd46151913f7c4c41c
+ *   src/DarkNet/models/packetSniffing.ts:90-125 */
+export function oracleFor(
+  harvest: HarvestSummary,
+  attempted: string,
+  modelId?: string,
+): OracleCapture | undefined {
+  if (modelId === "Pr0verFl0") {
+    // Its records cannot be attributed, and it does not need to be.
+    return undefined;
+  }
+  return harvest.oracles.find((capture) => capture.passwordAttempted === attempted);
 }

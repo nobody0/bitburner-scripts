@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   extractPacketCredentials,
   harvestLogs,
+  logShape,
   parseHeartbleedLine,
 } from "../shared/strategy/dnet/oracle.ts";
 
@@ -238,5 +239,36 @@ describe("noise, topology and grammar drift", () => {
     const summary = harvestLogs([]);
     expect(summary.credentials).toEqual([]);
     expect(summary.unrecognised).toEqual([]);
+  });
+});
+
+describe("grammar drift is reported as a shape, never as a line", () => {
+  test("every digit and letter run is erased, and the structure survives", () => {
+    // The shape has to be specific enough to write a fix against...
+    expect(logShape("Logging in with passcode: hunter2")).toBe("a a a a: a#");
+    expect(logShape("Response time: 1234ms")).toBe("a a: #a");
+    // ...and identical for two lines that differ only in their secret, which is
+    // what makes it safe to publish and useful to count.
+    expect(logShape("passcode: swordfish")).toBe(logShape("passcode: correcthorse"));
+  });
+
+  test("no password survives being turned into a shape", () => {
+    // The property this function exists for. An unrecognised line is BY
+    // DEFINITION one the parser failed to read, and the noise generator puts
+    // cleartext passwords in log lines — so reporting examples would report the
+    // passwords we missed.
+    const secret = "tr0ub4dor";
+    const shape = logShape(`dn-7 accepted ${secret} at 09:41`);
+    expect(shape).not.toContain(secret);
+    for (const fragment of ["tr0", "ub4", "dor", "b4d"]) {
+      expect(shape).not.toContain(fragment);
+    }
+    // Only the alphabet of the shape itself, plus punctuation.
+    expect(/^[a#\s\p{P}\p{S}]*$/u.test(shape)).toBe(true);
+  });
+
+  test("a shape is bounded, however long the line was", () => {
+    // Unbounded, a single pathological line would become a 200-entry map key.
+    expect(logShape("x!".repeat(500)).length).toBeLessThanOrEqual(60);
   });
 });

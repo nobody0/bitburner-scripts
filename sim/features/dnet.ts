@@ -3,24 +3,46 @@ import type { SimPlayer } from "../core/player.ts";
 import type { SimWorld } from "../world.ts";
 import { mockServer } from "../core/mocks.ts";
 import { randomIp } from "../network.ts";
-import {
-  COMMON_PASSWORDS,
-  DEFAULT_SETTINGS,
-  DOG_NAMES,
-  EU_COUNTRIES,
-} from "../../shared/strategy/dnet/dictionaries.ts";
 import type { ProcessTable } from "../ns/process.ts";
-import { isOnAirGap, LAB_LADDER, NET_WIDTH, type LabStage } from "../../shared/strategy/dnet/rates.ts";
+import { MAZE_PATH, directionFromInput, generateMaze, surroundingsVisualized } from "./dnet-maze.ts";
+import {
+  isLabyrinth,
+  isOnAirGap,
+  LAB_LADDER,
+  NET_WIDTH,
+  PHISH_CACHE_COOLDOWN_MS,
+  phishCacheChance,
+  phishCharismaExp,
+  phishMoneyChance,
+  promoteWaitMs,
+  ramBlockRemoved,
+  reclaimCharismaExp,
+  roundToTwo,
+  type LabStage,
+} from "../../shared/strategy/dnet/rates.ts";
+import { generateSecret, passwordRng, type PasswordFormat } from "./dnet-generators.ts";
+import {
+  capturePackets,
+  checkPassword as checkPasswordAgainst,
+  getExactCorrectChars,
+  getRandomCharsInPassword,
+  getSharedChars,
+  logEntryFor,
+  type PacketWorld,
+} from "./dnet-feedback.ts";
+import { PACKET_SNIFF_PHRASES } from "./dnet-phrases.ts";
 
 /** The darknet, modelled far enough that buying DarkscapeNavigator.exe is a real
  * event with real consequences.
  *
  * Scope is deliberate. What the controller does with the darknet today is
- * observe it — `dnet.core` probes five `ns.dnet` getters, the driver refuses
- * every action — so this models the population, the getters, the access gate and
- * the mutation clock, and nothing else. Every unmodelled member still reports
- * itself rather than answering with a fabrication — an ns member this does not
- * model is simply absent from the namespace, so the root proxy reports it.
+ * observe it and attempt passwords against it, so this models the population,
+ * the getters, the access gate, the mutation clock and every one of the
+ * twenty-four password models — their generation in `dnet-generators.ts` and
+ * their failure feedback in `dnet-feedback.ts`, both transcribed. Every
+ * unmodelled member still reports itself rather than answering with a
+ * fabrication — an ns member this does not model is simply absent from the
+ * namespace, so the root proxy reports it.
  *
  * The formulas are transcribed, and so is the GRID. A host holds a
  * `(depth, leftOffset)` cell on an 8-wide board with air-gap rows, exactly as
@@ -54,21 +76,72 @@ export const DNET_ASSUMPTIONS: readonly string[] = [
   + "independence, fixed cost",
   "dnet.probeOrder: upstream shuffles probe() results to hide the network structure; this returns a stable order, because "
   + "lodash shuffle consumes a variable number of draws and taking them from the shared stream would let topology perturb stock prices",
-  "dnet.logNoise: the noise mix is narrowed to the branches that leak password material plus the heartbeat everything else "
-  + "falls through to; the packet-sniffer blob, location and generated-name branches are not reproduced. Every line emitted is "
-  + "faithful — what is narrower is the mix between them",
-  "dnet.models: passwords are exact for the five transcribed dictionary models and correctly-formatted-but-unguessable for the "
-  + "other nineteen, which matches the fact that those solvers are not written. Per-model failure feedback is transcribed for "
-  + "the cheap pure-function models and falls through to the static hint otherwise, as upstream's own default branch does",
-  "dnet.backdoors: no backdoor path exists, so getDarknetInstability and the timeout chance are exactly neutral rather than "
-  + "approximated, and exec's backdoorBypasses is always false",
-  "dnet.stasis: setStasisLink is unmodelled, so getStasisLinkedServers() is [] by truth rather than by stub, and isImmutable "
-  + "reduces to isStationary",
-  "dnet.labyrinth: the ladder, depth, reward order and the lab server are modelled; the MAZE itself is not, so a lab is never completed from a script",
+  "dnet.logNoise: every branch of getLogNoise is now reproduced in upstream's order and at its probabilities — the spam "
+  + "phrases, a neighbour's plaintext password, the transaction edge, the exact-characters hint off the last attempt, two "
+  + "characters of this host's own password, a stranger's password, and addPacketSnifferNoise's own-or-neighbour leak — as is "
+  + "the back-fill's oldest-first prepend order. Two renderings differ: the heartbeat's clock is a UTC HH:MM:SS over virtual "
+  + "time rather than toLocaleTimeString(), which is locale-dependent and would make a run irreproducible across machines; and "
+  + "the noise draws come from a DEDICATED stream, because their number depends on how long a script waited before bleeding and "
+  + "billing them to the gameplay stream would let log volume perturb stock prices across an A/B",
+  "dnet.authXp: every authenticate now pays calculatePasswordAttemptChaGain — (3 + 1.1^difficulty) * threads, a fifth on "
+  + "an already-rooted host and ten times on a first success — on FAILURE as well as success, which is what makes "
+  + "iterative solving free in charisma terms rather than pure cost. hasDarknetBonusTime()'s 1.5x is false by truth: the "
+  + "sim has no offline accrual",
+  "dnet.models: all twenty-four models mint their password, hint and hint data through upstream's own per-model config "
+  + "builder, getPassword and getPasswordType — so passwordFormat is derived rather than declared, a numeric password of "
+  + "length >= 2 never starts with 0, and passwordLength is the length of the GENERATED string rather than the length its "
+  + "builder asked for. All fifteen arms of the failure switch are transcribed, including the isCloseToCorrectPassword "
+  + "tolerance that OctantVoxel and MathML need, capturePackets, the WHRNG-seeded KingOfTheHill landscape and "
+  + "logPasswordAttempt's Pr0verFl0 branch, which rewrites passwordAttempted to the received buffer. What differs is the "
+  + "ENTROPY SOURCE: getXorMaskEncryptedPasswordConfig, getPasswordMadeUpOfPrimesProduct and "
+  + "generateSimpleArithmeticExpression are unbounded rejection loops, so a host takes exactly ONE draw off the world stream "
+  + "and derives a mulberry32 from it (mixed with the hostname) that every generator then runs on. Same distributions, fixed "
+  + "cost per host, and a host's secret is reproducible from (secretDraw, hostname) alone. One substitution inside "
+  + "capturePackets: its generateDarknetServerName() branch emits an existing darknet hostname, because upstream's "
+  + "server-name generator and its offline-name recycling are not modelled",
+  "dnet.playerDraws: three player-initiated darknet rolls take their entropy from the DEDICATED noise stream rather than "
+  + "the shared gameplay one — the authentication timeout coin, the placement of an induced migration, and the maze's "
+  + "start/endpoint offsets. Upstream draws all three from Math.random(). The probabilities and distributions are "
+  + "upstream's exactly; what differs is the source, and it differs because how often a run authenticates, pushes or walks "
+  + "is a property of the STRATEGY — billing those draws to the gameplay stream would let a darknet policy perturb stock "
+  + "prices across an A/B, which is the same reason log noise already has its own stream",
+  "dnet.stasis: setStasisLink is modelled whole — it pins the CALLING host (it takes no hostname), respects "
+  + "getStasisLinkLimit() = 1 + TheBrokenWings + TheHammer + TheStaff read from INSTALLED augmentations with 453 when "
+  + "spent, excludes the host from every mutation branch's victim pool, and sets server.backdoorInstalled alongside the "
+  + "link exactly as effects.ts:233-234 does — so a pinned host IS remotely reachable, not because a link is a "
+  + "reachability primitive but because upstream installs a backdoor at the same moment, and releasing the link takes it "
+  + "away again. A pinned host is still filtered out of getBackdooredDarknetServers, so that backdoor costs no instability "
+  + "and cannot be drawn by the restart or delete branches. What is NOT modelled: the packet-noise leak pool still draws on "
+  + "isStationary rather than isImmutable, because upstream's own predicate there is unverified",
+  "dnet.backdoors: modelled end to end. singularity.installBackdoor on a darknet server is a flat 4 s with no hacking-skill "
+  + "and no root gate (calculateHackingTime returns 16 for a DarknetServer outright); getBackdoorAuthTimeDebuff's real "
+  + "1.07 ^ surplus over an allowance of max(rootedMovable / (NET_WIDTH * 3), 2) multiplies EVERY authentication through "
+  + "authTimeMs; getTimeoutChance's max(min((backdoored - 2) * 0.03, 0.5), 0) is rolled where upstream rolls it, after the "
+  + "delay and before the model is consulted, so a 408 is now reachable; and the two mutation branches that draw from the "
+  + "backdoored pool — a 10% restart and a 5% delete, both of which RETURN — are applied in upstream's order, with the "
+  + "restart clearing the backdoor as it clears the sessions. The terminal's own position pins a host against moves, as "
+  + "isImmutable's isConnectedTo term does",
+  "dnet.migration: induceServerMigration is modelled — the 6 s hardcoded wait, the refusal of the script's own host, the "
+  + "stationary throw, chargeServerMigration's ((cha + 500) / (difficulty * 200 + 1000)) * 0.01 * threads per call with its "
+  + "5 * threads * difficulty charisma xp, and the move at charge 1 into a band anchored on DIFFICULTY rather than depth "
+  + "([difficulty - 2, difficulty + 4]) — including the branch where getAllOpenPositions comes back empty and the host is "
+  + "DELETED rather than left floating. The accumulated charge is engine state no ns member exposes, so a script can only "
+  + "infer its progress from the depth changing, exactly as in the game",
+  "dnet.labyrinth: the maze is modelled. generateMaze's four stitched sub-mazes with their odd-rounding and their four "
+  + "punched gaps, the endpoint at [cols - 2, rows - 2] less a 0/2/4 offset on the last four labs, labLocations keyed by "
+  + "PID with the same offset at the start, getDirectionFromInput's word parsing, the radius-1 render with the player "
+  + "overlay and without the exit, and all four response branches — the 451 below the lab's charisma, the deliberate "
+  + "refusal of the lab's own password, the wall that leaves the position UNCHANGED, and the exit, which pays charisma at a "
+  + "fixed 32-thread equivalent, sets admin rights, drops the_great_work cache (three on BonusLab) and opens a session. "
+  + "Opening that cache queues the labyrinth augmentation rather than drawing from the reward table. The net DEEPENS at the "
+  + "install that follows rather than at the exit, because getNetDepth reads the current lab and the current lab is chosen "
+  + "by installed augmentations — which is upstream's behaviour, not a simplification. What differs: the maze carve takes "
+  + "an unbounded number of draws, so it runs on a generator derived from ONE world draw (same treatment as a host's "
+  + "password), and the start/endpoint offsets come off the dedicated stream (see dnet.playerDraws)",
   "dnet.cacheRewards: the draw is narrowed to money and the program/market unlocks, both exact; upstream also draws stock shares, clue files and (from phishing caches) coding contracts, so the MIX is narrower than upstream even though every reward given is faithful",
-  "dnet.cacheSources: caches are only created on request — memoryReallocation clearing a block, and phishingAttack, are not modelled",
+  "dnet.cacheSources: three of upstream's four sources are now modelled and exact. A first successful authenticate rolls its 0.1 * 1.05^difficulty cache; memoryReallocation frees getRamBlockRemoved's clamped, roundToTwo'd figure per call, decrements blockedRam AND ramUsed as the two separate writes upstream makes, pays 10 * 1.1^(difficulty+1) charisma xp a call and drops a .cache the moment the block reaches zero on a non-lab host; phishingAttack reproduces the whole handler in upstream's branch order and short-circuit order — the 3-minute NET-WIDE cooldown on DarknetState.lastPhishingCacheTime, both chance formulas, the money term with its depth factor and U(0.9,1.2), and the charisma xp INCLUDING the quarter rate on the failure path. What is not modelled: handleRamBlockClearedRewards' two side rolls, a 30% clue file and the STORM_SEED.exe drop, neither of which any subsystem here reads; hasDarknetBonusTime(), which is false by truth since the sim has no offline accrual; and the cooldown window starts OPEN at the beginning of a run rather than closed as upstream's construction-time stamp makes it — an install restamps it exactly as prestigeDarknetState does",
   "dnet.promoteStock: the charge curve, the 0.4x per-cycle decay, the wait time, the charisma XP and the prestige reset are transcribed exactly; the propaganda has no other modelled effect",
-  "dnet.prestige: an install clears the stock promotions, as upstream does; unlike upstream's prestigeDarknetState it does NOT regenerate the network or the labyrinth, so the map a run maps stays mapped across installs",
+  "dnet.prestige: an install clears the stock promotions and every stasis link, as upstream does; unlike upstream's prestigeDarknetState it does NOT regenerate the network or the labyrinth, so the map a run maps stays mapped across installs",
 ];
 
 /** `getDarknetVolatilityMult` — the propaganda curve `ns.dnet.promoteStock`
@@ -88,7 +161,10 @@ export function stockPromotionMult(charges: number): number {
 /** `promoteStock`'s netscriptDelay, floored at 200 ms however high charisma is.
  *  Source: src/NetscriptFunctions/Darknet.ts:590 */
 export function promoteStockWaitMs(charisma: number): number {
-  return Math.max(8000 * (600 / (600 + charisma)), 200);
+  // The one formula, from the one place a strategy also reads it: a second copy
+  // here is a place for the sim and the controller to disagree about how long a
+  // call takes, which is the divergence a simulator exists to prevent.
+  return promoteWaitMs(charisma);
 }
 
 /** Charges bought by one call. Source: src/NetscriptFunctions/Darknet.ts:597 */
@@ -99,6 +175,20 @@ export function promoteStockCharges(threads: number, charisma: number): number {
 /** Charisma experience the call grants. Source: src/NetscriptFunctions/Darknet.ts:600 */
 export function promoteStockCharismaExp(threads: number, charisma: number, charismaExpMult: number): number {
   return charismaExpMult * threads * 10 * ((200 + charisma) / 200);
+}
+
+/** `calculatePasswordAttemptChaGain`, as a free function so the labyrinth's
+ * fixed 32-thread grant and the ordinary per-attempt one cannot drift apart.
+ * `hasDarknetBonusTime()` is false by truth here: the sim has no offline
+ * accrual. */
+export function attemptCharismaExp(
+  difficulty: number,
+  rooted: boolean,
+  threads: number,
+  success: boolean,
+): number {
+  const base = 3 + 1.1 ** difficulty;
+  return base * (rooted ? 0.2 : 1) * (success && !rooted ? 10 : 1) * threads;
 }
 
 const SERVER_DENSITY = 0.6;
@@ -113,7 +203,7 @@ const MAX_LOG_LINES = 200;
 const LOW_LEVEL_SERVER_DENSITY = 0.7;
 /** Draws taken from the shared gameplay stream per mutation, whatever the tick
  * does. Fixed so two strategy variants advance that stream identically. */
-export const MUTATION_DRAWS = 28;
+export const MUTATION_DRAWS = 32;
 
 /** `labData`, in the order `getCurrentLabName` walks it.
  *
@@ -202,51 +292,6 @@ function modelPool(difficulty: number, fullAccess: boolean): readonly string[] {
   return [...tier3, ...TIER_4];
 }
 
-/** The dictionaries whose contents we know, keyed by the model that draws from
- * them. Shared with the game agents rather than duplicated: a sim that used a
- * different list would let a strategy pass here and fail in the game. */
-const DICTIONARIES: Record<string, readonly string[]> = {
-  ZeroLogon: [""],
-  "FreshInstall_1.0": DEFAULT_SETTINGS,
-  Laika4: DOG_NAMES,
-  "EuroZone Free": EU_COUNTRIES,
-  TopPass: COMMON_PASSWORDS,
-};
-
-/** Password hints, per model, in upstream's own words where we have them.
- * `DeskMemo_3.1` is the notable one: its hint literally contains the password,
- * which is why `models.ts` marks it readable from getServerDetails alone. */
-function passwordFor(modelId: string, difficulty: number, generate: () => number): {
-  password: string;
-  hint: string;
-  data: string;
-} {
-  const words = DICTIONARIES[modelId];
-  if (words) {
-    const password = words[Math.floor(generate() * words.length)]!;
-    return {
-      password,
-      hint: modelId === "ZeroLogon" ? "There is no password" : "I never changed the password",
-      data: "",
-    };
-  }
-  // Everything else gets a correctly-formatted password of the right shape. The
-  // FORMAT is faithful; the value is not guessable, which matches the fact that
-  // we have not written those solvers.
-  const length = Math.max(2, Math.min(2 + Math.floor(difficulty / 4), 8));
-  let password = "";
-  for (let i = 0; i < length; i++) password += String(Math.floor(generate() * 10));
-  if (modelId === "DeskMemo_3.1") {
-    // The echo vulnerability: upstream really does put the password in the hint.
-    return { password, hint: `The password is ${password}`, data: "" };
-  }
-  if (modelId === "PHP 5.4") {
-    const sorted = password.split("").sort().join("");
-    return { password, hint: `I accidentally sorted the password: ${sorted}`, data: sorted };
-  }
-  return { password, hint: "You should remember this one", data: "" };
-}
-
 /** DarknetServerOptions.ts:206-211. */
 function rollMaxRam(difficulty: number, random: () => number): number {
   const baseRam = 16 * 2 ** Math.floor(difficulty / 6);
@@ -279,22 +324,52 @@ function subDraw(draw: number, salt: number): number {
   return (x >>> 0) / 0x1_0000_0000;
 }
 
+/** A log line, parsed back out of the ring. The ring holds strings because
+ * that is what `heartbleed` hands a script; noise lines are prose and are not
+ * JSON, so a parse failure is expected and means "not an auth entry". */
+function parseLogLine(line: string): Record<string, unknown> | undefined {
+  if (!line.startsWith("{")) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(line);
+    return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The heartbeat line's clock. Upstream renders it with `toLocaleTimeString()`,
+ * which depends on the host machine's locale and would make a run
+ * irreproducible across developers; this is the same shape over virtual time,
+ * in UTC. Declared in DNET_ASSUMPTIONS. */
+function utcClock(atMs: number): string {
+  const total = Math.max(0, Math.floor(atMs / 1000));
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${pad(Math.floor(total / 3600) % 24)}:${pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}`;
+}
+
 export interface DarknetHost {
   hostname: string;
   modelId: string;
-  /** The real password. Generated at populate() from the WORLD stream, never
-   *  the gameplay one, so a strategy A/B faces the same net.
+  /** The real password, minted by upstream's own generator for this model.
    *
-   *  Faithful for the five dictionary models, whose lists are transcribed. For
-   *  the other nineteen it is a correctly-formatted string the sim will not let
-   *  a script guess — which is honest rather than convenient: those models are
-   *  unsolved in `shared/strategy/dnet/models.ts` too, so a sim that let them
-   *  fall would measure a strategy we do not have. */
+   *  Generated from the WORLD stream, never the gameplay one, so a strategy A/B
+   *  faces the same net — and from exactly ONE draw off it, because three of
+   *  upstream's generators are unbounded rejection loops. That draw is kept in
+   *  `secretDraw`, so a test holding `(draw, hostname)` can re-derive the whole
+   *  secret without replaying the net. */
   password: string;
   passwordHint: string;
   data: string;
+  /** The length of the GENERATED password, not the length its builder asked
+   *  for: `getPassword` runs numeric passwords through `Number().toString()`,
+   *  which can hand back a shorter string than the loop produced. */
   passwordLength: number;
-  passwordFormat: "numeric" | "alphabetic" | "alphanumeric" | "ASCII" | "unicode";
+  /** `getPasswordType(password)` — derived, never assumed. Several models draw
+   *  letters above difficulty 8, and a hardcoded "numeric" is a lie a solver
+   *  would act on. */
+  passwordFormat: PasswordFormat;
+  /** The single world-stream draw this host's secret was derived from. */
+  secretDraw: number;
   logTrafficInterval: number;
   blockedRam: number;
   difficulty: number;
@@ -310,6 +385,12 @@ export interface DarknetHost {
   leftOffset: number;
   requiredCharismaSkill: number;
   isStationary: boolean;
+  /** A stasis link pins this host: it cannot move, go offline or be deleted.
+   *
+   *  Upstream keeps the set on `DarknetState`; here it is a per-host flag
+   *  because every read is "is this one pinned" and the list is derived. It is
+   *  the second half of `isImmutable`, whose first half is `isStationary`. */
+  stasisLinked: boolean;
   online: boolean;
   /** PIDs holding a session, mirroring upstream's `authenticatedPIDs`.
    *
@@ -460,8 +541,23 @@ export class DarknetSystem {
    *  Upstream's `prestigeDarknetState` also drops the network, the labyrinth and
    *  the per-server state. This does not, and that predates the promotions —
    *  see the `dnet.prestige` entry in `DNET_ASSUMPTIONS`. */
-  prestige(): void {
+  prestige(nowMs?: number): void {
     this.#stockPromotions.clear();
+    // `prestigeDarknetState` drops `labyrinth`, `labEndpoint` and
+    // `labLocations` outright, so a walk that did not finish inside an install
+    // is not merely interrupted — the maze it was walking no longer exists.
+    this.#labMaze = undefined;
+    this.#labEndpoint = undefined;
+    this.#labLocations.clear();
+    this.#migrationCharge.clear();
+    // Stasis links are engine state on `DarknetState` and go with it. They are
+    // also worth nothing across an install: the link pins a host against a
+    // mutation clock that a prestige resets anyway.
+    for (const host of this.hosts.values()) host.stasisLinked = false;
+    // `prestigeDarknetState` restamps `lastPhishingCacheTime`, so an install
+    // starts with the phishing cache window SHUT. Modelled because it is a real
+    // three-minute hole at exactly the moment a run has the most residents.
+    if (nowMs !== undefined) this.#lastPhishingCacheMs = nowMs;
   }
 
   /** populateDarknet(). Idempotent, as upstream's guard makes it.
@@ -508,17 +604,21 @@ export class DarknetSystem {
     const blockedRam = rollBlockedRam(maxRam, generate);
     const pool = modelPool(difficulty, this.#opts.fullAccess());
     const model = pool[Math.floor(generate() * pool.length)]!;
-    const secret = passwordFor(model, difficulty, generate);
+    // EXACTLY ONE draw for the whole secret. `getXorMaskEncryptedPasswordConfig`,
+    // `getPasswordMadeUpOfPrimesProduct` and `generateSimpleArithmeticExpression`
+    // are unbounded rejection loops upstream, so generating from the shared
+    // stream would make a host's cost depend on how unlucky its password was.
+    const secretDraw = generate();
+    const secret = generateSecret(model, difficulty, passwordRng(secretDraw, hostname));
     this.hosts.set(hostname, {
       hostname,
       modelId: model,
       password: secret.password,
       passwordHint: secret.hint,
       data: secret.data,
-      // DERIVED from the password rather than invented, which is what makes a
-      // dictionary attack's length check agree with the answer.
-      passwordLength: secret.password.length,
-      passwordFormat: "numeric",
+      passwordLength: secret.passwordLength,
+      passwordFormat: secret.passwordFormat,
+      secretDraw,
       // DarknetServerOptions.ts:87.
       logTrafficInterval: 1 + 30 * 0.9 ** difficulty,
       blockedRam,
@@ -529,6 +629,7 @@ export class DarknetSystem {
       // depthScaling for depth < 2, per DarknetServerOptions.ts:70.
       requiredCharismaSkill: Math.max(1, depth * 10),
       isStationary: false,
+      stasisLinked: false,
       online: true,
       sessions: new Set<number>(),
       logs: [],
@@ -569,6 +670,7 @@ export class DarknetSystem {
       data: "",
       passwordLength: 0,
       passwordFormat: "ASCII",
+      secretDraw: 0,
       // Number.MAX_SAFE_INTEGER upstream: a lab never adds log traffic.
       logTrafficInterval: Number.MAX_SAFE_INTEGER,
       blockedRam: 0,
@@ -577,6 +679,7 @@ export class DarknetSystem {
       leftOffset: -1,
       requiredCharismaSkill: lab.cha,
       isStationary: true,
+      stasisLinked: false,
       online: true,
       sessions: new Set<number>(),
       logs: [],
@@ -619,6 +722,7 @@ export class DarknetSystem {
         data: "",
         passwordLength: 0,
         passwordFormat: "numeric",
+        secretDraw: 0,
         logTrafficInterval: 1 + 30,
         blockedRam: 0,
         difficulty: 0,
@@ -626,6 +730,7 @@ export class DarknetSystem {
         leftOffset: -1,
         requiredCharismaSkill: 1,
         isStationary: true,
+        stasisLinked: false,
         online: true,
         sessions: new Set<number>(),
         logs: [],
@@ -634,23 +739,170 @@ export class DarknetSystem {
     return this.#darkweb;
   }
 
-  /** getStasisLinkLimit(): 1 + the three labyrinth augmentations, none of which
-   * is reachable without full access, so it is 1 here. */
+  /** `getStasisLinkLimit()`: `1 + TheBrokenWings + TheHammer + TheStaff`.
+   *
+   * Read from INSTALLED augmentations, exactly as upstream's `hasAugmentation`
+   * does, so a labyrinth reward sitting in the queue does not widen the limit
+   * before the install that grants it. This is the loop the whole deep half of
+   * the feature turns on: walking a lab buys stasis capacity, and stasis
+   * capacity is what protects the next walker. */
   stasisLinkLimit(): number {
-    return 1;
+    const installed = this.#opts.installedAugmentations();
+    return 1
+      + (installed.has(LAB_AUGMENTATIONS[0]) ? 1 : 0)
+      + (installed.has(LAB_AUGMENTATIONS[2]) ? 1 : 0)
+      + (installed.has(LAB_AUGMENTATIONS[3]) ? 1 : 0);
   }
 
-  /** Exactly neutral rather than fabricated: instability is 1.07^surplus over
-   * backdoored darknet servers, and a darknet backdoor is not modelled, so the
-   * surplus is genuinely zero. It reports itself the moment that stops being
-   * true. */
+  /** `getBackdooredDarknetServers()`: movable, unpinned, and backdoored.
+   *
+   * The double exclusion is what makes stasis-plus-backdoor free. A pinned host
+   * is outside `getAllMovableDarknetServers` already, and this filters
+   * `!hasStasisLink` again on top — so its backdoor contributes to neither the
+   * instability surplus nor the timeout chance, and it cannot be drawn by the
+   * two mutation branches that pick their victim from this pool. */
+  #backdoored(): DarknetHost[] {
+    return this.#movable()
+      .map((name) => this.hosts.get(name)!)
+      .filter((host) => !host.stasisLinked && this.#opts.servers.get(host.hostname)?.backdoorInstalled === true);
+  }
+
+  /** `getBackdoorAuthTimeDebuff` and `getTimeoutChance`, both measured rather
+   * than assumed.
+   *
+   * The allowance is `max(rootedMovable / (NET_WIDTH * 3), 2)`, so TWO backdoors
+   * are always free and the allowance grows as the net is rooted. Past it every
+   * authentication in the run — not just one against the backdoored host —
+   * costs `1.07 ^ surplus`, which is what makes a backdoor a decision rather
+   * than a freebie.
+   *
+   * The timeout chance is a different curve off the same count and starts at
+   * the SECOND backdoor: `max(min((backdoored - 2) * 0.03, 0.5), 0)`. It is the
+   * only way a 408 can ever be produced, which is why the `dnet.authTimeout`
+   * assumption said the sim could not produce one until this existed.
+   * Source: src/DarkNet/effects/effects.ts:91-97,
+   *   src/DarkNet/effects/offlineServerHandling.ts:151-154 */
   instability(): { authenticationDurationMultiplier: number; authenticationTimeoutChance: number } {
-    return { authenticationDurationMultiplier: 1, authenticationTimeoutChance: 0 };
+    const backdoored = this.#backdoored().length;
+    const rooted = this.#movable()
+      .filter((name) => this.#opts.servers.get(name)?.hasAdminRights === true).length;
+    const safe = Math.max(rooted / (NET_WIDTH * 3), 2);
+    const surplus = Math.max(0, backdoored - safe);
+    return {
+      authenticationDurationMultiplier: 1.07 ** surplus,
+      authenticationTimeoutChance: Math.max(Math.min((backdoored - 2) * 0.03, 0.5), 0),
+    };
   }
 
-  /** Likewise: [] is the true answer while setStasisLink is unmodelled. */
   stasisLinkedServers(): string[] {
-    return [];
+    return [...this.hosts.values()]
+      .filter((host) => host.stasisLinked)
+      .map((host) => host.hostname)
+      .sort();
+  }
+
+  /** `setStasisLink(shouldLink)`, which takes NO host: it pins the calling
+   * script's own server. That is the whole reason spending a link needs a job
+   * standing on the host being pinned, and why home can never spend one itself.
+   *
+   * Returns the response code rather than a result object; the ns wrapper above
+   * shapes it. Source: src/NetscriptFunctions/Darknet.ts:337-374 */
+  setStasisLink(hostname: string, shouldLink: boolean): number {
+    const host = this.hosts.get(hostname);
+    // Not a darknet server at all: the caller is standing somewhere ordinary.
+    if (!host) return 503;
+    // THE SIDE EFFECT NOBODY EXPECTS, and it is in the engine rather than in a
+    // doc comment: `setStasisLink` writes `server.backdoorInstalled = shouldLink`
+    // alongside the link (`effects.ts:233-234`). So pinning a host DOES give it
+    // remote `exec` — not because a link is a reachability primitive, but
+    // because upstream installs a backdoor at the same moment — and RELEASING a
+    // link takes the backdoor away with it. The pinned host is still excluded
+    // from `getBackdooredDarknetServers`, so the backdoor is free of both the
+    // instability surplus and the two mutation branches.
+    const server = this.#opts.servers.get(hostname);
+    if (!shouldLink) {
+      host.stasisLinked = false;
+      if (server) server.backdoorInstalled = false;
+      return 200;
+    }
+    if (host.stasisLinked) return 200;
+    // The limit is GLOBAL, which is what makes a link scarce enough to rank
+    // candidates for at all.
+    if (this.stasisLinkedServers().length >= this.stasisLinkLimit()) return 453;
+    host.stasisLinked = true;
+    if (server) server.backdoorInstalled = true;
+    return 200;
+  }
+
+  // --- induced migration ----------------------------------------------------
+
+  /** `DarknetState.migrationInductionServers`: accumulated charge per host.
+   *
+   *  Engine state that NO ns member reads back, which is the fact that shapes
+   *  the strategy: a script can only ever infer its progress from the host's
+   *  depth changing. */
+  readonly #migrationCharge = new Map<string, number>();
+
+  /** Whether THIS authentication times out, from the instability curve.
+   *
+   * Drawn off the NOISE stream rather than the gameplay one. The number of
+   * authentications a run makes is a property of the strategy, so billing these
+   * draws to the shared stream would let a cracking policy perturb stock prices
+   * across an A/B — the same reason log noise has its own stream. The
+   * probability is upstream's exactly; only the source of the coin differs, and
+   * it is declared in `DNET_ASSUMPTIONS`. */
+  timesOut(): boolean {
+    const chance = this.instability().authenticationTimeoutChance;
+    if (chance <= 0) return false;
+    return (this.#opts.logNoise ?? this.#opts.generate)() < chance;
+  }
+
+  migrationCharge(hostname: string): number {
+    return this.#migrationCharge.get(hostname) ?? 0;
+  }
+
+  /** `chargeServerMigration`, and the move it fires at 1.
+   *
+   * Two things here are easy to get wrong and both change the strategy:
+   *
+   * - The charge is `((cha + 500) / (difficulty * 200 + 1000)) * 0.01 * threads`,
+   *   so it is anchored on DIFFICULTY rather than depth and a deep-difficulty
+   *   host charges far more slowly than a shallow one.
+   * - The move is `moveDarknetServer(server, 2, 4)` whose `startingDepth`
+   *   defaults to `server.difficulty` — NOT its current depth. So a host is
+   *   re-rolled inside `[difficulty - 2, difficulty + 4]` however many times it
+   *   has already been pushed, and no quantity of charge walks a shallow host
+   *   to the bottom row.
+   * Source: src/DarkNet/effects/effects.ts:245-262,
+   *   src/DarkNet/controllers/NetworkMovement.ts:230-260 */
+  chargeMigration(
+    hostname: string,
+    threads: number,
+    charisma: number,
+  ): { chargeIncrease: number; newCharge: number; charismaExp: number; moved: boolean; deleted: boolean } {
+    // The placement draws come off the DEDICATED stream, not the gameplay one.
+    // How often a migration is charged is a property of the strategy, so taking
+    // these from the shared stream would let a darknet policy perturb stock
+    // prices across an A/B — the same reason log noise has its own. Declared in
+    // DNET_ASSUMPTIONS.
+    const draw = this.#opts.logNoise ?? this.#opts.generate;
+    const host = this.hosts.get(hostname);
+    if (!host) return { chargeIncrease: 0, newCharge: 0, charismaExp: 0, moved: false, deleted: false };
+    const chargeIncrease = ((charisma + 500) / (host.difficulty * 200 + 1000)) * 0.01 * threads;
+    const charismaExp = 5 * threads * host.difficulty;
+    const newCharge = Math.min(this.migrationCharge(hostname) + chargeIncrease, 1);
+    this.#migrationCharge.set(hostname, newCharge);
+    if (newCharge < 1) return { chargeIncrease, newCharge, charismaExp, moved: false, deleted: false };
+    const before = host.depth;
+    const deleted = !this.#moveWithin(hostname, host.difficulty - 2, host.difficulty + 4, draw(), draw());
+    this.#migrationCharge.set(hostname, 0);
+    return {
+      chargeIncrease,
+      newCharge,
+      charismaExp,
+      moved: !deleted && this.hosts.get(hostname)!.depth !== before,
+      deleted,
+    };
   }
 
   // --- cache files --------------------------------------------------------
@@ -661,9 +913,13 @@ export class DarknetSystem {
 
   /** `addCacheToServer`. A phishing cache is `.d.cache`, and only those can
    * award coding contracts. Duplicate names are refused, as upstream does. */
-  addCache(hostname: string, fromPhishing: boolean): string | undefined {
+  addCache(hostname: string, fromPhishing: boolean, prefix?: string): string | undefined {
     const suffix = fromPhishing ? ".d.cache" : ".cache";
-    const name = `cache_${Math.floor(this.#opts.generate() * 900 + 100)}${suffix}`;
+    // The PREFIX is load-bearing for exactly one cache: `openCache` routes a
+    // labyrinth cache to `getLabReward` by testing that the filename contains
+    // `the_great_work` (`cacheFiles.ts:39`), and a lab cache named anything else
+    // would silently pay out money instead of an augmentation.
+    const name = `${prefix ?? "cache"}_${Math.floor(this.#opts.generate() * 900 + 100)}${suffix}`;
     const held = this.caches.get(hostname) ?? [];
     if (held.includes(name)) return undefined;
     held.push(name);
@@ -673,6 +929,134 @@ export class DarknetSystem {
 
   cachesOn(hostname: string): readonly string[] {
     return this.caches.get(hostname) ?? [];
+  }
+
+  // --- memoryReallocation ---------------------------------------------------
+
+  /** `handleRamBlockRemoved`, and the two writes are separate ON PURPOSE.
+   *
+   * Upstream does `server.blockedRam = roundToTwo(blockedRam - removed)` and
+   * then `server.updateRamUsed(server.ramUsed - removed)` — two fields, one
+   * figure. Collapsing them would hide the invariant the whole feature leans on:
+   * blocked RAM presents AS used RAM, so a script only ever sees the block
+   * through `getServerUsedRam`, and a model that moved one without the other
+   * would have `freeRam` disagree with what `exec` would actually accept.
+   *
+   * Clearing the block to zero drops a `.cache` on a non-labyrinth host, with no
+   * roll at all. The two side rolls upstream also makes here — a 30% clue file
+   * and the storm seed — are declared in DNET_ASSUMPTIONS rather than invented.
+   * Source: src/DarkNet/effects/ramblock.ts:22-66 */
+  reallocateRam(
+    hostname: string,
+    threads: number,
+    charisma: number,
+  ): { freed: number; blockedRam: number; cleared: boolean; charismaExp: number } | undefined {
+    const host = this.record(hostname);
+    if (!host) return undefined;
+    const freed = ramBlockRemoved(host.difficulty, host.blockedRam, threads, charisma);
+    host.blockedRam = roundToTwo(host.blockedRam - freed);
+    const server = this.#opts.servers.get(hostname);
+    if (server) server.ramUsed = Math.max(0, roundToTwo(server.ramUsed - freed));
+    let cleared = false;
+    if (host.blockedRam <= 0) {
+      cleared = true;
+      if (!isLabyrinth(hostname, host.modelId)) this.addCache(hostname, false);
+    }
+    return {
+      freed,
+      blockedRam: host.blockedRam,
+      cleared,
+      charismaExp: reclaimCharismaExp(host.difficulty, threads),
+    };
+  }
+
+  // --- phishingAttack -------------------------------------------------------
+
+  /** When a `.d.cache` last landed. NET-WIDE, on `DarknetState` and not on any
+   *  server, which is the whole reason phishing is a trickle: twenty caches an
+   *  hour however many hosts are phishing. */
+  #lastPhishingCacheMs: number | undefined;
+
+  /** `phishingCacheCooldownReached`. Source: src/DarkNet/effects/phishing.ts:70 */
+  phishCooldownReached(nowMs: number): boolean {
+    if (this.#lastPhishingCacheMs === undefined) return true;
+    return nowMs - this.#lastPhishingCacheMs > PHISH_CACHE_COOLDOWN_MS;
+  }
+
+  /** `handlePhishingAttack`, in upstream's branch order and with its
+   * short-circuits intact.
+   *
+   * The order is load-bearing twice over. The cache branch is an `if` and the
+   * money branch its `else if`, so claiming a cache FORECLOSES that call's money
+   * roll — and while the cooldown is unexpired every call falls straight through
+   * to money. And `cooldownReached() && random() < chance` short-circuits, so a
+   * call made inside the cooldown takes ONE draw rather than two.
+   *
+   * The charisma experience is returned rather than applied, because
+   * `Player.mults.charisma_exp` and `gainCharismaExp` live on the ns side.
+   * Source: src/DarkNet/effects/phishing.ts:14-73 */
+  phish(
+    hostname: string,
+    threads: number,
+    charisma: number,
+    nowMs: number,
+  ): { success: boolean; code: number; message: string; charismaExp: number } {
+    const host = this.record(hostname);
+    const person = this.#opts.world.person;
+    const mults = person.mults as unknown as Record<string, number>;
+    const crimeSuccess = mults["crime_success"] ?? 1;
+    const xpReward = phishCharismaExp(threads);
+    const cacheChance = phishCacheChance(threads, charisma, crimeSuccess);
+    const moneyChance = phishMoneyChance(charisma, crimeSuccess);
+    const isLab = host !== undefined && isLabyrinth(hostname, host.modelId);
+    const random = this.#opts.random;
+
+    if (this.phishCooldownReached(nowMs) && random() < cacheChance && !isLab) {
+      this.addCache(hostname, true);
+      this.#lastPhishingCacheMs = nowMs;
+      return {
+        success: true,
+        code: 200,
+        message: "Phishing attack succeeded! Found a cache file. (Gained cha xp)",
+        charismaExp: xpReward,
+      };
+    }
+    if (random() < moneyChance) {
+      // U(0.9, 1.2) — drawn here rather than folded into a mean, because the
+      // spread is what a strategy measuring phishing income actually sees.
+      const randomFactor = random() * 0.3 + 0.9;
+      // `hasDarknetBonusTime()` is offline accrual, which this world does not
+      // have. False by truth rather than by stub.
+      const depthFactor = 0.1 + (host?.depth ?? 0) * 0.05;
+      const reward = 500
+        * (mults["crime_money"] ?? 1)
+        // The second of the two places dnet_money is read at all, and the
+        // reason five of the six labyrinth augmentations raise it.
+        * (mults["dnet_money"] ?? 1)
+        * depthFactor
+        * threads
+        * ((400 + charisma) / 400)
+        * randomFactor
+        * this.#opts.darknetMoneyMultiplier();
+      this.#opts.player.money += reward;
+      // Upstream attributes this to a `darknet` source the ns MoneySource
+      // interface does not expose, so "other" is the closest key there is.
+      this.#opts.world.recordMoney("other", reward);
+      return {
+        success: true,
+        code: 200,
+        message: `Phishing attack succeeded! $${reward} retrieved. (Gained cha xp)`,
+        charismaExp: xpReward,
+      };
+    }
+    // Every call pays, and this is the quarter rate that makes phishing the
+    // reliable charisma source rather than the lottery it looks like.
+    return {
+      success: false,
+      code: 455,
+      message: "There were no takers on that phishing attempt. (Gained cha xp)",
+      charismaExp: xpReward / 4,
+    };
   }
 
   /** `getRewardFromCache`. Karma is spent whatever the reward turns out to be,
@@ -688,11 +1072,37 @@ export class DarknetSystem {
     const record = this.record(hostname);
     const held = this.caches.get(hostname) ?? [];
     if (!record || !held.includes(filename)) {
-      return { success: false, message: `${filename} does not exist on ${hostname}`, karmaLoss: 0 };
+      // Upstream THROWS here rather than refusing — `helpers.errorMessage` on
+      // both the bad-path and the not-found branches
+      // (`NetscriptFunctions/Darknet.ts:292-303`). That is a materially
+      // different failure from a refusal, because a throw kills the calling
+      // script: a job that opened a cache off a stale listing would cost its
+      // host the resident standing on it. Refusing quietly would have hidden
+      // exactly the bug the guard in `game/dnet/jobs.ts` exists to prevent.
+      throw new Error(`Cache file not found: ${filename} on server ${hostname}`);
     }
     this.caches.set(hostname, held.filter((name) => name !== filename));
     const karmaLoss = record.difficulty + 1;
     this.#opts.player.karma -= karmaLoss;
+
+    // THE LABYRINTH CACHE, which is a different thing wearing the same suffix.
+    // It queues an augmentation directly rather than drawing from the reward
+    // table — and the generic augmentation price multiplier is
+    // `1.9 ^ (queued non-SoA)`, charged against every purchase made after it,
+    // which is why home defers opening one until its shopping is done.
+    if (isLabyrinth(hostname, record.modelId) && filename.includes("the_great_work")) {
+      const reward = this.labReward() ?? NEUROFLUX;
+      const named = this.#opts.installedAugmentations().has(reward) ? NEUROFLUX : reward;
+      this.#opts.player.queuedAugmentations.set(
+        named,
+        (this.#opts.player.queuedAugmentations.get(named) ?? 0) + 1,
+      );
+      return {
+        success: true,
+        message: `You have discovered a cache with the augmentation ${named}!`,
+        karmaLoss: -karmaLoss,
+      };
+    }
 
     // Upstream draws uniformly from five kinds (six on a phishing cache). Three
     // of them need a subsystem this does not model — stock shares, clue files,
@@ -822,17 +1232,18 @@ export class DarknetSystem {
    * exactly, with no timer — the whole model is a function of "how long since
    * anyone looked".
    *
-   * The mix is narrower than upstream's: the branches transcribed are the ones
-   * that LEAK, plus the heartbeat everything else falls through to. That is
-   * declared in DNET_ASSUMPTIONS. Every line emitted is faithful; what is
-   * missing is some of the noise between them.
-   * Source: src/DarkNet/models/packetSniffing.ts:128-192 */
+   * The back-fill's ORDER is upstream's and looks wrong: the ring is
+   * newest-first, but the catch-up array is built oldest-first and prepended
+   * whole, so a burst of back-filled lines reads backwards relative to the
+   * lines around it. Kept, because a script that timestamps by position would
+   * be misled in the game in exactly the same way.
+   * Source: src/DarkNet/models/packetSniffing.ts:128-158 */
   populateLogs(hostname: string, nowMs: number): void {
     const host = this.record(hostname);
     if (!host || host.logTrafficInterval === Number.MAX_SAFE_INTEGER) return;
     const intervalMs = host.logTrafficInterval * 1000;
     if (host.lastLogMs === undefined) {
-      host.logs = [this.#logNoise(host), this.#logNoise(host)];
+      host.logs = [this.#logNoise(host, nowMs - intervalMs), this.#logNoise(host, nowMs - intervalMs * 2)];
       host.lastLogMs = nowMs;
       return;
     }
@@ -841,33 +1252,85 @@ export class DarknetSystem {
     // Bounded: a run that ignores a host for an hour must not build a thousand
     // lines to throw away, and the ring only holds MAX_LOG_LINES anyway.
     const lines = Math.min(missing, MAX_LOG_LINES);
-    for (let i = 0; i < lines; i++) host.logs.unshift(this.#logNoise(host));
-    host.logs = host.logs.slice(0, MAX_LOG_LINES);
+    const noise: string[] = [];
+    for (let i = 0; i < lines; i++) noise.push(this.#logNoise(host, host.lastLogMs + intervalMs * (i + 1)));
+    host.logs = [...noise, ...host.logs].slice(0, MAX_LOG_LINES);
     host.lastLogMs = host.lastLogMs + missing * intervalMs;
   }
 
-  /** One line of noise.
+  /** Everything `capturePackets` and the noise generator need to reach outside
+   * one host: the movable pool, the net's hostnames and this host's own most
+   * recent authentication attempt.
    *
-   * Drawn from a DEDICATED stream, not the shared gameplay one. The number of
-   * draws here depends on how long a script waited before bleeding, so using
+   * The stream is the DEDICATED noise one, not the shared gameplay stream.
+   * `getRandomData` loops until it has 124-144 characters and each iteration
+   * takes an unbounded number of draws, so billing it to `random` would let how
+   * often a script bleeds — or fails an authenticate against a packet sniffer —
+   * perturb stock prices across an A/B. */
+  #packetWorld(host: DarknetHost): PacketWorld {
+    return {
+      rand: this.#opts.logNoise ?? this.#opts.generate,
+      movablePasswords: () => [...this.hosts.values()]
+        .filter((entry) => entry.online && !entry.isStationary)
+        .map((entry) => entry.password),
+      serverNames: () => [...this.hosts.keys()],
+      lastAttempted: () => {
+        for (const line of host.logs) {
+          const parsed = parseLogLine(line);
+          if (parsed && typeof parsed["passwordAttempted"] === "string") return parsed["passwordAttempted"];
+        }
+        return null;
+      },
+    };
+  }
+
+  /** `getLogNoise`, every branch.
+   *
+   * Each `if` is an INDEPENDENT roll upstream rather than a weighted choice, so
+   * the later branches only fire when the earlier ones miss — which is why the
+   * heartbeat dominates on a high-difficulty host and the password leaks
+   * dominate on a shallow one. That shape is the whole reason bleeding a
+   * shallow neighbour is worth doing.
+   *
+   * Drawn from a DEDICATED stream, not the shared gameplay one: the number of
+   * draws depends on how long a script waited before bleeding, so using
    * `random` would let log volume perturb stock prices across an A/B — the same
-   * fixed-width-draw hazard `#mutate` already guards against. */
-  #logNoise(host: DarknetHost): string {
+   * fixed-width-draw hazard `#mutate` guards against.
+   * Source: src/DarkNet/models/packetSniffing.ts:160-215 */
+  #logNoise(host: DarknetHost, atMs: number): string {
     const draw = this.#opts.logNoise ?? this.#opts.generate;
     const neighbours = (this.#opts.network.get(host.hostname) ?? [])
       .filter((name) => this.hosts.has(name) || name === "darkweb");
+    const pickNeighbour = (): string | undefined => neighbours[Math.floor(draw() * neighbours.length)];
 
+    if (draw() < 0.2) {
+      return PACKET_SNIFF_PHRASES[Math.floor(draw() * PACKET_SNIFF_PHRASES.length)]!;
+    }
     // The leak that matters most: a NEIGHBOUR's password, in cleartext. The
     // chance falls with difficulty, exactly as upstream's does.
-    if (draw() < 0.05 * (1 / (host.difficulty + 1)) && neighbours.length > 0) {
-      const pick = neighbours[Math.floor(draw() * neighbours.length)]!;
-      const other = this.record(pick);
+    if (draw() < 0.05 * (1 / (host.difficulty + 1))) {
+      const pick = pickNeighbour();
+      const other = pick === undefined ? undefined : this.record(pick);
       if (other) return `Connecting to ${pick}:${other.password} ...`;
     }
-    // The packet sniffer leaks its OWN password, and often.
-    if (host.modelId === "OpenWebAccessPoint" && draw() < 0.7 - host.difficulty * 0.01) {
-      return `Logging in with passcode: ${host.password} ...`;
+    // A topology edge, free.
+    if (draw() < 0.05) {
+      const pick = pickNeighbour();
+      if (pick !== undefined) return `[sending transaction details to ${pick}.]`;
     }
+    // Which characters of the last attempt were in the right place.
+    if (draw() < 0.1) {
+      const last = this.#packetWorld(host).lastAttempted();
+      if (last !== null) {
+        const placement = getExactCorrectChars(host.password, last);
+        const rightChars = host.password.split("").filter((c, i) => placement[i]).slice(0, 2);
+        return rightChars.length === 0
+          ? "No characters are in the right place."
+          : `The characters ${rightChars.join(", ")} are in the right place. `;
+      }
+    }
+    // Two characters of this host's own password.
+    if (draw() < 0.1) return getRandomCharsInPassword(host.password, draw);
     // A stranger's password, unattributed.
     if (draw() < 0.05) {
       const movable = [...this.hosts.values()].filter((entry) => entry.online && !entry.isStationary);
@@ -875,17 +1338,21 @@ export class DarknetSystem {
         return `--${movable[Math.floor(draw() * movable.length)]!.password}--`;
       }
     }
-    // Two characters of this host's own password.
-    if (draw() < 0.1 && host.password.length > 0) {
-      const a = host.password[Math.floor(draw() * host.password.length)]!;
-      const b = host.password[Math.floor(draw() * host.password.length)]!;
-      return `There's definitely a ${a} and a ${b}...`;
+    // `addPacketSnifferNoise`: the model that leaks its own password, and often.
+    if (host.modelId === "OpenWebAccessPoint" && draw() < 0.7 - host.difficulty * 0.01) {
+      if (draw() < 0.3 || neighbours.length === 0) {
+        return `Logging in with passcode: ${host.password} ...`;
+      }
+      const pick = pickNeighbour();
+      const other = pick === undefined ? undefined : this.record(pick);
+      if (other) return `Connecting to ${other.hostname}:${other.password} ...`;
+      return `Logging in with passcode: ${host.password} ...`;
     }
-    // A topology edge, free.
-    if (draw() < 0.05 && neighbours.length > 0) {
-      return `[sending transaction details to ${neighbours[Math.floor(draw() * neighbours.length)]!}.]`;
-    }
-    return `00:00:00: ${host.hostname} - heartbeat check (alive)`;
+    // Upstream renders the log's date with `toLocaleTimeString()`, which is
+    // locale-dependent and therefore not reproducible across machines. A UTC
+    // wall clock over the virtual time is the same SHAPE and is deterministic;
+    // declared in DNET_ASSUMPTIONS.
+    return `${utcClock(atMs)}: ${host.hostname} - heartbeat check (alive)`;
   }
 
   /** heartbleed's read. `peek` leaves the lines in place. */
@@ -901,13 +1368,17 @@ export class DarknetSystem {
   /** Write an authentication attempt into the ring, as `logPasswordAttempt`
    * does. This is the ONLY way a model's response reaches a script: upstream's
    * `authenticate()` returns a generic failure for everything but the labyrinth.
+   *
+   * `Pr0verFl0` is the exception that has to be modelled, not glossed: its entry
+   * REWRITES `passwordAttempted` to the received half of the overflowed buffer,
+   * so a solver that matches captures against the string it sent loses that
+   * model's oracle entirely. `logEntryFor` carries that branch.
    * Source: src/DarkNet/models/packetSniffing.ts:90-125 */
   logAttempt(
     hostname: string,
     attempted: string,
     code: number,
-    message: string,
-    data: string | undefined,
+    response: { ok: boolean; message: string; data: string },
     nowMs: number,
   ): void {
     const host = this.record(hostname);
@@ -918,57 +1389,241 @@ export class DarknetSystem {
     // on the very first attempt against every host, which is the only one that
     // matters for a model we have never seen.
     this.populateLogs(hostname, nowMs);
-    const entry: Record<string, unknown> = { code, message, passwordAttempted: attempted };
-    if (data !== undefined) entry["data"] = data;
+    const entry = logEntryFor(host.modelId, attempted, code, response);
     host.logs = [JSON.stringify(entry), ...host.logs].slice(0, MAX_LOG_LINES);
+  }
+
+  // --- the labyrinth --------------------------------------------------------
+
+  /** The maze itself, `DarknetState.labyrinth`. Built once, lazily, exactly as
+   *  `getLabMaze` does — and destroyed by a prestige, which is what makes a
+   *  walk something that has to finish inside one install. */
+  #labMaze: string[] | undefined;
+  #labEndpoint: [number, number] | undefined;
+  /** `DarknetState.labLocations`, keyed by PID.
+   *
+   *  THE fact that shapes the walker. A position belongs to a process, not to
+   *  the player: when the process dies the entry is orphaned and the next one
+   *  starts from the beginning. Nothing in the engine lets a second process
+   *  adopt the first one's progress. */
+  readonly #labLocations = new Map<number, [number, number]>();
+
+  /** `getRandomOffset`: 0, 2 or 4 on each axis, and only on the last four labs.
+   *
+   * It is drawn ONCE per call upstream and used for both the start and the
+   * endpoint — the same function, called twice, so the two offsets are
+   * independent draws rather than one shared pair. */
+  #labOffset(stage: LabStage): [number, number] {
+    if (!stage.offsetStartAndEnd) return [0, 0];
+    const draw = this.#opts.logNoise ?? this.#opts.generate;
+    return [Math.floor(draw() * 3) * 2, Math.floor(draw() * 3) * 2];
+  }
+
+  /** `getLabMaze`, including the endpoint it stamps on first touch.
+   *
+   * ONE draw off the world stream, turned into a dedicated generator. The carve
+   * is a random DFS and takes an unbounded number of draws, so billing them to
+   * the shared stream would make the net's whole future depend on how twisty
+   * this maze happened to be. Same trick, same reason, as a host's password. */
+  labMaze(): { maze: string[]; endpoint: [number, number] } | undefined {
+    const stage = this.currentLab();
+    if (!stage) return undefined;
+    if (!this.#labMaze) {
+      const random = passwordRng(this.#opts.generate(), stage.hostname);
+      this.#labMaze = generateMaze(stage.mazeWidth, stage.mazeHeight, random);
+      const [offsetX, offsetY] = this.#labOffset(stage);
+      this.#labEndpoint = [
+        this.#labMaze[0]!.length - 2 - offsetX,
+        this.#labMaze.length - 2 - offsetY,
+      ];
+    }
+    return { maze: this.#labMaze, endpoint: this.#labEndpoint! };
+  }
+
+  /** `getPositionInLab`: this PID's cell, seeded on first look. */
+  labPosition(pid: number): [number, number] {
+    const held = this.#labLocations.get(pid);
+    if (held) return held;
+    const stage = this.currentLab();
+    const [offsetX, offsetY] = stage ? this.#labOffset(stage) : [0, 0];
+    const seeded: [number, number] = [1 + offsetX, 1 + offsetY];
+    this.#labLocations.set(pid, seeded);
+    return seeded;
+  }
+
+  /** `handleLabyrinthPassword`: one move, and everything that hangs off it.
+   *
+   * The response shape is the ordinary password one, which is the whole reason
+   * the walker needs no `heartbleed`: the labyrinth is the only model whose
+   * `message` and `data` are forwarded through `authenticate`'s own return
+   * value (`NetscriptFunctions/Darknet.ts:161-170`).
+   *
+   * Four branches, in upstream's order, and the order matters:
+   *
+   * 1. Below the lab's charisma, EVERY move is a 451 and nothing is learned.
+   * 2. With admin rights already, any move answers success and hands back the
+   *    lab's password — the maze is over and stays over.
+   * 3. The lab's real password is refused ON PURPOSE, with a message saying so.
+   * 4. A wall answers failure and DOES NOT MOVE the player.
+   *
+   * Reaching the exit grants charisma at a fixed 32-thread equivalent, sets
+   * admin rights, drops the lab cache (three on BonusLab) and opens a session.
+   * The net's DEPTH does not change here: `getNetDepth` reads the current lab,
+   * and the current lab is chosen by INSTALLED augmentations — so the net
+   * deepens at the install that follows, not at the exit. */
+  labAttempt(hostname: string, attempted: string, pid: number): {
+    ok: boolean;
+    code: number;
+    message: string;
+    data: string;
+    /** Charisma the EXIT pays, before `charisma_exp`. Granted by the ns layer,
+     *  like every other experience figure in this file, so there is one place
+     *  the multiplier is applied. Zero on every move but the last. */
+    charismaExp?: number;
+  } {
+    const stage = this.currentLab();
+    const host = this.record(hostname);
+    if (!stage || !host) return { ok: false, code: 401, message: "Unauthorized", data: "" };
+    if (this.#opts.world.person.skills.charisma < stage.cha) {
+      return {
+        ok: false,
+        code: 451,
+        message: "You find yourself lost and confused."
+          + " You need to be more charismatic to navigate the labyrinth.",
+        data: "",
+      };
+    }
+    const built = this.labMaze();
+    if (!built) return { ok: false, code: 401, message: "Unauthorized", data: "" };
+    const { maze, endpoint } = built;
+    const server = this.#opts.servers.get(hostname);
+    if (server?.hasAdminRights === true) {
+      this.addSession(hostname, pid);
+      return {
+        ok: true,
+        code: 200,
+        message: "You have discovered the end of the labyrinth.",
+        data: host.password,
+      };
+    }
+    if (attempted === host.password) {
+      return {
+        ok: false,
+        code: 401,
+        message: "You have decided, after some deliberation, that the best way to beat a maze is to find the end,"
+          + " and not to try and skip it.",
+        data: "",
+      };
+    }
+    const [x, y] = this.labPosition(pid);
+    const [dx, dy] = directionFromInput(attempted);
+    const here = surroundingsVisualized(maze, x, y, 1, true, false, endpoint);
+    if (maze[y + dy]?.[x + dx] !== MAZE_PATH) {
+      // A WALL, and the position is unchanged. The engine says so in the
+      // message rather than by omission, which is what lets a walker parse its
+      // way out of a desync it can never otherwise detect.
+      return { ok: false, code: 401, message: `You cannot go that way. You are still at ${x},${y}.`, data: here };
+    }
+    if (dx === 0 && dy === 0) {
+      return {
+        ok: false,
+        code: 401,
+        message: 'You don\'t know how to do that. Try a command such as "go north"',
+        data: here,
+      };
+    }
+    const to: [number, number] = [x + dx * 2, y + dy * 2];
+    this.#labLocations.set(pid, to);
+    if (to[0] === endpoint[0] && to[1] === endpoint[1]) {
+      // THE EXIT. Charisma at a fixed 32-thread equivalent, admin rights, the
+      // cache — three of them on BonusLab — and a session.
+      if (server) server.hasAdminRights = true;
+      const count = stage.hostname === LAB_LADDER[7]!.hostname ? 3 : 1;
+      for (let i = 0; i < count; i++) this.addCache(hostname, false, "the_great_work");
+      this.addSession(hostname, pid);
+      return {
+        ok: true,
+        code: 200,
+        message: "You have successfully navigated the labyrinth! Congratulations",
+        data: host.password,
+        // `calculatePasswordAttemptChaGain(server, 32, true)`, and the 32 is a
+        // literal rather than the caller's threads: finishing a maze pays the
+        // same whatever it was walked with.
+        charismaExp: attemptCharismaExp(host.difficulty, false, 32, true),
+      };
+    }
+    return {
+      ok: false,
+      code: 401,
+      message: `You have moved to ${to[0]},${to[1]}.`,
+      data: surroundingsVisualized(maze, to[0], to[1], 1, true, false, endpoint),
+    };
   }
 
   /** Check a password, and say what the model says back.
    *
-   * The feedback switch is narrower than upstream's twenty-four arms: the ones
-   * transcribed are the cheap pure-function ones, and the rest fall through to
-   * the static hint — which is exactly what upstream's own `default` branch
-   * does, so those are faithful rather than approximated. What is narrowed is
-   * which models get MORE than the default. Declared in DNET_ASSUMPTIONS.
-   * Source: src/DarkNet/effects/authentication.ts:33-147 */
-  checkPassword(hostname: string, attempted: string): { ok: boolean; message: string; data?: string } {
+   * All fifteen of upstream's arms, transcribed in `dnet-feedback.ts` — see the
+   * `dnet.models` entry in DNET_ASSUMPTIONS for what is left. The labyrinth is
+   * intercepted here rather than there, exactly as upstream branches on
+   * `isLabyrinthServer` above the equality test: it is a maze, not a password,
+   * and the sim does not model the maze.
+   *
+   * `responseTime` is the authenticate delay the caller already waited, which
+   * is what the `2G_cellular` arm reports back — upstream passes the same
+   * `networkDelay` it delayed by.
+   * Source: src/DarkNet/effects/authentication.ts:19-149 */
+  checkPassword(hostname: string, attempted: string, responseTime = 0, pid = -1): {
+    ok: boolean;
+    message: string;
+    data: string;
+    /** Set only by the labyrinth, which is the one model that can answer
+     *  something other than 200 or 401 — a 451 below the lab's charisma. */
+    code?: number;
+    /** Set only by the labyrinth's exit. See `labAttempt`. */
+    charismaExp?: number;
+  } {
     const host = this.record(hostname);
-    if (!host) return { ok: false, message: "Unauthorized" };
-    if (attempted === host.password) return { ok: true, message: "Success" };
-    switch (host.modelId) {
-      case "AccountsManager_4.2":
-        return {
-          ok: false,
-          message: host.passwordHint,
-          data: Number(attempted) > Number(host.password) ? "Lower" : "Higher",
-        };
-      case "BellaCuore":
-        return {
-          ok: false,
-          message: host.passwordHint,
-          data: Number(attempted) > Number(host.password) ? "ALTUS NIMIS" : "PARUM BREVIS",
-        };
-      case "NIL":
-        return {
-          ok: false,
-          message: "that wasn't right",
-          data: attempted.split("").map((char, i) => (char === host.password[i] ? "yes" : "yesn't")).join(","),
-        };
-      case "DeepGreen": {
-        let exact = 0;
-        for (let i = 0; i < attempted.length; i++) if (attempted[i] === host.password[i]) exact++;
-        const misplaced = attempted
-          .split("")
-          .filter((char, i) => char !== host.password[i] && host.password.includes(char)).length;
-        return { ok: false, message: `Hint: ${exact} exact, ${misplaced} misplaced.`, data: `${exact},${misplaced}` };
-      }
-      case "2G_cellular": {
-        const at = host.password.split("").findIndex((char, i) => char !== attempted[i]);
-        return { ok: false, message: `Found a mismatch while checking each character (${at})`, data: "Response time" };
-      }
-      default:
-        return { ok: false, message: "Unauthorized", data: host.data.length > 0 ? host.data : undefined };
+    if (!host) return { ok: false, message: "Unauthorized", data: "" };
+    if (host.modelId === "(The Labyrinth)") {
+      const move = this.labAttempt(hostname, attempted, pid);
+      return {
+        ok: move.ok,
+        message: move.message,
+        data: move.data,
+        code: move.code,
+        ...(move.charismaExp !== undefined ? { charismaExp: move.charismaExp } : {}),
+      };
     }
+    return checkPasswordAgainst(host, attempted, responseTime, this.#packetWorld(host));
+  }
+
+  /** Whether this host is a labyrinth. Exported through the system because the
+   * ns layer forwards a lab's message and data and NOTHING else's, and it
+   * should not have to know how a lab is recognised.
+   *
+   * By MODEL ID rather than by hostname: it is what an agent sees first and it
+   * survives a rename. */
+  isLab(hostname: string): boolean {
+    const host = this.record(hostname);
+    return host !== undefined && isLabyrinth(hostname, host.modelId);
+  }
+
+  /** `calculatePasswordAttemptChaGain`, before `Player.mults.charisma_exp`.
+   *
+   * EVERY attempt pays this, successful or not — which is the fact that makes
+   * iterative solving free: a forty-call solve at difficulty 20 earns hundreds
+   * of charisma experience on the way, and charisma is what gates `heartbleed`
+   * and shortens every future authentication. A model that granted only on
+   * success would make the whole feature look like a treadmill.
+   *
+   * The two multipliers are asymmetric on purpose: a host we have already
+   * rooted pays a fifth, and a FIRST success pays ten times.
+   * Source: src/DarkNet/effects/effects.ts:113-121 */
+  attemptCharismaExp(hostname: string, threads: number, success: boolean): number {
+    const host = this.record(hostname);
+    if (!host) return 0;
+    const rooted = this.#opts.servers.get(hostname)?.hasAdminRights === true;
+    return attemptCharismaExp(host.difficulty, rooted, threads, success);
   }
 
   /** How many leading characters of `attempted` are right.
@@ -979,10 +1634,7 @@ export class DarknetSystem {
   sharedChars(hostname: string, attempted: string): number {
     const host = this.record(hostname);
     if (!host) return 0;
-    for (let i = 0; i < host.password.length; i++) {
-      if (host.password[i] !== attempted[i]) return i;
-    }
-    return host.password.length;
+    return getSharedChars(host.password, attempted);
   }
 
   // --- the mutation clock, as a promise -------------------------------------
@@ -1074,35 +1726,67 @@ export class DarknetSystem {
       return;
     }
 
-    // Two backdoor branches upstream, both no-ops here: a darknet backdoor is
-    // not modelled, so the set they draw from is always empty. The draws are
-    // still spent, because the stream's width must not depend on that.
-    if (roll[14]! < 0.2) this.#restartOne(roll[15]!);
-
-    if (roll[16]! < 0.3) {
-      for (let i = 0; i < 3; i++) this.#moveHost(this.#pick(this.#movable(), roll[17 + i]!), roll[20]!, roll[21]!);
+    // THE PRICE OF A BACKDOOR, and it is paid by the backdoored host rather
+    // than by the net. Both branches draw from `getBackdooredDarknetServers`
+    // and both RETURN, so a tick that restarts or deletes a backdoored server
+    // does nothing else — which is why the effective rates are about 9% and 4%
+    // rather than the 10% and 5% the literals suggest.
+    //
+    // A restart clears the backdoor (`#restartOne` drops `backdoorInstalled`),
+    // so a backdoor is expendable by construction: it is re-installed rather
+    // than defended.
+    if (roll[14]! < 0.1) {
+      const victim = this.#pick(this.#backdoored().map((host) => host.hostname).sort(), roll[15]!);
+      if (victim !== undefined) {
+        this.#restartHost(victim);
+        return;
+      }
+    }
+    if (roll[16]! < 0.05) {
+      const victim = this.#pick(this.#backdoored().map((host) => host.hostname).sort(), roll[17]!);
+      if (victim !== undefined) {
+        this.#removeHost(victim);
+        return;
+      }
     }
 
-    if (roll[22]! < 0.5) {
-      this.#addConnections(roll[23]!, roll[24]!);
+    if (roll[18]! < 0.2) this.#restartOne(roll[19]!);
+
+    if (roll[20]! < 0.3) {
+      for (let i = 0; i < 3; i++) this.#moveHost(this.#pick(this.#movable(), roll[21 + i]!), roll[24]!, roll[25]!);
+    }
+
+    if (roll[26]! < 0.5) {
+      this.#addConnections(roll[27]!, roll[28]!);
       return;
     }
 
     // Severing every connection on one host is what makes an adjacency list the
     // shortest-lived thing we hold, and it is why `topology` expires fastest.
-    if (roll[25]! < 0.5) {
-      const victim = this.#pick(this.#movable(), roll[26]!);
+    if (roll[29]! < 0.5) {
+      const victim = this.#pick(this.#movable(), roll[30]!);
       if (victim) this.#disconnect(victim);
     }
 
-    if (roll[27]! < 0.1) this.#balance(roll);
+    if (roll[31]! < 0.1) this.#balance(roll);
+  }
+
+  /** `isImmutable`: nothing the mutation clock does can touch this host.
+   *
+   * Two independent reasons, and they are NOT the same thing. `isStationary` is
+   * a property of the host — darkweb and the labyrinth are built that way.
+   * A stasis link is a property of our RUN: we spent one of at most four global
+   * slots to pin it. Upstream's mutation branches all draw from the pool this
+   * excludes, which is exactly what makes a link worth a slot. */
+  #immutable(host: DarknetHost): boolean {
+    return host.isStationary || host.stasisLinked;
   }
 
   #movable(): string[] {
     return [...this.hosts.keys()]
       .filter((name) => {
         const host = this.hosts.get(name)!;
-        return host.online && !host.isStationary;
+        return host.online && !this.#immutable(host);
       })
       .sort();
   }
@@ -1323,7 +2007,13 @@ export class DarknetSystem {
   #moveHost(hostname: string | undefined, drawA: number, drawB: number): void {
     if (hostname === undefined) return;
     const host = this.hosts.get(hostname);
-    if (!host || !host.online || host.isStationary) return;
+    if (!host || !host.online || this.#immutable(host)) return;
+    // The terminal pins whatever it is standing on: `isImmutable` counts
+    // `isConnectedTo` alongside the stasis link. It matters for exactly one
+    // thing here, and it is not a nicety — home walks the terminal out to a
+    // darknet host to install a backdoor, and a move landing mid-walk would
+    // strand it.
+    if (this.#opts.servers.get(hostname)?.isConnectedTo === true) return;
     const span = 3;
     const shift = Math.floor(drawA * (span * 2 + 1)) - span;
     const wanted = Math.max(0, Math.min(host.depth + shift, this.netDepth() - 1));
@@ -1372,7 +2062,19 @@ export class DarknetSystem {
   #deleteOne(draw: number): void {
     const victim = this.#pick(this.#movable(), draw);
     if (victim === undefined) return;
-    const host = this.hosts.get(victim)!;
+    this.#removeHost(victim);
+  }
+
+  /** Take one host off the net for good.
+   *
+   * Split out of `#deleteOne` because a FAILED migration ends here too:
+   * `moveDarknetServer` deletes rather than leaving a host floating when
+   * `getAllOpenPositions` comes back empty (`NetworkMovement.ts:246-250`). That
+   * is the whole risk of an induced migration, so the two paths have to be the
+   * same path. */
+  #removeHost(victim: string): void {
+    const host = this.hosts.get(victim);
+    if (!host) return;
     // Gone, permanently, with its files, sessions and logs — and its cell, which
     // is what lets the restocking branch put something back there.
     host.online = false;
@@ -1384,12 +2086,50 @@ export class DarknetSystem {
     this.#opts.servers.delete(victim);
     this.#unwire(victim);
     this.#opts.network.delete(victim);
+    this.#migrationCharge.delete(victim);
+  }
+
+  /** `moveDarknetServer(server, maxDecrease, maxIncrease)` with the real band.
+   *
+   * Unlike the mutation clock's own move — which rolls a depth and then a cell
+   * in it — this takes every free cell in the whole band at once, which is what
+   * upstream does and what makes the bottom row a real target rather than a
+   * lucky roll.
+   *
+   * Returns false when the host was DELETED for want of anywhere to go. The band
+   * widens recursively until it finds a slot, so this only fires when the net is
+   * completely full — but the loss is total, which is why nothing irreplaceable
+   * is ever pushed. */
+  #moveWithin(hostname: string, minDepth: number, maxDepth: number, drawA: number, drawB: number): boolean {
+    const host = this.hosts.get(hostname);
+    if (!host || !host.online) return true;
+    // `isImmutable` is `openServer || isConnectedTo || hasStasisLink` — note it
+    // does NOT include isStationary, which is filtered at the pool instead.
+    if (this.#immutable(host) || this.#opts.servers.get(hostname)?.isConnectedTo === true) return true;
+    // Taken BEFORE the vacate, exactly as upstream orders it, so the host's own
+    // cell is not one of its own options.
+    const free = this.#openPositions(minDepth, maxDepth);
+    if (free.length === 0) {
+      this.#removeHost(hostname);
+      return false;
+    }
+    const cell = free[Math.floor(drawA * free.length)]!;
+    this.#unwire(hostname);
+    this.#vacate(host);
+    this.#seat(host, cell[0], cell[1]);
+    this.#wire(hostname, cell[0], cell[1], drawB);
+    return true;
   }
 
   #restartOne(draw: number): void {
     const victim = this.#pick(this.#movable(), draw);
     if (victim === undefined) return;
-    const host = this.hosts.get(victim)!;
+    this.#restartHost(victim);
+  }
+
+  #restartHost(victim: string): void {
+    const host = this.hosts.get(victim);
+    if (!host) return;
     // Scripts die and SESSIONS are cleared, but the host, its files and its
     // admin rights survive. All four halves are separately wrong-able.
     host.sessions.clear();

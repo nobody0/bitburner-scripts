@@ -70,23 +70,51 @@ describe("every refusal to spread is named", () => {
     expect(plan.refused[0]!.detail).toContain("memoryReallocation");
   });
 
-  test("the hop budget, the fan-out cap and the agent cap each refuse by name", () => {
-    const deep = planSpread([candidate({ host: "deep", depth: 9 })], DEFAULT_SPREAD_LIMITS, NOW);
-    expect(deep.refused[0]!.why).toBe("too-deep");
+  test("nothing is refused for being far away, or for being the third one", () => {
+    // The three invented budgets are GONE — hop budget, per-source fan-out and
+    // global agent cap — and with them their refusal names. Every neighbour we
+    // can reach gets an agent, at any depth, unconditionally. A refusal that can
+    // never fire tells the panel reader a limit is in force when it is not, so
+    // this asserts the deletion rather than an unused name.
+    const deep = planSpread([candidate({ host: "deep", depth: 39 })], DEFAULT_SPREAD_LIMITS, NOW);
+    expect(deep.plant.map((entry) => entry.host)).toEqual(["deep"]);
+    expect(deep.refused).toEqual([]);
 
-    // One source host must not spend the whole agent budget on its own
-    // neighbourhood.
+    // One source host places as many as it has candidates. How many actually
+    // FIT is a queue-depth fact, enforced by the controller's
+    // MAX_QUEUED_PER_HOST, not a spreading policy.
     const many = Array.from({ length: 5 }, (_, i) => candidate({ host: `n${i}`, from: "darkweb" }));
     const fanned = planSpread(many, DEFAULT_SPREAD_LIMITS, NOW);
-    expect(fanned.plant).toHaveLength(DEFAULT_SPREAD_LIMITS.fanOut);
-    expect(fanned.refused.every((r) => r.why === "fan-out")).toBe(true);
+    expect(fanned.plant).toHaveLength(5);
+    expect(fanned.refused).toEqual([]);
 
-    // ...and the total is capped too, because the report port is a 50-entry
-    // queue drained every 30 seconds.
+    // ...and there is no total either, however many are already live.
     const spread = Array.from({ length: 40 }, (_, i) => candidate({ host: `n${i}`, from: `src${i}` }));
-    const capped = planSpread(spread, { ...DEFAULT_SPREAD_LIMITS, fanOut: 99 }, NOW, 10);
-    expect(capped.plant).toHaveLength(2);
-    expect(capped.refused.some((r) => r.why === "agent-cap")).toBe(true);
+    expect(planSpread(spread, DEFAULT_SPREAD_LIMITS, NOW).plant).toHaveLength(40);
+  });
+
+  test("every surviving refusal is a fact about the host in front of us", () => {
+    // The six that are left, as a set. This is what makes the deletion above
+    // durable: a budget re-introduced as a refusal name shows up here.
+    const named = new Set<string>();
+    for (const plan of [
+      planSpread([candidate({ host: "a", goneAt: NOW - 1 })], DEFAULT_SPREAD_LIMITS, NOW),
+      planSpread([candidate({ host: "b", agentAlive: true })], DEFAULT_SPREAD_LIMITS, NOW),
+      planSpread([candidate({ host: "c", hasCredential: false })], DEFAULT_SPREAD_LIMITS, NOW),
+      planSpread([candidate({ host: "d", freeRam: undefined })], DEFAULT_SPREAD_LIMITS, NOW),
+      planSpread([candidate({ host: "e", freeRam: 0.5 })], DEFAULT_SPREAD_LIMITS, NOW),
+      planSpread([candidate({ host: "f", lastPlantAt: NOW })], DEFAULT_SPREAD_LIMITS, NOW),
+    ]) {
+      for (const refusal of plan.refused) named.add(refusal.why);
+    }
+    expect([...named].sort()).toEqual([
+      "agent-alive",
+      "cooldown",
+      "gone",
+      "no-credential",
+      "not-enough-ram",
+      "unknown-ram",
+    ]);
   });
 
   test("a host that keeps restarting is not allowed to absorb every worker", () => {
@@ -102,20 +130,39 @@ describe("every refusal to spread is named", () => {
   });
 });
 
-describe("spreading prefers the shallow and the roomy, deterministically", () => {
-  test("shallow first, then most room, then by name", () => {
-    // Depth is what the exercise is for, and a shallow host is also the cheapest
-    // place to stand while cracking the next one.
+describe("spreading prefers the deep and the roomy, deterministically", () => {
+  test("deepest first, then most room, then by name", () => {
+    // Inverted deliberately. Shallow-first was argued from "a shallow host is
+    // the cheapest place to stand", which only held while depth was also a
+    // BOUND. Now that we take every host, the order answers a different
+    // question: which do we want first when the net rearranges under us? The
+    // deep one — it is the only route to anything deeper, its facts expire
+    // fastest, and a shallow host is reachable again in a moment from anywhere.
     const plan = planSpread(
       [
-        candidate({ host: "deep", depth: 3, from: "a" }),
-        candidate({ host: "shallow-small", depth: 0, freeRam: 4, from: "b" }),
-        candidate({ host: "shallow-big", depth: 0, freeRam: 32, from: "c" }),
+        candidate({ host: "shallow", depth: 0, from: "a" }),
+        candidate({ host: "deep-small", depth: 3, freeRam: 4, from: "b" }),
+        candidate({ host: "deep-big", depth: 3, freeRam: 32, from: "c" }),
       ],
-      { ...DEFAULT_SPREAD_LIMITS, liveAgentCap: 99 },
+      DEFAULT_SPREAD_LIMITS,
       NOW,
     );
-    expect(plan.plant.map((entry) => entry.host)).toEqual(["shallow-big", "shallow-small", "deep"]);
+    expect(plan.plant.map((entry) => entry.host)).toEqual(["deep-big", "deep-small", "shallow"]);
+  });
+
+  test("a host we cannot place sorts after every host we can", () => {
+    // Unplaceable depth means unsurveyed, and preferring it would spend the
+    // scarce plant on the candidate we know least about.
+    const plan = planSpread(
+      [
+        candidate({ host: "nowhere", depth: undefined, from: "a" }),
+        candidate({ host: "shallow", depth: 0, from: "b" }),
+        candidate({ host: "deep", depth: 7, from: "c" }),
+      ],
+      DEFAULT_SPREAD_LIMITS,
+      NOW,
+    );
+    expect(plan.plant.map((entry) => entry.host)).toEqual(["deep", "shallow", "nowhere"]);
   });
 
   test("the same input plans the same way regardless of arrival order", () => {
@@ -196,10 +243,10 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(deriveTasks(knowledge, NOW, opts).some((t) => t.kind === "attempt")).toBe(false);
   });
 
-  test("an unsolved model gets one probe, and the probe outranks nothing", () => {
-    // The probe exists only to make the oracle appear in the log ring. It buys
-    // information, not a vantage, so it must not outrank a dictionary attack
-    // that is a few calls from opening the net.
+  test("cheapest-certain first: a dictionary outranks a conversation", () => {
+    // Both open the net, so neither is a probe — but a dictionary hit is one
+    // call away and a feedback solver has to converse first, so the order has
+    // to reflect that rather than treating every attempt alike.
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["hard", "easy"], depth: -1 } },
       { hostname: "hard", present: true, facts: { depth: 0, modelId: "DeepGreen", passwordLength: 4, passwordFormat: "numeric" } },
@@ -208,15 +255,222 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]) }).filter((t) => t.kind === "attempt");
     expect(tasks[0]!.host).toBe("easy");
     expect(tasks[1]!.host).toBe("hard");
-    expect(tasks[1]!.reason).toBe("mastermind solver not written");
+    // The reason names the model and what the conversation will cost, because a
+    // solve that may take dozens of calls should not read like a single guess.
+    expect(tasks[1]!.reason).toContain("Mastermind");
+    expect(tasks[1]!.reason).toContain("attempts");
 
-    // Once the probe is spent the ATTEMPT retires. The host still has other
-    // work — its own adjacency is unknown — so the assertion is about attempts,
-    // not about the host vanishing from the queue.
+    // And a solve does NOT retire after one deliberate failure the way a probe
+    // does: the ledger's probe count is not what bounds it.
     knowledge.hosts["hard"]!.attempts = { modelId: "DeepGreen", tried: 0, probes: 1 };
     const after = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]) });
-    expect(after.some((t) => t.kind === "attempt" && t.host === "hard")).toBe(false);
-    expect(after.some((t) => t.kind === "survey" && t.host === "hard")).toBe(true);
+    expect(after.some((t) => t.kind === "attempt" && t.host === "hard")).toBe(true);
+  });
+
+  test("the labyrinth is the one model left with no solver, and it gets a probe", () => {
+    // Every other model now has either a dictionary or a solver, so the probe
+    // path — one deliberate failure to make an oracle appear — survives for
+    // exactly one case, and it must still retire after that one attempt.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["maze"], depth: -1 } },
+      { hostname: "maze", present: true, facts: { depth: 0, modelId: "(The Labyrinth)", passwordLength: 4, passwordFormat: "numeric" } },
+    ]);
+    const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]) }).filter((t) => t.kind === "attempt");
+    expect(tasks).toHaveLength(1);
+    expect(tasks[0]!.reason).toContain("maze");
+
+    knowledge.hosts["maze"]!.attempts = { modelId: "(The Labyrinth)", tried: 0, probes: 1 };
+    const after = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]) });
+    expect(after.some((t) => t.kind === "attempt" && t.host === "maze")).toBe(false);
+    expect(after.some((t) => t.kind === "survey" && t.host === "maze")).toBe(true);
+  });
+
+  test("work a live process is already doing derives no second task", () => {
+    // The hole structural dedup cannot close. `attempt:<host>` writes no fact
+    // when it starts, so it re-derives every 2 s tick for the whole duration of
+    // a multi-second authenticate; only the controller's per-queue duplicate
+    // check hides it, and that check stops covering the case the moment a target
+    // has two adjacent vantages.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
+      { hostname: "dn-1", present: true, facts: { depth: 0, modelId: "ZeroLogon" } },
+    ]);
+    const opts = { agents: new Set(["darkweb"]) };
+    expect(deriveTasks(knowledge, NOW, opts).some((t) => t.id === "attempt:dn-1")).toBe(true);
+
+    const inFlight = new Map([["dn-1", [{ from: "darkweb", kind: "attempt" as const }]]]);
+    const during = deriveTasks(knowledge, NOW, { ...opts, inFlight });
+    expect(during.some((t) => t.id === "attempt:dn-1")).toBe(false);
+    // ...and only that pair. The host's adjacency is still unknown, so the
+    // survey is untouched: a claim suppresses one KIND, not a host.
+    expect(during.some((t) => t.id === "survey:dn-1")).toBe(true);
+  });
+
+  test("a claim of a different kind on the same host suppresses nothing", () => {
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
+      { hostname: "dn-1", present: true, facts: { depth: 0, modelId: "ZeroLogon" } },
+    ]);
+    const inFlight = new Map([["dn-1", [{ from: "darkweb", kind: "bleed" as const }]]]);
+    const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]), inFlight });
+    expect(tasks.some((t) => t.id === "attempt:dn-1")).toBe(true);
+  });
+
+  test("a plant already in flight is not filed twice", () => {
+    // The spread planner has its own cooldown, but it is per HOST and measured
+    // from the last plant that FINISHED. A plant in flight is a different fact.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
+      { hostname: "dn-1", present: true, facts: { depth: 0, modelId: "ZeroLogon" } },
+    ]);
+    const plantable = [{ host: "dn-1", from: "darkweb" }];
+    expect(deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]), plantable })
+      .some((t) => t.kind === "plant")).toBe(true);
+    const inFlight = new Map([["dn-1", [{ from: "darkweb", kind: "plant" as const }]]]);
+    expect(deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]), plantable, inFlight })
+      .some((t) => t.kind === "plant")).toBe(false);
+  });
+
+  test("two vantages split the pair, so the bleed and the attempt overlap", () => {
+    // `authenticate` and `heartbleed` both need adjacency and both take seconds,
+    // and a second job from the SAME vantage would only queue behind the first —
+    // one resident, one process. Splitting them is the only way to overlap them.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["a", "b"], depth: -1 } },
+      { hostname: "a", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "b", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon" } },
+    ]);
+    // We hold `target`'s credential, so it is worth listening to; we do not hold
+    // it in the vault for the attempt's sake, so force both by standing on it.
+    const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["a", "b", "target"]) });
+    const bleed = tasks.find((t) => t.id === "bleed:target")!;
+    const attempt = tasks.find((t) => t.id === "attempt:target")!;
+    // Standing on it, self is the first vantage — a resident is already there.
+    expect(bleed.from).toBe("target");
+    // ...and the attempt goes next door rather than queueing behind it.
+    expect(attempt.from).not.toBe(bleed.from);
+    expect(["a", "b"]).toContain(attempt.from);
+  });
+
+  test("one vantage is exactly the old behaviour: both fall back to it", () => {
+    // The whole pairing must be invisible until there is a choice to make.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["target"], depth: -1 } },
+      { hostname: "target", present: true, facts: { depth: 0, modelId: "ZeroLogon" } },
+    ]);
+    const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]) });
+    expect(tasks.find((t) => t.id === "attempt:target")!.from).toBe("darkweb");
+  });
+
+  test("a vantage already working the target is not handed a second job", () => {
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["a", "b"], depth: -1 } },
+      { hostname: "a", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "b", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon" } },
+    ]);
+    const inFlight = new Map([["target", [{ from: "a", kind: "bleed" as const }]]]);
+    const attempt = deriveTasks(knowledge, NOW, { agents: new Set(["a", "b"]), inFlight })
+      .find((t) => t.id === "attempt:target")!;
+    expect(attempt.from).toBe("b");
+  });
+
+  test("vantages are ordered by name, not by the order hosts were planted", () => {
+    // `agents` is a Set, so its iteration order is insertion order — which would
+    // make the derived queue depend on the sequence in which the net happened to
+    // be planted, and two derivations of the same knowledge disagree.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["a", "b"], depth: -1 } },
+      { hostname: "a", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "b", present: true, facts: { neighbours: ["target"], depth: 0 } },
+      { hostname: "target", present: true, facts: { depth: 1, modelId: "ZeroLogon" } },
+    ]);
+    const forward = deriveTasks(knowledge, NOW, { agents: new Set(["a", "b"]) });
+    const backward = deriveTasks(knowledge, NOW, { agents: new Set(["b", "a"]) });
+    expect(forward.map((t) => `${t.id}@${t.from}`)).toEqual(backward.map((t) => `${t.id}@${t.from}`));
+  });
+
+  test("a loose password outranks the model attempt on the same host, and suppresses it", () => {
+    // Branch 6 of the noise generator leaks a random MOVABLE host's password
+    // with no name on it, and the controller has already narrowed it to hosts
+    // whose length and format match. Spending one is a SINGLE authenticate with
+    // no penalty for being wrong, so running a solver alongside it would be
+    // paying for information the guess may make unnecessary.
+    //
+    // The password itself never reaches this module: the task carries an id and
+    // the controller resolves it. That is the same rule `inFlight` keeps.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
+      { hostname: "dn-1", present: true, facts: { neighbours: ["darkweb"], depth: 0, modelId: "ZeroLogon" } },
+    ]);
+    const tasks = deriveTasks(knowledge, NOW, {
+      agents: new Set(["darkweb"]),
+      guesses: [{ host: "dn-1", id: "7", reason: "a log leaked a 4-character numeric password" }],
+    });
+    const guess = tasks.find((t) => t.guessId !== undefined)!;
+    expect(guess.kind).toBe("attempt");
+    expect(guess.host).toBe("dn-1");
+    expect(guess.id).toBe("guess:dn-1:7");
+    // No second attempt against the same host this tick.
+    expect(tasks.filter((t) => t.kind === "attempt")).toHaveLength(1);
+    expect(JSON.stringify(tasks)).not.toContain("password\":");
+  });
+
+  test("a guess yields to work already in flight against the host", () => {
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
+      { hostname: "dn-1", present: true, facts: { neighbours: ["darkweb"], depth: 0, modelId: "ZeroLogon" } },
+    ]);
+    const inFlight = new Map([["dn-1", [{ from: "darkweb", kind: "attempt" as const }]]]);
+    const tasks = deriveTasks(knowledge, NOW, {
+      agents: new Set(["darkweb"]),
+      inFlight,
+      guesses: [{ host: "dn-1", id: "7", reason: "leak" }],
+    });
+    expect(tasks.filter((t) => t.kind === "attempt")).toEqual([]);
+  });
+
+  test("the deliberate three are merged with their own vantage, and only the push waits", () => {
+    // `pin` and `walk` are decided once for the whole net and outrank the farm:
+    // a pin that queues behind a forty-second phish may be spent on a host that
+    // has already been restarted. A `push` is the opposite — hundreds of calls
+    // whose value arrives at the end — so it sorts behind everything that opens
+    // the net. And `induce` is the one kind whose target is not where it runs.
+    const knowledge = fold([
+      { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
+      { hostname: "dn-1", present: true, facts: { neighbours: ["darkweb", "dn-2"], depth: 0 } },
+      { hostname: "dn-2", present: true, facts: { neighbours: ["dn-1"], depth: 1 } },
+    ]);
+    const tasks = deriveTasks(knowledge, NOW, {
+      agents: new Set(["darkweb", "dn-1"]),
+      vault: new Set(["darkweb", "dn-1", "dn-2"]),
+      hold: [
+        { kind: "pin", host: "dn-1", from: "dn-1", reason: "pin the host nothing can replace" },
+        { kind: "induce", host: "dn-2", from: "dn-1", reason: "push it toward the bottom row" },
+      ],
+    });
+    const pin = tasks.find((t) => t.kind === "pin")!;
+    const push = tasks.find((t) => t.kind === "induce")!;
+    // A pin outranks a WALK too, and that ordering is the one that matters: a
+    // host runs one process at a time and a walk holds its host for hours, so a
+    // pin queued behind one starts after the thing it exists to protect has
+    // finished.
+    const walking = deriveTasks(knowledge, NOW, {
+      agents: new Set(["darkweb", "dn-1"]),
+      vault: new Set(["darkweb", "dn-1", "dn-2"]),
+      hold: [
+        { kind: "walk", host: "dn-2", from: "dn-1", reason: "walk the maze" },
+        { kind: "pin", host: "dn-1", from: "dn-1", reason: "pin it first" },
+      ],
+    });
+    const order = walking.filter((t) => t.kind === "pin" || t.kind === "walk").map((t) => t.kind);
+    expect(order).toEqual(["pin", "walk"]);
+    expect(pin.from).toBe("dn-1");
+    expect(push.host).toBe("dn-2");
+    expect(push.from).toBe("dn-1");
+    expect(pin.priority).toBeLessThan(push.priority);
+    expect(tasks.indexOf(pin)).toBeLessThan(tasks.indexOf(push));
   });
 
   test("a plant outranks everything, because it is the only thing that grows the map", () => {

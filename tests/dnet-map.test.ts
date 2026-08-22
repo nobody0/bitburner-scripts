@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { BOX_W, COL_PITCH, MAP_W, NET_WIDTH, layoutNet, matches, netMap } from "../ui/app/tabs/dnet-map.ts";
+import { AUTH_LABEL, BOX_W, COL_PITCH, MAP_W, NET_WIDTH, layoutNet, matches, netLegend, netMap } from "../ui/app/tabs/dnet-map.ts";
 import { TABS } from "../ui/app/tabs/index.ts";
 import { emptyState } from "../ui/app/project.ts";
 import { setView } from "../ui/app/lib/viewstate.ts";
@@ -497,7 +497,6 @@ describe("the panel at the scale the game actually reaches", () => {
   test("the tab renders the whole net from the published fold", () => {
     const state = emptyState();
     state.topics.dnet = {
-      reachable: 1,
       maxDepth: 1,
       stasisLinkLimit: 1,
       stasisLinked: [],
@@ -537,15 +536,61 @@ describe("the panel at the scale the game actually reaches", () => {
     // The map is there, with both hosts on it...
     expect(html).toContain("<svg");
     expect(html.split('data-key="node:').length - 1).toBe(2);
-    // ...the detail card explains WHY the host is untouched rather than leaving
-    // a blank where a reason belongs — looked up from the model registry by id,
-    // not shipped per host...
-    expect(html).toContain("mastermind solver not written");
+    // ...the detail card describes the model from the registry, looked up by id
+    // rather than shipped per host. DeepGreen now HAS a solver, so the column
+    // that used to explain why it was untouched reports that instead — the
+    // status is derived from the solver registry, so it cannot go on claiming a
+    // reason that stopped being true.
+    expect(html).toContain("implemented");
     expect(html).toContain("MastermindHint");
+    // The oracle grammar is still described, because that is what a reader needs
+    // to check the solver against.
+    expect(html).toContain("Mastermind oracle");
     // ...an identity fact says it never expires, rather than showing 0ms left...
     expect(html).toContain("never expires");
     // ...and agent mortality is on screen, which it never has been before.
     expect(html).toContain("2 lost");
     setView("dnet.sel", "");
+  });
+});
+
+describe("the key describes the map, and not something near it", () => {
+  /** Every host state the map can draw, one host each, so the markup below
+   *  contains every class the map is capable of emitting. */
+  const EVERY_STATE: DarknetKnownHost[] = [
+    host({ hostname: "dn-session", depth: 0, authState: "session" }),
+    host({ hostname: "dn-auth", depth: 0, authState: "authenticated" }),
+    host({ hostname: "dn-locked", depth: 0, authState: "auth-required" }),
+    host({ hostname: "dn-unreached", depth: 1, authState: "no-connection" }),
+    host({ hostname: "dn-offline", depth: 1, authState: "offline" }),
+    host({ hostname: "dn-gone", depth: 1, goneAt: NOW }),
+    host({ hostname: "dn-pinned", depth: 2, stasisLinked: true }),
+    host({ hostname: "dn-stale", depth: 2, facts: { depth: 1 } }),
+  ];
+
+  test("every legend swatch names a class the map actually renders", () => {
+    // The guard for a real defect: the key carried a `linked` swatch for years
+    // while the node drew stasis as a `<rect class="stasis">` and never took a
+    // `linked` class at all. Nothing was visibly wrong — the two happened to
+    // share a colour — so only a structural check catches the next one.
+    const markup = netMap(EVERY_STATE, { ...OPTIONS, now: NOW + 10 * 60 * 1000 });
+    const rendered = new Set(
+      [...markup.matchAll(/class="([^"]+)"/g)].flatMap((m) => m[1]!.split(/\s+/)),
+    );
+    const swatches = [...netLegend().matchAll(/class="sw ([^"]+)"/g)].map((m) => m[1]!);
+
+    expect(swatches.length).toBeGreaterThan(4);
+    for (const swatch of swatches) {
+      expect(rendered.has(swatch), `the key shows "${swatch}" and no node renders it`).toBe(true);
+    }
+  });
+
+  test("every auth state the union allows gets its own class", () => {
+    // AUTH_LABEL is typed as a TOTAL record over the union, so this asserts the
+    // map keeps a distinct visual for each rather than collapsing two.
+    const markup = netMap(EVERY_STATE, OPTIONS);
+    for (const state of Object.keys(AUTH_LABEL)) {
+      expect(markup, `no node carries auth-${state}`).toContain(`auth-${state}`);
+    }
   });
 });

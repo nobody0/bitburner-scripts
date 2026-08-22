@@ -49,6 +49,16 @@ export interface LabStage {
   /** The whole net's depth while this lab is the current one. */
   depth: number;
   cha: number;
+  /** The maze upstream ASKS for, which is not the maze it gets — see
+   *  `labMazeSize`. Source: src/DarkNet/effects/labyrinth.ts:36-108 (labData) */
+  mazeWidth: number;
+  mazeHeight: number;
+  /** Whether the START and the EXIT are jittered. `getRandomOffset` returns
+   *  `[0,0]` unless this is set, and 0, 2 or 4 on each axis when it is — so on
+   *  the first four labs the exit is exactly `[cols - 2, rows - 2]` and the
+   *  walk begins at `[1,1]`, while on the last four both are unknown within
+   *  four cells. Source: labyrinth.ts:376-382 */
+  offsetStartAndEnd: boolean;
   /** Whether the UI will ALSO walk this maze by hand. Every lab is scriptable —
    *  the engine's movement handler gates on charisma alone and no ns call reads
    *  this flag — so `false` means "script-only", not "unreachable".
@@ -59,15 +69,35 @@ export interface LabStage {
 }
 
 export const LAB_LADDER: readonly LabStage[] = [
-  { hostname: "th3_l4byr1nth", depth: 7, cha: 300, manual: true },
-  { hostname: "cru3l_l4byr1nth", depth: 12, cha: 600, manual: true },
-  { hostname: "m3rc1l3ss_l4byr1nth", depth: 19, cha: 1_500, manual: false },
-  { hostname: "ub3r_l4byr1nth", depth: 23, cha: 2_500, manual: false },
-  { hostname: "et3rn4l_l4byr1nth", depth: 29, cha: 3_000, manual: false },
-  { hostname: "end13ss_l4byr1nth", depth: 31, cha: 3_500, manual: false },
-  { hostname: "f1n4l_l4byr1nth", depth: 36, cha: 4_000, manual: false },
-  { hostname: "b0nus_l4byr1nth", depth: 36, cha: 4_000, manual: false },
+  { hostname: "th3_l4byr1nth", depth: 7, cha: 300, mazeWidth: 20, mazeHeight: 14, offsetStartAndEnd: false, manual: true },
+  { hostname: "cru3l_l4byr1nth", depth: 12, cha: 600, mazeWidth: 30, mazeHeight: 20, offsetStartAndEnd: false, manual: true },
+  { hostname: "m3rc1l3ss_l4byr1nth", depth: 19, cha: 1_500, mazeWidth: 40, mazeHeight: 26, offsetStartAndEnd: false, manual: false },
+  { hostname: "ub3r_l4byr1nth", depth: 23, cha: 2_500, mazeWidth: 60, mazeHeight: 40, offsetStartAndEnd: true, manual: false },
+  { hostname: "et3rn4l_l4byr1nth", depth: 29, cha: 3_000, mazeWidth: 60, mazeHeight: 40, offsetStartAndEnd: true, manual: false },
+  { hostname: "end13ss_l4byr1nth", depth: 31, cha: 3_500, mazeWidth: 60, mazeHeight: 40, offsetStartAndEnd: true, manual: false },
+  { hostname: "f1n4l_l4byr1nth", depth: 36, cha: 4_000, mazeWidth: 60, mazeHeight: 40, offsetStartAndEnd: true, manual: false },
+  { hostname: "b0nus_l4byr1nth", depth: 36, cha: 4_000, mazeWidth: 60, mazeHeight: 40, offsetStartAndEnd: true, manual: false },
 ];
+
+/** The maze a lab ACTUALLY has, which is never the size `labData` asks for.
+ *
+ * `generateMaze` stitches four sub-mazes together above a width of five, and
+ * `mazeMaker` rounds each sub-maze's dimensions UP to an odd number first. The
+ * halves then overlap by one column and one row, so the result is
+ * `2 * odd(ceil(w / 2)) - 1` wide and the same in height — 21x13 for the 20x14
+ * the first lab declares, and 61x41 for the 60x40 the deep ones do.
+ *
+ * It matters because the exit is `[cols - 2, rows - 2]` (less the jitter), and
+ * a walker aiming at `[18, 12]` instead of `[19, 11]` searches the wrong corner
+ * of the last block — which on a 61x41 maze is hundreds of moves.
+ * Source: src/DarkNet/effects/labyrinth.ts:120-186 */
+export function labMazeSize(stage: Pick<LabStage, "mazeWidth" | "mazeHeight">): { width: number; height: number } {
+  const odd = (value: number): number => (value % 2 === 0 ? value + 1 : value);
+  return {
+    width: 2 * odd(Math.ceil(stage.mazeWidth / 2)) - 1,
+    height: 2 * odd(Math.ceil(stage.mazeHeight / 2)) - 1,
+  };
+}
 
 const LAB_BY_HOST = new Map(LAB_LADDER.map((stage) => [stage.hostname, stage]));
 
@@ -132,7 +162,7 @@ const SERVER_DENSITY = 0.6;
  *
  * Source: src/DarkNet/effects/labyrinth.ts:393-396 (getNetDepth),
  *   :485-497 (the no-access branch) */
-const DEFAULT_NET_DEPTH = 5;
+export const DEFAULT_NET_DEPTH = 5;
 
 /** How often the net gets a mutation TICK.
  *
@@ -236,4 +266,140 @@ export function msPerHostEventAny(
   if (perTick <= 0) return Infinity;
   const perHostPerTick = perTick / expectedServerCount(netDepth);
   return mutationIntervalMs(netDepth, bitNode) / perHostPerTick;
+}
+
+// --- the two farm calls, transcribed ---------------------------------------
+//
+// `memoryReallocation` and `phishingAttack` are the only darknet actions whose
+// PAYOFF a strategy has to price before it decides to spend wall-clock on them,
+// so their formulas live here beside the mutation clock rather than being
+// guessed at the call site. `sim/features/dnet.ts` imports these rather than
+// keeping a second copy: one definition means there is no parity suite to drift.
+// Source: src/DarkNet/effects/ramblock.ts:22-83,
+//         src/NetscriptFunctions/Darknet.ts:536,
+//         src/DarkNet/effects/phishing.ts:12-73
+
+/** `roundToTwo`. Both RAM-block figures pass through it upstream, and it is what
+ * makes a low-charisma grind quantise to 0.01 GB steps rather than trickling.
+ * Source: src/utils/helpers/roundToTwo.ts */
+export function roundToTwo(decimal: number): number {
+  return Math.round(decimal * 100) / 100;
+}
+
+/** `getRamBlockRemoved` — how much blocked RAM ONE `memoryReallocation` frees.
+ *
+ * Note whose difficulty: the exponent is the SERVER's `difficulty + 1`, while
+ * the charisma xp below uses `1.1 ** (difficulty + 1)` for the same reason. The
+ * clamp is against the block that is left, so the last call of a grind frees
+ * exactly the remainder.
+ * Source: src/DarkNet/effects/ramblock.ts:69-83 */
+export function ramBlockRemoved(
+  difficulty: number,
+  blockedRam: number,
+  threads: number,
+  charisma: number,
+): number {
+  const raw = rawRamBlockRemoved(difficulty, threads, charisma);
+  return roundToTwo(Math.max(Math.min(raw, blockedRam), 0));
+}
+
+/** The same figure BEFORE the clamp and the rounding.
+ *
+ * Split out because a planner has to answer a question the rounded number can
+ * no longer answer: `roundToTwo` takes anything under 0.005 to exactly zero, so
+ * `ramBlockRemoved` is only ever 0 or at least 0.01 and cannot say how far
+ * short a stalled grind actually falls. `farm.ts` quotes this in its refusal,
+ * which is the difference between "0.000GB a call" and a number that tells you
+ * how much charisma is missing. */
+export function rawRamBlockRemoved(difficulty: number, threads: number, charisma: number): number {
+  const charismaFactor = 1 + charisma / 100;
+  const difficultyFactor = 2 * 0.92 ** (difficulty + 1);
+  return 0.02 * difficultyFactor * threads * charismaFactor;
+}
+
+/** Charisma experience one `memoryReallocation` grants, before `charisma_exp`.
+ * Source: src/DarkNet/effects/ramblock.ts:34 */
+export function reclaimCharismaExp(difficulty: number, threads: number): number {
+  return threads * 10 * 1.1 ** (difficulty + 1);
+}
+
+/** `memoryReallocation`'s netscriptDelay. Floored at 200 ms.
+ * Source: src/NetscriptFunctions/Darknet.ts:536 */
+export function reclaimWaitMs(charisma: number): number {
+  return Math.max(8000 * (500 / (500 + charisma)), 200);
+}
+
+/** `getPhishingAttackSpeed`. Floored at 200 ms.
+ * Source: src/DarkNet/effects/phishing.ts:12 */
+export function phishWaitMs(charisma: number): number {
+  return Math.max(10000 * (400 / (400 + charisma)), 200);
+}
+
+/** `promoteStock`'s wait, floored at 200 ms however high charisma is. Propaganda
+ * is the cheapest call in the feature in time as well as RAM.
+ * Source: src/NetscriptFunctions/Darknet.ts:590 */
+export function promoteWaitMs(charisma: number): number {
+  return Math.max(8000 * (600 / (600 + charisma)), 200);
+}
+
+/** `induceServerMigration`'s wait, and it is a CONSTANT: upstream hardcodes six
+ * seconds and no skill shortens it (`NetscriptFunctions/Darknet.ts:443`). That
+ * is what makes a migration a project rather than a call — a shallow host needs
+ * hundreds of them. */
+export const INDUCE_WAIT_MS = 6_000;
+
+/** `getSetStasisLinkDuration`: `(1000 / (cha + 1000)) * 30_000`, so thirty
+ * seconds at charisma 0 and three at 9000. Not floored upstream.
+ * Source: src/DarkNet/effects/effects.ts:218-220 */
+export function stasisWaitMs(charisma: number): number {
+  return (1000 / (charisma + 1000)) * 30_000;
+}
+
+/** Charisma experience one `phishingAttack` grants, before `charisma_exp`. A
+ * QUARTER of this on the failure path — every call pays, which is what makes
+ * phishing the reliable charisma source rather than the cache lottery it looks
+ * like. Source: src/DarkNet/effects/phishing.ts:15,72 */
+export function phishCharismaExp(threads: number): number {
+  return threads * 50;
+}
+
+/** The phishing cache cooldown, and it is GLOBAL: `lastPhishingCacheTime` lives
+ * on `DarknetState`, not on a server, so the whole net yields at most twenty
+ * `.d.cache` files an hour however many hosts are phishing.
+ * Source: src/DarkNet/effects/phishing.ts:70-73 */
+export const PHISH_CACHE_COOLDOWN_MS = 3 * 60 * 1000;
+
+/** Chance one call claims the open cache window. Threads move the ROLL, never
+ * the ceiling. Source: src/DarkNet/effects/phishing.ts:17 */
+export function phishCacheChance(threads: number, charisma: number, crimeSuccessMult = 1): number {
+  return 0.005 * crimeSuccessMult * threads * ((400 + charisma) / 400);
+}
+
+/** Chance one call pays money instead. The cache branch is an `if` and this is
+ * its `else if`, so claiming a cache forecloses that call's money roll.
+ * Source: src/DarkNet/effects/phishing.ts:18 */
+export function phishMoneyChance(charisma: number, crimeSuccessMult = 1): number {
+  return 0.05 * crimeSuccessMult * ((200 + charisma) / 200);
+}
+
+/** Money one paying call yields, at the mean of upstream's U(0.9, 1.2) factor.
+ * DEPTH is the term that matters to a planner: `0.1 + depth * 0.05` is why the
+ * deepest resident is the one worth phishing from.
+ * Source: src/DarkNet/effects/phishing.ts:33-45 */
+export function phishMoney(
+  depth: number,
+  threads: number,
+  charisma: number,
+  mults: { crimeMoney?: number; dnetMoney?: number; nodeMult?: number; bonusTime?: boolean } = {},
+): number {
+  const depthFactor = 0.1 + depth * 0.05;
+  return 500
+    * (mults.crimeMoney ?? 1)
+    * (mults.dnetMoney ?? 1)
+    * depthFactor
+    * threads
+    * ((400 + charisma) / 400)
+    * (mults.bonusTime === true ? 1.3 : 1)
+    * 1.05
+    * (mults.nodeMult ?? 1);
 }

@@ -8,6 +8,7 @@ import {
   probePassword,
   type ModelId,
 } from "../shared/strategy/dnet/models.ts";
+import { solverFor } from "../shared/strategy/dnet/solvers/index.ts";
 import { COMMON_PASSWORDS, DEFAULT_SETTINGS, DOG_NAMES, EU_COUNTRIES } from "../shared/strategy/dnet/dictionaries.ts";
 
 /** The model registry is groundwork for a cracker nobody has written yet, so
@@ -59,15 +60,39 @@ describe("the model registry covers the game's taxonomy", () => {
   });
 });
 
-describe("only the transcribed-dictionary models are implemented", () => {
-  test("the implemented set is exactly the five getDictionaryAttackConfig models", () => {
-    const implemented = MODEL_IDS.filter((id) => describeModel(id).status === "implemented");
-    // All five go through upstream's one-line getDictionaryAttackConfig. Any
-    // OTHER model appearing here means someone shipped a solver without saying
-    // so, which is the thing this file exists to notice.
-    expect([...implemented].sort() as string[]).toEqual(
+describe("the registry says what is really implemented", () => {
+  test("every model but the labyrinth is implemented, and status is DERIVED", () => {
+    // `status` is no longer written on each arm by hand; `describeModel` reads
+    // it off the solver registry (`solvers/index.ts`), so this is checking a
+    // fact rather than a comment. The labyrinth is the one holdout and it is
+    // not a password at all — it is a maze, walked by a process.
+    const unattempted = MODEL_IDS.filter((id) => describeModel(id).status === "unattempted");
+    expect([...unattempted] as string[]).toEqual(["(The Labyrinth)"]);
+    expect(describeModel("(The Labyrinth)").blocked).toBeDefined();
+  });
+
+  test("nothing claims to be implemented without something that implements it", () => {
+    // The honesty rule, now mechanical: a model is implemented if and only if it
+    // has a dictionary to walk or a solver to run.
+    for (const id of MODEL_IDS) {
+      const entry = describeModel(id);
+      const backed = entry.candidates !== undefined || solverFor(id) !== undefined;
+      expect(entry.status === "implemented", `${id} status disagrees with its backing`).toBe(backed);
+      // And a solved model must not still carry the note explaining why it was
+      // not written, or the panel reports a reason that stopped being true.
+      if (entry.status === "implemented") expect(entry.blocked, `${id} still claims to be blocked`).toBeUndefined();
+    }
+  });
+
+  test("the five dictionary models stay dictionaries, with no solver", () => {
+    // Their attack is an ordered list resumed through `AttemptLedger.tried`,
+    // which is the one well-tested path in this feature. A solver here would be
+    // a rewrite of something that already works.
+    const dictionaries = MODEL_IDS.filter((id) => describeModel(id).candidates !== undefined);
+    expect([...dictionaries].sort() as string[]).toEqual(
       ["EuroZone Free", "FreshInstall_1.0", "Laika4", "TopPass", "ZeroLogon"].sort(),
     );
+    for (const id of dictionaries) expect(solverFor(id), `${id} has both a dictionary and a solver`).toBeUndefined();
   });
 
   test("each implemented model offers exactly its upstream dictionary", () => {
@@ -131,17 +156,45 @@ describe("planAttempt walks a dictionary and then stops", () => {
     expect(result.kind === "none" && result.reason).toContain("exhausted");
   });
 
-  test("an unimplemented model gets exactly ONE probe, then nothing", () => {
-    // The probe is not a guess. A model's oracle only exists once you have failed
-    // against it, because the response is written to the log ring BY the attempt
-    // — so one deliberate failure is what makes the oracle visible at all.
+  test("a solver-backed model plans a CONVERSATION, not a single guess", () => {
     const entry = describeModel("DeepGreen");
+    const planned = planAttempt(entry, { passwordLength: 5, passwordFormat: "numeric" }, 0, 0);
+    expect(planned.kind).toBe("solve");
+    if (planned.kind !== "solve") return;
+    // It declares its cost up front, which is what lets the queue rank it and
+    // the job bound it.
+    expect(planned.budget).toBeGreaterThan(1);
+    expect(planned.needsOracle).toBe(true);
+    // And unlike a probe it does not retire once a deliberate failure is spent.
+    const later = planAttempt(entry, { passwordLength: 5, passwordFormat: "numeric" }, 0, 5);
+    expect(later.kind).toBe("solve");
+  });
+
+  test("a closed-form model needs no oracle, so it works below the charisma gate", () => {
+    // The property the queue relies on to file these against hosts whose
+    // heartbleed would refuse: the answer arrives in `authenticate`'s own
+    // return value, not in the log ring.
+    const planned = planAttempt(
+      describeModel("DeskMemo_3.1"),
+      { passwordLength: 4, passwordFormat: "numeric", passwordHint: "The password is 4821" },
+      0,
+      0,
+    );
+    expect(planned.kind).toBe("solve");
+    if (planned.kind !== "solve") return;
+    expect(planned.needsOracle).toBe(false);
+    expect(planned.password).toBe("4821");
+    expect(planned.budget).toBe(1);
+  });
+
+  test("the labyrinth still gets exactly ONE probe, then nothing", () => {
+    // The probe path survives for the one model with no solver. It is not a
+    // guess: a model's oracle only exists once you have failed against it,
+    // because the response is written to the log ring BY the attempt.
+    const entry = describeModel("(The Labyrinth)");
     const first = planAttempt(entry, { passwordLength: 5, passwordFormat: "numeric" }, 0, 0);
-    expect(first).toEqual({
-      kind: "probe",
-      password: "00000",
-      reason: "mastermind solver not written",
-    });
+    expect(first.kind).toBe("probe");
+    expect(first.kind === "probe" && first.password).toBe("00000");
     const second = planAttempt(entry, { passwordLength: 5, passwordFormat: "numeric" }, 0, 1);
     expect(second.kind).toBe("none");
   });

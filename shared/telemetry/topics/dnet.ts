@@ -59,6 +59,10 @@ export interface DarknetKnownHost {
   passwordHint?: string;
   data?: string;
   logTrafficInterval?: number;
+  /** Unopened `.cache` files sitting on this host, from `ns.ls`. A cache dies
+   *  with its host, so this is the one published fact that is a standing offer
+   *  with an expiry date attached to it. */
+  caches?: string[];
   /** When each fact was OBSERVED, keyed by fact name — and nothing else.
    *
    *  Age, expiry class and staleness are all derivable from this plus the
@@ -77,6 +81,20 @@ export interface DarknetKnownHost {
     probes: number;
     lastCode?: number;
     lastAt?: number;
+    /** A feedback solver is part-way through a conversation with this host.
+     *  Its STATE is a credential and never travels; that it exists is not. */
+    solving?: boolean;
+    /** How far that conversation has got.
+     *
+     *  Two scalars, lifted out of the solver state by an explicit allow-list in
+     *  `publish.ts` — never a spread of it. The state itself is redacted
+     *  wholesale by `stripCredentials`, and that is not relaxed to carry these:
+     *  they are published under a different name precisely so the redaction can
+     *  stay absolute.
+     *
+     *  `budget` is absent because it is derivable: `Solver.budget(facts)` is a
+     *  pure function of the password facts above. */
+    solve?: { phase: string; spent: number };
   };
   /** THAT we hold a credential, never the credential. This record is written to
    *  disk as JSONL; the password lives only in the driver's vault. */
@@ -113,13 +131,18 @@ export interface DarknetState {
   observedFrom?: string;
   /** False until probes have collected neighbor lists from every graph node. */
   topologyComplete?: boolean;
-  /** Currently the number of direct neighbors of observedFrom, not a graph-wide count. */
-  reachable: number;
-  /** -1 until a host of known depth has been seen. */
+  /** -1 until a host of known depth has been seen, so the panel renders NONE
+   *  rather than a row that sorts above the root. */
   maxDepth: number;
-  stasisLinkLimit: number;
-  stasisLinked: string[];
-  instability: { authenticationDurationMultiplier: number; authenticationTimeoutChance: number };
+  /** The three below come from the DODGED PROBE and from nothing else
+   *  (`game/lib/probes/dodged.ts`). The driver tick publishes `knowledge`
+   *  without them, so a panel that guarded on `knowledge` and then read these
+   *  threw on the first tick of a run whose probe had not landed yet. They are
+   *  optional because neither producer guarantees them, and the driver has
+   *  always read its own copy that way (`remaining.ts`, `stasisLinked ?? []`). */
+  stasisLinkLimit?: number;
+  stasisLinked?: string[];
+  instability?: { authenticationDurationMultiplier: number; authenticationTimeoutChance: number };
   /** Home's own one-hop reading, in the SAME shape an agent reports.
    *
    *  Driver input, not a view: the tick folds it into knowledge as one more
@@ -143,6 +166,111 @@ export interface DarknetState {
    *  A Record rather than a Map, because the wire is JSON. This is what makes a
    *  refusal attributable instead of a blank. */
   codes?: Record<string, number>;
+  /** Why the net is not growing, from the controller's last spread derivation.
+   *
+   *  Beside `codes` on purpose: both answer "what refused, and by what name",
+   *  one for the game's responses and one for our own planner. `planSpread`
+   *  produced these from the day it was written and nothing rendered them, so a
+   *  net that had stopped spreading looked identical to one with nowhere left
+   *  to go. */
+  spread?: {
+    planted: number;
+    refused: Record<string, number>;
+    examples: { host: string; why: string; detail: string }[];
+  };
+  /** What the farm ladder decided last derivation — the leftovers, and the only
+   *  part of the darknet that PAYS.
+   *
+   *  Beside `spread` and for the same reason: a strict ladder that admits one
+   *  rung per host is unreadable without the refusals it fell through on the way
+   *  there. "phishing, because there is no cache to open and no block worth
+   *  grinding" is the whole answer, and two thirds of it are refusals. */
+  farm?: {
+    /** Tasks admitted, by kind. */
+    admitted: Record<string, number>;
+    refused: Record<string, number>;
+    examples: { host: string; why: string; detail: string }[];
+    /** When a `.d.cache` was last seen to land, so a reader can count the
+     *  net-wide phishing window down.
+     *
+     *  NOT derivable: the cooldown is engine state
+     *  (`DarknetState.lastPhishingCacheTime`) that no ns member exposes, so our
+     *  own sightings are the only evidence there is. The interval itself
+     *  (`PHISH_CACHE_COOLDOWN_MS`) is a constant in `rates.ts`, so only the
+     *  stamp travels. */
+    lastPhishCacheAt?: number;
+    /** The one resident elected to carry the net-wide phishing cache window.
+     *  There is exactly one `.d.cache` every three minutes for the whole net and
+     *  the roll that claims it scales with threads, so concentrating threads on
+     *  one host is strictly better than spreading them. */
+    cacheHunter?: string;
+  };
+  /** How far our log parser has drifted from the game's grammar.
+   *
+   *  SHAPES, never lines, and the distinction is a credential one rather than a
+   *  tidiness one: an unrecognised line is by definition one `oracle.ts` failed
+   *  to read, and three of the noise generator's branches write a plaintext
+   *  password into a log line — so publishing examples would publish exactly the
+   *  passwords we missed. `logShape` collapses every digit and letter run,
+   *  leaving the punctuation and the structure.
+   *
+   *  A rising count is the same class of event as `unknownModels`: a game update,
+   *  or a hole in our transcription, and both are things to hear about. */
+  grammar?: { unrecognised: number; shapes: Record<string, number> };
+  /** Why the derivation declined to read a host's log ring.
+   *
+   *  The bleed gate used to be a clock — "has it been longer than the topology
+   *  expiry" — which is a rule with nothing to do with logs and no name for its
+   *  refusals. `listen.ts` prices the call instead, and this is the third member
+   *  of the `spread`/`farm` family: what our own planner declined, by name.
+   *
+   *  Only the REFUSALS travel. The ranking is derivable — `shouldListen` is pure
+   *  in facts the digest already carries — so a reader computes it the same way
+   *  it computes a model's oracle from `modelId`. */
+  listen?: {
+    refused: Record<string, number>;
+    examples: { host: string; why: string; detail: string }[];
+  };
+  /** The three DELIBERATE decisions, and the fourth one home makes itself.
+   *
+   *  `spread`, `farm` and `listen` above are all things a host does as a matter
+   *  of course. These four are not: a stasis link is one of at most four in a
+   *  whole run, a backdoor past the free allowance taxes every authentication
+   *  in the net, an induced migration can cost the host outright, and a maze
+   *  walk occupies a resident for hours. So every one of them is expected to
+   *  refuse most of the time, and the refusal is the interesting half.
+   *
+   *  `backdoors` is nested rather than merged because it is decided somewhere
+   *  else entirely: `singularity.installBackdoor` acts on the terminal's
+   *  current server, so the route is walked from home and the controller never
+   *  sees it. */
+  hold?: {
+    admitted: Record<string, number>;
+    refused: Record<string, number>;
+    examples: { host: string; why: string; detail: string }[];
+    backdoors?: {
+      install: string[];
+      refused: Record<string, number>;
+      examples: { host: string; why: string; detail: string }[];
+    };
+  };
+  /** Karma spent opening caches this run, summed and NEGATIVE.
+   *
+   *  Karma only ever moves down and it survives an install, so a cache is free
+   *  progress toward the gang's -54000 rather than a cost. Published for `gang`
+   *  to read rather than left in a log line. */
+  karmaLoss?: number;
+  /** The labyrinth cache, and whether it can be opened RIGHT NOW.
+   *
+   *  It is the one cache that is deferred: `getLabReward` queues an
+   *  augmentation directly, and the generic price multiplier is
+   *  `1.9 ^ (queued non-SoA)`, charged against everything bought after it. So it
+   *  waits for the last purchase of an install cycle. `openable` is deliberately
+   *  a conjunction of things we have OBSERVED — the file exists, the host is up,
+   *  a live resident is standing on it — because `progression` raises an install
+   *  blocker off it, and a blocker raised for a cache we cannot reach would
+   *  stall the whole cycle. Absent means "no deferral, install normally". */
+  labCache?: { host: string; filename: string; openable: boolean };
   /** What we know versus what we still believe. `freshFraction` falling is the
    *  signal that the net is moving faster than we are learning it. */
   coverage?: {
@@ -180,7 +308,12 @@ export interface DarknetState {
 }
 
 export interface DarknetPlan {
-  action: { type: string; hostname?: string };
+  /** Hosts ranked by how much of the graph a stasis link on them keeps alive.
+   *
+   *  There is no `action` here any more. The two it used to carry —
+   *  `authenticate` and `stasis` — were unexecutable from home by construction,
+   *  so the panel rendered a selected action beside a refusal explaining why it
+   *  would not happen. See `shared/strategy/dnet/decide.ts`. */
   ranked: { hostname: string; depth: number; unlocks: number }[];
   /** Charisma the traversal is blocked on, posted to the needs board. */
   charismaNeeded?: number;

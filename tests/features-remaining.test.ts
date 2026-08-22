@@ -8,6 +8,9 @@ import { assignCoupled, assignIndependent } from "../shared/strategy/assignment.
 import { BLACKOP_CONFIDENCE, STAMINA_FLOOR, stepBladeburner } from "../shared/strategy/bladeburner/decide.ts";
 import { CORP_STAGES, stepCorp, type CorpView } from "../shared/strategy/corp/stages.ts";
 import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet/decide.ts";
+import { darknetRoute } from "../game/lib/features/remaining.ts";
+import { emptyKnowledge, foldReports } from "../shared/strategy/dnet/knowledge.ts";
+import { msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
 import { ASCEND_THRESHOLD, CLASH_CONFIDENCE, stepGang } from "../shared/strategy/gang/decide.ts";
 import {
   decideGoNeural,
@@ -32,6 +35,8 @@ import {
   installCadencePushRate,
   installCadenceRemainingSec,
   installVerdict,
+  LAB_CACHE_DEFER_MS,
+  labCacheDeferral,
   routeCountInstallValue,
   orderingCost,
   phaseOf,
@@ -722,9 +727,9 @@ describe("corp staged script", () => {
 
 describe("darknet", () => {
   const servers = [
-    { hostname: "root", depth: 0, blockedRam: 0, isOnline: true, requiredCharisma: 0, stasisLinked: false, neighbours: ["mid"] },
-    { hostname: "mid", depth: 1, blockedRam: 0, isOnline: false, requiredCharisma: 0, stasisLinked: false, neighbours: ["leaf"] },
-    { hostname: "leaf", depth: 2, blockedRam: 0, isOnline: true, requiredCharisma: 0, stasisLinked: false, neighbours: [] },
+    { hostname: "root", depth: 0, isOnline: true, requiredCharisma: 0, stasisLinked: false, neighbours: ["mid"] },
+    { hostname: "mid", depth: 1, isOnline: false, requiredCharisma: 0, stasisLinked: false, neighbours: ["leaf"] },
+    { hostname: "leaf", depth: 2, isOnline: true, requiredCharisma: 0, stasisLinked: false, neighbours: [] },
   ];
 
   test("an offline server is only traversable while held in stasis", () => {
@@ -732,50 +737,95 @@ describe("darknet", () => {
     expect(reachableFrom(servers, new Set(["mid"]))).toEqual(new Set(["root", "mid", "leaf"]));
   });
 
-  test("stasis links are spent where they unlock the most", () => {
+  test("stasis is RANKED by what dies with the host, and nothing is selected", () => {
+    // The ranking survived the deletion of the actions and is still exact: a
+    // stasis link is the only thing that makes a host immune to move, delete and
+    // restart, so a link on `mid` really does keep `mid` and `leaf` alive. What
+    // it does NOT buy is remote `exec` — that is a backdoor — and the traversal
+    // actions that read like it did are gone.
     expect(unlockValue({ servers, stasisLinked: [] } as never, "mid")).toBe(2);
     const decision = stepDarknet({
       topologyComplete: true,
       servers,
-      reachable: 1,
-      maxDepth: 2,
-      stasisLinkLimit: 1,
       stasisLinked: [],
-      instability: { authenticationDurationMultiplier: 1, authenticationTimeoutChance: 0 },
       charisma: 100,
-      instabilityCeiling: 0.5,
     });
-    expect(decision.action.type).toBe("stasis");
-    expect(decision.action.type === "stasis" && decision.action.hostname).toBe("mid");
-  });
-
-  test("high instability stops backdooring instead of making it worse", () => {
-    const decision = stepDarknet({
-      topologyComplete: true,
-      servers,
-      reachable: 1,
-      maxDepth: 2,
-      stasisLinkLimit: 1,
-      stasisLinked: [],
-      instability: { authenticationDurationMultiplier: 3, authenticationTimeoutChance: 0.9 },
-      charisma: 100,
-      instabilityCeiling: 0.5,
-    });
-    expect(decision.action.type).toBe("idle");
+    expect(decision.ranked[0]!.hostname).toBe("mid");
+    expect(decision.ranked[0]!.unlocks).toBe(2);
+    // No action, because home can perform none of them: `setStasisLink` pins the
+    // CALLING host, so spending a link means a 12 GB script standing on the
+    // target, and `authenticate` needs a direct connection home only has to
+    // `darkweb`.
+    expect(decision).not.toHaveProperty("action");
   });
 
   test("charisma blocks become a NEED for career, not a grind here", () => {
     const decision = stepDarknet({
       topologyComplete: true,
       servers: [{ ...servers[0]!, requiredCharisma: 500 }],
-      reachable: 0,
-      maxDepth: 0,
-      stasisLinkLimit: 0,
       stasisLinked: [],
-      instability: { authenticationDurationMultiplier: 1, authenticationTimeoutChance: 0 },
       charisma: 10,
-      instabilityCeiling: 0.5,
     });
+    expect(decision.charismaNeeded).toBe(500);
+  });
+
+  test("the backdoor route is built from the FOLD, because ns.scan cannot see the darknet", () => {
+    // Home installs darknet backdoors itself — `singularity.installBackdoor`
+    // acts on the terminal's current server, and only home has a terminal — but
+    // the BFS the hacking backdoor uses cannot find the way: `ns.scan` omits
+    // darknet servers outright, so from home it sees `darkweb` and stops. The
+    // graph has to come from the controller's folded adjacency.
+    const now = 10_000_000;
+    const knowledge = foldReports(
+      emptyKnowledge("15:0"),
+      [
+        { hostname: "darkweb", at: now, present: true, neighbours: ["dn-0"], depth: -1 },
+        { hostname: "dn-0", at: now, present: true, neighbours: ["darkweb", "dn-1"], depth: 0 },
+        { hostname: "dn-1", at: now, present: true, neighbours: ["dn-0"], depth: 1 },
+      ],
+      now,
+    ).knowledge;
+    expect(darknetRoute(knowledge, "dn-1", now, {})).toEqual(["darkweb", "dn-0", "dn-1"]);
+    // Every route starts at darkweb, which is the one darknet host home is
+    // adjacent to — it holds the TOR edge.
+    expect(darknetRoute(knowledge, "darkweb", now, {})).toEqual(["darkweb"]);
+  });
+
+  test("...and it refuses outright when a hop's adjacency has expired", () => {
+    // Adjacency is the shortest-lived fact in the feature — a mutation tick
+    // lands every ~6 s and one branch severs every edge on a host — so this
+    // refuses far more often than it succeeds, and that is the correct ratio.
+    // The failure it prevents is not a wasted call: a connect chain that breaks
+    // halfway leaves the TERMINAL stranded deep in a net that is rearranging
+    // around it.
+    const now = 10_000_000;
+    const knowledge = foldReports(
+      emptyKnowledge("15:0"),
+      [
+        { hostname: "darkweb", at: now, present: true, neighbours: ["dn-0"], depth: -1 },
+        { hostname: "dn-0", at: now, present: true, neighbours: ["darkweb", "dn-1"], depth: 0 },
+        { hostname: "dn-1", at: now, present: true, neighbours: ["dn-0"], depth: 1 },
+      ],
+      now,
+    ).knowledge;
+    const later = now + msPerHostEvent("disconnected") * 100;
+    expect(darknetRoute(knowledge, "dn-1", later, {})).toBeUndefined();
+  });
+
+  test("a partial map withholds the ranking but never the charisma need", () => {
+    // `probe()` is host-local, so home's own view is one hop wide and the
+    // topology is incomplete on nearly every run. The reachability number is
+    // refused there, because a partial graph presented as an exact answer is
+    // worse than no answer — but a charisma requirement is a per-host identity
+    // fact, just as true on a partial map, and gating it behind the same check
+    // kept the need off the board for exactly the runs that were short of it.
+    const decision = stepDarknet({
+      topologyComplete: false,
+      servers: [{ ...servers[0]!, requiredCharisma: 500 }],
+      stasisLinked: [],
+      charisma: 10,
+    });
+    expect(decision.ranked).toEqual([]);
     expect(decision.charismaNeeded).toBe(500);
   });
 });
@@ -800,6 +850,83 @@ describe("progression", () => {
     runSec: 0,
     routeRequiresInstall: false,
     ...over,
+  });
+
+  describe("the labyrinth-cache deferral can never stall an install", () => {
+    // The rule: a labyrinth cache is opened only after the last augmentation
+    // purchase of a cycle, because `getLabReward` queues an augmentation
+    // directly and the generic price multiplier is `1.9 ^ (queued non-SoA)`
+    // charged against everything bought after it.
+    //
+    // The rule has a hard limit, and it is the reason these tests exist rather
+    // than only the happy path: MISSING the deferral costs one augmentation's
+    // price scaling, once. BLOCKING an install costs the whole cycle. So the
+    // deferral is allowed to be wrong in one direction only.
+    const wanting = (over = {}) =>
+      view({ queued: ["a"], routeRequiresInstall: true, ...over });
+
+    test("no reachable lab cache means no blocker at all", () => {
+      // The ordinary case, and it is every run before the maze has been walked.
+      // The driver publishes `labCacheOpenable` only when the file is known to
+      // exist AND the lab is online AND a live resident is standing on it, so
+      // absent is what "we do not have one" looks like from here.
+      const decision = stepProgression(wanting());
+      expect(decision.installBlockers).not.toContain("dnet-lab-cache");
+      expect(decision.installReady).toBe(true);
+      // Explicitly false is the same answer, not a different one.
+      expect(stepProgression(wanting({ labCacheOpenable: false })).installReady).toBe(true);
+    });
+
+    test("an openable one holds the install, but only after the last purchase", () => {
+      // The ordering is free rather than arranged: the `augmentations` blocker
+      // already holds the install open while anything remains to buy, so gating
+      // on `purchasableAugmentation === undefined` puts this last in the
+      // sequence without either blocker knowing about the other.
+      const shopping = stepProgression(wanting({
+        labCacheOpenable: true,
+        purchasableAugmentation: "NeuroFlux Governor",
+      }));
+      expect(shopping.installBlockers).toContain("augmentations");
+      expect(shopping.installBlockers).not.toContain("dnet-lab-cache");
+
+      const done = stepProgression(wanting({ labCacheOpenable: true }));
+      expect(done.installBlockers).toEqual(["dnet-lab-cache"]);
+      expect(done.installReady).toBe(false);
+    });
+
+    test("the deferral EXPIRES rather than latching", () => {
+      // The backstop for the case the openable check cannot see: the job was
+      // filed, the host died under it, and nothing will ever come back. Without
+      // this the install cycle waits for ever on a cache nobody is going to open.
+      const start = 1_000_000;
+      let held = labCacheDeferral({}, true, start);
+      expect(held).toEqual({ since: start, defer: true });
+
+      // The window runs from when it was FIRST raised, not from the last pass —
+      // a deferral that restamped itself every tick would never expire.
+      held = labCacheDeferral(held, true, start + LAB_CACHE_DEFER_MS - 1);
+      expect(held.defer).toBe(true);
+      expect(held.since).toBe(start);
+
+      held = labCacheDeferral(held, true, start + LAB_CACHE_DEFER_MS);
+      expect(held.defer).toBe(false);
+      // ...and once it has given up it stays given up while the cache sits there.
+      expect(labCacheDeferral(held, true, start + LAB_CACHE_DEFER_MS + 1).defer).toBe(false);
+    });
+
+    test("a cache that stops being openable releases the install immediately", () => {
+      // Not merely on the deadline: a lab that went offline, or a resident that
+      // died, is not something to keep waiting for.
+      const start = 1_000_000;
+      const held = labCacheDeferral({}, true, start);
+      const released = labCacheDeferral(held, false, start + 1);
+      expect(released.defer).toBe(false);
+      expect(released.since).toBeUndefined();
+      // And re-raising later starts a FRESH window rather than resuming a spent
+      // one — otherwise a flapping resident could inherit an expired clock and
+      // be refused a deferral it is entitled to.
+      expect(labCacheDeferral(released, true, start + 2)).toEqual({ since: start + 2, defer: true });
+    });
   });
 
   test("the run-phase machine promotes on value, then on cash", () => {

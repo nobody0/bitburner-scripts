@@ -120,6 +120,18 @@ export interface ProgressionView {
    * live in progressionMemory): true = install beats pushing, false = keep
    * pushing, undefined = no route ETA — the legacy cash gate decides. */
   marginalInstall?: boolean;
+  /** A LABYRINTH cache is sitting on a live resident right now, and home wants
+   * it opened before the install rather than during the shopping trip.
+   *
+   * `getLabReward` queues an augmentation directly, and the generic price
+   * multiplier is `1.9 ^ (queued non-SoA)` charged against every purchase after
+   * it — so opening one mid-cycle multiplies the rest of the bill and
+   * invalidates the frozen drainOrder underneath it.
+   *
+   * Absent or false is the ordinary case and means NO BLOCKER AT ALL. The driver
+   * only ever passes true when the cache is openable this instant and the
+   * deferral's own deadline has not run out; see `labCacheDeferral`. */
+  labCacheOpenable?: boolean;
   /** The final sweep could still convert at least one rep-met, affordable
    * offer. Purchases are end-loaded, so mid-cycle the queue is empty BY
    * DESIGN — this is the "an install would activate something" signal that
@@ -128,7 +140,45 @@ export interface ProgressionView {
   resetRealizable?: boolean;
 }
 
-export type InstallBlockerKind = "factions" | "stock" | "graft" | "augmentations";
+export type InstallBlockerKind = "factions" | "stock" | "graft" | "augmentations" | "dnet-lab-cache";
+
+/** How long the labyrinth-cache deferral may hold an install open before it is
+ * abandoned.
+ *
+ * This number exists because of an asymmetry, and the asymmetry is the whole
+ * design: opening the lab cache after the last purchase saves one cycle's worth
+ * of `1.9 ^ queued` price scaling, ONCE. Failing to install costs the entire
+ * cycle. So the deferral is allowed to be wrong in one direction only — it gives
+ * up rather than waits — and this is the clock that makes it give up. Generous
+ * enough for the round trip (the `dnet` driver runs on a 30 s cadence and needs
+ * two of its passes: one to file the job, one to see it land), short enough that
+ * a job that dies out there costs minutes rather than the run.
+ *
+ * The blocker is ALSO gated on the cache being openable right now — a live
+ * resident standing on an online lab host that holds the file — so in the
+ * ordinary case, which is every run before the maze has been walked, it is never
+ * raised at all. This is the backstop for the case where it was raised and the
+ * world moved. */
+export const LAB_CACHE_DEFER_MS = 150_000;
+
+/** Whether the lab-cache deferral should hold the install this pass, and when it
+ * started holding it.
+ *
+ * Pure and separate from `stepProgression` because it is the half that needs a
+ * CLOCK, and because it is the half a test has to be able to drive directly: the
+ * one behaviour that must be proven is that it expires rather than latches.
+ *
+ * `openable` false at any point resets the window outright — a cache that has
+ * become unreachable is not a cache we are waiting for. */
+export function labCacheDeferral(
+  previous: { since?: number },
+  openable: boolean,
+  now: number,
+): { since?: number; defer: boolean } {
+  if (!openable) return { defer: false };
+  const since = previous.since ?? now;
+  return { since, defer: now - since < LAB_CACHE_DEFER_MS };
+}
 
 export interface ProgressionDecision {
   phase: RunPhase;
@@ -370,6 +420,19 @@ export function stepProgression(view: ProgressionView): ProgressionDecision {
   }
   if (installWanted && view.graftInProgress) {
     installBlockers.push("graft");
+  }
+  // AFTER the purchases, and that ordering is free rather than arranged: the
+  // `augmentations` blocker above already holds the install open while anything
+  // remains to buy, so gating on `purchasableAugmentation === undefined` puts
+  // this last in the sequence without either blocker knowing about the other.
+  //
+  // And it is raised ONLY when the cache is openable right now — the driver has
+  // already checked that the file exists, the lab is online and a live resident
+  // is standing on it, and that the deferral has not timed out. Every other
+  // case, including the overwhelmingly common one where the maze has never been
+  // walked, raises nothing and installs unchanged.
+  if (installWanted && view.labCacheOpenable === true && view.purchasableAugmentation === undefined) {
+    installBlockers.push("dnet-lab-cache");
   }
   if (installWanted && view.queued.length === 0 && view.purchasableAugmentation === undefined) {
     // The game's installAugmentations is a NO-OP with nothing queued — an

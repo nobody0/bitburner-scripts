@@ -1,3 +1,4 @@
+import { solverFor } from "./solvers/index.ts";
 import { COMMON_PASSWORDS, DEFAULT_SETTINGS, DOG_NAMES, EU_COUNTRIES } from "./dictionaries.ts";
 
 /** The twenty-four darknet server models, and what each one tells you when you
@@ -128,9 +129,13 @@ const dictionary = (id: ModelId, name: string, words: readonly string[], oracle:
   candidates: () => words,
 });
 
-/** Total over `MODEL_IDS`. The `never` arm at the bottom is the compile-time
+/** What this model IS — its mechanic, its feedback grammar, where that feedback
+ * surfaces. Descriptive only: whether we can actually open it is decided by
+ * `describeModel` below, from the solver registry.
+ *
+ * Total over `MODEL_IDS`. The `never` arm at the bottom is the compile-time
  * proof: adding an id without an arm fails to typecheck. */
-export function describeModel(id: ModelId): ModelEntry {
+function describeModelShape(id: ModelId): ModelEntry {
   switch (id) {
     // --- implemented: the password comes from a transcribed list -------------
     // All five go through upstream's one-line `getDictionaryAttackConfig`, so
@@ -435,6 +440,28 @@ const KNOWN: ReadonlySet<string> = new Set<string>(MODEL_IDS);
 /** Undefined for an id we have never seen. Callers MUST treat that as a counted,
  * reported event: an unrecognised model is either a game update or a hole in our
  * transcription, and both are things we want to hear about rather than skip. */
+/** The model, with `status` DERIVED from whether a solver exists for it.
+ *
+ * `status` used to be written by hand on each arm, which is exactly the kind of
+ * claim that rots: a registry saying "implemented" for something nobody wrote,
+ * or still saying "unattempted" for something now solved, is worse than no
+ * registry at all. Reading it off `solverFor` means the honesty test in
+ * `tests/dnet-models.test.ts` is checking a fact rather than a comment.
+ *
+ * The five dictionary models keep `status: "implemented"` from their own arm:
+ * their attack is `candidates`, walked by `planAttempt`, and they have no
+ * solver by design (see `solvers/index.ts`). */
+export function describeModel(id: ModelId): ModelEntry {
+  const shape = describeModelShape(id);
+  if (shape.candidates !== undefined) return shape;
+  const solver = solverFor(id);
+  if (solver === undefined) return shape;
+  // Solved: the `blocked` note explaining why it was not written must go, or the
+  // panel keeps reporting a reason that is no longer true.
+  const { blocked: _blocked, ...rest } = shape;
+  return { ...rest, status: "implemented" };
+}
+
 export function modelEntry(raw: string | undefined): ModelEntry | undefined {
   if (raw === undefined || !KNOWN.has(raw)) return undefined;
   return describeModel(raw as ModelId);
@@ -447,7 +474,14 @@ export function modelFamily(raw: string | undefined): ModelFamily {
 }
 
 export type Attempt =
+  /** The next entry of an ordered dictionary. */
   | { kind: "candidate"; password: string; index: number; total: number }
+  /** A model with a solver: the job runs its conversation in-process rather
+   *  than one attempt per job, so the plan names the opening move and how much
+   *  it will cost rather than a single password. `needsOracle` decides whether
+   *  the attempt is worth filing at all below the host's charisma requirement,
+   *  since `heartbleed` is the only charisma-gated call. */
+  | { kind: "solve"; password: string; note: string; needsOracle: boolean; budget: number }
   | { kind: "probe"; password: string; reason: string }
   | { kind: "none"; reason: string };
 
@@ -479,12 +513,29 @@ export function planAttempt(
       ? { kind: "probe", password: probePassword(facts), reason: "unknown model: capture its oracle once" }
       : { kind: "none", reason: "unknown model" };
   }
-  if (entry.status === "implemented" && entry.candidates) {
+  if (entry.candidates) {
     const list = entry.candidates(facts);
     if (tried < list.length) {
       return { kind: "candidate", password: list[tried]!, index: tried, total: list.length };
     }
     return { kind: "none", reason: `${entry.name} dictionary exhausted (${list.length} candidates)` };
+  }
+  const solver = solverFor(entry.id);
+  if (solver) {
+    // Ask the solver for its opening move, purely so the queue can say what the
+    // task IS and price it. The job re-derives this and then keeps going; the
+    // plan does not carry state.
+    const opening = solver.first(facts);
+    if (opening.kind === "give-up") {
+      return { kind: "none", reason: `${entry.name}: ${opening.reason}` };
+    }
+    return {
+      kind: "solve",
+      password: opening.password,
+      note: opening.note,
+      needsOracle: opening.kind === "attempt" ? opening.needsOracle : false,
+      budget: solver.budget(facts),
+    };
   }
   if (probesUsed < probeLimit) {
     return { kind: "probe", password: probePassword(facts), reason: entry.blocked ?? "not implemented" };

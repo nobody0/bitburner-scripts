@@ -29,6 +29,7 @@ import { only } from "../../shared/features/profile.ts";
 lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
   test("a BN1 run with no SF15 buys the program and then sees a darknet", async () => {
     const observed: number[] = [];
+    const mapped: number[] = [];
     const result = await runGame({
       // Unreachable on purpose: with only progression and dnet active there is
       // no income, so the run goes to its horizon instead of exiting the moment
@@ -45,10 +46,13 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
       // contract-generation boundary, which is a separate, pre-existing gap.
       features: only("progression", "dnet"),
       onRecord: (line) => {
-        const record = JSON.parse(line) as { key?: string; data?: { servers?: unknown[] } };
-        if (record.key === "dnet" && Array.isArray(record.data?.servers)) {
-          observed.push(record.data.servers.length);
-        }
+        const record = JSON.parse(line) as {
+          key?: string;
+          data?: { probed?: unknown[]; knowledge?: { hosts?: unknown[] } };
+        };
+        if (record.key !== "dnet") return;
+        if (Array.isArray(record.data?.probed)) observed.push(record.data.probed.length);
+        if (Array.isArray(record.data?.knowledge?.hosts)) mapped.push(record.data.knowledge.hosts.length);
       },
     });
 
@@ -57,10 +61,14 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
     expect(result.unmodeled).toEqual({});
     expect(result.crashes).toEqual([]);
     // In BN1 with no SF15 the dnet probe is gated off until the program lands,
-    // so a populated reading can only mean the purchase happened AND generated
-    // a darknet. A record with zero hosts would not prove either.
+    // so the mere EXISTENCE of a reading is what proves the purchase happened.
     expect(observed.length).toBeGreaterThan(0);
     expect(Math.max(...observed)).toBeGreaterThan(0);
+    // That the probe ran does not yet prove a net was GENERATED: `probed`
+    // always carries `darkweb`, which `initDarkwebServer` builds unconditionally
+    // and independently of `populateDarknet`. What proves generation is the
+    // folded map holding more than that one host.
+    expect(Math.max(...mapped, 0)).toBeGreaterThan(1);
   }, 120_000);
 
   test("the controller plants an overseer on darkweb and the net gets MAPPED", async () => {
@@ -436,13 +444,23 @@ describe("cache files, which are what the purchase is actually worth", () => {
     // Returned negative, as the CacheResult contract has it.
     expect(result.karmaLoss).toBe(-(difficulty + 1));
     expect(dnet.cachesOn(target!)).not.toContain(file);
-    // A second open of the same file finds nothing.
-    expect(dnet.openCache(target!, file).success).toBe(false);
+    // A second open of the same file THROWS, which is upstream's own behaviour
+    // and materially different from a refusal — see below.
+    expect(() => dnet.openCache(target!, file)).toThrow();
   });
 
-  test("a missing cache is refused rather than throwing", () => {
+  test("a missing cache THROWS, exactly as upstream does", () => {
+    // This test used to assert the opposite, and the assertion was wrong rather
+    // than the engine: `openCache` raises through `helpers.errorMessage` on both
+    // its bad-path and not-found branches (`NetscriptFunctions/Darknet.ts:292-303`).
+    // The distinction is not pedantic. A throw KILLS THE CALLING SCRIPT, so a
+    // job that opened a cache off a listing that had gone stale under it would
+    // cost its host the only resident standing there — and nothing outside the
+    // darknet can put one back. Modelling it as a refusal would have made the
+    // guard in `game/dnet/jobs.ts` look like belt-and-braces instead of the
+    // thing that keeps a host alive.
     const dnet = system({ hasProgram: true });
-    expect(dnet.openCache("darkweb", "nope.cache")).toMatchObject({ success: false, karmaLoss: 0 });
+    expect(() => dnet.openCache("darkweb", "nope.cache")).toThrow("Cache file not found");
   });
 });
 
@@ -494,6 +512,47 @@ describe("the darknet model's own claims", () => {
     const all = DNET_ASSUMPTIONS.join(" ");
     expect(all).not.toContain("deletes and restarts only");
     expect(all).not.toContain("the exact grid is shape");
+  });
+
+  test("the password models claim full transcription, and name what is left", () => {
+    // The same record, for the half a solver is written against. This entry
+    // used to say nineteen of the twenty-four models had an unguessable
+    // password — a solver could not be tested at all against that, and the
+    // moment it stopped being true the text had to move with it.
+    const models = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.models"))!;
+    expect(models).toContain("All fifteen arms");
+    expect(models).toContain("isCloseToCorrectPassword");
+    expect(models).toContain("ENTROPY SOURCE");
+    expect(DNET_ASSUMPTIONS.join(" ")).not.toContain("correctly-formatted-but-unguessable");
+  });
+
+  test("a 408 is reachable now that backdoors are modelled, and the entry says how", () => {
+    // This line USED to be `dnet.authTimeout`, declaring a timeout unreachable
+    // because `getTimeoutChance()` is exactly 0 with no backdoor path. That was
+    // true and is no longer: the chance is `max(min((backdoored - 2) * 0.03,
+    // 0.5), 0)`, so the third backdoor makes 408 a real outcome and the
+    // resume-across-a-timeout path in `attemptJob` is exercised rather than
+    // merely unit-tested. The record moves with the model.
+    expect(DNET_ASSUMPTIONS.some((line) => line.startsWith("dnet.authTimeout"))).toBe(false);
+    const backdoors = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.backdoors"))!;
+    expect(backdoors).toBeDefined();
+    expect(backdoors).toContain("408");
+    // The two halves that make a backdoor a decision rather than a freebie: it
+    // taxes every authentication in the net, and it makes its own host churn.
+    expect(backdoors).toContain("1.07 ^ surplus");
+    expect(backdoors).toContain("restart");
+    expect(DNET_ASSUMPTIONS.join(" ")).not.toContain("no backdoor path is modelled");
+  });
+
+  test("the maze is claimed as modelled, with the wall rule stated", () => {
+    // The one branch a walker cannot recover from getting wrong: a refused move
+    // leaves the position unchanged, so a walker that assumed its move landed
+    // desyncs from the engine permanently. If the sim ever stops reproducing
+    // that, this line is what says the measurement is void.
+    const labyrinth = DNET_ASSUMPTIONS.find((line) => line.startsWith("dnet.labyrinth"))!;
+    expect(labyrinth).toContain("UNCHANGED");
+    expect(labyrinth).toContain("PID");
+    expect(DNET_ASSUMPTIONS.join(" ")).not.toContain("a lab is never completed from a script");
   });
 });
 

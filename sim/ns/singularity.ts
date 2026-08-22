@@ -256,8 +256,18 @@ export function makeSingularity(deps: SingularityDeps): SingularityNamespace {
     requireSingularityAccess();
     const server = world.servers.get(deps.terminal.host);
     if (!server) throw new Error(`installBackdoor: server '${deps.terminal.host}' does not exist`);
+    // A DARKNET backdoor skips both gates and takes a flat four seconds:
+    // `calculateHackingTime` returns 16 for a DarknetServer outright
+    // (`Hacking.ts:60-61`) and the install is a quarter of it, so there is no
+    // hacking-skill requirement and no root requirement to check. That is what
+    // makes it cheap enough to be worth spending the free allowance on, and why
+    // the only thing that limits it is the `1.07 ^ surplus` tax the darknet
+    // system charges every authentication once the allowance is gone.
     if (server.simKind === "DarknetServer") {
-      return unmodeled("subsystem", "Darknet backdoor", "Darknet authentication/backdoor effects are not modeled");
+      await delay((16 * 1000) / 4);
+      server.backdoorInstalled = true;
+      world.emit({ kind: "event", name: "backdoor", data: { host: server.hostname } });
+      return;
     }
     if (server.purchasedByPlayer) throw new Error("installBackdoor: cannot backdoor a purchased server");
     if (!server.hasAdminRights) throw new Error(`installBackdoor: no root access on '${server.hostname}'`);

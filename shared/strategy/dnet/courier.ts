@@ -39,6 +39,32 @@ export const LOCAL_CODES = {
    *  its host, its resident was swept, or it hit the controller's timeout. Kept
    *  apart from 903 so a dying net does not read as a RAM shortage. */
   905: "JobDied",
+  // 906-910 are the password solvers stopping, and they are ordered by how
+  // loudly they should be read. The first three are operational; the last two
+  // say our transcription of the game is wrong, which is a different kind of
+  // problem and must not blend into the others.
+  /** The declared attempt budget ran out. The state is kept, so the next
+   *  vantage resumes rather than restarting. Expected on the expensive models
+   *  and not a fault. */
+  906: "SolverBudget",
+  /** A matched response taught us nothing new. Usually means we are parsing the
+   *  model's grammar loosely enough to accept a line that says nothing. */
+  907: "SolverStalled",
+  /** Feedback was needed and the log ring could not be read — below the host's
+   *  charisma requirement, or `heartbleed` refused. Not the solver's fault, and
+   *  it clears on its own once charisma catches up. */
+  908: "OracleUnavailable",
+  /** The response did not match the grammar this model is documented to speak.
+   *  Upstream changed, or we transcribed it wrong. */
+  909: "OracleUnparsed",
+  /** The search space was eliminated with no hit: the password provably is not
+   *  where our model of the game says it must be. The loudest code here. */
+  910: "SolverExhausted",
+  /** A `phishingAttack` claimed the net-wide cache window. Counted rather than
+   *  merely logged because it is the ONLY evidence we get of a piece of engine
+   *  state — `DarknetState.lastPhishingCacheTime` is exposed nowhere — and the
+   *  controller stamps its cooldown belief off it. */
+  911: "PhishingCacheWon",
 } as const;
 
 export function codeName(code: number): string {
@@ -76,6 +102,14 @@ export interface ReportHost {
   /** Whether the OBSERVING process held a session. Per-PID, so it says nothing
    *  about anyone else and expires with its observer. */
   hasSession?: boolean;
+  /** `.cache` files `ns.ls` listed on the host.
+   *
+   *  The only channel there is: upstream appends a darknet server's caches to
+   *  its `ls` listing and exposes them through no other member, which is why
+   *  `survey` pays 0.2 GB for a call it otherwise would not make. An empty array
+   *  is a real observation — "we looked and there were none" — and is what stops
+   *  a `cache` task from being derived, so it must not be conflated with absent. */
+  caches?: string[];
 }
 
 /** One password attempt and what it taught us.
@@ -99,6 +133,10 @@ export interface AttemptOutcome {
   elapsedMs?: number;
   /** The model-specific response, scraped back out of the log ring. */
   oracle?: OracleCapture;
+  /** Where a feedback solver got to, so the next vantage resumes rather than
+   *  starting the conversation again. Redacted before anything is published —
+   *  see `CREDENTIAL_KEYS` — because a half-solved password is a password. */
+  solver?: Record<string, unknown>;
 }
 
 /** A resident saying it is alive. Three missed beats and the controller retires
@@ -127,7 +165,18 @@ export interface VaultEntry {
 /** Field names that carry a recovered credential and must never be recorded.
  *
  * `passwordExpected` is deliberately absent: see `AttemptOutcome`. */
-const CREDENTIAL_KEYS: ReadonlySet<string> = new Set(["password", "credential", "credentials", "vault"]);
+/** `solver` and `scratch` are here for the same reason `password` is. A solver's
+ * scratch accumulates resolved characters, known prefixes and modular residues,
+ * so late in a solve it IS the password in pieces — and it rides on the attempt
+ * ledger, which is a published structure. */
+const CREDENTIAL_KEYS: ReadonlySet<string> = new Set([
+  "password",
+  "credential",
+  "credentials",
+  "vault",
+  "solver",
+  "scratch",
+]);
 
 /** Strip credentials at every depth.
  *

@@ -85,10 +85,40 @@ export function parseWorkerArgs(args: readonly unknown[]): WorkerArgs | undefine
   return { missionId, generation, identity, role, agentId };
 }
 
-/** The job id an agent was launched with, when it was launched as a job rather
- * than as a resident. Positional, so it lives here beside the parsers. */
-export function jobIdFrom(args: readonly unknown[]): string | undefined {
-  return typeof args[5] === "string" ? args[5] : undefined;
+/** How many arguments a RESIDENT carries. The sixth, when present, is a job id,
+ * and every spawn carries the first five forward unchanged. It lives here rather
+ * than in `game/dnet/agent.ts` because it is a property of the positional
+ * contract this file owns, and the agent is the only reader left. */
+const RESIDENT_ARG_COUNT = 5;
+
+/** The job id an agent was launched with. Private: `parseAgentMode` is the only
+ * caller, because reading the mode out of two places is how "argv length six"
+ * became an unwritten rule in the first place. */
+function jobIdFrom(args: readonly unknown[]): string | undefined {
+  return typeof args[RESIDENT_ARG_COUNT] === "string" ? args[RESIDENT_ARG_COUNT] : undefined;
+}
+
+/** What an agent process was launched to BE, named rather than inferred.
+ *
+ * The two modes used to be told apart by argv length at the call site, which
+ * made the positional contract something a reader had to reconstruct from a
+ * `slice(0, 5)` and an index. Naming it puts the whole rule in this file. */
+export type AgentMode =
+  | { kind: "resident"; mission: WorkerArgs }
+  | { kind: "job"; mission: WorkerArgs; jobId: string };
+
+export function parseAgentMode(args: readonly unknown[]): AgentMode | undefined {
+  const mission = parseWorkerArgs(args);
+  if (!mission) return undefined;
+  const jobId = jobIdFrom(args);
+  return jobId === undefined ? { kind: "resident", mission } : { kind: "job", mission, jobId };
+}
+
+/** The arguments a spawn back to resident mode must carry: this process's own,
+ * minus any job id. Takes the raw args rather than a `WorkerArgs` so a resident
+ * re-launches itself with exactly what it was given, byte for byte. */
+export function residentArgsFrom(args: readonly unknown[]): (string | number)[] {
+  return args.slice(0, RESIDENT_ARG_COUNT) as (string | number)[];
 }
 
 /** Args for a resident, as a job that plants one must pass them on. Kept beside

@@ -4,26 +4,33 @@ import {
   collapsible,
   dataTable,
   definitions,
+  dot,
   filters,
   hint,
   meter,
   note,
   outcome,
-  rankedTable,
   search,
+  shownOf,
   table,
   tiles,
   waiting,
+  type Status,
 } from "../lib/dom.ts";
 import { raw, type Markup } from "../lib/html.ts";
 import { esc, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
 import { view } from "../lib/viewstate.ts";
 import type { ProjectedState } from "../project.ts";
 import { codeName } from "../../../shared/strategy/dnet/courier.ts";
-import { modelEntry } from "../../../shared/strategy/dnet/models.ts";
+import { modelEntry, type PasswordFacts } from "../../../shared/strategy/dnet/models.ts";
+import { solverFor } from "../../../shared/strategy/dnet/solvers/index.ts";
+import { shouldListen } from "../../../shared/strategy/dnet/listen.ts";
+import { reclaimForecast } from "../../../shared/strategy/dnet/farm.ts";
+import { PHISH_CACHE_COOLDOWN_MS } from "../../../shared/strategy/dnet/rates.ts";
+import { LAB_LADDER, isLabyrinth } from "../../../shared/strategy/dnet/rates.ts";
 import { FACT_CLASS, type ExpiryOpts } from "../../../shared/strategy/dnet/knowledge.ts";
 import type { DarknetKnownHost, DarknetState } from "../../../shared/telemetry/topics/dnet.ts";
-import { factLife, isStale, matches, mapOptions, netLegend, netMap } from "./dnet-map.ts";
+import { AUTH_LABEL, factLife, isStale, matches, mapOptions, netLegend, netMap } from "./dnet-map.ts";
 import type { Tab } from "./index.ts";
 
 /** The Darknet panel.
@@ -39,22 +46,121 @@ import type { Tab } from "./index.ts";
  * shared modules the controller uses, which is why `expiryMs` and `modelEntry`
  * are imported rather than having their answers shipped per host per tick.
  *
- * The second job is the password problem. Nineteen of the twenty-four models are
- * deliberately unsolved, so for those the panel's task is to hand over the raw
- * material — the hint, the captured oracle, the response codes, the exact reason
- * we have not attacked it — rather than to hide a blank behind a shrug. */
+ * The second job used to be "why have we not attacked this", and it is not any
+ * more. `shared/strategy/dnet/solvers/` implements nineteen solvers and the five
+ * dictionary models are walked by `planAttempt`, so twenty-three of the
+ * twenty-four are openable — and `models.ts:describeModel` DERIVES `status` from
+ * `solverFor()` and deletes the `blocked` note the moment a solver exists, which
+ * is what stops the registry claiming a reason that stopped being true.
+ *
+ * So the password surface splits in two. For the twenty-three, the question is
+ * SOLVE PROGRESS — what is running, how far through its budget, which phase, and
+ * what the last response code was. For the labyrinth, which is a maze walked by
+ * a process rather than a password, and for any model id the game invents that
+ * we have not transcribed, the old job survives unchanged: hand over the raw
+ * material rather than hide a blank behind a shrug. */
 
 /** How many rows the server table shows before saying it truncated. The MAP
  * never truncates; a table is where a limit belongs. */
 const TABLE_LIMIT = 60;
 
-/** Why a host has not been attacked, from the registry rather than the wire. */
-function modelReason(modelId: string | undefined): Markup {
+/** A host's row, as something other than a raw number.
+ *
+ * `-1` reaches the panel from three different places and means something
+ * different in each: it is darkweb's REAL depth, it is what every labyrinth
+ * reports (all eight are constructed at `depth: -1` and the renderer pins them
+ * to `getNetDepth() + 0.5`), and it is what `getDepth` answers when the lookup
+ * fails. `layoutNet` already separates the three by identity rather than by
+ * depth for exactly this reason; a table printing `-1` in all three cases puts
+ * the shop, the goal and an unplaced rumour on the same row. */
+function depthLabel(host: DarknetKnownHost): string {
+  if (host.isDarkweb === true || host.hostname === "darkweb") return "shop";
+  if (isLabyrinth(host.hostname, host.modelId)) return "lab";
+  return host.depth === undefined || host.depth < 0 ? NONE : String(host.depth);
+}
+
+/** Why a planner declined, rendered the one way.
+ *
+ * Three of them now answer the same question in the same shape — `spread`,
+ * `farm` and `listen` all carry `{refused, examples}` — and each had its own
+ * copy of this twelve-line loop. The shape is dnet's own, so the helper lives
+ * here rather than in the shared vocabulary.
+ *
+ * Sorted by count, and one example per reason: a reason with no example is a
+ * number nobody can act on, and a row per host is a wall. */
+function refusals(
+  refused: Record<string, number>,
+  examples: readonly { why: string; detail: string }[],
+  empty: Markup,
+): string {
+  return table(
+    ["refused", "n", "why"],
+    Object.entries(refused)
+      .sort((a, b) => b[1] - a[1])
+      .map(([why, n]) => [esc(why), String(n), esc(examples.find((e) => e.why === why)?.detail ?? "")]),
+    { empty, left: [0, 2], wrap: [2] },
+  );
+}
+
+/** The published password facts, in the shape the shared modules expect.
+ *
+ * The digest ships these five and the panel reassembles them, rather than the
+ * controller shipping every derived answer per host per tick — the same trade
+ * that has `modelEntry` looked up here rather than sent. */
+function passwordFacts(h: DarknetKnownHost): PasswordFacts {
+  return {
+    ...(h.passwordLength !== undefined ? { passwordLength: h.passwordLength } : {}),
+    ...(h.passwordFormat !== undefined ? { passwordFormat: h.passwordFormat } : {}),
+    ...(h.passwordHint !== undefined ? { passwordHint: h.passwordHint } : {}),
+    ...(h.data !== undefined ? { data: h.data } : {}),
+    ...(h.difficulty !== undefined ? { difficulty: h.difficulty } : {}),
+  };
+}
+
+/** What grinding this host's owner-blocked RAM open would cost.
+ *
+ * Derived rather than published: `reclaimForecast` is a pure function of
+ * `difficulty`, `blockedRam` and charisma, all of which already travel. Until
+ * now it only reached a reader as prose buried inside a farm refusal, so the
+ * question "is this block worth grinding" had no number attached to it on the
+ * one screen that shows the block.
+ *
+ * A call that frees less than `RECLAIM_MIN_PER_CALL_GB` frees literally nothing
+ * once the engine rounds it, which is a stall rather than a slow grind — and
+ * those want different responses, so they are named differently. */
+function reclaimRow(host: DarknetKnownHost, charisma: number | undefined): string {
+  if (!host.blockedRam || charisma === undefined) return "";
+  const forecast = reclaimForecast(
+    { difficulty: host.difficulty, blockedRam: host.blockedRam },
+    charisma,
+  );
+  if (forecast === undefined) return "";
+  if (forecast.perCallGb <= 0) {
+    return `<p class="bad">${fmtRam(host.blockedRam)} blocked, and a call frees nothing at this charisma`
+      + ` — the grind is stalled, not slow</p>`;
+  }
+  return `<p class="muted">${fmtRam(host.blockedRam)} blocked · ${fmtRam(forecast.perCallGb)} per call`
+    + ` · clear in ${Number.isFinite(forecast.clearMs) ? fmtTime(forecast.clearMs) : "never"}</p>`;
+}
+
+/** Whether we can open this model, decided ONCE.
+ *
+ * The detail card and the password surface used to write this decision
+ * separately, with different wording, so the same host could be described two
+ * ways on one screen. It is a pure function of the model id — `describeModel`
+ * derives `status` from the solver registry — so it belongs in one place and is
+ * looked up rather than shipped per host per tick.
+ *
+ * An unrecognised id is `bad` rather than merely unknown: it is a game update or
+ * a hole in `models.ts`, `unknownModels` is counting it, and a generic fallback
+ * here would hide both. */
+function solverStatus(modelId: string | undefined): { status: Status; label: Markup } {
   const entry = modelEntry(modelId);
-  if (!entry) return `<span class="bad">unrecognised model id</span>`;
-  return entry.blocked !== undefined
-    ? `<span class="muted">${esc(entry.blocked)}</span>`
-    : `<span class="good">implemented</span>`;
+  if (!entry) return { status: "bad", label: `<span class="bad">unrecognised model id</span>` };
+  if (entry.blocked !== undefined) {
+    return { status: "wait", label: `<span class="muted">${esc(entry.blocked)}</span>` };
+  }
+  return { status: "good", label: `<span class="good">implemented</span>` };
 }
 
 function factRows(host: DarknetKnownHost, now: number, expiry: ExpiryOpts): [Markup, Markup][] {
@@ -85,24 +191,33 @@ function detailCard(
   expiry: ExpiryOpts,
 ): string {
   const host = hosts.find((entry) => entry.hostname === selected)
-    ?? hosts.find((entry) => entry.hostname === d.plan?.action.hostname)
+    // Nothing is "selected" by the plan any more, so the fallback is the
+    // best-ranked stasis candidate: the host the panel has most to say about.
+    ?? hosts.find((entry) => entry.hostname === d.plan?.ranked[0]?.hostname)
     ?? hosts.find((entry) => entry.isDarkweb)
     ?? hosts[0];
   if (!host) return card("Host", note("no host selected"));
 
   const summary = tiles([
-    { label: "depth", value: host.depth === undefined ? "?" : String(host.depth) },
+    { label: "depth", value: depthLabel(host) },
     {
       label: "usable RAM",
       value: host.maxRam === undefined ? NONE : fmtRam(host.freeRam ?? 0),
-      sub: host.maxRam === undefined ? undefined : `of ${fmtRam(host.maxRam)}`,
+      // `used` and `blocked` are separate problems with separate fixes — the
+      // owner's block is what `memoryReallocation` grinds, our own use is not —
+      // so the tile names both rather than folding them into one shortfall.
+      sub: host.maxRam === undefined
+        ? undefined
+        : `of ${fmtRam(host.maxRam)}`
+          + (host.usedRam ? ` · ${fmtRam(host.usedRam)} used` : "")
+          + (host.blockedRam ? ` · ${fmtRam(host.blockedRam)} blocked` : ""),
     },
     {
       label: "charisma",
       value: host.requiredCharisma === undefined ? NONE : fmtNum(host.requiredCharisma, 0),
       sub: d.charisma !== undefined ? `have ${fmtNum(d.charisma, 0)}` : undefined,
     },
-    { label: "state", value: host.authState ?? NONE },
+    { label: "state", value: host.authState === undefined ? NONE : AUTH_LABEL[host.authState] },
   ]);
 
   // The password model, and — when we have not attacked it — exactly why not.
@@ -131,27 +246,41 @@ function detailCard(
     if (entry) {
       modelRows.push([hint("oracle", "what a wrong guess tells you, and where it appears"), esc(entry.oracle)]);
       modelRows.push(["read via", esc(entry.via)]);
-      if (entry.blocked !== undefined) {
-        modelRows.push(["not attacked", `<span class="muted">${esc(entry.blocked)}</span>`]);
-      }
-    } else {
-      // Shown as exactly that. A generic fallback here would hide a game update
-      // behind a shrug — and `unknownModels` is counting it.
-      modelRows.push(["not attacked", `<span class="bad">unrecognised model id</span>`]);
     }
+    // One decision, one wording — see `solverStatus`.
+    const opens = solverStatus(host.modelId);
+    modelRows.push([dot(opens.status, "can we open this model at all"), opens.label]);
   }
 
   const attempt = host.attempt;
-  const attemptRows: [Markup, Markup][] = attempt
-    ? [
-      ["status", esc(attempt.status)],
-      ["candidates tried", String(attempt.tried)],
-      [hint("probes", "deliberate failures spent to make the oracle appear at all"), String(attempt.probes)],
-      ...(attempt.lastCode !== undefined
-        ? [[`last code`, `${attempt.lastCode} ${esc(codeName(attempt.lastCode))}`] as [Markup, Markup]]
-        : []),
-    ]
-    : [];
+  const attemptRows: [Markup, Markup][] = [];
+  if (attempt) {
+    attemptRows.push(["status", esc(attempt.status)]);
+    attemptRows.push(["candidates tried", String(attempt.tried)]);
+    attemptRows.push([
+      hint("probes", "deliberate failures spent to make the oracle appear at all"),
+      String(attempt.probes),
+    ]);
+    if (attempt.lastCode !== undefined) {
+      // The code and its AGE together. A code on its own does not say whether
+      // the conversation is live or was abandoned an hour ago, and those want
+      // opposite things from an operator.
+      attemptRows.push([
+        "last code",
+        `${attempt.lastCode} ${esc(codeName(attempt.lastCode))}`
+        + (attempt.lastAt !== undefined ? ` <span class="muted">· ${fmtTime(now - attempt.lastAt)} ago</span>` : ""),
+      ]);
+    }
+    if (attempt.modelId !== undefined && host.modelId !== undefined && attempt.modelId !== host.modelId) {
+      // The ledger was built against a different model, which means the host
+      // was replaced under it. Every count above is about a password that no
+      // longer exists — see the `goneAt` branch in the fold.
+      attemptRows.push([
+        "ledger model",
+        `<span class="bad">${esc(attempt.modelId)} — stale, the host was replaced</span>`,
+      ]);
+    }
+  }
 
   const neighbours = (host.neighbours ?? []).length > 0
     ? `<div class="chips">`
@@ -175,6 +304,15 @@ function detailCard(
         : `<p class="bad">resident lost — last beat ${fmtTime(now - host.agent.lastBeatAt)} ago</p>`
       : "")
     + (host.goneAt !== undefined ? `<p class="bad">gone — its identity facts were dropped with it</p>` : "")
+    // A cache dies with its host, so an unopened one is a standing offer with an
+    // expiry date on it. `.d.cache` is called out because it is the only kind
+    // that can hand back a coding contract.
+    + ((host.caches ?? []).length > 0
+      ? `<p class="good">${host.caches!.length} unopened `
+        + `cache${host.caches!.length === 1 ? "" : "s"}: ${esc(host.caches!.join(", "))}`
+        + `${host.caches!.some((f) => f.endsWith(".d.cache")) ? " — a .d.cache can carry a contract" : ""}</p>`
+      : "")
+    + reclaimRow(host, d.charisma)
     + (modelRows.length > 0 ? definitions(modelRows) : note("no password model observed"))
     + (attemptRows.length > 0 ? collapsible("dnet.attempt", "attempts", definitions(attemptRows), true) : "")
     + collapsible("dnet.facts", "facts, with age", definitions(factRows(host, now, expiry)), true)
@@ -198,8 +336,12 @@ function crewCard(d: DarknetState, hosts: readonly DarknetKnownHost[], now: numb
     {
       label: "overseer",
       value: overseer ? (overseer.alive ? "alive" : "silent") : NONE,
+      // WHERE it is standing, not only whether it is: the controller lives on a
+      // host that reboots, and "silent" plus a hostname is a place to look.
       sub: overseer
-        ? `beat ${overseer.lastBeatAt > 0 ? `${fmtTime(now - overseer.lastBeatAt)} ago` : NONE} · ${overseer.seedAttempts} seeds`
+        ? `${overseer.host}${overseer.pid !== undefined ? ` pid ${overseer.pid}` : ""}`
+          + ` · beat ${overseer.lastBeatAt > 0 ? `${fmtTime(now - overseer.lastBeatAt)} ago` : NONE}`
+          + ` · ${overseer.seedAttempts} seeds`
         : undefined,
     },
     {
@@ -300,9 +442,31 @@ export const dnetTab: Tab = {
     const options = mapOptions(now, expiry, d.netDepth);
     const matched = options.query ? hosts.filter((host) => matches(host, options.query)) : hosts;
 
+    // The three probe-only readings. They arrive from the DODGED PROBE and the
+    // driver tick does not carry them, so a run whose first tick lands before
+    // its first probe has a `knowledge` and none of these — which is exactly
+    // the shape the panel used to throw on.
+    const linked = d.stasisLinked;
+    const instability = d.instability;
+
     const summary = tiles([
-      { label: "hosts known", value: String(knowledge.hosts.length - knowledge.gone) },
-      { label: "max depth", value: String(d.maxDepth) },
+      {
+        label: "hosts known",
+        // Counted OVER THE ROWS WE HAVE, not `hosts.length - gone`: the digest
+        // caps `hosts` at KNOWLEDGE_MAX_HOSTS while `gone` is counted over every
+        // host the controller holds (`publish.ts`), so subtracting one from the
+        // other mixes two populations — it under-reports as soon as the cap
+        // bites and goes NEGATIVE once more hosts are gone than the cap carries.
+        value: String(knowledge.hosts.filter((entry) => entry.goneAt === undefined).length),
+        // The digest caps at KNOWLEDGE_MAX_HOSTS, and a capped count that says
+        // nothing about the cap is a smaller net than the one we are flying.
+        sub: knowledge.truncated && knowledge.totalHosts !== undefined
+          ? `of ${knowledge.totalHosts} — digest capped`
+          : undefined,
+      },
+      // -1 is getDepth's "no idea", not a depth. Rendering it would put the
+      // sentinel on screen next to real rows.
+      { label: "max depth", value: d.maxDepth >= 0 ? String(d.maxDepth) : NONE },
       {
         label: "cracked",
         value: String(d.coverage?.cracked ?? 0),
@@ -315,14 +479,27 @@ export const dnetTab: Tab = {
         // mortality, and out there that is the loss that actually matters.
         sub: knowledge.agents.lostSinceBoot > 0 ? `${knowledge.agents.lostSinceBoot} lost` : undefined,
       },
-      { label: "stasis links", value: `${d.stasisLinked.length} / ${d.stasisLinkLimit}` },
+      {
+        label: "stasis links",
+        value: linked === undefined || d.stasisLinkLimit === undefined
+          ? NONE
+          : `${linked.length} / ${d.stasisLinkLimit}`,
+        sub: linked === undefined ? "awaiting the probe" : undefined,
+      },
       {
         label: hint("mutation", "how often the net rearranges itself"),
         value: d.mutationIntervalMs === undefined ? NONE : fmtTime(d.mutationIntervalMs),
         sub: knowledge.mutationsSeen !== undefined ? `${knowledge.mutationsSeen} seen` : undefined,
       },
-      { label: "auth duration", value: `x${fmtNum(d.instability.authenticationDurationMultiplier, 2)}` },
-      { label: "timeout chance", value: fmtPct(d.instability.authenticationTimeoutChance) },
+      {
+        label: "auth duration",
+        value: instability === undefined ? NONE : `x${fmtNum(instability.authenticationDurationMultiplier, 2)}`,
+        sub: instability === undefined ? "awaiting the probe" : undefined,
+      },
+      {
+        label: "timeout chance",
+        value: instability === undefined ? NONE : fmtPct(instability.authenticationTimeoutChance),
+      },
     ]);
 
     const controls =
@@ -380,7 +557,22 @@ export const dnetTab: Tab = {
             + ` data-view-key="dnet.sel" data-view-value="${esc(h.hostname)}">${esc(h.hostname)}</button>`,
           sort: (h) => h.hostname,
         },
-        { id: "depth", label: "depth", cell: (h) => (h.depth === undefined ? NONE : String(h.depth)), sort: (h) => h.depth ?? 999 },
+        {
+          id: "depth",
+          label: "depth",
+          cell: (h) => depthLabel(h),
+          // `-1` means three different things (see `depthLabel`), so the sort
+          // has to separate them the way the map does rather than lump them:
+          // darkweb is the ROOT and belongs at the top, the labyrinths sit below
+          // every placed host, and a row we cannot place sorts last of all —
+          // sending darkweb to the bottom with the unplaced put the shop out of
+          // the table's own row limit on a deep net.
+          sort: (h) => {
+            if (h.isDarkweb === true || h.hostname === "darkweb") return -1;
+            if (isLabyrinth(h.hostname, h.modelId)) return 998;
+            return h.depth === undefined || h.depth < 0 ? 999 : h.depth;
+          },
+        },
         { id: "model", label: "model", left: true, cell: (h) => (h.modelId ? esc(h.modelId) : NONE), sort: (h) => h.modelId ?? "" },
         {
           id: "usable",
@@ -409,61 +601,209 @@ export const dnetTab: Tab = {
         {
           id: "state",
           label: "state",
-          cell: (h) =>
-            [
-              h.authState === "session" ? `<span class="good">session</span>` : "",
-              h.authState === "authenticated" ? `<span class="good">cracked</span>` : "",
-              h.authState === "auth-required" ? `<span class="muted">auth</span>` : "",
-              h.authState === "no-connection" ? `<span class="muted">unreached</span>` : "",
+          // The auth state comes from AUTH_LABEL rather than being enumerated
+          // again here. It was enumerated twice, and the copy in this column was
+          // the one missing `offline` — so a host that answered "I am not there"
+          // rendered as a blank. Everything below AUTH_LABEL is ADDITIVE and
+          // independent of it, which is why those stay a list.
+          cell: (h) => {
+            const auth = h.authState === undefined
+              ? ""
+              : `<span class="${h.authState === "session" || h.authState === "authenticated" ? "good" : "muted"}">`
+                + `${esc(AUTH_LABEL[h.authState])}</span>`;
+            return [
+              auth,
               h.goneAt !== undefined ? `<span class="bad">gone</span>` : "",
-              h.stasisLinked ? `<span class="good">linked</span>` : "",
+              h.stasisLinked ? `<span class="good">pinned</span>` : "",
               h.isStationary ? `<span class="muted">fixed</span>` : "",
               isStale(h, now, expiry) ? `<span class="muted">stale</span>` : "",
-            ].filter(Boolean).join(" ") || NONE,
+            ].filter(Boolean).join(" ") || NONE;
+          },
+          sort: (h) => h.authState ?? "",
         },
       ],
       { defaultSort: { key: "depth", dir: 1 }, empty: "nothing observed yet", limit: TABLE_LIMIT },
     );
 
-    // The password surface for the whole net at once, kept as a table because
-    // comparing models across hosts is how you spot which one to solve first.
-    const discovery = table(
+    // --- the password surface, in two halves --------------------------------
+    //
+    // It used to be one table whose last column was "why untouched". With
+    // nineteen solvers written and the five dictionary models walked by
+    // `planAttempt`, that column is now a column of "implemented" — it answers a
+    // question nobody is asking any more. What an operator wants for those
+    // twenty-three is HOW FAR: which are running, how much of the budget is
+    // spent, and what the host last said. The genuinely unopenable remainder —
+    // the labyrinth, and any model id the game invents that we have not
+    // transcribed — still wants the raw material, so it keeps its own table.
+    const attempted = hosts.filter((h) => h.modelId !== undefined);
+
+    /** Ordered candidates for a dictionary model, so the table can say n of N.
+     *  Derived from the id and the published password facts exactly as the
+     *  oracle and the model name are — the count is a pure function of both. */
+    const candidateTotal = (h: DarknetKnownHost): number | undefined =>
+      modelEntry(h.modelId)?.candidates?.(passwordFacts(h)).length;
+
+    /** A feedback solver's budget for this host.
+     *  Derived, not shipped: `Solver.budget(facts)` is a pure function of the
+     *  password facts the digest already carries, exactly like the model's name
+     *  and its oracle. */
+    const solverBudget = (h: DarknetKnownHost): number | undefined =>
+      solverFor(h.modelId)?.budget(passwordFacts(h));
+
+    /** One number both progress shapes sort on, so the column orders sensibly
+     *  whichever kind of attack a host is under. */
+    const solveFraction = (h: DarknetKnownHost): number => {
+      const solve = h.attempt?.solve;
+      const budget = solverBudget(h);
+      if (solve !== undefined && budget !== undefined && budget > 0) return solve.spent / budget;
+      const total = candidateTotal(h);
+      return total ? (h.attempt?.tried ?? 0) / total : -1;
+    };
+
+    // Solved first, then whatever is moving, then the untouched — the order an
+    // operator scans in.
+    const STATUS_RANK: Record<string, number> = { solved: 0, failed: 1, unattempted: 2, "unknown-model": 3 };
+
+    const solveProgress = dataTable(
+      "dnet.solveprog",
+      attempted,
+      [
+        {
+          id: "host",
+          label: "host",
+          left: true,
+          cell: (h) =>
+            `<button class="chip pick${h.hostname === options.selected ? " sel" : ""}"`
+            + ` data-view-key="dnet.sel" data-view-value="${esc(h.hostname)}">${esc(h.hostname)}</button>`,
+          sort: (h) => h.hostname,
+        },
+        { id: "model", label: "model", left: true, cell: (h) => esc(h.modelId ?? ""), sort: (h) => h.modelId ?? "" },
+        {
+          id: "status",
+          label: "status",
+          left: true,
+          cell: (h) => {
+            const opens = solverStatus(h.modelId);
+            const status = h.attempt?.status ?? "unattempted";
+            // The registry's verdict and the ledger's are different facts — one
+            // says whether we CAN open this model, the other how the last try
+            // went — so the dot reports the LEDGER. Showing the registry's
+            // "implemented" as a green dot beside the word "failed" was the
+            // panel telling an operator two different things in one cell.
+            const mark: Status = status === "solved"
+              ? "good"
+              // Failure is the normal case out there: a wrong guess is not
+              // punished, and the conversation continues.
+              : status === "failed"
+                ? "wait"
+                : status === "unknown-model"
+                  ? "bad"
+                  : opens.status === "good" ? "ready" : opens.status;
+            return `${dot(mark, opens.status === "good" ? "a solver exists for this model" : "no solver")} ${esc(status)}`;
+          },
+          sort: (h) => STATUS_RANK[h.attempt?.status ?? "unattempted"] ?? 9,
+        },
+        {
+          id: "progress",
+          label: "progress",
+          cell: (h) => {
+            // A feedback solver measures itself in attempts against a budget; a
+            // dictionary measures itself in candidates ruled out. They are not
+            // the same denominator, so neither is forced into the other's.
+            const solve = h.attempt?.solve;
+            const budget = solverBudget(h);
+            if (solve !== undefined && budget !== undefined && budget > 0) {
+              return meter(Math.min(1, solve.spent / budget), `${solve.spent}/${budget}`);
+            }
+            const tried = h.attempt?.tried ?? 0;
+            const total = candidateTotal(h);
+            if (total === undefined || total === 0) return tried > 0 ? String(tried) : NONE;
+            return meter(Math.min(1, tried / total), `${tried}/${total}`);
+          },
+          sort: (h) => solveFraction(h),
+        },
+        {
+          id: "phase",
+          label: "phase",
+          left: true,
+          // Solver-defined, and the one field that says WHAT the conversation is
+          // doing rather than how much of it is left.
+          cell: (h) => (h.attempt?.solve?.phase ? esc(h.attempt.solve.phase) : NONE),
+          sort: (h) => h.attempt?.solve?.phase ?? "",
+        },
+        {
+          id: "probes",
+          // `dataTable` escapes its labels as text, so the explanation lives in
+          // the detail card's own `probes` row rather than as a hint here.
+          label: "probes",
+          cell: (h) => String(h.attempt?.probes ?? 0),
+          sort: (h) => h.attempt?.probes ?? 0,
+        },
+        {
+          id: "code",
+          label: "last code",
+          left: true,
+          cell: (h) =>
+            h.attempt?.lastCode === undefined
+              ? NONE
+              : `${h.attempt.lastCode} ${esc(codeName(h.attempt.lastCode))}`,
+          sort: (h) => h.attempt?.lastCode ?? -1,
+        },
+        {
+          id: "ago",
+          // A code with no age is a number nobody can act on: it does not say
+          // whether the conversation is live or was abandoned an hour ago.
+          label: "ago",
+          cell: (h) => (h.attempt?.lastAt === undefined ? NONE : fmtTime(now - h.attempt.lastAt)),
+          sort: (h) => -(h.attempt?.lastAt ?? 0),
+        },
+      ],
+      { defaultSort: { key: "status", dir: 1 }, empty: "nothing has been attempted yet", limit: TABLE_LIMIT },
+    );
+
+    // The remainder: everything the registry cannot open. `entry.blocked` is
+    // deleted the moment a solver is written, so this list empties itself.
+    const unsolved = attempted.filter((h) => solverStatus(h.modelId).status !== "good");
+    const unsolvedSurface = table(
       [
         "host",
         hint("model", "similar models share vulnerabilities; the list is undocumented upstream"),
         "password",
         "hint",
         "data",
-        hint("why untouched", "the registry's own reason, per model"),
+        hint("oracle", "what a wrong guess tells you, and where it appears — what a solver is written against"),
+        "blocked on",
       ],
-      hosts
-        .filter((h) => h.modelId !== undefined)
-        .map((h) => [
-          esc(h.hostname),
-          esc(h.modelId ?? ""),
-          h.passwordLength === undefined ? NONE : `${h.passwordLength} × ${esc(h.passwordFormat ?? "?")}`,
-          h.passwordHint ? esc(h.passwordHint) : NONE,
-          h.data ? esc(h.data) : NONE,
-          modelReason(h.modelId),
-        ]),
-      { empty: "no host details observed yet", left: [0, 1, 3, 4, 5], wrap: [3, 4, 5] },
+      unsolved.map((h) => [
+        esc(h.hostname),
+        esc(h.modelId ?? ""),
+        h.passwordLength === undefined ? NONE : `${h.passwordLength} × ${esc(h.passwordFormat ?? "?")}`,
+        h.passwordHint ? esc(h.passwordHint) : NONE,
+        h.data ? esc(h.data) : NONE,
+        esc(modelEntry(h.modelId)?.oracle ?? ""),
+        solverStatus(h.modelId).label,
+      ]),
+      {
+        empty: "every model we have seen has a solver",
+        left: [0, 1, 3, 4, 5, 6],
+        wrap: [3, 4, 5, 6],
+      },
     );
 
     const plan = d.plan;
     const decision = plan
       ? tiles([
-        { label: "selected", value: plan.action.type, sub: plan.action.hostname },
         { label: "charisma gate", value: plan.charismaNeeded === undefined ? "clear" : fmtNum(plan.charismaNeeded, 0) },
         { label: "topology", value: d.topologyComplete ? "complete" : "partial" },
       ])
-        + rankedTable(
+        // Ranked, not SELECTED. Spending a link is not something home can do —
+        // `setStasisLink` pins the calling host — so there is no chosen row to
+        // highlight, and pretending otherwise was the panel's half of a decision
+        // nothing carried out.
+        + table(
           ["host", "depth", "servers kept reachable"],
           plan.ranked.map((entry) => [esc(entry.hostname), String(entry.depth), String(entry.unlocks)]),
-          {
-            selected: (i) => plan.ranked[i]!.hostname === plan.action.hostname,
-            empty: "no stasis candidates",
-            left: [0],
-          },
+          { empty: "no stasis candidates; the map is still partial", left: [0] },
         )
         + (plan.lastResult ? outcome(plan.lastResult) : "")
       : waiting("the first darknet decision");
@@ -488,7 +828,11 @@ export const dnetTab: Tab = {
     const delivery = channel
       ? definitions([
         ["reports drained", String(channel.drained)],
-        [hint("refused", "a rendezvous belonging to a run this world no longer shares"), String(channel.rejected)],
+        [
+          hint("refused", "a rendezvous belonging to a run this world no longer shares"),
+          `${channel.rejected}`
+          + ` <span class="muted">· we are ${esc(knowledge.generation)}</span>`,
+        ],
         [hint("hosts forgotten", "unseen long enough that keeping them would be a map of a dead world"), String(channel.forgotten)],
         ...(channel.vaultDrained !== undefined
           ? [[hint("credentials taken", "moved into home's vault; the count travels, they do not"), String(channel.vaultDrained)] as [Markup, Markup]]
@@ -502,12 +846,311 @@ export const dnetTab: Tab = {
       .sort((a, b) => b[1] - a[1])
       .map(([code, count]) => [code, esc(codeName(Number(code))), String(count)]);
 
-    const unknown = knowledge?.unknownModels;
-    const unknownCard = unknown && Object.keys(unknown).length > 0
+    // Why the net is not growing. `planSpread` names every refusal and nothing
+    // rendered them, so a planner that had run out of reachable hosts looked
+    // exactly like one that had stopped working — and the caps that were removed
+    // in favour of these six would have been unobservable either way.
+    const spread = d.spread;
+    const spreadCard = spread
       ? card(
-        "Unrecognised models",
-        note("the game produced a model id our transcription does not know — a game update, or a hole in shared/strategy/dnet/models.ts")
-        + table(["model", "seen"], Object.entries(unknown).map(([id, n]) => [esc(id), String(n)]), { left: [0] }),
+        "Spreading",
+        definitions([
+          [hint("planted", "plants the last derivation admitted; every reachable neighbour is a candidate"), String(spread.planted)],
+        ])
+        + refusals(spread.refused, spread.examples, "nothing refused; every reachable host has an agent"),
+      )
+      : "";
+
+    // What the residents are DOING with the hosts they hold, once those hosts
+    // have stopped teaching us anything. A strict ladder admits one rung per
+    // host, so the refusals are not noise — they are the rest of the sentence:
+    // "phishing, because there is no cache and no block worth grinding".
+    const farming = d.farm;
+    const farmCard = farming
+      ? card(
+        "Farming",
+        definitions([
+          ...Object.entries(farming.admitted)
+            .sort((a, b) => b[1] - a[1])
+            .map(([kind, n]) => [esc(kind), String(n)] as [string, string]),
+          ...(farming.cacheHunter !== undefined
+            ? [[
+              hint("cache hunter", "one .d.cache every three minutes for the WHOLE net, and the roll scales with threads — so the threads go to one deep resident rather than being spread thin"),
+              esc(farming.cacheHunter),
+            ] as [Markup, Markup]]
+            : []),
+          ...(d.karmaLoss !== undefined
+            ? [[
+              hint("karma", "karma only ever moves down and survives an install, so a cache is free progress toward the gang's -54000"),
+              String(Math.round(d.karmaLoss)),
+            ] as [Markup, Markup]]
+            : []),
+          // The one piece of engine state no ns member exposes, so our own
+          // sightings are the only evidence there is. Whether the window is open
+          // decides whether a phish can pay a cache at all — every call while it
+          // is shut falls straight through to the money branch.
+          ...(farming.lastPhishCacheAt !== undefined
+            ? [[
+              hint("phish window", "one .d.cache every three minutes for the WHOLE net; while it is shut every call falls through to money"),
+              (() => {
+                const left = PHISH_CACHE_COOLDOWN_MS - (now - farming.lastPhishCacheAt!);
+                return left <= 0
+                  ? `<span class="good">open</span>`
+                  : `<span class="muted">shut — ${fmtTime(left)} left</span>`;
+              })(),
+            ] as [Markup, Markup]]
+            : []),
+        ])
+        + refusals(farming.refused, farming.examples, "every resident took the top rung of the ladder"),
+      )
+      : "";
+
+    // --- the labyrinth -------------------------------------------------------
+    //
+    // The ladder is static registry data, so it costs nothing to draw and it is
+    // the only place the charisma ramp (300 -> 4000) is visible as a whole. The
+    // rung we are on is inferred the way the game infers it: `getNetDepth()` IS
+    // the current lab's depth, so the deepest lab we have laid eyes on pins it.
+    //
+    // `labCache` is the reason this card exists rather than a tile. Opening one
+    // queues an augmentation DIRECTLY, and the generic price multiplier is
+    // 1.9 ^ (queued non-SoA) charged against everything bought afterwards — so
+    // it is the one cache that waits, and "can it be opened yet" is a decision
+    // home makes rather than a status the net reports.
+    const labCache = d.labCache;
+    const seenLabs = hosts.filter((h) => isLabyrinth(h.hostname, h.modelId));
+    const currentDepth = d.netDepth;
+    const rung = currentDepth === undefined
+      ? undefined
+      : LAB_LADDER.findIndex((stage) => stage.depth === currentDepth);
+    const stage = rung !== undefined && rung >= 0 ? LAB_LADDER[rung] : undefined;
+
+    const labCard = labCache !== undefined || seenLabs.length > 0 || stage !== undefined
+      ? card(
+        "Labyrinth",
+        tiles([
+          {
+            label: "rung",
+            value: stage === undefined ? NONE : `${(rung ?? 0) + 1} / ${LAB_LADDER.length}`,
+            sub: stage?.hostname,
+          },
+          {
+            label: hint("charisma gate", "the movement handler gates on charisma and nothing else"),
+            value: stage === undefined ? NONE : fmtNum(stage.cha, 0),
+            sub: d.charisma !== undefined ? `have ${fmtNum(d.charisma, 0)}` : undefined,
+          },
+          { label: "net depth", value: currentDepth === undefined ? NONE : String(currentDepth) },
+          { label: "labs seen", value: String(seenLabs.length) },
+        ])
+        + (labCache !== undefined
+          ? definitions([
+            [
+              hint(
+                "deferred cache",
+                "getLabReward queues an augmentation directly, and the price multiplier is 1.9 ^ queued —"
+                + " so it waits for the last purchase of an install cycle",
+              ),
+              `${dot(labCache.openable ? "ready" : "wait")} ${esc(labCache.filename)}`
+              + ` <span class="muted">on ${esc(labCache.host)}</span>`,
+            ],
+            [
+              "openable",
+              labCache.openable
+                ? `<span class="good">yes — home has cleared the last purchase</span>`
+                : `<span class="muted">held; opening it now would multiply the rest of the cycle's bill</span>`,
+            ],
+          ])
+          : note("no labyrinth cache is waiting"))
+        + table(
+          ["lab", "net depth", "charisma", "seen"],
+          LAB_LADDER.map((entry, index) => [
+            index === rung ? `<span class="good">${esc(entry.hostname)}</span>` : esc(entry.hostname),
+            String(entry.depth),
+            // Coloured against what we actually have, so the ladder reads as a
+            // plan rather than a table of constants.
+            d.charisma === undefined
+              ? String(entry.cha)
+              : `<span class="${d.charisma >= entry.cha ? "good" : "muted"}">${fmtNum(entry.cha, 0)}</span>`,
+            seenLabs.some((h) => h.hostname === entry.hostname) ? `<span class="good">yes</span>` : NONE,
+          ]),
+          { left: [0] },
+        ),
+      )
+      : "";
+
+    // --- the deliberate three ------------------------------------------------
+    //
+    // Spreading and cracking are unbounded: an attempt costs only time and a
+    // wrong guess is not even punished, so their planners mostly say yes. These
+    // do not. A stasis link is one of at most four slots in the whole run, an
+    // induced migration is a long charge that can lose the host outright, and a
+    // backdoor is charged in global authentication slowdown past a free
+    // allowance. "Why not" is the usual answer here, which is why the refusals
+    // get as much room as the actions.
+    const hold = d.hold;
+    const backdoors = hold?.backdoors;
+    const holdCard = hold
+      ? card(
+        "Deliberate",
+        definitions([
+          [
+            hint("pinned", "setStasisLink pins the CALLING host, so spending a link needs a resident standing on it"),
+            linked === undefined || d.stasisLinkLimit === undefined
+              ? NONE
+              : `${linked.length} / ${d.stasisLinkLimit}`
+              + (linked.length > 0 ? ` <span class="muted">· ${esc(linked.join(", "))}</span>` : ""),
+          ],
+          ...Object.entries(hold.admitted)
+            .sort((a, b) => b[1] - a[1])
+            .map(([kind, n]) => [esc(kind), String(n)] as [Markup, Markup]),
+        ])
+        + refusals(hold.refused, hold.examples, "nothing was declined")
+        + (backdoors
+          ? collapsible(
+            "dnet.backdoors",
+            "backdoors — installed from HOME",
+            // No longer advice: home walks its terminal out along the folded
+            // adjacency and installs these itself, because
+            // `singularity.installBackdoor` acts on the terminal's current
+            // server and only home has a terminal. What it buys is remote
+            // `exec`; what it costs is `1.07 ^ surplus` on EVERY authentication
+            // in the net past a free allowance of `max(rooted / 24, 2)` — so
+            // two are free for ever and the third is a decision.
+            note(
+              "installed from home's terminal along the folded adjacency, because ns.scan cannot see the darknet;"
+              + " only the free allowance is spent, and a stale hop refuses the whole route rather than stranding"
+              + " the terminal out there",
+            )
+            + (backdoors.install.length > 0
+              ? definitions([["would install", esc(backdoors.install.join(", "))]])
+              : "")
+            + refusals(backdoors.refused, backdoors.examples, "nothing was declined"),
+            false,
+          )
+          : ""),
+      )
+      : "";
+
+    // --- listening -----------------------------------------------------------
+    //
+    // Which ring is worth reading next, and why the rest are not. The RANKING is
+    // derived here rather than shipped: `shouldListen` is pure in facts the
+    // digest already carries, exactly like the model registry, so the wire
+    // carries only the refusals the controller actually acted on.
+    //
+    // The ordering is not the intuition, which is why it is worth drawing. A
+    // deep host is chatty — it writes a line every 2s at difficulty 30 — but the
+    // branch that leaks a NEIGHBOUR's password scales as 1/(difficulty+1), so it
+    // is thirty times rarer there. Neither depth nor age is a proxy for value.
+    const listenNow = hosts
+      .filter((h) => h.goneAt === undefined)
+      .map((h) => {
+        const neighbours = h.neighbours ?? [];
+        return {
+          hostname: h.hostname,
+          verdict: shouldListen(
+            {
+              hostname: h.hostname,
+              ...(h.difficulty !== undefined ? { difficulty: h.difficulty } : {}),
+              ...(h.logTrafficInterval !== undefined ? { logTrafficIntervalSec: h.logTrafficInterval } : {}),
+              ...(h.modelId !== undefined ? { modelId: h.modelId } : {}),
+              hasCredential: h.credentialKnown === true,
+              uncrackedNeighbours: neighbours.filter((name) =>
+                hosts.find((other) => other.hostname === name)?.credentialKnown !== true).length,
+              topologyStale: h.neighbours === undefined,
+              solveInFlight: h.attempt?.solving === true,
+              ...(h.facts["lastBleedAt"] !== undefined ? { lastBleedAt: h.facts["lastBleedAt"] } : {}),
+            },
+            now,
+            {
+              netHasUncrackedMovable: hosts.some((other) =>
+                other.goneAt === undefined && other.isStationary !== true && other.credentialKnown !== true),
+              charismaOk: d.charisma === undefined
+                || h.requiredCharisma === undefined
+                || h.requiredCharisma <= d.charisma,
+            },
+          ),
+        };
+      })
+      .filter((entry) => entry.verdict.worth)
+      .sort((a, b) => b.verdict.value - a.verdict.value);
+
+    const bestListen = listenNow[0]?.verdict.value ?? 0;
+    const listening = d.listen;
+    const listenCard = listenNow.length > 0 || listening !== undefined
+      ? card(
+        "Listening",
+        dataTable(
+          "dnet.listen",
+          listenNow,
+          [
+            {
+              id: "host",
+              label: "host",
+              left: true,
+              cell: (r) =>
+                `<button class="chip pick" data-view-key="dnet.sel" data-view-value="${esc(r.hostname)}">`
+                + `${esc(r.hostname)}</button>`,
+              sort: (r) => r.hostname,
+            },
+            {
+              id: "lines",
+              label: "new lines",
+              cell: (r) => String(r.verdict.lines),
+              sort: (r) => r.verdict.lines,
+            },
+            {
+              id: "value",
+              label: "useful lines",
+              cell: (r) =>
+                meter(bestListen > 0 ? r.verdict.value / bestListen : 0, fmtNum(r.verdict.value, 2)),
+              sort: (r) => r.verdict.value,
+            },
+            { id: "why", label: "why", left: true, wrap: true, cell: (r) => esc(r.verdict.why), sort: (r) => r.verdict.why },
+          ],
+          { defaultSort: { key: "value", dir: -1 }, empty: "no ring is worth reading right now", limit: 12 },
+        )
+        + (listening
+          // `no-new-lines` clears itself by waiting; `nothing-to-learn` does not
+          // — it clears only when the world changes. Same table, but they are
+          // not the same kind of "no", and the detail says which.
+          ? refusals(listening.refused, listening.examples, "nothing was declined")
+          : ""),
+      )
+      : "";
+
+    // Two readings of the same question: has the game moved out from under our
+    // transcription? One counts model ids we do not know, the other counts log
+    // lines we cannot parse. They are the same class of event, so they share a
+    // card — and both are things to hear about rather than swallow.
+    const unknown = knowledge?.unknownModels;
+    const drift = d.grammar;
+    const hasUnknown = unknown !== undefined && Object.keys(unknown).length > 0;
+    const hasDrift = drift !== undefined && drift.unrecognised > 0;
+    const unknownCard = hasUnknown || hasDrift
+      ? card(
+        "Drift",
+        (hasUnknown
+          ? note("the game produced a model id our transcription does not know — a game update, or a hole in shared/strategy/dnet/models.ts")
+            + table(["model", "seen"], Object.entries(unknown!).map(([id, n]) => [esc(id), String(n)]), { left: [0] })
+          : "")
+        + (hasDrift
+          ? definitions([[
+            hint("unparsed log lines", "our grammar has fallen behind the game's — see shared/strategy/dnet/oracle.ts"),
+            String(drift!.unrecognised),
+          ]])
+          // SHAPES, not lines. An unparsed line is one we failed to read, and
+          // the noise generator writes cleartext passwords into log lines, so
+          // the examples would be the passwords we missed. Digits and letters
+          // are collapsed; the structure is what a fix is written against.
+          + table(
+            [hint("shape", "digits are #, letters are a — the line itself never leaves the game"), "seen"],
+            Object.entries(drift!.shapes)
+              .sort((a, b) => b[1] - a[1])
+              .map(([shape, n]) => [esc(shape), String(n)]),
+            { empty: "no shape recorded", left: [0], wrap: [0] },
+          )
+          : ""),
       )
       : "";
 
@@ -530,7 +1173,15 @@ export const dnetTab: Tab = {
           { value: "gone", label: "gone" },
         ], "all")
         + servers
-        + collapsible("dnet.discovery", "password surface, every host", discovery, false),
+        // The DIGEST's own cap, which is a different truncation from the
+        // table's: `dataTable` says when IT dropped rows, and this says when the
+        // publisher did. Without it a 220-host reading of a 400-host net looked
+        // like the whole net.
+        + (knowledge.truncated && knowledge.totalHosts !== undefined
+          ? shownOf(knowledge.hosts.length, knowledge.totalHosts, "the digest caps at KNOWLEDGE_MAX_HOSTS")
+          : "")
+        + collapsible("dnet.solve", "solve progress, every host", solveProgress, false)
+        + collapsible("dnet.unsolved", "unsolved surface — hint, data, oracle", unsolvedSurface, false),
       )
       + card("Decision", decision)
       + `</div>`
@@ -540,6 +1191,11 @@ export const dnetTab: Tab = {
       + card("Knowledge", reach)
       + card("Report channel", delivery)
       + card("Response codes", table(["code", "meaning", "n"], codes, { empty: "no darknet call has answered yet", left: [0, 1] }))
+      + labCard
+      + holdCard
+      + listenCard
+      + spreadCard
+      + farmCard
       + unknownCard
       + `</div>`
     );

@@ -59,9 +59,13 @@ export const SIM_FEATURE_COVERAGE: Readonly<Record<FeatureId, FeatureCoverage>> 
   // The mutation tick applies every kind upstream rolls — moves, connects and
   // disconnects included, the rates every knowledge expiry is derived from — so
   // a sim run does exercise the staleness policy, and promoteStock is
-  // transcribed exactly (see DNET_ASSUMPTIONS). Still absent, and still
-  // throwing: stasis links, memoryReallocation, phishing, induced migration,
-  // and the maze — which is why this stays "partial".
+  // transcribed exactly (see DNET_ASSUMPTIONS). Model version 9 adds the two
+  // farm calls the net pays with: memoryReallocation, with its clamped per-call
+  // figure and the two SEPARATE writes it makes to blockedRam and ramUsed, and
+  // phishingAttack, with the three-minute net-wide cache cooldown, both chance
+  // formulas and the quarter-rate charisma on the failure path. Still absent,
+  // and still throwing: stasis links, induced migration, the storm seed and the
+  // maze — which is why this stays "partial".
   dnet: "partial",
   side: "oracle-only",
 };

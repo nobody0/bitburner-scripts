@@ -353,7 +353,7 @@ describe("tab rendering", () => {
       },
     };
     state.topics.dnet = {
-      reachable: 2, maxDepth: 1, stasisLinkLimit: 2, stasisLinked: [], topologyComplete: true,
+      maxDepth: 1, stasisLinkLimit: 2, stasisLinked: [], topologyComplete: true,
       instability: { authenticationDurationMultiplier: 1, authenticationTimeoutChance: 0.1 },
       // Home's own one-hop reading, in the shape an agent reports. The panel
       // renders the FOLD below; the driver folds this into it as one more vantage.
@@ -372,23 +372,67 @@ describe("tab rendering", () => {
         at: 1_000,
         generation: "15:0",
         gone: 1,
+        truncated: true,
+        totalHosts: 220,
         agents: { live: 1, seenEver: 1, lostSinceBoot: 0 },
+        overseer: { host: "darkweb", pid: 42, lastBeatAt: 900, alive: true, seedAttempts: 2 },
         hosts: [
           {
             hostname: "dn-1", depth: 1, lastSeenAt: 1_000, blockedRam: 11, requiredCharisma: 50,
             maxRam: 16, usedRam: 0, freeRam: 5, modelId: "2G_cellular", passwordLength: 6,
             passwordFormat: "numeric", passwordHint: "the dog, obviously", data: "rex",
-            logTrafficInterval: 45, difficulty: 3, isStationary: true,
+            // Half a second, so against this fixture's 1s clock the ring has
+            // genuinely minted lines and the listening ranking has something to
+            // rank. A deep host really is this chatty — 2.3s at difficulty 30.
+            logTrafficInterval: 0.5, difficulty: 3, isStationary: true,
             authState: "auth-required",
             facts: { depth: 1_000, modelId: 1_000, maxRam: 1_000 },
+            caches: ["loot.cache", "hunt.d.cache"],
+            attempt: {
+              modelId: "2G_cellular", status: "failed", tried: 3, probes: 1,
+              lastCode: 401, lastAt: 1_000 - 30_000,
+              solving: true, solve: { phase: "narrowing", spent: 12 },
+            },
           },
           { hostname: "dn-gone", lastSeenAt: 1_000, goneAt: 1_000, facts: {}, authState: "offline" },
         ],
       },
       plan: {
-        action: { type: "stasis", hostname: "dn-1" },
         ranked: [{ hostname: "dn-1", depth: 1, unlocks: 3 }],
         charismaNeeded: 50,
+      },
+      netDepth: 7,
+      charisma: 400,
+      grammar: { unrecognised: 5, shapes: { "a a: a#": 3 } },
+      hold: {
+        admitted: { pin: 1, walk: 1 },
+        refused: { "no-slot": 2 },
+        examples: [{ host: "dn-1", why: "no-slot", detail: "all 2 stasis links are spent" }],
+        backdoors: {
+          install: ["dn-1"],
+          refused: { unstable: 1 },
+          examples: [{ host: "dn-gone", why: "unstable", detail: "authentication already costs x1.30" }],
+        },
+      },
+      listen: {
+        refused: { "nothing-to-learn": 4 },
+        examples: [{ host: "dn-gone", why: "nothing-to-learn", detail: "every line it can write is spam" }],
+      },
+      labCache: { host: "th3_l4byr1nth", filename: "lab.cache", openable: false },
+      channel: { drained: 4, rejected: 1, forgotten: 0 },
+      farm: {
+        admitted: { phish: 1 },
+        refused: { "cache-none": 2 },
+        examples: [{ host: "dn-1", why: "cache-none", detail: "no .cache file on this host" }],
+        cacheHunter: "dn-1",
+        // Two minutes into a three-minute window, so the countdown is a real
+        // number rather than "open".
+        lastPhishCacheAt: 1_000 - 120_000,
+      },
+      spread: {
+        planted: 2,
+        refused: { "not-enough-ram": 3 },
+        examples: [{ host: "dn-1", why: "not-enough-ram", detail: "1.00GB free, needs 2.60GB" }],
       },
     };
     state.topics.gang = {
@@ -438,6 +482,120 @@ describe("tab rendering", () => {
     expect(rendered).toContain("5.00GB");
     // getDepth's -1 sentinel is "unknown", never a depth to render or sort on.
     expect(rendered).not.toContain(">-1<");
+    // Why the net is not growing. `planSpread` has named its refusals since it
+    // was written and nothing rendered them, so a planner that had run out of
+    // reachable hosts read identically to one that had stopped working.
+    expect(rendered).toContain("not-enough-ram");
+    expect(rendered).toContain("1.00GB free, needs 2.60GB");
+
+    // Solve progress, not "why untouched". Nineteen solvers exist and the five
+    // dictionary models are walked, so the old column answered a question
+    // nobody is asking; what an operator wants is how far each host got.
+    expect(rendered).toContain("solve progress, every host");
+    expect(rendered).not.toContain("why untouched");
+    // The last response code, WITH its age — a code alone does not say whether
+    // the conversation is live or was abandoned.
+    expect(rendered).toContain("30s ago");
+
+    // The digest caps at KNOWLEDGE_MAX_HOSTS, and a capped count that does not
+    // say so is a smaller net than the one we are flying.
+    expect(rendered).toContain("220");
+
+    // Where the overseer is standing, not merely that it is.
+    expect(rendered).toContain("pid 42");
+
+    // The labyrinth cache is a DECISION — opening it multiplies every
+    // augmentation still unbought by 1.9x — so it is named and its gate stated.
+    expect(rendered).toContain("lab.cache");
+    expect(rendered).toContain("th3_l4byr1nth");
+    // The ladder's charisma gate, against what we actually hold.
+    expect(rendered).toContain("Labyrinth");
+
+    // `offline` is a real auth state that the servers table used to omit while
+    // the map rendered it, so a host that answered "I am not there" was blank.
+    expect(rendered).toContain("(offline)");
+
+    // Solver progress: spent against a budget DERIVED from the published
+    // password facts, plus the phase. A multi-hundred-attempt solve used to be
+    // indistinguishable from an idle host.
+    expect(rendered).toContain("narrowing");
+    expect(rendered).toMatch(/12\/\d+/);
+
+    // An unopened cache dies with its host, and `.d.cache` is the only kind that
+    // can carry a coding contract.
+    expect(rendered).toContain("loot.cache");
+    expect(rendered).toContain("a .d.cache can carry a contract");
+
+    // The net-wide phishing window, counted down. It is engine state no ns
+    // member exposes, so our own sightings are the only evidence there is.
+    expect(rendered).toContain("phish window");
+    expect(rendered).toContain("shut — 60s left");
+
+    // What grinding the owner's block would actually cost, as a number rather
+    // than prose buried in a refusal.
+    expect(rendered).toContain("11GB blocked");
+
+    // Grammar drift is the same class of event as an unrecognised model id, and
+    // it reaches the screen as a SHAPE. The line itself never leaves the game:
+    // an unparsed line is one we failed to read, and the noise generator writes
+    // cleartext passwords into log lines.
+    expect(rendered).toContain("unparsed log lines");
+    expect(rendered).toContain("a a: a#");
+
+    // Which ring to read next, ranked by expected USEFUL lines. Depth and age
+    // both fail as proxies — a deep host is chatty but its neighbour-credential
+    // branch is thirty times rarer — so the panel ranks on the model's own
+    // number, derived here from facts the digest already carries.
+    expect(rendered).toContain("useful lines");
+    expect(rendered).toContain('data-sort-table="dnet.listen"');
+    // And why the rest were declined, by name.
+    expect(rendered).toContain("nothing-to-learn");
+    expect(rendered).toContain("every line it can write is spam");
+
+    // The three actions with a real price. Their refusals get as much room as
+    // the actions, because "why not" is the usual answer for all three.
+    expect(rendered).toContain("Deliberate");
+    expect(rendered).toContain("no-slot");
+    expect(rendered).toContain("all 2 stasis links are spent");
+    // The backdoor plan used to be ADVICE — no ns.dnet member installs one — and
+    // said so. It is now carried out, from HOME: `singularity.installBackdoor`
+    // acts on the terminal's current server, so the one process with a terminal
+    // is the one that can spend the allowance. The panel says where it happens
+    // and what refuses it, because the refusal is still the usual answer.
+    expect(rendered).toContain("backdoors — installed from HOME");
+    expect(rendered).toContain("ns.scan cannot see the darknet");
+    expect(rendered).not.toContain("nothing out there can act on it");
+  });
+
+  test("the darknet panel survives a driver tick that no probe has preceded", () => {
+    // `knowledge` comes from the DRIVER; `instability`, `stasisLinkLimit` and
+    // `stasisLinked` come only from the dodged probe. The panel guarded on the
+    // first and then dereferenced the other three, so the first tick of a run
+    // whose probe had not landed threw a TypeError and took the whole panel
+    // with it. Every other dnet fixture in this file supplies all four, which
+    // is exactly why nothing caught it.
+    const state = emptyState();
+    state.topics.dnet = {
+      maxDepth: -1,
+      knowledge: {
+        at: 1_000,
+        generation: "15:0",
+        gone: 0,
+        agents: { live: 0, seenEver: 0, lostSinceBoot: 0 },
+        hosts: [{ hostname: "darkweb", lastSeenAt: 1_000, isDarkweb: true, depth: -1, facts: {} }],
+      },
+    };
+
+    const html = TABS.dnet.render(state);
+    // It renders at all — the assertion the crash made impossible.
+    expect(html).toContain("darkweb");
+    // The unobserved readings say so rather than inventing a number.
+    expect(html).toContain("awaiting the probe");
+    expect(html).not.toContain("NaN");
+    expect(html).not.toContain("undefined");
+    // -1 is getDepth's "no idea". It is not a depth, so it is not rendered as
+    // one — in the TILE as well as in the table.
+    expect(html).not.toContain(">-1<");
   });
 
   test("the raw event view renders payload facts and observed codes", () => {

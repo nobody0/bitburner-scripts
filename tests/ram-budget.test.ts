@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { readFile, rm } from "node:fs/promises";
+import { readdir, readFile, rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
-import { JOB_METHODS, RESIDENT_METHODS } from "../game/dnet/realm.ts";
+import { JOB_METHODS, NO_RESPAWN_KINDS, RESIDENT_METHODS, ROUTINE_JOB_KINDS } from "../game/dnet/realm.ts";
+import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
 import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
 import { WORKER_RAM } from "../shared/world.ts";
 import type { NS } from "@ns";
@@ -263,22 +264,33 @@ describe("in-game static RAM budget", () => {
 
   test("the declared method lists cover every call the job bodies make", async () => {
     // THE test that keeps this design honest. A job's allocation is declared by
-    // the controller from `JOB_METHODS`, but the calls are made by closures in
-    // overseer.ts, and the two are connected only by these lists. Get one wrong
-    // and the engine kills the process on its first unlisted call.
+    // the controller from `JOB_METHODS`, but the calls are made by the bodies in
+    // game/dnet/jobs.ts, and the two are connected only by these lists. Get one
+    // wrong and the engine kills the process on its first unlisted call.
     //
     // The simulator cannot catch that — it does not model the dynamic-RAM check
     // — so an under-declared job runs perfectly in a sim run and dies in the
     // game. Reading the source is the only place the drift is visible.
-    const source = await readFile("game/dnet/overseer.ts", "utf8");
+    //
+    // Every file in the directory, not one named file: the bodies moved out of
+    // overseer.ts once and a grep pinned to a filename would have gone quietly
+    // to zero matches rather than failing. They all bundle into the same
+    // artifact, so the rule is a property of the directory.
+    const sources = await Promise.all(
+      (await readdir("game/dnet"))
+        .filter((name) => name.endsWith(".ts"))
+        .map((name) => readFile(`game/dnet/${name}`, "utf8")),
+    );
     const declared = new Set(Object.values(JOB_METHODS).flat());
 
-    // The closures reach ns only through bracket notation on the ns they are
+    // The bodies reach ns only through bracket notation on the ns they are
     // HANDED, which is what keeps them free to the controller and also what
     // makes them greppable.
     const referenced = new Set<string>();
-    for (const match of source.matchAll(/jobNs\["(\w+)"\](?:\["(\w+)"\])?/g)) {
-      referenced.add(match[2] ? `${match[1]}.${match[2]}` : match[1]!);
+    for (const source of sources) {
+      for (const match of source.matchAll(/jobNs\["(\w+)"\](?:\["(\w+)"\])?/g)) {
+        referenced.add(match[2] ? `${match[1]}.${match[2]}` : match[1]!);
+      }
     }
     expect(referenced.size).toBeGreaterThan(4);
     for (const method of referenced) {
@@ -286,14 +298,88 @@ describe("in-game static RAM budget", () => {
     }
   });
 
+  test("each job kind declares the calls ITS OWN body makes", async () => {
+    // The union check above is necessary and not sufficient, and the gap is not
+    // theoretical: `reclaim` was written calling `describeHost(..., true)` — a
+    // cache listing, because clearing a block to zero is what drops the .cache —
+    // while its own JOB_METHODS entry omitted `ls`. Every referenced member was
+    // declared SOMEWHERE, so the union check passed, and the job would have been
+    // killed by the engine on its first `ls`. The simulator cannot see it
+    // either: it does not model the dynamic-RAM check.
+    //
+    // So the attribution is done per KIND. Each body is a distinct
+    // `const <name>Job` and the returned map ties a kind to one of them, which
+    // is enough to slice the source and resolve what each actually reaches for.
+    const source = await readFile("game/dnet/jobs.ts", "utf8");
+
+    // kind -> body identifier, from the map the factory returns.
+    const bound = new Map<string, string>();
+    for (const match of source.matchAll(/^\s{4}(\w+): (\w+Job),$/gm)) bound.set(match[1]!, match[2]!);
+    expect(bound.size, "the returned body map should be greppable").toBe(Object.keys(JOB_METHODS).length);
+
+    // Where each body starts, so a body can be sliced up to the next one.
+    const starts = [...source.matchAll(/^\s{2}const (\w+Job) = async \(/gm)]
+      .map((match) => ({ name: match[1]!, at: match.index! }));
+    expect(starts.length).toBe(bound.size);
+
+    // The two shared helpers, and what reaching for them implies. `describeHost`
+    // takes a third argument that turns on the cache listing, and `cacheFilesOn`
+    // IS the listing — both resolve to `ls` plus the describe trio.
+    const DESCRIBE = ["dnet.getServerDetails", "getServerMaxRam", "getServerUsedRam"];
+
+    for (const [kind, body] of bound) {
+      const index = starts.findIndex((entry) => entry.name === body);
+      expect(index, `${body} should be a top-level body`).toBeGreaterThanOrEqual(0);
+      const from = starts[index]!.at;
+      const to = index + 1 < starts.length ? starts[index + 1]!.at : source.length;
+      const slice = source.slice(from, to);
+
+      const wanted = new Set<string>();
+      for (const match of slice.matchAll(/jobNs\["(\w+)"\](?:\["(\w+)"\])?/g)) {
+        wanted.add(match[2] ? `${match[1]}.${match[2]}` : match[1]!);
+      }
+      if (slice.includes("describeHost(")) for (const method of DESCRIBE) wanted.add(method);
+      // `describeHost(jobNs, x, true)` and `cacheFilesOn(jobNs, x)` both call ls.
+      if (slice.includes("cacheFilesOn(") || /describeHost\([^)]*,\s*true\)/.test(slice)) wanted.add("ls");
+
+      const declared = new Set(JOB_METHODS[kind] ?? []);
+      for (const method of wanted) {
+        expect(
+          declared.has(method),
+          `JOB_METHODS.${kind} is missing ns.${method}, which ${body} calls — the engine kills the process on it`,
+        ).toBe(true);
+      }
+    }
+  });
+
+  test("the shipped controller still reaches ns by BRACKET, not by dot", async () => {
+    // The whole 1.65 GB scheme rests on esbuild leaving `x["dnet"]["probe"]()`
+    // alone. A `minifySyntax` flag would rewrite it to `x.dnet.probe()`, which
+    // the game's analyser bills — silently moving the entire job surface onto
+    // the controller. The source-level greps above cannot see that, because it
+    // happens after them; only the artifact can.
+    const artifacts = await buildScripts(config, { telemetry: true });
+    const overseer = artifacts.find((a) => a.filename === "dnet/overseer.js")!;
+    expect(overseer.content).toContain('["dnet"]');
+    // ...and the same for the two ordinary getters a job describes a host with,
+    // which have no `dnet` prefix to hide behind.
+    expect(overseer.content).toContain('["getServerMaxRam"]');
+  });
+
   test("a resident and the heaviest job both fit a darknet host", () => {
     // `darkweb` is the one darknet host guaranteed a clear 16 GB, and it has to
     // hold the controller AND a resident at once. After that a host holds one
     // agent at a time, because a job SPAWNS from the resident rather than
     // running beside it.
+    //
+    // Priced through `getFunctionRamCost`, which is what `priceAgent` itself
+    // calls. The local table above has no `dnet.*` entries and its `?? 0`
+    // fallback silently valued every darknet call at nothing — so this test
+    // passed by pricing `plant` at a third of its real size, and would have gone
+    // on passing for a 12 GB `setStasisLink`.
     const cost = (methods: readonly string[]): number => {
       let total = BASE_GB;
-      for (const method of new Set(methods)) total += RAM_COSTS[`ns.${method}`] ?? 0;
+      for (const method of new Set(methods)) total += getFunctionRamCost(method);
       return total + 0.5;
     };
     const controllerGb = cost(["getHostname"]);
@@ -309,6 +395,61 @@ describe("in-game static RAM budget", () => {
     const execPeak = cost(["getHostname", "exec"])
       + cost(JOB_METHODS["plant"]!.filter((method) => method !== "spawn"));
     expect(plantGb).toBeLessThan(execPeak);
+
+    // Every ROUTINE kind has to fit beside the controller on `darkweb`, because
+    // that is the one host home can reach and the only one it can re-seed.
+    for (const kind of ROUTINE_JOB_KINDS) {
+      const methods = JOB_METHODS[kind];
+      if (!methods) continue;
+      expect(controllerGb + cost(methods), `${kind} does not fit darkweb beside the controller`)
+        .toBeLessThanOrEqual(16);
+    }
+  });
+
+  test("a 12 GB stasis link is why the RAM target is not simply the largest job", () => {
+    // A stated deployment fact rather than a surprise. `setStasisLink` alone is
+    // 12 GB, so a pin job is ~16 GB — it does not fit `darkweb` beside the
+    // controller, and it does not fit a shallow host's entire 16 GB at all.
+    //
+    // That is survivable for a deliberate one-off, and fatal as a net-wide
+    // target: `planFarm`'s `wantedGb` is "the heaviest thing a host should be
+    // able to hold", so taking it over every declared kind would mark the whole
+    // net cramped and set the reclaim ladder grinding everywhere. Hence
+    // ROUTINE_JOB_KINDS, and hence this test naming the number.
+    const cost = (methods: readonly string[]): number => {
+      let total = BASE_GB;
+      for (const method of new Set(methods)) total += getFunctionRamCost(method);
+      return total + 0.5;
+    };
+    const pinGb = cost(JOB_METHODS["pin"]!);
+    const controllerGb = cost(["getHostname"]);
+
+    expect(getFunctionRamCost("dnet.setStasisLink")).toBe(12);
+    expect(pinGb).toBeGreaterThan(16 - controllerGb);
+
+    // THE EXCEPTION, encoded rather than loosened. `pin` is the only kind whose
+    // method list omits `spawn`, and that is not an economy: with the 2.0 GB
+    // spawn back it would be over 16 GB and could not run on a shallow darknet
+    // host AT ALL. Without it the job's process simply ends and leaves the host
+    // empty for `planSpread` to re-plant — which is safe only because the pin
+    // has just made that host immutable, and which the controller refuses by
+    // name when no neighbour could re-plant it.
+    expect(JOB_METHODS["pin"]).not.toContain("spawn");
+    expect(NO_RESPAWN_KINDS).toEqual(["pin"]);
+    expect(pinGb).toBeLessThan(16);
+    expect(pinGb + getFunctionRamCost("spawn")).toBeGreaterThan(16);
+    // Every other kind hands the host back, because nothing outside can put a
+    // resident there.
+    for (const [kind, methods] of Object.entries(JOB_METHODS)) {
+      if (NO_RESPAWN_KINDS.includes(kind)) continue;
+      expect(methods, `${kind} must be able to spawn back to resident mode`).toContain("spawn");
+    }
+    // ...and every routine kind is comfortably under it, which is the gap the
+    // routine set exists to preserve.
+    for (const kind of ROUTINE_JOB_KINDS) {
+      const methods = JOB_METHODS[kind];
+      if (methods) expect(cost(methods)).toBeLessThan(pinGb);
+    }
   });
 
   test("every worker ramOverride covers the base plus the call it makes", () => {

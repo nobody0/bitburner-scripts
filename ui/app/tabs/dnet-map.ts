@@ -662,7 +662,13 @@ const FAMILY_GLYPH: Record<string, string> = {
   lab: "※",
 };
 
-const AUTH_LABEL: Record<string, string> = {
+/** Every auth state, in the words the map and the table both use.
+ *
+ * Keyed by the UNION rather than by `string`, and exported, because this was
+ * enumerated twice — once here and once inline in the servers table — and the
+ * second copy was missing `offline`. A total record fails the build if the union
+ * grows and this does not, which is the only version of this that stays true. */
+export const AUTH_LABEL: Record<NonNullable<DarknetKnownHost["authState"]>, string> = {
   session: "● session",
   authenticated: "[ authenticated ]",
   "auth-required": "[ auth required ]",
@@ -755,7 +761,6 @@ function nodeMarkup(entry: Placed, options: MapOptions): string {
   const classes = ["node", `auth-${host.authState ?? "no-connection"}`];
   if (host.goneAt !== undefined) classes.push("gone");
   if (isStale(host, options.now, options.expiry)) classes.push("stale");
-  if (host.stasisLinked) classes.push("linked");
   if (host.hostname === selected) classes.push("sel");
   if (query) classes.push(matches(host, query) ? "hit" : "dim");
 
@@ -889,8 +894,12 @@ export function netLegend(): string {
     + swatch("auth-authenticated", "cracked")
     + swatch("auth-auth-required", "auth required")
     + swatch("auth-no-connection", "no connection")
+    + swatch("auth-offline", "offline")
     + swatch("gone", "gone")
-    + swatch("linked", "stasis")
+    // `stasis`, not `linked`: the node draws a left bar (`<rect class="stasis">`)
+    // and never carried a `linked` class that anything styled, so the swatch was
+    // describing a class the map does not render.
+    + swatch("stasis", "stasis")
     + swatch("stale", "faded = believed, not confirmed")
     + `</div>`
     // The edge vocabulary, which had no key at all — including the one edge that

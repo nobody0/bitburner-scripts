@@ -63,7 +63,47 @@ const PUBLISHED_FACTS = [
   "data",
   "logTrafficInterval",
   "hasSession",
+  // The unopened `.cache` files on a host. Already collected by `surveyJob` and
+  // already classed `resource`, so its timestamp carries its own staleness — it
+  // was simply missing from the allow-list, which is why nothing downstream
+  // could say which hosts were holding one. A lab's cache listing is also the
+  // only evidence we have that its maze has been walked.
+  "caches",
+  // When we last read this host's log ring. The `.at` IS the payload, so this
+  // adds no field to `DarknetKnownHost` — it rides `facts` like everything
+  // else, and it is what lets a reader work out whether a bleed is due.
+  "lastBleedAt",
 ] as const;
+
+/** How far a feedback solver has got, and NOTHING else from its state.
+ *
+ * `SolverState.scratch` accumulates resolved characters, known prefixes and
+ * modular residues — late in a solve it IS the password — so `stripCredentials`
+ * deletes any key named `solver` or `scratch` at any depth, and that stays
+ * absolute. This does not weaken it and does not ask to be exempted from it:
+ * it publishes under a DIFFERENT name, and it is built field by field.
+ *
+ * The allow-list is the whole safety argument. A spread of the state, or a loop
+ * over its entries, would ship `scratch` the first time a solver added a field;
+ * naming the two scalars means `scratch` is never read at this site at all, so
+ * there is no path from it into the result.
+ *
+ * `budget` is deliberately absent: `Solver.budget(facts)` is a pure function of
+ * the password facts we already publish, so a reader derives it exactly as it
+ * derives the model's name and oracle from `modelId`.
+ *
+ * `phase` is solver-defined free text, so it is capped rather than trusted. */
+function solveProgress(state: Record<string, unknown> | undefined): { solve?: { phase: string; spent: number } } {
+  if (state === undefined) return {};
+  const phase = typeof state["phase"] === "string" ? state["phase"] : "";
+  const spent = typeof state["spent"] === "number" && Number.isFinite(state["spent"]) ? state["spent"] : 0;
+  if (phase === "" && spent === 0) return {};
+  return { solve: { phase: phase.slice(0, PHASE_MAX), spent } };
+}
+
+/** A solver's phase name is a label like `bisect` or `probe`. Anything longer is
+ * not a label, and a cap costs nothing to enforce. */
+const PHASE_MAX = 32;
 
 export interface PublishOptions {
   netDepth?: number;
@@ -150,6 +190,7 @@ export function publishHost(
     ...(values["logTrafficInterval"] !== undefined
       ? { logTrafficInterval: values["logTrafficInterval"] as number }
       : {}),
+    ...(values["caches"] !== undefined ? { caches: values["caches"] as string[] } : {}),
     // Not a fact: we are the only thing that links or releases, so the
     // controller's set is the truth and an observed copy could only be staler.
     ...(opts.stasisLinked?.has(host.hostname) === true ? { stasisLinked: true } : {}),
@@ -169,6 +210,8 @@ export function publishHost(
           probes: ledger.probes,
           ...(ledger.lastCode !== undefined ? { lastCode: ledger.lastCode } : {}),
           ...(ledger.lastAt !== undefined ? { lastAt: ledger.lastAt } : {}),
+          ...(ledger.solver !== undefined ? { solving: true } : {}),
+          ...solveProgress(ledger.solver),
         },
       }
       : {}),

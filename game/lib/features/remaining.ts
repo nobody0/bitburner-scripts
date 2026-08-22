@@ -10,6 +10,7 @@ import { stepBladeburner } from "../../../shared/strategy/bladeburner/decide.ts"
 import { successChance, type CrimeStats } from "../../../shared/strategy/career/crimes.ts";
 import { stepCorp } from "../../../shared/strategy/corp/stages.ts";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
+import { planBackdoors, type HoldHost } from "../../../shared/strategy/dnet/hold.ts";
 import type { AttemptOutcome, ReportHost } from "../../../shared/strategy/dnet/courier.ts";
 import { overseerArgs, residentArgs } from "../../../shared/strategy/dnet/mission.ts";
 import { versionedScript } from "../../../shared/deployment.ts";
@@ -22,9 +23,19 @@ import {
   priceAgent,
   residentLastLife,
   type DnetRendezvous,
+  type DnetSpreadReport,
+  type DnetFarmReport,
+  type DnetListenReport,
+  type DnetHoldReport,
 } from "../../dnet/realm.ts";
 import type { DarknetAgentDigest } from "../../../shared/telemetry/topics/dnet.ts";
-import { mutationIntervalMs, netDepthFromLabs } from "../../../shared/strategy/dnet/rates.ts";
+import {
+  DEFAULT_NET_DEPTH,
+  isLabyrinth,
+  msPerHostEventAny,
+  mutationIntervalMs,
+  netDepthFromLabs,
+} from "../../../shared/strategy/dnet/rates.ts";
 import { DARKSCAPE_TOTAL_COST, stepDarkscape } from "../../../shared/strategy/dnet/unlock.ts";
 import {
   coverage,
@@ -85,7 +96,7 @@ import {
   fundedActivationBatch,
   routeCountVerdict,
 } from "../../../shared/strategy/progression/activation.ts";
-import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installCadenceRemainingSec, installVerdict, stepProgression } from "../../../shared/strategy/progression/decide.ts";
+import { bankedFavorActivationValue, chooseNextBitNode, dwellInstallVerdict, INSTALL_VERDICT_OVERHEAD_SEC, installCadencePushRate, installCadenceRemainingSec, installVerdict, labCacheDeferral, stepProgression } from "../../../shared/strategy/progression/decide.ts";
 import {
   DAEDALUS_COMBAT,
   daedalusAugsRequired,
@@ -2188,6 +2199,35 @@ let dnetKnowledge: DarknetKnowledge | undefined;
 /** Cumulative response codes reported by agents. Kept next to the knowledge so
  * one reset clears both. */
 let dnetCodes: Record<string, number> = {};
+/** The controller's last spread verdict: how many plants it admitted and why it
+ * refused the rest. A SNAPSHOT, replaced whole on each drain rather than
+ * accumulated, because a standing refusal is one problem however many ticks
+ * noticed it. Undefined until the first derivation lands. */
+let dnetSpread: DnetSpreadReport | undefined;
+/** The controller's last farm verdict, on the same snapshot discipline. */
+let dnetFarm: DnetFarmReport | undefined;
+/** The last bleed-gate verdict, on the same snapshot discipline as the two
+ *  above. */
+let dnetListen: DnetListenReport | undefined;
+/** The last hold derivation: the pin, the push and the walk. */
+let dnetHold: DnetHoldReport | undefined;
+/** Karma spent opening caches this generation. Negative, and it SURVIVES an
+ * install — which is the whole reason it is worth publishing rather than
+ * logging: `gang` wants -54000 and a cache is free progress toward it. */
+let dnetKarmaLoss = 0;
+/** Log-grammar drift, as the controller last tallied it. Shapes, never lines —
+ *  see `DarknetState.grammar`. */
+let dnetGrammar: { unrecognised: number; shapes: Record<string, number> } | undefined;
+/** When a `.d.cache` was last seen to land, held here so it survives a
+ * controller death and is replayed to the replacement. The phishing cache
+ * cooldown is NET-WIDE engine state exposed through no ns member at all. */
+let dnetLastPhishCacheAt: number | undefined;
+/** When the lab-cache install deferral was first raised, so it can EXPIRE.
+ *
+ * The asymmetry is the point and it is stated here because this is the variable
+ * that enforces it: missing the deferral costs one augmentation's price scaling,
+ * once. Blocking an install costs the whole cycle. */
+let dnetLabCacheSince: number | undefined;
 /** Credentials agents recovered, keyed by host.
  *
  * MODULE STATE AND NOTHING ELSE. It is never merged into a topic and never
@@ -2198,6 +2238,31 @@ let dnetCodes: Record<string, number> = {};
  * its host, and re-cracking a net we already opened would be the most expensive
  * possible way to recover from a reboot. */
 let dnetVault: Map<string, string> = new Map();
+/** Darknet hosts HOME has backdoored, and the backoff that keeps a structurally
+ *  impossible one from relaunching a stub every pass.
+ *
+ *  Home's own record rather than an observed fact, for the same reason the
+ *  stasis set is the controller's: `singularity.installBackdoor` acts on the
+ *  terminal's current server, so home is the only thing in the run that can
+ *  install one — and `ns.getServer().backdoorInstalled` is 2 GB home does not
+ *  spend on a host it already knows about. A restart clears the backdoor
+ *  (~9%/tick on a backdoored host), so the set is trimmed whenever the host is
+ *  seen to have gone and re-earned otherwise. */
+let dnetBackdoored: Map<string, number> = new Map();
+let dnetBackdoorNextAt = 0;
+let dnetBackdoorInFlight = false;
+/** What the backdoor policy last decided, published beside the other planners'
+ *  refusals: `planBackdoors` spends only the FREE allowance, so "why not" is
+ *  its usual answer and the only interesting one. */
+let dnetBackdoorReport: { install: string[]; refused: Record<string, number>; examples: { host: string; why: string; detail: string }[] } | undefined;
+/** The controller's own stasis set, as drained. Unioned with the dodged probe's
+ *  reading, because the two see it at different cadences and a pinned host that
+ *  reads as perishable costs a survey a minute for ever. */
+let dnetStasisLinked: Set<string> = new Set();
+/** The highest charisma a JOB said it needed. Today only the maze walker
+ *  reports one, and it is folded into the career need `stepDarknet` already
+ *  posts rather than into a second channel. */
+let dnetCharismaNeeded: number | undefined;
 /** Model ids the game produced that `shared/strategy/dnet/models.ts` does not
  * know. Counted rather than ignored: a non-empty tally is a game update or a
  * hole in our transcription, and both are things to hear about. */
@@ -2273,6 +2338,23 @@ function drainDarknet(generation: string): {
   for (const [code, count] of Object.entries(taken.codes)) {
     dnetCodes[code] = (dnetCodes[code] ?? 0) + Number(count);
   }
+  if (taken.spread) dnetSpread = taken.spread;
+  if (taken.farm) dnetFarm = taken.farm;
+  if (taken.listen) dnetListen = taken.listen;
+  if (taken.hold) dnetHold = taken.hold;
+  for (const hostname of taken.stasisLinked ?? []) dnetStasisLinked.add(hostname);
+  if (taken.charismaNeeded !== undefined) {
+    dnetCharismaNeeded = Math.max(dnetCharismaNeeded ?? 0, taken.charismaNeeded);
+  }
+  // ACCUMULATED, not assigned: `drain()` hands over the karma spent since the
+  // last drain and clears it, exactly as it does with `codes`. A controller
+  // dies with its host out here, and assigning a re-seeded controller's
+  // since-boot total would reset home's tally to zero for the rest of the run.
+  if (taken.karmaLoss !== undefined) dnetKarmaLoss += taken.karmaLoss;
+  if (taken.grammar) dnetGrammar = taken.grammar;
+  if (taken.lastPhishCacheAt !== undefined) {
+    dnetLastPhishCacheAt = Math.max(dnetLastPhishCacheAt ?? 0, taken.lastPhishCacheAt);
+  }
   for (const resident of taken.residents) {
     // Every field of the drained resident IS a digest field — the digest is a
     // superset — so the record travels whole rather than being re-listed and
@@ -2346,7 +2428,10 @@ const dnet: FeatureDriver = {
     const expiry: ExpiryOpts = {
       bitNode,
       ...(netDepth !== undefined ? { netDepth } : {}),
-      stasisLinked: new Set(topic.stasisLinked ?? []),
+      // Both sources, because they see the set at different cadences: the
+      // dodged probe reads `getStasisLinkedServers` when it happens to run, and
+      // the controller knows every link it spent the moment it spent one.
+      stasisLinked: new Set([...(topic.stasisLinked ?? []), ...dnetStasisLinked]),
     };
     // Home's own probe is folded as one more vantage rather than kept beside the
     // map in a second shape. It is the only source for `darkweb` until a resident
@@ -2403,6 +2488,42 @@ const dnet: FeatureDriver = {
     // exactly the condition `reachableFrom` needs to be an exact answer rather
     // than a partial graph presented as one.
     const topologyComplete = cover.known > 0 && cover.adjacencyKnown === cover.known;
+    // --- the labyrinth cache, and the one rule that governs it --------------
+    //
+    // `getLabReward` calls `Player.queueAugmentation` directly, and the generic
+    // augmentation price multiplier is `1.9 ^ (queued non-SoA)` charged against
+    // every purchase made after it. The labyrinth six are not SoA-exempt, so
+    // opening a lab cache mid-shopping-trip multiplies the rest of the cycle's
+    // bill by 1.9x — and it silently invalidates the drainOrder and drainCeiling
+    // `shared/strategy/factions/` froze, because the price context moved under
+    // them. So it is held until the last purchase of an install cycle.
+    //
+    // `openable` is a conjunction of things we have OBSERVED, and every term is
+    // there because `progression` raises an INSTALL BLOCKER off this value:
+    //
+    //   the cache file is known to exist, AND the host is online, AND a live
+    //   resident is standing on it.
+    //
+    // Anything else — no file, no resident, the lab offline, the maze never
+    // walked — publishes nothing at all and the install proceeds unchanged. The
+    // asymmetry is deliberate: missing the deferral costs one augmentation's
+    // price scaling once; blocking an install costs the whole cycle.
+    let labCache: { host: string; filename: string; openable: boolean } | undefined;
+    for (const host of Object.values(dnetKnowledge.hosts)) {
+      if (!isLabyrinth(host.hostname, fresh<string>(host, "modelId", now, expiry))) continue;
+      const files = fresh<string[]>(host, "caches", now, expiry) ?? [];
+      const filename = [...files].sort()[0];
+      if (filename === undefined) continue;
+      const resident = dnetAgents.get(host.hostname);
+      labCache = {
+        host: host.hostname,
+        filename,
+        openable: host.goneAt === undefined
+          && resident !== undefined
+          && now - resident.lastBeatAt < OVERSEER_STALE_MS,
+      };
+      break;
+    }
     // Work in flight, summed from each resident's last report. Live residents
     // only: a dead one's queue died with it, so counting its pending jobs would
     // report work that no longer exists.
@@ -2420,6 +2541,37 @@ const dnet: FeatureDriver = {
       },
       coverage: cover,
       codes: { ...dnetCodes },
+      // Beside the response codes, and for the same reason: our own planner's
+      // refusals are as attributable as the game's. Without this, removing the
+      // three invented spread caps would have been unobservable.
+      ...(dnetSpread ? { spread: dnetSpread } : {}),
+      // The farm's own refusals, beside the spread's. Both answer "what did the
+      // planner decline, and by what name".
+      // The phishing window rides the farm block, because that is where its
+      // reader is. The stamp is the only part that travels: the three-minute
+      // interval is a constant, and the countdown is arithmetic.
+      ...(dnetFarm
+        ? {
+          farm: {
+            ...dnetFarm,
+            ...(dnetLastPhishCacheAt !== undefined ? { lastPhishCacheAt: dnetLastPhishCacheAt } : {}),
+          },
+        }
+        : {}),
+      ...(dnetListen ? { listen: dnetListen } : {}),
+      // The deliberate three, beside the farm and the spread and for the same
+      // reason: each has a real price, so "why not" is the common answer.
+      ...(dnetHold || dnetBackdoorReport
+        ? {
+          hold: {
+            ...(dnetHold ?? { admitted: {}, refused: {}, examples: [] }),
+            ...(dnetBackdoorReport ? { backdoors: dnetBackdoorReport } : {}),
+          },
+        }
+        : {}),
+      ...(dnetKarmaLoss !== 0 ? { karmaLoss: dnetKarmaLoss } : {}),
+      ...(dnetGrammar ? { grammar: dnetGrammar } : {}),
+      ...(labCache ? { labCache } : {}),
       // THE MAP, and the only host representation the topic carries.
       knowledge: publishKnowledge(dnetKnowledge, now, {
         bitNode,
@@ -2486,27 +2638,23 @@ const dnet: FeatureDriver = {
           ...(neighbours ? { neighbours } : {}),
         };
       }),
-      reachable: topic.reachable,
-      maxDepth: deepest,
-      stasisLinkLimit: topic.stasisLinkLimit,
       stasisLinked: topic.stasisLinked ?? [],
-      instability: topic.instability,
       charisma: ctx.state.topics.player?.skills.charisma ?? 1,
-      instabilityCeiling: 0.5,
     });
 
     merge(ctx.state, "dnet", {
       plan: {
-        action: {
-          type: decision.action.type,
-          ...(decision.action.type !== "idle" ? { hostname: decision.action.hostname } : {}),
-        },
         ranked: decision.ranked.slice(0, 8).map((entry) => ({
           hostname: entry.hostname,
           depth: entry.depth,
           unlocks: entry.unlocks,
         })),
-        ...(decision.charismaNeeded !== undefined ? { charismaNeeded: decision.charismaNeeded } : {}),
+        // Two sources, one channel. `stepDarknet` reads the map and says what
+        // the next host would cost; the maze walker reports what the ENGINE
+        // refused it. The higher of the two is the one that unblocks anything.
+        ...(Math.max(decision.charismaNeeded ?? 0, dnetCharismaNeeded ?? 0) > 0
+          ? { charismaNeeded: Math.max(decision.charismaNeeded ?? 0, dnetCharismaNeeded ?? 0) }
+          : {}),
         ...(results["dnet"] ? { lastResult: results["dnet"] } : {}),
       },
     });
@@ -2620,6 +2768,33 @@ const dnet: FeatureDriver = {
     // (0.5 GB out of 1.65), and it needs charisma to know which hosts a job may
     // heartbleed at all. The vault is replayed with it so a restarted controller
     // does not re-crack a net we already opened.
+    // The one darknet action home performs itself, and it performs it because
+    // it is the only thing that can: a backdoor is installed on the TERMINAL's
+    // current server. Spends only the free allowance, so most passes it decides
+    // to do nothing and says why.
+    await serveDarknetBackdoors(
+      ctx,
+      dnetKnowledge,
+      now,
+      expiry,
+      netDepth,
+      bitNode,
+      ctx.state.topics.player?.skills.charisma ?? 1,
+      topic.instability?.authenticationDurationMultiplier ?? 1,
+    );
+
+    // Symbols worth spreading propaganda about, and the bar is deliberately
+    // high: `promoteStock` raises VOLATILITY and never forecast, so it
+    // amplifies whatever edge a symbol already has in BOTH directions and is
+    // worth nothing on a symbol we have no view on. The stock planner's own
+    // ranking is that view — an entry it would take, priced net of commission —
+    // and two symbols is as far as it is worth spreading a charge curve that
+    // saturates. Usually empty, and the farm ladder says so by name.
+    const promoteSymbols = (ctx.state.topics.stock?.plan?.ranked ?? [])
+      .filter((entry) => entry.expectedProfit > 0)
+      .slice(0, 2)
+      .map((entry) => entry.sym);
+
     if (overseerAlive && rendezvous) {
       rendezvous.order({
         charisma: ctx.state.topics.player?.skills.charisma ?? 1,
@@ -2632,6 +2807,30 @@ const dnet: FeatureDriver = {
         // has not landed — the unsafe direction.
         ...(netDepth !== undefined ? { netDepth } : {}),
         ...(progression?.bitNode !== undefined ? { bitNode } : {}),
+        // The one permission home grants the farm ladder, and it is granted only
+        // while `progression` is actually holding an install open for it. The
+        // controller refuses a labyrinth cache by name otherwise.
+        openLabCache: progression?.plan?.installBlockers?.includes("dnet-lab-cache") === true,
+        // Three things only home can see, and every one of them is a term in a
+        // decision the controller makes rather than a status line.
+        //
+        // The backdoor COUNT is a mutation rate: a backdoored host carries a
+        // ~9%/tick restart and a ~4%/tick delete on top of the ordinary
+        // branches, so every knowledge expiry out there is shorter once we hold
+        // any. The stasis LIMIT is `1 + TheBrokenWings + TheHammer + TheStaff`,
+        // read by the dodged probe. And the symbols are the market, which the
+        // darknet cannot see at all.
+        backdoored: dnetBackdoored.size,
+        ...(promoteSymbols.length > 0 ? { promoteSymbols } : {}),
+        // The net facts only the dodged probe can read. The controller PLANS
+        // stasis — it is the only thing that knows which hosts have live
+        // residents and which are irreplaceable — and it ACTS, because
+        // `setStasisLink` pins the calling host. But it cannot see how many
+        // links exist or which hosts already hold one, so those come from here.
+        ...(topic.stasisLinkLimit !== undefined ? { stasisLimit: topic.stasisLinkLimit } : {}),
+        ...(topic.stasisLinked !== undefined ? { stasisLinked: topic.stasisLinked } : {}),
+
+        ...(dnetLastPhishCacheAt !== undefined ? { lastPhishCacheAt: dnetLastPhishCacheAt } : {}),
         ...(dnetVault.size > 0
           ? {
             vault: [...dnetVault].map(([hostname, password]) => ({
@@ -2645,20 +2844,203 @@ const dnet: FeatureDriver = {
       });
     }
 
-    if (decision.action.type === "idle") return;
-    // Stasis is the one action still refused, and the reason is mechanical
-    // rather than unfinished: `setStasisLink` takes no host — it pins the
-    // CALLING script's own server — so spending a link means running a 12 GB
-    // script on the host being pinned, which is more RAM than most darknet
-    // hosts have free. `authenticate` no longer refuses here because home never
-    // reaches it: a job does, standing next door to its target.
-    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L337-L374
-    const detail = decision.action.type === "authenticate"
-      ? "authentication happens on the agents, next door to the target; home is never adjacent to anything but darkweb"
-      : "setStasisLink pins the CALLING host, so it needs a 12 GB script running on the target itself";
-    record("dnet", decision.action.type, false, detail);
+    // Nothing follows. `stepDarknet` no longer proposes an action for home to
+    // refuse: authentication happens in a job standing next door to its target,
+    // and `setStasisLink` pins the CALLING host, so neither was ever something
+    // this driver could carry out. The block that recorded those refusals went
+    // with them — a standing refusal for work nobody was going to attempt is
+    // noise in the one panel that exists to say why the net is stuck.
   },
 };
+
+/** ns members the darknet backdoor dodge calls. NO `scan`: `ns.scan` omits
+ * darknet servers outright, so the BFS the hacking backdoor uses cannot find a
+ * route out here at all — the route comes from the controller's folded
+ * adjacency instead, which is the only place it exists. */
+const DNET_BACKDOOR_CALLS = ["singularity.connect", "singularity.installBackdoor"] as const;
+/** How long a failed darknet backdoor waits before it is tried again. Longer
+ * than the hacking one's 30 s floor because the failure mode out here is a net
+ * that moved, and it will have moved again in thirty seconds. */
+const DNET_BACKDOOR_BACKOFF_MS = 120_000;
+
+/** The terminal route from home to a darknet host, or nothing.
+ *
+ * `singularity.connect` walks `serversOnNetwork` one hop at a time, and darknet
+ * edges ARE on it — so the walk is possible. What is not possible is finding it
+ * the way the hacking backdoor does: `ns.scan` omits darknet servers, so its BFS
+ * sees `darkweb` and stops. The graph has to come from the fold.
+ *
+ * Every hop is walked over a neighbour list we still BELIEVE, which is what the
+ * `fresh` call does: a stale hop is not a slower route, it is a route that ends
+ * with the terminal stranded somewhere deep while the net rearranges around it.
+ * Adjacency is the shortest-lived fact we hold, so this refuses far more often
+ * than it succeeds, and that is the correct ratio. */
+export function darknetRoute(
+  knowledge: DarknetKnowledge,
+  target: string,
+  now: number,
+  expiry: ExpiryOpts,
+): string[] | undefined {
+  // `darkweb` is the one darknet host home is adjacent to — it holds the TOR
+  // edge — so every route starts there and nowhere else.
+  if (target === "darkweb") return ["darkweb"];
+  const parents = new Map<string, string | undefined>([["darkweb", undefined]]);
+  const queue = ["darkweb"];
+  for (let index = 0; index < queue.length && !parents.has(target); index++) {
+    const current = queue[index]!;
+    const host = knowledge.hosts[current];
+    if (!host || host.goneAt !== undefined) continue;
+    const neighbours = fresh<string[]>(host, "neighbours", now, expiry);
+    // A hop whose adjacency has expired is not a hop. Skipping it rather than
+    // trusting it is the whole safety property here.
+    if (neighbours === undefined) continue;
+    for (const neighbour of neighbours) {
+      if (parents.has(neighbour)) continue;
+      parents.set(neighbour, current);
+      queue.push(neighbour);
+    }
+  }
+  if (!parents.has(target)) return undefined;
+  const route: string[] = [];
+  for (let at: string | undefined = target; at !== undefined; at = parents.get(at)) route.push(at);
+  return route.reverse();
+}
+
+/** Install one backdoor on one darknet host, from home's terminal.
+ *
+ * Home-side and not a dnet job, because there is no other choice:
+ * `singularity.installBackdoor` acts on `Player.getCurrentServer()` — the
+ * TERMINAL's server — and only home has a terminal. A darknet backdoor is a
+ * flat four seconds (`calculateHackingTime` returns 16 for a DarknetServer, and
+ * the install is a quarter of it) and skips the hacking-skill gate entirely,
+ * which is what makes it worth having at all.
+ *
+ * What it buys is remote `exec`: the reachability gate tests
+ * `backdoorBypasses && backdoorInstalled` and nothing else, so a backdoored host
+ * can be reached from anywhere rather than only from a neighbour. What it costs
+ * is `1.07 ^ surplus` on EVERY authentication in the net past a free allowance
+ * of `max(rootedMovable / 24, 2)` — which is why `planBackdoors` spends only the
+ * allowance and why two are always free. */
+async function serveDarknetBackdoors(
+  ctx: DriverContext,
+  knowledge: DarknetKnowledge,
+  now: number,
+  expiry: ExpiryOpts,
+  netDepth: number | undefined,
+  bitNode: number,
+  charisma: number,
+  instability: number,
+): Promise<void> {
+  const hosts: HoldHost[] = Object.values(knowledge.hosts).map((host) => {
+    const neighbours = fresh<string[]>(host, "neighbours", now, expiry);
+    const depth = fresh<number>(host, "depth", now, expiry);
+    return {
+      hostname: host.hostname,
+      ...(depth !== undefined ? { depth } : {}),
+      agentAlive: (dnetAgents.get(host.hostname)?.lastBeatAt ?? 0) > now - OVERSEER_STALE_MS,
+      hasCredential: dnetVault.has(host.hostname),
+      ...(neighbours !== undefined ? { neighbours } : {}),
+      ...(fresh<boolean>(host, "isStationary", now, expiry) === true ? { isStationary: true } : {}),
+      // A stasis link SETS `backdoorInstalled` (`effects.ts:234`), so a pinned
+      // host already has one and is also outside the counted pool. Recording it
+      // as backdoored is what stops us spending a four-second install on a host
+      // that has been reachable all along.
+      ...(dnetBackdoored.has(host.hostname) || dnetStasisLinked.has(host.hostname) ? { backdoored: true } : {}),
+      ...(dnetStasisLinked.has(host.hostname) ? { stasisLinked: true } : {}),
+      ...(host.goneAt !== undefined ? { gone: true } : {}),
+    };
+  });
+  const plan = planBackdoors({
+    hosts,
+    netDepth: netDepth ?? DEFAULT_NET_DEPTH,
+    stasisLimit: ctx.state.topics.dnet?.stasisLinkLimit ?? 1,
+    charisma,
+    authDurationMultiplier: instability,
+  });
+  const byReason: Record<string, number> = {};
+  const examples: { host: string; why: string; detail: string }[] = [];
+  for (const refusal of plan.refused) {
+    byReason[refusal.why] = (byReason[refusal.why] ?? 0) + 1;
+    if (byReason[refusal.why] === 1) {
+      examples.push({ host: refusal.hostname, why: refusal.why, detail: refusal.detail });
+    }
+  }
+  dnetBackdoorReport = { install: plan.install, refused: byReason, examples };
+
+  if (dnetBackdoorInFlight || now < dnetBackdoorNextAt) return;
+  // THE BELIEF EXPIRES, exactly as every other darknet fact does. A backdoored
+  // host carries a ~9%/tick restart and a restart CLEARS the backdoor
+  // (`restartServer` drops `backdoorInstalled`), and nothing home can afford
+  // observes it: `ns.getServer` is 2 GB and no darknet server detail reports
+  // one. So the install is a stamped fact checked against the mutation clock —
+  // and holding it past its life is the expensive direction twice over, because
+  // it both suppresses the re-install and inflates the instability count the
+  // controller runs its expiries on.
+  const backdoorLife = msPerHostEventAny(
+    ["restarted", "deleted"],
+    netDepth ?? DEFAULT_NET_DEPTH,
+    bitNode,
+    dnetBackdoored.size,
+  );
+  for (const [hostname, installedAt] of [...dnetBackdoored]) {
+    const host = knowledge.hosts[hostname];
+    if (!host || host.goneAt !== undefined || now - installedAt > backdoorLife) {
+      dnetBackdoored.delete(hostname);
+    }
+  }
+  const target = plan.install[0];
+  if (target === undefined) return;
+  const route = darknetRoute(knowledge, target, now, expiry);
+  if (route === undefined) {
+    // Not a failure to record against the host: the map is stale, which the
+    // next survey fixes on its own.
+    dnetBackdoorNextAt = now + DNET_BACKDOOR_BACKOFF_MS;
+    dnetBackdoorReport.refused["stale-route"] = (dnetBackdoorReport.refused["stale-route"] ?? 0) + 1;
+    dnetBackdoorReport.examples.push({
+      host: target,
+      why: "stale-route",
+      detail: "no hop-by-hop route from darkweb whose every adjacency we still believe",
+    });
+    return;
+  }
+  dnetBackdoorInFlight = true;
+  try {
+    const outcome = await featureDodgeOn(ctx, "dnet", "action:backdoor", DNET_BACKDOOR_CALLS, "home", async (stubNs: NS) => {
+      // Home first, always: the terminal is global state and some other dodge
+      // may have left it anywhere. Without this the first hop is measured from
+      // a server we are not on and the walk fails at step one.
+      if (!stubNs["singularity"]["connect"]("home" as never)) {
+        throw new Error("could not return the terminal to home");
+      }
+      for (const hop of route) {
+        if (!stubNs["singularity"]["connect"](hop as never)) {
+          throw new Error(`route to ${target} failed at ${hop}`);
+        }
+      }
+      await stubNs["singularity"]["installBackdoor"]();
+      // Back to home rather than left deep in the net. While the terminal is
+      // ON a darknet server that server is `isImmutable` and cannot be moved —
+      // which sounds useful and is not: it is one host pinned by accident, and
+      // every other backdoor and every terminal-using dodge would start from
+      // wherever this one stopped.
+      stubNs["singularity"]["connect"]("home" as never);
+      return route.length;
+    });
+    if (outcome.ok) {
+      dnetBackdoored.set(target, Date.now());
+      record("dnet", "backdoor", true, `${target} backdoored, ${outcome.value} hops out`);
+    } else if (!outcome.queued) {
+      dnetBackdoorNextAt = now + DNET_BACKDOOR_BACKOFF_MS;
+      record("dnet", "backdoor", false, outcome.reason);
+    }
+  } catch (error) {
+    if (isScriptDeath(error)) throw error;
+    dnetBackdoorNextAt = now + DNET_BACKDOOR_BACKOFF_MS;
+    record("dnet", "backdoor", false, String(error).slice(0, 200));
+  } finally {
+    dnetBackdoorInFlight = false;
+  }
+}
 
 /** Whether home should be holding RAM for a seed this pass.
  *
@@ -3497,8 +3879,17 @@ function progressionRefresh(ctx: NeedContext): void {
     marginalInstall = false;
   }
 
+  // The lab-cache deferral, and its deadline. The blocker is raised only while
+  // `dnet` says the cache is openable RIGHT NOW, and abandoned once the window
+  // has run out — so an install can never stall on a cache we do not have,
+  // cannot reach, or asked for and never got.
+  const labCacheOpen = ctx.state.topics.dnet?.labCache?.openable === true;
+  const deferral = labCacheDeferral({ since: dnetLabCacheSince }, labCacheOpen, ctx.now);
+  dnetLabCacheSince = deferral.since;
+
   const decision = stepProgression({
     queued: pending,
+    ...(deferral.defer ? { labCacheOpenable: true } : {}),
     affordableValueProduct: affordableValueProduct(ctx),
     factionWorkInProgress: ctx.state.topics.career?.currentWork?.type === "FACTION",
     // Once factions has published any plan it owns the pre-install handshake:
@@ -4048,6 +4439,25 @@ export const dnetModule: FeatureModule = {
     // map, which is the same class of bug as a stale topic.
     dnetKnowledge = undefined;
     dnetCodes = {};
+    dnetSpread = undefined;
+    dnetFarm = undefined;
+    dnetListen = undefined;
+    dnetHold = undefined;
+    // Backdoors and stasis links are per-WORLD: a prestige rebuilds the net and
+    // `prestigeDarknetState` drops every link with it, so carrying either set
+    // across would have home believing it held reach it does not.
+    dnetBackdoored = new Map();
+    dnetBackdoorReport = undefined;
+    dnetBackdoorNextAt = 0;
+    dnetStasisLinked = new Set();
+    dnetCharismaNeeded = undefined;
+    dnetKarmaLoss = 0;
+    dnetGrammar = undefined;
+    // `prestigeDarknetState` restamps `lastPhishingCacheTime`, so an install
+    // starts with the window SHUT. Clearing this to undefined would tell the
+    // next controller the opposite; stamping it now is what upstream does.
+    dnetLastPhishCacheAt = Date.now();
+    dnetLabCacheSince = undefined;
     // The vault goes with the knowledge, and for a stronger reason: a BitNode
     // reset destroys the darknet outright, so every password we hold is for a
     // host that no longer exists. Carrying them across would be the credential
@@ -4064,14 +4474,14 @@ export const dnetModule: FeatureModule = {
     resetWithTopic("dnet")(state);
   },
   claims: (ctx) => {
-    // The seed is claimed whenever the beachhead is not known to be standing,
-    // independent of what `stepDarknet` planned: putting the overseer back is
-    // not one of the traversal actions, it is the precondition for all of them.
+    // The seed is the ONLY darknet action home performs, so it is the only thing
+    // there is to reserve RAM for. `stepDarknet` used to propose traversal
+    // actions here too; none of them were executable from home, so the claim
+    // beside them reserved RAM for work that always refused.
     if (dnetSeedWanted(ctx.state)) {
-      return [actionRamClaim(ctx, "dnet", "action:seed", dnetMethods("seed"))];
+      return [actionRamClaim(ctx, "dnet", "action:seed", DNET_SEED_METHODS)];
     }
-    const action = ctx.state.topics.dnet?.plan?.action.type;
-    return maybeActionClaim("dnet", ctx, action === "idle" ? undefined : action, dnetMethods(action));
+    return [];
   },
   needs: dnetNeeds,
 };
@@ -4211,17 +4621,11 @@ function sleeveBatchPeakMethods(actions: readonly string[]): readonly string[] {
   return ["sleeve.getTask"];
 }
 
-function dnetMethods(action: string | undefined): readonly string[] {
-  // The seed is the one darknet action home performs itself, and it is a real
-  // 1.9 GB of dynamic RAM inside the stub. Pricing it is what makes the claim
-  // honest: an unpriced action would place a stub the broker never reserved for.
-  //
-  // `authenticate` and stasis still refuse locally — the first happens on the
-  // agents, next door to their targets, and the second needs a 12 GB script
-  // running on the host being pinned — so neither reserves anything.
-  if (action === "seed") return ["scp", "exec"];
-  return [];
-}
+/** What the seed stub calls. The seed is the one darknet action home performs
+ * itself, and it is a real 1.9 GB of dynamic RAM inside the stub — pricing it is
+ * what makes the claim honest, because an unpriced action would place a stub the
+ * broker never reserved for. */
+const DNET_SEED_METHODS: readonly string[] = ["scp", "exec"];
 
 /** A dollar held through the install transaction advances the binding money
  * clock by 1 / measuredIncome seconds. Scale by how much of the install clock

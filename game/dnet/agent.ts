@@ -1,8 +1,9 @@
 import type { NS } from "@ns";
-import { jobIdFrom, parseWorkerArgs } from "../../shared/strategy/dnet/mission.ts";
+import { parseAgentMode, residentArgsFrom } from "../../shared/strategy/dnet/mission.ts";
 import {
+  NO_RESPAWN_KINDS,
   RESIDENT_METHODS,
-  dnetRealm,
+  liveRendezvous,
   nextJob,
   priceAgent,
   type DnetHostQueue,
@@ -11,54 +12,23 @@ import {
 
 /** The one thing that runs on a darknet host, in two modes.
  *
- * `game/lib/dodge-stub.ts` is the model, with one difference worth stating: the
- * stub imports no VALUES at all, because its cost must stay at exactly the
- * 1.6 GB base. This file may import pure helpers — they cost nothing — but it
- * must reference no expensive `ns` member, because a job's real cost arrives as
- * the `ramOverride` its launcher declares. A single `ns.scan` in this file would
- * be charged to every resident on every host we ever reach.
+ * As a RESIDENT it beats into the controller's queue for this host, measures
+ * what is actually free, and `spawn`s into the first queued job that fits —
+ * which kills it and hands the job the RAM it was holding. As a JOB it runs that
+ * one job, settles the controller's promise, and spawns back to resident mode.
+ * `shared/strategy/dnet/mission.ts` owns which of the two a set of arguments
+ * means; `game/dnet/realm.ts` states why the round trip is cheaper than `exec`
+ * and how a session survives it.
  *
- * One file serves both modes because they differ only in whether `ns.args`
- * carries a job id, and a second artifact differing in three lines would be one
- * more thing to sync, scp and keep versioned everywhere.
+ * One file serves both modes because they differ only in that sixth argument,
+ * and a second artifact differing in three lines would be one more thing to
+ * sync, scp and keep versioned on every host we ever reach.
  *
- * ## Resident mode — `agent.js <missionId> <generation> <identity> <role> <agentId>`
- *
- * Sits on the host and does nothing expensive. Every loop it beats into the
- * controller's queue for this host, measures what is actually free, and asks
- * whether the next queued job fits. When one does it `spawn`s into it with
- * `spawnDelay: 0` — which KILLS this process and starts the job immediately on
- * the same host, so the job gets the RAM the resident was holding.
- *
- * ## Job mode — the same, plus a sixth argument: the job id
- *
- * Runs exactly one job with the allocation the resident declared, settles the
- * controller's promise, and spawns back to resident mode.
- *
- * ## Why the round trip, rather than exec
- *
- * A resident that `exec`'d its jobs would stay alive alongside them, so the host
- * would need `(1.6 + 1.3) + (1.6 + calls)`. Spawning costs 2.0 against exec's
- * 1.3 but frees the caller first, so the host needs
- * `max(resident, 1.6 + calls + 2.0)`. That is a real saving on the heavy jobs
- * and the difference between running and not running on a host whose owner has
- * blocked most of its RAM.
- *
- * The spawn back is not optional and is the expensive half of the tax. It is
- * still the cheap option, because a host left with no resident cannot be
- * repaired from outside: planting one needs a session AND adjacency, and the
- * controller has neither to anything but `darkweb`.
- *
- * ## The thing that looks impossible
- *
- * A session belongs to the PID that won it, and `spawn` ends the PID — so a job
- * that authenticates cannot hand its session onward. `connectToSession` buys it
- * back at any distance for 0.05 GB, which is why the queue carries passwords and
- * why this design works at all. See `game/dnet/realm.ts`. */
-
-/** The resident's own arguments, which every spawn carries forward unchanged. A
- * job adds its id as a sixth; going back to resident mode drops it again. */
-const RESIDENT_ARG_COUNT = 5;
+ * **The one rule that binds this file:** no expensive `ns` member may be
+ * REFERENCED in source. A job's cost arrives as the `ramOverride` its launcher
+ * declares; a single `ns.scan` here would be charged to every resident on every
+ * host we ever reach. `tests/ram-budget.test.ts` pins the four that are
+ * allowed. */
 
 /** How long resident mode waits between looks. Short enough that a job queued by
  * the controller starts promptly; long enough that an idle net costs nothing.
@@ -68,48 +38,44 @@ const RESIDENT_POLL_MS = 1_000;
 export async function main(ns: NS): Promise<void> {
   ns.disableLog("ALL");
 
-  const mission = parseWorkerArgs(ns.args);
+  const mode = parseAgentMode(ns.args);
   // Wrong argument shape: exit quietly rather than crashing into the game log.
-  if (!mission) return;
+  if (!mode) return;
+  const generation = mode.mission.generation;
 
-  const realm = dnetRealm();
-  const rendezvous = realm.dnet_overseer;
-  // No controller, or one from a world this run no longer shares. Exit rather
-  // than freelancing: without the queue there is nothing to coordinate with, and
-  // two uncoordinated agents would spend the same calls on the same hosts.
-  if (!rendezvous || rendezvous.generation !== mission.generation) return;
-
-  const host = ns.getHostname();
-  const jobId = jobIdFrom(ns.args);
-
-  if (jobId !== undefined) {
-    // The job settles into the queue it was spawned from. If the controller was
-    // replaced mid-job the promise it kept died with it, and the respawned
-    // resident below re-registers with whatever is live.
-    await performJob(ns, ensureQueue(rendezvous.queues, host), jobId);
-    return;
-  }
-
-  // --- resident mode -------------------------------------------------------
   // Priced from the game's own table rather than guessed: the engine compares
   // DYNAMIC usage against this allocation and kills the script on overrun, and
   // the simulator does not model that check — so a hand-computed number is a bug
-  // that only ever shows up in a real run.
+  // that only ever shows up in a real run. `getFunctionRamCost` is 0 GB, so
+  // pricing it once here and passing it down costs nothing and drifts nowhere.
   const residentGb = priceAgent(ns, RESIDENT_METHODS);
+
+  const host = ns.getHostname();
+
+  if (mode.kind === "job") {
+    // No controller, or one from a world this run no longer shares. Exit rather
+    // than freelancing: without the queue there is nothing to coordinate with,
+    // and two uncoordinated agents would spend the same calls on the same hosts.
+    const rendezvous = liveRendezvous(generation);
+    if (!rendezvous) return;
+    // The job settles into the queue it was spawned from. If the controller was
+    // replaced mid-job the promise it kept died with it, and the respawned
+    // resident below re-registers with whatever is live.
+    await performJob(ns, ensureQueue(rendezvous.queues, host), mode.jobId, residentGb);
+    return;
+  }
+
   for (;;) {
-    // Re-checked every pass, not just at boot. A controller dies with its host
-    // and a prestige changes the generation outright, and neither is something a
-    // resident can be told: `reclaimFleet` walks the ordinary `ns.scan`
-    // snapshot, which never contains a darknet host, so nothing else will ever
-    // clean this process up. Without this it holds its RAM for the rest of the
-    // session, on a host whose queue no longer exists.
-    const live = dnetRealm().dnet_overseer;
-    if (!live || live.generation !== mission.generation) return;
-    // The queue is resolved from the LIVE rendezvous every pass, not bound at
-    // boot. A replacement controller of the same generation — darkweb reboots,
-    // home re-seeds — installs a fresh rendezvous with a fresh queues Map, and a
-    // resident still beating into the old one would pass the generation check
-    // above while being invisible to the new controller for ever.
+    // Resolved from the LIVE rendezvous every pass, never bound at boot and
+    // never held across the sleep below. A controller dies with its host, a
+    // prestige changes the generation outright, and a replacement controller of
+    // the same generation installs a fresh queues Map — a resident still beating
+    // into the old one would pass every check while being invisible to the
+    // controller that is actually running. Nothing else will ever clean this
+    // process up either: `reclaimFleet` walks the ordinary `ns.scan` snapshot,
+    // which never contains a darknet host.
+    const live = liveRendezvous(generation);
+    if (!live) return;
     const queue = ensureQueue(live.queues, host);
 
     queue.lastBeatAt = Date.now();
@@ -124,11 +90,14 @@ export async function main(ns: NS): Promise<void> {
       queue.active = job;
       job.startedAt = Date.now();
       // Kills this process and starts the job immediately on this host, with the
-      // allocation the controller sized for it.
+      // allocation the controller sized for it. `ramOverride` is charged PER
+      // THREAD, so the pair is `(job.threads, job.budgetGb)` and the fit check
+      // above compares their product — a hardcoded `threads: 1` here would have
+      // quietly ignored every thread count a planner asked for.
       ns.spawn(
         ns.getScriptName(),
-        { threads: 1, spawnDelay: 0, ramOverride: job.budgetGb, temporary: true },
-        ...(ns.args.slice(0, RESIDENT_ARG_COUNT) as (string | number)[]),
+        { threads: job.threads, spawnDelay: 0, ramOverride: job.budgetGb, temporary: true },
+        ...residentArgsFrom(ns.args),
         job.id,
       );
       return;
@@ -159,18 +128,33 @@ function ensureQueue(queues: Map<string, DnetHostQueue>, host: string): DnetHost
  *
  * The `finally` matters more than the try: whatever happens, the host must end
  * up with a resident again, because nothing outside can put one there. */
-async function performJob(ns: NS, queue: DnetHostQueue, jobId: string): Promise<void> {
+async function performJob(
+  ns: NS,
+  queue: DnetHostQueue,
+  jobId: string,
+  residentGb: number,
+): Promise<void> {
   const job: DnetJob | undefined = queue.active?.id === jobId
     ? queue.active
     : queue.pending.find((entry) => entry.id === jobId);
   if (!job) {
     // The controller retired the job while we were being launched. Go straight
     // back to resident mode rather than leaving the host empty.
-    respawnResident(ns);
+    respawnResident(ns, residentGb);
     return;
   }
   try {
-    const result = await job.body(ns, job.state);
+    // The beat is what a LONG-LIVED job uses to say it is still going. A short
+    // job never calls it and does not need to: it is vouched for by
+    // `startedAt + JOB_TIMEOUT_MS`. A long one is skipped by the controller's
+    // timeout loop entirely, so without this its queue would be pinned open for
+    // ever by a process that died with its host.
+    const result = await job.body(ns, job.state, (progress) => {
+      job.beatAt = Date.now();
+      // Carried rather than replaced wholesale, so a body that beats without a
+      // payload does not erase the last position it reported.
+      if (progress !== undefined) job.progress = progress;
+    });
     queue.completed++;
     job.settle(result);
   } catch (error) {
@@ -180,16 +164,28 @@ async function performJob(ns: NS, queue: DnetHostQueue, jobId: string): Promise<
   } finally {
     queue.active = undefined;
     queue.lastBeatAt = Date.now();
-    respawnResident(ns);
+    // Almost always: whatever happened, the host must end up with a resident,
+    // because nothing outside can put one there.
+    //
+    // The exception is a job whose ALLOCATION does not include `spawn`, and
+    // there is exactly one — the stasis pin, at 12 GB for `setStasisLink`
+    // alone, which does not fit a 16 GB host with the 2.0 GB spawn back on top
+    // of it. Calling `spawn` from a process that did not budget for it is not a
+    // slow path, it is a dead one: the engine's dynamic RAM check kills the
+    // script on the call. So the process simply ends and leaves the host empty
+    // — which the controller only ever asks for on a host a neighbour can
+    // re-plant, and which is safe precisely because the pin just made the host
+    // immutable.
+    if (!NO_RESPAWN_KINDS.includes(job.kind)) respawnResident(ns, residentGb);
   }
 }
 
 /** Back to resident mode. This is the last thing a job process does, and it does
  * not return: `spawn` kills the caller. */
-function respawnResident(ns: NS): void {
+function respawnResident(ns: NS, residentGb: number): void {
   ns.spawn(
     ns.getScriptName(),
-    { threads: 1, spawnDelay: 0, ramOverride: priceAgent(ns, RESIDENT_METHODS), temporary: true },
-    ...(ns.args.slice(0, RESIDENT_ARG_COUNT) as (string | number)[]),
+    { threads: 1, spawnDelay: 0, ramOverride: residentGb, temporary: true },
+    ...residentArgsFrom(ns.args),
   );
 }

@@ -805,7 +805,7 @@ async function runGameInstalled(
     stock.prestige();
     // Before the market re-rolls, not after: propaganda and the portfolio are
     // cleared on the same boundary upstream (DarknetState.ts:97).
-    dnet?.prestige();
+    dnet?.prestige(virtualTime.nowMs());
     grafting.prestige();
     programs.prestige();
     hasTor.value = permanentDarknetAccess();

@@ -6,6 +6,7 @@ import {
   promoteStockWaitMs,
   type DarknetSystem,
 } from "../features/dnet.ts";
+import { phishWaitMs, reclaimWaitMs, stasisWaitMs } from "../../shared/strategy/dnet/rates.ts";
 import { SymbolToStockMap } from "../vendor/bitburner/src/StockMarket/MarketAdapter.ts";
 import { Stock } from "../vendor/bitburner/src/StockMarket/Stock.ts";
 
@@ -43,12 +44,13 @@ export interface DnetNsOptions {
  * api"*. Without that, buying DarkscapeNavigator.exe would have no observable
  * effect and the purchase could not be tested at all.
  *
- * Deliberately still absent, and still throwing: `setStasisLink`,
- * `memoryReallocation`, `phishingAttack`, `induceServerMigration`,
- * `unleashStormSeed`, `labreport`, `labradar`. None is on the
- * deploy path, and while `setStasisLink` is unmodelled
- * `getStasisLinkedServers()` returning `[]` is LITERALLY TRUE rather than a
- * stub — which is the difference between a gap and a fabrication. */
+ * Deliberately still absent, and still throwing: `induceServerMigration`,
+ * `unleashStormSeed`, `labreport`, `labradar`. None is on the deploy path.
+ *
+ * `setStasisLink` IS modelled, and modelling it is what makes
+ * `getStasisLinkedServers()` a reading rather than a constant: the link pins the
+ * calling host against move, delete and restart, so it changes the pool every
+ * mutation branch draws from. */
 export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
   const { system, process, delay, skills, hasBoots, sf15Level, servers } = options;
 
@@ -63,7 +65,9 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
   const OK = 200;
   const DIRECT_CONNECTION_REQUIRED = 351;
   const AUTH_FAILURE = 401;
+  const REQUEST_TIMEOUT = 408;
   const NOT_ENOUGH_CHARISMA = 451;
+  const NO_BLOCK_RAM = 454;
   const SERVICE_UNAVAILABLE = 503;
 
   /** `calculateAuthenticationTime`, transcribed.
@@ -84,10 +88,16 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       ? 1.5 + (host.requiredCharismaSkill + 50) / (charisma + 50)
       : 1;
     const bootsFactor = hasBoots() ? 0.8 : 1;
+    // `getBackdoorAuthTimeDebuff`, and it is not optional. It multiplies EVERY
+    // authentication in the run — including ones against hosts that are not
+    // backdoored — so leaving it out would make a backdoor read as free and any
+    // policy that spends the allowance untestable in the only direction that
+    // matters.
+    const backdoorFactor = system.instability().authenticationDurationMultiplier;
     // The docs attribute the discount to SF15.2; the code tests level > 2.
     // Code wins.
     const sf15Factor = sf15Level() > 2 ? 0.8 : 1;
-    const base = 850 * skillFactor * underleveled * bootsFactor * sf15Factor * threadsFactor;
+    const base = 850 * skillFactor * backdoorFactor * underleveled * bootsFactor * sf15Factor * threadsFactor;
     const intelligenceBonus = 1 + (Math.pow(intelligence, 0.8) * 0.25) / 600;
     return base / intelligenceBonus
       + (host.modelId === "2G_cellular" ? correctChars : 0) * 50 * threadsFactor;
@@ -216,7 +226,11 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
         return { success: false, code: gate.code, message: gate.message };
       }
       const correct = system.sharedChars(hostname, password);
-      await delay(authTimeMs(hostname, process.threads, correct) + additional, "dnet.authenticate");
+      // The delay upstream calls `networkDelay`, and it is not only a wait: it
+      // is what the `2G_cellular` arm reports back as its `data`, so the same
+      // number has to reach checkPassword.
+      const networkDelay = authTimeMs(hostname, process.threads, correct) + additional;
+      await delay(networkDelay, "dnet.authenticate");
 
       // Re-check AFTER the delay: a host that moved or died mid-flight answers
       // 351 or 503, not 401. That is BN15's actual hazard, and the reason the
@@ -224,11 +238,39 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       const after = check(hostname, { requireDirectConnection: true });
       if (!after.success) return { success: false, code: after.code, message: after.message };
 
-      const verdict = system.checkPassword(hostname, password);
-      system.logAttempt(hostname, password, verdict.ok ? OK : AUTH_FAILURE, verdict.message, verdict.data, options.nowMs());
-      if (!verdict.ok) return { success: false, code: AUTH_FAILURE, message: "Unauthorized" };
+      // The timeout roll sits exactly here upstream: AFTER the delay and BEFORE
+      // the model is ever consulted, so a 408 writes no log line and teaches
+      // nothing. It is exactly 0 until the run holds three backdoors, which is
+      // why it was unreachable before they were modelled.
+      if (system.timesOut()) {
+        return { success: false, code: REQUEST_TIMEOUT, message: "Request Timeout" };
+      }
+      const verdict = system.checkPassword(hostname, password, networkDelay, process.pid);
+      const code = verdict.code ?? (verdict.ok ? OK : AUTH_FAILURE);
+      system.logAttempt(hostname, password, code, verdict, options.nowMs());
+      // The exit's own grant, then the ordinary per-attempt one. BOTH, because
+      // upstream's `getAuthResult` calls `handleSuccessfulAuth` after
+      // `handleLabyrinthPassword` has already paid the 32-thread bonus — and by
+      // then the lab is rooted, so the second grant is the fifth-rate one.
+      if (verdict.charismaExp) options.gainCharismaExp(options.charismaExpMult() * verdict.charismaExp);
+      // EVERY attempt pays charisma, failures included. Leaving this out made
+      // iterative solving look like pure cost in the simulator while being the
+      // feature's main early charisma source in the game.
+      options.gainCharismaExp(
+        options.charismaExpMult() * system.attemptCharismaExp(hostname, process.threads, verdict.ok),
+      );
+      if (!verdict.ok) {
+        // Only the labyrinth's message and data are forwarded: every other
+        // model answers a GENERIC failure and hides its response in the log
+        // ring, which is the whole reason `attempt` carries `heartbleed`.
+        return system.isLab(hostname)
+          ? { success: false, code, message: verdict.message, data: verdict.data }
+          : { success: false, code, message: "Unauthorized" };
+      }
       system.addSession(hostname, process.pid);
-      return { success: true, code: OK, message: "Success" };
+      return system.isLab(hostname)
+        ? { success: true, code: OK, message: verdict.message, data: verdict.data }
+        : { success: true, code: OK, message: "Success" };
     },
 
     /** Re-open a session at ANY distance, with the password.
@@ -325,9 +367,144 @@ export function makeDnet(options: DnetNsOptions): Record<string, unknown> {
       return system.stasisLinkedServers();
     },
 
+    /** Takes NO host: it pins the CALLING script's own server.
+     *
+     * That signature is the whole reason spending a link needs a job standing
+     * on the host being pinned — home can never spend one, however good a
+     * candidate it has picked. `453 StasisLinkLimitReached` when the global
+     * limit is already spent. */
+    setStasisLink: async (rawShould?: unknown) => {
+      requireAccess();
+      const shouldLink = rawShould === undefined ? true : Boolean(rawShould);
+      // `getSetStasisLinkDuration`, not a token wait: 30 s at charisma 0 down to
+      // 3 s at 9000. It is half of what makes a pin expensive — the job costs
+      // 12 GB AND holds its host — and a flat 100 ms reported pinning as free in
+      // time while the game charges half a `JOB_TIMEOUT_MS` for it.
+      await delay(stasisWaitMs(skills().charisma), "dnet.setStasisLink");
+      const code = system.setStasisLink(process.host, shouldLink);
+      return code === 200
+        ? { success: true, code: OK, message: shouldLink ? "Stasis link applied" : "Stasis link removed" }
+        : {
+          success: false,
+          code,
+          message: code === 453 ? "Stasis link limit reached" : "Service Unavailable",
+        };
+    },
+
+    /** Push a NEIGHBOUR toward a new position, one charge at a time.
+     *
+     * The only call in the feature that refuses its own host, and upstream
+     * checks that AFTER the server check and BEFORE the six-second wait
+     * (`Darknet.ts:412-443`). Six seconds is hardcoded: no skill shortens it,
+     * which is what makes a migration a project of hundreds of calls.
+     *
+     * Both checks run twice, once before the wait and once after, and
+     * `preventUseOnStationaryServers` is what stops darkweb and the labyrinth
+     * being pushed at all. */
+    induceServerMigration: async (rawHost: unknown) => {
+      const hostname = String(rawHost);
+      const gate = check(hostname, { requireDirectConnection: true });
+      if (!gate.success) {
+        await delay(100, "dnet.induceServerMigration");
+        return { success: false, code: gate.code, message: gate.message };
+      }
+      const record = system.record(hostname);
+      if (record?.isStationary === true) {
+        throw new Error(`${hostname} is a stationary server and cannot be moved.`);
+      }
+      if (hostname === process.host) {
+        await delay(100, "dnet.induceServerMigration");
+        return {
+          success: false,
+          code: DIRECT_CONNECTION_REQUIRED,
+          message: "Cannot induce migration on a script's own server."
+            + " induceServerMigration must target a neighboring connected server.",
+        };
+      }
+      await delay(6000, "dnet.induceServerMigration");
+      const after = check(hostname, { requireDirectConnection: true });
+      if (!after.success) return { success: false, code: after.code, message: after.message };
+      const charged = system.chargeMigration(hostname, process.threads, skills().charisma);
+      options.gainCharismaExp(options.charismaExpMult() * charged.charismaExp);
+      return {
+        success: true,
+        code: OK,
+        message: charged.deleted
+          ? `${hostname} could not be placed and was removed from the network.`
+          : `Migration prep is now at ${(charged.newCharge * 100).toFixed(2)}%.`,
+      };
+    },
+
     getDarknetInstability: () => {
       requireAccess();
       return system.instability();
+    },
+
+    /** Free RAM the server's owner is sitting on.
+     *
+     * The check options are `requireDirectConnection` AND `requireAdminRights`,
+     * and the ORDER is what makes this the cheapest action in the feature: the
+     * connection requirement is evaluated first, self is trivially directly
+     * connected, and the self early-out then returns BEFORE the admin-rights
+     * check is ever reached. So a resident grinds its own host's block open with
+     * no credential at all, while the same call against a neighbour needs one.
+     *
+     * The block is re-checked twice, once before the wait and once after, and
+     * the whole server check runs again after the wait too — a host that moved
+     * or died mid-grind answers 351 or 503 rather than freeing anything.
+     * Source: src/NetscriptFunctions/Darknet.ts:509-561 */
+    memoryReallocation: async (rawHost?: unknown) => {
+      const hostname = rawHost === undefined ? process.host : String(rawHost);
+      const gate = check(hostname, { requireDirectConnection: true, requireAdminRights: true });
+      if (!gate.success) {
+        await delay(100, "dnet.memoryReallocation");
+        return { success: false, code: gate.code, message: gate.message };
+      }
+      const before = system.record(hostname);
+      if (!before || before.blockedRam <= 0) {
+        await delay(100, "dnet.memoryReallocation");
+        return { success: false, code: NO_BLOCK_RAM, message: "No Block RAM" };
+      }
+      await delay(reclaimWaitMs(skills().charisma), "dnet.memoryReallocation");
+      const after = check(hostname, { requireDirectConnection: true, requireAdminRights: true });
+      if (!after.success) {
+        await delay(100, "dnet.memoryReallocation");
+        return { success: false, code: after.code, message: after.message };
+      }
+      const record = system.record(hostname);
+      if (!record || record.blockedRam <= 0) {
+        return { success: false, code: NO_BLOCK_RAM, message: "No Block RAM" };
+      }
+      const freed = system.reallocateRam(hostname, process.threads, skills().charisma);
+      if (!freed) return { success: false, code: SERVICE_UNAVAILABLE, message: "Service Unavailable" };
+      options.gainCharismaExp(options.charismaExpMult() * freed.charismaExp);
+      return {
+        success: true,
+        code: OK,
+        message: `Liberated ${freed.freed} of RAM from the server owner's processes.`,
+      };
+    },
+
+    /** Charisma every call, money by depth, and a `.d.cache` behind a
+     * three-minute NET-WIDE cooldown.
+     *
+     * Runs on the CALLING host and takes no target: `expectRunningOnDarknetServer`
+     * is the only gate besides access, and both are evaluated BEFORE the wait —
+     * so a script on an ordinary server throws rather than waiting ten seconds to
+     * be told no.
+     * Source: src/NetscriptFunctions/Darknet.ts:611-619 */
+    phishingAttack: async () => {
+      if (servers.get(process.host)?.simKind !== "DarknetServer") {
+        throw new Error(
+          `This API can only be used on a darknet server, but it was called by ${process.filename} ` +
+            `(PID: ${process.pid}) on ${process.host}.`,
+        );
+      }
+      requireAccess();
+      await delay(phishWaitMs(skills().charisma), "dnet.phishingAttack");
+      const outcome = system.phish(process.host, process.threads, skills().charisma, options.nowMs());
+      options.gainCharismaExp(options.charismaExpMult() * outcome.charismaExp);
+      return { success: outcome.success, code: outcome.code, message: outcome.message };
     },
 
     openCache: (rawFilename: unknown, _suppressToast?: unknown) => {

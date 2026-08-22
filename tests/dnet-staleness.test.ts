@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { DARKNET_CODES, LOCAL_CODES, codeName, stripCredentials } from "../shared/strategy/dnet/courier.ts";
 import {
-  jobIdFrom,
   overseerArgs,
+  parseAgentMode,
   parseOverseerArgs,
   parseWorkerArgs,
+  residentArgsFrom,
   workerArgs,
 } from "../shared/strategy/dnet/mission.ts";
 import {
@@ -22,6 +23,8 @@ import {
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
 import {
   JOB_TIMEOUT_MS,
+  LONG_JOB_BEAT_MS,
+  nextJob,
   overseerIsLive,
   RENDEZVOUS_PROTOCOL,
   RESIDENT_BEAT_MS,
@@ -290,8 +293,12 @@ describe("mission arguments", () => {
       role: "resident",
       agentId: "a",
     });
-    expect(jobIdFrom(base)).toBeUndefined();
-    expect(jobIdFrom([...base, "survey:dn-1"])).toBe("survey:dn-1");
+    expect(parseAgentMode(base)).toEqual({ kind: "resident", mission: parseWorkerArgs(base)! });
+    expect(parseAgentMode([...base, "survey:dn-1"]))
+      .toEqual({ kind: "job", mission: parseWorkerArgs(base)!, jobId: "survey:dn-1" });
+    // ...and the spawn back to resident mode drops it again, which is the other
+    // half of the positional contract living in one file.
+    expect(residentArgsFrom([...base, "survey:dn-1"])).toEqual(base);
   });
 });
 
@@ -432,6 +439,8 @@ describe("the sweep does not race a running job", () => {
     kind: "survey",
     label: "test",
     budgetGb: 2.6,
+    threads: 1,
+    priority: 0,
     longLived: false,
     state: { host: "dn-1", from: "dn-1" },
     body: async () => ({ ok: true }),
@@ -465,9 +474,62 @@ describe("the sweep does not race a running job", () => {
     expect(sweepQueues(queues, startedAt + JOB_TIMEOUT_MS + BEAT_WINDOW + 1)).toHaveLength(1);
   });
 
-  test("a long-lived job holds its queue open indefinitely", () => {
+  test("a long-lived job holds its queue open on its OWN beat, not for ever", () => {
+    // This used to be "indefinitely", and indefinitely was the bug.
+    // `residentLastLife` returned Infinity for a long-lived job and the
+    // controller's timeout loop skipped one outright, so a job whose PROCESS had
+    // been killed — the ordinary case out here, a mutation tick restarts hosts
+    // and takes what was running on them — pinned its queue open permanently.
+    // The host would never be swept and could never be re-planted. So a
+    // long-lived job says it is alive, exactly as a resident does.
     const queues = queueOf({ active: job({ startedAt: 0, longLived: true }) });
-    expect(sweepQueues(queues, Number.MAX_SAFE_INTEGER)).toHaveLength(0);
+    const window = LONG_JOB_BEAT_MS + BEAT_WINDOW;
+    // Silent but inside its window: alive.
+    expect(sweepQueues(queues, window)).toHaveLength(0);
+    // A beat resets the window, which is the whole mechanism.
+    queues.get("dn-1")!.active!.beatAt = window;
+    expect(sweepQueues(queues, window * 2)).toHaveLength(0);
+    // ...and silence past it is death, rather than a queue nobody can retire.
+    expect(sweepQueues(queues, window * 2 + window + 1)).toHaveLength(1);
+    expect(queues.size).toBe(0);
+  });
+});
+
+describe("a job's allocation is PER THREAD, and both fit checks know it", () => {
+  // `ramOverride` is charged per thread by the engine, so a four-thread phish on
+  // a 6.35 GB budget needs 25.4 GB. `reclaim` and `phish` are the reason the
+  // field exists at all: both scale linearly with threads, and `agent.ts`
+  // hardcoded `threads: 1` at its spawn — so a planner asking for more would
+  // have been silently ignored while believing it had been granted.
+  const job = (over: Partial<DnetJob> = {}): DnetJob => ({
+    id: "phish:dn-1",
+    kind: "phish",
+    label: "test",
+    budgetGb: 6,
+    threads: 1,
+    priority: 400,
+    longLived: false,
+    state: { host: "dn-1", from: "dn-1" },
+    body: async () => ({ ok: true }),
+    settle: () => {},
+    fail: () => {},
+    ...over,
+  });
+  const queue = (pending: DnetJob[]): DnetHostQueue =>
+    ({ host: "dn-1", pending, lastBeatAt: 0, completed: 0, failed: 0 });
+
+  test("a multi-thread job is not admitted on room for one thread", () => {
+    expect(nextJob(queue([job({ threads: 3 })]), 12)).toBeUndefined();
+    expect(nextJob(queue([job({ threads: 3 })]), 18)).toBeDefined();
+  });
+
+  test("a job that does not fit is left in the queue, and a smaller one takes the host", () => {
+    // Blocked RAM gets freed and hosts get restarted, so the work is still worth
+    // doing when it does fit. Skipping past it is what keeps one oversized job
+    // from starving everything behind it.
+    const cheap = job({ id: "reclaim:dn-1", kind: "reclaim", budgetGb: 5, threads: 1 });
+    const taken = nextJob(queue([job({ threads: 4 }), cheap]), 8);
+    expect(taken?.id).toBe("reclaim:dn-1");
   });
 });
 
@@ -476,20 +538,124 @@ describe("a bleed leaves a mark, so the task stops re-deriving", () => {
   // the game gives no signal that a host was just listened to. The controller's
   // own `lastBleedAt` stamp is therefore the only thing standing between one
   // bleed and an endless spawn/heartbleed/spawn loop on every held host.
-  test("a fresh stamp suppresses the bleed; an expired one revives it", () => {
-    // Late enough that the never-bled default of 0 reads as overdue.
-    const at = expiryMs("topology") + 1_000;
-    const { knowledge } = foldReports(emptyKnowledge(GEN), [report("dn-1", at, { depth: 1 })], at);
+  //
+  // What the stamp is measured AGAINST changed: it used to be the topology
+  // expiry, which is a clock with nothing to do with logs, and is now the host's
+  // own log traffic interval by way of `shouldListen`. A ring that has not
+  // written a line since we last read it has nothing to give however long ago
+  // that was, which the old gate could not express.
+  test("a fresh stamp suppresses the bleed; a line's worth of time revives it", () => {
+    // Stated rather than inferred: the host writes a line every 10s, so the
+    // arithmetic below is the rule itself and not a coincidence of defaults.
+    const interval = 10;
+    const at = 100_000;
+    const { knowledge } = foldReports(
+      emptyKnowledge(GEN),
+      [report("dn-1", at, { depth: 1, logTrafficInterval: interval })],
+      at,
+    );
     const agents = new Set(["dn-1"]);
     const bleeds = (now: number) => deriveTasks(knowledge, now, { agents }).filter((t) => t.kind === "bleed");
 
+    // Never bled, and the ring has had ages to fill.
     expect(bleeds(at)).toHaveLength(1);
 
     knowledge.hosts["dn-1"]!.facts["lastBleedAt"] = { value: true, at };
-    expect(bleeds(at + 1)).toHaveLength(0);
+    // One second later it cannot have written anything.
+    expect(bleeds(at + 1_000)).toHaveLength(0);
+    // Still nothing a hair under one interval.
+    expect(bleeds(at + interval * 1_000 - 1)).toHaveLength(0);
+    // One line's worth of time, and it is worth a call again.
+    expect(bleeds(at + interval * 1_000 + 1)).toHaveLength(1);
+  });
+});
 
-    const expired = at + expiryMs("topology") + 1;
-    expect(bleeds(expired)).toHaveLength(1);
+describe("a bleed is priced, not merely timed", () => {
+  // What replacing the clock with `shouldListen` actually buys. The old gate
+  // asked "has it been a while"; this one asks "will the ring have anything in
+  // it, and could any of it be something we do not already hold".
+  const at = 1_000_000;
+
+  test("a host with nothing left to leak is refused BY NAME", () => {
+    // We hold its password and its only neighbour's, its adjacency is fresh, and
+    // no movable host anywhere is still shut — so every line it can write is
+    // spam or a heartbeat. The old gate would have bled it forever on a timer.
+    const { knowledge } = foldReports(
+      emptyKnowledge(GEN),
+      [
+        report("dn-1", at, { depth: 1, neighbours: ["dn-2"], logTrafficInterval: 1, isStationary: true }),
+        report("dn-2", at, { depth: 1, neighbours: ["dn-1"], isStationary: true }),
+      ],
+      at,
+    );
+    const listenOut = { refused: {} as Record<string, number>, examples: [] as { host: string; why: string; detail: string }[] };
+    const tasks = deriveTasks(knowledge, at, {
+      agents: new Set(["dn-1"]),
+      vault: new Set(["dn-1", "dn-2"]),
+      listenOut,
+    });
+
+    expect(tasks.filter((t) => t.kind === "bleed")).toHaveLength(0);
+    // The refusal is attributable rather than a silence — the same contract
+    // `planSpread` and `planFarm` keep, and the last decision in the derivation
+    // that had no name for its "no". BOTH hosts refuse: we hold both passwords
+    // and neither can leak the other, which is the whole point of the case.
+    expect(listenOut.refused["nothing-to-learn"]).toBe(2);
+    // One example per reason, so the panel can print a sentence without
+    // carrying a row per host.
+    expect(listenOut.examples).toHaveLength(1);
+    expect(listenOut.examples[0]!.why).toBe("nothing-to-learn");
+  });
+
+  test("an uncracked movable host anywhere keeps every ring worth reading", () => {
+    // Branch 6 leaks a password belonging to some OTHER movable host, so its
+    // value is a property of the NET. Same two hosts as above, except dn-2 is
+    // movable and still shut.
+    const { knowledge } = foldReports(
+      emptyKnowledge(GEN),
+      [
+        report("dn-1", at, { depth: 1, neighbours: ["dn-2"], logTrafficInterval: 1, isStationary: true }),
+        report("dn-2", at, { depth: 1, neighbours: ["dn-1"] }),
+      ],
+      at,
+    );
+    const tasks = deriveTasks(knowledge, at, {
+      agents: new Set(["dn-1"]),
+      vault: new Set(["dn-1"]),
+    });
+    expect(tasks.filter((t) => t.kind === "bleed")).toHaveLength(1);
+  });
+
+  test("a chatty host outranks a quiet one, but never outranks a survey", () => {
+    // Ordering is by expected useful lines WITHIN the +10 band. A host with a
+    // lot to say should be read first; nothing that merely has a lot to say
+    // should displace learning the shape of the net.
+    const { knowledge } = foldReports(
+      emptyKnowledge(GEN),
+      [
+        // Both have an uncracked neighbour, so they are worth the same PER LINE
+        // and differ only in how many lines they will have minted.
+        report("chatty", at, { depth: 1, neighbours: ["unmapped"], logTrafficInterval: 1 }),
+        report("quiet", at, { depth: 1, neighbours: ["unmapped"], logTrafficInterval: 500 }),
+        // Adjacency never observed, so a survey derives for it — which is what
+        // the band assertion below needs something to compare against.
+        report("unmapped", at, { depth: 2 }),
+      ],
+      at,
+    );
+    const tasks = deriveTasks(knowledge, at, { agents: new Set(["chatty", "quiet"]) });
+    const bleeds = tasks.filter((t) => t.kind === "bleed");
+    const chatty = bleeds.find((t) => t.host === "chatty")!;
+    const quiet = bleeds.find((t) => t.host === "quiet")!;
+    expect(chatty.priority).toBeLessThan(quiet.priority);
+
+    // ...and every bleed still sits behind every survey, which is what the
+    // clamp on the value bias is for.
+    const surveys = tasks.filter((t) => t.kind === "survey");
+    expect(surveys.length).toBeGreaterThan(0);
+    for (const survey of surveys) {
+      for (const bleed of bleeds) expect(survey.priority).toBeLessThan(bleed.priority);
+    }
   });
 });
 
@@ -502,9 +668,12 @@ describe("the charisma gate withholds what heartbleed would refuse", () => {
   const at = expiryMs("topology") + 1_000;
 
   test("bleeds derive only above the host's requirement — or when it is unknown", () => {
+    // `logTrafficInterval` is supplied so the ring is known to have something in
+    // it: this test is about the CHARISMA gate, and a host with no new lines
+    // would refuse for an unrelated reason and pass for the wrong one.
     const { knowledge } = foldReports(
       emptyKnowledge(GEN),
-      [report("dn-1", at, { depth: 1, requiredCharisma: 120 })],
+      [report("dn-1", at, { depth: 1, requiredCharisma: 120, logTrafficInterval: 1 })],
       at,
     );
     const agents = new Set(["dn-1"]);
@@ -519,7 +688,11 @@ describe("the charisma gate withholds what heartbleed would refuse", () => {
 
     // Requirement unknown: the refused call's own describeHost report is what
     // teaches us the number, so the first try IS the survey.
-    const unknown = foldReports(emptyKnowledge(GEN), [report("dn-2", at, { depth: 1 })], at).knowledge;
+    const unknown = foldReports(
+      emptyKnowledge(GEN),
+      [report("dn-2", at, { depth: 1, logTrafficInterval: 1 })],
+      at,
+    ).knowledge;
     expect(
       deriveTasks(unknown, at, { agents: new Set(["dn-2"]), charisma: 1 }).filter((t) => t.kind === "bleed"),
     ).toHaveLength(1);
