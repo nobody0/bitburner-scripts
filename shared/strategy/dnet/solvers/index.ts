@@ -86,10 +86,6 @@ const BY_MODEL: Partial<Record<ModelId, Solver>> = {
   "KingOfTheHill": HILL_SOLVERS.kingOfTheHill,
 };
 
-/** `BellaCuore`'s decode half on its own, for tests that want to drive the
- * regime directly rather than through the dispatcher above. */
-export const ROMAN_DECODE = CLOSED_FORM_SOLVERS.romanNumeral;
-
 export function solverFor(modelId: string | undefined): Solver | undefined {
   if (modelId === undefined) return undefined;
   return BY_MODEL[modelId as ModelId];

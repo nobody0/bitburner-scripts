@@ -8,7 +8,7 @@ import { assignCoupled, assignIndependent } from "../shared/strategy/assignment.
 import { BLACKOP_CONFIDENCE, STAMINA_FLOOR, stepBladeburner } from "../shared/strategy/bladeburner/decide.ts";
 import { CORP_STAGES, stepCorp, type CorpView } from "../shared/strategy/corp/stages.ts";
 import { reachableFrom, stepDarknet, unlockValue } from "../shared/strategy/dnet/decide.ts";
-import { darknetRoute } from "../game/lib/features/remaining.ts";
+import { darknetRoute } from "../game/lib/features/dnet.ts";
 import { emptyKnowledge, foldReports } from "../shared/strategy/dnet/knowledge.ts";
 import { msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
 import { ASCEND_THRESHOLD, CLASH_CONFIDENCE, stepGang } from "../shared/strategy/gang/decide.ts";

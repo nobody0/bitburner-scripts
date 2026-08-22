@@ -2,12 +2,13 @@
  *
  * Args only — free, atomic, and guaranteed present at launch. An agent reads its
  * whole identity here rather than from the page realm, so a resident planted by
- * a controller that has since died still knows which run it belongs to.
+ * an overseer that has since died still knows which run it belongs to.
  *
- * Two shapes, because there are two roles:
+ * Two shapes, because there are two roles (always launched via `ns.exec` from
+ * home, or `ns.spawn` from the agent itself — never typed at a terminal):
  *
- *     run dnet/overseer.js <missionId> <generation> <identityJson> <charisma> <agentFile>
- *     run dnet/agent.js    <missionId> <generation> <identityJson> <role> <agentId> [jobId]
+ *     dnet/overseer.js <missionId> <generation> <identityJson> <charisma> <agentFile>
+ *     dnet/agent.js    <missionId> <generation> <identityJson> <role> <agentId> [jobId]
  *
  * The agent's optional SIXTH argument selects its mode: absent, it is the host's
  * resident; present, it is the one job with that id. One binary in two modes,
@@ -16,12 +17,12 @@
  *
  * There are no port numbers here any more. Everything the darknet says travels
  * through the `globalThis` rendezvous: a resident registers itself there, the
- * controller finds it there, and home reads the controller's state there. See
+ * overseer finds it there, and home reads the overseer's state there. See
  * `game/dnet/realm.ts` for why that is sound and what it costs.
  *
  * `generation` ties everything to the world it was gathered in and must match
- * what the controller publishes (`<bitNode>:<lastAugReset>`). Agents outlive
- * controllers, so this is not a formality: a live script from a dead run really
+ * what the overseer publishes (`<bitNode>:<lastAugReset>`). Agents outlive
+ * overseers, so this is not a formality: a live script from a dead run really
  * can still be talking to us. */
 
 export type AgentRole = "overseer" | "resident";
@@ -36,13 +37,13 @@ export interface OverseerArgs {
   missionId: string;
   generation: string;
   /** JSON ArtifactIdentity, so the agent's telemetry lands in the same run
-   *  artifact as the controller's without reading the page realm. */
+   *  artifact as the overseer's without reading the page realm. */
   identity: string;
-  /** Charisma at launch. The controller cannot afford `getPlayer` (0.5 GB out of
+  /** Charisma at launch. The overseer cannot afford `getPlayer` (0.5 GB out of
    *  1.65), and it needs this to know which hosts a job may heartbleed at all.
    *  Refreshed by home through the rendezvous rather than re-read. */
   charisma: number;
-  /** The build-versioned agent filename. The controller spreads what home
+  /** The build-versioned agent filename. The overseer spreads what home
    *  shipped and never constructs a filename itself, so a build handoff cannot
    *  leave it exec'ing a version that is no longer on disk. */
   agentFile: string;

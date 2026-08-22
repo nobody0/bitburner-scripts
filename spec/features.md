@@ -251,12 +251,13 @@ All fourteen are implemented; there is no `inert()` helper any more. `corp` is
 implemented to the *strategy* level only and refuses to issue its calls; `dnet`
 issues its own on live hosts through the overseer/agent pipeline, while
 `stepDarknet` stays a pure ranking with no action for a driver to carry out
-(`spec/progress.md`, and for dnet's reasons `spec/dnet.md`). Four have
-their own file (`factions`, `career`, `hacknet`, `stock`) because they needed
-more than the common shape; the rest share `features/remaining.ts`, which is a
-statement about their SHAPE — build a view, call one pure `step*`, execute at
-most one action per tick in one dodge — not about their size. Any of them moves
-to its own file the moment it needs more.
+(`spec/progress.md`, and for dnet's reasons `spec/dnet.md`). Seven have their own
+file (`hacking`, `factions`, `career`, `hacknet`, `stock`, `dnet`, `side`) because
+they needed more than the common shape; the other seven (`progression`, `gang`,
+`corp`, `bladeburner`, `sleeves`, `go`, `stanek`) share
+`features/remaining.ts`, which is a statement about their SHAPE — build a view,
+call one pure `step*`, execute at most one action per tick in one dodge — not
+about their size. Any of them moves to its own file the moment it needs more.
 
 The network sweep — scan, reclaim, root, deploy, reap, heap resync — lives in
 `game/lib/fleet.ts` as an infrastructure module: the shape of a feature

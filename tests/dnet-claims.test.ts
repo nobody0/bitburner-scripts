@@ -7,7 +7,8 @@ import {
   type DnetHostQueue,
   type DnetJob,
 } from "../game/dnet/realm.ts";
-import { stripCredentials } from "../shared/strategy/dnet/courier.ts";
+import { LOCAL_CODE, LOCAL_CODES, stripCredentials } from "../shared/strategy/dnet/courier.ts";
+import { SOLVER_CODES } from "../shared/strategy/dnet/solvers/types.ts";
 
 /** A claim is the one piece of darknet state that is neither knowledge nor a
  * queue: it says "a process is alive doing this to that host, right now".
@@ -138,6 +139,36 @@ describe("a claim carries a credential, and it never leaves the realm", () => {
     // is in flight.
     expect(stripped[0]!.target).toBe("dn-1");
     expect(stripped[0]!.kind).toBe("attempt");
+  });
+});
+
+describe("the local response codes have exactly one meaning each", () => {
+  // `LOCAL_CODES` is the number -> name direction the panel renders;
+  // `LOCAL_CODE` is the name -> number direction every emit site now uses. Two
+  // tables of the same facts drift the moment one is edited alone, and the drift
+  // is invisible: a code emitted under a number the panel does not know renders
+  // as a blank, which is the one thing the local block exists to prevent.
+  test("LOCAL_CODE and LOCAL_CODES are inverses", () => {
+    for (const [name, code] of Object.entries(LOCAL_CODE)) {
+      expect((LOCAL_CODES as Record<number, string>)[code], `LOCAL_CODES is missing ${code}`).toBe(name);
+    }
+    // The other direction, minus the solver block: those numbers live with the
+    // contract that defines them (`SOLVER_CODES`), and duplicating them into
+    // `LOCAL_CODE` would give one number two homes.
+    const solverCodes = new Set<number>(Object.values(SOLVER_CODES));
+    for (const [code, name] of Object.entries(LOCAL_CODES)) {
+      if (solverCodes.has(Number(code))) {
+        expect((SOLVER_CODES as Record<string, number>)[name]).toBe(Number(code));
+        continue;
+      }
+      expect((LOCAL_CODE as Record<string, number>)[name], `LOCAL_CODE is missing ${name}`).toBe(Number(code));
+    }
+  });
+
+  test("no code is claimed by both the local block and the solvers", () => {
+    for (const code of Object.values(LOCAL_CODE)) {
+      expect(Object.values(SOLVER_CODES)).not.toContain(code);
+    }
   });
 });
 

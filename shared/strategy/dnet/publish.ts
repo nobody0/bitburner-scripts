@@ -1,6 +1,7 @@
 import { stripCredentials } from "./courier.ts";
 import { modelEntry } from "./models.ts";
 import {
+  LAST_BLEED_AT,
   freeRam,
   fresh,
   isImmune,
@@ -14,7 +15,7 @@ import type {
   DarknetKnownHost,
 } from "../../telemetry/topics/dnet.ts";
 
-/** Turning what the controller KNOWS into something a person can look at.
+/** Turning what the overseer KNOWS into something a person can look at.
  *
  * The rule it serves is the one in spec/dnet.md: no darknet fact may be treated
  * as current without checking its age. A digest of bare values would publish a
@@ -72,7 +73,7 @@ const PUBLISHED_FACTS = [
   // When we last read this host's log ring. The `.at` IS the payload, so this
   // adds no field to `DarknetKnownHost` — it rides `facts` like everything
   // else, and it is what lets a reader work out whether a bleed is due.
-  "lastBleedAt",
+  LAST_BLEED_AT,
 ] as const;
 
 /** How far a feedback solver has got, and NOTHING else from its state.
@@ -192,7 +193,7 @@ export function publishHost(
       : {}),
     ...(values["caches"] !== undefined ? { caches: values["caches"] as string[] } : {}),
     // Not a fact: we are the only thing that links or releases, so the
-    // controller's set is the truth and an observed copy could only be staler.
+    // overseer's set is the truth and an observed copy could only be staler.
     ...(opts.stasisLinked?.has(host.hostname) === true ? { stasisLinked: true } : {}),
     facts,
     ...(ledger

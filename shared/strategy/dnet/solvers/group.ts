@@ -297,10 +297,8 @@ function advance(
   };
 }
 
-/** The blank symbol, exported so a test can assert it stays outside every
- * alphabet a password can be drawn from. */
-export const GROUP_BLANK = BLANK;
-
+/** That the blank symbol stays outside every alphabet a password can be drawn
+ * from, asserted by test through this rather than by exporting `BLANK`. */
 export function blankIsSafe(): boolean {
   return !NUMBERS.includes(BLANK) && !LETTERS.includes(BLANK);
 }

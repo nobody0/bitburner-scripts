@@ -875,6 +875,7 @@ describe("feature dodges are centralised and priced", () => {
       "game/lib/features/hacknet.ts",
       "game/lib/features/stock.ts",
       "game/lib/features/hacking.ts",
+      "game/lib/features/dnet.ts",
       "game/lib/features/remaining.ts",
     ];
     for (const file of files) {

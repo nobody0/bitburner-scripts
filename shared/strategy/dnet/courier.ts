@@ -4,7 +4,7 @@ import type { OracleCapture } from "./oracle.ts";
  * password out of everything that is written down.
  *
  * Nothing here is serialized: every script the game runs shares one JS realm, so
- * the controller's own object is reachable from home directly — see
+ * the overseer's own object is reachable from home directly — see
  * `game/dnet/realm.ts` for why that is sound rather than merely convenient, and
  * what it costs. What lives here is the shapes, the response codes that make a
  * refusal attributable, and `stripCredentials`, which is the one rule that
@@ -29,14 +29,15 @@ export const DARKNET_CODES = {
 /** Codes we invent, kept numerically clear of the engine's 2xx-5xx range and
  * commented as ours so nobody hunts for them in the game source. They exist so
  * that "nothing happened" is never a blank in the response-code panel — every
- * one of these is emitted by a real refusal in `game/dnet/overseer.ts`. */
+ * one of these is emitted by a real refusal, mostly from the job bodies in
+ * `game/dnet/jobs.ts` (905 comes from the overseer's timeout path). */
 export const LOCAL_CODES = {
   900: "UnknownModel",
   902: "NoCredential",
   903: "NotEnoughRam",
   904: "ModelUnattempted",
   /** The job's promise was rejected rather than settled: its process died with
-   *  its host, its resident was swept, or it hit the controller's timeout. Kept
+   *  its host, its resident was swept, or it hit the overseer's timeout. Kept
    *  apart from 903 so a dying net does not read as a RAM shortage. */
   905: "JobDied",
   // 906-910 are the password solvers stopping, and they are ordered by how
@@ -63,8 +64,29 @@ export const LOCAL_CODES = {
   /** A `phishingAttack` claimed the net-wide cache window. Counted rather than
    *  merely logged because it is the ONLY evidence we get of a piece of engine
    *  state — `DarknetState.lastPhishingCacheTime` is exposed nowhere — and the
-   *  controller stamps its cooldown belief off it. */
+   *  overseer stamps its cooldown belief off it. */
   911: "PhishingCacheWon",
+} as const;
+
+/** The same vocabulary, by name, for the code we EMIT.
+ *
+ * `LOCAL_CODES` above is the number→name direction, which is what the panel
+ * renders; this is the direction the emitting code needs, and it exists because
+ * every emit site used to be a bare literal — `count(900)`, `codes: { "902": 1 }`
+ * — so a code's meaning lived only in a comment beside it. The solver codes are
+ * NOT here: they have their own named constant next to the contract that defines
+ * them (`SOLVER_CODES` in `solvers/types.ts`), and duplicating them would give
+ * the same number two homes.
+ *
+ * `tests/dnet-claims.test.ts` pins the two halves against each other, so a name
+ * added to one and not the other fails rather than drifting. */
+export const LOCAL_CODE = {
+  UnknownModel: 900,
+  NoCredential: 902,
+  NotEnoughRam: 903,
+  ModelUnattempted: 904,
+  JobDied: 905,
+  PhishingCacheWon: 911,
 } as const;
 
 export function codeName(code: number): string {
@@ -139,7 +161,7 @@ export interface AttemptOutcome {
   solver?: Record<string, unknown>;
 }
 
-/** A resident saying it is alive. Three missed beats and the controller retires
+/** A resident saying it is alive. Three missed beats and the overseer retires
  * its queue, because a resident dies with its host. */
 export interface AgentBeat {
   agentId: string;
@@ -148,11 +170,11 @@ export interface AgentBeat {
   at: number;
 }
 
-/** A password an agent recovered, on its way to the controller's vault.
+/** A password an agent recovered, on its way to the overseer's vault.
  *
  * The one structure in the feature that carries a secret. It never crosses a
  * channel that is written down: it lives in the realm between the job that found
- * it and the controller, and in home's module state after that. */
+ * it and the overseer, and in home's module state after that. */
 export interface VaultEntry {
   hostname: string;
   password: string;

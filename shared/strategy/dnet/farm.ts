@@ -1,3 +1,4 @@
+import { compareDepthDesc } from "./knowledge.ts";
 import {
   PHISH_CACHE_COOLDOWN_MS,
   phishWaitMs,
@@ -237,9 +238,8 @@ export function electCacheHunter(
     host.goneAt === undefined && host.isLab !== true && (eligible?.(host) ?? true));
   if (pool.length === 0) return undefined;
   const best = [...pool].sort((a, b) => {
-    const da = a.depth ?? Number.MIN_SAFE_INTEGER;
-    const db = b.depth ?? Number.MIN_SAFE_INTEGER;
-    if (da !== db) return db - da;
+    const byDepth = compareDepthDesc(a.depth, b.depth);
+    if (byDepth !== 0) return byDepth;
     if (a.freeGb !== b.freeGb) return b.freeGb - a.freeGb;
     return a.host < b.host ? -1 : a.host > b.host ? 1 : 0;
   })[0]!;
@@ -282,9 +282,8 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
   let promoted = 0;
 
   const ordered = [...hosts].sort((a, b) => {
-    const da = a.depth ?? Number.MIN_SAFE_INTEGER;
-    const db = b.depth ?? Number.MIN_SAFE_INTEGER;
-    if (da !== db) return db - da;
+    const byDepth = compareDepthDesc(a.depth, b.depth);
+    if (byDepth !== 0) return byDepth;
     return a.host < b.host ? -1 : a.host > b.host ? 1 : 0;
   });
 
@@ -482,7 +481,7 @@ export function planFarm(hosts: readonly FarmHost[], inputs: FarmInputs): FarmPl
 /** How long one bounded farm batch should keep calling.
  *
  * Every farm job runs a BATCH rather than one call, because the alternative is
- * paying the 2.0 GB spawn back and a full controller tick for a 6-second wait.
+ * paying the 2.0 GB spawn back and a full overseer tick for a 6-second wait.
  * It is bounded rather than long-lived so that `longLived` — and the beat that
  * goes with it — ends up with exactly one user, the maze walker, and so that a
  * host is never held away from a plant or an attempt for longer than an attempt

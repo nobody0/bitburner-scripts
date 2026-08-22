@@ -1,13 +1,16 @@
 import type { NS } from "@ns";
-import type { ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
+import { LOCAL_CODE, type ReportHost, type VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { AttemptLedger } from "../../shared/strategy/dnet/knowledge.ts";
 import { modelEntry, planAttempt, type ModelId, type PasswordFacts } from "../../shared/strategy/dnet/models.ts";
 import { harvestLogs, logShape, oracleFor } from "../../shared/strategy/dnet/oracle.ts";
 import { solverFor } from "../../shared/strategy/dnet/solvers/index.ts";
 import {
+  EXHAUSTED_PHASE,
+  PENDING_ATTEMPT,
   SOLVER_CODES,
   freshState,
-  stateMatches,
+  resumableState,
+  withoutPending,
   type SolverObservation,
   type SolverState,
   type SolverStep,
@@ -17,23 +20,23 @@ import { INDUCE_WAIT_MS, labMazeSize, labStage } from "../../shared/strategy/dne
 import { emptyMaze, markBlocked, readCoords, stepMaze, type Cell } from "../../shared/strategy/dnet/maze.ts";
 import { RESIDENT_METHODS, priceAgent, type DnetJobResult, type DnetJobState, type JobBeat } from "./realm.ts";
 
-/** What a darknet job actually DOES, separated from the controller that decides
+/** What a darknet job actually DOES, separated from the overseer that decides
  * it should happen.
  *
- * These five bodies run in the AGENT's process, never in the controller's, so
- * they were closures in `game/dnet/overseer.ts` for one reason only: two of them
- * need controller state that moves (charisma, and the per-host attempt ledger).
- * Passing those two as FUNCTIONS gets the bodies out of a 635-line scheduler
- * while keeping them live — the overseer reassigns both, so capturing either by
+ * Every body here runs in the AGENT's process, never in the overseer's. They
+ * were once closures in `game/dnet/overseer.ts` for one reason only: some need
+ * overseer state that moves (charisma, and the per-host attempt ledger).
+ * Passing those as FUNCTIONS gets the bodies out of the scheduler while
+ * keeping them live — the overseer reassigns both, so capturing either by
  * value would have a job authenticating on last hour's charisma.
  *
  * ## The rule this file exists under, with no exceptions
  *
- * It bundles into the same artifact as the controller, and Bitburner's static
+ * It bundles into the same artifact as the overseer, and Bitburner's static
  * analyser charges by MEMBER NAME across the whole bundle. So every `ns` reach
  * here is bracket notation on the `jobNs` the body was HANDED
  * (`jobNs["dnet"]["authenticate"]`), and one dot-access would bill the entire
- * job surface — authenticate, heartbleed, scp, exec — to a controller pinned at
+ * job surface — authenticate, heartbleed, scp, exec — to an overseer pinned at
  * 1.65 GB. `tests/ram-budget.test.ts` greps every file in this directory for
  * that shape and pins the built artifact against esbuild rewriting it.
  *
@@ -74,38 +77,12 @@ function grammarDrift(
  * before a move or a disconnect takes it away, and a round trip out there is
  * roughly 3.3 s. A job that ran longer than this would be conversing with a
  * host it can no longer reach, and would learn that by collecting 351s. Well
- * under `JOB_TIMEOUT_MS`, so the controller never times out a job that is
+ * under `JOB_TIMEOUT_MS`, so the overseer never times out a job that is
  * working.
  *
  * A solve that does not finish inside it is not lost: the solver's state rides
  * home on the attempt ledger and the next vantage resumes the conversation. */
 const ATTEMPT_WALL_MS = 36_000;
-
-/** Where a paused solve records the attempt it was waiting on.
- *
- * It lives inside the solver's own `scratch` so that it travels with the state
- * through the ledger and the fold without any of them needing to know about it,
- * and so that `stripCredentials` redacts it along with everything else in there
- * — a pending attempt is a guess at the password, and late in a solve that is
- * very nearly the password. The solvers never see it: it is removed before the
- * state is handed back to one. */
-const PENDING = "__pendingAttempt";
-
-/** The phase a solver's state is parked in once its search space is GONE.
- *
- * `SolverExhausted` means the password provably is not where our model of the
- * game says it must be, so running the identical search again cannot reach a
- * different answer — and nothing else stops it running: `planAttempt` calls
- * `solver.first()` fresh on every derivation, and the ledger's `lastCode` holds
- * the engine's 401 rather than our 910. Without this marker a host whose model
- * we cannot open (`Factori-Os` above difficulty 24 is the transcribed example,
- * and `deep.ts` says so in its own give-up) spends its whole walk, gives up, and
- * is filed again on the next tick, for ever.
- *
- * It is a normal `SolverState`, so it carries the identity fingerprint and dies
- * exactly when the identity does: `foldReports` drops a host's whole ledger when
- * it reports absent, and a re-minted host is tried again as it should be. */
-const EXHAUSTED = "__exhausted";
 
 /** The `.cache` files on a host, out of `ns.ls`.
  *
@@ -121,19 +98,13 @@ function cacheFilesOn(jobNs: NS, host: string): string[] {
   return jobNs["ls"](host).filter((name) => name.endsWith(".cache"));
 }
 
-/** The state as its solver expects it, with the job's own bookkeeping removed. */
-function withoutPending(state: SolverState): SolverState {
-  const { [PENDING]: _pending, ...scratch } = state.scratch;
-  return { ...state, scratch };
-}
-
-/** The two pieces of controller state a job needs and cannot be handed once.
+/** The two pieces of overseer state a job needs and cannot be handed once.
  *
  * Both are read at CALL time, inside the job, because the overseer reassigns
  * them: home refreshes charisma through the rendezvous, and the ledger is
  * re-folded every time an attempt lands. */
 export interface JobDeps {
-  /** Charisma as the controller last heard it, for the heartbleed gate. */
+  /** Charisma as the overseer last heard it, for the heartbleed gate. */
   charisma: () => number;
   /** What this host's model has already been asked, so a dictionary walk
    *  resumes rather than restarting at candidate one. */
@@ -143,7 +114,7 @@ export interface JobDeps {
 /** What a job body is handed.
  *
  * The third argument is the LONG-JOB BEAT and short jobs ignore it: a job that
- * declares `longLived` is skipped by the controller's timeout loop, so the only
+ * declares `longLived` is skipped by the overseer's timeout loop, so the only
  * evidence it is still alive is its own stamp. See `LONG_JOB_BEAT_MS`. */
 export type JobBody = (jobNs: NS, state: DnetJobState, beat?: JobBeat) => Promise<DnetJobResult>;
 
@@ -231,7 +202,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       codes: jobCodes,
       credentials,
       // The `--<password>--` lines, which name no owner. They travel to the
-      // controller and no further: it is the only thing that knows which hosts
+      // overseer and no further: it is the only thing that knows which hosts
       // a password of this length and format could belong to, and an
       // unattributed password is still a password.
       ...(harvest.loose.length > 0 ? { loose: harvest.loose } : {}),
@@ -286,7 +257,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       count(answer.code);
       // A model id our transcription does not know is either a game update or a
       // hole in `shared/strategy/dnet/models.ts`.
-      if (entry === undefined) count(900);
+      if (entry === undefined) count(LOCAL_CODE.UnknownModel);
 
       // Read the ring whatever happened: on a failure it holds the model's
       // response, and on a success it still holds whatever the host leaked while
@@ -337,7 +308,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       if (carried !== undefined && attempts.length > 0) {
         const withPending = pending === undefined
           ? carried
-          : { ...carried, scratch: { ...carried.scratch, [PENDING]: pending } };
+          : { ...carried, scratch: { ...carried.scratch, [PENDING_ATTEMPT]: pending } };
         attempts[attempts.length - 1]!.solver = withPending as unknown as Record<string, unknown>;
       }
       const grammar = grammarDrift(driftLines);
@@ -356,7 +327,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     // --- one unattributed password, and nothing else -----------------------
     //
     // A log line that reads `--<password>--` leaks a random MOVABLE host's
-    // password with no name attached, and the controller has already narrowed
+    // password with no name attached, and the overseer has already narrowed
     // it to hosts whose length and format match. Spending it is one call: a
     // failed `authenticate` costs nothing but time and even pays charisma xp
     // (`effects.ts:48-50`), so there is nothing to weigh up. It short-circuits
@@ -377,151 +348,138 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     if (solver) {
       // --- the conversation, in ONE process ---------------------------------
       //
-      // One attempt per job would pay the 2.0 GB spawn tax and a full controller
+      // One attempt per job would pay the 2.0 GB spawn tax and a full overseer
       // tick per guess, turning a nine-exchange solve into half a minute of
       // scheduling. `JOB_METHODS.attempt` already carries both calls, so the
       // whole conversation happens here and reports once.
-      const resumed = ledger?.solver as SolverState | undefined;
-      // A resumed state is only usable if it belongs to THIS identity: hostnames
-      // are recycled upstream, so a ledger can outlive the machine it describes,
-      // and resuming onto a new password would never terminate.
-      //
-      // The MODEL is checked here and not inside `stateMatches`, which
-      // recomputes the fingerprint from the state's own `model` and so can only
-      // ever confirm what the state already believes. Two models with the same
-      // length, the same format and no hint or data fingerprint identically —
-      // `AccountsManager_4.2` and `NIL` do — and feeding one solver's scratch to
-      // another does not fail politely: it spreads an `undefined` and THROWS,
-      // which kills the agent process rather than failing the attempt.
-      const usable = resumed !== undefined
-          && resumed.model === details.modelId
-          && stateMatches(resumed, facts)
-        ? resumed
-        : undefined;
+      const carried = resumableState(ledger?.solver as SolverState | undefined, details.modelId, facts);
 
       /** The marker this identity is parked under once it is eliminated. */
       const exhaustedState = (): SolverState =>
-        freshState(details.modelId as ModelId, facts, EXHAUSTED);
+        freshState(details.modelId as ModelId, facts, EXHAUSTED_PHASE);
 
       const deadline = Date.now() + ATTEMPT_WALL_MS;
       const budget = solver.budget(facts);
-      // An identity we have already eliminated. Costs nothing and spends no
-      // call: see `EXHAUSTED`.
-      if (usable?.phase === EXHAUSTED) {
-        count(SOLVER_CODES.SolverExhausted);
-        return settle(false, `${state.host}: this identity was eliminated already`);
-      }
-      // A state is only RESUMABLE when a pending attempt travels with it: the
-      // `Solver` contract offers `first()` and `next(state, observation)` and
-      // nothing in between, so without the attempt whose answer advances it
-      // there is no way back into the conversation and the solve restarts.
-      const resuming = usable !== undefined && typeof usable.scratch[PENDING] === "string";
-      // Carried forward only when we are actually continuing. Charging a
-      // restarted solve for the attempts it is NOT building on would shrink its
-      // budget every time it was interrupted, until `spent >= budget` fired on
-      // the first pass and the host could never be opened at all.
-      let spent = resuming ? usable!.spent : 0;
-      let step: SolverStep;
 
-      if (resuming && spent >= budget) {
-        // THE BUDGET BOUNDS THE RESUME, and it has to: the resume path sends its
-        // pending attempt before the loop's own check is ever reached, so
-        // without this a solve that had spent its budget made one more exchange
-        // on every vantage, for ever — `solver.next` handed back a fresh pending
-        // each time, the task re-derived on the next tick, and the declared
-        // "most attempts this solver may spend on one identity" was exceeded
-        // without bound. Stopping here costs nothing and keeps the state
-        // resumable, so a later budget change picks the conversation back up.
-        count(SOLVER_CODES.SolverBudget);
+      /** The exchanges, from wherever the conversation currently stands. */
+      const converse = async (first: SolverStep, alreadySpent: number): Promise<DnetJobResult> => {
+        let step = first;
+        let spent = alreadySpent;
+        while (step.kind !== "give-up") {
+          if (Date.now() > deadline || spent >= budget) {
+            count(SOLVER_CODES.SolverBudget);
+            return settle(
+              false,
+              `${state.host}: solve paused after ${spent} attempts`,
+              step.kind === "attempt" ? step.state : undefined,
+              step.password,
+            );
+          }
+          const seen = await send(step.password, step.kind === "attempt" ? step.needsOracle : false);
+          if (seen.success) return settle(true, `opened ${state.host}`);
+
+          // A timeout fires AFTER the delay and BEFORE the model is consulted, so
+          // no log line was written and nothing was learned. Retry the same step
+          // without charging it.
+          if (seen.code === 408) continue;
+          // The host moved or went offline mid-conversation. Keep the state: the
+          // password has not changed, only our ability to reach it.
+          if (seen.code === 351 || seen.code === 503) {
+            return settle(
+              false,
+              `${state.host}: lost the vantage mid-solve`,
+              step.kind === "attempt" ? step.state : undefined,
+              step.password,
+            );
+          }
+          spent++;
+          if (step.kind === "answer") {
+            // We asserted a decoded password and it was refused, so our reading of
+            // this model is wrong rather than unlucky. That is worth hearing.
+            count(SOLVER_CODES.SolverExhausted);
+            return settle(false, `${state.host}: decoded password refused`, exhaustedState());
+          }
+          if (step.needsOracle && seen.oracle === undefined) {
+            count(SOLVER_CODES.OracleUnavailable);
+            // The attempt travels with the state, exactly as a budget pause's
+            // does. Without it the state is unresumable — the next vantage would
+            // fall back to `first()` and throw away a conversation that may have
+            // been thirty exchanges deep — and this stop is the most resumable
+            // one there is: charisma catches up, the ring becomes readable, and
+            // re-sending the same password recovers the answer that was lost.
+            return settle(false, `${state.host}: no readable response`, step.state, step.password);
+          }
+          step = solver.next(facts, step.state, seen);
+        }
+
+        count(step.code);
         return settle(
           false,
-          `${state.host}: solve is at its ${budget}-attempt budget`,
-          withoutPending(usable!),
-          usable!.scratch[PENDING] as string,
+          `${state.host}: ${step.reason}`,
+          step.code === SOLVER_CODES.SolverExhausted ? exhaustedState() : step.state,
         );
-      }
-      if (resuming) {
-        // --- resuming a conversation the previous vantage did not finish -----
-        //
-        // A solver's state pairs with the attempt it was about to make, and the
-        // answer to that attempt is what advances it. The previous job sent that
-        // attempt and never heard back, so what has to be recovered is the
-        // ANSWER, not the state.
-        //
-        // Re-sending the same password recovers it exactly: every model's
-        // response is a pure function of (password, attempt), so the reply is
-        // the one that was lost. That is why this is a resume rather than an
-        // approximation — and it costs exactly one exchange, against restarting
-        // a search that may have been thirty deep.
-        const pending = usable.scratch[PENDING] as string;
+      };
+
+      /** Re-enter a conversation the previous vantage did not finish.
+       *
+       * A solver's state pairs with the attempt it was about to make, and the
+       * answer to that attempt is what advances it. The previous job sent that
+       * attempt and never heard back, so what has to be recovered is the ANSWER,
+       * not the state.
+       *
+       * Re-sending the same password recovers it exactly: every model's response
+       * is a pure function of (password, attempt), so the reply is the one that
+       * was lost. That is why this is a resume rather than an approximation — and
+       * it costs exactly one exchange, against restarting a search that may have
+       * been thirty deep. */
+      const resume = async (usable: SolverState, pending: string): Promise<DnetJobResult> => {
+        // Carried forward only when we are actually continuing. Charging a
+        // restarted solve for the attempts it is NOT building on would shrink its
+        // budget every time it was interrupted, until `spent >= budget` fired on
+        // the first pass and the host could never be opened at all.
+        const spent = usable.spent;
+        if (spent >= budget) {
+          // THE BUDGET BOUNDS THE RESUME, and it has to: the resume sends its
+          // pending attempt before `converse`'s own check is ever reached, so
+          // without this a solve that had spent its budget made one more exchange
+          // on every vantage, for ever — `solver.next` handed back a fresh pending
+          // each time, the task re-derived on the next tick, and the declared
+          // "most attempts this solver may spend on one identity" was exceeded
+          // without bound. Stopping here costs nothing and keeps the state
+          // resumable, so a later budget change picks the conversation back up.
+          count(SOLVER_CODES.SolverBudget);
+          return settle(
+            false,
+            `${state.host}: solve is at its ${budget}-attempt budget`,
+            withoutPending(usable),
+            pending,
+          );
+        }
         const seen = await send(pending, true);
         if (seen.success) return settle(true, `opened ${state.host}`);
         if (seen.code === 351 || seen.code === 503) {
           return settle(false, `${state.host}: lost the vantage again`, usable);
         }
-        step = solver.next(facts, withoutPending(usable), seen);
-      } else {
-        step = solver.first(facts);
+        return await converse(solver.next(facts, withoutPending(usable), seen), spent);
+      };
+
+      // An identity we have already eliminated. Costs nothing and spends no
+      // call: see `EXHAUSTED_PHASE`.
+      if (carried.state?.phase === EXHAUSTED_PHASE) {
+        count(SOLVER_CODES.SolverExhausted);
+        return settle(false, `${state.host}: this identity was eliminated already`);
       }
-
-      while (step.kind !== "give-up") {
-        if (Date.now() > deadline || spent >= budget) {
-          count(SOLVER_CODES.SolverBudget);
-          return settle(
-            false,
-            `${state.host}: solve paused after ${spent} attempts`,
-            step.kind === "attempt" ? step.state : undefined,
-            step.password,
-          );
-        }
-        const seen = await send(step.password, step.kind === "attempt" ? step.needsOracle : false);
-        if (seen.success) return settle(true, `opened ${state.host}`);
-
-        // A timeout fires AFTER the delay and BEFORE the model is consulted, so
-        // no log line was written and nothing was learned. Retry the same step
-        // without charging it.
-        if (seen.code === 408) continue;
-        // The host moved or went offline mid-conversation. Keep the state: the
-        // password has not changed, only our ability to reach it.
-        if (seen.code === 351 || seen.code === 503) {
-          return settle(
-            false,
-            `${state.host}: lost the vantage mid-solve`,
-            step.kind === "attempt" ? step.state : undefined,
-            step.password,
-          );
-        }
-        spent++;
-        if (step.kind === "answer") {
-          // We asserted a decoded password and it was refused, so our reading of
-          // this model is wrong rather than unlucky. That is worth hearing.
-          count(SOLVER_CODES.SolverExhausted);
-          return settle(false, `${state.host}: decoded password refused`, exhaustedState());
-        }
-        if (step.needsOracle && seen.oracle === undefined) {
-          count(SOLVER_CODES.OracleUnavailable);
-          // The attempt travels with the state, exactly as a budget pause's
-          // does. Without it the state is unresumable — the next vantage would
-          // fall back to `first()` and throw away a conversation that may have
-          // been thirty exchanges deep — and this stop is the most resumable
-          // one there is: charisma catches up, the ring becomes readable, and
-          // re-sending the same password recovers the answer that was lost.
-          return settle(false, `${state.host}: no readable response`, step.state, step.password);
-        }
-        step = solver.next(facts, step.state, seen);
+      if (carried.state !== undefined && carried.pending !== undefined) {
+        return await resume(carried.state, carried.pending);
       }
-
-      count(step.code);
-      return settle(
-        false,
-        `${state.host}: ${step.reason}`,
-        step.code === SOLVER_CODES.SolverExhausted ? exhaustedState() : step.state,
-      );
+      return await converse(solver.first(facts), 0);
     }
 
     // --- no solver: a dictionary walk, or the one deliberate probe -----------
     const plan = planAttempt(entry, facts, ledger?.tried ?? 0, ledger?.probes ?? 0);
-    if (plan.kind === "none") return { ok: false, codes: { "904": 1 }, detail: plan.reason };
+    if (plan.kind === "none") {
+      return { ok: false, codes: { [LOCAL_CODE.ModelUnattempted]: 1 }, detail: plan.reason };
+    }
     const seen = await send(plan.password, true);
     if (plan.kind === "candidate" && attempts.length > 0) {
       attempts[attempts.length - 1]!.candidateIndex = plan.index;
@@ -541,7 +499,9 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
    * only ever starts a script where the caller already is. */
   const plantJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
     const jobCodes: Record<string, number> = {};
-    if (state.password === undefined) return { ok: false, codes: { "902": 1 }, detail: "no credential" };
+    if (state.password === undefined) {
+      return { ok: false, codes: { [LOCAL_CODE.NoCredential]: 1 }, detail: "no credential" };
+    }
     // connectToSession is the cheap path, and it only works on a host that is
     // ALREADY ROOTED — `requireAdminRights`, which only a successful
     // `authenticate` ever sets. A credential harvested from a log is for a host
@@ -561,14 +521,14 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     const pid = jobNs["exec"](
       (state.payloads ?? [])[0]!,
       state.host,
-      // Priced with the JOB's ns, in the job's own process. The controller could
+      // Priced with the JOB's ns, in the job's own process. The overseer could
       // pass a number, but a stale one would under-allocate the resident and
       // kill it on its first call — and this is free.
       { threads: 1, ramOverride: priceAgent(jobNs, RESIDENT_METHODS), temporary: true },
       ...(state.plantArgs ?? []),
     );
     if (pid === 0) {
-      jobCodes["903"] = 1;
+      jobCodes[LOCAL_CODE.NotEnoughRam] = 1;
       return { ok: false, codes: jobCodes, detail: "exec refused: no room for a resident" };
     }
     return { ok: true, codes: jobCodes, hosts: [describeHost(jobNs, state.host)], detail: `resident pid ${pid}` };
@@ -579,7 +539,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
   // Three calls that need no credential and no neighbour, because all three act
   // on the host the process is already standing on. They are BATCHES rather than
   // single calls: one `memoryReallocation` is a six-second wait, and paying the
-  // 2.0 GB spawn back plus a full controller tick per six seconds would spend
+  // 2.0 GB spawn back plus a full overseer tick per six seconds would spend
   // more on scheduling than on the work. Every batch is bounded well under
   // `JOB_TIMEOUT_MS`, which is what leaves `longLived` with no user here at all.
 
@@ -634,7 +594,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
    * state (`DarknetState.lastPhishingCacheTime`) exposed through no member at
    * all, so the only sighting of it we ever get is our own success message — and
    * the batch stops on it, because the window is now shut for three minutes and
-   * the controller should re-size this host's threads for money instead. */
+   * the overseer should re-size this host's threads for money instead. */
   const phishJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
     const jobCodes: Record<string, number> = {};
     const count = (code: number | string): void => {
@@ -652,9 +612,9 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       if (phished.success) paid++;
       // The one discriminator upstream gives us. `String.prototype.includes`,
       // never a RegExp: `RegExp.prototype.exec` anywhere in this bundle bills the
-      // full 1.3 GB of `ns.exec` to a controller pinned at 1.65.
+      // full 1.3 GB of `ns.exec` to an overseer pinned at 1.65.
       if (phished.success && phished.message.includes("Found a cache file")) {
-        count(911);
+        count(LOCAL_CODE.PhishingCacheWon);
         wonCache = true;
         break;
       }
@@ -680,7 +640,11 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
   const cacheJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
     const wanted = state.filename;
     if (wanted === undefined) {
-      return { ok: false, codes: { "902": 1 }, detail: "no cache filename; a job never invents one" };
+      return {
+        ok: false,
+        codes: { [LOCAL_CODE.NoCredential]: 1 },
+        detail: "no cache filename; a job never invents one",
+      };
     }
     const held = cacheFilesOn(jobNs, state.host);
     if (!held.includes(wanted)) {
@@ -708,7 +672,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       ok: opened.success,
       codes: { [String(opened.success ? 200 : 404)]: 1 },
       // `karmaLoss` comes back NEGATIVE and karma only ever moves down, so it is
-      // free progress toward the gang threshold. The controller accumulates it
+      // free progress toward the gang threshold. The overseer accumulates it
       // and publishes the total for `gang` to read.
       ...(opened.success ? { karmaLoss: opened.karmaLoss } : {}),
       hosts: [{ ...describeHost(jobNs, state.host), caches: cacheFilesOn(jobNs, state.host) }],
@@ -728,7 +692,11 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
   const promoteJob = async (jobNs: NS, state: DnetJobState): Promise<DnetJobResult> => {
     const symbol = state.symbol;
     if (symbol === undefined) {
-      return { ok: false, codes: { "902": 1 }, detail: "no symbol; a job never invents one" };
+      return {
+        ok: false,
+        codes: { [LOCAL_CODE.NoCredential]: 1 },
+        detail: "no symbol; a job never invents one",
+      };
     }
     const jobCodes: Record<string, number> = {};
     const count = (code: number | string): void => {
@@ -911,7 +879,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
       if (where === undefined) {
         // The grammar moved. Stopping is right: a walker that cannot read its
         // own position would walk into the same wall for hours.
-        count(909);
+        count(SOLVER_CODES.OracleUnparsed);
         return {
           ok: false,
           codes: jobCodes,
@@ -939,7 +907,7 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<string, JobBody>> 
     }
   };
 
-  // Keyed by `TaskKind`, and `survey` is the fallback the controller uses for a
+  // Keyed by `TaskKind`, and `survey` is the fallback the overseer uses for a
   // kind it does not recognise: surveying is the one job that is safe to do to
   // anything, because it only looks.
   return {

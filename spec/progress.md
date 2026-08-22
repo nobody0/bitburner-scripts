@@ -36,7 +36,7 @@ The acceptance bar for a feature is the full vertical slice:
 | 8 | sleeves | **done** |
 | 9 | go | **done** |
 | 10 | stanek | **done** |
-| 11 | dnet | **exploring** — the overseer/agent pipeline (`game/dnet/`) surveys, bleeds, cracks and plants on live darknet hosts, and every one of the 24 password models now has a solver (`shared/strategy/dnet/solvers/`); the labyrinth is the one model left unsolved, because it is a maze rather than a password. What the feature still does not do is ACT on the net: memoryReallocation, phishing, caches, propaganda, backdoors and stasis are all documented and priced but unwired |
+| 11 | dnet | **done** — the overseer/agent pipeline (`game/dnet/`) surveys, bleeds, cracks and plants on live darknet hosts; every one of the 24 password models has a solver (`shared/strategy/dnet/solvers/`), the labyrinth walker included; and the feature acts on the net: memoryReallocation (reclaim), phishing, caches, stock propaganda (promote), stasis pins and induced migrations are wired as jobs in `game/dnet/jobs.ts`, and backdoors — the one darknet action that can only be taken from home's terminal — as a dodge in `game/lib/features/dnet.ts` |
 | 12 | side | **done** |
 | 13 | progression | **done** — endgame route, install barrier, two-pass arm/execute, and post-install restart are live |
 | 14 | endgame route + refresh/act split | **done** — see below |

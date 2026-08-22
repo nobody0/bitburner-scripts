@@ -2,14 +2,14 @@ import type { NS } from "@ns";
 import type { AttemptOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
 import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
 
-/** The rendezvous the controller and its resident agents meet at.
+/** The rendezvous the overseer and its resident agents meet at.
  *
  * This is `game/lib/dodge-shared.ts` for the darknet, and the differences are
  * all forced by one thing: RAM out there is scarce, uneven, and can vanish.
  *
  * ## The shape
  *
- * - The **controller** is long-lived and holds every piece of state: the map,
+ * - The **overseer** is long-lived and holds every piece of state: the map,
  *   the credentials, and a QUEUE of work per darknet host. It never spawns and
  *   never execs, because it must not die and `spawn` kills its caller.
  * - Each darknet host holds exactly one **resident**, also long-lived. It is the
@@ -35,7 +35,7 @@ import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
  * than one script. It pays here because darknet jobs are individually expensive
  * and because the alternative — leaving a host with no resident — cannot be
  * repaired from outside: re-planting one needs a session AND adjacency, which
- * the controller has to nothing but `darkweb`.
+ * the overseer has to nothing but `darkweb`.
  *
  * ## The rule that nearly makes it impossible, and the 0.05 GB that saves it
  *
@@ -51,7 +51,7 @@ import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
  *
  * ## The rendezvous
  *
- * The job design depends on the controller describing work it cannot afford to
+ * The job design depends on the overseer describing work it cannot afford to
  * perform and handing the description to a process that can — a live function
  * reference, which is why the conversation lives in the page realm rather than
  * in anything written down. That is not a shortcut past a game rule: what
@@ -66,16 +66,16 @@ import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
  *    timed out; a claim on work whose vantage or job is gone is dropped
  *    (`sweepClaims`). A realm reference to a dead host is exactly the hazard.
  * 2. **A foreign generation is refused** (`overseerIsLive`), because agents
- *    outlive controllers and a live script from a dead run describes a world
+ *    outlive overseers and a live script from a dead run describes a world
  *    this one does not share.
  * 3. **Home keeps its own fold.** `drain()` hands observations over ONCE and
- *    home folds them into knowledge it owns, so a controller dying loses
+ *    home folds them into knowledge it owns, so an overseer dying loses
  *    scheduling rather than the map.
- * 4. **A credential never reaches telemetry.** It lives in the controller's
+ * 4. **A credential never reaches telemetry.** It lives in the overseer's
  *    vault and in home's, and `publishKnowledge` publishes a boolean. */
 
 /** Bumped from 1 when `claims` joined the rendezvous. It is a version on the
- * SHAPE, and the reason it has to move is that agents outlive controllers and a
+ * SHAPE, and the reason it has to move is that agents outlive overseers and a
  * build handoff leaves both on disk: an agent from the previous build reading a
  * rendezvous whose shape moved under it is a bug with no symptom. Refusing by
  * number makes it exit instead. */
@@ -105,7 +105,7 @@ export const RESIDENT_METHODS: readonly string[] = [
   "getServerUsedRam",
 ];
 
-/** The controller: the base, and `getHostname`. It observes nothing, cracks
+/** The overseer: the base, and `getHostname`. It observes nothing, cracks
  * nothing and launches nothing, so it costs nothing else. */
 export const CONTROLLER_METHODS: readonly string[] = ["getHostname"];
 
@@ -114,7 +114,7 @@ const DESCRIBE_METHODS = ["dnet.getServerDetails", "getServerMaxRam", "getServer
 
 /** What each job body calls, per kind.
  *
- * These lists are the contract between the controller, which SIZES the process,
+ * These lists are the contract between the overseer, which SIZES the process,
  * and the closures in `overseer.ts`, which make the calls. Getting one wrong is
  * a bug the simulator cannot catch — it does not model the dynamic-RAM check —
  * and that the game expresses as the script dying on its first call.
@@ -183,7 +183,7 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
   reclaim: [...AGENT_BASE_METHODS, "dnet.memoryReallocation", "ls", ...DESCRIBE_METHODS],
   phish: [...AGENT_BASE_METHODS, "dnet.phishingAttack", ...DESCRIBE_METHODS],
   // `ls` again, and for two reasons: the job re-reads the host's file list after
-  // opening one so the controller's belief is not one tick stale, and it is the
+  // opening one so the overseer's belief is not one tick stale, and it is the
   // guard against `openCache` THROWING — the call raises rather than refuses on
   // a filename the host does not hold, and a throw kills the agent.
   cache: [...AGENT_BASE_METHODS, "dnet.openCache", "ls", ...DESCRIBE_METHODS],
@@ -207,7 +207,7 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
   // the 16 GB a shallow darknet host has. Dropping the spawn is what makes the
   // job runnable at all on such a host — the process simply ends, leaving the
   // host empty for `planSpread` to re-plant, which is safe precisely BECAUSE
-  // the host is now immutable. The controller files this variant only when a
+  // the host is now immutable. The overseer files this variant only when a
   // neighbour could actually re-plant it, and refuses by name otherwise.
   pin: ["getHostname", "dnet.setStasisLink", ...DESCRIBE_METHODS],
   // The maze walker. It keeps `spawn` — the walk is over by the time it runs —
@@ -240,7 +240,7 @@ export function priceAgent(ns: NS, methods: readonly string[]): number {
   return total + PRICE_MARGIN_GB;
 }
 
-/** How long a job may run before the controller gives up on it.
+/** How long a job may run before the overseer gives up on it.
  *
  * Generous, because the work is genuinely slow: one `authenticate` against a
  * deep host takes seconds and `heartbleed` is 1.5x that. This is here for a job
@@ -253,7 +253,7 @@ export const JOB_TIMEOUT_MS = 60_000;
  *
  * This exists because the alternative was `Infinity`, and `Infinity` is a
  * promise the realm cannot keep. `residentLastLife` returned it for a long-lived
- * job and the controller's timeout loop skipped one outright, so a job whose
+ * job and the overseer's timeout loop skipped one outright, so a job whose
  * PROCESS had been killed — which out here is the ordinary case, a mutation tick
  * restarts hosts and takes what was running on them — would pin its queue for
  * ever. The host would never be swept, never be re-planted, and never be
@@ -269,13 +269,13 @@ export const LONG_JOB_BEAT_MS = 30_000;
 export const RESIDENT_BEAT_MS = 5_000;
 export const RESIDENT_BEAT_MISSES = 3;
 
-/** What a job hands back. Data, never live objects: the controller folds it into
+/** What a job hands back. Data, never live objects: the overseer folds it into
  * knowledge, and knowledge has to outlive the process that produced it. */
 export interface DnetJobResult {
   ok: boolean;
   hosts?: ReportHost[];
   attempts?: AttemptOutcome[];
-  /** Credentials recovered. The controller keeps them so the NEXT job can use
+  /** Credentials recovered. The overseer keeps them so the NEXT job can use
    *  them without a round trip, and `drain()` hands them to home's vault. */
   credentials?: VaultEntry[];
   codes?: Record<string, number>;
@@ -291,12 +291,12 @@ export interface DnetJobResult {
    *
    *  They never reach `drain()` and never reach home: an unattributed password
    *  is still a password, and the only thing that can spend one is the
-   *  controller, which knows which hosts its length and format could belong
+   *  overseer, which knows which hosts its length and format could belong
    *  to. See `looseCandidates` in `shared/strategy/dnet/listen.ts`. */
   loose?: string[];
   /** Karma an `openCache` spent, as the engine returns it: NEGATIVE, because
    *  karma only ever moves down. That is what makes a cache free progress
-   *  toward the gang threshold rather than a cost, so the controller sums it
+   *  toward the gang threshold rather than a cost, so the overseer sums it
    *  and publishes the total for `gang` to read. */
   karmaLoss?: number;
   /** How far our log grammar has drifted from the game's.
@@ -314,11 +314,17 @@ export interface DnetJobResult {
  * It lives in the realm rather than in `ns.args` because it carries a password,
  * and `ns.args` is visible in the game's script listing. */
 export interface DnetJobState {
-  /** The job's target. */
+  /** The TARGET the job acts on — not the host it runs on, which is `from`.
+   *
+   *  The two are the same for most kinds, which is exactly why the difference
+   *  is worth stating: `induce` is the one call that REFUSES its own host
+   *  (`Darknet.ts:428-439`), so there `host` is a neighbour and `from` is where
+   *  the resident stands. Note the asymmetry with `DnetHostQueue.host`, which
+   *  means the vantage. */
   host: string;
-  /** Where the job runs — the resident's own host. */
+  /** Where the job RUNS — the resident's own host, the vantage. */
   from: string;
-  /** Credential for `host`, when the controller holds one. The one field that
+  /** Credential for `host`, when the overseer holds one. The one field that
    *  must never leave the realm: it travels only to home's vault, and
    *  `stripCredentials` keeps it out of anything that is published. */
   password?: string;
@@ -326,7 +332,7 @@ export interface DnetJobState {
    *  builds a filename: they are build-versioned, and a guess would `exec` a
    *  version that is not on disk and get a silent 0. */
   payloads?: string[];
-  /** Args for a resident this job plants. Built by the controller so the
+  /** Args for a resident this job plants. Built by the overseer so the
    *  positional order lives in exactly one place. */
   plantArgs?: (string | number)[];
   /** A password we do NOT believe belongs to this host, to be spent on one
@@ -363,7 +369,7 @@ export interface DnetJob {
    *
    *  `ramOverride` is charged PER THREAD by the engine, so the real cost is
    *  `budgetGb * threads` and BOTH fit checks — `nextJob` here and the
-   *  controller's pre-filter — have to multiply. `reclaim` and `phish` are the
+   *  overseer's pre-filter — have to multiply. `reclaim` and `phish` are the
    *  reason the field exists: both scale linearly with threads, and the agent
    *  hardcoded `threads: 1` at its `ns.spawn`, so asking for more would have
    *  been silently ignored while the planner believed it had been granted. */
@@ -375,14 +381,14 @@ export interface DnetJob {
    *  that fits, so a forty-second phish queued one tick before a plant would
    *  hold the host away from the plant for its whole batch. */
   priority: number;
-  /** True for work that does not finish on its own. The controller keeps the
+  /** True for work that does not finish on its own. The overseer keeps the
    *  promise either way, but only times out jobs that SHOULD end: a long-lived
    *  one is expected to sit there, so a watchdog would kill exactly the thing it
    *  was meant to protect.
    *
-   *  Everything today is short-lived. The flag exists because the work that is
-   *  not — `phishingAttack` in a loop, a stasis hold — is the obvious next step,
-   *  and this is the one place that distinction can live. */
+   *  The labyrinth walk is the long-lived case: it holds its host for the whole
+   *  maze and proves its liveness by beat (`LONG_JOB_BEAT_MS`) instead of by
+   *  finishing. Everything else is short-lived and answers to `JOB_TIMEOUT_MS`. */
   longLived: boolean;
   state: DnetJobState;
   /** NOT named `run`: Bitburner's static analyser charges by MEMBER NAME, so a
@@ -392,7 +398,7 @@ export interface DnetJob {
    *
    *  Runs with the JOB process's ns, which is where the budget lives. Written
    *  with bracket notation on that ns so the analyser charges the declared
-   *  override rather than the controller's bundle. */
+   *  override rather than the overseer's bundle. */
   body: (jobNs: NS, state: DnetJobState, beat?: JobBeat) => Promise<DnetJobResult>;
   settle: (result: DnetJobResult) => void;
   fail: (error: unknown) => void;
@@ -407,7 +413,7 @@ export interface DnetJob {
    *  A short job reports once, at the end, and that is enough. A job that runs
    *  for an hour has to be able to say where it has got to, or its only
    *  observable state for that hour is "still going". Untyped here on purpose:
-   *  the realm carries it, the controller publishes it, and neither has to know
+   *  the realm carries it, the overseer publishes it, and neither has to know
    *  what a given job's progress looks like. */
   progress?: Record<string, unknown>;
 }
@@ -419,12 +425,15 @@ export interface DnetJob {
  * got to — free in RAM, and the general mechanism any future long job wants. */
 export type JobBeat = (progress?: Record<string, unknown>) => void;
 
-/** One darknet host's work, as the controller sees it.
+/** One darknet host's work, as the overseer sees it.
  *
- * The controller decides WHAT runs and in what order; the resident decides WHEN,
+ * The overseer decides WHAT runs and in what order; the resident decides WHEN,
  * because only it knows how much RAM is actually free at the moment it looks —
  * and out here that changes without warning when the owner's processes move. */
 export interface DnetHostQueue {
+  /** The VANTAGE this queue's resident stands on — the host that will RUN every
+   *  job filed here. Not the target: a job's target is `DnetJobState.host`, and
+   *  for `induce` the two differ. */
   host: string;
   pending: DnetJob[];
   /** The job the resident has spawned into. While this is set the resident is
@@ -432,7 +441,7 @@ export interface DnetHostQueue {
   active?: DnetJob;
   /** Last time the resident said it was alive. */
   lastBeatAt: number;
-  /** Free RAM the resident last measured. The controller uses it to avoid
+  /** Free RAM the resident last measured. The overseer uses it to avoid
    *  queueing work that cannot possibly fit. */
   freeGb?: number;
   /** Jobs finished here, for the panel. */
@@ -443,73 +452,91 @@ export interface DnetHostQueue {
   lastError?: string;
 }
 
-/** Why the net is not growing, as of the controller's most recent derivation.
+/** One planner refusal, as every rolled-up report carries it. */
+export interface RefusalExample {
+  host: string;
+  why: string;
+  detail: string;
+}
+
+/** What a planner declined, and by what name. The shape every report below
+ * shares — it answers the same question everywhere, and one shape means one
+ * renderer.
+ *
+ * A SNAPSHOT of the last derivation, not a counter. Counting would tally the
+ * same standing refusal once per 2 s tick and report a host that has been
+ * quietly full for a minute as thirty problems. */
+export interface RefusalRollup {
+  /** Refusals by name, from the last derivation. */
+  refused: Record<string, number>;
+  /** One host per reason, with the planner's own sentence. The counts say how
+   *  much; these say what to go and look at. */
+  examples: RefusalExample[];
+}
+
+/** Roll a planner's refusal list up into counts plus one example per reason.
+ *
+ * This was written out longhand at every report site until there were four
+ * identical copies; the shape is load-bearing (the panel renders it), so it is
+ * folded in exactly one place. Callers whose planner keys refusals `hostname`
+ * map at the call site. */
+export function foldRefusals(entries: readonly RefusalExample[]): RefusalRollup {
+  const refused: Record<string, number> = {};
+  const examples: RefusalExample[] = [];
+  for (const entry of entries) {
+    refused[entry.why] = (refused[entry.why] ?? 0) + 1;
+    if (refused[entry.why] === 1) examples.push(entry);
+  }
+  return { refused, examples };
+}
+
+/** Why the net is not growing, as of the overseer's most recent derivation.
  *
  * `planSpread` has produced named refusals since it was written and every one of
  * them was thrown away, which made the named-refusal contract in `spec/dnet.md`
  * half-implemented: the panel could see that spreading had stopped and never why.
  * It matters more now than it did, because removing the three invented caps
  * would otherwise be completely unobservable — the whole point of the change is
- * that the surviving refusals are the real ones.
- *
- * A SNAPSHOT of the last derivation, not a counter. Counting would tally the
- * same standing refusal once per 2 s tick and report a host that has been
- * quietly full for a minute as thirty problems. */
-export interface DnetSpreadReport {
+ * that the surviving refusals are the real ones. */
+export interface DnetSpreadReport extends RefusalRollup {
   /** Plants the last derivation admitted. */
   planted: number;
-  /** Refusals by name, from the same derivation. */
-  refused: Record<string, number>;
-  /** One host per reason, with the planner's own sentence. The counts say how
-   *  much; these say what to go and look at. */
-  examples: { host: string; why: string; detail: string }[];
 }
 
 /** What the farm ladder decided last derivation, in the same shape and for the
  * same reason as `DnetSpreadReport`.
  *
- * A SNAPSHOT, not a tally: a host that has had nothing to open for a minute is
- * one fact, not thirty ticks of it. `planFarm` names a refusal for every rung a
- * host fell through, so "phishing, because there is no cache and no block"
- * arrives complete rather than as an unexplained phish. */
-export interface DnetFarmReport {
+ * `planFarm` names a refusal for every rung a host fell through, so "phishing,
+ * because there is no cache and no block" arrives complete rather than as an
+ * unexplained phish. */
+export interface DnetFarmReport extends RefusalRollup {
   /** Farm tasks the last derivation admitted, by kind. */
   admitted: Record<string, number>;
-  refused: Record<string, number>;
-  examples: { host: string; why: string; detail: string }[];
   /** The resident elected to carry the net-wide phishing cache window. */
   cacheHunter?: string;
 }
 
-/** What one darknet run has learned and has not yet handed to home. */
-/** What the bleed gate declined, and why.
- *
- * Same three-field shape as `DnetSpreadReport` and `DnetFarmReport`, because it
- * answers the same question — what did our own planner decline, and by what
- * name — and one shape means one renderer. */
-export interface DnetListenReport {
-  refused: Record<string, number>;
-  examples: { host: string; why: string; detail: string }[];
-}
+/** What the bleed gate declined, and why. The bare roll-up: the gate admits
+ * nothing of its own, so there is no `admitted` half to carry. */
+export type DnetListenReport = RefusalRollup;
 
 /** What the three DELIBERATE decisions did, and what they declined.
  *
- * Same shape as `DnetFarmReport` on purpose. These are the decisions with a real
- * price — a stasis link is one of at most four in a whole run, a push can cost
- * the host, and a walk occupies a resident for hours — so "why not" is the more
- * common answer and by far the more useful one to read. */
-export interface DnetHoldReport {
+ * These are the decisions with a real price — a stasis link is one of at most
+ * four in a whole run, a push can cost the host, and a walk occupies a resident
+ * for hours — so "why not" is the more common answer and by far the more useful
+ * one to read. */
+export interface DnetHoldReport extends RefusalRollup {
   admitted: Record<string, number>;
-  refused: Record<string, number>;
-  examples: { host: string; why: string; detail: string }[];
 }
 
+/** What one darknet run has learned and has not yet handed to home. */
 export interface DnetDrain {
   hosts: ReportHost[];
   credentials: VaultEntry[];
   /** Attempt outcomes since the last drain, tagged with their target. Home folds
    *  them into its OWN ledger, so the panel's per-host cracking progress
-   *  survives a controller death the way the map itself does. `attempted` and
+   *  survives an overseer death the way the map itself does. `attempted` and
    *  the oracle stay inside the realm: only the ledger summary is published. */
   attempts: { hostname: string; outcome: AttemptOutcome }[];
   codes: Record<string, number>;
@@ -523,9 +550,9 @@ export interface DnetDrain {
   listen?: DnetListenReport;
   /** The last hold derivation: the pin, the push and the walk. */
   hold?: DnetHoldReport;
-  /** Hosts the controller has pinned with a stasis link.
+  /** Hosts the overseer has pinned with a stasis link.
    *
-   *  It travels UP rather than down because the controller is the only thing
+   *  It travels UP rather than down because the overseer is the only thing
    *  that can spend one — `setStasisLink` pins the calling host — while home is
    *  the one that has to run its own fold's expiries against the set. A pinned
    *  host is outside every mutation branch's victim pool, so believing it
@@ -535,14 +562,14 @@ export interface DnetDrain {
    *  reports one; home turns it into the career need it already posts. */
   charismaNeeded?: number;
   /** Karma spent on caches SINCE THE LAST DRAIN, summed and NEGATIVE. A delta
-   *  like `codes` beside it, and for the same reason: a controller dies with
+   *  like `codes` beside it, and for the same reason: an overseer dies with
    *  its host, so a since-boot total would reset home's tally every time one is
    *  re-seeded. Karma only ever moves down, so home's accumulation is progress
    *  toward the gang threshold rather than a cost — which is why it is
    *  published rather than merely logged. */
   karmaLoss?: number;
   /** When a `.d.cache` was last seen to land, so home can carry the net-wide
-   *  phishing cooldown across a controller death. The cooldown lives on
+   *  phishing cooldown across an overseer death. The cooldown lives on
    *  `DarknetState` and is exposed nowhere, so our own sightings are the only
    *  evidence there is. */
   lastPhishCacheAt?: number;
@@ -561,15 +588,15 @@ export interface DnetDrain {
   residentsLost: number;
 }
 
-/** What home tells the controller. Small on purpose: home does not plan the
+/** What home tells the overseer. Small on purpose: home does not plan the
  * darknet, it only says what home alone can see. */
 export interface DnetOrders {
   charisma: number;
   /** Credentials home already holds, replayed after a re-seed so a restarted
-   *  controller does not re-crack a net we already opened. */
+   *  overseer does not re-crack a net we already opened. */
   vault?: VaultEntry[];
   /** The net's real depth, when home has pinned it from a lab sighting. Without
-   *  it the controller derives tasks and expiries on `DEFAULT_NET_DEPTH`, which
+   *  it the overseer derives tasks and expiries on `DEFAULT_NET_DEPTH`, which
    *  errs toward re-observing — safe, but paid for in jobs. */
   netDepth?: number;
   /** The mutation clock runs at half speed outside BN15, and only home can see
@@ -589,7 +616,7 @@ export interface DnetOrders {
    *  hosts are movable, so holding one risks losing it for nothing. */
   openLabCache?: boolean;
   /** The net-wide phishing cooldown, replayed after a re-seed so a restarted
-   *  controller does not believe the window is open when it is not. */
+   *  overseer does not believe the window is open when it is not. */
   lastPhishCacheAt?: number;
   /** Symbols worth spreading propaganda about, best first.
    *
@@ -598,27 +625,27 @@ export interface DnetOrders {
    *  empty — the usual answer — and the ladder refuses `promote` by name. */
   promoteSymbols?: string[];
   /** `getStasisLinkedServers()`. Home's probe is the authority; a pin job's own
-   *  0 GB reading updates the controller's copy in between. */
+   *  0 GB reading updates the overseer's copy in between. */
   stasisLinked?: string[];
 
   /** How many darknet hosts home has backdoored.
    *
    *  A term in the mutation rates, not a status line: a backdoored host carries
    *  a ~9%/tick restart and a ~4%/tick delete on top of the ordinary branches,
-   *  so every knowledge expiry the controller runs is shorter once we hold any.
+   *  so every knowledge expiry the overseer runs is shorter once we hold any.
    *  Home installs them (`singularity.installBackdoor` acts on the terminal's
    *  own server), so home is the only thing that can count them. */
   backdoored?: number;
   /** `getStasisLinkLimit()`: `1 + TheBrokenWings + TheHammer + TheStaff`.
    *
-   *  Ordered rather than read because the controller cannot afford
+   *  Ordered rather than read because the overseer cannot afford
    *  `getOwnedAugmentations`, and defaulting to 1 — the value before the
    *  labyrinth pays out anything — is the direction that spends nothing it does
    *  not have. */
   stasisLimit?: number;
 }
 
-/** The controller, as everything else sees it.
+/** The overseer, as everything else sees it.
  *
  * This is the whole inter-process surface of the feature: residents find their
  * queue here, and home drains findings and pushes orders here. There is no other
@@ -632,7 +659,7 @@ export interface DnetRendezvous {
   lastBeatAt: number;
   /** Per-host queues. Keyed by hostname, because a host is exactly the thing
    *  that has one resident and one RAM budget. A resident REGISTERS itself by
-   *  creating its entry here, which is how the controller discovers it. */
+   *  creating its entry here, which is how the overseer discovers it. */
   queues: Map<string, DnetHostQueue>;
   /** Work in flight, keyed by TARGET. Deliberately not part of `drain()`: it is
    *  work, not knowledge, and realm rule 3 is about knowledge. See `DnetClaim`. */
@@ -642,9 +669,9 @@ export interface DnetRendezvous {
    * Draining rather than exposing is deliberate: it is what makes home's fold
    * the durable copy. An accessor that returned the same observations for ever
    * would let home double-count them, and one that never cleared would make the
-   * controller the only holder of the map. */
+   * overseer the only holder of the map. */
   drain(): DnetDrain;
-  /** Home to the controller. */
+  /** Home to the overseer. */
   order(orders: DnetOrders): void;
 }
 
@@ -662,16 +689,16 @@ export function dnetRealm(): DnetGlobalThis {
  *
  * Read fresh and never held across an `await`. That is the whole point of the
  * function: an agent that bound the rendezvous at boot kept a reference to an
- * object a replacement controller of the same generation has already retired —
- * it would pass every generation check while being invisible to the controller
+ * object a replacement overseer of the same generation has already retired —
+ * it would pass every generation check while being invisible to the overseer
  * that is actually running, for ever.
  *
  * The protocol is checked here and the generation is checked here, and nothing
  * else is. In particular the beat window is deliberately NOT applied: an agent
- * is the one process that cannot be replaced from outside, so a controller that
- * is merely slow must not empty the net. Home re-seeds a dead controller, and
+ * is the one process that cannot be replaced from outside, so an overseer that
+ * is merely slow must not empty the net. Home re-seeds a dead overseer, and
  * the residents that survived re-register with it on their next pass. The beat
- * window belongs to the single-controller election below, which decides the
+ * window belongs to the single-overseer election below, which decides the
  * opposite question. */
 export function liveRendezvous(generation: string): DnetRendezvous | undefined {
   const existing = dnetRealm().dnet_overseer;
@@ -683,7 +710,7 @@ export function liveRendezvous(generation: string): DnetRendezvous | undefined {
 
 /** Whether an existing rendezvous should be left alone.
  *
- * The single-controller election, in one function so the boot check and the
+ * The single-overseer election, in one function so the boot check and the
  * tests read the same rule. A rendezvous from another generation is not "live"
  * however recently it beat: it belongs to a world this one does not share, and
  * deferring to it would hand the net to a dead run. */
@@ -701,9 +728,9 @@ export function overseerIsLive(
 /** Retire hosts whose resident stopped beating.
  *
  * The condition the whole realm exception rests on: an entry is expired by the
- * controller, never trusted. A resident dies with its host — a mutation tick
+ * overseer, never trusted. A resident dies with its host — a mutation tick
  * restarts and deletes servers — and a queue left behind would have the
- * controller filing work for a machine that is gone.
+ * overseer filing work for a machine that is gone.
  *
  * Returns the hostnames dropped, so the caller can fail their in-flight jobs
  * rather than leaving promises nobody will ever settle. */
@@ -734,7 +761,7 @@ export function sweepQueues(queues: Map<string, DnetHostQueue>, now: number): Dn
   for (const [host, queue] of queues) {
     // Sweeping on the beat window alone retired any queue whose job ran longer
     // than three beats, losing the result of a merely slow authenticate and
-    // miscounting it as a lost resident. The controller's timeout loop fires at
+    // miscounting it as a lost resident. The overseer's timeout loop fires at
     // exactly `startedAt + JOB_TIMEOUT_MS` and stamps the beat as it clears the
     // job, so the beat allowance on top of it here is what gives that loop
     // first claim, and the returning resident time to beat.
@@ -756,8 +783,8 @@ export function sweepQueues(queues: Map<string, DnetHostQueue>, now: number): Dn
  *
  * It lives on the rendezvous and NOT in knowledge, which is the whole reason
  * this is a separate structure. Realm rule 3 drains knowledge to home so it
- * outlives the controller; a claim's entire meaning is "this controller has a
- * live process on it", so surviving the controller's death is precisely wrong.
+ * outlives the overseer; a claim's entire meaning is "this overseer has a
+ * live process on it", so surviving the overseer's death is precisely wrong.
  * Folding it into knowledge would also send it home, and a claim carries a
  * password. */
 export interface DnetClaim {
@@ -768,11 +795,11 @@ export interface DnetClaim {
   kind: TaskKind;
   jobId: string;
   /** Realm-only. Never published, never drained, never logged: this object
-   *  exists so the controller can describe work in flight completely, and
+   *  exists so the overseer can describe work in flight completely, and
    *  `stripCredentials` is the backstop if it ever reaches a channel. */
   password?: string;
   claimedAt: number;
-  /** When the controller stops believing a claim whose job has not STARTED yet,
+  /** When the overseer stops believing a claim whose job has not STARTED yet,
    *  on the clock alone. The same window the job timeout uses, because it is the
    *  same question: past it, the process is either dead or holding a vantage
    *  that has already rotated. Once the job starts, `sweepClaims` runs the
@@ -828,7 +855,7 @@ export function sweepClaims(
       // would stop seeing the target as busy, and a second vantage would file a
       // second walker: two PIDs in one maze, which is the exact failure the
       // whole design exists to prevent. So it is judged by whether it is still
-      // BEATING, symmetrically with `residentLastLife`, and the controller's own
+      // BEATING, symmetrically with `residentLastLife`, and the overseer's own
       // timeout loop already skips it for the same reason.
       const deadline = job.longLived
         ? (job.beatAt ?? job.startedAt ?? claim.claimedAt) + LONG_JOB_BEAT_MS
@@ -847,7 +874,7 @@ export function sweepClaims(
 
 /** The next job this host can actually start.
  *
- * The RAM check is the resident's, not the controller's, and deliberately so:
+ * The RAM check is the resident's, not the overseer's, and deliberately so:
  * only the resident can see how much is free at the instant it looks, and out
  * here that moves without warning. A job that does not fit is left in the queue
  * rather than dropped — blocked RAM gets freed, hosts get restarted, and the

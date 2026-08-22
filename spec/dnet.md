@@ -35,7 +35,7 @@ and the session dies with it.
 |---|---|
 | `scp` *from* a darknet host | nothing at all |
 | `scp` *to* a darknet host | a session — but **no** direct connection, at any distance |
-| `ns.exec` on a darknet host | a session **and** either a direct connection or a backdoor (a stasis link does *not* help — see [Backdoors and stasis links](#backdoors-and-stasis-links)) |
+| `ns.exec` on a darknet host | a session **and** either a direct connection or a backdoor (a stasis link grants the backdoor too — see [Backdoors and stasis links](#backdoors-and-stasis-links)) |
 
 So getting *data* around is nearly free, and getting a *running process* to
 depth *n* is the hard problem. Everything upstream of that is a credential
@@ -297,7 +297,10 @@ labCha * 0.85` and `levelVariance = (random * 3 - 1) * depth`.
 
 `ModelIds` (`DarkNet/Enums.ts:15-41`) is 24 entries, commented "This list is not
 exposed to the player; they find them through discovery", with the feedback each
-gives on a wrong attempt (`authentication.ts:33-147`):
+gives on a wrong attempt (`authentication.ts:33-147`). Nineteen of them are
+conversations rather than lists, and the framework that holds those conversations
+— the `Solver` contract, the resume protocol, and what each give-up code means —
+is [dnet-solvers.md](dnet-solvers.md).
 
 | `modelId` | Kind | Feedback on a wrong password |
 |---|---|---|
@@ -420,16 +423,22 @@ directly connected: `ns.exec` calls the darknet gate with
 `backdoorInstalled` satisfies the direct-connection requirement. **It is the
 only bypass there is.**
 
-A stasis link does *not* grant remote `exec`, though the engine's own error
-message and upstream's `connectToSession` doc comment both say otherwise. The
-gate tests `options.backdoorBypasses && targetServer.backdoorInstalled` and
-nothing else (`DarkNet/effects/offlineServerHandling.ts:82-97`), while
-`isDirectConnected` is pure adjacency (`:128-129`); `hasStasisLink` never
-touches `serversOnNetwork` at all. What misleads is the failure path's own
-advice, *"You can also use a backdoor or stasis link on the target to allow
-remote access"* (`offlineServerHandling.ts:89`), which is an upstream doc bug.
+A stasis link grants remote `exec` too, and an earlier revision of this spec
+confidently said otherwise — the reasoning looked airtight from the consumer
+side. The gate does test `options.backdoorBypasses &&
+targetServer.backdoorInstalled` and nothing else
+(`DarkNet/effects/offlineServerHandling.ts:82-97`), and `hasStasisLink` never
+appears in a reachability check. But the producer settles it: `setStasisLink`
+sets **both** flags — `server.hasStasisLink = shouldLink; server.backdoorInstalled
+= shouldLink` (`DarkNet/effects/effects.ts:233-234`). Pinning a host installs a
+backdoor on it, so the gate passes for the ordinary reason; releasing the link
+takes the backdoor away again. Upstream's error message and doc comment were
+right all along. The lesson is recorded at length in
+`shared/strategy/dnet/hold.ts`: verifying every reader of a flag proves nothing
+until you have also read every writer.
 
-> **Stasis buys durability. A backdoor buys reach. Neither buys the other.**
+> **Stasis buys everything a backdoor buys, plus durability — and it is
+> invisible to the instability tax. The only thing rationing it is the slots.**
 
 Three costs attach to a backdoor:
 
@@ -455,19 +464,20 @@ isConnectedTo || hasStasisLink` (`NetworkMovement.ts:227-228`) is checked by
 `deleteDarknetServer`, `moveDarknetServer` and `restartServer`, each returning
 early on it — a stasis-linked host is not deleted, moved or restarted.
 
-**Stasis and a backdoor together are strictly free.**
-`getBackdooredDarknetServers` filters `!s.hasStasisLink`
-(`darknetNetworkUtils.ts:90`) and the instability surplus counts only that pool
-(`effects.ts:91-97`), so a pinned host contributes nothing to the `1.07 ^
-surplus` slowdown. It is also outside the movable pool the restart and delete
-branches draw from. Pinning a backdoored host therefore removes its instability
-cost *and* its churn risk at once — the one combination in this feature with no
-downside.
+**A stasis link is a backdoor with no tax.** `getBackdooredDarknetServers`
+filters `!s.hasStasisLink` (`darknetNetworkUtils.ts:90`) and the instability
+surplus counts only that pool (`effects.ts:91-97`), so a pinned host — despite
+carrying `backdoorInstalled` — contributes nothing to the `1.07 ^ surplus`
+slowdown. It is also outside the movable pool the restart and delete branches
+draw from. These are not a trade-off at all: on the same host a stasis link
+gives everything a backdoor gives, plus immunity from move, delete and restart,
+at zero instability. Pinning an already-backdoored host removes its instability
+cost *and* its churn risk at once.
 
 | | Count | Grants | Costs |
 |---|---|---|---|
 | Backdoor | unlimited | remote `exec` — the only bypass | auth slowdown past the free allowance; restart/delete targeting; the restart clears the backdoor |
-| Stasis link | 1-4 | exemption from delete, move and restart. **Not** remote `exec` | a limited slot; 12 GB and the apply time on the target |
+| Stasis link | 1-4 | remote `exec` (it sets `backdoorInstalled`) **and** exemption from delete, move and restart — tax-free | a limited slot; 12 GB and the apply time on the target |
 
 So backdoors are the expendable frontier, and a stasis link keeps one HOST
 alive rather than keeping the graph reachable. What most deserves one is the
@@ -867,6 +877,71 @@ code (`game/dnet/realm.ts`):
 `sim/tests/dnet-session.test.ts` pins the engine rules the first three
 compensate for.
 
+### The life of a job
+
+End to end, because the design lives in three file headers and nowhere as one
+story. `game/lib/features/dnet.ts` is the home driver, `game/dnet/overseer.ts`
+the overseer, `game/dnet/agent.ts` both agent modes, `game/dnet/jobs.ts` the
+bodies, `game/dnet/realm.ts` the contract between them.
+
+1. **Home seeds.** The driver `scp`s both artifacts to `darkweb` in ONE call and
+   `exec`s the overseer, then darkweb's own resident — each with an explicit
+   `ramOverride` from `priceAgent`, which is why neither artifact's *static* cost
+   is binding (unlike `start.js`, which the game autoexecs with no override). The
+   stub is pinned to `home` because `ns.exec` evaluates its direct-connection
+   requirement BEFORE the darkweb early-out. A failed seed backs off
+   exponentially; a live overseer is left strictly alone, because it holds the
+   only copy of the map.
+2. **The overseer derives and files.** Every 2 s it sweeps dead queues, times out
+   jobs that stopped answering, then derives — spread, farm, hold, loose-password
+   guesses, `deriveTasks` — and files each task onto the queue of the host that
+   would have to run it, in PRIORITY order rather than arrival order. It launches
+   nothing.
+3. **The resident takes it.** Every 1 s (`RESIDENT_POLL_MS`) the resident stamps
+   its beat, measures real free RAM, and takes the first pending job that fits
+   `free + residentGb` — its own allocation counts, because `spawn` frees the
+   caller before the job starts.
+4. **`spawn` becomes the job.** `ns.spawn(scriptName, {threads, ramOverride,
+   spawnDelay: 0}, ...residentArgs, jobId)` kills the resident and starts the
+   same file in job mode. Mode is chosen purely by ARGV LENGTH — five args is a
+   resident, a sixth is that job id (`parseAgentMode`) — so there is one artifact
+   to sync rather than two. `ramOverride` is charged PER THREAD, which is why
+   both fit checks compare `budgetGb * threads`.
+5. **The body runs**, reaching ns only through bracket notation on the ns it was
+   handed, and returns data — never live objects.
+6. **It settles and hands the host back.** `performJob`'s `finally` spawns back
+   into resident mode, because nothing outside can put a resident on a darknet
+   host: planting one needs a session AND adjacency. The overseer's promise
+   handlers fold the result into the map, so the very next derivation already
+   accounts for it and the task simply stops existing.
+
+Two kinds break the pattern, and both are encoded rather than commented:
+
+- **`pin` never respawns** (`NO_RESPAWN_KINDS`). `setStasisLink` alone is 12 GB;
+  with the 2.0 GB spawn back it would not fit a 16 GB host at all. Its process
+  ends and leaves the host empty for `planSpread` to re-plant — which is safe
+  only because the pin has just made that host immutable, and which the overseer
+  refuses by name when no neighbour could re-plant it.
+- **`walk` is long-lived.** It holds its host for the whole maze and proves it is
+  alive by beat (`LONG_JOB_BEAT_MS`) instead of by finishing, because
+  `DarknetState.labLocations` is keyed by PID: there is no resuming a walk, so a
+  fixed watchdog would kill exactly the thing it was meant to protect.
+
+**One whole-RAM job at a time, and the serialization is a feature.** Several
+`ns.dnet` calls block the host for seconds at a stretch, so splitting a host's
+RAM between two processes buys no parallelism — it only halves what each can ask
+for. Since `authenticate` gets faster with threads (`threadsFactor = 1 / (1 +
+0.2 * (threads - 1))`), the right shape is the opposite of sharing: queue the
+work, chain it with `spawn`, and give each job as much of the host as it can use.
+That is the whole reason a host's peak is a max rather than a sum, and it is the
+assumption to preserve — a future scheduler that co-resides two jobs on one host
+would make every authenticate slower and gain nothing.
+
+`tests/ram-budget.test.ts` is the executable form of this section: it prices a
+resident and the heaviest job against a 16 GB host, checks `JOB_METHODS` against
+the calls each body actually makes (per kind, not merely as a union), and pins
+`pin` as the one kind whose list omits `spawn`.
+
 ### Observability
 
 Agents emit their own telemetry over their own `new WebSocket()` — a browser
@@ -891,9 +966,11 @@ out there.
   acquisition` and lists The St4ff before The H4mmer, contradicting the prereq
   chain in its own `AugmentationTable`. The prereq data is the mechanic, so our
   code follows it; the comment is unexplained.
-- Cache creation is unmodelled in the simulator (`DNET_ASSUMPTIONS`,
-  `dnet.cacheSources`, `sim/features/dnet.ts:93`), so nothing in the test suite
-  covers a cache farm. The rates above are transcribed, not simulated.
+- Cache creation is now modelled and farmed — three of upstream's four sources
+  are exact (see `dnet.cacheSources` in `DNET_ASSUMPTIONS`,
+  `sim/features/dnet.ts`), and `tests/dnet-farm.test.ts` covers the ladder. What
+  remains open is only `handleRamBlockClearedRewards`' two side rolls (the 30%
+  clue file and the STORM_SEED.exe drop), which nothing here reads.
 - The $30m "Shadowed Walkway" Darkscape discount is real but unreachable from a
   script (`shared/strategy/dnet/rates.ts:101-115`) — unmodelled, and probably
   staying that way.

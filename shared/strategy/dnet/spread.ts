@@ -1,4 +1,4 @@
-import { freeRam, fresh, type DarknetKnowledge, type ExpiryOpts } from "./knowledge.ts";
+import { compareDepthDesc, freeRam, fresh, type DarknetKnowledge, type ExpiryOpts } from "./knowledge.ts";
 
 /** Where to put the next agent, and why not everywhere else.
  *
@@ -125,11 +125,8 @@ export function planSpread(
   const refused: Refusal[] = [];
 
   const ordered = [...candidates].sort((a, b) => {
-    // Unknown depth sorts after every known one, which needs a sentinel BELOW
-    // the floor now that the comparison runs the other way.
-    const da = a.depth ?? Number.MIN_SAFE_INTEGER;
-    const db = b.depth ?? Number.MIN_SAFE_INTEGER;
-    if (da !== db) return db - da;
+    const byDepth = compareDepthDesc(a.depth, b.depth);
+    if (byDepth !== 0) return byDepth;
     const ra = a.freeRam ?? -1;
     const rb = b.freeRam ?? -1;
     if (ra !== rb) return rb - ra;
@@ -176,7 +173,7 @@ export function planSpread(
     }
     // No per-source cap and no global cap. The one real thing `fanOut`
     // prevented was filing more plants than a source host's queue can hold, and
-    // that is a queue-depth fact rather than a spread policy: the controller's
+    // that is a queue-depth fact rather than a spread policy: the overseer's
     // `MAX_QUEUED_PER_HOST` is where it belongs and where it is already
     // enforced.
     plant.push(candidate);
@@ -201,7 +198,7 @@ export function candidatesFrom(
   knowledge: DarknetKnowledge,
   at: number,
   opts: {
-    /** Hosts we have a process on — the controller's own, plus every resident. */
+    /** Hosts we have a process on — the overseer's own, plus every resident. */
     standing: ReadonlySet<string>;
     /** Hosts we hold a credential for. */
     vault: ReadonlySet<string>;

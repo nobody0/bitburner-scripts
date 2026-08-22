@@ -52,6 +52,7 @@
  *   src/DarkNet/controllers/NetworkGenerator.ts:203-231 (addServerToNetwork)
  *   src/DarkNet/utils/darknetNetworkUtils.ts:16-34, 69-78, 90 */
 
+import { fresh, type DarknetHostKnowledge, type ExpiryOpts } from "./knowledge.ts";
 import { NET_WIDTH } from "./rates.ts";
 
 /** What every policy here needs to know about one host. All of it is already in
@@ -97,6 +98,38 @@ export interface HoldRefusal {
   hostname: string;
   why: string;
   detail: string;
+}
+
+/** The shared core of a `HoldHost`, projected from one knowledge record.
+ *
+ * The overseer and home each build these from the same fold but see different
+ * extras — the overseer spreads in `difficulty`/`maxRam`/`blockedRam`/`freeGb`/
+ * `irreplaceable`, home spreads in `backdoored` — so this covers only what both
+ * derive identically: the fresh facts, and the three flags the caller already
+ * holds. Fields stay ABSENT rather than `undefined` when unknown; the planners
+ * branch on `!== undefined` and the tests pin the difference. */
+export function holdHostFrom(
+  standing: DarknetHostKnowledge,
+  opts: {
+    at: number;
+    expiry: ExpiryOpts;
+    agentAlive: boolean;
+    hasCredential: boolean;
+    stasisLinked: boolean;
+  },
+): HoldHost {
+  const depth = fresh<number>(standing, "depth", opts.at, opts.expiry);
+  const neighbours = fresh<string[]>(standing, "neighbours", opts.at, opts.expiry);
+  return {
+    hostname: standing.hostname,
+    ...(depth !== undefined ? { depth } : {}),
+    agentAlive: opts.agentAlive,
+    hasCredential: opts.hasCredential,
+    ...(neighbours !== undefined ? { neighbours } : {}),
+    ...(fresh<boolean>(standing, "isStationary", opts.at, opts.expiry) === true ? { isStationary: true } : {}),
+    ...(opts.stasisLinked ? { stasisLinked: true } : {}),
+    ...(standing.goneAt !== undefined ? { gone: true } : {}),
+  };
 }
 
 // --- backdoors ---------------------------------------------------------------
@@ -202,6 +235,19 @@ export interface StasisPlan {
   refused: HoldRefusal[];
 }
 
+/** The weights `planStasis` ranks by. Relative sizes are the whole content: an
+ *  irreplaceable host must outrank every combination of the others, a backdoor
+ *  must outrank a bare resident, and ground-down RAM is a tie-break rather than
+ *  an argument. */
+const STASIS_IRREPLACEABLE = 1000;
+const STASIS_BACKDOORED = 50;
+const STASIS_STANDING = 10;
+/** One point per 16 GB cleared — a shallow host's whole base RAM. */
+const STASIS_GROUND_PER_POINT = 16;
+/** Capped so that grinding alone can never approach a backdoor's 50: a host
+ *  with a lot of free RAM is a nice place to stand, not a thing worth pinning. */
+const STASIS_GROUND_CAP = 20;
+
 /** Rank by what dies with the host.
  *
  * A link buys two things at once — reach, because pinning sets
@@ -224,10 +270,16 @@ export function planStasis(view: HoldView): StasisPlan {
   const linked = live.filter((host) => host.stasisLinked);
 
   const value = (host: HoldHost): number => {
-    if (host.irreplaceable) return 1000;
+    // Out of reach of every other term put together, deliberately: an
+    // irreplaceable host is not merely the best candidate, it is a different
+    // question. Nothing a host has ground down or been backdoored into is worth
+    // the maze walk this host is carrying.
+    if (host.irreplaceable) return STASIS_IRREPLACEABLE;
     // A block we have already ground down is sunk cost we would pay again.
     const ground = (host.maxRam ?? 0) - (host.blockedRam ?? 0);
-    return (host.backdoored ? 50 : 0) + (host.agentAlive ? 10 : 0) + Math.min(ground / 16, 20);
+    return (host.backdoored ? STASIS_BACKDOORED : 0)
+      + (host.agentAlive ? STASIS_STANDING : 0)
+      + Math.min(ground / STASIS_GROUND_PER_POINT, STASIS_GROUND_CAP);
   };
 
   const candidates = live

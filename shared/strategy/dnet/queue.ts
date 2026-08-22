@@ -1,10 +1,10 @@
-import { expiryMs, fresh, type DarknetKnowledge, type DarknetHostKnowledge } from "./knowledge.ts";
+import { LAST_BLEED_AT, expiryMs, fresh, type DarknetKnowledge, type DarknetHostKnowledge } from "./knowledge.ts";
 import { modelEntry, planAttempt } from "./models.ts";
 import { shouldListen, type ListenContext, type ListenRefusal, type ListenTarget } from "./listen.ts";
 
 /** What there is to do out there, and who is doing it.
  *
- * The controller does not keep a task list. It DERIVES one, and that is the
+ * The overseer does not keep a task list. It DERIVES one, and that is the
  * whole of the dedup.
  *
  * **The queue is DERIVED from knowledge, never appended to.** There is no
@@ -25,12 +25,12 @@ import { shouldListen, type ListenContext, type ListenRefusal, type ListenTarget
  * Structural dedup works because finishing the work makes the task stop
  * existing. That fails for work with no fact stamp — `attempt:<host>` is the
  * case — where the task re-derives every tick for the whole duration of a
- * multi-second `authenticate`. Today that is hidden by the controller's
+ * multi-second `authenticate`. Today that is hidden by the overseer's
  * per-queue duplicate check, and the moment a target has two adjacent vantages
  * the check stops covering it and the same authenticate fires twice.
  *
  * So `inFlight` is admitted here, and it is deliberately as small as it can be:
- * `(target -> {from, kind})`, DATA ONLY. The controller's own claims carry a
+ * `(target -> {from, kind})`, DATA ONLY. The overseer's own claims carry a
  * password; those never reach this module, because a pure function that held a
  * credential would eventually be asked to explain itself in a log line. */
 
@@ -87,10 +87,10 @@ export interface Task {
   /** Which unattributed password an `attempt` task is spending, BY REFERENCE.
    *
    *  The password itself never enters this module. A log's `--<password>--`
-   *  line names no owner, so the controller matches it against the length and
+   *  line names no owner, so the overseer matches it against the length and
    *  format facts it already holds and hands the result over as an opaque id;
    *  the id is what the job state's `guess` is resolved from, back in the
-   *  controller, where credentials live. Same rule `inFlight` keeps, and for
+   *  overseer, where credentials live. Same rule `inFlight` keeps, and for
    *  the same reason: a pure function that held a credential would eventually
    *  be asked to explain itself in a log line. */
   guessId?: string;
@@ -101,7 +101,7 @@ export interface DeriveOptions {
   bitNode?: number;
   backdoored?: number;
   // No `stasisLinked` here, deliberately. Stasis is a HOME decision — the
-  // controller never sees the set — so a stasis-linked host looks perishable to
+  // overseer never sees the set — so a stasis-linked host looks perishable to
   // the queue and gets re-surveyed a little sooner than it needs to be. That
   // errs toward re-observing, which is the safe direction, and plumbing a
   // fourth channel to save a few jobs on at most four hosts is not worth it.
@@ -155,7 +155,7 @@ export interface DeriveOptions {
   /** Work a live process is already doing, keyed by TARGET. A `(kind, target)`
    *  pair in here emits no task.
    *
-   *  Data only, and never a password: see the note above. The controller builds
+   *  Data only, and never a password: see the note above. The overseer builds
    *  it from `DnetClaim` by naming the two fields it may pass, so a field added
    *  to a claim later cannot leak in by default. */
   inFlight?: ReadonlyMap<string, readonly { from: string; kind: TaskKind }[]>;
@@ -207,6 +207,32 @@ const HOLD_PRIORITY: Readonly<Record<"pin" | "induce" | "walk", number>> = {
   // behind anything that opens the net.
   induce: 200,
 };
+
+/** Placing a process is the scarcest thing we do — it is the only action that
+ *  grows the set of places we can act FROM — so it outranks everything, the
+ *  deliberate three included. */
+const PLANT_PRIORITY = -100;
+
+/** The per-host offsets, all applied to `rank` (the negated depth).
+ *
+ * These are BANDS rather than fine gradations: what matters is that no host's
+ * bleed can reach into another kind's band, because the ordering across kinds
+ * is a policy and the ordering within one is a detail. */
+
+/** A leaked candidate is one `authenticate` with no oracle and no charisma gate,
+ *  so it goes below every model attempt on the same host and still above a
+ *  survey. */
+const GUESS_BONUS = -5;
+/** A solve that has to converse costs more than a dictionary hit or a
+ *  closed-form decode, both of which are one call and read their own answer. */
+const ORACLE_SOLVE_SURCHARGE = 10;
+/** A probe buys information and nothing else — no credential, no vantage. */
+const PROBE_SURCHARGE = 50;
+/** The band a bleed sits in, above every attempt on the same host. */
+const BLEED_BAND = 10;
+/** How far a chatty host may climb WITHIN the bleed band. One less than the
+ *  band itself, so even the loudest host cannot cross into the attempts. */
+const BLEED_VALUE_CAP = BLEED_BAND - 1;
 
 /** Every place a process could stand to reach `host`, best first.
  *
@@ -320,7 +346,7 @@ export function deriveTasks(
     // laws pull in OPPOSITE directions — a deep host is chatty but its
     // neighbour-credential branch is 30x rarer — so no single proxy works, and
     // a clock is the worst of them.
-    const lastBleedAt = host.facts["lastBleedAt"]?.at ?? 0;
+    const lastBleedAt = host.facts[LAST_BLEED_AT]?.at ?? 0;
     const neighbours = fresh<string[]>(host, "neighbours", now, expiry);
     const target: ListenTarget = {
       hostname: host.hostname,
@@ -401,7 +427,7 @@ export function deriveTasks(
         from: attemptFrom,
         // Below every model attempt on the same host and above every survey:
         // one call, no oracle, no charisma gate.
-        priority: rank - 5,
+        priority: rank + GUESS_BONUS,
         reason: guess.reason,
         guessId: guess.id,
       });
@@ -443,8 +469,8 @@ export function deriveTasks(
         const surcharge = attempt.kind === "candidate"
           ? 0
           : attempt.kind === "solve"
-            ? (attempt.needsOracle ? 10 : 0)
-            : 50;
+            ? (attempt.needsOracle ? ORACLE_SOLVE_SURCHARGE : 0)
+            : PROBE_SURCHARGE;
         tasks.push({
           id: `attempt:${host.hostname}`,
           kind: "attempt",
@@ -469,11 +495,11 @@ export function deriveTasks(
         kind: "bleed",
         host: host.hostname,
         from: bleedFrom,
-        // Ordered by expected useful lines WITHIN the +10 band, never across it:
-        // a host with a lot to say goes before one with a little, and neither
-        // goes before a survey. Clamped so a single very chatty host cannot
-        // reach into the band below.
-        priority: rank + 10 - Math.min(9, Math.round(verdict.value)),
+        // Ordered by expected useful lines WITHIN the bleed band, never across
+        // it: a host with a lot to say goes before one with a little, and
+        // neither goes before a survey. Clamped so a single very chatty host
+        // cannot reach into the band below.
+        priority: rank + BLEED_BAND - Math.min(BLEED_VALUE_CAP, Math.round(verdict.value)),
         // The verdict's own sentence, so the queue says WHY rather than
         // repeating a constant.
         reason: verdict.why,
@@ -490,9 +516,7 @@ export function deriveTasks(
       kind: "plant",
       host: entry.host,
       from: entry.from,
-      // Placing a process is the scarcest thing we do — it is the only action
-      // that grows the set of places we can act FROM — so it outranks everything.
-      priority: -100,
+      priority: PLANT_PRIORITY,
       reason: "a credential and room for an agent",
     });
   }

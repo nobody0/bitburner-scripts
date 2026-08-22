@@ -3,7 +3,7 @@ import { readdir, readFile, rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
-import { JOB_METHODS, RESIDENT_METHODS, ROUTINE_JOB_KINDS } from "../game/dnet/realm.ts";
+import { CONTROLLER_METHODS, JOB_METHODS, RESIDENT_METHODS, ROUTINE_JOB_KINDS } from "../game/dnet/realm.ts";
 import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
 import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
 import { WORKER_RAM } from "../shared/world.ts";
@@ -217,6 +217,58 @@ describe("in-game static RAM budget", () => {
     expect(analysis.cost).toBeCloseTo(BASE_GB + 0.1 + 0.15 + 0.15 + 2.4, 10);
   });
 
+  /** Billable names short enough for the minifier to invent by accident.
+   *
+   * The game's analyser bills any IDENTIFIER matching a billable member, a
+   * mangled local included — and esbuild assigns short names by frequency, so a
+   * module-level const can land on a two-character billable name. Only these two
+   * are reachable that way (every other billable member is three characters or
+   * more), both are cheap getters, and neither is a member the darknet artifacts
+   * are forbidden to reference by design.
+   *
+   * This is a false positive rather than a cost. Unlike start.js — which the
+   * game autoexecs with no override, so its static number IS its allocation —
+   * both darknet artifacts are launched by us with an explicit `ramOverride`
+   * (`priceAgent(ns, CONTROLLER_METHODS)` and `RESIDENT_METHODS`), and the engine
+   * then charges DYNAMIC RAM against that override, counting calls actually
+   * made. A variable that happens to be spelled `ls` is not a call to `ns.ls`,
+   * so it costs nothing at runtime. What must hold for these two is that each
+   * process's real calls fit its declared override, which the JOB_METHODS tests
+   * below check against the source.
+   *
+   * Filtering them out is a hole, though, and the test below it closes: with `ls`
+   * struck from the built artifact's list, a REAL `ns.ls(...)` added to
+   * `overseer.ts` would pass here and then die on its first call, because the
+   * override the process is launched at declares `getHostname` and nothing else.
+   * So the allowance is paired with a source check that only `jobNs` — the ns a
+   * job body is HANDED, which carries its own override — may reach them. */
+  const MANGLE_COLLISIONS = ["ls", "ps"];
+
+  test("only a job body reaches the members the minifier can forge", async () => {
+    // Every file in the directory, for the reason the JOB_METHODS test gives:
+    // they all bundle into the same two artifacts, so the rule is a property of
+    // the directory rather than of a filename.
+    const names = await readdir("game/dnet");
+    for (const name of names.filter((file) => file.endsWith(".ts"))) {
+      // Comments stripped first: these files explain the members they must not
+      // call, at length, and prose naming `ns.ls` is documentation rather than a
+      // call.
+      const source = (await readFile(`game/dnet/${name}`, "utf8"))
+        .replace(/\/\*[\s\S]*?\*\//g, "")
+        .replace(/\/\/[^\n]*/g, "");
+      for (const member of MANGLE_COLLISIONS) {
+        const reaches = new RegExp(`(\\w+)(?:\\.${member}\\b|\\[\\s*"${member}"\\s*\\])`, "g");
+        for (const match of source.matchAll(reaches)) {
+          expect(
+            match[1],
+            `game/dnet/${name} reaches .${member} on ${match[1]}; only jobNs may, because `
+              + `MANGLE_COLLISIONS filters ${member} out of the static check`,
+          ).toBe("jobNs");
+        }
+      }
+    }
+  });
+
   test("the darknet controller decides and cannot act", async () => {
     const artifacts = await buildScripts(config, { telemetry: true });
     const overseer = artifacts.find((a) => a.filename === "dnet/overseer.js")!;
@@ -226,9 +278,15 @@ describe("in-game static RAM budget", () => {
     // 1.65 GB: the base plus one getter. Everything the controller actually
     // needs is free — sleep, and the queues, which are live objects in the page
     // realm — so the durable process is also the cheapest thing this repository
-    // ships.
-    expect(analysis.entries.map((entry) => entry.name).sort()).toEqual(["getHostname"]);
-    expect(analysis.cost).toBeCloseTo(BASE_GB + 0.05, 10);
+    // ships. Launched at exactly that, whatever a mangled identifier adds to the
+    // static figure: see MANGLE_COLLISIONS.
+    const referenced = analysis.entries
+      .map((entry) => entry.name)
+      .filter((name) => !MANGLE_COLLISIONS.includes(name))
+      .sort();
+    expect(referenced).toEqual(["getHostname"]);
+    expect(CONTROLLER_METHODS).toEqual(["getHostname"]);
+    expect(getFunctionRamCost("getHostname")).toBe(0.05);
 
     // The ABSENCES are the design. It describes the jobs in this very file —
     // authenticate, scp, exec and the rest — but only through bracket notation
@@ -251,8 +309,12 @@ describe("in-game static RAM budget", () => {
     // needs to be a RESIDENT, and every job's cost arrives as a ramOverride at
     // spawn time. If a job's calls appeared here, every resident on every host
     // would pay for the most expensive thing any of them might ever do.
-    expect(analysis.entries.map((entry) => entry.name).sort())
-      .toEqual(["getHostname", "getServerMaxRam", "getServerUsedRam", "spawn"]);
+    expect(
+      analysis.entries
+        .map((entry) => entry.name)
+        .filter((name) => !MANGLE_COLLISIONS.includes(name))
+        .sort(),
+    ).toEqual(["getHostname", "getServerMaxRam", "getServerUsedRam", "spawn"]);
     // getScriptName is 0 GB, so it never appears in a BILLABLE list — the agent
     // uses it to spawn itself rather than carrying its own filename.
     expect(agent.content).toContain("getScriptName");

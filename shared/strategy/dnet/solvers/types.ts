@@ -21,7 +21,7 @@
  * But the PASSWORD lasts far longer: only deletion mints a new one (~576 s), and
  * a move or a restart leaves it alone. So a solve that outlives its vantage must
  * be resumable from a different one, which means the state has to survive in the
- * controller's knowledge rather than in the process holding the session. That is
+ * overseer's knowledge rather than in the process holding the session. That is
  * already how the ledger behaves — `foldReports` drops `attempts` only when a
  * host reports absent — so the state rides along with it.
  *
@@ -157,4 +157,70 @@ export function freshState(model: ModelId, facts: PasswordFacts, phase: string):
 /** Whether a state may still be used against the host described by `facts`. */
 export function stateMatches(state: SolverState, facts: PasswordFacts): boolean {
   return state.fingerprint === solverFingerprint(state.model, facts);
+}
+
+// --- the resume protocol -----------------------------------------------------
+//
+// A solver offers `first()` and `next(state, observation)` and nothing in
+// between, so a state alone is not enough to re-enter a conversation: what
+// advances it is the ANSWER to the attempt it was waiting on. These two keys are
+// how that attempt, and the end of the road, travel with the state through the
+// attempt ledger and home's fold without either having to know about them.
+
+/** Where a paused solve records the attempt it was waiting on.
+ *
+ * It lives inside the solver's own `scratch` so that it travels with the state,
+ * and so that `stripCredentials` redacts it along with everything else in there
+ * — a pending attempt is a guess at the password, and late in a solve that is
+ * very nearly the password. The solvers never see it: `withoutPending` removes
+ * it before the state is handed back to one. */
+export const PENDING_ATTEMPT = "__pendingAttempt";
+
+/** The phase a solver's state is parked in once its search space is GONE.
+ *
+ * `SolverExhausted` means the password provably is not where our model of the
+ * game says it must be, so running the identical search again cannot reach a
+ * different answer — and nothing else stops it running: `planAttempt` calls
+ * `solver.first()` fresh on every derivation, and the ledger's `lastCode` holds
+ * the engine's 401 rather than our 910. Without this marker a host whose model
+ * we cannot open (`Factori-Os` above difficulty 24 is the transcribed example,
+ * and `deep.ts` says so in its own give-up) spends its whole walk, gives up, and
+ * is filed again on the next tick, for ever.
+ *
+ * It is a normal `SolverState`, so it carries the identity fingerprint and dies
+ * exactly when the identity does: `foldReports` drops a host's whole ledger when
+ * it reports absent, and a re-minted host is tried again as it should be. */
+export const EXHAUSTED_PHASE = "__exhausted";
+
+/** The state as its solver expects it, with the job's own bookkeeping removed. */
+export function withoutPending(state: SolverState): SolverState {
+  const { [PENDING_ATTEMPT]: _pending, ...scratch } = state.scratch;
+  return { ...state, scratch };
+}
+
+/** Whether a carried state may resume THIS identity's conversation, and the
+ * attempt it was waiting on.
+ *
+ * Three things have to hold, and each fails in a different way:
+ *
+ * - The MODEL must match, and it is checked here rather than inside
+ *   `stateMatches`, which recomputes the fingerprint from the state's own
+ *   `model` and so can only ever confirm what the state already believes. Two
+ *   models with the same length, the same format and no hint or data fingerprint
+ *   identically — `AccountsManager_4.2` and `NIL` do — and feeding one solver's
+ *   scratch to another does not fail politely: it spreads an `undefined` and
+ *   THROWS, which kills the agent process rather than failing the attempt.
+ * - The IDENTITY must match, or we would be resuming onto a new password and
+ *   never terminate: hostnames are recycled upstream, so a ledger can outlive
+ *   the machine it describes.
+ * - A PENDING ATTEMPT must travel with it, or there is no way back into the
+ *   conversation and the solve restarts from `first()`. */
+export function resumableState(
+  carried: SolverState | undefined,
+  modelId: string | undefined,
+  facts: PasswordFacts,
+): { state?: SolverState; pending?: string } {
+  if (carried === undefined || carried.model !== modelId || !stateMatches(carried, facts)) return {};
+  const pending = carried.scratch[PENDING_ATTEMPT];
+  return typeof pending === "string" ? { state: carried, pending } : { state: carried };
 }

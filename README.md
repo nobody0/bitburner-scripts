@@ -32,7 +32,8 @@ note per BitNode, a feature catalog (unlock / needs / yields), and the
 dependency graph of shared resources. One feature has its own page because its
 mechanic spans thirteen of the fifteen BitNodes and its work runs off `home`:
 [spec/dnet.md](spec/dnet.md), the darknet's ground truth and remote-execution
-model.
+model, with its password-solver framework in
+[spec/dnet-solvers.md](spec/dnet-solvers.md).
 
 ## Reference repositories
 

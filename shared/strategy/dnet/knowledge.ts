@@ -24,6 +24,15 @@ export interface HostFact<T> {
  * neighbour list long after the net rewired it. */
 export type FactClass = "identity" | "position" | "topology" | "resource";
 
+/** When we last read a host's log ring.
+ *
+ * The one fact key that is OURS rather than the game's: `heartbleed` with `peek`
+ * leaves the ring intact, so the engine gives no signal that a host was just
+ * listened to, and without this stamp `bleed:<host>` re-derives on every tick
+ * for every host we hold, for ever. The overseer writes it and the queue reads
+ * it, which is exactly why it is named here instead of spelled out at both ends. */
+export const LAST_BLEED_AT = "lastBleedAt";
+
 export const FACT_CLASS: Readonly<Record<string, FactClass>> = {
   // Fixed for the lifetime of a host identity. A deleted host that later
   // reappears is a NEW host with a new password, so these are invalidated by
@@ -56,6 +65,12 @@ export const FACT_CLASS: Readonly<Record<string, FactClass>> = {
   // stale listing means calling `openCache` on a filename the host no longer
   // holds, and that call THROWS rather than refusing.
   caches: "resource",
+  // Not an observation of the HOST at all: it is our own bookkeeping stamp,
+  // written when we read a host's log ring. Nothing reads it through `fresh` —
+  // the `.at` IS the payload — so the class it is given never decides anything,
+  // and `topology` is named here only because it is what the table's `??`
+  // fallback was already giving it. Listed so the table stops lying by omission.
+  [LAST_BLEED_AT]: "topology",
 };
 
 /** How far the cracker got against one host identity.
@@ -92,8 +107,8 @@ export interface AttemptLedger {
 
 /** Fold attempt outcomes into a host's ledger.
  *
- * Shared between the controller — whose ledger drives `planAttempt` — and home,
- * whose copy survives the controller's death and feeds the panel. One function,
+ * Shared between the overseer — whose ledger drives `planAttempt` — and home,
+ * whose copy survives the overseer's death and feeds the panel. One function,
  * so the two can never count a candidate differently. Mutates in place, like the
  * ledger itself: attempts are about US, not the host, so they sit outside the
  * fold's newest-wins rule. */
@@ -137,7 +152,7 @@ export interface DarknetHostKnowledge {
 
 export interface DarknetKnowledge {
   hosts: Record<string, DarknetHostKnowledge>;
-  /** Generation of the run that produced this. Agents outlive controllers, so a
+  /** Generation of the run that produced this. Agents outlive overseers, so a
    * mismatch means the whole rendezvous belongs to a world this run no longer
    * shares; it is refused there, by `overseerIsLive`, rather than per fact. */
   generation: string;
@@ -150,15 +165,25 @@ export function emptyKnowledge(generation: string): DarknetKnowledge {
   return { hosts: {}, generation, mutationsSeen: 0 };
 }
 
+/** Deepest first; a host whose depth we cannot place sorts LAST.
+ *
+ * The planners all rank deepest-first — a deep host is the scarce vantage — and
+ * each used to carry its own copy of this line. The sentinel sits BELOW the
+ * floor because the comparison runs descending: an unsurveyed host must never
+ * outrank one we can actually place. Callers keep their own tie-breaks. */
+export function compareDepthDesc(a: number | undefined, b: number | undefined): number {
+  return (b ?? Number.MIN_SAFE_INTEGER) - (a ?? Number.MIN_SAFE_INTEGER);
+}
+
 export interface ExpiryOpts {
   netDepth?: number;
   bitNode?: number;
   backdoored?: number;
   /** Hosts we hold a stasis link on.
    *
-   *  Taken from the controller rather than from the observed `stasisLinked`
+   *  Taken from the overseer rather than from the observed `stasisLinked`
    *  fact, because we are the only thing that sets or releases a link: the
-   *  controller knows the set exactly, while an observed copy is a worse source
+   *  overseer knows the set exactly, while an observed copy is a worse source
    *  that can itself go stale. */
   stasisLinked?: ReadonlySet<string>;
   /** Set by a caller that has already resolved it for this host — see
@@ -281,7 +306,7 @@ export interface FoldOutcome {
  *
  * Generation is deliberately NOT rechecked here. It is enforced once, on the
  * whole rendezvous, by `overseerIsLive` and by the drain: agents outlive
- * controllers, so what has to be refused is the channel, not the record. */
+ * overseers, so what has to be refused is the channel, not the record. */
 export function foldReports(
   knowledge: DarknetKnowledge,
   reports: readonly ReportHost[],

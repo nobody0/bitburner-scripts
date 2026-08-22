@@ -1,8 +1,14 @@
 import type { NS } from "@ns";
 import type { ArtifactIdentity } from "../../shared/run-identity.ts";
-import type { AttemptOutcome, ReportHost, VaultEntry } from "../../shared/strategy/dnet/courier.ts";
+import {
+  LOCAL_CODE,
+  type AttemptOutcome,
+  type ReportHost,
+  type VaultEntry,
+} from "../../shared/strategy/dnet/courier.ts";
 import { parseOverseerArgs, residentArgs } from "../../shared/strategy/dnet/mission.ts";
 import {
+  LAST_BLEED_AT,
   coverage,
   emptyKnowledge,
   foldAttempts,
@@ -15,7 +21,7 @@ import {
 import { deriveTasks, type DeriveOptions, type Task, type TaskKind } from "../../shared/strategy/dnet/queue.ts";
 import { DEFAULT_SPREAD_LIMITS, candidatesFrom, planSpread } from "../../shared/strategy/dnet/spread.ts";
 import { planFarm, type FarmHost, type FarmKind } from "../../shared/strategy/dnet/farm.ts";
-import { planInduce, planStasis, type HoldHost, type HoldView } from "../../shared/strategy/dnet/hold.ts";
+import { holdHostFrom, planInduce, planStasis, type HoldHost, type HoldView } from "../../shared/strategy/dnet/hold.ts";
 import { looseCandidates, type LooseTarget } from "../../shared/strategy/dnet/listen.ts";
 import { getPasswordType } from "../../shared/strategy/dnet/codecs.ts";
 import { DEFAULT_NET_DEPTH, isLabyrinth, labStage } from "../../shared/strategy/dnet/rates.ts";
@@ -27,6 +33,7 @@ import {
   RENDEZVOUS_PROTOCOL,
   RESIDENT_METHODS,
   dnetRealm,
+  foldRefusals,
   priceAgent,
   overseerIsLive,
   sweepClaims,
@@ -46,7 +53,9 @@ import {
 import { makeJobBodies } from "./jobs.ts";
 import { initTelemetry } from "../lib/telemetry.ts";
 
-/** The darknet controller: one long-lived script that decides, and never acts.
+/** The darknet overseer: one long-lived script that decides, and never acts.
+ * (The spec's vocabulary: the HOME DRIVER runs on home, this OVERSEER holds the
+ * map on `darkweb`, and RESIDENTS spawn in and out of jobs on every other host.)
  *
  * It exists because of a shape the darknet forces on us. `probe()` is host-local
  * and `ns.scan` excludes the darknet, so the map can only be assembled by
@@ -62,7 +71,7 @@ import { initTelemetry } from "../lib/telemetry.ts";
  * second base plus 1.3 GB is usually RAM we do not have.
  *
  * So it does not launch work. It QUEUES work, per host, and the resident already
- * standing there spawns into it. The controller decides WHAT runs and in what
+ * standing there spawns into it. The overseer decides WHAT runs and in what
  * order; the resident decides WHEN, because only it can see how much RAM is free
  * at the instant it looks — and out here that moves without warning.
  *
@@ -76,7 +85,7 @@ import { initTelemetry } from "../lib/telemetry.ts";
  * Deliberately absent: `probe`, `getServerDetails`, `heartbleed`, `authenticate`,
  * `scp`, `exec` and `spawn`. It cannot observe, cannot crack, and cannot launch.
  *
- * That absence is the design rather than an economy. A controller that COULD do
+ * That absence is the design rather than an economy. An overseer that COULD do
  * the work would, and then the process holding the only copy of the map would be
  * the one sitting inside a multi-second `authenticate` on a host about to be
  * restarted.
@@ -91,7 +100,7 @@ import { initTelemetry } from "../lib/telemetry.ts";
  * the work it describes costs several times that. They bundle into this same
  * artifact, so that rule binds them exactly as hard as it binds this file. */
 
-/** How often the controller tells home it is alive. Home re-seeds if this stops. */
+/** How often the overseer tells home it is alive. Home re-seeds if this stops. */
 const BEAT_INTERVAL_MS = 15_000;
 /** How often it reconsiders the queues. `ns.sleep` is 0 GB, so this is only a
  * question of how promptly a freshly-queued job starts. */
@@ -122,7 +131,7 @@ function looseId(password: string): string {
   return h.toString(36);
 }
 
-/** Distinct log shapes the controller will remember.
+/** Distinct log shapes the overseer will remember.
  *
  * Drift shows up as a handful of recurring shapes, so a cap costs nothing real —
  * and without one a game update that broke the parser outright would grow this
@@ -149,7 +158,7 @@ export async function main(ns: NS): Promise<void> {
 
   const realm = dnetRealm();
   const bootAt = Date.now();
-  // Deferring to a live controller of the same generation is what makes a
+  // Deferring to a live overseer of the same generation is what makes a
   // re-seed idempotent: home may launch us whenever it is unsure, and the
   // redundant copy exits instead of running a second scheduler.
   if (overseerIsLive(realm.dnet_overseer, mission.generation, bootAt)) return;
@@ -192,13 +201,13 @@ export async function main(ns: NS): Promise<void> {
   /** Passwords a log leaked with no owner attached.
    *
    *  Realm-only and never drained: an unattributed password is still a
-   *  password, and the controller is the only thing that holds both it and the
+   *  password, and the overseer is the only thing that holds both it and the
    *  length and format facts that say which hosts it could open. Bounded,
    *  because a chatty net mints these faster than they can be spent and the
    *  oldest are the least likely to still belong to a live host. */
   const loosePool: string[] = [];
   /** `<host>\u0000<password>` pairs already spent, so a candidate that was
-   *  wrong is not offered again for the life of this controller. The engine
+   *  wrong is not offered again for the life of this overseer. The engine
    *  charges nothing for a wrong `authenticate`, but a call is still a call and
    *  the same wrong pair would otherwise re-derive every tick for ever. */
   const spentGuesses = new Set<string>();
@@ -207,7 +216,7 @@ export async function main(ns: NS): Promise<void> {
   const guessFor = new Map<string, string>();
   /** Hosts WE have pinned. The set is ours rather than observed: nothing else
    *  in the run sets or releases a link, and `getStasisLinkedServers` is not a
-   *  member the controller can afford. Drained so home can carry it into the
+   *  member the overseer can afford. Drained so home can carry it into the
    *  expiry it runs its own fold on. */
   const stasisLinked = new Set<string>();
   /** The highest charisma any job has said it needed and did not have. Only the
@@ -223,13 +232,13 @@ export async function main(ns: NS): Promise<void> {
   /** How many darknet hosts home has backdoored. It is a term in the mutation
    *  rates every expiry is derived from — a backdoored host carries a ~9%/tick
    *  restart and a ~4%/tick delete on top of the ordinary branches — so a
-   *  controller that did not hear about them would believe its facts lasted
+   *  overseer that did not hear about them would believe its facts lasted
    *  longer than they do. */
   let backdoored: number | undefined;
   /** Karma spent opening caches SINCE THE LAST DRAIN. Negative, because karma
    *  only falls — which is what makes a cache free progress toward the gang
    *  threshold. A delta rather than a running total, so that home's tally
-   *  survives this controller being replaced; see `drain`. */
+   *  survives this overseer being replaced; see `drain`. */
   let karmaLoss = 0;
   /** When a `.d.cache` was last seen to land. The phishing cache cooldown is
    *  NET-WIDE engine state (`DarknetState.lastPhishingCacheTime`) and is exposed
@@ -302,7 +311,7 @@ export async function main(ns: NS): Promise<void> {
       for (const key of Object.keys(codes)) delete codes[key];
       // A DELTA, cleared like `codes` and `residentsLost` beside it. Handing
       // home a running total instead would work only for as long as this
-      // controller lives: a re-seeded one starts at zero, and home — which
+      // overseer lives: a re-seeded one starts at zero, and home — which
       // assigns rather than accumulates — would silently drop the karma every
       // cache before the restart bought.
       karmaLoss = 0;
@@ -319,14 +328,14 @@ export async function main(ns: NS): Promise<void> {
       if (orders.backdoored !== undefined) backdoored = orders.backdoored;
       if (orders.stasisLimit !== undefined) stasisLimit = orders.stasisLimit;
       // Home's probe is the AUTHORITY on which hosts are pinned; the set below
-      // is only what this controller has seen itself do. Replayed for the same
-      // reason the vault and the phishing window are: a re-seeded controller
+      // is only what this overseer has seen itself do. Replayed for the same
+      // reason the vault and the phishing window are: a re-seeded overseer
       // starts with an empty set, and would otherwise spend its whole first
       // stretch filing 16 GB pin jobs for links the game already holds and
       // collecting 453s. Union rather than replacement, because a pin this
-      // controller has just made is newer than the probe that missed it.
+      // overseer has just made is newer than the probe that missed it.
       for (const hostname of orders.stasisLinked ?? []) stasisLinked.add(hostname);
-      // Replayed after a re-seed so a fresh controller does not believe a window
+      // Replayed after a re-seed so a fresh overseer does not believe a window
       // is open that home watched close under the previous one.
       if (orders.lastPhishCacheAt !== undefined) {
         lastPhishCacheAt = Math.max(lastPhishCacheAt ?? 0, orders.lastPhishCacheAt);
@@ -334,7 +343,7 @@ export async function main(ns: NS): Promise<void> {
       if (orders.standDown === true) standDown = true;
     },
   };
-  // BOOTSTRAP. The queue is DERIVED from knowledge, so a controller that knows
+  // BOOTSTRAP. The queue is DERIVED from knowledge, so an overseer that knows
   // nothing derives nothing and files no work — for ever. Recording that our own
   // host exists, with no facts at all, is what makes the first
   // `survey:<selfHost>` job appear: an absent adjacency IS the work, and the
@@ -388,10 +397,10 @@ export async function main(ns: NS): Promise<void> {
       // discard on.
       if (loosePool.length > MAX_LOOSE_PASSWORDS) loosePool.shift();
     }
-    // 911 is the ONLY sighting we ever get of the net-wide phishing cooldown.
-    // Stamping it here rather than in the job keeps the belief in the one place
-    // that survives the job's process.
-    if ((result.codes ?? {})["911"] !== undefined) lastPhishCacheAt = at;
+    // A won cache window is the ONLY sighting we ever get of the net-wide
+    // phishing cooldown. Stamping it here rather than in the job keeps the
+    // belief in the one place that survives the job's process.
+    if ((result.codes ?? {})[LOCAL_CODE.PhishingCacheWon] !== undefined) lastPhishCacheAt = at;
   };
 
   const recordAttempts = (hostname: string, result: DnetJobResult): void => {
@@ -405,7 +414,7 @@ export async function main(ns: NS): Promise<void> {
 
   /** Queue one job on a host, and KEEP ITS PROMISE.
    *
-   * The promise is how the controller tells "still working" from "died holding
+   * The promise is how the overseer tells "still working" from "died holding
    * the host", and out here the second is the common case: a mutation tick
    * restarts a server and takes whatever was running on it. A settled promise is
    * a result; one that never settles is a death, and the timeout below is what
@@ -433,7 +442,7 @@ export async function main(ns: NS): Promise<void> {
     const stampBleed = (): void => {
       if (job.kind !== "bleed") return;
       const host = knowledge.hosts[job.state.host];
-      if (host) host.facts["lastBleedAt"] = { value: true, at: Date.now() };
+      if (host) host.facts[LAST_BLEED_AT] = { value: true, at: Date.now() };
     };
     void promise.then(
       (result) => {
@@ -453,10 +462,11 @@ export async function main(ns: NS): Promise<void> {
         stampBleed();
       },
       () => {
-        // 905, not 903: this path is a job whose promise was REJECTED — its host
-        // restarted under it, its resident was swept, or it timed out — and
-        // counting that as NotEnoughRam made a dying net read as a RAM shortage.
-        note(905);
+        // JobDied, not NotEnoughRam: this path is a job whose promise was
+        // REJECTED — its host restarted under it, its resident was swept, or it
+        // timed out — and counting that as a RAM shortage made a dying net read
+        // as a full one.
+        note(LOCAL_CODE.JobDied);
         stampBleed();
       },
     );
@@ -545,139 +555,120 @@ export async function main(ns: NS): Promise<void> {
    * The policies themselves are pure and live in `shared/strategy/dnet/hold.ts`.
    * What this function adds is the two things that file cannot see: how much RAM
    * a candidate actually has, and whether anything could put a resident back. */
-  const planHold = (at: number): { tasks: HoldTask[]; report: DnetHoldReport } => {
-    const expiry = expiryOpts();
-    const refused: DnetHoldReport["examples"] = [];
-    const refuse = (host: string, why: string, detail: string): void => {
-      refused.push({ host, why, detail });
-    };
-    const tasks: HoldTask[] = [];
-
-    // A host running the maze walker is IRREPLACEABLE, and that is not a
-    // figure of speech: the walk is keyed by PID, so losing the process loses
-    // the whole maze with no way to resume. It is what `planStasis` ranks
-    // first and what `planInduce` refuses to push.
+  /** Every host as the hold policies need to see it.
+   *
+   * The two things `hold.ts` cannot work out for itself are added here: how much
+   * RAM a candidate actually has (the resident's own measurement, plus the
+   * allocation it hands back when it spawns), and which hosts are carrying a
+   * walk. A host running the maze walker is IRREPLACEABLE, and that is not a
+   * figure of speech: the walk is keyed by PID, so losing the process loses the
+   * whole maze with no way to resume. */
+  const projectHoldHosts = (at: number, expiry: ExpiryOpts): HoldHost[] => {
     const walking = new Set<string>();
     for (const queue of queues.values()) {
       if (queue.active?.kind === "walk") walking.add(queue.host);
       for (const job of queue.pending) if (job.kind === "walk") walking.add(queue.host);
     }
-
-    const hosts: HoldHost[] = Object.values(knowledge.hosts).map((host) => {
+    return Object.values(knowledge.hosts).map((host) => {
       const queue = queues.get(host.hostname);
-      const depth = fresh<number>(host, "depth", at, expiry);
       const difficulty = fresh<number>(host, "difficulty", at, expiry);
       const maxRam = fresh<number>(host, "maxRam", at, expiry);
       const blockedRam = fresh<number>(host, "blockedRam", at, expiry);
-      const neighbours = fresh<string[]>(host, "neighbours", at, expiry);
       return {
-        hostname: host.hostname,
-        ...(depth !== undefined ? { depth } : {}),
+        ...holdHostFrom(host, {
+          at,
+          expiry,
+          agentAlive: queue !== undefined,
+          hasCredential: vault.has(host.hostname),
+          stasisLinked: stasisLinked.has(host.hostname),
+        }),
         ...(difficulty !== undefined ? { difficulty } : {}),
         ...(maxRam !== undefined ? { maxRam } : {}),
         ...(blockedRam !== undefined ? { blockedRam } : {}),
         freeGb: (queue?.freeGb ?? freeRam(host, at, expiry)) + (queue ? residentGb : 0),
-        agentAlive: queue !== undefined,
-        hasCredential: vault.has(host.hostname),
-        ...(neighbours !== undefined ? { neighbours } : {}),
-        ...(fresh<boolean>(host, "isStationary", at, expiry) === true ? { isStationary: true } : {}),
-        ...(stasisLinked.has(host.hostname) ? { stasisLinked: true } : {}),
         ...(walking.has(host.hostname) ? { irreplaceable: true } : {}),
-        ...(host.goneAt !== undefined ? { gone: true } : {}),
       };
     });
-    const view: HoldView = {
-      hosts,
-      netDepth: netDepth ?? DEFAULT_NET_DEPTH,
-      stasisLimit,
-      charisma,
-      // Backdoors are home's to install and home's to count; from out here the
-      // multiplier is unobservable, and 1 is the value that makes `planStasis`
-      // and `planInduce` decide on their own terms rather than on a guess.
-      authDurationMultiplier: 1,
-    };
+  };
 
-    // --- the walk ----------------------------------------------------------
-    //
-    // The whole point of the feature's deep half. A completed lab hands over
-    // admin rights, a cache and a queued augmentation, and it DEEPENS THE NET,
-    // which is the only thing that ever changes the mutation clock.
+  /** Whether to start walking a maze, and from where.
+   *
+   * The whole point of the feature's deep half. A completed lab hands over admin
+   * rights, a cache and a queued augmentation, and it DEEPENS THE NET, which is
+   * the only thing that ever changes the mutation clock.
+   *
+   * A closure rather than a top-level function because it both reads `charisma`
+   * and writes `charismaNeeded`, and the overseer reassigns the first on every
+   * order from home: a version that captured either by value would gate the walk
+   * on last hour's number. */
+  const planWalk = (
+    at: number,
+    expiry: ExpiryOpts,
+    hosts: readonly HoldHost[],
+    refuse: (host: string, why: string, detail: string) => void,
+  ): { lab?: HoldHost; task?: HoldTask } => {
     const lab = hosts.find((host) => isLabyrinth(
       host.hostname,
       fresh<string>(knowledge.hosts[host.hostname]!, "modelId", at, expiry),
     ) && !host.gone);
-    if (lab === undefined) {
-      // Not a refusal worth a name per host: there is exactly one lab in a net
-      // and we have not laid eyes on it.
-    } else if (vault.has(lab.hostname)) {
+    // Not a refusal worth a name per host: there is exactly one lab in a net
+    // and we have not laid eyes on it.
+    if (lab === undefined) return {};
+    if (vault.has(lab.hostname)) {
       refuse(lab.hostname, "lab-walked", "we already hold this lab's password, so its maze has been finished");
-    } else {
-      const stage = labStage(lab.hostname);
-      const needed = stage?.cha;
-      if (needed !== undefined && charisma < needed) {
-        // The one gate in the feature that cannot be worked around: below the
-        // lab's charisma EVERY move answers 451, so starting would spend a host
-        // for hours and learn nothing. Posted as a career need instead.
-        charismaNeeded = Math.max(charismaNeeded ?? 0, needed);
-        refuse(lab.hostname, "charisma", `the maze needs charisma ${needed}, and every move below it answers 451`);
-      } else {
-        // Its host must be ADJACENT to the lab, which out here means on the
-        // bottom row — `addServerToNetwork` wires anything landing at
-        // `netDepth - 1` to the labyrinth automatically.
-        const vantage = [...queues.values()]
-          .map((queue) => queue.host)
-          .filter((host) => {
-            const standing = knowledge.hosts[host];
-            if (!standing) return false;
-            return (fresh<string[]>(standing, "neighbours", at, expiry) ?? []).includes(lab.hostname);
-          })
-          .sort()
-          .find((host) => {
-            const queue = queues.get(host)!;
-            return queue.freeGb === undefined || budgets["walk"]! <= queue.freeGb + residentGb;
-          });
-        if (vantage === undefined) {
-          refuse(
-            lab.hostname,
-            "no-vantage",
-            "nothing of ours is standing next to the labyrinth with room for a walker",
-          );
-        } else {
-          tasks.push({
-            kind: "walk",
-            host: lab.hostname,
-            from: vantage,
-            reason: `walk the maze from ${vantage}`,
-          });
-          // Marked BEFORE `planStasis` runs, and that is the whole point: the
-          // host is about to carry work that cannot be rebuilt, and a link
-          // spent after the walk has started is a link spent on a host whose
-          // walk has already survived without one. `planStasis` ranks
-          // `irreplaceable` above everything else, so this is what makes the
-          // walker's host the first stasis target rather than merely the best
-          // argued one.
-          const standing = hosts.find((host) => host.hostname === vantage);
-          if (standing) standing.irreplaceable = true;
-        }
-      }
+      return { lab };
     }
-
-    // --- the pin -----------------------------------------------------------
-    const stasis = planStasis(view);
-    for (const refusal of stasis.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
-    // A RECYCLE the planner wants and nothing carries out. `setStasisLink(false)`
-    // is the same 12 GB call with a different argument, and no job kind takes
-    // one — so rather than dropping the verdict on the floor (which is what
-    // `planSpread`'s refusals did for months and why nobody could tell a
-    // planner with nothing to do from a broken one), it is published by name.
-    for (const hostname of stasis.release) {
+    const needed = labStage(lab.hostname)?.cha;
+    if (needed !== undefined && charisma < needed) {
+      // The one gate in the feature that cannot be worked around: below the
+      // lab's charisma EVERY move answers 451, so starting would spend a host
+      // for hours and learn nothing. Posted as a career need instead.
+      charismaNeeded = Math.max(charismaNeeded ?? 0, needed);
+      refuse(lab.hostname, "charisma", `the maze needs charisma ${needed}, and every move below it answers 451`);
+      return { lab };
+    }
+    // Its host must be ADJACENT to the lab, which out here means on the
+    // bottom row — `addServerToNetwork` wires anything landing at
+    // `netDepth - 1` to the labyrinth automatically.
+    const vantage = [...queues.values()]
+      .map((queue) => queue.host)
+      .filter((host) => {
+        const standing = knowledge.hosts[host];
+        if (!standing) return false;
+        return (fresh<string[]>(standing, "neighbours", at, expiry) ?? []).includes(lab.hostname);
+      })
+      .sort()
+      .find((host) => {
+        const queue = queues.get(host)!;
+        return queue.freeGb === undefined || budgets["walk"]! <= queue.freeGb + residentGb;
+      });
+    if (vantage === undefined) {
       refuse(
-        hostname,
-        "release-unwired",
-        "this link would be better spent elsewhere, but no job carries setStasisLink(false)",
+        lab.hostname,
+        "no-vantage",
+        "nothing of ours is standing next to the labyrinth with room for a walker",
       );
+      return { lab };
     }
-    for (const hostname of stasis.pin) {
+    return {
+      lab,
+      task: { kind: "walk", host: lab.hostname, from: vantage, reason: `walk the maze from ${vantage}` },
+    };
+  };
+
+  /** Which pins `planStasis` asked for can actually be carried out.
+   *
+   * Both refusals here are things the pure policy cannot see: whether the host
+   * has room for a 12 GB call, and whether anything could put a resident back
+   * afterwards. */
+  const admitPins = (
+    at: number,
+    expiry: ExpiryOpts,
+    pin: readonly string[],
+    refuse: (host: string, why: string, detail: string) => void,
+  ): HoldTask[] => {
+    const tasks: HoldTask[] = [];
+    for (const hostname of pin) {
       const queue = queues.get(hostname);
       const free = (queue?.freeGb ?? 0) + residentGb;
       if (queue !== undefined && queue.freeGb !== undefined && budgets["pin"]! > free) {
@@ -708,6 +699,60 @@ export async function main(ns: NS): Promise<void> {
       }
       tasks.push({ kind: "pin", host: hostname, from: hostname, reason: "pin the host nothing can replace" });
     }
+    return tasks;
+  };
+
+  const planHold = (at: number): { tasks: HoldTask[]; report: DnetHoldReport } => {
+    const expiry = expiryOpts();
+    const refused: DnetHoldReport["examples"] = [];
+    const refuse = (host: string, why: string, detail: string): void => {
+      refused.push({ host, why, detail });
+    };
+    const tasks: HoldTask[] = [];
+
+    const hosts = projectHoldHosts(at, expiry);
+    const view: HoldView = {
+      hosts,
+      netDepth: netDepth ?? DEFAULT_NET_DEPTH,
+      stasisLimit,
+      charisma,
+      // Backdoors are home's to install and home's to count; from out here the
+      // multiplier is unobservable, and 1 is the value that makes `planStasis`
+      // and `planInduce` decide on their own terms rather than on a guess.
+      authDurationMultiplier: 1,
+    };
+
+    // --- the walk ----------------------------------------------------------
+    const walk = planWalk(at, expiry, hosts, refuse);
+    if (walk.task) {
+      tasks.push(walk.task);
+      // Marked BEFORE `planStasis` runs, and that is the whole point: the
+      // host is about to carry work that cannot be rebuilt, and a link
+      // spent after the walk has started is a link spent on a host whose
+      // walk has already survived without one. `planStasis` ranks
+      // `irreplaceable` above everything else, so this is what makes the
+      // walker's host the first stasis target rather than merely the best
+      // argued one. The order of these three blocks is the policy.
+      const standing = hosts.find((host) => host.hostname === walk.task!.from);
+      if (standing) standing.irreplaceable = true;
+    }
+
+    // --- the pin -----------------------------------------------------------
+    const stasis = planStasis(view);
+    for (const refusal of stasis.refused) refuse(refusal.hostname, refusal.why, refusal.detail);
+    // A RECYCLE the planner wants and nothing carries out. `setStasisLink(false)`
+    // is the same 12 GB call with a different argument, and no job kind takes
+    // one — so rather than dropping the verdict on the floor (which is what
+    // `planSpread`'s refusals did for months and why nobody could tell a
+    // planner with nothing to do from a broken one), it is published by name.
+    for (const hostname of stasis.release) {
+      refuse(
+        hostname,
+        "release-unwired",
+        "this link would be better spent elsewhere, but no job carries setStasisLink(false)",
+      );
+    }
+    tasks.push(...admitPins(at, expiry, stasis.pin, refuse));
 
     // --- the push ----------------------------------------------------------
     //
@@ -717,6 +762,7 @@ export async function main(ns: NS): Promise<void> {
     // `addServerToNetwork` wires a host to the labyrinth for free. With a
     // vantage on the lab already, pushing anything is churn we are paying for:
     // it costs hundreds of calls and, if the net is full, the host itself.
+    const lab = walk.lab;
     const wantsPush = lab !== undefined
       && !vault.has(lab.hostname)
       && !tasks.some((task) => task.kind === "walk");
@@ -737,17 +783,137 @@ export async function main(ns: NS): Promise<void> {
 
     const admitted: Record<string, number> = {};
     for (const task of tasks) admitted[task.kind] = (admitted[task.kind] ?? 0) + 1;
-    const byReason: Record<string, number> = {};
-    const examples: DnetHoldReport["examples"] = [];
-    for (const refusal of refused) {
-      byReason[refusal.why] = (byReason[refusal.why] ?? 0) + 1;
-      if (byReason[refusal.why] === 1) examples.push(refusal);
-    }
-    return { tasks, report: { admitted, refused: byReason, examples } };
+    return { tasks, report: { admitted, ...foldRefusals(refused) } };
   };
 
-  /** Turn the derived task list into queued jobs, filed against the host a
-   * resident would have to be standing on to do them. */
+  /** Every host the farm ladder could act on.
+   *
+   * Only hosts we are STANDING on: all four farm calls act on the calling host,
+   * so a host with no resident has nothing to offer here whatever its blocked
+   * RAM says. */
+  const projectFarmHosts = (at: number, expiry: ExpiryOpts): FarmHost[] => {
+    const farmHosts: FarmHost[] = [];
+    for (const queue of queues.values()) {
+      const host = knowledge.hosts[queue.host];
+      if (!host) continue;
+      const busy = new Set<FarmKind>();
+      for (const claim of claims.get(queue.host) ?? []) {
+        // All FOUR rungs, `promote` included. Leaving it out did not risk a
+        // duplicate — `deriveTasks` drops a busy kind either way — it made the
+        // ladder spend a host's one rung re-admitting propaganda that was then
+        // silently dropped, inflated `farm.admitted.promote` with work nobody
+        // filed, and left `promote-in-flight` a refusal name that could never
+        // fire.
+        if (
+          claim.kind === "cache" || claim.kind === "reclaim"
+          || claim.kind === "phish" || claim.kind === "promote"
+        ) busy.add(claim.kind);
+      }
+      const depth = fresh<number>(host, "depth", at, expiry);
+      const difficulty = fresh<number>(host, "difficulty", at, expiry);
+      const blockedRam = fresh<number>(host, "blockedRam", at, expiry);
+      farmHosts.push({
+        host: queue.host,
+        ...(depth !== undefined ? { depth } : {}),
+        ...(difficulty !== undefined ? { difficulty } : {}),
+        ...(blockedRam !== undefined ? { blockedRam } : {}),
+        // What a JOB would get: the resident hands its own allocation back when
+        // it spawns. `freeGb` is the resident's own measurement where it has
+        // made one, and the folded facts otherwise.
+        freeGb: (queue.freeGb ?? freeRam(host, at, expiry)) + residentGb,
+        caches: fresh<string[]>(host, "caches", at, expiry) ?? [],
+        isLab: isLabyrinth(queue.host, fresh<string>(host, "modelId", at, expiry)),
+        ...(host.goneAt !== undefined ? { goneAt: host.goneAt } : {}),
+        busy,
+      });
+    }
+    return farmHosts;
+  };
+
+  /** Every host an unattributed password could belong to.
+   *
+   * `harvestLogs` has been collecting `--<password>--` lines all along. A bare
+   * string looks useless and is not: `passwordLength` and `passwordFormat` are
+   * IDENTITY facts — they are replaced only when the host is — so they never
+   * expire underneath a guess in flight, and between them they usually name a
+   * handful of candidates out of the whole net. Each candidate is one
+   * `authenticate`, which has no penalty for being wrong. */
+  const projectLooseTargets = (at: number, expiry: ExpiryOpts): LooseTarget[] =>
+    Object.values(knowledge.hosts).map((host) => {
+      const length = fresh<number>(host, "passwordLength", at, expiry);
+      const format = fresh<string>(host, "passwordFormat", at, expiry);
+      return {
+        hostname: host.hostname,
+        ...(length !== undefined ? { passwordLength: length } : {}),
+        ...(format !== undefined ? { passwordFormat: format } : {}),
+        hasCredential: vault.has(host.hostname),
+        ...(fresh<boolean>(host, "isStationary", at, expiry) === true ? { isStationary: true } : {}),
+        ...(host.goneAt !== undefined ? { gone: true } : {}),
+      };
+    });
+
+  /** One derived task, mapped onto the queue of the host that must run it.
+   *
+   * This is the only place a `Task` becomes a `DnetJob`, and the only place a
+   * password is put back into one: the queue carried an opaque id precisely so
+   * that a pure module never had to hold a credential. */
+  const fileTask = (task: Task): void => {
+    const queue = queues.get(task.from);
+    // No resident there: nothing can run it, and filing it would be a plan for
+    // a machine we cannot reach.
+    if (!queue) return;
+    const budget = budgets[task.kind] ?? budgets["survey"]!;
+    const threads = task.threads ?? 1;
+    // The resident's own allocation comes back when it spawns, so that is what
+    // a job actually gets. Skipping here rather than queueing keeps a job that
+    // can never fit from blocking the ones that can. `budgetGb` is PER THREAD,
+    // exactly as the engine charges `ramOverride`, so the product is the cost.
+    if (queue.freeGb !== undefined && budget * threads > queue.freeGb + residentGb) return;
+    enqueue(queue, {
+      id: task.id,
+      kind: task.kind,
+      label: task.reason,
+      budgetGb: budget,
+      threads,
+      priority: task.priority,
+      // The walker is the ONE long-lived job in the feature: a lab is
+      // hundreds of moves and `DarknetState.labLocations` is keyed by PID, so
+      // nothing can pick the walk up if this process ends. It is watched by
+      // its own beat instead of by `JOB_TIMEOUT_MS`.
+      longLived: task.kind === "walk",
+      state: {
+        host: task.host,
+        from: task.from,
+        ...(vault.has(task.host) ? { password: vault.get(task.host)! } : {}),
+        ...(task.filename !== undefined ? { filename: task.filename } : {}),
+        ...(task.symbol !== undefined ? { symbol: task.symbol } : {}),
+        // Resolved HERE and nowhere else: the queue carried an id precisely so
+        // that a pure module never had to hold a password.
+        ...(task.guessId !== undefined && guessFor.has(task.guessId)
+          ? { guess: guessFor.get(task.guessId)! }
+          : {}),
+        ...(task.kind === "plant"
+          ? {
+            payloads,
+            plantArgs: residentArgs({
+              missionId: mission.missionId,
+              generation: mission.generation,
+              identity: mission.identity,
+              agentId: `resident-${task.host}`,
+            }),
+          }
+          : {}),
+      },
+      body: bodyFor(task.kind),
+    });
+  };
+
+  /** Derive what there is to do, and file it.
+   *
+   * The order is the policy and every step feeds the next: spread and farm and
+   * hold each produce admitted work plus named refusals, the loose-password pass
+   * turns leaked strings into opaque guess ids, and `deriveTasks` merges all four
+   * with what the map alone implies. */
   const fileWork = (at: number): Task[] => {
     const plan = planSpread(
       candidatesFrom(knowledge, at, {
@@ -762,58 +928,10 @@ export async function main(ns: NS): Promise<void> {
     // Recorded rather than discarded: `plan.refused` is the only answer the
     // feature has to "why has the net stopped growing", and one example per
     // reason is what turns a count into somewhere to look.
-    const byReason: Record<string, number> = {};
-    const examples: DnetSpreadReport["examples"] = [];
-    for (const refusal of plan.refused) {
-      byReason[refusal.why] = (byReason[refusal.why] ?? 0) + 1;
-      if (byReason[refusal.why] === 1) {
-        examples.push({ host: refusal.host, why: refusal.why, detail: refusal.detail });
-      }
-    }
-    spread = { planted: plan.plant.length, refused: byReason, examples };
+    spread = { planted: plan.plant.length, ...foldRefusals(plan.refused) };
 
     // --- the farm ---------------------------------------------------------
-    //
-    // Only hosts we are STANDING on: all three farm calls act on the calling
-    // host, so a host with no resident has nothing to offer here whatever its
-    // blocked RAM says.
-    const farmHosts: FarmHost[] = [];
-    for (const queue of queues.values()) {
-      const host = knowledge.hosts[queue.host];
-      if (!host) continue;
-      const held = claims.get(queue.host) ?? [];
-      const busy = new Set<FarmKind>();
-      for (const claim of held) {
-        // All FOUR rungs, `promote` included. Leaving it out did not risk a
-        // duplicate — `deriveTasks` drops a busy kind either way — it made the
-        // ladder spend a host's one rung re-admitting propaganda that was then
-        // silently dropped, inflated `farm.admitted.promote` with work nobody
-        // filed, and left `promote-in-flight` a refusal name that could never
-        // fire.
-        if (
-          claim.kind === "cache" || claim.kind === "reclaim"
-          || claim.kind === "phish" || claim.kind === "promote"
-        ) busy.add(claim.kind);
-      }
-      const depth = fresh<number>(host, "depth", at, expiryOpts());
-      const difficulty = fresh<number>(host, "difficulty", at, expiryOpts());
-      const blockedRam = fresh<number>(host, "blockedRam", at, expiryOpts());
-      farmHosts.push({
-        host: queue.host,
-        ...(depth !== undefined ? { depth } : {}),
-        ...(difficulty !== undefined ? { difficulty } : {}),
-        ...(blockedRam !== undefined ? { blockedRam } : {}),
-        // What a JOB would get: the resident hands its own allocation back when
-        // it spawns. `freeGb` is the resident's own measurement where it has
-        // made one, and the folded facts otherwise.
-        freeGb: (queue.freeGb ?? freeRam(host, at, expiryOpts())) + residentGb,
-        caches: fresh<string[]>(host, "caches", at, expiryOpts()) ?? [],
-        isLab: isLabyrinth(queue.host, fresh<string>(host, "modelId", at, expiryOpts())),
-        ...(host.goneAt !== undefined ? { goneAt: host.goneAt } : {}),
-        busy,
-      });
-    }
-    const farmPlan = planFarm(farmHosts, {
+    const farmPlan = planFarm(projectFarmHosts(at, expiryOpts()), {
       now: at,
       charisma,
       gbPerThread: farmGbPerThread,
@@ -823,19 +941,10 @@ export async function main(ns: NS): Promise<void> {
       openLabCache,
     });
     const farmAdmitted: Record<string, number> = {};
-    const farmByReason: Record<string, number> = {};
-    const farmExamples: DnetFarmReport["examples"] = [];
     for (const task of farmPlan.tasks) farmAdmitted[task.kind] = (farmAdmitted[task.kind] ?? 0) + 1;
-    for (const refusal of farmPlan.refused) {
-      farmByReason[refusal.why] = (farmByReason[refusal.why] ?? 0) + 1;
-      if (farmByReason[refusal.why] === 1) {
-        farmExamples.push({ host: refusal.host, why: refusal.why, detail: refusal.detail });
-      }
-    }
     farm = {
       admitted: farmAdmitted,
-      refused: farmByReason,
-      examples: farmExamples,
+      ...foldRefusals(farmPlan.refused),
       ...(farmPlan.cacheHunter !== undefined ? { cacheHunter: farmPlan.cacheHunter } : {}),
     };
 
@@ -844,27 +953,7 @@ export async function main(ns: NS): Promise<void> {
     hold = holdPlan.report;
 
     // --- unattributed passwords -------------------------------------------
-    //
-    // `harvestLogs` has been collecting `--<password>--` lines all along. A
-    // bare string looks useless and is not: `passwordLength` and
-    // `passwordFormat` are IDENTITY facts — they are replaced only when the
-    // host is — so they never expire underneath a guess in flight, and between
-    // them they usually name a handful of candidates out of the whole net.
-    // Each candidate is one `authenticate`, which has no penalty for being
-    // wrong.
-    const looseTargets: LooseTarget[] = [];
-    for (const host of Object.values(knowledge.hosts)) {
-      const length = fresh<number>(host, "passwordLength", at, expiryOpts());
-      const format = fresh<string>(host, "passwordFormat", at, expiryOpts());
-      looseTargets.push({
-        hostname: host.hostname,
-        ...(length !== undefined ? { passwordLength: length } : {}),
-        ...(format !== undefined ? { passwordFormat: format } : {}),
-        hasCredential: vault.has(host.hostname),
-        ...(fresh<boolean>(host, "isStationary", at, expiryOpts()) === true ? { isStationary: true } : {}),
-        ...(host.goneAt !== undefined ? { gone: true } : {}),
-      });
-    }
+    const looseTargets = projectLooseTargets(at, expiryOpts());
     guessFor.clear();
     const guesses: { host: string; id: string; reason: string }[] = [];
     for (const candidate of looseCandidates(loosePool, looseTargets, getPasswordType)) {
@@ -904,56 +993,7 @@ export async function main(ns: NS): Promise<void> {
       ...(guesses.length > 0 ? { guesses } : {}),
     });
     listen = listenOut;
-    for (const task of tasks) {
-      const queue = queues.get(task.from);
-      // No resident there: nothing can run it, and filing it would be a plan for
-      // a machine we cannot reach.
-      if (!queue) continue;
-      const budget = budgets[task.kind] ?? budgets["survey"]!;
-      const threads = task.threads ?? 1;
-      // The resident's own allocation comes back when it spawns, so that is what
-      // a job actually gets. Skipping here rather than queueing keeps a job that
-      // can never fit from blocking the ones that can. `budgetGb` is PER THREAD,
-      // exactly as the engine charges `ramOverride`, so the product is the cost.
-      if (queue.freeGb !== undefined && budget * threads > queue.freeGb + residentGb) continue;
-      enqueue(queue, {
-        id: task.id,
-        kind: task.kind,
-        label: task.reason,
-        budgetGb: budget,
-        threads,
-        priority: task.priority,
-        // The walker is the ONE long-lived job in the feature: a lab is
-        // hundreds of moves and `DarknetState.labLocations` is keyed by PID, so
-        // nothing can pick the walk up if this process ends. It is watched by
-        // its own beat instead of by `JOB_TIMEOUT_MS`.
-        longLived: task.kind === "walk",
-        state: {
-          host: task.host,
-          from: task.from,
-          ...(vault.has(task.host) ? { password: vault.get(task.host)! } : {}),
-          ...(task.filename !== undefined ? { filename: task.filename } : {}),
-          ...(task.symbol !== undefined ? { symbol: task.symbol } : {}),
-          // Resolved HERE and nowhere else: the queue carried an id precisely so
-          // that a pure module never had to hold a password.
-          ...(task.guessId !== undefined && guessFor.has(task.guessId)
-            ? { guess: guessFor.get(task.guessId)! }
-            : {}),
-          ...(task.kind === "plant"
-            ? {
-              payloads,
-              plantArgs: residentArgs({
-                missionId: mission.missionId,
-                generation: mission.generation,
-                identity: mission.identity,
-                agentId: `resident-${task.host}`,
-              }),
-            }
-            : {}),
-        },
-        body: bodyFor(task.kind),
-      });
-    }
+    for (const task of tasks) fileTask(task);
     return tasks;
   };
 
@@ -964,7 +1004,7 @@ export async function main(ns: NS): Promise<void> {
     rendezvous.lastBeatAt = at;
 
     // The condition the realm exception rests on: entries are expired by the
-    // controller, never trusted. A resident dies with its host, and a queue left
+    // overseer, never trusted. A resident dies with its host, and a queue left
     // behind would be a plan for a machine that is gone.
     for (const dead of sweepQueues(queues, at)) {
       residentsLost++;

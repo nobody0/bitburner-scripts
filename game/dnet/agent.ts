@@ -12,10 +12,10 @@ import {
 
 /** The one thing that runs on a darknet host, in two modes.
  *
- * As a RESIDENT it beats into the controller's queue for this host, measures
+ * As a RESIDENT it beats into the overseer's queue for this host, measures
  * what is actually free, and `spawn`s into the first queued job that fits —
  * which kills it and hands the job the RAM it was holding. As a JOB it runs that
- * one job, settles the controller's promise, and spawns back to resident mode.
+ * one job, settles the overseer's promise, and spawns back to resident mode.
  * `shared/strategy/dnet/mission.ts` owns which of the two a set of arguments
  * means; `game/dnet/realm.ts` states why the round trip is cheaper than `exec`
  * and how a session survives it.
@@ -31,7 +31,7 @@ import {
  * allowed. */
 
 /** How long resident mode waits between looks. Short enough that a job queued by
- * the controller starts promptly; long enough that an idle net costs nothing.
+ * the overseer starts promptly; long enough that an idle net costs nothing.
  * `ns.sleep` is 0 GB. */
 const RESIDENT_POLL_MS = 1_000;
 
@@ -53,12 +53,12 @@ export async function main(ns: NS): Promise<void> {
   const host = ns.getHostname();
 
   if (mode.kind === "job") {
-    // No controller, or one from a world this run no longer shares. Exit rather
+    // No overseer, or one from a world this run no longer shares. Exit rather
     // than freelancing: without the queue there is nothing to coordinate with,
     // and two uncoordinated agents would spend the same calls on the same hosts.
     const rendezvous = liveRendezvous(generation);
     if (!rendezvous) return;
-    // The job settles into the queue it was spawned from. If the controller was
+    // The job settles into the queue it was spawned from. If the overseer was
     // replaced mid-job the promise it kept died with it, and the respawned
     // resident below re-registers with whatever is live.
     await performJob(ns, ensureQueue(rendezvous.queues, host), mode.jobId, residentGb);
@@ -67,11 +67,11 @@ export async function main(ns: NS): Promise<void> {
 
   for (;;) {
     // Resolved from the LIVE rendezvous every pass, never bound at boot and
-    // never held across the sleep below. A controller dies with its host, a
-    // prestige changes the generation outright, and a replacement controller of
+    // never held across the sleep below. An overseer dies with its host, a
+    // prestige changes the generation outright, and a replacement overseer of
     // the same generation installs a fresh queues Map — a resident still beating
     // into the old one would pass every check while being invisible to the
-    // controller that is actually running. Nothing else will ever clean this
+    // overseer that is actually running. Nothing else will ever clean this
     // process up either: `reclaimFleet` walks the ordinary `ns.scan` snapshot,
     // which never contains a darknet host.
     const live = liveRendezvous(generation);
@@ -90,7 +90,7 @@ export async function main(ns: NS): Promise<void> {
       queue.active = job;
       job.startedAt = Date.now();
       // Kills this process and starts the job immediately on this host, with the
-      // allocation the controller sized for it. `ramOverride` is charged PER
+      // allocation the overseer sized for it. `ramOverride` is charged PER
       // THREAD, so the pair is `(job.threads, job.budgetGb)` and the fit check
       // above compares their product — a hardcoded `threads: 1` here would have
       // quietly ignored every thread count a planner asked for.
@@ -106,8 +106,8 @@ export async function main(ns: NS): Promise<void> {
   }
 }
 
-/** This host's queue, creating it if the controller has not seen this host
- * before. Creating it here IS the registration: the controller discovers a
+/** This host's queue, creating it if the overseer has not seen this host
+ * before. Creating it here IS the registration: the overseer discovers a
  * resident by finding its queue, so a planted agent announces itself simply by
  * starting. */
 function ensureQueue(queues: Map<string, DnetHostQueue>, host: string): DnetHostQueue {
@@ -138,7 +138,7 @@ async function performJob(
     ? queue.active
     : queue.pending.find((entry) => entry.id === jobId);
   if (!job) {
-    // The controller retired the job while we were being launched. Go straight
+    // The overseer retired the job while we were being launched. Go straight
     // back to resident mode rather than leaving the host empty.
     respawnResident(ns, residentGb);
     return;
@@ -146,7 +146,7 @@ async function performJob(
   try {
     // The beat is what a LONG-LIVED job uses to say it is still going. A short
     // job never calls it and does not need to: it is vouched for by
-    // `startedAt + JOB_TIMEOUT_MS`. A long one is skipped by the controller's
+    // `startedAt + JOB_TIMEOUT_MS`. A long one is skipped by the overseer's
     // timeout loop entirely, so without this its queue would be pinned open for
     // ever by a process that died with its host.
     const result = await job.body(ns, job.state, (progress) => {
@@ -173,7 +173,7 @@ async function performJob(
     // of it. Calling `spawn` from a process that did not budget for it is not a
     // slow path, it is a dead one: the engine's dynamic RAM check kills the
     // script on the call. So the process simply ends and leaves the host empty
-    // — which the controller only ever asks for on a host a neighbour can
+    // — which the overseer only ever asks for on a host a neighbour can
     // re-plant, and which is safe precisely because the pin just made the host
     // immutable.
     if (!NO_RESPAWN_KINDS.includes(job.kind)) respawnResident(ns, residentGb);

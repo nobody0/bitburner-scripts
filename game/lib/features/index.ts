@@ -13,12 +13,12 @@ import type { DodgeAcquire } from "../ram.ts";
 import type { ArenaPlan, BrokerRequest } from '../../../shared/ram/broker.ts';
 import type { FeatureClaim, RamClaim } from "./claims.ts";
 import { careerModule } from "./career.ts";
+import { dnetModule } from "./dnet.ts";
 import { factionsModule } from "./factions.ts";
 import { hacknetModule } from "./hacknet.ts";
 import {
   bladeburnerModule,
   corpModule,
-  dnetModule,
   gangModule,
   goModule,
   progressionModule,
