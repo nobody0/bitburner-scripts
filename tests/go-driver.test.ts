@@ -2,7 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import type { DodgeGlobals, GoDodgeGlobals } from "../game/lib/dodge-shared.ts";
 import { emptyBoard, type DriverContext } from "../game/lib/features/index.ts";
-import { GO_ANCHOR_POLL_MS, goModule, setGoCheatSuccessTableForTest, setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
+import { GO_ANCHOR_POLL_MS, goModule, setGoCheatSuccessTableForTest, setGoNeuralRuntimeForTest, setGoPlaybookCheatSeedForTest } from "../game/lib/features/remaining.ts";
 import { GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
 import { GO_DISPATCH_GUARD_MS } from "../shared/strategy/go/tick.ts";
 import { StubGoValueBackend } from "./support/go-value-backend.ts";
@@ -708,13 +708,23 @@ describe("Go certified playbook integration", () => {
     goModule.reset?.(state, "bitnode");
   });
 
-  test("a cheat-unlocked game never consults the playbook", async () => {
+  test("an unseeded cheat game consults the playbook and the certified move overrides an engine cheat", async () => {
     let consulted = 0;
+    const preferreds: ({ x: number; y: number } | undefined)[] = [];
     setGoCheatSuccessTableForTest(Array.from({ length: 32 }, () => 1));
     setGoNeuralRuntimeForTest({
       install: async () => ({ positionId: "cheat", preparationMs: 0, cached: true }),
-      evaluate: async () => evaluation(neuralMove),
-      playbook: async () => { consulted++; return undefined; },
+      // The engine would cheat on this roll-safe tick; the certified move
+      // must still win because Illuminati has no cheatSeedFromTurn.
+      evaluate: async (_positionId, _dispatchPlaytime, _parent, preferredFirstMove) => {
+        preferreds.push(preferredFirstMove);
+        return evaluation({ ...neuralMove,
+          action: { type: "cheatTwoMoves", x1: 1, y1: 1, x2: 0, y2: 0 } });
+      },
+      playbook: async () => {
+        consulted++;
+        return { action: { kind: "move", x: 4, y: 4 }, alignmentCredit: 5, alignmentBoards: 12 };
+      },
       playbookRoute: async () => undefined,
       commit: () => "cheat:test",
       confirm() {},
@@ -723,12 +733,144 @@ describe("Go certified playbook integration", () => {
     });
     const state = playbookState();
     state.topics.go!.cheat = { unlocked: true, count: 0, successChance: 1 };
+    const moves: Array<[number, number]> = [];
+    let cheats = 0;
     const stubNs = {
-      go: { makeMove: async () => ({ type: "gameOver", x: null, y: null }) },
+      go: {
+        makeMove: async (x: number, y: number) => {
+          moves.push([x, y]);
+          return { type: "gameOver", x: null, y: null };
+        },
+        cheat: {
+          playTwoMoves: async () => { cheats++; return { type: "gameOver", x: null, y: null }; },
+        },
+      },
     } as unknown as NS;
-    await runGrantedTurn(state, stubNs, { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] });
-    expect(consulted).toBe(0);
+    await runGrantedTurn(state, stubNs,
+      { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] }, cheatCaps);
+    expect(consulted).toBeGreaterThan(0);
+    expect(preferreds[0]).toBeUndefined();
+    expect(cheats).toBe(0);
+    expect(moves).toEqual([[4, 4]]);
+    expect(state.topics.go?.lastTurn?.prediction?.playbook).toBe(true);
     setGoCheatSuccessTableForTest();
+    goModule.reset?.(state, "bitnode");
+  });
+
+  const cheatCaps = {
+    bitNode: 1,
+    sourceFiles: { "14": 2 },
+    unlocked: {}, reason: {}, restrictions: {},
+  } as unknown as DriverContext["caps"];
+
+  test("past cheatSeedFromTurn the double is seeded from the certified stone and leaves the line", async () => {
+    const credits: number[] = [];
+    const preferreds: ({ x: number; y: number } | undefined)[] = [];
+    setGoPlaybookCheatSeedForTest({ Illuminati: 0 });
+    setGoCheatSuccessTableForTest(Array.from({ length: 32 }, () => 1));
+    let playbookCalls = 0;
+    setGoNeuralRuntimeForTest({
+      install: async () => ({ positionId: "seeded", preparationMs: 0, cached: true }),
+      evaluate: async (_positionId, _dispatchPlaytime, _parent, preferredFirstMove) => {
+        preferreds.push(preferredFirstMove);
+        return evaluation(preferredFirstMove
+          ? { ...neuralMove, action: {
+            type: "cheatTwoMoves",
+            x1: preferredFirstMove.x, y1: preferredFirstMove.y, x2: 0, y2: 0,
+          } }
+          : neuralMove);
+      },
+      playbook: async (_positionId, _dispatchPlaytime, credit) => {
+        credits.push(credit);
+        return playbookCalls++ === 0
+          ? { action: { kind: "move", x: 4, y: 4 }, alignmentCredit: 5, alignmentBoards: 12 }
+          : undefined;
+      },
+      playbookRoute: async () => undefined,
+      commit: () => "seeded:test",
+      confirm() {},
+      async reset() {},
+      dispose() {},
+    });
+    const state = playbookState();
+    state.topics.go!.cheat = { unlocked: true, count: 0, successChance: 1 };
+    const cheats: number[][] = [];
+    const moves: Array<[number, number]> = [];
+    const stubNs = {
+      go: {
+        cheat: {
+          playTwoMoves: async (...coordinates: number[]) => {
+            cheats.push(coordinates);
+            // The cheat succeeds and White replies: the game continues so the
+            // next turn can prove the line credit was zeroed, not spent to 4.
+            return { type: "move", x: 2, y: 2 };
+          },
+        },
+        makeMove: async (x: number, y: number) => {
+          moves.push([x, y]);
+          return { type: "gameOver", x: null, y: null };
+        },
+      },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs,
+      { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] }, cheatCaps);
+    for (let settle = 0; settle < 300 && moves.length < 1; settle++) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    expect(cheats).toEqual([[4, 4, 0, 0]]);
+    // The engine-chosen cheat wins over the certified move: it is not a
+    // certified dispatch, so the record carries no playbook flag...
+    expect(state.topics.go?.lastTurn?.prediction?.playbook).toBeUndefined();
+    // ...and the certified move rode into the evaluation as the seed.
+    expect(preferreds[0]).toEqual({ x: 4, y: 4 });
+    // The dispatched cheat abandoned the line: the follow-up turn consults at
+    // credit 0, not at the certified grant's 5 - 1.
+    expect(credits).toEqual([0, 0]);
+    expect(moves).toHaveLength(1);
+    setGoCheatSuccessTableForTest();
+    setGoPlaybookCheatSeedForTest();
+    goModule.reset?.(state, "bitnode");
+  });
+
+  test("a certified move still overrides when the engine keeps plain play", async () => {
+    const preferreds: ({ x: number; y: number } | undefined)[] = [];
+    setGoPlaybookCheatSeedForTest({ Illuminati: 0 });
+    setGoCheatSuccessTableForTest(Array.from({ length: 32 }, () => 1));
+    setGoNeuralRuntimeForTest({
+      install: async () => ({ positionId: "kept", preparationMs: 0, cached: true }),
+      evaluate: async (_positionId, _dispatchPlaytime, _parent, preferredFirstMove) => {
+        preferreds.push(preferredFirstMove);
+        return evaluation(neuralMove);
+      },
+      playbook: async () => ({
+        action: { kind: "move", x: 4, y: 4 }, alignmentCredit: 5, alignmentBoards: 12,
+      }),
+      playbookRoute: async () => undefined,
+      commit: () => "kept:test",
+      confirm() {},
+      async reset() {},
+      dispose() {},
+    });
+    const state = playbookState();
+    state.topics.go!.cheat = { unlocked: true, count: 0, successChance: 1 };
+    const moves: Array<[number, number]> = [];
+    const stubNs = {
+      go: {
+        makeMove: async (x: number, y: number) => {
+          moves.push([x, y]);
+          return { type: "gameOver", x: null, y: null };
+        },
+      },
+    } as unknown as NS;
+    await runGrantedTurn(state, stubNs,
+      { playtimes: [...ANCHOR_READS, 10_000, 10_000, 10_000], sleeps: [] }, cheatCaps);
+
+    expect(moves).toEqual([[4, 4]]);
+    expect(preferreds[0]).toEqual({ x: 4, y: 4 });
+    expect(state.topics.go?.lastTurn?.prediction?.playbook).toBe(true);
+    setGoCheatSuccessTableForTest();
+    setGoPlaybookCheatSeedForTest();
     goModule.reset?.(state, "bitnode");
   });
 

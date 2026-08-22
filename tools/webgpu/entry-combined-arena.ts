@@ -5,6 +5,11 @@ import { validateMergedPlaybook } from "../../shared/strategy/go/playbook-facade
 import { playCombinedArenaGame, type CombinedArenaTiming } from "../../sim/go-combined-arena.ts";
 import { GoNeuralEngine } from "../../shared/strategy/go/neural/engine.ts";
 import { createRequiredWebGpuGoValueBackend } from "../../shared/strategy/go/neural/webgpu.ts";
+import { goGameNodePowerGain } from "../../shared/strategy/go/rewards.ts";
+import type { GoRewardOpponent } from "../../shared/strategy/go/rules.ts";
+
+type CombinedArenaArm = "combined" | "neuralOnly" | "playbookOnly" | "neuralUnrouted"
+  | "combinedUnrouted" | "combinedCheat" | "combinedCheatSeeded" | "combinedCheatLate";
 
 interface CombinedArenaConfig {
   games: number;
@@ -13,7 +18,10 @@ interface CombinedArenaConfig {
   timing: CombinedArenaTiming;
   defenseSeed: number;
   opponent?: string;
-  arms: readonly ("combined" | "neuralOnly" | "playbookOnly" | "neuralUnrouted" | "combinedUnrouted")[];
+  cheatChance?: number;
+  /** Black policy turn from which combinedCheatLate allows an on-line cheat. */
+  cheatLateTurn?: number;
+  arms: readonly CombinedArenaArm[];
 }
 
 function percentile(values: readonly number[], fraction: number): number {
@@ -36,12 +44,17 @@ async function main(): Promise<unknown> {
   interface Bucket {
     games: number; wins: number; completed: number;
     certifiedTurns: number; neuralTurns: number; neuralReturns: number;
-    blackPower: number; totalRounds: number;
+    cheatsPlayed: number;
+    nodePower: number; totalRounds: number;
+    /** Threaded across the bucket's game sequence in play order; the game
+     * tracks the streak per opponent, so the per-opponent bucket's streak is
+     * the authoritative one (the arm total sums per-opponent gains). */
+    streak: number;
     neuralLatency: number[]; failures: string[];
   }
   const newBucket = (): Bucket => ({ games: 0, wins: 0, completed: 0, certifiedTurns: 0,
-    neuralTurns: 0, neuralReturns: 0, blackPower: 0, totalRounds: 0, neuralLatency: [],
-    failures: [] });
+    neuralTurns: 0, neuralReturns: 0, cheatsPlayed: 0, nodePower: 0, totalRounds: 0,
+    streak: 0, neuralLatency: [], failures: [] });
   const results: Record<string, Bucket> = {};
   const perOpponent: Record<string, Record<string, Bucket>> = {};
   for (const arm of config.arms) {
@@ -63,17 +76,31 @@ async function main(): Promise<unknown> {
         neuralOnly: arm === "neuralOnly" || arm === "neuralUnrouted",
         playbookOnly: arm === "playbookOnly",
         unrouted: arm === "neuralUnrouted" || arm === "combinedUnrouted",
+        ...(arm === "combinedCheat" || arm === "combinedCheatSeeded" || arm === "combinedCheatLate"
+          ? { cheat: {
+            enabled: true,
+            seeded: arm !== "combinedCheat",
+            ...(arm === "combinedCheatLate" ? { minOnLineTurn: config.cheatLateTurn ?? 4 } : {}),
+            ...(config.cheatChance !== undefined ? { successChance: config.cheatChance } : {}),
+          } } : {}),
       });
       const armOpponents = perOpponent[arm]!;
       armOpponents[game.enemy] ??= newBucket();
-      for (const bucket of [results[arm]!, armOpponents[game.enemy]!]) {
+      // Node power uses the live game's transition exactly: black score times
+      // difficulty times streak multiplier, with the streak per opponent.
+      const opponentBucket = armOpponents[game.enemy]!;
+      const power = goGameNodePowerGain(
+        game.enemy as GoRewardOpponent, 5, game.blackScore, game.won, opponentBucket.streak);
+      opponentBucket.streak = power.streakAfter;
+      for (const bucket of [results[arm]!, opponentBucket]) {
       bucket.games++;
       if (game.completed) bucket.completed++;
       if (game.won) bucket.wins++;
       bucket.certifiedTurns += game.certifiedTurns;
       bucket.neuralTurns += game.neuralTurns;
       bucket.neuralReturns += game.neuralReturns;
-      bucket.blackPower += game.won ? game.blackScore : game.blackScore * 0.5;
+      bucket.cheatsPlayed += game.cheatsPlayed;
+      bucket.nodePower += power.gain;
       bucket.totalRounds += game.policyRounds;
       bucket.neuralLatency.push(...game.neuralLatencyMs);
       if (game.failure && bucket.failures.length < 20) {
@@ -90,7 +117,9 @@ async function main(): Promise<unknown> {
     certifiedTurns: bucket.certifiedTurns,
     neuralTurns: bucket.neuralTurns,
     neuralReturns: bucket.neuralReturns,
-    powerPerTurn: bucket.blackPower / Math.max(1, bucket.totalRounds),
+    cheatsPlayed: bucket.cheatsPlayed,
+    meanNodePowerGain: bucket.nodePower / Math.max(1, bucket.games),
+    nodePowerPerTurn: bucket.nodePower / Math.max(1, bucket.totalRounds),
     neuralLatencyMs: {
       p50: +percentile(bucket.neuralLatency, 0.5).toFixed(2),
       p95: +percentile(bucket.neuralLatency, 0.95).toFixed(2),

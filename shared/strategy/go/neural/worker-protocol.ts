@@ -76,7 +76,13 @@ export interface GoWorkerPlaybookRoute {
 
 export type GoWorkerRequest =
   | { type: "install"; requestId: number; positionId: string; view: GoView; parentTurnId?: string }
-  | { type: "evaluate"; requestId: number; positionId: string; dispatchPlaytime: number }
+  // preferredFirstMove is the certified playbook move for the position, when
+  // the controller wants a cheat-eligible tick to consider a playbook-seeded
+  // double move. Like the alignment credit it is main-thread state and is
+  // deliberately not part of the position identity; it forks only the
+  // per-evaluation cache key.
+  | { type: "evaluate"; requestId: number; positionId: string; dispatchPlaytime: number;
+    preferredFirstMove?: { x: number; y: number } }
   // Playbook lookups are pure table reads outside the evaluation queue. The
   // certified result depends on the alignment credit, which is deliberately
   // not part of the position identity, so these are never cached.

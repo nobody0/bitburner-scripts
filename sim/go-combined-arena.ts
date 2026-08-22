@@ -10,7 +10,17 @@
  * The timing, defense-tie, and White-oracle mechanics deliberately mirror the
  * proof arena in `sim/ipvgobruteforce-arena.ts` so ledgers stay comparable.
  */
-import { playMove, scoreBoard, type GoBoard, type GoRewardOpponent } from "../shared/strategy/go/rules.ts";
+import {
+  applyGoCheat,
+  GO_CHEAT_LIMITS_BY_SIZE,
+  isGoCheatAction,
+  playMove,
+  scoreBoard,
+  type GoBoard,
+  type GoCheatState,
+  type GoRewardOpponent,
+} from "../shared/strategy/go/rules.ts";
+import { goArenaCheatSuccessTable } from "./go-arena.ts";
 import {
   finalizeNeuralGoDecision,
   prepareNeuralGoDecision,
@@ -56,6 +66,15 @@ export interface CombinedArenaOptions {
    * the same harness. */
   unrouted?: boolean;
   maxPolicyRounds?: number;
+  /** Cheat-unlocked play: neural-fallback turns may cheat on roll-safe ticks
+   * (the same slip-safe WHRNG gate live play uses). With `seeded`, a certified
+   * hit additionally offers the playbook-seeded double move — first stone the
+   * certified move, second neural — and a chosen cheat deliberately leaves the
+   * certified line (fully neural afterwards). `minOnLineTurn` delays that
+   * on-line offer until the given Black policy turn, so the certified opening
+   * is banked before a cheat may spend the line to finish faster; off-line
+   * turns cheat regardless. */
+  cheat?: { enabled: boolean; successChance?: number; seeded?: boolean; minOnLineTurn?: number };
 }
 
 export interface CombinedArenaGame {
@@ -70,6 +89,7 @@ export interface CombinedArenaGame {
   certifiedTurns: number;
   neuralTurns: number;
   neuralReturns: number;
+  cheatsPlayed: number;
   failure?: string;
   neuralLatencyMs: number[];
 }
@@ -140,6 +160,16 @@ export async function playCombinedContinuation(
   let neuralReturns = 0;
   let offCertificate = false;
   let failure: string | undefined;
+  let cheatCount = 0;
+  let cheatsPlayed = 0;
+  const cheatState: Omit<GoCheatState, "count"> | undefined = options.cheat?.enabled
+    ? {
+      unlocked: true,
+      successByCount: goArenaCheatSuccessTable(options.cheat.successChance),
+      candidateLimit: GO_CHEAT_LIMITS_BY_SIZE[5]!.candidateLimit,
+      doubleMoveLimit: GO_CHEAT_LIMITS_BY_SIZE[5]!.doubleMoveLimit,
+    }
+    : undefined;
   const neuralLatencyMs: number[] = [];
   const defenseRandom = randomFor(options.defenseSeed);
   const timingRandom = randomFor(options.timingSeed ?? (options.defenseSeed ^ 0x9e37_79b9));
@@ -149,7 +179,7 @@ export async function playCombinedContinuation(
   try {
     Math.random = defenseRandom;
     for (let step = 0; passes < 2 && policyRounds < maximumRounds && step < maximumRounds * 4; step++) {
-      let action: { kind: "move"; x: number; y: number } | { kind: "pass" };
+      let action: { kind: "move"; x: number; y: number } | { kind: "pass" } | { kind: "cheat"; board: GoBoard };
       if (forced) {
         // The branch under test: the forced move replaces this turn's policy
         // and pins the game off (or on) the certified line deliberately.
@@ -185,11 +215,61 @@ export async function playCombinedContinuation(
         action = described.kind === "move"
           ? { kind: "move", x: described.x, y: described.y }
           : { kind: "pass" };
-        certifiedTurns++;
         if (offCertificate) {
           neuralReturns++;
           offCertificate = false;
         }
+        // The seeded arm: on a certified move, let the engine weigh the
+        // playbook-seeded double (first stone the certified move, second
+        // neural) against the plain certified continuation. A chosen cheat
+        // wins and deliberately leaves the line — the live driver's exact
+        // precedence.
+        let seededCheat = false;
+        // The threshold counts Black turns the way the live driver does —
+        // goBlackTurnIndex = floor(previousBoards.length / 2), one history
+        // entry per placed stone — NOT policyRounds, which also advances on
+        // certified align turns that place nothing.
+        if (cheatState && options.cheat?.seeded && action.kind === "move"
+          && Math.floor(history.length / 2) >= (options.cheat.minOnLineTurn ?? 0)) {
+          const view = {
+            board,
+            currentPlayer: "Black",
+            opponent: enemy as GoRewardOpponent,
+            status: "inProgress",
+            previousBoards: [...history].reverse(),
+            consecutivePasses: passes,
+            komi: GO_REWARD_RULES[enemy as GoRewardOpponent].komi,
+            bonusCycles: 0,
+            cheat: { ...cheatState, count: cheatCount },
+          } as const;
+          const started = performance.now();
+          const decision = await finalizeNeuralGoDecision(
+            prepareNeuralGoDecision(view),
+            goOpponentSeedCandidates(playtime, 0),
+            engine,
+            playtime,
+            { preferredFirstMove: { x: action.x, y: action.y } },
+          );
+          neuralLatencyMs.push(performance.now() - started);
+          // Mirrors resolveGoExactAction: a cheat from an evaluation whose
+          // certified benchmark was dropped never competed against the
+          // certified continuation, so the certified move stands.
+          if (decision.preferredFirstMoveRetained !== false && isGoCheatAction(decision.action)) {
+            const cheated = applyGoCheat(board, decision.action);
+            if (!cheated) {
+              failure = `seeded cheat produced invalid ${decision.action.type}`;
+              break;
+            }
+            action = { kind: "cheat", board: cheated.board };
+            cheatCount++;
+            cheatsPlayed++;
+            neuralTurns++;
+            alignmentCredit = 0;
+            offCertificate = true;
+            seededCheat = true;
+          }
+        }
+        if (!seededCheat) certifiedTurns++;
       } else if (options.playbookOnly) {
         failure = `playbook miss at phase ${phase}, round ${policyRounds}`;
         break;
@@ -218,6 +298,7 @@ export async function playCombinedContinuation(
           consecutivePasses: passes,
           komi: GO_REWARD_RULES[enemy as GoRewardOpponent].komi,
           bonusCycles: 0,
+          ...(cheatState ? { cheat: { ...cheatState, count: cheatCount } } : {}),
         } as const;
         const started = performance.now();
         const decision = await finalizeNeuralGoDecision(
@@ -232,6 +313,21 @@ export async function playCombinedContinuation(
           action = { kind: "move", x: decision.action.x, y: decision.action.y };
         } else if (decision.action.type === "pass") {
           action = { kind: "pass" };
+        } else if (isGoCheatAction(decision.action)) {
+          const cheated = applyGoCheat(board, decision.action);
+          if (!cheated) {
+            failure = `neural fallback produced invalid ${decision.action.type}`;
+            break;
+          }
+          action = { kind: "cheat", board: cheated.board };
+          cheatCount++;
+          cheatsPlayed++;
+          // Live play zeroes the playbook line on ANY dispatched cheat
+          // (resetGoPlaybookLine): the diverged board can never match a
+          // certified entry again. Keeping the credit here — as the comment
+          // above rightly does for reproduced MOVES — would let this arm
+          // re-match credit-window entries live play cannot reach.
+          alignmentCredit = 0;
         } else {
           failure = `neural fallback produced ${decision.action.type}`;
           break;
@@ -240,7 +336,12 @@ export async function playCombinedContinuation(
       }
 
       const timingControlled = alignmentCredit > 0;
-      if (action.kind === "move") {
+      if (action.kind === "cheat") {
+        // Cheat transitions were resolved by applyGoCheat above; like the
+        // game, a cheat records no history entry.
+        board = action.board;
+        passes = 0;
+      } else if (action.kind === "move") {
         const played = playMove(board, action.x, action.y, "X",
           new Set(history.map((position) => position.join(""))));
         if (!played) {
@@ -306,6 +407,7 @@ export async function playCombinedContinuation(
     certifiedTurns,
     neuralTurns,
     neuralReturns,
+    cheatsPlayed,
     ...(failure ? { failure } : {}),
     neuralLatencyMs,
   };

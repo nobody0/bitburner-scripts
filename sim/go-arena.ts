@@ -8,6 +8,7 @@
  */
 import {
   applyGoCheat,
+  GO_CHEAT_LIMITS_BY_SIZE,
   isGoCheatAction,
   playMove,
   scoreBoard,
@@ -30,6 +31,7 @@ import {
 } from "../shared/strategy/go/neural/engine.ts";
 import { createRequiredWebGpuGoValueBackend } from "../shared/strategy/go/neural/webgpu.ts";
 import { alignedAiSeed, GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
+import { goGameNodePowerGain } from "../shared/strategy/go/rewards.ts";
 import { oracleInitialBoard } from "./features/go-oracle.ts";
 import { GoColor, GoOpponent, GoPlayType } from "./vendor/bitburner/src/Go/Enums.ts";
 import { getMove } from "./vendor/bitburner/src/Go/boardAnalysis/goAI.ts";
@@ -201,6 +203,12 @@ export interface GoArenaSummary {
   meanDurationMs: number;
   decisions: number;
   meanCheatsPlayed: number;
+  /** Node power accrued by the arm, streak threaded across the game sequence
+   * in play order. Per-turn and per-second forms are both reported: turn count
+   * alone rewards short losses, wall time alone hides slow planning. */
+  meanNodePowerGain: number;
+  nodePowerPerTurn: number;
+  nodePowerPerSecond: number;
   latencyMs: { p50: number; p95: number; p99: number; p999: number; max: number };
   losingSeeds: {
     seed: number;
@@ -241,8 +249,8 @@ function arenaCheatConfig(options: GoArenaOptions, boardSize: number): Omit<GoCh
     && (!Number.isFinite(config.successChance) || config.successChance < 0 || config.successChance > 1)) {
     throw new Error(`arena cheat successChance must be between 0 and 1, got ${config.successChance}`);
   }
-  const candidateLimit = config.candidateLimit ?? (boardSize === 19 ? 0 : 4);
-  const doubleMoveLimit = config.doubleMoveLimit ?? (boardSize === 19 ? 1 : 2);
+  const candidateLimit = config.candidateLimit ?? GO_CHEAT_LIMITS_BY_SIZE[boardSize]!.candidateLimit;
+  const doubleMoveLimit = config.doubleMoveLimit ?? GO_CHEAT_LIMITS_BY_SIZE[boardSize]!.doubleMoveLimit;
   if (!Number.isFinite(candidateLimit) || candidateLimit < 0) {
     throw new Error(`arena cheat candidateLimit must be nonnegative, got ${candidateLimit}`);
   }
@@ -251,11 +259,17 @@ function arenaCheatConfig(options: GoArenaOptions, boardSize: number): Omit<GoCh
   }
   return {
     unlocked: true,
-    successByCount: Array.from({ length: 1_024 }, (_, cheatCount) => config.successChance
-      ?? Math.max(0, Math.min(1, 0.6 * (0.7 - 0.02 * cheatCount) ** cheatCount))),
+    successByCount: goArenaCheatSuccessTable(config.successChance),
     candidateLimit: Math.floor(candidateLimit),
     doubleMoveLimit: Math.floor(doubleMoveLimit),
   };
+}
+
+/** The SF14.2 count-decay success schedule (or a fixed chance for stress
+ * tests), shared by both arenas so their curves cannot drift apart. */
+export function goArenaCheatSuccessTable(successChance?: number): number[] {
+  return Array.from({ length: 1_024 }, (_, cheatCount) => successChance
+    ?? Math.max(0, Math.min(1, 0.6 * (0.7 - 0.02 * cheatCount) ** cheatCount)));
 }
 
 function percentile(sorted: readonly number[], fraction: number): number {
@@ -571,6 +585,15 @@ export function playGoArenaPosition(
 export function summarizeGoArena(opponent: GoRewardOpponent, games: readonly GoArenaGameResult[]): GoArenaSummary {
   const times = games.flatMap((game) => game.planningMs).sort((a, b) => a - b);
   const wins = games.filter((game) => game.won).length;
+  let streak = 0;
+  let totalNodePower = 0;
+  for (const game of games) {
+    const power = goGameNodePowerGain(opponent, game.size, game.score.X, game.won, streak);
+    totalNodePower += power.gain;
+    streak = power.streakAfter;
+  }
+  const totalTurns = games.reduce((sum, game) => sum + game.turns, 0);
+  const totalDurationMs = games.reduce((sum, game) => sum + game.durationMs, 0);
   return {
     opponent,
     games: games.length,
@@ -581,9 +604,12 @@ export function summarizeGoArena(opponent: GoRewardOpponent, games: readonly GoA
     wilsonLower95: wilsonLower95(wins, games.length),
     pointDifference: games.reduce((sum, game) => sum + game.score.X - game.score.O, 0),
     meanBlackScore: games.length ? games.reduce((sum, game) => sum + game.score.X, 0) / games.length : 0,
-    meanDurationMs: games.length ? games.reduce((sum, game) => sum + game.durationMs, 0) / games.length : 0,
+    meanDurationMs: games.length ? totalDurationMs / games.length : 0,
     decisions: times.length,
     meanCheatsPlayed: games.length ? games.reduce((sum, game) => sum + game.cheatsPlayed, 0) / games.length : 0,
+    meanNodePowerGain: games.length ? totalNodePower / games.length : 0,
+    nodePowerPerTurn: totalTurns ? totalNodePower / totalTurns : 0,
+    nodePowerPerSecond: totalDurationMs ? totalNodePower / (totalDurationMs / 1_000) : 0,
     latencyMs: {
       p50: percentile(times, 0.5),
       p95: percentile(times, 0.95),

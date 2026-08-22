@@ -236,18 +236,31 @@ function install(view: GoView, requestedId?: string): { id: string; position: Ca
   return { id: identity.id, position, cached: false };
 }
 
-function evaluate(positionId: string, dispatchPlaytime: number): CachedEvaluation {
+/** The evaluation cache key. A certified preferred move forks the key exactly
+ * like the dispatch tick does: it changes the decision without being part of
+ * the position identity. */
+function evaluationKey(dispatchPlaytime: number, preferredFirstMove?: { x: number; y: number }): string {
+  const base = goDispatchKey(dispatchPlaytime);
+  return preferredFirstMove ? `${base}|pf:${preferredFirstMove.x},${preferredFirstMove.y}` : base;
+}
+
+function evaluate(
+  positionId: string,
+  dispatchPlaytime: number,
+  preferredFirstMove?: { x: number; y: number },
+): CachedEvaluation {
   const position = positions.get(positionId);
   if (!position) throw new Error(`Go worker does not hold position ${positionId}`);
   position.touched = ++touch;
-  const key = goDispatchKey(dispatchPlaytime);
+  const key = evaluationKey(dispatchPlaytime, preferredFirstMove);
   const found = position.evaluations.get(key);
   if (found) return found;
   const entry = {} as CachedEvaluation;
   const run = evaluationQueue.then(async () => {
     const startedAt = performance.now();
     const seeds = goOpponentSeedCandidates(dispatchPlaytime, position.prepared.view.bonusCycles ?? 0);
-    const decision = await finalizeNeuralGoDecision(position.prepared, seeds, engine, dispatchPlaytime);
+    const decision = await finalizeNeuralGoDecision(position.prepared, seeds, engine, dispatchPlaytime,
+      preferredFirstMove ? { preferredFirstMove } : undefined);
     const backend = await engine.backendFor(position.prepared.view.board.size);
     entry.decision = decision;
     entry.continuations = neuralGoContinuations(position.prepared, seeds, decision, dispatchPlaytime);
@@ -297,7 +310,17 @@ async function predictNextTurns(
 ): Promise<void> {
   const source = positions.get(request.positionId);
   if (!source) throw new Error(`committed position is missing for ${request.positionId}`);
-  const evaluated = source?.evaluations.get(goDispatchKey(request.dispatchPlaytime));
+  // A seeded evaluation lives under a forked key; the commit request carries
+  // only the dispatch tick. When both a plain and a seeded evaluation exist for
+  // the tick, the one whose settled decision matches the committed action is
+  // the one that was dispatched.
+  const dispatchKey = goDispatchKey(request.dispatchPlaytime);
+  const tickEvaluations = [...(source?.evaluations ?? [])]
+    .filter(([key]) => key === dispatchKey || key.startsWith(`${dispatchKey}|pf:`))
+    .map(([, entry]) => entry);
+  const evaluated = tickEvaluations.find((entry) => entry.decision !== undefined
+    && entry.decision.action.type !== "resume" && entry.decision.action.type !== "newGame"
+    && sameAction(entry.decision.action, request.action)) ?? tickEvaluations[0];
   if (!evaluated) throw new Error(`committed evaluation is missing for ${request.positionId}`);
   const committed = await evaluated.promise;
   if (committed.decision.action.type === "resume" || committed.decision.action.type === "newGame") {
@@ -430,7 +453,7 @@ port.onmessage = (event) => {
       return;
     }
     if (request.type === "evaluate") {
-      const entry = evaluate(request.positionId, request.dispatchPlaytime);
+      const entry = evaluate(request.positionId, request.dispatchPlaytime, request.preferredFirstMove);
       const cached = entry.decision !== undefined;
       const value = await entry.promise;
       port.postMessage({

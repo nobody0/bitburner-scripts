@@ -46,10 +46,17 @@ async function main(): Promise<unknown> {
       if ((query === "secret" || query === "world-daemon") && opponent.name === "????????????") return true;
       return opponent.name.toLowerCase().includes(query);
     });
-    for (const opponent of selected) {
+    for (const selectedOpponent of selected) {
+      const requestedBoard = ([5, 7, 9, 13] as const)
+        .find((size) => size === config?.boardSize);
+      const opponent = requestedBoard !== undefined
+        ? { ...selectedOpponent, requestedSize: requestedBoard }
+        : selectedOpponent;
       const daemon = opponent.name === "????????????";
+      // The default all-opponents gate keeps its 2-game daemon smoke; an
+      // explicitly selected daemon bench plays the full requested corpus.
       const cases = goArenaSeedPairs(
-        daemon ? Math.min(2, config?.games ?? 12) : config?.games ?? 12,
+        daemon && !config?.opponent ? Math.min(2, config?.games ?? 12) : config?.games ?? 12,
         123_456,
         3_203_338_803,
       );
@@ -79,7 +86,12 @@ async function main(): Promise<unknown> {
         games: summary.games,
         wins: summary.wins,
         winRate: +summary.winRate.toFixed(4),
+        wilsonLower95: +summary.wilsonLower95.toFixed(4),
         meanCheatsPlayed: +summary.meanCheatsPlayed.toFixed(2),
+        meanBlackScore: +summary.meanBlackScore.toFixed(2),
+        meanNodePowerGain: +summary.meanNodePowerGain.toFixed(3),
+        nodePowerPerTurn: +summary.nodePowerPerTurn.toFixed(4),
+        nodePowerPerSecond: +summary.nodePowerPerSecond.toFixed(4),
         decisions: summary.decisions,
         latencyMs: {
           p50: +summary.latencyMs.p50.toFixed(2),
@@ -111,6 +123,7 @@ declare global {
     cheat: boolean;
     games: number;
     opponent?: string;
+    boardSize?: number;
     cheatChance?: number;
     cheatK?: number;
     cheatDoubleK?: number;

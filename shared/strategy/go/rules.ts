@@ -137,6 +137,33 @@ export interface GoCheatState {
   doubleMoveLimit: number;
 }
 
+/** Production cheat budgets per board size, shared by the live driver and the
+ * arenas so their defaults cannot drift.
+ *
+ * Boards above 5x5 route to the policy-only daemon19 weights, whose value
+ * head is stripped from the installed artifact: any candidateLimit > 0 needs
+ * a value batch and the engine refuses it outright, so the greedy
+ * doubles-only path (candidateLimit 0) is the ONLY cheat path those sizes
+ * can execute — the topology-mutating single-point families are unreachable
+ * there by construction. Live play only ever schedules 5x5 (the six faction
+ * opponents) and 19x19 (the world daemon); 7/9/13 are listed defensively so
+ * an experimental game cannot crash on an unevaluable budget.
+ *
+ * Measured 2026-08-22 (go:gpu --arena --games 128 --opponent secret): 19x19
+ * greedy cheating wins 95.3% vs 85.9% without cheats, +35% node power per
+ * turn, planning latency unchanged. Changes land here as one-line edits
+ * recorded with the arena run that justified them. */
+export const GO_CHEAT_LIMITS_BY_SIZE: Readonly<Record<number, {
+  candidateLimit: number;
+  doubleMoveLimit: number;
+}>> = {
+  5: { candidateLimit: 4, doubleMoveLimit: 2 },
+  7: { candidateLimit: 0, doubleMoveLimit: 1 },
+  9: { candidateLimit: 0, doubleMoveLimit: 1 },
+  13: { candidateLimit: 0, doubleMoveLimit: 1 },
+  19: { candidateLimit: 0, doubleMoveLimit: 1 },
+};
+
 export type GoCheatAction =
   | { type: "cheatTwoMoves"; x1: number; y1: number; x2: number; y2: number }
   | { type: "cheatRemoveRouter"; x: number; y: number }
@@ -179,6 +206,13 @@ export interface GoDecision {
    * a seed where one wins; the caller must dispatch in that later tick or the
    * decision does not describe the game it will be played in. */
   dispatchOffsetMs?: number;
+  /** Present only when the evaluation was asked to seed the double-move cheat
+   * family from a certified first stone: true when that move was found among
+   * the legal candidates (seeded double offered, plain certified move
+   * force-retained as a value-batch finalist), false when it had to be
+   * dropped — in which case no returned cheat ever competed against the
+   * certified continuation and callers must not let it override one. */
+  preferredFirstMoveRetained?: boolean;
 }
 
 interface PlayedMove {

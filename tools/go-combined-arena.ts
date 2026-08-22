@@ -12,7 +12,17 @@
  * Usage:
  *   bun run go:combined:arena [--games N] [--start-phase N] [--phase-stride N]
  *     [--timing minimum|maximum|random] [--defense-seed N] [--opponent NAME]
+ *     [--cheat] [--cheat-seeded] [--cheat-late [N]] [--cheat-chance P]
  *     [--out result.json]
+ *
+ * `--cheat` adds the `combinedCheat` arm (playbook-first with cheat-unlocked
+ * neural fallback); `--cheat-seeded` additionally adds `combinedCheatSeeded`
+ * (certified hits may become playbook-seeded double-move cheats that leave the
+ * line); `--cheat-late [N]` adds `combinedCheatLate`, which delays the on-line
+ * seeded offer until Black turn N (default 4, counted like the driver's
+ * goBlackTurnIndex). Compare their winRate/nodePowerPerTurn against
+ * `playbookOnly` before setting an opponent's `cheatSeedFromTurn` threshold in
+ * GO_PLAYBOOK_OPPONENTS.
  */
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -51,6 +61,18 @@ if (timing !== "minimum" && timing !== "maximum" && timing !== "random") {
   throw new Error("--timing must be minimum, maximum, or random");
 }
 const opponentIndex = Bun.argv.indexOf("--opponent");
+const cheatEnabled = Bun.argv.includes("--cheat");
+const cheatSeeded = Bun.argv.includes("--cheat-seeded");
+const cheatLateIndex = Bun.argv.indexOf("--cheat-late");
+const cheatLate = cheatLateIndex >= 0;
+// The turn number is optional: `--cheat-late` alone means turn 4.
+const cheatLateRaw = cheatLate ? Number(Bun.argv[cheatLateIndex + 1]) : Number.NaN;
+const cheatLateTurn = cheatLate
+  ? Math.max(0, Math.floor(Number.isFinite(cheatLateRaw) ? cheatLateRaw : 4))
+  : undefined;
+const cheatChance = Bun.argv.includes("--cheat-chance")
+  ? numberFlag("--cheat-chance", 1)
+  : undefined;
 const config = {
   games: Math.max(1, Math.floor(numberFlag("--games", 96))),
   startPhase: Math.floor(numberFlag("--start-phase", 12_345)),
@@ -67,15 +89,22 @@ const config = {
   // certified lookups help from wherever the game actually starts
   // (combinedUnrouted vs neuralUnrouted, which is the live controller's
   // mid-game-only policy).
-  arms: (Bun.argv.includes("--unrouted-baseline")
-    ? ["combined", "playbookOnly", "neuralOnly", "neuralUnrouted", "combinedUnrouted"]
-    : ["combined", "playbookOnly", "neuralOnly"]) as readonly
-    ("combined" | "playbookOnly" | "neuralOnly" | "neuralUnrouted" | "combinedUnrouted")[],
+  ...(cheatChance !== undefined ? { cheatChance } : {}),
+  ...(cheatLateTurn !== undefined ? { cheatLateTurn } : {}),
+  arms: [
+    ...(Bun.argv.includes("--unrouted-baseline")
+      ? ["combined", "playbookOnly", "neuralOnly", "neuralUnrouted", "combinedUnrouted"]
+      : ["combined", "playbookOnly", "neuralOnly"]),
+    ...(cheatEnabled || cheatSeeded || cheatLate ? ["combinedCheat"] : []),
+    ...(cheatSeeded ? ["combinedCheatSeeded"] : []),
+    ...(cheatLate ? ["combinedCheatLate"] : []),
+  ] as readonly ("combined" | "playbookOnly" | "neuralOnly" | "neuralUnrouted"
+    | "combinedUnrouted" | "combinedCheat" | "combinedCheatSeeded" | "combinedCheatLate")[],
 };
 
 const run = await runInHeadlessChrome(
   join(import.meta.dir, "webgpu", "entry-combined-arena.ts"),
-  Math.max(1_800_000, config.games * 3 * 20_000),
+  Math.max(1_800_000, config.games * config.arms.length * 20_000),
   { __goCombinedArenaConfig: config },
   [inlinePlaybookScript(await Bun.file(PLAYBOOK).text())],
 );

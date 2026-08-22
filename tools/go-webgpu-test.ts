@@ -39,11 +39,19 @@ if (Bun.argv.includes("--arena")) {
     if (exact >= 0) return Bun.argv[exact + 1];
     return Bun.argv.find((value) => value.startsWith(`${name}=`))?.slice(name.length + 1);
   };
-  const arena = await runInHeadlessChrome(join(HERE, "entry-arena.ts"), 900_000, {
+  const games = Number(valueAfter("--games") ?? 12);
+  const opponent = valueAfter("--opponent");
+  const daemonRun = opponent === "secret" || opponent === "world-daemon";
+  // Daemon games are an order of magnitude slower than 5x5; give an explicit
+  // daemon bench room to finish instead of the default gate's 15 minutes.
+  const arenaTimeout = Math.max(900_000, games * (daemonRun ? 240_000 : 15_000));
+  const arena = await runInHeadlessChrome(join(HERE, "entry-arena.ts"), arenaTimeout, {
     __goArenaOptions: {
       cheat: Bun.argv.includes("--cheat"),
-      games: Number(valueAfter("--games") ?? 12),
-      opponent: valueAfter("--opponent"),
+      games,
+      opponent,
+      boardSize: valueAfter("--board-size") === undefined
+        ? undefined : Number(valueAfter("--board-size")),
       cheatChance: valueAfter("--cheat-chance") === undefined
         ? undefined : Number(valueAfter("--cheat-chance")),
       cheatK: valueAfter("--cheat-k") === undefined ? undefined : Number(valueAfter("--cheat-k")),

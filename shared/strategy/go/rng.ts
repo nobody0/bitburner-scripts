@@ -69,6 +69,16 @@ export function goCheatSucceeds(dispatchPlaytimeMs: number, successChance: numbe
   return whrng(dispatchPlaytimeMs, 1)[0]! <= successChance;
 }
 
+/** A cheat is offered only when the roll succeeds in the dispatch tick AND in
+ * the immediately following tick, so a dispatch that slips one engine cycle
+ * past the guard can never land on a failing roll. A failed cheat ends the
+ * game, so this must stay a pure function of the dispatch tick — cached worker
+ * evaluations and push-ahead predictions have no wall-clock margin to consult. */
+export function goCheatSucceedsSafely(dispatchPlaytimeMs: number, successChance: number): boolean {
+  return goCheatSucceeds(dispatchPlaytimeMs, successChance)
+    && goCheatSucceeds(dispatchPlaytimeMs + GO_ENGINE_CYCLE_MS, successChance);
+}
+
 /** White constructs a separate WHRNG after its first waitCycle. A 40 ms
  * offline-cycle wait may stay in the dispatch tick or cross one rollover. */
 export function goOpponentSeedCandidates(dispatchPlaytimeMs: number, bonusCycles = 0): number[] {

@@ -35,14 +35,22 @@ interface PendingRequest {
 
 type GoWorkerRpcRequest =
   | { type: "install"; positionId: string; view: GoView; parentTurnId?: string }
-  | { type: "evaluate"; positionId: string; dispatchPlaytime: number }
+  | { type: "evaluate"; positionId: string; dispatchPlaytime: number;
+    preferredFirstMove?: { x: number; y: number } }
   | { type: "playbook"; positionId: string; dispatchPlaytime: number; credit: number }
   | { type: "playbookRoute"; playtime: number; opponent: string }
   | { type: "reset" };
 
 export interface GoNeuralRuntime {
   install(view: GoView, parentTurnId?: string): Promise<{ positionId: string; preparationMs?: number; cached: boolean }>;
-  evaluate(positionId: string, dispatchPlaytime: number, parentTurnId?: string): Promise<GoWorkerEvaluation>;
+  evaluate(
+    positionId: string,
+    dispatchPlaytime: number,
+    parentTurnId?: string,
+    /** Certified playbook move to seed the double-move cheat family with.
+     * Per-evaluation state, like the dispatch tick — never position identity. */
+    preferredFirstMove?: { x: number; y: number },
+  ): Promise<GoWorkerEvaluation>;
   /** Certified merged-playbook action for an installed position at an exact
    * dispatch tick, or undefined off the certified line (or with no playbook
    * embedded in this build). */
@@ -137,8 +145,15 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
     };
   }
 
-  async evaluate(positionId: string, dispatchPlaytime: number, parentTurnId?: string): Promise<GoWorkerEvaluation> {
-    if (parentTurnId) {
+  async evaluate(
+    positionId: string,
+    dispatchPlaytime: number,
+    parentTurnId?: string,
+    preferredFirstMove?: { x: number; y: number },
+  ): Promise<GoWorkerEvaluation> {
+    // A pushed prediction never carries a preferred move, so a seeded evaluate
+    // must go to the worker rather than consume speculative plain-play work.
+    if (parentTurnId && !preferredFirstMove) {
       const key = this.#predictionKey(parentTurnId, positionId, dispatchPlaytime);
       const pushed = this.#predictions.get(key);
       if (pushed) {
@@ -150,6 +165,7 @@ class GoNeuralWorkerClient implements GoNeuralRuntime {
       type: "evaluate",
       positionId,
       dispatchPlaytime: normalizeGoPlaytime(dispatchPlaytime),
+      ...(preferredFirstMove ? { preferredFirstMove } : {}),
     });
     if (response.type !== "evaluated") throw new Error(`unexpected Go worker response ${response.type}`);
     return response.value;

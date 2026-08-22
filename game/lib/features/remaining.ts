@@ -23,6 +23,7 @@ import { stepGang } from "../../../shared/strategy/gang/decide.ts";
 import { goDemands } from "../../../shared/strategy/go/demand.ts";
 import {
   goNeuralPositionIdentity,
+  type GoWorkerPlaybookAction,
 } from "../../../shared/strategy/go/neural/worker-protocol.ts";
 import { GO_OPPONENT_MODEL } from "../../../shared/strategy/go/opponent.ts";
 import { GO_REWARD_RULES, goFavorRepCap, rankGoGames, type GoEtaDemand, type GoRewardView } from "../../../shared/strategy/go/rewards.ts";
@@ -30,6 +31,7 @@ import { goRamPricingCandidate, planGoSchedule } from "../../../shared/strategy/
 import { GO_ENGINE_CYCLE_MS, goAiWaitMs } from "../../../shared/strategy/go/rng.ts";
 import {
   applyGoCheat,
+  GO_CHEAT_LIMITS_BY_SIZE,
   GO_OPPONENTS,
   GO_REWARD_OPPONENTS,
   territory as goTerritory,
@@ -133,8 +135,6 @@ import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedCon
 /** Go's pure ROI policy needs a cold estimate before a runtime request exists;
  * this is not used for broker sizing or placement. */
 const GO_ESTIMATED_GB = 4;
-const GO_CHEAT_CANDIDATE_LIMIT = 4;
-const GO_CHEAT_DOUBLE_MOVE_LIMIT = 2;
 // This is far beyond the useful portion of the rapidly decaying chance curve
 // and keeps the worker independent of Netscript throughout practical games.
 const GO_CHEAT_CHANCE_SAMPLES = 1_024;
@@ -881,11 +881,41 @@ let goTurnReadyAt: number | undefined;
  *
  * So Illuminati justifies a long wait, Daedalus and Tetrads a short one, and
  * the remaining three justify none — their certified lines win no games the
- * network does not already win. */
-const GO_PLAYBOOK_OPPONENTS: Readonly<Record<string, { maxWaitPhases: number }>> = {
+ * network does not already win.
+ *
+ * Cheat-unlocked games always consult the playbook now, with the certified
+ * move overriding an engine cheat by default: the 2026-08-22 combined arena
+ * (512 games/arm, installed merged playbook, random timing) measured
+ * playbook-with-off-line-cheats at 500/512 for Illuminati against 466/512
+ * (91.0%) for the pure neural+cheat play cheat games used to fall back to.
+ *
+ * `cheatSeedFromTurn` additionally allows the engine, from that Black turn
+ * on, to play a double-move cheat whose first stone is the certified move —
+ * deliberately leaving the line (fully neural afterwards). Same runs:
+ *
+ * | Opponent | combined (no cheat) | off-line cheats | seeded from 0 |
+ * |---|---:|---:|---:|
+ * | Illuminati | 504/512, 31.1 pw/turn | 500/512, 32.9 | 468/512, 29.2 |
+ * | Daedalus | 512/512, 5.90 | 504/512, 5.93 | 511/512, 7.34 |
+ * | Tetrads | 512/512, 5.82 | 508/512, 6.21 | 512/512, 7.69 |
+ *
+ * Seeding always pays for Daedalus/Tetrads (+24%/+32% node power per turn at
+ * no win cost) and hurts Illuminati, whose neural baseline is too weak to
+ * leave the certified line early. Delaying Illuminati's seeding was benched
+ * too (same corpus, `--cheat-late`): from turn 4 still loses (477/512), and
+ * from turn 8 (499/512, 32.98 pw/turn) is statistically identical to never
+ * seeding (500/512, 32.89) — the line is spent by then — so Illuminati keeps
+ * no threshold. Set one only where an arena run justifies it, recording the
+ * run here. */
+const GO_PLAYBOOK_OPPONENTS: Readonly<Record<string, {
+  maxWaitPhases: number;
+  /** Black turn index from which an on-line cheat may be seeded from the
+   * certified move; absent = never seed (certified always overrides). */
+  cheatSeedFromTurn?: number;
+}>> = {
   Illuminati: { maxWaitPhases: 5_000 },
-  Daedalus: { maxWaitPhases: 900 },
-  Tetrads: { maxWaitPhases: 900 },
+  Daedalus: { maxWaitPhases: 900, cheatSeedFromTurn: 0 },
+  Tetrads: { maxWaitPhases: 900, cheatSeedFromTurn: 0 },
   "The Black Hand": { maxWaitPhases: 0 },
   Netburners: { maxWaitPhases: 0 },
   "Slum Snakes": { maxWaitPhases: 0 },
@@ -911,6 +941,72 @@ let goPlaybookEntry: { opponent: string; entryPlaytime: number } | undefined;
 function resetGoPlaybookLine(): void {
   goPlaybookCredit = 0;
   goPlaybookPendingCredit = undefined;
+}
+
+type GoPlaybookMoveOrPass = { type: "move"; x: number; y: number } | { type: "pass" };
+
+/** Precedence between the exact neural decision and the certified playbook
+ * action for the same tick. When the evaluation was SEEDED (the certified
+ * move rode in as the double-move's first stone), an engine-chosen cheat
+ * wins: by construction it beat the force-retained certified move
+ * head-to-head in the same value batch, and it deliberately leaves the
+ * certified line. On an unseeded evaluation the certified action overrides
+ * everything — including an engine cheat, which would derail the line with
+ * nothing banked (measured 2026-08-22: 91.0% for cheat-first Illuminati
+ * against 97.7% certified-first). `seeded` therefore means the evaluation was
+ * ASKED to seed AND the engine did not report the benchmark dropped
+ * (decision.preferredFirstMoveRetained !== false): a cheat from an evaluation
+ * whose certified benchmark never competed must not displace the certified
+ * move. The provisional path and the seed-exact dispatch path MUST both route
+ * through this helper, or the published plan digest and the dispatched action
+ * could diverge. */
+function resolveGoExactAction(
+  exact: GoAction,
+  playbookAction: GoPlaybookMoveOrPass | undefined,
+  seeded: boolean,
+): GoAction {
+  return seeded && isGoCheatAction(exact) ? exact : playbookAction ?? exact;
+}
+
+/** The certified playbook lookup's action in the driver's move/pass shape;
+ * align/sleep (and misses) carry no dispatchable move. Shared by the
+ * provisional and seed-exact dispatch paths so the two cannot drift. */
+function goPlaybookMoveOrPass(action: GoWorkerPlaybookAction | undefined): GoPlaybookMoveOrPass | undefined {
+  return action?.kind === "move"
+    ? { type: "move", x: action.x, y: action.y }
+    : action?.kind === "pass"
+      ? { type: "pass" }
+      : undefined;
+}
+
+/** The certified move rides into the evaluation only from the opponent's
+ * cheatSeedFromTurn threshold on: it seeds the double-move family's first
+ * stone and forces the plain certified move into the value batch as the
+ * benchmark the seeded cheat has to beat. Below the threshold (or with none)
+ * the evaluation is unseeded and the certified move overrides whatever the
+ * engine picks. Shared by both dispatch paths so the gate cannot drift. */
+function goCheatSeedMove(
+  view: GoView,
+  playbookAction: GoPlaybookMoveOrPass | undefined,
+  cheatSeedTurn: number | undefined,
+): { x: number; y: number } | undefined {
+  return view.cheat?.unlocked === true
+    && playbookAction?.type === "move"
+    && cheatSeedTurn !== undefined
+    && goBlackTurnIndex(view) >= cheatSeedTurn
+    ? { x: playbookAction.x, y: playbookAction.y }
+    : undefined;
+}
+
+/** Black turn index of the current decision: the move history holds one
+ * entry per move and Black moves first, so k full Black/White rounds leave
+ * 2k entries. Cheats record no history, but the index only gates seeding
+ * while the game is still ON the certified line, where every prior turn was
+ * an ordinary move. Passes record no history either, so a line containing a
+ * pass makes this a LOWER bound on the true Black turn — seeding then starts
+ * late, never early, which is the safe direction for a threshold. */
+function goBlackTurnIndex(view: GoView): number {
+  return Math.floor(view.previousBoards.length / 2);
 }
 
 /** The held board is a LOCAL SIMULATION, advanced by applying our move and the
@@ -953,6 +1049,20 @@ export function setGoNeuralRuntimeForTest(runtime?: GoNeuralRuntime): void {
 export function setGoCheatSuccessTableForTest(chances?: number[]): void {
   if (typeof Bun === "undefined") throw new Error("Go cheat test injection is only available under Bun");
   goCheatSuccessByCount = chances;
+}
+
+let goPlaybookCheatSeedOverride: Readonly<Record<string, number>> | undefined;
+
+export function setGoPlaybookCheatSeedForTest(overrides?: Record<string, number>): void {
+  if (typeof Bun === "undefined") throw new Error("Go playbook test injection is only available under Bun");
+  goPlaybookCheatSeedOverride = overrides;
+}
+
+/** Black turn index from which this opponent's certified move may seed a
+ * double-move cheat, or undefined when the certified move always overrides. */
+function goPlaybookCheatSeedFromTurn(opponent: string): number | undefined {
+  return goPlaybookCheatSeedOverride?.[opponent]
+    ?? GO_PLAYBOOK_OPPONENTS[opponent]?.cheatSeedFromTurn;
 }
 
 /** Wall-clock anchor for the 200 ms engine cycle, established by observing a
@@ -1186,12 +1296,13 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     const installRemainingSec = installHorizonSec(ctx.horizons);
     const rewardOpponents: readonly GoRewardOpponent[] = allowWorldDaemon ? GO_REWARD_OPPONENTS : GO_OPPONENTS;
     // Certified entry windows for the wait-aware ranker. Measured only when a
-    // new game could start, the phase clock is anchored, and cheats are
-    // locked (certified lines are unreachable in cheat games, remaining.ts
-    // playbookEnabled). Each lookup is a cheap worker table read; opponents
-    // beyond their per-opponent wait cap are simply not offered aligned.
+    // new game could start and the phase clock is anchored — cheat games
+    // follow certified lines too (certified moves override engine cheats
+    // until a cheatSeedFromTurn threshold). Each lookup is a cheap worker
+    // table read; opponents beyond their per-opponent wait cap are simply not
+    // offered aligned.
     let playbookEntries: Partial<Record<GoRewardOpponent, { waitSec: number; entryPlaytime: number }>> | undefined;
-    if (claimedAction === "newGame" && goTickPhase && !cheatUnlocked) {
+    if (claimedAction === "newGame" && goTickPhase) {
       const runtime = goNeuralRuntime();
       const routePlaytime = goPredictedPlaytime(goTickPhase, Date.now());
       // One round trip per routed opponent, ISSUED TOGETHER: they are
@@ -1304,11 +1415,10 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         unlocked: topic.cheat.unlocked,
         count: topic.cheat.count,
         successByCount: goCheatSuccessByCount,
-        // Exact faction analysis dominates 19x19 latency on cheat-created
-        // states. There the strongest family gets the whole budget; selectable
-        // boards retain four finalists per topology-changing family.
-        candidateLimit: topic.boardSize === 19 ? 0 : GO_CHEAT_CANDIDATE_LIMIT,
-        doubleMoveLimit: topic.boardSize === 19 ? 1 : GO_CHEAT_DOUBLE_MOVE_LIMIT,
+        // Budgets come from the shared per-size table so live play and the
+        // arenas cannot drift apart; the rationale lives on the table itself.
+        candidateLimit: GO_CHEAT_LIMITS_BY_SIZE[topic.boardSize]!.candidateLimit,
+        doubleMoveLimit: GO_CHEAT_LIMITS_BY_SIZE[topic.boardSize]!.doubleMoveLimit,
       } } : {}),
       nextGame: {
         opponent: preferred.opponent,
@@ -1361,14 +1471,14 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     const playbookEnabled = view.status === "inProgress"
       && view.currentPlayer === "Black"
       && view.board.size === 5
-      && GO_PLAYBOOK_OPPONENTS[view.opponent] !== undefined
-      // Certified lines were proven against the plain rules. With cheats
-      // unlocked the engine may dispatch a cheat action instead of a move,
-      // whose board change is not on any certified line, and the turn's RAM
-      // grant is priced for the claimed action — a playbook move substituted
-      // into a cheat turn would not even be affordable. Cheat games therefore
-      // stay purely neural.
-      && view.cheat?.unlocked !== true;
+      && GO_PLAYBOOK_OPPONENTS[view.opponent] !== undefined;
+    // Cheat games consult the playbook like any other: on an unseeded turn
+    // the certified move overrides even an engine cheat (see
+    // resolveGoExactAction), so the line survives, and cheats fire only off
+    // the line or from an opponent's cheatSeedFromTurn threshold on. RAM is
+    // not a constraint: every cheat-unlocked Black turn is priced by the 8 GB
+    // playTwoMoves representative, which a plain certified makeMove fits
+    // inside.
     // A committed aligned start binds only the first Black move of its game.
     const committedEntry = playbookEnabled
       && goPlaybookEntry
@@ -1402,16 +1512,8 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
         committedEntry?.entryPlaytime,
       ).targetPlaytime
       : observedPlaytime;
-    // This first request also covers a cold position. On normal chained
-    // turns the worker already holds both the position and likely seed set
-    // because it evaluated them during the preceding White response.
-    const provisionalEvaluation = await neuralRuntime.evaluate(
-      installed.positionId,
-      provisionalDispatch,
-      expectedPredictionParent,
-    );
-    decision = provisionalEvaluation.decision;
-    if (generation !== goGeneration) return;
+    // The certified lookup runs BEFORE the evaluation: a certified move can
+    // seed the double-move cheat family, so the evaluation must know it.
     const certifiedProvisional = playbookEnabled
       ? await neuralRuntime.playbook(installed.positionId, provisionalDispatch, goPlaybookCredit)
         .catch(() => undefined)
@@ -1435,15 +1537,24 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       goContinuationReady = true;
       return;
     }
-    if (provisionalPlaybookAction?.kind === "move") {
-      decision = { ...decision, action: {
-        type: "move",
-        x: provisionalPlaybookAction.x,
-        y: provisionalPlaybookAction.y,
-      } };
-    } else if (provisionalPlaybookAction?.kind === "pass") {
-      decision = { ...decision, action: { type: "pass" } };
-    }
+    const provisionalPlaybookMoveOrPass = goPlaybookMoveOrPass(provisionalPlaybookAction);
+    const cheatSeedTurn = goPlaybookCheatSeedFromTurn(view.opponent);
+    const preferredFirstMove = goCheatSeedMove(view, provisionalPlaybookMoveOrPass, cheatSeedTurn);
+    // This first request also covers a cold position. On normal chained
+    // turns the worker already holds both the position and likely seed set
+    // because it evaluated them during the preceding White response.
+    const provisionalEvaluation = await neuralRuntime.evaluate(
+      installed.positionId,
+      provisionalDispatch,
+      expectedPredictionParent,
+      preferredFirstMove,
+    );
+    if (generation !== goGeneration) return;
+    decision = provisionalEvaluation.decision;
+    const provisionalAction = resolveGoExactAction(
+      decision.action, provisionalPlaybookMoveOrPass,
+      preferredFirstMove !== undefined && decision.preferredFirstMoveRetained !== false);
+    if (provisionalAction !== decision.action) decision = { ...decision, action: provisionalAction };
     const decisionAt = Date.now();
     // Provisional planning ended here. The breakdown assembled at dispatch
     // uses this as the boundary between page-side preparation and the RAM
@@ -1659,6 +1770,20 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
               // for the tick this turn will actually land in rather than the
               // one that happens to be current while planning.
               const dispatchPlaytime = target?.targetPlaytime ?? player.totalPlaytime;
+              // The certified lookup is bound to the exact dispatch tick and
+              // runs BEFORE the evaluation so a certified move can seed the
+              // double-move cheat family. A boundary retry that slips the slot
+              // re-consults; when the new slot is off the line (including an
+              // align/sleep there), the neural decision for that same slot
+              // takes over.
+              const certified = !playbookEnabled
+                ? undefined
+                : dispatchPlaytime === provisionalDispatch
+                  ? certifiedProvisional
+                  : await neuralRuntime.playbook(installed.positionId, dispatchPlaytime, goPlaybookCredit)
+                    .catch(() => undefined);
+              const playbookAction = goPlaybookMoveOrPass(certified?.action);
+              const slotPreferredFirstMove = goCheatSeedMove(view, playbookAction, cheatSeedTurn);
               // Usually this is a completed pushed result. A missed seed
               // still reuses the worker's prepared position and GPU weights;
               // the main game thread only performs this small RPC.
@@ -1671,34 +1796,26 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                   installed.positionId,
                   dispatchPlaytime,
                   expectedPredictionParent,
+                  slotPreferredFirstMove,
                 );
               const exactDecision = evaluated.decision;
-              // The certified lookup is bound to the exact dispatch tick. A
-              // boundary retry that slips the slot re-consults; when the new
-              // slot is off the line (including an align/sleep there), the
-              // neural decision for that same slot takes over.
-              const certified = !playbookEnabled
-                ? undefined
-                : dispatchPlaytime === provisionalDispatch
-                  ? certifiedProvisional
-                  : await neuralRuntime.playbook(installed.positionId, dispatchPlaytime, goPlaybookCredit)
-                    .catch(() => undefined);
-              const certifiedAction = certified?.action;
-              const playbookAction = certifiedAction?.kind === "move"
-                ? { type: "move" as const, x: certifiedAction.x, y: certifiedAction.y }
-                : certifiedAction?.kind === "pass"
-                  ? { type: "pass" as const }
-                  : undefined;
               const decisionAt = Date.now();
               finalizeMs += decisionAt - sampledAt;
-              const exactAction = playbookAction ?? exactDecision.action;
+              const exactAction = resolveGoExactAction(
+                exactDecision.action, playbookAction,
+                slotPreferredFirstMove !== undefined && exactDecision.preferredFirstMoveRetained !== false);
               if (exactAction.type === "resume" || exactAction.type === "newGame") {
                 throw new Error(`V9 returned ${exactAction.type} for an active Black turn`);
               }
+              // An engine-chosen cheat leaves the certified line: it is not a
+              // certified dispatch, so no credit may be refreshed from it.
+              const dispatchedPlaybook = !isGoCheatAction(exactAction) && playbookAction !== undefined;
               return {
                 action: exactAction,
-                decision: playbookAction ? { ...exactDecision, action: playbookAction } : exactDecision,
-                playbookCertified: playbookAction ? certified : undefined,
+                decision: exactAction === exactDecision.action
+                  ? exactDecision
+                  : { ...exactDecision, action: exactAction },
+                playbookCertified: dispatchedPlaybook ? certified : undefined,
                 positionId: installed.positionId,
                 seeds: evaluated.opponentSeeds,
                 nextRolloverAt: target
@@ -1707,9 +1824,9 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                 // A certified move is not the committed neural action, so the
                 // worker's push-ahead commit (which verifies its own decision)
                 // is skipped; the next turn issues a fresh install/evaluate.
-                continuationHints: playbookAction ? [] : evaluated.continuations,
+                continuationHints: dispatchedPlaybook ? [] : evaluated.continuations,
                 prediction: {
-                  ...(playbookAction ? { playbook: true as const } : {}),
+                  ...(dispatchedPlaybook ? { playbook: true as const } : {}),
                   model: GO_OPPONENT_MODEL,
                   backend: evaluated.backend ?? "webgpu",
                   modelProfile: evaluated.modelProfile,
@@ -1818,7 +1935,14 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
               ...(latency ? { dispatchBreakdown: latency } : {}),
             };
             response = seeded.response;
-            if (playbookEnabled) {
+            if (playbookEnabled && dispatchedAction && isGoCheatAction(dispatchedAction)) {
+              // The cheat deliberately left the certified line: the diverged
+              // board can never match a certified entry again, so zero the
+              // credit (and any pending align grant) rather than letting a
+              // stale credit hold turns for a dead line. The game is fully
+              // neural from here.
+              resetGoPlaybookLine();
+            } else if (playbookEnabled) {
               // Every dispatched turn spends one board of alignment credit,
               // certified or not. The credit records how many further boards
               // the certificate proved under controlled timing — a property of

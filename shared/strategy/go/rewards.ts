@@ -180,6 +180,28 @@ function nextGoStreak(current: number, won: boolean): { current: number; previou
   return { previous: current, current: current >= 0 ? -1 : current - 1 };
 }
 
+/** Node power granted by one finished game — the exact transition the game
+ * applies at scoring (mirrored by sim/features/go-system.ts): the final Black
+ * score times the opponent difficulty times the streak multiplier of the
+ * streak as it stands AFTER this game's result. Used by the arenas to compare
+ * arms on power per turn, with the streak threaded across each arm's game
+ * sequence. */
+export function goGameNodePowerGain(
+  opponent: GoRewardOpponent,
+  boardSize: number,
+  blackScore: number,
+  won: boolean,
+  streakBefore: number,
+): { gain: number; streakAfter: number } {
+  const streak = nextGoStreak(streakBefore, won);
+  return {
+    gain: blackScore
+      * goDifficultyMultiplier(opponent, boardSize)
+      * goStreakMultiplier(streak.current, streak.previous),
+    streakAfter: streak.current,
+  };
+}
+
 export function goEffectMultiplier(
   nodePower: number,
   opponent: GoRewardOpponent,

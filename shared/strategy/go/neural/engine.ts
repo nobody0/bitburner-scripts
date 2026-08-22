@@ -43,7 +43,7 @@ import {
 import {
   alignedAiSeed,
   GO_ENGINE_CYCLE_MS,
-  goCheatSucceeds,
+  goCheatSucceedsSafely,
   goOpponentSeedCandidates,
   goSuccessorDispatchCandidates,
   nextGoTurnTiming,
@@ -555,6 +555,7 @@ async function finalizeForSeeds(
   seeds: readonly number[],
   engine: GoNeuralEngine,
   dispatchPlaytime?: number,
+  preferredFirstMove?: { x: number; y: number },
 ): Promise<GoDecision> {
   if (prepared.immediate) return prepared.immediate;
   const { view, candidates: allCandidates, elapsedRounds } = prepared;
@@ -576,8 +577,9 @@ async function finalizeForSeeds(
   const cheatChance = view.cheat?.successByCount[view.cheat.count] ?? 0;
   const useCheat = view.cheat?.unlocked === true
     && dispatchPlaytime !== undefined
-    && goCheatSucceeds(dispatchPlaytime, cheatChance);
+    && goCheatSucceedsSafely(dispatchPlaytime, cheatChance);
   let proposalPositionValue = 0;
+  let preferredFirstMoveRetained: boolean | undefined;
   for (const behavior of behaviorBySeed) if (behavior.length !== backend.behaviorFeatures) {
     throw new Error(`V9 behavior shape ${behavior.length} does not match ${backend.behaviorFeatures}`);
   }
@@ -700,10 +702,30 @@ async function finalizeForSeeds(
           forecast: [],
         };
       }
-      const firsts = bestProposal.action.type === "pass" ? [] : ranked
+      // A certified playbook move seeds the double family as an extra first
+      // placement — it does not consume a doubleMoveLimit slot — and its plain
+      // form is force-retained as a value-batch finalist below, so a seeded
+      // cheat is chosen only when it beats the certified continuation
+      // head-to-head under the same evaluation.
+      const preferred = preferredFirstMove === undefined ? undefined
+        : candidates.find((candidate) => candidate.action.type === "move"
+          && candidate.action.x === preferredFirstMove.x
+          && candidate.action.y === preferredFirstMove.y);
+      // Reported to the caller: an engine cheat may only override a certified
+      // move when the certified benchmark actually competed in this batch. A
+      // dropped preferred move (not a legal candidate here) means no such
+      // head-to-head happened.
+      if (preferredFirstMove !== undefined) preferredFirstMoveRetained = preferred !== undefined;
+      const rankedFirsts = bestProposal.action.type === "pass" ? [] : ranked
         .map((index) => candidates[index]!)
         .filter((candidate) => candidate.action.type === "move")
         .slice(0, Math.floor(cheat.doubleMoveLimit));
+      const firsts = preferred && rankedFirsts.length && !rankedFirsts.some((candidate) =>
+        candidate.action.type === "move"
+        && candidate.action.x === preferredFirstMove!.x
+        && candidate.action.y === preferredFirstMove!.y)
+        ? [preferred, ...rankedFirsts]
+        : rankedFirsts;
       const doubles: GoNeuralPreparedCandidate[] = [];
       if (firsts.length) {
         const count = firsts.length * seeds.length;
@@ -767,6 +789,7 @@ async function finalizeForSeeds(
       candidates = [
         ...doubles,
         ...boundedSinglePointCheats(view, Math.floor(cheat.candidateLimit)),
+        ...(preferred ? [preferred] : []),
         pass,
       ];
     } else {
@@ -1156,6 +1179,7 @@ async function finalizeForSeeds(
       positionValue,
       forecast: best.predictedReplies,
       ...(policyOnly ? {} : { predictedWin: best.winProbability }),
+      ...(preferredFirstMoveRetained === undefined ? {} : { preferredFirstMoveRetained }),
     };
   }
   return {
@@ -1165,6 +1189,7 @@ async function finalizeForSeeds(
     positionValue,
     forecast: best.predictedReplies,
     ...(policyOnly ? {} : { predictedWin: best.winProbability }),
+    ...(preferredFirstMoveRetained === undefined ? {} : { preferredFirstMoveRetained }),
   };
 }
 
@@ -1212,6 +1237,11 @@ export interface GoFinalizeOptions {
   /** Explicit configuration, or null to disable; absent resolves the
    * per-profile production default. */
   seedWait?: GoSeedWaitV1 | null;
+  /** Certified playbook move for the current position. On a cheat-eligible
+   * tick it seeds the double-move family's first placement and its plain form
+   * is force-retained as a finalist. Per-evaluation state: it never enters
+   * GoView or the position identity. */
+  preferredFirstMove?: { x: number; y: number };
 }
 
 /** Play a decided turn out to its conclusion and report whether it wins.
@@ -1298,7 +1328,8 @@ export async function finalizeNeuralGoDecision(
   dispatchPlaytime?: number,
   options?: GoFinalizeOptions,
 ): Promise<GoDecision> {
-  const decision = await finalizeForSeeds(prepared, seeds, engine, dispatchPlaytime);
+  const decision = await finalizeForSeeds(
+    prepared, seeds, engine, dispatchPlaytime, options?.preferredFirstMove);
   const profile = goModelProfile(prepared.view.board.size);
   const wait = options?.seedWait === null ? undefined
     : options?.seedWait ?? GO_PROFILE_SEED_WAIT[profile];
@@ -1321,6 +1352,7 @@ export async function finalizeNeuralGoDecision(
     goOpponentSeedCandidates(waitedDispatch, prepared.view.bonusCycles ?? 0),
     engine,
     waitedDispatch,
+    options?.preferredFirstMove,
   );
   const waitedPlaying = waited.action.type !== "resume" && waited.action.type !== "newGame";
   if (rollout) {
@@ -1356,7 +1388,7 @@ export function neuralGoContinuations(
   if (cheat?.candidateLimit === 0
     && dispatchPlaytime !== undefined
     && cheat.unlocked
-    && goCheatSucceeds(dispatchPlaytime, cheat.successByCount[cheat.count] ?? 0)) return [];
+    && goCheatSucceedsSafely(dispatchPlaytime, cheat.successByCount[cheat.count] ?? 0)) return [];
   const decisionAction = decision.action;
   const selected: GoNeuralPreparedCandidate | undefined = decisionAction.type === "move" || decisionAction.type === "pass"
     ? prepared.candidates.find((candidate) => {
@@ -1443,7 +1475,8 @@ export async function decideGoNeural(
   seeds: readonly number[],
   engine: GoNeuralEngine,
   dispatchPlaytime?: number,
+  options?: GoFinalizeOptions,
 ): Promise<GoDecision> {
   const prepared = prepareNeuralGoDecision(view);
-  return finalizeNeuralGoDecision(prepared, seeds, engine, dispatchPlaytime);
+  return finalizeNeuralGoDecision(prepared, seeds, engine, dispatchPlaytime, options);
 }
