@@ -38,6 +38,37 @@ describe("seed-assured Go neural dispatch", () => {
     expect(result.waitedMs).toBe(0);
   });
 
+  test("can verify the clock and invoke the move atomically inside one dodge", async () => {
+    let fallbackDispatches = 0;
+    let atomicDispatches = 0;
+    const result = await runGoNeuralSeedDispatch({
+      phase,
+      clock: {
+        now: () => 1_020,
+        player: async () => player(10_000),
+        sleep: async () => {},
+      },
+      infer: async () => "move",
+      dispatch: async () => { fallbackDispatches++; return "wrong"; },
+      verifyAndDispatch: async (_value, accept) => {
+        const snapshot = player(10_000);
+        const observedAt = 1_020;
+        expect(accept(snapshot, observedAt)).toBe(true);
+        atomicDispatches++;
+        return {
+          player: snapshot,
+          observedAt,
+          dispatched: true,
+          response: Promise.resolve("ok"),
+        };
+      },
+    });
+
+    expect(result.response).toBe("ok");
+    expect(atomicDispatches).toBe(1);
+    expect(fallbackDispatches).toBe(0);
+  });
+
   test("reports deliberate waiting separately from the rest of the turn", async () => {
     // 1,199 leaves one millisecond of the cycle: inside the guard band, so the
     // dispatch targets the next tick and must wait for it.

@@ -4,6 +4,8 @@ import { PRIORITY } from '../strategy/arbiter.ts';
 export const STUB_BASE_GB = 1.6;
 export const COLD_HOME_ARENA_GB = 4.1;
 export const HANDOFF_HOME_RESERVE_GB = 3.6;
+/** Largest recurring dodge including the stub; foodnstuff's 16 GB covers it. */
+export const ROUTINE_DODGE_ARENA_GB = 13.6;
 export const STARVATION_MS = 5_000;
 /** Sentinel for "no planner pass observed yet". Real pass ids start at 1, so
  * the first observation is never mistaken for a repeat of this one. */
@@ -15,7 +17,6 @@ export const FARM_PREEMPTION_PRIORITY = PRIORITY['progression:install-freeze'];
 const DEMAND_HALF_LIFE_MS = 10 * 60_000;
 const POOLING_DEMOTION_OBSERVATIONS = 3;
 
-export type DodgeLane = 'default' | 'long';
 export type RequestClass = 'instant' | 'deferrable';
 
 export interface BrokerRequest {
@@ -24,7 +25,6 @@ export interface BrokerRequest {
   /** Dynamic priceCalls cost; the broker adds STUB_BASE_GB itself. */
   gb: number;
   priority: number;
-  lane: DodgeLane;
   class: RequestClass;
   /** Place ONLY here, or queue.
    *
@@ -115,7 +115,7 @@ export type ReclamationPlan =
       shareGb: number;
       victim: PreemptibleFarmWorker;
       threshold: number;
-      reason: 'priority-at-or-above-install-freeze';
+      reason: 'idle-pooled-worker' | 'priority-at-or-above-install-freeze';
     }
   | {
       action: 'wait';
@@ -136,8 +136,8 @@ interface Demand {
   at: number;
 }
 
-function key(request: Pick<BrokerRequest, 'by' | 'id' | 'lane'>): string {
-  return `${request.by}\0${request.id}\0${request.lane}`;
+function key(request: Pick<BrokerRequest, 'by' | 'id'>): string {
+  return `${request.by}\0${request.id}`;
 }
 
 function executableGb(request: BrokerRequest): number {
@@ -183,10 +183,6 @@ export function planReclamation(
   if (pendingCouldPlace) {
     return { action: 'wait', request, neededGb, threshold: FARM_PREEMPTION_PRIORITY, reason: 'share-exit-pending' };
   }
-  if (request.priority < FARM_PREEMPTION_PRIORITY) {
-    return { action: 'wait', request, neededGb, threshold: FARM_PREEMPTION_PRIORITY, reason: 'priority-below-threshold' };
-  }
-
   const candidates: { victim: PreemptibleFarmWorker; share: ShareChoice }[] = [];
   for (const victim of farmWorkers) {
     const host = usable.find((candidate) => candidate.hostname === victim.hostname);
@@ -205,6 +201,21 @@ export function planReclamation(
     || a.victim.hostname.localeCompare(b.victim.hostname)
     || a.victim.workerId - b.victim.workerId);
   const selected = candidates[0];
+  if (selected && !selected.victim.active) {
+    return {
+      action: 'preempt',
+      request,
+      neededGb,
+      shareWorkerIds: selected.share.workers.map((worker) => worker.workerId),
+      shareGb: selected.share.gb,
+      victim: selected.victim,
+      threshold: FARM_PREEMPTION_PRIORITY,
+      reason: 'idle-pooled-worker',
+    };
+  }
+  if (request.priority < FARM_PREEMPTION_PRIORITY) {
+    return { action: 'wait', request, neededGb, threshold: FARM_PREEMPTION_PRIORITY, reason: 'priority-below-threshold' };
+  }
   if (!selected) {
     return { action: 'wait', request, neededGb, threshold: FARM_PREEMPTION_PRIORITY, reason: 'no-single-victim-unblocks' };
   }
@@ -367,13 +378,16 @@ export class RamBroker {
     const measuredDynamicGb = this.largestMeasured(now);
     let guaranteed = Math.max(0, ...Object.values(reserves));
 
-    // Smallest host that fits, matching the old placement policy: carving the
-    // reserve out of the biggest host shrinks the largest contiguous block
-    // every hack solve depends on.
+    // The stable ladder is bootstrap home -> n00dles -> full foodnstuff.
+    // Before fixed promotion, starvation may carve only the current request's
+    // transient block. Host selection is nevertheless sized for the largest
+    // recurring dodge, so a Go turn chooses foodnstuff rather than CSEC. The
+    // carve collapses as soon as the request drains.
     const starvedGb = this.starvedExecutableGb(now);
     if (starvedGb > guaranteed) {
+      const hostNeedGb = Math.max(starvedGb, ROUTINE_DODGE_ARENA_GB);
       const candidate = usable
-        .filter((host) => host.maxRam >= starvedGb)
+        .filter((host) => host.maxRam >= hostNeedGb)
         .sort((a, b) => a.maxRam - b.maxRam || a.hostname.localeCompare(b.hostname))[0];
       if (candidate) {
         reserves[candidate.hostname] = Math.max(reserves[candidate.hostname] ?? 0, starvedGb);
@@ -417,7 +431,7 @@ export class RamBroker {
       existing.request = request;
       return { status: 'queued', request, enqueuedAt: existing.enqueuedAt };
     }
-    const host = chooseHost(hosts, arena, executableGb(request), request.lane, request.pinHost);
+    const host = chooseHost(hosts, arena, executableGb(request), request.pinHost);
     if (host) return { status: 'placed', host, request };
     return this.enqueue(request, now);
   }
@@ -441,17 +455,17 @@ export class RamBroker {
       (a, b) => b.request.priority - a.request.priority || a.enqueuedAt - b.enqueuedAt || a.sequence - b.sequence,
     );
     const placed: Extract<BrokerDecision, { status: 'placed' }>[] = [];
-    const lanes = new Set<DodgeLane>();
     for (const queued of ordered) {
-      if (lanes.has(queued.request.lane)) continue;
-      const host = chooseHost(free, arena, executableGb(queued.request), queued.request.lane, queued.request.pinHost);
+      const host = chooseHost(free, arena, executableGb(queued.request), queued.request.pinHost);
       if (!host) continue;
       const entry = free.find((candidate) => candidate.hostname === host)!;
       entry.freeGb -= executableGb(queued.request);
       this.#queue.delete(key(queued.request));
       this.#measure(queued.request, now);
-      lanes.add(queued.request.lane);
       placed.push({ status: 'placed', host, request: queued.request });
+      // There is one synchronous dodge FIFO. Granting more than its head here
+      // would pin several heap leases before any later stub can start.
+      break;
     }
     return placed;
   }
@@ -502,7 +516,6 @@ function chooseHost(
   hosts: readonly BrokerHost[],
   arena: ArenaPlan,
   neededGb: number,
-  lane: DodgeLane,
   pinHost?: string,
 ): string | undefined {
   const arenaSet = new Set(arena.hosts);
@@ -511,13 +524,7 @@ function chooseHost(
     // A pinned request places there or waits. Falling back to another host would
     // defeat the reason it was pinned.
     .filter((host) => pinHost === undefined || host.hostname === pinHost);
-  // The long Go lane may overlap the controller/default lane. Keep it off
-  // home unconditionally, so it cannot consume the direct sweep's home floor
-  // while that independent lane is entering its stub; it queues when the
-  // fleet has no suitable block.
-  const nonHome = lane === 'long' ? candidates.filter((host) => host.hostname !== 'home') : [];
-  const laneCandidates = lane === 'long' ? nonHome : candidates;
   const compare = (a: BrokerHost, b: BrokerHost): number => a.freeGb - b.freeGb || a.hostname.localeCompare(b.hostname);
-  return laneCandidates.filter((host) => arenaSet.has(host.hostname)).sort(compare)[0]?.hostname
-    ?? laneCandidates.filter((host) => !arenaSet.has(host.hostname)).sort(compare)[0]?.hostname;
+  return candidates.filter((host) => arenaSet.has(host.hostname)).sort(compare)[0]?.hostname
+    ?? candidates.filter((host) => !arenaSet.has(host.hostname)).sort(compare)[0]?.hostname;
 }

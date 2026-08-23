@@ -1,9 +1,12 @@
 import type { NS } from "@ns";
 import { stepDarknet } from "../../../shared/strategy/dnet/decide.ts";
 import { CONTRACT_QUEUE_LIMIT } from "../../../shared/strategy/side/contracts.ts";
-import { holdHostFrom, planBackdoors, type HoldHost } from "../../../shared/strategy/dnet/hold.ts";
+import {
+  holdHostFrom,
+  planBackdoors,
+  type HoldHost,
+} from "../../../shared/strategy/dnet/hold.ts";
 import type { AttemptOutcome, LogDrainOutcome, ReportHost, VaultEntry } from "../../../shared/strategy/dnet/courier.ts";
-import { overseerArgs, residentArgs } from "../../../shared/strategy/dnet/mission.ts";
 import { publishKnowledge } from "../../../shared/strategy/dnet/publish.ts";
 import {
   DEFAULT_NET_DEPTH,
@@ -19,6 +22,7 @@ import {
   foldLogDrain,
   foldAttempts,
   foldReports,
+  forgetMs,
   fresh,
   isImmune,
   markCredentialKnown,
@@ -29,7 +33,6 @@ import {
 import type { Need } from "../../../shared/strategy/needs.ts";
 import { labCacheDeferral } from "../../../shared/strategy/progression/decide.ts";
 import type { DarknetAgentDigest } from "../../../shared/telemetry/topics/dnet.ts";
-import { versionedScript } from "../../../shared/deployment.ts";
 import {
   CONTROLLER_METHODS,
   RESIDENT_METHODS,
@@ -39,14 +42,17 @@ import {
   type DnetRendezvous,
   type DnetSpreadReport,
   type DnetFarmReport,
+  type DnetCredentialRejection,
   type DnetLabReport,
   type DnetHoldReport,
   type DnetStormReport,
 } from "../../dnet/realm.ts";
 import { gameBuildId } from "../build-id.ts";
+import { handoffLaunch, temporaryRunOptions } from "../launch-shared.ts";
+import type { DnetAgentLaunch, DnetOverseerLaunch } from "../../dnet/launch.ts";
 import { gameGlobal } from "../globals.ts";
 import { isScriptDeath } from "../errors.ts";
-import { merge, type GameState } from "../state.ts";
+import { merge, set, type GameState } from "../state.ts";
 import {
   darknetContractsFromListings,
   mergeContractQueue,
@@ -223,28 +229,29 @@ interface DnetHomeState {
   vault: Map<string, VaultEntry>;
   /** Darknet hosts HOME has backdoored, keyed to when each was installed.
    *
-   *  Home's own record rather than an observed fact, for the same reason the
-   *  stasis set is the overseer's: `singularity.installBackdoor` acts on the
-   *  terminal's current server, so home is the only thing in the run that can
+   *  Home's own record rather than an observed fact: `singularity.installBackdoor`
+   *  acts on the terminal's current server, so home is the only thing that can
    *  install one — and `ns.getServer().backdoorInstalled` is 2 GB home does not
    *  spend on a host it already knows about. A restart clears the backdoor
    *  (~9%/tick on a backdoored host), so the set is trimmed whenever the host is
    *  seen to have gone and re-earned otherwise. */
   backdoored: Map<string, number>;
+  /** Last exact JSON written to dnet-vault.txt. Used only to avoid rewriting an
+   * unchanged zero-RAM state file on every five-second feature tick. */
+  persistedState: string | undefined;
   /** The backoff that keeps a structurally impossible backdoor from relaunching
    *  a stub every pass. */
   backdoorNextAt: number;
   backdoorInFlight: boolean;
-  /** What the backdoor policy last decided, published beside the other planners'
-   *  refusals: `planBackdoors` spends only the FREE allowance, so "why not" is
-   *  its usual answer and the only interesting one. */
+  /** What the two-slot recycler last decided. Its harvest and quality refusals
+   *  are the useful explanation for why a sacrificial target was not chosen. */
   backdoorReport:
     | { install: string[]; refused: Record<string, number>; examples: { host: string; why: string; detail: string }[] }
     | undefined;
-  /** The overseer's own stasis set, as drained. Unioned with the dodged probe's
-   *  reading, because the two see it at different cadences and a pinned host that
-   *  reads as perishable costs a survey a minute for ever. */
+  /** Newest complete stasis set, whether read directly or changed by a job. */
   stasisLinked: Set<string>;
+  /** Observation/change time of that complete set. */
+  stasisObservedAt: number;
   /** The highest charisma a JOB said it needed. Today only the maze walker
    *  reports one, and it is folded into the career need `stepDarknet` already
    *  posts rather than into a second channel. */
@@ -255,7 +262,7 @@ interface DnetHomeState {
   unknownModels: Record<string, number>;
   /** Agent hosts seen this generation, and how many stopped reporting. The gap
    * between them is agent mortality — see spec/dnet.md's Observability note. */
-  agentsSeen: Set<string>;
+  agentsSeenEver: number;
   /** Residents the overseer last reported, keyed by HOST.
    *
    * A host keeps exactly one resident — that is the spawn-chain design — and the
@@ -292,13 +299,15 @@ function freshDnetHomeState(): DnetHomeState {
     lab: undefined,
     vault: new Map(),
     backdoored: new Map(),
+    persistedState: undefined,
     backdoorNextAt: 0,
     backdoorInFlight: false,
     backdoorReport: undefined,
     stasisLinked: new Set(),
+    stasisObservedAt: 0,
     charismaNeeded: undefined,
     unknownModels: {},
-    agentsSeen: new Set(),
+    agentsSeenEver: 0,
     agents: new Map(),
     residentsLost: 0,
     overseerBeatAt: 0,
@@ -313,6 +322,148 @@ let home = freshDnetHomeState();
 
 function record(action: string, ok: boolean, detail: string): void {
   home.lastResult = { action, ok, detail, at: Date.now() };
+}
+
+/** Whether a delayed rejection still refers to the credential home holds.
+ * A newer verification or a different server lifetime always wins. */
+export function credentialRejectionApplies(
+  held: VaultEntry,
+  rejection: DnetCredentialRejection,
+): boolean {
+  return held.at <= rejection.at
+    && (held.identity === undefined || rejection.identity === undefined || held.identity === rejection.identity);
+}
+
+/** Where home persists private darknet progress across a save RELOAD.
+ *
+ * The vault and ordinary-backdoor set are page-realm memory: a reload restarts
+ * every script from nothing while the game keeps both underlying facts. Losing
+ * them would force a full re-crack and would make the planner install extras.
+ * whose password provably has not changed (stasis-linked ones above all). Home's
+ * OWN files survive a reload, and `ns.read`/`ns.write` are 0 GB, so home simply
+ * remembers what it legitimately cracked and reads it back on boot — no scp, no
+ * darkweb, no dodge. This is save-state recovery of our own work, NOT reading a
+ * password out of game memory (which would skip the cracking challenge and is
+ * deliberately not done anywhere).
+ *
+ * The file carries the GENERATION. A prestige mints a whole new net with new
+ * passwords, so its stored generation no longer matches and the file is ignored
+ * — the vault is rebuilt from scratch, as it must be. A reload keeps the
+ * generation, so the passwords are still valid; each is re-verified by
+ * `authenticate` on use anyway, and an identity mismatch drops it. */
+const DNET_VAULT_FILE = "dnet-vault.txt";
+
+export interface PersistedBackdoorEntry {
+  hostname: string;
+  installedAt: number;
+}
+
+export function serializePersistedDnetState(
+  generation: string,
+  entries: readonly VaultEntry[],
+  backdoors: readonly PersistedBackdoorEntry[] = [],
+): string {
+  return JSON.stringify({ generation, vault: entries, backdoors });
+}
+
+/** Parse the one generation-bound private state file. Invalid sections become
+ * empty; a corrupt file or generation mismatch restores nothing. */
+export function parsePersistedDnetState(
+  raw: string,
+  generation: string,
+): { vault: VaultEntry[]; backdoors: PersistedBackdoorEntry[] } {
+  try {
+    if (raw.length === 0) return { vault: [], backdoors: [] };
+    const parsed = JSON.parse(raw) as {
+      generation?: string;
+      vault?: VaultEntry[];
+      backdoors?: PersistedBackdoorEntry[];
+    };
+    if (parsed.generation !== generation) return { vault: [], backdoors: [] };
+    const vault = Array.isArray(parsed.vault)
+      ? parsed.vault.filter((entry): entry is VaultEntry =>
+        !!entry && typeof entry.hostname === "string" && entry.hostname.length > 0
+        && typeof entry.password === "string" && typeof entry.at === "number" && Number.isFinite(entry.at))
+      : [];
+    const validBackdoors = Array.isArray(parsed.backdoors)
+      ? parsed.backdoors.filter((entry): entry is PersistedBackdoorEntry =>
+        !!entry && typeof entry.hostname === "string" && entry.hostname.length > 0
+        && typeof entry.installedAt === "number" && Number.isFinite(entry.installedAt))
+      : [];
+    const backdoors = [...new Map(validBackdoors.map((entry) => [entry.hostname, entry])).values()];
+    return { vault, backdoors };
+  } catch {
+    return { vault: [], backdoors: [] };
+  }
+}
+
+/** Persisted backdoors disproved by authoritative fold evidence.
+ *
+ * Absence from knowledge is not evidence after reload: the crawler may simply
+ * not have rediscovered the host yet. A gone observation, an identity
+ * replacement, or the fold finally forgetting a previously-gone host is
+ * conclusive and releases the slot. */
+export function invalidatedPersistedBackdoors(
+  entries: ReadonlyMap<string, number>,
+  knowledge: DarknetKnowledge,
+  replacedOrForgotten: readonly string[],
+): string[] {
+  const invalidated = new Set(replacedOrForgotten);
+  for (const hostname of entries.keys()) {
+    if (knowledge.hosts[hostname]?.goneAt !== undefined) invalidated.add(hostname);
+  }
+  return [...invalidated].filter((hostname) => entries.has(hostname)).sort();
+}
+
+function persistDnetState(ns: NS, generation: string): void {
+  const serialized = serializePersistedDnetState(
+    generation,
+    [...home.vault.values()],
+    [...home.backdoored].map(([hostname, installedAt]) => ({ hostname, installedAt })),
+  );
+  if (serialized === home.persistedState) return;
+  try {
+    ns.write(DNET_VAULT_FILE, serialized, "w");
+    home.persistedState = serialized;
+  } catch {
+    /* a bad write costs one reload's worth of re-cracking, never the run */
+  }
+}
+
+/** Repopulate the vault from home's persisted file when — and only when — it
+ * belongs to THIS generation. Also seeds each host into knowledge so the fresh
+ * fold does not immediately sweep the credential as belonging to a host it has
+ * never heard of, and so the host shows as a known, credentialled re-plant
+ * target the moment a neighbour re-surveys it. Returns how many were loaded. */
+function loadPersistedDnetState(
+  ns: NS,
+  generation: string,
+): { credentials: number; backdoors: number } {
+  let raw: string;
+  try {
+    raw = ns.read(DNET_VAULT_FILE);
+  } catch {
+    return { credentials: 0, backdoors: 0 };
+  }
+  if (typeof raw !== "string") return { credentials: 0, backdoors: 0 };
+  home.persistedState = raw;
+  const persisted = parsePersistedDnetState(raw, generation);
+  let loaded = 0;
+  for (const entry of persisted.vault) {
+    home.vault.set(entry.hostname, entry);
+    if (home.knowledge && !home.knowledge.hosts[entry.hostname]) {
+      home.knowledge.hosts[entry.hostname] = {
+        hostname: entry.hostname,
+        ...(entry.identity !== undefined ? { identity: entry.identity } : {}),
+        lastSeenAt: entry.at ?? Date.now(),
+        facts: {},
+        credentialKnown: true,
+      };
+    }
+    loaded++;
+  }
+  for (const entry of persisted.backdoors) home.backdoored.set(entry.hostname, entry.installedAt);
+  return { credentials: loaded, backdoors: persisted.backdoors.length };
 }
 
 /** Take what the darknet has learned, and hand it what only home can see.
@@ -358,7 +509,23 @@ function drainDarknet(generation: string): {
   if (taken.spread) home.spread = taken.spread;
   if (taken.farm) home.farm = taken.farm;
   if (taken.hold) home.hold = taken.hold;
-  for (const hostname of taken.stasisLinked ?? []) home.stasisLinked.add(hostname);
+  if (taken.stasisSnapshot !== undefined && taken.stasisSnapshot.at > home.stasisObservedAt) {
+    home.stasisObservedAt = taken.stasisSnapshot.at;
+    home.stasisLinked = new Set(taken.stasisSnapshot.hosts);
+  }
+  for (const rejection of taken.credentialRejections) {
+    const held = home.vault.get(rejection.hostname);
+    if (held === undefined || !credentialRejectionApplies(held, rejection)) continue;
+    home.vault.delete(rejection.hostname);
+    const host = home.knowledge?.hosts[rejection.hostname];
+    if (host !== undefined) delete host.credentialKnown;
+  }
+  for (const invalidation of taken.backdoorInvalidations) {
+    const installedAt = home.backdoored.get(invalidation.hostname);
+    if (installedAt !== undefined && installedAt <= invalidation.at) {
+      home.backdoored.delete(invalidation.hostname);
+    }
+  }
   if (taken.charismaNeeded !== undefined) {
     home.charismaNeeded = Math.max(home.charismaNeeded ?? 0, taken.charismaNeeded);
   }
@@ -394,6 +561,7 @@ function drainDarknet(generation: string): {
     // superset — so the record travels whole rather than being re-listed and
     // silently missing whatever counter is added next. `alive` is recomputed
     // from the beat window at publish time.
+    if (!home.agents.has(resident.host)) home.agentsSeenEver++;
     home.agents.set(resident.host, { ...resident, role: "resident", alive: true });
   }
   home.overseerBeatAt = Math.max(home.overseerBeatAt, rendezvous.lastBeatAt);
@@ -420,7 +588,19 @@ function dnetRendezvous(): DnetRendezvous | undefined {
 
 const dnet: FeatureDriver = {
   id: "dnet",
-  everyMs: 30_000,
+  // 5s — the feature-cadence floor, and as fast as this may go without joining
+  // the hot path. This tick DRAINS the overseer and PUBLISHES the map, pure
+  // in-process work (read the realm rendezvous, fold, publish; the seed and
+  // backdoors carry their own backoffs and no-op until due). But feature
+  // drivers are awaited SERIALLY, and this one folds + publishes over up to 220
+  // hosts and plans backdoors every pass, so a sub-5s period would crowd the
+  // 200ms dispatcher the way `features.test.ts` guards against. The period is
+  // pure first-paint latency: the resident surveys darkweb in ~3s and drains
+  // to the overseer instantly, but the MAP cannot appear until home's next tick
+  // publishes it. 10s left a blank screen long after the beachhead was alive;
+  // 5s follows it closely. Going lower is a job for an event-driven wake (the
+  // overseer signalling home on drain), not a hotter poll.
+  everyMs: 5_000,
   requires: "dnet",
   async tick(ctx: DriverContext) {
     const topic = ctx.state.topics.dnet;
@@ -436,18 +616,37 @@ const dnet: FeatureDriver = {
     const progression = ctx.state.topics.progression;
     const generation = `${progression?.bitNode ?? 0}:${progression?.lastAugReset ?? 0}`;
     if (!home.knowledge || home.knowledge.generation !== generation) {
+      home = freshDnetHomeState();
       home.knowledge = emptyKnowledge(generation);
-      home.codes = {};
       delete ctx.state.darknetContractListings;
       delete ctx.state.darknetContractHandledAt;
       ctx.state.contractQueue = ctx.state.contractQueue?.filter((contract) => contract.dnet === undefined);
+      // A reload restarts every script and empties the vault; this reads back the
+      // passwords home cracked before it, so a reloaded run skips re-cracking
+      // (immune/stasis hosts especially, whose password never changes). The file
+      // is generation-guarded, so a prestige's mismatch loads nothing. Done here,
+      // once per generation, right after knowledge is reset so the seeded hosts
+      // land in the fresh fold.
+      const loaded = loadPersistedDnetState(ctx.ns, generation);
+      if (loaded.credentials > 0 || loaded.backdoors > 0) {
+        record(
+          "dnet-restore",
+          true,
+          `restored ${loaded.credentials} credential(s) and ${loaded.backdoors} backdoor(s) from the last reload`,
+        );
+      }
+    }
+    const topicIsCurrent = topic.knowledge === undefined || topic.knowledge.generation === generation;
+    if (topicIsCurrent && topic.stasisLinked !== undefined && topic.stasisObservedAt !== undefined
+      && topic.stasisObservedAt > home.stasisObservedAt) {
+      home.stasisObservedAt = topic.stasisObservedAt;
+      home.stasisLinked = new Set(topic.stasisLinked);
     }
     const knowledge = home.knowledge;
     const {
       hosts: reported,
       attempts: reportedAttempts,
       logDrains: reportedLogDrains,
-      residents,
       drained,
       rejected,
       credentials: vaultDrained,
@@ -466,21 +665,29 @@ const dnet: FeatureDriver = {
     // instead of the real depth, and the map cannot draw the rows we have not
     // reached without knowing how many there are. Carried over from the topic
     // between sightings, since it only changes when a lab is completed.
-    const netDepth = netDepthFromLabs(Object.keys(knowledge.hosts)) ?? topic.netDepth;
+    const netDepth = netDepthFromLabs(Object.keys(knowledge.hosts)) ?? (topicIsCurrent ? topic.netDepth : undefined);
     const expiry: ExpiryOpts = {
       bitNode,
       backdoored: home.backdoored.size,
       ...(netDepth !== undefined ? { netDepth } : {}),
-      // Both sources, because they see the set at different cadences: the
-      // dodged probe reads `getStasisLinkedServers` when it happens to run, and
-      // the overseer knows every link it spent the moment it spent one.
-      stasisLinked: new Set([...(topic.stasisLinked ?? []), ...home.stasisLinked]),
+      // The authoritative snapshot plus any newer controller pin/release
+      // events, reconciled by observation time above.
+      stasisLinked: new Set(home.stasisLinked),
     };
-    // Home's own probe is folded as one more vantage rather than kept beside the
-    // map in a second shape. It is the only source for `darkweb` until a resident
-    // is standing out there, and it costs nothing to merge.
-    const folded = foldReports(knowledge, [...(topic.probed ?? []), ...reported], now, expiry);
+    // Only the residents' drained reports now. Home no longer reads darkweb
+    // itself — the resident standing on it probes it on the mutation clock and
+    // drains the result here, so there is exactly one prober and no redundant
+    // home-side copy to fold in.
+    const folded = foldReports(knowledge, reported, now, expiry);
     home.knowledge = folded.knowledge;
+    const invalidatedHosts = new Set([...folded.hostsReplaced, ...folded.hostsForgotten]);
+    for (const hostname of invalidatedPersistedBackdoors(
+      home.backdoored,
+      home.knowledge,
+      [...folded.hostsReplaced, ...folded.hostsForgotten],
+    )) {
+      home.backdoored.delete(hostname);
+    }
     syncDarknetContracts(ctx.state, home.knowledge, now, expiry);
     // Attempt outcomes fold into home's OWN ledger — the same helper the
     // overseer uses — so the panel's cracking progress survives an overseer
@@ -519,10 +726,19 @@ const dnet: FeatureDriver = {
         markCredentialKnown(host);
       }
     }
+    // Persist the private reload state after reconciliation. The writer compares
+    // exact JSON first, so unchanged five-second ticks perform no file write;
+    // credential growth/shrink and backdoor installs/removals do.
+    persistDnetState(ctx.ns, generation);
     home.knowledge.mutationsSeen += mutations;
     // The hosts that actually reported, so `seenEver - live` is agent mortality
     // rather than a count of the one label a drain used to carry.
-    for (const host of residents) home.agentsSeen.add(host);
+    const agentRetentionMs = forgetMs(expiry);
+    for (const [hostname, agent] of [...home.agents]) {
+      const host = home.knowledge.hosts[hostname];
+      if (invalidatedHosts.has(hostname) || host === undefined || host.goneAt !== undefined
+        || now - agent.lastBeatAt > agentRetentionMs) home.agents.delete(hostname);
+    }
     const cover = coverage(home.knowledge, now, expiry);
     // From the FOLD, for the same reason `topologyComplete` is. Home's probe
     // computes this over its own one hop, and `probe()` is HOST-LOCAL — so from
@@ -588,7 +804,11 @@ const dnet: FeatureDriver = {
     for (const agent of liveResidents) {
       if (agent.active !== undefined) activeByKind[agent.active] = (activeByKind[agent.active] ?? 0) + 1;
     }
-    merge(ctx.state, "dnet", {
+    set(ctx.state, "dnet", {
+      ...(topicIsCurrent && topic.stasisLinkLimit !== undefined
+        ? { stasisLinkLimit: topic.stasisLinkLimit }
+        : {}),
+      ...(topicIsCurrent && topic.instability !== undefined ? { instability: topic.instability } : {}),
       channel: {
         drained,
         rejected,
@@ -667,8 +887,8 @@ const dnet: FeatureDriver = {
               { ...digest, alive: now - digest.lastBeatAt < OVERSEER_STALE_MS },
             ]),
         ),
-        agentsLost: [...home.agents.values()].filter((agent) => now - agent.lastBeatAt >= OVERSEER_STALE_MS).length,
-        agentsSeenEver: Math.max(home.agentsSeen.size, home.agents.size),
+        agentsLost: home.residentsLost,
+        agentsSeenEver: Math.max(home.agentsSeenEver, home.agents.size),
         overseer: {
           host: "darkweb",
           lastBeatAt: home.overseerBeatAt,
@@ -686,6 +906,8 @@ const dnet: FeatureDriver = {
       mutationIntervalMs: mutationIntervalMs(netDepth, bitNode),
       charisma: ctx.state.topics.player?.skills.charisma ?? 1,
       topologyComplete,
+      stasisLinked: [...home.stasisLinked].sort(),
+      stasisObservedAt: home.stasisObservedAt,
     });
     const decision = stepDarknet({
       topologyComplete,
@@ -709,7 +931,7 @@ const dnet: FeatureDriver = {
           ...(neighbours ? { neighbours } : {}),
         };
       }),
-      stasisLinked: topic.stasisLinked ?? [],
+      stasisLinked: [...home.stasisLinked],
       charisma: ctx.state.topics.player?.skills.charisma ?? 1,
     });
 
@@ -743,7 +965,15 @@ const dnet: FeatureDriver = {
     // evaluates its direct-connection requirement BEFORE the darkweb early-out,
     // and only home holds the TOR edge. A stub anywhere else scps happily and
     // then gets a silent 0.
-    const overseerAlive = now - home.overseerBeatAt < OVERSEER_STALE_MS;
+    const buildId = gameBuildId();
+    const retiringBuild = rendezvous !== undefined && rendezvous.buildId !== buildId;
+    if (retiringBuild) {
+      rendezvous.order({
+        charisma: ctx.state.topics.player?.skills.charisma ?? 1,
+        standDown: true,
+      });
+    }
+    const overseerAlive = !retiringBuild && now - home.overseerBeatAt < OVERSEER_STALE_MS;
     // A host keeps exactly ONE resident, and it is the only thing that can start
     // work there. Home plants the first two — the overseer and darkweb's own
     // resident — and after that the net plants itself: a resident that opens a
@@ -759,55 +989,66 @@ const dnet: FeatureDriver = {
     const darkwebResident = rendezvous?.queues.get("darkweb");
     const residentAlive = darkwebResident !== undefined
       && now - residentLastLife(darkwebResident) < OVERSEER_STALE_MS;
-    if ((!overseerAlive || !residentAlive) && now >= home.seedNextAt
-      && (topic.probed ?? []).some((server) => server.hostname === "darkweb")) {
-      const buildId = gameBuildId();
-      const controllerFile = versionedScript("dnet/overseer.js", buildId);
-      const agentFile = versionedScript("dnet/agent.js", buildId);
-      // The agent carries its identity in ns.args rather than reading the realm,
-      // so a resident planted by an overseer that has since died still knows
-      // which run artifact its telemetry belongs to.
-      const identity = JSON.stringify(gameGlobal.artifactIdentity ?? {});
+    // NOT gated on the dodged probe. `darkweb` is a guaranteed constant the
+    // moment dnet access is granted — and this driver only runs at all once it
+    // is (`requires: "dnet"`), so waiting for `topic.probed` to name darkweb
+    // just added a probe period (up to 30s) of blank screen before the
+    // beachhead could even be attempted. The probe never confirmed the thing
+    // that gates `exec` anyway — home's TOR edge — only that darkweb exists.
+    // The seed's own `scp`+`exec` is the real reachability test, and it fails
+    // into `seedNextAt`'s exponential backoff on a world where home cannot yet
+    // reach darkweb (no TOR). So the seed is attempted on the FIRST tick this
+    // driver runs, and the probe is left to enrich the map, not gate the boot.
+    if (!retiringBuild && (!overseerAlive || !residentAlive) && now >= home.seedNextAt) {
+      const controllerFile = "dnet/overseer.js";
+      const agentFile = "dnet/agent.js";
+      // The prober rides to darkweb too, though darkweb's own worker never execs
+      // it (the overseer probes darkweb directly): it has to be PRESENT on darkweb
+      // so the worker there can `scp` it onward to each neighbour it plants.
+      const proberFile = "dnet/prober.js";
       const charisma = ctx.state.topics.player?.skills.charisma ?? 1;
-      const missionId = `dnet-${generation}-${Math.floor(now / 1000)}`;
-      const controllerArgs = overseerArgs({ missionId, generation, identity, charisma, agentFile });
-      const residentLaunchArgs = residentArgs({
-        missionId,
-        generation,
-        identity,
-        agentId: "resident-darkweb",
-      });
       const wantController = !overseerAlive;
 
       // The same list the claim is priced from, so the reservation and the stub
       // can never be sized off different sets.
-      const seeded = await featureDodgeOn(ctx, "dnet", "action:seed", DNET_SEED_METHODS, "home", (stubNs: NS) => {
+      const seeded = await featureDodgeOn(ctx, "dnet", "action:seed", DNET_SEED_METHODS, "home", async (stubNs: NS) => {
         // Both payloads in ONE scp. `exec` of a file that is not there returns 0,
         // which is indistinguishable from "the host is full" — the same trap
         // game/lib/net.ts documents for the dodge stub — so the agent must never
         // arrive without the overseer beside it, or the other way round.
-        if (!stubNs["scp"]([controllerFile, agentFile], "darkweb", "home")) {
+        if (!stubNs["scp"]([controllerFile, agentFile, proberFile], "darkweb", "home")) {
           return { controller: 0, resident: 0, reason: "scp refused" };
         }
         // The overseer is the durable half and holds the accumulated map, so a
         // live one is left strictly alone: restarting it to fix a missing
         // resident would throw the map away to solve a smaller problem.
         const controller = wantController
-          ? stubNs["exec"](
-            controllerFile,
-            "darkweb",
-            { threads: 1, ramOverride: priceAgent(stubNs, CONTROLLER_METHODS) },
-            ...controllerArgs,
+          ? await handoffLaunch<DnetOverseerLaunch>(
+            {
+              kind: "dnet-overseer",
+              host: "darkweb",
+              buildId,
+              generation,
+              identity: gameGlobal.artifactIdentity,
+              charisma,
+            },
+            () => stubNs["exec"](
+              controllerFile,
+              "darkweb",
+              temporaryRunOptions({ threads: 1, ramOverride: priceAgent(stubNs, CONTROLLER_METHODS) }),
+            ),
           )
           : -1;
         if (controller === 0) {
           return { controller, resident: 0, reason: "exec refused (darkweb full, or not synced)" };
         }
-        const resident = stubNs["exec"](
-          agentFile,
-          "darkweb",
-          { threads: 1, ramOverride: priceAgent(stubNs, RESIDENT_METHODS) },
-          ...residentLaunchArgs,
+        const resident = await handoffLaunch<DnetAgentLaunch>(
+          { kind: "dnet-agent", host: "darkweb" },
+          () => stubNs["exec"](
+            agentFile,
+            "darkweb",
+            temporaryRunOptions({ threads: 1, ramOverride: priceAgent(stubNs, RESIDENT_METHODS) }),
+          ),
         );
         return {
           controller,
@@ -842,8 +1083,8 @@ const dnet: FeatureDriver = {
     // does not re-crack a net we already opened.
     // The one darknet action home performs itself, and it performs it because
     // it is the only thing that can: a backdoor is installed on the TERMINAL's
-    // current server. Spends only the free allowance, so most passes it decides
-    // to do nothing and says why.
+    // current server. It keeps two sacrificial backdoors on the worst fully
+    // harvested RAM hosts, so most passes it decides to do nothing and says why.
     await serveDarknetBackdoors(
       ctx,
       home.knowledge,
@@ -852,7 +1093,7 @@ const dnet: FeatureDriver = {
       netDepth,
       bitNode,
       ctx.state.topics.player?.skills.charisma ?? 1,
-      topic.instability?.authenticationDurationMultiplier ?? 1,
+      (topicIsCurrent ? topic.instability?.authenticationDurationMultiplier : undefined) ?? 1,
     );
 
     // Symbols worth spreading propaganda about, and the bar is deliberately
@@ -904,8 +1145,11 @@ const dnet: FeatureDriver = {
         // residents and which are irreplaceable — and it ACTS, because
         // `setStasisLink` pins the calling host. But it cannot see how many
         // links exist or which hosts already hold one, so those come from here.
-        ...(topic.stasisLinkLimit !== undefined ? { stasisLimit: topic.stasisLinkLimit } : {}),
-        ...(topic.stasisLinked !== undefined ? { stasisLinked: topic.stasisLinked } : {}),
+        ...(topicIsCurrent && topic.stasisLinkLimit !== undefined ? { stasisLimit: topic.stasisLinkLimit } : {}),
+        stasisSnapshot: {
+          hosts: [...home.stasisLinked].sort(),
+          at: home.stasisObservedAt,
+        },
         // Whether a labyrinth can exist at all: `getCurrentLabName` is gated on
         // FULL access (BN15 or SF15), so a program-only run gets the 5-deep net
         // and no lab is ever generated. Only home can see the bitNode and the
@@ -921,8 +1165,7 @@ const dnet: FeatureDriver = {
         // burst for ordinary churn, and the 30-minute seed-eligibility window
         // is what gates its seed hunt.
         ...(home.lastStormAt !== undefined ? { lastStormAt: home.lastStormAt } : {}),
-        vault: [...home.vault.values()],
-        vaultSnapshotAt: now,
+        vaultSnapshot: { entries: [...home.vault.values()], at: now },
       });
     }
 
@@ -987,12 +1230,10 @@ export function darknetRoute(
  * the install is a quarter of it) and skips the hacking-skill gate entirely,
  * which is what makes it worth having at all.
  *
- * What it buys is remote `exec`: the reachability gate tests
- * `backdoorBypasses && backdoorInstalled` and nothing else, so a backdoored host
- * can be reached from anywhere rather than only from a neighbour. What it costs
- * is `1.07 ^ surplus` on EVERY authentication in the net past a free allowance
- * of `max(rootedMovable / 24, 2)` — which is why `planBackdoors` spends only the
- * allowance and why two are always free. */
+ * The policy uses the destructive side deliberately: two backdoors avoid every
+ * global authentication penalty while making fully harvested, subnormal-RAM
+ * hosts eligible for the restart/delete branches. Only deletion plus a later
+ * population addition creates a fresh first-auth roll and RAM-clear cache. */
 async function serveDarknetBackdoors(
   ctx: DriverContext,
   knowledge: DarknetKnowledge,
@@ -1003,20 +1244,36 @@ async function serveDarknetBackdoors(
   charisma: number,
   instability: number,
 ): Promise<void> {
-  const hosts: HoldHost[] = Object.values(knowledge.hosts).map((host) => ({
-    ...holdHostFrom(host, {
-      at: now,
-      expiry,
-      agentAlive: (home.agents.get(host.hostname)?.lastBeatAt ?? 0) > now - OVERSEER_STALE_MS,
-      hasCredential: home.vault.has(host.hostname),
-      stasisLinked: home.stasisLinked.has(host.hostname),
-    }),
-    // A stasis link SETS `backdoorInstalled` (`effects.ts:234`), so a pinned
-    // host already has one and is also outside the counted pool. Recording it
-    // as backdoored is what stops us spending a four-second install on a host
-    // that has been reachable all along.
-    ...(home.backdoored.has(host.hostname) || home.stasisLinked.has(host.hostname) ? { backdoored: true } : {}),
-  }));
+  const protectedHosts = new Set(
+    (home.lab?.walkers ?? []).map((walker) => walker.from),
+  );
+  const hosts: HoldHost[] = Object.values(knowledge.hosts).map((host) => {
+    const difficulty = fresh<number>(host, "difficulty", now, expiry);
+    const maxRam = fresh<number>(host, "maxRam", now, expiry);
+    const blockedRam = fresh<number>(host, "blockedRam", now, expiry);
+    const caches = fresh<string[]>(host, "caches", now, expiry);
+    const contracts = fresh<string[]>(host, "contracts", now, expiry);
+    const stormSeed = fresh<boolean>(host, "stormSeed", now, expiry);
+    return {
+      ...holdHostFrom(host, {
+        at: now,
+        expiry,
+        agentAlive: (home.agents.get(host.hostname)?.lastBeatAt ?? 0) > now - OVERSEER_STALE_MS,
+        hasCredential: home.vault.has(host.hostname),
+        stasisLinked: home.stasisLinked.has(host.hostname),
+      }),
+      ...(difficulty !== undefined ? { difficulty } : {}),
+      ...(maxRam !== undefined ? { maxRam } : {}),
+      ...(blockedRam !== undefined ? { blockedRam } : {}),
+      ...(caches !== undefined ? { caches } : {}),
+      ...(contracts !== undefined ? { contracts } : {}),
+      ...(stormSeed !== undefined ? { stormSeed } : {}),
+      ...(protectedHosts.has(host.hostname) ? { protected: true } : {}),
+      // A stasis link sets backdoorInstalled, so a pinned host is already
+      // remotely reachable and is outside the recycler's destructive pool.
+      ...(home.backdoored.has(host.hostname) || home.stasisLinked.has(host.hostname) ? { backdoored: true } : {}),
+    };
+  });
   const plan = planBackdoors({
     hosts,
     netDepth: netDepth ?? DEFAULT_NET_DEPTH,
@@ -1037,24 +1294,25 @@ async function serveDarknetBackdoors(
   if (home.backdoorInFlight || now < home.backdoorNextAt) return;
   // THE BELIEF EXPIRES, exactly as every other darknet fact does. A backdoored
   // host carries a ~9%/tick restart and a restart CLEARS the backdoor
-  // (`restartServer` drops `backdoorInstalled`), and nothing home can afford
-  // observes it: `ns.getServer` is 2 GB and no darknet server detail reports
-  // one. So the install is a stamped fact checked against the mutation clock —
-  // and holding it past its life is the expensive direction twice over, because
-  // it both suppresses the re-install and inflates the instability count the
-  // overseer runs its expiries on.
+  // (restartServer drops backdoorInstalled). The stamped belief is persisted
+  // beside the credential vault, so a reload restores the same occupied slots.
+  // Expiry removes a belief when restart/deletion should have invalidated it,
+  // and that removal is persisted before another slot can be filled.
   const backdoorLife = msPerHostEventAny(
     ["restarted", "deleted"],
     netDepth ?? DEFAULT_NET_DEPTH,
     bitNode,
     home.backdoored.size,
   );
+  let backdoorsChanged = false;
   for (const [hostname, installedAt] of [...home.backdoored]) {
     const host = knowledge.hosts[hostname];
     if (!host || host.goneAt !== undefined || now - installedAt > backdoorLife) {
       home.backdoored.delete(hostname);
+      backdoorsChanged = true;
     }
   }
+  if (backdoorsChanged) persistDnetState(ctx.ns, knowledge.generation);
   const target = plan.install[0];
   if (target === undefined) return;
   const route = darknetRoute(knowledge, target, now, expiry);
@@ -1095,6 +1353,7 @@ async function serveDarknetBackdoors(
     });
     if (outcome.ok) {
       home.backdoored.set(target, Date.now());
+      persistDnetState(ctx.ns, knowledge.generation);
       record("backdoor", true, `${target} backdoored, ${outcome.value} hops out`);
     } else if (!outcome.queued) {
       home.backdoorNextAt = now + DNET_BACKDOOR_BACKOFF_MS;
@@ -1115,7 +1374,11 @@ async function serveDarknetBackdoors(
  * disagree: a claim without an action wastes a reservation, and an action
  * without a claim spends RAM the broker never accounted for. */
 function dnetSeedWanted(state: GameState): boolean {
-  if (!(state.topics.dnet?.probed ?? []).some((server) => server.hostname === "darkweb")) return false;
+  // Deliberately NOT gated on `topic.probed`: the tick's seed action is not
+  // either (see the beachhead block). `darkweb` is guaranteed the moment dnet
+  // access is granted, so the claim reserves seed RAM on the first tick and
+  // the action spends it the same tick, rather than both waiting a probe
+  // period for a fact that was never in doubt.
   const now = Date.now();
   // Either the overseer is gone, or darkweb has no resident to run anything.
   if (now - home.overseerBeatAt >= OVERSEER_STALE_MS) return true;

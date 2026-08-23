@@ -56,9 +56,9 @@ describe("darknet contract queue", () => {
     expect(contracts.map(contractKey)).toEqual(["dn-1\0a.cct", "dn-1\0c.cct", "dn-2\0b.cct"]);
   });
 
-  test("rejects identity-less legacy state and terminal observations", () => {
+  test("rejects identity-less listings and terminal observations", () => {
     const listings = {
-      legacy: { identity: undefined, observedAt: 1_000, validUntil: 2_000, files: ["old.cct"] },
+      invalid: { identity: undefined, observedAt: 1_000, validUntil: 2_000, files: ["old.cct"] },
       "dn-1": { identity: "10.0.0.1", observedAt: 1_000, validUntil: 2_000, files: ["a.cct", "b.cct"] },
     } as unknown as Record<string, { identity: string; observedAt: number; validUntil: number; files: string[] }>;
     expect(darknetContractsFromListings(listings, 1_500).map(contractKey))

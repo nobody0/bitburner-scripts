@@ -34,7 +34,7 @@ export function brokerHosts(
 }
 
 function requestKey(request: BrokerRequest): string {
-  return `${request.by}\0${request.id}\0${request.lane}`;
+  return `${request.by}\0${request.id}`;
 }
 
 /** Commit pure broker placements to the same Heap the farm allocates from. */

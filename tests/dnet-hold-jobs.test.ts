@@ -165,7 +165,6 @@ function rig(over: {
     getServerMaxRam: () => 32,
     getServerUsedRam: () => 0,
     getServer: () => ({ ip: "10.0.0.1" }),
-    getHostname: () => "dn-1",
   } as unknown as NS;
   return state;
 }
@@ -181,10 +180,12 @@ describe("the walker", () => {
     // Every word it sent is one the engine's parser accepts. The direction word
     // IS the password: there is no move call.
     for (const word of r.walked) expect(["north", "east", "south", "west"]).toContain(word);
-    // The lab's cache listing rides home with the success, because reaching the
-    // exit is what drops it.
-    expect(result.hosts?.[0]!.caches).toContain("the_great_work_123.cache");
-    expect(result.hosts?.[0]!.contracts).toEqual(["found.cct"]);
+    // The walker does NOT list the exit's `.cache` — no `ls` on the walk, so no
+    // caches/contracts ride home. The ordinary worker `planSpread` re-plants here
+    // the instant the walk ends reads it, paying `ls` on one resident instead of
+    // on every authenticate thread.
+    expect(result.hosts?.[0]!.caches).toBeUndefined();
+    expect(result.hosts?.[0]!.contracts).toBeUndefined();
   });
 
   test("a wall does not move it, and it does not walk into the same wall twice", async () => {
@@ -201,34 +202,38 @@ describe("the walker", () => {
     expect(r.walked.length).toBeLessThan(10);
   });
 
-  test("below the lab's charisma it refuses to START, and posts the need", async () => {
+  test("an unexpected act-time charisma refusal ends the walker immediately", async () => {
     // Every move would be a 451 and nothing would be learned, so the walk is a
     // host held for hours in exchange for refusals. The requirement travels to
     // home's existing career need instead.
     const r = rig({ charismaGate: 600 });
     const result = await bodies(300).walk!(r.ns, { host: LAB_LADDER[0]!.hostname, from: "dn-1" });
     expect(result.ok).toBe(false);
-    expect(result.charismaNeeded).toBe(600);
-    // ...and it never sent a single move.
-    expect(r.walked).toEqual([]);
+    expect(result.charismaNeeded).toBeUndefined();
+    expect(r.walked).toEqual(["east"]);
   });
 
-  test("it is the one long-lived kind, and it never spawns mid-walk", () => {
-    // Position is `DarknetState.labLocations[pid]`: a dead PID abandons the
-    // walk with no way to resume. `spawn` ends the PID, so the walk has to be
-    // one process from start to finish — which is what `longLived` and the beat
-    // exist for. The `spawn` in the list fires only AFTER the exit, to hand the
-    // host back to resident mode.
-    expect(JOB_METHODS["walk"]).toContain("spawn");
-    expect(NO_RESPAWN_KINDS).not.toContain("walk");
-    // And NO `heartbleed`, ever: a log read mid-walk would need a respawn cycle
-    // that abandons the maze position with the PID. The lab answers through
-    // `authenticate`'s own return value, and the only extra vision the walker
-    // pays for — `labradar` — is a same-PID, 0 GB call whose render also comes
-    // back in the return value. Anything that DOES need a log ring is a job for
-    // a different host, scheduled by the overseer, never for the walker.
+  test("it is the one long-lived kind, and it runs its host ALONE with no spawn", () => {
+    // Position is `DarknetState.labLocations[pid]`: a dead PID abandons the walk
+    // with no way to resume, which is what `longLived` and the beat exist for.
+    // But it carries NO `spawn`: while it is the lab walker its host is the most
+    // important in the net and runs it alone — every byte a spawn-back would cost
+    // is an `authenticate` thread instead — so it is NO_RESPAWN and ends by
+    // letting `planSpread` re-plant the host as an ordinary worker once the lab is
+    // done (the overseer re-execs through the freed, now-immutable host).
+    expect(JOB_METHODS["walk"]).not.toContain("spawn");
+    expect(NO_RESPAWN_KINDS).toContain("walk");
+    // And NO `heartbleed`, ever: the lab answers through `authenticate`'s own
+    // return value, and the only extra vision the walker pays for — `labradar` —
+    // is a same-PID, 0 GB call whose render also comes back in the return value.
     expect(JOB_METHODS["walk"]).toContain("dnet.labradar");
     expect(JOB_METHODS["walk"]).not.toContain("dnet.heartbleed");
+    // Its ONLY job is to walk to completion — no `ls` (the exit cache is read by
+    // the ordinary worker re-planted afterwards) and no `getServer` (2.0 GB of ip
+    // the overseer never uses), so its per-thread price is as small as possible
+    // and the thread count as large as possible.
+    expect(JOB_METHODS["walk"]).not.toContain("ls");
+    expect(JOB_METHODS["walk"]).not.toContain("getServer");
   });
 
   test("it beats every move, so its queue is not swept out from under it", async () => {
@@ -250,9 +255,8 @@ describe("the walker", () => {
 
   test("it publishes its map through the realm, and a successor walks the seeded maze straighter", async () => {
     // The one piece of walk progress that survives a PID: the field. The first
-    // walker pays for the map; the second — a re-seeded walker after a death,
-    // or a scout joining — starts from it and stops paying for walls the first
-    // one already found.
+    // walker pays for the map; a re-seeded successor starts from it and stops
+    // paying for walls the first one already found.
     let shared: LabField | undefined;
     const deps = {
       charisma: () => 1000,
@@ -273,12 +277,6 @@ describe("the walker", () => {
     expect(second.walked.length).toBeLessThanOrEqual(first.walked.length);
   });
 
-  test("a scout walk finishes too — its route bias only closes doors nobody has seen", async () => {
-    const r = rig();
-    const result = await bodies().walk!(r.ns, { host: LAB_LADDER[0]!.hostname, from: "dn-1", role: "scout" });
-    expect(result.ok, result.detail).toBe(true);
-    for (const word of r.walked) expect(["north", "east", "south", "west"]).toContain(word);
-  });
 });
 
 describe("the pin", () => {
@@ -415,7 +413,6 @@ describe("the storm job", () => {
       ls: () => (over.seeded === false ? ["cache_1.cache"] : ["STORM_SEED.exe", "cache_1.cache"]),
       getServerMaxRam: () => 32,
       getServerUsedRam: () => 0,
-      getHostname: () => "dn-1",
     } as unknown as NS;
     return { ns, calls };
   };

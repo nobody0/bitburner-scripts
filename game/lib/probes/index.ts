@@ -109,7 +109,7 @@ export interface SingleStepProbe extends ProbeBase {
    *  tests/features.test.ts checks every name against the type definitions.
    *  Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L434-L448 */
   methods: string[];
-  run(stubNs: NS, ctx: ProbeContext): Emission[] | Promise<Emission[]>;
+  run(stubNs: NS, ctx: ProbeContext): Emission[];
 }
 
 /** Whatever a stepped probe carries between its steps. Deliberately untyped at
@@ -123,7 +123,7 @@ export interface DodgeStep {
    *  WHICH half of a probe is unaffordable rather than just "the probe". */
   id: string;
   methods: string[];
-  run(stubNs: NS, ctx: ProbeContext, acc: ProbeAcc): void | Promise<void>;
+  run(stubNs: NS, ctx: ProbeContext, acc: ProbeAcc): void;
 }
 
 /** A dodged probe split across several stub launches.

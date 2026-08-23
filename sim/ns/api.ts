@@ -581,6 +581,19 @@ export function makeSimNs(host: SimNsHost, process: SimProcess): NS {
     getServerSecurityLevel: (hostname: unknown): number => requireServer(host, hostname, process.host).hackDifficulty ?? 0,
     getServerMaxRam: (hostname: unknown): number => requireServer(host, hostname, process.host).maxRam,
     getServerUsedRam: (hostname: unknown): number => requireServer(host, hostname, process.host).ramUsed,
+    // v3.0.1 NetscriptFunctions.ts: dnsLookup is bidirectional. The shared
+    // resolver already applies Netscript's hostname/IP coercion and visibility
+    // rules; unlike ordinary getters this API returns "" for an invalid host.
+    dnsLookup: (rawHost: unknown = process.host): string => {
+      let server: SimServer;
+      try {
+        server = requireServer(host, rawHost, process.host);
+      } catch {
+        return "";
+      }
+      const query = typeof rawHost === "number" ? String(rawHost) : rawHost;
+      return query === server.ip ? server.hostname : server.ip;
+    },
 
     // --- ops ------------------------------------------------------------
     hack: hgw("hack"),

@@ -1,5 +1,4 @@
 import type { NS, ResetInfo } from "@ns";
-import { versionedScript } from "../shared/deployment.ts";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
 import type { Goal } from "../shared/goals/goal.ts";
 import { describeOverrides, type FeatureOverrides } from "../shared/features/profile.ts";
@@ -71,15 +70,16 @@ import { setGoNeuralRuntimeForTest } from "../game/lib/features/remaining.ts";
  * uses for its dodge and worker rendezvous — so multi-seed fan-out is
  * process-level (sim/run.ts). */
 
-const WORKER_SCRIPT = versionedScript("worker/worker.js", "sim");
-const DODGE_STUB = versionedScript("lib/dodge-stub.js", "sim");
+const WORKER_SCRIPT = "worker/worker.js";
+const DODGE_STUB = "lib/dodge-stub.js";
 /** The darknet payloads. Registered like any other artifact so the controller's
  * seed really places a process and the agents really run — without them the
  * seed would `exec` a filename the sim has no main() for, the process would
  * finish immediately, and a BN15 run would report a darknet that never advances
  * while looking like the deploy worked. */
-const DNET_OVERSEER = versionedScript("dnet/overseer.js", "sim");
-const DNET_AGENT = versionedScript("dnet/agent.js", "sim");
+const DNET_OVERSEER = "dnet/overseer.js";
+const DNET_AGENT = "dnet/agent.js";
+const DNET_PROBER = "dnet/prober.js";
 const START_SCRIPT = "start.js";
 
 export interface GameRunOptions {
@@ -238,6 +238,8 @@ export interface GameRunResult {
  * hosts more than one (tests) cannot leak a controller epoch or a live worker
  * registry into the next. */
 const REALM_SLOTS = [
+  "spawning_script",
+  "script_launch_tail",
   "controllerEpoch",
   "artifactIdentity",
   "state",
@@ -245,22 +247,13 @@ const REALM_SLOTS = [
   "worker_info",
   "worker_jobs",
   "worker_wake",
-  "worker_stop",
-  "worker_stop_requested",
   "dispatch_done",
   "dispatch_wake",
   "dispatch_wake_pending",
   "dispatch_weaken_timer",
   "dispatch_jit_timer",
   "dispatch_jit_at",
-  "dodge_func",
-  "dodge_cb",
-  "dodge_reject",
-  "dodge_running",
-  "go_dodge_func",
-  "go_dodge_cb",
-  "go_dodge_reject",
-  "go_dodge_running",
+  "dodge_tail",
 ] as const;
 
 function clearRealm(): void {
@@ -404,8 +397,8 @@ async function runGameInstalled(
   const terminal = { host: save?.currentServer ?? "home" };
   const initialHomeFiles = new Set(
     save
-      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_OVERSEER, DNET_AGENT, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
-      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_OVERSEER, DNET_AGENT, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
+      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_OVERSEER, DNET_AGENT, DNET_PROBER, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
+      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_OVERSEER, DNET_AGENT, DNET_PROBER, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
   );
   const permanentDarknetAccess = (): boolean => bitnode === 15 || (world.player.sourceFiles["15"] ?? 0) > 0;
   if (permanentDarknetAccess()) initialHomeFiles.add("DarkscapeNavigator.exe");
@@ -750,6 +743,7 @@ async function runGameInstalled(
     worker,
     dnetOverseer,
     dnetAgent,
+    dnetProber,
   ] = await Promise.all([
     import("../game/start.ts"),
     import("../game/lib/features/index.ts"),
@@ -758,6 +752,7 @@ async function runGameInstalled(
     import("../game/worker/worker.ts"),
     import("../game/dnet/overseer.ts"),
     import("../game/dnet/agent.ts"),
+    import("../game/dnet/prober.ts"),
   ]);
 
   // Bun caches every feature module for the process lifetime, while each
@@ -914,6 +909,7 @@ async function runGameInstalled(
   host.scripts.set(WORKER_SCRIPT, worker.main as ScriptMain);
   host.scripts.set(DNET_OVERSEER, dnetOverseer.main as ScriptMain);
   host.scripts.set(DNET_AGENT, dnetAgent.main as ScriptMain);
+  host.scripts.set(DNET_PROBER, dnetProber.main as ScriptMain);
   host.scripts.set(START_SCRIPT, ((ns: NS) => startMain(ns, options.features)) as ScriptMain);
 
   const scenarioId = scenarioFingerprint({

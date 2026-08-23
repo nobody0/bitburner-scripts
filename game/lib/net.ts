@@ -1,5 +1,4 @@
 import type { NS, Server } from "@ns";
-import { isScriptVersion } from "../../shared/deployment.ts";
 
 /** Network bootstrap closures — every function here runs INSIDE a dodge stub
  * (bracket-notation ns calls, so importing bundles pay nothing). Budgets are
@@ -79,7 +78,7 @@ export function deployFleet(stubNs: NS, scripts: string[], servers: Record<strin
   return deployed;
 }
 
-/** Budget: ps 0.2 + kill 0.5 + killall 0.5 = 1.2 (getHostname and pid are free).
+/** Budget: ps 0.2 + kill 0.5 + killall 0.5 = 1.2 (pid is free).
  *
  * Cold-boot fleet reclaim. Our controller owns the fleet, so anything still
  * running when a fresh realm starts is an orphan: workers from a previous
@@ -95,10 +94,13 @@ export function deployFleet(stubNs: NS, scripts: string[], servers: Record<strin
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L742-L759
  *
  * Returns the hosts that had something to reclaim. */
-export function reclaimFleet(stubNs: NS, servers: Record<string, Server>, controllerPid: number): string[] {
+export function reclaimFleet(
+  stubNs: NS,
+  servers: Record<string, Server>,
+  controllerPid: number,
+  stubHost = "home",
+): string[] {
   const reclaimed: string[] = [];
-  // Free (0 GB) getters, so this costs the stub nothing.
-  const stubHost = stubNs["getHostname"]();
   const survivors = new Set([controllerPid, stubNs["pid"]]);
   for (const server of Object.values(servers)) {
     if (!server.hasAdminRights) continue;
@@ -119,13 +121,8 @@ export function reclaimFleet(stubNs: NS, servers: Record<string, Server>, contro
   return reclaimed;
 }
 
-/** Scripts from earlier versions of this project. They are killed wherever
- * they turn up, so a build push is enough to retire an architecture — no game
- * reload required. */
-export const RETIRED_SCRIPTS = ["worker/starter.js", "main.js"];
-
 /** Budget: ps 0.2 + kill 0.5 = 0.7. Continuous safety net run every sweep:
- * kills retired scripts, plus workers whose op is no longer registered.
+ * kills workers whose process is no longer registered.
  *
  * Liveness is tested against the realm-level worker registry, NOT the
  * dispatcher's own ledger: a build handoff gives the new controller a fresh
@@ -136,21 +133,15 @@ export function reapStrayScripts(
   stubNs: NS,
   hosts: string[],
   workerBaseScript: string,
-  registeredOpIds: Set<number>,
-): { workers: number; retired: number } {
-  const retiredNames = new Set(RETIRED_SCRIPTS);
+  registeredPids: Set<number>,
+): number {
   let workers = 0;
-  let retired = 0;
   for (const host of hosts) {
     for (const process of stubNs["ps"](host)) {
-      if (retiredNames.has(process.filename)) {
-        if (stubNs["kill"](process.pid)) retired++;
-        continue;
-      }
-      if (!isScriptVersion(process.filename, workerBaseScript)) continue;
-      if (registeredOpIds.has(Number(process.args[0]))) continue;
+      if (process.filename !== workerBaseScript) continue;
+      if (registeredPids.has(process.pid)) continue;
       if (stubNs["kill"](process.pid)) workers++;
     }
   }
-  return { workers, retired };
+  return workers;
 }

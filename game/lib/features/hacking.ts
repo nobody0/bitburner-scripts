@@ -101,8 +101,6 @@ export function resetHackingState(): void {
   globals.worker_info!.clear();
   globals.worker_jobs!.clear();
   globals.worker_wake!.clear();
-  globals.worker_stop!.clear();
-  globals.worker_stop_requested!.clear();
   globals.dispatch_done!.length = 0;
   globals.dispatch_wake = undefined;
   globals.dispatch_wake_pending = false;
@@ -1678,14 +1676,14 @@ async function buyPortOpener(ctx: DriverContext, portsRequired: number, claimId?
 /** One dispatcher pump: build the view, drain completions, plan, launch, and
  * track the target switch. Shared by the scheduled tick and the wake pass —
  * the wake pass IS a pump, just triggered by a landing instead of the clock. */
-function runPump(
+async function runPump(
   ns: NS,
   game: GameState,
   caps: DriverContext["caps"],
   arenaReserves: Readonly<Record<string, number>>,
   installSec: number | undefined,
   sharePricing: ShareValue | undefined,
-): ReturnType<typeof pump> | undefined {
+): Promise<Awaited<ReturnType<typeof pump>> | undefined> {
   const servers = game.topics.servers;
   const player = game.topics.player;
   if (!servers || !player || Object.keys(servers).length === 0) return undefined;
@@ -1722,7 +1720,7 @@ function runPump(
   // pooling: farm batch ops ride pooled serve workers (worker.ts serve mode),
   // collapsing exec churn — the browser-side cost of a fresh WorkerScript per
   // op — to near zero at depth.
-  const result = pump(ns, driver, view, completions, {
+  const result = await pump(ns, driver, view, completions, {
     arenaReserves,
     pooling: true,
     ...(installSec !== undefined ? { horizonMs: installSec * 1_000 } : {}),
@@ -1762,13 +1760,13 @@ export function plannerPassId(): number {
   return plannerPasses;
 }
 
-export function pumpOnWake(
+export async function pumpOnWake(
   ns: NS,
   game: GameState,
   caps: DriverContext["caps"],
   arenaReserves: Readonly<Record<string, number>>,
   installSec: number | undefined,
-): void {
+): Promise<void> {
   const now = performance.now();
   // Ordinary completions are throughput hints and may be coalesced. A queued
   // weaken is different: after a spread weaken's trailing debounce, this is
@@ -1786,7 +1784,7 @@ export function pumpOnWake(
   if (weakenWindow) weakenWindowPumps++;
   wakesThisFrame++;
   wakePumps++;
-  runPump(ns, game, caps, arenaReserves, installSec, latestShareValue);
+  await runPump(ns, game, caps, arenaReserves, installSec, latestShareValue);
 }
 
 export const hacking: FeatureDriver = {
@@ -1823,7 +1821,7 @@ export const hacking: FeatureDriver = {
     // everything below planFarm is ms-native.
     const installSec = usableForecastSec(ctx.horizons.install);
     latestShareValue = shareValue(game, ctx.caps);
-    const result = runPump(ns, game, ctx.caps, ctx.arena.reserves, installSec, latestShareValue);
+    const result = await runPump(ns, game, ctx.caps, ctx.arena.reserves, installSec, latestShareValue);
     if (!result) return;
     const driver = hackingState();
     const target = result.directive.farm?.host ?? "";

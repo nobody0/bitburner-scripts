@@ -81,7 +81,7 @@ export interface RamArenaDigest {
   queueDepth: number;
   largestWaitingGb: number;
   neededForLargestWaitingGb: number;
-  waits: { by: string; id: string; gb: number; waitMs: number; class: 'instant' | 'deferrable'; lane: 'default' | 'long' }[];
+  waits: { by: string; id: string; gb: number; waitMs: number; class: 'instant' | 'deferrable' }[];
   starvation: { by: string; id: string; gb: number; waitMs: number }[];
   demand: Record<string, number>;
   promoted: boolean;

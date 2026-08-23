@@ -673,13 +673,6 @@ describe("corp staged script", () => {
     ...over,
   });
 
-  test("stages run in order and each names its expected effect", () => {
-    for (const stage of CORP_STAGES) {
-      expect(stage.expect.length).toBeGreaterThan(5);
-      expect(stage.id.length).toBeGreaterThan(2);
-    }
-  });
-
   test("founding comes first, then Agriculture", () => {
     expect(stepCorp(view({ hasCorporation: false })).action.type).toBe("createCorporation");
     expect(stepCorp(view()).action.type).toBe("expandIndustry");

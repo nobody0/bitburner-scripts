@@ -21,7 +21,7 @@ type GoPlayer = ReturnType<NS["getPlayer"]>;
 
 export interface GoNeuralSeedClock {
   now(): number;
-  player(): GoPlayer;
+  player(): GoPlayer | Promise<GoPlayer>;
   sleep(ms: number): Promise<void>;
 }
 
@@ -49,6 +49,10 @@ export interface GoNeuralSeedDispatch<T, R> {
   phase?: GoTickPhase;
 }
 
+export type GoVerifiedDispatch<R> =
+  | { player: GoPlayer; observedAt: number; dispatched: false }
+  | { player: GoPlayer; observedAt: number; dispatched: true; response: Promise<R> };
+
 /** Run seed-dependent neural inference and the Go call as one assured unit.
  *
  * A target tick is chosen before inference. Inference runs immediately, so it
@@ -61,6 +65,14 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
   phase?: GoTickPhase;
   infer(player: GoPlayer, target?: GoSeedTarget): Promise<T>;
   dispatch(value: T): Promise<R>;
+  /** Optional atomic final boundary. The implementation synchronously reads
+   * the public clock and invokes the ns action in one dodge when `accept`
+   * succeeds; the returned action Promise is awaited only after that stub exits. */
+  verifyAndDispatch?(
+    value: T,
+    accept: (player: GoPlayer, observedAt: number) => boolean,
+  ): Promise<GoVerifiedDispatch<R>>;
+  onDispatched?(value: T, observedAt: number): void;
   maxReplans?: number;
   /** Earliest engine tick allowed to dispatch, for phase-exact committed
    * playbook turns. Requires an agreeing anchor; ignored without one. */
@@ -70,7 +82,7 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
   let phase = options.phase;
   let boundaryRetries = 0;
   let waitedMs = 0;
-  let player = options.clock.player();
+  let player = await options.clock.player();
 
   for (;;) {
     const observedAt = options.clock.now();
@@ -89,12 +101,14 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
       waitedMs += options.clock.now() - sleepStartedAt;
     }
 
-    let verified = options.clock.player();
-    let verifiedAt = options.clock.now();
+    let verified: GoPlayer;
+    let verifiedAt: number;
     // A timer can wake just before Engine.updateGame applies the rollover. Poll
     // only while genuinely early; this is normally zero iterations and avoids
     // adding a fixed latency tax to every move.
-    if (target) {
+    if (target && !options.verifyAndDispatch) {
+      verified = await options.clock.player();
+      verifiedAt = options.clock.now();
       for (
         let poll = 0;
         verified.totalPlaytime < dispatchPlaytime && poll < GO_TARGET_POLL_LIMIT;
@@ -102,9 +116,34 @@ export async function runGoNeuralSeedDispatch<T, R>(options: {
       ) {
         const pollStartedAt = options.clock.now();
         await options.clock.sleep(GO_TARGET_POLL_MS);
-        verified = options.clock.player();
+        verified = await options.clock.player();
         verifiedAt = options.clock.now();
         waitedMs += verifiedAt - pollStartedAt;
+      }
+    } else if (!options.verifyAndDispatch) {
+      verified = await options.clock.player();
+      verifiedAt = options.clock.now();
+    } else {
+      const accepted = (candidate: GoPlayer, at: number): boolean => {
+        const agrees = !phase || goPhaseAgrees(phase, candidate.totalPlaytime, at);
+        const targetMatched = candidate.totalPlaytime === dispatchPlaytime;
+        const safeMargin = !phase || goNextRolloverAt(phase, at) - at > GO_DISPATCH_GUARD_MS;
+        return agrees && targetMatched && safeMargin;
+      };
+      const dispatched = await options.verifyAndDispatch(value, accepted);
+      verified = dispatched.player;
+      verifiedAt = dispatched.observedAt;
+      if (dispatched.dispatched) {
+        const attempt = {
+          player: verified,
+          observedAt: verifiedAt,
+          dispatchPlaytime,
+          ...(target ? { target } : {}),
+          value,
+        };
+        options.onDispatched?.(value, verifiedAt);
+        const response = await dispatched.response;
+        return { attempt, response, boundaryRetries, waitedMs, ...(phase ? { phase } : {}) };
       }
     }
 

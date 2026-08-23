@@ -44,4 +44,42 @@ const goCore: DirectProbe = {
   },
 };
 
-export const DIRECT_PROBES: readonly DirectProbe[] = [goCore];
+/** The three darknet facts only HOME can read, and the whole reason they are
+ * here rather than in a RAM dodge: every one is 0 GB
+ * (`RamCostGenerator.ts` — getStasisLinkLimit/getStasisLinkedServers/
+ * getDarknetInstability all cost nothing), so a dodge stub bought nothing but
+ * latency. They are home-owned facts, so home reads them inline and ships them
+ * over the order channel.
+ *
+ * Everything ELSE the old `dnet.core` dodge read — darkweb's own details, its
+ * neighbours, its RAM — was redundant: the resident standing on darkweb runs
+ * `ns.dnet.probe()` + `getServerDetails` every mutation and drains the result
+ * home. Home re-reading the same host from a stub was a second, slower,
+ * hardcoded-cadence copy of a fact the beachhead already reports on the
+ * mutation clock. So the darknet keeps exactly one prober — the agent — and
+ * home contributes only what the agent structurally cannot see. `stasisLinked`
+ * is read here too as a complete timestamped snapshot; the newest complete
+ * direct or controller-produced set wins downstream. */
+const dnetFacts: DirectProbe = {
+  id: "dnet.facts",
+  kind: "direct",
+  feature: "dnet",
+  requires: "dnet",
+  // These change on lab-aug installs (the limit) and backdoor churn
+  // (instability), not on the mutation clock, so a slow cadence is honest —
+  // but the warm-up burst runs it once immediately on unlock, so the overseer
+  // has its stasis limit and instability from the first order it receives.
+  everyMs: 30_000,
+  merge: true,
+  methods: ["dnet.getStasisLinkLimit", "dnet.getStasisLinkedServers", "dnet.getDarknetInstability"],
+  run(ns: NS) {
+    return [emitPartial("dnet", {
+      stasisLinkLimit: ns["dnet"]["getStasisLinkLimit"](),
+      stasisLinked: ns["dnet"]["getStasisLinkedServers"]().map(String),
+      stasisObservedAt: Date.now(),
+      instability: ns["dnet"]["getDarknetInstability"](),
+    })];
+  },
+};
+
+export const DIRECT_PROBES: readonly DirectProbe[] = [goCore, dnetFacts];

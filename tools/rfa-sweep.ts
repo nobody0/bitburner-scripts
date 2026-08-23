@@ -3,8 +3,7 @@ import type { RfaSession } from "./rfa-session.ts";
 
 export interface SweepResult {
   deleted: string[];
-  /** Files the game refused to delete — normally the outgoing build's workers,
-   * which are still running. They clear on the next sync. */
+  /** Stale files the game refused to delete because they are still running. */
   skipped: string[];
   hosts: number;
 }

@@ -3,7 +3,7 @@ import { readdir, readFile, rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
-import { CONTROLLER_METHODS, JOB_METHODS, RESIDENT_METHODS, ROUTINE_JOB_KINDS } from "../game/dnet/realm.ts";
+import { BOOTSTRAP_RECLAIM_METHODS, CONTROLLER_METHODS, JOB_METHODS, PROBER_METHODS, RESIDENT_METHODS, ROUTINE_JOB_KINDS, threadsForJob } from "../game/dnet/realm.ts";
 import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
 import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
 import { WORKER_RAM } from "../shared/world.ts";
@@ -54,6 +54,7 @@ const config: BitburnerConfig = {
     { source: "game/worker/worker.ts", target: "worker/worker.js" },
     { source: "game/dnet/overseer.ts", target: "dnet/overseer.js" },
     { source: "game/dnet/agent.ts", target: "dnet/agent.js" },
+    { source: "game/dnet/prober.ts", target: "dnet/prober.js" },
   ],
   restoreEntry: { source: "game/restore.ts", target: "restore.js" },
 };
@@ -238,8 +239,8 @@ describe("in-game static RAM budget", () => {
    *
    * Filtering them out is a hole, though, and the test below it closes: with `ls`
    * struck from the built artifact's list, a REAL `ns.ls(...)` added to
-   * `overseer.ts` would pass here and then die on its first call, because the
-   * override the process is launched at declares `getHostname` and nothing else.
+   * `overseer.ts` would pass here and then die on its first call, because that
+   * member is absent from the controller's declared dynamic-RAM surface.
    * So the allowance is paired with a source check that only `jobNs` — the ns a
    * job body is HANDED, which carries its own override — may reach them. */
   const MANGLE_COLLISIONS = ["ls", "ps"];
@@ -275,27 +276,39 @@ describe("in-game static RAM budget", () => {
     const analysis = analyzeScriptRam(overseer.content);
     expect(analysis.overridden).toBe(false);
 
-    // 1.65 GB: the base plus one getter. Everything the controller actually
-    // needs is free — sleep, and the queues, which are live objects in the page
-    // realm — so the durable process is also the cheapest thing this repository
-    // ships. Launched at exactly that, whatever a mangled identifier adds to the
-    // static figure: see MANGLE_COLLISIONS.
+    // STATIC figure stays base + one getter: the overseer's own reads
+    // (`probe`, `getServerDetails`, `getServerMaxRam`, `isRunning`,
+    // `kill`) are all BRACKET notation, so the analyser does not charge them and
+    // the static number is unchanged. The launch allocation is
+    // `priceAgent(CONTROLLER_METHODS)` (~2 GB), which is what actually covers the
+    // dynamic cost of those reads.
     const referenced = analysis.entries
       .map((entry) => entry.name)
       .filter((name) => !MANGLE_COLLISIONS.includes(name))
       .sort();
-    expect(referenced).toEqual(["getHostname"]);
-    expect(CONTROLLER_METHODS).toEqual(["getHostname", "dnet.nextMutation", "isRunning", "kill"]);
-    expect(getFunctionRamCost("getHostname")).toBe(0.05);
+    expect(referenced).toEqual(["getServerMaxRam"]);
+    // The overseer now OBSERVES — but only through SYNCHRONOUS, instant reads
+    // (`probe` for darkweb's own adjacency, `getServerDetails` + `getServerMaxRam`
+    // for any host from anywhere), never a blocking `authenticate`. The map-holder
+    // stays responsive; "never block" is preserved, "never observe" relaxed.
+    expect(CONTROLLER_METHODS).toEqual([
+      "isRunning",
+      "kill",
+      "dnet.probe",
+      "dnet.getServerDetails",
+      "dnsLookup",
+      "getServerMaxRam",
+    ]);
+    expect(getFunctionRamCost("getServerMaxRam")).toBe(0.05);
 
-    // The ABSENCES are the design. It describes the jobs in this very file —
-    // authenticate, scp, exec and the rest — but only through bracket notation
-    // on the ns it HANDS to an agent, so the analyser charges the agent's
-    // declared override instead. A controller that could act would, and then the
-    // process holding the only copy of the map would be the one sitting inside a
-    // multi-second authenticate on a host about to be restarted.
+    // The ABSENCES that remain the design: it can OBSERVE now, but it still cannot
+    // CRACK or LAUNCH. It describes the jobs in this very file — authenticate, scp,
+    // exec — only through bracket notation on the ns it HANDS to an agent, so the
+    // analyser charges the agent's override instead. A controller that could crack
+    // or launch would be the process holding the only copy of the map while sitting
+    // inside a multi-second authenticate on a host about to be restarted.
     const names = new Set(analysis.entries.map((entry) => entry.name));
-    for (const forbidden of ["probe", "getServerDetails", "heartbleed", "authenticate", "scp", "exec", "spawn"]) {
+    for (const forbidden of ["heartbleed", "authenticate", "scp", "exec", "spawn"]) {
       expect(names.has(forbidden), `controller must not reference ns.${forbidden}`).toBe(false);
     }
   });
@@ -314,13 +327,39 @@ describe("in-game static RAM budget", () => {
         .map((entry) => entry.name)
         .filter((name) => !MANGLE_COLLISIONS.includes(name))
         .sort(),
-    ).toEqual(["getHostname", "getServerMaxRam", "getServerUsedRam", "spawn"]);
+    ).toEqual(["spawn"]);
     // getScriptName is 0 GB, so it never appears in a BILLABLE list — the agent
     // uses it to spawn itself rather than carrying its own filename.
     expect(agent.content).toContain("getScriptName");
     const names = new Set(analysis.entries.map((entry) => entry.name));
     for (const forbidden of ["probe", "getServerDetails", "heartbleed", "authenticate", "connectToSession", "scp"]) {
       expect(names.has(forbidden), `agent must not reference ns.${forbidden} in source`).toBe(false);
+    }
+  });
+
+  test("the darknet prober carries only its probe surface — 1.8 GB, no safety net", async () => {
+    const artifacts = await buildScripts(config, { telemetry: true });
+    const prober = artifacts.find((a) => a.filename === "dnet/prober.js")!;
+    const analysis = analyzeScriptRam(prober.content);
+
+    // The prober stands on its host for ONE reason — `probe()` is host-local — and
+    // its ONLY billed call is that. `nextMutation` (its clock) is 0 GB, so it is a
+    // member of PROBER_METHODS but never a billed entry. Critically ABSENT are
+    // `spawn` (2.0) and `getServerMaxRam` (0.05): the prober carries no self-
+    // revival, so its whole cost is base + probe = exactly 1.8 GB. The overseer
+    // re-execs a dead one through its worker instead.
+    expect(
+      analysis.entries
+        .map((entry) => entry.name)
+        .filter((name) => !MANGLE_COLLISIONS.includes(name))
+        .sort(),
+    ).toEqual(["probe"]);
+    expect(PROBER_METHODS).toEqual(["dnet.probe", "dnet.nextMutation"]);
+    // base 1.6 + probe 0.2, and NOTHING else — the reserve every host holds.
+    expect(BASE_GB + getFunctionRamCost("dnet.probe")).toBe(1.8);
+    const names = new Set(analysis.entries.map((entry) => entry.name));
+    for (const forbidden of ["spawn", "getServerMaxRam", "getServerDetails", "heartbleed", "authenticate", "connectToSession", "scp", "exec"]) {
+      expect(names.has(forbidden), `prober must not reference ns.${forbidden} in source`).toBe(false);
     }
   });
 
@@ -387,7 +426,7 @@ describe("in-game static RAM budget", () => {
     // The two shared helpers, and what reaching for them implies. `describeHost`
     // takes a third argument that turns on the file listing, and `listingOn`
     // IS the listing — both resolve to `ls` plus the describe trio.
-    const DESCRIBE = ["dnet.getServerDetails", "getServerMaxRam", "getServerUsedRam"];
+    const DESCRIBE = ["dnet.getServerDetails"];
 
     for (const [kind, body] of bound) {
       const index = starts.findIndex((entry) => entry.name === body);
@@ -401,8 +440,13 @@ describe("in-game static RAM budget", () => {
         wanted.add([match[1], match[2], match[3]].filter(Boolean).join("."));
       }
       if (slice.includes("describeHost(")) for (const method of DESCRIBE) wanted.add(method);
-      // `describeHost(jobNs, x, true)` and `listingOn(jobNs, x)` both call ls.
-      if (slice.includes("listingOn(") || /describeHost\([^)]*,\s*true\)/.test(slice)) wanted.add("ls");
+      // Infer optional helper branches from the actual argument positions.
+      // Keep this line-bounded: the old `[^)]*` crossed later expressions and
+      // falsely attributed `ls` to plantJob when it found an unrelated `true)`.
+      const listed = /describeHost\(\s*jobNs\s*,\s*[^,\r\n)]+\s*,\s*true(?:\s*,|\s*\))/.test(slice);
+      const identified = /describeHost\(\s*jobNs\s*,\s*[^,\r\n)]+\s*,\s*(?:true|false)\s*,\s*true\s*\)/.test(slice);
+      if (slice.includes("listingOn(") || listed) wanted.add("ls");
+      if (identified) wanted.add("dnsLookup");
 
       const declared = new Set(JOB_METHODS[kind] ?? []);
       for (const method of wanted) {
@@ -442,9 +486,9 @@ describe("in-game static RAM budget", () => {
     const cost = (methods: readonly string[]): number => {
       let total = BASE_GB;
       for (const method of new Set(methods)) total += getFunctionRamCost(method);
-      return total + 0.5;
+      return total;
     };
-    const controllerGb = cost(["getHostname"]);
+    const controllerGb = cost(CONTROLLER_METHODS);
     const residentGb = cost(RESIDENT_METHODS);
     const plantGb = cost(JOB_METHODS["plant"]!);
 
@@ -454,7 +498,7 @@ describe("in-game static RAM budget", () => {
     // And the whole reason for spawning rather than exec'ing: a resident that
     // exec'd its jobs would need BOTH at once. Spawn costs 2.0 against exec's
     // 1.3 but frees the caller first, so a host's peak is a max, not a sum.
-    const execPeak = cost(["getHostname", "exec"])
+    const execPeak = cost([...RESIDENT_METHODS.filter((method) => method !== "spawn"), "exec"])
       + cost(JOB_METHODS["plant"]!.filter((method) => method !== "spawn"));
     expect(plantGb).toBeLessThan(execPeak);
 
@@ -468,10 +512,28 @@ describe("in-game static RAM budget", () => {
     }
   });
 
+  test("normal hosts reserve the prober and lab walkers consume the clear host", () => {
+    const cost = (methods: readonly string[]): number => {
+      let total = BASE_GB;
+      for (const method of new Set(methods)) total += getFunctionRamCost(method);
+      return total;
+    };
+    expect(cost(RESIDENT_METHODS)).toBe(3.6);
+    expect(BASE_GB + getFunctionRamCost("dnet.probe")).toBe(1.8);
+    expect(cost(BOOTSTRAP_RECLAIM_METHODS)).toBe(2.6);
+    expect(cost(JOB_METHODS["attempt"]!)).toBeCloseTo(4.7, 10);
+    expect(cost(JOB_METHODS["walk"]!)).toBe(2);
+    expect(JOB_METHODS["walk"]).not.toContain("dnet.getServerDetails");
+
+    const ordinaryRoom = 16 - 1.8;
+    expect(threadsForJob(ordinaryRoom, cost(JOB_METHODS["attempt"]!), true)).toBe(3);
+    expect(threadsForJob(16, cost(JOB_METHODS["walk"]!), true)).toBe(8);
+  });
+
   test("a 12 GB stasis link is why the RAM target is not simply the largest job", () => {
     // A stated deployment fact rather than a surprise. `setStasisLink` alone is
-    // 12 GB, so a pin job is ~16 GB — it does not fit `darkweb` beside the
-    // controller, and it does not fit a shallow host's entire 16 GB at all.
+    // 12 GB, so a pin job nearly fills a shallow host once its 1.8 GB prober is
+    // included. It also does not fit `darkweb` beside the controller.
     //
     // That is survivable for a deliberate one-off, and fatal as a net-wide
     // target: `planFarm`'s `wantedGb` is "the heaviest thing a host should be
@@ -481,10 +543,11 @@ describe("in-game static RAM budget", () => {
     const cost = (methods: readonly string[]): number => {
       let total = BASE_GB;
       for (const method of new Set(methods)) total += getFunctionRamCost(method);
-      return total + 0.5;
+      return total;
     };
     const pinGb = cost(JOB_METHODS["pin"]!);
-    const controllerGb = cost(["getHostname"]);
+    const controllerGb = cost(CONTROLLER_METHODS);
+    const proberGb = BASE_GB + getFunctionRamCost("dnet.probe");
 
     expect(getFunctionRamCost("dnet.setStasisLink")).toBe(12);
     expect(pinGb).toBeGreaterThan(16 - controllerGb);
@@ -497,12 +560,17 @@ describe("in-game static RAM budget", () => {
     // has just made that host immutable, and which the controller refuses by
     // name when no neighbour could re-plant it.
     expect(JOB_METHODS["pin"]).not.toContain("spawn");
-    expect(pinGb).toBeLessThan(16);
-    expect(pinGb + getFunctionRamCost("spawn")).toBeGreaterThan(16);
-    // Every other kind hands the host back, because nothing outside can put a
-    // resident there.
+    expect(pinGb + proberGb).toBeLessThanOrEqual(16);
+    expect(pinGb + proberGb + getFunctionRamCost("spawn")).toBeGreaterThan(16);
+    // The two NO_RESPAWN kinds omit `spawn` and end by handing the host to
+    // `planSpread` to re-plant: `pin` because 12 GB + spawn will not fit a shallow
+    // host, `walk` because while it IS the lab walker its host runs it alone and
+    // every byte the spawn would cost is an `authenticate` thread instead.
+    expect(JOB_METHODS["walk"]).not.toContain("spawn");
+    // Every other kind hands the host back itself, because nothing outside can put
+    // a resident there mid-run.
     for (const [kind, methods] of Object.entries(JOB_METHODS)) {
-      if (kind === "pin") continue;
+      if (kind === "pin" || kind === "walk") continue;
       expect(methods, `${kind} must be able to spawn back to resident mode`).toContain("spawn");
     }
     // ...and every routine kind is comfortably under it, which is the gap the

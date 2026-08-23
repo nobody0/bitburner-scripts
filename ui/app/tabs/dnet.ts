@@ -966,7 +966,7 @@ export const dnetTab: Tab = {
      *  than which of the two we cannot afford to lose. */
     const walkerLine = (walker: DarknetLabWalker): string => {
       const eta = walkerEtaMs(walker);
-      const role = walker.role ?? "finisher";
+      const role = "finisher";
       return `<div class="labwalker">`
         + `<span class="who ${role}">${dot(walker.pinned ? "good" : "wait", walker.pinned
           ? "stasis-pinned: a mutation cannot move or delete this host"
@@ -1052,7 +1052,7 @@ export const dnetTab: Tab = {
             ],
             ...(explored !== undefined
               ? [[
-                hint("shared map", "both walkers read and write one field, so a walker dying costs its position and not the map"),
+                hint("shared map", "the field survives the PID-bound walker, so a replacement keeps discoveries but not position"),
                 `${explored.known} of ${explored.total} wall slots resolved`,
               ] as [Markup, Markup]]
               : []),
@@ -1124,8 +1124,8 @@ export const dnetTab: Tab = {
     // wrong guess is not even punished, so their planners mostly say yes. These
     // do not. A stasis link is one of at most four slots in the whole run, an
     // induced migration is a long charge that can lose the host outright, and a
-    // backdoor is charged in global authentication slowdown past a free
-    // allowance. "Why not" is the usual answer here, which is why the refusals
+    // backdoor is a two-slot recycler for harvested low-RAM hosts. "Why not" is
+    // the usual answer here, which is why the refusals
     // get as much room as the actions.
     const hold = d.hold;
     const backdoors = hold?.backdoors;
@@ -1152,13 +1152,12 @@ export const dnetTab: Tab = {
             // No longer advice: home walks its terminal out along the folded
             // adjacency and installs these itself, because
             // `singularity.installBackdoor` acts on the terminal's current
-            // server and only home has a terminal. What it buys is remote
-            // `exec`; what it costs is `1.07 ^ surplus` on EVERY authentication
-            // in the net past a free allowance of `max(rooted / 24, 2)` — so
-            // two are free for ever and the third is a decision.
+            // server and only home has a terminal. The policy keeps exactly two
+            // on fully harvested low-RAM hosts: restart merely clears one, while
+            // deletion lets a later addition mint two fresh cache opportunities.
             note(
               "installed from home's terminal along the folded adjacency, because ns.scan cannot see the darknet;"
-              + " only the free allowance is spent, and a stale hop refuses the whole route rather than stranding"
+              + " two harvested low-RAM hosts are recycled, and a stale hop refuses the whole route rather than stranding"
               + " the terminal out there",
             )
             + (backdoors.install.length > 0

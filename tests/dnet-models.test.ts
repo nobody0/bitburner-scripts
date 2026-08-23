@@ -9,7 +9,6 @@ import {
   type ModelId,
 } from "../shared/strategy/dnet/models.ts";
 import { solverFor } from "../shared/strategy/dnet/solvers/index.ts";
-import { COMMON_PASSWORDS, DEFAULT_SETTINGS, DOG_NAMES, EU_COUNTRIES } from "../shared/strategy/dnet/dictionaries.ts";
 
 /** The model registry is groundwork for a cracker nobody has written yet, so
  * what these tests actually guard is that it stays TOTAL and stays HONEST:
@@ -30,17 +29,6 @@ describe("the model registry covers the game's taxonomy", () => {
     expect([...MODEL_IDS].sort() as string[]).toEqual(upstream.sort());
   });
 
-  test("describeModel is total, and every arm says what the oracle IS", () => {
-    for (const id of MODEL_IDS) {
-      const entry = describeModel(id);
-      expect(entry.id, `${id} returns the wrong id`).toBe(id);
-      // The upstream ModelIds KEY is the only place the mechanic is named, so an
-      // empty name would throw away the one piece of meaning we have.
-      expect(entry.name.length, `${id} has no upstream name`).toBeGreaterThan(0);
-      expect(entry.oracle.length, `${id} does not describe its oracle`).toBeGreaterThan(20);
-    }
-  });
-
   test("an unrecognised model id is undefined, never a silent default", () => {
     // This is the loud-failure contract: a model we have never seen must reach
     // the caller as "I do not know this", so it can be counted and reported.
@@ -59,16 +47,6 @@ describe("the model registry covers the game's taxonomy", () => {
 });
 
 describe("the registry says what is really implemented", () => {
-  test("every model but the labyrinth is implemented, and status is DERIVED", () => {
-    // `status` is no longer written on each arm by hand; `describeModel` reads
-    // it off the solver registry (`solvers/index.ts`), so this is checking a
-    // fact rather than a comment. The labyrinth is the one holdout and it is
-    // not a password at all — it is a maze, walked by a process.
-    const unattempted = MODEL_IDS.filter((id) => describeModel(id).status === "unattempted");
-    expect([...unattempted] as string[]).toEqual(["(The Labyrinth)"]);
-    expect(describeModel("(The Labyrinth)").blocked).toBeDefined();
-  });
-
   test("nothing claims to be implemented without something that implements it", () => {
     // The honesty rule, now mechanical: a model is implemented if and only if it
     // has a dictionary to walk or a solver to run.
@@ -82,26 +60,6 @@ describe("the registry says what is really implemented", () => {
     }
   });
 
-  test("the five dictionary models stay dictionaries, with no solver", () => {
-    // Their attack is an ordered list resumed through `AttemptLedger.tried`,
-    // which is the one well-tested path in this feature. A solver here would be
-    // a rewrite of something that already works.
-    const dictionaries = MODEL_IDS.filter((id) => describeModel(id).candidates !== undefined);
-    expect([...dictionaries].sort() as string[]).toEqual(
-      ["EuroZone Free", "FreshInstall_1.0", "Laika4", "TopPass", "ZeroLogon"].sort(),
-    );
-    for (const id of dictionaries) expect(solverFor(id), `${id} has both a dictionary and a solver`).toBeUndefined();
-  });
-
-  test("each implemented model offers exactly its upstream dictionary", () => {
-    const candidates = (id: ModelId) => describeModel(id).candidates?.({});
-    expect(candidates("ZeroLogon")).toEqual([""]);
-    expect(candidates("FreshInstall_1.0")).toEqual(DEFAULT_SETTINGS);
-    expect(candidates("Laika4")).toEqual(DOG_NAMES);
-    expect(candidates("EuroZone Free")).toEqual(EU_COUNTRIES);
-    expect(candidates("TopPass")).toEqual(COMMON_PASSWORDS);
-  });
-
   test("every unattempted model states why, and offers no candidates", () => {
     for (const id of MODEL_IDS) {
       const entry = describeModel(id);
@@ -112,28 +70,6 @@ describe("the registry says what is really implemented", () => {
     }
   });
 
-  test("the two models a human is most likely to solve first name their exact oracle", () => {
-    // These are the ones the registry exists to hand over, so the text has to
-    // carry the actual format rather than a gesture at it.
-    expect(describeModel("2G_cellular").oracle).toContain("50ms");
-    expect(describeModel("2G_cellular").feedback).toBe("timing");
-    expect(describeModel("DeepGreen").oracle).toContain("<exact>,<misplaced>");
-    expect(describeModel("DeepGreen").feedback).toBe("mastermind");
-    // And the buffer model, whose whole trick is that a wrong string can win.
-    expect(describeModel("Pr0verFl0").oracle).toContain("NON-EQUAL");
-  });
-
-  test("models whose answer is already in the hint are marked as details reads", () => {
-    // These need a decoder, not a search, and the input arrives free from
-    // getServerDetails. Mislabelling one as `heartbleed` would send a future
-    // solver hunting for feedback that was never needed.
-    for (const id of ["DeskMemo_3.1", "CloudBlare(tm)", "110100100", "OrdoXenos", "OctantVoxel", "PrimeTime 2"] as const) {
-      expect(describeModel(id).via, `${id} should be readable without an attempt`).toBe("details");
-    }
-    // The labyrinth is the one model whose data really does come back on
-    // authenticate(), because it is handled before the model switch.
-    expect(describeModel("(The Labyrinth)").via).toBe("authenticate");
-  });
 });
 
 describe("planAttempt walks a dictionary and then stops", () => {

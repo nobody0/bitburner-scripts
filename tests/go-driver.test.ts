@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import type { DodgeGlobals, GoDodgeGlobals } from "../game/lib/dodge-shared.ts";
+import type { DodgeLaunch } from "../game/lib/dodge-shared.ts";
+import { captureLaunch } from "../game/lib/launch-shared.ts";
 import { emptyBoard, type DriverContext } from "../game/lib/features/index.ts";
 import { GO_ANCHOR_POLL_MS, goModule, setGoCheatSuccessTableForTest, setGoNeuralRuntimeForTest, setGoPlaybookCheatSeedForTest } from "../game/lib/features/remaining.ts";
 import { GO_ENGINE_CYCLE_MS } from "../shared/strategy/go/rng.ts";
@@ -89,26 +90,18 @@ async function runGrantedTurn(
     getFunctionRamCost: (method: string) => method === "go.cheat.playTwoMoves"
       ? 8 : method === "go.makeMove" || method === "go.getBoardState" ? 4
         : method === "getPlayer" ? 0.5 : 0,
-    // The 4th argument is the lane (dodge.ts passes lane.laneArg). The turn
-    // runs on "long"; the post-turn board verification runs on the ordinary
-    // lane, which uses a different global slot set — servicing only the long
-    // slots would hang that dodge until its watchdog.
-    exec: (_script: string, _host: string, options: { ramOverride?: number }, lane?: string) => {
+    // Every launch carries one unique scalar process key. There is one generic
+    // FIFO; a pending Go API promise is awaited by the controller after its
+    // stub has handed the promise over and exited.
+    exec: (_script: string, _host: string, options: { ramOverride?: number }) => {
       if (options.ramOverride !== undefined) ramOverrides.push(options.ramOverride);
-      const globals = globalThis as typeof globalThis & DodgeGlobals & GoDodgeGlobals;
       queueMicrotask(async () => {
-        if (lane === "long") {
-          try {
-            globals.go_dodge_cb?.(await globals.go_dodge_func!(dodgedNs));
-          } catch (error) {
-            globals.go_dodge_reject?.(error);
-          }
-          return;
-        }
+        const launch = captureLaunch<DodgeLaunch>("dodge");
+        if (!launch) return;
         try {
-          globals.dodge_cb?.(await globals.dodge_func!(dodgedNs));
+          launch.resolve({ result: launch.func(dodgedNs) });
         } catch (error) {
-          globals.dodge_reject?.(error);
+          launch.reject(error);
         }
       });
       return 1;
@@ -428,12 +421,13 @@ describe("Go live seed observation", () => {
     const ns = {
       getFunctionRamCost: () => 1,
       exec: () => {
-        const globals = globalThis as typeof globalThis & GoDodgeGlobals;
         queueMicrotask(async () => {
+          const launch = captureLaunch<DodgeLaunch>("dodge");
+          if (!launch) return;
           try {
-            globals.go_dodge_cb?.(await globals.go_dodge_func!(dodgedNs));
+            launch.resolve({ result: launch.func(dodgedNs) });
           } catch (error) {
-            globals.go_dodge_reject?.(error);
+            launch.reject(error);
           }
         });
         return 1;

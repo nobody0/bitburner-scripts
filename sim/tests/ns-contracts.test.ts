@@ -118,6 +118,16 @@ function harness(programs: string[] = [], withStock = false, bitnode = 1, withDa
   return { ns: makeSimNs(host, process), host, world };
 }
 
+describe("dnsLookup", () => {
+  test("maps a hostname to its IP and the IP back to the hostname", () => {
+    const { ns, world } = harness([], false, 1, true);
+    const ip = world.servers.get("darkweb")!.ip;
+    expect(ns.dnsLookup("darkweb")).toBe(ip);
+    expect(ns.dnsLookup(ip)).toBe("darkweb");
+    expect(ns.dnsLookup("missing-host")).toBe("");
+  });
+});
+
 describe("darkweb, the one darknet host reachable without a credential", () => {
   test("scan hides it, but it is rooted, 16 GB, and can be exec'd onto", () => {
     const { ns } = harness([], false, 1, true);

@@ -11,18 +11,12 @@ import { DARKSCAPE_COST, TOR_COST } from "./rates.ts";
  * / 4S access, which `stock` otherwise buys for $200m + $5b + $25b — and none of
  * that is modelled anywhere in this project yet. Inventing an income rate to
  * feed the arbiter would be asserting a number we have not measured. So the
- * decision is affordability: buy it once the cost is small against liquid cash,
- * and let a later increment price it properly once the caches are modelled.
- *
- * The affordability test is what keeps that honest. An unpriced claim resolves
- * off the top of its band without ROI ranking, so bidding only when we hold ten
- * times the cost is what stops it displacing a priced hacknet or infrastructure
- * purchase that would earn more. */
+ * decision is affordability: buy it as soon as TOR plus the program are
+ * affordable, because it gates the entire darknet progression path. A later
+ * increment can price its cache payoff once those rewards are modelled. */
 
-/** Only bid when the cost is at most this share of liquid cash. At $50.2m that
- * means bidding from about $500m — by which point the purchase is noise against
- * the bankroll and cannot crowd out a better-priced investment. */
-export const DARKSCAPE_AFFORDABLE_SHARE = 0.1;
+/** Bid as soon as liquid cash covers the complete TOR + program purchase. */
+export const DARKSCAPE_AFFORDABLE_SHARE = 1;
 
 export interface DarkscapeView {
   /** True when a simulation profile has switched `dnet` OFF. Buying access to a
@@ -63,7 +57,7 @@ export function stepDarkscape(view: DarkscapeView): boolean {
     // be a straight $50m loss.
     view.bitNode !== 15 && view.sf15 === 0 &&
     // Only once the gate probe has reported the program absent (`undefined`
-    // means not probed yet), and only when the cost is noise against cash.
+    // means not probed yet), and only when the complete cost is affordable.
     view.hasProgram === false &&
     view.money * DARKSCAPE_AFFORDABLE_SHARE >= DARKSCAPE_TOTAL_COST
   );

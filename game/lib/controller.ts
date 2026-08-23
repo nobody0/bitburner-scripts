@@ -15,8 +15,9 @@ import { bestIncomePerSec, bestReinvestmentReturnPerDollarSec, slotRates } from 
 import { ContributionCache } from "./features/contributions.ts";
 import { hackingState, plannerPassId, pumpOnWake, takeTargetSwitch } from "./features/hacking.ts";
 import { noteTickLateness, resetTickHealth } from "./tick-health.ts";
-import { armWake, sleepOrWake } from "./wake.ts";
+import { armWake, realmSleep, sleepOrWake } from "./wake.ts";
 import { workerGlobals } from "./worker-shared.ts";
+import { handoffLaunch, temporaryRunOptions } from "./launch-shared.ts";
 import { takeRouteChange } from "./features/remaining.ts";
 import { driverEnabled, featureModule, grantsFor, resetAllFeatures, selectDueModules } from "./features/index.ts";
 import type { ClaimContext, NeedContext } from "./features/index.ts";
@@ -125,7 +126,18 @@ export async function runController(
     // Self-update: a newer build was pushed -> hand off to a fresh instance.
     const pushedBuild = ns.read("build-id.txt").trim();
     if (pushedBuild !== "" && pushedBuild !== __BUILD_ID__) {
-      const pid = ns.exec("start.js", "home", { threads: 1, temporary: true }, "handoff", pushedBuild);
+      // Share is the only worker mode with no natural completion/idle drain.
+      // Resolve its descriptor-installed lifetime gate before handing control
+      // to the new build; one-shots finish and pooled workers idle out.
+      for (const [id, worker] of workerGlobals().worker_info ?? []) {
+        if (worker.mode !== "share") continue;
+        worker.stop?.();
+        TELEMETRY: if (__TELEMETRY__) tel!.event("worker.retire", { id, mode: worker.mode });
+      }
+      const pid = await handoffLaunch(
+        { kind: "start", buildId: pushedBuild },
+        (launchId) => ns.exec("start.js", "home", temporaryRunOptions({ threads: 1 }), launchId),
+      );
       if (pid !== 0) {
         TELEMETRY: if (__TELEMETRY__) {
           tel!.event("start.respawn", { from: __BUILD_ID__, to: pushedBuild });
@@ -140,7 +152,10 @@ export async function runController(
         }
         ns.tprint(`WARNING: failed to start build ${pushedBuild}; keeping ${__BUILD_ID__} online and retrying`);
       }
-      await ns.sleep(TICK_MS);
+      // Realm timer, matching the main tick's `sleepOrWake`: this loop never
+      // parks on an ns call, so no future async arm can trip the engine's
+      // concurrency kill. The `ns.read` above surfaces a kill next pass.
+      await realmSleep(TICK_MS);
       continue;
     }
     reportedRespawnFailure = undefined;
@@ -180,7 +195,7 @@ export async function runController(
       const before = caps(state);
       const gateArena = buildArena(Date.now());
       await runGateProbe(ns, state, (gb, id) => brokerAcquire(
-        ns, tel, ramBroker, state, gateArena, gb, { by: 'gate', id, lane: 'default', priority: PRIORITY['probe:gate'] },
+        ns, tel, ramBroker, state, gateArena, gb, { by: 'gate', id, priority: PRIORITY['probe:gate'] },
       ));
       const delta = capsDelta(before, caps(state));
       const currentReset = resetIdentity(state.topics.progression);
@@ -259,7 +274,7 @@ export async function runController(
     if (tick % PROBE_EVERY_TICKS === 0) {
       const probeArena = buildArena(Date.now());
       await runProbes(ns, probes, state, (gb, id) => brokerAcquire(
-        ns, tel, ramBroker, state, probeArena, gb, { by: 'probe', id, lane: 'default', priority: PRIORITY['probe:background'] },
+        ns, tel, ramBroker, state, probeArena, gb, { by: 'probe', id, priority: PRIORITY['probe:background'] },
       ));
     }
 
@@ -453,23 +468,23 @@ export async function runController(
     }
     if (ready.some((request) => request.by === 'gate')) {
       await runGateProbe(ns, state, (gb, id) => brokerAcquire(
-        ns, tel, ramBroker, state, arena, gb, { by: 'gate', id, lane: 'default', priority: PRIORITY['probe:gate'] },
+        ns, tel, ramBroker, state, arena, gb, { by: 'gate', id, priority: PRIORITY['probe:gate'] },
       ));
     }
     if (ready.some((request) => request.by === 'probe')) {
       await runProbes(ns, probes, state, (gb, id) => brokerAcquire(
-        ns, tel, ramBroker, state, arena, gb, { by: 'probe', id, lane: 'default', priority: PRIORITY['probe:background'] },
+        ns, tel, ramBroker, state, arena, gb, { by: 'probe', id, priority: PRIORITY['probe:background'] },
       ));
     }
     const brokerSnapshot = ramBroker.snapshot(Date.now());
     publishedArena = publishArena(state, arena, brokerSnapshot, publishedArena);
     TELEMETRY: if (__TELEMETRY__) {
-      const starving = new Set(brokerSnapshot.starvation.map((request) => `${request.by}\0${request.id}\0${request.lane}`));
+      const starving = new Set(brokerSnapshot.starvation.map((request) => `${request.by}\0${request.id}`));
       for (const request of brokerSnapshot.starvation) {
-        const key = `${request.by}\0${request.id}\0${request.lane}`;
+        const key = `${request.by}\0${request.id}`;
         if (brokerStarvationReported.has(key)) continue;
         brokerStarvationReported.add(key);
-        tel!.event('ram.starvation', { by: request.by, id: request.id, gb: request.gb, waitMs: request.waitMs, lane: request.lane });
+        tel!.event('ram.starvation', { by: request.by, id: request.id, gb: request.gb, waitMs: request.waitMs });
       }
       for (const key of brokerStarvationReported) if (!starving.has(key)) brokerStarvationReported.delete(key);
     }
@@ -501,7 +516,7 @@ export async function runController(
         // the planner with the lease visible as foreign usage.
         const brokerShareExits = settleBrokerShareExits(hackingState());
         if (brokerShareExits.length === 0) {
-          pumpOnWake(ns, state, active, arena.reserves, usableForecastSec(horizons.install));
+          await pumpOnWake(ns, state, active, arena.reserves, usableForecastSec(horizons.install));
         }
         const wakeArena = buildArena(Date.now());
         const wakeReady = ramBroker.drain(
@@ -511,19 +526,19 @@ export async function runController(
           Date.now(),
         );
         if (brokerShareExits.length > 0) {
-          pumpOnWake(ns, state, active, wakeArena.reserves, usableForecastSec(horizons.install));
+          await pumpOnWake(ns, state, active, wakeArena.reserves, usableForecastSec(horizons.install));
         }
         for (const request of wakeReady) {
           if (FEATURE_IDS.includes(request.by as (typeof FEATURE_IDS)[number])) state.featureLastRun[request.by] = 0;
         }
         if (wakeReady.some((request) => request.by === 'gate')) {
           await runGateProbe(ns, state, (gb, id) => brokerAcquire(
-            ns, tel, ramBroker, state, wakeArena, gb, { by: 'gate', id, lane: 'default', priority: PRIORITY['probe:gate'] },
+            ns, tel, ramBroker, state, wakeArena, gb, { by: 'gate', id, priority: PRIORITY['probe:gate'] },
           ));
         }
         if (wakeReady.some((request) => request.by === 'probe')) {
           await runProbes(ns, probes, state, (gb, id) => brokerAcquire(
-            ns, tel, ramBroker, state, wakeArena, gb, { by: 'probe', id, lane: 'default', priority: PRIORITY['probe:background'] },
+            ns, tel, ramBroker, state, wakeArena, gb, { by: 'probe', id, priority: PRIORITY['probe:background'] },
           ));
         }
       } catch (error) {
@@ -591,7 +606,6 @@ function brokerAcquire(
       beneficiary: {
         by: brokerRequest.by,
         id: brokerRequest.id,
-        lane: brokerRequest.lane,
         gb: roundSigFigs(brokerRequest.gb, 3),
         priority: brokerRequest.priority,
       },
@@ -638,7 +652,6 @@ function publishArena(
       gb: sig3(request.gb),
       waitMs: Math.round(request.waitMs / 1_000) * 1_000,
       class: request.class,
-      lane: request.lane,
     })),
     starvation: snapshot.starvation.map((request) => ({
       by: request.by,

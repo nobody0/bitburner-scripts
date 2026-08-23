@@ -6,6 +6,7 @@ import {
   HANDOFF_HOME_RESERVE_GB,
   planReclamation,
   RamBroker,
+  ROUTINE_DODGE_ARENA_GB,
   STARVATION_MS,
   STUB_BASE_GB,
   type ArenaPlan,
@@ -15,7 +16,7 @@ import {
 import { Heap } from '../shared/ram/heap.ts';
 
 const request = (id: string, gb: number, priority = 10): BrokerRequest => ({
-  by: 'test', id, gb, priority, lane: 'default', class: 'deferrable',
+  by: 'test', id, gb, priority, class: 'deferrable',
 });
 
 const hosts = (free = true): BrokerHost[] => [
@@ -57,6 +58,7 @@ describe('RamBroker arena', () => {
     expect(starved.targetGb).toBeCloseTo(needed);
     expect(starved.reserves['foodnstuff']).toBeCloseTo(needed);
     expect(starved.reserves['omega-net']).toBeUndefined();
+    expect(ROUTINE_DODGE_ARENA_GB).toBeLessThanOrEqual(16);
 
     // Growth is not gated on the farm being worthless: a starved action must
     // be able to open room even once the farm is earning. The opportunity
@@ -71,6 +73,22 @@ describe('RamBroker arena', () => {
     expect(broker.arena(hosts(), STARVATION_MS + 1, 0).reserves)
       .toEqual({ home: HANDOFF_HOME_RESERVE_GB, n00dles: 4 });
     expect(broker.largestMeasured(10 * 60_000)).toBeCloseTo(5, 1);
+  });
+
+  test('a Go-sized waiter carves transient foodnstuff RAM instead of CSEC', () => {
+    const broker = new RamBroker();
+    const early: BrokerHost[] = [
+      { hostname: 'home', maxRam: 8, freeGb: 0, rooted: true, deployed: true },
+      { hostname: 'n00dles', maxRam: 4, freeGb: 0, rooted: true, deployed: true },
+      { hostname: 'CSEC', maxRam: 8, freeGb: 0, rooted: true, deployed: true },
+      { hostname: 'foodnstuff', maxRam: 16, freeGb: 0, rooted: true, deployed: true },
+    ];
+    const floor = broker.arena(early, 0, 0);
+    broker.request(request('go-turn', 5), early, floor, 0);
+    const starved = broker.arena(early, STARVATION_MS, 0);
+    expect(starved.reserves.CSEC).toBeUndefined();
+    expect(starved.reserves.foodnstuff).toBeCloseTo(5 + STUB_BASE_GB);
+    expect(starved.targetGb).toBeCloseTo(5 + STUB_BASE_GB);
   });
 
   test('foodnstuff promotion follows pooling with demotion hysteresis', () => {
@@ -193,6 +211,23 @@ describe('RamBroker reclamation ladder', () => {
     });
   });
 
+  test('rung 2 reclaims an idle pooled worker without requiring install priority', () => {
+    const wanted = request('ordinary-go-turn', 5, 1);
+    const plan = planReclamation(wanted, [blockedHost], [], [{
+      workerId: 12,
+      hostname: 'omega-net',
+      kind: 'grow',
+      segment: 'farm',
+      gb: 7,
+      active: false,
+    }], 1_000);
+    expect(plan).toMatchObject({
+      action: 'preempt',
+      reason: 'idle-pooled-worker',
+      victim: { workerId: 12, active: false },
+    });
+  });
+
   test('rung 3 never preempts below install-freeze and leaves the request queued', () => {
     const broker = new RamBroker();
     const arena = new RamBroker().arena(hosts(), 0, 0);
@@ -243,23 +278,23 @@ describe('RamBroker placement', () => {
       .toMatchObject({ status: 'placed', host: 'tight' });
   });
 
-  test('keeps a concurrent long-lane dodge off home when a fleet host fits', () => {
+  test('uses the arena host before another fitting host', () => {
     const broker = new RamBroker();
     const available: BrokerHost[] = [
       { hostname: 'home', maxRam: 32, freeGb: 8, rooted: true, deployed: true },
       { hostname: 'foodnstuff', maxRam: 16, freeGb: 8, rooted: true, deployed: true },
     ];
-    expect(broker.request({ ...request('go-turn', 5), lane: 'long' }, available, plan(), 0))
+    expect(broker.request(request('go-turn', 5), available, plan(), 0))
       .toMatchObject({ status: 'placed', host: 'foodnstuff' });
   });
 
-  test('queues the long lane rather than borrowing home when the fleet is full', () => {
+  test('uses free home RAM instead of fabricating starvation', () => {
     const broker = new RamBroker();
     const home: BrokerHost = {
       hostname: 'home', maxRam: 32, freeGb: 32, rooted: true, deployed: true,
     };
-    expect(broker.request({ ...request('go-waits', 5), lane: 'long' }, [home], plan(), 0))
-      .toMatchObject({ status: 'queued' });
+    expect(broker.request(request('go-waits', 5), [home], plan(), 0))
+      .toMatchObject({ status: 'placed', host: 'home' });
   });
 });
 

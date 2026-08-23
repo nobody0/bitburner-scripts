@@ -199,16 +199,15 @@ function arenaBody(arena: RamArena | undefined): string {
   ]);
   const waiting = arena.waits.length
     ? table(
-        ["waiting", "request", "GB", "class", "lane", "waited"],
+        ["waiting", "request", "GB", "class", "waited"],
         arena.waits.map((request: RamArena["waits"][number]) => [
           starved.has(`${request.by}\0${request.id}`) ? "starved" : "queued",
           esc(`${request.by}:${request.id}`),
           fmtNum(request.gb, 1),
           esc(request.class),
-          esc(request.lane),
           fmtTime(request.waitMs),
         ]),
-        { left: [0, 1, 3, 4] },
+        { left: [0, 1, 3] },
       )
     : note("nothing waiting for RAM");
   const shortfall = arena.queueDepth > 0

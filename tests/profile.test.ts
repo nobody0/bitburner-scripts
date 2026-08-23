@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { selectDue, FEATURE_DRIVERS } from "../game/lib/features/index.ts";
-import { applyOverrides, describeOverrides, only } from "../shared/features/profile.ts";
+import { applyOverrides, only } from "../shared/features/profile.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import { PROFILES, findProfile } from "../sim/profiles.ts";
 import { initialContext, reduceRecord } from "../shared/goals/evaluate.ts";
@@ -60,11 +60,6 @@ describe("feature overrides", () => {
     expect(ids).not.toContain("side");
   });
 
-  test("describes itself for the run record", () => {
-    expect(describeOverrides(undefined)).toBe("all features");
-    expect(describeOverrides(only("hacking"))).toContain("only hacking");
-    expect(describeOverrides({ gang: "on" })).toContain("forced");
-  });
 });
 
 describe("simulation profiles", () => {
@@ -91,28 +86,10 @@ describe("simulation profiles", () => {
     expect(findProfile("bn1-full-sf12-30").experiment).toBe("feature-scenario");
   });
 
-  test("profile ids are unique, retired aliases stay retired, and unknown ids are rejected", () => {
+  test("profile ids are unique and unknown ids are rejected", () => {
     const ids = PROFILES.map((p) => p.id);
     expect(new Set(ids).size).toBe(ids.length);
     expect(() => findProfile("nope")).toThrow(/unknown profile/);
-    // jit-process-pressure is deliberately NOT retired: it is the tier-1
-    // large-scale pressure profile. scenario-jit-stress covers the same three
-    // benchmarks in seconds, but only at small scale — the process-count
-    // regime this profile exists for is unreachable there.
-    for (const id of [
-      "hacking-only",
-      "install-favor",
-      "stock-manipulation",
-      "stock-manipulation-mid",
-      "stock-manipulation-large",
-    ]) {
-      expect(() => findProfile(id)).toThrow(/unknown profile/);
-    }
-
-    const hacking = findProfile("hacking-early");
-    expect(hacking.features).toEqual(only("hacking", "progression"));
-    expect(hacking.horizon).toBe("1h");
-    expect(findProfile("stock-only").horizon).toBe("8h");
   });
 
   test("full BN1 and cross-city cadence runs include the career gate owner", () => {

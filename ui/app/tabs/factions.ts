@@ -50,7 +50,7 @@ import type { Tab } from "./index.ts";
 
 const ACTION_LABELS: Record<string, string> = {
   idle: "idle",
-  joinFaction: "join",
+  joinFactions: "join",
   workForFaction: "work",
   stopWork: "stop work",
   donate: "donate",
@@ -63,6 +63,7 @@ const ACTION_LABELS: Record<string, string> = {
 interface FactionPlanAction {
   type: string;
   faction?: string;
+  factions?: string[];
   augmentation?: string;
   city?: string;
   workType?: string;
@@ -76,7 +77,7 @@ function actionLine(action: FactionPlanAction): string {
     ? `${fmtMoney(action.amount)}${action.faction ? ` to ${action.faction}` : ""}`
     : action.augmentation
       ? `${action.augmentation}${action.faction ? ` from ${action.faction}` : ""}`
-      : (action.faction ?? action.city ?? "");
+      : (action.factions?.join(", ") ?? action.faction ?? action.city ?? "");
   const work = action.workType ? ` (${action.workType})` : "";
   return `${esc(label)}${subject ? ` <strong>${esc(subject)}</strong>` : ""}${esc(work)}`;
 }

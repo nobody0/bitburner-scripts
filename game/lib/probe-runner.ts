@@ -12,7 +12,6 @@ import {
   type Emission,
   type ProbeAcc,
   type ProbeContext,
-  type SingleStepProbe,
   type SteppedProbe,
 } from "./probes/index.ts";
 import {
@@ -237,76 +236,56 @@ export async function runProbes(
     if (isStepped(probe)) await runSteppedProbe(ns, runner, state, probe, ctx, acquire, now);
   }
 
-  // ONE probe RUNS per pass, not a packed batch. Keeping the broker request
-  // identity stable while it is queued matters more than sharing a stub: a
+  // STARTUP RUNS EVERYTHING ONCE; STEADY STATE STAGGERS. In the steady state
+  // exactly ONE single-step probe runs per pass — keeping a queued broker
+  // request's footprint stable matters more than sharing a stub, because a
   // cheap arrival joining an older waiting request would change that request's
   // executable footprint under the broker and restart its wait.
   //
-  // But a probe that cannot be PLACED must not keep the slot. Earliest-
-  // deadline-first made an unaffordable head permanent: a 4.6 GB probe that
-  // no cold-start host can hold was due first every pass, its acquire came
-  // back queued, the pass returned, and every affordable probe behind it —
-  // including the 0.2 GB stock account ladder, the market's only eye — waited
-  // ~3.5 virtual minutes for the farm to happen to free RAM (measured on
-  // bn8-full seed 1: first stock topic at t=212 s, and the whole BN8 bankroll
-  // was spent by measurable claims in that blind window). The blocked head's
-  // broker request STAYS queued — its starvation feedback is what grows the
-  // arena — but the pass now falls through to the next due probe that can
-  // actually be placed.
-  let placed: { probe: SingleStepProbe; cost: number; lease: Extract<DodgeAcquire, { status: 'placed' }> } | undefined;
+  // But that throttle is a STEADY-STATE discipline, and at boot it was pure
+  // latency: every applicable probe is due at once, and draining them one per
+  // pass left the game half-blind for ~(#probes × pass interval) — the market,
+  // the map, the darknet beachhead all waiting in a single-file queue for a
+  // fact each could have read on the first frame. So while any applicable
+  // probe has never run, this places ALL that fit THIS pass — a warm-up burst
+  // — and only reverts to one-per-pass once every one has run once. A feature
+  // unlocked LATER re-enters the burst for its own probes the moment it
+  // becomes applicable, which is the same rule: a probe that has never run is
+  // grabbed immediately, not staggered in behind a queue of already-known
+  // facts.
+  const warming = DODGED_PROBES.filter(applicable).some((probe) => !runner.lastRunAt.has(probe.id));
+
+  // A probe that cannot be PLACED must not keep the slot. Earliest-deadline
+  // ordering made an unaffordable head permanent: a 4.6 GB probe no cold-start
+  // host can hold was due first every pass, its acquire came back queued, the
+  // pass returned, and every affordable probe behind it starved. So an
+  // unplaceable probe is skipped (its broker request stays queued — that
+  // starvation feedback grows the arena) and the pass falls through to the
+  // next one that fits. In steady state the first that fits is the only one
+  // run; while warming, every one that fits runs.
+  let ranOne = false;
   for (const probe of dueProbes) {
     if (isStepped(probe)) continue;
+    if (ranOne && !warming) break;
     const cost = priceMethods(ns, probe.methods);
     const lease = acquire(cost, `batch:${probe.id}`);
     if (lease.status === 'queued') continue;
-    placed = { probe, cost, lease };
-    break;
-  }
-
-  if (!placed) return;
-  const batch: SingleStepProbe[] = [placed.probe];
-  const cost = placed.cost;
-  const lease = placed.lease;
-  for (const probe of batch) runner.lastRunAt.set(probe.id, now);
-  state.probeBatch = { ids: batch.map((p) => p.id), cost, budget: cost };
-
-  let results: { id: string; emissions?: Emission[]; error?: string }[];
-  try {
-    results = await dodge(
-      ns,
-      async (stubNs) => {
-        const out: { id: string; emissions?: Emission[]; error?: string }[] = [];
-        for (const probe of batch) {
-          // Per-probe isolation: ns.gang.* and ns.bladeburner.* throw outside
-          // their BitNode, and one throw must not cost the whole batch.
-          // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Gang.ts#L18-L23 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Bladeburner.ts#L30-L42
-          try {
-            out.push({ id: probe.id, emissions: await probe.run(stubNs, ctx) });
-          } catch (error) {
-            out.push({ id: probe.id, error: String(error) });
-          }
-        }
-        return out;
-      },
-      cost,
-      { host: lease.host },
-    );
-  } catch (error) {
-    // The stub itself failed to launch or timed out — the whole batch is lost.
-    for (const probe of batch) recordProbeFailure(state, probe.id, error);
-    return;
-  } finally {
-    lease.release();
-  }
-
-  for (const result of results) {
-    const probe = batch.find((p) => p.id === result.id)!;
-    if (result.error !== undefined) {
-      recordProbeFailure(state, result.id, result.error);
-      continue;
+    ranOne = true;
+    runner.lastRunAt.set(probe.id, now);
+    state.probeBatch = { ids: [probe.id], cost, budget: cost };
+    try {
+      // One probe, one stub: a throw from ns.gang.*/ns.bladeburner.* outside
+      // its BitNode fails only this probe's dodge, never a neighbour's — the
+      // isolation the packed batch used a per-probe try/catch to get, now
+      // structural.
+      const emissions = await dodge(ns, (stubNs) => probe.run(stubNs, ctx), cost, { host: lease.host });
+      publish(state, emissions ?? [], probe.merge ?? false);
+      clearProbeFailure(state, probe.id);
+    } catch (error) {
+      recordProbeFailure(state, probe.id, error);
+    } finally {
+      lease.release();
     }
-    publish(state, result.emissions ?? [], probe.merge ?? false);
-    clearProbeFailure(state, result.id);
   }
 }
 
@@ -345,7 +324,7 @@ async function runSteppedProbe(
       break;
     }
     try {
-      await dodge(ns, async (stubNs) => await step.run(stubNs, ctx, acc), cost, { host: lease.host });
+      await dodge(ns, (stubNs) => step.run(stubNs, ctx, acc), cost, { host: lease.host });
       ran++;
     } catch (error) {
       // One step failing is not the probe failing: report it and keep what the

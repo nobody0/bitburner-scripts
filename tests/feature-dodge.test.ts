@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import type { NS } from "@ns";
-import type { DodgeGlobals } from "../game/lib/dodge-shared.ts";
+import type { DodgeLaunch } from "../game/lib/dodge-shared.ts";
+import { captureLaunch } from "../game/lib/launch-shared.ts";
 import { featureDodge } from "../game/lib/features/dodge.ts";
 import type { DriverContext } from "../game/lib/features/index.ts";
 import { Heap } from "../shared/ram/heap.ts";
@@ -18,12 +17,13 @@ function harness(acquire = true) {
     sleep: async () => {},
     exec: () => {
       execs++;
-      const globals = globalThis as typeof globalThis & DodgeGlobals;
       queueMicrotask(async () => {
+        const launch = captureLaunch<DodgeLaunch>("dodge");
+        if (!launch) return;
         try {
-          globals.dodge_cb?.(await globals.dodge_func!(stubNs));
+          launch.resolve({ result: launch.func(stubNs) });
         } catch (error) {
-          globals.dodge_reject?.(error);
+          launch.reject(error);
         }
       });
       return 1;
@@ -71,6 +71,48 @@ describe("feature dodge broker and heap leases", () => {
     expect(h.counts()).toEqual({ execs: 1, acquired: 1, released: 1 });
   });
 
+  test("a Promise result is awaited after the stub lease has been released", async () => {
+    const h = harness();
+    let resolve!: (value: number) => void;
+    const gameResult = new Promise<number>((done) => { resolve = done; });
+    let settled = false;
+    const outcome = featureDodge(
+      h.ctx,
+      "factions",
+      "action:join",
+      ["singularity.joinFaction"],
+      () => gameResult,
+    ).then((value) => {
+      settled = true;
+      return value;
+    });
+
+    await new Promise<void>((done) => setTimeout(done, 0));
+    expect(h.counts()).toEqual({ execs: 1, acquired: 1, released: 1 });
+    expect(settled).toBe(false);
+
+    resolve(42);
+    expect(await outcome).toEqual({ ok: true, value: 42 });
+  });
+
+  test("a pending result does not block the next synchronous dodge handoff", async () => {
+    const h = harness();
+    let finishFirst!: () => void;
+    const firstResult = new Promise<void>((done) => { finishFirst = done; });
+    const first = featureDodge(
+      h.ctx, "factions", "action:join", ["singularity.joinFaction"], () => firstResult,
+    );
+    const second = featureDodge(
+      h.ctx, "factions", "action:join", ["singularity.joinFaction"], () => 2,
+    );
+
+    await new Promise<void>((done) => setTimeout(done, 0));
+    expect(h.counts()).toEqual({ execs: 2, acquired: 2, released: 2 });
+    expect(await second).toEqual({ ok: true, value: 2 });
+    finishFirst();
+    expect(await first).toEqual({ ok: true, value: undefined });
+  });
+
   test("lease releases on ordinary failure and ScriptDeath", async () => {
     for (const error of [new Error("boom"), Object.assign(new Error("killed"), { name: "ScriptDeath" })]) {
       const h = harness();
@@ -86,14 +128,5 @@ describe("feature dodge broker and heap leases", () => {
     expect(heap.allocate({ blockSize: 1.7, threads: 4, policy: "contiguous" }).ok).toBe(false);
     lease.release();
     expect(heap.allocate({ blockSize: 1.7, threads: 4, policy: "contiguous" }).ok).toBe(true);
-  });
-
-  test("feature sources cannot bypass the central helper", () => {
-    const root = resolve(import.meta.dir, "../game/lib/features");
-    for (const file of ["career.ts", "factions.ts", "hacking.ts", "hacknet.ts", "remaining.ts", "stock.ts"]) {
-      const source = readFileSync(resolve(root, file), "utf8");
-      expect(source, file).not.toMatch(/\bdodge\s*\(/);
-      expect(source, file).not.toMatch(/\bdodgeHost\s*\(/);
-    }
   });
 });

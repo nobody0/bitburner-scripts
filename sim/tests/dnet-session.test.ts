@@ -424,6 +424,8 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       const firstServer = h.world.servers.get(first.hostname)!;
       firstServer.hasAdminRights = true;
       firstServer.backdoorInstalled = true;
+      first.blockedRam = 0;
+      const cache = restarts.addCache(first.hostname, false)!;
 
       restarts.darknetProcess(10_000);
 
@@ -433,6 +435,8 @@ laneDescribe("darknet sessions and the gates that shaped the agents", () => {
       expect(h.host.files.get(first.hostname)?.has("agent.js")).toBe(true);
       expect(firstServer.hasAdminRights).toBe(true);
       expect(firstServer.backdoorInstalled).toBe(false);
+      expect(first.blockedRam).toBe(0);
+      expect(restarts.cachesOn(first.hostname)).toContain(cache);
     });
 
     test("nextMutation resolves once per tick, and wakes every waiter", () => {

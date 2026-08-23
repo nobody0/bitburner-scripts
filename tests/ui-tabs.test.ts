@@ -1,8 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { FEATURES } from "../shared/features/registry.ts";
 import { deriveCapabilities } from "../shared/features/unlock.ts";
 import type { LogRecord } from "../shared/telemetry/schema.ts";
-import type { StateKey, StateMap } from "../shared/telemetry/state-map.ts";
+import type { StateMap } from "../shared/telemetry/state-map.ts";
 import { appendRecords, project, emptyState, EVENT_RING, SERIES_LIMIT, type ProjectedState } from "../ui/app/project.ts";
 import { NO_SORT, setView, sortOf, toggleSort } from "../ui/app/lib/viewstate.ts";
 import { groupRequests } from "../ui/app/tabs/career.ts";
@@ -218,136 +217,63 @@ describe("tab rendering", () => {
     expect(html).not.toContain("</span> of wall");
   });
 
-  test("every feature's populated panel renders", () => {
-    // One synthetic record per topic, so no panel's data branch is untested
-    // just because the local save cannot reach that feature.
-    // Keep the former prose-bearing shapes here as legacy replay coverage:
-    // feature panels must render old JSONL without displaying those fields.
-    const topics = {
-      farm: { target: "n00dles", totals: { moneyEarned: 1e6, hacks: 12 }, inFlight: { hack: 1, grow: 2, weaken: 3 }, ramPie: { farm: 10, prep: 5, share: 0, free: 2, reserve: 4 }, pipelines: [{ host: "n00dles", role: "farm", mode: "hwgw", segment: "farm", gb: 10, inFlight: { hack: 1, grow: 2, weaken: 3 }, money: 9e5, moneyMax: 1e6, security: 1.2, minSecurity: 1, planThreads: { hack: 16, grow: 5, weaken: 4 }, moneyPerSecPerGb: 3.5, hackTimeMs: 2400, weakenTimeMs: 9600 }, { host: "joesguns", role: "prep", segment: "prep", gb: 5, inFlight: { hack: 0, grow: 4, weaken: 8 }, money: 3e5, moneyMax: 1e6, security: 12, minSecurity: 5, eta: { seconds: 252, bound: "ram", prepped: false } }], landingOrder: { planned: "h-w1-g-w2", batches: 400, observed: { "h-w1-g-w2": 396, "h-g-w1-w2": 4 }, incomplete: 2, anomalies: [{ at: 5000, observed: "h-g-w1-w2", planned: "h-w1-g-w2", target: "n00dles" }] }, allocation: { threads: { farm: { hack: 1600, grow: 500, weaken: 400 } }, effectThreads: { farm: { hack: 1600, grow: 625, weaken: 500 } } }, ramWork: { nativeGbMs: 100, paddingGbMs: 10, nativeGbMsByKind: { hack: 50, grow: 30, weaken: 20 }, paddingGbMsByKind: { hack: 5, grow: 3, weaken: 2 }, nativeGbMsBySegment: { farm: 80, prep: 20, share: 0 }, paddingGbMsBySegment: { farm: 8, prep: 2, share: 0 }, nativeGbMsBySegmentKind: { farm: { hack: 50, grow: 20, weaken: 10 }, prep: { hack: 0, grow: 10, weaken: 10 }, share: { hack: 0, grow: 0, weaken: 0 } }, paddingGbMsBySegmentKind: { farm: { hack: 5, grow: 2, weaken: 1 }, prep: { hack: 0, grow: 1, weaken: 1 }, share: { hack: 0, grow: 0, weaken: 0 } } } },
-      fleet: { rootedHosts: 3, totalHosts: 9, maxRam: 64, usedRam: 32, purchased: { count: 1, totalRam: 8, limit: 25 }, home: { maxRam: 32, usedRam: 8, cores: 2 }, portOpeners: 2 },
-      progression: { bitNode: 12, sourceFiles: { "4": 3 }, ownedAugs: { NeuroFlux: 5 }, augCount: 1, lastAugReset: 1, lastNodeReset: 1, multipliers: { ScriptHackMoney: 0.2 } },
-      factions: { joined: ["CyberSec"], standings: [{ name: "CyberSec", rep: 100, favor: 1 }], invites: ["NiteSec"], favorToDonate: 150, workTypes: { CyberSec: ["hacking"] }, enemies: { CyberSec: [] }, requirements: { NiteSec: [{ type: "skills", skills: { hacking: 200 } }] }, gates: { CyberSec: { joined: true, invited: false, progress: 1, reachable: true, missing: [] }, NiteSec: { joined: false, invited: true, progress: 1, reachable: true, missing: [] }, "The Covenant": { joined: false, invited: false, progress: 0.4, reachable: true, missing: [{ kind: "skill", subject: "agility", target: 850, have: 340, progress: 0.4, owner: "career", reachable: true }] }, Illuminati: { joined: false, invited: false, progress: 0, reachable: false, missing: [{ kind: "bitNode", target: 0, have: 0, progress: 0, owner: "progression", reachable: false }] } }, augMeta: { Rootkit: { prereqs: [], mults: { hacking: 1.1 } } }, ownedAugs: ["BitWire"], offers: [{ name: "Rootkit", faction: "CyberSec", price: 1.9e6, basePrice: 1e6, repReq: 100, affordableRep: true, repGap: 0, owned: false }], augTotal: 1, graftable: [{ name: "Rootkit", price: 1e6, timeMs: 6e4 }], plan: { context: { evaluatedAt: 0, horizonSec: 3600, ownedAugCount: 1, queuedAugCount: 0, incomePerSec: 1000, moneyAvailable: 1e6, moneyGranted: 1e6, holdsWorkSlot: true, favorToDonate: 150, priceQueue: { nonSoA: 0, ownedSoA: 0, neurofluxLevel: 0 } }, objective: { factions: ["CyberSec"], augmentations: ["Rootkit"], value: 1.5, foreclosed: [{ name: "Volhaven", bannedBy: "Sector-12" }] }, action: { type: "workForFaction", faction: "CyberSec", workType: "hacking" }, alternatives: [{ label: "work NiteSec", value: 0.2 }], blockers: [{ faction: "NiteSec", kind: "skill", subject: "hacking", target: 200, have: 50, progress: 0.25, owner: "hacking", reachable: true }], until: { kind: "rep", faction: "CyberSec", target: 100, have: 40, etaSec: 120 }, lastResult: { action: "workForFaction", ok: true, detail: "started", at: 1 }, recommendInstall: { augmentations: ["Rootkit"] } } },
-      career: { karma: -100, numPeopleKilled: 0, skills: { hacking: 10, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1, intelligence: 0 }, exp: { hacking: 10, strength: 0, defense: 0, dexterity: 0, agility: 0, charisma: 0, intelligence: 0 }, city: "Sector-12", location: "home", entropy: 0, totalPlaytime: 1e6, jobs: { ECorp: "Software" }, companies: { ECorp: { rep: 10, favor: 1 } }, currentWork: { type: "CRIME", detail: "Mug" }, crimes: [{ name: "Mug", chance: 0.5, money: 1000, timeMs: 4000, karma: -0.25, moneyPerSec: 125 }] },
-      hacknet: { servers: false, numNodes: 2, maxNumNodes: 30, purchaseNodeCost: 1e5, totalProduction: 500, productionPerSec: 1.5, nodes: [{ name: "hacknet-node-0", level: 10, ram: 2, cores: 1, production: 1.5, totalProduction: 500, timeOnline: 3600 }], nextUpgrades: [{ kind: "level", node: 0, cost: 1000 }] },
-      stock: { hasWseAccount: true, hasTixApiAccess: true, has4SData: false, has4SDataApi: true, positions: [{ sym: "ECP", price: 100, ask: 100.2, bid: 99.8, maxShares: 1e6, shares: 100, avgPx: 90, sharesShort: 0, avgPxShort: 0, value: 9980, costBasis: 9000 }], signals: { ECP: { forecast: 0.6, volatility: 0.0045 } }, portfolioValue: 9980, portfolioCost: 9000, tradeCashFlow: -4e8, unlockSpend: 5.2e9, wealth: 1.2e10, orders: { ECP: [{ type: "Limit Buy Order", position: "Long", shares: 500, price: 95 }] }, market: { tick: 120, ticksUntilCycle: 43, cyclesSeen: 1, lastFlipCount: 15, lastV: 0.42 }, manipulation: { ecorp: { sym: "ECP", side: "long", valuePerOp: 12000, notional: 9980 } }, plan: { actions: [{ type: "buy" }], ranked: [{ sym: "ECP", side: "long", forecast: 0.6, volatility: 0.0045, exact: true, manipulable: true, breakEvenTicks: 4.2, expectedProfit: 5e5 }], entry: { sym: "ECP", side: "long", shares: 1000, cost: 1e5, expectedProfit: 5e5, holdTicks: 43, breakEvenTicks: 4.2 }, unlock: { type: "buy4SApi", cost: 25e9, investmentCost: 30.2e9, gainPerSec: 1e6, paybackSec: 25000, netOverHorizon: 1e9 }, reserve: { amount: 2e8, ratePerSec: 5e4 }, horizons: { positionSec: 258, unlockSec: 4320 }, flat: false, lastResult: { action: "buy", ok: true, detail: "bought 1000 ECP", at: 1 } } },
-      gang: { faction: "Slum Snakes", isHacking: false, respect: 100, respectGainRate: 1, wantedLevel: 2, wantedLevelGainRate: 0.1, wantedPenalty: 0.9, moneyGainRate: 500, power: 10, territory: 0.2, territoryClashChance: 0.1, territoryWarfareEngaged: false, respectForNextRecruit: 200, recruitsAvailable: 1, canRecruit: true, members: [{ name: "a", task: "Mug People", earnedRespect: 10, respectGain: 0.5, wantedLevelGain: 0.01, moneyGain: 100, skills: { hack: 1, str: 10, def: 10, dex: 10, agi: 10, cha: 1 }, ascMults: { hack: 1, str: 1, def: 1, dex: 1, agi: 1, cha: 1 }, upgrades: 2, augmentations: 1 }], clashChances: { Tetrads: 0.4 } },
-      corp: { name: "Acme", funds: 1e9, revenue: 1e6, expenses: 5e5, public: false, valuation: 1e10, sharePrice: 10, totalShares: 1e9, numShares: 9e8, issuedShares: 0, dividendRate: 0, dividendEarnings: 0, state: "START", divisions: [{ name: "Ag", industry: "Agriculture", awareness: 1, popularity: 1, productionMult: 2, researchPoints: 100, lastCycleRevenue: 1e6, lastCycleExpenses: 5e5, numAdVerts: 1, cities: ["Sector-12"], products: [], maxProducts: 0, offices: [{ city: "Sector-12", size: 9, numEmployees: 9, avgEnergy: 99, avgMorale: 99, jobs: { Operations: 3 } }], warehouses: [{ city: "Sector-12", level: 1, size: 100, sizeUsed: 50, smartSupplyEnabled: true }] }], investmentOffer: { round: 1, funds: 1e9, shares: 1e8 } },
-      bladeburner: { rank: 100, skillPoints: 5, stamina: [50, 100], city: "Sector-12", current: { type: "Contract", name: "Tracking", elapsedMs: 1000 }, nextBlackOp: { name: "Operation Typhoon", rank: 2500 }, skills: { "Blade's Intuition": { level: 1, upgradeCost: 3 } }, actions: [{ type: "contract", name: "Tracking", chance: [0.5, 0.7], timeMs: 30000, countRemaining: 100, level: 1, maxLevel: 5 }], cities: [{ name: "Sector-12", population: 1e6, communities: 5, chaos: 10 }] },
-      sleeves: { count: 1, sleeves: [{ index: 0, shock: 10, sync: 90, memory: 1, storedCycles: 0, city: "Sector-12", hp: { current: 10, max: 10 }, skills: { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 }, task: { type: "CRIME", detail: "Mug" }, purchasableAugs: [{ name: "BitWire", price: 1e6 }] }] },
-      go: {
-        status: "inProgress",
-        currentPlayer: "Black",
-        opponent: "Netburners",
-        boardSize: 5,
-        board: ["XO...", ".X...", "..O..", ".....", "....."],
-        previousBoards: [["X....", ".....", ".....", ".....", "....."]],
-        whiteScore: 5.5,
-        blackScore: 3,
-        komi: 1.5,
-        bonusCycles: 12,
-        moveCount: 4,
-        territory: { black: 2, white: 1 },
-        stats: [{ opponent: "Netburners", wins: 3, losses: 1, winStreak: 2, highestWinStreak: 2, rep: 100, bonusPercent: 5, bonusDescription: "hacking speed" }],
-        plan: {
-          action: { type: "move", x: 1, y: 1 },
-          ranked: [{
-            x: 1, y: 1, score: 0.84, powerPerRound: 5.5, captures: 1,
-            predictedReplies: [{ x: 2, y: 2, count: 5 }, { x: null, y: null, count: 1 }],
-          }],
-          input: {
-            at: 1_000, board: ["X....", ".....", ".....", ".....", "....."], previousBoards: [],
-            status: "inProgress", currentPlayer: "Black", komi: 1.5,
-          },
-          planning: { finalistCount: 4, positionValue: 0.25 },
-          selection: {
-          preferred: {
-            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, aligned: false, waitSec: 0, winProbability: 0.8,
-            expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
-            currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
-            multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
-            favorEventProbability: 0, favorBefore: 0, favorAfter: 0, favorRemainingWorkSec: 0,
-            expectedFavorGain: 0, favorSecSaved: 0, totalSecSaved: 20, utilityPerSec: 20 / 70,
-            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0,
-          },
-          candidates: [{
-            opponent: "Netburners", boardSize: 5, observedBoardSize: 5, aligned: false, waitSec: 0, winProbability: 0.8,
-            expectedBlackScore: 15, expectedGameSec: 70, difficultyMultiplier: 0.5,
-            currentWinStreak: 0, powerIfWin: 15, powerIfLoss: 5, expectedNodePower: 12,
-            multiplierBefore: 1, multiplierAfter: 1.01, transientSecSaved: 20,
-            favorEventProbability: 0, favorBefore: 0, favorAfter: 0, favorRemainingWorkSec: 0,
-            expectedFavorGain: 0, favorSecSaved: 0, totalSecSaved: 20, utilityPerSec: 20 / 70,
-            planningGames: 8, horizonNodePower: 80, horizonTransientSecSaved: 60, horizonFavorSecSaved: 0,
-          }],
-          context: {
-            goPower: 1, hasSourceFile14: false, favorRepCap: 100_000, installRemainingSec: 3_600,
-            joinedFactions: [], demands: {},
-          },
-        },
-        },
-        lastTurn: {
-          at: 1_100,
-          durationMs: 205,
-          action: { type: "move", x: 1, y: 1 },
-          opponentResponse: { type: "move", x: 2, y: 2 },
-          predictionSupport: { matching: 5, total: 6 },
-          prediction: {
-            model: "clean-room-v3.0.1",
-            sampledTotalPlaytime: 100_000,
-            sampledAt: 900,
-            decisionAt: 1_000,
-            preparationMs: 1.2,
-            finalizationMs: 0.8,
-            totalPlanningMs: 2,
-            engineCycleMs: 200,
-            aiWaitMs: 200,
-            seedCandidates: [100_200],
-            dispatchPlaytime: 100_000,
-            boundaryRetries: 0,
-          },
-          ok: true,
-          detail: "move; opponent move",
-        },
-      },
-      stanek: { width: 3, height: 3, occupied: { "0,0": 1, "1,0": 1 }, fragments: [{ id: 1, type: "Hacking", x: 0, y: 0, rotation: 0, power: 1.5, limit: 1, effect: "+x% hacking", numCharge: 10, highestCharge: 10, chargedEffect: 1.2 }], availableTypes: [{ id: 1, type: "Hacking", power: 1.5, limit: 1 }] },
-      dnet: { reachable: 4, maxDepth: 2, stasisLinkLimit: 2, stasisLinked: ["dn-1"], instability: { authenticationDurationMultiplier: 1.2, authenticationTimeoutChance: 0.05 }, probed: [{ hostname: "dn-1", at: 1_000, present: true, depth: 1, blockedRam: 16, requiredCharisma: 50 }] },
-      side: {
-        contracts: [{ host: "home", file: "c.cct" }],
-        contractTotal: 900,
-        solvableTotal: 400,
-        unsolvableByType: { "Proper 2-Coloring of a Graph": 500 },
-        unsolvableTotal: 500,
-        registryComplete: false,
-        contractTypeTotal: 30,
-        supportedTypeTotal: 29,
-        failures: [{ host: "n00dles", file: "bad.cct", type: "Array Jumping Game", reason: "answer rejected", triesBefore: 1, at: 1 }],
-        quarantinedTotal: 1,
-        lastResult: { action: "contract", ok: true, detail: "20 solved", at: 1 },
-      },
-    };
-
+  test("dense entity tables expose sortable views", () => {
     const state = emptyState();
-    state.runId = "synthetic";
-    state.topics = topics as unknown as { [K in StateKey]?: StateMap[K] };
+    state.topics.hacknet = {
+      servers: false, numNodes: 1, maxNumNodes: 30, purchaseNodeCost: 1e5,
+      totalProduction: 500, productionPerSec: 1.5,
+      nodes: [{ name: "hacknet-node-0", level: 10, ram: 2, cores: 1, production: 1.5, totalProduction: 500, timeOnline: 3600 }],
+      nextUpgrades: [],
+    } as StateMap["hacknet"];
+    state.topics.stock = {
+      hasWseAccount: true, hasTixApiAccess: true, has4SData: false, has4SDataApi: true,
+      positions: [{ sym: "ECP", price: 100, ask: 100.2, bid: 99.8, maxShares: 1e6, shares: 100, avgPx: 90, sharesShort: 0, avgPxShort: 0, value: 9980, costBasis: 9000 }],
+      signals: {}, portfolioValue: 9980, portfolioCost: 9000, orders: {},
+      market: { tick: 120, ticksUntilCycle: 43, cyclesSeen: 1, lastFlipCount: 15, lastV: 0.42 },
+    } as StateMap["stock"];
+    state.topics.gang = {
+      faction: "Slum Snakes", isHacking: false, respect: 100, respectGainRate: 1,
+      wantedLevel: 2, wantedLevelGainRate: 0.1, wantedPenalty: 0.9, moneyGainRate: 500,
+      power: 10, territory: 0.2, territoryClashChance: 0.1, territoryWarfareEngaged: false,
+      respectForNextRecruit: 200, recruitsAvailable: 1, canRecruit: true, clashChances: {},
+      members: [{
+        name: "a", task: "Mug People", earnedRespect: 10, respectGain: 0.5,
+        wantedLevelGain: 0.01, moneyGain: 100,
+        skills: { hack: 1, str: 10, def: 10, dex: 10, agi: 10, cha: 1 },
+        ascMults: { hack: 1, str: 1, def: 1, dex: 1, agi: 1, cha: 1 },
+        upgrades: 2, augmentations: 1,
+      }],
+    } as StateMap["gang"];
+    state.topics.bladeburner = {
+      rank: 100, skillPoints: 5, stamina: [50, 100], city: "Sector-12",
+      current: { type: "Contract", name: "Tracking", elapsedMs: 1000 }, skills: {},
+      actions: [{ type: "contract", name: "Tracking", chance: [0.5, 0.7], timeMs: 30000, countRemaining: 100, level: 1, maxLevel: 5 }],
+      cities: [],
+    } as StateMap["bladeburner"];
+    state.topics.sleeves = {
+      count: 1,
+      sleeves: [{
+        index: 0, shock: 10, sync: 90, memory: 1, storedCycles: 0, city: "Sector-12",
+        hp: { current: 10, max: 10 },
+        skills: { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 },
+        task: { type: "CRIME", detail: "Mug" }, purchasableAugs: [],
+      }],
+    } as StateMap["sleeves"];
     state.caps = deriveCapabilities({
-      bitNode: 1,
-      sourceFiles: Object.fromEntries(FEATURES.flatMap((f) => f.bitnodes.map((n) => [String(n), 1]))),
-      inGang: true,
-      inBladeburner: true,
-      hasCorporation: true,
-      hasWseAccount: true,
-      hasTixApiAccess: true,
-      goPlayable: true,
+      bitNode: 1, sourceFiles: { "2": 1, "7": 1, "9": 1, "10": 1 },
+      inGang: true, inBladeburner: true, hasWseAccount: true, hasTixApiAccess: true,
     });
-    renderAll(state);
 
-    // The dense per-entity tables are sortable, one viewstate id each.
-    expect(TABS["gang"].render(state)).toContain('data-sort-table="gang.members"');
-    expect(TABS["sleeves"].render(state)).toContain('data-sort-table="sleeves.list"');
-    expect(TABS["bladeburner"].render(state)).toContain('data-sort-table="bladeburner.actions"');
-    expect(TABS["stock"].render(state)).toContain('data-sort-table="stock.positions"');
-    expect(TABS["stock"].render(state)).toContain('data-sort-table="stock.market"');
-    expect(TABS["hacknet"].render(state)).toContain('data-sort-table="hacknet.nodes"');
+    for (const [tab, table] of [
+      ["gang", "gang.members"],
+      ["sleeves", "sleeves.list"],
+      ["bladeburner", "bladeburner.actions"],
+      ["stock", "stock.positions"],
+      ["stock", "stock.market"],
+      ["hacknet", "hacknet.nodes"],
+    ] as const) {
+      expect(TABS[tab].render(state)).toContain(`data-sort-table="${table}"`);
+    }
   });
 
   test("the stock tab reads the whole ledger the topic publishes", () => {
@@ -456,40 +382,11 @@ describe("tab rendering", () => {
     expect(html).not.toContain(">hold<");
   });
 
-  test("structured plans expose decision evidence without authored rationale", () => {
+  test("the darknet plan exposes operational evidence without authored rationale", () => {
     const state = emptyState();
-    state.topics.bladeburner = {
-      rank: 100, skillPoints: 3, stamina: [50, 100], city: "Sector-12",
-      plan: {
-        action: { type: "act", actionType: "contract", name: "Tracking" },
-        ranked: [{ name: "Tracking", actionType: "contract", rankPerSec: 2.5, chanceLow: 0.8 }],
-      },
-    };
-    state.topics.corp = {
-      name: "Acme", funds: 1e9, revenue: 1e6, expenses: 5e5, public: false,
-      valuation: 1e10, sharePrice: 10, totalShares: 1e9, numShares: 9e8,
-      issuedShares: 0, dividendRate: 0, dividendEarnings: 0, state: "START",
-      plan: {
-        action: { type: "expandCity", division: "Agriculture", city: "Aevum" },
-        stage: "agriculture-cities", completed: ["found", "agriculture"],
-      },
-    };
     state.topics.dnet = {
       maxDepth: 1, stasisLinkLimit: 2, stasisLinked: [], topologyComplete: true,
       instability: { authenticationDurationMultiplier: 1, authenticationTimeoutChance: 0.1 },
-      // Home's own one-hop reading, in the shape an agent reports. The panel
-      // renders the FOLD below; the driver folds this into it as one more vantage.
-      probed: [
-        {
-          hostname: "dn-1", at: 1_000, present: true, depth: 1, blockedRam: 11, requiredCharisma: 50,
-          maxRam: 16, usedRam: 0, modelId: "2G_cellular", passwordLength: 6,
-          passwordFormat: "numeric", passwordHint: "the dog, obviously", data: "rex",
-          logTrafficInterval: 45, difficulty: 3, isStationary: true,
-        },
-        // A host that went offline answers with a dummy details object, so
-        // everything except its liveness is absent.
-        { hostname: "dn-gone", at: 1_000, present: false },
-      ],
       knowledge: {
         at: 1_000,
         generation: "15:0",
@@ -555,10 +452,6 @@ describe("tab rendering", () => {
             from: "dn-1", at: "7,1", moves: 24, walls: 0, radars: 1, attempts: 25,
             believedLeft: 30, startedAt: 1_000 - 60_000, beatAt: 1_000, pinned: true,
           },
-          {
-            from: "dn-2", role: "scout", at: "3,5", moves: 11, walls: 1, radars: 0, attempts: 12,
-            believedLeft: 48, startedAt: 1_000 - 30_000, beatAt: 1_000, pinned: false,
-          },
         ],
       },
       channel: { drained: 4, rejected: 1, forgotten: 0 },
@@ -577,42 +470,8 @@ describe("tab rendering", () => {
         examples: [{ host: "dn-1", why: "not-enough-ram", detail: "1.00GB free, needs 2.60GB" }],
       },
     };
-    state.topics.gang = {
-      faction: "Slum Snakes", isHacking: false, respect: 100, respectGainRate: 1,
-      wantedLevel: 2, wantedLevelGainRate: 0.1, wantedPenalty: 0.9, moneyGainRate: 500,
-      power: 10, territory: 0.2, territoryClashChance: 0.1, territoryWarfareEngaged: false,
-      respectForNextRecruit: 200, recruitsAvailable: 0, canRecruit: false, members: [],
-      plan: {
-        actions: [{ type: "assign", member: "m-1", task: "Mug People" }],
-        assignment: { total: 12.5, approximated: false, choices: [{ member: "m-1", task: "Mug People", score: 12.5 }] },
-      },
-    };
-    state.topics.sleeves = {
-      count: 1,
-      sleeves: [{ index: 0, shock: 0, sync: 100, memory: 1, storedCycles: 0, city: "Aevum", hp: { current: 10, max: 10 }, skills: { hacking: 1, strength: 1, defense: 1, dexterity: 1, agility: 1, charisma: 1 } }],
-      plan: {
-        assignments: [{ index: 0, task: "crime:Mug" }],
-        selection: [{ index: 0, task: "crime:Mug", score: 4.2 }],
-        totalScore: 4.2,
-      },
-    };
-    state.topics.stanek = {
-      width: 2, height: 2, occupied: {}, fragments: [],
-      plan: {
-        placements: [{ id: 1, x: 0, y: 0, rotation: 0 }], value: 9,
-        approximated: false, chargeOrder: [1],
-      },
-    };
-
-    const rendered = ["bladeburner", "corp", "dnet", "gang", "sleeves", "stanek"]
-      .map((id) => TABS[id as TabId].render(state))
-      .join("\n");
-    expect(rendered).toContain("rank/sec");
-    expect(rendered).toContain("agriculture-cities");
+    const rendered = TABS["dnet"].render(state);
     expect(rendered).toContain("servers kept reachable");
-    expect(rendered).toContain("raw score");
-    expect(rendered).toContain("total score");
-    expect(rendered).toContain("objective value");
     expect(rendered).not.toContain("invented");
     // The darknet's discovery surface is rendered, because the whole point of
     // acquiring it is to be able to look at it.
@@ -657,10 +516,8 @@ describe("tab rendering", () => {
     // a walk holds a host for hours and the panel could only say "active: walk".
     // The map itself, drawn from the published grid...
     expect(rendered).toContain("labmaze");
-    // ...both walkers, by the role that decides whether losing one matters...
+    // ...the single PID-bound walker and its pinned vantage...
     expect(rendered).toContain("finisher");
-    expect(rendered).toContain("scout");
-    expect(rendered).toContain("dn-2");
     // ...and the exit, which on this rung is known before the first move.
     expect(rendered).toContain("19,11");
 

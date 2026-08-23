@@ -64,7 +64,7 @@ export const EXTRA_AUG_PUSH_FRACTION = 0.01;
  *
  * ACTION PRECEDENCE, and why it is this order:
  *
- *   purchaseAugmentation -> joinFaction -> travelTo -> donate -> graft
+ *   purchaseAugmentation -> joinFactions -> travelTo -> donate -> graft
  *   -> workForFaction -> stopWork -> idle
  *
  * Purchase is first only after the final transaction has been closed. Before
@@ -688,6 +688,63 @@ function decideFactions(
   // travel, or renewed work may reopen the package under escalated prices.
   const drainLatched = memory.drainCeiling !== undefined;
 
+  // --- 1) join --------------------------------------------------------------
+  // Consume every compatible invitation in ONE action. Spawning one dodge per
+  // faction turned a seven-invite backlog into minutes of avoidable latency,
+  // during which none of those factions earned passive reputation.
+  //
+  // Planned factions go first. Unplanned invitations are welcome when they do
+  // not conflict with any still-unjoined faction in the committed portfolio.
+  // The durable choices are included alongside the current objective because a
+  // promoted/latching objective can temporarily expose only its current head.
+  // Check both enemy directions: metadata is a fact about each faction, not a
+  // promise that every synthetic or partially observed table is symmetric.
+  const protectedFactions = new Set([
+    ...objective.factions,
+    ...(next.portfolioChoices ?? []).map((choice) => choice.faction),
+  ]);
+  const conflictsWith = (left: FactionStanding, right: FactionStanding): boolean =>
+    left.enemies.includes(right.name) || right.enemies.includes(left.name);
+  const pendingInvites = view.factions.filter((standing) => standing.invited && !standing.joined);
+  const inviteOrder = [...pendingInvites].sort((left, right) => {
+    const leftPlanned = protectedFactions.has(left.name);
+    const rightPlanned = protectedFactions.has(right.name);
+    if (leftPlanned !== rightPlanned) return leftPlanned ? -1 : 1;
+    // With no planned preference, choose the least-exclusive side first. For
+    // the city graph this selects the three compatible eastern factions over
+    // a two-faction western side or Volhaven alone.
+    const leftConflicts = pendingInvites.filter((other) => other !== left && conflictsWith(left, other)).length;
+    const rightConflicts = pendingInvites.filter((other) => other !== right && conflictsWith(right, other)).length;
+    return leftConflicts - rightConflicts || left.name.localeCompare(right.name);
+  });
+  const invitations: FactionStanding[] = [];
+  if (!drainLatched) {
+    for (const candidate of inviteOrder) {
+      if (view.factions.some((member) => member.joined && conflictsWith(candidate, member))) continue;
+      if (
+        !protectedFactions.has(candidate.name) &&
+        view.factions.some(
+          (planned) =>
+            !planned.joined &&
+            protectedFactions.has(planned.name) &&
+            conflictsWith(candidate, planned),
+        )
+      ) continue;
+      if (invitations.some((selected) => conflictsWith(candidate, selected))) continue;
+      invitations.push(candidate);
+    }
+  }
+  if (invitations.length > 0) {
+    const action: FactionAction = {
+      type: "joinFactions",
+      factions: invitations.map((standing) => standing.name),
+    };
+    return {
+      memory: { ...next, lastAction: action },
+      decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
+    };
+  }
+
   if (view.currentWork?.kind === "grafting") {
     // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Work/GraftingWork.tsx#L26-L98
     const action: FactionAction = { type: "idle", reason: "continue" };
@@ -697,7 +754,7 @@ function decideFactions(
     };
   }
 
-  // --- 1) purchase: DELIBERATELY ABSENT mid-run -------------------------------
+  // --- 2) purchase: DELIBERATELY ABSENT mid-run -------------------------------
   // The two-loop money rule: an augmentation does nothing until the install
   // reset, and every queued purchase escalates every LATER purchase 1.9x. So
   // buying mid-run both pulls money out of compounding investments and pays
@@ -733,44 +790,6 @@ function decideFactions(
     const action: FactionAction = view.requirementView.city === "New Tokyo"
       ? { type: "graft", augmentation: graft }
       : { type: "travelTo", city: "New Tokyo" };
-    return {
-      memory: { ...next, lastAction: action },
-      decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
-    };
-  }
-
-  // --- 2) join --------------------------------------------------------------
-  const invitation = view.factions.find(
-    (standing) => standing.invited && !standing.joined && objective.factions.includes(standing.name),
-  );
-  if (invitation && !drainLatched) {
-    const action: FactionAction = { type: "joinFaction", faction: invitation.name };
-    return {
-      memory: { ...next, lastAction: action },
-      decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },
-    };
-  }
-
-  // --- 2b) free joins -------------------------------------------------------
-  // An invitation that forecloses NOTHING is pure upside regardless of the
-  // objective: it costs one call, unlocks the faction's augmentations and
-  // reputation forever, and cannot ban anything (no enemies in either
-  // direction). Measured failure without this: CyberSec's invite arrived with
-  // half an hour left in the run and sat unaccepted because the objective had
-  // moved on — the entire backdoor chain completed for nothing. Enemy-bearing
-  // invitations still wait for the objective to want them.
-  // https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Faction/FactionHelpers.tsx#L35-L51
-  const freeInvite = view.factions.find(
-    (standing) =>
-      !view.installRequested &&
-      !drainLatched &&
-      standing.invited &&
-      !standing.joined &&
-      standing.enemies.length === 0 &&
-      !view.factions.some((member) => member.joined && member.enemies.includes(standing.name)),
-  );
-  if (freeInvite) {
-    const action: FactionAction = { type: "joinFaction", faction: freeInvite.name };
     return {
       memory: { ...next, lastAction: action },
       decision: { objective, action, alternatives, blockers: allBlockers, needOwners, invalidation },

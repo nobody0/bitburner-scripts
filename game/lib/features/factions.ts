@@ -627,12 +627,54 @@ async function execute(_ns: NS, ctx: DriverContext, action: FactionAction, view:
     case "idle":
       return;
 
-    case "joinFaction": {
-      const ok = await run(["singularity.joinFaction"], (stubNs) =>
-        stubNs["singularity"]["joinFaction"](action.faction as never),
+    case "joinFactions": {
+      const result = await run(["singularity.joinFaction"], (stubNs) => {
+        const joined: string[] = [];
+        const failed: string[] = [];
+        for (const faction of action.factions) {
+          if (!stubNs["singularity"]["joinFaction"](faction as never)) {
+            failed.push(faction);
+            continue;
+          }
+          joined.push(faction);
+        }
+        return { joined, failed };
+      });
+      if (result === refused) {
+        // The decision is published before its RAM claim can land. Retry on
+        // the next controller pass, not on the 30-second faction cadence.
+        chainWake = true;
+        return;
+      }
+      if (result.joined.length > 0) {
+        const topic = ctx.state.topics.factions;
+        const accepted = new Set(result.joined);
+        const acceptedStandings = view.factions.filter((standing) => accepted.has(standing.name));
+        const invalidated = new Set(
+          view.factions
+            .filter((standing) => acceptedStandings.some(
+              (member) =>
+                member.enemies.includes(standing.name) ||
+                standing.enemies.includes(member.name),
+            ))
+            .map((standing) => standing.name),
+        );
+        merge(ctx.state, "factions", {
+          joined: [...new Set([...(topic?.joined ?? []), ...result.joined])],
+          invites: (topic?.invites ?? []).filter(
+            (faction) => !accepted.has(faction) && !invalidated.has(faction),
+          ),
+        });
+        // Membership changes the immediately actionable work frontier.
+        chainWake = true;
+      }
+      const complete = result.failed.length === 0;
+      record(
+        complete,
+        complete
+          ? `joined ${result.joined.join(", ")}`
+          : `joined ${result.joined.join(", ") || "none"}; game refused ${result.failed.join(", ")}`,
       );
-      if (ok === refused) return;
-      record(Boolean(ok), ok ? `joined ${action.faction}` : "game refused the join (invitation withdrawn?)");
       return;
     }
 
@@ -839,6 +881,7 @@ function planDigest(decision: FactionDecision, view: FactionsView, bankedAugment
       type: decision.action.type,
       ...(decision.action.type === "idle" && decision.action.reason === "slot" ? { awaitingWorkSlot: true } : {}),
       ...("faction" in decision.action ? { faction: decision.action.faction } : {}),
+      ...("factions" in decision.action ? { factions: [...decision.action.factions] } : {}),
       ...("augmentation" in decision.action ? { augmentation: decision.action.augmentation } : {}),
       ...("city" in decision.action ? { city: decision.action.city } : {}),
       ...("workType" in decision.action ? { workType: decision.action.workType } : {}),
@@ -1595,7 +1638,7 @@ function factionClaimId(type: string): string {
 
 function factionMethods(type: string): readonly string[] {
   switch (type) {
-    case "joinFaction": return ["singularity.joinFaction"];
+    case "joinFactions": return ["singularity.joinFaction"];
     case "workForFaction": return ["singularity.workForFaction"];
     case "stopWork": return ["singularity.stopAction"];
     case "travelTo": return ["singularity.travelToCity"];

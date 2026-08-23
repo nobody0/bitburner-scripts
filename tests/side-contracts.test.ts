@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
-import type { DodgeGlobals } from "../game/lib/dodge-shared.ts";
+import type { DodgeLaunch } from "../game/lib/dodge-shared.ts";
+import { captureLaunch } from "../game/lib/launch-shared.ts";
 import { sideModule } from "../game/lib/features/side.ts";
 import type { DriverContext } from "../game/lib/features/index.ts";
 import type { GameState } from "../game/lib/state.ts";
@@ -21,12 +22,13 @@ function harness(attempt: (answer: unknown) => string) {
     sleep: async () => {},
     exec: () => {
       execs++;
-      const globals = globalThis as typeof globalThis & DodgeGlobals;
       queueMicrotask(async () => {
+        const launch = captureLaunch<DodgeLaunch>("dodge");
+        if (!launch) return;
         try {
-          globals.dodge_cb?.(await globals.dodge_func!(stubNs));
+          launch.resolve({ result: launch.func(stubNs) });
         } catch (error) {
-          globals.dodge_reject?.(error);
+          launch.reject(error);
         }
       });
       return execs;

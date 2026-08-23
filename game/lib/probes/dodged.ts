@@ -13,7 +13,6 @@ import { rotate } from "../../../shared/strategy/stanek/pack.ts";
 import type { AugmentationMeta } from "../../../shared/telemetry/topics/factions.ts";
 import type { CorpState } from "../../../shared/telemetry/topics/corp.ts";
 import type { BladeburnerState } from "../../../shared/telemetry/topics/bladeburner.ts";
-import type { ReportHost } from "../../../shared/strategy/dnet/courier.ts";
 import {
   contractKey,
   darknetContractsFromListings,
@@ -62,10 +61,6 @@ const MIN_10 = 600_000;
  * late-game save has ~1000 augmentations and 33 stock symbols; the panels
  * only ever show a page of them. Totals are reported alongside. */
 const LIST_LIMIT = 60;
-/** Darknet password hints and their extracted data are free text of unknown
- *  length upstream, and one record carries a page of hosts. Clip at the source
- *  rather than trusting the field to be short. */
-const HINT_LIMIT = 120;
 
 // --- hacking ---------------------------------------------------------------
 
@@ -1742,105 +1737,6 @@ const stanekCore: DodgedProbe = {
   },
 };
 
-// --- darknet ---------------------------------------------------------------
-
-const dnetCore: DodgedProbe = {
-  id: "dnet.core",
-  kind: "dodged",
-  feature: "dnet",
-  requires: "dnet",
-  everyMs: MIN_1,
-  merge: true,
-  // getServerDetails already carries depth, blockedRam and requiredCharismaSkill,
-  // so getDepth / getBlockedRam / getServerRequiredCharismaLevel would be three
-  // extra distinct-function charges for values we already hold. The RAM getters
-  // answer the one question the details object does not: whether a darknet host
-  // has room to run an agent at all.
-  methods: [
-    "getHostname",
-    "getServerMaxRam",
-    "getServerUsedRam",
-    "dnet.probe",
-    "dnet.getServerDetails",
-    "dnet.getStasisLinkLimit",
-    "dnet.getStasisLinkedServers",
-    "dnet.getDarknetInstability",
-  ],
-  run(stubNs: NS) {
-    const observedFrom = stubNs["getHostname"]();
-    // probe() returns only Darknet neighbors of the SCRIPT EXECUTION host and
-    // shuffles their order. One launch is not a complete graph traversal.
-    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L314-L335
-    // probe() only sees the CALLING host's darknet neighbours, and a dodged
-    // probe lands wherever the broker leased RAM — usually not home, the one
-    // fleet host that neighbours darkweb. So the local neighbour list is a
-    // bonus, not the source: getServerDetails takes no connection requirement
-    // (checkDarknetServer is called with no options upstream), so `darkweb` —
-    // the one darknet hostname guaranteed to exist — is readable from anywhere.
-    // Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions/Darknet.ts#L382-L385
-    const hosts = [...new Set(["darkweb", ...stubNs["dnet"]["probe"]()])];
-    const linked = new Set(stubNs["dnet"]["getStasisLinkedServers"]().map(String));
-    let maxDepth = -1;
-    // ReportHost, the same shape a resident sends: home's one hop is one more
-    // vantage on the same map rather than a second representation of it.
-    const probed: ReportHost[] = [];
-    const at = Date.now();
-    for (const host of hosts.slice(0, LIST_LIMIT)) {
-      // A host that has gone offline recently answers with a DUMMY details
-      // object carrying isOnline: false. Its other fields describe nothing, so
-      // publish the liveness bit and no more.
-      const details = stubNs["dnet"]["getServerDetails"](host);
-      if (details.isOnline === false) {
-        probed.push({ hostname: host, at, present: false });
-        continue;
-      }
-      if (details.depth > maxDepth) maxDepth = details.depth;
-      // Ordinary server getters are not darknet-aware and throw on a host that
-      // vanished between probe() and here.
-      let maxRam: number | undefined;
-      let usedRam: number | undefined;
-      try {
-        maxRam = stubNs["getServerMaxRam"](host);
-        usedRam = stubNs["getServerUsedRam"](host);
-      } catch {
-        /* host went away mid-batch; the details above still stand */
-      }
-      probed.push({
-        hostname: host,
-        at,
-        present: true,
-        depth: details.depth,
-        blockedRam: details.blockedRam,
-        requiredCharisma: details.requiredCharismaSkill,
-        // The discovery surface. Every one of these is undocumented upstream and
-        // is what a password attack would have to reason from, so acquire it now
-        // and let the tab show what the darknet actually looks like.
-        modelId: details.modelId,
-        passwordLength: details.passwordLength,
-        passwordFormat: details.passwordFormat,
-        passwordHint: details.passwordHint.slice(0, HINT_LIMIT),
-        data: details.data.slice(0, HINT_LIMIT),
-        logTrafficInterval: details.logTrafficInterval,
-        difficulty: details.difficulty,
-        isStationary: details.isStationary,
-        ...(maxRam !== undefined ? { maxRam } : {}),
-        ...(usedRam !== undefined ? { usedRam } : {}),
-      });
-    }
-    return [
-      emit("dnet", {
-        observedFrom,
-        topologyComplete: false,
-        maxDepth,
-        stasisLinkLimit: stubNs["dnet"]["getStasisLinkLimit"](),
-        stasisLinked: [...linked],
-        instability: stubNs["dnet"]["getDarknetInstability"](),
-        probed,
-      }),
-    ];
-  },
-};
-
 // --- side ------------------------------------------------------------------
 
 /** Contract discovery keeps a private bounded work queue and sends only its
@@ -1964,7 +1860,6 @@ export const DODGED_PROBES: readonly DodgedProbe[] = [
   bladeCities,
   sleevesCore,
   stanekCore,
-  dnetCore,
   sideContracts,
 ];
 

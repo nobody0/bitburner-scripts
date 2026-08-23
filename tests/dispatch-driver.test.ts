@@ -134,7 +134,7 @@ describe('broker farm preemption adapter', () => {
     const killed: number[] = [];
     const result = reclaimForDodge({ kill: (pid: number) => (killed.push(pid), true) } as NS, state, {
       by: 'progression', id: 'action:install', gb: 5, priority: 110,
-      lane: 'default', class: 'deferrable',
+      class: 'deferrable',
     }, [{
       hostname: 'foodnstuff', maxRam: 16, freeGb: 0, rooted: true, deployed: true,
     }]);

@@ -150,7 +150,6 @@ interface Scenario {
     pressure: JitPressure,
   ) => Record<string, number | undefined> | void;
   /** Set when the scenario documents a gap rather than asserting behaviour. */
-  skip?: string;
 }
 
 /** SEED SWEEP MODE. The fixtures pin one seed each, which is the right default:
@@ -246,11 +245,7 @@ function runScenario(scenario: Scenario): void {
       expect(verdict.regressions.join("\n")).toBe("");
     };
 
-    if (scenario.skip !== undefined) {
-      test.skip(`${scenario.what} [gap: ${scenario.skip}]`, body, scenario.timeoutMs);
-    } else {
-      test(scenario.what, body, scenario.timeoutMs);
-    }
+    test(scenario.what, body, scenario.timeoutMs);
   });
 }
 
@@ -358,23 +353,6 @@ const CHURN_TARGET = {
   requiredHackingSkill: 1, serverGrowth: 100, numOpenPortsRequired: 0, maxRam: 0,
 } as const;
 
-/** Already prepped and genuinely profitable: the earner whose income must not
- *  be switched off. `moneyMax` is derived as 25x `moneyAvailable`, so "at max"
- *  means `currentMoney = 25x`. */
-const MIGRATE_READY = {
-  hostname: "migrate-ready", organizationName: org,
-  hackDifficulty: 1, currentDifficulty: 1,
-  moneyAvailable: 2e6, currentMoney: 5e7,
-  requiredHackingSkill: 1, serverGrowth: 3000, numOpenPortsRequired: 0, maxRam: 0,
-} as const;
-/** Fatter, unprepped, and therefore the target worth migrating TO — but only
- *  after a prep the ready server has to pay for. */
-const MIGRATE_BETTER = {
-  hostname: "migrate-better", organizationName: org,
-  hackDifficulty: 20, moneyAvailable: 5e8,
-  requiredHackingSkill: 1, serverGrowth: 100, numOpenPortsRequired: 0, maxRam: 0,
-} as const;
-
 const SOLO = {
   hostname: "solo-target", organizationName: org,
   hackDifficulty: 3, currentDifficulty: 1,
@@ -382,19 +360,10 @@ const SOLO = {
   requiredHackingSkill: 1, serverGrowth: 100, numOpenPortsRequired: 0, maxRam: 0,
 } as const;
 
-const RICH_A = {
-  hostname: "both-alpha", organizationName: org,
-  hackDifficulty: 3, currentDifficulty: 1,
-  moneyAvailable: 1e8, currentMoney: 2.5e9,
-  requiredHackingSkill: 1, serverGrowth: 100, numOpenPortsRequired: 0, maxRam: 0,
-} as const;
-const RICH_B = { ...RICH_A, hostname: "both-beta" } as const;
-
 const star = (...hosts: { hostname: string }[]): Record<string, readonly string[]> => ({
   home: hosts.map((host) => host.hostname),
   ...Object.fromEntries(hosts.map((host) => [host.hostname, ["home"]])),
 });
-
 /* -------------------------------------------------------------------------- *
  * The ladder.
  * -------------------------------------------------------------------------- */
@@ -846,95 +815,6 @@ runScenario({
   },
 });
 
-/** MIGRATE — the "a better server shows up" case, built without any mid-run
- * mutation hook. One server starts ALREADY PREPPED and earning; the fatter one
- * starts cold and has to be prepped out of that income before it can be farmed.
- * So the interesting behaviour is forced by the fixture's initial state alone:
- * farm and prep must run in parallel, and then the farm must migrate.
- *
- * Merged from scenario-farm.test.ts, which built exactly this world to prove
- * prep never switches the farm off, but stopped short of asserting the payoff.
- * Both halves are here now: the earner keeps earning THROUGH the investment,
- * and the investment is actually collected.
- *
- * OPEN GAP — the fixture is right and the controller is wrong, so this row is
- * marked rather than retuned. `solveCycle` prices `migrate-better` at 54x
- * `migrate-ready`'s income score and 1.38x its experience score, at every skill
- * from 10 to 400, so there is no reading under which the migration is not
- * worth taking. It never happens. Traced through a 45-minute run:
- *
- *   - prep of `migrate-better` runs at exactly 25 GB (14 weaken threads) for
- *     the entire run while 448 TB of the fleet sits free. `evaluator.ts` pins
- *     `chosenPrepGb` to the PREVIOUS pass's prep segment inside the sticky-prep
- *     block, so the wave is frozen at whatever the cold fleet could afford;
- *   - at that rate security 15.1 -> 7.0 takes 32 minutes and money reaches only
- *     $1.0e9 of $1.25e10 by minute 45, so the target is never `prepped` and
- *     `bestPrepped` never sees it;
- *   - merely HAVING the second target costs ~8x income: `migrate-ready` alone
- *     earns $1.56e8/sec and $3.28e11 total against $2.03e7/sec and $3.47e9 with
- *     both present.
- *
- * Naively unfreezing the wave size is not the fix — prep then eats the fleet
- * and income falls to $1.20e5/sec — so this needs prep sizing reworked, not a
- * one-line change. */
-runScenario({
-  id: "jit-migrate",
-  title: "scenario: prep in parallel, then migrate to the better target",
-  what: "keeps earning while prepping a better target, then switches to it and gains",
-  steadyFromMs: 10 * 60_000,
-  timeoutMs: 600_000,
-  skip: "prep is frozen at its cold-start wave size, so the better target never finishes prep and the farm never migrates",
-  options: {
-    goal: parseGoals(["earn:1e30"]),
-    seed: 1,
-    horizonMs: 45 * 60_000,
-    bitnode: 1,
-    homeRam: 128,
-    startingMoney: 1e6,
-    features: only("hacking", "progression"),
-    network: [MIGRATE_READY, MIGRATE_BETTER] as never,
-    topology: star(MIGRATE_READY, MIGRATE_BETTER),
-  },
-  structural: (run, metrics) => {
-    const switched = run.switches.find((event) => event.to === MIGRATE_BETTER.hostname);
-    const switchAt = switched?.atMs;
-    const farmAndPrep = run.samples.some((sample) => sample.farmGb > 0 && sample.prepGb > 0);
-    // Prep is paid for out of SURPLUS, never out of the income stream that
-    // funds everything: the farm segment must never be squeezed to nothing.
-    const starved = run.samples.filter((sample) => sample.atMs >= 20 * 60_000 && sample.farmGb === 0);
-    const earnedBy = (minute: number): number =>
-      sampleAtOrBefore(run.samples, minute * 60_000)?.earned ?? 0;
-
-    const beforeRate = switchAt === undefined ? 0 : moneyRate(run.samples, switchAt - 120_000, switchAt);
-    const afterRate = switchAt === undefined
-      ? 0
-      : moneyRate(run.samples, switchAt + 60_000, switchAt + 300_000);
-
-    console.info(
-      `[jit-migrate] switch=${switchAt === undefined ? "none" : `${switchAt / 1_000}s`}`
-      + ` farmAndPrep=${farmAndPrep} starved=${starved.length}`
-      + ` rate=${beforeRate.toExponential(3)}->${afterRate.toExponential(3)}`
-      + ` earned=25min:${earnedBy(25).toExponential(3)} 40min:${earnedBy(40).toExponential(3)}`
-      + ` prep-max=${Math.max(...run.samples.map((s2) => s2.prepGb)).toFixed(1)}GB`
-      + ` fleet-max=${Math.max(...run.samples.map((s2) => s2.fleetGb)).toFixed(0)}GB`,
-    );
-
-    // The farm has to be earning before anything can be said about it stalling.
-    expect(earnedBy(20)).toBeGreaterThan(0);
-    // Income must keep accruing while prep runs. A flat stretch means the
-    // earner was switched off to fund the investment, which is never right.
-    expect(earnedBy(40) - earnedBy(25)).toBeGreaterThan(0);
-    expect(starved).toHaveLength(0);
-    expect(farmAndPrep).toBe(true);
-    expect(metrics.launchedHacks).toBeGreaterThan(0);
-
-    // THE MIGRATION, which scenario-farm never checked: prepping the better
-    // target is only worth its cost if we actually move onto it and earn more.
-    expect(switched).toBeDefined();
-    expect(afterRate).toBeGreaterThan(beforeRate);
-  },
-});
-
 /** ONE SERVER — the base case. A single target and RAM to spare, so nothing
  * competes and nothing fragments. The point is not throughput for its own sake
  * but HONESTY: `solveCycle` predicts a steady-state $/sec for this target, and
@@ -1036,64 +916,5 @@ runScenario({
     expect(realizedShare).toBeGreaterThan(0.5);
     expect(realizedShare).toBeLessThan(2.0);
     return { realizedShare };
-  },
-});
-
-/** FARM BOTH — a documented gap, not an assertion.
- *
- * The evaluator emits exactly ONE farm host plus one prep host
- * (`shared/strategy/evaluator.ts:958`). Once the fleet passes the farm's depth
- * cap (`ceil(weakenTime/INTERVAL) * ramPerBatch`), extra RAM cannot buy more
- * batches on that target, and the surplus is absorbed into `share` rather than
- * into a second farm. This fixture is two comparable rich servers with RAM far
- * past one target's cap — the exact shape where a two-target farm would earn
- * close to double — and it measures how much of that we leave on the table.
- *
- * It is SKIPPED because it measures the ceiling of a deliberate design, not a
- * defect: `tests/share.test.ts` records the counter-evidence for the obvious
- * "just use the surplus" fix, a measured bn1 regression from $18.05q to
- * $12.23q when RAM past the depth cap was treated as free. Run it by name when
- * revisiting multi-target farming; the printed share is the size of the prize. */
-runScenario({
-  id: "jit-farm-both",
-  title: "scenario: two rich targets and RAM to spare",
-  what: "measures the headroom a single-target farm leaves on a fat fleet",
-  skip: "the farm runs one target at a time by design; this measures the ceiling",
-  steadyFromMs: 5 * 60_000,
-  timeoutMs: 180_000,
-  options: {
-    goal: parseGoals(["earn:1e30"]),
-    seed: 5,
-    horizonMs: 20 * 60_000,
-    bitnode: 1,
-    homeRam: 16_384,
-    startingMoney: 0,
-    person: { skills: { hacking: 1_000 }, exp: { hacking: calculateExp(1_000) } },
-    features: only("hacking"),
-    network: [RICH_A, RICH_B] as never,
-    topology: star(RICH_A, RICH_B),
-  },
-  structural: (run, metrics) => {
-    const skill = run.skills.at(-1)?.hacking ?? 1_000;
-    const a = solved(RICH_A, skill, 1)!;
-    const b = solved(RICH_B, skill, 1)!;
-    const fleetGb = Math.max(...run.samples.map((sample) => sample.fleetGb));
-    const oneTarget = a.score * Math.min(fleetGb, a.jitSaturationGb ?? fleetGb);
-    const bothTargets = oneTarget
-      + b.score * Math.min(Math.max(0, fleetGb - (a.jitSaturationGb ?? fleetGb)), b.jitSaturationGb ?? 0);
-    const maxShareGb = Math.max(...run.samples.map((sample) => sample.shareGb));
-
-    console.info(
-      `[jit-farm-both] fleet=${fleetGb}GB depthCap=${(a.jitSaturationGb ?? 0).toFixed(1)}GB`
-      + ` one-target=$${oneTarget.toExponential(6)}/s both=$${bothTargets.toExponential(6)}/s`
-      + ` realized=$${metrics.moneyPerSec.toExponential(6)}/s`
-      + ` headroom=${(bothTargets / Math.max(oneTarget, 1e-9)).toFixed(3)}x`
-      + ` share=${maxShareGb}GB`,
-    );
-
-    // The premise: the fleet really does exceed one target's depth cap, so the
-    // headroom being measured is real and not an artefact of a small fixture.
-    expect(fleetGb).toBeGreaterThan(a.jitSaturationGb ?? Infinity);
-    expect(bothTargets).toBeGreaterThan(oneTarget);
   },
 });

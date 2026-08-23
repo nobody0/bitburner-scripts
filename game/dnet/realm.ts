@@ -16,7 +16,8 @@ import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
  *   only thing that can start work there.
  * - When the resident takes a job it `spawn`s into it with `spawnDelay: 0`,
  *   which kills the resident and starts the job immediately on the same host.
- *   The job runs, settles its promise, and spawns back to resident mode.
+ *   The job runs, settles its promise, then atExit starts the next queued job
+ *   directly or returns to resident mode when the queue is empty.
  *
  * So a host holds ONE agent process at a time, and its peak RAM is the largest
  * single link rather than the sum of everything running.
@@ -31,7 +32,7 @@ import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
  * it is the difference between a job running and not running at all.
  *
  * **The tax is real and is stated rather than buried:** every job pays 2.0 GB
- * for the spawn back to resident mode. A chain of trivial steps would be WORSE
+ * for the atExit successor spawn. A chain of trivial steps would be WORSE
  * than one script. It pays here because darknet jobs are individually expensive
  * and because the alternative — leaving a host with no resident — cannot be
  * repaired from outside: re-planting one needs a session AND adjacency, which
@@ -63,8 +64,7 @@ import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
  *
  * 1. **Entries are expired, never trusted.** A resident that stops beating is
  *    swept and its queue retired (`sweepQueues`); a job that stops settling is
- *    timed out; a claim on work whose vantage or job is gone is dropped
- *    (`sweepClaims`). A realm reference to a dead host is exactly the hazard.
+ *    timed out. A realm reference to a dead host is exactly the hazard.
  * 2. **A foreign generation is refused** (`overseerIsLive`), because agents
  *    outlive overseers and a live script from a dead run describes a world
  *    this one does not share.
@@ -74,48 +74,85 @@ import type { TaskKind } from "../../shared/strategy/dnet/queue.ts";
  * 4. **A credential never reaches telemetry.** It lives in the overseer's
  *    vault and in home's, and `publishKnowledge` publishes a boolean. */
 
-/** Bumped from 1 when `claims` joined the rendezvous. It is a version on the
- * SHAPE, and the reason it has to move is that agents outlive overseers and a
+/** A version on the rendezvous SHAPE. It has to move because agents outlive
+ * overseers and a
  * build handoff leaves both on disk: an agent from the previous build reading a
  * rendezvous whose shape moved under it is a bug with no symptom. Refusing by
  * number makes it exit instead. */
-export const RENDEZVOUS_PROTOCOL = 3;
+export const RENDEZVOUS_PROTOCOL = 6;
 
 /** The script base, which every allocation starts from. Transcribed rather than
  * read, because a launcher sizes a process it has not started yet.
  * Source: src/Netscript/RamCostGenerator.ts RamCostConstants.Base */
 export const SCRIPT_BASE_GB = 1.6;
 
-/** Headroom over the priced cost, matching `game/lib/dodge.ts`'s reasoning: the
- * engine compares DYNAMIC usage against the allocation and kills the script on
- * overrun, so an exact price is a coin flip — any call a body makes that is not
- * in its method list is fatal. Half a gigabyte is cheap next to losing the job. */
-const PRICE_MARGIN_GB = 0.5;
+/** The one thing every agent process must be able to do: `spawn` — into a job, or
+ * back to resident mode. Its own hostname comes from the launch descriptor or
+ * its sole self-spawn argument.
+ * Both modes pay this, so both lists below start from it. */
+const AGENT_BASE_METHODS = ["spawn"] as const;
 
-/** What every agent process calls before doing anything else: it reads its own
- * hostname to find its queue, and it spawns — into a job, or back to resident
- * mode. Both modes pay these, so both lists below start from them. */
-const AGENT_BASE_METHODS = ["getHostname", "spawn"] as const;
+/** Resident mode: `spawn`, and NOTHING else. It gets its host from args, the
+ * overseer computes its RAM and owns adjacency (so no getters and no preflight
+ * probe), and its atExit respawn CATCHES `spawn`'s synchronous host-deleted throw
+ * rather than pre-checking with `getServerMaxRam`. The leanest a self-respawning
+ * agent can be — its whole cost is the base plus the one `spawn` it exists to
+ * make. */
+export const RESIDENT_METHODS: readonly string[] = [...AGENT_BASE_METHODS];
 
-/** Resident mode: the base pair, the two RAM getters, and a last-moment
- * adjacency/identity preflight before it gives up the resident to spawn. */
-export const RESIDENT_METHODS: readonly string[] = [
-  ...AGENT_BASE_METHODS,
-  "getServerMaxRam",
-  "getServerUsedRam",
-  "dnet.probe",
-];
-
-/** The overseer observes the mutation clock and process liveness, and holds the
+/** The overseer receives the probers' mutation clock and observes process
+ * liveness, and holds the
  * one destructive member in the whole system: `kill`, for retiring a live job
  * whose work is provably pointless. It still cannot inspect a target, crack it,
  * or launch work. `kill` works by PID from anywhere — the engine's worker map
  * is global and the pid form checks no host — which is what lets the overseer
  * on darkweb reach a job seconds deep in an `authenticate` on a distant host. */
-export const CONTROLLER_METHODS: readonly string[] = ["getHostname", "dnet.nextMutation", "isRunning", "kill"];
+export const CONTROLLER_METHODS: readonly string[] = [
+  "isRunning",
+  "kill",
+  // The overseer now OBSERVES — but only through SYNCHRONOUS, instant reads, never
+  // a blocking `authenticate`. `probe` learns darkweb's own neighbours (host-local,
+  // and the overseer stands on darkweb); `getServerDetails` + `getServerMaxRam`
+  // read any host's facts from anywhere with no connection, so adjacency from the
+  // probers plus these two are the whole map. `getServerMaxRam` is an identity
+  // fact read once per host and cached.
+  "dnet.probe",
+  "dnet.getServerDetails",
+  "dnsLookup",
+  "getServerMaxRam",
+];
 
-/** Every job also calls `describeHost`. */
-const DESCRIBE_METHODS = ["dnet.getServerDetails", "getServerMaxRam", "getServerUsedRam"] as const;
+/** The prober: the one thing that must run ON a darknet host, because `probe()`
+ * is host-local. It does that and NOTHING else — `nextMutation` is its clock
+ * (0 GB) and it reports through the shared realm (0 GB). It carries NO safety
+ * net: no `spawn` to revive itself and no `getServerMaxRam` to check its host is
+ * alive. That is the whole point of the split. `spawn` alone is 2 GB, and a
+ * script that only ever reads one host-local fact has no business paying it —
+ * the overseer re-`exec`s a dead prober through its worker instead (it sees the
+ * death as a stale `at` in the `probes` map, see `reportProbe`). The host is
+ * supplied by its launch descriptor. The result is a FIXED reserve of exactly
+ * `SCRIPT_BASE_GB + probe` = 1.8 GB on every host, priced by `proberReserveGb`. */
+export const PROBER_METHODS: readonly string[] = [
+  "dnet.probe",
+  "dnet.nextMutation",
+];
+
+/** The prober's exact allocation: base plus its one billable call, NO margin.
+ *
+ * The prober calls `probe` (0.2) and `nextMutation` (0), full stop, so its
+ * exact allocation is 1.8 GB with no guard band.
+ * This is the number the overseer reserves and the number the launcher execs at,
+ * so the two can never drift. */
+export function proberReserveGb(ns: NS): number {
+  return SCRIPT_BASE_GB + ns.getFunctionRamCost("dnet.probe");
+}
+
+/** Every job also calls `describeHost` — but ONLY `getServerDetails` now. The two
+ * RAM getters are gone: the overseer reads `maxRam` itself and computes usable RAM
+ * (`maxRam − blockedRam − prober`), never consulting `usedRam`, so a job paying for
+ * them was 0.1 GB of pure waste on every thread. `getServerDetails` stays because
+ * its `blockedRam` is the one RAM fact an action (a grind) actually moves. */
+const DESCRIBE_METHODS = ["dnet.getServerDetails"] as const;
 
 /** What each job body calls, per kind.
  *
@@ -138,7 +175,7 @@ const DESCRIBE_METHODS = ["dnet.getServerDetails", "getServerMaxRam", "getServer
  * ever firing, and set the whole ladder grinding RAM it does not need. A pin is
  * something we do once to one host, not a size every host must fit. */
 export const ROUTINE_JOB_KINDS: readonly string[] = [
-  "survey",
+  "inventory",
   "bleed",
   "attempt",
   "plant",
@@ -149,13 +186,21 @@ export const ROUTINE_JOB_KINDS: readonly string[] = [
 
 export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
   // `ls` is here and nowhere it is not needed: it is the only view of caches,
-  // coding contracts and storm seeds. It works at any distance, so a surveyor
-  // already standing at the right vantage can report the whole listing.
-  survey: [...AGENT_BASE_METHODS, "dnet.probe", "getServer", "ls", ...DESCRIBE_METHODS],
+  // coding contracts and storm seeds. It works at any distance; the inventory
+  // job runs locally because it is filed only for that host's fresh drop.
+  // The LIST job, filed only for a host marked dirty by an action that may have
+  // dropped a file. It LISTS (`ls`) and reads identity (`dnsLookup`); it does NOT
+  // `probe` (the prober owns adjacency) and reports no neighbours (the overseer
+  // reads host facts itself). Instant, so its per-thread cost never matters —
+  // unlike the action jobs it keeps clean.
+  inventory: [...AGENT_BASE_METHODS, "dnsLookup", "ls", "read", "rm", ...DESCRIBE_METHODS],
   bleed: [...AGENT_BASE_METHODS, "dnet.heartbleed", ...DESCRIBE_METHODS],
   // authenticate and heartbleed together, because `authenticate()` answers with
   // a GENERIC failure for every model but the labyrinth: the model's real
   // response goes to the target's log ring, and only heartbleed reads it back.
+  // A first successful authenticate can create a cache without saying so in the
+  // response — so a win flags the host dirty (`result.dirtied`) and the overseer
+  // lists it once, rather than paying `ls` on every authenticate thread.
   attempt: [...AGENT_BASE_METHODS, "dnet.authenticate", "dnet.heartbleed", "formulas.dnet.getAuthenticateTime", ...DESCRIBE_METHODS],
   // connectToSession FIRST, because the credential was usually won by an earlier
   // process whose session died with it, and re-opening one costs 0.05 GB and no
@@ -169,6 +214,8 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
     "dnet.authenticate",
     "scp",
     "exec",
+    "kill",
+    "dnsLookup",
     ...DESCRIBE_METHODS,
   ],
   // --- the farm, all three of them self-host ------------------------------
@@ -177,19 +224,21 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
   // declares `requireAdminRights`, but the self early-out at
   // `offlineServerHandling.ts:98-101` returns before that check is reached, so a
   // resident grinds its OWN block open for nothing.
-  // `ls` here too, and it is not optional: clearing a block to zero is what
-  // DROPS a `.cache`, so a grind that ran to the end and did not look would
-  // leave the file it just earned invisible until some neighbour's survey
-  // happened past. The body calls it, so the list must declare it — the union
-  // check in `tests/ram-budget.test.ts` cannot see a per-kind mismatch, and the
-  // engine expresses one by killing the process on its first unlisted call.
-  reclaim: [...AGENT_BASE_METHODS, "dnet.memoryReallocation", "getServer", "ls", ...DESCRIBE_METHODS],
+  // NO `getServer` (2.0) and NO `ls` (0.2): grinding a block to zero drops a
+  // `.cache`, but reading it on every grind thread is 2.2 GB of threads lost. The
+  // job flags the host dirty and keeps a plain describe for the `blockedRam` it
+  // moves; the overseer's instant list job reads the drop.
+  reclaim: [...AGENT_BASE_METHODS, "dnet.memoryReallocation", ...DESCRIBE_METHODS],
+  // A winning phish creates a `.d.cache` during the call, but this thread-scaled
+  // job does NOT `ls` to see it — that is 0.2 GB per phishing thread. It flags the
+  // host dirty (`result.dirtied`) and the overseer files one instant inventory
+  // job to read the drop, keeping every phishing thread for phishing.
   phish: [...AGENT_BASE_METHODS, "dnet.phishingAttack", ...DESCRIBE_METHODS],
   // `ls` again, and for two reasons: the job re-reads the host's file list after
   // opening one so the overseer's belief is not one tick stale, and it is the
   // guard against `openCache` THROWING — the call raises rather than refuses on
   // a filename the host does not hold, and a throw kills the agent.
-  cache: [...AGENT_BASE_METHODS, "dnet.openCache", "getServer", "ls", ...DESCRIBE_METHODS],
+  cache: [...AGENT_BASE_METHODS, "dnet.openCache", "dnsLookup", "ls", "read", "rm", ...DESCRIBE_METHODS],
   // --- the deliberate ones -------------------------------------------------
   //
   // None of these four is routine. Each is decided once, for one host, by a
@@ -205,9 +254,9 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
   // outright, so this is the one deliberate job whose target is not where it
   // runs.
   induce: [...AGENT_BASE_METHODS, "dnet.induceServerMigration", ...DESCRIBE_METHODS],
-  // THE ONE KIND WITH NO `spawn`, and it is not an economy: 12 GB of
-  // `setStasisLink` plus the 2.0 GB spawn back is 16.15 GB, which does not fit
-  // the 16 GB a shallow darknet host has. Dropping the spawn is what makes the
+  // One of two kinds with no `spawn`, and it is not an economy: the 12 GB
+  // `setStasisLink` job starts beside the host's 1.8 GB prober, so adding the
+  // 2.0 GB spawn-back surface would exceed a shallow host's 16 GB. Dropping it makes the
   // job runnable at all on such a host — the process simply ends, leaving the
   // host empty for `planSpread` to re-plant, which is safe precisely BECAUSE
   // the host is now immutable. The overseer files this variant only when a
@@ -215,18 +264,23 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
   // `dnet.probe` is the act-time edge check: the pin re-verifies the lab edge
   // it exists for immediately before the irrevocable `setStasisLink`, and
   // refuses (912 EdgeGone) rather than spend the slot on a severed one.
-  pin: ["getHostname", "dnet.probe", "dnet.setStasisLink", ...DESCRIBE_METHODS],
-  // The maze walker. It keeps `spawn` — the walk is over by the time it runs —
-  // and it is the only long-lived kind, because a lab is hundreds of moves and
-  // `DarknetState.labLocations` is keyed by PID, so the walk cannot be resumed
-  // by a second process. No `heartbleed`: the labyrinth is the one model that
-  // answers through `authenticate`'s own return value. `labradar` is 0 GB and
-  // the planner pays its authentication-time price only when one radius-3
-  // render decides the exit or scouts a seam's door candidates.
-  // `ls` for the ONE report that matters: reaching the exit drops a `.cache` on
-  // the lab (three on BonusLab), and a walk that finished without looking would
-  // leave the file it just spent hours earning invisible.
-  walk: [...AGENT_BASE_METHODS, "dnet.authenticate", "dnet.labradar", "getServer", "ls", ...DESCRIBE_METHODS],
+  pin: ["dnet.probe", "dnet.setStasisLink", ...DESCRIBE_METHODS],
+  // The maze walker. It DROPS `spawn` (the host is already process state):
+  // while it is the lab walker its host is the most important in the net and runs
+  // it alone, filling every byte with `authenticate` threads, so the 2.0 GB a
+  // spawn-back would cost is 2.0 GB of threads instead. It is `NO_RESPAWN` in
+  // consequence — the walk ends by handing the host to `planSpread` to re-plant,
+  // exactly as a pin does. It is the only long-lived kind, because a lab is
+  // hundreds of moves and `DarknetState.labLocations` is keyed by PID, so the walk
+  // cannot be resumed by a second process. No `heartbleed`: the labyrinth answers
+  // through `authenticate`'s own return value. `labradar` is 0 GB. `ls` for the
+  // Its ONLY job is to walk to completion, so its surface is as small as it goes:
+  // `authenticate` (the moves), `labradar` (0 GB), and the describe trio for the
+  // charisma/online preflight. NO `spawn`, NO `getServer`, NO `ls` — the exit's
+  // `.cache` and the lab's identity are read by the ordinary worker `planSpread`
+  // re-plants here the instant the walk ends, so those costs land on ONE resident
+  // rather than on every authenticate thread.
+  walk: ["dnet.authenticate", "dnet.labradar"],
   // The reroll. `unleashStormSeed` is 0.1 GB and fires `STORM_SEED.exe` off the
   // CALLING host — the seed cannot be scp'd, so the job runs where the file is.
   // `ls` is the act-time re-check: the sighting can go stale exactly like a
@@ -235,14 +289,27 @@ export const JOB_METHODS: Readonly<Record<string, readonly string[]>> = {
   // next derivation without spending anything. Deliberate, so not routine —
   // `wantedGb` must not grow to fit a job that runs a handful of times a run.
   storm: [...AGENT_BASE_METHODS, "dnet.unleashStormSeed", "ls", ...DESCRIBE_METHODS],
+  // Re-establish this host's dead prober. The prober carries no `spawn` of its
+  // own (that is the whole point of its 1.8 GB), so when a host restart kills it
+  // the overseer files this — a single local `exec` of the prober that is already
+  // on disk here — at max priority through the host's own worker. `scp` is absent:
+  // the file was placed at plant time and a restart does not remove files, only
+  // processes. It keeps `spawn` so the worker can hand off afterwards.
+  relaunchProbe: [...AGENT_BASE_METHODS, "exec"],
 };
+
+/** Spawn-free local recovery process: exact 1.6 GB base + 1.0 GB action per
+ * thread. It intentionally carries neither probe, details nor spawn. */
+export const BOOTSTRAP_RECLAIM_METHODS: readonly string[] = ["dnet.memoryReallocation"];
 
 /** Kinds whose process does NOT hand the host back to a resident.
  *
- * `pin` is the only one, and the whole reason it exists — see `JOB_METHODS.pin`.
- * Read by `game/dnet/agent.ts`, which otherwise respawns unconditionally in a
- * `finally`. */
-export const NO_RESPAWN_KINDS: readonly string[] = ["pin"];
+ * Two: `pin` (12 GB `setStasisLink` beside its prober cannot afford spawn — see
+ * `JOB_METHODS.pin`) and `walk` (drops the spawn so every byte goes to the lab's
+ * `authenticate` threads — see `JOB_METHODS.walk`). Both end by leaving the host
+ * empty for `planSpread` to re-plant. Ordinary kinds instead use the agent's
+ * atExit successor handoff. */
+export const NO_RESPAWN_KINDS: readonly string[] = ["pin", "walk"];
 
 /** Kinds the overseer's kill sweep must never hard-cancel, even armored.
  *
@@ -271,7 +338,15 @@ export function hardCancelEligible(job: DnetJob): boolean {
 export function priceAgent(ns: NS, methods: readonly string[]): number {
   let total = SCRIPT_BASE_GB;
   for (const method of new Set(methods)) total += ns.getFunctionRamCost(method);
-  return total + PRICE_MARGIN_GB;
+  return total;
+}
+
+/** Convert usable host RAM into the exact process thread count the engine can
+ * admit. `ramOverride` is charged once per thread, including script base and
+ * the spawn-back surface. */
+export function threadsForJob(roomGb: number, perThreadGb: number, scaled: boolean, requested = 1): number {
+  if (!Number.isFinite(roomGb) || !Number.isFinite(perThreadGb) || roomGb <= 0 || perThreadGb <= 0) return 0;
+  return scaled ? Math.floor(roomGb / perThreadGb) : requested;
 }
 
 /** How long a job may run before the overseer gives up on it.
@@ -308,7 +383,7 @@ export const RESIDENT_BEAT_MISSES = 3;
 export interface DnetJobResult {
   ok: boolean;
   /** Network diagnosis for work that could not reach the identity it targeted. */
-  targetState?: "edge-lost" | "gone" | "replaced" | "cancelled";
+  targetState?: "edge-lost" | "gone" | "replaced" | "credential-rejected" | "launch-refused" | "cancelled";
   hosts?: ReportHost[];
   /** Summary of attempts already written through to the target ledger. */
   attempts?: AttemptOutcome[];
@@ -338,6 +413,13 @@ export interface DnetJobResult {
    *  examples would be exactly the passwords we missed. `logShape` erases every
    *  digit and letter run and keeps the structure. */
   grammar?: { unrecognised: number; shapes: string[] };
+  /** The job may have DROPPED A FILE — a `.cache` or a coding contract — on its
+   *  host and did not spend an `ls` to look. Action jobs stay thread-lean by never
+   *  listing; instead a winning phish, a block ground to zero, a first authenticate
+   *  or an opened cache sets this, and the overseer marks the host dirty and files
+   *  an instant `list` job (high priority, but it never cancels a running job).
+   *  See `game/dnet/jobs.ts` and the overseer's dirty set. */
+  dirtied?: boolean;
   detail?: string;
 }
 
@@ -367,6 +449,14 @@ export interface DnetJobState {
   knownHosts?: string[];
   /** Actual process threads, needed by formulas whose time scales per thread. */
   jobThreads?: number;
+  /** Self-reclaim only: stop the batch once blocked RAM falls to this value,
+   * because the resident can then respawn into one additional job thread. */
+  resizeAtBlockedRam?: number;
+  /** Plant a minimal local reclaimer instead of the ordinary resident/prober. */
+  bootstrapReclaim?: boolean;
+  bootstrapThreads?: number;
+  /** The pinned lab candidate gets no prober before its full-RAM walk. */
+  omitProber?: boolean;
 
   /** This plant is intentionally non-adjacent and may only reuse an existing
    * rooted session. Falling back to authenticate would always fail remotely. */
@@ -380,13 +470,8 @@ export interface DnetJobState {
    *  freeing the slot for a host that still earns one. The edge check does not
    *  apply: a release is filed precisely BECAUSE the edge is gone. */
   unpin?: boolean;
-  /** Payload filenames, for a job that plants a resident elsewhere. A job never
-   *  builds a filename: they are build-versioned, and a guess would `exec` a
-   *  version that is not on disk and get a silent 0. */
+  /** Stable payload filenames for a job that plants a resident elsewhere. */
   payloads?: string[];
-  /** Args for a resident this job plants. Built by the overseer so the
-   *  positional order lives in exactly one place. */
-  plantArgs?: (string | number)[];
   /** A password we do NOT believe belongs to this host, to be spent on one
    *  `authenticate` and no more.
    *
@@ -410,16 +495,15 @@ export interface DnetJobState {
    *  route prior onto the macro-route the finisher is not on, and it is the
    *  walk whose loss costs only its own position — the shared field it fed
    *  lives with the overseer. Absent means the finisher. */
-  role?: "scout";
 }
 
 export interface DnetJob {
   id: string;
-  kind: string;
+  kind: TaskKind;
   /** For the panel and for the failure line. */
   label: string;
   /** Allocation for the process that runs it, PER THREAD: base + its calls + the
-   *  spawn back to resident mode. Declared at launch rather than bought by
+   *  atExit successor spawn. Declared at launch rather than bought by
    *  referencing an expensive ns member in source. */
   budgetGb: number;
   /** Threads the job runs at.
@@ -460,6 +544,8 @@ export interface DnetJob {
   settle: (result: DnetJobResult) => void;
   fail: (error: unknown) => void;
   startedAt?: number;
+  /** Current completion estimate used only to choose the least-cost victim. */
+  expectedDoneAt?: number;
   /** PID written through by job mode as soon as it starts. */
   pid?: number;
   /** Set by the overseer when the job's work became pointless. Cooperative
@@ -494,8 +580,8 @@ export interface DnetJob {
 
 /** How a long-lived job says it is still going, and optionally how far.
  *
- * Called with nothing, it is the liveness stamp the claim sweep and the resident
- * watchdog both read. Called with a payload, it also records where the job has
+ * Called with nothing, it is the liveness stamp the resident watchdog reads.
+ * Called with a payload, it also records where the job has
  * got to — free in RAM, and the general mechanism any future long job wants. */
 export type JobBeat = (progress?: Record<string, unknown>) => void;
 export type JobCancellation = () => string | undefined;
@@ -518,15 +604,84 @@ export interface DnetHostQueue {
   residentPid?: number;
   /** Last time the resident said it was alive. */
   lastBeatAt: number;
-  /** Free RAM the resident last measured. The overseer uses it to avoid
-   *  queueing work that cannot possibly fit. */
-  freeGb?: number;
   /** Jobs finished here, for the panel. */
   completed: number;
   failed: number;
   /** Why the last one failed. A count with no reason is a number nobody can
    *  act on, and out here failures are the normal case rather than the alarm. */
   lastError?: string;
+  /** Resolves the idle resident's wait the INSTANT the overseer files work
+   *  here, so a queued job is picked up without waiting out the poll tick.
+   *  Realm-only, never drained or published — the resident arms it, the
+   *  overseer fires it, both reach it because the queue lives in the shared
+   *  rendezvous. See `waitForQueueWork` / `signalQueueWork`. */
+  wake?: () => void;
+  /** A fire that arrived before the resident re-armed its waiter — consumed on
+   *  the next arm, so a job enqueued between the resident's `nextJob` check and
+   *  its `await` is never lost. */
+  wakePending?: boolean;
+}
+
+/** Wake an idle resident on this queue, or remember the wake if none is waiting.
+ *
+ * The overseer calls this the moment it files a job, turning the resident's
+ * ≤1 s poll into ~0 for job pickup. If no resident is currently parked (it is
+ * mid-job, or between the `nextJob` check and its `await`), `wakePending`
+ * carries the signal to the next arm so it is never dropped. */
+export function signalQueueWork(queue: DnetHostQueue): void {
+  const wake = queue.wake;
+  if (wake) wake();
+  else queue.wakePending = true;
+}
+
+/** A prober files its host's adjacency (and its own pid) and wakes the overseer.
+ *
+ * ONE map, `host -> probe`, and everything reads from it. Newest-wins on the
+ * host key: a later probe replaces the earlier one. The `at` is what makes a
+ * dead prober visible — a live one stamps it every mutation, so a host whose
+ * stamp has fallen behind the mutation clock has lost its prober and the overseer
+ * re-execs it. No separate death channel and no atExit: absence of a fresh stamp
+ * IS the death. The `pid` is here so the overseer can KILL this prober — the one
+ * case being a host that becomes a lab walker, which wants every byte for its
+ * `authenticate` and no prober beside it. The wake is best-effort. */
+export function reportProbe(
+  rendezvous: DnetRendezvous,
+  host: string,
+  neighbours: readonly string[],
+  at: number,
+  pid: number,
+): void {
+  rendezvous.probes.set(host, { neighbours: [...neighbours], at, pid, epoch: rendezvous.mutationEpoch });
+  rendezvous.signalDerive?.();
+}
+
+/** The idle resident's wait: resolve the instant work is signalled, else after
+ * `fallbackMs`. The fallback is the heartbeat — it is what keeps the resident
+ * beating, re-measuring RAM and noticing a kill within one interval — so it
+ * stays well under the sweep window and is NOT lengthened by the wake.
+ *
+ * A realm `setTimeout`, never `ns.sleep`: it holds no Netscript lock. Two races
+ * are closed here — a signal that arrived before this arm (`wakePending`), and
+ * a stale timer from a since-killed resident, which must not null out a newer
+ * resident's handle (`queue.wake === finish`). */
+export function waitForQueueWork(queue: DnetHostQueue, fallbackMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (queue.wakePending) {
+      queue.wakePending = false;
+      resolve();
+      return;
+    }
+    let done = false;
+    const finish = (): void => {
+      if (done) return;
+      done = true;
+      if (queue.wake === finish) queue.wake = undefined;
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, fallbackMs);
+    queue.wake = finish;
+  });
 }
 
 /** One planner refusal, as every rolled-up report carries it. */
@@ -622,6 +777,17 @@ export interface DnetStormReport extends RefusalRollup {
 }
 
 /** What one darknet run has learned and has not yet handed to home. */
+export interface DnetStasisSnapshot {
+  hosts: string[];
+  at: number;
+}
+
+export interface DnetCredentialRejection {
+  hostname: string;
+  identity?: string;
+  at: number;
+}
+
 export interface DnetDrain {
   hosts: ReportHost[];
   credentials: VaultEntry[];
@@ -646,14 +812,12 @@ export interface DnetDrain {
    *  module state exposed nowhere, and our own stamp is the only clock there is
    *  for both the quiet period and the 30-minute seed-eligibility window. */
   stormFiredAt?: number;
-  /** Hosts the overseer has pinned with a stasis link.
-   *
-   *  It travels UP rather than down because the overseer is the only thing
-   *  that can spend one — `setStasisLink` pins the calling host — while home is
-   *  the one that has to run its own fold's expiries against the set. A pinned
-   *  host is outside every mutation branch's victim pool, so believing it
-   *  perishable costs a survey a minute for ever. */
-  stasisLinked?: string[];
+  /** Newest complete stasis set observed or changed by the overseer. */
+  stasisSnapshot?: DnetStasisSnapshot;
+  /** Credentials disproved while the same server identity still answered. */
+  credentialRejections: DnetCredentialRejection[];
+  /** Ordinary backdoor beliefs disproved by restart or remote exec refusal. */
+  backdoorInvalidations: { hostname: string; at: number }[];
   /** The highest charisma a job refused for want of. Only the maze walker
    *  reports one; home turns it into the career need it already posts. */
   charismaNeeded?: number;
@@ -698,8 +862,6 @@ export interface DnetDrain {
 export interface DnetLabWalker {
   /** The vantage the walk RUNS on. Not the target: the target is the lab. */
   from: string;
-  /** Absent for the finisher; `"scout"` for the disposable second walker. */
-  role?: "scout";
   /** `"x,y"`, from the engine's own message. Absent before the first response. */
   at?: string;
   moves: number;
@@ -712,8 +874,7 @@ export interface DnetLabWalker {
   believedLeft?: number;
   startedAt: number;
   beatAt: number;
-  /** Whether a mutation can take this walker. The finisher's host is pinned
-   *  first; a scout's never is, by design. */
+  /** Whether a mutation can take this walker. Its host is pinned first. */
   pinned: boolean;
 }
 
@@ -740,11 +901,10 @@ export interface DnetLabReport {
 export interface DnetOrders {
   charisma: number;
   /** Credentials home already holds, replayed after a re-seed so a restarted
-   *  overseer does not re-crack a net we already opened. */
-  vault?: VaultEntry[];
-  /** Time of home's authoritative vault snapshot. Locally verified entries
-   * newer than this survive a concurrent order. */
-  vaultSnapshotAt?: number;
+   *  overseer does not re-crack a net we already opened. The timestamp makes
+   *  this an atomic snapshot: locally verified entries newer than it survive
+   *  a concurrent order. */
+  vaultSnapshot?: { entries: VaultEntry[]; at: number };
   /** The net's real depth, when home has pinned it from a lab sighting. Without
    *  it the overseer derives tasks and expiries on `DEFAULT_NET_DEPTH`, which
    *  errs toward re-observing — safe, but paid for in jobs. */
@@ -786,7 +946,7 @@ export interface DnetOrders {
   crimeSuccessMult?: number;
   /** `getStasisLinkedServers()`. Home's probe is the authority; a pin job's own
    *  0 GB reading updates the overseer's copy in between. */
-  stasisLinked?: string[];
+  stasisSnapshot?: DnetStasisSnapshot;
 
   /** Darknet hosts home has backdoored, with the install observation time.
    *
@@ -824,18 +984,42 @@ export interface DnetOrders {
  * channel. */
 export interface DnetRendezvous {
   readonly protocol: number;
+  /** Build that owns this scheduler. */
+  readonly buildId: string;
   /** `<bitNode>:<lastAugReset>`. An agent from another world refuses to run. */
   readonly generation: string;
   readonly controllerPid: number;
   readonly startedAt: number;
   lastBeatAt: number;
+  /** Monotonic network generation, advanced once for each nextMutation turn. */
+  mutationEpoch: number;
+  /** Coalesces every controller/prober continuation from one mutation turn. */
+  noteMutation(at: number): number;
   /** Per-host queues. Keyed by hostname, because a host is exactly the thing
    *  that has one resident and one RAM budget. A resident REGISTERS itself by
    *  creating its entry here, which is how the overseer discovers it. */
   queues: Map<string, DnetHostQueue>;
-  /** Work in flight, keyed by TARGET. Deliberately not part of `drain()`: it is
-   *  work, not knowledge, and realm rule 3 is about knowledge. See `DnetClaim`. */
-  claims: Map<string, DnetClaim[]>;
+  /** The one prober map: `host -> { neighbours, at, pid }`, keyed by the host the
+   *  prober stands on. It writes its host's neighbours, the timestamp, and its own
+   *  pid here on boot and every mutation; the overseer folds new adjacency, infers
+   *  a dead prober from a STALE `at` (and re-execs it through the worker), and
+   *  keeps the `pid` so it can kill the prober on a host it turns into a lab
+   *  walker. Realm-only, never sent home — knowledge travels through `drain()`. */
+  probes: Map<string, { neighbours: string[]; at: number; pid: number; epoch: number }>;
+  /** Spawn-free local reclaimers are not residents and must not receive queued
+   * jobs. Their liveness still suppresses duplicate planting. */
+  bootstraps: Map<string, { pid: number; lastBeatAt: number }>;
+  /** Hosts whose bootstrap ended. The overseer refreshes details immediately,
+   * rather than waiting for the next mutation-wide detail sweep. */
+  bootstrapDone: Set<string>;
+  /** Set by the overseer so a prober can wake its derive loop the instant it
+   *  reports.
+   *  Undefined until the overseer installs it; a prober that finds it absent
+   *  just leaves its report for the next drain. */
+  signalDerive?: () => void;
+  /** Plant calls this after the first probe and before launching the resident.
+   * The controller creates the target queue and files its initial inventory. */
+  preparePlantedHost?: (host: string) => void;
   /** Hand home everything learned since it last asked, and forget it.
    *
    * Draining rather than exposing is deliberate: it is what makes home's fold
@@ -872,11 +1056,10 @@ export function dnetRealm(): DnetGlobalThis {
  * the residents that survived re-register with it on their next pass. The beat
  * window belongs to the single-overseer election below, which decides the
  * opposite question. */
-export function liveRendezvous(generation: string): DnetRendezvous | undefined {
+export function liveRendezvous(): DnetRendezvous | undefined {
   const existing = dnetRealm().dnet_overseer;
   if (!existing) return undefined;
   if (existing.protocol !== RENDEZVOUS_PROTOCOL) return undefined;
-  if (existing.generation !== generation) return undefined;
   return existing;
 }
 
@@ -944,120 +1127,18 @@ export function sweepQueues(queues: Map<string, DnetHostQueue>, now: number): Dn
   return dead;
 }
 
-/** A process is alive doing this, right now.
- *
- * Keyed by TARGET rather than by vantage, because that is the axis the queues do
- * not cover: a queue is per-host because a host has one resident and one RAM
- * budget, while a claim answers "what is being done TO this machine, from
- * wherever". The moment a target has two adjacent vantages the queues stop
- * answering that at all — `enqueue`'s per-queue duplicate check only ever saw
- * one of them — and the same multi-second `authenticate` fires twice.
- *
- * It lives on the rendezvous and NOT in knowledge, which is the whole reason
- * this is a separate structure. Realm rule 3 drains knowledge to home so it
- * outlives the overseer; a claim's entire meaning is "this overseer has a
- * live process on it", so surviving the overseer's death is precisely wrong.
- * Folding it into knowledge would also send it home, and a claim carries a
- * password. */
-export interface DnetClaim {
-  /** What is being worked on. */
-  target: string;
-  /** The vantage — whose death ends this claim. */
-  from: string;
-  kind: TaskKind;
-  jobId: string;
-  /** Realm-only. Never published, never drained, never logged: this object
-   *  exists so the overseer can describe work in flight completely, and
-   *  `stripCredentials` is the backstop if it ever reaches a channel. */
-  password?: string;
-  claimedAt: number;
-  /** When the overseer stops believing a claim whose job has not STARTED yet,
-   *  on the clock alone. The same window the job timeout uses, because it is the
-   *  same question: past it, the process is either dead or holding a vantage
-   *  that has already rotated. Once the job starts, `sweepClaims` runs the
-   *  timeout off `startedAt` instead — a job waits behind its queue, and a claim
-   *  anchored on its filing time would expire under a process still working. */
-  expectedDoneAt: number;
-}
 
-/** Drop claims whose work cannot still be happening.
+/** The next job this host's resident should spawn into: simply the first one
+ * queued.
  *
- * Three deaths, in this order, and the order is the point: the first two are
- * STRUCTURAL and reuse a verdict this tick already computed, so they need no
- * clock and cannot drift. Only the third is a timer, and it exists for the case
- * the other two cannot see — a job that is somehow still queued long after the
- * adjacency it depends on has rotated away.
- *
- * 1. the vantage is gone — `sweepQueues` has just deleted its queue;
- * 2. the job is no longer in that queue — it settled, failed or timed out, and
- *    the tick that cleared it is the same tick that ends the claim;
- * 3. the clock has run out — `startedAt + JOB_TIMEOUT_MS` once the job is
- *    running, `expectedDoneAt` while it is still waiting its turn. A LONG-LIVED
- *    job is exempt from that fixed timeout and runs off its own beat instead,
- *    for the reason in the body.
- *
- * Returns what it dropped, in case the caller wants to count it. */
-export function sweepClaims(
-  claims: Map<string, DnetClaim[]>,
-  queues: ReadonlyMap<string, DnetHostQueue>,
-  now: number,
-): DnetClaim[] {
-  const dropped: DnetClaim[] = [];
-  for (const [target, held] of claims) {
-    const alive = held.filter((claim) => {
-      const queue = queues.get(claim.from);
-      if (!queue) return false;
-      const job = queue.active?.id === claim.jobId
-        ? queue.active
-        : queue.pending.find((entry) => entry.id === claim.jobId);
-      if (!job) return false;
-      // The clock runs from when the job STARTED, not from when it was filed.
-      // A job waits behind whatever is already in its queue, and a claim that
-      // expired on its filing time would go stale under a process that is still
-      // working — after which the derivation stops seeing the target as busy
-      // and files the same multi-second `authenticate` from a second vantage,
-      // which is the one thing a claim exists to prevent. Before it starts,
-      // `expectedDoneAt` is still the only clock there is.
-      //
-      // A long-lived job is the case the fixed timeout cannot express. It is
-      // MEANT to sit there — the maze walker holds one PID for the whole walk,
-      // because `DarknetState.labLocations` is keyed by pid and a dead process
-      // abandons its progress with no way to resume. Judging it by
-      // `JOB_TIMEOUT_MS` would drop its claim after a minute, the derivation
-      // would stop seeing the target as busy, and a second vantage would file a
-      // second walker: two PIDs in one maze, which is the exact failure the
-      // whole design exists to prevent. So it is judged by whether it is still
-      // BEATING, symmetrically with `residentLastLife`, and the overseer's own
-      // timeout loop already skips it for the same reason.
-      const deadline = job.longLived
-        ? (job.beatAt ?? job.startedAt ?? claim.claimedAt) + LONG_JOB_BEAT_MS
-        : job.startedAt !== undefined
-          ? job.startedAt + JOB_TIMEOUT_MS
-          : claim.expectedDoneAt;
-      return now <= deadline;
-    });
-    if (alive.length === held.length) continue;
-    for (const claim of held) if (!alive.includes(claim)) dropped.push(claim);
-    if (alive.length === 0) claims.delete(target);
-    else claims.set(target, alive);
-  }
-  return dropped;
-}
-
-/** The next job this host can actually start.
- *
- * The RAM check is the resident's, not the overseer's, and deliberately so:
- * only the resident can see how much is free at the instant it looks, and out
- * here that moves without warning. A job that does not fit is left in the queue
- * rather than dropped — blocked RAM gets freed, hosts get restarted, and the
- * work is still worth doing when it does.
- *
- * `freeGb` must already ACCOUNT for the resident's own allocation being returned
- * when it spawns: the caller passes what will be free once it dies. */
-export function nextJob(queue: DnetHostQueue, freeGb: number): DnetJob | undefined {
+ * There is no RAM check here any more. The overseer sizes every job it files to
+ * fit the host's computed budget — `maxRam − blockedRam − prober` — before it
+ * ever reaches this queue, and it reads those facts itself off darkweb; the
+ * resident cannot measure and does not need to. `blockedRam` only ever falls, so
+ * a job that fit when it was filed still fits when it runs, and the host holds
+ * exactly two of our scripts (the prober and this worker), so there is nothing
+ * unaccounted for to fit around. The resident just takes what it was handed. */
+export function nextJob(queue: DnetHostQueue): DnetJob | undefined {
   if (queue.active) return undefined;
-  // `budgetGb` is PER THREAD, because that is how the engine charges
-  // `ramOverride`. Comparing the bare figure would have admitted a four-thread
-  // phish onto a host with room for one and had the engine refuse the spawn.
-  return queue.pending.find((job) => job.budgetGb * job.threads <= freeGb);
+  return queue.pending[0];
 }

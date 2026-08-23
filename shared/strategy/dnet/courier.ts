@@ -1,5 +1,6 @@
 import type { OracleCapture } from "./oracle.ts";
 import type { PasswordEvidence } from "./evidence.ts";
+import { SOLVER_CODES } from "./solvers/types.ts";
 
 /** The shapes the darknet's findings travel in, and the rule that keeps a
  * password out of everything that is written down.
@@ -27,76 +28,30 @@ export const DARKNET_CODES = {
   503: "ServiceUnavailable",
 } as const;
 
-/** Codes we invent, kept numerically clear of the engine's 2xx-5xx range and
- * commented as ours so nobody hunts for them in the game source. They exist so
- * that "nothing happened" is never a blank in the response-code panel — every
- * one of these is emitted by a real refusal, mostly from the job bodies in
- * `game/dnet/jobs.ts` (905 comes from the overseer's timeout path). */
-export const LOCAL_CODES = {
-  900: "UnknownModel",
-  902: "NoCredential",
-  903: "NotEnoughRam",
-  904: "ModelUnattempted",
-  /** The job's promise was rejected rather than settled: its process died with
-   *  its host, its resident was swept, or it hit the overseer's timeout. Kept
-   *  apart from 903 so a dying net does not read as a RAM shortage. */
-  905: "JobDied",
-  // 906-910 are the password solvers stopping, and they are ordered by how
-  // loudly they should be read. The first three are operational; the last two
-  // say our transcription of the game is wrong, which is a different kind of
-  // problem and must not blend into the others.
-  /** The declared attempt budget ran out. The state is kept, so the next
-   *  vantage resumes rather than restarting. Expected on the expensive models
-   *  and not a fault. */
-  906: "SolverBudget",
-  /** A matched response taught us nothing new. Usually means we are parsing the
-   *  model's grammar loosely enough to accept a line that says nothing. */
-  907: "SolverStalled",
-  /** Feedback was needed and the log ring could not be read — below the host's
-   *  charisma requirement, or `heartbleed` refused. Not the solver's fault, and
-   *  it clears on its own once charisma catches up. */
-  908: "OracleUnavailable",
-  /** The response did not match the grammar this model is documented to speak.
-   *  Upstream changed, or we transcribed it wrong. */
-  909: "OracleUnparsed",
-  /** The search space was eliminated with no hit: the password provably is not
-   *  where our model of the game says it must be. The loudest code here. */
-  910: "SolverExhausted",
-  /** A `phishingAttack` claimed the net-wide cache window. Counted rather than
-   *  merely logged because it is the ONLY evidence we get of a piece of engine
-   *  state — `DarknetState.lastPhishingCacheTime` is exposed nowhere — and the
-   *  overseer stamps its cooldown belief off it. */
-  911: "PhishingCacheWon",
-  /** A pin job's act-time check found the edge it exists for already severed,
-   *  and the link was NOT spent. The mutation clock cuts every connection on
-   *  one host per branch roll, and a stasis link freezes a host's edges only
-   *  once it is applied — so a pin planned against a live edge can arrive at a
-   *  dead one, and pinning anyway would spend a near-irrevocable slot on a
-   *  host that no longer reaches what it was pinned FOR. */
-  912: "EdgeGone",
-} as const;
-
-/** The same vocabulary, by name, for the code we EMIT.
- *
- * `LOCAL_CODES` above is the number→name direction, which is what the panel
- * renders; this is the direction the emitting code needs, and it exists because
- * every emit site used to be a bare literal — `count(900)`, `codes: { "902": 1 }`
- * — so a code's meaning lived only in a comment beside it. The solver codes are
- * NOT here: they have their own named constant next to the contract that defines
- * them (`SOLVER_CODES` in `solvers/types.ts`), and duplicating them would give
- * the same number two homes.
- *
- * `tests/dnet-claims.test.ts` pins the two halves against each other, so a name
- * added to one and not the other fails rather than drifting. */
+/** Codes we invent, kept clear of the engine's 2xx-5xx range. Named constants
+ * are the source of truth used by emitters; the panel map below is derived from
+ * them so the two directions cannot drift. */
 export const LOCAL_CODE = {
   UnknownModel: 900,
   NoCredential: 902,
   NotEnoughRam: 903,
   ModelUnattempted: 904,
+  /** A queued job died, was swept, or timed out; this is not a RAM refusal. */
   JobDied: 905,
+  ...SOLVER_CODES,
+  /** A phishing call won the net-wide cache window. */
   PhishingCacheWon: 911,
+  /** A pin arrived after the edge it was meant to preserve disappeared. */
   EdgeGone: 912,
+  /** The target existed, but scp or exec refused the plant. */
+  LaunchRefused: 913,
+  /** Authentication rejected this credential for the same target identity. */
+  CredentialRejected: 914,
 } as const;
+
+export const LOCAL_CODES: Readonly<Record<number, keyof typeof LOCAL_CODE>> = Object.fromEntries(
+  Object.entries(LOCAL_CODE).map(([name, code]) => [code, name]),
+) as Readonly<Record<number, keyof typeof LOCAL_CODE>>;
 
 export function codeName(code: number): string {
   return (DARKNET_CODES as Record<number, string>)[code]
@@ -248,7 +203,7 @@ export interface VaultEntry {
 export interface ProvisionalCredential {
   hostname: string;
   password: string;
-  via: "connecting" | "passcode" | "packet";
+  via: "connecting" | "passcode" | "packet" | "data-file" | "neighbour-file";
   /** When heartbleed exposed the line. The ring carries no creation stamp, so
    * this is the only honest WHEN the script can attach to the observation. */
   at: number;

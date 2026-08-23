@@ -3,8 +3,6 @@
  * authenticated while instability rises. A routing/budget problem with a
  * decaying resource. */
 
-import type { ReportHost } from "../../strategy/dnet/courier.ts";
-
 /** An agent we believe is alive out there. */
 export interface DarknetAgentDigest {
   /** "overseer" is the controller; "resident" is the one agent a host keeps. */
@@ -126,18 +124,13 @@ export interface DarknetKnowledgeDigest {
   queue?: { pending: number; active: number; byKind: Record<string, number> };
 }
 
-/** One PID-bound walker in the maze.
+/** The one PID-bound walker in the maze.
  *
- * There can be two: a FINISHER, whose host is the first thing a stasis link is
- * spent on because losing its PID loses its position, and a disposable SCOUT on
- * a second adjacent host, which commits to the macro-route the finisher is not
- * on and is deliberately never pinned. Both feed one shared map, so the scout
- * dying costs its position and nothing else. */
+ * Its host receives the reserved stasis link because losing the PID loses the
+ * position. */
 export interface DarknetLabWalker {
   /** The vantage the walk RUNS on — never the lab, which is the target. */
   from: string;
-  /** Absent for the finisher; `"scout"` for the second, disposable walker. */
-  role?: "scout";
   /** `"x,y"`, parsed from the engine's own message. Absent before the first
    *  response, because the position is unknowable until then. */
   at?: string;
@@ -187,23 +180,21 @@ export interface DarknetState {
   /** -1 until a host of known depth has been seen, so the panel renders NONE
    *  rather than a row that sorts above the root. */
   maxDepth: number;
-  /** The three below come from the DODGED PROBE and from nothing else
-   *  (`game/lib/probes/dodged.ts`). The driver tick publishes `knowledge`
-   *  without them, so a panel that guarded on `knowledge` and then read these
-   *  threw on the first tick of a run whose probe had not landed yet. They are
-   *  optional because neither producer guarantees them, and the driver has
-   *  always read its own copy that way (`remaining.ts`, `stasisLinked ?? []`). */
+  /** The three below are the only darknet facts HOME reads directly, and the
+   *  only ones it must: each is a 0 GB call the overseer cannot afford, so the
+   *  DIRECT probe `dnet.facts` reads them inline (no dodge) and ships them over
+   *  the order channel. The driver tick publishes `knowledge` without them, so
+   *  a panel that guarded on `knowledge` and then read these threw on the first
+   *  tick before the direct probe landed; they stay optional for that reason,
+   *  and the driver has always read its own copy that way (`remaining.ts`,
+   *  `stasisLinked ?? []`). Everything darkweb-specific home used to read here
+   *  is gone: the resident on darkweb probes it on the mutation clock and
+   *  drains the result home, so the darknet has exactly one prober. */
   stasisLinkLimit?: number;
   stasisLinked?: string[];
+  /** Observation time of the authoritative direct stasis snapshot. */
+  stasisObservedAt?: number;
   instability?: { authenticationDurationMultiplier: number; authenticationTimeoutChance: number };
-  /** Home's own one-hop reading, in the SAME shape an agent reports.
-   *
-   *  Driver input, not a view: the tick folds it into knowledge as one more
-   *  vantage and the panel reads `knowledge` only. It stays on the topic because
-   *  the probe is a dodge stub running on some leased host, and the topic is the
-   *  only way back. `probe()` is host-local, so from home this is `darkweb` and
-   *  its neighbours — which is also exactly what the seed decision needs. */
-  probed?: ReportHost[];
   /** Health of the agent report channel, per tick. `rejected` is a whole
    *  rendezvous refused for belonging to a run this world no longer shares —
    *  refused at the channel, because agents outlive controllers. */
@@ -274,8 +265,9 @@ export interface DarknetState {
    *
    *  `spread` and `farm` above are things a host does as a matter
    *  of course. These four are not: a stasis link is one of at most four in a
-   *  whole run, a backdoor past the free allowance taxes every authentication
-   *  in the net, an induced migration can cost the host outright, and a maze
+   *  whole run, an ordinary backdoor makes its host a restart/delete victim
+   *  (and a third taxes global authentication), an induced migration can cost
+   *  the host outright, and a maze
    *  walk occupies a resident for hours. So every one of them is expected to
    *  refuse most of the time, and the refusal is the interesting half.
    *

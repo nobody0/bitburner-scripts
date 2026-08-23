@@ -1,11 +1,11 @@
 import type { NS, Player, Server } from "@ns";
-import { versionedScript } from "../../shared/deployment.ts";
+// stable helper filenames are overwritten in place; loaded old scripts drain.
 import type { HackNodeMults } from "../../shared/formulas.ts";
 import type { SharePricingInput } from "../../shared/strategy/share.ts";
 import { initFarm, planFarm, reportFailed, type FarmMemory } from "../../shared/strategy/farm-planner.ts";
 import type { CompletionEvent, HgwAction, ServerView, ShareAction, StockInfluence, WorldView } from "../../shared/world.ts";
 import { WORKER_RAM } from "../../shared/world.ts";
-import { gameBuildId } from "./build-id.ts";
+import { handoffLaunch, temporaryRunOptions } from "./launch-shared.ts";
 import { workerGlobals, type WorkerGlobalThis } from "./worker-shared.ts";
 
 import {
@@ -24,7 +24,7 @@ import { releaseWorkerExits, requestShareStops, type Tracked } from '../../share
 
 export const WORKER_BASE_SCRIPT = "worker/worker.js";
 export function workerScript(): string {
-  return versionedScript(WORKER_BASE_SCRIPT, gameBuildId());
+  return WORKER_BASE_SCRIPT;
 }
 
 export interface DriverState {
@@ -149,7 +149,7 @@ export function buildView(
 }
 
 /** One dispatcher pass: plan, then launch. Returns how many ops started. */
-export function pump(
+export async function pump(
   ns: NS,
   state: DriverState,
   view: WorldView,
@@ -170,7 +170,7 @@ export function pump(
     hackingSkillGoal?: number;
     shareValue?: SharePricingInput;
   } = {},
-): { launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"]; nextWakeMs?: number } {
+): Promise<{ launched: number; failed: number; directive: ReturnType<typeof planFarm>["directive"]; nextWakeMs?: number }> {
   const result = planFarm(view, state.memory, completions, {
     ...(options.arenaReserves ? { arenaReserves: options.arenaReserves } : {}),
     ...(options.reinvestmentReturnPerDollarSec !== undefined
@@ -188,18 +188,17 @@ export function pump(
   let launched = 0;
   for (const action of result.actions) {
     if (action.type === "stopShare") {
-      state.globals.worker_stop_requested?.add(action.opId);
-      state.globals.worker_stop?.get(action.opId)?.();
+      state.globals.worker_info?.get(action.opId)?.stop?.();
       continue;
     }
     if (action.type === "share") {
-      if (startShare(ns, state, action)) launched++;
+      if (await startShare(ns, state, action)) launched++;
       else failed.push(action.opId);
       continue;
     }
     if (action.type !== "hack" && action.type !== "grow" && action.type !== "weaken") continue;
     if (action.opId === undefined) continue;
-    if (startOp(ns, state, action, action.opId, view.time)) launched++;
+    if (await startOp(ns, state, action, action.opId, view.time)) launched++;
     else failed.push(action.opId);
   }
   if (failed.length > 0) reportFailed(state.memory, failed);
@@ -215,7 +214,7 @@ export function pump(
   };
 }
 
-function startShare(ns: NS, state: DriverState, action: ShareAction): boolean {
+async function startShare(ns: NS, state: DriverState, action: ShareAction): Promise<boolean> {
   if (!state.deployed.has(action.source) || !state.globals.worker_info) return false;
   state.globals.worker_info.set(action.opId, {
     kind: "share",
@@ -223,12 +222,16 @@ function startShare(ns: NS, state: DriverState, action: ShareAction): boolean {
     threads: action.threads,
     mode: "share",
   });
-  const pid = ns.exec(
-    workerScript(),
-    action.source,
-    // ramOverride is per thread, exactly as for HGW workers.
-    { threads: action.threads, temporary: true, ramOverride: WORKER_RAM.share },
-    action.opId,
+  const info = state.globals.worker_info.get(action.opId)!;
+  const pid = await handoffLaunch(
+    { kind: "worker", id: action.opId, worker: info },
+    (launchId) => ns.exec(
+      workerScript(),
+      action.source,
+      // ramOverride is per thread, exactly as for HGW workers.
+      temporaryRunOptions({ threads: action.threads, ramOverride: WORKER_RAM.share }),
+      launchId,
+    ),
   );
   if (pid !== 0) {
     const info = state.globals.worker_info.get(action.opId);
@@ -236,13 +239,11 @@ function startShare(ns: NS, state: DriverState, action: ShareAction): boolean {
     return true;
   }
   state.globals.worker_info.delete(action.opId);
-  state.globals.worker_stop?.delete(action.opId);
-  state.globals.worker_stop_requested?.delete(action.opId);
   state.execFails++;
   return false;
 }
 
-function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, plannedAt: number): boolean {
+async function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, plannedAt: number): Promise<boolean> {
   const host = action.source;
   // Deployment is done by the dodged sweep; an undeployed host is simply not
   // usable this pass (keeping ns.scp out of the controller's static RAM).
@@ -311,12 +312,15 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
     ]);
   }
 
-  const pid = ns.exec(
-    workerScript(),
-    host,
+  const info = globals.worker_info!.get(execId)!;
+  const pid = await handoffLaunch(
+    { kind: "worker", id: execId, worker: info },
+    (launchId) => ns.exec(
+      workerScript(),
+      host,
     // ramOverride is per thread: the generic worker is billed exactly as the
     // op it performs. One binary, deliberately — and the batcher reference
-    // agrees: nobody01/bitburnerscript@master execs a single
+    // agrees: bitburner-2024@master (dc0720b) execs a single
     // `scripts/worker.js` for every role and varies only ramOverride
     // (imports/batchRunner.ts:21-38), holding those processes resident in
     // pools. Its earlier @2023 branch had moved the OTHER way, to a script per
@@ -325,8 +329,9 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
     // later line abandoned that split. Our pooled serve mode matches @master:
     // per-role INSTANCES of one script.
     // Source (ramOverride is the per-thread RunningScript allocation): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L275-L310
-    { threads: action.threads, temporary: true, ramOverride: WORKER_RAM[action.type] },
-    execId,
+      temporaryRunOptions({ threads: action.threads, ramOverride: WORKER_RAM[action.type] }),
+      launchId,
+    ),
   );
   if (pid === 0) {
     globals.worker_info!.delete(execId);
@@ -334,8 +339,8 @@ function startOp(ns: NS, state: DriverState, action: HgwAction, opId: number, pl
     state.execFails++;
     return false;
   }
-  const info = globals.worker_info!.get(execId);
-  if (info) info.pid = pid;
+  const launchedInfo = globals.worker_info!.get(execId);
+  if (launchedInfo) launchedInfo.pid = pid;
   return true;
 }
 
@@ -362,8 +367,7 @@ export function reclaimForDodge(
   requestShareStops(dispatch, actions, plan.shareGb, new Set(plan.shareWorkerIds));
   for (const action of actions) {
     if (action.type !== 'stopShare') continue;
-    state.globals.worker_stop_requested?.add(action.opId);
-    state.globals.worker_stop?.get(action.opId)?.();
+    state.globals.worker_info?.get(action.opId)?.stop?.();
   }
   if (plan.action !== 'preempt') return { plan, preempted: false };
 

@@ -141,6 +141,7 @@ describe("the inspector answers what one augmentation actually does", () => {
     setView("augs.mode", "all");
     setView("augs.selected", PLANNED);
     const html = TABS["factions"].render(factionsState());
+    expect(html).toContain('<tr class="picked">');
     expect(html).toContain("server-inspector");
     expect(html).toContain("Sellers");
     expect(html).toContain("worth to this run");

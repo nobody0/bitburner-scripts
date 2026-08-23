@@ -44,7 +44,7 @@ export async function sweepFleet(
   if (cold) {
     const self = ns.pid;
     const snapshot = state.topics.servers!;
-    const reclaimed = await dodge(ns, (stubNs) => reclaimFleet(stubNs, snapshot, self), 1.5);
+    const reclaimed = await dodge(ns, (stubNs) => reclaimFleet(stubNs, snapshot, self, "home"), 1.5);
     if (reclaimed.length > 0) {
       ns.tprint(`reclaimed ${reclaimed.length} host(s) from orphaned scripts`);
       TELEMETRY: if (__TELEMETRY__) tel!.event("fleet.reclaimed", { hosts: reclaimed });
@@ -76,13 +76,17 @@ export async function sweepFleet(
   );
   for (const host of deployed) driver.deployed.add(host);
 
-  // 3a) Safety net: retire old architectures and kill unreachable workers.
+  // 3a) Safety net: kill unreachable workers.
   //     Liveness comes from the realm registry (survives build handoffs),
   //     never from this instance's ledger.
-  const registered = new Set(driver.globals.worker_info?.keys() ?? []);
+  const registered = new Set(
+    [...(driver.globals.worker_info?.values() ?? [])]
+      .map((worker) => worker.pid)
+      .filter((pid): pid is number => pid !== undefined),
+  );
   const reaped = await dodge(ns, (stubNs) => reapStrayScripts(stubNs, deployed, WORKER_BASE_SCRIPT, registered), 1);
-  TELEMETRY: if (__TELEMETRY__ && (reaped.workers > 0 || reaped.retired > 0)) {
-    tel!.event("fleet.reaped", reaped);
+  TELEMETRY: if (__TELEMETRY__ && reaped > 0) {
+    tel!.event("fleet.reaped", { workers: reaped });
   }
 
   // 4) Reconcile the heap with the game's real usage.

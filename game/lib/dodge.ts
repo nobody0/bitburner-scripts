@@ -1,12 +1,11 @@
 import type { NS } from "@ns";
-import { versionedScript } from "../../shared/deployment.ts";
 import { STUB_BASE_GB } from '../../shared/ram/broker.ts';
-import { gameBuildId } from "./build-id.ts";
-import type { DodgeGlobalThis } from "./dodge-shared.ts";
+import type { DodgeGlobalThis, DodgeStarted } from "./dodge-shared.ts";
+import { handoffLaunch, temporaryRunOptions } from "./launch-shared.ts";
+import { realmSleep } from "./wake.ts";
 
-/** RAM dodger — TypeScript port of the stubCall design from the predecessor
- * scripts (bitburner-legacy/src/_lib/stub-call.ts,
- * nobody01/bitburnerscript@2023). A temporary stub script buys a dynamic RAM
+/** RAM dodger — TypeScript port of the stubCall design from
+ * nobody01/bitburnerscript@2023 (43e8585), src/_lib/stub-call.ts. A temporary stub script buys a dynamic RAM
  * budget, runs one closure with ITS ns, hands the raw result back through
  * globalThis, and dies. The caller pays only ns.exec (1.3 GB), not the cost of
  * the dodged functions.
@@ -20,18 +19,17 @@ import type { DodgeGlobalThis } from "./dodge-shared.ts";
 const g = globalThis as DodgeGlobalThis;
 
 export function dodgeStubScript(): string {
-  return versionedScript("lib/dodge-stub.js", gameBuildId());
+  return "lib/dodge-stub.js";
 }
-const DODGE_TIMEOUT_MS = 10_000;
 /** How many times to retry `ns.exec` of the stub before giving up.
  *
  * From the predecessor scripts (src/_lib/stub-call.ts:11-39), and worth
  * copying: `exec` returns 0 for a transient condition as readily as a
  * permanent one — the target host can be momentarily full because a worker has
  * not been reaped yet. Failing immediately turns a RAM blip into a lost probe
- * and a 30 s wait for the next sweep. An `asleep(0)` between attempts yields
- * to the game's scheduler without registering a cancellable Netscript delay;
- * unlike `sleep`, `asleep` is explicitly concurrency-exempt. */
+ * and a 30 s wait for the next sweep. A `realmSleep(0)` between attempts
+ * yields a macrotask to the game's scheduler — the same bare `setTimeout(0)`
+ * that `ns.asleep(0)` was upstream, minus the ns surface. */
 const EXEC_RETRIES = 10;
 /** Default dynamic budget for the dodged calls themselves — fits scan +
  * getServer + stock getters. (The predecessor scripts default to 6.6 GB and
@@ -93,68 +91,6 @@ export function priceCalls(ns: NS, methods: readonly string[]): number {
  * treat it as retryable; a body throw keeps its own type. */
 export class DodgeExecError extends Error {}
 
-export type DodgeLane = "default" | "long";
-
-type DodgeFunc = (ns: NS) => unknown;
-interface DodgeSlots {
-  func?: DodgeFunc;
-  cb?: (result: unknown) => void;
-  reject?: (error: unknown) => void;
-  running?: Promise<unknown>;
-}
-
-interface DodgeLaneDescriptor {
-  slots: DodgeSlots;
-  /** Passed to the stub as ns.args[0] so one deployed file serves both lanes. */
-  laneArg: string;
-  busy: "wait" | "reject";
-  watchdogMs?: number;
-  cleanup: "unconditional" | "owner";
-}
-
-const DEFAULT_SLOTS: DodgeSlots = {
-  get func() { return g.dodge_func; },
-  set func(value) { g.dodge_func = value; },
-  get cb() { return g.dodge_cb; },
-  set cb(value) { g.dodge_cb = value; },
-  get reject() { return g.dodge_reject; },
-  set reject(value) { g.dodge_reject = value; },
-  get running() { return g.dodge_running; },
-  set running(value) { g.dodge_running = value; },
-};
-
-const LONG_SLOTS: DodgeSlots = {
-  get func() { return g.go_dodge_func; },
-  set func(value) { g.go_dodge_func = value; },
-  get cb() { return g.go_dodge_cb; },
-  set cb(value) { g.go_dodge_cb = value; },
-  get reject() { return g.go_dodge_reject; },
-  set reject(value) { g.go_dodge_reject = value; },
-  get running() { return g.go_dodge_running; },
-  set running(value) { g.go_dodge_running = value; },
-};
-
-const LANES: Record<DodgeLane, DodgeLaneDescriptor> = {
-  default: {
-    slots: DEFAULT_SLOTS,
-    laneArg: "default",
-    busy: "wait",
-    watchdogMs: DODGE_TIMEOUT_MS,
-    cleanup: "unconditional",
-  },
-  long: {
-    slots: LONG_SLOTS,
-    laneArg: "long",
-    busy: "reject",
-    // Go's makeMove/passTurn await opponentNextTurn inside the same call. The
-    // turn duration therefore belongs to the game AI, not to controller
-    // scheduling; timing it out would free the lane while that stub is still
-    // alive and permit two turns to overlap. Preserve the former Go lane's
-    // deliberately disabled watchdog.
-    cleanup: "owner",
-  },
-};
-
 export interface DodgeOptions {
   /** Where to run the stub. Defaults to home.
    *
@@ -163,9 +99,6 @@ export interface DodgeOptions {
    *  its result back exactly as a home stub does. This is what lifts the RAM
    *  ceiling off expensive probes — see shared/ram/broker.ts. */
   host?: string;
-  /** Independent rendezvous lane. The long lane rejects concurrent calls and
-   * has no watchdog because its Go worker awaits the opponent. */
-  lane?: DodgeLane;
 }
 
 /** budgetGb = dynamic RAM the closure may use inside the stub. Declared via
@@ -173,55 +106,73 @@ export interface DodgeOptions {
  * each dodge: dodge(ns, fn, 10) for a contract batch, default 2.5. */
 export async function dodge<T>(
   ns: NS,
-  func: (stubNs: NS) => T | Promise<T>,
+  func: (stubNs: NS) => T,
   budgetGb = DODGE_BUDGET_GB,
   options: DodgeOptions = {},
-): Promise<T> {
-  const lane = LANES[options.lane ?? "default"];
-  const slots = lane.slots;
-  // Resolution wakes promise waiters before the owner's finally block clears
-  // the rendezvous slots. Yield until that exact owner has completed cleanup;
-  // the next ordinary probe can otherwise crash the controller with "dodge
-  // error after queueing". The long lane must fail instead of queueing because
-  // a second Go turn means its driver lifecycle has drifted.
-  if (lane.busy === "reject" && slots.running) {
-    throw new Error("a Go turn is already running");
-  }
-  while (slots.running) {
-    const owner = slots.running;
-    await owner.catch(() => {});
-    while (slots.running === owner) await Promise.resolve();
-  }
+): Promise<Awaited<T>> {
+  const started = await startDodge(ns, func, budgetGb, options);
+  return await started.result;
+}
 
+/** Start one serialized dodge and return as soon as its stub hands back the
+ * raw result. Promise-valued results are deliberately not awaited here. */
+export async function startDodge<T>(
+  ns: NS,
+  func: (stubNs: NS) => T,
+  budgetGb = DODGE_BUDGET_GB,
+  options: DodgeOptions = {},
+): Promise<DodgeStarted<T>> {
+  const predecessor = g.dodge_tail ?? Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const turn = predecessor.catch(() => {}).then(() => gate);
+  g.dodge_tail = turn;
+  await predecessor.catch(() => {});
+  try {
+    return await runCall(ns, func, budgetGb, options);
+  } finally {
+    release();
+    if (g.dodge_tail === turn) g.dodge_tail = undefined;
+  }
+}
+
+async function runCall<T>(
+  ns: NS,
+  func: (stubNs: NS) => T,
+  budgetGb: number,
+  options: DodgeOptions,
+): Promise<DodgeStarted<T>> {
   const host = options.host ?? "home";
   let settle!: (result: unknown) => void;
   let fail!: (error: unknown) => void;
-  const promise = new Promise<T>((resolve, reject) => {
+  const promise = new Promise<DodgeStarted<T>>((resolve, reject) => {
     settle = resolve as (result: unknown) => void;
     fail = reject;
   });
-  // Claimed before the first exec attempt: the retry loop awaits, and the
-  // mutex has to be held across that await or a second dodge could interleave
-  // and overwrite the rendezvous slots.
-  slots.func = func;
-  slots.cb = settle;
-  slots.reject = fail;
-  slots.running = promise;
   // The rejection path below settles `promise` and then throws the same error.
   // Without a handler attached here that settle would be an unhandled
   // rejection, because the `await` never happens on that path.
   void promise.catch(() => {});
-  const watchdog = lane.watchdogMs === undefined
-    ? undefined
-    : setTimeout(() => fail(new Error("dodge timed out")), lane.watchdogMs);
-
   try {
     const stubScript = dodgeStubScript();
     let pid = 0;
     for (let attempt = 0; attempt < EXEC_RETRIES && pid === 0; attempt++) {
-      pid = ns.exec(stubScript, host, { ramOverride: STUB_BASE_GB + budgetGb, temporary: true }, lane.laneArg);
+      pid = await handoffLaunch(
+        {
+          kind: "dodge",
+          func,
+          resolve: settle,
+          reject: fail,
+        },
+        (launchId) => ns.exec(
+          stubScript,
+          host,
+          temporaryRunOptions({ ramOverride: STUB_BASE_GB + budgetGb }),
+          launchId,
+        ),
+      );
       // Yield to the game's scheduler so a pending reap can free the RAM.
-      if (pid === 0) await ns.asleep(0);
+      if (pid === 0) await realmSleep(0);
     }
     if (pid === 0) {
       const error = new DodgeExecError(
@@ -233,16 +184,6 @@ export async function dodge<T>(
     }
     return await promise;
   } finally {
-    if (watchdog !== undefined) clearTimeout(watchdog);
-    // A prestige can let a successor controller claim the long lane before
-    // this killed worker's rejection continuation runs. Never erase its newer
-    // rendezvous slots. Default cleanup remains deliberately unconditional.
-    if (lane.cleanup === "unconditional" || slots.running === promise) {
-      slots.func = undefined;
-      slots.cb = undefined;
-      slots.reject = undefined;
-      slots.running = undefined;
-    }
     // The engine awaits main() and only then queues its cleanup handler, so
     // two microtask turns are required before that handler has synchronously
     // returned the stub's RAM. Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L48-L66 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptWorker.ts#L143-L159

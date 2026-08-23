@@ -10,23 +10,23 @@
     },
     {
       "source": "game/lib/dodge-stub.ts",
-      "target": "lib/dodge-stub.js",
-      "versioned": true
+      "target": "lib/dodge-stub.js"
     },
     {
       "source": "game/worker/worker.ts",
-      "target": "worker/worker.js",
-      "versioned": true
+      "target": "worker/worker.js"
     },
     {
       "source": "game/dnet/overseer.ts",
-      "target": "dnet/overseer.js",
-      "versioned": true
+      "target": "dnet/overseer.js"
     },
     {
       "source": "game/dnet/agent.ts",
-      "target": "dnet/agent.js",
-      "versioned": true
+      "target": "dnet/agent.js"
+    },
+    {
+      "source": "game/dnet/prober.ts",
+      "target": "dnet/prober.js"
     }
   ],
   "restoreEntry": {

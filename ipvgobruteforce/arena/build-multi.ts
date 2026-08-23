@@ -437,6 +437,12 @@ const BOARD_SIZE = 5;
 const PHASES = 150000;
 const MISS = -1;
 const BOARD_START_DEADLINE_MS = 50;
+// Realm timer: unlike ns.sleep, this never acquires Bitburner's per-script
+// Netscript concurrency lock. The standalone playbook has concurrent async
+// arms, so an ns call made while ns.sleep is pending can kill the script.
+function realmSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 const OPPONENTS = Object.freeze(${JSON.stringify(names)});
 const AUTOMATIC_ORDER = Object.freeze(${JSON.stringify(automaticOrder)});
 const QUALITY_OFFSETS = Object.freeze(${JSON.stringify(qualityOffsets)});
@@ -659,7 +665,7 @@ function certifiedAction(enemy, actualPhase, bonusCycles, board, passes, credit,
 async function sleepTowardPhaseEdge(ns) {
   const within = ((ns.getPlayer().totalPlaytime % 200) + 200) % 200;
   const coarse = 200 - within - 25;
-  await ns.sleep(coarse >= 5 ? coarse : 1);
+  await realmSleep(coarse >= 5 ? coarse : 1);
 }
 
 async function advanceOnePhase(ns) {
@@ -696,7 +702,7 @@ async function waitForPhaseChange(ns) {
 async function waitTowardPhase(ns, target) {
   const before = phaseNow(ns.getPlayer().totalPlaytime);
   const remaining = (target - before + PHASES) % PHASES;
-  if (remaining > 2) await ns.sleep((remaining - 2) * 200);
+  if (remaining > 2) await realmSleep((remaining - 2) * 200);
   const step = await waitForPhaseChange(ns);
   return {
     phase: step.phase,
@@ -1093,7 +1099,7 @@ export async function main(ns) {
       replaced++;
     }
   }
-  if (replaced) await ns.sleep(1);
+  if (replaced) await realmSleep(1);
 
   if (!noUi) {
     ns.ui.openTail();
@@ -1157,13 +1163,13 @@ export async function main(ns) {
         // Known active states never enter this path and are never regenerated.
         stats.losses++;
         replaceActive = active.signature;
-        await ns.sleep(1);
+        await realmSleep(1);
         continue;
       }
       // No board to forfeit: back off so a persistent failure (for example a
       // seed-class mismatch) logs one visible error per second instead of
       // busy-spinning the script.
-      await ns.sleep(1000);
+      await realmSleep(1000);
     }
   }
 }

@@ -13,6 +13,9 @@ import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
 
 const host = (over: Partial<StormHost> & { hostname: string }): StormHost => ({
   agentAlive: false,
+  hasCredential: true,
+  blockedRam: 0,
+  caches: [],
   ...over,
 });
 
@@ -124,6 +127,27 @@ describe("links-unspent: the survivors ARE the reconquest", () => {
   });
 });
 
+describe("harvest-incomplete: exhaust movable-host rewards before rerolling", () => {
+  test("authentication, blocked RAM, cache files, and active harvest work each hold the seed", () => {
+    const cases: StormHost[] = [
+      host({ hostname: "auth", hasCredential: false }),
+      host({ hostname: "ram", blockedRam: 0.01 }),
+      host({ hostname: "cache", caches: ["reward.cache"] }),
+      host({ hostname: "busy", harvestBusy: true }),
+    ];
+    for (const incomplete of cases) {
+      const seeded = host({ hostname: "seed", stormSeed: true, agentAlive: true, stasisLinked: true });
+      const plan = planStorm(green({ hosts: [seeded, incomplete] }));
+      expect(plan.refused[0]?.why, incomplete.hostname).toBe("harvest-incomplete");
+    }
+  });
+
+  test("stationary hosts use their separate cache policy", () => {
+    const lab = host({ hostname: "lab", isStationary: true, hasCredential: false, blockedRam: undefined, caches: ["lab.cache"] });
+    expect(planStorm(green({ hosts: [green().hosts[0]!, lab] })).fire).toBeDefined();
+  });
+});
+
 describe("walker-unpinned: a finisher's walk is hours one restart from zero", () => {
   test("a finisher on an unpinned host holds the fire", () => {
     const plan = planStorm(green({ labWalked: false, walkInFlight: true, walkerPinned: false }));
@@ -217,12 +241,14 @@ describe("seedHunt lifts the reclaim clear budget", () => {
 
 // --- the queue's ordering ----------------------------------------------------
 
-describe("a storm task sits between the walk and the attempt bands", () => {
-  test("a pending pin structurally outranks the fire; the fire outranks the farm", () => {
+describe("a storm task sits below losable caches and above ordinary farm work", () => {
+  test("a cache is collected before the pin/fire sequence; the fire outranks reclaim", () => {
     // The ordering IS the policy: `links-unspent` argues a pending pin holds
     // the storm, and the priorities enforce it even if both are filed in the
-    // same derivation. Below them, a storm queued behind a 36 s attempt or a
-    // 40 s farm batch could miss the phish window its policy just proved.
+    // same derivation. A discovered cache is the exception: the storm can
+    // destroy its host, so it must be collected first. A storm queued behind a
+    // 36 s attempt or ordinary farm batch could miss the phish window its
+    // policy just proved.
     const tasks = deriveTasks(emptyKnowledge("test:1"), NOW, {
       agents: new Set(["dn-5-1", "dn-6-1"]),
       hold: [
@@ -230,12 +256,16 @@ describe("a storm task sits between the walk and the attempt bands", () => {
         { kind: "pin", host: "dn-6-1", from: "dn-6-1", reason: "pin" },
         { kind: "walk", host: "th3_l4byr1nth", from: "dn-6-1", reason: "walk" },
       ],
-      farm: [{ kind: "cache", host: "dn-5-1", threads: 1, filename: "cache_1.cache", reason: "open" }],
+      farm: [
+        { kind: "cache", host: "dn-5-1", threads: 1, filename: "cache_1.cache", reason: "open" },
+        { kind: "reclaim", host: "dn-6-1", threads: 1, reason: "grind" },
+      ],
     });
     const order = tasks.map((task) => task.kind);
-    expect(order.indexOf("pin")).toBeLessThan(order.indexOf("storm"));
     expect(order.indexOf("walk")).toBeLessThan(order.indexOf("storm"));
-    expect(order.indexOf("storm")).toBeLessThan(order.indexOf("cache"));
+    expect(order.indexOf("cache")).toBeLessThan(order.indexOf("pin"));
+    expect(order.indexOf("pin")).toBeLessThan(order.indexOf("storm"));
+    expect(order.indexOf("storm")).toBeLessThan(order.indexOf("reclaim"));
   });
 });
 

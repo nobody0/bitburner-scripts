@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { main as workerMain } from "../../game/worker/worker.ts";
-import { workerGlobals, type WorkerDone, type WorkerGlobalThis } from "../../game/lib/worker-shared.ts";
+import { handoffLaunch } from "../../game/lib/launch-shared.ts";
+import { workerGlobals, type WorkerDone, type WorkerGlobalThis, type WorkerLaunch } from "../../game/lib/worker-shared.ts";
 import { Clock, drainMicrotasks } from "../clock.ts";
 import { installVirtualTime, type VirtualTime } from "../realm/timers.ts";
 
@@ -16,8 +17,6 @@ function cleanupRealm(): void {
   delete g.worker_info;
   delete g.worker_jobs;
   delete g.worker_wake;
-  delete g.worker_stop;
-  delete g.worker_stop_requested;
   delete g.dispatch_done;
   delete g.dispatch_wake;
   delete g.dispatch_wake_pending;
@@ -38,7 +37,7 @@ function mockNs(pending: MockOp[]): { ns: unknown; exitCbs: (() => void)[] } {
       pending.push({ resolve, ...(opts ? { opts } : {}) });
     });
   const ns = {
-    args: [WORKER_ID],
+    args: [],
     disableLog: () => undefined,
     atExit: (cb: () => void) => exitCbs.push(cb),
     hack: op,
@@ -47,6 +46,27 @@ function mockNs(pending: MockOp[]): { ns: unknown; exitCbs: (() => void)[] } {
     share: () => op(""),
   };
   return { ns, exitCbs };
+}
+
+async function launchWorker(
+  ns: unknown,
+  exitCbs: (() => void)[],
+  returned?: () => void,
+  exitOnReturn = true,
+): Promise<{ run: Promise<void> }> {
+  const info = workerGlobals().worker_info!.get(WORKER_ID)!;
+  let run!: Promise<void>;
+  await handoffLaunch<WorkerLaunch>(
+    { kind: "worker", id: WORKER_ID, worker: info },
+    () => {
+      run = workerMain(ns as never).then(() => {
+        returned?.();
+        if (exitOnReturn) for (const cb of exitCbs) cb();
+      });
+      return WORKER_ID;
+    },
+  );
+  return { run };
 }
 
 let vt: VirtualTime | undefined;
@@ -71,11 +91,7 @@ describe("serve-mode worker", () => {
     const { ns, exitCbs } = mockNs(pending);
 
     let returned = false;
-    const run = workerMain(ns as never).then(() => {
-      returned = true;
-      // The host runs atExit when main returns; the mock does it here.
-      for (const cb of exitCbs) cb();
-    });
+    const { run } = await launchWorker(ns, exitCbs, () => { returned = true; });
 
     await drainMicrotasks();
     expect(pending).toHaveLength(1); // first job started immediately
@@ -118,19 +134,15 @@ describe("serve-mode worker", () => {
     const { ns, exitCbs } = mockNs(pending);
 
     let returned = false;
-    const run = workerMain(ns as never).then(() => {
-      returned = true;
-      for (const cb of exitCbs) cb();
-    });
+    const { run } = await launchWorker(ns, exitCbs, () => { returned = true; });
     await drainMicrotasks();
     expect(pending).toHaveLength(1);
-    expect(g.worker_stop!.has(WORKER_ID)).toBe(true);
+    expect(g.worker_info!.get(WORKER_ID)?.stop).toBeFunction();
 
     // The ten-second share promise is deliberately left unresolved. The
     // mailbox wins the race, main returns, and the host's atExit is the sole
     // reservation-release completion.
-    g.worker_stop_requested!.add(WORKER_ID);
-    g.worker_stop!.get(WORKER_ID)!();
+    g.worker_info!.get(WORKER_ID)!.stop!();
     await drainMicrotasks();
     await run;
     expect(returned).toBe(true);
@@ -149,7 +161,7 @@ describe("serve-mode worker", () => {
     const pending: MockOp[] = [];
     const { ns, exitCbs } = mockNs(pending);
 
-    void workerMain(ns as never);
+    void launchWorker(ns, exitCbs, undefined, false);
     await drainMicrotasks();
     expect(pending).toHaveLength(1); // op in flight
 
@@ -177,10 +189,10 @@ describe("serve-mode worker", () => {
     clock.in(75, () => {});
     clock.run();
 
+    g.worker_info!.set(WORKER_ID, { kind: "hack", target: "delta", threads: 1, delayUntil: deadline });
     const pending: MockOp[] = [];
     const { ns } = mockNs(pending);
-    g.worker_info!.set(WORKER_ID, { kind: "hack", target: "delta", threads: 1, delayUntil: deadline });
-    void workerMain(ns as never);
+    void launchWorker(ns, []);
     await drainMicrotasks();
 
     expect(pending).toHaveLength(1);

@@ -2,7 +2,6 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import * as acorn from "acorn";
 import { build } from "esbuild";
-import { versionedScript } from "../shared/deployment.ts";
 import { loadConfig, safeBuildDir, type BitburnerConfig, type BuildEntry } from "./config.ts";
 
 export interface BuiltArtifact {
@@ -31,8 +30,8 @@ function createBuildId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function artifactName(entry: BuildEntry, buildId: string): string {
-  return entry.versioned ? versionedScript(entry.target, buildId) : entry.target;
+function artifactName(entry: BuildEntry): string {
+  return entry.target;
 }
 
 /** Bitburner's static analyzer honours `ns.ramOverride(<literal>)` only as
@@ -193,7 +192,7 @@ export async function buildScript(
   await mkdir(config.buildDir, { recursive: true });
   const buildId = createBuildId();
   const goWorkerSource = await bundleGoWorkerSource();
-  return bundleEntry(config, entry, artifactName(entry, buildId), buildId, options, goWorkerSource);
+  return bundleEntry(config, entry, artifactName(entry), buildId, options, goWorkerSource);
 }
 
 export async function buildScripts(
@@ -206,21 +205,13 @@ export async function buildScripts(
   const buildId = createBuildId();
   const goWorkerSource = await bundleGoWorkerSource();
 
-  const built: { artifact: BuiltArtifact; versioned: boolean }[] = [];
+  const built: BuiltArtifact[] = [];
   for (const entry of config.entries) {
-    const filename = artifactName(entry, buildId);
-    built.push({
-      artifact: await bundleEntry(config, entry, filename, buildId, options, goWorkerSource),
-      versioned: entry.versioned === true,
-    });
+    const filename = artifactName(entry);
+    built.push(await bundleEntry(config, entry, filename, buildId, options, goWorkerSource));
   }
 
-  // Immutable helpers go first. The stable controller is replaced only after
-  // every helper exists, and the stamp remains the final commit point.
-  const artifacts = [
-    ...built.filter((item) => item.versioned).map((item) => item.artifact),
-    ...built.filter((item) => !item.versioned).map((item) => item.artifact),
-  ];
+  const artifacts = [...built];
   await writeFile(path.join(config.buildDir, BUILD_ID_FILE), buildId, "utf8");
   artifacts.push({ filename: BUILD_ID_FILE, content: buildId });
   return artifacts;

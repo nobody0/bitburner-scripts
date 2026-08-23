@@ -881,6 +881,95 @@ describe("faction breakpoint package planner", () => {
     return { firstA, firstB, catalog, first };
   }
 
+  test("batches planned and compatible unplanned invitations into one action", () => {
+    const planned = packageStanding("Planned", { joined: false, invited: true });
+    const safe = packageStanding("Safe", { joined: false, invited: true });
+    const safeEnemy = packageStanding("SafeEnemy", {
+      joined: false,
+      invited: true,
+      enemies: ["Irrelevant"],
+    });
+    const blocker = packageStanding("Blocker", {
+      joined: false,
+      invited: true,
+      enemies: ["Planned"],
+    });
+    const irrelevant = packageStanding("Irrelevant", { joined: false, invited: false });
+    const catalog = new Map([
+      ["planned aug", aug("planned aug", {
+        factions: ["Planned"],
+        baseCost: 0,
+        baseRepRequirement: 100,
+        mults: { hacking: 2 },
+      })],
+    ]);
+
+    const { decision } = stepFactions(
+      factionsView({
+        factions: [planned, safe, safeEnemy, blocker, irrelevant],
+        catalog,
+        horizonSec: 100_000,
+        moneyAvailable: 1e15,
+      }),
+      initFactionMemory(),
+    );
+
+    expect(decision.objective?.factions).toContain("Planned");
+    expect(decision.action).toEqual({
+      type: "joinFactions",
+      factions: ["Planned", "Safe", "SafeEnemy"],
+    });
+  });
+
+  test("does not opportunistically join a faction that blocks the committed plan", () => {
+    const planned = packageStanding("Planned", { joined: false, invited: false });
+    const blocker = packageStanding("Blocker", {
+      joined: false,
+      invited: true,
+      enemies: ["Planned"],
+    });
+    const catalog = new Map([
+      ["planned aug", aug("planned aug", {
+        factions: ["Planned"],
+        baseCost: 0,
+        baseRepRequirement: 100,
+        mults: { hacking: 2 },
+      })],
+    ]);
+
+    const { decision } = stepFactions(
+      factionsView({ factions: [planned, blocker], catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      initFactionMemory(),
+    );
+
+    expect(decision.objective?.factions).toContain("Planned");
+    expect(decision.action.type).not.toBe("joinFactions");
+  });
+
+  test("checks the planned faction's enemy list when the invite omits the reverse edge", () => {
+    const planned = packageStanding("Planned", {
+      joined: false,
+      invited: false,
+      enemies: ["Blocker"],
+    });
+    const blocker = packageStanding("Blocker", { joined: false, invited: true, enemies: [] });
+    const catalog = new Map([
+      ["planned aug", aug("planned aug", {
+        factions: ["Planned"],
+        baseCost: 0,
+        baseRepRequirement: 100,
+        mults: { hacking: 2 },
+      })],
+    ]);
+
+    const { decision } = stepFactions(
+      factionsView({ factions: [planned, blocker], catalog, horizonSec: 100_000, moneyAvailable: 1e15 }),
+      initFactionMemory(),
+    );
+
+    expect(decision.action.type).not.toBe("joinFactions");
+  });
+
   test("switches to the runner-up before an unattractive deep breakpoint", () => {
     const factions = [packageStanding("A"), packageStanding("B")];
     const catalog = new Map([

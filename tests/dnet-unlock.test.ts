@@ -40,11 +40,11 @@ describe("buying DarkscapeNavigator.exe", () => {
     expect(stepDarkscape(view({ hasProgram: true }))).toBe(false);
   });
 
-  test("the affordability guard is what stops an unpriced claim starving the farm", () => {
+  test("access is bought as soon as TOR plus Darkscape are affordable", () => {
     // The claim is `pricing: "hard"` because the .cache payoff is unmodelled, and
     // an unpriced step resolves off the top of its band without ROI ranking. So
     // the guard is the protection: bid only while holding ten times the cost.
-    expect(stepDarkscape(view({ money: DARKSCAPE_TOTAL_COST }))).toBe(false);
+    expect(stepDarkscape(view({ money: DARKSCAPE_TOTAL_COST }))).toBe(true);
     expect(stepDarkscape(view({ money: RICH - 1 }))).toBe(false);
     expect(stepDarkscape(view({ money: RICH }))).toBe(true);
     expect(stepDarkscape(view({ money: 0 }))).toBe(false);

@@ -8,7 +8,12 @@ import { GROUP_SOLVERS, blankIsSafe } from "../shared/strategy/dnet/solvers/grou
 import { HILL_SOLVERS } from "../shared/strategy/dnet/solvers/hill.ts";
 import { solverFor } from "../shared/strategy/dnet/solvers/index.ts";
 import type { Solver, SolverObservation } from "../shared/strategy/dnet/solvers/types.ts";
-import type { ModelId, PasswordFacts } from "../shared/strategy/dnet/models.ts";
+import {
+  describeModel,
+  MODEL_IDS,
+  type ModelId,
+  type PasswordFacts,
+} from "../shared/strategy/dnet/models.ts";
 
 /** The end-to-end proof: every solver, against the SIMULATOR's transcription of
  * upstream's generators and its failure switch.
@@ -197,6 +202,21 @@ describe("every solved model opens a host the simulator minted", () => {
       // than quietly slowing the net down.
       expect(worst, `${model} got more expensive; re-measure before moving this`).toBe(expectedWorst);
     });
+  }
+});
+
+test("every password model is proven by a solver or a dictionary against a minted host", () => {
+  const solverModels = new Set(SOLVED.map(({ model }) => model));
+  for (const model of MODEL_IDS) {
+    if (model === "(The Labyrinth)") continue;
+    const host = mint(model, 12, `coverage-${model}`, 0.314159);
+    const candidates = describeModel(model).candidates?.(host.facts);
+    if (candidates) {
+      expect(candidates, `${model} dictionary cannot produce the generated password`).toContain(host.password);
+      expect(checkPassword(host.server, host.password, 1_000, world).ok).toBe(true);
+    } else {
+      expect(solverModels, `${model} has neither a dictionary nor a minted-host solver test`).toContain(model);
+    }
   }
 });
 

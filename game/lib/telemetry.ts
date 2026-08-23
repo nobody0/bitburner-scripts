@@ -118,19 +118,27 @@ export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity
 
   function connect(): void {
     if (disposed) return;
-    ws = new WebSocket(`ws://127.0.0.1:${TELEMETRY_PORT}/ingest`);
-    ws.onopen = () => {
+    const socket = new WebSocket(`ws://127.0.0.1:${TELEMETRY_PORT}/ingest`);
+    ws = socket;
+    socket.onopen = () => {
+      // Opening is asynchronous. Teardown or a newer reconnect may have
+      // replaced this socket before the callback runs.
+      if (disposed || ws !== socket) {
+        socket.close();
+        return;
+      }
       backoff = BACKOFF_MIN_MS;
-      ws!.send(JSON.stringify({ v: WIRE_VERSION, hello: { run, src: "game", script, startedAt, identity } }));
+      socket.send(JSON.stringify({ v: WIRE_VERSION, hello: { run, src: "game", script, startedAt, identity } }));
       flush();
     };
-    ws.onclose = () => {
+    socket.onclose = () => {
+      if (ws !== socket) return;
       ws = undefined;
       if (disposed) return;
       reconnectTimer = setTimeout(connect, backoff);
       backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
     };
-    ws.onerror = () => ws?.close();
+    socket.onerror = () => socket.close();
   }
 
   function push(record: LogRecord, debug = false): void {
@@ -138,8 +146,7 @@ export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity
     if (buffer.count() >= FLUSH_AT) flush();
   }
 
-  function flush(): void {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  function flushTo(socket: WebSocket): void {
     const dropped = buffer.takeDropped();
     if (dropped > 0) {
       buffer.push(
@@ -151,7 +158,13 @@ export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity
     // The frame is assembled from the already-serialized lines; it must parse
     // as a WireMessage exactly as JSON.stringify of one would (pinned by
     // tests/telemetry-client.test.ts).
-    ws.send(`{"v":${WIRE_VERSION},"records":[${buffer.drain()}]}`);
+    socket.send(`{"v":${WIRE_VERSION},"records":[${buffer.drain()}]}`);
+  }
+
+  function flush(): void {
+    const socket = ws;
+    if (disposed || socket === undefined || socket.readyState !== WebSocket.OPEN) return;
+    flushTo(socket);
   }
 
   const flushTimer = setInterval(flush, FLUSH_MS);
@@ -166,12 +179,26 @@ export function initTelemetry(ns: NS, script: string, identity: ArtifactIdentity
     debug: (msg, data) => push({ seq: seq++, t: Date.now(), run, src: "game", kind: "debug", msg, data }, true),
     flush,
     dispose: () => {
-      flush();
+      if (disposed) return;
       disposed = true;
       clearInterval(flushTimer);
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      buffer.clear();
-      ws?.close();
+      if (reconnectTimer !== undefined) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = undefined;
+      }
+      // Detach ownership before any WebSocket callback can run. In particular,
+      // close() may synchronously deliver onclose in tests and a queued onopen
+      // may arrive after teardown in the browser.
+      const socket = ws;
+      ws = undefined;
+      try {
+        if (socket?.readyState === WebSocket.OPEN) flushTo(socket);
+      } catch {
+        // Telemetry is best-effort, including during script teardown.
+      } finally {
+        buffer.clear();
+        socket?.close();
+      }
     },
   };
 

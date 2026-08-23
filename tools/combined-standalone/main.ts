@@ -221,6 +221,6 @@ export async function main(ns: NsLike): Promise<void> {
       + `totals ${STATS.wins}W/${STATS.losses}L, `
       + `${STATS.certifiedTurns} certified / ${STATS.neuralTurns} neural turns `
       + `(${STATS.playbookMisses} misses, mean neural ${meanNeuralMs} ms)`);
-    await ns.sleep(200);
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
   }
 }

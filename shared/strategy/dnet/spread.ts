@@ -43,6 +43,15 @@ export interface SpreadCandidate {
   remote?: boolean;
   depth?: number;
   freeRam?: number;
+  /** Fresh owner block. A cramped host with some runnable RAM gets a minimal
+   * local reclaimer instead of waiting until a full resident+prober fits. */
+  blockedRam?: number;
+  /** Lab candidate: reclaim locally without a prober, then plant only a
+   * resident. The walker subsequently takes the entire pinned host. */
+  reclaimOnly?: boolean;
+  omitProber?: boolean;
+  bootstrapReclaim?: boolean;
+  bootstrapThreads?: number;
   hasCredential: boolean;
   /** A live agent is already here. */
   agentAlive: boolean;
@@ -54,6 +63,10 @@ export interface SpreadLimits {
   /** RAM the payload needs. The surveyor is the small one; a breaker needs more,
    *  and the caller picks which it is asking about. */
   agentRamGb: number;
+  /** Resident alone, for the pinned lab candidate. */
+  residentRamGb: number;
+  /** One thread of the spawn-free local reclaim bootstrap. */
+  bootstrapRamGb: number;
   /** How long after a plant a host is left alone. The one surviving limit that
    *  is not a fact about RAM, and it is not a budget either: a host that keeps
    *  coming back empty is RESTARTING, and re-planting it every derivation would
@@ -66,7 +79,9 @@ export interface SpreadLimits {
 }
 
 export const DEFAULT_SPREAD_LIMITS: SpreadLimits = {
-  agentRamGb: 2.6,
+  agentRamGb: 5.4,
+  residentRamGb: 3.6,
+  bootstrapRamGb: 2.6,
   plantCooldownMs: 60_000,
 };
 
@@ -162,10 +177,21 @@ export function planSpread(
       refuse("unknown-ram", "no believable RAM facts; survey it before planting");
       continue;
     }
-    if (candidate.freeRam < limits.agentRamGb) {
+    const needed = candidate.omitProber ? limits.residentRamGb : limits.agentRamGb;
+    if (candidate.blockedRam !== undefined && candidate.blockedRam > 0
+      && (candidate.reclaimOnly === true || candidate.freeRam < needed)
+      && candidate.freeRam >= limits.bootstrapRamGb) {
+      plant.push({
+        ...candidate,
+        bootstrapReclaim: true,
+        bootstrapThreads: Math.floor(candidate.freeRam / limits.bootstrapRamGb),
+      });
+      continue;
+    }
+    if (candidate.freeRam < needed) {
       refuse(
         "not-enough-ram",
-        `${candidate.freeRam.toFixed(2)}GB free, needs ${limits.agentRamGb.toFixed(2)}GB`
+        `${candidate.freeRam.toFixed(2)}GB free, needs ${needed.toFixed(2)}GB`
         + " — usually the owner's block, which memoryReallocation would have to grind down",
       );
       continue;
@@ -221,11 +247,27 @@ export function candidatesFrom(
     if (opts.standing.has(host.hostname)) continue;
     let from: string | undefined;
     let remote = false;
+    // Adjacency is SYMMETRIC, so a vantage for this host is any standing host on
+    // either side of a believed edge: one whose own fresh neighbour list names
+    // the target, OR one the TARGET's own fresh neighbour list names. The second
+    // direction is what recovers a host we can no longer see from the outside —
+    // an immune (stasis) host above all, whose neighbour list never expires, so
+    // it is frequently the ONLY vantage we will ever have on it. The plant job
+    // re-probes the live edge in its preflight, so a since-severed edge refuses
+    // cleanly rather than being planted blind.
     for (const where of opts.standing) {
       const neighbours = fresh<string[]>(knowledge.hosts[where], "neighbours", at, expiry);
       if (neighbours?.includes(host.hostname)) {
         from = where;
         break;
+      }
+    }
+    if (from === undefined) {
+      for (const neighbour of fresh<string[]>(host, "neighbours", at, expiry) ?? []) {
+        if (opts.standing.has(neighbour)) {
+          from = neighbour;
+          break;
+        }
       }
     }
     if (from === undefined && opts.remoteExec?.has(host.hostname)) {
@@ -240,6 +282,16 @@ export function candidatesFrom(
     }
     if (from === undefined) continue;
     const depth = fresh<number>(host, "depth", at, expiry);
+    // The cooldown applies to EVERY host, immune ones included. An immune host
+    // cannot flap from a restart — but it CAN from a persistently-FAILING plant,
+    // and it must be held off exactly then: symmetric adjacency can propose a
+    // vantage across an edge that an immune host's never-expiring neighbour list
+    // still names but the net has since severed, and without the cooldown that
+    // plant re-derives, fails its preflight and re-derives again every pass — a
+    // spawn-churn loop that starves the game. The one case the cooldown would
+    // wrongly block — a freshly-PINNED host whose own pin job emptied it — is
+    // handled at the source instead: a successful pin clears the host's plant
+    // stamp (see the overseer), so its re-plant is not seen as a flap.
     const plantedAt = opts.lastPlantAt?.get(host.hostname);
     out.push({
       host: host.hostname,
@@ -247,6 +299,9 @@ export function candidatesFrom(
       ...(remote ? { remote: true } : {}),
       ...(depth !== undefined ? { depth } : {}),
       freeRam: freeRam(host, at, expiry),
+      ...(fresh<number>(host, "blockedRam", at, expiry) !== undefined
+        ? { blockedRam: fresh<number>(host, "blockedRam", at, expiry)! }
+        : {}),
       hasCredential: opts.vault.has(host.hostname),
       agentAlive: false,
       ...(plantedAt !== undefined ? { lastPlantAt: plantedAt } : {}),
@@ -254,4 +309,53 @@ export function candidatesFrom(
     });
   }
   return out;
+}
+
+/** Job kinds a plant may CANCEL to free a vantage. Everything a host does as a
+ * matter of course is fair game — spreading gives a new execution host AND locks
+ * a server in before it can move, so it outranks any of them. The exclusions are
+ * the lab and its protection (`walk`, `pin`), another plant (cancelling one
+ * spread for another is net churn), and a storm (a one-shot fire in a timing
+ * window). `induce` is deliberately IN: a push is hundreds of calls whose value
+ * arrives only at the end, so it is the cheapest thing to interrupt. */
+import { choosePreemptionVantage } from './priority.ts';
+
+export interface VantageState {
+  /** A host we could exec the plant from — adjacent to the target, or a
+   *  stamped remote-exec vantage. */
+  host: string;
+  /** The kind of job its resident is running, or undefined if it is idle. */
+  activeKind?: string;
+  /** When that job started, so the least-loss choice can prefer the one that
+   *  has run the shortest. */
+  activeStartedAt?: number;
+  /** Canonical queue priority of the active job. */
+  activePriority?: number;
+  /** Best current completion estimate for remaining-time tie-breaking. */
+  activeExpectedDoneAt?: number;
+  /** Usable job RAM on this worker. */
+  usableGb?: number;
+  /** Already selected for cancellation or work in this scheduling pass. */
+  cancelling?: boolean;
+  assigned?: number;
+}
+
+/** Which vantage should run a plant, and whether doing so preempts a job.
+ *
+ * Spreading is critical, so this looks past "is a vantage free" to "which
+ * vantage costs the least to free". The order is:
+ *
+ *   1. A FREE vantage — nothing is lost, so it wins outright.
+ *   2. Otherwise the PREEMPTIBLE job we lose the least time on: the one that has
+ *      run the shortest, because cancelling it throws away the least work.
+ *   3. Otherwise nothing — every vantage is busy with the lab, a pin, another
+ *      plant or a storm, none of which a plant may interrupt. The plant waits in
+ *      its filed queue rather than sacrificing something more important.
+ *
+ * Deterministic: ties break by host name so a derivation is reproducible. */
+export function pickPlantVantage(
+  vantages: readonly VantageState[],
+  now: number,
+): { vantage: string; preempt: boolean } | undefined {
+  return choosePreemptionVantage('plant', vantages, now);
 }

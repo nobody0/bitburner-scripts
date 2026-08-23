@@ -58,7 +58,6 @@ function stubNs(
     cleared,
     ns: {
       pid,
-      getHostname: () => stubHost,
       ps: (host: string) => processes[host] ?? [],
       kill: (target: number) => {
         killed.push(target);
@@ -93,7 +92,7 @@ describe("reclaimFleet", () => {
       "pserv-0": rooted("pserv-0", 8191),
       idle: rooted("idle", 0),
     };
-    const reclaimed = reclaimFleet(stub.ns, servers, 1);
+    const reclaimed = reclaimFleet(stub.ns, servers, 1, "home");
 
     expect(stub.killed).toEqual([3]); // only the orphan
     expect(stub.cleared).toEqual(["pserv-0"]); // idle host untouched
@@ -125,7 +124,7 @@ describe("reclaimFleet", () => {
       "pserv-0",
     );
     const servers = { home: rooted("home", 4), "pserv-0": rooted("pserv-0", 40), other: rooted("other", 12) };
-    const reclaimed = reclaimFleet(stub.ns, servers, 1);
+    const reclaimed = reclaimFleet(stub.ns, servers, 1, "pserv-0");
 
     // pserv-0 is cleared per-process, sparing the stub; only `other` is nuked.
     expect(stub.cleared).toEqual(["other"]);
@@ -135,18 +134,17 @@ describe("reclaimFleet", () => {
 });
 
 describe("reapStrayScripts", () => {
-  test("kills unregistered workers and retired scripts, spares the rest", () => {
+  test("kills unregistered workers and spares the rest", () => {
     const stub = stubNs({
       "pserv-0": [
         { pid: 10, filename: "worker/worker.js", args: [7] }, // registered
         { pid: 11, filename: "worker/worker.js", args: [99] }, // unreachable
-        { pid: 12, filename: "worker/starter.js", args: [] }, // retired
         { pid: 13, filename: "something-else.js", args: [] }, // not ours
       ],
     });
-    const reaped = reapStrayScripts(stub.ns, ["pserv-0"], "worker/worker.js", new Set([7]));
-    expect(reaped).toEqual({ workers: 1, retired: 1 });
-    expect(stub.killed.sort()).toEqual([11, 12]);
+    const reaped = reapStrayScripts(stub.ns, ["pserv-0"], "worker/worker.js", new Set([10]));
+    expect(reaped).toBe(1);
+    expect(stub.killed).toEqual([11]);
   });
 
   test("registered workers survive a build handoff", () => {
@@ -158,20 +156,8 @@ describe("reapStrayScripts", () => {
         { pid: 21, filename: "worker/worker.js", args: [2] },
       ],
     });
-    const reaped = reapStrayScripts(stub.ns, ["pserv-0"], "worker/worker.js", new Set([1, 2]));
-    expect(reaped).toEqual({ workers: 0, retired: 0 });
+    const reaped = reapStrayScripts(stub.ns, ["pserv-0"], "worker/worker.js", new Set([20, 21]));
+    expect(reaped).toBe(0);
     expect(stub.killed).toEqual([]);
-  });
-
-  test("reaps unregistered workers from older versioned builds", () => {
-    const stub = stubNs({
-      "pserv-0": [
-        { pid: 30, filename: "worker/worker.old-build.js", args: [1] },
-        { pid: 31, filename: "worker/worker.new-build.js", args: [2] },
-      ],
-    });
-    const reaped = reapStrayScripts(stub.ns, ["pserv-0"], "worker/worker.js", new Set([2]));
-    expect(reaped).toEqual({ workers: 1, retired: 0 });
-    expect(stub.killed).toEqual([30]);
   });
 });

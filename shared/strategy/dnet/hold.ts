@@ -66,6 +66,12 @@ export interface HoldHost {
   difficulty?: number;
   maxRam?: number;
   freeGb?: number;
+  /** Fresh owner-blocked RAM. A recycler target must have paid this down. */
+  blockedRam?: number;
+  /** Fresh file-list facts. Empty is observed-empty; absent is unknown/stale. */
+  caches?: readonly string[];
+  contracts?: readonly string[];
+  stormSeed?: boolean;
   /** A resident of ours is standing here. */
   agentAlive: boolean;
   /** We hold this host's password. */
@@ -77,6 +83,8 @@ export interface HoldHost {
   stasisLinked?: boolean;
   /** It is running something we could not rebuild — today, the maze walker. */
   irreplaceable?: boolean;
+  /** Home-side equivalent of irreplaceable, derived from the drained walker. */
+  protected?: boolean;
   gone?: boolean;
 }
 
@@ -158,16 +166,35 @@ export function holdHostFrom(
   };
 }
 
+/** Choose the one host that will become the lab walker.
+ *
+ * Once a candidate has been stasis-linked it is a commitment: switching to a
+ * larger unlinked neighbour would strand the first link and restart the whole
+ * preparation sequence. Among equally committed candidates RAM wins because
+ * every remaining gigabyte becomes an authenticate thread. */
+export function chooseLabVantage(candidates: readonly HoldHost[]): HoldHost | undefined {
+  return [...candidates].sort((a, b) =>
+    Number(b.stasisLinked === true) - Number(a.stasisLinked === true)
+    || (b.maxRam ?? 0) - (a.maxRam ?? 0)
+    || (a.hostname < b.hostname ? -1 : a.hostname > b.hostname ? 1 : 0))[0];
+}
+
 // --- backdoors ---------------------------------------------------------------
 
-/** How many backdoors are free.
- *
- * `max(rootedMovable / (NET_WIDTH * 3), 2)` (`effects.ts:91-97`), where
- * `rootedMovable` counts movable servers with admin rights. Two are always free,
- * and the allowance grows as we root more of the net — so this is one of the few
- * places where breadth pays for depth. */
+/** Two recycler slots avoid the third backdoor's global 3% timeout chance. */
+export const BACKDOOR_RECYCLER_LIMIT = 2;
+
+/** Engine authentication-duration allowance. Kept for fidelity/tests; the
+ * recycler deliberately ignores growth beyond two because timeout chance starts
+ * at the third ordinary backdoor regardless of this allowance. */
 export function freeBackdoorAllowance(rootedMovable: number): number {
   return Math.max(rootedMovable / (NET_WIDTH * 3), 2);
+}
+
+/** The unmutated RAM for a host's immutable generation difficulty.
+ * Upstream then chooses one of [0.5, 1, 1, 1.15, 1.4], with a 16 GB floor. */
+export function normalRamForDifficulty(difficulty: number): number {
+  return Math.max(16, 16 * 2 ** Math.floor(difficulty / 6));
 }
 
 export interface BackdoorPlan {
@@ -176,22 +203,16 @@ export interface BackdoorPlan {
   allowance: number;
 }
 
-/** Spend only the free allowance, and only where a backdoor buys something.
+/** Keep two expendable backdoors on the worst fully-harvested hosts.
  *
- * A backdoor is worth having on a host that is a VANTAGE — one whose adjacency
- * we would otherwise lose when the net rearranges — and worth nothing on a host
- * we hold no credential for, because `exec` still checks the session.
- *
- * A stasis-linked host never reaches the ranking: pinning sets
- * `backdoorInstalled`, so it is already backdoored and filtered out. It does not
- * consume the allowance either, because `getBackdooredDarknetServers` excludes
- * it from the pool the surplus is counted over — which is why `held` below
- * counts only the taxed ones. */
-export function planBackdoors(view: HoldView, ceiling = 1.0): BackdoorPlan {
+ * Restarts remove the backdoor but preserve root, files and cleared RAM.
+ * Deletion removes the identity, letting a later population addition mint a
+ * fresh first-auth cache roll and a fresh block with its guaranteed clear
+ * cache. Missing resource facts refuse rather than masquerading as empty. */
+export function planBackdoors(view: HoldView): BackdoorPlan {
   const refused: HoldRefusal[] = [];
   const live = view.hosts.filter((host) => !host.gone);
-  const rootedMovable = live.filter((host) => host.hasCredential && !host.isStationary).length;
-  const allowance = freeBackdoorAllowance(rootedMovable);
+  const allowance = BACKDOOR_RECYCLER_LIMIT;
   // Only the TAXED pool: `getBackdooredDarknetServers` excludes stasis-linked
   // hosts, so a pinned host's backdoor is free and must not eat the allowance.
   const held = live.filter((host) => host.backdoored && !host.stasisLinked).length;
@@ -199,15 +220,6 @@ export function planBackdoors(view: HoldView, ceiling = 1.0): BackdoorPlan {
   const refuse = (hostname: string, why: string, detail: string): void => {
     refused.push({ hostname, why, detail });
   };
-
-  // Instability above 1 means the slowdown is already biting every
-  // authentication in the run, which is a tax on the thing we do most.
-  if (view.authDurationMultiplier > ceiling) {
-    for (const host of live) {
-      if (!host.backdoored) refuse(host.hostname, "unstable", `authentication already costs x${view.authDurationMultiplier.toFixed(2)}`);
-    }
-    return { install: [], refused, allowance };
-  }
 
   const ranked = live
     .filter((host) => {
@@ -219,33 +231,54 @@ export function planBackdoors(view: HoldView, ceiling = 1.0): BackdoorPlan {
         return false;
       }
       if (!host.hasCredential) {
-        // The gate bypass only covers the CONNECTION requirement; the session
-        // check is still there, so a backdoor without a credential buys nothing.
-        refuse(host.hostname, "no-credential", "a backdoor bypasses the connection check, not the session check");
+        refuse(host.hostname, "no-credential", "the first-authentication reward has not been claimed");
         return false;
       }
-      if (!host.agentAlive && (host.neighbours?.length ?? 0) === 0) {
-        refuse(host.hostname, "not-a-vantage", "nothing runs here and nothing is reached through it");
+      if (host.protected || host.irreplaceable) {
+        refuse(host.hostname, "protected", "an irreplaceable labyrinth walk is running here");
+        return false;
+      }
+      if (host.difficulty === undefined || host.maxRam === undefined) {
+        refuse(host.hostname, "ram-unknown", "difficulty or maximum RAM is missing or stale");
+        return false;
+      }
+      if (host.blockedRam === undefined || host.caches === undefined
+        || host.contracts === undefined || host.stormSeed === undefined) {
+        refuse(host.hostname, "harvest-unknown", "blocked RAM or the file listing is missing or stale");
+        return false;
+      }
+      if (host.blockedRam > 0) {
+        refuse(host.hostname, "ram-blocked", `${host.blockedRam.toFixed(2)}GB remains to reclaim`);
+        return false;
+      }
+      if (host.caches.length > 0) {
+        refuse(host.hostname, "cache-held", `${host.caches.length} cache file${host.caches.length === 1 ? " is" : "s are"} unopened`);
+        return false;
+      }
+      if (host.contracts.length > 0) {
+        refuse(host.hostname, "contract-held", `${host.contracts.length} coding contract${host.contracts.length === 1 ? " is" : "s are"} uncollected`);
+        return false;
+      }
+      if (host.stormSeed) {
+        refuse(host.hostname, "seed-held", "STORM_SEED.exe would be destroyed by deletion");
         return false;
       }
       return true;
     })
     .map((host) => ({
       host,
-      // What we lose if this host's edges move: everything standing on it, plus
-      // everything we reach through it.
-      reach: (host.agentAlive ? 1 : 0) + (host.neighbours?.length ?? 0),
+      ratio: host.maxRam! / normalRamForDifficulty(host.difficulty!),
     }))
-    // No stasis-linked host can appear here: pinning one sets `backdoorInstalled`
-    // (see the header), so it is filtered out by the `host.backdoored` check
-    // above. An earlier version sorted them first as "free"; that branch could
-    // never fire.
-    .sort((a, b) => b.reach - a.reach || (a.host.hostname < b.host.hostname ? -1 : 1));
+    // True 0.5x generation outliers lead. If there are fewer than two, the same
+    // order deliberately falls back through the worst normal hosts.
+    .sort((a, b) => a.ratio - b.ratio
+      || a.host.maxRam! - b.host.maxRam!
+      || (a.host.hostname < b.host.hostname ? -1 : 1));
 
   const install: string[] = [];
   for (const entry of ranked) {
     if (held + install.length >= allowance) {
-      refuse(entry.host.hostname, "allowance-spent", `${allowance.toFixed(1)} free backdoors are already held`);
+      refuse(entry.host.hostname, "slots-filled", `${allowance} recycler backdoors are already held or planned`);
       continue;
     }
     install.push(entry.host.hostname);
@@ -293,11 +326,17 @@ export const STASIS_TARGET_SLACK = 1;
  *   from the top again is the whole crawl. A surviving deep vantage saves the
  *   most wall clock — the same reason the walker's own row is the prize.
  *
- * So the targets are the equal-mass centers under a weight that grows with
- * depth (w(d) = d + 1): evenly spread by MASS, which is denser toward the
- * bottom by construction. The walker's row and the row beside it are excluded
- * — the walker's pin already covers them — and air-gap rows, which can hold
- * nothing, shift a target one row up.
+ * And a fourth, STRUCTURAL fact outranks all three: the air-gap rows (every
+ * 8th depth) are permanently empty and wiring reaches only ±1 row, so the net
+ * is cut into BANDS no edge ever crosses. After a storm, a pin inside a band
+ * is the only surviving foothold there — `darkweb` can only re-crawl the top
+ * band, and nothing walks across a gap. So the placement is per band: the
+ * spares are allocated across the bands by depth mass (deeper bands are
+ * heavier, so deep fills first), and sit at even centers WITHIN their band —
+ * one spare lands at the band's middle, and centers keep clear of the
+ * gap-adjacent edge rows, whose upper or lower catchment is a row that can
+ * never hold a server. The walker's row and the row beside it are excluded —
+ * the walker's pin already anchors the deepest band's floor.
  *
  * In a LAB-LESS world (program-only access never generates a labyrinth) there
  * is no walker, so the deepest anchor — the bottom row itself — is a spare's,
@@ -307,31 +346,86 @@ export const STASIS_TARGET_SLACK = 1;
 export function stasisTargetDepths(netDepth: number, spares: number, labExpected = true): number[] {
   if (spares <= 0) return [];
   const targets: number[] = [];
-  const claim = (depth: number): void => {
-    let d = Math.max(0, Math.min(depth, netDepth - 1));
-    // An air-gap row holds nothing, and two targets on one row are one target.
-    // Deeper targets are claimed first, so a collision steps SHALLOWER — into
-    // the half where coverage is cheaper to concede.
-    while (d >= 0 && (isOnAirGap(d) || targets.includes(d))) d--;
-    if (d >= 0) targets.push(d);
-  };
   let remaining = spares;
   if (!labExpected) {
-    claim(netDepth - 1);
+    // No walker owns the bottom row there; the deepest anchor is a spare's.
+    targets.push(netDepth - 1);
     remaining--;
   }
-  // Rows 0..top: everything below the walker's row and its immediate
-  // neighbour, which the walker's own pin already covers.
-  const top = netDepth - 3;
-  if (top >= 0 && remaining > 0) {
-    for (let i = remaining; i >= 1; i--) {
-      // Centers of equal-mass bands under w(d) = d + 1: the cumulative mass to
-      // x is proportional to x², so band i's center sits at sqrt((i - ½) / k).
-      const x = (top + 1) * Math.sqrt((i - 0.5) / remaining);
-      claim(Math.round(x - 0.5));
+  // Eligible rows: never a gap, never the bottom anchor's own coverage —
+  // whether that anchor is the walker's pin or the lab-less bottom spare.
+  const bands = depthBands(netDepth, netDepth - 3);
+  // d'Hondt by depth mass: each spare goes to the band maximizing
+  // mass / (allocated + 1), ties to the DEEPER band, quota capped at the
+  // band's row count. Depth weighting makes deep bands heavy, so deep fills
+  // first and densest without a special case.
+  const quota = bands.map(() => 0);
+  for (let spare = 0; spare < remaining; spare++) {
+    let best = -1;
+    let bestScore = -1;
+    for (let index = 0; index < bands.length; index++) {
+      if (quota[index]! >= bands[index]!.rows.length) continue;
+      const score = bands[index]!.mass / (quota[index]! + 1);
+      // Bands are listed shallow-first, so >= hands ties to the deeper one.
+      if (score >= bestScore) {
+        bestScore = score;
+        best = index;
+      }
+    }
+    if (best < 0) break;
+    quota[best]!++;
+  }
+  // Even centers within each band: j spares in n rows sit at the centers of j
+  // equal slices — one spare is the band middle, and no center touches an
+  // edge row unless the band is too small to avoid it.
+  for (let index = 0; index < bands.length; index++) {
+    const rows = bands[index]!.rows;
+    for (let i = 1; i <= quota[index]!; i++) {
+      const at = Math.min(
+        rows.length - 1,
+        Math.max(0, Math.round(((i - 0.5) / quota[index]!) * rows.length - 0.5)),
+      );
+      const depth = rows[at]!;
+      if (!targets.includes(depth)) targets.push(depth);
     }
   }
   return targets.sort((a, b) => b - a);
+}
+
+/** The contiguous non-gap row runs of `[0 .. through]`, shallow-first, each
+ * with its depth mass (Σ d+1) — the denominator of the spare allocation and
+ * the unit the ferry conquers. */
+function depthBands(netDepth: number, through: number): { rows: number[]; mass: number }[] {
+  const bands: { rows: number[]; mass: number }[] = [];
+  const top = Math.min(through, netDepth - 1);
+  for (let depth = 0; depth <= top; depth++) {
+    if (isOnAirGap(depth)) continue;
+    const current = bands[bands.length - 1];
+    if (current !== undefined && current.rows[current.rows.length - 1] === depth - 1) {
+      current.rows.push(depth);
+      current.mass += depth + 1;
+    } else {
+      bands.push({ rows: [depth], mass: depth + 1 });
+    }
+  }
+  return bands;
+}
+
+/** The bands (over the WHOLE net this time, bottom row included) where no
+ * resident of ours is standing — the ferry's destinations, deepest first.
+ *
+ * No edge ever crosses an air gap, and a leaked password is unusable across
+ * one (`connectToSession` needs the host already rooted, `authenticate` a
+ * direct connection) — so pushing a credentialed host with its resident
+ * riding is the ONLY deliberate way into an unconquered band. A band we have
+ * never even observed still counts: pushing in is also how we look. */
+export function unconqueredBands(view: Pick<HoldView, "hosts" | "netDepth">): number[][] {
+  return depthBands(view.netDepth, view.netDepth - 1)
+    .filter((band) => !view.hosts.some((host) =>
+      host.gone !== true && host.agentAlive
+      && host.depth !== undefined && band.rows.includes(host.depth)))
+    .map((band) => band.rows)
+    .sort((a, b) => b[0]! - a[0]!);
 }
 
 /** Whether a host at this depth serves this target. */
@@ -402,8 +496,9 @@ export function planStasis(view: HoldView): StasisPlan {
     // The walker's vantage is admitted on `planWalk`'s say-so — it was
     // collected as a host ADJACENT to the lab this pass. Everything else is a
     // spare, and a spare is held to the target standard.
-    if (host.irreplaceable === true) walkers.push(host);
-    else spareable.push(host);
+    if (host.irreplaceable === true) {
+      walkers.push(host);
+    } else spareable.push(host);
   }
   walkers.sort((a, b) => (a.hostname < b.hostname ? -1 : 1));
 
@@ -530,16 +625,20 @@ export function canReachBottomRow(difficulty: number, netDepth: number): boolean
   return difficulty + 4 >= netDepth - 1;
 }
 
-/** Why a push was chosen, because four different questions share the one
+/** Why a push was chosen, because five different questions share the one
  *  call: seat a lab candidate on the bottom row, clear a stranger OFF the
  *  bottom row so a candidate can land, seat a big host inside an open stasis
- *  target's window, or just deepen the net's frontier. */
-export type InducePurpose = "free-slot" | "lab" | "seat" | "frontier";
+ *  target's window, ferry a resident-carrying host across an air gap into an
+ *  unconquered band, or just deepen the net's frontier. */
+export type InducePurpose = "free-slot" | "lab" | "seat" | "ferry" | "frontier";
 
 export interface InducePlan {
-  /** The host to push, and the neighbour that must do the pushing —
-   *  `induceServerMigration` cannot target its own host. */
-  push?: {
+  /** Every admitted push: one per PUSHER, any number per TARGET. The charge
+   *  accumulates on the TARGET (`DarknetState.migrationInductionServers`), so
+   *  several adjacent agents charging one host move it ~N× faster —
+   *  `induceServerMigration` cannot target its own host, so each entry names
+   *  the neighbour doing the pushing. */
+  pushes: {
     host: string;
     from: string;
     /** Sized from the PUSHER's free RAM: the charge each call adds is linear
@@ -548,17 +647,18 @@ export interface InducePlan {
     expectedCalls: number;
     reason: string;
     purpose: InducePurpose;
-  };
+  }[];
   refused: HoldRefusal[];
 }
 
-/** Pick ONE host to push, for the best of three purposes.
+/** Every push worth making this pass, one per available pusher.
  *
  * Every migration is a re-roll inside `[difficulty - 2, difficulty + 4]` (see
  * `canReachBottomRow` — the band is anchored on DIFFICULTY, never on where the
  * host currently sits), and `addServerToNetwork` connects any server landing
  * at `depth === netDepth - 1` to the lab automatically
- * (`NetworkGenerator.ts:225-230`). Three distinct things a re-roll can buy:
+ * (`NetworkGenerator.ts:225-230`). Five distinct things a re-roll can buy, in
+ * priority order:
  *
  * 1. **`free-slot`** — the bottom row holds `NET_WIDTH` seats, and a landing
  *    needs an open one. When the row looks full and a lab candidate is
@@ -575,11 +675,28 @@ export interface InducePlan {
  *    inside the target's `STASIS_TARGET_SLACK` window, where `planStasis`
  *    pins it. A host already standing inside an open window is never pushed —
  *    a re-roll is the one thing that could move it OUT.
- * 4. **`frontier`** — with nothing to seat, general movement down. The band's
- *    centre is `difficulty + 1`, so a host at or above that depth moves DEEPER
- *    on average; one at or below it is as likely to bounce up, and is left
- *    alone (`no-gain`). Biggest first — RAM still ranks, it just stopped
- *    being an entry requirement.
+ * 4. **`ferry`** — the biggest authenticated host WITH A RESIDENT whose band
+ *    reaches into an unconquered band (`unconqueredBands`). No edge ever
+ *    crosses an air gap and a leaked password is unusable across one, so this
+ *    is the only deliberate way in — and the resident IS the payload, riding
+ *    the move to become the far side's first vantage. A ferried host cannot
+ *    be released again until a neighbour can re-plant it; while pinned, its
+ *    stasis backdoor permits a remote plant from any live resident.
+ * 5. **`frontier`** — with nothing to seat or ferry, general movement down.
+ *    The band's centre is `difficulty + 1`, so a host at or above that depth
+ *    moves DEEPER on average; one at or below it is as likely to bounce up,
+ *    and is left alone (`no-gain`). Biggest first — RAM still ranks, it just
+ *    stopped being an entry requirement.
+ *
+ * One push per PUSHER, any number per TARGET: the charge accumulates on the
+ * target, so every unused adjacent agent joins the highest-priority target it
+ * can reach — adjacency keeps the pile-on local — while free-slot, lab, seat
+ * and ferry each cap their TARGETS (one evictee, one lab candidate, one host
+ * per window, one per band): racing two hosts toward the same landing wastes
+ * one of them. The queue's per-agent priorities (induce below survey, attempt
+ * and reclaim; above phish and promote) then run each push exactly when that
+ * agent has nothing better to do — induce is exploration's last step, and
+ * money is the filler behind it.
  *
  * Three things make this worth paying for at all, and one makes it dangerous:
  *
@@ -608,9 +725,13 @@ export function planInduce(view: HoldView): InducePlan {
   const seatPool: HoldHost[] = [];
   /** Which open target each seat push aims for, for the reason line. */
   const seatTargetFor = new Map<string, number>();
+  const ferryPool: HoldHost[] = [];
+  /** Which unconquered band each ferry crosses into. */
+  const ferryBandFor = new Map<string, readonly number[]>();
   const frontierPool: HoldHost[] = [];
   const evictPool: HoldHost[] = [];
   const openTargets = openSpareTargets(view);
+  const unconquered = unconqueredBands(view);
   const bottomCount = live.filter((host) => host.depth === bottom).length;
   // As observed — knowledge may be missing seats we have never seen, so this
   // errs toward NOT evicting, which is the direction that spends nothing.
@@ -668,6 +789,17 @@ export function planInduce(view: HoldView): InducePlan {
       seatTargetFor.set(host.hostname, seatTarget);
       continue;
     }
+    // A ferry: the band reaches into a band no resident of ours stands in.
+    // The resident IS the payload, so only a host carrying one qualifies.
+    const ferryBand = host.agentAlive
+      ? unconquered.find((band) => band.some((row) =>
+        host.difficulty! - 2 <= row && row <= host.difficulty! + 4))
+      : undefined;
+    if (ferryBand !== undefined) {
+      ferryPool.push(host);
+      ferryBandFor.set(host.hostname, ferryBand);
+      continue;
+    }
     // The band's centre is difficulty + 1: at or above it a re-roll moves the
     // host deeper on average, below it the same roll is as likely to lift it.
     if (host.depth !== undefined && host.depth <= host.difficulty + 1) {
@@ -697,6 +829,12 @@ export function planInduce(view: HoldView): InducePlan {
     (b.maxRam ?? 0) - (a.maxRam ?? 0)
     || (seatTargetFor.get(b.hostname) ?? 0) - (seatTargetFor.get(a.hostname) ?? 0)
     || (a.hostname < b.hostname ? -1 : 1));
+  // Biggest first for the ferries, ties by the DEEPER destination band — the
+  // far side of the deepest gap is the foothold worth the most.
+  ferryPool.sort((a, b) =>
+    (b.maxRam ?? 0) - (a.maxRam ?? 0)
+    || (ferryBandFor.get(b.hostname)?.[0] ?? 0) - (ferryBandFor.get(a.hostname)?.[0] ?? 0)
+    || (a.hostname < b.hostname ? -1 : 1));
   // Biggest first, ties by how far below the band's centre the host sits —
   // the expected depth gained by one landing.
   frontierPool.sort((a, b) =>
@@ -709,22 +847,33 @@ export function planInduce(view: HoldView): InducePlan {
     (a.maxRam ?? 0) - (b.maxRam ?? 0)
     || (a.hostname < b.hostname ? -1 : 1));
 
-  const attempt = (
-    pool: readonly HoldHost[],
+  // One push per PUSHER, any number per TARGET: the charge accumulates on the
+  // target, so every unused adjacent agent joins the highest-priority target
+  // it can reach. A pusher spent on one target is unavailable for the next —
+  // which is what makes the purpose order below a real priority.
+  const pushes: InducePlan["pushes"] = [];
+  const usedPushers = new Set<string>();
+  const assign = (
+    host: HoldHost,
     purpose: InducePurpose,
     reasonFor: (host: HoldHost, calls: number) => string,
-  ): InducePlan["push"] | undefined => {
-    for (const host of pool) {
-      // Somebody adjacent has to do the pushing, and it cannot be the host
-      // itself.
-      const pusher = live.find((other) =>
+  ): boolean => {
+    // Somebody adjacent has to do the pushing, and it cannot be the host
+    // itself. Roomiest first: threads come from the pusher, so its RAM is the
+    // charge rate.
+    const pushers = live
+      .filter((other) =>
         other.hostname !== host.hostname
         && other.agentAlive
-        && (other.neighbours?.includes(host.hostname) ?? false));
-      if (!pusher) {
-        refuse(refused, host, "no-pusher", "induceServerMigration cannot target its own host, and no neighbour of ours is standing next to it");
-        continue;
-      }
+        && !usedPushers.has(other.hostname)
+        && (other.neighbours?.includes(host.hostname) ?? false))
+      .sort((a, b) => (b.freeGb ?? 0) - (a.freeGb ?? 0) || (a.hostname < b.hostname ? -1 : 1));
+    if (pushers.length === 0) {
+      refuse(refused, host, "no-pusher", "induceServerMigration cannot target its own host, and no free neighbour of ours is standing next to it");
+      return false;
+    }
+    for (const pusher of pushers) {
+      usedPushers.add(pusher.hostname);
       // Threads come from the PUSHER: the charge is linear in the calling
       // script's threads and the 6 s wait is constant, so every thread the
       // pusher's RAM affords divides the project's call count directly. No
@@ -734,40 +883,74 @@ export function planInduce(view: HoldView): InducePlan {
         ? Math.max(1, Math.floor((pusher.freeGb ?? 0) / view.induceGbPerThread))
         : 1;
       const calls = migrationCalls(host.difficulty!, view.charisma, threads);
-      return {
+      pushes.push({
         host: host.hostname,
         from: pusher.hostname,
         threads,
         expectedCalls: calls,
         reason: reasonFor(host, calls) + (threads !== 1 ? ` on ${threads} threads` : ""),
         purpose,
-      };
+      });
     }
-    return undefined;
+    return true;
   };
 
-  let push: InducePlan["push"] | undefined;
-  // Eviction only while a candidate is actually waiting for the seat: an empty
-  // lab pool makes a freed slot a slot freed for nobody.
+  // Eviction only while a candidate is actually waiting for the seat — an
+  // empty lab pool makes a freed slot a slot freed for nobody — and only ONE
+  // evictee: one seat is all the landing needs.
   if (bottomFull && labPool.length > 0) {
-    push = attempt(evictPool, "free-slot", (host, calls) =>
-      `bottom row full (${bottomCount}/${NET_WIDTH}): re-roll the ${(host.maxRam ?? 0)}GB stranger`
-      + ` off row ${bottom} to free a seat for a lab candidate — ~${calls} calls`);
+    for (const evictee of evictPool) {
+      if (assign(evictee, "free-slot", (host, calls) =>
+        `bottom row full (${bottomCount}/${NET_WIDTH}): re-roll the ${(host.maxRam ?? 0)}GB stranger`
+        + ` off row ${bottom} to free a seat for a lab candidate — ~${calls} calls`)) break;
+    }
   }
-  push ??= attempt(labPool, "lab", (host, calls) =>
-    `${(host.maxRam ?? 0)}GB at difficulty ${host.difficulty}, band reaches row ${bottom}`
-    + ` — ~${calls} calls`);
-  push ??= attempt(seatPool, "seat", (host, calls) =>
-    `${(host.maxRam ?? 0)}GB at depth ${host.depth ?? "unplaced"}, band covers the open`
-    + ` stasis target at row ${seatTargetFor.get(host.hostname)} — ~${calls} calls a roll`);
-  push ??= attempt(frontierPool, "frontier", (host, calls) =>
-    `${(host.maxRam ?? 0)}GB at depth ${host.depth}, expected landing ${host.difficulty! + 1}`
-    + ` — deeper on average; ~${calls} calls`);
+  // One lab candidate: the walk needs one vantage, and racing two hosts
+  // toward the same row wastes the loser. Same rule per seat window and per
+  // ferried band below, with the also-rans refused by name.
+  let labChosen = false;
+  for (const host of labPool) {
+    if (labChosen) {
+      refuse(refused, host, "push-covered", "a bigger host is already being pushed toward the bottom row");
+      continue;
+    }
+    labChosen = assign(host, "lab", (chosen, calls) =>
+      `${(chosen.maxRam ?? 0)}GB at difficulty ${chosen.difficulty}, band reaches row ${bottom}`
+      + ` — ~${calls} calls`);
+  }
+  const seatCovered = new Set<number>();
+  for (const host of seatPool) {
+    const target = seatTargetFor.get(host.hostname)!;
+    if (seatCovered.has(target)) {
+      refuse(refused, host, "push-covered", `a bigger host is already being pushed toward the stasis target at row ${target}`);
+      continue;
+    }
+    if (assign(host, "seat", (chosen, calls) =>
+      `${(chosen.maxRam ?? 0)}GB at depth ${chosen.depth ?? "unplaced"}, band covers the open`
+      + ` stasis target at row ${target} — ~${calls} calls a roll`)) seatCovered.add(target);
+  }
+  const ferried = new Set<number>();
+  for (const host of ferryPool) {
+    const band = ferryBandFor.get(host.hostname)!;
+    const label = `${band[0]}-${band[band.length - 1]}`;
+    if (ferried.has(band[0]!)) {
+      refuse(refused, host, "push-covered", `a bigger host is already being ferried into rows ${label}`);
+      continue;
+    }
+    if (assign(host, "ferry", (chosen, calls) =>
+      `${(chosen.maxRam ?? 0)}GB with a resident riding, band crosses the air gap into unconquered`
+      + ` rows ${label} — ~${calls} calls a roll`)) ferried.add(band[0]!);
+  }
+  for (const host of frontierPool) {
+    assign(host, "frontier", (chosen, calls) =>
+      `${(chosen.maxRam ?? 0)}GB at depth ${chosen.depth}, expected landing ${chosen.difficulty! + 1}`
+      + ` — deeper on average; ~${calls} calls`);
+  }
 
   // An evictee left standing is a bottom-row host like any other.
   for (const host of evictPool) {
-    if (push?.host === host.hostname) continue;
+    if (pushes.some((entry) => entry.host === host.hostname)) continue;
     refuse(refused, host, "already-there", "already on the bottom row, so already connected to the labyrinth");
   }
-  return { ...(push !== undefined ? { push } : {}), refused };
+  return { pushes, refused };
 }

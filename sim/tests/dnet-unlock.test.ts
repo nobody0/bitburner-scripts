@@ -27,7 +27,6 @@ import { only } from "../../shared/features/profile.ts";
  * these run the real controller rather than poking the system directly. */
 lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
   test("a BN1 run with no SF15 buys the program and then sees a darknet", async () => {
-    const observed: number[] = [];
     const mapped: number[] = [];
     const result = await runGame({
       // Unreachable on purpose: with only progression and dnet active there is
@@ -38,8 +37,8 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
       horizonMs: 12 * 60_000,
       bitnode: 1,
       homeRam: 256,
-      // Comfortably past the 10% affordability guard on $50.2m, so the test
-      // measures the purchase rather than the grind up to it.
+      // Comfortably past the full $50.2m purchase, so the test measures the
+      // access transition rather than the grind up to it.
       startingMoney: 2e9,
       // Isolated so `unmodeled` speaks about the darknet. `side` reaches the
       // contract-generation boundary, which is a separate, pre-existing gap.
@@ -47,10 +46,9 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
       onRecord: (line) => {
         const record = JSON.parse(line) as {
           key?: string;
-          data?: { probed?: unknown[]; knowledge?: { hosts?: unknown[] } };
+          data?: { knowledge?: { hosts?: unknown[] } };
         };
         if (record.key !== "dnet") return;
-        if (Array.isArray(record.data?.probed)) observed.push(record.data.probed.length);
         if (Array.isArray(record.data?.knowledge?.hosts)) mapped.push(record.data.knowledge.hosts.length);
       },
     });
@@ -59,14 +57,10 @@ lane({ feature: "dnet", bn: 1 }).describe("buying darknet access", () => {
     // purchase threw `subsystem darknet population` on every pass.
     expect(result.unmodeled).toEqual({});
     expect(result.crashes).toEqual([]);
-    // In BN1 with no SF15 the dnet probe is gated off until the program lands,
-    // so the mere EXISTENCE of a reading is what proves the purchase happened.
-    expect(observed.length).toBeGreaterThan(0);
-    expect(Math.max(...observed)).toBeGreaterThan(0);
-    // That the probe ran does not yet prove a net was GENERATED: `probed`
-    // always carries `darkweb`, which `initDarkwebServer` builds unconditionally
-    // and independently of `populateDarknet`. What proves generation is the
-    // folded map holding more than that one host.
+    // In BN1 with no SF15 the controller cannot seed darkweb until the program
+    // lands. The authoritative proof is the folded map holding more than the
+    // unconditional darkweb host; the retired `data.probed` telemetry field is
+    // not part of the current topic schema.
     expect(Math.max(...mapped, 0)).toBeGreaterThan(1);
   }, 120_000);
 

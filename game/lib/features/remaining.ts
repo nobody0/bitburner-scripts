@@ -1,4 +1,5 @@
 import type { NS } from "@ns";
+import { realmSleep } from "../wake.ts";
 import { AUGMENTATIONS } from "../../../shared/features/augmentations.ts";
 import { effectiveBitNodeMultipliers, WORLD_DAEMON_BASE_SKILL } from "../../../shared/features/bitnode.ts";
 import { BLADEBURNER_RANK_CHANNEL, currencyWorth } from "../../../shared/strategy/income.ts";
@@ -118,7 +119,7 @@ import { armSleeveCompletion, consumeSleeveCompletion, pendingSleeveCompletions,
 import { merge, set, type GameState } from "../state.ts";
 import type { WorkTaskLike } from "../work-completion.ts";
 import type { FeatureClaim } from "./claims.ts";
-import { actionRamClaim, featureDodge, featureGoDodge } from "./dodge.ts";
+import { actionRamClaim, featureDodge } from "./dodge.ts";
 import { dnetLabCacheDeferral } from "./dnet.ts";
 import { liquidatableValue } from "./factions.ts";
 import type { ClaimContext, DriverContext, FeatureDriver, FeatureModule, NeedContext } from "./index.ts";
@@ -172,17 +173,40 @@ async function act<T>(
   methods: readonly string[],
   body: (stubNs: NS) => T | Promise<T>,
   describe: (value: T) => { ok: boolean; detail: string },
-  lane: "ordinary" | "go" = "ordinary",
 ): Promise<T | undefined> {
   try {
-    const outcome = lane === "go"
-      ? await featureGoDodge(ctx, goActionClaimId(action), methods, body)
-      : await featureDodge(ctx, id as Claim["by"], actionClaimId(action), methods, body);
+    const outcome = await featureDodge(
+      ctx,
+      id as Claim["by"],
+      id === "go" ? goActionClaimId(action) : actionClaimId(action),
+      methods,
+      body,
+    );
     if (!outcome.ok) {
       record(id, action, false, outcome.reason);
       return;
     }
     const value = outcome.value;
+    const { ok, detail } = describe(value);
+    record(id, action, ok, detail);
+    return value;
+  } catch (error) {
+    if (isScriptDeath(error)) throw error;
+    record(id, action, false, String(error));
+  }
+}
+
+/** Record controller-side orchestration. Netscript calls inside `body` must be
+ * individual synchronous dodges; awaiting their returned promises happens
+ * here, after each stub and heap lease have already been released. */
+async function actController<T>(
+  id: string,
+  action: string,
+  body: () => Promise<T>,
+  describe: (value: T) => { ok: boolean; detail: string },
+): Promise<T | undefined> {
+  try {
+    const value = await body();
     const { ok, detail } = describe(value);
     record(id, action, ok, detail);
     return value;
@@ -202,6 +226,17 @@ function goActionClaimId(action: string): string {
     || action.startsWith("cheat")
     ? "action:turn"
     : actionClaimId(action);
+}
+
+async function goDodgeValue<T>(
+  ctx: DriverContext,
+  action: string,
+  methods: readonly string[],
+  body: (stubNs: NS) => T | Promise<T>,
+): Promise<T> {
+  const outcome = await featureDodge(ctx, "go", goActionClaimId(action), methods, body);
+  if (!outcome.ok) throw new Error(outcome.reason);
+  return outcome.value;
 }
 
 function maybeActionClaim(
@@ -1087,12 +1122,14 @@ let goAnchorFailedAt = 0;
  * never held while merely waiting for the clock. Netscript prices RAM per
  * distinct function used rather than per call, so the poll loop itself is
  * free. */
-async function observeGoTickPhase(stubNs: NS): Promise<GoTickPhase | undefined> {
-  const initial = stubNs["getPlayer"]().totalPlaytime;
+async function observeGoTickPhase(
+  readPlayer: () => Promise<ReturnType<NS["getPlayer"]>>,
+): Promise<GoTickPhase | undefined> {
+  const initial = (await readPlayer()).totalPlaytime;
   const attempts = Math.ceil(GO_ENGINE_CYCLE_MS / GO_ANCHOR_POLL_MS) + 2;
   for (let attempt = 0; attempt < attempts; attempt++) {
-    await stubNs["sleep"](GO_ANCHOR_POLL_MS);
-    const playtime = stubNs["getPlayer"]().totalPlaytime;
+    await realmSleep(GO_ANCHOR_POLL_MS);
+    const playtime = (await readPlayer()).totalPlaytime;
     if (playtime !== initial) return { wallAt: Date.now(), playtime };
   }
   // A paused or heavily throttled game never rolls over; report failure and
@@ -1441,17 +1478,15 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       && (claimedAction === "move" || claimedAction === "pass")
       && Date.now() - goAnchorFailedAt > GO_ANCHOR_RETRY_MS
     ) {
-      const anchored = await act(
-        ctx,
+      const anchored = await actController(
         "go",
         "align",
-        goMethods("align"),
-        (stubNs: NS) => observeGoTickPhase(stubNs),
+        () => observeGoTickPhase(() =>
+          goDodgeValue(ctx, "align", ["getPlayer"], (stubNs) => stubNs["getPlayer"]())),
         (value) => ({
           ok: value !== undefined,
           detail: value ? `anchored engine tick ${value.playtime}` : "no engine tick observed",
         }),
-        "go",
       );
       if (generation !== goGeneration) return;
       if (anchored) goTickPhase = anchored;
@@ -1642,29 +1677,30 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       }
       const alignedEntry = goPlaybookEntry;
       const actionStartedAt = Date.now();
-      const reset = await act(
-        ctx,
+      const reset = await actController(
         "go",
         action.type,
-        goMethods(action.type, cheatUnlocked, alignedEntry !== undefined),
-        async (stubNs: NS) => {
+        async () => {
           // A reset that lands in-game but whose stub then dies is a desync
           // source like any other dispatch, so invalidate before either call.
           invalidateGoMirror("a board reset was dispatched and its result never merged");
           if (!alignedEntry || !goTickPhase) {
-            return stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize);
+            return goDodgeValue(ctx, action.type, ["go.resetBoardState"], (stubNs) =>
+              stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize));
           }
           const seeded = await runGoNeuralSeedDispatch({
             phase: goTickPhase,
             notBeforePlaytime: alignedEntry.entryPlaytime,
             clock: {
               now: Date.now,
-              player: () => stubNs["getPlayer"](),
-              sleep: async (ms) => { await stubNs["sleep"](ms); },
+              player: () => goDodgeValue(
+                ctx, action.type, ["getPlayer"], (stubNs) => stubNs["getPlayer"](),
+              ),
+              sleep: async (ms) => { await realmSleep(ms); },
             },
             infer: async () => undefined,
-            dispatch: async () =>
-              stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize),
+            dispatch: () => goDodgeValue(ctx, action.type, ["go.resetBoardState"], (stubNs) =>
+              stubNs["go"]["resetBoardState"](newGameAction.opponent, newGameAction.boardSize)),
           });
           goTickPhase = seeded.phase;
           return seeded.response;
@@ -1740,14 +1776,48 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
     let continueImmediately = false;
     const runTurn = async (): Promise<void> => {
       const actionStartedAt = Date.now();
-      const rawOutcome = await act(
-        ctx,
+      const turnDodge = async <T>(
+        methods: readonly string[],
+        body: (stubNs: NS) => T | Promise<T>,
+      ): Promise<T> => goDodgeValue(ctx, action.type, methods, body);
+      const readPlayer = (): Promise<ReturnType<NS["getPlayer"]>> =>
+        turnDodge(["getPlayer"], (stubNs) => stubNs["getPlayer"]());
+      const goActionMethod = (candidate: GoPlayingAction): string => {
+        switch (candidate.type) {
+          case "move": return "go.makeMove";
+          case "pass": return "go.passTurn";
+          case "cheatTwoMoves": return "go.cheat.playTwoMoves";
+          case "cheatRemoveRouter": return "go.cheat.removeRouter";
+          case "cheatDestroyNode": return "go.cheat.destroyNode";
+          case "cheatRepairNode": return "go.cheat.repairOfflineNode";
+        }
+      };
+      const invokeGo = (stubNs: NS, candidate: GoPlayingAction): Promise<RawGoResponse> => {
+        switch (candidate.type) {
+          case "move":
+            return stubNs["go"]["makeMove"](candidate.x, candidate.y);
+          case "pass":
+            return stubNs["go"]["passTurn"]();
+          case "cheatTwoMoves":
+            return stubNs["go"]["cheat"]["playTwoMoves"](
+              candidate.x1, candidate.y1, candidate.x2, candidate.y2,
+            );
+          case "cheatRemoveRouter":
+            return stubNs["go"]["cheat"]["removeRouter"](candidate.x, candidate.y);
+          case "cheatDestroyNode":
+            return stubNs["go"]["cheat"]["destroyNode"](candidate.x, candidate.y);
+          case "cheatRepairNode":
+            return stubNs["go"]["cheat"]["repairOfflineNode"](candidate.x, candidate.y);
+        }
+      };
+      const dispatchGo = (candidate: GoPlayingAction): Promise<RawGoResponse> =>
+        turnDodge([goActionMethod(candidate)], (stubNs) => invokeGo(stubNs, candidate));
+      const rawOutcome = await actController(
         "go",
         action.type,
-        goMethods(action.type, cheatUnlocked),
-        async (stubNs: NS): Promise<GoActionOutcome> => {
-          // The RAM broker admitted us and the dodge stub is running. Anything
-          // before this instant is lease cost, not planning or alignment.
+        async (): Promise<GoActionOutcome> => {
+          // Prediction and timing are controller/web-worker work. Only each
+          // immediate Netscript invocation below enters the generic dodge FIFO.
           const stubEnteredAt = Date.now();
           let finalizeMs = 0;
           let dispatchPlayer: ReturnType<NS["getPlayer"]> | undefined;
@@ -1861,38 +1931,33 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
               ...(committedEntry ? { notBeforePlaytime: committedEntry.entryPlaytime } : {}),
               clock: {
                 now: Date.now,
-                player: () => stubNs["getPlayer"](),
-                sleep: async (ms) => { await stubNs["sleep"](ms); },
+                player: readPlayer,
+                sleep: async (ms) => { await realmSleep(ms); },
               },
               infer: finalizeForSlot,
-              dispatch: async (finalized): Promise<RawGoResponse> => {
-                // A reset invalidates both the board and the prepared batch.
-                // Check at the last possible instant, after inference and seed
-                // assurance but before the irreversible Go call.
-                if (generation !== goGeneration) throw new Error("Go generation changed before dispatch");
-                const dispatchWallAt = Date.now();
-                moveDispatchedAt = dispatchWallAt;
-                // From here the game board and the mirror can only be reconciled
-                // by observing the game. Anything that stops us reaching the
-                // merge below leaves this set and the next pass rebuilds.
-                invalidateGoMirror(GO_DISPATCH_UNMERGED);
-                const responsePromise = finalized.action.type === "move"
-                  ? stubNs["go"]["makeMove"](finalized.action.x, finalized.action.y)
-                  : finalized.action.type === "pass"
-                    ? stubNs["go"]["passTurn"]()
-                    : finalized.action.type === "cheatTwoMoves"
-                      ? stubNs["go"]["cheat"]["playTwoMoves"](
-                        finalized.action.x1, finalized.action.y1,
-                        finalized.action.x2, finalized.action.y2,
-                      )
-                      : finalized.action.type === "cheatRemoveRouter"
-                        ? stubNs["go"]["cheat"]["removeRouter"](finalized.action.x, finalized.action.y)
-                        : finalized.action.type === "cheatDestroyNode"
-                          ? stubNs["go"]["cheat"]["destroyNode"](finalized.action.x, finalized.action.y)
-                          : stubNs["go"]["cheat"]["repairOfflineNode"](finalized.action.x, finalized.action.y);
+              dispatch: (finalized): Promise<RawGoResponse> => dispatchGo(finalized.action),
+              verifyAndDispatch: (finalized, accept) => turnDodge(
+                ["getPlayer", goActionMethod(finalized.action)],
+                (stubNs) => {
+                  const player = stubNs["getPlayer"]();
+                  const observedAt = Date.now();
+                  if (!accept(player, observedAt)) return { player, observedAt, dispatched: false as const };
+                  // Check at the last possible instant, after inference and
+                  // seed assurance but before the irreversible Go call.
+                  if (generation !== goGeneration) throw new Error("Go generation changed before dispatch");
+                  moveDispatchedAt = observedAt;
+                  invalidateGoMirror(GO_DISPATCH_UNMERGED);
+                  return {
+                    player,
+                    observedAt,
+                    dispatched: true as const,
+                    response: invokeGo(stubNs, finalized.action),
+                  };
+                },
+              ),
+              onDispatched: (finalized, dispatchWallAt) => {
                 // The game promise is now sleeping through White's response.
-                // Start likely successor evaluations without awaiting them or
-                // extending the RAM-holding main-thread dodge.
+                // Start likely successor evaluations without awaiting them.
                 if (finalized.continuationHints.length) {
                   predictionParentId = neuralRuntime.commit(
                     finalized.positionId,
@@ -1903,7 +1968,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
                     expectedPredictionParent,
                   );
                 }
-                return responsePromise;
               },
             });
             goTickPhase = seeded.phase;
@@ -1968,13 +2032,14 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
             // board-changing call, so from here the mirror is unproven.
             invalidateGoMirror(GO_DISPATCH_UNMERGED);
             if (dispatchedAction?.type === "move") {
-              response = await stubNs["go"]["makeMove"](dispatchedAction.x, dispatchedAction.y);
+              response = await dispatchGo(dispatchedAction);
             } else if (action.type === "resume") {
               // makeMove/passTurn already await this same promise. This branch only
               // reattaches after a restart interrupted an in-flight white turn.
-              response = await stubNs["go"]["opponentNextTurn"](false, false);
+              response = await turnDodge(["go.opponentNextTurn"], (stubNs) =>
+                stubNs["go"]["opponentNextTurn"](false, false));
             } else {
-              response = await stubNs["go"]["passTurn"]();
+              response = await dispatchGo({ type: "pass" });
             }
           } else {
             throw new Error(`invalid Go turn action ${action.type}`);
@@ -1983,7 +2048,17 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           // Predictions are intentionally absent on the latency-bounded 19x19
           // cheat path. Observe this public state unconditionally so offline
           // bonus-cycle accounting never depends on speculative continuations.
-          const responseBonusCycles = stubNs["go"]["getGameState"]().bonusCycles;
+          const observePlayer = Boolean(
+            predictionParentId || (response?.type === "gameOver" && action.type !== "resume"),
+          );
+          const responseObservation = await turnDodge(
+            ["go.getGameState", ...(observePlayer ? ["getPlayer"] : [])],
+            (stubNs) => ({
+              bonusCycles: stubNs["go"]["getGameState"]().bonusCycles,
+              ...(observePlayer ? { player: stubNs["getPlayer"]() } : {}),
+            }),
+          );
+          const responseBonusCycles = responseObservation.bonusCycles;
           // Two unrelated reasons to sample the player here, and the union is
           // deliberate: the compact clock confirmation a neural move's armed
           // worker needs, and the multiplier step a FINISHED game just applied.
@@ -2005,11 +2080,7 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           // call and leave the stub with nothing between it and a RAM USAGE
           // ERROR. A resume that ends the game raises `playerDirty` after the
           // merge instead, which is exactly what that flag exists for.
-          const responsePlayer =
-            predictionParentId
-            || (response?.type === "gameOver" && action.type !== "resume")
-              ? stubNs["getPlayer"]()
-              : undefined;
+          const responsePlayer = responseObservation.player;
           const responseObservedAt = responsePlayer ? Date.now() : undefined;
           return {
             response,
@@ -2029,7 +2100,6 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
           ok: value.response !== undefined,
           detail: `${value.action?.type ?? action.type}; opponent ${value.response?.type}`,
         }),
-        "go",
       );
       if (generation !== goGeneration) return;
       const result = requireResult("go");
@@ -2183,8 +2253,8 @@ async function goTick(ctx: DriverContext, generation: number): Promise<void> {
       // The mirror was advanced by applying rules LOCALLY. Prove it against the
       // game before the next turn plans on it.
       //
-      // Its own small ordinary-lane dodge, deliberately: go.getBoardState is
-      // 4 GB and must not enlarge the turn's contiguous long-lane grant, and
+      // Its own small dodge, deliberately: go.getBoardState is 4 GB and must
+      // not enlarge the move call's contiguous grant, and
       // nothing may be inserted between the verified clock read and makeMove
       // (go-neural.ts, runGoNeuralSeedDispatch). Running it here costs neither —
       // the game board is settled, White has already replied, and no Go promise
@@ -3504,6 +3574,7 @@ const progression: FeatureDriver = {
         return;
       }
       if (!plan.completion.execute || plan.completion.armedAt !== progressionMemory.nodeCompletionArmedAt) return;
+
       const outcome = await featureDodge(
         ctx,
         "progression",
@@ -3586,7 +3657,7 @@ const progression: FeatureDriver = {
     if (!plan.install || progressionMemory.installQueueKey !== queueKey) return;
 
     // The rooted callback is deliberate: relative "start.js" would resolve
-    // beside the versioned dodge stub as lib/start.js.
+    // beside the dodge stub as lib/start.js.
     const outcome = await featureDodge(
       ctx,
       "progression",
@@ -3814,13 +3885,9 @@ type GoVerification = "match" | "drift" | "unavailable" | "skipped";
 
 /** Read the game's own rows and compare them with the mirror we just merged.
  *
- * ORDINARY lane on purpose. The turn runs on the exclusive long lane, whose
- * running-guard rejects a second concurrent call outright ("a Go turn is
- * already running"), and go.getBoardState is 4 GB — folding it into the turn's
- * method list would push that grant from 6.6 GB to 10.6 GB of CONTIGUOUS RAM on
- * a single non-home host, since the long lane is banned from home. As its own
- * 6.1 GB stub (1.6 base + 4 + 0.5 margin) it may sit on home and competes with
- * nothing the turn needs.
+ * Kept as a separate synchronous dodge: go.getBoardState is 4 GB, so folding
+ * it into the move invocation would enlarge the contiguous grant for no gain.
+ * The generic broker may place either call on home or a fleet arena host.
  *
  * Deliberately NOT declared in goModule.claims: that returns exactly one claim
  * per pass, and a permanent 4.5 GB claim would inflate Go's continuous
@@ -3871,7 +3938,8 @@ function goMethods(
   // Seed anchoring is split out precisely because it is cheap: 0.5 GB of
   // getPlayer instead of the 4 GB go.makeMove grant, which must not be held
   // while waiting for an engine tick.
-  if (action === "align") return ["getPlayer", "sleep"];
+  // All Go timing waits use the realm timer, so `sleep` is never priced.
+  if (action === "align") return ["getPlayer"];
   // A dispatch-time seed change can legitimately flip the V9 decision between
   // move and pass. Price both calls for every Black turn so the exact action is
   // always executable. passTurn is zero-RAM in v3.0.1, so this does not enlarge
@@ -3881,8 +3949,8 @@ function goMethods(
     // one representative method reserves the exact maximum dynamic-RAM path
     // without incorrectly summing four mutually exclusive calls.
     return cheatUnlocked
-      ? ["getPlayer", "sleep", "go.getGameState", "go.cheat.playTwoMoves"]
-      : ["getPlayer", "sleep", "go.getGameState", "go.makeMove", "go.passTurn"];
+      ? ["getPlayer", "go.getGameState", "go.cheat.playTwoMoves"]
+      : ["getPlayer", "go.getGameState", "go.makeMove", "go.passTurn"];
   }
   // Deliberately still free. A resume reattaches to White's turn, and White
   // passing second DOES end the game and apply the Node Power multipliers — but
@@ -3893,7 +3961,7 @@ function goMethods(
   if (action === "resume") return ["go.getGameState", "go.opponentNextTurn"];
   if (action === "newGame") {
     return alignedStart
-      ? ["getPlayer", "sleep", "go.resetBoardState"]
+      ? ["getPlayer", "go.resetBoardState"]
       : ["go.resetBoardState"];
   }
   return [];

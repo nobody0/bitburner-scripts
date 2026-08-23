@@ -1,9 +1,7 @@
 # bitburner-scripts
 
 A clean-sheet Bitburner automation codebase. The predecessor scripts
-([`nobody01/bitburnerscript`](https://gitlab.com/nobody01/bitburnerscript),
-branches `master` and `2023`) are inspiration only; this repository starts with
-new history and a deliberately small architecture.
+[`nobody01/bitburnerscript`](https://gitlab.com/nobody01/bitburnerscript), are inspiration;
 
 Four parts (see [spec/repo-layout.md](spec/repo-layout.md)):
 
@@ -125,6 +123,11 @@ root is ever touched — that is where every game-generated file lives (`.msg`,
 `.lit`, `.exe`, `.cct`) and where `start.js` and `build-id.txt` are simply
 overwritten — and neither is `data/`, which the running controller writes to.
 `--no-sweep` disables it; `--sweep-dry-run` prints the delete set instead.
+
+The root rule has one narrow exception: the game exposes copied `dnet/`
+artifacts on darkweb as root-level basenames. Sync therefore owns only the
+configured `agent.js` and `overseer.js` version families at that root; every
+other darkweb root file remains protected.
 
 The worker and RAM-dodge helper are immutable per build: their filenames carry
 the same build id baked into `start.js`. Helpers are pushed first, then the

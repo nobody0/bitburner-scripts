@@ -152,7 +152,11 @@ export class ProcessTable {
 
   killall(host: string, exceptPid?: number): number {
     let killed = 0;
-    for (const process of [...this.#processes.values()]) {
+    // Upstream killServerScripts iterates the live running-script maps. Keep
+    // this live too: an atExit callback that inserts another process must be
+    // observable to the same teardown, which is the restart-loop hazard the
+    // agent lifecycle is designed around.
+    for (const process of this.#processes.values()) {
       if (process.host !== host || process.pid === exceptPid) continue;
       this.#stop(process, true);
       killed++;

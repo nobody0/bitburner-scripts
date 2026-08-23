@@ -5,8 +5,8 @@
  * The runtime consumers instead inline the source as a plain script after
  * rewriting its module syntax: the export list becomes a
  * `globalThis.__combinedPlaybook` assignment (the bare identifier list is
- * already valid object shorthand) and its standalone `main` entry is renamed
- * out of the way. The transform is anchored to the exact shapes the packer
+ * already valid object shorthand) and its standalone `main` entry is removed.
+ * The transform is anchored to the exact shapes the packer
  * emits and fails loudly on drift.
  */
 
@@ -20,14 +20,18 @@ export function inlinePlaybookScript(moduleSource: string): string {
   if (!exportBlock.test(moduleSource)) {
     throw new Error("playbook module does not contain the expected export block");
   }
+  const standalone = moduleSource.indexOf("\n/** @param {NS} ns */\nexport async function main(");
+  if (standalone < 0) {
+    throw new Error("playbook module does not contain the expected standalone main");
+  }
+  moduleSource = moduleSource.slice(0, standalone);
   // The generated module uses top-level await (its packed tables inflate
   // through DecompressionStream), so a classic script must wrap the body in
   // an async IIFE. The export list becomes the IIFE's return value; the
-  // renamed standalone entry is a hoisted declaration, so its position after
-  // the return is harmless.
+  // standalone terminal runner is intentionally not part of the embedded
+  // runtime; only the exported playbook API is returned.
   const body = moduleSource
-    .replace(exportBlock, "\nreturn {\n")
-    .replace(/\nexport async function main\(/, "\nasync function __playbookStandaloneMain(");
+    .replace(exportBlock, "\nreturn {\n");
   if (/^export\b/m.test(body)) {
     throw new Error("playbook module contains export syntax the inline transform does not cover");
   }

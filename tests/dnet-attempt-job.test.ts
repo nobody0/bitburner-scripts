@@ -110,7 +110,9 @@ function rig(modelId: string, difficulty: number, opts: { charismaGate?: number;
     },
     getServerMaxRam: () => 32,
     getServerUsedRam: () => 0,
-    getHostname: () => host,
+    // A successful authenticate can create this without mentioning the roll
+    // in its response. The job must return the post-auth listing.
+    ls: () => ["auth-reward.cache"],
   } as unknown as NS;
   return state;
 }
@@ -140,6 +142,11 @@ describe("attemptJob runs the whole conversation in one process", () => {
       expect(r.sent[r.sent.length - 1]).toBe(r.password);
       // Every exchange is reported, so the panel can see what the solve cost.
       expect(result.attempts?.length).toBe(r.sent.length);
+      // A win may have dropped a `.cache`, but the job does not `ls` for it — that
+      // would be 0.2 GB per authenticate thread. It flags the host dirty and the
+      // overseer files one instant list job.
+      expect(result.dirtied).toBe(true);
+      expect(result.hosts?.[0]?.caches).toBeUndefined();
       // And the credential writes through before the job settles.
       expect(recovered).toContainEqual({
         hostname: "dn-1",
@@ -148,8 +155,10 @@ describe("attemptJob runs the whole conversation in one process", () => {
         at: expect.any(Number),
       });
       expect(r.bleedOptions.every((options) => !options.peek && options.logsToCapture === 200)).toBe(true);
-      expect(drained.at(-1)).toBe(0);
-      expect(r.bleedOptions).toHaveLength(r.sent.length + 1);
+      // The successful record stays pending: credential write-through happens
+      // synchronously, and planting must not wait for one more heartbleed.
+      expect(drained.at(-1)).toBe(1);
+      expect(r.bleedOptions).toHaveLength(r.sent.length);
     })();
   });
 
@@ -159,9 +168,10 @@ describe("attemptJob runs the whole conversation in one process", () => {
       const result = await bodies().attempt!(r.ns, { host: "dn-1", from: "darkweb" });
       expect(result.ok, result.detail).toBe(true);
       expect(r.sent).toEqual([r.password]);
-      // The first drain protects existing logs from the capped-ring prepend;
-      // the second consumes the successful authentication record.
-      expect(r.bleeds).toBe(2);
+      // The initial drain protects existing logs from the capped-ring prepend.
+      // Success writes the credential through and leaves its record for the
+      // later background drain rather than delaying the plant handoff.
+      expect(r.bleeds).toBe(1);
     })();
   });
 
@@ -171,8 +181,9 @@ describe("attemptJob runs the whole conversation in one process", () => {
       ringFor: () => ({ pendingAuthRecords: 0, lastBleedAttemptAt: 1, lastBleedAt: 1 }),
     }).attempt!(r.ns, { host: "dn-1", from: "darkweb" });
     expect(result.ok, result.detail).toBe(true);
-    // Only the successful authentication record remains to drain.
-    expect(r.bleeds).toBe(1);
+    // The successful authentication record remains for the later background
+    // drain, so this already-drained host needs no heartbleed in the hot path.
+    expect(r.bleeds).toBe(0);
   });
 
   test("existing leaks are drained before authenticate can evict them, but stay provisional", async () => {
@@ -217,9 +228,8 @@ describe("attemptJob runs the whole conversation in one process", () => {
     expect(recordedAttempts).toEqual(r.sent);
     expect(drains.some((outcome) => outcome.pendingAuthRecords === 1)).toBe(true);
     expect(drains[drains.length - 1]).toMatchObject({
-      pendingAuthRecords: 0,
+      pendingAuthRecords: 1,
       attemptedAt: expect.any(Number),
-      drainedAt: expect.any(Number),
     });
   });
 
@@ -331,20 +341,54 @@ describe("a solve that loses its host keeps its place", () => {
 });
 
 describe("a verified credential is bound to the server lifetime", () => {
-  test("a 401 while re-opening it forces identity reconciliation", async () => {
-    const ns = {
-      dnet: {
-        connectToSession: () => ({ success: false, code: 401, message: "wrong" }),
-        authenticate: () => Promise.resolve({ success: false, code: 401, message: "wrong" }),
-      },
-    } as unknown as NS;
-    const result = await bodies().plant!(ns, {
+  const plantNs = (identity: string) => ({
+    dnet: {
+      connectToSession: () => ({ success: false, code: 401, message: "wrong" }),
+      authenticate: () => Promise.resolve({ success: false, code: 401, message: "wrong" }),
+      getServerDetails: () => ({ isOnline: true }),
+    },
+    dnsLookup: () => identity,
+  }) as unknown as NS;
+
+  test("a 401 on the same identity quarantines only the credential", async () => {
+    const result = await bodies().plant!(plantNs("10.0.0.1"), {
+      host: "dn-1",
+      from: "darkweb",
+      password: "formerly-right",
+      targetIdentity: "10.0.0.1",
+    });
+    expect(result.targetState).toBe("credential-rejected");
+  });
+
+  test("a 401 with a changed IP proves hostname reuse", async () => {
+    const result = await bodies().plant!(plantNs("10.0.0.2"), {
       host: "dn-1",
       from: "darkweb",
       password: "formerly-right",
       targetIdentity: "10.0.0.1",
     });
     expect(result.targetState).toBe("replaced");
+  });
+
+  test("an ambiguous scp refusal is not mislabeled as RAM exhaustion", async () => {
+    const ns = {
+      dnet: {
+        connectToSession: () => ({ success: true, code: 200, message: "ok" }),
+        getServerDetails: () => ({ isOnline: true }),
+      },
+      dnsLookup: () => "10.0.0.1",
+      scp: () => false,
+    } as unknown as NS;
+    const result = await bodies().plant!(ns, {
+      host: "dn-1",
+      from: "darkweb",
+      password: "right",
+      targetIdentity: "10.0.0.1",
+      payloads: ["agent.js", "prober.js"],
+    });
+    expect(result.targetState).toBe("launch-refused");
+    expect(result.codes?.["903"]).toBeUndefined();
+    expect(result.codes?.["913"]).toBe(1);
   });
 });
 

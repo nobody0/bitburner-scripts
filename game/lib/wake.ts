@@ -22,6 +22,28 @@ import type { WorkerGlobalThis } from "./worker-shared.ts";
  * Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Netscript/NetscriptHelpers.tsx#L398-L431 and https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptFunctions.ts#L250-L265
  */
 
+/** Sleep on the REALM timer — the one delay primitive our long-running loops
+ * use, replacing both `ns.sleep` and `ns.asleep` everywhere.
+ *
+ * `ns.sleep` is actively dangerous in any script with a second async arm: it
+ * holds the Netscript concurrency lock (`netscriptDelay` sets
+ * `ws.env.runningFn`), and the engine KILLS a script whose other arm makes any
+ * ns call while it is pending — the bug that killed every darknet overseer at
+ * its first mutation event. `ns.asleep` is lock-free but is itself just a bare
+ * `setTimeout` upstream (NetscriptFunctions.ts:259-265), so it buys nothing a
+ * realm timer does not, while still LOOKING like an ns call that might hold
+ * the lock.
+ *
+ * The one thing neither this nor `ns.asleep` provides is prompt kill delivery:
+ * a killed script parked on a foreign promise only dies at its next ns call.
+ * Every loop that parks here must therefore touch ns each pass (they all do —
+ * a beat, a RAM measurement, a read), so a kill still surfaces within one
+ * tick. The simulator virtualizes realm timers (sim/realm/timers.ts), so both
+ * worlds behave identically. */
+export function realmSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /** Signal a controller wake without losing it when the controller is inside
  * another feature tick and has not armed its promise yet. */
 export function signalWake(globals: WorkerGlobalThis): void {

@@ -6,22 +6,9 @@ import { gameGlobal } from "./lib/globals.ts";
 import { makeSink, type TelemetrySink } from "./lib/telemetry-sink.ts";
 import { initTelemetry, type Telemetry } from "./lib/telemetry.ts";
 import { resolveRunIdentity } from "./lib/run-identity.ts";
+import { captureLaunch, resetLaunchState, type StartLaunch } from "./lib/launch-shared.ts";
 
 export type StartMode = "cold" | "handoff";
-
-/** The only supported invocation forms.
- *
- * Empty args are load/reset callbacks: Bitburner always invokes the exported
- * `main` function, and its singularity reset callbacks cannot supply args.
- * A deployment handoff names the build it expects to have launched so an
- * interleaved/stale push cannot silently run the wrong stable `start.js`. */
-export function parseStartMode(args: readonly unknown[], buildId: string): StartMode {
-  if (args.length === 0) return "cold";
-  if (args.length === 2 && args[0] === "handoff" && args[1] === buildId) return "handoff";
-  throw new Error(
-    `invalid start.js args ${JSON.stringify(args)}; expected no args or ["handoff", "${buildId}"]`,
-  );
-}
 
 /** Claim the controller epoch, and report what was claimed.
  *
@@ -61,8 +48,8 @@ export function shouldReportCrash(error: unknown): boolean {
  *    with "Exclude Running Scripts from Save" nothing else survived — full
  *    sweep: scan, root, redeploy the whole fleet.
  *    Source: https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/Server/BaseServer.ts#L296-L311
- *  - HANDOFF: a newer build was pushed; the previous instance exec'd us with
- *    ("handoff", buildId) and exited. The realm and the remote starters
+ *  - HANDOFF: a newer build was pushed; the previous instance published our
+ *    launch descriptor and exec'd us. The realm and the remote starters
  *    survive — inherit the game-state store and keep farming.
  *    Source (scripts are imported modules in the page realm): https://github.com/bitburner-official/bitburner-src/blob/3162fd2590e221eadd0c0fbd46151913f7c4c41c/src/NetscriptJSEvaluator.ts#L208-L223
  *  Either way the controller-epoch guard makes the newest instance the only
@@ -83,7 +70,15 @@ export async function main(ns: NS, featureOverrides?: FeatureOverrides): Promise
   // HGW is deliberately high-frequency. Avoid constructing and retaining a
   // Netscript log entry for every scheduler getter and exec call.
   ns.disableLog("ALL");
-  const mode = parseStartMode(ns.args, __BUILD_ID__);
+  const launch = captureLaunch<StartLaunch>("start");
+  if (launch && launch.buildId !== __BUILD_ID__) {
+    throw new Error(`start handoff expected build ${launch.buildId}, loaded ${__BUILD_ID__}`);
+  }
+  if (!launch && ns.args.length !== 0) {
+    throw new Error(`start.js takes no arguments; received ${JSON.stringify(ns.args)}`);
+  }
+  const mode: StartMode = launch ? "handoff" : "cold";
+  if (mode === "cold") resetLaunchState();
   const epoch = claimControllerEpoch(gameGlobal);
   const identity = await resolveRunIdentity(ns, mode === "handoff");
 

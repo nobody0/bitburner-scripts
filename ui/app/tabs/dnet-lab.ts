@@ -152,10 +152,8 @@ export function labMaze(lab: DarknetLabDigest, prior?: LabPrior): string {
   const walls = pathOf(runsOf(grid, width, height, (char) => char === WALL));
   const open = pathOf(runsOf(grid, width, height, (char) => char !== WALL && char !== UNKNOWN));
 
-  // The two seams, faint. They are the reason the maze has a macro-structure at
-  // all — four sub-mazes joined by four punched doors — and therefore the reason
-  // a second walker is worth having: the finisher takes one door pair and the
-  // scout the other. Without them the split looks arbitrary.
+  // The two seams, faint. They expose the maze's macro-structure: four
+  // sub-mazes joined by punched doors, which is what the route prior exploits.
   const seams = prior === undefined || prior.seamX === undefined || prior.seamY === undefined
     ? ""
     : `<path class="seam" d="M${prior.seamX * CELL + CELL / 2} 0V${height * CELL}`
@@ -174,17 +172,16 @@ export function labMaze(lab: DarknetLabDigest, prior?: LabPrior): string {
     })
     .join("");
 
-  // The walkers. A scout is hollow because it is the disposable one: it is
-  // never pinned, and a mutation taking it costs its position and nothing else.
+  // The single PID-bound finisher.
   const dots = lab.walkers
     .map((walker) => {
       const at = walker.at === undefined ? undefined : parse(walker.at);
       if (at === undefined) return "";
       const [cx, cy] = centre(at);
-      const title = `${walker.role ?? "finisher"} from ${walker.from}`
+      const title = `finisher from ${walker.from}`
         + ` — ${walker.moves} moves, ${walker.attempts} authentications`
         + (walker.pinned ? ", pinned" : ", not pinned");
-      return `<circle class="walker ${walker.role ?? "finisher"}${walker.pinned ? " pinned" : ""}"`
+      return `<circle class="walker finisher${walker.pinned ? " pinned" : ""}"`
         + ` cx="${cx}" cy="${cy}" r="${CELL}"><title>${esc(title)}</title></circle>`;
     })
     .join("");
@@ -205,7 +202,7 @@ export function labMaze(lab: DarknetLabDigest, prior?: LabPrior): string {
     + `</svg></div>`;
 }
 
-/** The maze's own legend. Six glyphs, and every one of them is a decision the
+/** The maze's own legend. Every glyph is a decision the
  * walk actually turns on. */
 export function labMazeLegend(): string {
   return `<div class="labkey">`
@@ -214,7 +211,6 @@ export function labMazeLegend(): string {
     + `<span><i class="sw fog"></i>unseen</span>`
     + `<span><i class="sw seamkey"></i>quadrant seam</span>`
     + `<span><i class="sw walkerkey"></i>finisher</span>`
-    + `<span><i class="sw scoutkey"></i>scout</span>`
     + `<span><i class="sw exitkey"></i>exit candidate</span>`
     + `</div>`;
 }

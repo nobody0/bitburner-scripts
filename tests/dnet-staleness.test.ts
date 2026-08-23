@@ -2,14 +2,6 @@ import { describe, expect, test } from "bun:test";
 import type { NS } from "@ns";
 import { DARKNET_CODES, LOCAL_CODES, codeName, stripCredentials } from "../shared/strategy/dnet/courier.ts";
 import {
-  overseerArgs,
-  parseAgentMode,
-  parseOverseerArgs,
-  parseWorkerArgs,
-  residentArgsFrom,
-  workerArgs,
-} from "../shared/strategy/dnet/mission.ts";
-import {
   FACT_CLASS,
   coverage,
   emptyKnowledge,
@@ -41,7 +33,6 @@ import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
 import { foldAttempts, type DarknetHostKnowledge } from "../shared/strategy/dnet/knowledge.ts";
 import type { AttemptOutcome } from "../shared/strategy/dnet/courier.ts";
 import { mutationIntervalMs, msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
-import { preflightJob } from "../game/dnet/agent.ts";
 import { retireLostEdgeJobs, retireLostPin } from "../game/dnet/overseer.ts";
 
 const GEN = "run-1";
@@ -301,58 +292,6 @@ describe("a host that goes away is forgotten, not remembered for ever", () => {
   });
 });
 
-describe("mission arguments", () => {
-  test("mission args round-trip through their encoder, per role", () => {
-    // The encoders exist so the launcher and the parser cannot drift: an agent
-    // launched with the wrong positional order would fail silently at 3am on a
-    // darknet host, which is the worst place to discover a typo.
-    const worker = {
-      missionId: "m-1",
-      generation: GEN,
-      identity: "identity-json",
-      role: "resident" as const,
-      agentId: "resident-dn-1",
-    };
-    expect(parseWorkerArgs(workerArgs(worker))).toEqual(worker);
-
-    const overseer = {
-      missionId: "m-1",
-      generation: GEN,
-      identity: "identity-json",
-      charisma: 120,
-      agentFile: "dnet/agent.abc123.js",
-    };
-    expect(parseOverseerArgs(overseerArgs(overseer))).toEqual(overseer);
-  });
-
-  test("a wrong argument shape exits quietly instead of crashing the game log", () => {
-    expect(parseWorkerArgs(["only-one"])).toBeUndefined();
-    // An unrecognised role is refused rather than coerced: an agent that does not
-    // know what it is would take work it cannot perform.
-    expect(parseWorkerArgs(["m", "g", "i", "saboteur", "a"])).toBeUndefined();
-    expect(parseOverseerArgs(["m", "g", "i", "not-a-number", "f"])).toBeUndefined();
-    expect(parseOverseerArgs(["m", "g", "i", 1])).toBeUndefined();
-  });
-
-  test("the job id is what selects an agent's MODE", () => {
-    // One binary, two modes: absent it is the host's resident, present it is the
-    // one job with that id. The same trick dodge-stub uses for its two lanes.
-    const base = workerArgs({
-      missionId: "m",
-      generation: GEN,
-      identity: "i",
-      role: "resident",
-      agentId: "a",
-    });
-    expect(parseAgentMode(base)).toEqual({ kind: "resident", mission: parseWorkerArgs(base)! });
-    expect(parseAgentMode([...base, "survey:dn-1"]))
-      .toEqual({ kind: "job", mission: parseWorkerArgs(base)!, jobId: "survey:dn-1" });
-    // ...and the spawn back to resident mode drops it again, which is the other
-    // half of the positional contract living in one file.
-    expect(residentArgsFrom([...base, "survey:dn-1"])).toEqual(base);
-  });
-});
-
 describe("a credential is never written down", () => {
   /** Telemetry is mirrored over a socket and written to disk as JSONL, so a
    * password that gets through here outlives the run in a file nobody
@@ -485,8 +424,8 @@ describe("the sweep does not race a running job", () => {
   const BEAT_WINDOW = RESIDENT_BEAT_MS * RESIDENT_BEAT_MISSES;
 
   const job = (over: Partial<DnetJob> = {}): DnetJob => ({
-    id: "survey:dn-1",
-    kind: "survey",
+    id: "inventory:dn-1",
+    kind: "inventory",
     label: "test",
     budgetGb: 2.6,
     threads: 1,
@@ -545,12 +484,12 @@ describe("the sweep does not race a running job", () => {
   });
 });
 
-describe("a job's allocation is PER THREAD, and both fit checks know it", () => {
-  // `ramOverride` is charged per thread by the engine, so a four-thread phish on
-  // a 6.35 GB budget needs 25.4 GB. `reclaim` and `phish` are the reason the
-  // field exists at all: both scale linearly with threads, and `agent.ts`
-  // hardcoded `threads: 1` at its spawn — so a planner asking for more would
-  // have been silently ignored while believing it had been granted.
+describe("the resident takes the next job it was handed, no RAM check of its own", () => {
+  // The fit check moved to the overseer, which sizes every job against the host's
+  // computed budget (`maxRam − blockedRam − prober`) before it is ever queued —
+  // the worker cannot measure and does not try. `nextJob` is now just "the first
+  // pending job, unless one is already active." The per-thread cost still matters,
+  // but it is `fileTask` on the overseer that enforces it, not this.
   const job = (over: Partial<DnetJob> = {}): DnetJob => ({
     id: "phish:dn-1",
     kind: "phish",
@@ -565,21 +504,21 @@ describe("a job's allocation is PER THREAD, and both fit checks know it", () => 
     fail: () => {},
     ...over,
   });
-  const queue = (pending: DnetJob[]): DnetHostQueue =>
-    ({ host: "dn-1", pending, lastBeatAt: 0, completed: 0, failed: 0 });
+  const queue = (pending: DnetJob[], over: Partial<DnetHostQueue> = {}): DnetHostQueue =>
+    ({ host: "dn-1", pending, lastBeatAt: 0, completed: 0, failed: 0, ...over });
 
-  test("a multi-thread job is not admitted on room for one thread", () => {
-    expect(nextJob(queue([job({ threads: 3 })]), 12)).toBeUndefined();
-    expect(nextJob(queue([job({ threads: 3 })]), 18)).toBeDefined();
+  test("returns the first pending job whatever its size — the overseer already sized it", () => {
+    // A four-thread job the old check would have refused on an 8 GB host is taken
+    // regardless: the overseer would not have filed it if it did not fit.
+    const big = job({ id: "phish:dn-1", threads: 4 });
+    const taken = nextJob(queue([big, job({ id: "reclaim:dn-1", kind: "reclaim" })]));
+    expect(taken?.id).toBe("phish:dn-1");
   });
 
-  test("a job that does not fit is left in the queue, and a smaller one takes the host", () => {
-    // Blocked RAM gets freed and hosts get restarted, so the work is still worth
-    // doing when it does fit. Skipping past it is what keeps one oversized job
-    // from starving everything behind it.
-    const cheap = job({ id: "reclaim:dn-1", kind: "reclaim", budgetGb: 5, threads: 1 });
-    const taken = nextJob(queue([job({ threads: 4 }), cheap]), 8);
-    expect(taken?.id).toBe("reclaim:dn-1");
+  test("returns nothing while a job is active, or when the queue is empty", () => {
+    expect(nextJob(queue([], { active: job() }))).toBeUndefined();
+    expect(nextJob(queue([job()], { active: job() }))).toBeUndefined();
+    expect(nextJob(queue([]))).toBeUndefined();
   });
 });
 
@@ -642,46 +581,6 @@ describe("target-owned bleed scheduling", () => {
 });
 
 describe("mutation-triggered recovery", () => {
-  test("one observed mutation refreshes a resident's otherwise-fresh adjacency", () => {
-    const at = 100_000;
-    const knowledge = foldReports(
-      emptyKnowledge(GEN),
-      [report("dn-1", at, { neighbours: ["dn-2"], depth: 1 })],
-      at,
-    ).knowledge;
-    const ordinary = deriveTasks(knowledge, at + 1, { agents: new Set(["dn-1"]) });
-    expect(ordinary.some((task) => task.kind === "survey" && task.host === "dn-1")).toBe(false);
-    const changed = deriveTasks(knowledge, at + 1, {
-      agents: new Set(["dn-1"]),
-      lastMutationAt: at + 1,
-    });
-    expect(changed.find((task) => task.kind === "survey" && task.host === "dn-1")?.reason)
-      .toBe("mutation observed since last survey");
-  });
-
-  test("resident preflight distinguishes a lost edge from a replaced identity", () => {
-    const draft = {
-      kind: "attempt",
-      state: { host: "dn-2", from: "dn-1", targetIdentity: "10.0.0.2" },
-    } as DnetJob;
-    const calls: unknown[][] = [];
-    const ns = {
-      dnet: {
-        probe: (...args: unknown[]) => {
-          calls.push(args);
-          return args[0] === true ? ["10.0.0.9"] : ["dn-2"];
-        },
-      },
-    } as unknown as NS;
-    expect(preflightJob(ns, draft)?.targetState).toBe("replaced");
-    expect(calls).toEqual([[], [true]]);
-
-    const lost = {
-      dnet: { probe: () => ["somewhere-else"] },
-    } as unknown as NS;
-    expect(preflightJob(lost, draft)?.targetState).toBe("edge-lost");
-  });
-
   test("a fresh neighbour set settles pending edge work and only flags active work", () => {
     const settled: string[] = [];
     const make = (id: string, host: string, state: Partial<DnetJob["state"]> = {}): DnetJob => ({

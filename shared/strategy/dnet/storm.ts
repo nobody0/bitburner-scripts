@@ -64,6 +64,11 @@ export interface StormHost {
   stormSeed?: boolean;
   /** A resident stands here — the fire job can only run on the holder. */
   agentAlive: boolean;
+  isStationary?: boolean;
+  hasCredential?: boolean;
+  blockedRam?: number;
+  caches?: readonly string[];
+  harvestBusy?: boolean;
   stasisLinked?: boolean;
   gone?: boolean;
 }
@@ -73,12 +78,12 @@ export interface StormView {
   now: number;
   /** `getStasisLinkLimit()` — 1 to 4, raised only by labyrinth augmentations. */
   stasisLimit: number;
-  /** Links actually applied, by the union the overseer already keeps. */
+  /** Links actually applied, from the newest complete stasis snapshot. */
   stasisLinked: number;
   /** A pin task filed or in flight this pass: a slot is being spent RIGHT NOW,
    *  and firing under it would waste the 12 GB + wait already committed. */
   pinsPending: boolean;
-  /** A finisher walk (not a scout) is active. */
+  /** The lab walker is active. */
   walkInFlight: boolean;
   /** The finisher's host is in the linked set. Meaningless unless
    *  `walkInFlight`. */
@@ -96,6 +101,7 @@ export type StormRefusalReason =
   | "storm-in-flight"
   | "no-seed"
   | "seed-unreachable"
+  | "harvest-incomplete"
   | "links-unspent"
   | "walker-unpinned"
   | "phish-window-open";
@@ -153,6 +159,30 @@ export function planStorm(view: StormView): StormPlan {
   // 3. The fire job runs ON the holder; the file cannot be scp'd off it.
   if (!holder.agentAlive) {
     refuse(holder.hostname, "seed-unreachable", "the seed's host has no resident, and the seed cannot be moved; waiting for a plant");
+    return { refused };
+  }
+
+  const incomplete = view.hosts.find((host) => host.gone !== true && host.isStationary !== true && (
+    host.hasCredential !== true
+    || host.blockedRam === undefined
+    || host.blockedRam > 0
+    || host.caches === undefined
+    || host.caches.length > 0
+    || host.harvestBusy === true
+  ));
+  if (incomplete !== undefined) {
+    const detail = incomplete.hasCredential !== true
+      ? "first authentication has not been completed"
+      : incomplete.blockedRam === undefined
+        ? "blocked RAM has not been freshly observed"
+        : incomplete.blockedRam > 0
+          ? `${incomplete.blockedRam.toFixed(2)}GB blocked RAM remains`
+          : incomplete.caches === undefined
+            ? "the cache listing has not been freshly observed"
+            : incomplete.caches.length > 0
+              ? `${incomplete.caches.length} cache file(s) remain unopened`
+              : "authentication, reclaim, or cache work is still active";
+    refuse(incomplete.hostname, "harvest-incomplete", detail);
     return { refused };
   }
 

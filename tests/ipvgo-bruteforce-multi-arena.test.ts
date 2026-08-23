@@ -75,7 +75,8 @@ lane({ feature: "go", requires: PLAYBOOK }).describe("merged IPvGO brute-force 5
     expect(standaloneSource).toContain("ns.ui.openTail()");
     expect(standaloneSource).not.toContain("ns.tail()");
     expect(standaloneSource).not.toContain("ns.prompt(");
-    expect(standaloneSource).not.toContain("ns.sleep(200)");
+    expect(standaloneSource).not.toMatch(/\bns\s*(?:\.\s*sleep|\[\s*["']sleep["']\s*\])\s*\(/);
+    expect(standaloneSource).toContain("function realmSleep(ms)");
     expect(standaloneSource).toContain("snapshot.bonusCycles");
     expect(standaloneSource).toContain('telemetry("CREATED"');
     expect(standaloneSource).toContain('telemetry("DISPATCH"');

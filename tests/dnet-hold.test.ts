@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
+import { isOnAirGap } from "../shared/strategy/dnet/rates.ts";
+import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
+import { emptyKnowledge } from "../shared/strategy/dnet/knowledge.ts";
 import {
+  BACKDOOR_RECYCLER_LIMIT,
   canReachBottomRow,
-  freeBackdoorAllowance,
+  chooseLabVantage,
   migrationCalls,
+  normalRamForDifficulty,
   openSpareTargets,
   planBackdoors,
   planInduce,
@@ -26,6 +31,17 @@ const host = (over: Partial<HoldHost> & { hostname: string }): HoldHost => ({
   ...over,
 });
 
+const spent = (over: Partial<HoldHost> & { hostname: string }): HoldHost => host({
+  difficulty: 6,
+  maxRam: 32,
+  blockedRam: 0,
+  caches: [],
+  contracts: [],
+  stormSeed: false,
+  hasCredential: true,
+  ...over,
+});
+
 const view = (hosts: HoldHost[], over: Partial<HoldView> = {}): HoldView => ({
   hosts,
   netDepth: 7,
@@ -35,25 +51,24 @@ const view = (hosts: HoldHost[], over: Partial<HoldView> = {}): HoldView => ({
   ...over,
 });
 
-describe("backdoors are spent only where they buy reach", () => {
-  test("two are always free, and the allowance grows as the net is rooted", () => {
-    // max(rootedMovable / (NET_WIDTH * 3), 2) — effects.ts:91-97.
-    expect(freeBackdoorAllowance(0)).toBe(2);
-    expect(freeBackdoorAllowance(24)).toBe(2);
-    expect(freeBackdoorAllowance(48)).toBe(2);
-    expect(freeBackdoorAllowance(240)).toBe(10);
+describe("backdoors recycle the worst fully-harvested servers", () => {
+  test("the normal RAM baseline follows immutable difficulty", () => {
+    // The generator changes baseline only at six-difficulty boundaries.
+    expect(BACKDOOR_RECYCLER_LIMIT).toBe(2);
+    expect(normalRamForDifficulty(0)).toBe(16);
+    expect(normalRamForDifficulty(5)).toBe(16);
+    expect(normalRamForDifficulty(6)).toBe(32);
+    expect(normalRamForDifficulty(12)).toBe(64);
   });
 
-  test("a host we hold no credential for is refused, because exec still checks the session", () => {
-    // The bypass covers the CONNECTION requirement only. This is the refusal
-    // that stops us spending instability on a host we cannot exec to anyway.
-    const plan = planBackdoors(view([host({ hostname: "dn-1", neighbours: ["dn-2"] })]));
+  test("a host we hold no credential for is refused because it is not harvested", () => {
+    const plan = planBackdoors(view([spent({ hostname: "dn-1", hasCredential: false })]));
     expect(plan.install).toEqual([]);
     expect(plan.refused[0]?.why).toBe("no-credential");
   });
 
   test("a stationary host is refused", () => {
-    const plan = planBackdoors(view([host({ hostname: "darkweb", hasCredential: true, isStationary: true })]));
+    const plan = planBackdoors(view([spent({ hostname: "darkweb", isStationary: true })]));
     expect(plan.refused[0]?.why).toBe("stationary");
   });
 
@@ -63,46 +78,79 @@ describe("backdoors are spent only where they buy reach", () => {
     // hosts first as "free"; that branch could never fire, because such a host
     // is already backdoored and filtered out above.
     const plan = planBackdoors(view([
-      host({ hostname: "reachy", hasCredential: true, agentAlive: true, neighbours: ["a", "b", "c", "d"] }),
-      host({ hostname: "pinned", hasCredential: true, agentAlive: true, stasisLinked: true, backdoored: true, neighbours: ["a"] }),
+      spent({ hostname: "reachy" }),
+      spent({ hostname: "pinned", stasisLinked: true, backdoored: true }),
     ]));
     expect(plan.install).toEqual(["reachy"]);
   });
 
-  test("a pinned host's backdoor does NOT eat the free allowance", () => {
+  test("a pinned host's implicit backdoor does not eat a recycler slot", () => {
     // The surplus is counted over getBackdooredDarknetServers, which filters
     // !hasStasisLink — so two pinned hosts still leave both free backdoors
     // available. Counting them would silently halve the allowance.
     const plan = planBackdoors(view([
-      host({ hostname: "pin-a", hasCredential: true, agentAlive: true, stasisLinked: true, backdoored: true, neighbours: ["x"] }),
-      host({ hostname: "pin-b", hasCredential: true, agentAlive: true, stasisLinked: true, backdoored: true, neighbours: ["x"] }),
-      host({ hostname: "one", hasCredential: true, agentAlive: true, neighbours: ["x"] }),
-      host({ hostname: "two", hasCredential: true, agentAlive: true, neighbours: ["x"] }),
+      spent({ hostname: "pin-a", stasisLinked: true, backdoored: true }),
+      spent({ hostname: "pin-b", stasisLinked: true, backdoored: true }),
+      spent({ hostname: "one" }),
+      spent({ hostname: "two" }),
     ]));
     expect(plan.install.sort()).toEqual(["one", "two"]);
   });
 
-  test("nothing is installed once authentication is already slowed", () => {
-    // Instability taxes EVERY authenticate in the run, which is the thing we do
-    // most — so past the ceiling more backdoors make the net slower, not bigger.
-    const plan = planBackdoors(view(
-      [host({ hostname: "dn-1", hasCredential: true, agentAlive: true, neighbours: ["x"] })],
-      { authDurationMultiplier: 1.4 },
-    ));
-    expect(plan.install).toEqual([]);
-    expect(plan.refused[0]?.why).toBe("unstable");
+  test("true generation outliers lead, normalized across difficulties", () => {
+    const plan = planBackdoors(view([
+      spent({ hostname: "normal-small", difficulty: 6, maxRam: 32 }),
+      spent({ hostname: "outlier-big", difficulty: 18, maxRam: 64 }),
+      spent({ hostname: "outlier-small", difficulty: 12, maxRam: 32 }),
+    ]));
+    expect(plan.install).toEqual(["outlier-small", "outlier-big"]);
   });
 
-  test("the free allowance bounds how many are installed", () => {
+  test("two fixed slots are filled with normal fallbacks", () => {
     const hosts = Array.from({ length: 6 }, (_, i) =>
-      host({ hostname: `dn-${i}`, hasCredential: true, agentAlive: true, neighbours: ["x"] }));
+      spent({ hostname: `dn-${i}`, maxRam: 32 + i }));
     const plan = planBackdoors(view(hosts));
     expect(plan.install.length).toBe(2);
-    expect(plan.refused.some((r) => r.why === "allowance-spent")).toBe(true);
+    expect(plan.install).toEqual(["dn-0", "dn-1"]);
+    expect(plan.refused.some((r) => r.why === "slots-filled")).toBe(true);
   });
+
+  test("only fresh, fully-harvested, disposable hosts are eligible", () => {
+    const plan = planBackdoors(view([
+      spent({ hostname: "blocked", blockedRam: 1 }),
+      spent({ hostname: "cache", caches: ["reward.cache"] }),
+      spent({ hostname: "contract", contracts: ["reward.cct"] }),
+      spent({ hostname: "seed", stormSeed: true }),
+      spent({ hostname: "unknown", caches: undefined }),
+      spent({ hostname: "walker", protected: true }),
+    ]));
+    expect(plan.install).toEqual([]);
+    expect(new Set(plan.refused.map((entry) => entry.why))).toEqual(new Set([
+      "ram-blocked", "cache-held", "contract-held", "seed-held", "harvest-unknown", "protected",
+    ]));
+  });
+
+  test("inherited ordinary backdoors consume slots until churn removes them", () => {
+    const plan = planBackdoors(view([
+      spent({ hostname: "held-a", backdoored: true }),
+      spent({ hostname: "held-b", backdoored: true }),
+      spent({ hostname: "held-c", backdoored: true }),
+      spent({ hostname: "candidate" }),
+    ]));
+    expect(plan.install).toEqual([]);
+    expect(plan.refused.find((entry) => entry.hostname === "candidate")?.why).toBe("slots-filled");
+  });
+
 });
 
 describe("stasis is spent on what cannot be rebuilt", () => {
+  test("an existing lab pin is a commitment, even when an unpinned neighbour has more RAM", () => {
+    const pinned = host({ hostname: "pinned", stasisLinked: true, maxRam: 32 });
+    const larger = host({ hostname: "larger", maxRam: 512 });
+    expect(chooseLabVantage([larger, pinned])).toBe(pinned);
+    expect(chooseLabVantage([host({ hostname: "small", maxRam: 32 }), larger])).toBe(larger);
+  });
+
   test("setStasisLink pins the CALLING host, so a host with nobody on it is refused", () => {
     const plan = planStasis(view([host({ hostname: "dn-1", maxRam: 128 })]));
     expect(plan.pin).toEqual([]);
@@ -120,9 +168,17 @@ describe("stasis is spent on what cannot be rebuilt", () => {
     // feature has that property, and no amount of RAM outranks it.
     const plan = planStasis(view([
       host({ hostname: "huge", agentAlive: true, maxRam: 512, backdoored: true }),
-      host({ hostname: "walker", agentAlive: true, maxRam: 128, irreplaceable: true }),
+      host({ hostname: "walker", agentAlive: true, maxRam: 128, blockedRam: 0, irreplaceable: true }),
     ]));
     expect(plan.pin).toEqual(["walker"]);
+  });
+
+  test("blocked RAM does not prevent an in-position lab candidate from winning stasis", () => {
+    const plan = planStasis(view([
+      host({ hostname: "walker", agentAlive: true, maxRam: 128, blockedRam: 96, irreplaceable: true }),
+    ]));
+    expect(plan.pin).toEqual(["walker"]);
+    expect(plan.refused.some((entry) => entry.why === "ram-blocked")).toBe(false);
   });
 
   test("with the limit spent, a link is recycled only for something strictly better", () => {
@@ -130,12 +186,12 @@ describe("stasis is spent on what cannot be rebuilt", () => {
     // worse than holding one imperfectly.
     const spent = planStasis(view([
       host({ hostname: "held", agentAlive: true, stasisLinked: true, maxRam: 64 }),
-      host({ hostname: "walker", agentAlive: true, irreplaceable: true }),
+      host({ hostname: "walker", agentAlive: true, blockedRam: 0, irreplaceable: true }),
     ]));
     expect(spent.release).toEqual(["held"]);
 
     const noBetter = planStasis(view([
-      host({ hostname: "held", agentAlive: true, stasisLinked: true, irreplaceable: true }),
+      host({ hostname: "held", agentAlive: true, blockedRam: 0, stasisLinked: true, irreplaceable: true }),
       host({ hostname: "ordinary", agentAlive: true, maxRam: 32 }),
     ]));
     expect(noBetter.release).toEqual([]);
@@ -145,28 +201,44 @@ describe("stasis is spent on what cannot be rebuilt", () => {
     // "b" qualifies for a spare on its own merits — it stands inside an open
     // target's window — so the only thing refusing it is the slot count.
     const plan = planStasis(view([
-      host({ hostname: "a", agentAlive: true, irreplaceable: true }),
+      host({ hostname: "a", agentAlive: true, blockedRam: 0, irreplaceable: true }),
       host({ hostname: "b", agentAlive: true, depth: 4, maxRam: 128 }),
     ], { spareTargets: [4] }));
     expect(plan.pin).toEqual(["a"]);
     expect(plan.refused.some((r) => r.hostname === "b" && r.why === "no-slot")).toBe(true);
   });
 
-  test("spare targets are depth-weighted: evenly spread by mass, denser toward the bottom", () => {
-    // Equal-mass centers under w(d) = d + 1, over the rows below the walker's
-    // own coverage (netDepth - 1 and netDepth - 2 are his).
-    expect(stasisTargetDepths(12, 3)).toEqual([9, 7, 4]);
-    expect(stasisTargetDepths(12, 1)).toEqual([7]);
-    expect(stasisTargetDepths(7, 2)).toEqual([4, 2]);
+  test("spare targets sit at band centers, allocated to bands by depth mass", () => {
+    // netDepth 12: eligible rows are [0-7] (mass 36) and [9] (mass 10) — the
+    // walker owns 10-11 and depth 8 is a gap. d'Hondt keeps handing spares to
+    // [0-7] (36, 18, 12 all beat 10); centers of 3/2/1 even slices of an
+    // 8-row band avoid the gap-adjacent edge rows.
+    expect(stasisTargetDepths(12, 3)).toEqual([6, 4, 1]);
+    expect(stasisTargetDepths(12, 2)).toEqual([6, 2]);
+    expect(stasisTargetDepths(12, 1)).toEqual([4]);
     expect(stasisTargetDepths(12, 0)).toEqual([]);
-    // The walker's rows never appear: nothing in a 12-deep net targets 10 or 11.
-    for (const target of stasisTargetDepths(12, 3)) expect(target).toBeLessThanOrEqual(9);
+    // A small early net has one band; centers spread inside it.
+    expect(stasisTargetDepths(7, 2)).toEqual([3, 1]);
+    // Deeper nets: the deep band's mass wins it the extra spare — one spare at
+    // each band's middle, the deepest band densest.
+    expect(stasisTargetDepths(19, 3)).toEqual([14, 10, 4]);
+    expect(stasisTargetDepths(36, 3)).toEqual([30, 26, 20]);
   });
 
-  test("an air-gap target steps to the row beside it — nothing can sit on the gap", () => {
-    // Depth 8 is structurally empty (isOnAirGap), and the two-spare split of a
-    // 12-deep net would land its deep center exactly there.
-    expect(stasisTargetDepths(12, 2)).toEqual([7, 5]);
+  test("no target ever sits on a gap row or the walker's rows", () => {
+    // Gap rows are structurally empty; the walker's pin covers netDepth-1 and
+    // netDepth-2. Band construction makes both impossible by construction.
+    for (const netDepth of [7, 12, 19, 23, 36]) {
+      for (const spares of [1, 2, 3]) {
+        for (const target of stasisTargetDepths(netDepth, spares)) {
+          expect(isOnAirGap(target), `gap row targeted at netDepth ${netDepth}`).toBe(false);
+          expect(target, `walker row targeted at netDepth ${netDepth}`).toBeLessThanOrEqual(netDepth - 3);
+        }
+      }
+    }
+    // Quota is capped at a band's row count: a tiny net cannot hold more
+    // targets than it has rows.
+    expect(stasisTargetDepths(7, 3)).toEqual([4, 2, 0]);
   });
 
   test("a lab-less world's first anchor is the bottom row itself", () => {
@@ -249,7 +321,7 @@ describe("stasis is spent on what cannot be rebuilt", () => {
   test("the reservation stands down for the walker itself, and once its link is held", () => {
     // An irreplaceable candidate IS the walker's slot being spent: it takes the
     // reserved slot, and an on-target spare may take any remaining one.
-    const walker = host({ hostname: "walker", agentAlive: true, irreplaceable: true });
+    const walker = host({ hostname: "walker", agentAlive: true, blockedRam: 0, irreplaceable: true });
     const spare = host({ hostname: "spare-4", agentAlive: true, depth: 4, maxRam: 256 });
     const spending = planStasis(view(
       [walker, spare],
@@ -259,7 +331,7 @@ describe("stasis is spent on what cannot be rebuilt", () => {
 
     // And once the walker's host is LINKED, spares flow freely again.
     const pinnedWalker = host({
-      hostname: "walker", agentAlive: true, irreplaceable: true, stasisLinked: true,
+      hostname: "walker", agentAlive: true, blockedRam: 0, irreplaceable: true, stasisLinked: true,
     });
     const after = planStasis(view(
       [pinnedWalker, spare],
@@ -311,8 +383,8 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "pusher", agentAlive: true, neighbours: ["edge"] }),
       host({ hostname: "edge", depth: 2, difficulty: 1, maxRam: 16, hasCredential: true }),
     ], { netDepth: 12 }));
-    expect(plan.push?.host).toBe("edge");
-    expect(plan.push?.purpose).toBe("frontier");
+    expect(plan.pushes[0]?.host).toBe("edge");
+    expect(plan.pushes[0]?.purpose).toBe("frontier");
   });
 
   test("...but a host already below its band's centre is left alone: the roll would likely lift it", () => {
@@ -320,7 +392,7 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "pusher", agentAlive: true, neighbours: ["sunk"] }),
       host({ hostname: "sunk", depth: 4, difficulty: 1, maxRam: 16, hasCredential: true }),
     ], { netDepth: 12 }));
-    expect(plan.push).toBeUndefined();
+    expect(plan.pushes).toEqual([]);
     expect(plan.refused.find((r) => r.hostname === "sunk")?.why).toBe("no-gain");
   });
 
@@ -332,8 +404,8 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "edge", depth: 2, difficulty: 1, maxRam: 16, hasCredential: true }),
       host({ hostname: "giant", depth: 3, difficulty: 5, maxRam: 128, hasCredential: true }),
     ], { netDepth: 7 }));
-    expect(plan.push?.host).toBe("giant");
-    expect(plan.push?.purpose).toBe("lab");
+    expect(plan.pushes[0]?.host).toBe("giant");
+    expect(plan.pushes[0]?.purpose).toBe("lab");
   });
 
   test("a full bottom row evicts the smallest STRANGER to free a seat for the candidate", () => {
@@ -347,8 +419,8 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "giant", depth: 3, difficulty: 5, maxRam: 128, hasCredential: true }),
       ...strangers,
     ], { netDepth: 7 }));
-    expect(full.push?.host).toBe("seat-3");
-    expect(full.push?.purpose).toBe("free-slot");
+    expect(full.pushes[0]?.host).toBe("seat-3");
+    expect(full.pushes[0]?.purpose).toBe("free-slot");
     // The seats not chosen read as any other bottom-row host.
     expect(full.refused.find((r) => r.hostname === "seat-0")?.why).toBe("already-there");
 
@@ -358,8 +430,8 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "giant", depth: 3, difficulty: 5, maxRam: 128, hasCredential: true }),
       ...strangers.slice(0, 7),
     ], { netDepth: 7 }));
-    expect(roomy.push?.host).toBe("giant");
-    expect(roomy.push?.purpose).toBe("lab");
+    expect(roomy.pushes[0]?.host).toBe("giant");
+    expect(roomy.pushes[0]?.purpose).toBe("lab");
 
     // And a full row with NO candidate waiting evicts nobody: a freed seat
     // would be a seat freed for nobody.
@@ -367,7 +439,7 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "pusher", agentAlive: true, neighbours: ["seat-3"] }),
       ...strangers,
     ], { netDepth: 7 }));
-    expect(noCandidate.push).toBeUndefined();
+    expect(noCandidate.pushes).toEqual([]);
   });
 
   test("the biggest host is chosen, which is also the one whose band reaches deepest", () => {
@@ -378,8 +450,8 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "small", depth: 3, difficulty: 3, maxRam: 16, hasCredential: true }),
       host({ hostname: "big", depth: 4, difficulty: 5, maxRam: 128, hasCredential: true }),
     ], { netDepth: 7 }));
-    expect(plan.push?.host).toBe("big");
-    expect(plan.push?.from).toBe("pusher");
+    expect(plan.pushes[0]?.host).toBe("big");
+    expect(plan.pushes[0]?.from).toBe("pusher");
   });
 
   test("with the walk done, big hosts are pushed into open stasis windows instead", () => {
@@ -390,8 +462,8 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "pusher", agentAlive: true, neighbours: ["giant"] }),
       host({ hostname: "giant", depth: 0, difficulty: 5, maxRam: 128, hasCredential: true }),
     ], { netDepth: 7, spareTargets: [4], needLabVantage: false }));
-    expect(seated.push?.host).toBe("giant");
-    expect(seated.push?.purpose).toBe("seat");
+    expect(seated.pushes[0]?.host).toBe("giant");
+    expect(seated.pushes[0]?.purpose).toBe("seat");
 
     // A host already INSIDE the open window is never pushed — a re-roll is the
     // one thing that could move it out; `planStasis` pins it where it stands.
@@ -399,7 +471,7 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "pusher", agentAlive: true, neighbours: ["giant"] }),
       host({ hostname: "giant", depth: 4, difficulty: 5, maxRam: 128, hasCredential: true }),
     ], { netDepth: 7, spareTargets: [4], needLabVantage: false }));
-    expect(standing.push).toBeUndefined();
+    expect(standing.pushes).toEqual([]);
     expect(standing.refused.find((r) => r.hostname === "giant")?.why).toBe("on-target");
 
     // A target a held link already serves opens no seat push at all.
@@ -408,7 +480,93 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "held", stasisLinked: true, depth: 4, maxRam: 64 }),
       host({ hostname: "giant", depth: 0, difficulty: 5, maxRam: 128, hasCredential: true }),
     ], { netDepth: 7, spareTargets: [4], needLabVantage: false }));
-    expect(served.push?.purpose).not.toBe("seat");
+    expect(served.pushes[0]?.purpose).not.toBe("seat");
+  });
+
+  test("a resident-carrying host is FERRIED across the air gap into an unconquered band", () => {
+    // netDepth 12: bands [0-7] and [9-11], and no edge ever crosses the gap at
+    // 8 — a leaked password is unusable over there, so pushing a credentialed
+    // host with its resident riding is the only deliberate way in. The
+    // carrier's difficulty 6 bands it to [4, 10], reaching rows 9-10.
+    const carrier = host({ hostname: "carrier", agentAlive: true, depth: 5, difficulty: 6, maxRam: 128, hasCredential: true });
+    const ferry = planInduce(view([
+      host({ hostname: "pusher", agentAlive: true, depth: 3, neighbours: ["carrier"] }),
+      carrier,
+    ], { netDepth: 12, needLabVantage: false }));
+    expect(ferry.pushes[0]?.host).toBe("carrier");
+    expect(ferry.pushes[0]?.purpose).toBe("ferry");
+
+    // With a resident already standing across the gap, the band is conquered
+    // and the same carrier is just frontier movement.
+    const conquered = planInduce(view([
+      host({ hostname: "pusher", agentAlive: true, depth: 3, neighbours: ["carrier"] }),
+      host({ hostname: "outpost", agentAlive: true, depth: 10 }),
+      carrier,
+    ], { netDepth: 12, needLabVantage: false }));
+    expect(conquered.pushes[0]?.purpose).toBe("frontier");
+
+    // And a seat outranks a ferry: the same band also covers an open stasis
+    // window, and a slot that survives the storm beats a foothold.
+    const seated = planInduce(view([
+      host({ hostname: "pusher", agentAlive: true, depth: 3, neighbours: ["carrier"] }),
+      { ...carrier, depth: 6 },
+    ], { netDepth: 12, needLabVantage: false, spareTargets: [4] }));
+    expect(seated.pushes[0]?.purpose).toBe("seat");
+
+    // A carrier with NO resident has no payload, and is not ferried.
+    const empty = planInduce(view([
+      host({ hostname: "pusher", agentAlive: true, depth: 3, neighbours: ["carrier"] }),
+      { ...carrier, agentAlive: false },
+    ], { netDepth: 12, needLabVantage: false }));
+    expect(empty.pushes[0]?.purpose).toBe("frontier");
+  });
+
+  test("every idle neighbour pushes: one push per pusher, several per target", () => {
+    // The migration charge accumulates on the TARGET
+    // (DarknetState.migrationInductionServers), so two agents flanking one
+    // carrier both join it and move it ~2x faster.
+    const carrier = host({ hostname: "carrier", agentAlive: true, depth: 5, difficulty: 6, maxRam: 128, hasCredential: true });
+    const both = planInduce(view([
+      host({ hostname: "p1", agentAlive: true, depth: 4, neighbours: ["carrier"] }),
+      host({ hostname: "p2", agentAlive: true, depth: 5, neighbours: ["carrier"] }),
+      carrier,
+    ], { netDepth: 12, needLabVantage: false }));
+    expect(both.pushes.map((entry) => entry.from).sort()).toEqual(["p1", "p2"]);
+    expect(both.pushes.every((entry) => entry.host === "carrier")).toBe(true);
+
+    // Separate targets with separate neighbours push IN PARALLEL...
+    const spread = planInduce(view([
+      host({ hostname: "p1", agentAlive: true, depth: 2, neighbours: ["a"] }),
+      host({ hostname: "p2", agentAlive: true, depth: 3, neighbours: ["b"] }),
+      host({ hostname: "a", depth: 2, difficulty: 3, maxRam: 32, hasCredential: true }),
+      host({ hostname: "b", depth: 3, difficulty: 3, maxRam: 64, hasCredential: true }),
+    ], { netDepth: 7, needLabVantage: false }));
+    expect(spread.pushes.length).toBe(2);
+    expect(new Set(spread.pushes.map((entry) => entry.host))).toEqual(new Set(["a", "b"]));
+
+    // ...but a pusher spent on one target is unavailable for the next: the
+    // bigger frontier host takes the only agent, the other waits.
+    const contested = planInduce(view([
+      host({ hostname: "p1", agentAlive: true, depth: 2, neighbours: ["a", "b"] }),
+      host({ hostname: "a", depth: 2, difficulty: 3, maxRam: 32, hasCredential: true }),
+      host({ hostname: "b", depth: 3, difficulty: 3, maxRam: 64, hasCredential: true }),
+    ], { netDepth: 7, needLabVantage: false }));
+    expect(contested.pushes.length).toBe(1);
+    expect(contested.pushes[0]?.host).toBe("b");
+    expect(contested.refused.find((r) => r.hostname === "a")?.why).toBe("no-pusher");
+  });
+
+  test("one host per landing: a second candidate for the same window is push-covered", () => {
+    // Racing two hosts toward the same seat wastes the loser; the also-ran is
+    // refused by name and its would-be pusher stays free for other work.
+    const plan = planInduce(view([
+      host({ hostname: "p1", agentAlive: true, depth: 2, neighbours: ["big"] }),
+      host({ hostname: "p2", agentAlive: true, depth: 3, neighbours: ["small"] }),
+      host({ hostname: "big", depth: 0, difficulty: 5, maxRam: 128, hasCredential: true }),
+      host({ hostname: "small", depth: 1, difficulty: 5, maxRam: 32, hasCredential: true }),
+    ], { netDepth: 7, needLabVantage: false, spareTargets: [4] }));
+    expect(plan.pushes.filter((entry) => entry.purpose === "seat").map((entry) => entry.host)).toEqual(["big"]);
+    expect(plan.refused.find((r) => r.hostname === "small")?.why).toBe("push-covered");
   });
 
   test("a host with no neighbour of ours is refused: it cannot push itself", () => {
@@ -416,7 +574,7 @@ describe("induced migration is anchored on difficulty, not depth", () => {
     const plan = planInduce(view([
       host({ hostname: "lonely", depth: 3, difficulty: 5, maxRam: 128, hasCredential: true }),
     ], { netDepth: 7 }));
-    expect(plan.push).toBeUndefined();
+    expect(plan.pushes).toEqual([]);
     expect(plan.refused.find((r) => r.hostname === "lonely")?.why).toBe("no-pusher");
   });
 
@@ -437,7 +595,7 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "pusher", agentAlive: true, neighbours: ["there"] }),
       host({ hostname: "there", depth: 6, difficulty: 5, maxRam: 128 }),
     ], { netDepth: 7 }));
-    expect(plan.push).toBeUndefined();
+    expect(plan.pushes).toEqual([]);
     expect(plan.refused.find((r) => r.hostname === "there")?.why).toBe("already-there");
   });
 
@@ -457,15 +615,15 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "pusher", agentAlive: true, neighbours: ["giant"], freeGb: 40 }),
       host({ hostname: "giant", depth: 3, difficulty: 5, maxRam: 128, hasCredential: true }),
     ], { netDepth: 7, induceGbPerThread: 5.6 }));
-    expect(plan.push?.threads).toBe(7);
-    expect(plan.push?.expectedCalls).toBe(migrationCalls(5, 1000, 7));
+    expect(plan.pushes[0]?.threads).toBe(7);
+    expect(plan.pushes[0]?.expectedCalls).toBe(migrationCalls(5, 1000, 7));
 
     // Without the pricing input, one thread — today's behaviour.
     const unpriced = planInduce(view([
       host({ hostname: "pusher", agentAlive: true, neighbours: ["giant"], freeGb: 40 }),
       host({ hostname: "giant", depth: 3, difficulty: 5, maxRam: 128, hasCredential: true }),
     ], { netDepth: 7 }));
-    expect(unpriced.push?.threads).toBe(1);
+    expect(unpriced.pushes[0]?.threads).toBe(1);
   });
 
   test("only an authenticated host is pushed — the refusal that fixes itself", () => {
@@ -476,7 +634,7 @@ describe("induced migration is anchored on difficulty, not depth", () => {
       host({ hostname: "pusher", agentAlive: true, neighbours: ["stranger"] }),
       host({ hostname: "stranger", depth: 3, difficulty: 5, maxRam: 128 }),
     ], { netDepth: 7 }));
-    expect(plan.push).toBeUndefined();
+    expect(plan.pushes).toEqual([]);
     expect(plan.refused.find((r) => r.hostname === "stranger")?.why).toBe("not-ours");
   });
 
@@ -488,5 +646,23 @@ describe("induced migration is anchored on difficulty, not depth", () => {
     expect(migrationCalls(20, 1000, 16)).toBe(21);
     // And charisma helps, which is why the charisma engines come first.
     expect(migrationCalls(20, 5000, 16)).toBeLessThan(migrationCalls(20, 1000, 16));
+  });
+});
+
+describe("the queue files pushes per vantage", () => {
+  // The migration charge accumulates on the TARGET, so several vantages may
+  // legitimately charge one host at once — the dedup that must survive is
+  // per (kind, target, vantage), like the walk's, never per target.
+  test("two vantages may charge one target; the same vantage never twice", () => {
+    const tasks = deriveTasks(emptyKnowledge("t"), 0, {
+      agents: new Set(["v1", "v2"]),
+      hold: [
+        { kind: "induce", host: "t1", from: "v1", reason: "push" },
+        { kind: "induce", host: "t1", from: "v2", reason: "push" },
+      ],
+      inFlight: new Map([["t1", [{ from: "v1", kind: "induce" as const }]]]),
+    });
+    const induces = tasks.filter((task) => task.kind === "induce");
+    expect(induces.map((task) => task.id)).toEqual(["induce:t1:v2"]);
   });
 });

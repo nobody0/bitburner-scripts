@@ -1,3 +1,5 @@
+import type { ScriptLaunch } from "./launch-shared.ts";
+
 /** Rendezvous between the dispatcher and its puppet workers (same JS realm,
  * same trick as dodge-shared.ts). Type-only module: nothing exists at runtime.
  *
@@ -35,9 +37,18 @@ export interface WorkerInfo {
    *  jobs arrive through `worker_jobs` (target may vary), the loop parks on a
    *  `worker_wake` resolver raced against an idle timeout, and exit reports a
    *  `workerExit` completion so the dispatcher frees the reservation. The id
-   *  in `ns.args[0]` is then a WORKER id (same counter as opIds, so the two
-   *  spaces can never collide). Absent/undefined = the classic one-shot. */
+   *  in the launch descriptor is then a WORKER id (same counter as opIds, so
+   *  the two spaces can never collide). Absent = a one-shot worker. */
   mode?: "serve" | "share";
+  /** Resolve the worker's lifetime gate. Returning from main lets Bitburner
+   * cancel an in-flight Netscript call through ordinary script teardown. */
+  stop?: () => void;
+}
+
+export interface WorkerLaunch extends ScriptLaunch {
+  readonly kind: "worker";
+  readonly id: number;
+  readonly worker: WorkerInfo & { threads: number };
 }
 
 export interface WorkerJob {
@@ -80,10 +91,6 @@ export interface WorkerGlobals {
   worker_jobs?: Map<number, WorkerJob[]>;
   /** workerId -> resolver parking that serve worker's idle race. */
   worker_wake?: Map<number, () => void>;
-  /** share-worker id -> resolver racing the current 10-second ns.share slice. */
-  worker_stop?: Map<number, () => void>;
-  /** Stop requested before the fresh worker installed its resolver. */
-  worker_stop_requested?: Set<number>;
   /** Completions waiting for the next dispatcher pump. */
   dispatch_done?: WorkerDone[];
   /** Poked by a finishing worker so the controller can wake early. */
@@ -108,8 +115,6 @@ export function workerGlobals(): WorkerGlobalThis {
   g.worker_info ??= new Map();
   g.worker_jobs ??= new Map();
   g.worker_wake ??= new Map();
-  g.worker_stop ??= new Map();
-  g.worker_stop_requested ??= new Set();
   g.dispatch_done ??= [];
   return g;
 }

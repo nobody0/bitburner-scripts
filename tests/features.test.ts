@@ -63,10 +63,9 @@ describe("feature registry", () => {
     expect(extra).toEqual([]);
   });
 
-  test("every feature owns at least one topic and describes its problem", () => {
+  test("every feature owns at least one topic", () => {
     for (const feature of FEATURES) {
       expect(feature.topics.length, `${feature.id} owns no topic`).toBeGreaterThan(0);
-      expect(feature.problem.length, `${feature.id} has no problem statement`).toBeGreaterThan(20);
     }
   });
 

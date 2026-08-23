@@ -4,8 +4,6 @@ import path from "node:path";
 export interface BuildEntry {
   source: string;
   target: string;
-  /** Qualify this runtime helper with the build id. */
-  versioned?: boolean;
 }
 
 export interface BitburnerConfig {
@@ -50,10 +48,7 @@ function parseBuildEntry(value: unknown, field: string): BuildEntry {
     throw new Error(`${field}.source must live under game/ (only game/ is synced)`);
   }
   const target = relativePath(item.target, `${field}.target`, ".js");
-  if (item.versioned !== undefined && typeof item.versioned !== "boolean") {
-    throw new Error(`${field}.versioned must be a boolean`);
-  }
-  return { source, target, ...(item.versioned === true ? { versioned: true } : {}) };
+  return { source, target };
 }
 
 export function validateConfig(raw: unknown): BitburnerConfig {

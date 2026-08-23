@@ -10,10 +10,10 @@ const valid = {
 };
 
 describe("validateConfig", () => {
-  test("accepts versioned runtime entries and a separate restore entry", () => {
+  test("accepts stable runtime entries and a separate restore entry", () => {
     const configured = {
       ...valid,
-      entries: [{ source: "game/worker/worker.ts", target: "worker/worker.js", versioned: true }],
+      entries: [{ source: "game/worker/worker.ts", target: "worker/worker.js" }],
       restoreEntry: { source: "game/restore.ts", target: "restore.js" },
     };
     expect(validateConfig(configured)).toEqual(configured);

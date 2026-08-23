@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import path from "node:path";
-import { isScriptVersion, isSweepableFile, ownedDirectories, versionedScript } from "../shared/deployment.ts";
+import { isSweepableFile, ownedDirectories } from "../shared/deployment.ts";
 import { BUILD_ID_FILE, buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 
@@ -15,20 +15,20 @@ const config: BitburnerConfig = {
   // immutable helper before it.
   entries: [
     { source: "game/lib/dodge-stub.ts", target: "lib/dodge-stub.js" },
-    { source: "game/worker/worker.ts", target: "worker/worker.js", versioned: true },
+    { source: "game/worker/worker.ts", target: "worker/worker.js" },
   ],
   restoreEntry: { source: "game/restore.ts", target: "restore.js" },
 };
 
 afterAll(async () => rm(buildDir, { recursive: true, force: true }));
 
-describe("versioned deployment artifacts", () => {
-  test("uses the build id and pushes helpers before stable scripts and the stamp", async () => {
+describe("stable deployment artifacts", () => {
+  test("uses stable helper names and writes the stamp last", async () => {
     const artifacts = await buildScripts(config);
     const buildId = artifacts.at(-1)!.content;
     expect(artifacts.map((artifact) => artifact.filename)).toEqual([
-      versionedScript("worker/worker.js", buildId),
       "lib/dodge-stub.js",
+      "worker/worker.js",
       BUILD_ID_FILE,
     ]);
     expect(await Bun.file(path.join(buildDir, BUILD_ID_FILE)).text()).toBe(buildId);
@@ -38,14 +38,7 @@ describe("versioned deployment artifacts", () => {
     const restore = await buildScript(config, config.restoreEntry!);
     expect(restore.filename).toBe("restore.js");
     expect(await Bun.file(path.join(buildDir, "restore.js")).exists()).toBe(true);
-    expect(await Bun.file(path.join(buildDir, versionedScript("worker/worker.js", buildId))).exists()).toBe(true);
-  });
-
-  test("recognises only members of the managed script family", () => {
-    expect(isScriptVersion("worker/worker.js", "worker/worker.js")).toBe(true);
-    expect(isScriptVersion("worker/worker.abc-123.js", "worker/worker.js")).toBe(true);
-    expect(isScriptVersion("worker/worker.other/name.js", "worker/worker.js")).toBe(false);
-    expect(isScriptVersion("worker/not-worker.abc.js", "worker/worker.js")).toBe(false);
+    expect(await Bun.file(path.join(buildDir, "worker/worker.js")).exists()).toBe(true);
   });
 
   test("owns directories the build writes into, and never the root", () => {
@@ -59,16 +52,14 @@ describe("versioned deployment artifacts", () => {
 
   test("sweeps only stale .js files inside owned directories", () => {
     const owned = new Set(["lib/", "worker/"]);
-    const keep = new Set(["worker/worker.new-id.js", "lib/dodge-stub.new-id.js"]);
+    const keep = new Set(["worker/worker.js", "lib/dodge-stub.js"]);
 
-    expect(isSweepableFile("worker/worker.old-id.js", owned, keep)).toBe(true);
-    expect(isSweepableFile("lib/go-dodge-stub.old-id.js", owned, keep)).toBe(true);
-    expect(isSweepableFile("worker/starter.js", owned, keep)).toBe(true);
+    expect(isSweepableFile("worker/unused.js", owned, keep)).toBe(true);
+    expect(isSweepableFile("lib/obsolete.js", owned, keep)).toBe(true);
 
-    expect(isSweepableFile("worker/worker.new-id.js", owned, keep)).toBe(false);
-    // The root is never swept: unversioned targets are overwritten by the push.
+    expect(isSweepableFile("worker/worker.js", owned, keep)).toBe(false);
+    // The root is never swept: stable targets are overwritten by the push.
     expect(isSweepableFile("start.js", owned, keep)).toBe(false);
-    expect(isSweepableFile("main.js", owned, keep)).toBe(false);
     expect(isSweepableFile("build-id.txt", owned, keep)).toBe(false);
     // Written by the running game script, and not a build target directory.
     expect(isSweepableFile("data/run-lineage.txt", owned, keep)).toBe(false);

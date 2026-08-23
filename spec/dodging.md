@@ -12,52 +12,37 @@ caller pays only `ns.exec` (1.3 GB).
 
 ## Mechanics (`game/lib/dodge.ts`)
 
-- All scripts share one JS realm. One dodger implementation selects a lane
-  descriptor containing its four rendezvous slots, stub script, busy policy,
-  and watchdog policy. Live references cross the slots without serialization,
-  so class instances survive.
-- The **default** lane uses `dodge_func/cb/reject/running`, waits for a busy
-  owner, has a 10 s watchdog, and cleans its slots unconditionally. The
-  **long** lane uses `go_dodge_func/cb/reject/running`, rejects overlap with
-  `a Go turn is already running`, has no watchdog, and only clears slots it
-  still owns. Go's `makeMove`, `passTurn`, and recovery
-  `opponentNextTurn` calls await the opponent; they must not hold up ordinary
-  probes or be timed out while their worker remains alive.
-- **One** tiny stub serves both lanes: `lib/dodge-stub.<build-id>.js`, which
-  reads its lane from `ns.args[0]` and selects the matching slot set. `ns.args`
-  is a property rather than an API call, so the lane argument is free and the
-  base stays 1.6 GB; a second file differing only in four slot names was pure
-  duplication scp'd to every rooted host. It references no ns members;
-  its RAM budget is declared at launch via `ns.exec(..., { ramOverride })` —
-  `dodge(ns, fn, budgetGb)` sizes each call (default 2.5 GB dynamic; pass more
-  for e.g. contract batches). Each stub file serves every budget. The reference
-  scripts default to 6.6 GB (5 + 1.6) and document their exceptions inline:
-  graft 7.5, `codingcontract.attempt` 10,
-  `destroyW0r1dD43m0n` 32, and a BN1 target of 3.5 to fit an 8 GB home.
-- Both lanes share the same ten-attempt exec retry loop, with `ns.asleep(0)`
-  between failures (ported from the predecessor's `src/_lib/stub-call.ts:11-39`;
-  ours is `game/lib/dodge.ts`). Promise results are forwarded (not awaited) so
-  synchronous
-  closures resolve before another script gets a scheduling slot; two trailing
-  microtask ticks let the engine reap the stub.
+- There is exactly one generic FIFO. A dodge waits for the preceding stub to
+  hand off its result, invokes its closure once, and releases the FIFO. Go has
+  no lane, host ban, watchdog, or execution mode of its own.
+- `lib/dodge-stub.js` references no ns members. Its RAM is declared with
+  `ns.exec(..., { ramOverride })`, priced from the exact methods the closure can
+  invoke. Every launch receives one monotonically increasing integer argument;
+  that is only a distinct process key because Bitburner identifies a process by
+  filename plus args. Semantic launch data stays in the realm handoff.
+- The stub invokes the closure synchronously and envelopes the raw return value.
+  If the ns method returns a Promise, the controller receives that same Promise;
+  the stub exits and its heap lease is released before the controller awaits it.
+  The Promise's duration therefore never owns the dodge FIFO or RAM.
+- A dodge closure may synchronously invoke ns and return its raw value or
+  Promise. It must not await and then use `stubNs` again. Multi-step asynchronous
+  Netscript orchestration is a worker, not a dodge.
+- Launch has a ten-attempt exec retry loop with a realm-timer yield between
+  failures. Two trailing microtasks let the engine reap the completed stub.
 - Inside a dodged closure, call ns members with **bracket notation on the
   closure's ns argument** (`stubNs["getServer"](host)`) or the static parser
   charges the calling bundle anyway.
 
-## Placement (`shared/ram/placement.ts`, `game/lib/ram.ts`)
+## Placement (`shared/ram/broker.ts`, `game/lib/ram.ts`)
 
-A dodge is not confined to home. `dodge(ns, fn, gb, { host })` runs the stub
-anywhere the stub file exists and the RAM is free; the sweep scp's it to every
-rooted host alongside the worker. Policy, in one function:
-
-- budgets at or below 4 GB prefer **home** — a remote hop buys nothing, and
-  home is the one host guaranteed to hold the stub;
-- larger budgets take the **smallest fleet host that fits**, so large
-  contiguous blocks stay available for hack ops, which cannot be split;
-- home is the fallback, not the preference, once the budget is big;
-- a host without the stub is not a candidate at all: `ns.exec` of a missing
-  file returns 0, which is indistinguishable from "full" and would burn every
-  retry looking like a RAM shortage.
+A dodge may run on any rooted, deployed host with the stub. The broker first
+uses its arena, then the smallest remaining free block that fits; home is an
+ordinary eligible host. Before a stable arena is affordable, a request queues
+and may reclaim share or an idle pooled farm worker. After five seconds of
+proven starvation it carves only that request's transient reserve, selecting a
+host large enough for the recurring 13.6 GB dodge ceiling so a 6.6 GB Go call
+uses foodnstuff rather than promoting CSEC. The stable arena ladder is bootstrap
+home, n00dles, then full foodnstuff.
 
 Placement **takes a heap lease** (`Heap.reserveOn`) for the life of the stub,
 atomically with choosing the host. Choosing and reserving as two steps leaves a
@@ -77,8 +62,8 @@ Two consequences that bite if forgotten:
 
 ## Constraints
 
-- One dodge per lane may be in flight. A long Go turn does not hold the default
-  lane; each call still spends one stub launch (~2 game ticks).
+- Only one stub handoff is in flight. Promise settlement is unrelated and may
+  overlap later dodges.
 - Keep home RAM headroom so `ns.exec` of the stub never fails. The reference
   scripts sidestep this by passing a `hostname` to `stubCall` and running the
   stub on a rooted client (they run a 32 GB `destroyW0r1dD43m0n` stub that way);

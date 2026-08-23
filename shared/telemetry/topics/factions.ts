@@ -139,6 +139,8 @@ export interface FactionPlan {
      * Consumed by the driver to bootstrap matching time and RAM claims. */
     awaitingWorkSlot?: boolean;
     faction?: string;
+    /** One conflict-safe invitation batch, executed inside a single dodge. */
+    factions?: string[];
     augmentation?: string;
     city?: string;
     workType?: string;

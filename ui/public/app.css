@@ -530,11 +530,8 @@ canvas.microchart { height: 88px; }
 /* A candidate is a question; the exit is an answer. Hollow until it is settled. */
 .labmaze .exit { fill: none; stroke: var(--series-5); stroke-width: 1; stroke-dasharray: 2 2; }
 .labmaze .exit.known { fill: var(--series-5); stroke-dasharray: none; }
-/* The finisher is solid because it is the walk that must survive; the scout is
-   hollow because it is the one we are content to lose. A pinned walker gets the
-   stasis colour, which is the same token the net map draws a link in. */
+/* The pinned walker gets the stasis colour, the same token the net map uses. */
 .labmaze .walker { fill: var(--good); stroke: var(--bb-background); stroke-width: 0.5; }
-.labmaze .walker.scout { fill: none; stroke: var(--series-2); stroke-width: 1.2; }
 .labmaze .walker.pinned { stroke: var(--series-5); stroke-width: 1.2; }
 
 .labkey { display: flex; flex-wrap: wrap; gap: var(--sp-1) var(--sp-3); margin-top: var(--sp-1); font-size: var(--fs-xs); color: var(--muted); }
@@ -545,15 +542,12 @@ canvas.microchart { height: 88px; }
 .labkey .sw.fog { background: #101010; border: 1px solid var(--bb-well); }
 .labkey .sw.seamkey { height: 0; width: 14px; border-radius: 0; border-top: 1px dashed var(--bb-secondary-dark); }
 .labkey .sw.walkerkey { background: var(--good); border-radius: 50%; }
-.labkey .sw.scoutkey { border: 2px solid var(--series-2); border-radius: 50%; }
 .labkey .sw.exitkey { border: 1px dashed var(--series-5); border-radius: 50%; }
 
-/* The walker rows. A table would align four numbers and lose the one thing
-   that matters — which of these two we cannot afford to lose. */
+/* The walker row. */
 .labwalkers { display: flex; flex-direction: column; gap: var(--sp-1); margin-top: var(--sp-2); }
 .labwalker { display: flex; align-items: baseline; gap: var(--sp-2); font-size: var(--fs-sm); flex-wrap: wrap; }
 .labwalker .who { font-weight: 600; color: var(--text-secondary); }
-.labwalker .who.scout { font-weight: 400; color: var(--series-2); }
 .labwalker .num { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--muted); }
 
 @media (max-width: 760px) {

@@ -1,5 +1,6 @@
 import type { NS } from "@ns";
-import { workerGlobals, type WorkerJob } from "../lib/worker-shared.ts";
+import { captureLaunch } from "../lib/launch-shared.ts";
+import { workerGlobals, type WorkerJob, type WorkerLaunch } from "../lib/worker-shared.ts";
 import { signalWake } from "../lib/wake.ts";
 import { MINIMUM_WORKER_PRECISION_MS } from "../../shared/strategy/timing.ts";
 
@@ -46,12 +47,18 @@ export async function main(ns: NS): Promise<void> {
   // A worker can execute thousands of HGW calls over its life; telemetry, not
   // Netscript's per-call log, is the automation's observable record.
   ns.disableLog("ALL");
-  const id = Number(ns.args[0]);
+  const scriptWorker = captureLaunch<WorkerLaunch>("worker");
+  if (!scriptWorker) return;
+  const id = scriptWorker.id;
   const g = workerGlobals();
-  const info = g.worker_info?.get(id);
+  const info = scriptWorker.worker;
   // No descriptor: the realm was reset (game reload) — exit quietly, the
   // controller will rebuild its ledger.
-  if (!info) return;
+  if (g.worker_info?.get(id) !== info) return;
+
+  let finishLifetime!: () => void;
+  const atExitPromise = new Promise<void>((resolve) => { finishLifetime = resolve; });
+  info.stop = finishLifetime;
 
   const options = (job: {
     additionalMsec?: number;
@@ -94,23 +101,15 @@ export async function main(ns: NS): Promise<void> {
   if (info.mode === "share") {
     ns.atExit(() => {
       g.worker_info?.delete(id);
-      g.worker_stop?.delete(id);
-      g.worker_stop_requested?.delete(id);
+      info.stop = undefined;
       g.dispatch_done?.push({ opId: id, kind: "workerExit", target: "", threads: info.threads });
       wakeDispatcher("share");
     }, `share${id}`);
-    for (;;) {
-      if (g.worker_stop_requested?.delete(id)) return;
-      const stopped = new Promise<boolean>((resolve) => {
-        g.worker_stop?.set(id, () => resolve(true));
-      });
-      const shouldStop = await Promise.race([
-        ns.share().then(() => false),
-        stopped,
-      ]);
-      g.worker_stop?.delete(id);
-      if (shouldStop || !g.worker_info?.has(id)) return;
-    }
+    const runningTaskPromise = (async () => {
+      while (g.worker_info?.has(id)) await ns.share();
+    })();
+    await Promise.race([runningTaskPromise, atExitPromise]);
+    return;
   }
   if (info.kind === "share") return;
   const hgwKind = info.kind;
@@ -124,6 +123,7 @@ export async function main(ns: NS): Promise<void> {
     let result: number | undefined;
     ns.atExit(() => {
       g.worker_info?.delete(id);
+      info.stop = undefined;
       g.dispatch_done?.push({
         opId: id,
         kind: hgwKind,
@@ -134,7 +134,12 @@ export async function main(ns: NS): Promise<void> {
       });
       wakeDispatcher(hgwKind);
     }, `op${id}`);
-    result = await run(info.target, options({ ...info, threads: info.strengthThreads }));
+    const runningTaskPromise = run(info.target, options({ ...info, threads: info.strengthThreads }))
+      .then((value) => {
+        result = value;
+        finishLifetime();
+      });
+    await Promise.race([runningTaskPromise, atExitPromise]);
     return;
   }
 
@@ -143,6 +148,7 @@ export async function main(ns: NS): Promise<void> {
   let current: WorkerJob | undefined;
   ns.atExit(() => {
     g.worker_info?.delete(id);
+    info.stop = undefined;
     g.worker_jobs?.delete(id);
     g.worker_wake?.delete(id);
     if (current) {
@@ -160,6 +166,7 @@ export async function main(ns: NS): Promise<void> {
     wakeDispatcher(hgwKind);
   }, `worker${id}`);
 
+  const runningTaskPromise = (async () => {
   for (;;) {
     // The realm registry is the liveness authority: a kill (or reset) already
     // ran atExit and deleted the entry — a continuation that observes that
@@ -197,4 +204,6 @@ export async function main(ns: NS): Promise<void> {
     });
     wakeDispatcher(hgwKind);
   }
+  })();
+  await Promise.race([runningTaskPromise, atExitPromise]);
 }

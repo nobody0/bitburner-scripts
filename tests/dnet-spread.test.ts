@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { DEFAULT_SPREAD_LIMITS, candidatesFrom, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/spread.ts";
+import { DEFAULT_SPREAD_LIMITS, candidatesFrom, pickPlantVantage, planSpread, type SpreadCandidate } from "../shared/strategy/dnet/spread.ts";
 import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
 import {
   emptyKnowledge,
@@ -68,6 +68,36 @@ describe("every refusal to spread is named", () => {
     expect(plan.refused[0]!.why).toBe("not-enough-ram");
     expect(plan.refused[0]!.detail).toContain("1.00GB free");
     expect(plan.refused[0]!.detail).toContain("memoryReallocation");
+  });
+
+  test("a cramped blocked host boots the largest local reclaimer that fits", () => {
+    const plan = planSpread([
+      candidate({ host: "blocked", freeRam: 5.3, blockedRam: 10 }),
+    ], DEFAULT_SPREAD_LIMITS, NOW);
+    expect(plan.refused).toEqual([]);
+    expect(plan.plant[0]).toEqual(expect.objectContaining({
+      host: "blocked",
+      bootstrapReclaim: true,
+      bootstrapThreads: 2,
+    }));
+  });
+
+  test("an ordinary host that fits the resident and prober uses the normal plant", () => {
+    const plan = planSpread([
+      candidate({ host: "roomy", freeRam: 5.4, blockedRam: 10 }),
+    ], DEFAULT_SPREAD_LIMITS, NOW);
+    expect(plan.plant[0]?.bootstrapReclaim).toBeUndefined();
+  });
+
+  test("a pinned lab candidate reclaims without a prober even when a resident would fit", () => {
+    const plan = planSpread([
+      candidate({ host: "walker", freeRam: 12, blockedRam: 4, reclaimOnly: true, omitProber: true }),
+    ], DEFAULT_SPREAD_LIMITS, NOW);
+    expect(plan.plant[0]).toEqual(expect.objectContaining({
+      bootstrapReclaim: true,
+      bootstrapThreads: 4,
+      omitProber: true,
+    }));
   });
 
   test("nothing is refused for being far away, or for being the third one", () => {
@@ -147,7 +177,7 @@ describe("spreading prefers the deep and the roomy, deterministically", () => {
       DEFAULT_SPREAD_LIMITS,
       NOW,
     );
-    expect(plan.plant.map((entry) => entry.host)).toEqual(["deep-big", "deep-small", "shallow"]);
+    expect(plan.plant.map((entry) => entry.host)).toEqual(["deep-big", "shallow"]);
   });
 
   test("a host we cannot place sorts after every host we can", () => {
@@ -197,6 +227,26 @@ describe("remote recovery candidates", () => {
     }));
   });
 
+  test("a target that names a standing host is plantable even if the vantage's own adjacency is unknown", () => {
+    // The stasis case: an immune host whose neighbour list never expires names a
+    // resident whose OWN neighbours we have not surveyed. Adjacency is symmetric,
+    // so that resident is a valid vantage — without this the host is unreachable
+    // for planting and sits agent-less for ever.
+    const knowledge = fold([
+      { hostname: "resident", present: true, facts: { depth: 3 } }, // no neighbours fact
+      { hostname: "pinned", present: true, facts: { depth: 7, neighbours: ["resident"], maxRam: 32, usedRam: 0, blockedRam: 0 } },
+    ]);
+    const candidates = candidatesFrom(knowledge, NOW, {
+      standing: new Set(["resident"]),
+      vault: new Set(["pinned"]),
+      expiry: { stasisLinked: new Set(["pinned"]) },
+    });
+    expect(candidates).toContainEqual(expect.objectContaining({ host: "pinned", from: "resident" }));
+    // And it is NOT a remote plant — the edge is a real one, so it authenticates
+    // and execs directly.
+    expect(candidates.find((c) => c.host === "pinned")!.remote).toBeUndefined();
+  });
+
   test("a credential alone never creates a non-adjacent plant", () => {
     const knowledge = fold([
       { hostname: "resident", present: true, facts: { neighbours: [], depth: 1 } },
@@ -207,6 +257,80 @@ describe("remote recovery candidates", () => {
       vault: new Set(["target"]),
       remoteVantages: [{ host: "resident", freeGb: 12 }],
     })).toEqual([]);
+  });
+
+  test("the cooldown applies to immune hosts too — a recent plant stamp is honoured", () => {
+    // An immune host is NOT exempt from the cooldown: it can flap from a
+    // persistently-failing plant (a stale reverse-edge from symmetric adjacency),
+    // and the cooldown is what stops that becoming a spawn-churn loop. The
+    // deliberate-empty case (a pin) is handled by the overseer clearing the stamp
+    // at the source, not by exempting it here.
+    const knowledge = fold([
+      { hostname: "resident", present: true, facts: { neighbours: ["pinned", "mortal"], depth: 1 } },
+      { hostname: "pinned", present: true, facts: { depth: 7, maxRam: 32, usedRam: 0, blockedRam: 0 } },
+      { hostname: "mortal", present: true, facts: { depth: 7, maxRam: 32, usedRam: 0, blockedRam: 0 } },
+    ]);
+    const cands = candidatesFrom(knowledge, NOW, {
+      standing: new Set(["resident"]),
+      vault: new Set(["pinned", "mortal"]),
+      lastPlantAt: new Map([["pinned", NOW - 1_000], ["mortal", NOW - 1_000]]),
+      expiry: { stasisLinked: new Set(["pinned"]) },
+    });
+    for (const host of ["pinned", "mortal"]) {
+      const c = cands.find((entry) => entry.host === host)!;
+      expect(c.lastPlantAt).toBe(NOW - 1_000);
+      expect(planSpread([c], DEFAULT_SPREAD_LIMITS, NOW).refused[0]!.why).toBe("cooldown");
+    }
+    // With no recent stamp — the overseer having cleared it after a pin — the
+    // same immune host plants at once.
+    const cleared = candidatesFrom(knowledge, NOW, {
+      standing: new Set(["resident"]),
+      vault: new Set(["pinned"]),
+      expiry: { stasisLinked: new Set(["pinned"]) },
+    }).find((c) => c.host === "pinned")!;
+    expect(planSpread([cleared], DEFAULT_SPREAD_LIMITS, NOW).plant).toHaveLength(1);
+  });
+});
+
+describe("spreading preempts to take a vantage", () => {
+  test("a free vantage wins outright, and nothing is cancelled", () => {
+    const choice = pickPlantVantage([
+      { host: "busy", activeKind: "attempt", activeStartedAt: NOW - 5_000 },
+      { host: "free" },
+    ], NOW);
+    expect(choice).toEqual({ vantage: "free", preempt: false });
+  });
+
+  test("with none free, the lowest-priority active job is the one we cancel", () => {
+    const choice = pickPlantVantage([
+      { host: "old", activeKind: "attempt", activeStartedAt: NOW - 9_000 },
+      { host: "fresh", activeKind: "induce", activeStartedAt: NOW - 500 },
+      { host: "mid", activeKind: "bleed", activeStartedAt: NOW - 4_000 },
+    ], NOW);
+    expect(choice).toEqual({ vantage: "fresh", preempt: true });
+  });
+
+  test("the lab and its pin are never sacrificed for a plant", () => {
+    // Every vantage is busy with something a plant may not touch → no choice,
+    // the plant waits rather than cancelling the walk, its pin or a storm.
+    expect(pickPlantVantage([
+      { host: "walker", activeKind: "walk", activeStartedAt: NOW - 1_000 },
+      { host: "pinner", activeKind: "pin", activeStartedAt: NOW - 1_000 },
+    ], NOW)).toBeUndefined();
+  });
+
+  test("a free vantage beats a just-started preemptible one", () => {
+    expect(pickPlantVantage([
+      { host: "z-free" },
+      { host: "a-fresh", activeKind: "attempt", activeStartedAt: NOW },
+    ], NOW)).toEqual({ vantage: "z-free", preempt: false });
+  });
+
+  test("ties break by name, so the derivation is reproducible", () => {
+    expect(pickPlantVantage([
+      { host: "b", activeKind: "attempt", activeStartedAt: NOW - 1_000 },
+      { host: "a", activeKind: "attempt", activeStartedAt: NOW - 1_000 },
+    ], NOW)).toEqual({ vantage: "a", preempt: true });
   });
 });
 
@@ -223,12 +347,12 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     ]);
     const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]), vault: new Set(["dn-1", "darkweb"]) });
     // Both adjacency lists are fresh and both hosts are already open.
-    expect(tasks.filter((t) => t.kind === "survey")).toEqual([]);
+    expect(tasks.filter((t) => t.kind === "inventory")).toEqual([]);
     expect(tasks.filter((t) => t.kind === "attempt")).toEqual([]);
     expect(tasks.filter((t) => t.kind === "bleed")).toEqual([]);
   });
 
-  test("an expired adjacency brings the survey back by itself", () => {
+  test("an expired adjacency is left to the permanent prober", () => {
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
       { hostname: "dn-1", present: true, facts: { neighbours: ["darkweb"], depth: 0 } },
@@ -237,8 +361,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     const tasks = deriveTasks(knowledge, later, { agents: new Set(["darkweb"]) });
     // ...which is also the self-healing property: a worker that died mid-survey
     // left the fact stale, so the task simply reappears with no death detection.
-    expect(tasks.some((t) => t.id === "survey:darkweb")).toBe(true);
-    expect(tasks.find((t) => t.id === "survey:darkweb")!.reason).toBe("adjacency expired");
+    expect(tasks.some((t) => t.kind === "inventory")).toBe(false);
   });
 
   test("a host nobody can reach produces no task, because there is no vantage", () => {
@@ -315,7 +438,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     knowledge.hosts["maze"]!.attempts = { modelId: "(The Labyrinth)", tried: 0, probes: 1 };
     const after = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]) });
     expect(after.some((t) => t.kind === "attempt" && t.host === "maze")).toBe(false);
-    expect(after.some((t) => t.kind === "survey" && t.host === "maze")).toBe(true);
+    expect(after.some((t) => t.kind === "inventory" && t.host === "maze")).toBe(false);
   });
 
   test("work a live process is already doing derives no second task", () => {
@@ -336,7 +459,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(during.some((t) => t.id === "attempt:dn-1")).toBe(false);
     // ...and only that pair. The host's adjacency is still unknown, so the
     // survey is untouched: a claim suppresses one KIND, not a host.
-    expect(during.some((t) => t.id === "survey:dn-1")).toBe(true);
+    expect(during.some((t) => t.kind === "inventory")).toBe(false);
   });
 
   test("a bleed claim owns the target ring until it finishes", () => {
@@ -347,7 +470,7 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     const inFlight = new Map([["dn-1", [{ from: "darkweb", kind: "bleed" as const }]]]);
     const tasks = deriveTasks(knowledge, NOW, { agents: new Set(["darkweb"]), inFlight });
     expect(tasks.some((t) => t.id === "attempt:dn-1")).toBe(false);
-    expect(tasks.some((t) => t.id === "survey:dn-1")).toBe(true);
+    expect(tasks.some((t) => t.kind === "inventory")).toBe(false);
   });
 
   test("a plant already in flight is not filed twice", () => {
@@ -481,20 +604,21 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     });
     const pin = tasks.find((t) => t.kind === "pin")!;
     const push = tasks.find((t) => t.kind === "induce")!;
-    // A pin outranks a WALK too, and that ordering is the one that matters: a
-    // host runs one process at a time and a walk holds its host for hours, so a
-    // pin queued behind one starts after the thing it exists to protect has
-    // finished.
+    // The WALK now outranks EVERYTHING, the pin included: completing the lab is
+    // the point of the darknet, so until it is done the walker is the most
+    // important script on its host and nothing may take its slot. A walker's host
+    // is protected by being the walker (the overseer marks it irreplaceable),
+    // not by a prior pin.
     const walking = deriveTasks(knowledge, NOW, {
       agents: new Set(["darkweb", "dn-1"]),
       vault: new Set(["darkweb", "dn-1", "dn-2"]),
       hold: [
+        { kind: "pin", host: "dn-1", from: "dn-1", reason: "pin it" },
         { kind: "walk", host: "dn-2", from: "dn-1", reason: "walk the maze" },
-        { kind: "pin", host: "dn-1", from: "dn-1", reason: "pin it first" },
       ],
     });
     const order = walking.filter((t) => t.kind === "pin" || t.kind === "walk").map((t) => t.kind);
-    expect(order).toEqual(["pin", "walk"]);
+    expect(order).toEqual(["walk", "pin"]);
     expect(pin.from).toBe("dn-1");
     expect(push.host).toBe("dn-2");
     expect(push.from).toBe("dn-1");
@@ -502,12 +626,10 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     expect(tasks.indexOf(pin)).toBeLessThan(tasks.indexOf(push));
   });
 
-  test("a finisher and a scout may walk the same lab, but never two from one vantage", () => {
-    // The lab is the one target that legitimately carries two walks at once:
-    // the maze is global while positions are per PID, so a scout on a second
-    // adjacent host maps the macro-route the finisher is not on. Walk dedup is
-    // therefore by (kind, target, VANTAGE) — the same lab from the same host is
-    // the same walk, while another vantage is another walker.
+  test("only one walker may own a lab across all vantages", () => {
+    // The maze is global while positions are per PID, so a second walk would
+    // duplicate the shared map while competing for the one protected vantage.
+    // Walk dedup is therefore per target, across every vantage.
     const knowledge = fold([
       { hostname: "darkweb", present: true, facts: { neighbours: ["dn-1"], depth: -1 } },
       { hostname: "dn-1", present: true, facts: { neighbours: ["darkweb", "dn-2"], depth: 0 } },
@@ -515,21 +637,20 @@ describe("the queue is derived, so dedup needs no bookkeeping", () => {
     ]);
     const hold = [
       { kind: "walk" as const, host: "dn-2", from: "dn-1", reason: "walk the maze" },
-      { kind: "walk" as const, host: "dn-2", from: "darkweb", role: "scout" as const, reason: "scout the southern route" },
+      { kind: "walk" as const, host: "dn-2", from: "darkweb", reason: "duplicate walk" },
     ];
     const base = { agents: new Set(["darkweb", "dn-1"]), vault: new Set(["darkweb", "dn-1", "dn-2"]) };
     const both = deriveTasks(knowledge, NOW, { ...base, hold }).filter((t) => t.kind === "walk");
-    expect(both.map((t) => t.id).sort()).toEqual(["walk:dn-2:darkweb", "walk:dn-2:dn-1"]);
-    expect(both.find((t) => t.from === "dn-1")!.role).toBeUndefined();
-    expect(both.find((t) => t.from === "darkweb")!.role).toBe("scout");
+    expect(both.map((t) => t.id)).toEqual(["walk:dn-2"]);
+    expect(both[0]!.from).toBe("dn-1");
 
-    // With the finisher already in flight, only the scout's vantage re-derives.
+    // With the walker already in flight, no other vantage re-derives it.
     const rederived = deriveTasks(knowledge, NOW, {
       ...base,
       hold,
       inFlight: new Map([["dn-2", [{ from: "dn-1", kind: "walk" as const }]]]),
     }).filter((t) => t.kind === "walk");
-    expect(rederived.map((t) => t.from)).toEqual(["darkweb"]);
+    expect(rederived).toEqual([]);
   });
 
   test("a plant outranks everything, because it is the only thing that grows the map", () => {
@@ -609,7 +730,7 @@ describe("attempts stand on the roomiest vantage, and buy threads with it", () =
     expect(attempt.from).toBe("dn-a");
   });
 
-  test("without the pricing inputs, one thread from the name-sorted vantage — today's behaviour", () => {
+  test("unknown RAM still chooses a deterministic vantage", () => {
     const attempt = deriveTasks(net(), NOW, {
       agents: agents(),
     }).find((t) => t.kind === "attempt" && t.host === "target")!;
@@ -617,14 +738,4 @@ describe("attempts stand on the roomiest vantage, and buy threads with it", () =
     expect(attempt.threads).toBeUndefined();
   });
 
-  test("a vantage too cramped for even one thread still attempts at one", () => {
-    // The floor is 1: a queue that derived zero-thread work would file nothing
-    // for a host that a resident could still crack slowly.
-    const attempt = deriveTasks(net(), NOW, {
-      agents: agents(),
-      agentFreeGb: new Map([["dn-a", 0.5], ["dn-b", 0.4]]),
-      attemptGbPerThread: 2,
-    }).find((t) => t.kind === "attempt" && t.host === "target")!;
-    expect(attempt.threads).toBeUndefined();
-  });
 });

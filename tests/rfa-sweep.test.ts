@@ -2,13 +2,14 @@ import { describe, expect, test } from "bun:test";
 import { ownedDirectories } from "../shared/deployment.ts";
 import type { RfaSession } from "../tools/rfa-session.ts";
 import { planSweep, sweepStaleFiles } from "../tools/rfa-sweep.ts";
+import { selectSweepHosts } from "../tools/sync.ts";
 
 const OWNED = ownedDirectories(["start.js", "lib/dodge-stub.js", "worker/worker.js"]);
-const KEEP = new Set(["worker/worker.new-id.js", "lib/dodge-stub.new-id.js"]);
+const KEEP = new Set(["worker/worker.js", "lib/dodge-stub.js"]);
 
 /** Transcribed from a real `ls -l` on home: every category of file the game
  * generates, a player-authored file, the run-lineage file the controller writes
- * itself, and several accumulated generations of our own helpers. */
+ * itself, our current helpers, and stale files in directories this project owns. */
 const HOME_LISTING = [
   "19dfj3l1nd.msg",
   "csec-test.msg",
@@ -34,13 +35,11 @@ const HOME_LISTING = [
   "restore-payload.txt",
   "notes.txt",
   "data/run-lineage.txt",
-  "worker/worker.new-id.js",
-  "worker/worker.old-id.js",
-  "worker/worker.older-id.js",
-  "worker/starter.js",
-  "lib/dodge-stub.new-id.js",
-  "lib/dodge-stub.old-id.js",
-  "lib/go-dodge-stub.old-id.js",
+  "worker/worker.js",
+  "worker/unused.js",
+  "worker/diagnostic.js",
+  "lib/dodge-stub.js",
+  "lib/obsolete.js",
 ];
 
 function fakeSession(
@@ -60,43 +59,51 @@ function fakeSession(
 }
 
 describe("sync stale-file sweep", () => {
+  test("includes darkweb even though the game does not mark it rooted", () => {
+    expect(selectSweepHosts("home", [
+      { hostname: "home", hasAdminRights: true },
+      { hostname: "darkweb", hasAdminRights: false },
+      { hostname: "rooted", hasAdminRights: true },
+      { hostname: "locked", hasAdminRights: false },
+    ])).toEqual(["home", "darkweb", "rooted"]);
+  });
+
   test("deletes only this project's stale artifacts, never a game or player file", () => {
     expect(planSweep(HOME_LISTING, OWNED, KEEP)).toEqual([
-      "lib/dodge-stub.old-id.js",
-      "lib/go-dodge-stub.old-id.js",
-      "worker/starter.js",
-      "worker/worker.old-id.js",
-      "worker/worker.older-id.js",
+      "lib/obsolete.js",
+      "worker/diagnostic.js",
+      "worker/unused.js",
     ]);
   });
 
   test("leaves everything alone when nothing is stale", () => {
-    const current = HOME_LISTING.filter((name) => !name.includes("old") && name !== "worker/starter.js");
+    const stale = new Set(["lib/obsolete.js", "worker/diagnostic.js", "worker/unused.js"]);
+    const current = HOME_LISTING.filter((name) => !stale.has(name));
     expect(planSweep(current, OWNED, KEEP)).toEqual([]);
   });
 
   test("a refused delete is a skip, not a failed sync", async () => {
     const { session, deletions } = fakeSession(
       { home: HOME_LISTING },
-      new Set(["worker/worker.old-id.js"]),
+      new Set(["worker/unused.js"]),
     );
     const result = await sweepStaleFiles(session, OWNED, KEEP, ["home"]);
-    expect(result.skipped).toEqual(["home:worker/worker.old-id.js"]);
-    expect(result.deleted).toHaveLength(4);
-    expect(deletions).toHaveLength(5);
+    expect(result.skipped).toEqual(["home:worker/unused.js"]);
+    expect(result.deleted).toHaveLength(2);
+    expect(deletions).toHaveLength(3);
   });
 
   test("a dry run deletes nothing", async () => {
     const { session, deletions } = fakeSession({ home: HOME_LISTING });
     const result = await sweepStaleFiles(session, OWNED, KEEP, ["home"], { dryRun: true });
     expect(deletions).toEqual([]);
-    expect(result.deleted).toHaveLength(5);
+    expect(result.deleted).toHaveLength(3);
   });
 
   test("an unlistable host is skipped rather than aborting the fleet sweep", async () => {
-    const { session, deletions } = fakeSession({ home: HOME_LISTING, blade: ["worker/worker.old-id.js"] });
+    const { session, deletions } = fakeSession({ home: HOME_LISTING, blade: ["worker/unused.js"] });
     const result = await sweepStaleFiles(session, OWNED, KEEP, ["home", "vanished", "blade"]);
-    expect(result.deleted).toContain("blade:worker/worker.old-id.js");
-    expect(deletions).toHaveLength(6);
+    expect(result.deleted).toContain("blade:worker/unused.js");
+    expect(deletions).toHaveLength(4);
   });
 });

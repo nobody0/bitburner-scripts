@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { ownedDirectories, versionedScript } from "../shared/deployment.ts";
+import { ownedDirectories } from "../shared/deployment.ts";
 import { buildScripts, BUILD_ID_FILE } from "./build.ts";
 import type { BitburnerConfig } from "./config.ts";
 import type { RfaSession } from "./rfa-session.ts";
@@ -74,28 +74,39 @@ async function refreshTypes(session: RfaSession, config: BitburnerConfig, log: S
   log(`updated ${path.relative(process.cwd(), TYPES_FILE)}`);
 }
 
-/** Every rooted host, because the controller scp's the versioned helpers to all
- * of them. `config.server` is unioned in so home is swept even if the game's
- * listing comes back unexpectedly thin. */
-async function sweepHosts(session: RfaSession, config: BitburnerConfig): Promise<string[]> {
-  const servers = await session.getAllServers().catch(() => []);
-  const hosts = new Set([config.server]);
-  for (const server of servers) if (server.hasAdminRights) hosts.add(server.hostname);
+interface SweepHost {
+  hostname: string;
+  hasAdminRights: boolean;
+}
+
+/** Hosts on which this deployment can leave files.
+ *
+ * Darkweb is deliberately included without admin rights. Bitburner v3.0.1
+ * special-cases it before the ordinary admin/session checks, so the controller
+ * can scp and exec the darknet beachhead there while `hasAdminRights` is false
+ * (`src/DarkNet/effects/offlineServerHandling.ts`, pinned in
+ * `spec/game-source.md`). */
+export function selectSweepHosts(configServer: string, servers: readonly SweepHost[]): string[] {
+  const hosts = new Set([configServer]);
+  for (const server of servers) {
+    if (server.hasAdminRights || server.hostname === "darkweb") hosts.add(server.hostname);
+  }
   return [...hosts];
 }
 
-/** Filenames this build and the previous one own.
- *
- * The previous generation is kept deliberately: the outgoing controller lives
- * for up to one tick after build-id.txt changes, and its in-flight workers
- * still reference their own worker.<id>.js. That generation is collected by the
- * NEXT sync, once nothing is running it. */
-function keepSet(config: BitburnerConfig, newIds: readonly string[], pushed: readonly string[]): Set<string> {
+/** Every host on which the controller can leave helpers.
+ * `config.server` is unioned in so home is swept even if the game's listing
+ * comes back unexpectedly thin. */
+async function sweepHosts(session: RfaSession, config: BitburnerConfig): Promise<string[]> {
+  const servers = await session.getAllServers().catch(() => []);
+  return selectSweepHosts(config.server, servers);
+}
+
+/** Stable filenames this deployment owns. */
+function keepSet(config: BitburnerConfig, pushed: readonly string[]): Set<string> {
   const keep = new Set(pushed);
-  for (const id of newIds) {
-    for (const entry of config.entries) {
-      if (entry.versioned) keep.add(versionedScript(entry.target, id));
-    }
+  for (const filename of pushed) {
+    if (filename.startsWith("dnet/")) keep.add(filename.slice(filename.lastIndexOf("/") + 1));
   }
   return keep;
 }
@@ -106,25 +117,28 @@ async function buildAndPush(
   options: SyncOptions,
   log: SyncLog,
 ): Promise<void> {
-  // Read the installed stamp BEFORE the push replaces it.
-  const installed = (await session.getFile(config.server, BUILD_ID_FILE))?.trim();
-
   const artifacts = await buildScripts(config, {
     telemetry: !options.perf,
     minifyNames: !options.readable,
   });
-  for (const artifact of artifacts) {
+  const pushOrder = [
+    ...artifacts.filter((artifact) => artifact.filename !== "start.js" && artifact.filename !== BUILD_ID_FILE),
+    ...artifacts.filter((artifact) => artifact.filename === "start.js"),
+    ...artifacts.filter((artifact) => artifact.filename === BUILD_ID_FILE),
+  ];
+  for (const artifact of pushOrder) {
     await session.pushFile(config.server, artifact.filename, artifact.content);
     log(`pushed ${config.server}:${artifact.filename}`);
   }
   if (options.noSweep) return;
 
   const pushed = artifacts.map((artifact) => artifact.filename);
-  const previous = installed && /^[a-z0-9-]+$/i.test(installed) ? [installed] : [];
   const owned = ownedDirectories(config.entries.map((entry) => entry.target));
   const hosts = await sweepHosts(session, config);
   const dryRun = options.sweepDryRun === true;
-  const result = await sweepStaleFiles(session, owned, keepSet(config, previous, pushed), hosts, { dryRun });
+  const result = await sweepStaleFiles(session, owned, keepSet(config, pushed), hosts, {
+    dryRun,
+  });
 
   if (dryRun) {
     for (const filename of result.deleted) log(`would delete ${filename}`);

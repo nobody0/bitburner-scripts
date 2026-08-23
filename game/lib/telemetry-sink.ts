@@ -148,6 +148,7 @@ export function makeSink(tel: Telemetry): TelemetrySink {
             action: {
               type: plan.action.type,
               faction: plan.action.faction,
+              factions: plan.action.factions,
               augmentation: plan.action.augmentation,
               city: plan.action.city,
               amount: plan.action.amount,

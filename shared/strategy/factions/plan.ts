@@ -127,7 +127,7 @@ export interface FactionIntent {
 
 export type FactionAction =
   | { type: "idle"; reason: "blocked" | "waiting" | "continue" | "slot" }
-  | { type: "joinFaction"; faction: string }
+  | { type: "joinFactions"; factions: string[] }
   | { type: "workForFaction"; faction: string; workType: WorkType; focus: boolean }
   | { type: "stopWork" }
   | { type: "donate"; faction: string; amount: number; purchaseCost?: number }

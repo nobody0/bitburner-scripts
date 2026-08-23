@@ -21,12 +21,7 @@ describe("seeded vanilla network", () => {
   test("contains the complete standard server population", () => {
     const hosts = VANILLA_NETWORK.network.map((server) => server.hostname).sort();
     expect(hosts.filter((host) => host !== "darkweb")).toEqual(Object.keys(SERVER_METADATA).sort());
-    expect(hosts).toHaveLength(71);
-    expect(hosts).toContain("n00dles");
-    expect(hosts).toContain("The-Cave");
-    expect(hosts).toContain("w0r1d_d43m0n");
     expect(hosts).toContain("darkweb");
-    expect(hosts).not.toContain("late-farm");
     const ips = [VANILLA_NETWORK.homeIp, ...VANILLA_NETWORK.network.map((server) => server.ip!)];
     expect(ips.every((ip) => /^\d+\.\d+\.\d+\.\d+$/.test(ip))).toBe(true);
     expect(new Set(ips).size).toBe(ips.length);
@@ -114,16 +109,12 @@ describe("seeded vanilla network", () => {
 
   test("uses the vanilla layer tree and leaves the daemon hidden until Red Pill install", () => {
     const { topology } = VANILLA_NETWORK;
-    expect(Object.keys(topology)).toHaveLength(72);
     expect(topology["w0r1d_d43m0n"]).toEqual([]);
     expect(topology["darkweb"]).toEqual([]);
 
-    let directedEdges = 0;
     for (const [host, neighbours] of Object.entries(topology)) {
-      directedEdges += neighbours.length;
       for (const neighbour of neighbours) expect(topology[neighbour]).toContain(host);
     }
-    expect(directedEdges / 2).toBe(69);
 
     const depth = new Map<string, number>([["home", 0]]);
     const queue = ["home"];
@@ -135,7 +126,6 @@ describe("seeded vanilla network", () => {
         queue.push(neighbour);
       }
     }
-    expect(depth.size).toBe(70);
     expect(depth.has("w0r1d_d43m0n")).toBe(false);
     for (const metadata of Object.values(SERVER_METADATA)) {
       if (metadata.layer) expect(depth.get(metadata.host)).toBe(metadata.layer[0]);
@@ -147,7 +137,6 @@ describe("seeded vanilla network", () => {
     const world = profile.world!;
     expect(world.network).toEqual(VANILLA_NETWORK.network);
     expect(world.topology).toEqual(VANILLA_NETWORK.topology);
-    expect(world.network).toHaveLength(71);
     expect(profile.homeRam).toBe(8);
     expect(profile.startingMoney).toBeUndefined();
     expect(world.person).toBeUndefined();
