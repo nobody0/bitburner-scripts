@@ -260,9 +260,13 @@ interface DnetHomeState {
    * know. Counted rather than ignored: a non-empty tally is a game update or a
    * hole in our transcription, and both are things to hear about. */
   unknownModels: Record<string, number>;
-  /** Agent hosts seen this generation, and how many stopped reporting. The gap
-   * between them is agent mortality — see spec/dnet.md's Observability note. */
-  agentsSeenEver: number;
+  /** Agent hosts seen this generation, as a SET rather than a counter: the
+   * live `agents` map below is pruned when a host goes stale or gone, so a
+   * counter bumped on "not currently in the map" would re-count every host
+   * that dies and is later replanted. The set's size is what publishes as
+   * `agentsSeenEver`; the gap to the live count is agent mortality — see
+   * spec/dnet.md's Observability note. */
+  agentHostsSeen: Set<string>;
   /** Residents the overseer last reported, keyed by HOST.
    *
    * A host keeps exactly one resident — that is the spawn-chain design — and the
@@ -307,7 +311,7 @@ function freshDnetHomeState(): DnetHomeState {
     stasisObservedAt: 0,
     charismaNeeded: undefined,
     unknownModels: {},
-    agentsSeenEver: 0,
+    agentHostsSeen: new Set(),
     agents: new Map(),
     residentsLost: 0,
     overseerBeatAt: 0,
@@ -561,7 +565,7 @@ function drainDarknet(generation: string): {
     // superset — so the record travels whole rather than being re-listed and
     // silently missing whatever counter is added next. `alive` is recomputed
     // from the beat window at publish time.
-    if (!home.agents.has(resident.host)) home.agentsSeenEver++;
+    home.agentHostsSeen.add(resident.host);
     home.agents.set(resident.host, { ...resident, role: "resident", alive: true });
   }
   home.overseerBeatAt = Math.max(home.overseerBeatAt, rendezvous.lastBeatAt);
@@ -888,7 +892,7 @@ const dnet: FeatureDriver = {
             ]),
         ),
         agentsLost: home.residentsLost,
-        agentsSeenEver: Math.max(home.agentsSeenEver, home.agents.size),
+        agentsSeenEver: Math.max(home.agentHostsSeen.size, home.agents.size),
         overseer: {
           host: "darkweb",
           lastBeatAt: home.overseerBeatAt,

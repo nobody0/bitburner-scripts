@@ -435,8 +435,11 @@ export function makeJobBodies(deps: JobDeps): Readonly<Record<TaskKind, JobBody>
       // hole in `shared/strategy/dnet/models.ts`.
       if (entry === undefined) count(LOCAL_CODE.UnknownModel);
 
-      // Feedback models drain immediately. Timing-only 2G rounds can safely
-      // batch until the full-ring bound; success always drains the remainder.
+      // Feedback models drain immediately; timing-only 2G rounds can safely
+      // batch until the full-ring bound. A SUCCESS deliberately drains nothing:
+      // the credential is already recorded above, spreading onto the opened
+      // host outranks harvesting its leftovers, and whatever the ring still
+      // holds keeps deriving an ordinary bleed task against the same stamp.
       const harvest = canBleed && !answer.success && (wantsOracle || pendingAuthRecords >= LOG_LINES)
         ? await drainLogs()
         : undefined;
