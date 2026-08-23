@@ -16,24 +16,18 @@ import {
   staleness,
 } from "../shared/strategy/dnet/knowledge.ts";
 import type { ReportHost } from "../shared/strategy/dnet/courier.ts";
-import {
-  JOB_TIMEOUT_MS,
-  LONG_JOB_BEAT_MS,
-  nextJob,
-  overseerIsLive,
-  RENDEZVOUS_PROTOCOL,
-  RESIDENT_BEAT_MS,
-  RESIDENT_BEAT_MISSES,
-  sweepQueues,
-  type DnetHostQueue,
-  type DnetJob,
-  type DnetRendezvous,
-} from "../game/dnet/realm.ts";
 import { deriveTasks } from "../shared/strategy/dnet/queue.ts";
 import { foldAttempts, type DarknetHostKnowledge } from "../shared/strategy/dnet/knowledge.ts";
 import type { AttemptOutcome } from "../shared/strategy/dnet/courier.ts";
 import { mutationIntervalMs, msPerHostEvent } from "../shared/strategy/dnet/rates.ts";
-import { retireLostEdgeJobs, retireLostPin } from "../game/dnet/overseer.ts";
+
+/** NOTE: the runtime blocks that once lived here — the resident beat sweep,
+ * `nextJob`, the single-controller election, and the mutation-triggered edge/pin
+ * retirement — moved into `game/dnet/controller.ts` when the overseer/realm/jobs
+ * split was replaced by the controller/agent protocol. Their end-to-end
+ * behavior is now exercised by `sim/tests/dnet-session.test.ts` and the agent
+ * lifecycle by `tests/dnet-hard-cancel.test.ts`. What remains here is the
+ * knowledge fold and the derived-queue behavior, which are still pure. */
 
 const GEN = "run-1";
 
@@ -177,30 +171,6 @@ describe("every fact carries an observation time", () => {
     const { knowledge } = foldReports(emptyKnowledge(GEN), [report("dn-1", 999_999, { depth: 1 })], 1_000);
     // Otherwise a clock we do not control could make a fact immortal.
     expect(knowledge.hosts["dn-1"]!.facts["depth"]!.at).toBe(1_000);
-  });
-});
-
-describe("a run from a dead world is refused at the channel", () => {
-  // Agents outlive controllers — they survive a cold boot, a build handoff and a
-  // page reload — so a live script from a dead run really can be talking to us.
-  // The refusal belongs to the WHOLE rendezvous rather than to each fact: by the
-  // time a report reaches the fold, the channel it arrived on has already been
-  // accepted, and re-checking a value the caller just compared cannot fail.
-  const rendezvous = (over: Partial<DnetRendezvous> = {}) => ({
-    protocol: RENDEZVOUS_PROTOCOL,
-    generation: GEN,
-    controllerPid: 1,
-    startedAt: 0,
-    lastBeatAt: 1_000,
-    ...over,
-  } as DnetRendezvous);
-
-  test("a foreign generation is not live however recently it beat", () => {
-    expect(overseerIsLive(rendezvous(), GEN, 1_100)).toBe(true);
-    expect(overseerIsLive(rendezvous({ generation: "run-0" }), GEN, 1_100)).toBe(false);
-    // A protocol we do not speak is refused for the same reason.
-    expect(overseerIsLive(rendezvous({ protocol: RENDEZVOUS_PROTOCOL + 1 }), GEN, 1_100)).toBe(false);
-    expect(overseerIsLive(undefined, GEN, 1_100)).toBe(false);
   });
 });
 
@@ -420,108 +390,6 @@ describe("the facts the spreading agents added", () => {
 
 });
 
-describe("the sweep does not race a running job", () => {
-  const BEAT_WINDOW = RESIDENT_BEAT_MS * RESIDENT_BEAT_MISSES;
-
-  const job = (over: Partial<DnetJob> = {}): DnetJob => ({
-    id: "inventory:dn-1",
-    kind: "inventory",
-    label: "test",
-    budgetGb: 2.6,
-    threads: 1,
-    priority: 0,
-    longLived: false,
-    state: { host: "dn-1", from: "dn-1" },
-    body: async () => ({ ok: true }),
-    settle: () => {},
-    fail: () => {},
-    ...over,
-  });
-
-  const queueOf = (over: Partial<DnetHostQueue> = {}): Map<string, DnetHostQueue> =>
-    new Map([["dn-1", { host: "dn-1", pending: [], lastBeatAt: 0, completed: 0, failed: 0, ...over }]]);
-
-  test("an idle resident that stops beating is retired after three beats", () => {
-    const queues = queueOf();
-    expect(sweepQueues(queues, BEAT_WINDOW)).toHaveLength(0);
-    expect(sweepQueues(queues, BEAT_WINDOW + 1)).toHaveLength(1);
-    expect(queues.size).toBe(0);
-  });
-
-  test("an active job is evidence of life until its own timeout has passed", () => {
-    // While a job runs the resident is dead BY DESIGN — spawn killed it — so
-    // lastBeatAt freezes for the whole job. Sweeping on the beat window alone
-    // retired any queue whose job outran three beats, losing the result of a
-    // merely slow authenticate and miscounting it as a lost resident.
-    const startedAt = 10_000;
-    const queues = queueOf({ active: job({ startedAt }) });
-    // Far past the beat window, well inside the job timeout: alive.
-    expect(sweepQueues(queues, startedAt + JOB_TIMEOUT_MS)).toHaveLength(0);
-    // The controller's own timeout loop fires at startedAt + JOB_TIMEOUT_MS, so
-    // the sweep concedes it a full beat window before treating silence as death.
-    expect(sweepQueues(queues, startedAt + JOB_TIMEOUT_MS + BEAT_WINDOW)).toHaveLength(0);
-    expect(sweepQueues(queues, startedAt + JOB_TIMEOUT_MS + BEAT_WINDOW + 1)).toHaveLength(1);
-  });
-
-  test("a long-lived job holds its queue open on its OWN beat, not for ever", () => {
-    // This used to be "indefinitely", and indefinitely was the bug.
-    // `residentLastLife` returned Infinity for a long-lived job and the
-    // controller's timeout loop skipped one outright, so a job whose PROCESS had
-    // been killed — the ordinary case out here, a mutation tick restarts hosts
-    // and takes what was running on them — pinned its queue open permanently.
-    // The host would never be swept and could never be re-planted. So a
-    // long-lived job says it is alive, exactly as a resident does.
-    const queues = queueOf({ active: job({ startedAt: 0, longLived: true }) });
-    const window = LONG_JOB_BEAT_MS + BEAT_WINDOW;
-    // Silent but inside its window: alive.
-    expect(sweepQueues(queues, window)).toHaveLength(0);
-    // A beat resets the window, which is the whole mechanism.
-    queues.get("dn-1")!.active!.beatAt = window;
-    expect(sweepQueues(queues, window * 2)).toHaveLength(0);
-    // ...and silence past it is death, rather than a queue nobody can retire.
-    expect(sweepQueues(queues, window * 2 + window + 1)).toHaveLength(1);
-    expect(queues.size).toBe(0);
-  });
-});
-
-describe("the resident takes the next job it was handed, no RAM check of its own", () => {
-  // The fit check moved to the overseer, which sizes every job against the host's
-  // computed budget (`maxRam − blockedRam − prober`) before it is ever queued —
-  // the worker cannot measure and does not try. `nextJob` is now just "the first
-  // pending job, unless one is already active." The per-thread cost still matters,
-  // but it is `fileTask` on the overseer that enforces it, not this.
-  const job = (over: Partial<DnetJob> = {}): DnetJob => ({
-    id: "phish:dn-1",
-    kind: "phish",
-    label: "test",
-    budgetGb: 6,
-    threads: 1,
-    priority: 400,
-    longLived: false,
-    state: { host: "dn-1", from: "dn-1" },
-    body: async () => ({ ok: true }),
-    settle: () => {},
-    fail: () => {},
-    ...over,
-  });
-  const queue = (pending: DnetJob[], over: Partial<DnetHostQueue> = {}): DnetHostQueue =>
-    ({ host: "dn-1", pending, lastBeatAt: 0, completed: 0, failed: 0, ...over });
-
-  test("returns the first pending job whatever its size — the overseer already sized it", () => {
-    // A four-thread job the old check would have refused on an 8 GB host is taken
-    // regardless: the overseer would not have filed it if it did not fit.
-    const big = job({ id: "phish:dn-1", threads: 4 });
-    const taken = nextJob(queue([big, job({ id: "reclaim:dn-1", kind: "reclaim" })]));
-    expect(taken?.id).toBe("phish:dn-1");
-  });
-
-  test("returns nothing while a job is active, or when the queue is empty", () => {
-    expect(nextJob(queue([], { active: job() }))).toBeUndefined();
-    expect(nextJob(queue([job()], { active: job() }))).toBeUndefined();
-    expect(nextJob(queue([]))).toBeUndefined();
-  });
-});
-
 describe("target-owned bleed scheduling", () => {
   test("pending records derive one serialized full-ring drain", () => {
     const at = 100_000;
@@ -580,78 +448,6 @@ describe("target-owned bleed scheduling", () => {
   });
 });
 
-describe("mutation-triggered recovery", () => {
-  test("a fresh neighbour set settles pending edge work and only flags active work", () => {
-    const settled: string[] = [];
-    const make = (id: string, host: string, state: Partial<DnetJob["state"]> = {}): DnetJob => ({
-      id,
-      kind: "attempt",
-      label: id,
-      budgetGb: 1,
-      threads: 1,
-      priority: 0,
-      longLived: false,
-      state: { host, from: "dn-1", ...state },
-      body: async () => ({ ok: true }),
-      settle: (result) => settled.push(`${id}:${result.targetState}`),
-      fail: () => undefined,
-    });
-    const pendingLost = make("pending-lost", "dn-2");
-    const remote = make("remote", "dn-3", { sessionOnly: true });
-    const self = make("self", "dn-1");
-    const active = make("active-lost", "dn-4");
-    const queue: DnetHostQueue = {
-      host: "dn-1",
-      pending: [pendingLost, remote, self],
-      active,
-      lastBeatAt: 0,
-      completed: 0,
-      failed: 0,
-    };
-
-    expect(retireLostEdgeJobs(queue, "dn-1", ["dn-live"])).toBe(2);
-    expect(queue.pending).toEqual([remote, self]);
-    expect(settled).toEqual(["pending-lost:edge-lost"]);
-    expect(active.cancelReason).toContain("no longer adjacent");
-  });
-
-  test("a pending pin is abandoned when the lab edge it exists for is severed", () => {
-    // A pin is self-targeting, so `retireLostEdgeJobs` never matches it — its
-    // edge is the LAB it carries in `state.edge`, and a survey showing that
-    // edge gone dooms the pin. `retireLostPin` retires it before it spawns; a
-    // live edge, an unpin (release) job, and a plain pin with no edge are all
-    // left alone.
-    const settled: string[] = [];
-    const pin = (id: string, state: Partial<DnetJob["state"]>): DnetJob => ({
-      id,
-      kind: "pin",
-      label: id,
-      budgetGb: 12,
-      threads: 1,
-      priority: -95,
-      longLived: false,
-      state: { host: "dn-1", from: "dn-1", ...state },
-      body: async () => ({ ok: true }),
-      settle: (result) => settled.push(`${id}:${result.targetState}`),
-      fail: () => undefined,
-    });
-    const doomed = pin("pin-doomed", { edge: "lab" });
-    const alive = pin("pin-alive", { edge: "lab2" });
-    const releasing = pin("pin-release", { edge: "lab", unpin: true });
-    const edgeless = pin("pin-plain", {});
-    const q: DnetHostQueue = {
-      host: "dn-1",
-      pending: [doomed, alive, releasing, edgeless],
-      lastBeatAt: 0,
-      completed: 0,
-      failed: 0,
-    };
-    // Fresh neighbours include lab2 but not lab.
-    expect(retireLostPin(q, "dn-1", ["lab2", "dn-x"])).toBe(1);
-    expect(q.pending).toEqual([alive, releasing, edgeless]);
-    expect(settled).toEqual(["pin-doomed:edge-lost"]);
-  });
-});
 describe("the charisma gate withholds what heartbleed would refuse", () => {
   // `heartbleed` is the ONE charisma-gated call: below the host's requirement
   // it can only answer 451. A bleed below the gate is a wasted job, and a probe

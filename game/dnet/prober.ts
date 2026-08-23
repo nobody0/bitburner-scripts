@@ -1,7 +1,7 @@
 import type { NS } from "@ns";
 import { captureLaunch } from "../lib/launch-shared.ts";
 import type { DnetProberLaunch } from "./launch.ts";
-import { liveRendezvous, reportProbe } from "./realm.ts";
+import { live } from "./shared.ts";
 
 /** The prober: the one darknet process that MUST stand on its host.
  *
@@ -49,20 +49,20 @@ export async function main(ns: NS): Promise<void> {
     // report and try again after the next mutation. The prober keeps running
     // across a re-seed untouched, so the successor overseer just starts receiving
     // its reports again; no death, no revival.
-    const live = liveRendezvous();
-    if (live) {
-      reportProbe(live, host, ns.dnet.probe(), Date.now(), ns.pid);
+    const controller = live();
+    if (controller) {
+      controller.reportProbe(host, ns.dnet.probe(), Date.now(), ns.pid);
       if (first) {
         first = false;
         launch.firstReport?.();
       }
     }
     // Block until the net changes. 0 GB, and a kill delivered while awaiting is a
-    // clean ScriptDeath — the loop just ends. The overseer notices the stale
-    // stamp and re-establishes us through the worker.
+    // clean ScriptDeath — the loop just ends. The controller notices the stale
+    // stamp and re-establishes us through the agent.
     await ns.dnet.nextMutation();
     // All waiters resolving in this engine turn observe the same realm time;
     // the controller coalesces them before the next topology report.
-    liveRendezvous()?.noteMutation?.(Date.now());
+    live()?.noteMutation(Date.now());
   }
 }

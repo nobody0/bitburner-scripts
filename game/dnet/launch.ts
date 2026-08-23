@@ -10,6 +10,15 @@ export interface DnetOverseerLaunch extends ScriptLaunch {
   readonly charisma: number;
 }
 
+export interface DnetControllerLaunch extends ScriptLaunch {
+  readonly kind: "dnet-controller";
+  readonly host: string;
+  readonly buildId: string;
+  readonly generation: string;
+  readonly identity?: ArtifactIdentity;
+  readonly charisma: number;
+}
+
 export interface DnetAgentLaunch extends ScriptLaunch {
   readonly kind: "dnet-agent";
   readonly host: string;

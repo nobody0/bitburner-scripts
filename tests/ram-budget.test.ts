@@ -3,9 +3,22 @@ import { readdir, readFile, rm } from "node:fs/promises";
 import { buildScript, buildScripts } from "../tools/build.ts";
 import type { BitburnerConfig } from "../tools/config.ts";
 import { analyzeScriptRam, billableRamNames } from "../tools/ram-analysis.ts";
-import { BOOTSTRAP_RECLAIM_METHODS, CONTROLLER_METHODS, JOB_METHODS, PROBER_METHODS, RESIDENT_METHODS, ROUTINE_JOB_KINDS, threadsForJob } from "../game/dnet/realm.ts";
+import { CONTROLLER_CALLS, KIND_CALLS, PROBER_CALLS, threadsFor, type OrderKind } from "../game/dnet/shared.ts";
 import { getFunctionRamCost } from "../sim/ns/ram-costs.ts";
 import { priceCalls, UNKNOWN_CALL_GB } from "../game/lib/dodge.ts";
+
+/** The order kinds that run as an ORDER (through the agent switch), i.e. every
+ * kind except resident `idle` and the spawn-free `bootstrapReclaim`. */
+const JOB_KINDS = (Object.keys(KIND_CALLS) as OrderKind[]).filter((k) => k !== "idle" && k !== "bootstrapReclaim");
+/** The heaviest thing a host does as a matter of course (excludes one-off pins). */
+const ROUTINE_JOB_KINDS: readonly OrderKind[] = ["inventory", "bleed", "attempt", "plant", "cache", "reclaim", "phish"];
+/** Back-compat aliases so the assertions below read unchanged. */
+const CONTROLLER_METHODS = CONTROLLER_CALLS;
+const RESIDENT_METHODS = KIND_CALLS.idle;
+const PROBER_METHODS = PROBER_CALLS;
+const BOOTSTRAP_RECLAIM_METHODS = KIND_CALLS.bootstrapReclaim;
+const JOB_METHODS = KIND_CALLS as Readonly<Record<string, readonly string[]>>;
+const threadsForJob = threadsFor;
 import { WORKER_RAM } from "../shared/world.ts";
 import type { NS } from "@ns";
 
@@ -52,7 +65,7 @@ const config: BitburnerConfig = {
   entries: [
     { source: "game/start.ts", target: "start.js" },
     { source: "game/worker/worker.ts", target: "worker/worker.js" },
-    { source: "game/dnet/overseer.ts", target: "dnet/overseer.js" },
+    { source: "game/dnet/controller.ts", target: "dnet/controller.js" },
     { source: "game/dnet/agent.ts", target: "dnet/agent.js" },
     { source: "game/dnet/prober.ts", target: "dnet/prober.js" },
   ],
@@ -272,7 +285,7 @@ describe("in-game static RAM budget", () => {
 
   test("the darknet controller decides and cannot act", async () => {
     const artifacts = await buildScripts(config, { telemetry: true });
-    const overseer = artifacts.find((a) => a.filename === "dnet/overseer.js")!;
+    const overseer = artifacts.find((a) => a.filename === "dnet/controller.js")!;
     const analysis = analyzeScriptRam(overseer.content);
     expect(analysis.overridden).toBe(false);
 
@@ -399,60 +412,64 @@ describe("in-game static RAM budget", () => {
     }
   });
 
-  test("each job kind declares the calls ITS OWN body makes", async () => {
-    // The union check above is necessary and not sufficient, and the gap is not
-    // theoretical: `reclaim` was written calling `describeHost(..., true)` — a
-    // cache listing, because clearing a block to zero is what drops the .cache —
-    // while its own JOB_METHODS entry omitted `ls`. Every referenced member was
-    // declared SOMEWHERE, so the union check passed, and the job would have been
-    // killed by the engine on its first `ls`. The simulator cannot see it
-    // either: it does not model the dynamic-RAM check.
+  test("each order kind declares the calls ITS OWN body makes", async () => {
+    // The union check above is necessary and not sufficient: `reclaim` was once
+    // written calling `describeHost(..., true)` — a cache listing — while its own
+    // method list omitted `ls`. Every referenced member was declared SOMEWHERE,
+    // so the union check passed, and the job would have died on its first `ls`.
     //
-    // So the attribution is done per KIND. Each body is a distinct
-    // `const <name>Job` and the returned map ties a kind to one of them, which
-    // is enough to slice the source and resolve what each actually reaches for.
-    const source = await readFile("game/dnet/jobs.ts", "utf8");
+    // So the attribution is done per KIND. The order bodies live in
+    // `game/dnet/orders.ts` (a `<name>Order` function per kind, tied to a kind by
+    // the `runOrder` switch), except `attempt`/`walk`, which are their own files
+    // (`attempt.ts`/`walk.ts`) dispatched by the switch. `describeHost` and
+    // `listingOn` are shared helpers whose reach a caller inherits.
+    const ordersSrc = await readFile("game/dnet/orders.ts", "utf8");
+    const attemptSrc = await readFile("game/dnet/attempt.ts", "utf8");
+    const walkSrc = await readFile("game/dnet/walk.ts", "utf8");
 
-    // kind -> body identifier, from the map the factory returns.
-    const bound = new Map<string, string>();
-    for (const match of source.matchAll(/^\s{4}(\w+): (\w+Job),$/gm)) bound.set(match[1]!, match[2]!);
-    expect(bound.size, "the returned body map should be greppable").toBe(Object.keys(JOB_METHODS).length);
+    // kind -> the function the switch dispatches to.
+    const dispatched = new Map<string, string>();
+    for (const match of ordersSrc.matchAll(/case "(\w+)":\s*return (\w+)\(/g)) dispatched.set(match[1]!, match[2]!);
 
-    // Where each body starts, so a body can be sliced up to the next one.
-    const starts = [...source.matchAll(/^\s{2}const (\w+Job) = async \(/gm)]
+    // Where each `<name>Order` function starts, to slice one body out.
+    const starts = [...ordersSrc.matchAll(/^(?:async )?function (\w+Order)\(/gm)]
       .map((match) => ({ name: match[1]!, at: match.index! }));
-    expect(starts.length).toBe(bound.size);
 
-    // The two shared helpers, and what reaching for them implies. `describeHost`
-    // takes a third argument that turns on the file listing, and `listingOn`
-    // IS the listing — both resolve to `ls` plus the describe trio.
-    const DESCRIBE = ["dnet.getServerDetails"];
+    const DESCRIBE = "dnet.getServerDetails";
 
-    for (const [kind, body] of bound) {
-      const index = starts.findIndex((entry) => entry.name === body);
-      expect(index, `${body} should be a top-level body`).toBeGreaterThanOrEqual(0);
-      const from = starts[index]!.at;
-      const to = index + 1 < starts.length ? starts[index + 1]!.at : source.length;
-      const slice = source.slice(from, to);
-
+    const surfaceOf = (slice: string): Set<string> => {
       const wanted = new Set<string>();
       for (const match of slice.matchAll(/jobNs\["(\w+)"\](?:\["(\w+)"\])?(?:\["(\w+)"\])?/g)) {
         wanted.add([match[1], match[2], match[3]].filter(Boolean).join("."));
       }
-      if (slice.includes("describeHost(")) for (const method of DESCRIBE) wanted.add(method);
-      // Infer optional helper branches from the actual argument positions.
-      // Keep this line-bounded: the old `[^)]*` crossed later expressions and
-      // falsely attributed `ls` to plantJob when it found an unrelated `true)`.
-      const listed = /describeHost\(\s*jobNs\s*,\s*[^,\r\n)]+\s*,\s*true(?:\s*,|\s*\))/.test(slice);
-      const identified = /describeHost\(\s*jobNs\s*,\s*[^,\r\n)]+\s*,\s*(?:true|false)\s*,\s*true\s*\)/.test(slice);
+      if (slice.includes("describeHost(")) wanted.add(DESCRIBE);
+      // Shift for the `deps` argument at position 3: withListing is arg 4,
+      // withIdentity is arg 5. Line-bounded so a later `true` is not misread.
+      const listed = /describeHost\(\s*jobNs\s*,\s*[^,\r\n)]+\s*,\s*[^,\r\n)]+\s*,\s*true(?:\s*,|\s*\))/.test(slice);
+      const identified = /describeHost\(\s*jobNs\s*,\s*[^,\r\n)]+\s*,\s*[^,\r\n)]+\s*,\s*(?:true|false)\s*,\s*true\s*\)/.test(slice);
       if (slice.includes("listingOn(") || listed) wanted.add("ls");
       if (identified) wanted.add("dnsLookup");
+      return wanted;
+    };
 
-      const declared = new Set(JOB_METHODS[kind] ?? []);
-      for (const method of wanted) {
+    for (const kind of JOB_KINDS) {
+      let slice: string;
+      if (kind === "attempt") slice = attemptSrc;
+      else if (kind === "walk") slice = walkSrc;
+      else {
+        const fn = dispatched.get(kind);
+        expect(fn, `orders.ts switch must dispatch "${kind}"`).toBeDefined();
+        const index = starts.findIndex((entry) => entry.name === fn);
+        expect(index, `${fn} should be a top-level order body`).toBeGreaterThanOrEqual(0);
+        const from = starts[index]!.at;
+        const to = index + 1 < starts.length ? starts[index + 1]!.at : ordersSrc.length;
+        slice = ordersSrc.slice(from, to);
+      }
+      const declared = new Set(KIND_CALLS[kind]);
+      for (const method of surfaceOf(slice)) {
         expect(
           declared.has(method),
-          `JOB_METHODS.${kind} is missing ns.${method}, which ${body} calls — the engine kills the process on it`,
+          `KIND_CALLS.${kind} is missing ns.${method}, which its body calls — the engine kills the process on it`,
         ).toBe(true);
       }
     }
@@ -465,7 +482,7 @@ describe("in-game static RAM budget", () => {
     // the controller. The source-level greps above cannot see that, because it
     // happens after them; only the artifact can.
     const artifacts = await buildScripts(config, { telemetry: true });
-    const overseer = artifacts.find((a) => a.filename === "dnet/overseer.js")!;
+    const overseer = artifacts.find((a) => a.filename === "dnet/controller.js")!;
     expect(overseer.content).toContain('["dnet"]');
     // ...and the same for the two ordinary getters a job describes a host with,
     // which have no `dnet` prefix to hide behind.
@@ -570,7 +587,9 @@ describe("in-game static RAM budget", () => {
     // Every other kind hands the host back itself, because nothing outside can put
     // a resident there mid-run.
     for (const [kind, methods] of Object.entries(JOB_METHODS)) {
-      if (kind === "pin" || kind === "walk") continue;
+      // `pin`/`walk` are NO_RESPAWN; `bootstrapReclaim` is the spawn-free local
+      // reclaimer (it ends and the controller re-execs); `idle` IS the resident.
+      if (kind === "pin" || kind === "walk" || kind === "bootstrapReclaim" || kind === "idle") continue;
       expect(methods, `${kind} must be able to spawn back to resident mode`).toContain("spawn");
     }
     // ...and every routine kind is comfortably under it, which is the gap the

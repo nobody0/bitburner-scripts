@@ -3,14 +3,58 @@ import type { NS } from "@ns";
 import { captureLaunch, handoffLaunch } from "../game/lib/launch-shared.ts";
 import type { DnetAgentLaunch, DnetProberLaunch } from "../game/dnet/launch.ts";
 import { main as agentMain } from "../game/dnet/agent.ts";
-import { makeJobBodies } from "../game/dnet/jobs.ts";
-import { JOB_METHODS, RENDEZVOUS_PROTOCOL, dnetRealm, type DnetRendezvous } from "../game/dnet/realm.ts";
+import { runOrder } from "../game/dnet/orders.ts";
+import {
+  DNET_PROTOCOL,
+  KIND_CALLS,
+  dnetRealm,
+  type AgentIo,
+  type ControllerDeps,
+  type ControllerHandle,
+  type Order,
+  type OrderKind,
+} from "../game/dnet/shared.ts";
 import type { ProvisionalCredential } from "../shared/strategy/dnet/courier.ts";
 import { exactNeighbourClueEpoch } from '../shared/strategy/dnet/file-clues.ts';
 
 afterEach(() => {
-  delete dnetRealm().dnet_overseer;
+  delete dnetRealm().dnet_controller;
 });
+
+function makeOrder(kind: OrderKind, over: Partial<Order> & { host: string; from: string }): Order {
+  return {
+    id: `${kind}:${over.host}`,
+    kind,
+    ramOverrideGb: 4,
+    threads: 1,
+    priority: 0,
+    longLived: kind === "walk",
+    label: "test",
+    ...over,
+  };
+}
+
+function makeDeps(over: Partial<ControllerDeps> = {}): ControllerDeps {
+  return {
+    charisma: () => 1_000,
+    ledgerFor: () => undefined,
+    ringFor: () => undefined,
+    recordAttempt: () => {},
+    recordLogDrain: () => {},
+    recordCredential: () => {},
+    recordLoose: () => {},
+    recordProvisional: () => {},
+    recordNeighbourPassword: () => {},
+    recordFileEvidence: () => {},
+    labField: () => undefined,
+    publishLabField: () => {},
+    ...over,
+  };
+}
+
+function makeIo(over: Partial<ControllerDeps> = {}): AgentIo {
+  return { beat: () => {}, cancelled: () => undefined, deps: makeDeps(over) };
+}
 
 describe('unnamed first-auth clue epochs', () => {
   test('only authentication, probe and inventory from one mutation are exact', () => {
@@ -82,15 +126,13 @@ describe("darknet farm job cache observations", () => {
       read: (name: string) => contents[name] ?? "",
       rm: (name: string) => { removed.push(name); return true; },
     } as unknown as NS;
-    const result = await makeJobBodies({
-      charisma: () => 1_000,
-      ledgerFor: () => undefined,
+    const result = await runOrder(ns, makeOrder("inventory", { host: "dn-1", from: "dn-1" }), makeIo({
       recordNeighbourPassword: (source, password) => neighbours.push({ source, password }),
       recordProvisional: (entry) => provisionals.push(entry),
       recordFileEvidence: (hostname, clue) => {
         if (clue.kind === "contains") evidence.push({ hostname, chars: clue.chars });
       },
-    }).inventory!(ns, { host: "dn-1", from: "dn-1" });
+    }));
 
     expect(result.hosts?.[0]?.caches).toEqual(["vault_123.cache"]);
     expect(neighbours).toEqual([{ source: "dn-1", password: "1234" }]);
@@ -111,12 +153,10 @@ describe("darknet farm job cache observations", () => {
   });
 
   test("a winning phish flags the host dirty instead of spending a thread on ls", async () => {
-    const result = await makeJobBodies({
-      charisma: () => 1_000,
-      ledgerFor: () => undefined,
-    }).phish!(
+    const result = await runOrder(
       winningPhish(["bankdata_577.d.cache"]),
-      { host: "darkweb", from: "darkweb" },
+      makeOrder("phish", { host: "darkweb", from: "darkweb" }),
+      makeIo(),
     );
 
     expect(result.ok).toBe(true);
@@ -124,9 +164,9 @@ describe("darknet farm job cache observations", () => {
     // sets `dirtied`, and the overseer files one instant inventory job.
     expect(result.dirtied).toBe(true);
     expect(result.hosts?.[0]?.caches).toBeUndefined();
-    expect(JOB_METHODS.phish).not.toContain("ls");
+    expect(KIND_CALLS.phish).not.toContain("ls");
     // The dedicated inventory job is the one that lists.
-    expect(JOB_METHODS.inventory).toContain("ls");
+    expect(KIND_CALLS.inventory).toContain("ls");
   });
 
   test("reclaim hands the host back when another worker thread becomes legal", async () => {
@@ -155,9 +195,10 @@ describe("darknet farm job cache observations", () => {
         }),
       },
     } as unknown as NS;
-    const result = await makeJobBodies({ charisma: () => 1_000, ledgerFor: () => undefined }).reclaim!(
+    const result = await runOrder(
       ns,
-      { host: "dn-1", from: "dn-1", resizeAtBlockedRam: 3 },
+      makeOrder("reclaim", { host: "dn-1", from: "dn-1", resizeAtBlockedRam: 3 }),
+      makeIo(),
     );
     expect(calls).toBe(1);
     expect(result.hosts?.[0]?.blockedRam).toBe(2.5);
@@ -179,9 +220,10 @@ describe("darknet farm job cache observations", () => {
         }),
       },
     } as unknown as NS;
-    const result = await makeJobBodies({ charisma: () => 1_000, ledgerFor: () => undefined }).reclaim!(
+    const result = await runOrder(
       ns,
-      { host: "dn-1", from: "dn-1", resizeAtBlockedRam: 0 },
+      makeOrder("reclaim", { host: "dn-1", from: "dn-1", resizeAtBlockedRam: 0 }),
+      makeIo(),
     );
 
     expect(result.hosts?.[0]?.blockedRam).toBe(0);
@@ -195,10 +237,10 @@ describe("darknet farm job cache observations", () => {
     let residentAccepted = true;
     let autoFirstReport = false;
     let reportFirst: (() => void) | undefined;
-    dnetRealm().dnet_overseer = {
-      protocol: RENDEZVOUS_PROTOCOL,
-      preparePlantedHost: (host: string) => { order.push(`prepare:${host}`); },
-    } as unknown as DnetRendezvous;
+    dnetRealm().dnet_controller = {
+      protocol: DNET_PROTOCOL,
+      preparePlant: (host: string) => { order.push(`prepare:${host}`); },
+    } as unknown as ControllerHandle;
     const ns = {
       dnet: {
         connectToSession: () => ({ success: true, code: 200, message: "connected" }),
@@ -232,13 +274,16 @@ describe("darknet farm job cache observations", () => {
       kill: (pid: number) => { killed.push(pid); return true; },
       getFunctionRamCost: (method: string) => method === "dnet.probe" ? 0.2 : method === "spawn" ? 2 : 0,
     } as unknown as NS;
-    const planting = makeJobBodies({ charisma: () => 1_000, ledgerFor: () => undefined }).plant!(
+    const planting = runOrder(
       ns,
-      {
+      makeOrder("plant", {
         host: "dn-1", from: "darkweb", password: "pw",
         payloads: ["dnet/agent.js", "dnet/prober.js"],
-      },
+      }),
+      makeIo(),
     );
+    await Promise.resolve();
+    await Promise.resolve();
     await Promise.resolve();
     await Promise.resolve();
     expect(launches.map((entry) => entry.file)).toEqual(["dnet/prober.js"]);
@@ -257,12 +302,13 @@ describe("darknet farm job cache observations", () => {
     order.length = 0;
     autoFirstReport = true;
     residentAccepted = false;
-    const refused = await makeJobBodies({ charisma: () => 1_000, ledgerFor: () => undefined }).plant!(
+    const refused = await runOrder(
       ns,
-      {
+      makeOrder("plant", {
         host: "dn-2", from: "darkweb", password: "pw",
         payloads: ["dnet/agent.js", "dnet/prober.js"],
-      },
+      }),
+      makeIo(),
     );
     expect(refused.ok).toBe(false);
     expect(killed).toEqual([1]);
@@ -270,12 +316,12 @@ describe("darknet farm job cache observations", () => {
 
   test("a cramped plant launches only the thread-scaled local reclaimer", async () => {
     const launches: { file: string; options: { temporary?: boolean; threads?: number; ramOverride?: number } }[] = [];
-    const rendezvous = {
-      protocol: RENDEZVOUS_PROTOCOL,
+    const registered: { host: string; pid: number }[] = [];
+    dnetRealm().dnet_controller = {
+      protocol: DNET_PROTOCOL,
       buildId: "test",
-      bootstraps: new Map(),
-    } as unknown as DnetRendezvous;
-    dnetRealm().dnet_overseer = rendezvous;
+      registerBootstrap: (host: string, pid: number) => registered.push({ host, pid }),
+    } as unknown as ControllerHandle;
     const ns = {
       dnet: {
         connectToSession: () => ({ success: true, code: 200, message: "connected" }),
@@ -293,35 +339,37 @@ describe("darknet farm job cache observations", () => {
       },
       getFunctionRamCost: (method: string) => method === "dnet.memoryReallocation" ? 1 : 0,
     } as unknown as NS;
-    const result = await makeJobBodies({ charisma: () => 1_000, ledgerFor: () => undefined }).plant!(
+    const result = await runOrder(
       ns,
-      {
+      makeOrder("plant", {
         host: "dn-1", from: "darkweb", password: "pw",
         payloads: ["dnet/agent.js", "dnet/prober.js"],
         bootstrapReclaim: true,
         bootstrapThreads: 3,
-      },
+      }),
+      makeIo(),
     );
     expect(result.ok).toBe(true);
     expect(launches).toEqual([{
       file: "dnet/agent.js",
       options: { threads: 3, ramOverride: 2.6, temporary: true },
     }]);
-    expect(rendezvous.bootstraps.get("dn-1")?.pid).toBe(7);
+    expect(registered).toEqual([{ host: "dn-1", pid: 7 }]);
   });
 
-  test("bootstrap mode reclaims exactly once, wakes derivation, and exits", async () => {
+  test("bootstrap mode reclaims exactly once, reports itself done, and exits", async () => {
     let reallocations = 0;
     let spawns = 0;
-    let wakes = 0;
-    const rendezvous = {
-      protocol: RENDEZVOUS_PROTOCOL,
+    const registered: { host: string; pid: number }[] = [];
+    const doneHosts: string[] = [];
+    dnetRealm().dnet_controller = {
+      protocol: DNET_PROTOCOL,
       buildId: "test",
-      bootstraps: new Map(),
-      bootstrapDone: new Set<string>(),
-      signalDerive: () => { wakes++; },
-    } as unknown as DnetRendezvous;
-    dnetRealm().dnet_overseer = rendezvous;
+      registerBootstrap: (host: string, pid: number) => registered.push({ host, pid }),
+      // The controller's own `bootstrapDone` is what wakes derivation, so the
+      // agent's obligation is simply to call it.
+      bootstrapDone: (host: string) => doneHosts.push(host),
+    } as unknown as ControllerHandle;
     const ns = {
       pid: 77,
       args: [],
@@ -347,8 +395,7 @@ describe("darknet farm job cache observations", () => {
 
     expect(reallocations).toBe(1);
     expect(spawns).toBe(0);
-    expect(rendezvous.bootstraps.has("dn-1")).toBe(false);
-    expect(rendezvous.bootstrapDone.has("dn-1")).toBe(true);
-    expect(wakes).toBeGreaterThan(0);
+    expect(registered).toEqual([{ host: "dn-1", pid: 77 }]);
+    expect(doneHosts).toEqual(["dn-1"]);
   });
 });

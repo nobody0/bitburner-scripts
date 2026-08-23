@@ -34,22 +34,27 @@ import type { Need } from "../../../shared/strategy/needs.ts";
 import { labCacheDeferral } from "../../../shared/strategy/progression/decide.ts";
 import type { DarknetAgentDigest } from "../../../shared/telemetry/topics/dnet.ts";
 import {
-  CONTROLLER_METHODS,
-  RESIDENT_METHODS,
+  CONTROLLER_CALLS,
+  KIND_CALLS,
+  BEAT_WINDOW_MS,
+  JOB_TIMEOUT_MS,
+  LONG_JOB_BEAT_MS,
+  priceCalls,
+  type ControllerHandle,
+  type HostEntry,
+} from "../../dnet/shared.ts";
+import {
   foldRefusals,
-  priceAgent,
-  residentLastLife,
-  type DnetRendezvous,
   type DnetSpreadReport,
   type DnetFarmReport,
   type DnetCredentialRejection,
   type DnetLabReport,
   type DnetHoldReport,
   type DnetStormReport,
-} from "../../dnet/realm.ts";
+} from "../../dnet/wire.ts";
 import { gameBuildId } from "../build-id.ts";
 import { handoffLaunch, temporaryRunOptions } from "../launch-shared.ts";
-import type { DnetAgentLaunch, DnetOverseerLaunch } from "../../dnet/launch.ts";
+import type { DnetAgentLaunch, DnetControllerLaunch } from "../../dnet/launch.ts";
 import { gameGlobal } from "../globals.ts";
 import { isScriptDeath } from "../errors.ts";
 import { merge, set, type GameState } from "../state.ts";
@@ -586,8 +591,19 @@ function drainDarknet(generation: string): {
 
 /** The darknet overseer, if one is running. Typed access to the realm slot the
  * agents install, so home never reaches into `globalThis` by hand. */
-function dnetRendezvous(): DnetRendezvous | undefined {
-  return (globalThis as typeof globalThis & { dnet_overseer?: DnetRendezvous }).dnet_overseer;
+function dnetRendezvous(): ControllerHandle | undefined {
+  return (globalThis as typeof globalThis & { dnet_controller?: ControllerHandle }).dnet_controller;
+}
+
+/** The last instant a host's agent gave evidence of life. While an order runs
+ * the beat freezes (spawn killed the resident), so an active order vouches for
+ * its host until its own timeout; a long order vouches on its own beat. */
+function residentLastLife(entry: HostEntry | undefined): number {
+  const agent = entry?.agent;
+  if (agent === undefined) return 0;
+  if (agent.order.longLived) return Math.max(agent.beatAt, agent.beatAt + LONG_JOB_BEAT_MS);
+  if (agent.order.kind !== "idle" && agent.startedAt !== undefined) return Math.max(agent.beatAt, agent.startedAt + JOB_TIMEOUT_MS);
+  return agent.beatAt;
 }
 
 const dnet: FeatureDriver = {
@@ -990,8 +1006,8 @@ const dnet: FeatureDriver = {
     // killed the resident, by design — and `JOB_TIMEOUT_MS` equals the stale
     // window, so a merely slow authenticate read as a dead resident and home
     // execed a SECOND agent onto darkweb while the first was still working.
-    const darkwebResident = rendezvous?.queues.get("darkweb");
-    const residentAlive = darkwebResident !== undefined
+    const darkwebResident = rendezvous?.hosts.get("darkweb");
+    const residentAlive = darkwebResident?.agent !== undefined
       && now - residentLastLife(darkwebResident) < OVERSEER_STALE_MS;
     // NOT gated on the dodged probe. `darkweb` is a guaranteed constant the
     // moment dnet access is granted — and this driver only runs at all once it
@@ -1004,7 +1020,7 @@ const dnet: FeatureDriver = {
     // reach darkweb (no TOR). So the seed is attempted on the FIRST tick this
     // driver runs, and the probe is left to enrich the map, not gate the boot.
     if (!retiringBuild && (!overseerAlive || !residentAlive) && now >= home.seedNextAt) {
-      const controllerFile = "dnet/overseer.js";
+      const controllerFile = "dnet/controller.js";
       const agentFile = "dnet/agent.js";
       // The prober rides to darkweb too, though darkweb's own worker never execs
       // it (the overseer probes darkweb directly): it has to be PRESENT on darkweb
@@ -1027,9 +1043,9 @@ const dnet: FeatureDriver = {
         // live one is left strictly alone: restarting it to fix a missing
         // resident would throw the map away to solve a smaller problem.
         const controller = wantController
-          ? await handoffLaunch<DnetOverseerLaunch>(
+          ? await handoffLaunch<DnetControllerLaunch>(
             {
-              kind: "dnet-overseer",
+              kind: "dnet-controller",
               host: "darkweb",
               buildId,
               generation,
@@ -1039,7 +1055,7 @@ const dnet: FeatureDriver = {
             () => stubNs["exec"](
               controllerFile,
               "darkweb",
-              temporaryRunOptions({ threads: 1, ramOverride: priceAgent(stubNs, CONTROLLER_METHODS) }),
+              temporaryRunOptions({ threads: 1, ramOverride: priceCalls(stubNs, CONTROLLER_CALLS) }),
             ),
           )
           : -1;
@@ -1051,7 +1067,7 @@ const dnet: FeatureDriver = {
           () => stubNs["exec"](
             agentFile,
             "darkweb",
-            temporaryRunOptions({ threads: 1, ramOverride: priceAgent(stubNs, RESIDENT_METHODS) }),
+            temporaryRunOptions({ threads: 1, ramOverride: priceCalls(stubNs, KIND_CALLS.idle) }),
           ),
         );
         return {
@@ -1386,8 +1402,8 @@ function dnetSeedWanted(state: GameState): boolean {
   const now = Date.now();
   // Either the overseer is gone, or darkweb has no resident to run anything.
   if (now - home.overseerBeatAt >= OVERSEER_STALE_MS) return true;
-  const resident = dnetRendezvous()?.queues.get("darkweb");
-  return resident === undefined || now - resident.lastBeatAt >= OVERSEER_STALE_MS;
+  const resident = dnetRendezvous()?.hosts.get("darkweb");
+  return resident?.agent === undefined || now - residentLastLife(resident) >= OVERSEER_STALE_MS;
 }
 
 /** Darknet needs charisma, which career owns. */

@@ -77,7 +77,7 @@ const DODGE_STUB = "lib/dodge-stub.js";
  * seed would `exec` a filename the sim has no main() for, the process would
  * finish immediately, and a BN15 run would report a darknet that never advances
  * while looking like the deploy worked. */
-const DNET_OVERSEER = "dnet/overseer.js";
+const DNET_CONTROLLER = "dnet/controller.js";
 const DNET_AGENT = "dnet/agent.js";
 const DNET_PROBER = "dnet/prober.js";
 const START_SCRIPT = "start.js";
@@ -397,8 +397,8 @@ async function runGameInstalled(
   const terminal = { host: save?.currentServer ?? "home" };
   const initialHomeFiles = new Set(
     save
-      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_OVERSEER, DNET_AGENT, DNET_PROBER, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
-      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_OVERSEER, DNET_AGENT, DNET_PROBER, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
+      ? [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, "build-id.txt", ...save.homeFiles, ...(options.homeFiles ?? [])]
+      : [START_SCRIPT, DODGE_STUB, WORKER_SCRIPT, DNET_CONTROLLER, DNET_AGENT, DNET_PROBER, "build-id.txt", "NUKE.exe", "hackers-starting-handbook.lit", ...(options.homeFiles ?? [])],
   );
   const permanentDarknetAccess = (): boolean => bitnode === 15 || (world.player.sourceFiles["15"] ?? 0) > 0;
   if (permanentDarknetAccess()) initialHomeFiles.add("DarkscapeNavigator.exe");
@@ -741,7 +741,7 @@ async function runGameInstalled(
     { initState },
     dodgeStub,
     worker,
-    dnetOverseer,
+    dnetController,
     dnetAgent,
     dnetProber,
   ] = await Promise.all([
@@ -750,7 +750,7 @@ async function runGameInstalled(
     import("../game/lib/state.ts"),
     import("../game/lib/dodge-stub.ts"),
     import("../game/worker/worker.ts"),
-    import("../game/dnet/overseer.ts"),
+    import("../game/dnet/controller.ts"),
     import("../game/dnet/agent.ts"),
     import("../game/dnet/prober.ts"),
   ]);
@@ -907,7 +907,7 @@ async function runGameInstalled(
 
   host.scripts.set(DODGE_STUB, dodgeStub.main as ScriptMain);
   host.scripts.set(WORKER_SCRIPT, worker.main as ScriptMain);
-  host.scripts.set(DNET_OVERSEER, dnetOverseer.main as ScriptMain);
+  host.scripts.set(DNET_CONTROLLER, dnetController.main as ScriptMain);
   host.scripts.set(DNET_AGENT, dnetAgent.main as ScriptMain);
   host.scripts.set(DNET_PROBER, dnetProber.main as ScriptMain);
   host.scripts.set(START_SCRIPT, ((ns: NS) => startMain(ns, options.features)) as ScriptMain);

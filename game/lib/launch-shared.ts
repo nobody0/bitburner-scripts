@@ -114,6 +114,6 @@ export function resetLaunchState(): void {
     "dispatch_jit_at",
     "dispatch_weaken_timer",
     "dodge_tail",
-    "dnet_overseer",
+    "dnet_controller",
   ]) delete slots[key];
 }
