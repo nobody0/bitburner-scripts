@@ -3,7 +3,7 @@ import { unknownCapabilities, type Capabilities } from "../../shared/features/un
 import type { DebugRecord, EventRecord, LogRecord } from "../../shared/telemetry/schema.ts";
 import type { StateKey, StateMap } from "../../shared/telemetry/state-map.ts";
 import type { ContractFailure } from "../../shared/telemetry/topics/side.ts";
-import type { FarmRollup, SettledBatchReport } from "../../shared/telemetry/topics/hacking.ts";
+import type { FarmRollup, FleetRollup, SettledBatchReport } from "../../shared/telemetry/topics/hacking.ts";
 import type { StockState } from "../../shared/telemetry/topics/stock.ts";
 import type { ExperimentIdentity } from "../../shared/experiment.ts";
 
@@ -51,6 +51,47 @@ export interface SimRunResult {
  * keeping an unbounded array of everything a 12-hour run emitted just to slice
  * the tail off it is how a viewer tab reaches a gigabyte. */
 export const EVENT_RING = 500;
+
+/** Episodes retained in the arbiter decision log. Small on purpose — an
+ * episode is a coalesced RUN of identical outcomes, not one event, so 120 of
+ * them cover far more wall clock than the event ring ever holds. */
+export const DECISION_LOG_LIMIT = 120;
+
+export type DecisionRankedOption = NonNullable<FleetRollup["infrastructurePlan"]>["ranked"][number];
+
+/** One coalesced run of identical investment decisions or results.
+ *
+ * Kept OUTSIDE the event ring on purpose: the ring is shared with probe and
+ * debug traffic, so on a busy run a decision is evicted within minutes — and
+ * the arbiter's history is exactly the thing worth keeping longer than that.
+ * Coalescing happens here rather than at render time for the same reason: a
+ * refusal repeated every pass must occupy one episode, not one ring slot each. */
+export interface DecisionEpisode {
+  subsystem: string;
+  kind: "decision" | "result";
+  /** `t` of the first and last occurrence folded into this episode. */
+  firstT: number;
+  lastT: number;
+  count: number;
+  /** What the plan chose: buy kind, spend/reserve name, entry side+sym,
+   * unlock type — or "hold". For a result, the action that ran. */
+  choice: string;
+  /** The arbiter's verdict on OUR claim. Absent when no digest rode along or
+   * the subsystem made no claim this pass. */
+  funded?: boolean;
+  wanted?: number;
+  granted?: number;
+  available?: number;
+  denialReason?: string;
+  /** Grants that are NOT ours — where the money went instead. */
+  winners?: { by: string; id: string; amount: number }[];
+  /** Ranked alternatives captured with the decision, newest occurrence wins. */
+  ranked?: DecisionRankedOption[];
+  rankedTotal?: number;
+  /** Result rows only. */
+  ok?: boolean;
+  detail?: string;
+}
 
 /** Points retained for the money chart. The canvas is ~1200 px wide and is
  * redrawn on every hover, so anything past a couple of thousand points costs
@@ -258,6 +299,9 @@ export interface ProjectedState {
   /** Latest full contract replay. Held separately from the bounded event feed
    * so ordinary debug traffic cannot evict the actionable failure details. */
   contractReplay: ContractFailure | null;
+  /** Money-arbitrated decisions and their results, coalesced into episodes.
+   * See DecisionEpisode for why this is not read off `events`. */
+  decisionLog: DecisionEpisode[];
   /** Run-level simulator records must outlive the bounded event feed. */
   simMeta: SimRunMeta | null;
   simResult: SimRunResult | null;
@@ -376,6 +420,7 @@ export function emptyState(): ProjectedState {
     caps: unknownCapabilities(),
     events: [],
     contractReplay: null,
+    decisionLog: [],
     simMeta: null,
     simResult: null,
     simGapDetails: new Map(),
@@ -503,9 +548,145 @@ function foldOne(state: ProjectedState, record: LogRecord, cutoff: number): bool
       });
     }
   }
+  if (record.kind === "event") foldDecisionLog(state, record);
   state.events.push(record);
   if (state.events.length > EVENT_RING) state.events.splice(0, state.events.length - EVENT_RING);
   return true;
+}
+
+/** Which feature's arbitration claims belong to each investment subsystem, so
+ * the fold can tell OUR grant/denial from the winners that beat us. The id
+ * prefix narrows hacking's claims to the fleet one — its opener claims are a
+ * different purchase with a different history. */
+const DECISION_OWNERS: Record<string, { by: string; idPrefix?: string }> = {
+  infrastructure: { by: "hacking", idPrefix: "infrastructure:" },
+  hacknet: { by: "hacknet" },
+  stock: { by: "stock" },
+};
+
+/** The wire shapes foldDecisionLog reads. Loose on purpose: each subsystem's
+ * plan is its own type and only these fields are shared enough to fold. */
+interface DecisionEventData {
+  subsystem?: string;
+  plan?: {
+    moneyAvailable?: number;
+    moneyGranted?: number;
+    buy?: { kind?: string; cost?: number };
+    candidate?: { kind?: string; cost?: number };
+    spend?: { name?: string };
+    reserve?: { name?: string };
+    /** `stock`'s selection is a position, not a purchase: it names a symbol
+     * and a side rather than a `kind` or a `name`, and its `reserve` is
+     * `{amount, ratePerSec}` with no name at all — so without these two the
+     * whole subsystem falls through to the "hold" default and every trade it
+     * ever made reads as an idle tick. */
+    entry?: { sym?: string; side?: string };
+    unlock?: { type?: string };
+    ranked?: DecisionRankedOption[];
+    rankedTotal?: number;
+  };
+  result?: { action?: string; ok?: boolean; detail?: string };
+  /** hash.result carries the result fields at the top level. */
+  action?: string;
+  ok?: boolean;
+  detail?: string;
+  arbitration?: {
+    grants?: { by: string; id: string; amount: number; wanted?: number }[];
+    denied?: { by: string; id?: string; reason: string; wanted?: number; available?: number }[];
+  };
+}
+
+/** The coalescing key. Amounts and free-running numbers are excluded ON
+ * PURPOSE — they drift every pass, and their drift is the churn this log
+ * exists to remove; the newest occurrence's figures overwrite the episode's.
+ * Only the tail is ever compared against, so an interleaved episode from
+ * another subsystem breaks the run: interleaving is real ordering information. */
+function decisionSignature(episode: DecisionEpisode): string {
+  const funded = episode.funded === undefined ? "-" : episode.funded ? "y" : "n";
+  const detail = (episode.detail ?? "").replace(/\$?\d[\d.,]*(?:e[+-]?\d+)?[a-z%]*/gi, "#");
+  return [episode.subsystem, episode.kind, episode.choice, funded, episode.denialReason ?? "", detail].join("|");
+}
+
+/** Fold one investment/hash decision or result into the coalesced log. */
+function foldDecisionLog(state: ProjectedState, record: EventRecord): void {
+  const kind =
+    record.name === "investment.decision" || record.name === "hash.decision"
+      ? ("decision" as const)
+      : record.name === "investment.result" || record.name === "hash.result"
+        ? ("result" as const)
+        : undefined;
+  if (!kind) return;
+  const data = record.data as DecisionEventData | undefined;
+  // Hash spending is hacknet's second economy — real decisions, but the money
+  // arbiter never sees them, so they carry no arbitration columns.
+  const subsystem = record.name.startsWith("hash.") ? "hashes" : (data?.subsystem ?? "unknown");
+
+  const episode: DecisionEpisode = { subsystem, kind, firstT: record.t, lastT: record.t, count: 1, choice: "" };
+  if (kind === "result") {
+    const result = data?.result ?? data;
+    episode.choice = result?.action ?? "";
+    if (typeof result?.ok === "boolean") episode.ok = result.ok;
+    episode.detail = result?.detail ?? "";
+  } else {
+    const plan = data?.plan;
+    episode.choice =
+      plan?.spend?.name ??
+      plan?.reserve?.name ??
+      plan?.buy?.kind ??
+      plan?.candidate?.kind ??
+      (plan?.entry ? `${plan.entry.side ?? ""} ${plan.entry.sym ?? ""}`.trim() || undefined : undefined) ??
+      plan?.unlock?.type ??
+      "hold";
+    if (plan?.ranked?.length) {
+      episode.ranked = plan.ranked;
+      episode.rankedTotal = plan.rankedTotal ?? plan.ranked.length;
+    }
+    const owner = DECISION_OWNERS[subsystem];
+    const arbitration = data?.arbitration;
+    if (arbitration && owner) {
+      const ours = (id: string | undefined) => !owner.idPrefix || (id ?? "").startsWith(owner.idPrefix);
+      const denial = arbitration.denied?.find((entry) => entry.by === owner.by && ours(entry.id));
+      const grant = arbitration.grants?.find((entry) => entry.by === owner.by && ours(entry.id));
+      const winners = (arbitration.grants ?? [])
+        .filter((entry) => entry.by !== owner.by || !ours(entry.id))
+        .map((entry) => ({ by: entry.by, id: entry.id, amount: entry.amount }));
+      if (winners.length) episode.winners = winners;
+      if (denial) {
+        episode.funded = false;
+        episode.denialReason = denial.reason;
+        if (typeof denial.wanted === "number") episode.wanted = denial.wanted;
+        if (typeof denial.available === "number") episode.available = denial.available;
+      } else if (grant) {
+        episode.funded = true;
+        episode.granted = grant.amount;
+        if (typeof grant.wanted === "number") episode.wanted = grant.wanted;
+      }
+    }
+    // Plan-level figures fill whatever the digest could not say: the producers
+    // sign `funded` as moneyGranted >= cost (game/lib/telemetry-sink.ts), so
+    // the same reading here cannot disagree with the emitted transition.
+    if (episode.wanted === undefined) episode.wanted = plan?.buy?.cost ?? plan?.candidate?.cost;
+    if (episode.granted === undefined && typeof plan?.moneyGranted === "number") episode.granted = plan.moneyGranted;
+    if (episode.available === undefined && typeof plan?.moneyAvailable === "number") episode.available = plan.moneyAvailable;
+    if (episode.funded === undefined && episode.wanted !== undefined && typeof plan?.moneyGranted === "number") {
+      episode.funded = plan.moneyGranted >= episode.wanted;
+    }
+  }
+
+  const log = state.decisionLog;
+  const last = log[log.length - 1];
+  if (last && decisionSignature(last) === decisionSignature(episode)) {
+    // Same outcome again: one episode, latest figures, longer span. REPLACE
+    // the tail rather than merging into it — Object.assign never deletes, so
+    // optional fields absent on the newest occurrence (winners, ranked,
+    // granted, available, ok) survived a merge and rendered stale facts.
+    episode.firstT = last.firstT;
+    episode.count = last.count + 1;
+    log[log.length - 1] = episode;
+    return;
+  }
+  log.push(episode);
+  if (log.length > DECISION_LOG_LIMIT) log.splice(0, log.length - DECISION_LOG_LIMIT);
 }
 
 const KINDS = ["hack", "grow", "weaken"] as const;

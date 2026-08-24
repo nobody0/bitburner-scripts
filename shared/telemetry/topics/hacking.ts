@@ -222,6 +222,12 @@ export interface FarmRollup {
     maxAbsMs: number;
   }>>;
   execFails?: number;
+  /** Launch lateness past startAt by JIT role — names the delayed role behind
+   * mis-ordered landings directly. */
+  launchLate?: Partial<Record<"h" | "w1" | "g" | "w2",
+    { n: number; meanMs: number; maxMs: number; overWindow: number }>>;
+  /** Launches deferred by a full role quota, keyed phase:role. */
+  quotaSkips?: Record<string, number>;
   batchesSkipped?: number;
   /** `batchesSkipped` split by cause, so the scalar can be read as the several
    * distinct phenomena it pools. Same keys as `missedWindow`, different

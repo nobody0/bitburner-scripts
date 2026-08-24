@@ -12,7 +12,6 @@ import { sfLevel } from "../../../shared/features/unlock.ts";
 import { bar, card, collapsible, dataTable, definitions, dot, filters, hint, meter, NONE, note, outcome, rankedTable, search, table, tiles, waiting, type Column } from "../lib/dom.ts";
 import { inline, raw, type Html } from "../lib/html.ts";
 import { chartCanvas, hasSpan, mountChart, type ChartSeries } from "../lib/chart.ts";
-import { decisionHistory } from "../lib/history.ts";
 import { esc, fmtMoney, fmtMs, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
 import { hackTimeSeconds, makeHackContext, type HackContext } from "../../../shared/formulas.ts";
 import { view } from "../lib/viewstate.ts";
@@ -1869,12 +1868,6 @@ export const hackingTab: Tab = {
               )))
       : "";
 
-    const infrastructureHistory = decisionHistory(state, {
-      subsystem: "infrastructure",
-      by: "hacking",
-      idPrefix: "infrastructure:",
-    });
-
     // --- servers ---
     const all = buildRows(state);
     const activeHosts = new Set([
@@ -1962,7 +1955,8 @@ export const hackingTab: Tab = {
       // of the panel. The two are independent readings and now render as such.
       (infrastructurePlan ? card("Infrastructure ROI", infrastructurePlan) : "") +
       (homeRamPlan ? card("Home RAM (next upgrade)", homeRamPlan) : "") +
-      (infrastructureHistory ? card("Decision history", infrastructureHistory) : "") +
+      // Funding history lives in the arbiter drawer (ui/app/lib/arbiter.ts):
+      // the decisions are cross-feature, so their log is too.
       (segments ? card("RAM segments", segments) : "") +
       (health || trends ? card("Dispatcher health", trends + (health || "")) : "") +
       `</div>`

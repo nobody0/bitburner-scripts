@@ -905,28 +905,60 @@ export function stepEvaluator(
     memory.farmReadyHost === farmHost &&
     memory.farmReadySince !== undefined &&
     now - memory.farmReadySince >= farmEntry.solution!.weakenTimeS * 1_000;
-  if (firstIncomeWindowElapsed) {
+  // A COLD farm prep cannot use the whole fleet: its waves are one target's
+  // weaken cover plus atomic grows, and everything beyond that idles for the
+  // whole prep (measured live: a 78 TB fleet at ~50% while the farm target
+  // prepped, 63 targets waiting). Selling capacity the farm's quote assumed is
+  // still forbidden — the cold-prep allowance is bounded by what remains after
+  // BOTH the farm's protected envelope and its own outstanding prep demand.
+  const farmPrepPlan = farmEntry ? prepOf(farmEntry) : undefined;
+  const farmColdPrepping = farmPrepPlan !== undefined && !farmPrepPlan.prepped;
+  const coldPrepSpareGb = farmColdPrepping
+    ? Math.max(0, secondaryPrepGbLimit - prepGbFor(farmPrepPlan))
+    : 0;
+  // During the cold window the value question inverts: the farm earns nothing
+  // until ITS prep lands, so a stopgap candidate is priced over exactly that
+  // window with NO current-income baseline ("prep is free" — evaluatePrep's
+  // own contract for current: undefined). A candidate whose prep consumes the
+  // whole window values to ~zero and loses naturally; what wins is a fast
+  // target whose prep plus a few farm cycles FIT before the main target comes
+  // online — some money and exp in the meantime instead of none.
+  const coldWindowMs = farmColdPrepping
+    ? Math.min(prepHorizonMs, prepTimeSeconds(farmPrepPlan, Math.max(1, fleetGb)) * 1_000)
+    : 0;
+  if (firstIncomeWindowElapsed || coldPrepSpareGb > 0) {
+    const secondaryCapGb = firstIncomeWindowElapsed ? secondaryPrepGbLimit : coldPrepSpareGb;
+    const horizonForSecondaryMs = firstIncomeWindowElapsed ? prepHorizonMs : coldWindowMs;
+    // The viability bar scales with the window being sold: 2% of a multi-hour
+    // horizon would price every honest two-minute stopgap out of existence.
+    bestRuntimeNet = 0.02 * (horizonForSecondaryMs / 1_000);
     for (const candidate of ranked) {
       if (candidate === farmEntry) continue;
       const plan = prepOf(candidate);
       if (!plan || plan.prepped) continue;
-      const candidatePrepGb = Math.min(prepGbFor(plan), secondaryPrepGbLimit);
+      const candidatePrepGb = Math.min(prepGbFor(plan), secondaryCapGb);
       if (candidatePrepGb <= 0) continue;
       const retainedFarmRate = farmIncomeRate(farmModel, fleetGb - candidatePrepGb);
       const ramGrowthRate = reinvestmentRate * (currentRateNow > 0 ? retainedFarmRate / currentRateNow : 0);
       const rawPrepSec = prepTimeSeconds(plan, candidatePrepGb, ramGrowthRate);
       const economics = evaluatePrep({
-        current: farmModel,
+        current: firstIncomeWindowElapsed ? farmModel : undefined,
         candidate: candidate.solution!,
         plan,
         fleetGb,
-        horizonMs: prepHorizonMs,
+        horizonMs: horizonForSecondaryMs,
         prepTimeScale: prepScaleOf(candidate, rawPrepSec),
         maxPrepGb: candidatePrepGb,
+        // In the cold window nothing else earns from this RAM, so the fleet-
+        // share allocation heuristic has nothing to trade against: hand the
+        // stopgap the WHOLE spare allowance and let it prep at the latency
+        // floor. Measured live without this: the stopgap sat "RAM-bound" on
+        // ~1 TB while 85% of the fleet idled.
+        ...(firstIncomeWindowElapsed ? {} : { prepGb: candidatePrepGb }),
         reinvestmentReturnPerDollarSec: reinvestmentRate,
       });
       if (!economics) continue;
-      const secondsAfterPrep = Math.max(0, prepHorizonMs / 1_000 - economics.prepSeconds);
+      const secondsAfterPrep = Math.max(0, horizonForSecondaryMs / 1_000 - economics.prepSeconds);
       const currentExpRate = farmModel ? experienceRate(farmModel) : 0;
       const candidateExpRate = experienceRate(candidate.solution!);
       // Keep the two effects in their natural units until the final comparison:

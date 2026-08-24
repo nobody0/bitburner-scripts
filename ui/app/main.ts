@@ -10,6 +10,7 @@ import { BITNODES } from "../../shared/features/bitnode.ts";
 import type { RunCatalogEntry } from "../../shared/run-catalog.ts";
 import { renderMarkdown } from "./lib/markdown.ts";
 import { featureSpecFile } from "../specs.ts";
+import { arbiterDrawer } from "./lib/arbiter.ts";
 
 /** Viewer shell: one live socket, one loaded run, one active tab.
  *
@@ -49,6 +50,10 @@ let active: TabId = "overview";
 let state: ProjectedState = emptyState();
 let specOpen = false;
 let specRequest = 0;
+/** The arbiter drawer. Unlike the spec drawer it is not per-feature — the
+ * arbiter allocates money and the work slot ACROSS features, so its view is
+ * reachable from every tab, Overview included. */
+let arbOpen = false;
 /** Rendered HTML per feature id: renderSpec runs on every telemetry render
  * while the drawer is open, so the markdown parse must not be repeated. */
 const specCache = new Map<string, string>();
@@ -90,11 +95,28 @@ function renderTabs(): void {
     return `<a class="tab ${cls}"${current ? ` aria-current="page"` : ""} href="#/${tab.id}" title="${esc(title)}">${mark}${esc(tab.label)}</a>`;
   }).join("");
   const feature = FEATURES.find((candidate) => candidate.id === active);
+  // The arbiter toggle renders on EVERY tab — cross-feature by definition —
+  // where the spec toggle exists only for a feature tab.
+  const arb =
+    `<button class="tab spec-toggle${arbOpen ? " on" : ""}" type="button" data-arb-toggle="1" ` +
+    `title="Cross-feature resource arbitration: open needs, money grants and denials, and the decision log">arbiter</button>`;
   const spec = feature
     ? `<button class="tab spec-toggle${specOpen ? " on" : ""}" type="button" data-spec-toggle="1" ` +
       `title="Read the checked-in ${esc(feature.label)} strategy specification">spec</button>`
     : "";
-  morph($("tabs"), links + spec);
+  morph($("tabs"), links + arb + spec);
+}
+
+function renderArb(): void {
+  const drawer = $("arbdrawer");
+  if (!arbOpen) {
+    drawer.hidden = true;
+    return;
+  }
+  drawer.hidden = false;
+  // Patched, not assigned: the drawer re-renders with every live frame, and
+  // morph is what lets its scroll offset and open disclosures survive that.
+  morph($("arbbody"), arbiterDrawer(state));
 }
 
 function closeSpec(): void {
@@ -249,6 +271,7 @@ function render(): void {
   reproject();
   renderTabs();
   void renderSpec();
+  renderArb();
   renderView();
   const offset = cutoff === Infinity ? "" : fmtTime(cutoff - (run.t0 ?? 0));
   $("scrubt").textContent = offset;
@@ -288,7 +311,14 @@ window.addEventListener("hashchange", () => {
 window.addEventListener("resize", queueRender);
 
 $("tabs").addEventListener("click", (ev) => {
-  const toggle = (ev.target as HTMLElement | null)?.closest<HTMLElement>("[data-spec-toggle]");
+  const target = ev.target as HTMLElement | null;
+  if (target?.closest<HTMLElement>("[data-arb-toggle]")) {
+    arbOpen = !arbOpen;
+    renderTabs();
+    renderArb();
+    return;
+  }
+  const toggle = target?.closest<HTMLElement>("[data-spec-toggle]");
   if (!toggle) return;
   specOpen = !specOpen;
   // Reopening the drawer IS the retry: a spec that failed because the hub was
@@ -298,15 +328,21 @@ $("tabs").addEventListener("click", (ev) => {
   void renderSpec();
 });
 $("specclose").addEventListener("click", closeSpec);
+$("arbclose").addEventListener("click", () => {
+  arbOpen = false;
+  renderArb();
+  renderTabs();
+});
 
 // --- panel interaction -----------------------------------------------------
 
 /** Filters, sorting and search are DELEGATED from the container rather than
  * bound to the controls themselves. The panel is replaced wholesale on every
  * frame, so a listener attached to a chip would be discarded within the
- * second; `#view` is the only node that survives. Handlers write to viewstate
- * and re-render, which is what makes a choice outlive the frame that made it. */
-$("view").addEventListener("click", (ev) => {
+ * second; `#view` and the arbiter drawer are the only nodes that survive.
+ * Handlers write to viewstate and re-render, which is what makes a choice
+ * outlive the frame that made it. */
+const panelClick = (ev: Event): void => {
   const target = (ev.target as HTMLElement | null)?.closest<HTMLElement>("[data-view-key],[data-sort-key]");
   if (!target) return;
   const sortKey = target.dataset["sortKey"];
@@ -320,7 +356,9 @@ $("view").addEventListener("click", (ev) => {
     setView(key, target.dataset["viewValue"]);
     render();
   }
-});
+};
+$("view").addEventListener("click", panelClick);
+$("arbdrawer").addEventListener("click", panelClick);
 
 /** A disclosure's open state lives in viewstate, not in the DOM.
  *
@@ -333,23 +371,21 @@ $("view").addEventListener("click", (ev) => {
  * dispatched at the `<details>` element and would never reach `#view`
  * otherwise. No re-render is needed — the browser has already opened the
  * section, and this only makes that outlive the next frame. */
-$("view").addEventListener(
-  "toggle",
-  (ev) => {
-    const details = ev.target as HTMLDetailsElement | null;
-    const key = details?.dataset?.["openKey"];
-    if (key === undefined || !details) return;
-    setView(`open.${key}`, details.open ? "1" : "0");
-    // A canvas inside a closed disclosure measures 0x0, so anything drawn
-    // while it was shut is a blank bitmap. A stored run never re-renders on
-    // its own (only `resize` and live records queue one), so opening a section
-    // has to redraw it or the chart stays empty until the pointer wanders in.
-    if (details.open) render();
-  },
-  true,
-);
+const panelToggle = (ev: Event): void => {
+  const details = ev.target as HTMLDetailsElement | null;
+  const key = details?.dataset?.["openKey"];
+  if (key === undefined || !details) return;
+  setView(`open.${key}`, details.open ? "1" : "0");
+  // A canvas inside a closed disclosure measures 0x0, so anything drawn
+  // while it was shut is a blank bitmap. A stored run never re-renders on
+  // its own (only `resize` and live records queue one), so opening a section
+  // has to redraw it or the chart stays empty until the pointer wanders in.
+  if (details.open) render();
+};
+$("view").addEventListener("toggle", panelToggle, true);
+$("arbdrawer").addEventListener("toggle", panelToggle, true);
 
-$("view").addEventListener("input", (ev) => {
+const panelInput = (ev: Event): void => {
   const target = ev.target as HTMLInputElement | null;
   const key = target?.dataset["viewKey"];
   if (!target || key === undefined || target.dataset["viewValue"] !== undefined) return;
@@ -357,7 +393,9 @@ $("view").addEventListener("input", (ev) => {
   // Typing must not wait on the live-render throttle, or the box lags a
   // keystroke behind what it filters.
   render();
-});
+};
+$("view").addEventListener("input", panelInput);
+$("arbdrawer").addEventListener("input", panelInput);
 
 // --- run selection & replay ------------------------------------------------
 

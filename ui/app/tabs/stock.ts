@@ -3,7 +3,6 @@ import { chartCanvas, hasSpan, mountChart } from "../lib/chart.ts";
 import { ageMs, stamp } from "../lib/clock.ts";
 import { NONE, card, dataTable, dot, hint, meter, note, table, tiles, waitingPanel } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtTime } from "../lib/format.ts";
-import { decisionHistory } from "../lib/history.ts";
 import { html, raw, type Html, type Markup } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -489,11 +488,6 @@ export const stockTab: Tab = {
       { empty: "no symbol worth manipulating", left: [0, 1, 2] },
     );
 
-    // The recent trade log. Bounded by the event ring, so it is a log and not a
-    // run history — the run history is the earnings curve above, which is the
-    // division of labour the two exist for.
-    const history = decisionHistory(state, { subsystem: "stock", by: "stock" });
-
     return (
       `<div class="col wide">` +
       card("Capital", capitalTiles + charts) +
@@ -502,7 +496,9 @@ export const stockTab: Tab = {
       `<div class="col">` +
       card("Plan", planCard) +
       card("Positions", positionsTable + orders) +
-      (history ? card("Decision history", history) : "") +
+      // The trade log lives in the arbiter drawer's decision log
+      // (ui/app/lib/arbiter.ts), coalesced and retained past the event ring;
+      // the run history is the earnings curve above.
       // hack pushes a symbol DOWN and grow pushes it UP, so this is the channel
       // by which the market commandeers the HWGW farm. See spec/targeting.md.
       card("Manipulation", manipulation) +

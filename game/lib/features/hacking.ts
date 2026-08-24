@@ -609,6 +609,19 @@ function rollup(game: GameState, driver: DriverState, target: string, prepTarget
         }),
     ) } : {}),
     execFails: driver.execFails,
+    ...(Object.values(stats.jitLaunchLate).some((entry) => entry.n > 0) ? {
+      launchLate: Object.fromEntries(
+        (Object.entries(stats.jitLaunchLate) as ["h" | "w1" | "g" | "w2", typeof stats.jitLaunchLate.h][])
+          .filter(([, entry]) => entry.n > 0)
+          .map(([role, entry]) => [role, {
+            n: entry.n,
+            meanMs: roundSigFigs(entry.sumMs / entry.n, 3),
+            maxMs: roundSigFigs(entry.maxMs, 3),
+            overWindow: entry.overWindow,
+          }]),
+      ),
+    } : {}),
+    ...(Object.keys(stats.jitQuotaSkips).length > 0 ? { quotaSkips: stats.jitQuotaSkips } : {}),
     batchesSkipped: stats.batchesSkipped,
     ...(stats.batchesSkipped > 0 ? { batchesSkippedBy: {
       deadline: roundSigFigs(stats.batchesSkippedBy.deadline, 3),

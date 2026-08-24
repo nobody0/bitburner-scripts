@@ -381,21 +381,18 @@ describe("tab rendering", () => {
     expect(html).toContain("no trade can clear its round trip");
   });
 
-  test("the stock decision history names the trade, not \"hold\"", () => {
-    const state = emptyState();
-    state.topics.stock = { hasWseAccount: true, hasTixApiAccess: true } as StateMap["stock"];
-    // A StockPlan carries neither `buy.kind` nor a named `reserve`, so without
-    // the entry/unlock rungs in the shared selection chain every stock row
-    // falls through to the "hold" default and the trade log says nothing.
-    state.events.push(
+  test("the stock tab no longer carries a decision history card", () => {
+    // The trade log moved to the arbiter drawer's decision log: funding
+    // decisions are cross-feature, so their history is too.
+    const state = appendRecords(emptyState(), [
       { t: 10, seq: 1, run: "r", src: "sim", kind: "event", name: "investment.decision", data: { subsystem: "stock", plan: { entry: { sym: "ECP", side: "long" } } } } as never,
       { t: 20, seq: 2, run: "r", src: "sim", kind: "event", name: "investment.result", data: { subsystem: "stock", result: { action: "buy", ok: true, detail: "bought 1000 ECP" } } } as never,
-    );
+    ]);
+    state.topics.stock = { hasWseAccount: true, hasTixApiAccess: true } as StateMap["stock"];
     const html = TABS["stock"].render(state);
-    expect(html).toContain("Decision history");
-    expect(html).toContain("long ECP");
-    expect(html).toContain("bought 1000 ECP");
-    expect(html).not.toContain(">hold<");
+    expect(html).not.toContain("Decision history");
+    // The fold still captured both episodes for the drawer.
+    expect(state.decisionLog.map((episode) => episode.choice)).toEqual(["long ECP", "buy"]);
   });
 
   test("the darknet plan exposes operational evidence without authored rationale", () => {

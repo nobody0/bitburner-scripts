@@ -2,7 +2,6 @@ import type { HacknetNodeDigest, HacknetPlan } from "../../../shared/telemetry/t
 import { ago, isStale, stamp } from "../lib/clock.ts";
 import { NONE, card, dataTable, hint, note, outcome, rankedTable, shownOf, table, tiles, waitingPanel, type Tile } from "../lib/dom.ts";
 import { esc, fmtMoney, fmtNum, fmtPct, fmtRam, fmtTime } from "../lib/format.ts";
-import { decisionHistory } from "../lib/history.ts";
 import { html } from "../lib/html.ts";
 import type { ProjectedState } from "../project.ts";
 import type { Tab } from "./index.ts";
@@ -258,12 +257,6 @@ export const hacknetTab: Tab = {
           : "")
       : "";
 
-    const history = decisionHistory(state, {
-      events: ["hash.decision", "hash.result"],
-      subsystem: "hacknet",
-      by: "hacknet",
-    });
-
     return (
       `<div class="col wide">` +
       card("Hacknet", summary + nodes) +
@@ -271,7 +264,9 @@ export const hacknetTab: Tab = {
       `<div class="col">` +
       card("Decision", decision) +
       (hashPlan ? card("Hash plan", hashPlan) : "") +
-      (history ? card("Decision history", history) : "") +
+      // Funding and hash-spend history live in the arbiter drawer
+      // (ui/app/lib/arbiter.ts): the decisions are cross-feature, so their
+      // log is too.
       (hashUpgrades ? card("Hash upgrades", hashUpgrades) : "") +
       `</div>`
     );

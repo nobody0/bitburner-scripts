@@ -268,7 +268,10 @@ carries only the newest result and the trades are otherwise unrecoverable.
 `hash.result` form a compact index over those snapshots: they fire when the
 winner, hold/funding state, or outcome changes, not once per sample. The raw
 topic stream remains the authoritative high-frequency history; the events make
-transitions easy to find in replay and fit in the UI's bounded event ring.
+transitions easy to find in replay and fit in the UI's bounded event ring. The
+viewer additionally folds them into a retained, coalesced decision log
+(`ui/app/project.ts`) rendered by the arbiter drawer, so a refusal repeated
+every pass survives ring eviction as one episode with a count.
 
 Faction planning follows that pattern too. `factions.plan.context` records the
 planning horizon and route, augmentation-count goal, income, available/granted

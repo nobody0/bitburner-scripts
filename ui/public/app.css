@@ -51,16 +51,19 @@ nav#tabs {
 .tab.unknown { color: var(--bb-secondary); opacity: 1; font-style: italic; }
 .tab.spec-toggle { margin-left: auto; align-self: center; }
 
-/* Checked-in feature documentation. It is a sibling of the live panel rather
-   than content inside it, so a telemetry refresh never resets its scroll. */
-#specdrawer {
+/* Checked-in feature documentation, and the arbiter's live resource view.
+   Both are siblings of the live panel rather than content inside it, so a
+   telemetry refresh never resets their scroll. */
+#specdrawer,
+#arbdrawer {
   max-height: 58vh;
   overflow: auto;
   margin: 10px 16px 0;
   border: 1px solid var(--bb-well-light);
   background: var(--bb-background);
 }
-#specdrawer[hidden] { display: none; }
+#specdrawer[hidden],
+#arbdrawer[hidden] { display: none; }
 .spec-head {
   position: sticky;
   top: 0;
@@ -68,9 +71,10 @@ nav#tabs {
   justify-content: space-between;
   border-bottom-color: var(--bb-well-light);
 }
-#spectitle { color: var(--bb-primary-light); font-weight: 600; }
+#spectitle, #arbtitle { color: var(--bb-primary-light); font-weight: 600; }
 #specpath { color: var(--muted); font-size: var(--fs-xs); }
 #specbody { padding: 10px 14px 18px; color: var(--text-secondary); }
+#arbbody { padding: 10px 14px 18px; }
 #specbody h1, #specbody h2, #specbody h3, #specbody h4 {
   color: var(--bb-primary-light);
   margin: 16px 0 7px;
